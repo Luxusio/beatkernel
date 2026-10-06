@@ -121,6 +121,73 @@ impl NativePause {
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }
+    /// Validates a fully observed candidate without changing either pause owner.
+    pub fn validate_replacement(
+        &self,
+        candidate: &Self,
+        basis: beatkernel::audio::OutputFrameBasis,
+        pair: ClockPair,
+    ) -> Result<(), PauseError> {
+        if self.phase != PausePhase::Paused
+            || candidate.phase != PausePhase::Paused
+            || candidate.epoch <= self.epoch
+            || self.end_marker.is_some()
+            || candidate.end_marker.is_some()
+            || self.origin != candidate.origin
+            || self.host != candidate.host
+            || self.rate != candidate.rate
+            || self.gap != candidate.gap
+            || self.frozen != candidate.frozen
+            || self.start_frame != candidate.start_frame
+            || self.start_configured != candidate.start_configured
+            || self.playback_end != candidate.playback_end
+            || candidate.boundary.is_some()
+            || basis.origin() != self.origin
+            || basis.sample_rate() != self.rate
+            || candidate.min_physical_frame != basis.start_physical_frame()
+        {
+            return Err(PauseError(
+                "replacement changed acknowledged pause identity",
+            ));
+        }
+        self.check_pair(pair)?;
+        candidate.check_pair(pair)?;
+        let report = candidate
+            .last_report
+            .ok_or(PauseError("replacement lacks paused render evidence"))?;
+        candidate.check_report(report)?;
+        self.check_report(report)?;
+        if self.playback_end.is_some_and(|end| self.frozen >= end) {
+            return Err(PauseError("replacement cannot reopen reached endpoint"));
+        }
+        if !report.paused
+            || report.frames == 0
+            || report.playback_frames != 0
+            || report.playback_start_frame != self.frozen
+        {
+            return Err(PauseError("replacement changed frozen playback"));
+        }
+        match candidate.evidence_kind {
+            Some(EvidenceKind::Point) if candidate.last_pair == Some(pair) => {}
+            Some(EvidenceKind::Interval) => {
+                let interval = candidate
+                    .last_interval
+                    .ok_or(PauseError("replacement lacks original interval evidence"))?;
+                if interval.render != report
+                    || interval.clock.output != pair.source
+                    || pair.target.domain != interval.clock.before.domain
+                    || pair.target.timestamp < interval.clock.before.timestamp
+                    || pair.target.timestamp > interval.clock.after.timestamp
+                {
+                    return Err(PauseError(
+                        "replacement pair differs from original interval",
+                    ));
+                }
+            }
+            _ => return Err(PauseError("replacement lacks accepted pause observation")),
+        }
+        Ok(())
+    }
     /// Rebinds a newer output owner after the caller proves native retirement.
     /// Frozen playback and acknowledged pause gap remain unchanged until resume.
     pub fn rebind_output(

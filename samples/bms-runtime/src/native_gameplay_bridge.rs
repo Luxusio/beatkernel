@@ -39,6 +39,13 @@ use beatkernel_platform::audio::presentation::discipline::PresentationDiscipline
 use std::collections::VecDeque;
 
 pub trait NativeGameplayDevice {
+    /// Compatibility hook for committed paused replacement; existing owners opt out.
+    fn publish_paused_output(
+        &mut self,
+        _: crate::gameplay_presentation::GameplayOutputContext<'_, PresentationDiscipline>,
+    ) -> NativeGameplayResult<bool> {
+        Ok(false)
+    }
     fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()>;
     /// Native interval owners override this with original coherent evidence;
     /// correction-only midpoint pairs cannot establish their pause boundary.
@@ -126,6 +133,12 @@ impl GameplayPresentationPort for PresentationDiscipline {
 
 impl<D: NativeGameplayDevice> GameplayDevice for D {
     type Presentation = PresentationDiscipline;
+    fn publish_paused_output(
+        &mut self,
+        context: crate::gameplay_presentation::GameplayOutputContext<'_, Self::Presentation>,
+    ) -> NativeGameplayResult<bool> {
+        NativeGameplayDevice::publish_paused_output(self, context)
+    }
     fn observe(&mut self, discipline: &mut Self::Presentation) -> NativeGameplayResult<()> {
         NativeGameplayDevice::observe(self, discipline)
     }

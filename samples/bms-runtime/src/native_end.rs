@@ -66,6 +66,46 @@ impl NativeEnd {
         result.point(end)?;
         Ok(result)
     }
+    /// Stages a fresh stream relation while retaining the original finite frame grid.
+    /// Reached endpoints and regressed actual render/host history refuse atomically.
+    pub fn restart_for_output(
+        &self,
+        basis: beatkernel::audio::OutputFrameBasis,
+        report: RenderReport,
+        pair: ClockPair,
+    ) -> Result<Self, EndError> {
+        if self.physical.is_some()
+            || self.emitted
+            || report.playback_end_physical_frame.is_some()
+            || basis.origin() != self.origin
+            || basis.sample_rate() != self.rate
+            || report.start_frame < basis.start_physical_frame()
+            || !report.paused
+            || report.frames == 0
+            || report.playback_frames != 0
+            || report.playback_start_frame >= self.end
+        {
+            return Err(EndError(
+                "finite output replacement changed or reached endpoint",
+            ));
+        }
+        self.check_pair(pair)?;
+        if pair.source.timestamp
+            < basis
+                .point_at_stream_frame(0)
+                .map_err(|_| EndError("replacement frame timestamp overflow"))?
+                .timestamp
+        {
+            return Err(EndError("replacement pair precedes new stream"));
+        }
+        self.check_report(report)?;
+        let mut next = self.clone();
+        next.lower = None;
+        next.last_pair = None;
+        next.last_report = None;
+        next.observe(Some(report), pair)?;
+        Ok(next)
+    }
     /// Configures an immutable initial physical-frame prefix before observation.
     pub fn with_start_frame(mut self, frame: u64) -> Result<Self, EndError> {
         if self.start_configured || self.last_pair.is_some() || self.last_report.is_some() {
@@ -496,9 +536,7 @@ mod fixtures {
         latency_frames: u32,
         error_ns: u64,
     ) -> beatkernel_platform::audio::asio::AsioPresentationObservation {
-        use beatkernel_platform::audio::asio::{
-            AsioPresentationObservation, MultimediaHostInterval,
-        };
+        use beatkernel_platform::audio::asio::{AsioPresentationObservation, MultimediaHostInterval};
         AsioPresentationObservation::from_render(
             render,
             1000,

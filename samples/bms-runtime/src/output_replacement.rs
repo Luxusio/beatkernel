@@ -496,3 +496,81 @@ impl<B: OutputReplacementBackend> OutputReplacement<B> {
 #[cfg(test)]
 #[path = "output_replacement_fixtures.rs"]
 mod fixtures;
+
+/// Refusal returns the original ready owner and hold without publishing any target.
+pub struct ReadyPublicationFailure<P: GameplayPresentationPort, O> {
+    pub error: Box<dyn std::error::Error>,
+    pub ready: ReadyOutput<P, O>,
+}
+/// Publishes all ownership only after every fallible timing/end check succeeds.
+pub fn publish_ready_output<P: GameplayPresentationPort, O>(
+    ready: ReadyOutput<P, O>,
+    output: &mut Option<O>,
+    context: crate::gameplay_presentation::GameplayOutputContext<'_, P>,
+) -> Result<(), ReadyPublicationFailure<P, O>> {
+    let staged = (|| -> Result<_, Box<dyn std::error::Error>> {
+        if output.is_some() {
+            return Err("replacement output slot must be empty".into());
+        }
+        let old_epoch = context
+            .presentation
+            .epoch()
+            .ok_or("live presentation has no output epoch")?;
+        if old_epoch != context.pause.epoch()
+            || ready.timing.presentation.epoch() != Some(ready.timing.pause.epoch())
+            || ready.timing.pause.epoch() <= old_epoch
+            || ready.timing.presentation.config() != context.presentation.config()
+            || ready.timing.basis.sample_rate() != context.config.sample_rate
+            || ready.timing.basis.origin().domain != context.config.playback_origin.domain
+            || ready.timing.pause.host_domain() != context.config.origin.domain
+            || ready.timing.playback_origin != ready.timing.basis.point_at_stream_frame(0)?
+        {
+            return Err("replacement timing/configuration identity differs".into());
+        }
+        let pair = ready
+            .timing
+            .presentation
+            .latest_pair()
+            .ok_or("replacement lacks accepted presentation")?;
+        ready.timing.presentation.validate_host(pair.target)?;
+        context
+            .pause
+            .validate_replacement(&ready.timing.pause, ready.timing.basis, pair)?;
+        if let Some(old) = context.presentation.latest_pair() {
+            if pair.source.domain != old.source.domain
+                || pair.target.domain != old.target.domain
+                || pair.target.timestamp < old.target.timestamp
+            {
+                return Err("replacement presentation host history regressed".into());
+            }
+        }
+        let report = ready
+            .timing
+            .pause
+            .last_render_report()
+            .ok_or("replacement lacks render history")?;
+        let end = context
+            .end
+            .as_ref()
+            .map(|end| end.restart_for_output(ready.timing.basis, report, pair))
+            .transpose()?;
+        Ok(end)
+    })();
+    let end = match staged {
+        Ok(end) => end,
+        Err(error) => return Err(ReadyPublicationFailure { error, ready }),
+    };
+    let ReadyOutput {
+        output: candidate,
+        timing,
+        hold,
+    } = ready;
+    *output = Some(candidate);
+    *context.presentation = timing.presentation;
+    *context.pause = timing.pause;
+    context.config.stream_origin = timing.playback_origin;
+    context.config.playback_origin = timing.playback_origin;
+    *context.end = end;
+    drop(hold);
+    Ok(())
+}

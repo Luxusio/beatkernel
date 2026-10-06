@@ -940,3 +940,8 @@ pub mod native_wasapi_replacement;
 
 #[cfg(all(target_os = "windows", feature = "asio-sdk"))]
 pub mod native_asio_replacement;
+
+#[cfg(test)]
+mod gameplay_output_publication_fixtures;
+#[cfg(test)]
+mod native_output_publication_fixtures;

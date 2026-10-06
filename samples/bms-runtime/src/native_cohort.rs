@@ -603,7 +603,7 @@ pub fn run_cohort_with_results_and_ports<
 >(
     device: &mut D,
     mut session: CohortSession<'_, S, G, D::Presentation>,
-    config: NativeGameplayConfig,
+    mut config: NativeGameplayConfig,
     control: &mut C,
     host_port: &mut H,
 ) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
@@ -854,6 +854,23 @@ pub fn run_cohort_with_results_and_ports<
                         }
                     }
                 }
+            }
+            if pause_committed
+                && end_boundary.is_none()
+                && resume_boundary.is_none()
+                && !host_port.cancelled()
+            {
+                device.publish_paused_output(
+                    crate::gameplay_presentation::GameplayOutputContext {
+                        control: crate::gameplay_presentation::GameplayPauseControl::cohort(
+                            session.group,
+                        ),
+                        presentation: session.discipline,
+                        pause: session.pause,
+                        config: &mut config,
+                        end: session.end,
+                    },
+                )?;
             }
             control.wait(WallDuration::from_millis(1))?;
             continue;

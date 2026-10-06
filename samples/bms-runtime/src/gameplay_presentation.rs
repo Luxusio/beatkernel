@@ -215,8 +215,51 @@ impl GameplayPresentationPort for PresentationEstimator {
     }
 }
 
+/// Cold access to the actual shared producer's exclusive pause lease.
+pub struct GameplayPauseControl<'a> {
+    owner: PauseControlOwner<'a>,
+}
+enum PauseControlOwner<'a> {
+    Solo(&'a mut crate::local_runtime::SoloRuntime),
+    Cohort(&'a mut crate::local_runtime::RuntimeGroup),
+}
+impl<'a> GameplayPauseControl<'a> {
+    pub fn solo(runtime: &'a mut crate::local_runtime::SoloRuntime) -> Self {
+        Self {
+            owner: PauseControlOwner::Solo(runtime),
+        }
+    }
+    pub fn cohort(group: &'a mut crate::local_runtime::RuntimeGroup) -> Self {
+        Self {
+            owner: PauseControlOwner::Cohort(group),
+        }
+    }
+    pub fn hold_audio_pause(
+        &mut self,
+    ) -> Result<beatkernel::audio::PauseHold, beatkernel::audio::PauseHoldError> {
+        match &mut self.owner {
+            PauseControlOwner::Solo(runtime) => runtime.hold_audio_pause(),
+            PauseControlOwner::Cohort(group) => group.hold_audio_pause(),
+        }
+    }
+}
+/// Borrowed live timing ownership; publication preserves gameplay/session state.
+pub struct GameplayOutputContext<'a, P: GameplayPresentationPort> {
+    pub control: GameplayPauseControl<'a>,
+    pub presentation: &'a mut P,
+    pub pause: &'a mut crate::playback_pause::NativePause,
+    pub config: &'a mut crate::native_gameplay::NativeGameplayConfig,
+    pub end: &'a mut Option<NativeEnd>,
+}
 pub trait GameplayDevice {
     type Presentation: GameplayPresentationPort;
+    /// Called only during a committed nonterminal pause; default adapters have no replacement.
+    fn publish_paused_output(
+        &mut self,
+        _: GameplayOutputContext<'_, Self::Presentation>,
+    ) -> NativeGameplayResult<bool> {
+        Ok(false)
+    }
     fn observe(&mut self, discipline: &mut Self::Presentation) -> NativeGameplayResult<()>;
     /// Interval owners override this with original coherent evidence;
     /// correction-only midpoint pairs cannot establish their pause boundary.

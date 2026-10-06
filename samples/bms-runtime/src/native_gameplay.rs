@@ -409,7 +409,7 @@ pub fn run_gameplay_with_result_and_ports<
 >(
     device: &mut D,
     mut session: GameplaySession<'_, S, D::Presentation>,
-    config: NativeGameplayConfig,
+    mut config: NativeGameplayConfig,
     control: &mut C,
     host_port: &mut H,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
@@ -650,6 +650,21 @@ pub fn run_gameplay_with_result_and_ports<
                     host_port.publish_pause(PauseState::Paused);
                 }
             }
+        }
+        if pause_committed
+            && session.pause.phase() == PausePhase::Paused
+            && !end_rendered
+            && end_boundary.is_none()
+            && resume_boundary.is_none()
+            && !host_port.cancelled()
+        {
+            device.publish_paused_output(crate::gameplay_presentation::GameplayOutputContext {
+                control: crate::gameplay_presentation::GameplayPauseControl::solo(session.runtime),
+                presentation: session.discipline,
+                pause: session.pause,
+                config: &mut config,
+                end: session.end,
+            })?;
         }
         if (session.pause.phase() == PausePhase::Paused && !end_rendered)
             || resume_boundary.is_some()
