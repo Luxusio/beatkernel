@@ -237,3 +237,66 @@ fn focus_loss_close_and_joined_terminal_route_dispose_or_suspend_child_without_r
     assert!(app.game.as_ref().unwrap().cancelling);
     assert!(app.game.as_ref().unwrap().worker.is_none());
 }
+
+#[test]
+fn live_audio_navigation_keeps_the_running_worker_until_explicit_close() {
+    let (mut app, publisher) = prepared();
+    let play = app.navigator.active_id().unwrap();
+    let (started, ready) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        player::with_publisher(publisher, || {
+            started.send(()).unwrap();
+            while !player::cancelled() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok(())
+        })
+    });
+    app.game.as_mut().unwrap().worker = Some(worker);
+    ready
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+
+    for _ in 0..2 {
+        app.key(KeyCode::F2, false);
+        assert_eq!(app.navigator.route(), ScreenRoute::LiveAudio);
+        let game = app.game.as_ref().unwrap();
+        assert!(!game.cancelling);
+        assert!(!game.joined);
+        assert!(!game.worker.as_ref().unwrap().is_finished());
+        app.activate(ControlId(91));
+        assert_eq!(app.navigator.active_id(), Some(play));
+        assert!(
+            !app.game
+                .as_ref()
+                .unwrap()
+                .worker
+                .as_ref()
+                .unwrap()
+                .is_finished()
+        );
+        assert!(app.game.as_ref().unwrap().viewer.pause_requested());
+    }
+
+    app.request_close();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !app
+        .game
+        .as_ref()
+        .unwrap()
+        .worker
+        .as_ref()
+        .unwrap()
+        .is_finished()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cancelled worker did not exit"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    app.collect_game();
+    assert_eq!(app.navigator.route(), ScreenRoute::Closing);
+    assert!(app.game.as_ref().unwrap().joined);
+    assert!(app.game.as_ref().unwrap().worker.is_none());
+}

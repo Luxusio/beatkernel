@@ -7,6 +7,9 @@ Back returns to the same Play instance and leaves playback paused. Owner finish,
 cancellation, focus loss and close settle requests and dispose child UI state
 through existing lifecycle rules. Replay and unsupported adapters do not expose
 this action. Native input remains independent from text editing in the UI.
+Route cleanup uses retained Play ancestry rather than a list of known root
+routes. Entering any retained Play child must preserve the game owner and its
+background assets. Closing retains the owner until cancellation and join finish.
 Request identity and screen-instance identity are independent. A late reply can
 update authoritative shared applied settings but cannot overwrite a different
 reopened child draft; dispose its field/IME/gesture state using the navigator.
@@ -56,9 +59,11 @@ preparation must not allocate a maximum-size default buffer; native scratch stay
 sized to the actual opened period. Validate numeric/size constraints before
 native retirement, preserving the original PCM format/grid and cursor.
 
-Author independent command/lifecycle/IME/draft and actual bridge/controller/pump
-fixtures plus portable native conversion tests. After both writer stops, scoped
-Rustfmt and four sequential compile-only configurations apply. All assertions,
-browser/desktop/device execution, formal reviews and required QA remain deferred.
+Author command/lifecycle/IME/draft and actual bridge/controller/pump fixtures plus
+portable native conversion tests. The user lifted verification deferral on
+2026-10-06: execute relevant tests and checks alongside implementation. The
+earlier compile-only restriction no longer applies. Final close still requires
+actual ordered independent review and required QA evidence. Current session
+delegation follows the user's instruction to wait for another parallel request.
 Foreign-call isolation, other OS composition, cross-backend enums and acoustic
 acceptance remain full-Goal work; this increment does not close the task.

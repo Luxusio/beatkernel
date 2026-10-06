@@ -70,7 +70,7 @@ use beatkernel_bms_runtime::{
     practice_loop::PracticeLoop,
     presentation_settings::PresentationSettings,
     record_catalog::{RecordCatalog, RecordPreview},
-    screen_lifecycle::{ScreenInstanceId, ScreenNavigator, ScreenPhase, ScreenRoute},
+    screen_lifecycle::{ScreenInstanceId, ScreenKind, ScreenNavigator, ScreenPhase, ScreenRoute},
     session_launch::SessionLaunch,
     settings::{NativeSettings, SettingsHost},
     settings_profile::PlayerProfile,
@@ -1950,16 +1950,12 @@ impl Desktop {
             self.selection_view = None;
         }
         self.painted_reactive = None;
-        if !matches!(
-            self.navigator.route(),
-            ScreenRoute::Play { .. } | ScreenRoute::Results { .. } | ScreenRoute::Closing
-        ) {
+        if self.navigator.route() != ScreenRoute::Closing
+            && !self.navigator.route().contains(ScreenKind::Play)
+        {
             self.game = None;
         }
-        if !matches!(
-            self.navigator.route(),
-            ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
-        ) {
+        if !self.navigator.route().contains(ScreenKind::Play) {
             self.release_backgrounds();
         }
     }
