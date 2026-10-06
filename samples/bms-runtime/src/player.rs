@@ -394,6 +394,33 @@ impl PlayerPublisher {
         &self,
         capability: Option<crate::live_output_control::OutputCapability>,
     ) -> io::Result<()> {
+        if self.0.cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if self.0.output_closed.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "output controls closed",
+            ));
+        }
+        // Cold startup on the game owner, never an audio callback. A transient
+        // UI reader must not turn a successfully opened output into failure.
+        let mut controls = self
+            .0
+            .output
+            .lock()
+            .map_err(|_| io::Error::other("output controls are unavailable"))?;
+        if self.0.cancel.load(Ordering::Acquire) {
+            controls.close("output controls cancelled during setup");
+            self.0.output_supported.store(false, Ordering::Release);
+            self.0
+                .output_queued
+                .store(controls.queued(), Ordering::Release);
+            self.0
+                .output_busy
+                .store(controls.pending(), Ordering::Release);
+            return Ok(());
+        }
         if self.0.output_closed.load(Ordering::Acquire) {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -401,12 +428,7 @@ impl PlayerPublisher {
             ));
         }
         let supported = capability.is_some();
-        self.0
-            .output
-            .try_lock()
-            .map_err(room_lock_error)?
-            .advertise(capability)
-            .map_err(io::Error::other)?;
+        controls.advertise(capability).map_err(io::Error::other)?;
         self.0.output_supported.store(supported, Ordering::Release);
         Ok(())
     }
@@ -510,6 +532,9 @@ impl PlayerViewer {
         Ok(id)
     }
     pub fn take_output_reply(&self) -> io::Result<Option<crate::live_output_control::OutputReply>> {
+        if !self.0.output_busy.load(Ordering::Acquire) {
+            return Ok(None);
+        }
         let mut controls = self.0.output.try_lock().map_err(room_lock_error)?;
         if self.0.cancel.load(Ordering::Acquire) || self.0.output_closed.load(Ordering::Acquire) {
             controls.close("output controls closed or cancelled");
@@ -2233,3 +2258,7 @@ mod completed_result_fixtures;
 mod live_output_channel_fixtures {
     crate::live_output_control::fixtures::player_channel_tests!();
 }
+
+#[cfg(test)]
+#[path = "player_output_startup_fixtures.rs"]
+mod output_startup_fixtures;
