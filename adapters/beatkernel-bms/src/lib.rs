@@ -9,6 +9,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 mod conditional;
+#[cfg(test)]
+mod exbmp_fixtures;
 mod invisible;
 #[cfg(test)]
 mod mine_fixtures;
@@ -177,6 +179,19 @@ impl BgaCrop {
         Ok(())
     }
 }
+/// Exact EXBMP `a,r,g,b` bytes retained beside the shared image path.
+/// No blending, color-key or transparency meaning is applied by the adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImageArgb {
+    /// Original alpha byte.
+    pub alpha: u8,
+    /// Original red byte.
+    pub red: u8,
+    /// Original green byte.
+    pub green: u8,
+    /// Original blue byte.
+    pub blue: u8,
+}
 /// Static Poor-image activation mode; gameplay and timing are unchanged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PoorBgaMode {
@@ -277,6 +292,8 @@ pub struct BmsChart {
     pub samples: BTreeMap<u16, String>,
     /// Exact opaque BMP paths, including optional initial Poor resource 00.
     pub images: BTreeMap<ImageId, String>,
+    /// EXBMP ARGB bytes for IDs whose selected definition was EXBMP.
+    pub image_argb: BTreeMap<ImageId, ImageArgb>,
     /// Crop canvases by destination identity, separate from BMP definitions.
     pub bga_crops: BTreeMap<ImageId, BgaCrop>,
     /// Visual selections, kept outside the gameplay and audio grids.

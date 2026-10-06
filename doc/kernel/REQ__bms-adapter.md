@@ -38,6 +38,24 @@ The [format memo author's SWITCH extension documentation](https://saxxonpike.git
 
 ## Independent visual resources and timing
 
+### EXBMP definition retention
+
+Selected case-insensitive `#EXBMPxx a,r,g,b path` definitions share the BMP
+image namespace, resource radix and Reject/LastWins duplicate policy. Retain
+the exact nonempty path and four decimal bytes (0..255) in `image_argb`; each
+comma-separated field has one to three ASCII digits and no sign or internal
+whitespace. A subsequent accepted plain BMP definition clears the same ID's
+ARGB metadata. Inactive conditional payload does not define or validate these
+resources, following existing seeded selection. Physical source limits remain.
+
+This is parsing and metadata retention only: the application does not yet apply
+EXBMP transparency, approximate color matching or blending. Existing image
+preparation and channel opacity policies continue independently. Definitions
+do not change gameplay timing, keysounds or replay identity when gameplay
+physical lines remain fixed. Verify malformed values, shared duplicates, BASE62
+case distinctions, branch selection and unchanged compilation in adapter tests.
+The extension syntax reference is the [BMS command memo](https://hitkey.nekokan.dyndns.info/cmds.htm).
+
 ImageId is a separate selected-radix BMP namespace, including BMP00 initial poor
 resource. Definitions retain exact opaque nonempty paths; there is no parser
 asset IO. BgaChannel Base/Poor/Layer/Layer2 correspond to04/06/07/0A. Zero row tokens

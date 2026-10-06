@@ -127,6 +127,35 @@ fn crop(value: &str, sugar: bool, radix: u32, line: usize) -> Result<BgaCrop, Bm
         .map_err(|_| fail(line, BmsErrorKind::Syntax("invalid BGA source rectangle")))?;
     Ok(crop)
 }
+fn argb(token: &str, line: usize) -> Result<ImageArgb, BmsError> {
+    let mut bytes = [0u8; 4];
+    let mut fields = token.split(',');
+    for byte in &mut bytes {
+        let field = fields.next().unwrap_or("");
+        if !(1..=3).contains(&field.len()) || !field.bytes().all(|digit| digit.is_ascii_digit()) {
+            return Err(fail(
+                line,
+                BmsErrorKind::Syntax("EXBMP requires four decimal ARGB bytes"),
+            ));
+        }
+        *byte = field
+            .parse()
+            .map_err(|_| fail(line, BmsErrorKind::Syntax("EXBMP ARGB byte must be 0..255")))?;
+    }
+    if fields.next().is_some() {
+        return Err(fail(
+            line,
+            BmsErrorKind::Syntax("EXBMP requires four decimal ARGB bytes"),
+        ));
+    }
+    let [alpha, red, green, blue] = bytes;
+    Ok(ImageArgb {
+        alpha,
+        red,
+        green,
+        blue,
+    })
+}
 fn define<K: Ord, V>(
     map: &mut BTreeMap<K, V>,
     key: K,
@@ -263,6 +292,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     let mut base_defined = false;
     let mut samples = BTreeMap::new();
     let mut images = BTreeMap::new();
+    let mut image_argb = BTreeMap::new();
     let mut bga_crops = BTreeMap::new();
     let mut tempos = BTreeMap::new();
     let mut stops = BTreeMap::new();
@@ -521,6 +551,29 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 "BMP definition",
                 options.duplicates,
             )?;
+            // A later plain BMP replaces an EXBMP definition, including its bytes.
+            image_argb.remove(&id);
+        } else if command.len() == 7 && command.starts_with("EXBMP") {
+            let id = ImageId(code(&original_command[5..], resource_radix, line)?);
+            let split = value.find(char::is_whitespace).unwrap_or(value.len());
+            let color = argb(&value[..split], line)?;
+            let path = value[split..].trim();
+            if path.is_empty() || path.contains('\0') {
+                return Err(fail(
+                    line,
+                    BmsErrorKind::Syntax("nonempty EXBMP path required"),
+                ));
+            }
+            // BMP and EXBMP share one image namespace and duplicate policy.
+            define(
+                &mut images,
+                id,
+                path.to_owned(),
+                line,
+                "BMP definition",
+                options.duplicates,
+            )?;
+            image_argb.insert(id, color);
         } else if (command.len() == 5 && command.starts_with("BGA"))
             || (command.len() == 6 && command.starts_with("@BGA"))
         {
@@ -1155,6 +1208,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         source,
         samples,
         images,
+        image_argb,
         bga_crops,
         bga,
         bga_opacity,
