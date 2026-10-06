@@ -439,3 +439,12 @@ unrepresentable evidence instead of inventing point samples. Author portable
 interval and real gated-mixer startup fixtures for later execution. Ordinary
 source/GNU checks do not cover the SDK/MSVC driver branch; SDK compilation, device,
 network and physical timing acceptance remain deferred.
+
+## Stopped native mixer ownership
+
+The core static recovery port and native stream retirement paths now follow
+[stopped mixer recovery](REQ__stopped-mixer-recovery.md). The original software
+mixer can be moved once after confirmed join/callback retirement, retaining PCM,
+voices, command ownership and cursor state. This does not drain unheard device
+buffers, rebase a reopened device clock or guarantee gapless transfer. Those
+controls remain separate from [output clock epochs](REQ__output-clock-epochs.md).

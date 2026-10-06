@@ -36,6 +36,10 @@ pause/output fence, actual first-playback anchor, runtime integration and physic
 latency measurements remain required. Buffer-length variation on an unchanged
 stream stays distinct from a backend/latency discontinuity. Acoustic accuracy and
 gapless or instant synchronization are not guaranteed by this helper.
+Native stopped-output ownership recovery now follows
+[stopped mixer recovery](REQ__stopped-mixer-recovery.md), retaining the original
+software state after retirement. Presentation fencing, new-device origin mapping
+and live application transfer remain separate required integrations.
 
 Author independent core storage/atomicity/epoch/warmup/continuous-history cases,
 platform source-reset/tagged-refusal cases and actual generic port delegation/
