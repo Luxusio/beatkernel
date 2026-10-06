@@ -34,6 +34,16 @@ pub trait OutputReplacementBackend {
         output: &mut Self::Output,
         presentation: &mut Self::Presentation,
     ) -> Result<(), Self::Error>;
+    /// Interval backends override this with their original accepted end evidence.
+    fn observe_end(
+        &self,
+        _: &Self::Output,
+        end: &mut crate::native_end::NativeEnd,
+        pair: ClockPair,
+        report: Option<RenderReport>,
+    ) -> crate::native_gameplay::NativeGameplayResult<Option<crate::native_end::EndBoundary>> {
+        Ok(end.observe(report, pair)?)
+    }
     fn render_report(&self, output: &Self::Output) -> Result<Option<RenderReport>, Self::Error>;
     fn pause_observation(
         &self,
@@ -61,12 +71,14 @@ pub enum ReplacementPhase {
     Start,
     Observe,
 }
+#[derive(Debug)]
 pub enum ReplacementCause<E> {
     Policy(&'static str),
     Timing(Box<dyn std::error::Error>),
     Hold(PauseHoldError),
     Backend { phase: ReplacementPhase, error: E },
 }
+#[derive(Debug)]
 pub struct ReplacementFailure<E> {
     pub cause: ReplacementCause<E>,
     pub cleanup: Option<E>,
@@ -92,6 +104,35 @@ impl<E> ReplacementFailure<E> {
             cause: ReplacementCause::Backend { phase, error },
             cleanup: None,
             recovery: None,
+        }
+    }
+}
+impl<E: std::fmt::Display> std::fmt::Display for ReplacementFailure<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.cause {
+            ReplacementCause::Policy(message) => f.write_str(message)?,
+            ReplacementCause::Timing(error) => error.fmt(f)?,
+            ReplacementCause::Hold(error) => error.fmt(f)?,
+            ReplacementCause::Backend { phase, error } => {
+                write!(f, "output replacement {phase:?}: {error}")?
+            }
+        }
+        if let Some(error) = &self.cleanup {
+            write!(f, "; cleanup: {error}")?;
+        }
+        if let Some(error) = &self.recovery {
+            write!(f, "; recovery: {error}")?;
+        }
+        Ok(())
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for ReplacementFailure<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.cause {
+            ReplacementCause::Timing(error) => Some(error.as_ref()),
+            ReplacementCause::Hold(error) => Some(error),
+            ReplacementCause::Backend { error, .. } => Some(error),
+            _ => None,
         }
     }
 }
@@ -144,6 +185,43 @@ impl<B: OutputReplacementBackend> OutputReplacement<B> {
     }
     pub fn backend(&self) -> &B {
         &self.backend
+    }
+    pub fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
+    /// Explicitly retire owned rejected/other output through the same recovery policy.
+    pub fn stop_owned(&mut self) -> Result<bool, ReplacementFailure<B::Error>> {
+        if self.state() == ReplacementState::Waiting {
+            return self.cancel();
+        }
+        let slot = std::mem::replace(&mut self.slot, Slot::Detached);
+        match slot {
+            Slot::Attached(output) | Slot::Pending(output) => {
+                self.retire_owned_output(output).map(|_| true)
+            }
+            other => {
+                self.slot = other;
+                Ok(false)
+            }
+        }
+    }
+    pub fn retire_owned_output(
+        &mut self,
+        output: B::Output,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        let (cleanup, recovery) = self.cleanup_output(output);
+        match (cleanup, recovery) {
+            (Some(error), recovery) => {
+                let mut failure = ReplacementFailure::backend(ReplacementPhase::Retire, error);
+                failure.recovery = recovery;
+                Err(failure)
+            }
+            (None, Some(error)) => Err(ReplacementFailure::backend(
+                ReplacementPhase::Recover,
+                error,
+            )),
+            (None, None) => Ok(()),
+        }
     }
     /// Rejected ownership is returned untouched, never implicitly dropped.
     pub fn attach(&mut self, output: B::Output) -> Result<(), B::Output> {

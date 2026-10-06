@@ -589,23 +589,47 @@ mod native {
         InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
         NativeGameplaySession, retain_input, run_gameplay_with_result_and_score,
     };
+    use beatkernel_bms_runtime::{
+        gameplay_output_owner::GameplayOutputOwner,
+        native_alsa_replacement::{AlsaReplacementBackend, AlsaReplacementOutput},
+    };
+    type OwnedOutput = GameplayOutputOwner<AlsaReplacementBackend>;
     struct GameplayDevice<'a> {
-        stream: &'a mut AlsaStream,
+        output: &'a mut OwnedOutput,
         input: &'a mut EvdevDevice,
         clock: &'a MonotonicClock,
         retained: &'a mut VecDeque<PhysicalInputEvent>,
     }
     impl NativeGameplayDevice for GameplayDevice<'_> {
         fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
-            if let Some(pair) = observe(self.stream, false)? {
-                discipline.observe_clock_pair(pair)?;
+            Ok(self.output.observe(discipline)?)
+        }
+        fn output_replacement_pending(&self) -> bool {
+            self.output.replacement_pending()
+        }
+        fn publish_paused_output(
+            &mut self,
+            context: beatkernel_bms_runtime::gameplay_presentation::GameplayOutputContext<
+                '_,
+                PresentationDiscipline,
+            >,
+        ) -> NativeGameplayResult<bool> {
+            if !self.output.has_work() {
+                return Ok(false);
             }
-            Ok(())
+            self.output.publish_paused(context, self.clock.now()?)
+        }
+        fn pause_observation(
+            &mut self,
+            pair: ClockPair,
+        ) -> NativeGameplayResult<beatkernel_bms_runtime::live_pause::LivePauseObservation>
+        {
+            Ok(self.output.pause_observation(pair, pair.target)?)
         }
         fn render_report(
             &mut self,
         ) -> NativeGameplayResult<Option<beatkernel::audio::RenderReport>> {
-            Ok(self.stream.last_render_report())
+            Ok(self.output.render_report())
         }
         fn host_now(&self) -> NativeGameplayResult<ClockPoint> {
             Ok(self.clock.now()?)
@@ -645,20 +669,16 @@ mod native {
             discipline: &PresentationDiscipline,
             report: Option<beatkernel::audio::RenderReport>,
         ) -> NativeGameplayResult<Option<beatkernel_bms_runtime::native_end::EndBoundary>> {
-            Ok(end.observe(
-                report,
-                discipline
-                    .latest_pair()
-                    .ok_or("native end clock relation missing")?,
-            )?)
+            let _ = report;
+            self.output.observe_end(end, discipline)
         }
         fn seed_resume(
             &mut self,
             discipline: &mut PresentationDiscipline,
             reference: ClockPair,
         ) -> NativeGameplayResult<()> {
-            discipline.observe_clock_pair(reference)?;
-            Ok(())
+            let _ = reference;
+            Ok(self.output.seed_resume(discipline)?)
         }
         fn fallback_schedule(&mut self, _: u32) -> NativeGameplayResult<ClockPoint> {
             Err("ALSA uses logical mixer scheduling".into())
@@ -839,10 +859,18 @@ mod native {
             allow_size_rounding: false,
             monotonic_domain: HOST,
         };
-        let mut stream = AlsaStream::open(request, mixer)?;
+        let stream = AlsaStream::open(request, mixer)?;
+        let mut output = OwnedOutput::new(
+            AlsaReplacementBackend,
+            AlsaReplacementOutput::from_stream(stream),
+        );
         println!(
             "requested/applied ALSA={:?}; evdev={:?}; exact source={:?}; bindings={:?}; windows={}/{}ns offset={}ns preroll={}ns advance_lag={}ns voices={} channel_policy={} queue/pending={} live_slack={SLACK}",
-            stream.configuration(),
+            output
+                .current()
+                .ok_or("initial ALSA output missing")?
+                .stream()
+                .configuration(),
             input.descriptor(),
             DEVICE,
             options.bindings,
@@ -885,7 +913,10 @@ mod native {
                         .ok_or("network startup owner missing")?;
                     let started = {
                         let mut device = StartupDevice {
-                            stream: &mut stream,
+                            stream: output
+                                .current_mut()
+                                .ok_or("startup ALSA output missing")?
+                                .stream_mut(),
                             input: &mut input,
                             clock: &clock,
                             before_origin: &mut before_origin,
@@ -932,14 +963,26 @@ mod native {
                     );
                     (discipline, pair, host_origin, plan.selected_output())
                 } else {
-                    stream.start()?;
+                    output
+                        .current_mut()
+                        .ok_or("startup ALSA output missing")?
+                        .stream_mut()
+                        .start()?;
                     let mut discipline = PresentationDiscipline::new(
                         DisciplineConfig::default(),
                         output_origin(),
                         HOST,
                         song_origin,
                     )?;
-                    let pair = seed(&stream, &mut discipline, &mut bgm, &mut producer)?;
+                    let pair = seed(
+                        output
+                            .current()
+                            .ok_or("startup ALSA output missing")?
+                            .stream(),
+                        &mut discipline,
+                        &mut bgm,
+                        &mut producer,
+                    )?;
                     let host_origin = ClockPoint {
                         domain: HOST,
                         timestamp: estimated_origin(pair, output_origin())?,
@@ -976,7 +1019,7 @@ mod native {
                 }
                 let pump_outcome = {
                     let mut device = GameplayDevice {
-                        stream: &mut stream,
+                        output: &mut output,
                         input: &mut input,
                         clock: &clock,
                         retained: &mut startup_inputs,
@@ -1019,19 +1062,25 @@ mod native {
                 );
                 pump_outcome
             })();
-        let timing = stream.timing_snapshot();
-        let stop = stream.stop(); // joins and tears down native handles before evdev drop
-        match stream.last_render_report() {
+        let timing = output
+            .current()
+            .and_then(|output| output.stream().timing_snapshot());
+        let stop = output.stop(); // joins and tears down native handles before evdev drop
+        match output
+            .current()
+            .and_then(|output| output.stream().last_render_report())
+            .or(output.render_report())
+        {
             Some(report) => println!(
-                "last successful Mixer render report={report:?}; execution counters distinct from queue admission/native writes; physical delivery unverified"
+                "last observed Mixer render report={report:?}; execution counters distinct from queue admission/native writes; physical delivery unverified"
             ),
             None => println!(
-                "last successful Mixer render report unavailable; no render observation substituted"
+                "last observed Mixer render report unavailable; no render observation substituted"
             ),
         }
         println!(
             "final independent ALSA counters={:?}; last separately coherent timing={timing:?}; evdev={:?}; pre-origin ignored={before_origin}; physical latency=unmeasured",
-            stream.snapshot(),
+            output.current().map(|output| output.stream().snapshot()),
             input.counters()
         );
         if let Err(error) = &stop {

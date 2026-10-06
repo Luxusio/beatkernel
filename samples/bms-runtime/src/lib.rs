@@ -945,3 +945,8 @@ pub mod native_asio_replacement;
 mod gameplay_output_publication_fixtures;
 #[cfg(test)]
 mod native_output_publication_fixtures;
+
+/// Statically owned current and replacement output for live gameplay adapters.
+pub mod gameplay_output_owner;
+#[cfg(test)]
+mod native_owned_output_fixtures;

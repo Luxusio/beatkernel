@@ -44,6 +44,9 @@ impl AlsaReplacementOutput {
     pub fn stream(&self) -> &AlsaStream {
         &self.stream
     }
+    pub fn stream_mut(&mut self) -> &mut AlsaStream {
+        &mut self.stream
+    }
     pub fn epoch(&self) -> u64 {
         self.epoch
     }

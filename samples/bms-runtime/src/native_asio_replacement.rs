@@ -234,6 +234,18 @@ impl OutputReplacementBackend for AsioReplacementBackend {
         }
         Ok(())
     }
+    fn observe_end(
+        &self,
+        output: &Self::Output,
+        end: &mut crate::native_end::NativeEnd,
+        _: ClockPair,
+        _: Option<RenderReport>,
+    ) -> crate::native_gameplay::NativeGameplayResult<Option<crate::native_end::EndBoundary>> {
+        match output.observation {
+            Some(observation) => Ok(end.observe_asio(observation)?),
+            None => Ok(None),
+        }
+    }
     fn render_report(&self, output: &Self::Output) -> Result<Option<RenderReport>, Self::Error> {
         Ok(output.observation.map(|observation| observation.render))
     }

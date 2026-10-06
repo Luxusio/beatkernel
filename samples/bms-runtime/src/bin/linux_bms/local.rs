@@ -100,8 +100,13 @@ impl NativeStartDevice for CohortStartupDevice<'_> {
     }
 }
 
+use beatkernel_bms_runtime::{
+    gameplay_output_owner::GameplayOutputOwner,
+    native_alsa_replacement::{AlsaReplacementBackend, AlsaReplacementOutput},
+};
+type OwnedOutput = GameplayOutputOwner<AlsaReplacementBackend>;
 struct CohortDevice<'a> {
-    stream: &'a mut AlsaStream,
+    output: &'a mut OwnedOutput,
     inputs: &'a mut [EvdevDevice],
     clock: &'a MonotonicClock,
     backlogged: &'a mut [bool],
@@ -109,13 +114,31 @@ struct CohortDevice<'a> {
 }
 impl NativeGameplayDevice for CohortDevice<'_> {
     fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
-        if let Some(pair) = observe(self.stream, false)? {
-            discipline.observe_clock_pair(pair)?;
+        Ok(self.output.observe(discipline)?)
+    }
+    fn output_replacement_pending(&self) -> bool {
+        self.output.replacement_pending()
+    }
+    fn publish_paused_output(
+        &mut self,
+        context: beatkernel_bms_runtime::gameplay_presentation::GameplayOutputContext<
+            '_,
+            PresentationDiscipline,
+        >,
+    ) -> NativeGameplayResult<bool> {
+        if !self.output.has_work() {
+            return Ok(false);
         }
-        Ok(())
+        self.output.publish_paused(context, self.clock.now()?)
+    }
+    fn pause_observation(
+        &mut self,
+        pair: beatkernel::time::ClockPair,
+    ) -> NativeGameplayResult<beatkernel_bms_runtime::live_pause::LivePauseObservation> {
+        Ok(self.output.pause_observation(pair, pair.target)?)
     }
     fn render_report(&mut self) -> NativeGameplayResult<Option<beatkernel::audio::RenderReport>> {
-        Ok(self.stream.last_render_report())
+        Ok(self.output.render_report())
     }
     fn host_now(&self) -> NativeGameplayResult<ClockPoint> {
         Ok(self.clock.now()?)
@@ -169,20 +192,16 @@ impl NativeGameplayDevice for CohortDevice<'_> {
         discipline: &PresentationDiscipline,
         report: Option<beatkernel::audio::RenderReport>,
     ) -> NativeGameplayResult<Option<beatkernel_bms_runtime::native_end::EndBoundary>> {
-        Ok(end.observe(
-            report,
-            discipline
-                .latest_pair()
-                .ok_or("native end clock relation missing")?,
-        )?)
+        let _ = report;
+        self.output.observe_end(end, discipline)
     }
     fn seed_resume(
         &mut self,
         discipline: &mut PresentationDiscipline,
         reference: ClockPair,
     ) -> NativeGameplayResult<()> {
-        discipline.observe_clock_pair(reference)?;
-        Ok(())
+        let _ = reference;
+        Ok(self.output.seed_resume(discipline)?)
     }
     fn fallback_schedule(&mut self, _: u32) -> NativeGameplayResult<ClockPoint> {
         Err("ALSA local cohorts use logical mixer scheduling".into())
@@ -304,7 +323,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         }
         inputs.push(input);
     }
-    let mut stream = AlsaStream::open(
+    let stream = AlsaStream::open(
         AlsaRequest {
             device: options.alsa.clone(),
             format: DeviceFormat::new(
@@ -320,9 +339,17 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         },
         mixer,
     )?;
+    let mut output = OwnedOutput::new(
+        AlsaReplacementBackend,
+        AlsaReplacementOutput::from_stream(stream),
+    );
     println!(
         "local players={count}; shared requested/applied ALSA={:?}; exact input devices={:?}; one asset bank/BGM/output; independent judges/captures/scores",
-        stream.configuration(),
+        output
+            .current()
+            .ok_or("initial ALSA output missing")?
+            .stream()
+            .configuration(),
         options.local_inputs
     );
     let mut before_origin = 0u64;
@@ -332,7 +359,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         {
             let started = start_committed(
                 &mut CohortStartupDevice {
-                    stream: &mut stream,
+                    stream: output.current_mut().ok_or("startup ALSA output missing")?.stream_mut(),
                     inputs: &mut inputs,
                     clock: &clock,
                     before_origin: &mut before_origin,
@@ -373,14 +400,14 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             discipline.observe_clock_pair(started.observation.timing.point()?)?;
             (discipline, started.host_origin, selected)
         } else {
-            stream.start()?;
+            output.current_mut().ok_or("startup ALSA output missing")?.stream_mut().start()?;
             let mut discipline = PresentationDiscipline::new(
                 DisciplineConfig::default(),
                 output_origin(),
                 HOST,
                 song_origin,
             )?;
-            let pair = seed(&stream, &mut discipline, &mut bgm, &mut producer)?;
+            let pair = seed(output.current().ok_or("startup ALSA output missing")?.stream(), &mut discipline, &mut bgm, &mut producer)?;
             let host_origin = ClockPoint {
                 domain: HOST,
                 timestamp: estimated_origin(pair, output_origin())?,
@@ -401,7 +428,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         let pump = {
             let mut backlogged = vec![true; count];
             let mut device = CohortDevice {
-                stream: &mut stream,
+                output: &mut output,
                 inputs: &mut inputs,
                 clock: &clock,
                 backlogged: &mut backlogged,
@@ -448,12 +475,17 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         }
         pump
     })();
-    let timing = stream.timing_snapshot();
-    let stop = stream.stop();
+    let timing = output
+        .current()
+        .and_then(|output| output.stream().timing_snapshot());
+    let stop = output.stop();
     println!(
-        "shared final ALSA={:?}; timing={timing:?}; last mixer={:?}; pre-origin ignored={before_origin}; physical delivery unverified",
-        stream.snapshot(),
-        stream.last_render_report()
+        "shared final ALSA={:?}; timing={timing:?}; last observed mixer={:?}; pre-origin ignored={before_origin}; physical delivery unverified",
+        output.current().map(|output| output.stream().snapshot()),
+        output
+            .current()
+            .and_then(|output| output.stream().last_render_report())
+            .or(output.render_report())
     );
     for (index, input) in inputs.iter().enumerate() {
         println!(

@@ -39,6 +39,9 @@ use beatkernel_platform::audio::presentation::discipline::PresentationDiscipline
 use std::collections::VecDeque;
 
 pub trait NativeGameplayDevice {
+    fn output_replacement_pending(&self) -> bool {
+        false
+    }
     /// Compatibility hook for committed paused replacement; existing owners opt out.
     fn publish_paused_output(
         &mut self,
@@ -133,6 +136,9 @@ impl GameplayPresentationPort for PresentationDiscipline {
 
 impl<D: NativeGameplayDevice> GameplayDevice for D {
     type Presentation = PresentationDiscipline;
+    fn output_replacement_pending(&self) -> bool {
+        NativeGameplayDevice::output_replacement_pending(self)
+    }
     fn publish_paused_output(
         &mut self,
         context: crate::gameplay_presentation::GameplayOutputContext<'_, Self::Presentation>,

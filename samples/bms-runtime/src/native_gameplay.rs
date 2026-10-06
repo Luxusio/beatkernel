@@ -464,7 +464,8 @@ pub fn run_gameplay_with_result_and_ports<
                 && !end_rendered
                 && (session.pause.phase() == PausePhase::Running || pause_committed)
                 && resume_boundary.is_none())
-            .then(|| host_port.pause_requested());
+            .then(|| host_port.pause_requested())
+            .filter(|desired| *desired || !device.output_replacement_pending());
             let update = update_live_pause(
                 session.pause,
                 device.pause_observation(reference)?,

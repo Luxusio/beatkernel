@@ -253,6 +253,10 @@ pub struct GameplayOutputContext<'a, P: GameplayPresentationPort> {
 }
 pub trait GameplayDevice {
     type Presentation: GameplayPresentationPort;
+    /// A held replacement defers coordinated resume until publication or cancellation.
+    fn output_replacement_pending(&self) -> bool {
+        false
+    }
     /// Called only during a committed nonterminal pause; default adapters have no replacement.
     fn publish_paused_output(
         &mut self,
