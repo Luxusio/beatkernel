@@ -14,6 +14,10 @@ pub use beatkernel::time::presentation::{DisciplineConfig, DisciplineUpdate, Obs
 /// Rejected operation; observer and transport state remain unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisciplineError {
+    /// Output epochs must increase strictly without wrapping.
+    InvalidEpoch,
+    /// The observation belongs to a different output stream epoch.
+    EpochMismatch,
     /// Configuration is nonpositive, out of bounds or cannot cover its minimum span.
     InvalidConfig,
     /// Preallocation failed before any state was constructed.
@@ -64,6 +68,8 @@ impl From<TransportError> for DisciplineError {
 impl From<EstimatorError> for DisciplineError {
     fn from(value: EstimatorError) -> Self {
         match value {
+            EstimatorError::InvalidEpoch => Self::InvalidEpoch,
+            EstimatorError::EpochMismatch => Self::EpochMismatch,
             EstimatorError::InvalidConfig => Self::InvalidConfig,
             EstimatorError::AllocationFailed => Self::AllocationFailed,
             EstimatorError::DomainMismatch => Self::DomainMismatch,
@@ -146,6 +152,58 @@ impl PresentationDiscipline {
     /// The helper has no numeric hardware accuracy bound.
     pub const fn quality(&self) -> ClockMappingQuality {
         self.estimator.quality()
+    }
+    /// Current output observation epoch, initially zero.
+    pub const fn epoch(&self) -> u64 {
+        self.estimator.epoch()
+    }
+    /// Rebinds a strictly newer stream epoch and clears source identity only
+    /// after core origin validation succeeds; transport remains caller-owned.
+    pub fn rebind_output(
+        &mut self,
+        epoch: u64,
+        output_origin: ClockPoint,
+        playback_origin: ClockPoint,
+        song_origin: Timestamp,
+    ) -> Result<(), DisciplineError> {
+        self.estimator
+            .rebind_output(epoch, output_origin, playback_origin, song_origin)?;
+        self.output_origin = output_origin;
+        self.latest_source = None;
+        Ok(())
+    }
+    /// The token must come from the creating stream, never from a delayed callback's admission.
+    pub fn observe_in_epoch(
+        &mut self,
+        epoch: u64,
+        snapshot: AudioStreamSnapshot,
+    ) -> Result<ObservationAdmission, DisciplineError> {
+        if epoch != self.epoch() {
+            return Err(DisciplineError::EpochMismatch);
+        }
+        self.observe(snapshot)
+    }
+    /// Checks the pair's stream-creation token before source validation or admission.
+    pub fn observe_clock_pair_in_epoch(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+    ) -> Result<ObservationAdmission, DisciplineError> {
+        if epoch != self.epoch() {
+            return Err(DisciplineError::EpochMismatch);
+        }
+        self.observe_clock_pair(pair)
+    }
+    /// Checks the ASIO observation's original epoch before metadata conversion.
+    pub fn observe_asio_in_epoch(
+        &mut self,
+        epoch: u64,
+        observation: crate::audio::asio::AsioPresentationObservation,
+    ) -> Result<ObservationAdmission, DisciplineError> {
+        if epoch != self.epoch() {
+            return Err(DisciplineError::EpochMismatch);
+        }
+        self.observe_asio(observation)
     }
     /// Validated caller configuration.
     pub const fn config(&self) -> DisciplineConfig {
@@ -343,3 +401,7 @@ impl PresentationDiscipline {
             .map_err(DisciplineError::from)
     }
 }
+
+#[cfg(test)]
+#[path = "rebind_fixtures.rs"]
+mod rebind_fixtures;

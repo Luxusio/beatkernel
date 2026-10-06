@@ -24,6 +24,18 @@ pub trait GameplayPresentationPort: Sized {
         host_domain: ClockDomainId,
         applied_song_origin: Timestamp,
     ) -> NativeGameplayResult<Self>;
+    fn epoch(&self) -> Option<u64> {
+        None
+    }
+    fn rebind_output(
+        &mut self,
+        _epoch: u64,
+        _output_origin: ClockPoint,
+        _playback_origin: ClockPoint,
+        _song_origin: Timestamp,
+    ) -> NativeGameplayResult<()> {
+        Err("presentation output rebinding is unsupported".into())
+    }
     fn latest_pair(&self) -> Option<ClockPair>;
     fn quality(&self) -> ClockMappingQuality;
     fn validate_host(&self, point: ClockPoint) -> NativeGameplayResult<()>;
@@ -48,6 +60,24 @@ impl GameplayPresentationPort for PresentationEstimator {
             playback_origin,
             host_domain,
             applied_song_origin,
+        )?)
+    }
+    fn epoch(&self) -> Option<u64> {
+        Some(Self::epoch(self))
+    }
+    fn rebind_output(
+        &mut self,
+        epoch: u64,
+        output_origin: ClockPoint,
+        playback_origin: ClockPoint,
+        song_origin: Timestamp,
+    ) -> NativeGameplayResult<()> {
+        Ok(Self::rebind_output(
+            self,
+            epoch,
+            output_origin,
+            playback_origin,
+            song_origin,
         )?)
     }
     fn latest_pair(&self) -> Option<ClockPair> {
@@ -99,3 +129,7 @@ pub trait GameplayDevice {
     ) -> NativeGameplayResult<()>;
     fn fallback_schedule(&mut self, rate: u32) -> NativeGameplayResult<ClockPoint>;
 }
+
+#[cfg(test)]
+#[path = "presentation_rebind_port_fixtures.rs"]
+mod presentation_rebind_port_fixtures;

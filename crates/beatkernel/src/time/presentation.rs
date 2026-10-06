@@ -82,6 +82,10 @@ pub enum DisciplineUpdate {
 /// Rejected operation; estimator and transport state remain unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EstimatorError {
+    /// Output epochs must increase strictly without wrapping.
+    InvalidEpoch,
+    /// The observation belongs to a different output stream epoch.
+    EpochMismatch,
     /// Configuration is nonpositive, out of bounds or cannot cover its minimum span.
     InvalidConfig,
     /// Preallocation failed before any state was constructed.
@@ -120,6 +124,7 @@ impl From<TransportError> for EstimatorError {
 /// Pure bounded observation owner and continuous transport correction policy.
 #[derive(Debug)]
 pub struct PresentationEstimator {
+    epoch: u64,
     config: DisciplineConfig,
     output_origin: ClockPoint,
     playback_origin: ClockPoint,
@@ -136,6 +141,7 @@ impl Clone for PresentationEstimator {
         let mut retained = Vec::with_capacity(self.config.capacity);
         retained.extend_from_slice(&self.retained);
         Self {
+            epoch: self.epoch,
             config: self.config,
             output_origin: self.output_origin,
             playback_origin: self.playback_origin,
@@ -205,6 +211,7 @@ impl PresentationEstimator {
             .try_reserve_exact(config.capacity)
             .map_err(|_| EstimatorError::AllocationFailed)?;
         Ok(Self {
+            epoch: 0,
             config,
             output_origin,
             playback_origin,
@@ -216,6 +223,64 @@ impl PresentationEstimator {
             last_retained: None,
             last_update: None,
         })
+    }
+
+    /// Current output observation epoch, initially zero and preserved by cloning.
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    /// Replaces only observation origins/history; startup and transport remain caller-owned.
+    pub fn rebind_output(
+        &mut self,
+        epoch: u64,
+        output_origin: ClockPoint,
+        playback_origin: ClockPoint,
+        song_origin: Timestamp,
+    ) -> Result<(), EstimatorError> {
+        if epoch <= self.epoch {
+            return Err(EstimatorError::InvalidEpoch);
+        }
+        if playback_origin.domain != output_origin.domain {
+            return Err(EstimatorError::DomainMismatch);
+        }
+        if playback_origin.timestamp < output_origin.timestamp {
+            return Err(EstimatorError::InvalidConfig);
+        }
+        self.epoch = epoch;
+        self.output_origin = output_origin;
+        self.playback_origin = playback_origin;
+        self.applied_song_origin = song_origin;
+        self.retained.clear();
+        self.next = 0;
+        self.latest = None;
+        self.last_retained = None;
+        self.last_update = None;
+        Ok(())
+    }
+    /// Admits a pair tagged when its stream observation was created.
+    /// A mismatched token refuses before domain, history or freshness mutation.
+    pub fn observe_clock_pair_in_epoch(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+    ) -> Result<ObservationAdmission, EstimatorError> {
+        if epoch != self.epoch {
+            return Err(EstimatorError::EpochMismatch);
+        }
+        self.observe_clock_pair(pair)
+    }
+    /// Admits externally proven progress with its original stream epoch token.
+    /// Token validation precedes admission; the caller still proves progress in
+    /// original evidence and must not relabel a delayed observation.
+    pub fn observe_progress_pair_in_epoch(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+    ) -> Result<ObservationAdmission, EstimatorError> {
+        if epoch != self.epoch {
+            return Err(EstimatorError::EpochMismatch);
+        }
+        self.observe_progress_pair(pair)
     }
 
     /// Supplied relations provide no numeric hardware accuracy bound.
@@ -416,3 +481,7 @@ fn rounded(numerator: i128, denominator: i128) -> Result<i128, EstimatorError> {
         / denominator;
     Ok(if numerator < 0 { -result } else { result })
 }
+
+#[cfg(test)]
+#[path = "presentation_rebind_fixtures.rs"]
+mod presentation_rebind_fixtures;

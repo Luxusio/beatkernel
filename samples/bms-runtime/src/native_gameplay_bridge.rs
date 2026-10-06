@@ -84,6 +84,24 @@ impl GameplayPresentationPort for PresentationDiscipline {
             applied_song_origin,
         )?)
     }
+    fn epoch(&self) -> Option<u64> {
+        Some(Self::epoch(self))
+    }
+    fn rebind_output(
+        &mut self,
+        epoch: u64,
+        output_origin: ClockPoint,
+        playback_origin: ClockPoint,
+        song_origin: Timestamp,
+    ) -> NativeGameplayResult<()> {
+        Ok(Self::rebind_output(
+            self,
+            epoch,
+            output_origin,
+            playback_origin,
+            song_origin,
+        )?)
+    }
     fn latest_pair(&self) -> Option<ClockPair> {
         Self::latest_pair(self)
     }
