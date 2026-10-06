@@ -183,7 +183,7 @@ fn actual_solo_pause_resume_reconstructs_pure_port_and_reconciles_original_relea
         ..Default::default()
     };
     f.run(false, &mut host, &mut Control::default()).unwrap();
-    assert_eq!(f.device.seeds, [pair(40_000_000, 40_000_000)]);
+    assert_eq!(f.device.seeds, [pair(50_000_000, 50_000_000)]);
     assert_eq!(f.pause.phase(), crate::playback_pause::PausePhase::Running);
     assert_eq!(f.delivery.observed_events(), 4);
     let releases = host

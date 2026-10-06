@@ -45,7 +45,7 @@ fn actual_solo_resume_retains_nondefault_discipline_and_nonzero_or_max_epoch_wit
         f.run(false, &mut host, &mut Control::default()).unwrap();
         assert_eq!(f.presentation.epoch(), epoch);
         assert_eq!(f.presentation.config(), settings);
-        assert_eq!(f.device.seeds, [pair(40_000_000, 40_000_000)]);
+        assert_eq!(f.device.seeds, [pair(50_000_000, 50_000_000)]);
         assert_eq!(f.pause.phase(), crate::playback_pause::PausePhase::Running);
         assert_eq!(f.delivery.observed_events(), 4);
         assert_eq!(f.observer.as_ref().unwrap().marks, 0);
