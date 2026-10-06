@@ -184,13 +184,13 @@ test("raw WebHID packets preserve separate report IDs and exact payload in the s
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
     1, 0x44, 0x49, 0x48, 0x57, 1, 0x7f, 0, 0, 0,
     1, 0x4e, 0x49, 0x57, 0, 8, 7, 6, 5, 4, 3, 2, 1,
-    0, 1, 0x7f, 4, 0, 0, 0, 0x7f, 0, 0xff, 0x80,
+    0, 1, 0x7f, 4, 0, 0, 0, 0, 0, 0, 0, 0x7f, 0, 0xff, 0x80,
   ]);
   const backing = Uint8Array.from([99, 0x7f, 0, 0xff, 0x80, 99]);
   const record = hid({ data: backing.subarray(1, 5) });
   const encoded = encodeRawHidEvent(record);
   assert.deepEqual(encoded, literal);
-  assert.equal(encoded.length, 69);
+  assert.equal(encoded.length, 73);
   assert.notEqual(encoded.buffer, backing.buffer);
   backing.fill(0);
   record.reportId = 0; record.source = 3n;
@@ -200,11 +200,11 @@ test("raw WebHID packets preserve separate report IDs and exact payload in the s
     const bytes = encodeRawHidEvent(hid({ reportId, data, source: 18446744073709551615n,
       sequence: 18446744073709551615n, hostNs: 9223372036854775807n }));
     const view = new DataView(bytes.buffer);
-    assert.equal(bytes.length, (reportId === 0 ? 64 : 65) + size);
+    assert.equal(bytes.length, (reportId === 0 ? 68 : 69) + size);
     assert.equal(bytes[59], reportId === 0 ? 0 : 1);
     if (reportId !== 0) assert.equal(bytes[60], reportId);
-    assert.equal(view.getUint32(reportId === 0 ? 60 : 61, true), size);
-    assert.deepEqual(bytes.subarray(reportId === 0 ? 64 : 65), data, "a leading payload byte equal to the separate ID is never stripped");
+    assert.equal(view.getBigUint64(reportId === 0 ? 60 : 61, true), BigInt(size));
+    assert.deepEqual(bytes.subarray(reportId === 0 ? 68 : 69), data, "a leading payload byte equal to the separate ID is never stripped");
     assert.equal(view.getUint32(41, true), reportId);
     assert.equal(view.getBigUint64(7, true), 18446744073709551615n);
     assert.equal(view.getBigUint64(27, true), 18446744073709551615n);
@@ -223,8 +223,8 @@ test("raw HID encoding rejects malformed acquisition identity or payload instead
   ]) for (const value of values) assert.throws(() => encodeRawHidEvent(hid({ [field]: value })));
   for (const value of [undefined, null, [], "report"]) assert.throws(() => encodeRawHidEvent(value));
   const minimum = encodeRawHidEvent(hid({ hostNs: 0n, source: 3n, sequence: 0n, reportId: 0, data: new Uint8Array() }));
-  assert.equal(minimum.length, 64);
-  assert.deepEqual(Array.from(minimum.subarray(59)), [0, 0, 0, 0, 0]);
+  assert.equal(minimum.length, 68);
+  assert.deepEqual(Array.from(minimum.subarray(59)), [0, 0, 0, 0, 0, 0, 0, 0, 0]);
   for (const length of [0, 1]) {
     const data = new Uint8Array(length);
     structuredClone(data.buffer, { transfer: [data.buffer] });

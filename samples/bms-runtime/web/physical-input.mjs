@@ -219,7 +219,7 @@ export function encodeRawHidEvent(event) {
   // Reconstructing even an empty view rejects a detached input buffer. WebHID
   // has already separated the report ID: every payload byte stays unchanged.
   const payload = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-  const offset = reportId === 0 ? 64 : 65;
+  const offset = reportId === 0 ? 68 : 69;
   const bytes = new Uint8Array(offset + payload.byteLength);
   const view = new DataView(bytes.buffer);
   bytes.set([0x42, 0x4b, 0x50, 0x49]);
@@ -239,7 +239,8 @@ export function encodeRawHidEvent(event) {
   // Byte 58: no extra original clock point; acquisition is already HOST time.
   view.setUint8(59, reportId === 0 ? 0 : 1);
   if (reportId !== 0) view.setUint8(60, reportId);
-  view.setUint32(offset - 4, payload.byteLength, true);
+  // BKPI v1 payload lengths are u64, even with our 1024-byte report cap.
+  view.setBigUint64(offset - 8, BigInt(payload.byteLength), true);
   bytes.set(payload, offset);
   return bytes;
 }

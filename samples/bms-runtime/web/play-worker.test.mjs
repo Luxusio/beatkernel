@@ -3932,9 +3932,9 @@ test("mixed keyboard contact and numbered or zero-ID HID inputs use the actual c
   }
   assert.deepEqual(calls[1].slice(2), [480, 360, 960, 720, 9007199254741222n]);
   assert.equal(new DataView(calls[2][1].buffer).getBigUint64(7, true), HID_SOURCE);
-  assert.deepEqual(Array.from(calls[2][1].slice(65)), [9, 255, 0], "a payload byte equal to report ID remains payload");
-  assert.equal(calls[3][1].length, 64); assert.equal(calls[3][1][59], 0);
-  backing.fill(0); assert.deepEqual(Array.from(calls[2][1].slice(65)), [9, 255, 0]);
+  assert.deepEqual(Array.from(calls[2][1].slice(69)), [9, 255, 0], "a payload byte equal to report ID remains payload");
+  assert.equal(calls[3][1].length, 68); assert.equal(calls[3][1][59], 0);
+  backing.fill(0); assert.deepEqual(Array.from(calls[2][1].slice(69)), [9, 255, 0]);
   assert.deepEqual(calls[5], ["advance", ORIGIN + 5n, 9007199254741222n]);
   assert.equal(h.of("play-step-done")[0].tickId, 1);
   await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);

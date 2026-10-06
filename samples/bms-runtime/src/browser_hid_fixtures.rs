@@ -13,11 +13,11 @@ use beatkernel_platform::input::hid_report::{
 
 const HOST: ClockDomainId = ClockDomainId(0x57494e);
 // Independent literal shared with physical-input.test.mjs, not computed by a fixture codec.
-const NUMBERED: [u8; 69] = [
+const NUMBERED: [u8; 73] = [
     66, 75, 80, 73, 1, 0, 5, 0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 8, 7, 6, 5, 4, 3, 2,
     1, 0x4e, 0x49, 0x57, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 1, 0x44, 0x49, 0x48,
     0x57, 1, 0x7f, 0, 0, 0, 1, 0x4e, 0x49, 0x57, 0, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 0x7f, 4, 0, 0, 0,
-    0x7f, 0, 0xff, 0x80,
+    0, 0, 0, 0, 0x7f, 0, 0xff, 0x80,
 ];
 fn metadata(report_id: u32) -> EventMeta {
     let host = ClockPoint {
@@ -58,7 +58,7 @@ fn literal_webhid_packet_round_trips_through_actual_core_with_full_provenance_an
     )
     .unwrap();
     assert_eq!(PhysicalInputEvent::RawHidReport(normalized), expected);
-    for length in [6, 35, 58, 59, 60, 64, 68] {
+    for length in [6, 35, 58, 59, 60, 64, 68, 72] {
         assert!(decode_input(&NUMBERED[..length], limits, HOST).is_err());
     }
     let mut trailing = NUMBERED.to_vec();
@@ -68,8 +68,8 @@ fn literal_webhid_packet_round_trips_through_actual_core_with_full_provenance_an
     invalid_tag[59] = 2;
     assert!(decode_input(&invalid_tag, limits, HOST).is_err());
     assert!(decode_input(&NUMBERED, limits, ClockDomainId(HOST.0 + 1)).is_err());
-    assert!(decode_input(&NUMBERED, CodecLimits::new(68, 4).unwrap(), HOST).is_err());
-    assert!(decode_input(&NUMBERED, CodecLimits::new(69, 3).unwrap(), HOST).is_err());
+    assert!(decode_input(&NUMBERED, CodecLimits::new(72, 4).unwrap(), HOST).is_err());
+    assert!(decode_input(&NUMBERED, CodecLimits::new(73, 3).unwrap(), HOST).is_err());
 }
 
 #[test]
@@ -93,13 +93,23 @@ fn actual_separate_id_normalization_preserves_zero_empty_and_bounded_payloads_be
             assert_eq!(report.data, payload);
             let event = PhysicalInputEvent::RawHidReport(report);
             let bytes = encode_event(&event, CodecLimits::new(4096, 1024).unwrap()).unwrap();
-            assert_eq!(bytes.len(), (if id == 0 { 64 } else { 65 }) + payload.len());
+            assert_eq!(bytes.len(), (if id == 0 { 68 } else { 69 }) + payload.len());
             let exact = CodecLimits::new(bytes.len(), payload.len()).unwrap();
             assert_eq!(decode_input(&bytes, exact, HOST).unwrap(), event);
             if id == 0 {
                 assert_eq!(
-                    &bytes[59..64],
-                    &[0, payload.len() as u8, (payload.len() >> 8) as u8, 0, 0]
+                    &bytes[59..68],
+                    &[
+                        0,
+                        payload.len() as u8,
+                        (payload.len() >> 8) as u8,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
                 );
             }
         }
