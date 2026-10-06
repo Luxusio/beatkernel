@@ -2115,7 +2115,13 @@ pause/input/clock/lifecycle ownership remains. Rejection leaves the old live
 output and transport intact under the normal output-request policy.
 
 This field is live-output-only: it is not added to initial native arguments or
-saved profile schema. Windows/macOS panels do not advertise it until their
-typed UI mappings are connected. Source/target rates cannot be changed here.
+saved profile schema. Windows panels do not advertise it until their typed UI
+mapping is connected. macOS solo nonnetwork play uses the common output owner
+and paused-boundary policy for device/buffer/matrix fields; cohort/network/Watch
+capabilities remain unavailable until their owner integration is complete.
+Matrix selection/preservation/reset rules belong to common domain functions.
+CoreAudio rates and original frame basis remain fixed across reopen. The actual
+stream reports startup acknowledgement even when bootstrap used its raw handle.
+Source/target rates cannot be changed here.
 Pure parser/mapper/retained-panel tests and an actual ALSA null request diagnostic
 are separate from physical-device/audio-sync acceptance and full player completion.

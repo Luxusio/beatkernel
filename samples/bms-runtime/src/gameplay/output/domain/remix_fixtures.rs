@@ -45,3 +45,16 @@ fn malformed_nonfinite_ragged_or_oversized_matrix_text_rejects() {
         (32, 32)
     );
 }
+
+#[test]
+fn shared_live_selection_preserves_and_resets_without_native_request_policy() {
+    let matrix = parse_matrix("1;0.5").unwrap().unwrap();
+    let (channels, same) = select_matrix(1, Some(&matrix), "").unwrap();
+    assert_eq!(channels, 2);
+    assert_eq!(same, Some(matrix));
+    let (channels, empty) = select_matrix(1, same.as_ref(), "exact").unwrap();
+    assert_eq!(channels, 1);
+    assert!(empty.is_none());
+    assert!(select_matrix(2, same.as_ref(), "").is_err());
+    assert!(select_matrix(1, None, "1,0").is_err());
+}

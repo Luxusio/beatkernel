@@ -7,6 +7,8 @@ pub mod alsa_ui;
 pub mod asio;
 #[cfg(target_os = "macos")]
 pub mod coreaudio;
+#[cfg(target_os = "macos")]
+pub mod coreaudio_ui;
 pub mod observation;
 pub mod player;
 pub mod remix;

@@ -46,18 +46,24 @@ impl std::error::Error for CoreAudioReplacementError {
 pub struct CoreAudioReplacementOutput {
     stream: CoreAudioStream,
     epoch: u64,
-    started: bool,
+    matrix: Option<beatkernel::audio::ChannelMatrix>,
 }
 impl CoreAudioReplacementOutput {
     pub fn from_stream(stream: CoreAudioStream) -> Self {
         Self {
             stream,
             epoch: 0,
-            started: false,
+            matrix: None,
         }
     }
     pub fn stream(&self) -> &CoreAudioStream {
         &self.stream
+    }
+    pub fn stream_mut(&mut self) -> &mut CoreAudioStream {
+        &mut self.stream
+    }
+    pub fn channel_matrix(&self) -> Option<&beatkernel::audio::ChannelMatrix> {
+        self.matrix.as_ref()
     }
     pub fn epoch(&self) -> u64 {
         self.epoch
@@ -82,7 +88,7 @@ fn map_open_failure(
             CoreAudioReplacementOutput {
                 stream,
                 epoch,
-                started: false,
+                matrix: None,
             },
         ),
         None => OutputOpenFailure::recovered(CoreAudioReplacementError::Native(error), mixer),
@@ -116,7 +122,7 @@ impl OutputReplacementBackend for CoreAudioReplacementBackend {
             .map(|stream| CoreAudioReplacementOutput {
                 stream,
                 epoch,
-                started: false,
+                matrix: None,
             })
             .map_err(|error| map_open_failure(error, epoch))
     }
@@ -125,7 +131,6 @@ impl OutputReplacementBackend for CoreAudioReplacementBackend {
             .stream
             .stop()
             .map_err(CoreAudioReplacementError::Native)?;
-        output.started = false;
         Ok(())
     }
     fn start(&mut self, output: &mut Self::Output) -> Result<(), Self::Error> {
@@ -133,7 +138,6 @@ impl OutputReplacementBackend for CoreAudioReplacementBackend {
             .stream
             .start()
             .map_err(CoreAudioReplacementError::Native)?;
-        output.started = true;
         Ok(())
     }
     fn epoch(&self, output: &Self::Output) -> u64 {
@@ -161,7 +165,7 @@ impl OutputReplacementBackend for CoreAudioReplacementBackend {
                 snapshot.callback_failures,
             ));
         }
-        if !output.started {
+        if !output.stream.is_started() {
             return Ok(());
         }
         let Some(observation) = snapshot.presentation else {
@@ -198,11 +202,24 @@ impl crate::gameplay::output::ports::OutputChannelRemixBackend for CoreAudioRepl
         CoreAudioReplacementOutput,
         OutputOpenFailure<CoreAudioReplacementError, CoreAudioReplacementOutput>,
     > {
-        CoreAudioStream::open_remixed_recoverable(request, self.clock, mixer, matrix)
+        let native_matrix = match beatkernel::audio::ChannelMatrix::new(
+            matrix.source_channels(),
+            matrix.target_channels(),
+            matrix.coefficients(),
+        ) {
+            Ok(copy) => copy,
+            Err(_) => {
+                return Err(OutputOpenFailure::recovered(
+                    CoreAudioReplacementError::Native(CoreAudioError::Capacity),
+                    Some(mixer),
+                ));
+            }
+        };
+        CoreAudioStream::open_remixed_recoverable(request, self.clock, mixer, native_matrix)
             .map(|stream| CoreAudioReplacementOutput {
                 stream,
                 epoch,
-                started: false,
+                matrix: Some(matrix),
             })
             .map_err(|failure| map_open_failure(failure, epoch))
     }

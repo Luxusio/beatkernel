@@ -414,7 +414,7 @@ impl NativeSettings {
                 "--output-matrix",
             ],
             SettingsHost::Windows => &["--device", "--buffer", "--period"],
-            SettingsHost::Macos => &["--device", "--buffer-frames"],
+            SettingsHost::Macos => &["--device", "--buffer-frames", "--output-matrix"],
         };
         if args.len() % 2 != 0
             || args
@@ -440,7 +440,7 @@ impl NativeSettings {
         settings
             .fields
             .retain(|field| allowed.contains(&field.flag));
-        if host == SettingsHost::Linux {
+        if matches!(host, SettingsHost::Linux | SettingsHost::Macos) {
             settings.fields.push(field(("--output-matrix", "OUTPUT CHANNEL MATRIX",
                 "Rows separated by semicolons, source gains by commas (mono to stereo: 1;1). Empty keeps current; exact restores source channels."), matrix.unwrap_or_default()));
         }
@@ -684,7 +684,7 @@ fn valid_value(value: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
-    fn output_matrix_is_linux_live_only_and_never_enters_initial_profile_schema() {
+    fn output_matrix_is_live_only_and_never_enters_initial_profile_schema() {
         let args = args(&["--output-matrix", "1;0.5"]);
         let live = NativeSettings::output_only(&args, SettingsHost::Linux).unwrap();
         let row = live
@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(row.value, "1;0.5");
         assert!(NativeSettings::from_args(&args, SettingsHost::Linux).is_err());
         assert!(NativeSettings::output_only(&args, SettingsHost::Windows).is_err());
-        assert!(NativeSettings::output_only(&args, SettingsHost::Macos).is_err());
+        assert!(NativeSettings::output_only(&args, SettingsHost::Macos).is_ok());
         assert!(
             NativeSettings::output_only(&[args.clone(), args].concat(), SettingsHost::Linux)
                 .is_err()

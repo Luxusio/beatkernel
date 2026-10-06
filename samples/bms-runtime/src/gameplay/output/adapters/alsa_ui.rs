@@ -8,7 +8,7 @@ use crate::{
     gameplay::output::application::owner::GameplayOutputOwner,
     gameplay::output::{
         adapters::remix::RemixedOutputBackend,
-        domain::remix::{RemixedOutputRequest, parse_matrix, matrix_text},
+        domain::remix::{RemixedOutputRequest, select_matrix, matrix_text},
     },
     gameplay_presentation::GameplayOutputContext,
 };
@@ -67,29 +67,7 @@ pub fn remixed_request_for_args(
         .map_or("", |field| field.value.as_str());
     let source_channels =
         current_matrix.map_or(current.format.channels(), ChannelMatrix::source_channels);
-    let matrix = if value.trim().is_empty() {
-        current_matrix
-            .map(|matrix| {
-                ChannelMatrix::new(
-                    matrix.source_channels(),
-                    matrix.target_channels(),
-                    matrix.coefficients(),
-                )
-                .map_err(|e| e.to_string())
-            })
-            .transpose()?
-    } else {
-        parse_matrix(value)?
-    };
-    if matrix
-        .as_ref()
-        .is_some_and(|matrix| matrix.source_channels() != source_channels)
-    {
-        return Err("channel matrix columns must match original mixer channels".into());
-    }
-    let channels = matrix
-        .as_ref()
-        .map_or(source_channels, ChannelMatrix::target_channels);
+    let (channels, matrix) = select_matrix(source_channels, current_matrix, value)?;
     native.format = DeviceFormat::new(
         current.format.sample_rate(),
         channels,

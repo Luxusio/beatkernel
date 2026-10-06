@@ -507,6 +507,15 @@ impl CoreAudioStream {
     pub const fn configuration(&self) -> &CoreAudioApplied {
         &self.applied
     }
+    /// Successful native Start acknowledgement and current callback admission.
+    /// This control state is not a device presentation/latency observation.
+    pub fn is_started(&self) -> bool {
+        self.started
+            && self
+                .context
+                .as_ref()
+                .is_some_and(|context| context.enabled.load(Ordering::Acquire))
+    }
     /// Starts this exact native IOProc once; closed streams require reopening.
     pub fn start(&mut self) -> Result<(), CoreAudioError> {
         let context = self.context.as_deref().ok_or(CoreAudioError::Closed)?;

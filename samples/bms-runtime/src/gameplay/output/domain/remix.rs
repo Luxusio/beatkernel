@@ -22,6 +22,39 @@ impl<R> RemixedOutputRequest<R> {
 }
 
 pub const MAX_MATRIX_TEXT_BYTES: usize = 4096;
+/// Shared live selection policy; device-shaped requests remain adapter-owned.
+pub fn select_matrix(
+    source_channels: u16,
+    current: Option<&ChannelMatrix>,
+    text: &str,
+) -> Result<(u16, Option<ChannelMatrix>), String> {
+    let matrix = if text.trim().is_empty() {
+        current
+            .map(|matrix| {
+                ChannelMatrix::new(
+                    matrix.source_channels(),
+                    matrix.target_channels(),
+                    matrix.coefficients(),
+                )
+                .map_err(|e| e.to_string())
+            })
+            .transpose()?
+    } else {
+        parse_matrix(text)?
+    };
+    if matrix
+        .as_ref()
+        .is_some_and(|matrix| matrix.source_channels() != source_channels)
+    {
+        return Err("channel matrix columns must match original mixer channels".into());
+    }
+    Ok((
+        matrix
+            .as_ref()
+            .map_or(source_channels, ChannelMatrix::target_channels),
+        matrix,
+    ))
+}
 /// Rows are target channels, comma-delimited columns are original source channels.
 pub fn parse_matrix(text: &str) -> Result<Option<ChannelMatrix>, String> {
     if text.len() > MAX_MATRIX_TEXT_BYTES
