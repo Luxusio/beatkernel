@@ -650,10 +650,10 @@ async function workerHarness(options = {}) {
       if (this.setupPhase === "prepared" && this.schedules.length) { this.setupPhase = "complete"; return -1n; }
       return this.setupPhase === "lobby" ? -2n : this.setupExpires - elapsed;
     }
-    begin_drain(elapsed, timeout) { this.live(); this.drainExpires = elapsed + timeout; this.drainAdmitted = false; }
+    begin_drain(elapsed, timeout) { this.live(); this.drainExpires = elapsed + timeout; this.drainAdmitted = false; this.drainSteps = []; }
     drain_requested() { this.live(); return this.drainAdmitted === true; }
     drain_wait_step(elapsed) {
-      this.live();
+      this.live(); this.drainSteps.push(elapsed);
       if (elapsed >= this.drainExpires) throw Object.assign(new Error("scripted common drain deadline"), { code: "timeout" });
       if (this.progressComplete && !this.drainAdmitted) { this.request("drain"); this.drainAdmitted = true; }
       return this.drainComplete ? -1n : 1000000n;
@@ -706,7 +706,9 @@ async function workerHarness(options = {}) {
     }
     publication_due(elapsed, finalPrefix) {
       this.live(); this.publicationDueCalls.push({ elapsed, finalPrefix });
-      const result = this.publicationDueOutputs.length ? this.publicationDueOutputs.shift() : true;
+      const result = this.publicationDueOutputs.length ? this.publicationDueOutputs.shift()
+        : this.lastPublication === undefined || (finalPrefix && !this.finalPublished)
+          || elapsed - this.lastPublication >= 250000000n;
       if (result instanceof Error) throw result;
       return result;
     }
@@ -715,7 +717,8 @@ async function workerHarness(options = {}) {
       const result = this.publicationOutputs.length ? this.publicationOutputs.shift() : true;
       if (result instanceof Error) throw result;
       if (result !== true) return result;
-      this.publish_progress(words, finalPrefix); return true;
+      this.publish_progress(words, finalPrefix);
+      this.lastPublication = elapsed; this.finalPublished = finalPrefix; return true;
     }
     take_peer_progress() { this.live(); return this.peerProgress.shift() ?? null; }
     local_final_written() { this.live(); return this.finalWritten; }
@@ -1604,7 +1607,7 @@ test("stop during room opening disposes gameplay now but joins late acquisition 
   assert.equal(game.stops, 1); assert.equal(game.frees, 1);
   assert.equal(h.of("play-stopped").length, 0, "terminal ownership cannot precede late channel cleanup");
   await h.send(startRequest({ playId: 8, rpcId: 1 }));
-  assert.equal(h.games[0].frees, 0);
+  assert.equal(h.games.length, 0, "replacement waits for joined room cleanup");
   const channel = h.roomChannels[0];
   gate.resolve(); await flushJobs();
   assert.equal(channel.closes, 1); assert.equal(channel.reads.length, 0); assert.equal(channel.writes.length, 0);
@@ -1736,6 +1739,7 @@ test("room Window origin, committed preroll and exact live activation boundaries
 test("Prepared timeout and stop during a pending room control join cleanup and never authorize a later owner", async () => {
   const timed = await roomPrepared(); await requestRoom(timed); await preparedRoomReceipt(timed);
   await roomReceive(timed, () => {});
+  timed.setNetworkNow(11000);
   await timed.runTimer(10000);
   assert.equal(timed.of("play-room").some(row => row.event.kind === "start"), false);
   assert.equal(timed.locals[0].frees, 1); assert.equal(timed.roomSessions[0].frees, 1);
@@ -1749,7 +1753,7 @@ test("Prepared timeout and stop during a pending room control join cleanup and n
   assert.equal(game.frees, 1); assert.equal(session.frees, 1);
   assert.equal(h.of("play-stopped").length, 0);
   await h.send(startRequest({ playId: 8, rpcId: 1 }));
-  assert.equal(h.games[0].frees, 0);
+  assert.equal(h.games.length, 0, "replacement waits for joined room cleanup");
   channel.writes.at(-1).gate.resolve(); await flushJobs();
   assert.equal(h.of("play-stopped").length, 0, "the outstanding read is still owned by room cleanup");
   channel.reads.at(-1).gate.resolve(Uint8Array.of(1)); await flushJobs();
@@ -1922,7 +1926,7 @@ test("room HUD capability and binding failures fence only presentation and prese
     assert.equal(game.calls.some(call => call[0] === "advance"), true);
     await h.send({ kind: "play-stop", playId: 7 });
     const final = h.of("play-stopped").at(-1);
-    assert.equal(final.released, true); assert.equal(final.room.error, null);
+    assert.equal(game.frees, 1); assert.equal(h.roomSessions[0].frees, 1); assert.equal(final.room.error, null);
     assert.equal(final.room.peers[0].sequence, 2n);
     assert.ok(final.replays[0].replay instanceof Uint8Array);
     assert.equal(game.frees, 1); assert.equal(session.frees, 1);
@@ -2024,7 +2028,7 @@ test("an activated room fault fences only publication and joins stale continuati
   await h.send({ kind: "play-stop", playId: 7 });
   assert.equal(game.frees, 1); assert.equal(h.of("play-stopped").length, 0);
   await h.send(startRequest({ playId: 8, rpcId: 1 }));
-  assert.equal(h.games[0].frees, 0);
+  assert.equal(h.games.length, 0, "replacement waits for joined room cleanup");
   channel.writes.at(-1).gate.resolve(); await flushJobs();
   assert.deepEqual(session.credits, credits); assert.equal(h.of("play-room").length, oldEvents);
   const final = h.of("play-stopped").at(-1);
@@ -2050,7 +2054,11 @@ test("an activated room fault fences only publication and joins stale continuati
 
 async function naturalRoomDrain(options = {}) {
   const h = await roomPrepared({ ...options, observeOutput: () => true });
-  const game = h.locals[0], event = await committedRoom(h);
+  const game = h.locals[0], event = await committedRoom(h, undefined, options.roomMembers ?? null);
+  if (options.roomInitialPage !== undefined) {
+    const rpc = await requestRoom(h, "play-room-page", { page: options.roomInitialPage });
+    assert.equal(roomReply(h, rpc).result.page, options.roomInitialPage);
+  }
   await h.rpc("play-activate", { hostNs: event.targetHostNs, targetHostNs: event.targetHostNs, startFrame: START });
   const session = h.roomSessions[0], channel = h.roomChannels[0];
   session.onPublish = (_, finalPrefix) => {
@@ -2206,7 +2214,7 @@ test("retained room archive and rendering faults remain presentation-only and ev
       ]) }));
     await completeRoomDrain(fixture);
     const terminal = h.of("play-stopped").at(-1);
-    assert.equal(terminal.released, true); assert.equal(terminal.replays[0].replayComplete, true);
+    assert.equal(h.locals[0].frees, 1); assert.equal(session.frees, 1); assert.equal(terminal.replays[0].replayComplete, true);
     assert.equal(terminal.room.finalDrain, "complete"); assert.equal(terminal.room.error, null);
     const replay = terminal.replays[0].replay.slice();
     if (options.roomResultsDrawError) await h.tick();
@@ -2273,11 +2281,12 @@ test("retained room archive and rendering faults remain presentation-only and ev
 test("room drain failure preserves genuine local completion while actual gameplay cleanup failure remains separate", async () => {
   for (const mode of ["timeout", "transport", "cleanup"]) {
     const { h, game, session, channel } = await naturalRoomDrain(mode === "cleanup" ? { roomCloseError: "actual channel cleanup failed" } : {});
-    if (mode !== "transport") await h.runTimer(10000);
+    if (mode !== "transport") { h.setNetworkNow(11000); await h.runTimer(1); }
     else { channel.writes.at(-1).gate.reject(new Error("final room write failed")); await flushJobs(); }
     const final = h.of(mode === "cleanup" ? "play-error" : "play-stopped").at(-1);
     assert.ok(final); assert.equal(final.room.finalDrain, "failed");
-    assert.match(final.room.error, mode === "transport" ? /Room write failed/ : /timed out/i);
+    assert.match(final.room.error, mode === "transport" ? /Room write failed/ : /Room drain failed/);
+    if (mode !== "transport") assert.equal(session.drainSteps.at(-1), 10000000000n);
     assert.equal(final.room.finalQueued, true); assert.equal(final.room.finalWritten, false);
     assert.equal(final.room.finalAcknowledged, false); assert.equal(final.room.localComplete, false);
     assert.equal(final.replays[0].replayComplete, mode !== "cleanup"); assert.ok(final.replays[0].replay instanceof Uint8Array);
@@ -2292,7 +2301,7 @@ test("room drain failure preserves genuine local completion while actual gamepla
   session.onPublish = () => session.frames.push({ kind: 1, id: 51n, bytes: new Uint8Array(11) });
   await h.send(directObservation()); await h.roomPort.acknowledge({ report: renderReport() });
   await h.send({ kind: "play-stop", playId: 7, completed: true });
-  if (h.of("play-error").length === 0) await h.runTimer(10000);
+  if (h.of("play-error").length === 0) { h.setNetworkNow(11000); await h.runTimer(1); }
   const failed = h.of("play-error").at(-1);
   assert.match(failed.message, /actual gameplay free failed/); assert.equal(failed.released, false);
   assert.equal(failed.replays[0].replayComplete, false); assert.ok(failed.replays[0].replay instanceof Uint8Array);
