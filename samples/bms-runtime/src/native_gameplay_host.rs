@@ -43,9 +43,36 @@ pub enum NativeGameplayDiagnostic<'a> {
     SongProgress(Timestamp),
 }
 
+pub(crate) fn validate_policy_members(
+    policies: &[(PlayerId, &crate::gauge::GaugeProfile)],
+) -> NativeGameplayResult<()> {
+    if !(1..=64).contains(&policies.len())
+        || policies.iter().enumerate().any(|(index, (player, _))| {
+            player.0 == 0 || policies[..index].iter().any(|(prior, _)| prior == player)
+        })
+    {
+        return Err("native policy preparation requires 1..64 unique nonzero player IDs".into());
+    }
+    Ok(())
+}
+
 /// The application supplies commands and consumes actual committed evidence.
 /// Publication refusal is a technical error, not gameplay completion or rollback.
 pub trait NativeGameplayHost {
+    /// Cold setup capability. Legacy hosts cannot silently publish a custom policy as default.
+    fn prepare_policies(
+        &mut self,
+        policies: &[(PlayerId, &crate::gauge::GaugeProfile)],
+    ) -> NativeGameplayResult<()> {
+        validate_policy_members(policies)?;
+        if policies
+            .iter()
+            .any(|(_, profile)| **profile != crate::gauge::GaugeProfile::default())
+        {
+            return Err("native host does not support nondefault policy preparation".into());
+        }
+        Ok(())
+    }
     fn cancelled(&self) -> bool;
     fn pause_requested(&self) -> bool;
     fn retry_pause_publication(&mut self);
@@ -70,6 +97,12 @@ pub trait NativeGameplayHost {
 pub struct NoopGameplayHost;
 
 impl NativeGameplayHost for NoopGameplayHost {
+    fn prepare_policies(
+        &mut self,
+        policies: &[(PlayerId, &crate::gauge::GaugeProfile)],
+    ) -> NativeGameplayResult<()> {
+        validate_policy_members(policies)
+    }
     fn cancelled(&self) -> bool {
         false
     }
@@ -99,6 +132,12 @@ impl<'a, H: NativeGameplayHost> NativeScoreHost<'a, H> {
     }
 }
 impl<H: NativeGameplayHost> NativeGameplayHost for NativeScoreHost<'_, H> {
+    fn prepare_policies(
+        &mut self,
+        policies: &[(PlayerId, &crate::gauge::GaugeProfile)],
+    ) -> NativeGameplayResult<()> {
+        self.host.prepare_policies(policies)
+    }
     fn cancelled(&self) -> bool {
         self.host.cancelled()
     }

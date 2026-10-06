@@ -238,6 +238,12 @@ pub fn finite_cohort_done(
 pub(crate) struct PlayerGameplayHost;
 
 impl NativeGameplayHost for PlayerGameplayHost {
+    fn prepare_policies(
+        &mut self,
+        policies: &[(PlayerId, &crate::gauge::GaugeProfile)],
+    ) -> NativeGameplayResult<()> {
+        player::prepare_native_policies(policies)
+    }
     fn cancelled(&self) -> bool {
         player::cancelled()
     }

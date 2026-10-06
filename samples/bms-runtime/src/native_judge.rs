@@ -139,6 +139,39 @@ pub fn prepare_section_capture_for_source(
     )?))
 }
 
+/// Canonical native capture for a pristine judge paired with a resolved policy.
+/// Disabled capture checks policy/lifetime, but does not acquire source identity.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_section_capture_for_policy(
+    source: &BmsChart,
+    judge: &JudgeEngine,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    domain: ClockDomainId,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    limits: Option<ReplayCodecLimits>,
+) -> NativeGameplayResult<Option<LiveReplayCapture>> {
+    if judge.effective_song_time().is_some() || judge.profile() != policy.judge() {
+        return Err("native policy capture requires a pristine matching judge profile".into());
+    }
+    let Some(limits) = limits else {
+        return Ok(None);
+    };
+    let identity = InputSoundIdentity::from_source(source)?;
+    Ok(Some(LiveReplayCapture::new_with_gauge(
+        judge,
+        domain,
+        limits,
+        start,
+        chart_seed,
+        end,
+        BmsInputMode::ButtonOnly,
+        identity,
+        policy.gauge(),
+    )?))
+}
+
 #[cfg(test)]
 use beatkernel::{judge::JudgeGrade, time::Duration};
 #[cfg(test)]

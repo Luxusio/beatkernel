@@ -64,7 +64,7 @@ pub struct LocalPlayerSnapshot {
     pub score: ScoreSummary,
     /// Exact committed mine evidence, independent of ordinary-note score.
     pub mine_damage: MineDamageSummary,
-    /// Independent default-policy observations for this actual member.
+    /// Independent policy observations for this actual member (default until setup).
     pub gauge: BmsGauge,
     pub last_judge: Option<JudgeEvent>,
     pub recent_results: Vec<JudgeEvent>,
@@ -714,6 +714,7 @@ struct Session {
     last_publish: Option<Instant>,
     chart_published: bool,
     replay_policy: Option<GaugeProfile>,
+    live_policy_prepared: bool,
     pause_dirty: bool,
     room_dirty: bool,
 }
@@ -774,6 +775,7 @@ pub fn with_publisher<T>(
             last_publish: None,
             chart_published: false,
             replay_policy: None,
+            live_policy_prepared: false,
             pause_dirty: false,
             room_dirty: false,
         });
@@ -1147,6 +1149,55 @@ fn register_chart(
         current.snapshot.chart = Some(prepared);
         current.snapshot.images = images;
         current.chart_published = true;
+        current.observe_cancellation(false);
+        current.publish_latest(true);
+        Ok(())
+    })
+}
+
+/// Installs the entire registered roster's initial policies once before actual reports.
+/// Fallible full copies complete before any member or publication is changed.
+pub fn prepare_native_policies(
+    policies: &[(PlayerId, &GaugeProfile)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    crate::native_gameplay_host::validate_policy_members(policies)?;
+    SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let Some(current) = session.as_mut() else {
+            return Ok(());
+        };
+        if !current.chart_published
+            || current.live_policy_prepared
+            || current.replay_policy.is_some()
+            || current.snapshot.completed_end.is_some()
+            || current.snapshot.completed_results.is_some()
+            || !current
+                .snapshot
+                .players
+                .iter()
+                .map(|member| member.player)
+                .eq(policies.iter().map(|(player, _)| *player))
+            || current.snapshot.players.iter().any(|member| {
+                member.song_time.is_some()
+                    || member.last_judge.is_some()
+                    || !member.recent_results.is_empty()
+                    || member.score != ScoreSummary::default()
+                    || member.mine_damage != MineDamageSummary::default()
+                    || member.pressed_lanes != 0
+                    || member.gauge != BmsGauge::default()
+            })
+        {
+            return Err("native policies require an exact fresh registered live roster".into());
+        }
+        let mut gauges = Vec::new();
+        gauges.try_reserve_exact(policies.len())?;
+        for (_, profile) in policies {
+            gauges.push(BmsGauge::new(profile.try_copy()?));
+        }
+        for (member, gauge) in current.snapshot.players.iter_mut().zip(gauges) {
+            member.gauge = gauge;
+        }
+        current.live_policy_prepared = true;
         current.observe_cancellation(false);
         current.publish_latest(true);
         Ok(())

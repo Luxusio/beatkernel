@@ -367,3 +367,26 @@ and dynamics through the existing full setup identity. Public CLI/UI selection,
 nondefault live native admission, class-aware score labels and complete mine/
 empty compatibility remain unfinished; the common builder does not enable
 those launchers by itself.
+
+## Native policy preparation ports
+
+NativeGameplayHost has a cold policy preparation port accepting exact ordered
+player IDs and borrowed GaugeProfiles. Unsupported hosts reject nondefault
+policies; the explicit headless host supports them without publication, and the
+score observer forwards preparation to its wrapped host. The player adapter
+initializes each member's gauge atomically once, after exact chart/roster
+registration and before any report, replay policy or completion. IDs/order must
+match the entire original roster (1..64), preserving full-width IDs; failures
+leave every member, score, timeline and publication unchanged. No clocks or
+gameplay events are synthesized. Empty deadline reports after preparation
+continue using the same independent member profiles.
+
+Native policy capture preparation requires an unprocessed judge whose profile
+matches the immutable resolved policy. Disabled capture still checks that policy
+boundary but performs no source identity acquisition. Enabled capture uses the
+existing ButtonOnly native setup and records the complete gauge through its
+canonical wrapper; limits/refusal preserve the judge and policy. Legacy helper
+and default host behavior remain unchanged. This establishes preparation APIs,
+not custom live-pump admission: NativeGameplay/Cohort default-profile guards,
+competition policy identity, public selectors and class-aware scores still need
+integration before nondefault policies become end-user live options.

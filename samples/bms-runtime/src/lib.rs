@@ -309,6 +309,8 @@ mod native_mine_audio_fixtures;
 mod native_mine_fixtures;
 #[cfg(test)]
 mod native_mine_presentation_fixtures;
+#[cfg(test)]
+mod native_policy_preparation_fixtures;
 /// Injectable diagnostic deadlines and waiting for shared native pumps.
 pub mod native_pump_control;
 mod native_pump_system;
