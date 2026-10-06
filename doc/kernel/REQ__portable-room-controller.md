@@ -42,6 +42,11 @@ and exercise actual startup, error ownership, cancellation, schedule guard,
 constructor refusal and one-time cleanup. WASM library compilation now includes
 the actual shared controller, but not test execution or a browser adapter.
 
+Native room progress now uses the same Rust cadence policy as the browser
+split-operation driver under
+[shared room publication timing](REQ__room-publication-cadence.md). Original
+eligibility gates and retained local prefixes remain intact.
+
 ## Known ceiling
 
 Worker stream/thread/clock implementations, real network delivery, browser room

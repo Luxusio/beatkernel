@@ -27,6 +27,10 @@ final/ACK bits remain queryable after latched failure while progress/drain
 completion remains guarded by facade health. close idempotently stops/releases
 the session, decoder and peer token while preserving an earlier failure and
 metadata revision.
+Scalar due and cadence-aware publication now follow
+[shared room publication timing](REQ__room-publication-cadence.md). The actual
+browser Owner samples its elapsed clock and Worker consults the due hint before
+building progress words. Queue admission remains separate from write completion.
 
 Browser exports keep their signatures, BigInt identity/time/counter domains,
 bounded words decoding, snapshot/prefix serialization and code="state" tagging.
