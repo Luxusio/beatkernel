@@ -253,6 +253,10 @@ pub struct GameplayOutputContext<'a, P: GameplayPresentationPort> {
 }
 pub trait GameplayDevice {
     type Presentation: GameplayPresentationPort;
+    /// No published output clock while a held replacement waits for native evidence.
+    fn output_clock_suspended(&self) -> bool {
+        false
+    }
     /// A held replacement defers coordinated resume until publication or cancellation.
     fn output_replacement_pending(&self) -> bool {
         false
@@ -293,6 +297,24 @@ pub trait GameplayDevice {
         reference: ClockPair,
     ) -> NativeGameplayResult<()>;
     fn fallback_schedule(&mut self, rate: u32) -> NativeGameplayResult<ClockPoint>;
+}
+
+/// A committed paused input cutoff needs host ordering, not extrapolation from
+/// a retired output. Callers still validate domains, receipts and chronology.
+pub(crate) fn validate_gameplay_host<D: GameplayDevice>(
+    device: &D,
+    presentation: &D::Presentation,
+    point: ClockPoint,
+    committed_pause: Option<ClockPoint>,
+) -> NativeGameplayResult<()> {
+    if device.output_clock_suspended()
+        && committed_pause.is_some_and(|boundary| {
+            point.domain == boundary.domain && point.timestamp >= boundary.timestamp
+        })
+    {
+        return Ok(());
+    }
+    presentation.validate_host(point)
 }
 
 #[cfg(test)]

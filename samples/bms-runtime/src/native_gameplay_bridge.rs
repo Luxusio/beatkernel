@@ -39,6 +39,9 @@ use beatkernel_platform::audio::presentation::discipline::PresentationDiscipline
 use std::collections::VecDeque;
 
 pub trait NativeGameplayDevice {
+    fn output_clock_suspended(&self) -> bool {
+        false
+    }
     fn output_replacement_pending(&self) -> bool {
         false
     }
@@ -136,6 +139,9 @@ impl GameplayPresentationPort for PresentationDiscipline {
 
 impl<D: NativeGameplayDevice> GameplayDevice for D {
     type Presentation = PresentationDiscipline;
+    fn output_clock_suspended(&self) -> bool {
+        NativeGameplayDevice::output_clock_suspended(self)
+    }
     fn output_replacement_pending(&self) -> bool {
         NativeGameplayDevice::output_replacement_pending(self)
     }

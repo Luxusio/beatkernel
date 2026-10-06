@@ -15,6 +15,7 @@ use std::{
 };
 struct Device {
     owner: GameplayOutputOwner<Backend>,
+    expected_config: DisciplineConfig,
     trace: Rc<RefCell<Trace>>,
     devices: Vec<DeviceId>,
     command: Rc<Cell<bool>>,
@@ -41,6 +42,9 @@ impl GameplayDevice for Device {
         }
         self.owner.observe(p)?;
         Ok(())
+    }
+    fn output_clock_suspended(&self) -> bool {
+        self.owner.output_clock_suspended()
     }
     fn output_replacement_pending(&self) -> bool {
         self.owner.replacement_pending()
@@ -166,6 +170,7 @@ fn setup(
     (
         Device {
             owner,
+            expected_config: settings(),
             trace,
             devices,
             command: command.clone(),
@@ -214,7 +219,7 @@ fn assert_trace(
         assert_eq!(*phase, crate::playback_pause::PausePhase::Paused);
     }
     assert_eq!(p.epoch(), 1);
-    assert_eq!(p.config(), settings());
+    assert_eq!(p.config(), device.expected_config);
     assert_eq!(pause.epoch(), 1);
     assert_eq!(pause.phase(), crate::playback_pause::PausePhase::Running);
     assert_eq!(device.seeds, [(1, pair_frame(60))]);
@@ -270,9 +275,46 @@ fn assert_capture(
 #[test]
 fn actual_solo_owner_controller_waits_despite_early_resume_then_preserves_hit_gauge_capture_pcm_and_history()
  {
+    check_solo(None);
+}
+#[test]
+fn solo_held_replacement_wait_does_not_extrapolate_expired_old_clock() {
+    check_solo(Some(Duration::from_nanos(5_000_000)));
+}
+fn check_solo(age: Option<Duration>) {
     let source = chart();
     let (mut device, producer, mut presentation, mut pause, mut host) =
         setup(vec![DeviceId(u64::MAX)]);
+    if let Some(age) = age {
+        let cfg = DisciplineConfig {
+            max_observation_age: age,
+            ..settings()
+        };
+        presentation =
+            PresentationEstimator::new(cfg, point(2, 0), ClockDomainId(1), Timestamp::ZERO)
+                .unwrap();
+        presentation.observe_clock_pair(pair(0, 0)).unwrap();
+        device.expected_config = cfg;
+        assert!(!device.output_clock_suspended());
+        assert!(
+            crate::gameplay_presentation::validate_gameplay_host(
+                &device,
+                &presentation,
+                point(1, 30_000_000),
+                Some(point(1, 20_000_000))
+            )
+            .is_err()
+        );
+        assert!(
+            crate::gameplay_presentation::validate_gameplay_host(
+                &device,
+                &presentation,
+                point(3, 30_000_000),
+                Some(point(1, 20_000_000))
+            )
+            .is_err()
+        );
+    }
     let mut runtime = SoloRuntime::new(
         ClockDomainId(1),
         ClockDomainId(2),
@@ -347,6 +389,13 @@ fn actual_solo_owner_controller_waits_despite_early_resume_then_preserves_hit_ga
 #[test]
 fn actual_cohort_owner_controller_defers_early_resume_and_keeps_original_roster_scores_gauges_captures_and_future_voices()
  {
+    check_cohort(None);
+}
+#[test]
+fn cohort_held_replacement_wait_does_not_extrapolate_expired_old_clock() {
+    check_cohort(Some(Duration::from_nanos(5_000_000)));
+}
+fn check_cohort(age: Option<Duration>) {
     let source = chart();
     let ids = [
         (PlayerId(7), DeviceId(7)),
@@ -354,6 +403,36 @@ fn actual_cohort_owner_controller_defers_early_resume_and_keeps_original_roster_
     ];
     let (mut device, producer, mut presentation, mut pause, mut host) =
         setup(ids.iter().map(|(_, d)| *d).collect());
+    if let Some(age) = age {
+        let cfg = DisciplineConfig {
+            max_observation_age: age,
+            ..settings()
+        };
+        presentation =
+            PresentationEstimator::new(cfg, point(2, 0), ClockDomainId(1), Timestamp::ZERO)
+                .unwrap();
+        presentation.observe_clock_pair(pair(0, 0)).unwrap();
+        device.expected_config = cfg;
+        assert!(!device.output_clock_suspended());
+        assert!(
+            crate::gameplay_presentation::validate_gameplay_host(
+                &device,
+                &presentation,
+                point(1, 30_000_000),
+                Some(point(1, 20_000_000))
+            )
+            .is_err()
+        );
+        assert!(
+            crate::gameplay_presentation::validate_gameplay_host(
+                &device,
+                &presentation,
+                point(3, 30_000_000),
+                Some(point(1, 20_000_000))
+            )
+            .is_err()
+        );
+    }
     let members = ids
         .iter()
         .map(|(player, source_id)| MemberConfig {

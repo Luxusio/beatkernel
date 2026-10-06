@@ -89,6 +89,9 @@ impl GameplayDevice for ControlledDevice {
     fn observe(&mut self, p: &mut PresentationEstimator) -> NativeGameplayResult<()> {
         self.inner.observe(p)
     }
+    fn output_clock_suspended(&self) -> bool {
+        self.inner.owner.output_clock_suspended()
+    }
     fn output_replacement_pending(&self) -> bool {
         self.inner.owner.replacement_pending() || self.ui.pending()
     }

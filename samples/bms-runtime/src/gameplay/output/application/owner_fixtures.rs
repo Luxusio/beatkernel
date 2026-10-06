@@ -199,6 +199,32 @@ struct Fixture {
 }
 
 #[test]
+fn suspended_clock_is_only_native_waiting_and_controller_timeout_still_recovers_model() {
+    let mut f = Fixture::new();
+    let old_pair = f.presentation.latest_pair();
+    let old_report = f.owner.render_report();
+    assert!(!f.owner.output_clock_suspended());
+    assert!(f.owner.queue(request(74, usize::MAX), 100_000_000).is_ok());
+    assert!(!f.owner.output_clock_suspended());
+    assert!(!f.publish().unwrap());
+    assert!(f.owner.output_clock_suspended());
+    assert_eq!(f.presentation.latest_pair(), old_pair);
+    assert_eq!(f.owner.render_report(), old_report);
+    f.trace.borrow_mut().host_shift = 100_000_000;
+    let error = f.publish().unwrap_err();
+    let failure = error.downcast::<ReplacementFailure<Fault>>().unwrap();
+    assert!(matches!(
+        failure.cause,
+        ReplacementCause::Policy("output replacement observation timed out")
+    ));
+    assert!(!f.owner.output_clock_suspended());
+    assert_eq!(f.owner.state(), ReplacementState::RecoveredMixer);
+    assert_eq!(f.presentation.latest_pair(), old_pair);
+    assert_eq!(f.owner.render_report(), old_report);
+    assert!(f.owner.take_recovered_mixer().unwrap().is_paused());
+}
+
+#[test]
 fn resume_seed_refuses_a_quiet_backend_until_a_genuine_pair_is_admitted() {
     let mut f = Fixture::new();
     let committed = f.presentation.latest_pair();

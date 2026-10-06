@@ -777,7 +777,17 @@ pub fn run_cohort_with_results_and_ports<
             return Err("cohort host clock changed/regressed".into());
         }
         last_host = Some(now);
-        session.discipline.validate_host(now)?;
+        let frozen_pause = paused_boundary
+            .filter(|_| {
+                pause_committed && session.pause.phase() == PausePhase::Paused && !end_rendered
+            })
+            .map(|boundary| boundary.at);
+        crate::gameplay_presentation::validate_gameplay_host(
+            device,
+            session.discipline,
+            now,
+            frozen_pause,
+        )?;
         while let Some(event) = acquired.pop_front() {
             let host = point(&event);
             if host.domain != config.origin.domain || host.timestamp > now.timestamp {
@@ -790,7 +800,12 @@ pub fn run_cohort_with_results_and_ports<
                     .ok_or("cohort pre-origin counter overflow")?;
                 continue;
             }
-            session.discipline.validate_host(host)?;
+            crate::gameplay_presentation::validate_gameplay_host(
+                device,
+                session.discipline,
+                host,
+                frozen_pause,
+            )?;
             session.delivery.observe(host, now)?;
             session.merger.admit(event, now)?;
         }

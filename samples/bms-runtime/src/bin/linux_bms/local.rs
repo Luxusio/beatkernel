@@ -117,6 +117,9 @@ impl NativeGameplayDevice for CohortDevice<'_> {
     fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
         Ok(self.output.observe(discipline)?)
     }
+    fn output_clock_suspended(&self) -> bool {
+        self.output.output_clock_suspended()
+    }
     fn output_replacement_pending(&self) -> bool {
         self.output.replacement_pending() || self.output_ui.pending()
     }

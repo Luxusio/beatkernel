@@ -540,7 +540,17 @@ pub fn run_gameplay_with_result_and_ports<
             chronology(received, last)?;
         }
         last_host = Some(received);
-        session.discipline.validate_host(received)?;
+        let frozen_pause = paused_boundary
+            .filter(|_| {
+                pause_committed && session.pause.phase() == PausePhase::Paused && !end_rendered
+            })
+            .map(|boundary| boundary.at);
+        crate::gameplay_presentation::validate_gameplay_host(
+            device,
+            session.discipline,
+            received,
+            frozen_pause,
+        )?;
         let old_len = pending.len();
         let batch = device.acquire(&mut pending)?;
         if batch.closed {
@@ -552,7 +562,12 @@ pub fn run_gameplay_with_result_and_ports<
         let received = device.host_now()?;
         chronology(received, last_host.unwrap())?;
         last_host = Some(received);
-        session.discipline.validate_host(received)?;
+        crate::gameplay_presentation::validate_gameplay_host(
+            device,
+            session.discipline,
+            received,
+            frozen_pause,
+        )?;
         // Validate each newly acquired timestamp once, even while ACKs are pending.
         let mut index = old_len;
         while index < pending.len() {
@@ -570,7 +585,12 @@ pub fn run_gameplay_with_result_and_ports<
             }
             chronology(host, last_acquired)?;
             last_acquired = host;
-            session.discipline.validate_host(host)?;
+            crate::gameplay_presentation::validate_gameplay_host(
+                device,
+                session.discipline,
+                host,
+                frozen_pause,
+            )?;
             session.delivery.observe(host, received)?;
             index += 1;
         }

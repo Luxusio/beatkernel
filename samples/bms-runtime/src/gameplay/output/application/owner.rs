@@ -61,6 +61,9 @@ impl<B: OutputReplacementBackend> GameplayOutputOwner<B> {
             .unwrap_or(0)
             .max(self.controller.last_issued_epoch())
     }
+    pub fn output_clock_suspended(&self) -> bool {
+        self.current.is_none() && self.controller.state() == ReplacementState::Waiting
+    }
     pub fn replacement_pending(&self) -> bool {
         self.rejected.is_some() || self.controller.state() == ReplacementState::Waiting
     }
