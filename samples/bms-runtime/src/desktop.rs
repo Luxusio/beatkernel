@@ -893,7 +893,7 @@ impl LiveAudioDraft {
         &mut self,
         capability: &beatkernel_bms_runtime::live_output_control::OutputCapability,
     ) -> Result<(), String> {
-        let values = NativeSettings::output_only(&capability.current_args, capability.host)?;
+        let values = capability.settings()?;
         let selected = self.selected.min(values.fields().len().saturating_sub(1));
         let field = values
             .fields()
@@ -1801,8 +1801,15 @@ impl Desktop {
                 .output_capability()
                 .map_err(|e| e.to_string())?
                 .ok_or("live output controls unsupported")?;
-            let values = NativeSettings::output_only(&capability.current_args, capability.host)?;
-            let editor = LineEditor::new(&values.fields()[0].value, 4096)?;
+            let values = capability.settings()?;
+            let editor = LineEditor::new(
+                &values
+                    .fields()
+                    .first()
+                    .ok_or("output fields unavailable")?
+                    .value,
+                4096,
+            )?;
             let view = beatkernel_bms_runtime::ui::live_audio::LiveAudioView::new(
                 next.active_id()
                     .ok_or("output screen identity unavailable")?,

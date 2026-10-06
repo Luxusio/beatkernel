@@ -60,6 +60,11 @@ fn compose(app: &mut Desktop) {
 #[test]
 fn live_channel_matrix_field_edits_apply_and_refresh_canonical_policy_in_same_scope() {
     let (mut app, publisher) = prepared();
+    let mut initial = cap("initial-device");
+    initial
+        .current_args
+        .extend(["--output-matrix".into(), "exact".into()]);
+    publisher.advertise_output(Some(initial)).unwrap();
     app.open_live_audio();
     let scope = app.navigator.active_id();
     let index = app
@@ -117,6 +122,74 @@ fn live_channel_matrix_field_edits_apply_and_refresh_canonical_policy_in_same_sc
         Some(applied)
     );
     assert!(!app.game.as_ref().unwrap().cancelling);
+}
+
+#[test]
+fn asio_live_panel_edits_only_advertised_buffer_and_matrix_and_preserves_scope() {
+    let (mut app, publisher) = prepared();
+    let capability = OutputCapability {
+        host: SettingsHost::Windows,
+        current_args: vec![
+            "--buffer".into(),
+            "frames:64".into(),
+            "--output-matrix".into(),
+            "exact".into(),
+        ],
+    };
+    publisher
+        .advertise_output(Some(capability.clone()))
+        .unwrap();
+    app.open_live_audio();
+    let scope = app.navigator.active_id();
+    let draft = app.live_audio.as_mut().unwrap();
+    assert_eq!(
+        draft
+            .values
+            .fields()
+            .iter()
+            .map(|field| field.flag)
+            .collect::<Vec<_>>(),
+        vec!["--buffer", "--output-matrix"]
+    );
+    draft.editor.select_all();
+    draft.edit(None, Some("frames:128"));
+    compose(&mut app);
+    app.apply_live_audio();
+    let request = publisher.take_output_request().unwrap().unwrap();
+    assert_eq!(
+        request.args,
+        vec!["--buffer", "frames:128", "--output-matrix", "exact"]
+    );
+    let mut applied = capability;
+    applied.current_args[1] = "frames:128".into();
+    publisher
+        .reply_output(&OutputReply {
+            id: request.id,
+            result: Ok(applied),
+        })
+        .unwrap();
+    app.collect_game();
+    compose(&mut app);
+    assert_eq!(app.navigator.active_id(), scope);
+    assert_eq!(
+        app.live_audio.as_ref().unwrap().editor.value(),
+        "frames:128"
+    );
+}
+
+#[test]
+fn empty_output_capability_does_not_panic_or_commit_an_unusable_panel() {
+    let (mut app, publisher) = prepared();
+    publisher
+        .advertise_output(Some(OutputCapability {
+            host: SettingsHost::Windows,
+            current_args: vec![],
+        }))
+        .unwrap();
+    let scope = app.navigator.active_id();
+    app.open_live_audio();
+    assert_eq!(app.navigator.active_id(), scope);
+    assert!(app.live_audio.is_none());
 }
 #[test]
 fn actual_f2_gate_refuses_replay_terminal_cancel_and_unacknowledged_resume_intent_without_changing_play_instance()

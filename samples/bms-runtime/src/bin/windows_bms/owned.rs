@@ -80,10 +80,15 @@ impl StoppedMixerSource for OwnedOutput {
 pub(super) struct WindowsReplacementBackend {
     clock: QpcClock,
 }
+pub(super) enum WindowsRequest {
+    Wasapi(AudioStreamRequest),
+    #[cfg(feature = "asio-sdk")]
+    Asio(super::live_output::AsioLiveConfig),
+}
 impl WindowsReplacementBackend {
     fn open_native(
         &mut self,
-        request: AudioStreamRequest,
+        request: WindowsRequest,
         mixer: Mixer,
         epoch: u64,
         matrix: Option<ChannelMatrix>,
@@ -100,6 +105,36 @@ impl WindowsReplacementBackend {
                     Some(mixer),
                 ));
             }
+        };
+        #[cfg(feature = "asio-sdk")]
+        if let WindowsRequest::Asio(config) = request {
+            return match super::live_output::AsioOutput::reopen(
+                config,
+                mixer,
+                self.clock,
+                converter_matrix,
+            ) {
+                Ok(output) => Ok(OwnedOutput::new(Output::Asio(output), epoch, matrix)),
+                Err(failure) => {
+                    let (error, mixer, pending, cleanup) = failure.into_parts();
+                    let failure = match pending {
+                        Some(output) => OutputOpenFailure::pending(
+                            NativeOutputError(error),
+                            OwnedOutput::new(Output::Asio(output), epoch, matrix),
+                        ),
+                        None => OutputOpenFailure::recovered(NativeOutputError(error), mixer),
+                    };
+                    Err(match cleanup {
+                        Some(error) => failure.with_cleanup_error(NativeOutputError(error)),
+                        None => failure,
+                    })
+                }
+            };
+        }
+        let request = match request {
+            WindowsRequest::Wasapi(request) => request,
+            #[cfg(feature = "asio-sdk")]
+            WindowsRequest::Asio(_) => unreachable!("ASIO request handled above"),
         };
         let result = match converter_matrix {
             Some(matrix) => WasapiBackend.open_remixed_recoverable(
@@ -124,7 +159,7 @@ impl WindowsReplacementBackend {
 impl OutputReplacementBackend for WindowsReplacementBackend {
     type Presentation = PresentationDiscipline;
     type Output = OwnedOutput;
-    type Request = AudioStreamRequest;
+    type Request = WindowsRequest;
     type Error = NativeOutputError;
     fn open(
         &mut self,
@@ -239,7 +274,14 @@ fn capability(
             super::output_settings::capability(stream.configuration(), output.matrix.as_ref())
         }
         #[cfg(feature = "asio-sdk")]
-        Output::Asio(_) => Err("ASIO live request composition is not available".into()),
+        Output::Asio(native) => {
+            native.applied_buffer_frames().map_err(|e| e.to_string())?;
+            super::output_settings::asio_capability(
+                native.live.buffer,
+                u16::try_from(native.live.channels.len()).map_err(|e| e.to_string())?,
+                output.matrix.as_ref(),
+            )
+        }
     }
 }
 pub(super) struct WindowsOutputUi {
@@ -250,9 +292,7 @@ impl WindowsOutputUi {
         let mut bridge = GameplayOutputUi::new(PlayerOutputUi);
         let cap = if enabled {
             match owner.current() {
-                Some(output) if matches!(output.native, Output::Wasapi(_)) => {
-                    Some(capability(output)?)
-                }
+                Some(output) => Some(capability(output)?),
                 _ => None,
             }
         } else {
@@ -279,9 +319,21 @@ impl WindowsOutputUi {
                     stream.configuration().requested.clone(),
                     output.matrix.as_ref(),
                     &request.args,
-                ),
+                ).map(|request| beatkernel_bms_runtime::gameplay::output::domain::remix::RemixedOutputRequest {
+                    native: WindowsRequest::Wasapi(request.native), matrix: request.matrix,
+                }),
                 #[cfg(feature = "asio-sdk")]
-                Output::Asio(_) => Err("ASIO live request composition is not available".into()),
+                Output::Asio(native) => {
+                    let (buffer, matrix) = super::output_settings::asio_request(
+                        &native.live.registration.id.clsid, native.live.buffer,
+                        u16::try_from(native.live.channels.len()).map_err(|e| e.to_string())?,
+                        output.matrix.as_ref(), &request.args)?;
+                    let mut config = native.live.clone();
+                    config.buffer = buffer;
+                    Ok(beatkernel_bms_runtime::gameplay::output::domain::remix::RemixedOutputRequest {
+                        native: WindowsRequest::Asio(config), matrix,
+                    })
+                },
             },
             &mut capability,
         )

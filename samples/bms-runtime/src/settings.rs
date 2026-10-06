@@ -404,6 +404,15 @@ pub struct NativeSettings {
     fields: Vec<SettingsField>,
 }
 impl NativeSettings {
+    /// A capability advertises the exact editable fields and their current values.
+    /// Missing fields are not invented for a backend with a smaller live surface.
+    pub fn output_capability(args: &[String], host: SettingsHost) -> Result<Self, String> {
+        let mut values = Self::output_only(args, host)?;
+        values
+            .fields
+            .retain(|field| args.chunks_exact(2).any(|pair| pair[0] == field.flag));
+        Ok(values)
+    }
     /// Bounded output-only schema; empty values preserve the current native setting.
     pub fn output_only(args: &[String], host: SettingsHost) -> Result<Self, String> {
         let allowed: &[&str] = match host {

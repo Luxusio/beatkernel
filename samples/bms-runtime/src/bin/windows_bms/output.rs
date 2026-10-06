@@ -21,7 +21,7 @@ use beatkernel_platform::{
         AsioPresentationObservation, MultimediaClockAnchor,
     },
     windows::asio::{
-        AsioEnumerationLimits, AsioRegistryView,
+        AsioEnumerationLimits, AsioRegistryView, AsioDriverRegistration,
         control::AsioControl,
         enumerate_asio_drivers,
         stream::{AsioStream, AsioStreamPhase},
@@ -140,6 +140,7 @@ impl Setup {
                 // Keep the driver local newer than the HWND binding so every
                 // setup rejection drops/releases it before destroying sysref.
                 let mut control = control;
+                let registration = control.registration().clone();
                 let request = match options.buffer {
                     BufferRequest::DeviceDefault => AsioBufferRequest::DriverPreferred,
                     BufferRequest::Frames(n) => AsioBufferRequest::Frames(n),
@@ -153,13 +154,20 @@ impl Setup {
                 println!(
                     "ASIO requested={request:?}; reported={constraints:?}; resolved={resolved} frames"
                 );
+                let live = AsioLiveConfig {
+                    registration,
+                    channels: options.output_channels.clone().ok_or("ASIO channels missing")?,
+                    buffer: request,
+                    sample_rate: format.sample_rate(),
+                    timer_error: options.asio_timer_error,
+                    drift_error: options.asio_drift_error,
+                    latency_error: options.asio_latency_error,
+                    age: options.asio_anchor_age,
+                };
                 let mut stream = AsioStream::prepare_with_clock(
                     control,
                     mixer,
-                    options
-                        .output_channels
-                        .clone()
-                        .ok_or("ASIO output channels required")?,
+                    live.channels.clone(),
                     request,
                     clock,
                 )?;
@@ -177,7 +185,7 @@ impl Setup {
                 }
                 Ok(Output::Asio(AsioOutput {
                     stream,
-                    buffer_frames,
+                    buffer_frames: Some(buffer_frames),
                     sample_rate: format.sample_rate(),
                     _window: window,
                     clock,
@@ -186,6 +194,7 @@ impl Setup {
                     drift_error: options.asio_drift_error,
                     latency_error: options.asio_latency_error,
                     age: options.asio_anchor_age,
+                    live,
                 }))
             }
         }
@@ -274,7 +283,9 @@ impl Output {
                 let Some(observation) = output.observation()? else {
                     return Ok(None);
                 };
-                if observation.render.frames != output.buffer_frames as usize
+                if output
+                    .buffer_frames
+                    .is_none_or(|frames| observation.render.frames != frames as usize)
                     || observation.sample_rate != output.sample_rate
                 {
                     return Err("ASIO startup render configuration changed".into());
@@ -304,7 +315,9 @@ impl Output {
         match self {
             Self::Wasapi(stream) => Ok(stream.configuration().buffer_frames),
             #[cfg(feature = "asio-sdk")]
-            Self::Asio(output) => Ok(output.buffer_frames),
+            Self::Asio(output) => output
+                .buffer_frames
+                .ok_or_else(|| "ASIO applied buffer metadata unavailable".into()),
         }
     }
     pub(super) fn start(&mut self) -> Result<()> {
@@ -493,10 +506,22 @@ impl Output {
     }
 }
 #[cfg(feature = "asio-sdk")]
+#[derive(Clone)]
+pub(super) struct AsioLiveConfig {
+    pub(super) registration: AsioDriverRegistration,
+    pub(super) channels: Vec<u32>,
+    pub(super) buffer: AsioBufferRequest,
+    sample_rate: u32,
+    timer_error: u64,
+    drift_error: u64,
+    latency_error: u64,
+    age: u64,
+}
+#[cfg(feature = "asio-sdk")]
 pub(super) struct AsioOutput {
     // Drop order and explicit Drop guarantee close/drain before HWND destruction.
     pub(super) stream: AsioStream,
-    buffer_frames: u32,
+    buffer_frames: Option<u32>,
     sample_rate: u32,
     _window: Window,
     clock: QpcClock,
@@ -505,9 +530,112 @@ pub(super) struct AsioOutput {
     drift_error: u64,
     latency_error: u64,
     age: u64,
+    pub(super) live: AsioLiveConfig,
 }
 #[cfg(feature = "asio-sdk")]
 impl AsioOutput {
+    pub(super) fn applied_buffer_frames(&self) -> Result<u32> {
+        self.buffer_frames
+            .ok_or_else(|| "ASIO applied buffer metadata unavailable".into())
+    }
+    /// Reuses only the registration explicitly trusted by the initial session.
+    /// Each attempt keeps its own same-thread HWND through stream cleanup.
+    pub(super) fn reopen(
+        live: AsioLiveConfig,
+        mixer: Mixer,
+        clock: QpcClock,
+        matrix: Option<beatkernel::audio::ChannelMatrix>,
+    ) -> std::result::Result<Self, beatkernel::audio::OutputOpenFailure<Box<dyn Error>, Self>> {
+        use beatkernel::audio::OutputOpenFailure;
+        let window = match Window::hidden() {
+            Ok(window) => window,
+            Err(error) => return Err(OutputOpenFailure::recovered(error, Some(mixer))),
+        };
+        // SAFETY: this is the exact registration trusted at initial session open.
+        // This attempt owns its HWND on the same control thread, retained in the
+        // output (including pending failures) until driver Close/Release drains.
+        let control =
+            match unsafe { AsioControl::open(&live.registration, Some(window.hwnd as usize)) } {
+                Ok(control) => control,
+                Err(error) => return Err(OutputOpenFailure::recovered(error.into(), Some(mixer))),
+            };
+        let result = match matrix {
+            Some(matrix) => AsioStream::prepare_remixed_recoverable(
+                control,
+                mixer,
+                live.channels.clone(),
+                live.buffer,
+                matrix,
+                Some(clock),
+            ),
+            None => AsioStream::prepare_with_clock_recoverable(
+                control,
+                mixer,
+                live.channels.clone(),
+                live.buffer,
+                clock,
+            ),
+        };
+        match result {
+            Ok(stream) => {
+                let mut output = Self::pending(stream, window, live, clock);
+                let frames = (|| -> Result<u32> {
+                    let frames = u32::try_from(
+                        output
+                            .stream
+                            .snapshot()?
+                            .render
+                            .ok_or("ASIO primed report unavailable")?
+                            .frames,
+                    )?;
+                    if frames == 0 || frames as usize > AudioLimits::MAX_RENDER_FRAMES {
+                        return Err("ASIO applied buffer exceeds render capacity".into());
+                    }
+                    if matches!(output.live.buffer, AsioBufferRequest::Frames(requested) if requested != frames)
+                    {
+                        return Err("ASIO applied buffer differs from exact request".into());
+                    }
+                    Ok(frames)
+                })();
+                match frames {
+                    Ok(frames) => {
+                        output.buffer_frames = Some(frames);
+                        Ok(output)
+                    }
+                    Err(error) => Err(OutputOpenFailure::pending(error, output)),
+                }
+            }
+            Err(failure) => {
+                let (error, mixer, pending, cleanup) = failure.into_parts();
+                let failure = match pending {
+                    Some(stream) => OutputOpenFailure::pending(
+                        error.into(),
+                        Self::pending(stream, window, live, clock),
+                    ),
+                    None => OutputOpenFailure::recovered(error.into(), mixer),
+                };
+                Err(match cleanup {
+                    Some(error) => failure.with_cleanup_error(error.into()),
+                    None => failure,
+                })
+            }
+        }
+    }
+    fn pending(stream: AsioStream, window: Window, live: AsioLiveConfig, clock: QpcClock) -> Self {
+        Self {
+            stream,
+            buffer_frames: None,
+            sample_rate: live.sample_rate,
+            _window: window,
+            clock,
+            anchor: None,
+            timer_error: live.timer_error,
+            drift_error: live.drift_error,
+            latency_error: live.latency_error,
+            age: live.age,
+            live,
+        }
+    }
     fn pump_driver_messages(&self) -> Result<()> {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage, WM_CLOSE, WM_QUIT,

@@ -12,6 +12,98 @@ use beatkernel_platform::audio::{
     PeriodRequest, DeviceFormat,
 };
 
+#[cfg(any(feature = "asio-sdk", test))]
+pub(super) fn asio_request(
+    device: &str,
+    buffer: beatkernel_platform::audio::asio::AsioBufferRequest,
+    channels: u16,
+    matrix: Option<&ChannelMatrix>,
+    args: &[String],
+) -> Result<
+    (
+        beatkernel_platform::audio::asio::AsioBufferRequest,
+        Option<ChannelMatrix>,
+    ),
+    String,
+> {
+    use beatkernel_platform::audio::asio::AsioBufferRequest;
+    if channels == 0 || channels > 32 {
+        return Err("ASIO selected channel count is outside core limits".into());
+    }
+    let draft = NativeSettings::output_only(args, SettingsHost::Windows)?;
+    let mut buffer = buffer;
+    let mut text = "";
+    for field in draft
+        .fields()
+        .iter()
+        .filter(|field| !field.value.is_empty())
+    {
+        match field.flag {
+            "--device" if field.value == device => {}
+            "--device" => {
+                return Err("ASIO live replacement retains the selected trusted driver".into());
+            }
+            "--buffer" => {
+                buffer = match super::size(&field.value).map_err(|e| e.to_string())? {
+                    None => AsioBufferRequest::DriverPreferred,
+                    Some((true, count)) if count as usize <= AudioLimits::MAX_RENDER_FRAMES => {
+                        AsioBufferRequest::Frames(count as u32)
+                    }
+                    _ => {
+                        return Err(
+                            "ASIO buffer requires preferred/default or bounded exact frames".into(),
+                        );
+                    }
+                }
+            }
+            "--output-matrix" => text = &field.value,
+            _ => return Err("ASIO live replacement does not support a period field".into()),
+        }
+    }
+    let source = matrix.map_or(channels, ChannelMatrix::source_channels);
+    let (target, matrix) = select_matrix(source, matrix, text)?;
+    if target != channels {
+        return Err("ASIO matrix target width must match selected driver channels".into());
+    }
+    Ok((buffer, matrix))
+}
+
+#[cfg(any(feature = "asio-sdk", test))]
+pub(super) fn asio_capability(
+    buffer: beatkernel_platform::audio::asio::AsioBufferRequest,
+    channels: u16,
+    matrix: Option<&ChannelMatrix>,
+) -> Result<OutputCapability, String> {
+    if channels == 0
+        || channels > 32
+        || matches!(buffer, beatkernel_platform::audio::asio::AsioBufferRequest::Frames(frames) if frames == 0 || frames as usize > AudioLimits::MAX_RENDER_FRAMES)
+        || matrix.is_some_and(|matrix| matrix.target_channels() != channels)
+    {
+        return Err("ASIO applied channel matrix differs from selected channels".into());
+    }
+    let cap = OutputCapability {
+        host: SettingsHost::Windows,
+        current_args: vec![
+            "--buffer".into(),
+            match buffer {
+                beatkernel_platform::audio::asio::AsioBufferRequest::DriverPreferred => {
+                    "default".into()
+                }
+                beatkernel_platform::audio::asio::AsioBufferRequest::Frames(frames) => {
+                    format!("frames:{frames}")
+                }
+            },
+            "--output-matrix".into(),
+            match matrix {
+                Some(matrix) => matrix_text(matrix)?,
+                None => "exact".into(),
+            },
+        ],
+    };
+    cap.validate()?;
+    Ok(cap)
+}
+
 pub(super) fn request(
     current: AudioStreamRequest,
     matrix: Option<&ChannelMatrix>,
@@ -292,5 +384,83 @@ mod tests {
         .unwrap();
         assert_eq!(preserved.native.mode(), shared.mode());
         assert_eq!(preserved.native.period(), PeriodRequest::DeviceDefault);
+    }
+
+    #[test]
+    fn asio_draft_preserves_trusted_driver_channels_and_matrix_when_buffer_changes() {
+        use beatkernel_platform::audio::asio::AsioBufferRequest;
+        let matrix = ChannelMatrix::new(2, 2, &[0., 1., 1., 0.]).unwrap();
+        let (buffer, retained) = asio_request(
+            "trusted-driver",
+            AsioBufferRequest::DriverPreferred,
+            2,
+            Some(&matrix),
+            &["--buffer".into(), "frames:128".into()],
+        )
+        .unwrap();
+        assert_eq!(buffer, AsioBufferRequest::Frames(128));
+        assert_eq!(retained.as_ref(), Some(&matrix));
+        let cap = asio_capability(buffer, 2, retained.as_ref()).unwrap();
+        let fields = cap.settings().unwrap();
+        assert_eq!(
+            fields
+                .fields()
+                .iter()
+                .map(|field| field.flag)
+                .collect::<Vec<_>>(),
+            vec!["--buffer", "--output-matrix"]
+        );
+        assert_eq!(
+            asio_request(
+                "trusted-driver",
+                buffer,
+                2,
+                retained.as_ref(),
+                &cap.current_args
+            )
+            .unwrap(),
+            (buffer, retained)
+        );
+        let (preferred, cleared) = asio_request(
+            "trusted-driver",
+            buffer,
+            2,
+            Some(&matrix),
+            &[
+                "--buffer".into(),
+                "default".into(),
+                "--output-matrix".into(),
+                "exact".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(preferred, AsioBufferRequest::DriverPreferred);
+        assert!(cleared.is_none());
+    }
+
+    #[test]
+    fn asio_draft_refuses_unsupported_driver_period_duration_and_target_width() {
+        use beatkernel_platform::audio::asio::AsioBufferRequest;
+        for args in [
+            vec!["--device", "different-driver"],
+            vec!["--period", "frames:64"],
+            vec!["--buffer", "ns:1000000"],
+            vec!["--buffer", "frames:0"],
+            vec!["--output-matrix", "1,0"],
+            vec!["--output-matrix", "1,0;0,1;1,1"],
+        ] {
+            assert!(
+                asio_request(
+                    "trusted-driver",
+                    AsioBufferRequest::DriverPreferred,
+                    2,
+                    None,
+                    &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
+                )
+                .is_err()
+            );
+        }
+        assert!(asio_capability(AsioBufferRequest::Frames(0), 2, None).is_err());
+        assert!(asio_capability(AsioBufferRequest::DriverPreferred, 0, None).is_err());
     }
 }

@@ -6,8 +6,11 @@ pub struct OutputCapability {
     pub current_args: Vec<String>,
 }
 impl OutputCapability {
+    pub fn settings(&self) -> Result<NativeSettings, String> {
+        NativeSettings::output_capability(&self.current_args, self.host)
+    }
     pub fn validate(&self) -> Result<(), String> {
-        NativeSettings::output_only(&self.current_args, self.host).map(|_| ())
+        self.settings().map(|_| ())
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
