@@ -381,7 +381,8 @@ exceeds it for positive width. Zero-width windows remain empty. Pixel clipping m
 crop a whole admitted cluster wider than the field; do not split its text slice.
 Prefer complete composition when its enclosing clusters fit both budgets;
 otherwise keep the caret's cluster and native cursor visibility. Complex-script
-shaping and fallback remain separate work. Projection borrows cached text and
+shaping and automatic system font discovery remain separate work; supplied
+fallback fonts use the shared atlas chain below. Projection borrows cached text and
 glyph metrics without allocation, atlas mutation or per-note reactive work.
 
 The borrowed visible projection clips selected ranges to scalar columns and the
@@ -537,7 +538,8 @@ Native filesystem/window/device/performance acceptance remains unverified.
   capacity overflow report an error — revise admission for denser layouts.
 - Supplied fonts render catalog titles/artists and editable fields; remaining
   labels and noneditable metadata use bitmap glyphs. Shaping
-  and fallback fonts remain pending; native visual acceptance is deferred.
+  and automatic system font discovery remain pending; caller-provided fallback
+  chains are supported as described below. Native visual acceptance is pending.
 - Full-song completion now has source integration; native presentation and
   full-queue admission behavior remain unexecuted — verify these boundaries,
   final keysound/BGM tails and long-chart cancellation during deferred native
@@ -915,7 +917,8 @@ row. Cropping adjusts texture UVs rather than stretching the glyph. Long text
 and font overhang cannot paint into the next line, row or outside row padding.
 The row's original hit bounds and retained repaint dependencies stay unchanged.
 Known ceiling: overhanging glyphs can be visibly cut at a line boundary; ellipsis,
-wrapping, shaping and fallback fonts remain future widget work.
+wrapping and shaping remain future widget work; caller-supplied font fallback
+uses the shared atlas chain described below.
 
 Portable sprite clipping uses an immutable checked rectangle with positive
 extents and representable endpoints, intersected with the scene viewport.
@@ -929,12 +932,24 @@ geometry; the existing sticky scene capacity limit remains authoritative.
 Desktop `--title-font PATH` selects a caller-provided font for catalog titles and artists.
 Preparation reads at most 32 MiB, caches the first 1024 scalars of each title and artist
 in a fixed 14-pixel, 1024-square atlas with 4096 cached-character capacity, and
-fails explicitly before window/native startup on invalid or excessive data.
+fails explicitly before catalog publication or native play on invalid or
+excessive data. The desktop window/renderer may start earlier in loading state.
 The font also renders Search, Settings value/profile and visible value rows,
 Display fields, Practice start/end and the Records directory. The option stays
 outside native invocation/replay/profile arguments; labels, buttons and other
-noneditable metadata retain bitmap text. The supplied font must contain the
-desired characters; glyph-zero output does not establish fallback support.
+noneditable metadata retain bitmap text.
+
+Repeatable `--fallback-font PATH` (up to seven, only with `--title-font`) forms
+an ordered chain after the title font. Each read is bounded like the title font
+and every file is parsed before catalog publication or native play; any invalid file fails
+preparation explicitly. A character resolves to the first font in chain order
+whose map contains it, else to the title font's glyph zero as the visible
+replacement, flagged `missing`. Placement is keyed by chain index and font
+glyph, so equal glyph ids in different fonts never alias. All chain glyphs
+share the one atlas image, cache limits and renderer texture identity, and
+transactional field extension keeps the same chain. Ascent and baseline remain
+the title font's. Shaping, kerning and automatic system font discovery are not
+provided; fallback paths stay outside native, replay and profile arguments.
 
 At UI input/navigation/profile boundaries, extend the cache transactionally for
 current field text and uncommitted IME previews. Each string is bounded to 4096
@@ -954,8 +969,8 @@ the 1024-scalar draw window even for long or zero-advance input. Font-generation
 changes invalidate input nodes; cached identical updates leave retained nodes
 idle. Full renderer recovery uploads the latest CPU atlas, creates a new texture
 identity and rebinds fields/rebuilds Selection; surface-only recovery retains it.
-Font fallback, shaping and native visual acceptance remain
-unfinished. Source fixtures cover these boundaries for later execution.
+Automatic font discovery, shaping and native visual acceptance remain
+unfinished. Source fixtures cover these boundaries for execution.
 
 Portable font preparation accepts caller-provided TrueType/OpenType bytes and
 a fixed pixel scale, preparing glyphs into a bounded RGBA atlas for the existing
@@ -963,14 +978,16 @@ GPU texture path. Font bytes, dimensions, scale and cached glyph count have
 explicit limits. Cache hits reuse metrics/UVs; rejected glyphs preserve prior
 pixels, allocations and cache entries. Baseline bounds and advances are retained,
 whitespace needs no pixels, and missing glyphs are explicitly reported. Non-whitespace
-characters resolving to the same font glyph identity reuse its metrics and atlas
+characters resolving to the same font-and-glyph identity reuse its metrics and atlas
 placement, including missing glyph zero. The character cache limit remains unchanged;
 whitespace never acquires geometry from an alias, and failed preparation preserves
 both identity and character caches. Raster
 and packing run outside input/audio callbacks. No font is bundled; native font
-discovery, broader widget integration, fallback/shaping and actual multilingual
-GUI acceptance remain unfinished. Self-authored font fixtures are prepared for
-later execution; compilation alone does not establish visual behavior.
+discovery, broader widget integration, shaping and actual multilingual
+GUI acceptance remain unfinished. Self-authored font fixtures exercise these
+boundaries; compilation alone does not establish visual behavior. Executed
+regressions and bounded Linux multilingual GUI evidence are recorded in
+[font fallback integration](../changes/CHANGE__font-fallback-integration.md).
 
 All seven migrated views (Selection, Practice, Settings, Display, Records,
 Players and Devices) use the same RetainedNodes geometry storage/binding/composition implementation. Individual

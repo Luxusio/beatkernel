@@ -58,7 +58,7 @@ use beatkernel_bms_runtime::{
     bga_render::{BgaFrame, BgaTextureCache},
     competition::OpponentKind,
     device_catalog::{DeviceCatalog, DeviceRequest},
-    font_atlas::FontAtlas,
+    font_atlas::{FontAtlas, MAX_FONT_CHAIN},
     font_text::{FontText, MAX_TEXT_GLYPHS},
     local_players::PlayerId,
     local_setup::LocalSetup,
@@ -144,6 +144,8 @@ struct Options {
     presentation: Presentation,
     profile: Option<PathBuf>,
     title_font: Option<PathBuf>,
+    // Ordered after the title font; consulted only for glyphs it lacks.
+    fallback_fonts: Vec<PathBuf>,
     display_overrides: Vec<String>,
 }
 impl Options {
@@ -158,6 +160,7 @@ impl Options {
             presentation: Presentation::Fifo,
             profile: None,
             title_font: None,
+            fallback_fonts: Vec::new(),
             display_overrides: Vec::new(),
         };
         let mut index = 0;
@@ -171,6 +174,7 @@ impl Options {
                 "--library"
                     | "--profile"
                     | "--title-font"
+                    | "--fallback-font"
                     | "--ui-lookahead-ms"
                     | "--ui-fps"
                     | "--gpu-backend"
@@ -184,6 +188,15 @@ impl Options {
                         if options.title_font.replace(PathBuf::from(value)).is_some() {
                             return Err("duplicate --title-font".into());
                         }
+                    }
+                    "--fallback-font" => {
+                        if value.is_empty() {
+                            return Err("--fallback-font path cannot be empty".into());
+                        }
+                        if options.fallback_fonts.len() + 1 >= MAX_FONT_CHAIN {
+                            return Err("at most seven --fallback-font paths".into());
+                        }
+                        options.fallback_fonts.push(PathBuf::from(value));
                     }
                     "--profile" => {
                         if value.is_empty() {
@@ -221,6 +234,9 @@ impl Options {
         }
         if options.library.is_some() == options.chart.is_some() {
             return Err("choose exactly one of --library DIR or --chart PATH".into());
+        }
+        if !options.fallback_fonts.is_empty() && options.title_font.is_none() {
+            return Err("--fallback-font requires --title-font".into());
         }
         let display =
             PresentationSettings::default().apply_overrides(&options.display_overrides)?;
@@ -262,15 +278,16 @@ fn direct_entry(path: PathBuf) -> Entry {
 }
 #[cfg(test)]
 fn prepare_title_font(bytes: Vec<u8>, items: &[SelectionItem]) -> Result<Arc<FontAtlas>, String> {
-    prepare_title_font_with(bytes, items, || Ok(()))
+    prepare_title_font_with(bytes, Vec::new(), items, || Ok(()))
 }
 fn prepare_title_font_with(
     bytes: Vec<u8>,
+    fallbacks: Vec<Vec<u8>>,
     items: &[SelectionItem],
     mut checkpoint: impl FnMut() -> Result<(), String>,
 ) -> Result<Arc<FontAtlas>, String> {
     checkpoint()?;
-    let mut atlas = FontAtlas::new(bytes, 14.0, 1024, 1024, 4096)?;
+    let mut atlas = FontAtlas::with_fallbacks(bytes, fallbacks, 14.0, 1024, 1024, 4096)?;
     for item in items {
         checkpoint()?;
         for value in [&item.title, &item.artist] {
@@ -293,6 +310,7 @@ struct PreparedCatalog {
 fn prepare_catalog(
     library: player_chart::ChartLibrary,
     font_path: Option<PathBuf>,
+    fallbacks: Vec<PathBuf>,
     control: &CatalogControl,
 ) -> Result<PreparedCatalog, String> {
     control.checkpoint()?;
@@ -305,11 +323,12 @@ fn prepare_catalog(
             artist: entry.artist,
         })
         .collect();
-    prepare_catalog_parts(entries, library.diagnostics, font_path, control)
+    prepare_catalog_parts(entries, library.diagnostics, font_path, fallbacks, control)
 }
 fn prepare_direct_catalog(
     path: PathBuf,
     font_path: PathBuf,
+    fallbacks: Vec<PathBuf>,
     control: &CatalogControl,
 ) -> Result<PreparedCatalog, String> {
     control.checkpoint()?;
@@ -317,13 +336,25 @@ fn prepare_direct_catalog(
         vec![direct_entry(path)],
         Vec::new(),
         Some(font_path),
+        fallbacks,
         control,
     )
+}
+/// Reads one caller-provided font with the atlas byte limit plus one rejection byte.
+fn read_font(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|error| error.to_string())?
+        .take(32 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    Ok(bytes)
 }
 fn prepare_catalog_parts(
     entries: Vec<Entry>,
     diagnostics: Vec<String>,
     font_path: Option<PathBuf>,
+    fallback_paths: Vec<PathBuf>,
     control: &CatalogControl,
 ) -> Result<PreparedCatalog, String> {
     control.checkpoint()?;
@@ -339,14 +370,14 @@ fn prepare_catalog_parts(
     let search = CatalogSearch::new(&items)?;
     control.checkpoint()?;
     let font = if let Some(path) = font_path {
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)
-            .map_err(|error| error.to_string())?
-            .take(32 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| error.to_string())?;
+        let bytes = read_font(&path)?;
+        let mut fallbacks = Vec::with_capacity(fallback_paths.len());
+        for path in &fallback_paths {
+            control.checkpoint()?;
+            fallbacks.push(read_font(path)?);
+        }
         control.checkpoint()?;
-        Some(prepare_title_font_with(bytes, &items, || {
+        Some(prepare_title_font_with(bytes, fallbacks, &items, || {
             control.checkpoint()
         })?)
     } else {
@@ -364,8 +395,9 @@ fn prepare_catalog_parts(
 fn spawn_catalog(options: &Options) -> Result<Option<NativeCatalog<PreparedCatalog>>, String> {
     if let Some(root) = &options.library {
         let font_path = options.title_font.clone();
+        let fallbacks = options.fallback_fonts.clone();
         NativeCatalog::spawn(root.clone(), move |library, control| {
-            prepare_catalog(library, font_path, control)
+            prepare_catalog(library, font_path, fallbacks, control)
         })
         .map(Some)
     } else if let Some(font_path) = &options.title_font {
@@ -374,8 +406,9 @@ fn spawn_catalog(options: &Options) -> Result<Option<NativeCatalog<PreparedCatal
             .clone()
             .ok_or("direct title font requires a chart")?;
         let font_path = font_path.clone();
+        let fallbacks = options.fallback_fonts.clone();
         NativeCatalog::spawn_prepared(move |control| {
-            prepare_direct_catalog(path, font_path, control)
+            prepare_direct_catalog(path, font_path, fallbacks, control)
         })
         .map(Some)
     } else {
@@ -755,7 +788,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--title-font PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings or audio output in supported paused play; F3 in selection: search; F4 in settings: records; F6 in settings: practice; W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start and disable loop; F7: mark live position/loop start; F8: restart mark after cleanup; F9: pause/resume when native owner supports it; F10: mark loop end; F11: toggle native finite loop (live nonnetwork only, joins before restart; reopening may leave a gap); Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--title-font PATH [--fallback-font PATH]...] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings or audio output in supported paused play; F3 in selection: search; F4 in settings: records; F6 in settings: practice; W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start and disable loop; F7: mark live position/loop start; F8: restart mark after cleanup; F9: pause/resume when native owner supports it; F10: mark loop end; F11: toggle native finite loop (live nonnetwork only, joins before restart; reopening may leave a gap); Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }

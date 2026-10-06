@@ -13,9 +13,15 @@ pub struct Glyph {
     pub bounds: [i32; 4],
     /// Font-provided horizontal advance at this atlas's fixed scale.
     pub advance: f32,
-    /// This character resolved to the font's glyph zero, without substitution.
+    /// No font in the chain maps this character; the primary font's glyph
+    /// zero is the visible replacement.
     pub missing: bool,
+    /// Chain index of the supplying font; zero is the primary font.
+    pub font: u8,
 }
+
+/// Admitted fonts per atlas: one primary font and up to seven fallbacks.
+pub const MAX_FONT_CHAIN: usize = 8;
 
 #[derive(Clone, Copy, Default)]
 struct Shelf {
@@ -24,17 +30,21 @@ struct Shelf {
     height: u32,
 }
 
-/// One supplied font, one fixed scale, and one bounded atlas with stable UVs.
+/// An ordered font chain, one fixed scale, and one bounded atlas with stable UVs.
+/// Each character resolves through the primary font, then the fallbacks in
+/// order, then the primary font's glyph zero. All fonts share one image, so
+/// one texture identity serves the complete chain.
 /// Parsing, preparation and image upload belong outside audio callbacks.
-/// This component provides individual glyphs, without shaping or fallback fonts.
+/// This component provides individual glyphs, without shaping.
 pub struct FontAtlas {
-    font: FontArc,
+    fonts: Arc<[FontArc]>,
     pixels: f32,
     max_glyphs: usize,
     glyphs: BTreeMap<char, Glyph>,
-    // Only nonsuppressed glyphs enter this cache. Character admission remains
-    // independently bounded, including aliases and geometry-free whitespace.
-    placements: BTreeMap<u16, Glyph>,
+    // Only nonsuppressed glyphs enter this cache, keyed by chain index and
+    // font glyph. Character admission remains independently bounded,
+    // including aliases and geometry-free whitespace.
+    placements: BTreeMap<(u8, u16), Glyph>,
     image: RgbaImage,
     shelf: Shelf,
 }
@@ -48,7 +58,23 @@ impl FontAtlas {
         height: u32,
         max_glyphs: usize,
     ) -> Result<Self, String> {
+        Self::with_fallbacks(bytes, Vec::new(), pixels, width, height, max_glyphs)
+    }
+    /// Same limits as `new`, with up to seven fallback fonts of at most 32 MiB
+    /// each. Metrics such as ascent remain the primary font's.
+    pub fn with_fallbacks(
+        bytes: Vec<u8>,
+        fallbacks: Vec<Vec<u8>>,
+        pixels: f32,
+        width: u32,
+        height: u32,
+        max_glyphs: usize,
+    ) -> Result<Self, String> {
+        if fallbacks.len() >= MAX_FONT_CHAIN {
+            return Err("font chain exceeds one primary and seven fallback fonts".into());
+        }
         if bytes.len() > 32 * 1024 * 1024
+            || fallbacks.iter().any(|bytes| bytes.len() > 32 * 1024 * 1024)
             || !pixels.is_finite()
             || !(1.0..=128.0).contains(&pixels)
             || !(1..=2048).contains(&width)
@@ -59,10 +85,14 @@ impl FontAtlas {
                 "font atlas configuration exceeds byte, scale, extent or glyph limits".into(),
             );
         }
-        let font = FontArc::try_from_vec(bytes).map_err(|_| "invalid supplied font bytes")?;
-        let height_unscaled = font.height_unscaled();
-        if !height_unscaled.is_finite() || height_unscaled <= 0.0 {
-            return Err("font has invalid vertical scale metrics".into());
+        let mut fonts = Vec::with_capacity(1 + fallbacks.len());
+        for bytes in std::iter::once(bytes).chain(fallbacks) {
+            let font = FontArc::try_from_vec(bytes).map_err(|_| "invalid supplied font bytes")?;
+            let height_unscaled = font.height_unscaled();
+            if !height_unscaled.is_finite() || height_unscaled <= 0.0 {
+                return Err("font has invalid vertical scale metrics".into());
+            }
+            fonts.push(font);
         }
         let byte_len = usize::try_from(u64::from(width) * u64::from(height) * 4)
             .map_err(|_| "font atlas pixel byte count overflow")?;
@@ -71,7 +101,7 @@ impl FontAtlas {
             .map_err(|_| "font atlas allocation failed")?;
         rgba.resize(byte_len, 0);
         Ok(Self {
-            font,
+            fonts: fonts.into(),
             pixels,
             max_glyphs,
             glyphs: BTreeMap::new(),
@@ -120,7 +150,7 @@ impl FontAtlas {
             .map_err(|_| "font atlas extension allocation failed")?;
         pixels.extend_from_slice(current.image.pixels());
         let mut candidate = Self {
-            font: current.font.clone(),
+            fonts: Arc::clone(&current.fonts),
             pixels: current.pixels,
             max_glyphs: current.max_glyphs,
             glyphs: current.glyphs.clone(),
@@ -148,11 +178,17 @@ impl FontAtlas {
     pub fn image(&self) -> &RgbaImage {
         &self.image
     }
+    /// The primary font's ascent; fallback glyphs share its baseline.
     pub fn ascent(&self) -> f32 {
-        self.font.as_scaled(self.pixels).ascent()
+        self.fonts[0].as_scaled(self.pixels).ascent()
+    }
+    /// Number of fonts in the chain, including the primary font.
+    pub fn font_count(&self) -> usize {
+        self.fonts.len()
     }
     /// Returns a cached glyph or prepares it once. Non-whitespace aliases share
-    /// the font glyph's placement; each character still consumes a cache slot.
+    /// the same font glyph's placement; each character still consumes a cache slot.
+    /// The first font in chain order that maps the character supplies it.
     /// Any returned error preserves both caches, pixels and shelf placement.
     /// Controls are rejected and whitespace never acquires drawable geometry.
     pub fn prepare(&mut self, character: char) -> Result<Glyph, String> {
@@ -165,10 +201,19 @@ impl FontAtlas {
         if self.glyphs.len() >= self.max_glyphs {
             return Err("font atlas cached character limit reached".into());
         }
-        let scaled = self.font.as_scaled(self.pixels);
-        let id = scaled.glyph_id(character);
+        let (index, id) = self
+            .fonts
+            .iter()
+            .enumerate()
+            .map(|(index, font)| (index, font.glyph_id(character)))
+            .find(|(_, id)| id.0 != 0)
+            .unwrap_or((0, ab_glyph::GlyphId(0)));
+        // A reference count, not font data; mutation below borrows self.
+        let font = self.fonts[index].clone();
+        let source = index as u8;
+        let scaled = font.as_scaled(self.pixels);
         if !character.is_whitespace() {
-            if let Some(&glyph) = self.placements.get(&id.0) {
+            if let Some(&glyph) = self.placements.get(&(source, id.0)) {
                 self.glyphs.insert(character, glyph);
                 return Ok(glyph);
             }
@@ -182,13 +227,14 @@ impl FontAtlas {
             bounds: [0; 4],
             advance,
             missing: id.0 == 0,
+            font: source,
         };
         if character.is_whitespace() {
             self.glyphs.insert(character, glyph);
             return Ok(glyph);
         }
-        let Some(outline) = self.font.outline_glyph(id.with_scale(self.pixels)) else {
-            self.placements.insert(id.0, glyph);
+        let Some(outline) = font.outline_glyph(id.with_scale(self.pixels)) else {
+            self.placements.insert((source, id.0), glyph);
             self.glyphs.insert(character, glyph);
             return Ok(glyph);
         };
@@ -214,7 +260,7 @@ impl FontAtlas {
             .ok_or("font glyph height is invalid")?;
         glyph.bounds = [x, y, width, height];
         if width == 0 || height == 0 {
-            self.placements.insert(id.0, glyph);
+            self.placements.insert((source, id.0), glyph);
             self.glyphs.insert(character, glyph);
             return Ok(glyph);
         }
@@ -260,7 +306,7 @@ impl FontAtlas {
             }
         }
         self.shelf = next_shelf;
-        self.placements.insert(id.0, glyph);
+        self.placements.insert((source, id.0), glyph);
         self.glyphs.insert(character, glyph);
         Ok(glyph)
     }

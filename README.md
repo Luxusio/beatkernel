@@ -216,10 +216,14 @@ display options, practice times and the record directory use its actual glyph
 advances for text, cursor and selection. New input/IME characters extend the
 bounded 14-pixel atlas at UI state changes and update the same GPU texture;
 cached input does not rerasterize or rebuild the catalog. Renderer recovery
-uploads the latest atlas. Invalid initial font data fails before window startup;
-later cache-limit errors preserve the text, show an error and use bitmap fields.
-The supplied font must contain the desired glyphs. Other labels and controls
-retain bitmap text; shaping and fallback fonts remain pending.
+uploads the latest atlas. Invalid initial font data fails before catalog publication
+or native play; the window may already show loading state.
+Later cache-limit errors preserve the text, show an error and use bitmap fields.
+Add repeatable `--fallback-font PATH` options (up to seven, with `--title-font`)
+to supply missing glyphs in chain order. All fonts use the same atlas and GPU
+texture; the primary font supplies the shared baseline and final missing-glyph
+replacement. Other labels and controls retain bitmap text; shaping, kerning
+and automatic system font discovery remain pending.
 F5 or Retry starts the same chart again after the previous native session has
 finished cleanup. The accepted chart/device/timing/roster options stay pinned;
 recorded retries use distinct .retry<N>.bkr stems and create-new saves.

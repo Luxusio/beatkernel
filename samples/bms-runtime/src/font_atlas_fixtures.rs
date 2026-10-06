@@ -1,7 +1,7 @@
 //! Original minimal TrueType data exercises the real parser and rasterizer.
 use crate::font_atlas::FontAtlas;
 
-use crate::font_fixture::{font_bytes, font_bytes_with_space};
+use crate::font_fixture::{font_bytes, font_bytes_with_map, font_bytes_with_space};
 
 #[test]
 fn actual_font_unicode_raster_cache_padding_missing_and_space() {
@@ -641,5 +641,71 @@ fn extension_counts_all_4096_characters_even_when_they_share_one_missing_glyph()
         assert_eq!(full.len(), 4096);
         assert_eq!(full.get(uncached.chars().next().unwrap()), None);
         assert_eq!(full.image().pixels(), before);
+    }
+}
+
+#[test]
+fn missing_primary_glyphs_resolve_through_fallbacks_in_chain_order() {
+    use std::sync::Arc;
+    // Primary maps only Latin/Hangul. The first fallback maps 別 and also A,
+    // which must never override the primary. The second maps 別 and 曲.
+    let first = font_bytes_with_map(&[('A', 1), ('別', 1)]);
+    let second = font_bytes_with_map(&[('\u{3000}', 2), ('別', 1), ('曲', 1)]);
+    let mut atlas =
+        FontAtlas::with_fallbacks(font_bytes(), vec![first, second], 32.0, 128, 128, 16).unwrap();
+    assert_eq!(atlas.font_count(), 3);
+    let latin = atlas.prepare('A').unwrap();
+    assert_eq!((latin.font, latin.missing), (0, false));
+    let kanji = atlas.prepare('別').unwrap();
+    assert_eq!((kanji.font, kanji.missing), (1, false));
+    // The same glyph id in another font is a separate placement, not an alias.
+    assert_ne!(kanji.uv, latin.uv);
+    assert_eq!(kanji.bounds, latin.bounds);
+    let song = atlas.prepare('曲').unwrap();
+    assert_eq!((song.font, song.missing), (2, false));
+    assert_ne!(song.uv, kanji.uv);
+    let ideographic_space = atlas.prepare('\u{3000}').unwrap();
+    assert_eq!(ideographic_space.font, 2);
+    assert!(!ideographic_space.missing && ideographic_space.uv.is_none());
+    // No font maps this: the primary glyph zero is the visible replacement.
+    let replacement = atlas.prepare('🙂').unwrap();
+    assert_eq!((replacement.font, replacement.missing), (0, true));
+    assert!(replacement.uv.is_some());
+    let mut single = FontAtlas::new(font_bytes(), 32.0, 128, 128, 16).unwrap();
+    let alone = single.prepare('🙂').unwrap();
+    assert_eq!(
+        (alone.font, alone.missing, alone.bounds),
+        (0, true, replacement.bounds)
+    );
+
+    // Extension keeps the shared chain and existing placements stable.
+    let current = Arc::new(atlas);
+    let extended = FontAtlas::extend_texts(&current, &["別曲A가"]).unwrap();
+    assert_eq!(extended.font_count(), 3);
+    assert_eq!(extended.get('別'), Some(kanji));
+    assert_eq!(extended.get('曲'), Some(song));
+    assert_eq!(extended.get('가').unwrap().uv, latin.uv);
+
+    // Primary and fallback glyphs draw through one texture identity and batch.
+    use crate::{font_text::FontText, scene::Scene, texture::TextureId};
+    let texture = TextureId::allocate().unwrap();
+    let text = FontText::new(extended, texture).unwrap();
+    let mut scene = Scene::new(256, 64);
+    text.draw(&mut scene, 0, 0, "A別曲🙂", 0xffffff).unwrap();
+    assert_eq!(scene.rectangles().len(), 4);
+    assert_eq!(scene.batches().len(), 1);
+    assert_eq!(scene.batches()[0].texture, texture);
+}
+
+#[test]
+fn fallback_chain_admission_is_bounded_and_rejects_invalid_fonts() {
+    let chain = FontAtlas::with_fallbacks(font_bytes(), vec![font_bytes(); 7], 14.0, 64, 64, 4);
+    assert_eq!(chain.unwrap().font_count(), 8);
+    for fallbacks in [
+        vec![font_bytes(); 8],
+        vec![vec![0; 64]],
+        vec![vec![0; 32 * 1024 * 1024 + 1]],
+    ] {
+        assert!(FontAtlas::with_fallbacks(font_bytes(), fallbacks, 14.0, 64, 64, 4).is_err());
     }
 }

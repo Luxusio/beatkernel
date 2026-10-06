@@ -101,6 +101,7 @@ fn pending_renderer_fences_real_desktop_actions_and_catalog_publication_until_jo
                     diagnostics: vec!["UNPUBLISHED DIAGNOSTIC".into()],
                 },
                 None,
+                Vec::new(),
                 control,
             )
         })

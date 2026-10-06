@@ -22,7 +22,8 @@ pub struct FontFieldLine<'a> {
 }
 
 /// A fixed-scale prepared atlas paired with its renderer-owned texture identity.
-/// This draws independent glyphs, without shaping, kerning or fallback fonts.
+/// This draws independent glyphs, without shaping or kerning; the atlas's
+/// ordered font chain already resolved fallback glyphs into the same texture.
 #[derive(Clone)]
 pub struct FontText {
     atlas: Arc<FontAtlas>,

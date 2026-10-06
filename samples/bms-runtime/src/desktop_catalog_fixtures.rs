@@ -67,7 +67,7 @@ fn gated_catalog(
         assert_eq!(library.diagnostics.len(), 1);
         entered.send(()).unwrap();
         gate.recv_timeout(WAIT).map_err(|error| error.to_string())?;
-        prepare_catalog(library, Some(font), control)
+        prepare_catalog(library, Some(font), Vec::new(), control)
     })
     .unwrap();
     (job, ready, release)
@@ -327,7 +327,7 @@ fn gated_direct_catalog(
     let job = NativeCatalog::spawn_prepared(move |control| {
         entered.send(thread::current().id()).unwrap();
         gate.recv_timeout(WAIT).map_err(|error| error.to_string())?;
-        prepare_direct_catalog(path, font, control)
+        prepare_direct_catalog(path, font, Vec::new(), control)
     })
     .unwrap();
     (job, ready, release)
@@ -553,4 +553,74 @@ fn direct_font_failure_hidden_suspend_and_close_keep_prepared_data_owned_until_j
         assert!(replacement.catalog.is_none());
         assert!(replacement.title_font.is_none());
     }
+}
+
+#[test]
+fn library_titles_resolve_glyphs_missing_from_the_title_font_through_fallback_fonts() {
+    let root = CatalogTree::new();
+    // The primary fixture maps only space, A and 가. Fallbacks are consulted in
+    // order: 作 comes from the first file and 曲 from the second.
+    fs::write(
+        root.0.join("first.ttf"),
+        font_fixture::font_bytes_with_map(&[('作', 1)]),
+    )
+    .unwrap();
+    fs::write(
+        root.0.join("second.ttf"),
+        font_fixture::font_bytes_with_map(&[('作', 1), ('曲', 1)]),
+    )
+    .unwrap();
+    let path = |name: &str| root.0.join(name).to_str().unwrap().to_owned();
+    let args = [
+        "--library".into(),
+        root.0.to_str().unwrap().into(),
+        "--title-font".into(),
+        path("title.ttf"),
+        "--fallback-font".into(),
+        path("first.ttf"),
+        "--fallback-font".into(),
+        path("second.ttf"),
+    ];
+    let options = Options::parse(&args).unwrap();
+    assert_eq!(
+        options.fallback_fonts,
+        [root.0.join("first.ttf"), root.0.join("second.ttf")]
+    );
+    assert!(options.native.is_empty());
+    let mut job = spawn_catalog(&options).unwrap().unwrap();
+    let font = job.join().unwrap().unwrap().font.unwrap();
+    let source = |character| font.get(character).map(|glyph| (glyph.font, glyph.missing));
+    assert_eq!(font.font_count(), 3);
+    assert_eq!(source('作'), Some((1, false)));
+    assert_eq!(source('曲'), Some((2, false)));
+    assert_eq!(source('A'), Some((0, false)));
+    // Nothing in the chain maps É: the primary replacement glyph stays visible.
+    assert_eq!(source('É'), Some((0, true)));
+
+    let mut invalid = args.to_vec();
+    invalid[7] = path("invalid.ttf");
+    let options = Options::parse(&invalid).unwrap();
+    let mut job = spawn_catalog(&options).unwrap().unwrap();
+    let error = job.join().unwrap().err().unwrap();
+    assert!(error.contains("invalid supplied font bytes"));
+}
+
+#[test]
+fn fallback_font_option_requires_a_title_font_and_bounds_the_chain() {
+    let parse = |extra: &[&str]| {
+        let mut args = vec!["--chart".to_owned(), "fixture.bms".into()];
+        args.extend(extra.iter().map(|value| value.to_string()));
+        Options::parse(&args)
+    };
+    assert!(parse(&["--fallback-font", "cjk.ttf"]).is_err());
+    assert!(parse(&["--title-font", "t.ttf", "--fallback-font", ""]).is_err());
+    let mut seven = vec!["--title-font", "t.ttf"];
+    for _ in 0..7 {
+        seven.extend(["--fallback-font", "f.ttf"]);
+    }
+    let options = parse(&seven).unwrap();
+    assert_eq!(options.fallback_fonts.len(), 7);
+    assert_eq!(options.native, ["--chart", "fixture.bms"]);
+    seven.extend(["--fallback-font", "f.ttf"]);
+    assert!(parse(&seven).is_err());
 }

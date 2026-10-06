@@ -7,6 +7,12 @@ pub(crate) fn font_bytes() -> Vec<u8> {
 }
 
 pub(crate) fn font_bytes_with_space(space_glyph: u32) -> Vec<u8> {
+    font_bytes_with_map(&[(' ', space_glyph), ('A', 1), ('가', 1)])
+}
+
+/// The same three glyphs with a caller-chosen character map, sorted by
+/// character as format 12 requires. Glyph 1 is a triangle, 2 is empty.
+pub(crate) fn font_bytes_with_map(map: &[(char, u32)]) -> Vec<u8> {
     fn u16_at(bytes: &mut [u8], offset: usize, value: u16) {
         bytes[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
     }
@@ -76,9 +82,9 @@ pub(crate) fn font_bytes_with_space(space_glyph: u32) -> Vec<u8> {
     u32_at(&mut cmap, 8, 12);
     let mut format12 = vec![0; 16];
     u16_at(&mut format12, 0, 12);
-    u32_at(&mut format12, 4, 52);
-    u32_at(&mut format12, 12, 3);
-    for (character, glyph) in [(' ', space_glyph), ('A', 1), ('가', 1)] {
+    u32_at(&mut format12, 4, 16 + 12 * map.len() as u32);
+    u32_at(&mut format12, 12, map.len() as u32);
+    for &(character, glyph) in map {
         for value in [character as u32, character as u32, glyph] {
             format12.extend_from_slice(&value.to_be_bytes());
         }
