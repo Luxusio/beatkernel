@@ -1124,7 +1124,7 @@ mod fixtures {
             },
         };
         update.preview = Some(&preview);
-        update.opponents = 8;
+        update.opponents = 7;
         assert_eq!(hit(&update, Some((30.0, 175.0))), Some(ControlId(50010)));
         assert_eq!(hit(&update, Some((630.0, 480.0))), Some(ControlId(56)));
         assert_eq!(hit(&update, Some((790.0, 480.0))), Some(ControlId(57)));
@@ -1141,6 +1141,16 @@ mod fixtures {
                 .chain([56, 57, 50, 51, 52, 53, 54, 55, 59])
                 .collect::<Vec<_>>()
         );
+        let mut capped = frame(&directory, &catalog);
+        capped.first = 10;
+        capped.selected = Some(10);
+        capped.preview = Some(&preview);
+        capped.opponents = 8;
+        assert!(!available(&capped, ControlId(52)));
+        assert!(!available(&capped, ControlId(53)));
+        view.update(capped).unwrap();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(hits.iter().all(|(id, _)| !matches!(id.0, 52 | 53)));
         let mut pending = frame(&directory, &catalog);
         pending.pending = true;
         pending.first = 10;

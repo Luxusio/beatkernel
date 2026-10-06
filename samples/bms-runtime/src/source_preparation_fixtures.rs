@@ -572,7 +572,9 @@ fn image_aliases_share_raw_and_layer_bytes_and_keep_missing_reasons() {
     let chart = parse(text, Default::default()).unwrap();
     let mut files = selected(text.as_bytes());
     files.insert("pack/black.bmp", bmp([0, 0, 0])).unwrap();
-    files.insert("pack/missing.PNG", bmp([255, 0, 0])).unwrap();
+    files
+        .insert("pack/absent_decoy.PNG", bmp([255, 0, 0]))
+        .unwrap();
     files
         .insert("pack/movie.mpg", b"unsupported movie".to_vec())
         .unwrap();

@@ -291,7 +291,7 @@ fn status_failure_and_paging_preserve_the_fixed_local_field_and_touch_geometry()
             };
             use beatkernel::time::Timestamp;
             let source = beatkernel_bms::parse(
-                "#BPM 120\n#00011:0100\n#00012:0001\n",
+                "#BPM 120\n#WAV01 key.wav\n#00011:0100\n#00012:0001\n",
                 beatkernel_bms::ParseOptions::default(),
             )
             .unwrap();

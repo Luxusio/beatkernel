@@ -288,7 +288,7 @@ fn cached_presentation_contains_only_four_qualified_rows_and_retains_shared_lobb
             playfield_layout::local_touch_bounds,
         };
         let source = beatkernel_bms::parse(
-            "#BPM 120\n#00011:0100\n#00012:0001\n",
+            "#BPM 120\n#WAV01 key.wav\n#00011:0100\n#00012:0001\n",
             beatkernel_bms::ParseOptions::default(),
         )
         .unwrap();

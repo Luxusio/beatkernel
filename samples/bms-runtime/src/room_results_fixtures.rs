@@ -219,9 +219,11 @@ fn archive_is_a_snapshot_and_failed_presentation_stays_unavailable_with_original
             scene::Scene,
             ui::organisms::{self, LocalPlayerView},
         };
-        let source =
-            beatkernel_bms::parse("#BPM 120\n#00011:0100\n#00012:0001\n", Default::default())
-                .unwrap();
+        let source = beatkernel_bms::parse(
+            "#BPM 120\n#WAV01 key.wav\n#00011:0100\n#00012:0001\n",
+            Default::default(),
+        )
+        .unwrap();
         let chart = PlayerChart::from_compiled(&source, &source.compile().unwrap().chart).unwrap();
         let scores: [ScoreSummary; 4] = std::array::from_fn(|_| ScoreSummary::default());
         for view in [before.project(0).unwrap(), after.project(1).unwrap(), view] {
