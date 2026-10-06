@@ -291,6 +291,17 @@ native clock frequency remains separately observed. Legacy open remains strict.
 Portable fixtures exercise these common helpers; Windows type-checking and
 native Windows device execution are separate evidence tiers.
 
+CoreAudio exposes `open_remixed_recoverable` using the same preflight and
+capacity-bound conversion helpers. Source/request rates remain equal. Native
+layout, Float32 format and applied settings are validated as before; scratch
+and callback scatter use target channels rather than source Mixer channels.
+Portable channel-group copying serves interleaved and planar buffers without
+allocation. Callback registration/retirement guards continue owning the Mixer
+and converter together; original Mixer recovery occurs only after confirmed
+callback/listener retirement. Legacy open is strict. Verify target groups,
+invalid extents with no writes, source reports/pause/end, and macOS-only
+preflight/type-checks separately from actual HAL/acoustic execution.
+
 Known ceiling: remaining native owners still compare mixer and device formats and
 refuse a mismatch; adopting the converter, mapping presentation through its lookahead
 and choosing quality per device remain integration work. Quality is bounded by

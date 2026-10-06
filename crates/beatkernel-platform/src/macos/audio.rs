@@ -2,7 +2,7 @@
 use super::{clock::MachClock, ffi};
 use crate::audio::{AudioStreamSnapshot, AudioStreamStatus, StreamCounters, telemetry::Telemetry};
 use beatkernel::{
-    audio::{AudioFormat, Mixer, RenderReport},
+    audio::{AudioFormat, ChannelMatrix, FormatConverter, Mixer, RenderReport},
     time::{ClockDomainId, ClockPoint, Timestamp},
 };
 use std::{
@@ -168,6 +168,7 @@ pub struct CoreAudioSnapshot {
 }
 struct RenderState {
     mixer: Mixer,
+    remix: Option<FormatConverter>,
     scratch: Vec<f32>,
     render_version: u64,
 }
@@ -179,6 +180,7 @@ struct Context {
     origin: Timestamp,
     output_domain: ClockDomainId,
     rate: u32,
+    channels: u16,
     layout: Vec<u32>,
     buffer_frames: u32,
     enabled: AtomicBool,
@@ -199,11 +201,22 @@ struct Context {
 pub type CoreAudioOpenFailure =
     beatkernel::audio::OutputOpenFailure<CoreAudioError, CoreAudioStream>;
 
+#[cfg(test)]
 fn validate_open(request: &CoreAudioRequest, mixer: &Mixer) -> Result<(), CoreAudioError> {
-    if request.device == 0
-        || request.buffer_frames == 0
-        || mixer.config().format() != request.format
-    {
+    validate_open_with_matrix(request, mixer, None)
+}
+fn validate_open_with_matrix(
+    request: &CoreAudioRequest,
+    mixer: &Mixer,
+    matrix: Option<&ChannelMatrix>,
+) -> Result<(), CoreAudioError> {
+    if request.device == 0 || request.buffer_frames == 0 {
+        return Err(CoreAudioError::InvalidRequest);
+    }
+    if let Some(matrix) = matrix {
+        crate::audio::channel_remix::validate(mixer.config().format(), request.format, matrix)
+            .map_err(|_| CoreAudioError::InvalidRequest)?;
+    } else if mixer.config().format() != request.format {
         return Err(CoreAudioError::InvalidRequest);
     }
     if mixer.config().limits().max_render_frames() < request.buffer_frames as usize {
@@ -281,8 +294,26 @@ impl CoreAudioStream {
         clock: MachClock,
         mixer: Mixer,
     ) -> Result<Self, CoreAudioOpenFailure> {
+        Self::open_impl(request, clock, mixer, None)
+    }
+    /// Opens with an explicit channel matrix at the original source/device rate.
+    /// Native layouts and original frame/pause/end/retirement evidence remain exact.
+    pub fn open_remixed_recoverable(
+        request: CoreAudioRequest,
+        clock: MachClock,
+        mixer: Mixer,
+        matrix: ChannelMatrix,
+    ) -> Result<Self, CoreAudioOpenFailure> {
+        Self::open_impl(request, clock, mixer, Some(matrix))
+    }
+    fn open_impl(
+        request: CoreAudioRequest,
+        clock: MachClock,
+        mixer: Mixer,
+        matrix: Option<ChannelMatrix>,
+    ) -> Result<Self, CoreAudioOpenFailure> {
         let basis = mixer.output_frame_basis();
-        if let Err(error) = validate_open(&request, &mixer) {
+        if let Err(error) = validate_open_with_matrix(&request, &mixer, matrix.as_ref()) {
             return Err(CoreAudioOpenFailure::recovered(error, Some(mixer)));
         }
         let staged = (|| -> Result<_, CoreAudioError> {
@@ -349,6 +380,17 @@ impl CoreAudioStream {
                 .try_reserve_exact(samples)
                 .map_err(|_| CoreAudioError::Capacity)?;
             scratch.resize(samples, 0.0);
+            let remix = matrix
+                .map(|matrix| {
+                    crate::audio::channel_remix::prepare(
+                        config,
+                        request.format,
+                        matrix,
+                        actual_frames as usize,
+                    )
+                    .map_err(|_| CoreAudioError::Capacity)
+                })
+                .transpose()?;
             let applied = CoreAudioApplied {
                 request,
                 format: request.format,
@@ -358,9 +400,9 @@ impl CoreAudioStream {
                 output_origin: config.origin(),
                 native_clock: clock.native_domain(),
             };
-            Ok((applied, layout, scratch, streams))
+            Ok((applied, layout, scratch, streams, remix))
         })();
-        let (applied, layout, scratch, streams) = match staged {
+        let (applied, layout, scratch, streams, remix) = match staged {
             Ok(staged) => staged,
             Err(error) => return Err(CoreAudioOpenFailure::recovered(error, Some(mixer))),
         };
@@ -368,6 +410,7 @@ impl CoreAudioStream {
         let context = Box::new(Context {
             render: UnsafeCell::new(RenderState {
                 mixer,
+                remix,
                 scratch,
                 render_version: 0,
             }),
@@ -377,6 +420,7 @@ impl CoreAudioStream {
             origin: config.origin(),
             output_domain: config.domain(),
             rate: request.format.sample_rate(),
+            channels: request.format.channels(),
             layout,
             buffer_frames: applied.buffer_frames,
             enabled: AtomicBool::new(false),
@@ -725,7 +769,7 @@ unsafe fn render_buffers(
         }
     }
     let frames = frames.ok_or(())?;
-    let channels = usize::from(state.mixer.config().format().channels());
+    let channels = usize::from(context.channels);
     let samples = (frames as usize).checked_mul(channels).ok_or(())?;
     if samples > state.scratch.len() {
         return Err(());
@@ -734,10 +778,12 @@ unsafe fn render_buffers(
         .clock
         .sample_realtime()
         .map(|sample| sample.normalized.timestamp);
-    let report = state
-        .mixer
-        .render(&mut state.scratch[..samples])
-        .map_err(|_| ())?;
+    let report = crate::audio::channel_remix::render(
+        &mut state.mixer,
+        &mut state.remix,
+        &mut state.scratch[..samples],
+    )
+    .map_err(|_| ())?;
     match render_start {
         Some(at) => context
             .cadence
@@ -767,12 +813,14 @@ unsafe fn render_buffers(
                 frames as usize * buffer_channels,
             )
         };
-        for frame in 0..frames as usize {
-            for channel in 0..buffer_channels {
-                output[frame * buffer_channels + channel] =
-                    state.scratch[frame * channels + first_channel + channel];
-            }
-        }
+        crate::audio::channel_remix::copy_channel_group(
+            &state.scratch[..samples],
+            channels,
+            first_channel,
+            buffer_channels,
+            output,
+        )
+        .map_err(|_| ())?;
         first_channel += buffer_channels;
     }
     context.calls.fetch_add(1, Ordering::Relaxed);

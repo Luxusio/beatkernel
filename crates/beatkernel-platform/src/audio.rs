@@ -38,7 +38,7 @@ use std::fmt;
 /// SDK-free ASIO buffer and sample-rate request validation.
 pub mod asio;
 pub mod cadence;
-#[cfg(any(target_os = "windows", target_os = "linux", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", test))]
 pub(crate) mod channel_remix;
 mod convert;
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
