@@ -84,6 +84,9 @@ impl GameplayPresentationPort for PresentationDiscipline {
             applied_song_origin,
         )?)
     }
+    fn config(&self) -> DisciplineConfig {
+        Self::config(self)
+    }
     fn epoch(&self) -> Option<u64> {
         Some(Self::epoch(self))
     }

@@ -217,3 +217,7 @@ fn actual_cohort_refuses_bad_or_stale_pairs_without_member_or_shared_completion(
         assert_eq!(control.waits, 0);
     }
 }
+
+mod resume_clock {
+    include!("native_local_resume_clock_fixtures.rs");
+}

@@ -212,3 +212,7 @@ fn actual_solo_pause_resume_reconstructs_pure_port_and_reconciles_original_relea
     assert!(host.pause_states.contains(&PauseState::Resuming));
     assert_eq!(f.observer.as_ref().unwrap().marks, 0);
 }
+
+mod resume_clock {
+    include!("native_solo_resume_clock_fixtures.rs");
+}

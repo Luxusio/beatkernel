@@ -24,6 +24,39 @@ pub trait GameplayPresentationPort: Sized {
         host_domain: ClockDomainId,
         applied_song_origin: Timestamp,
     ) -> NativeGameplayResult<Self>;
+    fn config(&self) -> DisciplineConfig {
+        DisciplineConfig::default()
+    }
+    /// Stage a fresh observer on the same output epoch and explicit resumed origins.
+    /// Only the new observer may be rebound; refusal leaves this owner unchanged.
+    fn restart_for_resume(
+        &self,
+        output_origin: ClockPoint,
+        playback_origin: ClockPoint,
+        host_domain: ClockDomainId,
+        song_origin: Timestamp,
+    ) -> NativeGameplayResult<Self> {
+        let mut restarted = Self::new_with_playback_origin(
+            self.config(),
+            output_origin,
+            playback_origin,
+            host_domain,
+            song_origin,
+        )?;
+        if let Some(epoch) = self.epoch() {
+            match restarted.epoch() {
+                Some(current) if current == epoch => {}
+                Some(current) if current < epoch => {
+                    restarted.rebind_output(epoch, output_origin, playback_origin, song_origin)?
+                }
+                _ => return Err("resume presentation cannot preserve output epoch".into()),
+            }
+            if restarted.epoch() != Some(epoch) {
+                return Err("resume presentation cannot preserve output epoch".into());
+            }
+        }
+        Ok(restarted)
+    }
     fn epoch(&self) -> Option<u64> {
         None
     }
@@ -61,6 +94,9 @@ impl GameplayPresentationPort for PresentationEstimator {
             host_domain,
             applied_song_origin,
         )?)
+    }
+    fn config(&self) -> DisciplineConfig {
+        Self::config(self)
     }
     fn epoch(&self) -> Option<u64> {
         Some(Self::epoch(self))
@@ -133,3 +169,7 @@ pub trait GameplayDevice {
 #[cfg(test)]
 #[path = "presentation_rebind_port_fixtures.rs"]
 mod presentation_rebind_port_fixtures;
+
+#[cfg(test)]
+#[path = "presentation_resume_port_fixtures.rs"]
+mod presentation_resume_port_fixtures;

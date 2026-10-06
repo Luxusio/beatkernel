@@ -25,7 +25,9 @@ use beatkernel::{
     telemetry::InputDeliveryTelemetry,
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
 };
-use beatkernel::time::presentation::{DisciplineConfig, DisciplineUpdate};
+use beatkernel::time::presentation::DisciplineUpdate;
+#[cfg(test)]
+use beatkernel::time::presentation::DisciplineConfig;
 #[cfg(test)]
 use beatkernel::time::ClockPair;
 #[cfg(test)]
@@ -509,8 +511,7 @@ pub fn run_gameplay_with_result_and_ports<
                     resume_boundary = Some(boundary.at);
                     paused_boundary = None;
                     pause_committed = false;
-                    let mut discipline = D::Presentation::new_with_playback_origin(
-                        DisciplineConfig::default(),
+                    let mut discipline = session.discipline.restart_for_resume(
                         config.stream_origin,
                         config.playback_origin,
                         config.origin.domain,
