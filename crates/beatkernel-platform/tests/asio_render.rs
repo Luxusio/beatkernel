@@ -279,3 +279,23 @@ fn rendering_and_invalid_buffer_preflight_allocate_nothing() {
     assert_eq!(counts, [0, 0, 0]);
     assert_eq!(result.unwrap().start_frame, 1);
 }
+
+#[test]
+fn explicit_stereo_to_mono_remix_allocates_nothing_and_preserves_frame_reports() {
+    let (mut producer, mixer) = rig(&[(1, &[0.5, -0.5, 0.25, 0.75])], 8);
+    producer.try_push(play(1, 1, 1.0)).unwrap();
+    let mut renderer = AsioBlockRenderer::new_remixed_recoverable(
+        mixer,
+        2,
+        AudioFormat::new(4, 1).unwrap(),
+        vec![Float32Lsb],
+        beatkernel::audio::ChannelMatrix::default_mix(2, 1).unwrap(),
+    )
+    .unwrap_or_else(|f| panic!("{}", f.error()));
+    let mut plane = [0xa5; 8];
+    let (result, counts) = tracked(|| renderer.render(&mut [&mut plane]));
+    assert_eq!(counts, [0; 3]);
+    let report = result.unwrap();
+    assert_eq!((report.start_frame, report.frames), (0, 2));
+    assert_eq!(plane, [0, 0, 0, 0, 0, 0, 0, 0x3f]);
+}

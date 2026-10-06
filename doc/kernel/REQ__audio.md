@@ -302,8 +302,22 @@ callback/listener retirement. Legacy open is strict. Verify target groups,
 invalid extents with no writes, source reports/pause/end, and macOS-only
 preflight/type-checks separately from actual HAL/acoustic execution.
 
-Known ceiling: remaining native owners still compare mixer and device formats and
-refuse a mismatch; adopting the converter, mapping presentation through its lookahead
+The SDK-free AsioBlockRenderer exposes `new_remixed_recoverable` for an explicit
+target format, ordered native encodings and same-rate ChannelMatrix. Complete
+planar buffers validate before source progress; scratch/encoding use target
+channels, source_format retains the original Mixer format, and reports/pause/
+finite endpoints stay on their original frame grid. The optional SDK stream
+offers `prepare_remixed_recoverable`, taking explicit selected driver channels
+and optional original QPC cadence clock. Target plane count derives from those
+channels; driver rate must equal the source rate and the original mixer/context
+recovery rules remain. Legacy preparation is strict. Portable tests must cover
+literal heterogeneous output bytes, invalid planes/setup with preserved source,
+pause/end and cold transfer; SDK Rust source checks, MSVC bridge builds and
+actual ASIO driver execution are distinct evidence tiers. MIT authored sources
+and existing optional SDK-combined GPLv3 distribution policy remain unchanged.
+
+Known ceiling: full sample-rate conversion remains unconnected in native owners;
+mapping presentation through its lookahead
 and choosing quality per device remain integration work. Quality is bounded by
 the fixed tap count; no measured passband/stopband specification, dithering or
 speaker-mask-aware downmix is claimed. Native timing and device acceptance are

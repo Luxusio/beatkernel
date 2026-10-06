@@ -8,7 +8,7 @@ use crate::audio::{
     AudioStreamSnapshot, AudioStreamStatus, StreamCounters,
 };
 use crate::windows::clock::QpcClock;
-use beatkernel::audio::{Mixer, RenderReport};
+use beatkernel::audio::{AudioFormat, Mixer, RenderReport};
 use std::{
     cell::UnsafeCell,
     mem::ManuallyDrop,
@@ -518,7 +518,7 @@ impl AsioStream {
         channels: Vec<u32>,
         request: AsioBufferRequest,
     ) -> Result<Self, AsioPrepareFailure> {
-        Self::prepare_internal(control, mixer, channels, request, None)
+        Self::prepare_internal(control, mixer, channels, request, None, None)
     }
     /// Recoverable preparation with the original opt-in host cadence clock.
     pub fn prepare_with_clock_recoverable(
@@ -528,7 +528,19 @@ impl AsioStream {
         request: AsioBufferRequest,
         host_clock: QpcClock,
     ) -> Result<Self, AsioPrepareFailure> {
-        Self::prepare_internal(control, mixer, channels, request, Some(host_clock))
+        Self::prepare_internal(control, mixer, channels, request, Some(host_clock), None)
+    }
+    /// Prepares an explicit same-rate matrix in selected driver-channel order.
+    /// Optional QPC cadence keeps its original caller-selected origin.
+    pub fn prepare_remixed_recoverable(
+        control: AsioControl,
+        mixer: Mixer,
+        channels: Vec<u32>,
+        request: AsioBufferRequest,
+        matrix: beatkernel::audio::ChannelMatrix,
+        host_clock: Option<QpcClock>,
+    ) -> Result<Self, AsioPrepareFailure> {
+        Self::prepare_internal(control, mixer, channels, request, host_clock, Some(matrix))
     }
     /// Retries only while actual control/retirement evidence remains available.
     /// A consumed control without proof cannot be treated as a successful close.
@@ -549,13 +561,25 @@ impl AsioStream {
         channels: Vec<u32>,
         request: AsioBufferRequest,
         host_clock: Option<QpcClock>,
+        matrix: Option<beatkernel::audio::ChannelMatrix>,
     ) -> Result<Self, AsioPrepareFailure> {
         let basis = mixer.output_frame_basis();
         fn require_send<T: Send>() {}
         require_send::<AsioBlockRenderer>();
         let format = mixer.configuration().format();
         let staged = (|| -> Result<_, AsioStreamError> {
-            validate_channels(&channels, format)?;
+            let target = if let Some(matrix) = &matrix {
+                let count =
+                    u16::try_from(channels.len()).map_err(|_| AsioStreamError::InvalidChannels)?;
+                let target = AudioFormat::new(format.sample_rate(), count)
+                    .map_err(|_| AsioStreamError::InvalidChannels)?;
+                crate::audio::channel_remix::validate(format, target, matrix)
+                    .map_err(AsioRenderError::Core)?;
+                target
+            } else {
+                format
+            };
+            validate_channels(&channels, target)?;
             let rate = control.sample_rate()?;
             if rate != f64::from(format.sample_rate()) {
                 return Err(AsioStreamError::RateMismatch {
@@ -583,13 +607,19 @@ impl AsioStream {
                 };
                 encodings.push(encoding);
             }
-            Ok((rate, frames, encodings, rows))
+            Ok((rate, frames, encodings, rows, target))
         })();
-        let (rate, frames, encodings, rows) = match staged {
+        let (rate, frames, encodings, rows, target) = match staged {
             Ok(staged) => staged,
             Err(error) => return Err(recover_before_context(control, error, Some(mixer))),
         };
-        let renderer = match AsioBlockRenderer::new_recoverable(mixer, frames, encodings) {
+        let rendered = match matrix {
+            Some(matrix) => {
+                AsioBlockRenderer::new_remixed_recoverable(mixer, frames, target, encodings, matrix)
+            }
+            None => AsioBlockRenderer::new_recoverable(mixer, frames, encodings),
+        };
+        let renderer = match rendered {
             Ok(renderer) => renderer,
             Err(failure) => {
                 let (error, mixer) = failure.into_parts();

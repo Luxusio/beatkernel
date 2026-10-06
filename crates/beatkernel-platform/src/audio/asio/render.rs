@@ -1,7 +1,7 @@
 //! Preallocated Mixer delivery into a complete set of ASIO planar buffers.
 
 use super::{encode_asio_channel, AsioPcmEncoding, AsioPcmError};
-use beatkernel::audio::{AudioError, AudioFormat, Mixer, RenderReport};
+use beatkernel::audio::{AudioError, AudioFormat, ChannelMatrix, FormatConverter, Mixer, RenderReport};
 use std::{error::Error, fmt};
 
 /// Setup, Mixer or planar output failure without implicit resizing or remapping.
@@ -49,6 +49,8 @@ impl Error for AsioRenderError {
 /// retained even if a later finite-sample check rejects native delivery.
 pub struct AsioBlockRenderer {
     mixer: Option<Mixer>,
+    remix: Option<FormatConverter>,
+    source_format: AudioFormat,
     format: AudioFormat,
     frames: u32,
     encodings: Vec<AsioPcmEncoding>,
@@ -71,15 +73,43 @@ impl AsioBlockRenderer {
         frames: u32,
         encodings: Vec<AsioPcmEncoding>,
     ) -> Result<Self, beatkernel::audio::MixerOpenFailure<AsioRenderError>> {
+        let target = mixer.configuration().format();
+        Self::new_impl(mixer, frames, target, encodings, None)
+    }
+    /// Allocates explicit same-rate channel conversion before rendering begins.
+    /// Native encodings follow target-channel order; errors retain the source Mixer.
+    pub fn new_remixed_recoverable(
+        mixer: Mixer,
+        frames: u32,
+        target: AudioFormat,
+        encodings: Vec<AsioPcmEncoding>,
+        matrix: ChannelMatrix,
+    ) -> Result<Self, beatkernel::audio::MixerOpenFailure<AsioRenderError>> {
+        Self::new_impl(mixer, frames, target, encodings, Some(matrix))
+    }
+    fn new_impl(
+        mixer: Mixer,
+        frames: u32,
+        target: AudioFormat,
+        encodings: Vec<AsioPcmEncoding>,
+        matrix: Option<ChannelMatrix>,
+    ) -> Result<Self, beatkernel::audio::MixerOpenFailure<AsioRenderError>> {
+        let source_format = mixer.configuration().format();
         let staged = (|| -> Result<_, AsioRenderError> {
             let config = mixer.configuration();
-            let format = config.format();
+            let format = target;
             if frames == 0 || encodings.len() != usize::from(format.channels()) {
                 return Err(AsioRenderError::InvalidConfiguration);
             }
             if frames as usize > config.limits().max_render_frames() {
                 return Err(AsioRenderError::Capacity);
             }
+            let remix = matrix
+                .map(|matrix| {
+                    crate::audio::channel_remix::prepare(config, target, matrix, frames as usize)
+                        .map_err(AsioRenderError::Core)
+                })
+                .transpose()?;
             let samples = (frames as usize)
                 .checked_mul(encodings.len())
                 .ok_or(AsioRenderError::Capacity)?;
@@ -88,14 +118,16 @@ impl AsioBlockRenderer {
                 .try_reserve_exact(samples)
                 .map_err(|_| AsioRenderError::Capacity)?;
             scratch.resize(samples, 0.0);
-            Ok((format, scratch))
+            Ok((format, scratch, remix))
         })();
-        let (format, scratch) = match staged {
+        let (format, scratch, remix) = match staged {
             Ok(staged) => staged,
             Err(error) => return Err(beatkernel::audio::MixerOpenFailure::new(error, Some(mixer))),
         };
         Ok(Self {
             mixer: Some(mixer),
+            remix,
+            source_format,
             format,
             frames,
             encodings,
@@ -112,11 +144,15 @@ impl AsioBlockRenderer {
     pub const fn frames(&self) -> u32 {
         self.frames
     }
-    /// Actual immutable Mixer format.
+    /// Immutable native output format (the source format for legacy construction).
     pub const fn format(&self) -> AudioFormat {
         self.format
     }
-    /// Native encoding per mixer channel, retained in explicit setup order.
+    /// Original immutable Mixer format, retained even after cold transfer.
+    pub const fn source_format(&self) -> AudioFormat {
+        self.source_format
+    }
+    /// Native encoding per target channel, retained in explicit setup order.
     pub fn encodings(&self) -> &[AsioPcmEncoding] {
         &self.encodings
     }
@@ -143,8 +179,7 @@ impl AsioBlockRenderer {
         {
             return Err(AsioRenderError::InvalidBuffers);
         }
-        let report = mixer
-            .render(&mut self.scratch)
+        let report = crate::audio::channel_remix::render(mixer, &mut self.remix, &mut self.scratch)
             .map_err(AsioRenderError::Core)?;
         self.last_report = Some(report);
         if self.scratch.iter().any(|sample| !sample.is_finite()) {
