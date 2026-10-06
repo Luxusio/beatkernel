@@ -383,6 +383,8 @@ pub mod room_presentation;
 pub mod room_results_builder;
 #[cfg(test)]
 mod room_results_builder_fixtures;
+/// Shared retained room metadata without transport or schedule consumption.
+pub(crate) mod room_snapshot_projection;
 /// Retained bounded summaries for the common competition scoreboard.
 pub mod saved_opponent_hud;
 #[cfg(test)]

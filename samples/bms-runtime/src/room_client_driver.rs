@@ -16,6 +16,7 @@ pub struct RoomClientDriver {
     decoder: Option<RoomFrameDecoder>,
     failure: Option<RoomPlayError>,
     revision: u64,
+    retained_snapshot: crate::room_network_model::RoomSnapshot,
     pending_peer: Option<ParticipantId>,
     publication: crate::competition_progress_cadence::ProgressCadence,
     final_admitted: bool,
@@ -82,6 +83,7 @@ impl RoomClientDriver {
             decoder: Some(RoomFrameDecoder::new()),
             failure: None,
             revision: 0,
+            retained_snapshot: crate::room_network_model::RoomSnapshot::default(),
             pending_peer: None,
             publication: crate::competition_progress_cadence::ProgressCadence::new(),
             final_admitted: false,
@@ -320,7 +322,13 @@ impl RoomClientDriver {
             });
             owner.start_wait = Some(state);
             match result {
-                Ok(crate::room_start_wait::RoomStartStep::Ready) => Ok(owner.pending_start.take()),
+                Ok(crate::room_start_wait::RoomStartStep::Ready) => {
+                    let schedule = owner.pending_start.take();
+                    if let Some(schedule) = schedule {
+                        owner.retained_snapshot.schedule = Some(schedule);
+                    }
+                    Ok(schedule)
+                }
                 Ok(crate::room_start_wait::RoomStartStep::Pending(_))
                 | Ok(crate::room_start_wait::RoomStartStep::Cancelled) => Ok(None),
                 Err(crate::room_start_wait::RoomStartStepError::Port(error)) => Err(error),
@@ -340,6 +348,23 @@ impl RoomClientDriver {
             .map_or(0, |participant| participant.0)
     }
 
+    pub fn retained_snapshot(
+        &mut self,
+    ) -> Result<&crate::room_network_model::RoomSnapshot, RoomPlayError> {
+        self.operate(true, |owner| {
+            let session = owner.session.as_ref().ok_or(RoomPlayError::InvalidState)?;
+            crate::room_snapshot_projection::refresh(&mut owner.retained_snapshot, session)
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::InvalidInput {
+                        RoomPlayError::IdExhausted
+                    } else {
+                        RoomPlayError::Progress(RoomProgressClientError::Allocation)
+                    }
+                })?;
+            Ok(())
+        })?;
+        Ok(&self.retained_snapshot)
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -647,8 +672,12 @@ impl crate::final_ack_wait::FinalWaitControl for DriverDrainControl {
 
 #[cfg(test)]
 #[path = "room_client_driver_fixtures.rs"]
-mod fixtures;
+pub(crate) mod fixtures;
 
 #[cfg(test)]
 #[path = "room_driver_publication_fixtures.rs"]
 mod room_driver_publication_fixtures;
+
+#[cfg(test)]
+#[path = "room_driver_snapshot_fixtures.rs"]
+mod room_driver_snapshot_fixtures;

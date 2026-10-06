@@ -1,17 +1,10 @@
 //! Caller-driven room IO actor with portable streams, values and clocks.
 use crate::{
     multiplayer_room_io::RoomPlayIo,
-    multiplayer_group::GroupPrefix,
-    multiplayer_group_rooms::GroupRoomMember,
-    room_network_model::{
-        RoomNetworkOptions, RoomCommand, RoomFailure, RoomReceipts, RoomRoster, RoomOutcome,
-        RoomSnapshot,
-    },
+    room_network_model::{RoomNetworkOptions, RoomCommand, RoomFailure, RoomOutcome, RoomSnapshot},
 };
 use std::{
-    fmt,
     io::{self, Read, Write},
-    sync::Arc,
     time::Duration,
 };
 
@@ -23,17 +16,8 @@ pub trait RoomNetworkStream: Read + Write {
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
-fn allocation(error: impl fmt::Display) -> io::Error {
-    io::Error::other(error.to_string())
-}
 fn nanos(duration: Duration) -> io::Result<i64> {
     i64::try_from(duration.as_nanos()).map_err(|_| invalid("room clock exceeds signed nanoseconds"))
-}
-fn copy_slice<T: Clone>(slice: &[T]) -> io::Result<Vec<T>> {
-    let mut result = Vec::new();
-    result.try_reserve_exact(slice.len()).map_err(allocation)?;
-    result.extend_from_slice(slice);
-    Ok(result)
 }
 
 struct Drain {
@@ -147,85 +131,11 @@ impl<S: RoomNetworkStream> RoomNetworkActor<S> {
     }
 
     fn refresh(&mut self) -> io::Result<()> {
-        let participant = self.io.session().participant();
-        if self.snapshot.participant != participant {
-            self.snapshot.participant = participant;
-            self.changed = true;
-        }
-        if let Some(room) = self.io.session().room() {
-            let changed = self.snapshot.room.as_ref().is_none_or(|old| {
-                old.phase != room.phase
-                    || old.deadline_ns != room.deadline_ns
-                    || old.members.as_slice() != room.members
-            });
-            if changed {
-                let revision = self
-                    .snapshot
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("native room revision exhausted"))?;
-                let mut members = Vec::new();
-                members
-                    .try_reserve_exact(room.members.len())
-                    .map_err(allocation)?;
-                for member in room.members {
-                    members.push(GroupRoomMember {
-                        id: member.id,
-                        players: copy_slice(&member.players)?,
-                        prepared: member.prepared,
-                    });
-                }
-                self.snapshot.room = Some(Arc::new(RoomRoster {
-                    members,
-                    phase: room.phase,
-                    deadline_ns: room.deadline_ns,
-                }));
-                self.snapshot.revision = revision;
-                self.changed = true;
-            }
-            for member in room.members {
-                if let Some(prefix) = self.io.peer_progress(member.id) {
-                    let old = self
-                        .snapshot
-                        .peers
-                        .iter()
-                        .position(|(id, _)| *id == member.id);
-                    if old.is_none_or(|index| {
-                        self.snapshot.peers[index].1.sequence != prefix.sequence
-                    }) {
-                        let next = Arc::new(GroupPrefix {
-                            sequence: prefix.sequence,
-                            final_prefix: prefix.final_prefix,
-                            members: copy_slice(&prefix.members)?,
-                        });
-                        if let Some(index) = old {
-                            self.snapshot.peers[index].1 = next;
-                        } else {
-                            self.snapshot.peers.try_reserve(1).map_err(allocation)?;
-                            self.snapshot.peers.push((member.id, next));
-                            // Different peers can publish first in any order; presentation stays roster-ordered.
-                            self.snapshot.peers.sort_by_key(|(id, _)| {
-                                room.members.iter().position(|member| member.id == *id)
-                            });
-                        }
-                        self.changed = true;
-                    }
-                }
-            }
-        }
-        let receipts = RoomReceipts {
-            local_final_written: self.snapshot.receipts.local_final_written
-                || self.io.local_final_written(),
-            local_final_acknowledged: self.snapshot.receipts.local_final_acknowledged
-                || self.io.local_final_acknowledged(),
-            progress_complete: self.snapshot.receipts.progress_complete
-                || self.io.progress_complete(),
-            drain_complete: self.snapshot.receipts.drain_complete || self.io.drain_complete(),
-        };
-        if self.snapshot.receipts != receipts {
-            self.snapshot.receipts = receipts;
-            self.changed = true;
-        }
+        crate::room_snapshot_projection::refresh_with_changed(
+            &mut self.snapshot,
+            self.io.session(),
+            &mut self.changed,
+        )?;
         if self.snapshot.schedule.is_none() && !self.io.session().leave_written() {
             if let Some(schedule) = self.io.take_schedule()? {
                 self.snapshot.schedule = Some(schedule);
@@ -349,3 +259,7 @@ impl<S: RoomNetworkStream> RoomNetworkActor<S> {
 #[cfg(test)]
 #[path = "room_network_actor_fixtures.rs"]
 mod fixtures;
+
+#[cfg(test)]
+#[path = "room_actor_snapshot_fixtures.rs"]
+mod room_actor_snapshot_fixtures;

@@ -5,7 +5,7 @@ use crate::{
     multiplayer_group::encode_words,
     multiplayer_group_rooms::GroupRoomPhase,
     multiplayer_protocol::WriteStep,
-    multiplayer_room_play::{RoomPlayClient, RoomPlayError},
+    multiplayer_room_play::RoomPlayError,
     multiplayer_rooms::ParticipantId,
     multiplayer_start::StartPolicy,
     room_client_driver::{RoomClientDriver, RoomDrainError, RoomClientSetupError},
@@ -23,8 +23,8 @@ fn field(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsVa
     Ok(())
 }
 
-fn snapshot_value(session: &RoomPlayClient) -> Result<JsValue, JsValue> {
-    let Some(room) = session.room() else {
+fn snapshot_value(retained: &crate::room_network_model::RoomSnapshot) -> Result<JsValue, JsValue> {
+    let Some(room) = retained.room.as_ref() else {
         return Ok(JsValue::NULL);
     };
     let snapshot = js_sys::Object::new();
@@ -43,7 +43,7 @@ fn snapshot_value(session: &RoomPlayClient) -> Result<JsValue, JsValue> {
         },
     )?;
     let members = js_sys::Array::new();
-    for member in room.members {
+    for member in &room.members {
         let row = js_sys::Object::new();
         let players = js_sys::Uint32Array::new_with_length(member.players.len() as u32);
         for (index, player) in member.players.iter().enumerate() {
@@ -448,7 +448,11 @@ impl BrowserRoomClient {
         self.driver.leave_written()
     }
     pub fn snapshot(&mut self) -> Result<JsValue, JsValue> {
-        let result = snapshot_value(self.driver.session_ref().map_err(error)?);
+        let result = self
+            .driver
+            .retained_snapshot()
+            .map_err(error)
+            .and_then(snapshot_value);
         if result.is_err() {
             self.close();
         }
