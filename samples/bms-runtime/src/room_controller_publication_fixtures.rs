@@ -99,6 +99,63 @@ impl RoomUiHost for Ui {
         Ok(())
     }
 }
+
+struct AttachedUi(Rc<RefCell<Vec<crate::room_presentation::RoomStatus>>>);
+impl RoomUiHost for AttachedUi {
+    fn attached(&self) -> bool {
+        true
+    }
+    fn cancelled(&self) -> bool {
+        false
+    }
+    fn close_controls(&mut self) {}
+    fn take_request(&mut self) -> io::Result<Option<RoomUiRequest>> {
+        Ok(None)
+    }
+    fn reply(&mut self, _: RoomUiReply) -> io::Result<()> {
+        Ok(())
+    }
+    fn publish(&mut self, page: Arc<RoomPresentation>) -> Result<(), String> {
+        self.0.borrow_mut().push(page.status);
+        Ok(())
+    }
+    fn retry_publication(&mut self) {}
+    fn publish_results(&mut self, _: Arc<RoomResults>) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[test]
+fn pending_progress_keeps_connected_ui_and_does_not_sample_or_admit_again() {
+    let state = Rc::new(RefCell::new(State::default()));
+    let pages = Rc::new(RefCell::new(Vec::new()));
+    let mut owner = RoomCompetition::new_with_ports(
+        Port(state.clone()),
+        vec![PlayerId(u32::MAX), PlayerId(7)],
+        Duration::from_secs(1),
+        AttachedUi(pages.clone()),
+        Virtual,
+    )
+    .unwrap();
+    owner.observe(&rows(0)).unwrap();
+    assert!(owner.pending(CommandKind::Progress));
+    let clocks = state.borrow().clocks;
+    state.borrow_mut().now = -1;
+    owner.observe(&rows(1)).unwrap();
+    assert_eq!(state.borrow().clocks, clocks);
+    assert_eq!(state.borrow().commands.len(), 1);
+    assert_eq!(owner.local_progress(), Some(rows(1).as_slice()));
+    assert!(owner.failure.is_none());
+    assert_eq!(
+        pages.borrow().last(),
+        Some(&crate::room_presentation::RoomStatus::Connected)
+    );
+    assert!(
+        !pages
+            .borrow()
+            .contains(&crate::room_presentation::RoomStatus::Closed)
+    );
+}
 struct Virtual;
 impl RoomStartWaitControl for Virtual {
     type Error = io::Error;

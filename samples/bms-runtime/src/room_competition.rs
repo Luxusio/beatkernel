@@ -603,7 +603,6 @@ impl<P: RoomNetworkPort, H: RoomUiHost, R: RoomRuntimeHost> RoomCompetition<P, H
             || self.cancelled
             || self.leaving
             || self.pending(CommandKind::Leave)
-            || self.pending(CommandKind::Progress)
         {
             RoomStatus::Closed
         } else if self.failure.is_some() || self.snapshot.terminal.is_some() {
@@ -710,6 +709,7 @@ impl<P: RoomNetworkPort, H: RoomUiHost, R: RoomRuntimeHost> RoomCompetition<P, H
             || self.leaving
             || self.cancelled
             || self.pending(CommandKind::Leave)
+            || self.pending(CommandKind::Progress)
         {
             return Ok(());
         }
