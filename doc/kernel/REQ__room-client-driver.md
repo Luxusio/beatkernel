@@ -31,6 +31,10 @@ Scalar due and cadence-aware publication now follow
 [shared room publication timing](REQ__room-publication-cadence.md). The actual
 browser Owner samples its elapsed clock and Worker consults the due hint before
 building progress words. Queue admission remains separate from write completion.
+Browser snapshot export now refreshes the same retained metadata model as the
+native actor under [shared projection](REQ__room-snapshot-projection.md). Its
+metadata-content revision remains distinct from revision()'s accepted-frame count;
+only a genuinely returned start schedule enters the retained schedule field.
 
 Browser exports keep their signatures, BigInt identity/time/counter domains,
 bounded words decoding, snapshot/prefix serialization and code="state" tagging.

@@ -22,6 +22,10 @@ operation failure keeps accepted earlier data but cannot make late completion
 timely. finish preserves original operation error before refresh error, then
 stops the common owner and attempts injected stream cleanup once. Cleanup error,
 receipts, leave-written status and caller cancellation stay independent fields.
+Retained participant/roster/peer/receipt refresh now uses
+[the shared projection](REQ__room-snapshot-projection.md) also used by browser
+snapshot export. Dirty notification preserves accepted earlier mutations when
+a later projection fails; genuine schedule consumption remains actor-owned.
 
 take_changed_snapshot returns the retained snapshot only when dirty and clears
 that notification once; idle delegates explicitly to the stream port, and
