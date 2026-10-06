@@ -68,7 +68,8 @@ fn owner() -> (StepLocalGameplay, SampleBank) {
 fn fatal_owner() -> (StepLocalGameplay, SampleBank, StepAudioBatch) {
     let (mut game, bank) = owner();
     assert_eq!(game.players(), [FAILED, HEALTHY]);
-    assert_eq!(game.feed_audio(0, 8).unwrap().admitted, 1);
+    let fed = game.feed_audio(0, 8).unwrap();
+    assert_eq!((fed.admitted, fed.total_admitted), (0, 1));
     for (index, player, voice) in [(0usize, FAILED, 91u64), (1, HEALTHY, 93)] {
         let actual = game
             .process_input(

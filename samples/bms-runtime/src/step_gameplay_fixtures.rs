@@ -166,7 +166,11 @@ fn prepared(lines: &str) -> PreparedBms {
 }
 
 fn prepared_seed(lines: &str, seed: u64) -> PreparedBms {
-    let chart = format!("#BPM 60\n#VOLWAV 50\n#LNTYPE 1\n#WAV01 key.wav\n#WAV02 bgm.wav\n{lines}");
+    prepared_seed_with_bpm(lines, seed, "60")
+}
+fn prepared_seed_with_bpm(lines: &str, seed: u64, bpm: &str) -> PreparedBms {
+    let chart =
+        format!("#BPM {bpm}\n#VOLWAV 50\n#LNTYPE 1\n#WAV01 key.wav\n#WAV02 bgm.wav\n{lines}");
     let mut files = MemoryFiles::new(Default::default()).unwrap();
     files
         .insert("pack/chart.bms", chart.as_bytes().to_vec())
@@ -1190,7 +1194,7 @@ fn absent_and_repeated_output_cannot_complete_even_an_empty_or_multiweek_chart()
     assert!(!empty.observe_completion(None, presented).unwrap());
     assert!(empty.observe_completion(Some(idle), presented).unwrap());
 
-    let long = prepared("#BPM 0.1\n#99911:01\n");
+    let long = prepared_seed_with_bpm("#99911:01\n", 0, "0.1");
     let deadline = long.compiled.chart.objects()[0].time.start.as_nanos();
     assert!(deadline > 7 * 24 * 3600 * 1_000_000_000);
     let (mut game, bank) = StepGameplay::new(long, chosen, bindings(false)).unwrap();
@@ -2112,7 +2116,7 @@ fn simultaneous_audio_and_capture_failure_keeps_each_actual_committed_prefix_dis
         }
         assert_fenced(&mut game, chosen);
         let file = decode_replay(&game.take_replay().unwrap().unwrap(), limits).unwrap();
-        assert_eq!(file.records.len(), if records == 1 { 0 } else { 2 });
+        assert_eq!(file.records.len(), if records == 1 { 0 } else { 3 });
         let replay = reconstruct(&source, file, limits).unwrap();
         if records == 1 {
             assert!(

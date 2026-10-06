@@ -69,9 +69,9 @@ fn setup() -> (PreparedBms, StepGameplayConfig) {
         },
     )
 }
-fn bindings() -> BindingMap {
+fn bindings(device: DeviceSelector) -> BindingMap {
     BindingMap::from_bindings([Binding {
-        device: DeviceSelector::Any,
+        device,
         physical: PhysicalControlId::keyboard(4),
         game_control: GameControlId(0x11),
     }])
@@ -90,7 +90,7 @@ fn output(bank: SampleBank, end: Option<i64>) -> (CommandProducer, Mixer) {
         AudioFormat::new(1000, 1).unwrap(),
         ClockDomainId(2),
         Timestamp::ZERO,
-        AudioLimits::new(8, 2, 8, 16, 8).unwrap(),
+        AudioLimits::new(8, 2, 8, 64, 8).unwrap(),
     );
     (
         producer,
@@ -112,7 +112,7 @@ fn actual_solo_hit_exports_exact_score_only_after_full_or_finite_mixer_completio
         let (mut game, bank) = StepGameplay::new_section(
             prepared,
             config,
-            bindings(),
+            bindings(DeviceSelector::Any),
             Timestamp::ZERO,
             end.map(Timestamp::from_nanos),
         )
@@ -180,7 +180,10 @@ fn actual_local_hit_and_miss_export_whole_original_roster_and_consumed_member_re
         prepared,
         config,
         plan,
-        vec![bindings(), bindings()],
+        vec![
+            bindings(DeviceSelector::Exact(DeviceId(1))),
+            bindings(DeviceSelector::Exact(DeviceId(2))),
+        ],
         Timestamp::ZERO,
         Some(Timestamp::from_nanos(30_000_000)),
         beatkernel_bms::BmsInputMode::ButtonOnly,
@@ -246,8 +249,14 @@ fn actual_local_hit_and_miss_export_whole_original_roster_and_consumed_member_re
 fn actual_hit_prefix_and_cancelled_owner_never_export_historical_completed_scores() {
     for recording in [false, true] {
         let (prepared, config) = setup();
-        let (mut game, _) =
-            StepGameplay::new_section(prepared, config, bindings(), Timestamp::ZERO, None).unwrap();
+        let (mut game, _) = StepGameplay::new_section(
+            prepared,
+            config,
+            bindings(DeviceSelector::Any),
+            Timestamp::ZERO,
+            None,
+        )
+        .unwrap();
         if recording {
             game.configure_capture(limits(), 7).unwrap();
         }

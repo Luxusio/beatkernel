@@ -868,7 +868,7 @@ fn core_audio_failure_and_member_capture_failure_retain_every_already_committed_
     same_report(&reports[0].report, &core.completed_reports[0].report);
     assert_eq!(reports[0].report.judge_events.len(), 2);
     assert_eq!(reports[0].report.audio_failures.len(), 2);
-    assert_eq!(reports[0].report.bound_inputs.len(), 2);
+    assert_eq!(reports[0].report.bound_inputs.len(), 3);
     assert!(member_errors.is_empty());
     assert!(owner.failed());
     assert_eq!(owner.score(PLAYERS[0]).unwrap().hits, 2);
@@ -882,7 +882,7 @@ fn core_audio_failure_and_member_capture_failure_retain_every_already_committed_
         ),
         Err(StepLocalGameplayError::Control(StepGameplayError::Failed))
     ));
-    for (index, expected) in [2, 2, 0].into_iter().enumerate() {
+    for (index, expected) in [3, 3, 0].into_iter().enumerate() {
         let file = decode_replay(
             &owner.take_replay(PLAYERS[index]).unwrap().unwrap(),
             limits(128),
