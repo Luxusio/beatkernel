@@ -27,6 +27,9 @@ executed. Native device opening and Windows/macOS/ASIO recovery remain unverifie
 
 Panic can lose the Mixer; other backends and automatic handoff remain pending.
 Recovery does not undo rendered frames
-or prove unheard native buffer delivery. WASAPI/CoreAudio/ASIO recoverable open
+or prove unheard native buffer delivery. CoreAudio/ASIO recoverable open
 integration, application live backend transfer, physical fences and failed-open
 rollback policy remain pending. Full BMS player Goal remains active.
+Subsequent [WASAPI recoverable open](CHANGE__wasapi-recoverable-open.md) extends
+the ownership-returning path to WASAPI and shares the cold launch/join owner.
+Windows-native lifecycle and device acceptance remain pending.
