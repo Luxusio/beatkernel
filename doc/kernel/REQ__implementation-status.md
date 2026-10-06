@@ -26,7 +26,7 @@ It records implementation locations, not independent review or phase acceptance.
 The [full-plan acceptance evidence](REQ__plan-acceptance-evidence.md) maps every
 §24 completion condition and §17 verification category to current source and
 remaining proof, preserving the original scope.
-The user's verification deferral remains in force. Earlier executed evidence in
+The user lifted the verification deferral on 2026-10-06. Earlier executed evidence in
 the [primary goals](../common/REQ__project__primary-goals.md) applies only to the
 revisions it describes; subsequent compile checks do not renew that evidence.
 

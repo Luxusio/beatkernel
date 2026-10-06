@@ -81,9 +81,8 @@ requirements; deferral is not completion. Stop for a goal-wide blocker only when
 no meaningful independent work can proceed within the user's scope and current
 instructions. Do not add unrelated features to manufacture progress.
 
-This rule does not lift the existing verification deferral. Compile/format checks
-may still accompany implementation, while execution, independent reviews and
-final QA retain their documented sequencing.
+Compile/format checks and, since 2026-10-06, test execution and independent
+reviews accompany implementation; final QA retains its documented sequencing.
 
 ## Current evidence and remaining work
 
@@ -95,6 +94,12 @@ independent reviews and final QA as outstanding work; do not mark them passed
 or call the full runtime complete. Compile and format checks may accompany
 implementation to keep the code buildable. MIT, dependency boundaries,
 real-time restrictions and the selected ASIO distribution policy remain required.
+
+On 2026-10-06 the user lifted that deferral: run available verification
+(test-suite execution, independent code reviews, cross-target type checks) in
+parallel with continued implementation, using parallel subagents. Execution
+results apply only to the revision they ran on; hardware, acoustic, GPU and
+browser evidence remain outstanding until actually run.
 
 Phases 0–3 are implemented: [time and transport](../kernel/REQ__time-transport.md), [canonical input](../kernel/REQ__canonical-input.md), pure keyboard mapping fixtures for Windows, Linux, and macOS, and [device-aware binding](../kernel/REQ__binding.md). Binding retains owned typed samples, provenance, and ordered logical destinations. [Phase 4 Windows input](../kernel/REQ__windows-input.md) passed independent review and CLI QA. Six native API integration tests and five platform unit tests pass in an isolated Windows Server VM. An earlier inspector build captured device-attributed A Down/Up, provenance and normal/Alt+F4 cleanup through a Hyper-V virtual keyboard; the latest revision passed finite native execution with no acquisitions in a locked guest. Native virtual-device execution does not establish physical hardware latency.
 
