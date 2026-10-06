@@ -33,3 +33,23 @@ side retirement refusal that never opens the other side.
 Canonical implementation lives in gameplay/output/adapters/switch.rs and depends
 on the output port. The public root module is a static re-export; no wrapper
 instance, duplicated implementation or additional crate is introduced.
+# Explicit channel requests
+
+`RemixedOutputRequest<R>` carries a native request and an optional validated
+ChannelMatrix. `RemixedOutputBackend<B>` statically routes strict requests to
+the existing open port and explicit matrices to an OutputChannelRemixBackend
+extension port. Native adapters implement only their platform API calls; the
+domain request and the output owner/controller remain common.
+
+Output/error types are unchanged. Retire/start, epoch, original frame basis,
+presentation reports, original end and pause-observation overrides must forward
+to the actual backend, including interval-based ASIO evidence. Recoverable and
+pending open failures retain the original owner and cleanup error unchanged.
+Use the existing owner/controller for pause-boundary replacement and monotonic
+epochs; no implicit fallback, device discovery or matrix choice occurs here.
+
+Verify routing and unchanged PCM/Mixer custody through actual owner/controller
+memory traces, error/retry and pending cleanup. A separate explicit ALSA null
+diagnostic exercises the native adapter's matrix route. These are composition
+primitives; UI text/profile/configuration integration, rate conversion and
+physical device acceptance remain required before full player completion.

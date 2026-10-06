@@ -48,6 +48,17 @@ pub trait OutputReplacementBackend {
     }
 }
 
+/// Explicit same-rate channel conversion; no default can silently ignore a matrix.
+pub trait OutputChannelRemixBackend: OutputReplacementBackend {
+    fn open_remixed(
+        &mut self,
+        request: Self::Request,
+        mixer: Mixer,
+        epoch: u64,
+        matrix: beatkernel::audio::ChannelMatrix,
+    ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output>>;
+}
+
 pub trait OutputUiPort {
     fn advertise(&mut self, capability: Option<OutputCapability>) -> io::Result<()>;
     fn take_request(&mut self) -> io::Result<Option<OutputRequest>>;

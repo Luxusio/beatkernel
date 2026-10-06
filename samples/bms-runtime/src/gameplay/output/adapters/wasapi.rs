@@ -124,6 +124,24 @@ impl OutputReplacementBackend for WasapiReplacementBackend {
         Ok(output.stream.snapshot().render)
     }
 }
+
+impl crate::gameplay::output::ports::OutputChannelRemixBackend for WasapiReplacementBackend {
+    fn open_remixed(
+        &mut self,
+        request: AudioStreamRequest,
+        mixer: Mixer,
+        epoch: u64,
+        matrix: beatkernel::audio::ChannelMatrix,
+    ) -> Result<
+        WasapiReplacementOutput,
+        OutputOpenFailure<WasapiReplacementError, WasapiReplacementOutput>,
+    > {
+        WasapiBackend
+            .open_remixed_recoverable(request, mixer, self.clock, self.options, matrix)
+            .map(|stream| WasapiReplacementOutput { stream, epoch })
+            .map_err(map_open_failure)
+    }
+}
 #[cfg(test)]
 #[path = "wasapi_fixtures.rs"]
 mod fixtures;

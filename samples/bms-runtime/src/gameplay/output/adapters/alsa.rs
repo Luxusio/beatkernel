@@ -120,3 +120,21 @@ impl OutputReplacementBackend for AlsaReplacementBackend {
         Ok(output.stream.last_render_report())
     }
 }
+
+impl crate::gameplay::output::ports::OutputChannelRemixBackend for AlsaReplacementBackend {
+    fn open_remixed(
+        &mut self,
+        request: AlsaRequest,
+        mixer: Mixer,
+        epoch: u64,
+        matrix: beatkernel::audio::ChannelMatrix,
+    ) -> Result<AlsaReplacementOutput, OutputOpenFailure<AlsaReplacementError, AlsaReplacementOutput>>
+    {
+        AlsaStream::open_remixed_recoverable(request, mixer, matrix)
+            .map(|stream| AlsaReplacementOutput { stream, epoch })
+            .map_err(|failure| {
+                let (error, mixer) = failure.into_parts();
+                OutputOpenFailure::recovered(AlsaReplacementError::Linux(error), mixer)
+            })
+    }
+}

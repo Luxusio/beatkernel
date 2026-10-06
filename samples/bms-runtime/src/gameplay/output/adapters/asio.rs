@@ -258,6 +258,36 @@ impl OutputReplacementBackend for AsioReplacementBackend {
         Ok(asio_pause_observation(output.observation, now))
     }
 }
+
+impl crate::gameplay::output::ports::OutputChannelRemixBackend for AsioReplacementBackend {
+    fn open_remixed(
+        &mut self,
+        request: AsioReplacementRequest,
+        mixer: Mixer,
+        epoch: u64,
+        matrix: beatkernel::audio::ChannelMatrix,
+    ) -> Result<AsioReplacementOutput, OutputOpenFailure<AsioReplacementError, AsioReplacementOutput>>
+    {
+        let control = match request.opener.open() {
+            Ok(control) => control,
+            Err(error) => return Err(map_driver_open_error(error, mixer)),
+        };
+        AsioStream::prepare_remixed_recoverable(
+            control,
+            mixer,
+            request.channels,
+            request.buffer,
+            matrix,
+            Some(self.clock),
+        )
+        .map(|stream| AsioReplacementOutput {
+            stream,
+            epoch,
+            observation: None,
+        })
+        .map_err(|failure| map_prepare_failure(failure, epoch))
+    }
+}
 #[cfg(test)]
 #[path = "asio_fixtures.rs"]
 mod fixtures;

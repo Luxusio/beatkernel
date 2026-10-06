@@ -186,6 +186,27 @@ impl OutputReplacementBackend for CoreAudioReplacementBackend {
         Ok(output.stream.last_render_report())
     }
 }
+
+impl crate::gameplay::output::ports::OutputChannelRemixBackend for CoreAudioReplacementBackend {
+    fn open_remixed(
+        &mut self,
+        request: CoreAudioRequest,
+        mixer: Mixer,
+        epoch: u64,
+        matrix: beatkernel::audio::ChannelMatrix,
+    ) -> Result<
+        CoreAudioReplacementOutput,
+        OutputOpenFailure<CoreAudioReplacementError, CoreAudioReplacementOutput>,
+    > {
+        CoreAudioStream::open_remixed_recoverable(request, self.clock, mixer, matrix)
+            .map(|stream| CoreAudioReplacementOutput {
+                stream,
+                epoch,
+                started: false,
+            })
+            .map_err(|failure| map_open_failure(failure, epoch))
+    }
+}
 #[cfg(test)]
 #[path = "coreaudio_fixtures.rs"]
 mod fixtures;
