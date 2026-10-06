@@ -6,7 +6,11 @@ nonnetwork live play whose actual output adapter advertises control support.
 Back returns to the same Play instance and leaves playback paused. Owner finish,
 cancellation, focus loss and close settle requests and dispose child UI state
 through existing lifecycle rules. Replay and unsupported adapters do not expose
-this action. Native input remains independent from text editing in the UI.
+this action. An unavailable F2/open action is ignored without writing a session
+failure or changing an existing session diagnostic. Rejected clipboard and IME
+edits show an error on the live-output draft while retaining its editor/settings;
+a successful subsequent edit clears that local error. Native input remains
+independent from text editing in the UI.
 Route cleanup uses retained Play ancestry rather than a list of known root
 routes. Entering any retained Play child must preserve the game owner and its
 background assets. Closing retains the owner until cancellation and join finish.
