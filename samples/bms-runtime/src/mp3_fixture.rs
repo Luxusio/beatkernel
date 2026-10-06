@@ -16,7 +16,7 @@ pub fn silence_version(version: Mp3Version, channels: u8, frames: usize) -> Vec<
     assert!(frames <= 4096);
     let (b1, b2, length) = match version {
         Mp3Version::Mpeg1 => (0xfb, 0x90, 417),
-        Mp3Version::Mpeg2 => (0xf3, 0x80, 192),
+        Mp3Version::Mpeg2 => (0xf3, 0x84, 192), // 64kbps, rate index 1: 24000Hz.
         Mp3Version::Mpeg25 => (0xe3, 0x80, 417),
     };
     let mut bytes = vec![0; length * frames];

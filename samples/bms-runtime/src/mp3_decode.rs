@@ -447,7 +447,7 @@ mod tests {
     fn bitrate_and_padding_can_change_without_changing_format() {
         let mut bytes = silence(1, 1);
         let mut second = vec![0; 241];
-        second[..4].copy_from_slice(&[255, 0xf3, 0x92, 0xc0]); // 80kbps + padding
+        second[..4].copy_from_slice(&[255, 0xf3, 0x96, 0xc0]); // 80kbps, 24000Hz + padding
         bytes.extend_from_slice(&second);
         bytes.extend_from_slice(&silence(1, 1));
         assert_eq!(
