@@ -31,6 +31,10 @@ Remove room.lastProgress and its JavaScript interval calculation; non-room
 multiplayer cadence is outside this increment. Preserve idle/start/Leave/closed
 guards and finalQueued only after an accepted final. Native room controller
 retains every valid local prefix while suppressing only network publication.
+An unacknowledged Progress command prevents another ordinary publication before
+clock access. It does not close the room or disable its Connected UI status.
+Only the original Leave/terminal/cancel/finish conditions determine closure;
+local progress validation and retention continue while the command is pending.
 
 Pure clocks and the existing split write-completion driver remain separate:
 async promises are not std::io write completion. No new IO/timer/thread/lock,
@@ -39,8 +43,9 @@ RoomCompetition/RoomNetworkActor composition remains subsequent work.
 
 Author common boundary/chronology/admission rollback, actual driver protocol and
 native controller fixtures plus actual Owner/Worker delegation cases. Existing
-mock bindings gain the new methods without weakening assertions. Assertions,
-Node/JS parsing/runtime and formal review/QA remain deferred. Scoped Rust format
-and four sequential compile-only checks follow both paired writers stopping.
+mock bindings gain the new methods without weakening assertions. The user lifted
+verification deferral on 2026-10-06; execute applicable tests and checks alongside
+implementation. Final independent review/QA still gates task close. Browser and
+native execution count only when actually performed.
 Measured performance, real WebTransport and hardware acceptance remain unproven;
 full BMS player Goal stays active.
