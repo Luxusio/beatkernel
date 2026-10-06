@@ -153,7 +153,17 @@ impl<B: OutputReplacementBackend> GameplayOutputOwner<B> {
                 recovery: None,
             });
         }
-        self.observe(presentation)
+        self.observe(presentation)?;
+        if presentation.latest_pair().is_none() {
+            return Err(ReplacementFailure {
+                cause: ReplacementCause::Policy(
+                    "resume seed has no accepted presentation observation",
+                ),
+                cleanup: None,
+                recovery: None,
+            });
+        }
+        Ok(())
     }
     pub fn take_recovered_mixer(&mut self) -> Option<Mixer> {
         self.controller.take_recovered_mixer()

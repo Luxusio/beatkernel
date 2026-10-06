@@ -197,6 +197,44 @@ struct Fixture {
     runtime: SoloRuntime,
     trace: Rc<RefCell<Trace>>,
 }
+
+#[test]
+fn resume_seed_refuses_a_quiet_backend_until_a_genuine_pair_is_admitted() {
+    let mut f = Fixture::new();
+    let committed = f.presentation.latest_pair();
+    let history = f.runtime.transport_mut().anchors().to_vec();
+    let mut fresh =
+        PresentationEstimator::new(settings(), point(2, 0), ClockDomainId(1), Timestamp::ZERO)
+            .unwrap();
+    f.owner.current_mut().unwrap().quiet = 1;
+    let error = match f.owner.seed_resume(&mut fresh) {
+        Err(error) => error,
+        Ok(()) => panic!("resume accepted no clock relation"),
+    };
+    assert!(matches!(
+        error.cause,
+        ReplacementCause::Policy("resume seed has no accepted presentation observation")
+    ));
+    assert!(fresh.latest_pair().is_none());
+    assert_eq!(f.presentation.latest_pair(), committed);
+    assert_eq!(f.runtime.transport_mut().anchors(), history);
+    assert_eq!(f.pause.phase(), crate::playback_pause::PausePhase::Paused);
+    assert!(
+        f.owner
+            .current()
+            .unwrap()
+            .mixer
+            .as_ref()
+            .unwrap()
+            .is_paused()
+    );
+
+    assert!(f.owner.seed_resume(&mut fresh).is_ok());
+    assert_eq!(fresh.latest_pair(), Some(pair_frame(5)));
+    assert_eq!(fresh.epoch(), 0);
+    assert_eq!(f.runtime.transport_mut().anchors(), history);
+    assert_eq!(f.presentation.latest_pair(), committed);
+}
 impl Fixture {
     fn new() -> Self {
         Self::with_finite(false)
