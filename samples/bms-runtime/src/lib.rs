@@ -937,3 +937,6 @@ pub mod native_coreaudio_replacement;
 pub mod native_replacement_observation;
 #[cfg(target_os = "windows")]
 pub mod native_wasapi_replacement;
+
+#[cfg(all(target_os = "windows", feature = "asio-sdk"))]
+pub mod native_asio_replacement;

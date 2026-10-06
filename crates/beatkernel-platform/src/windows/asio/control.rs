@@ -254,6 +254,35 @@ pub struct AsioControl {
     registration: AsioDriverRegistration,
     _owner_thread: PhantomData<Rc<()>>,
 }
+/// Sealed permission to open one trusted registration on its owning thread.
+/// Construction performs no driver acquisition; each returned native owner keeps
+/// the constructor's trust and optional-window lifetime obligations.
+pub struct TrustedAsioOpener {
+    registration: AsioDriverRegistration,
+    host_window: Option<usize>,
+    _owner_thread: PhantomData<Rc<()>>,
+}
+impl TrustedAsioOpener {
+    /// Stores the exact trusted registration without loading driver code.
+    ///
+    /// # Safety
+    /// Driver code must be trusted. Any supplied HWND must remain valid and
+    /// caller-controlled until every control or stream opened with this capability
+    /// is closed or dropped, including pending failed-open owners.
+    pub unsafe fn new(registration: AsioDriverRegistration, host_window: Option<usize>) -> Self {
+        Self {
+            registration,
+            host_window,
+            _owner_thread: PhantomData,
+        }
+    }
+    /// Opens the stored registration under the constructor's safety contract.
+    pub fn open(self) -> Result<AsioControl, AsioControlError> {
+        // SAFETY: private fields can only be installed by the unsafe constructor;
+        // the original trust/window obligations cover the resulting owner.
+        unsafe { AsioControl::open(&self.registration, self.host_window) }
+    }
+}
 impl AsioControl {
     /// Opens exactly this validated registration and initializes IASIO with the
     /// caller's explicit optional HWND. Nonzero handles are checked with IsWindow.

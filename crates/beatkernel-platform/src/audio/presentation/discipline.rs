@@ -95,6 +95,7 @@ enum ObservationSource {
     },
     SuppliedPair,
     Asio {
+        basis: Option<beatkernel::audio::OutputFrameBasis>,
         sample_rate: u32,
         start_frame: u64,
         end_frame: u64,
@@ -347,8 +348,47 @@ impl PresentationDiscipline {
         &mut self,
         observation: crate::audio::asio::AsioPresentationObservation,
     ) -> Result<ObservationAdmission, DisciplineError> {
+        self.observe_asio_impl(observation, None)
+    }
+    /// Checks the original creation token before admitting an absolute ASIO block
+    /// against its original grid and this stream's captured physical frame basis.
+    pub fn observe_asio_with_basis_in_epoch(
+        &mut self,
+        epoch: u64,
+        observation: crate::audio::asio::AsioPresentationObservation,
+        basis: beatkernel::audio::OutputFrameBasis,
+    ) -> Result<ObservationAdmission, DisciplineError> {
+        if epoch != self.epoch() {
+            return Err(DisciplineError::EpochMismatch);
+        }
+        self.observe_asio_impl(observation, Some(basis))
+    }
+    fn observe_asio_impl(
+        &mut self,
+        observation: crate::audio::asio::AsioPresentationObservation,
+        basis: Option<beatkernel::audio::OutputFrameBasis>,
+    ) -> Result<ObservationAdmission, DisciplineError> {
         use crate::audio::asio::{AsioPresentationError, AsioPresentationObservation};
-        if observation.output_origin != self.output_origin
+        let expected_origin = if let Some(basis) = basis {
+            if basis.sample_rate() != observation.sample_rate
+                || observation.render.start_frame < basis.start_physical_frame()
+            {
+                return Err(DisciplineError::AsioPresentation(
+                    AsioPresentationError::Malformed,
+                ));
+            }
+            if basis
+                .point_at_stream_frame(0)
+                .map_err(|_| DisciplineError::Overflow)?
+                != self.output_origin
+            {
+                return Err(DisciplineError::DomainMismatch);
+            }
+            basis.origin()
+        } else {
+            self.output_origin
+        };
+        if observation.output_origin != expected_origin
             || observation.host.before.domain != self.host_domain
             || observation.host.after.domain != self.host_domain
         {
@@ -391,6 +431,7 @@ impl PresentationDiscipline {
             .ok_or(DisciplineError::Overflow)?;
         if let Some(previous_source) = self.latest_source {
             let ObservationSource::Asio {
+                basis: previous_basis,
                 sample_rate,
                 start_frame,
                 end_frame,
@@ -398,6 +439,9 @@ impl PresentationDiscipline {
             else {
                 return Err(DisciplineError::ObservationSourceChanged);
             };
+            if basis != previous_basis {
+                return Err(DisciplineError::ObservationSourceChanged);
+            }
             let previous = self
                 .estimator
                 .latest_pair()
@@ -423,6 +467,7 @@ impl PresentationDiscipline {
         }
         let admission = self.estimator.observe_clock_pair(pair)?;
         self.latest_source = Some(ObservationSource::Asio {
+            basis,
             sample_rate: observation.sample_rate,
             start_frame: observation.render.start_frame,
             end_frame,

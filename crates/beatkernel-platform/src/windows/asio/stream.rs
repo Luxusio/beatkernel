@@ -416,6 +416,7 @@ unsafe extern "C" fn render(
 /// All public native operations occur on the control's opening thread. Native
 /// callbacks use only preallocated state. Drop closes/drains before freeing it.
 pub struct AsioStream {
+    basis: beatkernel::audio::OutputFrameBasis,
     control: Option<AsioControl>,
     retired: bool,
     context: ManuallyDrop<Box<RenderContext>>,
@@ -480,6 +481,10 @@ fn recover_after_prepare(mut stream: AsioStream, original: AsioStreamError) -> A
     }
 }
 impl AsioStream {
+    /// Original physical mixer frame basis captured before native probes and priming.
+    pub const fn frame_basis(&self) -> beatkernel::audio::OutputFrameBasis {
+        self.basis
+    }
     /// Consumes exact driver/Mixer/channel choices, prepares buffers and primes B.
     /// Does not change rate, select another device, start, or show driver UI.
     pub fn prepare(
@@ -545,6 +550,7 @@ impl AsioStream {
         request: AsioBufferRequest,
         host_clock: Option<QpcClock>,
     ) -> Result<Self, AsioPrepareFailure> {
+        let basis = mixer.output_frame_basis();
         fn require_send<T: Send>() {}
         require_send::<AsioBlockRenderer>();
         let format = mixer.configuration().format();
@@ -596,6 +602,7 @@ impl AsioStream {
         };
 
         let mut stream = Self {
+            basis,
             control: Some(control),
             retired: false,
             context: ManuallyDrop::new(Box::new(RenderContext {

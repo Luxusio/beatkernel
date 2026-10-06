@@ -23,23 +23,7 @@ fn asio_pause_observation(
     observation: Option<beatkernel_platform::audio::asio::AsioPresentationObservation>,
     now: beatkernel::time::ClockPoint,
 ) -> beatkernel_bms_runtime::live_pause::LivePauseObservation {
-    use beatkernel_bms_runtime::{
-        live_pause::LivePauseObservation, native_start::StartInterval,
-        playback_pause::PauseIntervalObservation,
-    };
-    LivePauseObservation::Interval {
-        observation: observation.map(|value| PauseIntervalObservation {
-            output_origin: value.output_origin,
-            sample_rate: value.sample_rate,
-            render: value.render,
-            clock: StartInterval {
-                output: value.output,
-                before: value.host.before,
-                after: value.host.after,
-            },
-        }),
-        now,
-    }
+    beatkernel_bms_runtime::native_replacement_observation::asio_pause_observation(observation, now)
 }
 #[cfg(any(all(target_os = "windows", feature = "asio-sdk"), test))]
 fn seed_asio_resume(
