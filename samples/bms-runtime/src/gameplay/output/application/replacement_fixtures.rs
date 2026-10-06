@@ -286,7 +286,7 @@ fn rig() -> Rig {
             voice: VoiceId(7),
             sample: SampleId(1),
             at: Timestamp::from_nanos(1_000_000_000),
-            gain: 0.5,
+            gain: -0.5,
         })
         .unwrap();
     let settings = DisciplineConfig {
@@ -420,7 +420,7 @@ fn actual_ready_requires_accepted_observation_and_paused_report_then_returns_hol
             .unwrap()
             .render(&mut pcm)
             .unwrap();
-        assert_eq!(pcm, [0.75, 1.125]);
+        assert_eq!(pcm, [0.75, 0.875]);
         ready.output.retired = true; // Only memory ownership is retired; no native claim.
     }
 }
@@ -461,7 +461,7 @@ fn explicit_failed_open_attempts_preserve_original_error_model_and_never_reuse_i
     producer.request_pause(false);
     let mut pcm = [0.; 2];
     mixer.render(&mut pcm).unwrap();
-    assert_eq!(pcm, [0.75, 1.125]);
+    assert_eq!(pcm, [0.75, 0.875]);
 }
 #[test]
 fn failed_open_pending_owner_or_unavailable_model_is_retained_exactly_without_implicit_retry_or_empty_replacement()

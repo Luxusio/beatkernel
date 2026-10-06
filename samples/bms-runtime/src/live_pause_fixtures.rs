@@ -35,7 +35,7 @@ fn point(domain: u32, ns: i64) -> ClockPoint {
 fn mixer(rate: u32) -> (CommandProducer, Mixer) {
     let format = AudioFormat::new(rate, 1).unwrap();
     let limits = AudioLimits::new(8, 2, 8, 32, 8).unwrap();
-    let pcm = PcmLimits::new(128, 512, 1).unwrap();
+    let pcm = PcmLimits::new(256, 512, 1).unwrap();
     let mut bank = SampleBank::new(format, pcm).unwrap();
     bank.insert(
         SampleId(1),

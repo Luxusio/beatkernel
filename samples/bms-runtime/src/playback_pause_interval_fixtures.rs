@@ -40,7 +40,7 @@ fn observation(
 fn mixer(rate: u32, origin: i64, end: Option<u64>, gated: bool) -> (CommandProducer, Mixer) {
     let format = AudioFormat::new(rate, 1).unwrap();
     let limits = AudioLimits::new(8, 4, 8, 64, 8).unwrap();
-    let pcm = PcmLimits::new(256, 1024, 1).unwrap();
+    let pcm = PcmLimits::new(512, 1024, 1).unwrap();
     let mut bank = SampleBank::new(format, pcm).unwrap();
     bank.insert(
         SampleId(1),
