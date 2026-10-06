@@ -19,8 +19,9 @@ invisible presses and mine markers contribute no normal-note stage recovery.
 
 The documented BeatKernel default is initial 20%, clear threshold 80%, +1% per
 successful judged stage, -6% per missed stage, and recoverable zero. It is an
-explicit application policy, not LR2/IIDX/Angolmois gauge compatibility. TOTAL
-remains preserved source metadata in this slice. Pure custom profiles support
+explicit application policy, not LR2/IIDX/Angolmois gauge compatibility. Live
+owners do not yet consume TOTAL; the adapter's pure LR2 rules below resolve it
+without changing this runtime default. Pure custom profiles support
 other grade deltas and fail-on-empty policy; actual session owners use the fixed
 documented default until configurable session policy and capture identity are
 connected. Do not silently expose configurable live policy with an unrecorded
@@ -38,6 +39,60 @@ latches Depleted; retain the first failure reason and freeze subsequent numeric
 changes. An initial zero profile with fail-on-empty is initially Depleted.
 Invalid report batches leave the previous gauge snapshot exactly unchanged.
 Clear readiness is a level/failure predicate, not evidence that a song finished.
+
+## Adapter #TOTAL and LR2 gauge rules
+
+beatkernel-bms owns pure, allocation-free, float-free LR2 gauge rules in the
+same 1,000,000-units-per-percent fixed point. They classify six BMS judgments
+(PGREAT, GREAT, GOOD, BAD, POOR, empty POOR); mapping opaque core grades and
+miss/empty-press reports onto them stays with the application. Judged stage
+count N is one per gameplay object plus one per hold tail, matching the core
+judge's head/tail stages; mines, BGM and invisible keys never count. This
+deliberately counts core head/tail stages rather than one long-note object.
+Groove-family recovery uses TOTAL divided by this stage count; each delta
+truncates independently and gauge-level clamping may discard recovery. A full
+PGREAT run therefore need not add exactly TOTAL percent to the retained level.
+
+#TOTAL is a plain positive decimal (optional `+`, at most 18 digits) read with
+millionth precision; finer digits truncate. Zero, negative, exponent, malformed
+or u64-overflowing values are Invalid, absence is Absent, and both use the LR2
+default `160 + (N + clamp(N - 400, 0, 200)) * 0.16` exactly, saturating. Each
+resolution reports Declared/Absent/Invalid provenance; nothing is silently
+substituted. A chart with N = 0 has no defined gauge and is rejected at setup.
+The default formula is documented by the
+[LR2oraja project](https://github.com/wcko87/lr2oraja#6-revised-total-calculation-for-charts-without-a-specified-total-value).
+
+Per-judgment base percentages follow the LR2 table published by
+[LR2oraja gauge properties](https://github.com/wcko87/lr2oraja/blob/lr2oraja/src/bms/player/beatoraja/play/GaugeProperty.java),
+reimplemented here as data:
+
+| Variant | PG | GR | GD | BD | PR | Empty PR | Init | Floor | Fail below | Clear |
+|---|---|---|---|---|---|---|---|---|---|---|
+| AssistEasy | 1.2T | 1.2T | 0.6T | -3.2 | -4.8 | -1.6 | 20 | 2 | — | 60 |
+| Easy | 1.2T | 1.2T | 0.6T | -3.2 | -4.8 | -1.6 | 20 | 2 | — | 80 |
+| Groove | 1.0T | 1.0T | 0.5T | -4 | -6 | -2 | 20 | 2 | — | 80 |
+| Hard | 0.1 | 0.1 | 0.05 | -6D | -10D | -2D | 100 | 0 | 2 | alive |
+| ExHard | 0.1 | 0.1 | 0.05 | -12D | -20D | -2D | 100 | 0 | 2 | alive |
+| Hazard | 0.15 | 0.06 | 0 | -100 | -100 | -10 | 100 | 0 | 2 | alive |
+
+T is TOTAL/N. D is max(10 / clamp(floor(TOTAL/16) - 5, 1, 10), note factor),
+where the note factor is 10 for N <= 20, 8 + (30-N)/5 below 30, 5 + (60-N)/15
+below 60, 4 + (125-N)/65 below 125, 3 + (250-N)/125 below 250, 2 + (500-N)/250
+below 500, 1 + (1000-N)/500 below 1000, and 1 otherwise; the LR2oraja step at
+N = 30 is retained. Products are exact rationals truncated toward zero once at
+setup; recovery saturates at a full gauge. The damage and state reference is
+[LR2oraja GrooveGauge](https://github.com/wcko87/lr2oraja/blob/lr2oraja/src/bms/player/beatoraja/play/GrooveGauge.java).
+Hard damage is multiplied by 3/5,
+truncated, while the level is strictly below 32%. Levels clamp to [floor,
+100%]; a level strictly below the fail threshold becomes zero, which latches
+failure and freezes all later judgments. Groove-family gauges never fail and
+qualify only when the final level reaches their border. Survival gauges qualify
+while alive. Qualification is not evidence that a song finished.
+
+BmsGaugeState is Copy, has no heap or dynamic dispatch, and applies one
+judgment with constant work. Runtime owners still use the documented default
+profile: selecting an LR2 variant live, mine damage on these variants, course
+gauges and replay/capture policy identity remain separate integration work.
 
 ## Actual owners and remaining terminal control
 

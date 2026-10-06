@@ -11,6 +11,7 @@
 mod conditional;
 #[cfg(test)]
 mod exbmp_fixtures;
+mod gauge;
 mod invisible;
 #[cfg(test)]
 mod mine_fixtures;
@@ -26,6 +27,10 @@ use beatkernel::{
     time::Timestamp,
 };
 pub use parser::{parse, parse_seeded};
+pub use gauge::{
+    BmsGaugeError, BmsGaugeKind, BmsGaugeRules, BmsGaugeState, BmsJudgment, BmsTotal,
+    GAUGE_UNITS_PER_PERCENT, MAX_GAUGE_LEVEL, ResolvedTotal, TOTAL_UNITS, TotalSource,
+};
 pub use invisible::{InvisibleEvent, ScheduledInvisible};
 pub use mines::{MineDamage, MineEvent, ScheduledMine};
 use std::collections::{BTreeMap, BTreeSet};
