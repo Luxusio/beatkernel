@@ -6744,7 +6744,10 @@ mod tests {
         .map(String::from);
         let options = Options::parse(&args).unwrap();
         assert_eq!(options.title_font, Some(PathBuf::from("fonts/title.ttf")));
-        assert_eq!(options.native, ["--bind", "11:04"]);
+        assert_eq!(
+            options.native,
+            ["--chart", "fixture.bms", "--bind", "11:04"]
+        );
         for args in [
             vec!["--title-font", ""],
             vec!["--title-font", "one.ttf", "--title-font", "two.ttf"],
@@ -6870,7 +6873,7 @@ mod tests {
         pressed_input(&mut app, KeyCode::KeyX, Some("録"));
         assert!(app.title_font.as_ref().unwrap().get('録').is_some());
         assert!(app.input_font_error.is_none());
-        assert!(app.options.native.is_empty());
+        assert_eq!(app.options.native, ["--chart", "fixture.bms"]);
         assert!(app.profile_io.is_none());
         assert!(app.renderer.is_none());
         assert!(app.window.is_none());
@@ -7026,7 +7029,7 @@ mod tests {
             app.modifiers_changed(ModifiersState::empty());
             pressed_input(&mut app, KeyCode::Backspace, None);
             assert_eq!(field_editor(&app, field).value(), "");
-            assert!(app.options.native.is_empty());
+            assert_eq!(app.options.native, ["--chart", "fixture.bms"]);
             assert!(app.window.is_none());
             assert!(app.renderer.is_none());
             assert!(app.game.is_none());
@@ -7312,7 +7315,7 @@ mod tests {
         let draft = app.settings.as_ref().unwrap();
         assert_eq!(draft.editor.value(), "별.bkr");
         assert_eq!(draft.values.fields()[index].value, "별.bkr");
-        assert!(app.options.native.is_empty());
+        assert_eq!(app.options.native, ["--chart", "fixture.bms"]);
     }
     #[test]
     fn ime_field_and_lifecycle_changes_drop_preview_and_require_fresh_enable() {
@@ -8681,7 +8684,7 @@ mod tests {
             &Gesture::default(),
             None,
             false,
-            8,
+            7,
         );
         assert!(hits.iter().any(|(id, _)| *id == ControlId(52)));
         assert!(hits.iter().any(|(id, _)| *id == ControlId(53)));

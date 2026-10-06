@@ -176,7 +176,7 @@ fn every_new_ime_target_previews_and_paints_exact_native_ranges_then_cancels_or_
         rendered_preview(&mut app, field, &committed);
         assert_eq!(app.settings.as_ref().unwrap().values.native_args(), native);
         assert_eq!(app.settings.as_ref().unwrap().presentation, presentation);
-        assert!(app.options.native.is_empty());
+        assert_eq!(app.options.native, ["--chart", "fixture.bms"]);
     }
 }
 

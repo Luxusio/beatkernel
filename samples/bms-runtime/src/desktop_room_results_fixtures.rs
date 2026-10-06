@@ -137,6 +137,7 @@ fn joined_finished_failed_and_cancelled_results_page_locally_without_reopening_c
             assert!(result.request_room(action).is_err());
         }
         app.game = Some(result);
+        app.navigate(ScreenRoute::Play { replay: false }).unwrap();
         app.navigate(ScreenRoute::Results { replay: false })
             .unwrap();
         app.draw().unwrap();

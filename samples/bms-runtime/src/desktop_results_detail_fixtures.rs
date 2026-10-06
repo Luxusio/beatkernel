@@ -216,6 +216,7 @@ fn actual_c_key_mode_and_page_controls_reach_all_comparisons_then_clamp_to_detai
         game.owner_finished(true);
         let mut app = super::tests::lifecycle_fixture();
         app.game = Some(game);
+        app.navigate(ScreenRoute::Play { replay: false }).unwrap();
         app.navigate(ScreenRoute::Results { replay: false })
             .unwrap();
         app.draw().unwrap();
@@ -302,6 +303,7 @@ fn completed_control_requires_frozen_data_and_replay_or_unproven_prefix_keeps_or
         game.owner_finished(true);
         let mut app = super::tests::lifecycle_fixture();
         app.game = Some(game);
+        app.navigate(ScreenRoute::Play { replay }).unwrap();
         app.navigate(ScreenRoute::Results { replay }).unwrap();
         app.draw().unwrap();
         assert!(!app.hits.iter().any(|(id, _)| *id == ControlId(8)));

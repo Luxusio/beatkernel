@@ -195,7 +195,7 @@ fn actual_clipboard_keys_copy_cut_and_paste_each_of_the_seven_editable_targets()
         );
         assert!(error(&app).is_none());
         assert!(app.pending_clipboard.is_none());
-        assert!(app.options.native.is_empty());
+        assert_eq!(app.options.native, ["--chart", "fixture.bms"]);
         assert!(app.window.is_none() && app.renderer.is_none() && app.game.is_none());
     }
 }

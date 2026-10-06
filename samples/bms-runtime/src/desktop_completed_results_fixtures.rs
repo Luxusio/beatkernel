@@ -275,6 +275,7 @@ fn actual_results_paging_reaches_sixty_fourth_original_player_and_clamps_both_en
     game.owner_finished(true);
     let mut app = super::tests::lifecycle_fixture();
     app.game = Some(game);
+    app.navigate(ScreenRoute::Play { replay: false }).unwrap();
     app.navigate(ScreenRoute::Results { replay: false })
         .unwrap();
     for _ in 0..20 {
