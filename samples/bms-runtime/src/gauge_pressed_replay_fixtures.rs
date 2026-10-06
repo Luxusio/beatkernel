@@ -154,12 +154,12 @@ fn replay_failure_hides_all_owners_without_dropping_later_legacy_judge_operation
     let hash = runtime.judge().stable_hash().unwrap();
     let file = capture.into_file();
     assert_eq!(file.records.len(), 7);
-    let mut reconstructed = reconstruct(&source, file.clone(), limits).unwrap();
+    let mut reconstructed = reconstruct_section(&source, file.clone(), limits).unwrap();
     reconstructed.seek_cursor(7).unwrap();
     assert_eq!(reconstructed.engine().stable_hash().unwrap(), hash);
     assert_eq!(reconstructed.results().len(), 3);
 
-    let mut visual = ReplayVisual::new(&source, &file, limits).unwrap();
+    let mut visual = ReplayVisual::new_section(&source, &file, limits).unwrap();
     assert_eq!(visual.advance_to(ts(0)).unwrap().len(), 2);
     assert_eq!(visual.pressed_lanes(), 3);
     visual.advance_to(ts(SECOND)).unwrap();

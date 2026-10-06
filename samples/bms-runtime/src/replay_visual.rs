@@ -187,7 +187,7 @@ mod fixtures {
     }
     fn source() -> BmsChart {
         parse(
-            "#BPM 120\n#00011:01\n#00012:01\n#00014:01\n#00113:01\n",
+            "#BPM 120\n#WAV01 key.wav\n#00011:01\n#00012:01\n#00014:01\n#00113:01\n",
             ParseOptions::default(),
         )
         .unwrap()
