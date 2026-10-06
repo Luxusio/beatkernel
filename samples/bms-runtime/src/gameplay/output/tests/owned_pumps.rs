@@ -473,5 +473,5 @@ fn actual_cohort_owner_controller_defers_early_resume_and_keeps_original_roster_
 }
 
 mod live_output {
-    include!("native_live_output_fixtures.rs");
+    include!("live_requests.rs");
 }

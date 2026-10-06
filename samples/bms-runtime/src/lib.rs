@@ -942,13 +942,16 @@ pub mod native_wasapi_replacement;
 pub mod native_asio_replacement;
 
 #[cfg(test)]
+#[path = "gameplay/output/tests/publication.rs"]
 mod gameplay_output_publication_fixtures;
 #[cfg(test)]
+#[path = "gameplay/output/tests/publication_pumps.rs"]
 mod native_output_publication_fixtures;
 
 /// Statically owned current and replacement output for live gameplay adapters.
 pub mod gameplay_output_owner;
 #[cfg(test)]
+#[path = "gameplay/output/tests/owned_pumps.rs"]
 mod native_owned_output_fixtures;
 
 /// Static cold command bridge to actual gameplay output ownership.
@@ -957,3 +960,6 @@ pub mod gameplay_output_ui;
 pub mod live_output_control;
 #[cfg(target_os = "linux")]
 pub mod native_alsa_output_ui;
+
+/// Domain-organized gameplay application components.
+pub mod gameplay;

@@ -1,0 +1,119 @@
+//! Cold correlated UI admission, separate from output retirement and publication.
+use crate::{
+    gameplay::output::domain::control::{OutputCapability, OutputRequest, OutputReply},
+    gameplay::output::application::owner::GameplayOutputOwner,
+    gameplay_presentation::GameplayOutputContext,
+    gameplay::output::ports::OutputReplacementBackend,
+};
+use beatkernel::time::ClockPoint;
+use std::io;
+use crate::gameplay::output::ports::OutputUiPort;
+pub struct GameplayOutputUi<U: OutputUiPort> {
+    ui: U,
+    flight: Option<u64>,
+    reply: Option<OutputReply>,
+}
+impl<U: OutputUiPort> GameplayOutputUi<U> {
+    pub fn new(ui: U) -> Self {
+        Self {
+            ui,
+            flight: None,
+            reply: None,
+        }
+    }
+    pub fn pending(&self) -> bool {
+        self.flight.is_some() || self.reply.is_some() || self.ui.pending()
+    }
+    pub fn advertise(&mut self, cap: Option<OutputCapability>) -> io::Result<()> {
+        self.ui.advertise(cap)
+    }
+    fn flush(&mut self) -> io::Result<bool> {
+        let Some(reply) = &self.reply else {
+            return Ok(true);
+        };
+        match self.ui.reply(reply) {
+            Ok(()) => {
+                self.reply = None;
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+    pub fn service<B: OutputReplacementBackend>(
+        &mut self,
+        owner: &mut GameplayOutputOwner<B>,
+        context: GameplayOutputContext<'_, B::Presentation>,
+        now: ClockPoint,
+        map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
+        applied: &mut impl FnMut(&B::Output) -> Result<OutputCapability, String>,
+    ) -> Result<bool, Box<dyn std::error::Error>>
+    where
+        B::Error: std::error::Error + 'static,
+    {
+        if !self.flush()? {
+            return Ok(false);
+        }
+        if self.flight.is_none() {
+            let request = match self.ui.take_request() {
+                Ok(Some(request)) => request,
+                Ok(None) => return Ok(false),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
+            let typed = owner
+                .current()
+                .ok_or_else(|| "current output unavailable".to_string())
+                .and_then(|output| map(&request, output));
+            match typed {
+                Ok(typed) => {
+                    if owner.queue(typed, 2_000_000_000).is_err() {
+                        self.reply = Some(OutputReply {
+                            id: request.id,
+                            result: Err("output replacement is busy".into()),
+                        });
+                    } else {
+                        self.flight = Some(request.id);
+                    }
+                }
+                Err(error) => {
+                    self.reply = Some(OutputReply {
+                        id: request.id,
+                        result: Err(error),
+                    })
+                }
+            }
+            if self.flight.is_none() {
+                let _ = self.flush()?;
+                return Ok(false);
+            }
+        }
+        match owner.publish_paused(context, now) {
+            Ok(false) => Ok(false),
+            Ok(true) => {
+                let id = self.flight.take().expect("accepted output request");
+                let result = owner
+                    .current()
+                    .ok_or_else(|| "published output unavailable".into())
+                    .and_then(applied);
+                self.reply = Some(OutputReply { id, result });
+                let _ = self.flush()?;
+                Ok(true)
+            }
+            Err(error) => {
+                let id = self.flight.take().expect("active output request");
+                self.reply = Some(OutputReply {
+                    id,
+                    result: Err(error
+                        .to_string()
+                        .chars()
+                        .filter(|ch| !ch.is_control())
+                        .take(512)
+                        .collect()),
+                });
+                let _ = self.flush();
+                Err(error)
+            }
+        }
+    }
+}
