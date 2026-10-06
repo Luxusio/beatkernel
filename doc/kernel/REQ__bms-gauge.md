@@ -211,16 +211,16 @@ launchers keep the documented default until policy selection is connected.
 
 ## Native game owner failure contract
 
-NativeGameplaySession retains a borrowed default BmsGauge on the actual game
+NativeGameplaySession retains a borrowed BmsGauge on the actual game
 thread, independently of whether a UI publisher is attached. All three native
 solo launchers supply a persistent gauge; each native local PlayerState owns its
 own default gauge, including common preparation and all roster constructors.
 Use the same common report policy and committed-frontier fence as stepped play.
 Do not create OS-specific gauge or multiplayer rules.
-Native pump admission rejects a nondefault profile before processing, even when
-a typed caller supplies one through public state fields. Do not reset an existing
-valid retained gauge when entering the pump. Configurable live profiles require
-their own recorded policy identity before they can be admitted.
+Native nondefault admission below validates caller-supplied profiles before
+processing. Legacy default entry does not reset retained gauges; nondefault
+entry requires the initial gauge and pristine usable owner. Enabled recording
+and competition must retain and validate the chosen policy identity.
 
 On each actual native report, independently consume gauge, capture, competition
 and presentation observations even when one fails. Retain the original committed
@@ -364,7 +364,7 @@ mapping and core misses use POOR. Empty presses remain separate integration.
 Preparation is control-side; owning judge/gauge parts needs no dynamic dispatch
 or extra runtime wrapper. Replay capture retains the resulting windows/deltas
 and dynamics through the existing full setup identity. Public CLI/UI selection,
-nondefault live native admission, class-aware score labels and complete mine/
+nondefault shared-network admission, class-aware score labels and complete mine/
 empty compatibility remain unfinished; the common builder does not enable
 those launchers by itself.
 
@@ -386,7 +386,35 @@ matches the immutable resolved policy. Disabled capture still checks that policy
 boundary but performs no source identity acquisition. Enabled capture uses the
 existing ButtonOnly native setup and records the complete gauge through its
 canonical wrapper; limits/refusal preserve the judge and policy. Legacy helper
-and default host behavior remain unchanged. This establishes preparation APIs,
-not custom live-pump admission: NativeGameplay/Cohort default-profile guards,
-competition policy identity, public selectors and class-aware scores still need
+and default host behavior remain unchanged. These preparation APIs are invoked
+by the guarded common pumps described below. Policy-aware launcher construction,
+shared competition identity, public selectors and class-aware scores still need
 integration before nondefault policies become end-user live options.
+
+## Native nondefault admission
+
+Builtin pump setup retains its existing behavior. A nondefault native member
+requires an unprocessed judge and the exact initial gauge snapshot before any
+pump control/device effects. Poisoned or already fenced runtimes are refused even
+when the judge has not processed an operation. If capture is enabled, its records must be empty;
+the canonical header must match the gauge, judge windows, original pristine judge
+hash, normalized host domain and original-song start/end. Derive start from the
+configured song origin plus playback/stream-origin preroll, with checked wide
+arithmetic. Native ButtonOnly rules and exact chart-identity extents are required.
+
+Competition ports may supply their immutable expected header or explicitly
+declare themselves policy-agnostic (disabled Noop observers). Nondefault members
+reject opaque competition; supplied identities must match the same setup and,
+when capture exists, its entire header. Shared cohort networking remains refused
+for nondefault policies until it supplies policy-aware member identities.
+
+For a cohort containing any nondefault member, the usable RuntimeGroup's original
+roster order must exactly equal session.states. Every member, including builtin
+members, must have a pristine judge, initial gauge, fresh default score,
+last_song equal to configured song_origin and no gameplay fence. Validate every
+capture/competition identity before preparing the host's entire ordered roster.
+Nondefault admission permits at most 64 judge windows. Reserve cold scratch and
+policy-row storage before host preparation. Only a successful setup invokes the cold preparation port, before pump clock,
+device observation or input acquisition. Rejection preserves judge/gauge/capture
+state. This connects resolved policy to common native pumps without exposing a
+public selector or claiming new weighted/class-aware scoring or physical timing.

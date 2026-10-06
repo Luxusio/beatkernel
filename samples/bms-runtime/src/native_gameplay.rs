@@ -413,9 +413,7 @@ pub fn run_gameplay_with_result_and_ports<
     control: &mut C,
     host_port: &mut H,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
-    if session.gauge.profile() != &GaugeProfile::default() {
-        return Err("native gameplay requires the default recorded gauge policy".into());
-    }
+    let custom_policy = session.gauge.profile() != &GaugeProfile::default();
     if config.origin.domain == config.stream_origin.domain
         || config.stream_origin.domain != config.playback_origin.domain
         || config.playback_origin.timestamp < config.stream_origin.timestamp
@@ -425,10 +423,49 @@ pub fn run_gameplay_with_result_and_ports<
     {
         return Err("invalid native gameplay clocks/rate/lag".into());
     }
+    let mut pending = VecDeque::new();
+    if custom_policy {
+        if session.runtime.poisoned() || session.runtime.gameplay_fence().is_some() {
+            return Err("nondefault native runtime is poisoned or already fenced".into());
+        }
+        crate::native_policy_admission::validate_initial(session.runtime.judge(), session.gauge)?;
+        crate::native_policy_admission::validate_capture(
+            session.runtime.judge(),
+            session.gauge.profile(),
+            session.capture.as_ref(),
+            &config,
+        )?;
+        if let Some(competition) = session
+            .competition
+            .as_ref()
+            .filter(|port| !port.policy_agnostic())
+        {
+            let header = competition
+                .expected_policy_header()
+                .ok_or("nondefault native competition has no policy identity")?;
+            crate::native_policy_admission::validate_header(
+                session.runtime.judge(),
+                session.gauge.profile(),
+                header,
+                &config,
+            )?;
+            if session
+                .capture
+                .as_ref()
+                .is_some_and(|capture| capture.header() != header)
+            {
+                return Err("native capture and competition policy identities differ".into());
+            }
+        }
+        pending.try_reserve_exact(4096)?;
+        host_port
+            .prepare_policies(&[(crate::local_players::PlayerId(1), session.gauge.profile())])?;
+    }
     let mut deadline =
         NativePumpDeadline::new(control, config.seconds, "native gameplay deadline overflow")?;
-    let mut pending = VecDeque::new();
-    pending.try_reserve_exact(4096)?;
+    if !custom_policy {
+        pending.try_reserve_exact(4096)?;
+    }
     let mut last_acquired = config.origin;
     let mut last_operation = config.origin;
     let mut last_song = config.song_origin;
@@ -822,6 +859,10 @@ mod fixtures {
     }
     mod room_completion {
         include!("native_room_completion_fixtures.rs");
+    }
+    mod policy_admission {
+        use super::*;
+        include!("native_policy_admission_fixtures.rs");
     }
     include!("native_gameplay_interval_fixtures.rs");
     use super::*;

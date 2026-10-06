@@ -355,6 +355,9 @@ pub struct LiveCompetition {
     terminal: TerminalGuard,
 }
 impl LiveCompetition {
+    pub(crate) fn native_policy_header(&self) -> &beatkernel::replay::ReplayHeader {
+        self.competition.expected_header()
+    }
     /// Load ghosts before starting audio; spawn networking only when selected.
     pub fn prepare(
         options: &CompetitionOptions,

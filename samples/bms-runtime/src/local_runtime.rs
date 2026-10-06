@@ -546,6 +546,9 @@ impl RuntimeGroup {
         let guard = OwnerGuard::new(&mut member.runtime, &mut self.transport, &mut self.producer);
         Ok(guard.runtime.fence_gameplay_sounds(requested_at))
     }
+    pub(crate) fn player_ids(&self) -> impl Iterator<Item = PlayerId> + '_ {
+        self.members.iter().map(|member| member.player)
+    }
     pub fn member_judge(&self, player: PlayerId) -> Option<&JudgeEngine> {
         self.members
             .iter()
@@ -723,6 +726,9 @@ impl SoloRuntime {
         self.0
             .fence_player_sounds(PlayerId(1), requested_at)
             .expect("solo runtime retains its prepared member")
+    }
+    pub(crate) fn poisoned(&self) -> bool {
+        self.0.poisoned()
     }
     pub fn judge(&self) -> &JudgeEngine {
         self.0.members[0].runtime.judge()

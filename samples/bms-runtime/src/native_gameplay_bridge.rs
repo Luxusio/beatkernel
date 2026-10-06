@@ -201,6 +201,9 @@ pub type NativeCohortSession<'a> =
 pub type PlayerState = GameplayPlayerState<LiveCompetition>;
 
 impl SoloCompetitionPort for LiveCompetition {
+    fn expected_policy_header(&self) -> Option<&beatkernel::replay::ReplayHeader> {
+        Some(self.native_policy_header())
+    }
     fn observe(&mut self, report: &RuntimeReport) -> NativeGameplayResult<()> {
         LiveCompetition::observe(self, report)
     }

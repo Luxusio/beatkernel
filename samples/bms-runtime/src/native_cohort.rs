@@ -607,13 +607,10 @@ pub fn run_cohort_with_results_and_ports<
     control: &mut C,
     host_port: &mut H,
 ) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
-    if session
+    let custom_policy = session
         .states
         .iter()
-        .any(|state| state.gauge.profile() != &GaugeProfile::default())
-    {
-        return Err("native cohort requires the default recorded gauge policy".into());
-    }
+        .any(|state| state.gauge.profile() != &GaugeProfile::default());
     if !(2..=64).contains(&session.states.len())
         || config.origin.domain == config.stream_origin.domain
         || config.stream_origin.domain != config.playback_origin.domain
@@ -634,11 +631,83 @@ pub fn run_cohort_with_results_and_ports<
             return Err("invalid cohort roster".into());
         }
     }
+    let mut acquired = VecDeque::new();
+    if custom_policy {
+        if session.group.poisoned()
+            || !session
+                .group
+                .player_ids()
+                .eq(session.states.iter().map(|state| state.player))
+        {
+            return Err("nondefault cohort requires the exact usable group roster".into());
+        }
+        if session
+            .network
+            .as_ref()
+            .is_some_and(|network| !network.policy_agnostic())
+        {
+            return Err(
+                "nondefault cohort networking requires policy-aware member identities".into(),
+            );
+        }
+        for state in session.states.iter() {
+            if state.score != ScoreSummary::default()
+                || state.last_song != config.song_origin
+                || session.group.player_gameplay_fence(state.player).is_some()
+            {
+                return Err("nondefault cohort requires pristine member state".into());
+            }
+            let judge = session
+                .group
+                .member_judge(state.player)
+                .expect("roster checked");
+            crate::native_policy_admission::validate_initial(judge, &state.gauge)?;
+            crate::native_policy_admission::validate_capture(
+                judge,
+                state.gauge.profile(),
+                state.capture.as_ref(),
+                &config,
+            )?;
+            if let Some(competition) = state
+                .competition
+                .as_ref()
+                .filter(|port| !port.policy_agnostic())
+            {
+                let header = competition
+                    .expected_policy_header()
+                    .ok_or("nondefault member competition has no policy identity")?;
+                crate::native_policy_admission::validate_header(
+                    judge,
+                    state.gauge.profile(),
+                    header,
+                    &config,
+                )?;
+                if state
+                    .capture
+                    .as_ref()
+                    .is_some_and(|capture| capture.header() != header)
+                {
+                    return Err("member capture and competition policy identities differ".into());
+                }
+            }
+        }
+        let mut policies = Vec::new();
+        policies.try_reserve_exact(session.states.len())?;
+        policies.extend(
+            session
+                .states
+                .iter()
+                .map(|state| (state.player, state.gauge.profile())),
+        );
+        acquired.try_reserve_exact(64 * 256)?;
+        host_port.prepare_policies(&policies)?;
+    }
     let mut deadline =
         NativePumpDeadline::new(control, config.seconds, "cohort deadline overflow")?;
     let lag = config.advance_lag.as_nanos();
-    let mut acquired = VecDeque::new();
-    acquired.try_reserve_exact(64 * 256)?;
+    if !custom_policy {
+        acquired.try_reserve_exact(64 * 256)?;
+    }
     let mut last_host: Option<ClockPoint> = None;
     let mut stop_evidence = OwnedStopEvidence::default();
     let mut stop_barrier = NativeStopBarrier::default();
@@ -1059,6 +1128,10 @@ mod fixtures {
     }
     mod gauge_fence {
         include!("native_local_gauge_fence_fixtures.rs");
+    }
+    mod policy_admission {
+        use super::*;
+        include!("native_cohort_policy_admission_fixtures.rs");
     }
     include!("native_cohort_interval_fixtures.rs");
     use super::*;
