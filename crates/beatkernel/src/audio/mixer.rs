@@ -371,6 +371,11 @@ impl Mixer {
     pub fn applied_start_frame(&self) -> Option<u64> {
         self.consumer.applied_start_frame()
     }
+    /// Current producer-requested pause state, without consuming commands.
+    /// Cold output preparation must keep this requested through native priming.
+    pub fn pause_requested(&self) -> bool {
+        self.consumer.pause_requested()
+    }
     /// Applied end-state of the most recent valid nonempty render, including
     /// an immutable playback endpoint that queue resume cannot lift.
     pub const fn is_paused(&self) -> bool {

@@ -57,6 +57,29 @@ pub trait GameplayPresentationPort: Sized {
         }
         Ok(restarted)
     }
+    /// Stage a strictly newer output epoch without changing this owner or its config.
+    fn restart_for_output(
+        &self,
+        epoch: u64,
+        output_origin: ClockPoint,
+        playback_origin: ClockPoint,
+        host_domain: ClockDomainId,
+        song_origin: Timestamp,
+    ) -> NativeGameplayResult<Self> {
+        let current = self
+            .epoch()
+            .ok_or("output presentation epoch is unsupported")?;
+        if epoch <= current {
+            return Err("output presentation epoch must increase".into());
+        }
+        let mut restarted =
+            self.restart_for_resume(output_origin, playback_origin, host_domain, song_origin)?;
+        restarted.rebind_output(epoch, output_origin, playback_origin, song_origin)?;
+        if restarted.epoch() != Some(epoch) {
+            return Err("output presentation cannot preserve requested epoch".into());
+        }
+        Ok(restarted)
+    }
     fn epoch(&self) -> Option<u64> {
         None
     }
@@ -77,6 +100,64 @@ pub trait GameplayPresentationPort: Sized {
         now: ClockPoint,
         transport: &mut Transport,
     ) -> NativeGameplayResult<DisciplineUpdate>;
+}
+
+/// Cold timing candidates only: no native stream, accepted sample or startup permission.
+pub struct PreparedOutputTiming<P: GameplayPresentationPort> {
+    pub pause: crate::playback_pause::NativePause,
+    pub presentation: P,
+    pub basis: beatkernel::audio::OutputFrameBasis,
+    pub playback_origin: ClockPoint,
+}
+/// Stage compatible software clocks while the actual recovered mixer remains held.
+/// The caller must pin its producer pause request through native Ready priming.
+pub fn prepare_output_timing_rebind<P: GameplayPresentationPort>(
+    current: &P,
+    pause: &crate::playback_pause::NativePause,
+    epoch: u64,
+    mixer: &beatkernel::audio::Mixer,
+    original_song: Timestamp,
+) -> NativeGameplayResult<PreparedOutputTiming<P>> {
+    let current_epoch = current
+        .epoch()
+        .ok_or("output presentation epoch is unsupported")?;
+    if current_epoch != pause.epoch() {
+        return Err("pause and presentation output epochs differ".into());
+    }
+    if epoch <= current_epoch {
+        return Err("output presentation epoch must increase".into());
+    }
+    if !mixer.pause_requested() {
+        return Err("output timing preparation requires a held producer pause request".into());
+    }
+    let basis = mixer.output_frame_basis();
+    if let Some(pair) = current.latest_pair() {
+        if pair.source.domain != basis.origin().domain || pair.target.domain != pause.host_domain()
+        {
+            return Err("output timing owner clock domains differ".into());
+        }
+    }
+    let mut candidate_pause = pause.clone();
+    candidate_pause.rebind_output(epoch, mixer)?;
+    let playback_origin = basis.point_at_stream_frame(0)?;
+    let song_origin =
+        candidate_pause.song_origin_for_presentation(original_song, playback_origin)?;
+    let presentation = current.restart_for_output(
+        epoch,
+        playback_origin,
+        playback_origin,
+        candidate_pause.host_domain(),
+        song_origin,
+    )?;
+    if presentation.latest_pair().is_some() {
+        return Err("prepared output timing must have no accepted observation".into());
+    }
+    Ok(PreparedOutputTiming {
+        pause: candidate_pause,
+        presentation,
+        basis,
+        playback_origin,
+    })
 }
 
 impl GameplayPresentationPort for PresentationEstimator {
@@ -174,3 +255,7 @@ mod presentation_rebind_port_fixtures;
 #[cfg(test)]
 #[path = "presentation_resume_port_fixtures.rs"]
 mod presentation_resume_port_fixtures;
+
+#[cfg(test)]
+#[path = "presentation_output_rebind_fixtures.rs"]
+mod presentation_output_rebind_fixtures;

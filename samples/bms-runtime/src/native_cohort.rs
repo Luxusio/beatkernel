@@ -740,7 +740,10 @@ pub fn run_cohort_with_results_and_ports<
                         config.stream_origin,
                         config.playback_origin,
                         config.origin.domain,
-                        session.pause.song_origin_after_pause(config.song_origin)?,
+                        session.pause.song_origin_for_presentation(
+                            config.song_origin,
+                            config.playback_origin,
+                        )?,
                     )?;
                     device.seed_resume(&mut discipline, reference)?;
                     if discipline.latest_pair().is_none() {

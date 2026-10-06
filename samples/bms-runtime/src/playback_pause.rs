@@ -654,6 +654,39 @@ impl NativePause {
                 .ok_or(PauseError("resume presentation frame overflow"))?,
         )
     }
+    /// Host clock domain retained across output replacement.
+    pub const fn host_domain(&self) -> ClockDomainId {
+        self.host
+    }
+    /// Offset a new presentation anchor while preserving cumulative gap rounding.
+    /// Wide terms are combined before the one final timestamp narrowing.
+    pub fn song_origin_for_presentation(
+        &self,
+        original: Timestamp,
+        playback_origin: ClockPoint,
+    ) -> Result<Timestamp, PauseError> {
+        let startup = self.point(self.start_frame)?;
+        if playback_origin.domain != self.origin.domain
+            || playback_origin.timestamp < startup.timestamp
+        {
+            return Err(PauseError(
+                "presentation origin precedes startup or changed domain",
+            ));
+        }
+        let manual_gap = self
+            .gap
+            .checked_sub(self.start_frame)
+            .ok_or(PauseError("manual pause gap precedes startup"))?;
+        let gap = i128::from(manual_gap) * 1_000_000_000 / i128::from(self.rate);
+        let shift = i128::from(playback_origin.timestamp.as_nanos())
+            - i128::from(startup.timestamp.as_nanos());
+        let value = i128::from(original.as_nanos())
+            .checked_sub(gap)
+            .and_then(|value| value.checked_add(shift))
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or(PauseError("presentation song origin overflow"))?;
+        Ok(Timestamp::from_nanos(value))
+    }
     /// Applies the cumulative gap once, avoiding per-pause rounding drift.
     pub fn song_origin_after_pause(&self, original: Timestamp) -> Result<Timestamp, PauseError> {
         let manual_gap = self
@@ -1580,3 +1613,7 @@ mod interval_fixtures;
 #[cfg(test)]
 #[path = "playback_pause_rebind_fixtures.rs"]
 mod playback_pause_rebind_fixtures;
+
+#[cfg(test)]
+#[path = "playback_presentation_origin_fixtures.rs"]
+mod playback_presentation_origin_fixtures;
