@@ -61,6 +61,7 @@ fn worker(error: bool) -> (AlsaStream, CommandProducer, mpsc::Sender<()>) {
     let shared = Arc::new(Shared::new());
     let worker_shared = shared.clone();
     let (release, ready) = mpsc::channel();
+    let basis = mixer.output_frame_basis();
     let handle = thread::spawn(move || {
         ready.recv().unwrap();
         let report = mixer.render(&mut [0.; 1]).unwrap();
@@ -99,6 +100,7 @@ fn worker(error: bool) -> (AlsaStream, CommandProducer, mpsc::Sender<()>) {
     (
         AlsaStream {
             configuration: config(),
+            basis,
             shared,
             worker: Some(handle),
             recovered_mixer: None,
@@ -173,12 +175,14 @@ fn ordinary_joined_worker_error_returns_original_diagnostic_and_retains_rendered
 #[test]
 fn worker_panic_never_claims_retirement_or_recovers_destroyed_worker_state() {
     let (_, mixer) = rig();
+    let basis = mixer.output_frame_basis();
     let handle: JoinHandle<(Result<(), LinuxError>, Mixer)> = thread::spawn(move || {
         let _owned = mixer;
         panic!("controlled memory worker panic")
     });
     let mut stream = AlsaStream {
         configuration: config(),
+        basis,
         shared: Arc::new(Shared::new()),
         worker: Some(handle),
         recovered_mixer: None,

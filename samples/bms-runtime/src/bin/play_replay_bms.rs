@@ -563,7 +563,7 @@ trait NativeOutput {
     fn print_native(&mut self);
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn output_position(position: u64, frequency: u64) -> Result<ClockPoint> {
     if frequency == 0 {
         return Err("native presentation frequency is zero".into());
@@ -676,7 +676,10 @@ mod native {
             }
             // A newly initialized one-start IAudioClient has its own position-zero
             // epoch. Native clock units are frequency units, not assumed frames.
-            Ok(Some(output_position(clock.position, clock.frequency)?))
+            Ok(Some(self.0.frame_basis().point_at_native_counter(
+                clock.position,
+                clock.frequency,
+            )?))
         }
         fn presentation_pair(&mut self) -> Result<Option<ClockPair>> {
             let snapshot = self.0.snapshot();
@@ -696,7 +699,10 @@ mod native {
                 return Err("WASAPI replay host domain differs".into());
             }
             Ok(Some(ClockPair {
-                source: output_position(clock.position, clock.frequency)?,
+                source: self
+                    .0
+                    .frame_basis()
+                    .point_at_native_counter(clock.position, clock.frequency)?,
                 target,
             }))
         }
@@ -799,14 +805,12 @@ mod native {
             let Some(timing) = self.0.timing_snapshot() else {
                 return Ok(None);
             };
-            Ok(beatkernel_platform::linux::alsa_presentation_pair(
-                timing,
-                ClockPoint {
-                    domain: OUTPUT,
-                    timestamp: Timestamp::ZERO,
-                },
-                self.0.configuration().format.sample_rate(),
-            )?)
+            Ok(
+                beatkernel_platform::linux::alsa_presentation_pair_with_basis(
+                    timing,
+                    self.0.frame_basis(),
+                )?,
+            )
         }
         fn last_render(&mut self) -> Option<RenderReport> {
             self.0.last_render_report()

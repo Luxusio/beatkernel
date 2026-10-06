@@ -404,6 +404,7 @@ impl Shared {
 /// Owns the worker lifecycle; worker exclusively owns ALSA handles and Mixer.
 pub struct AlsaStream {
     configuration: AlsaAppliedConfig,
+    basis: beatkernel::audio::OutputFrameBasis,
     shared: Arc<Shared>,
     worker: Option<JoinHandle<(Result<(), LinuxError>, Mixer)>>,
     recovered_mixer: Option<Mixer>,
@@ -413,6 +414,7 @@ impl AlsaStream {
     /// Opens/configures on the worker and waits for its actual startup result.
     /// Render/conversion storage is allocated before this method returns Ready.
     pub fn open(request: AlsaRequest, mixer: Mixer) -> Result<Self, LinuxError> {
+        let basis = mixer.output_frame_basis();
         super::sys::supported_abi()?;
         if request.device.is_empty()
             || request.device.contains('\0')
@@ -515,6 +517,7 @@ impl AlsaStream {
         match receiver.recv() {
             Ok(Ok(configuration)) => Ok(Self {
                 configuration,
+                basis,
                 shared,
                 worker: Some(worker),
                 recovered_mixer: None,
@@ -531,6 +534,10 @@ impl AlsaStream {
         }
     }
 
+    /// Original mixer grid captured before this stream renders or submits frames.
+    pub const fn frame_basis(&self) -> beatkernel::audio::OutputFrameBasis {
+        self.basis
+    }
     /// Exact applied settings and output scheduling grid.
     pub const fn configuration(&self) -> &AlsaAppliedConfig {
         &self.configuration
@@ -679,9 +686,12 @@ fn run_worker(
                 report.frames as u64,
             );
             encode_pcm(config.format, render, conversion).map_err(LinuxError::Conversion)?;
-            shared
+            let rendered = shared
                 .rendered
-                .store(mixer.frame_cursor(), Ordering::Relaxed);
+                .load(Ordering::Relaxed)
+                .checked_add(u64::try_from(report.frames).map_err(|_| LinuxError::Overflow)?)
+                .ok_or(LinuxError::Overflow)?;
+            shared.rendered.store(rendered, Ordering::Relaxed);
             increment(&shared.renders, 1);
             pending_offset = 0;
         }
@@ -1274,6 +1284,15 @@ mod tests {
                 output_origin: Timestamp::ZERO,
                 requested,
             },
+            basis: beatkernel::audio::OutputFrameBasis::new(
+                ClockPoint {
+                    domain: ClockDomainId(9),
+                    timestamp: Timestamp::ZERO,
+                },
+                48_000,
+                0,
+            )
+            .unwrap(),
             shared: Arc::clone(&shared),
             worker: None, // Pure facade fixture: no native thread/PCM/device.
             recovered_mixer: None,
@@ -1382,3 +1401,7 @@ impl beatkernel::audio::StoppedMixerSource for AlsaStream {
 #[cfg(test)]
 #[path = "alsa/recovery_fixtures.rs"]
 mod recovery_fixtures;
+
+#[cfg(test)]
+#[path = "alsa/frame_basis_fixtures.rs"]
+mod frame_basis_fixtures;

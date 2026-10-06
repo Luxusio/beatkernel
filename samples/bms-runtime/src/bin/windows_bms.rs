@@ -940,16 +940,24 @@ mod native {
                 });
             if usable {
                 if let Some(previous) = first {
-                    match WasapiPresentationClock::from_snapshots(
+                    match WasapiPresentationClock::from_snapshots_with_basis(
                         previous,
                         snapshot,
-                        ClockPoint {
-                            domain: OUTPUT,
-                            timestamp: Timestamp::ZERO,
-                        },
+                        stream.frame_basis(),
                         ClockInterval {
-                            start: Timestamp::ZERO,
-                            end: Timestamp::from_nanos(extent),
+                            start: stream
+                                .frame_basis()
+                                .point_at_native_counter(0, 1)?
+                                .timestamp,
+                            end: Timestamp::from_nanos(
+                                stream
+                                    .frame_basis()
+                                    .point_at_native_counter(0, 1)?
+                                    .timestamp
+                                    .as_nanos()
+                                    .checked_add(extent)
+                                    .ok_or("presentation validity end overflow")?,
+                            ),
                         },
                         ExtrapolationPolicy::Bounded {
                             before: Duration::from_nanos(3_000_000_000),
@@ -995,7 +1003,7 @@ mod native {
             )
             .into());
         }
-        match discipline.observe(snapshot) {
+        match discipline.observe_with_basis(snapshot, stream.frame_basis()) {
             Ok(admission) => Ok(Some(admission)),
             Err(error) if skippable_observation(&error) => Ok(None),
             Err(error) => Err(error.into()),
@@ -1156,8 +1164,8 @@ mod native {
                 .last_evidence
                 .ok_or("original native resume evidence unavailable")?
             {
-                super::live_output::StartupEvidence::Wasapi(snapshot) => {
-                    discipline.observe(snapshot)?;
+                super::live_output::StartupEvidence::Wasapi(snapshot, basis) => {
+                    discipline.observe_with_basis(snapshot, basis)?;
                     if discipline.latest_pair() != Some(reference) {
                         return Err("WASAPI resume snapshot differs from accepted reference".into());
                     }

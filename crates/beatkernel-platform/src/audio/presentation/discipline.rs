@@ -1,5 +1,5 @@
 //! Native presentation evidence admission over the pure bounded core estimator.
-use super::{PresentationError, observation};
+use super::{PresentationError, observation, observation_with_basis};
 use crate::audio::AudioStreamSnapshot;
 use beatkernel::{
     time::{
@@ -88,6 +88,7 @@ impl From<EstimatorError> for DisciplineError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ObservationSource {
     Wasapi {
+        basis: Option<beatkernel::audio::OutputFrameBasis>,
         frequency: u64,
         position: u64,
         qpc: u64,
@@ -223,20 +224,62 @@ impl PresentationDiscipline {
         &mut self,
         snapshot: AudioStreamSnapshot,
     ) -> Result<ObservationAdmission, DisciplineError> {
+        self.observe_wasapi(snapshot, None)
+    }
+    /// Admits native evidence on a fixed original mixer frame basis within this epoch.
+    pub fn observe_with_basis(
+        &mut self,
+        snapshot: AudioStreamSnapshot,
+        basis: beatkernel::audio::OutputFrameBasis,
+    ) -> Result<ObservationAdmission, DisciplineError> {
+        self.observe_wasapi(snapshot, Some(basis))
+    }
+    /// Rejects a stale stream token before interpreting basis or native metadata.
+    pub fn observe_with_basis_in_epoch(
+        &mut self,
+        epoch: u64,
+        snapshot: AudioStreamSnapshot,
+        basis: beatkernel::audio::OutputFrameBasis,
+    ) -> Result<ObservationAdmission, DisciplineError> {
+        if epoch != self.epoch() {
+            return Err(DisciplineError::EpochMismatch);
+        }
+        self.observe_with_basis(snapshot, basis)
+    }
+    fn observe_wasapi(
+        &mut self,
+        snapshot: AudioStreamSnapshot,
+        basis: Option<beatkernel::audio::OutputFrameBasis>,
+    ) -> Result<ObservationAdmission, DisciplineError> {
+        if let Some(basis) = basis {
+            if basis
+                .point_at_native_counter(0, 1)
+                .map_err(|_| DisciplineError::Overflow)?
+                != self.output_origin
+            {
+                return Err(DisciplineError::DomainMismatch);
+            }
+        }
         if self.latest_source == Some(ObservationSource::SuppliedPair) {
             return Err(DisciplineError::ObservationSourceChanged);
         }
-        let (pair, frequency, position, qpc) = observation(snapshot, self.output_origin)?;
+        let (pair, frequency, position, qpc) = if let Some(basis) = basis {
+            observation_with_basis(snapshot, basis)?
+        } else {
+            observation(snapshot, self.output_origin)?
+        };
         if pair.target.domain != self.host_domain {
             return Err(DisciplineError::DomainMismatch);
         }
         let source = ObservationSource::Wasapi {
+            basis,
             frequency,
             position,
             qpc,
         };
         if let Some(previous_source) = self.latest_source {
             let ObservationSource::Wasapi {
+                basis: previous_basis,
                 frequency: previous_frequency,
                 position: previous_position,
                 qpc: previous_qpc,
@@ -244,6 +287,9 @@ impl PresentationDiscipline {
             else {
                 return Err(DisciplineError::ObservationSourceChanged);
             };
+            if basis != previous_basis {
+                return Err(DisciplineError::ObservationSourceChanged);
+            }
             let previous = self
                 .estimator
                 .latest_pair()

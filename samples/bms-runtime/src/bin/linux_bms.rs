@@ -508,7 +508,7 @@ mod native {
         },
         linux::{
             AlsaRequest, AlsaStatus, AlsaStream, EvdevDevice, EvdevItem, MonotonicClock,
-            alsa_presentation_pair,
+            alsa_presentation_pair_with_basis,
         },
     };
     use std::{
@@ -534,10 +534,9 @@ mod native {
         let Some(timing) = stream.timing_snapshot() else {
             return Ok(None);
         };
-        Ok(alsa_presentation_pair(
+        Ok(alsa_presentation_pair_with_basis(
             timing,
-            output_origin(),
-            stream.configuration().format.sample_rate(),
+            stream.frame_basis(),
         )?)
     }
     use beatkernel_bms_runtime::native_start::{

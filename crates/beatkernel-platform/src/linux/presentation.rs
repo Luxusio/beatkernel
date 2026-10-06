@@ -1,6 +1,6 @@
 //! Pure checked ALSA played-frame estimate to explicit output/host association.
 use super::{AlsaTimingSnapshot, LinuxError};
-use beatkernel::time::{ClockMappingQuality, ClockPair, ClockPoint, Timestamp};
+use beatkernel::time::{ClockMappingQuality, ClockPair, ClockPoint};
 
 /// Converts native ALSA timing into a caller-domain output/host pair.
 ///
@@ -13,11 +13,20 @@ pub fn alsa_presentation_pair(
     output_origin: ClockPoint,
     sample_rate: u32,
 ) -> Result<Option<ClockPair>, LinuxError> {
-    if sample_rate == 0 {
-        return Err(LinuxError::InvalidConfiguration(
-            "ALSA presentation requires nonzero applied sample rate",
-        ));
-    }
+    let basis =
+        beatkernel::audio::OutputFrameBasis::new(output_origin, sample_rate, 0).map_err(|_| {
+            LinuxError::InvalidConfiguration(
+                "ALSA presentation requires nonzero applied sample rate",
+            )
+        })?;
+    alsa_presentation_pair_with_basis(snapshot, basis)
+}
+/// Maps verified native played frames through the original physical mixer grid.
+/// Native counters remain stream-relative; the frame offset is added before floor.
+pub fn alsa_presentation_pair_with_basis(
+    snapshot: AlsaTimingSnapshot,
+    basis: beatkernel::audio::OutputFrameBasis,
+) -> Result<Option<ClockPair>, LinuxError> {
     let (Some(played), Some(native)) =
         (snapshot.estimated_played_frames, snapshot.native_timestamp)
     else {
@@ -64,19 +73,11 @@ pub fn alsa_presentation_pair(
             "ALSA played estimate contradicts submitted-minus-delay",
         ));
     }
-    let offset = i128::from(played)
-        .checked_mul(1_000_000_000)
-        .ok_or(LinuxError::Overflow)?
-        / i128::from(sample_rate);
-    let output = i128::from(output_origin.timestamp.as_nanos())
-        .checked_add(offset)
-        .ok_or(LinuxError::Overflow)?;
-    let output = Timestamp::from_nanos(i64::try_from(output).map_err(|_| LinuxError::Overflow)?);
+    let output = basis
+        .point_at_stream_frame(played)
+        .map_err(|_| LinuxError::Overflow)?;
     Ok(Some(ClockPair {
-        source: ClockPoint {
-            domain: output_origin.domain,
-            timestamp: output,
-        },
+        source: output,
         target: native,
     }))
 }
@@ -85,7 +86,7 @@ pub fn alsa_presentation_pair(
 mod tests {
     use super::*;
     use crate::linux::AlsaNativeTimestamp;
-    use beatkernel::time::ClockDomainId;
+    use beatkernel::time::{ClockDomainId, Timestamp};
     fn point(domain: u32, ns: i64) -> ClockPoint {
         ClockPoint {
             domain: ClockDomainId(domain),

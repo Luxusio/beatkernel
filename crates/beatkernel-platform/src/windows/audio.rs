@@ -196,6 +196,7 @@ impl WasapiBackend {
         clock: QpcClock,
         options: WasapiOptions,
     ) -> Result<WasapiStream, AudioPlatformError> {
+        let basis = mixer.output_frame_basis();
         if request.backend() == AudioBackendKind::Asio {
             return Err(AudioPlatformError::BackendUnavailable(
                 AudioBackendKind::Asio,
@@ -248,6 +249,7 @@ impl WasapiBackend {
         match opened_rx.recv() {
             Ok(Ok((configuration, wake))) => Ok(WasapiStream {
                 configuration,
+                basis,
                 options,
                 control,
                 wake,
@@ -271,6 +273,7 @@ impl WasapiBackend {
 
 /// A native stream whose terminal stop joins the worker before releasing assets.
 pub struct WasapiStream {
+    basis: beatkernel::audio::OutputFrameBasis,
     configuration: AppliedStreamConfig,
     options: WasapiOptions,
     control: Arc<Control>,
@@ -283,6 +286,10 @@ pub struct WasapiStream {
 }
 
 impl WasapiStream {
+    /// Original mixer grid captured before worker priming or native setup.
+    pub const fn frame_basis(&self) -> beatkernel::audio::OutputFrameBasis {
+        self.basis
+    }
     /// Unmodified explicit worker scheduling/wake options.
     pub const fn options(&self) -> WasapiOptions {
         self.options

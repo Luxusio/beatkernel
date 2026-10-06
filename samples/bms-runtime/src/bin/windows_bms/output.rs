@@ -198,15 +198,18 @@ pub(super) enum Output {
 }
 #[derive(Clone, Copy, Debug)]
 pub(super) enum StartupEvidence {
-    Wasapi(beatkernel_platform::audio::AudioStreamSnapshot),
+    Wasapi(
+        beatkernel_platform::audio::AudioStreamSnapshot,
+        beatkernel::audio::OutputFrameBasis,
+    ),
     #[cfg(feature = "asio-sdk")]
     Asio(AsioPresentationObservation),
 }
 impl StartupEvidence {
     pub(super) fn seed_discipline(self, discipline: &mut PresentationDiscipline) -> Result<()> {
         match self {
-            Self::Wasapi(snapshot) => {
-                discipline.observe(snapshot)?;
+            Self::Wasapi(snapshot, basis) => {
+                discipline.observe_with_basis(snapshot, basis)?;
             }
             #[cfg(feature = "asio-sdk")]
             Self::Asio(observation) => {
@@ -221,7 +224,7 @@ impl StartupEvidence {
         timing: NativeStartTiming,
     ) -> Result<()> {
         match self {
-            Self::Wasapi(_) => {
+            Self::Wasapi(..) => {
                 end.observe(None, timing.point()?)?;
             }
             #[cfg(feature = "asio-sdk")]
@@ -248,14 +251,14 @@ impl Output {
                     )
                     .into());
                 }
-                match discipline.observe(snapshot) {
+                match discipline.observe_with_basis(snapshot, stream.frame_basis()) {
                     Ok(ObservationAdmission::Retained | ObservationAdmission::Progress) => {
                         Ok(Some(NativeStartObservation {
                             timing: discipline
                                 .latest_pair()
                                 .ok_or("accepted startup relation missing")?
                                 .into(),
-                            evidence: StartupEvidence::Wasapi(snapshot),
+                            evidence: StartupEvidence::Wasapi(snapshot, stream.frame_basis()),
                         }))
                     }
                     Ok(

@@ -340,6 +340,18 @@ impl Mixer {
         self.config
     }
 
+    /// Captures this physical next-frame basis without changing mixer state.
+    pub fn output_frame_basis(&self) -> super::OutputFrameBasis {
+        super::OutputFrameBasis::new(
+            crate::time::ClockPoint {
+                domain: self.config.domain(),
+                timestamp: self.config.origin(),
+            },
+            self.config.format().sample_rate(),
+            self.frame_cursor,
+        )
+        .expect("mixer format has a validated positive sample rate")
+    }
     /// Absolute next output frame; Seek does not rewind it.
     pub const fn frame_cursor(&self) -> u64 {
         self.frame_cursor

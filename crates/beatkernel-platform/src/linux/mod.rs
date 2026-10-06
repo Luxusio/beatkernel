@@ -16,7 +16,7 @@ pub use input::{
     EvdevDevice, EvdevItem, EvdevKeyboardDevice, EvdevSnapshot, HidrawDevice, LinuxInputCounters,
     evdev_keyboard_devices,
 };
-pub use presentation::alsa_presentation_pair;
+pub use presentation::{alsa_presentation_pair, alsa_presentation_pair_with_basis};
 pub use sys::{LinuxError, MonotonicClock};
 
 /// The native target represented by this module.

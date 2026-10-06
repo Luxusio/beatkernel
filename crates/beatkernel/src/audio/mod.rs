@@ -39,12 +39,14 @@
 //! # Ok::<(), beatkernel::audio::AudioError>(())
 //! ```
 
+mod frame_basis;
 mod handoff;
 mod mixer;
 mod model;
 mod pcm;
 mod queue;
 
+pub use frame_basis::{OutputFrameBasis, OutputFrameBasisError};
 pub use handoff::StoppedMixerSource;
 pub use mixer::Mixer;
 pub use model::{

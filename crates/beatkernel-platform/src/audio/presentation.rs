@@ -43,6 +43,20 @@ fn observation(
     snapshot: AudioStreamSnapshot,
     output_origin: ClockPoint,
 ) -> Result<(ClockPair, u64, u64, u64), PresentationError> {
+    observation_impl(snapshot, output_origin, None)
+}
+/// Converts native counter evidence with one rational floor on the original grid.
+pub fn observation_with_basis(
+    snapshot: AudioStreamSnapshot,
+    basis: beatkernel::audio::OutputFrameBasis,
+) -> Result<(ClockPair, u64, u64, u64), PresentationError> {
+    observation_impl(snapshot, basis.origin(), Some(basis))
+}
+fn observation_impl(
+    snapshot: AudioStreamSnapshot,
+    output_origin: ClockPoint,
+    basis: Option<beatkernel::audio::OutputFrameBasis>,
+) -> Result<(ClockPair, u64, u64, u64), PresentationError> {
     if !snapshot.telemetry_available || snapshot.status != AudioStreamStatus::Running {
         return Err(PresentationError::Unavailable);
     }
@@ -57,17 +71,23 @@ fn observation(
         return Err(PresentationError::FrequencyChanged);
     }
     let host = clock.host_point.ok_or(PresentationError::Unavailable)?;
-    let offset = i128::from(clock.position) * 1_000_000_000 / i128::from(clock.frequency);
-    let source = i128::from(output_origin.timestamp.as_nanos()) + offset;
-    let source = i64::try_from(source)
-        .map(Timestamp::from_nanos)
-        .map_err(|_| PresentationError::Overflow)?;
+    let source = if let Some(basis) = basis {
+        basis
+            .point_at_native_counter(clock.position, clock.frequency)
+            .map_err(|_| PresentationError::Overflow)?
+    } else {
+        let offset = i128::from(clock.position) * 1_000_000_000 / i128::from(clock.frequency);
+        let source = i128::from(output_origin.timestamp.as_nanos()) + offset;
+        ClockPoint {
+            domain: output_origin.domain,
+            timestamp: Timestamp::from_nanos(
+                i64::try_from(source).map_err(|_| PresentationError::Overflow)?,
+            ),
+        }
+    };
     Ok((
         ClockPair {
-            source: ClockPoint {
-                domain: output_origin.domain,
-                timestamp: source,
-            },
+            source,
             target: host,
         },
         clock.frequency,
@@ -102,6 +122,41 @@ impl WasapiPresentationClock {
             observation(first, output_origin)?;
         let (second, second_frequency, second_position, second_qpc) =
             observation(second, output_origin)?;
+        Self::from_observations(
+            (first, first_frequency, first_position, first_qpc),
+            (second, second_frequency, second_position, second_qpc),
+            output_origin,
+            validity,
+            extrapolation,
+            uncertainty,
+        )
+    }
+    /// Calibrates fresh native counters against an existing physical mixer frame basis.
+    pub fn from_snapshots_with_basis(
+        first: AudioStreamSnapshot,
+        second: AudioStreamSnapshot,
+        basis: beatkernel::audio::OutputFrameBasis,
+        validity: ClockInterval,
+        extrapolation: ExtrapolationPolicy,
+        uncertainty: CalibrationUncertainty,
+    ) -> Result<Self, PresentationError> {
+        let first = observation_with_basis(first, basis)?;
+        let second = observation_with_basis(second, basis)?;
+        let origin = basis
+            .point_at_native_counter(0, 1)
+            .map_err(|_| PresentationError::Overflow)?;
+        Self::from_observations(first, second, origin, validity, extrapolation, uncertainty)
+    }
+    fn from_observations(
+        first: (ClockPair, u64, u64, u64),
+        second: (ClockPair, u64, u64, u64),
+        output_origin: ClockPoint,
+        validity: ClockInterval,
+        extrapolation: ExtrapolationPolicy,
+        uncertainty: CalibrationUncertainty,
+    ) -> Result<Self, PresentationError> {
+        let (first, first_frequency, first_position, first_qpc) = first;
+        let (second, second_frequency, second_position, second_qpc) = second;
         if first_frequency != second_frequency {
             return Err(PresentationError::FrequencyChanged);
         }
