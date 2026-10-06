@@ -2746,7 +2746,7 @@ pub(crate) fn validate_section_output_evidence_with_stops(
     Ok(normalized)
 }
 
-fn counter_values(counters: AudioCounters) -> [u64; 11] {
+pub(crate) fn counter_values(counters: AudioCounters) -> [u64; 11] {
     [
         counters.rendered_frames,
         counters.commands_consumed,

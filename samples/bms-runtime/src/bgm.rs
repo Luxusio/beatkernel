@@ -199,6 +199,36 @@ impl BgmFeeder {
         }
     }
 
+    /// Retire only accepted commands strictly before an actual completed playback cursor.
+    /// No callback or new admission occurs; invalid/regressed/late cursors preserve state.
+    pub fn retire_completed(
+        &mut self,
+        rendered_frames: u64,
+    ) -> Result<BgmFeedReport, BgmFeedError> {
+        if rendered_frames < self.cursor {
+            return Err(BgmFeedError::CursorRegression {
+                previous: self.cursor,
+                received: rendered_frames,
+            });
+        }
+        if let Some(cue) = self
+            .cues
+            .get(self.next)
+            .filter(|cue| cue.frame < rendered_frames)
+        {
+            return Err(BgmFeedError::Late {
+                command: cue.command,
+                target_frame: cue.frame,
+                rendered_frames,
+            });
+        }
+        self.cursor = rendered_frames;
+        while self.retired < self.next && self.cues[self.retired].frame < rendered_frames {
+            self.retired += 1;
+        }
+        Ok(self.report())
+    }
+
     /// Admit eligible commands using the caller's sole producer or Runtime.
     ///
     /// Horizon is inclusive. Target equal to `rendered_frames` still needs an

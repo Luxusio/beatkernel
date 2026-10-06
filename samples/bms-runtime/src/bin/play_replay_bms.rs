@@ -15,7 +15,7 @@ use beatkernel_bms_runtime::{
     player,
     replay_audio::{completed_render_cursor_for_feeder, plan_section_audio},
     replay_pause::ReplayPause,
-    replay_playback::{read_replay, decode_section_setup},
+    replay_playback::read_replay,
     replay_visual::ReplayVisual,
 };
 #[cfg(test)]
@@ -951,9 +951,6 @@ fn run(options: Options) -> Result<()> {
         CodecLimits::new(65536, 32768)?,
     )?;
     let file = read_replay(&mut File::open(&options.replay)?, limits)?;
-    if decode_section_setup(&file.header.options)?.end.is_some() {
-        return Err("native replay command does not yet support finite recorded endpoints".into());
-    }
     let prepared = load_prepared_for_section_replay(
         &options.chart,
         options.format,
@@ -992,6 +989,16 @@ fn run(options: Options) -> Result<()> {
     )?;
     let mut completion = ReplayCompletion::new(OUTPUT, options.format.sample_rate());
     let plan = plan_section_audio(&prepared, file, limits, origin, options.preroll)?;
+    let playback_end_frame = plan.playback_end_frame;
+    let mut finite_completion = playback_end_frame
+        .map(|end| {
+            beatkernel_bms_runtime::finite_replay_completion::FiniteReplayCompletion::new(
+                origin,
+                options.format.sample_rate(),
+                end,
+            )
+        })
+        .transpose()?;
     println!(
         "reconstructed logical replay: results={} hits={} recorded_until={:?} final_judge_hash={:#018x}; no live acquisition or original physical timing reproduction",
         plan.judge_events.len(),
@@ -1021,22 +1028,23 @@ fn run(options: Options) -> Result<()> {
         );
         return Err(error.into());
     }
-    let mixer = Mixer::new(
-        MixerConfig::new(
-            options.format,
-            origin.domain,
-            origin.timestamp,
-            AudioLimits::new(
-                options.capacity,
-                options.voices,
-                options.capacity,
-                AudioLimits::MAX_RENDER_FRAMES,
-                options.capacity,
-            )?,
-        ),
-        prepared.bank,
-        consumer,
-    )?;
+    let mixer_config = MixerConfig::new(
+        options.format,
+        origin.domain,
+        origin.timestamp,
+        AudioLimits::new(
+            options.capacity,
+            options.voices,
+            options.capacity,
+            AudioLimits::MAX_RENDER_FRAMES,
+            options.capacity,
+        )?,
+    );
+    let mixer_config = match playback_end_frame {
+        Some(end) => mixer_config.with_playback_end_frame(end),
+        None => mixer_config,
+    };
+    let mixer = Mixer::new(mixer_config, prepared.bank, consumer)?;
     if player::cancelled() {
         return Ok(());
     }
@@ -1047,6 +1055,9 @@ fn run(options: Options) -> Result<()> {
         visual.start(),
         options.preroll,
     )?;
+    if let Some(end) = playback_end_frame {
+        pause = pause.with_playback_end_frame(end)?;
+    }
     let mut pause_available = false;
     let mut stream = match native::open(&options, mixer) {
         Ok(stream) => stream,
@@ -1090,6 +1101,15 @@ fn run(options: Options) -> Result<()> {
             player::retry_pause_publication();
             let presentation = stream.presentation()?;
             let presented = presentation.presented;
+            if let Some(completion) = &mut finite_completion {
+                completion.observe(false, &feeder, rendered, presented)?;
+                if let (Some(report), Some(cursor)) = (rendered, cursor) {
+                    if report.playback_end_physical_frame.is_some() {
+                        feeder.retire_completed(cursor)?;
+                        completion.observe(false, &feeder, None, presented)?;
+                    }
+                }
+            }
             let update = update_replay_pause(
                 &mut pause,
                 &mut pause_available,
@@ -1116,9 +1136,12 @@ fn run(options: Options) -> Result<()> {
                     );
                 }
                 if boundary.paused {
-                    let events = visual.advance_to(boundary.song)?;
+                    let song = visual
+                        .end()
+                        .map_or(boundary.song, |end| boundary.song.min(end));
+                    let events = visual.advance_to(song)?;
                     player::publish_replay_prefix_with_gauge(
-                        boundary.song,
+                        song,
                         &events,
                         visual.pressed_lanes(),
                         *visual.mine_damage(),
@@ -1147,6 +1170,7 @@ fn run(options: Options) -> Result<()> {
                         Some(presentation_song(point, visual.start(), options.preroll)?)
                     };
                     if let Some(song) = song {
+                        let song = visual.end().map_or(song, |end| song.min(end));
                         let events = visual.advance_to(song)?;
                         player::publish_replay_prefix_with_gauge(
                             song,
@@ -1158,11 +1182,17 @@ fn run(options: Options) -> Result<()> {
                     }
                 }
             }
-            if pause.phase() == PausePhase::Running
-                && deadline.is_none()
-                && completion.observe(visual.finished(), feeder.report(), rendered, presented)?
-            {
-                break;
+            if deadline.is_none() {
+                let finished = if let Some(completion) = &mut finite_completion {
+                    completion.observe(visual.finished(), &feeder, None, presented)?
+                } else if pause.phase() == PausePhase::Running {
+                    completion.observe(visual.finished(), feeder.report(), rendered, presented)?
+                } else {
+                    false
+                };
+                if finished {
+                    break;
+                }
             }
             std::thread::sleep(WallDuration::from_millis(1));
         }

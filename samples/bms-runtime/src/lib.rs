@@ -79,6 +79,7 @@ pub mod completion;
 mod contact_input_mode_fixtures;
 /// Portable bounded audio device metadata and explicit draft selection.
 pub mod device_catalog;
+pub mod finite_replay_completion;
 #[cfg(test)]
 mod finite_replay_fixtures;
 #[cfg(test)]

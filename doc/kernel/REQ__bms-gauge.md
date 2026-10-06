@@ -326,7 +326,20 @@ unfinished; preserving a policy does not imply those launchers select it.
 
 The native output-only replay command uses policy-aware validation before PCM
 asset reads, pristine replay chart registration, and recorded-policy audio/visual
-planning for unlimited recordings. Finite replay commands remain explicitly
-unsupported until the native mixer cutoff and owner endpoint are integrated.
+planning for unlimited and finite recordings. The finite plan retains the exact
+upward-rounded playback endpoint, including preroll; Mixer and ReplayPause use
+that same immutable endpoint. Display targets clamp at the original-song end.
+Completion requires a genuine endpoint render marker, exactly all feeder-admitted
+commands consumed/applied, and native presentation crossing the marker's physical
+frame. Manual pauses may shift that physical frame; never assume it equals the
+configured playback frame. Validate connected producer, render/counter chronology,
+stable endpoint and frozen post-end state before publishing visual progress.
+Terminal reports are paused: retire feeder credits from their validated playback
+cursor without admitting more commands. Check exact endpoint execution before
+visual publication even if those credits have not yet retired. An irreversible
+endpoint completes when its presentation and recorded-prefix proof are present,
+including a pending manual pause; it must not wait for an impossible resume.
+Missing render/presentation evidence cannot complete playback. Ordinary idle
+drain is insufficient for a finite cutoff, and wall limits remain truncation.
 Headless publication validates gauge consistency and remains a presentation
 no-op. This does not establish physical audio/GPU or driver acceptance.

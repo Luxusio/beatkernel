@@ -102,6 +102,8 @@ fn completed_render_cursor_with_admitted_stops(
 /// Off-thread planned commands, distinct from queue/native execution.
 #[derive(Debug)]
 pub struct ReplayAudioPlan {
+    /// Immutable relative scheduling endpoint, including preroll; None is unlimited.
+    pub playback_end_frame: Option<u64>,
     /// Stable chronological output-domain Play and gameplay-failure Stop commands.
     pub commands: Vec<AudioCommand>,
     /// Actual full-log judge results with original input provenance.
@@ -583,6 +585,7 @@ fn plan_with_section(
         .map_err(|_| ReplayAudioError::AllocationFailed)?;
     judge_events.extend_from_slice(session.results());
     Ok(ReplayAudioPlan {
+        playback_end_frame: end,
         commands,
         judge_events,
         recorded_until,
