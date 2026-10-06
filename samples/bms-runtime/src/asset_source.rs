@@ -60,6 +60,7 @@ impl MemoryFiles {
         if limits.max_files == 0
             || limits.max_file_bytes == 0
             || limits.max_total_bytes == 0
+            || limits.max_file_bytes > limits.max_total_bytes
             || limits.max_path_bytes == 0
             || limits.max_file_bytes > isize::MAX as usize
             || limits.max_path_bytes > isize::MAX as usize

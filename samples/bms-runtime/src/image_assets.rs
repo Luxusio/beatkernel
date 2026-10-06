@@ -84,26 +84,15 @@ enum Cached {
     Unavailable(ImageUnavailable),
 }
 
-impl ImageAssets {
-    /// Loads referenced images, crop dependencies and initial BMP00/BGA00.
-    /// Bad/missing raster data is unavailable; unsafe IO and exhausted limits
-    /// reject the entire preparation. Filesystem stability is assumed, as for audio.
-    pub fn prepare(
-        root: &Path,
-        chart: &BmsChart,
-        limits: ImageAssetLimits,
-    ) -> Result<Self, String> {
-        limits.validate()?;
-        let source = FileAssetSource::new(root).map_err(|e| e.to_string())?;
-        Self::prepare_from_source(&source, chart, limits)
-    }
-
-    /// Prepares identical decoded/cropped/keyed resources from a scoped source.
-    pub fn prepare_from_source(
-        source: &dyn AssetSource,
-        chart: &BmsChart,
-        limits: ImageAssetLimits,
-    ) -> Result<Self, String> {
+struct ImagePlan {
+    explicit_canvas: Option<[u32; 2]>,
+    canvas: [u32; 2],
+    canvas_bytes: u64,
+    references: BTreeSet<ImageId>,
+    sources: BTreeSet<ImageId>,
+}
+impl ImagePlan {
+    fn new(chart: &BmsChart, limits: ImageAssetLimits) -> Result<Self, String> {
         limits.validate()?;
         let explicit_canvas = chart.canvas_size().map_err(|e| e.to_string())?;
         let canvas = explicit_canvas.unwrap_or([256, 256]);
@@ -155,6 +144,53 @@ impl ImageAssets {
         {
             return Err("image reference capacity exceeded".into());
         }
+        Ok(Self {
+            explicit_canvas,
+            canvas,
+            canvas_bytes,
+            references,
+            sources,
+        })
+    }
+}
+
+impl ImageAssets {
+    /// Loads referenced images, crop dependencies and initial BMP00/BGA00.
+    /// Bad/missing raster data is unavailable; unsafe IO and exhausted limits
+    /// reject the entire preparation. Filesystem stability is assumed, as for audio.
+    pub fn prepare(
+        root: &Path,
+        chart: &BmsChart,
+        limits: ImageAssetLimits,
+    ) -> Result<Self, String> {
+        let plan = ImagePlan::new(chart, limits)?;
+        let source = FileAssetSource::new(root).map_err(|e| e.to_string())?;
+        Self::prepare_validated(&source, chart, limits, plan)
+    }
+
+    /// Prepares identical decoded/cropped/keyed resources from a scoped source.
+    pub fn prepare_from_source(
+        source: &dyn AssetSource,
+        chart: &BmsChart,
+        limits: ImageAssetLimits,
+    ) -> Result<Self, String> {
+        let plan = ImagePlan::new(chart, limits)?;
+        Self::prepare_validated(source, chart, limits, plan)
+    }
+
+    fn prepare_validated(
+        source: &dyn AssetSource,
+        chart: &BmsChart,
+        limits: ImageAssetLimits,
+        plan: ImagePlan,
+    ) -> Result<Self, String> {
+        let ImagePlan {
+            explicit_canvas,
+            canvas,
+            canvas_bytes,
+            references,
+            sources,
+        } = plan;
         let mut bank = Self::default();
         let mut cache = BTreeMap::<PathBuf, Cached>::new();
         for id in sources {
