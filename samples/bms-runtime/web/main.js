@@ -1042,6 +1042,7 @@ ui["local-count"].addEventListener("change", () => {
     localRoster.clearSources();
     void releaseLocalSources(localRoster.players.length === 1 ? "One player uses inputs automatically. No source selection is needed." : "Discover sources before assigning local players.");
     showLocalRoster();
+    showOpponentSelection();
     ui["local-status"].textContent = localRoster.players.length === 1 ? "One player uses inputs automatically. No source selection is needed." : "Discover sources before assigning local players.";
     controls();
   } catch (error) { ui["local-count"].value = String(localRoster.players.length); status(error.message, true); }
