@@ -370,7 +370,7 @@ fn actual_capture_replay_preserves_equal_operation_order_delayed_advance_provena
             ReplayOperation::Advance
         ));
         let replay_data = data(ORDERED, true);
-        let plan = plan_audio(
+        let plan = plan_section_audio(
             &replay_data,
             actual.file,
             replay_limits(),

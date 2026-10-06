@@ -87,7 +87,7 @@ fn legacy_full_log_keeps_hash_and_results_but_audio_stops_after_the_actual_fatal
                 .iter()
                 .flat_map(|report| report.judge_events.clone())
                 .collect::<Vec<_>>();
-            let plan = plan_audio(
+            let plan = plan_section_audio(
                 &prepared,
                 legacy.file.clone(),
                 replay_limits(),
@@ -130,7 +130,7 @@ fn legacy_full_log_keeps_hash_and_results_but_audio_stops_after_the_actual_fatal
                 }
             )));
             if audible {
-                let missing = plan_audio(
+                let missing = plan_section_audio(
                     &data(&text, false),
                     legacy.file,
                     replay_limits(),
