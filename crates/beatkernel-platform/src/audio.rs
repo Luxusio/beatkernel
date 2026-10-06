@@ -39,6 +39,8 @@ use std::fmt;
 pub mod asio;
 pub mod cadence;
 mod convert;
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
+pub(crate) mod mixer_launch;
 mod negotiation;
 pub mod presentation;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", test))]

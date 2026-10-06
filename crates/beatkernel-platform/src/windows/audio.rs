@@ -196,15 +196,21 @@ impl WasapiBackend {
         clock: QpcClock,
         options: WasapiOptions,
     ) -> Result<WasapiStream, AudioPlatformError> {
+        self.open_recoverable(request, mixer, clock, options)
+            .map_err(|failure| failure.into_parts().0)
+    }
+    /// Retains recoverable software ownership on preflight/spawn/setup refusal.
+    /// Native resources retire on the worker before a joined failure is returned.
+    pub fn open_recoverable(
+        &self,
+        request: AudioStreamRequest,
+        mixer: Mixer,
+        clock: QpcClock,
+        options: WasapiOptions,
+    ) -> Result<WasapiStream, beatkernel::audio::MixerOpenFailure<AudioPlatformError>> {
         let basis = mixer.output_frame_basis();
-        if request.backend() == AudioBackendKind::Asio {
-            return Err(AudioPlatformError::BackendUnavailable(
-                AudioBackendKind::Asio,
-            ));
-        }
-        validate_options(&request, options)?;
-        if mixer.config().format() != request.format().pcm() {
-            return Err(AudioPlatformError::InvalidFormat);
+        if let Err(error) = validate_open(&request, &mixer, options) {
+            return Err(beatkernel::audio::MixerOpenFailure::new(error, Some(mixer)));
         }
         let control = Arc::new(Control {
             request: AtomicU8::new(0),
@@ -214,38 +220,42 @@ impl WasapiBackend {
         let worker_control = Arc::clone(&control);
         let (opened_tx, opened_rx) = mpsc::sync_channel(1);
         let (started_tx, started_rx) = mpsc::sync_channel(1);
-        let worker = thread::Builder::new()
-            .name("beatkernel-wasapi".into())
-            .spawn(move || {
+        let worker =
+            crate::audio::mixer_launch::launch_worker(NativeWorkerSpawner, mixer, move |mixer| {
+                let mut owned = Some(mixer);
                 // Setup result owns all partial COM/native resources locally;
                 // an error has dropped them before the failure is sent.
-                let setup = Worker::new(request, mixer, clock, options);
+                let setup = Worker::new(request, &mut owned, clock, options);
                 let mut worker = match setup {
                     Ok(worker) => worker,
                     Err(error) => {
                         let _ = opened_tx.send(Err(error));
-                        return None;
+                        return owned;
                     }
                 };
                 worker.publish(&worker_control.telemetry);
                 let duplicate = match worker.control_event.duplicate() {
                     Ok(event) => event,
                     Err(error) => {
+                        let mixer = worker.mixer.take();
                         drop(worker);
                         let _ = opened_tx.send(Err(error));
-                        return None;
+                        return mixer;
                     }
                 };
                 if opened_tx
                     .send(Ok((worker.configuration.clone(), duplicate)))
                     .is_err()
                 {
-                    return None;
+                    return worker.mixer.take();
                 }
                 worker.run(&worker_control, &started_tx);
                 worker.mixer.take()
             })
-            .map_err(|_| AudioPlatformError::WorkerFailure)?;
+            .map_err(|failure| {
+                let (_, mixer) = failure.into_parts();
+                beatkernel::audio::MixerOpenFailure::new(AudioPlatformError::WorkerFailure, mixer)
+            })?;
         match opened_rx.recv() {
             Ok(Ok((configuration, wake))) => Ok(WasapiStream {
                 configuration,
@@ -259,15 +269,45 @@ impl WasapiBackend {
                 started: started_rx,
                 has_started: false,
             }),
-            Ok(Err(error)) => {
-                let _ = worker.join();
-                Err(error)
-            }
-            Err(_) => {
-                let _ = worker.join();
-                Err(AudioPlatformError::WorkerFailure)
-            }
+            Ok(Err(error)) => Err(crate::audio::mixer_launch::join_open_failure(
+                worker,
+                error,
+                |mixer| mixer,
+            )),
+            Err(_) => Err(crate::audio::mixer_launch::join_open_failure(
+                worker,
+                AudioPlatformError::WorkerFailure,
+                |mixer| mixer,
+            )),
         }
+    }
+}
+
+fn validate_open(
+    request: &AudioStreamRequest,
+    mixer: &Mixer,
+    options: WasapiOptions,
+) -> Result<(), AudioPlatformError> {
+    if request.backend() == AudioBackendKind::Asio {
+        return Err(AudioPlatformError::BackendUnavailable(
+            AudioBackendKind::Asio,
+        ));
+    }
+    validate_options(request, options)?;
+    if mixer.config().format() != request.format().pcm() {
+        return Err(AudioPlatformError::InvalidFormat);
+    }
+    Ok(())
+}
+struct NativeWorkerSpawner;
+impl crate::audio::mixer_launch::WorkerSpawner<Option<Mixer>> for NativeWorkerSpawner {
+    fn spawn<F>(self, work: F) -> std::io::Result<JoinHandle<Option<Mixer>>>
+    where
+        F: FnOnce() -> Option<Mixer> + Send + 'static,
+    {
+        thread::Builder::new()
+            .name("beatkernel-wasapi".into())
+            .spawn(work)
     }
 }
 
@@ -849,10 +889,14 @@ struct Worker {
 impl Worker {
     fn new(
         request: AudioStreamRequest,
-        mixer: Mixer,
+        mixer: &mut Option<Mixer>,
         clock: QpcClock,
         options: WasapiOptions,
     ) -> Result<Self, AudioPlatformError> {
+        let mixer_config = mixer
+            .as_ref()
+            .ok_or(AudioPlatformError::RecoveryUnavailable)?
+            .config();
         let apartment = Apartment::new()?;
         let device = endpoint(request.device())?;
         let render_event = Event::new()?;
@@ -999,7 +1043,7 @@ impl Worker {
         // SAFETY: client initialized on this thread; native scalar configuration.
         let buffer_frames = unsafe { client.GetBufferSize() }.map_err(win_error)?;
         adjusted |= validate_native_buffer_size(&request, buffer_frames, reported)?;
-        if buffer_frames as usize > mixer.config().limits().max_render_frames() {
+        if buffer_frames as usize > mixer_config.limits().max_render_frames() {
             return Err(AudioPlatformError::Capacity);
         }
         if request.mode() == AudioStreamMode::Exclusive && period_frames != Some(buffer_frames) {
@@ -1050,7 +1094,7 @@ impl Worker {
             audio_clock,
             render_event,
             control_event,
-            mixer: Some(mixer),
+            mixer: mixer.take(),
             scratch,
             configuration,
             options,
@@ -1068,7 +1112,11 @@ impl Worker {
             _mmcss: mmcss,
             _apartment: apartment,
         };
-        worker.fill(false, None).map_err(native)?;
+        if let Err(error) = worker.fill(false, None) {
+            *mixer = worker.mixer.take();
+            drop(worker);
+            return Err(native(error));
+        }
         Ok(worker)
     }
 
@@ -1379,3 +1427,7 @@ impl beatkernel::audio::StoppedMixerSource for WasapiStream {
         Ok(self.recovered_mixer.take())
     }
 }
+
+#[cfg(test)]
+#[path = "audio/open_failure_fixtures.rs"]
+mod open_failure_fixtures;

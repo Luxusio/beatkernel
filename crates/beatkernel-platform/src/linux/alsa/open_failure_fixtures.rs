@@ -127,7 +127,7 @@ impl std::error::Error for LaunchRefusal {}
 struct RefusingSpawner {
     error: std::io::Error,
 }
-impl WorkerSpawner for RefusingSpawner {
+impl WorkerSpawner<WorkerExit> for RefusingSpawner {
     fn spawn<F>(self, _work: F) -> std::io::Result<JoinHandle<WorkerExit>>
     where
         F: FnOnce() -> WorkerExit + Send + 'static,

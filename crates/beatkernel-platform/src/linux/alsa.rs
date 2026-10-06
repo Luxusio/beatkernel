@@ -402,13 +402,9 @@ impl Shared {
 }
 
 type WorkerExit = (Result<(), LinuxError>, Mixer);
-trait WorkerSpawner {
-    fn spawn<F>(self, work: F) -> io::Result<JoinHandle<WorkerExit>>
-    where
-        F: FnOnce() -> WorkerExit + Send + 'static;
-}
+use crate::audio::mixer_launch::WorkerSpawner;
 struct NativeWorkerSpawner;
-impl WorkerSpawner for NativeWorkerSpawner {
+impl WorkerSpawner<WorkerExit> for NativeWorkerSpawner {
     fn spawn<F>(self, work: F) -> io::Result<JoinHandle<WorkerExit>>
     where
         F: FnOnce() -> WorkerExit + Send + 'static,
@@ -424,38 +420,19 @@ fn launch_worker<S, F>(
     work: F,
 ) -> Result<JoinHandle<WorkerExit>, MixerOpenFailure<LinuxError>>
 where
-    S: WorkerSpawner,
+    S: WorkerSpawner<WorkerExit>,
     F: FnOnce(Mixer) -> WorkerExit + Send + 'static,
 {
-    let slot = Arc::new(std::sync::Mutex::new(Some(mixer)));
-    let worker_slot = Arc::clone(&slot);
-    let launched = spawner.spawn(move || {
-        let mixer = worker_slot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-            .expect("worker claims one launch mixer");
-        // Drop the cold launch lock/slot before native setup and all rendering.
-        drop(worker_slot);
-        work(mixer)
-    });
-    match launched {
-        Ok(worker) => Ok(worker),
-        Err(error) => {
-            let mixer = slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            Err(MixerOpenFailure::new(error.into(), mixer))
-        }
-    }
+    crate::audio::mixer_launch::launch_worker(spawner, mixer, work).map_err(|failure| {
+        let (error, mixer) = failure.into_parts();
+        MixerOpenFailure::new(error.into(), mixer)
+    })
 }
 fn join_open_failure(
     worker: JoinHandle<WorkerExit>,
     original: LinuxError,
 ) -> MixerOpenFailure<LinuxError> {
-    let mixer = worker.join().ok().map(|(_, mixer)| mixer);
-    MixerOpenFailure::new(original, mixer)
+    crate::audio::mixer_launch::join_open_failure(worker, original, |(_, mixer)| Some(mixer))
 }
 
 /// Owns the worker lifecycle; worker exclusively owns ALSA handles and Mixer.
