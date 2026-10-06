@@ -58,3 +58,13 @@ with the existing Worker UI. Async orchestration, browser result conversion,
 actual WebTransport, physical timing and platform/performance acceptance remain
 unverified. No new per-note queue, lock, dynamic dispatch or speculative write
 receipt is introduced. Tests, formal review and QA remain deferred.
+
+## Browser binding capability preflight
+
+Worker room admission and BrowserRoomOwner configuration share one frozen
+ROOM_SESSION_METHODS list. It includes scalar publication/cadence and common
+setup, frame and drain wait methods, in addition to framing, roster, receipts
+and lifecycle operations. Worker checks the prototype before constructing a
+room client and the instance before transferring ownership. A missing capability
+is a recoverable room-open refusal before transport acquisition; preserve the
+existing gameplay owner instead of using a partial binding or fallback methods.

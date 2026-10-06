@@ -5,11 +5,11 @@ const MAX_FRAME = 65808;
 const MAX_CHUNK = 1024 * 1024;
 const U64_MAX = 18446744073709551615n;
 const I64_MAX = 9223372036854775807n;
-const METHODS = ["request_seal", "request_ready", "request_leave", "needed_bytes",
+export const ROOM_SESSION_METHODS = Object.freeze(["request_seal", "request_ready", "request_leave", "needed_bytes",
   "frame_pending", "receive_bytes", "next_write", "written", "participant_id",
   "revision", "has_snapshot", "leave_written", "snapshot", "take_start", "publish_progress",
   "publication_due", "publish_progress_at", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written",
-  "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "begin_setup", "setup_wait_step", "configure_frame_wait", "frame_wait_step", "close", "free"];
+  "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "begin_setup", "setup_wait_step", "configure_frame_wait", "frame_wait_step", "close", "free"]);
 
 export class BrowserRoomOwnerError extends Error {
   constructor(code, operation, message, cause) {
@@ -33,7 +33,7 @@ function configuration(url, options) {
   const { session, now, signal, setupTimeoutMs = 10000, ioTimeoutMs = 10000,
     channelFactory = (address, config) => WebTransportChannel.open(address, config),
     onSnapshot, onStart, onProgress, onReceipts, onClose } = options ?? {};
-  if (typeof AbortController !== "function" || !session || METHODS.some(name => typeof session[name] !== "function")
+  if (typeof AbortController !== "function" || !session || ROOM_SESSION_METHODS.some(name => typeof session[name] !== "function")
     || typeof now !== "function" || typeof channelFactory !== "function" || !integer(setupTimeoutMs, 1, 60000) || !integer(ioTimeoutMs, 1, 60000)
     || (onSnapshot !== undefined && typeof onSnapshot !== "function") || (onClose !== undefined && typeof onClose !== "function")
     || (onStart !== undefined && typeof onStart !== "function")

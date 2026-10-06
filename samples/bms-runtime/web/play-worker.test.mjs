@@ -629,6 +629,35 @@ async function workerHarness(options = {}) {
       if (this.requestError) throw this.requestError;
       this.onRequest?.(kind);
     }
+    configure_frame_wait(timeout) { this.live(); this.frameTimeout = timeout; this.frameExpires = null; }
+    frame_wait_step(elapsed) {
+      this.live();
+      if (!this.partial) { this.frameExpires = null; return -1n; }
+      this.frameExpires ??= elapsed + this.frameTimeout;
+      if (elapsed >= this.frameExpires) throw Object.assign(new Error("scripted common frame expiry"), { code: "timeout", operation: "frame" });
+      return this.frameExpires - elapsed;
+    }
+    begin_setup(elapsed, timeout) {
+      this.live(); this.setupTimeout = timeout; this.setupExpires = elapsed + timeout; this.setupPhase = "admission";
+    }
+    setup_wait_step(elapsed) {
+      this.live();
+      if (this.setupPhase === "complete") return -1n;
+      if (this.setupPhase !== "lobby" && elapsed >= this.setupExpires) throw Object.assign(new Error("scripted common setup expiry"),
+        { code: "timeout", operation: this.setupPhase === "prepared" ? "prepared" : "setup" });
+      if (this.setupPhase === "admission" && this.dto !== null && this.participantValue !== 0n) this.setupPhase = "lobby";
+      if (this.setupPhase === "lobby" && this.dto?.phase === 2) { this.setupPhase = "prepared"; this.setupExpires = elapsed + this.setupTimeout; }
+      if (this.setupPhase === "prepared" && this.schedules.length) { this.setupPhase = "complete"; return -1n; }
+      return this.setupPhase === "lobby" ? -2n : this.setupExpires - elapsed;
+    }
+    begin_drain(elapsed, timeout) { this.live(); this.drainExpires = elapsed + timeout; this.drainAdmitted = false; }
+    drain_requested() { this.live(); return this.drainAdmitted === true; }
+    drain_wait_step(elapsed) {
+      this.live();
+      if (elapsed >= this.drainExpires) throw Object.assign(new Error("scripted common drain deadline"), { code: "timeout" });
+      if (this.progressComplete && !this.drainAdmitted) { this.request("drain"); this.drainAdmitted = true; }
+      return this.drainComplete ? -1n : 1000000n;
+    }
     request_seal() { this.request("seal"); }
     request_ready() { this.request("ready"); }
     request_leave() { this.request("leave"); }
@@ -1456,7 +1485,10 @@ test("room mode, capability, URL and complete member identity refusals stay befo
   for (const options of [
     { missingRoomExport: true }, { missingRoomMethod: "receive_bytes" }, { missingRoomMethod: "take_start" },
     { missingRoomMethod: "publish_progress" }, { missingRoomMethod: "publication_due" }, { missingRoomMethod: "publish_progress_at" }, { missingRoomMethod: "request_drain" },
-    { missingRoomMethod: "drain_complete" }, { missingLocalProgress: true },
+    { missingRoomMethod: "drain_complete" },
+    ...["begin_drain", "drain_wait_step", "drain_requested", "begin_setup", "setup_wait_step", "configure_frame_wait", "frame_wait_step"]
+      .map(missingRoomMethod => ({ missingRoomMethod })),
+    { missingLocalProgress: true },
     { missingRoomStartConstructor: true }, { missingLocalIdentity: true },
     { roomConstructError: "actual room constructor refused" },
     { localIdentityError: player => player === 7 },
@@ -1900,11 +1932,7 @@ test("room HUD capability and binding failures fence only presentation and prese
 test("a completed output publishes one final room prefix outside cadence while actual write and read receipts remain distinct", async () => {
   let complete = false;
   const h = await roomPrepared({ observeOutput: () => complete });
-  const game = h.locals[0], event = await committedRoom(h, undefined, options.roomMembers ?? null);
-  if (options.roomInitialPage !== undefined) {
-    const rpc = await requestRoom(h, "play-room-page", { page: options.roomInitialPage });
-    assert.equal(roomReply(h, rpc).result.page, options.roomInitialPage);
-  }
+  const game = h.locals[0], event = await committedRoom(h);
   assert.equal((await h.rpc("play-activate", { hostNs: event.targetHostNs,
     targetHostNs: event.targetHostNs, startFrame: START })).result, null);
   const session = h.roomSessions[0], channel = h.roomChannels[0];
@@ -3835,7 +3863,10 @@ test("HID setup snapshots full-width constructor words before readiness and supp
     assert.deepEqual(configured.slice(1).map(value => Array.from(value)), [expected.deviceWords, expected.fieldWords, expected.axisParams]);
     assert.equal(game.calls.filter(call => call[0] === "hid-setup").length, 1);
     assert.ok(game.calls.indexOf(configured) < game.calls.findIndex(call => call[0] === "capture"));
-    if (inputMode === "physical-contact") assert.ok(game.calls.findIndex(call => call[0] === "touch-setup") < game.calls.indexOf(configured));
+    if (inputMode === "physical-contact") {
+      const touch = game.calls.findIndex(call => call[0] === "touch-setup");
+      assert.ok(touch >= 0 && touch < game.calls.findIndex(call => call[0] === "capture"));
+    }
     await h.send({ kind: "play-sample", playId: 7, rpcId: 2 });
     assert.ok(game.calls.indexOf(configured) < game.calls.findIndex(call => call[0] === "sample"));
     await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);

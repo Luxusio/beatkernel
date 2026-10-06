@@ -3,7 +3,7 @@ import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot } from "./host_model.mjs";
 import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
-import { BrowserRoomOwner } from "./room-owner.mjs";
+import { BrowserRoomOwner, ROOM_SESSION_METHODS } from "./room-owner.mjs";
 import { validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
 import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, encodeRawHidEvent, encodePointerEvent, encodePointerButtonEvent } from "./physical-input.mjs";
 import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
@@ -1150,10 +1150,7 @@ function openRoom(state, request) {
     || !/^\/rooms\/[A-Za-z0-9_-]{1,1024}$/.test(address.pathname)) {
     throw new Error("Room admission requires a canonical HTTPS room URL.");
   }
-  const methods = ["request_seal", "request_ready", "request_leave", "needed_bytes", "frame_pending",
-    "receive_bytes", "next_write", "written", "participant_id", "revision", "has_snapshot", "leave_written", "snapshot", "take_start",
-    "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete",
-    "request_drain", "drain_complete", "close", "free"];
+  const methods = ROOM_SESSION_METHODS;
   if (typeof BrowserRoomClient !== "function" || typeof AbortController !== "function"
     || typeof BrowserRoomClient.new_with_start !== "function"
     || methods.some(name => typeof BrowserRoomClient.prototype?.[name] !== "function")
