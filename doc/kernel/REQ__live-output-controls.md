@@ -34,6 +34,12 @@ guard or authoritative joined-owner boundary. An atomic closed signal allows
 settlement to finish after temporary control-lock contention; do not rely only
 on the code following the native run closure or overwrite already accepted
 applied replies with a later unrelated session failure.
+Startup capability advertisement is cold owner-thread setup, not an audio
+callback. Temporary UI control-lock contention must not fail playback startup;
+wait for this bounded critical section and recheck cancellation/closure before
+publishing. Cancellation during setup suppresses advertisement without reporting
+a gameplay failure; closed noncancelled or poisoned channels still report an
+error. Idle UI reply polling reads the atomic busy flag and takes no mutex.
 
 Live requests contain only supported output fields with existing byte/field
 bounds. They cannot change chart, keyboard mapping, recording, playback origin,
