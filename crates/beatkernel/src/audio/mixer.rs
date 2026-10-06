@@ -371,7 +371,8 @@ impl Mixer {
     pub fn applied_start_frame(&self) -> Option<u64> {
         self.consumer.applied_start_frame()
     }
-    /// Current producer-requested pause state, without consuming commands.
+    /// Effective producer pause state, including an outstanding exclusive hold.
+    /// Reading it does not consume commands.
     /// Cold output preparation must keep this requested through native priming.
     pub fn pause_requested(&self) -> bool {
         self.consumer.pause_requested()

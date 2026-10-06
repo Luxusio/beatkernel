@@ -567,6 +567,12 @@ impl RuntimeGroup {
     pub(crate) fn admitted_audio_commands(&self) -> u64 {
         self.producer.counters().accepted
     }
+    /// Acquires the exclusive pause hold for the whole cohort's shared output.
+    pub fn hold_audio_pause(
+        &mut self,
+    ) -> Result<beatkernel::audio::PauseHold, beatkernel::audio::PauseHoldError> {
+        self.producer.hold_pause()
+    }
     /// Shared output control only; acknowledged Transport/input coordination
     /// remains the native session owner's responsibility for the whole cohort.
     pub fn request_audio_pause(&mut self, paused: bool) {
@@ -690,6 +696,12 @@ impl SoloRuntime {
     }
     pub(crate) fn admitted_audio_commands(&self) -> u64 {
         self.0.admitted_audio_commands()
+    }
+    /// Acquires the same exclusive output pause hold as a multi-player cohort.
+    pub fn hold_audio_pause(
+        &mut self,
+    ) -> Result<beatkernel::audio::PauseHold, beatkernel::audio::PauseHoldError> {
+        self.0.hold_audio_pause()
     }
     /// Uses the same shared output control as a multi-player cohort.
     pub fn request_audio_pause(&mut self, paused: bool) {

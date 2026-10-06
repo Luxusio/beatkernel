@@ -923,3 +923,10 @@ pub mod room_client_driver;
 pub mod room_setup_wait;
 
 pub mod room_frame_wait;
+
+#[cfg(test)]
+mod audio_pause_hold_fixtures;
+#[cfg(target_os = "linux")]
+pub mod native_alsa_replacement;
+/// Portable paused-output replacement policy and statically injected lifecycle ports.
+pub mod output_replacement;

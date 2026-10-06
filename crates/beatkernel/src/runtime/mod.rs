@@ -623,6 +623,12 @@ impl Runtime {
         admit_audio(&mut self.producer, self.telemetry.counters_mut(), command)
     }
 
+    /// Acquires the shared cold pause hold without changing transport or judging.
+    pub fn hold_audio_pause(
+        &mut self,
+    ) -> Result<crate::audio::PauseHold, crate::audio::PauseHoldError> {
+        self.producer.hold_pause()
+    }
     /// Request audio scheduling pause through the same producer as keysounds.
     /// This does not pause Transport or judging. The session owner must fence
     /// input/admission and coordinate them with actual render/presentation evidence.

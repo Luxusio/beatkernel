@@ -61,6 +61,7 @@ struct Shared {
     producer_alive: AtomicBool,
     consumer_alive: AtomicBool,
     pause_requested: AtomicBool,
+    pause_held: AtomicBool,
     start_gated: bool,
     start_frame: AtomicU64,
     start_armed: AtomicBool,
@@ -77,6 +78,29 @@ impl Shared {
     }
 }
 
+/// Exclusive cold pause lease over the existing command queue allocation.
+/// Dropping it leaves pause requested; resume must be explicitly reissued.
+pub struct PauseHold {
+    shared: Arc<Shared>,
+}
+/// The queue already owns an outstanding exclusive pause lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PauseHoldError {
+    /// A prior hold has not been released.
+    AlreadyHeld,
+}
+impl std::fmt::Display for PauseHoldError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("audio pause is already held")
+    }
+}
+impl std::error::Error for PauseHoldError {}
+impl Drop for PauseHold {
+    fn drop(&mut self) {
+        self.shared.pause_requested.store(true, Ordering::Release);
+        self.shared.pause_held.store(false, Ordering::Release);
+    }
+}
 struct Slot {
     ready: AtomicBool,
     tag: AtomicU8,
@@ -213,6 +237,7 @@ fn queue(
         producer_alive: AtomicBool::new(true),
         consumer_alive: AtomicBool::new(true),
         pause_requested: AtomicBool::new(false),
+        pause_held: AtomicBool::new(false),
         start_gated,
         start_frame: AtomicU64::new(0),
         start_armed: AtomicBool::new(false),
@@ -261,7 +286,21 @@ impl CommandProducer {
     /// nonempty render. This independent desired state uses no queue slot and
     /// does not change admission counters; requests may coalesce before render.
     pub fn request_pause(&mut self, paused: bool) {
+        if !paused && self.shared.pause_held.load(Ordering::Acquire) {
+            return;
+        }
         self.shared.pause_requested.store(paused, Ordering::Release);
+    }
+    /// Pins effective pause without using a queue slot or allocating new storage.
+    /// Resume requests while held are ignored and must be reissued after release.
+    pub fn hold_pause(&mut self) -> Result<PauseHold, PauseHoldError> {
+        self.shared
+            .pause_held
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| PauseHoldError::AlreadyHeld)?;
+        Ok(PauseHold {
+            shared: Arc::clone(&self.shared),
+        })
     }
     /// Publishes one unmodified command or returns it on full/disconnect.
     ///
@@ -330,7 +369,8 @@ impl CommandConsumer {
     }
 
     pub(crate) fn pause_requested(&self) -> bool {
-        self.shared.pause_requested.load(Ordering::Acquire)
+        self.shared.pause_held.load(Ordering::Acquire)
+            || self.shared.pause_requested.load(Ordering::Acquire)
     }
     /// Retrieves one command; published commands drain after producer drop.
     pub fn try_pop(&mut self) -> Result<AudioCommand, QueuePopError> {
