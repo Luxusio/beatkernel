@@ -106,3 +106,20 @@ fn inverse_projection_excludes_menu_bars_but_preserves_fractional_and_captured_o
     let tiny = Viewport::new([1, 1], [u32::MAX, u32::MAX]).unwrap();
     assert!(tiny.project_unclipped((f64::MAX, f64::MAX)).is_err());
 }
+
+#[test]
+fn extreme_finite_captured_points_preserve_identity_and_downscale_without_intermediate_overflow() {
+    let identity = Viewport::new([u32::MAX, u32::MAX], [u32::MAX, u32::MAX]).unwrap();
+    assert_eq!(
+        identity.project_unclipped((f64::MAX, -f64::MAX)).unwrap(),
+        (f64::MAX, -f64::MAX)
+    );
+    let half = u32::MAX / 2;
+    let smaller = Viewport::new([u32::MAX, u32::MAX], [half, half]).unwrap();
+    let result = smaller.project_unclipped((f64::MAX, -f64::MAX)).unwrap();
+    assert!(result.0.is_finite() && result.1.is_finite());
+    let expected = f64::MAX / f64::from(u32::MAX) * f64::from(half);
+    assert_eq!(result, (expected, -expected));
+    assert!(result.0 > 0.0 && result.0 < f64::MAX);
+    assert!(smaller.project_unclipped((f64::INFINITY, 0.0)).is_err());
+}

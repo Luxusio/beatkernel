@@ -3906,7 +3906,11 @@ impl Desktop {
         }
     }
     fn set_search_focus(&mut self, focused: bool) {
-        if self.catalog.is_some() {
+        if focused
+            && (!self.ui_ready()
+                || self.navigator.route() != ScreenRoute::Selection
+                || self.catalog.is_some())
+        {
             return;
         }
         if self.search_focused != focused {
