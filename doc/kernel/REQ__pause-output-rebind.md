@@ -41,3 +41,7 @@ owner gets only scalar stream guards. Full runtime/backend/UI handoff, sample
 rate/grid conversion and device/acoustic acceptance remain subsequent work.
 Assertions/runtime/formal review/QA remain deferred; scoped Rustfmt and four
 sequential compile-only checks follow both paired writer terminal stops.
+Joint pause/presentation staging and translation to the fresh stream-zero anchor
+now follow [staged output timing](REQ__staged-output-timing.md). Keep the producer
+pause request pinned through native Ready priming; applied pause alone does not
+prevent a queued resume request from advancing the mixer during opening.

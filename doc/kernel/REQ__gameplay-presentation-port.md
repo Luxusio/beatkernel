@@ -25,6 +25,10 @@ Same-stream resume now follows
 the actual configuration and unchanged epoch before original native reseeding.
 Seeding must leave accepted evidence before clocks are replaced, following
 [resume commit order](REQ__resume-commit-order.md).
+Replacement output timing now stages both pause and presentation owners under
+[staged output timing](REQ__staged-output-timing.md). Its fresh frame-zero anchor
+uses checked song-base translation; ordinary solo/cohort resume uses the same
+mapping without changing the original logical song origin.
 
 Keep original NativeGameplayDevice, NativeGameplaySession, NativeCohortSession
 and run_* compatibility APIs at their existing public paths. The outer bridge
