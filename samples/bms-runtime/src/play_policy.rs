@@ -26,6 +26,27 @@ impl std::str::FromStr for GaugeSelection {
         })
     }
 }
+/// Original chart statistics retained before practice heads are removed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OriginalGaugeContext {
+    total: ResolvedTotal,
+    stages: u64,
+}
+impl OriginalGaugeContext {
+    pub fn from_source(source: &BmsChart) -> Self {
+        Self {
+            total: source.gauge_total(),
+            stages: source.judged_stage_count(),
+        }
+    }
+    pub const fn total(&self) -> ResolvedTotal {
+        self.total
+    }
+    pub const fn judged_stages(&self) -> u64 {
+        self.stages
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClassifiedWindow {
     pub judgment: BmsJudgment,
@@ -79,6 +100,19 @@ impl ResolvedPlayPolicy {
         classified: &[ClassifiedWindow],
         offset: i64,
     ) -> Result<Self, PolicyError> {
+        Self::from_context(
+            &OriginalGaugeContext::from_source(source),
+            kind,
+            classified,
+            offset,
+        )
+    }
+    pub fn from_context(
+        context: &OriginalGaugeContext,
+        kind: BmsGaugeKind,
+        classified: &[ClassifiedWindow],
+        offset: i64,
+    ) -> Result<Self, PolicyError> {
         if classified.is_empty() || classified.len() > MAX_GAUGE_GRADES {
             return Err(PolicyError::Invalid(
                 "hit windows must contain 1..=64 grades",
@@ -108,8 +142,9 @@ impl ResolvedPlayPolicy {
         );
         let judge =
             JudgeProfile::new(windows, Duration::from_nanos(offset)).map_err(PolicyError::Judge)?;
-        let total = source.gauge_total();
-        let rules = source.lr2_gauge_rules(kind).map_err(PolicyError::Bms)?;
+        let total = context.total;
+        let rules = beatkernel_bms::BmsGaugeRules::lr2(kind, total.total, context.stages)
+            .map_err(PolicyError::Bms)?;
         let gauge = GaugeProfile::from_bms_rules(rules, BmsJudgment::PGreat, &grades)
             .map_err(PolicyError::Gauge)?;
         Ok(Self {

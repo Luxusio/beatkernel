@@ -30,7 +30,7 @@ fn source() -> beatkernel_bms::BmsChart {
 }
 fn recording(settings: &NativeSettings, times: &[i64]) -> ReplayFile {
     let source = source();
-    let setup = draft_section(settings).unwrap();
+    let setup = draft_section(settings, &source).unwrap();
     let selected = crate::section_start::source_at(&source, setup.start).unwrap();
     let judge = JudgeEngine::new(
         selected.compile().unwrap().chart,
@@ -38,13 +38,16 @@ fn recording(settings: &NativeSettings, times: &[i64]) -> ReplayFile {
         setup.profile,
     )
     .unwrap();
-    let mut file = LiveReplayCapture::new_section(
+    let mut file = LiveReplayCapture::new_with_gauge(
         &judge,
         ClockDomainId(17),
         replay_limits().unwrap(),
         setup.start,
         setup.chart_seed,
         setup.end,
+        beatkernel_bms::BmsInputMode::ButtonOnly,
+        None,
+        &setup.gauge,
     )
     .unwrap()
     .into_file();
@@ -131,7 +134,7 @@ fn current_draft_extent_seed_profile_and_input_mode_mismatches_refuse_prefix() {
     )
     .unwrap();
     assert!(RecordPreview::from_file(Path::new("prefix.bkr"), &source(), &draft, changed).is_err());
-    let setup = draft_section(&draft).unwrap();
+    let setup = draft_section(&draft, &source()).unwrap();
     let selected = crate::section_start::source_at(&source(), setup.start).unwrap();
     let judge = JudgeEngine::new(
         selected.compile().unwrap().chart,
@@ -224,4 +227,33 @@ fn optional_wrong_or_ambiguous_history_preserves_prefix_scores_and_no_tail_miss(
         prefix.score.misses, 1,
         "the later 2-second note must not acquire a synthetic tail miss"
     );
+}
+
+#[test]
+fn selected_gauge_record_comparison_matches_original_source_policy_and_refuses_other_draft() {
+    let source = source();
+    let mut settings = NativeSettings::from_args(
+        &[
+            "--gauge".into(),
+            "groove".into(),
+            "--start-ns".into(),
+            "1000000000".into(),
+        ],
+        SettingsHost::Linux,
+    )
+    .unwrap();
+    let file = recording(&settings, &[]);
+    RecordPreview::from_file(Path::new("practice.bkr"), &source, &settings, file.clone()).unwrap();
+    let index = settings
+        .fields()
+        .iter()
+        .position(|row| row.flag == "--gauge")
+        .unwrap();
+    settings.set_value(index, "hard").unwrap();
+    assert!(
+        RecordPreview::from_file(Path::new("practice.bkr"), &source, &settings, file.clone())
+            .is_err()
+    );
+    settings.set_value(index, "invalid").unwrap();
+    assert!(RecordPreview::from_file(Path::new("practice.bkr"), &source, &settings, file).is_err());
 }

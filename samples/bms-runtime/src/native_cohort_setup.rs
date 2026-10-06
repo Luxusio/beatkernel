@@ -66,6 +66,31 @@ pub fn prepare_cohort(
     competition: &CompetitionOptions,
     config: &CohortPreparation<'_>,
 ) -> NativeGameplayResult<PreparedCohort> {
+    prepare_cohort_inner(prepared, assignments, competition, config, None)
+}
+pub fn prepare_cohort_with_policy(
+    prepared: &PreparedBms,
+    assignments: &[(PlayerId, DeviceId)],
+    competition: &CompetitionOptions,
+    config: &CohortPreparation<'_>,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+) -> NativeGameplayResult<PreparedCohort> {
+    crate::native_judge::validate_policy_competition(policy.selection(), competition)?;
+    if policy.judge().max_early().as_nanos() != config.early
+        || policy.judge().max_late().as_nanos() != config.late
+        || policy.judge().input_offset().as_nanos() != config.offset
+    {
+        return Err("cohort policy windows differ from native configuration".into());
+    }
+    prepare_cohort_inner(prepared, assignments, competition, config, Some(policy))
+}
+fn prepare_cohort_inner(
+    prepared: &PreparedBms,
+    assignments: &[(PlayerId, DeviceId)],
+    competition: &CompetitionOptions,
+    config: &CohortPreparation<'_>,
+    policy: Option<&crate::play_policy::ResolvedPlayPolicy>,
+) -> NativeGameplayResult<PreparedCohort> {
     admit_cohort(assignments.len(), false)?;
     if config.host == config.output
         || config.start.as_nanos() < 0
@@ -111,7 +136,10 @@ pub fn prepare_cohort(
         output: config.output,
         end: config.end,
     };
-    let profile = judge_config.profile()?;
+    let profile = match policy {
+        Some(policy) => policy.judge().clone(),
+        None => judge_config.profile()?,
+    };
     let limits = capture_limits(
         config.record_replay.is_some(),
         config.replay_max_bytes,
@@ -153,15 +181,27 @@ pub fn prepare_cohort(
             .record_replay
             .map(|path| replay_path(path, player))
             .transpose()?;
-        let capture = prepare_section_capture_for_source(
-            &prepared.source,
-            &member.judge,
-            config.host,
-            config.start,
-            config.chart_seed,
-            config.end,
-            limits,
-        )?;
+        let capture = match policy {
+            Some(policy) => crate::native_judge::prepare_section_capture_for_policy(
+                &prepared.source,
+                &member.judge,
+                policy,
+                config.host,
+                config.start,
+                config.chart_seed,
+                config.end,
+                limits,
+            )?,
+            None => prepare_section_capture_for_source(
+                &prepared.source,
+                &member.judge,
+                config.host,
+                config.start,
+                config.chart_seed,
+                config.end,
+                limits,
+            )?,
+        };
         let completion = judge_config.completion(prepared)?;
         states.push(PlayerState {
             player,
@@ -169,7 +209,10 @@ pub fn prepare_cohort(
             competition: None,
             completion,
             score: ScoreSummary::default(),
-            gauge: crate::gauge::BmsGauge::default(),
+            gauge: match policy {
+                Some(policy) => crate::gauge::BmsGauge::new(policy.gauge().try_copy()?),
+                None => crate::gauge::BmsGauge::default(),
+            },
             last_song: song_origin,
         });
         save_paths.push((player, path));

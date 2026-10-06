@@ -15,7 +15,7 @@ use std::sync::Arc;
 fn setup() -> (beatkernel_bms::BmsChart, NativeSettings, ReplayFile) {
     let source = beatkernel_bms::parse("#BPM 60\n", Default::default()).unwrap();
     let settings = NativeSettings::from_args(&[], SettingsHost::Linux).unwrap();
-    let setup = draft_section(&settings).unwrap();
+    let setup = draft_section(&settings, &source).unwrap();
     let judge = JudgeEngine::new(
         source.compile().unwrap().chart,
         source.rules(),

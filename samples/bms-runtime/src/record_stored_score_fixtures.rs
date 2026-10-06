@@ -40,7 +40,7 @@ fn draft(start: i64, end: Option<i64>) -> NativeSettings {
 }
 fn recording(settings: &NativeSettings) -> ReplayFile {
     let source = source();
-    let setup = draft_section(settings).unwrap();
+    let setup = draft_section(settings, &source).unwrap();
     let selected = crate::section_start::source_at(&source, setup.start).unwrap();
     let judge = JudgeEngine::new(
         selected.compile().unwrap().chart,

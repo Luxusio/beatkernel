@@ -92,6 +92,11 @@ type Spec = (&'static str, &'static str, &'static str);
 
 const COMMON: &[Spec] = &[
     (
+        "--gauge",
+        "GAUGE POLICY",
+        "Empty uses beatkernel. Choices: beatkernel, assist-easy, easy, groove, hard, ex-hard, hazard. Native simple timing uses one PGREAT hit window and POOR misses; nondefault competition is unavailable.",
+    ),
+    (
         "--chart-seed",
         "CHART BRANCH SEED",
         "Empty uses 0. Unsigned decimal u64; retries and recordings preserve the same BMS RANDOM branches.",

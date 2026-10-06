@@ -31,6 +31,7 @@ struct Options {
     offset: i64,
     preroll: i64,
     chart_seed: u64,
+    gauge: beatkernel_bms_runtime::play_policy::GaugeSelection,
     start_ns: i64,
     end_ns: Option<i64>,
     bgm_lookahead: i64,
@@ -81,6 +82,7 @@ fn parse(args: &[String]) -> Result<Options> {
         (150_000_000i64, 150_000_000i64, 0i64, 3_000_000_000i64);
     let mut advance_lag = 2_000_000i64;
     let mut chart_seed = 0u64;
+    let mut gauge = beatkernel_bms_runtime::play_policy::GaugeSelection::BeatKernel;
     let mut start_ns = 0i64;
     let mut end_ns = None;
     let mut bgm_lookahead = 3_000_000_000i64;
@@ -192,6 +194,7 @@ fn parse(args: &[String]) -> Result<Options> {
                     return Err("BGM lookahead must be positive i64 nanoseconds".into());
                 }
             }
+            "--gauge" => gauge = value.parse()?,
             "--chart-seed" => {
                 chart_seed = beatkernel_bms_runtime::settings::parse_chart_seed(value)?;
             }
@@ -268,6 +271,7 @@ fn parse(args: &[String]) -> Result<Options> {
         offset,
         preroll,
         chart_seed,
+        gauge,
         start_ns,
         end_ns,
         bgm_lookahead,
@@ -425,7 +429,7 @@ fn validate_finite_modes(
     competition: &beatkernel_bms_runtime::competition_live::CompetitionOptions,
 ) -> Result<()> {
     options.playback_end()?;
-    let _ = competition; // Network cohorts use the common committed-start owner.
+    beatkernel_bms_runtime::native_judge::validate_policy_competition(options.gauge, competition)?;
     Ok(())
 }
 
@@ -452,7 +456,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
         println!(
-            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and supports solo or local-cohort network peers with the same section endpoint; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; local groups use one shared QUIC/WebTransport connection and committed native start. Native float32 ALSA, no fallback. Physical timing Unknown."
+            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nGauge timing: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Nondefault gauges reject ghost/network competition.\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and supports solo or local-cohort network peers with the same section endpoint; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; local groups use one shared QUIC/WebTransport connection and committed native start. Native float32 ALSA, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
@@ -497,7 +501,7 @@ mod native {
     use beatkernel_bms_runtime::{
         ChannelPolicy,
         native_chart::{NativeChartConfig, prepare_chart},
-        native_judge::{NativeJudgeConfig, capture_limits, prepare_section_capture_for_source},
+        native_judge::{NativeJudgeConfig, capture_limits, prepare_section_capture_for_policy},
         playback_pause::NativePause,
         player::{self},
     };
@@ -799,6 +803,8 @@ mod native {
             output: OUTPUT,
             end: options.end_ns.map(Timestamp::from_nanos),
         };
+        let policy = judge_config.resolve_play_policy(&section.original_gauge, options.gauge)?;
+        let mut gauge = beatkernel_bms_runtime::gauge::BmsGauge::new(policy.gauge().try_copy()?);
         let mut completion = judge_config.completion(&prepared)?;
         for warning in &prepared.source.warnings {
             eprintln!("BMS warning line{}: {}", warning.line, warning.message);
@@ -818,7 +824,8 @@ mod native {
         if beatkernel_bms_runtime::player::cancelled() {
             return Ok(());
         }
-        let judge = judge_config.judge(&prepared.source, prepared.compiled.chart)?;
+        let judge =
+            judge_config.judge_with_policy(&prepared.source, prepared.compiled.chart, &policy)?;
         let mut competition =
             beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_native_section_at_with_chart_seed(
                 &competition_options,
@@ -905,13 +912,13 @@ mod native {
         let mut before_origin = 0u64;
         let mut capture = None;
         let mut startup_inputs = VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
-        let mut gauge = beatkernel_bms_runtime::gauge::BmsGauge::default();
         let mut score = beatkernel_bms_runtime::competition::ScoreSummary::default();
         let outcome =
             (|| -> Result<Option<beatkernel_bms_runtime::play_result::CompletedPlayResult>> {
-                capture = prepare_section_capture_for_source(
+                capture = prepare_section_capture_for_policy(
                     &prepared.source,
                     &judge,
+                    &policy,
                     HOST,
                     Timestamp::from_nanos(options.start_ns),
                     options.chart_seed,
@@ -1892,5 +1899,57 @@ mod fixtures {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn gauge_selection_uses_exact_names_and_rejects_invalid_or_duplicate_values() {
+        use beatkernel_bms::BmsGaugeKind;
+        use beatkernel_bms_runtime::play_policy::GaugeSelection;
+        let base = args();
+        assert_eq!(parse(&base).unwrap().gauge, GaugeSelection::BeatKernel);
+        for (name, selection) in [
+            ("beatkernel", GaugeSelection::BeatKernel),
+            ("assist-easy", GaugeSelection::Bms(BmsGaugeKind::AssistEasy)),
+            ("easy", GaugeSelection::Bms(BmsGaugeKind::Easy)),
+            ("groove", GaugeSelection::Bms(BmsGaugeKind::Groove)),
+            ("hard", GaugeSelection::Bms(BmsGaugeKind::Hard)),
+            ("ex-hard", GaugeSelection::Bms(BmsGaugeKind::ExHard)),
+            ("hazard", GaugeSelection::Bms(BmsGaugeKind::Hazard)),
+        ] {
+            let mut supplied = base.clone();
+            supplied.extend(["--gauge".into(), name.into()]);
+            assert_eq!(parse(&supplied).unwrap().gauge, selection);
+            assert!(validate_args(&supplied).is_ok());
+        }
+        for value in ["", "Hard", " hard", "hard ", "exhard", "unknown"] {
+            let mut supplied = base.clone();
+            supplied.extend(["--gauge".into(), value.into()]);
+            assert!(parse(&supplied).is_err(), "{value:?}");
+        }
+        let mut duplicate = base.clone();
+        duplicate.extend([
+            "--gauge".into(),
+            "hard".into(),
+            "--gauge".into(),
+            "easy".into(),
+        ]);
+        assert!(parse(&duplicate).is_err());
+        let mut missing = base;
+        missing.push("--gauge".into());
+        assert!(parse(&missing).is_err());
+    }
+
+    #[test]
+    fn nondefault_gauge_competition_is_rejected_without_opening_resources() {
+        for (flag, value) in [
+            ("--ghost-self", "unopened.bkr"),
+            ("--ghost-other", "unopened.bkr"),
+            ("--mp-host", "127.0.0.1:34567"),
+        ] {
+            let mut supplied = args();
+            supplied.extend([flag.into(), value.into()]);
+            assert!(validate_args(&supplied).is_ok());
+            supplied.extend(["--gauge".into(), "hard".into()]);
+            assert!(validate_args(&supplied).is_err());
+        }
     }
 }

@@ -22,14 +22,14 @@ invisible presses and mine markers contribute no normal-note stage recovery.
 
 The documented BeatKernel default is initial 20%, clear threshold 80%, +1% per
 successful judged stage, -6% per missed stage, and recoverable zero. It is an
-explicit application policy, not LR2/IIDX/Angolmois gauge compatibility. Live
-owners do not yet consume TOTAL; the adapter's pure LR2 rules below resolve it
-without changing this runtime default. Pure custom profiles support
+explicit application policy, not LR2/IIDX/Angolmois gauge compatibility. The
+builtin policy does not consume TOTAL. Selected native BMS gauges below consume
+retained original TOTAL/stage counts without changing the omitted-option default. Pure custom profiles support
 other grade deltas and fail-on-empty policy. Native launchers, browser launch
 defaults and replay defaults retain the fixed documented policy. Stepped owners
 can accept resolved profiles in pristine setup and retain them in result archives
 and standalone capture/replay setup identity as described below.
-Native/browser end-user policy selection remains unfinished.
+Native simple gauge selection is described below; browser and richer policy selection remain unfinished.
 
 Observe the report's normal results first, then its hazard events in original
 order. Validate every hazard value in 1..1295, including avoided outcomes and
@@ -97,9 +97,9 @@ while alive. Qualification is not evidence that a song finished.
 BmsGaugeState is Copy, has no heap or dynamic dispatch, and applies one
 judgment with constant work. Player launch defaults still use the documented
 default profile. Stepped setup may consume resolved adapter rules through
-`GaugeProfile::from_bms_rules` and `configure_gauge`; end-user LR2 selection,
-historical mine compatibility, course gauges and native/browser policy selection
-remain separate integration work. Recorded gauge setup is specified below.
+`GaugeProfile::from_bms_rules` and `configure_gauge`; native gauge selection is
+described below. Historical mine compatibility, course gauges, richer judgment
+presets and browser policy selection remain separate integration work. Recorded gauge setup is specified below.
 
 ## Actual owners and remaining terminal control
 
@@ -204,10 +204,10 @@ replay pipeline and verify that hash, score, gauge and hazard observations match
 the actual retained prefix. Legacy recordings continue to reconstruct their own
 recorded operations without retrospective rewriting. Stepped configurable
 gauge/failure setup identity is specified below; the core replay envelope remains
-unchanged. Native/browser selection remains separate work. The fixed default's
-only numeric failure is instant death. Resolved profiles in stepped setup are
-retained by result archives and standalone capture/replay setup. Native/browser public
-launchers keep the documented default until policy selection is connected.
+unchanged. The fixed default's only numeric failure is instant death. Resolved
+profiles are retained by result archives and standalone capture/replay setup.
+Native launchers use the documented default when --gauge is omitted; browser
+selection remains separate work.
 
 ## Native game owner failure contract
 
@@ -300,9 +300,9 @@ exercise solo and mixed-policy local completion, including original player IDs.
 Records with nonzero dynamics use versions 4/5, preserving all resolved fields
 (and optional comparison snapshots). Legacy/default records keep versions 1/2/3
 and old decoding supplies zero dynamics. Copied profiles and decoded live-level
-invariants must preserve these fields. Native/browser default policy and
-selectable judge/gauge integration remain separate unfinished work; introducing
-resolved rules must not silently change old playback.
+invariants must preserve these fields. Native default behavior and old playback
+must remain unchanged; browser selection and richer judgment presets remain
+unfinished.
 
 ## Recorded gauge setup
 
@@ -321,8 +321,8 @@ setups. Incremental visual/stepped replay and audio sound-stop planning use the
 recorded profile, including depletion from ordinary judgments without mines.
 Record catalog comparisons must include gauge policy. The kernel replay format
 and judge hash remain unchanged: the application options own this policy.
-Public/native/browser policy selection and complete LR2 compatibility remain
-unfinished; preserving a policy does not imply those launchers select it.
+Native simple gauge selection is described below. Browser selection, richer
+judgment presets and complete LR2 compatibility remain unfinished.
 
 The native output-only replay command uses policy-aware validation before PCM
 asset reads, pristine replay chart registration, and recorded-policy audio/visual
@@ -363,10 +363,10 @@ mapping and core misses use POOR. Empty presses remain separate integration.
 
 Preparation is control-side; owning judge/gauge parts needs no dynamic dispatch
 or extra runtime wrapper. Replay capture retains the resulting windows/deltas
-and dynamics through the existing full setup identity. Public CLI/UI selection,
-nondefault shared-network admission, class-aware score labels and complete mine/
-empty compatibility remain unfinished; the common builder does not enable
-those launchers by itself.
+and dynamics through the existing full setup identity. Native simple selection
+uses this builder as described below. Browser/per-member/live selection,
+nondefault competition, class-aware score labels and complete mine/empty
+compatibility remain unfinished.
 
 ## Native policy preparation ports
 
@@ -387,9 +387,9 @@ boundary but performs no source identity acquisition. Enabled capture uses the
 existing ButtonOnly native setup and records the complete gauge through its
 canonical wrapper; limits/refusal preserve the judge and policy. Legacy helper
 and default host behavior remain unchanged. These preparation APIs are invoked
-by the guarded common pumps described below. Policy-aware launcher construction,
-shared competition identity, public selectors and class-aware scores still need
-integration before nondefault policies become end-user live options.
+by the guarded common pumps and native launchers described below. Custom
+competition identity, richer/per-member/live/browser selectors and class-aware
+scores remain separate integration work.
 
 ## Native nondefault admission
 
@@ -416,5 +416,26 @@ capture/competition identity before preparing the host's entire ordered roster.
 Nondefault admission permits at most 64 judge windows. Reserve cold scratch and
 policy-row storage before host preparation. Only a successful setup invokes the cold preparation port, before pump clock,
 device observation or input acquisition. Rejection preserves judge/gauge/capture
-state. This connects resolved policy to common native pumps without exposing a
-public selector or claiming new weighted/class-aware scoring or physical timing.
+state. Native selection below uses these common pumps. This does not establish
+new weighted/class-aware scoring or physical timing.
+
+## Native gauge selection
+
+Native CLI and common retained settings expose `--gauge` with the exact seven
+selection names; omitted/empty draft values preserve `beatkernel`. Explicit CLI
+empty, unknown, non-lowercase, missing or duplicate --gauge values are refused
+by all three native parsers before play. Selected BMS
+gauges use the existing configurable early/late window as a single PGREAT hit
+class, with POOR for misses and the same signed offset. This is explicit simple
+timing, not a historical LR2 judgment-window preset or full scoring compatibility.
+
+Practice preparation retains original TOTAL provenance and full judged-stage
+count before excluding earlier heads. Resolve the selected policy from that
+context once, then use the same windows/gauge in solo or every local member,
+capture and host admission. Original context uses no additional asset read.
+Builtin behavior and recordings stay byte-compatible. Nondefault selection with
+ghost or network competition is explicitly rejected while competition preparation
+still uses legacy identities; do not silently disable it or start its resources.
+Current-draft record comparison resolves the same policy from original source.
+Live gauge changes, per-member selectors, graded timing presets/class-aware
+scores, custom competition and browser selection remain separate work.

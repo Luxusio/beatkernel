@@ -291,6 +291,8 @@ mod native_gameplay_bridge;
 pub mod native_gameplay_host;
 #[cfg(test)]
 mod native_gauge_fixtures;
+#[cfg(test)]
+mod native_gauge_selection_fixtures;
 /// One shared network/start owner over actual native local-member prefixes.
 pub mod native_group_competition;
 #[cfg(test)]

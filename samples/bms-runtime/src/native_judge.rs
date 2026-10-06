@@ -35,6 +35,52 @@ impl NativeJudgeConfig {
                 .0,
         )
     }
+    /// Native simple timing uses one explicit PGREAT hit class; misses retain POOR.
+    pub fn resolve_play_policy(
+        &self,
+        context: &crate::play_policy::OriginalGaugeContext,
+        selection: crate::play_policy::GaugeSelection,
+    ) -> NativeGameplayResult<crate::play_policy::ResolvedPlayPolicy> {
+        use crate::play_policy::{GaugeSelection, ResolvedPlayPolicy, ClassifiedWindow};
+        match selection {
+            GaugeSelection::BeatKernel => {
+                ResolvedPlayPolicy::builtin(self.early, self.late, self.offset).map_err(|error| {
+                    match error {
+                        crate::play_policy::PolicyError::Judge(error) => {
+                            Box::new(error) as Box<dyn std::error::Error>
+                        }
+                        other => Box::new(other),
+                    }
+                })
+            }
+            GaugeSelection::Bms(kind) => {
+                let profile = self.profile()?;
+                Ok(ResolvedPlayPolicy::from_context(
+                    context,
+                    kind,
+                    &[ClassifiedWindow {
+                        judgment: beatkernel_bms::BmsJudgment::PGreat,
+                        window: profile.windows()[0],
+                    }],
+                    self.offset,
+                )?)
+            }
+        }
+    }
+    pub fn judge_with_policy(
+        &self,
+        source: &BmsChart,
+        chart: CompiledChart,
+        policy: &crate::play_policy::ResolvedPlayPolicy,
+    ) -> NativeGameplayResult<JudgeEngine> {
+        Ok(crate::mine_plan::prepare_judge(
+            source,
+            chart,
+            policy.judge().clone(),
+            BmsInputMode::ButtonOnly,
+            beatkernel_bms::ParseOptions::default().max_objects,
+        )?)
+    }
     /// Constructs the actual source-aware pristine judge before native output
     /// starts. Mine timing and identity use the common ButtonOnly composition.
     pub fn judge(
@@ -66,6 +112,20 @@ impl NativeJudgeConfig {
             self.output,
         )?))
     }
+}
+/// Refuse unsupported identity preparation before native/ghost/network acquisition.
+pub fn validate_policy_competition(
+    selection: crate::play_policy::GaugeSelection,
+    options: &crate::competition_live::CompetitionOptions,
+) -> NativeGameplayResult<()> {
+    if selection != crate::play_policy::GaugeSelection::BeatKernel
+        && (!options.ghosts.is_empty() || options.network.is_some())
+    {
+        return Err(
+            "nondefault gauges currently require disabled ghost and multiplayer competition".into(),
+        );
+    }
+    Ok(())
 }
 /// Disabled recording does not validate otherwise unused recording settings.
 pub fn capture_limits(

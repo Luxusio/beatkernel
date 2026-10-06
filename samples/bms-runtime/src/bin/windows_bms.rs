@@ -85,6 +85,7 @@ struct Options {
     offset: i64,
     preroll: i64,
     chart_seed: u64,
+    gauge: beatkernel_bms_runtime::play_policy::GaugeSelection,
     start_ns: i64,
     end_ns: Option<i64>,
     bgm_lookahead: i64,
@@ -223,6 +224,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut offset = 0i64;
     let mut preroll = 3_000_000_000i64;
     let mut chart_seed = 0u64;
+    let mut gauge = beatkernel_bms_runtime::play_policy::GaugeSelection::BeatKernel;
     let mut start_ns = 0i64;
     let mut end_ns = None;
     let mut bgm_lookahead = 3_000_000_000i64;
@@ -378,6 +380,7 @@ fn parse(args: &[String]) -> Result<Options> {
                     return Err("BGM lookahead must be positive i64 nanoseconds".into());
                 }
             }
+            "--gauge" => gauge = value.parse()?,
             "--chart-seed" => {
                 chart_seed = beatkernel_bms_runtime::settings::parse_chart_seed(value)?;
             }
@@ -537,6 +540,7 @@ fn parse(args: &[String]) -> Result<Options> {
         offset,
         preroll,
         chart_seed,
+        gauge,
         start_ns,
         end_ns,
         bgm_lookahead,
@@ -666,9 +670,10 @@ pub(crate) fn validate_args(args: &[String]) -> Result<()> {
 }
 
 fn validate_finite_modes(
-    _options: &Options,
-    _competition: &beatkernel_bms_runtime::competition_live::CompetitionOptions,
+    options: &Options,
+    competition: &beatkernel_bms_runtime::competition_live::CompetitionOptions,
 ) -> Result<()> {
+    beatkernel_bms_runtime::native_judge::validate_policy_competition(options.gauge, competition)?;
     Ok(())
 }
 
@@ -698,7 +703,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
             "Local play: repeat --local-player ID:EXACT_INTERFACE_PATH for 2..64 distinct keyboards, without --keyboard-path. Stable positive u32 IDs are preserved in GUI scores and .p<ID>.bkr replay files. --advance-lag-ns 0..1000000000 (default 2000000) controls the common input frontier. Network local groups share one connection and start agreement; saved ghosts remain per-player. Native commands compose the graphical player's actual runtime."
         );
         println!(
-            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Optional --end-ns unsigned strictly after start completes a native-presented, input-drained finite prefix for solo or local WASAPI/SDK-enabled ASIO; ASIO waits for the actual crossing block upper presentation interval. Solo and local group network peers must agree on the same finite section endpoint. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
+            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --start-ns N --end-ns N --preroll-ns N\nGauge timing: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Nondefault gauges reject ghost/network competition.\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Optional --end-ns unsigned strictly after start completes a native-presented, input-drained finite prefix for solo or local WASAPI/SDK-enabled ASIO; ASIO waits for the actual crossing block upper presentation interval. Solo and local group network peers must agree on the same finite section endpoint. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
         );
         return Ok(());
     }
@@ -732,7 +737,7 @@ mod native {
     use beatkernel_bms_runtime::{
         ChannelPolicy,
         native_chart::{NativeChartConfig, prepare_chart},
-        native_judge::{NativeJudgeConfig, capture_limits, prepare_section_capture_for_source},
+        native_judge::{NativeJudgeConfig, capture_limits, prepare_section_capture_for_policy},
     };
     use beatkernel_bms_runtime::{
         playback_pause::NativePause,
@@ -1367,6 +1372,8 @@ mod native {
             output: OUTPUT,
             end: options.end_ns.map(Timestamp::from_nanos),
         };
+        let policy = judge_config.resolve_play_policy(&section.original_gauge, options.gauge)?;
+        let mut gauge = beatkernel_bms_runtime::gauge::BmsGauge::new(policy.gauge().try_copy()?);
         let mut completion = judge_config.completion(&prepared)?;
         for warning in &prepared.source.warnings {
             eprintln!(
@@ -1408,7 +1415,8 @@ mod native {
         if beatkernel_bms_runtime::player::cancelled() {
             return Ok(());
         }
-        let judge = judge_config.judge(&prepared.source, prepared.compiled.chart)?;
+        let judge =
+            judge_config.judge_with_policy(&prepared.source, prepared.compiled.chart, &policy)?;
         let mut competition =
             beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_native_section_at_with_chart_seed(
                 &competition_options,
@@ -1482,13 +1490,13 @@ mod native {
         let mut startup_inputs = std::collections::VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
         let startup_selection =
             selected.map(|(id, handle)| (beatkernel::input::DeviceId(id), handle));
-        let mut gauge = beatkernel_bms_runtime::gauge::BmsGauge::default();
         let mut score = beatkernel_bms_runtime::competition::ScoreSummary::default();
         let outcome =
             (|| -> Result<Option<beatkernel_bms_runtime::play_result::CompletedPlayResult>> {
-                capture = prepare_section_capture_for_source(
+                capture = prepare_section_capture_for_policy(
                     &prepared.source,
                     &judge,
+                    &policy,
                     HOST,
                     Timestamp::from_nanos(options.start_ns),
                     options.chart_seed,
@@ -2266,6 +2274,58 @@ mod preroll_fixtures {
             3_613_000_000_000
         );
         assert!(calibration_extent(u64::MAX, 0).is_err());
+    }
+    #[test]
+    fn gauge_selection_uses_exact_names_and_rejects_invalid_or_duplicate_values() {
+        use beatkernel_bms::BmsGaugeKind;
+        use beatkernel_bms_runtime::play_policy::GaugeSelection;
+        let base = arguments(None);
+        assert_eq!(parse(&base).unwrap().gauge, GaugeSelection::BeatKernel);
+        for (name, selection) in [
+            ("beatkernel", GaugeSelection::BeatKernel),
+            ("assist-easy", GaugeSelection::Bms(BmsGaugeKind::AssistEasy)),
+            ("easy", GaugeSelection::Bms(BmsGaugeKind::Easy)),
+            ("groove", GaugeSelection::Bms(BmsGaugeKind::Groove)),
+            ("hard", GaugeSelection::Bms(BmsGaugeKind::Hard)),
+            ("ex-hard", GaugeSelection::Bms(BmsGaugeKind::ExHard)),
+            ("hazard", GaugeSelection::Bms(BmsGaugeKind::Hazard)),
+        ] {
+            let mut supplied = base.clone();
+            supplied.extend(["--gauge".into(), name.into()]);
+            assert_eq!(parse(&supplied).unwrap().gauge, selection);
+            assert!(validate_args(&supplied).is_ok());
+        }
+        for value in ["", "Hard", " hard", "hard ", "exhard", "unknown"] {
+            let mut supplied = base.clone();
+            supplied.extend(["--gauge".into(), value.into()]);
+            assert!(parse(&supplied).is_err(), "{value:?}");
+        }
+        let mut duplicate = base.clone();
+        duplicate.extend([
+            "--gauge".into(),
+            "hard".into(),
+            "--gauge".into(),
+            "easy".into(),
+        ]);
+        assert!(parse(&duplicate).is_err());
+        let mut missing = base;
+        missing.push("--gauge".into());
+        assert!(parse(&missing).is_err());
+    }
+
+    #[test]
+    fn nondefault_gauge_competition_is_rejected_without_opening_resources() {
+        for (flag, value) in [
+            ("--ghost-self", "unopened.bkr"),
+            ("--ghost-other", "unopened.bkr"),
+            ("--mp-host", "127.0.0.1:34567"),
+        ] {
+            let mut supplied = arguments(None);
+            supplied.extend([flag.into(), value.into()]);
+            assert!(validate_args(&supplied).is_ok());
+            supplied.extend(["--gauge".into(), "hard".into()]);
+            assert!(validate_args(&supplied).is_err());
+        }
     }
 }
 

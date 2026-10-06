@@ -116,7 +116,7 @@ impl RecordPreview {
     ) -> Result<Self, String> {
         let setup =
             decode_section_setup(&file.header.options).map_err(|error| error.to_string())?;
-        let expected = draft_section(settings)?;
+        let expected = draft_section(settings, source)?;
         if setup.chart_seed != expected.chart_seed {
             return Err("saved record chart seed differs from the current draft".into());
         }
@@ -302,8 +302,35 @@ fn draft_setup(settings: &NativeSettings) -> Result<(JudgeProfile, Timestamp), S
 }
 
 /// Full current native draft identity; finite endpoints are strictly after the start.
-fn draft_section(settings: &NativeSettings) -> Result<RecordedSetup, String> {
+fn draft_section(
+    settings: &NativeSettings,
+    source: &beatkernel_bms::BmsChart,
+) -> Result<RecordedSetup, String> {
     let (profile, start) = draft_setup(settings)?;
+    let selection = settings
+        .fields()
+        .iter()
+        .find(|row| row.flag == "--gauge")
+        .map(|row| row.value.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("beatkernel")
+        .parse::<crate::play_policy::GaugeSelection>()
+        .map_err(|error| error.to_string())?;
+    let config = crate::native_judge::NativeJudgeConfig {
+        early: profile.max_early().as_nanos(),
+        late: profile.max_late().as_nanos(),
+        offset: profile.input_offset().as_nanos(),
+        preroll: 0,
+        output: beatkernel::time::ClockDomainId(0),
+        end: None,
+    };
+    let (profile, gauge) = config
+        .resolve_play_policy(
+            &crate::play_policy::OriginalGaugeContext::from_source(source),
+            selection,
+        )
+        .map_err(|error| error.to_string())?
+        .into_parts();
     let text = settings
         .fields()
         .iter()
@@ -327,7 +354,7 @@ fn draft_section(settings: &NativeSettings) -> Result<RecordedSetup, String> {
     };
     Ok(RecordedSetup {
         profile,
-        gauge: crate::gauge::GaugeProfile::default(),
+        gauge,
         start,
         end,
         chart_seed: settings.chart_seed()?,

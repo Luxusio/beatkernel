@@ -88,6 +88,7 @@ pub struct TailSelection {
 }
 #[derive(Debug)]
 pub struct SectionReport {
+    pub original_gauge: crate::play_policy::OriginalGaugeContext,
     pub start: Timestamp,
     pub excluded_objects: usize,
     pub excluded_crossing_holds: usize,
@@ -108,6 +109,7 @@ pub fn prepare_at(
         return Err("practice start must be nonnegative".into());
     }
     let mut report = SectionReport {
+        original_gauge: crate::play_policy::OriginalGaugeContext::from_source(&prepared.source),
         start,
         excluded_objects: 0,
         excluded_crossing_holds: 0,

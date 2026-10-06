@@ -9,15 +9,18 @@ use beatkernel::{
     time::Duration,
     transport::{Rate, Transport},
 };
-use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
 use beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::{
-    owner, NativeCoreAudioOutputOwner, NativeCoreAudioOutputUi,
+    NativeCoreAudioOutputOwner, NativeCoreAudioOutputUi, owner,
 };
+use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
 use beatkernel_bms_runtime::native_cohort_setup::{
     CohortPreparation, PreparedCohort, activate_cohort_with_sounds, admit_cohort as admit_mode,
-    finish_cohort, finish_cohort_with_results_and_network, finish_cohort_network, prepare_cohort,
+    finish_cohort, finish_cohort_network, finish_cohort_with_results_and_network,
+    prepare_cohort_with_policy,
 };
-use beatkernel_bms_runtime::native_start::{MAX_START_INPUT_EVENTS, NativeStartConfig, start_committed};
+use beatkernel_bms_runtime::native_start::{
+    MAX_START_INPUT_EVENTS, NativeStartConfig, start_committed,
+};
 use beatkernel_bms_runtime::{
     ChannelPolicy,
     competition_live::CompetitionOptions,
@@ -246,6 +249,10 @@ fn seed_group(
 }
 
 pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> Result<()> {
+    beatkernel_bms_runtime::native_judge::validate_policy_competition(
+        options.gauge,
+        &competition_options,
+    )?;
     admit_mode(
         options.local_players.len(),
         competition_options.network.is_some(),
@@ -283,6 +290,15 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         start: Timestamp::from_nanos(options.start_ns),
         bindings: &options.bindings,
     })?;
+    let policy = beatkernel_bms_runtime::native_judge::NativeJudgeConfig {
+        early: options.early,
+        late: options.late,
+        offset: options.offset,
+        preroll: options.preroll,
+        output: OUTPUT,
+        end: options.end_ns.map(Timestamp::from_nanos),
+    }
+    .resolve_play_policy(&section.original_gauge, options.gauge)?;
     println!("prepared practice section={section:?}");
     for warning in &prepared.source.warnings {
         eprintln!("BMS warning line{}: {}", warning.line, warning.message);
@@ -326,7 +342,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         mut states,
         save_paths,
         reserved,
-    } = prepare_cohort(
+    } = prepare_cohort_with_policy(
         &prepared,
         &assignments,
         &competition_options,
@@ -345,6 +361,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             replay_max_bytes: options.replay_max_bytes,
             replay_max_records: options.replay_max_records,
         },
+        &policy,
     )?;
     let network_start = network.is_some();
     let PreparedNativeAudio {
