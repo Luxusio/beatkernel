@@ -43,6 +43,9 @@ and live application transfer remain separate required integrations.
 Fresh ALSA/WASAPI counters now use the captured original mixer grid through
 [output frame basis](REQ__output-frame-basis.md). This supplies counter mapping;
 actual stream fencing and automatic runtime transitions remain pending.
+Ordinary pause/resume preserves the current epoch through
+[resume clock identity](REQ__resume-clock-identity.md), rather than silently
+reconstructing epoch zero. It does not increment the output stream token.
 
 Author independent core storage/atomicity/epoch/warmup/continuous-history cases,
 platform source-reset/tagged-refusal cases and actual generic port delegation/

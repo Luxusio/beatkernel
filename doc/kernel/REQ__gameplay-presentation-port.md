@@ -12,7 +12,7 @@ memory devices and actual native adapters.
 The presentation port supplies the latest accepted pair, quality, freshness
 validation, continuous transport update, and construction of a fresh estimator
 with explicit stream/playback/host/song origins at resume. Preserve existing
-resume chronology, default correction configuration, original native reseeding
+resume chronology, current correction configuration, original native reseeding
 and input/pause/end evidence. Reconstruction is explicit through the injected
 presentation implementation; common loops cannot fabricate native counters.
 The pure core estimator implements the port without IO or native references.
@@ -20,6 +20,9 @@ The port also exposes a cold optional epoch getter and explicit output rebind
 under [output clock epochs](REQ__output-clock-epochs.md). Existing custom owners
 default to unsupported refusal; core/native adapters implement the same contract.
 This supplies a timing transition interface, not live device/PCM handoff.
+Same-stream resume now follows
+[resume clock identity](REQ__resume-clock-identity.md): stage a new owner with
+the actual configuration and unchanged epoch before original native reseeding.
 
 Keep original NativeGameplayDevice, NativeGameplaySession, NativeCohortSession
 and run_* compatibility APIs at their existing public paths. The outer bridge
