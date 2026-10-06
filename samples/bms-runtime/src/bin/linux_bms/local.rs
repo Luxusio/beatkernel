@@ -12,7 +12,7 @@ use beatkernel::{
 use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
 use beatkernel_bms_runtime::native_cohort_setup::{
     CohortPreparation, PreparedCohort, activate_cohort_with_sounds, admit_cohort as admit_mode,
-    finish_cohort_with_results, prepare_cohort,
+    finish_cohort_with_results_and_network, prepare_cohort,
 };
 use beatkernel_bms_runtime::{
     ChannelPolicy,
@@ -470,14 +470,10 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     if let Err(error) = stop {
         failures.push(format!("output cleanup: {error}"));
     }
-    beatkernel_bms_runtime::native_cohort_setup::finish_cohort_network(
-        network.as_mut(),
-        &states,
-        &mut failures,
-    );
-    finish_cohort_with_results(
+    finish_cohort_with_results_and_network(
         outcome,
         states,
+        network.as_mut(),
         save_paths,
         failures,
         options.record_replay.as_deref(),

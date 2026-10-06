@@ -99,6 +99,22 @@ fn solo_archive_impl(
         }
     }))
 }
+pub fn solo_archive_with_score_and_comparisons(
+    outcome: &NativeGameplayResult<Option<CompletedPlayResult>>,
+    capture: Option<&LiveReplayCapture>,
+    profile: &GaugeProfile,
+    score: &crate::competition::ScoreSummary,
+    comparisons: &[(
+        PlayerId,
+        Option<&crate::competition_presentation::CompetitionSnapshot>,
+    )],
+) -> NativeGameplayResult<Option<ResultArchive>> {
+    let mut archive = solo_archive_with_score(outcome, capture, profile, score)?;
+    if let Some(archive) = &mut archive {
+        archive.attach_comparisons(comparisons)?;
+    }
+    Ok(archive)
+}
 /// Borrowed business data; no concrete competition or device owner crosses this port.
 pub struct ArchiveMember<'a> {
     pub player: PlayerId,
@@ -155,6 +171,21 @@ fn cohort_archive_impl(
         Some(scores) => ResultArchive::from_completed_with_scores(results, &identities, scores)?,
     }))
 }
+pub fn cohort_archive_with_scores_and_comparisons(
+    outcome: &NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>>,
+    states: &[ArchiveMember<'_>],
+    scores: &[(PlayerId, &crate::competition::ScoreSummary)],
+    comparisons: &[(
+        PlayerId,
+        Option<&crate::competition_presentation::CompetitionSnapshot>,
+    )],
+) -> NativeGameplayResult<Option<ResultArchive>> {
+    let mut archive = cohort_archive_with_scores(outcome, states, scores)?;
+    if let Some(archive) = &mut archive {
+        archive.attach_comparisons(comparisons)?;
+    }
+    Ok(archive)
+}
 /// All replay effects precede the archive effect, even when an earlier stage failed.
 /// Original boxed owner errors are returned unchanged after both save attempts.
 pub fn finalize_completed_save<T>(
@@ -180,3 +211,7 @@ pub fn finalize_completed_save<T>(
 #[cfg(test)]
 #[path = "native_archived_score_fixtures.rs"]
 mod native_archived_score_fixtures;
+
+#[cfg(test)]
+#[path = "native_archived_comparison_fixtures.rs"]
+mod native_archived_comparison_fixtures;

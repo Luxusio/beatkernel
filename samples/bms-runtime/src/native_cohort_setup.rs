@@ -345,6 +345,30 @@ pub fn finish_cohort_with_results(
     outcome: NativeGameplayResult<Option<Vec<(PlayerId, crate::play_result::CompletedPlayResult)>>>,
     states: Vec<PlayerState>,
     save_paths: Vec<(PlayerId, Option<PathBuf>)>,
+    failures: Vec<String>,
+    base_path: Option<&Path>,
+    save: impl FnMut(Option<LiveReplayCapture>, Option<&Path>, bool) -> NativeGameplayResult<()>,
+    save_archive: impl FnOnce(
+        &crate::result_archive::ResultArchive,
+        Option<&Path>,
+    ) -> NativeGameplayResult<()>,
+) -> NativeGameplayResult<()> {
+    finish_cohort_with_results_and_network(
+        outcome,
+        states,
+        None,
+        save_paths,
+        failures,
+        base_path,
+        save,
+        save_archive,
+    )
+}
+pub fn finish_cohort_with_results_and_network(
+    outcome: NativeGameplayResult<Option<Vec<(PlayerId, crate::play_result::CompletedPlayResult)>>>,
+    mut states: Vec<PlayerState>,
+    mut network: Option<&mut NativeGroupCompetition>,
+    save_paths: Vec<(PlayerId, Option<PathBuf>)>,
     mut failures: Vec<String>,
     base_path: Option<&Path>,
     save: impl FnMut(Option<LiveReplayCapture>, Option<&Path>, bool) -> NativeGameplayResult<()>,
@@ -353,6 +377,12 @@ pub fn finish_cohort_with_results(
         Option<&Path>,
     ) -> NativeGameplayResult<()>,
 ) -> NativeGameplayResult<()> {
+    finish_cohort_network(network.as_deref_mut(), &states, &mut failures);
+    for state in &mut states {
+        if let Some(competition) = &mut state.competition {
+            competition.finish();
+        }
+    }
     let archive = (|| -> NativeGameplayResult<Option<crate::result_archive::ResultArchive>> {
         if base_path.is_none() {
             return Ok(None);
@@ -381,7 +411,56 @@ pub fn finish_cohort_with_results(
                 profile: state.gauge.profile(),
             });
         }
-        crate::native_completed_save::cohort_archive_with_scores(&outcome, &members, &scores)
+        let mut archive =
+            crate::native_completed_save::cohort_archive_with_scores(&outcome, &members, &scores)?;
+        if let Some(archive) = &mut archive {
+            let network_rows = network
+                .as_ref()
+                .map(|network| network.archive_snapshots())
+                .transpose()?
+                .unwrap_or_default();
+            if !network_rows.is_empty()
+                && (network_rows.len() != states.len()
+                    || network_rows
+                        .iter()
+                        .any(|(id, _)| !states.iter().any(|state| state.player == *id)))
+            {
+                return Err("archive network roster differs from completed members".into());
+            }
+            if !network_rows.is_empty() || states.iter().any(|state| state.competition.is_some()) {
+                let mut snapshots = Vec::new();
+                snapshots.try_reserve_exact(states.len())?;
+                for state in &states {
+                    let mut snapshot = state
+                        .competition
+                        .as_ref()
+                        .map(|competition| competition.archive_snapshot())
+                        .transpose()?;
+                    if let Some((_, network)) =
+                        network_rows.iter().find(|(id, _)| *id == state.player)
+                    {
+                        snapshot
+                            .get_or_insert_with(|| {
+                                crate::competition_presentation::CompetitionSnapshot {
+                                    ghosts: Vec::new(),
+                                    network: None,
+                                }
+                            })
+                            .network = Some(network.clone());
+                    }
+                    snapshots.push((state.player, snapshot));
+                }
+                let mut rows = Vec::new();
+                rows.try_reserve_exact(snapshots.len())?;
+                rows.extend(
+                    snapshots
+                        .iter()
+                        .map(|(id, snapshot)| (*id, snapshot.as_ref())),
+                );
+                archive.attach_comparisons(&rows)?;
+            }
+        }
+        Ok(archive)
     })();
     if outcome.is_err() {
         failures.insert(
@@ -884,3 +963,7 @@ mod fixtures {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "native_cohort_comparison_fixtures.rs"]
+mod native_cohort_comparison_fixtures;

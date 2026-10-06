@@ -108,7 +108,7 @@ fn finish_solo_with_result_impl(
             .downcast_ref::<crate::play_result::CompletedSoloPublicationError>()
             .is_some(),
     };
-    let archive = if path.is_none() {
+    let mut archive = if path.is_none() {
         Ok(None)
     } else if has_completion && capture.is_none() {
         Err("completed recording missing capture".into())
@@ -126,6 +126,15 @@ fn finish_solo_with_result_impl(
     let failed_session = outcome.is_err() || output_stop.is_err() || input_close.is_err();
     if let Some(competition) = competition {
         competition.finish();
+        archive = match archive {
+            Ok(Some(mut archive)) => (|| -> NativeGameplayResult<_> {
+                let snapshot = competition.archive_snapshot()?;
+                archive
+                    .attach_comparisons(&[(crate::local_players::PlayerId(1), Some(&snapshot))])?;
+                Ok(Some(archive))
+            })(),
+            other => other,
+        };
     }
     crate::native_completed_save::finalize_completed_save(
         outcome,
@@ -362,3 +371,7 @@ mod fixtures {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "native_finish_comparison_fixtures.rs"]
+mod native_finish_comparison_fixtures;

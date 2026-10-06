@@ -196,6 +196,21 @@ impl NativeGroupCompetition {
         )
     }
 
+    /// Read retained mapped peer prefixes without new network effects.
+    pub fn archive_snapshots(
+        &self,
+    ) -> Result<Vec<(PlayerId, crate::competition_presentation::NetworkSnapshot)>> {
+        crate::competition_presentation::project_archive_network(
+            self.network.is_room(),
+            &self.players,
+            self.status,
+            self.network.remote_roster(),
+            self.network
+                .remote_final_progress()
+                .or_else(|| self.network.remote_progress()),
+        )
+    }
+
     /// Cleanup only: after an observation, send one actual terminal prefix and
     /// await its application ACK. Always join, including unplayed cancellation.
     pub fn finish(&mut self, members: &[MemberProgress]) -> Result<()> {

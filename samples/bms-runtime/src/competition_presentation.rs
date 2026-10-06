@@ -100,6 +100,69 @@ pub struct SoloNetworkPresentation<'a> {
     pub prefix: Option<&'a GroupPrefix>,
 }
 
+/// Cold archive projection of retained evidence, without UI or cadence effects.
+pub fn project_archive_snapshot(
+    player: PlayerId,
+    competition: &Competition,
+    network: Option<SoloNetworkPresentation<'_>>,
+) -> Result<CompetitionSnapshot> {
+    validate_roster(&[player])?;
+    if competition.opponents().len() > 8 {
+        return Err("archived opponent count exceeds bound".into());
+    }
+    let mut ghosts = Vec::new();
+    ghosts.try_reserve_exact(competition.opponents().len())?;
+    for opponent in competition.opponents() {
+        let label = try_display_basename(opponent.label())?;
+        let score = opponent.score();
+        ghosts.push(GhostSnapshot {
+            kind: opponent.kind(),
+            label,
+            hits: score.hits,
+            misses: score.misses,
+            combo: score.combo,
+            max_combo: score.max_combo,
+            recorded_until: opponent.recorded_until(),
+        });
+    }
+    let network = if let Some(network) = network {
+        let mapped = remote_members(&[player], network.roster, network.prefix)?;
+        network.status.map(|status| NetworkSnapshot {
+            status,
+            progress: mapped[0].1.map(|member| member.progress),
+        })
+    } else {
+        None
+    };
+    Ok(CompetitionSnapshot { ghosts, network })
+}
+/// Room rosters have no admitted one-to-one peer mapping in this policy.
+pub fn project_archive_network(
+    room: bool,
+    local: &[PlayerId],
+    status: NetworkStatus,
+    remote: Option<&[PlayerId]>,
+    prefix: Option<&GroupPrefix>,
+) -> Result<Vec<(PlayerId, NetworkSnapshot)>> {
+    validate_roster(local)?;
+    if room {
+        return Ok(Vec::new());
+    }
+    let mapped = remote_members(local, remote, prefix)?;
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(mapped.len())?;
+    for (player, remote) in mapped {
+        rows.push((
+            player,
+            NetworkSnapshot {
+                status,
+                progress: remote.map(|member| member.progress),
+            },
+        ));
+    }
+    Ok(rows)
+}
+
 pub fn publish_solo<H: CompetitionPresentationHost>(
     host: &mut H,
     last: &mut Option<u64>,
@@ -195,18 +258,24 @@ pub fn selected_remote_member(
 }
 
 pub fn display_basename(label: &str) -> String {
+    try_display_basename(label).expect("display basename allocation failed")
+}
+fn try_display_basename(label: &str) -> Result<String> {
     // Accept either platform separator without exposing directories in the UI.
     let basename = label.rsplit(['/', '\\']).next().unwrap_or("");
-    let clean: String = basename
+    let mut clean = String::new();
+    clean.try_reserve_exact(basename.len().min(256).max(6))?;
+    for character in basename
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|character| !character.is_control())
         .take(64)
-        .collect();
-    if clean.is_empty() {
-        "RECORD".into()
-    } else {
-        clean
+    {
+        clean.push(character);
     }
+    if clean.is_empty() {
+        clean.push_str("RECORD");
+    }
+    Ok(clean)
 }
 
 pub fn remote_members(
@@ -240,3 +309,7 @@ pub fn remote_members(
     }
     Ok(mapped)
 }
+
+#[cfg(test)]
+#[path = "competition_archive_projection_fixtures.rs"]
+mod competition_archive_projection_fixtures;

@@ -575,6 +575,22 @@ impl LiveCompetition {
         Ok(prepared)
     }
 
+    /// Read retained comparison evidence after cleanup without native effects.
+    pub fn archive_snapshot(&self) -> Result<crate::competition_presentation::CompetitionSnapshot> {
+        let network = self
+            .network
+            .as_ref()
+            .filter(|network| !network.is_room())
+            .map(|network| SoloNetworkPresentation {
+                status: self.network_status,
+                roster: network.remote_roster(),
+                prefix: network
+                    .remote_final_progress()
+                    .or_else(|| network.remote_progress()),
+            });
+        competition_presentation::project_archive_snapshot(self.player, &self.competition, network)
+    }
+
     fn publish_presentation(&mut self, force: bool) -> Result<()> {
         self.publish_presentation_with_host(force, &mut NativeCompetitionPresentation)
     }
