@@ -37,6 +37,14 @@ otherwise the old pause could enter Resuming and stop the eligible publication
 polls. Expose this through the default-false business device pending query, with
 compatibility forwarding and owner delegation. Do not block normal pause
 requests or infer a pending operation merely from an idle queued request.
+Expose a separate default-false suspended-output-clock query. Only the actual
+owner with no published current output and a Waiting replacement reports it.
+During a committed nonterminal Paused boundary, receipt/input timestamps at or
+after that boundary do not extrapolate the old output clock. Preserve original
+observations and still validate input domain, receipt bounds and chronology.
+Older input, active output, queued changes and reply contention keep normal
+freshness validation. The replacement controller's explicit wait budget bounds
+this state; resume and new Ready publication restore ordinary observation rules.
 Finite end projection of interval backends must use original backend evidence,
 not the correction midpoint. Native adapters retain thread-affinity and pending
 retirement safety. Cancellation/explicit stop retire waiting/current resources
