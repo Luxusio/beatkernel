@@ -88,7 +88,11 @@ impl NativeGameplayDevice for UntilClosed<'_> {
     }
     fn render_report(&mut self) -> NativeGameplayResult<Option<RenderReport>> {
         let actual = self.device.render_report()?;
-        Ok(if self.hide_render { None } else { actual })
+        Ok(if self.hide_render && self.device.step > 1 {
+            None
+        } else {
+            actual
+        })
     }
     fn host_now(&self) -> NativeGameplayResult<ClockPoint> {
         self.device.host_now()

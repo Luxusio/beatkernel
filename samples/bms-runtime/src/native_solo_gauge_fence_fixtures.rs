@@ -95,7 +95,7 @@ pub(super) fn fatal_fixture(queue_capacity: usize, capture_records: usize) -> Fi
             format,
             ClockDomainId(2),
             Timestamp::ZERO,
-            AudioLimits::new(queue_capacity, 2, 8, 32, 8).unwrap(),
+            AudioLimits::new(queue_capacity, 2, 8, 64, 8).unwrap(),
         ),
         bank,
         consumer,
@@ -191,16 +191,24 @@ fn successful_failure_prefix(viewer: Option<&player::PlayerViewer>) {
     assert_eq!(fixture.capture.as_ref().unwrap().records(), captured);
     assert_eq!(fixture.runtime.judge().stable_hash().unwrap(), hash);
     assert!(fixture.runtime.judge().is_held(held));
-    assert!(
+    assert!(matches!(
         fixture
             .runtime
             .process_input(
-                input(90_000_000, 2, ButtonState::Down),
+                input(90_000_000, 1, ButtonState::Down),
                 &ExplicitDomains,
                 point(2, 90_000_000),
             )
-            .is_err()
-    ); // Acquisition sequence validation remains live.
+            .unwrap_err()
+            .kind,
+        crate::local_runtime::FailureKind::Core(
+            beatkernel::runtime::RuntimeError::SequenceRegression {
+                last: 2,
+                received: 1,
+                ..
+            }
+        )
+    )); // Acquisition sequence validation remains live.
     if let (Some(viewer), Some(before)) = (viewer, before) {
         let after = latest(viewer);
         assert_eq!(before.score.hits, 2);

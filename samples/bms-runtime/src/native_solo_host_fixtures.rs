@@ -403,16 +403,22 @@ fn solo_publication_refusal_retains_fatal_capture_and_actual_stop_admission_pref
         let hash = f.runtime.judge().stable_hash().unwrap();
         let captured = f.capture.as_ref().unwrap().records().to_vec();
         host.reject = false;
-        let later = f
-            .runtime
-            .process_input(
-                input(60_000_000, 2, ButtonState::Up),
-                &ExplicitDomains,
-                point(2, 60_000_000),
-            )
-            .unwrap();
-        publish_actual(&mut f, later, &mut evidence, &mut host).unwrap();
-        assert!(host.reports.last().unwrap().judge_events.is_empty());
+        let published = host.reports.len();
+        let later = f.runtime.process_input(
+            input(60_000_000, 2, ButtonState::Up),
+            &ExplicitDomains,
+            point(2, 60_000_000),
+        );
+        if capacity == 8 {
+            publish_actual(&mut f, later.unwrap(), &mut evidence, &mut host).unwrap();
+            assert!(host.reports.last().unwrap().judge_events.is_empty());
+        } else {
+            assert!(matches!(
+                later.unwrap_err().kind,
+                crate::local_runtime::FailureKind::Poisoned
+            ));
+            assert_eq!(host.reports.len(), published);
+        }
         assert_eq!(f.capture.as_ref().unwrap().records(), captured);
         assert_eq!(f.runtime.judge().stable_hash().unwrap(), hash);
         let mut pcm = [0.0; 42];
