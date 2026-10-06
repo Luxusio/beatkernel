@@ -268,8 +268,21 @@ different arithmetic representation and corresponding real-time verification.
   replaced with silence and counted. Matching formats render directly into the
   output buffer. Render performs no allocation, lock or dynamic dispatch.
 
-Known ceiling: native owners still compare mixer and device formats and refuse
-a mismatch; adopting the converter, mapping presentation through its lookahead
+ALSA exposes an explicit `open_remixed_recoverable` entry point for a supplied
+ChannelMatrix at the same sample rate. Source/target channel dimensions and
+rate equality validate before native acquisition; setup creates the converter
+against the actual applied period before Ready. Buffer storage follows the
+device channels, while reports retain original Mixer evidence. Equal rates
+mean exactly one source frame per device frame and no retained resampling
+history, preserving pause/end frame boundaries and original OutputFrameBasis.
+Retirement returns the original mixer; the channel converter is worker-owned
+and can be discarded without losing audio history. Legacy ALSA open remains
+strict; no automatic matrix or rate fallback is introduced. Verify real
+PCM/telemetry, pause/finite-end behavior, preflight mixer recovery and an
+explicit ALSA null-plugin diagnostic separately from acoustic acceptance.
+
+Known ceiling: other native owners still compare mixer and device formats and
+refuse a mismatch; adopting the converter, mapping presentation through its lookahead
 and choosing quality per device remain integration work. Quality is bounded by
 the fixed tap count; no measured passband/stopband specification, dithering or
 speaker-mask-aware downmix is claimed. Native timing and device acceptance are

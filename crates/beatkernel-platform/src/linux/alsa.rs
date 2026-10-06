@@ -13,7 +13,10 @@ use crate::audio::{
     encode_pcm, telemetry::Telemetry,
 };
 use beatkernel::{
-    audio::{AudioError, Mixer, MixerOpenFailure, RenderReport},
+    audio::{
+        AudioError, ChannelMatrix, FormatConverter, Mixer, MixerOpenFailure, RenderReport,
+        ResampleQuality,
+    },
     time::{ClockDomainId, ClockPoint, Timestamp},
 };
 use std::{
@@ -456,6 +459,23 @@ impl AlsaStream {
         request: AlsaRequest,
         mixer: Mixer,
     ) -> Result<Self, MixerOpenFailure<LinuxError>> {
+        Self::open_impl(request, mixer, None)
+    }
+    /// Opens with an explicit channel matrix at the mixer's unchanged rate.
+    /// The converter has no rate history; original frame/pause/end evidence and
+    /// stopped-mixer recovery retain their meaning. Rate mismatches reject.
+    pub fn open_remixed_recoverable(
+        request: AlsaRequest,
+        mixer: Mixer,
+        matrix: ChannelMatrix,
+    ) -> Result<Self, MixerOpenFailure<LinuxError>> {
+        Self::open_impl(request, mixer, Some(matrix))
+    }
+    fn open_impl(
+        request: AlsaRequest,
+        mixer: Mixer,
+        matrix: Option<ChannelMatrix>,
+    ) -> Result<Self, MixerOpenFailure<LinuxError>> {
         let basis = mixer.output_frame_basis();
         let validation = (|| -> Result<(), LinuxError> {
             super::sys::supported_abi()?;
@@ -469,7 +489,18 @@ impl AlsaStream {
                     "explicit device, unspecified channel mask, and 0 < period < buffer required",
                 ));
             }
-            if mixer.config().format() != request.format.pcm() {
+            let source = mixer.config().format();
+            let target = request.format.pcm();
+            if let Some(matrix) = &matrix {
+                if source.sample_rate() != target.sample_rate()
+                    || matrix.source_channels() != source.channels()
+                    || matrix.target_channels() != target.channels()
+                {
+                    return Err(LinuxError::InvalidConfiguration(
+                        "ALSA remix requires equal rates and matching matrix channel dimensions",
+                    ));
+                }
+            } else if source != target {
                 return Err(LinuxError::InvalidConfiguration(
                     "ALSA and mixer formats must match exactly",
                 ));
@@ -497,6 +528,18 @@ impl AlsaStream {
                     .ok_or(LinuxError::Overflow)?;
                 let render = vec![0.0; samples];
                 let conversion = vec![0u8; bytes];
+                let remix = matrix
+                    .map(|matrix| {
+                        FormatConverter::for_mixer(
+                            mixer.config(),
+                            request.format.pcm(),
+                            matrix,
+                            ResampleQuality::Linear,
+                            period as usize,
+                        )
+                        .map_err(LinuxError::Mixer)
+                    })
+                    .transpose()?;
                 let configuration = AlsaAppliedConfig {
                     format: request.format,
                     buffer_frames: buffer,
@@ -507,9 +550,9 @@ impl AlsaStream {
                     output_origin: mixer.config().origin(),
                     requested: request.clone(),
                 };
-                Ok((pcm, configuration, render, conversion))
+                Ok((pcm, configuration, render, conversion, remix))
             });
-            let (mut pcm, configuration, mut render, mut conversion) = match opened {
+            let (mut pcm, configuration, mut render, mut conversion, mut remix) = match opened {
                 Ok(opened) => opened,
                 Err(error) => {
                     let _ = sender.send(Err(error));
@@ -537,6 +580,7 @@ impl AlsaStream {
                 &configuration,
                 &mut render,
                 &mut conversion,
+                &mut remix,
                 &worker_shared,
             );
             match &result {
@@ -707,6 +751,7 @@ fn run_worker(
     config: &AlsaAppliedConfig,
     render: &mut [f32],
     conversion: &mut [u8],
+    remix: &mut Option<FormatConverter>,
     shared: &Shared,
 ) -> Result<(), LinuxError> {
     let clock = MonotonicClock::new(config.requested.monotonic_domain);
@@ -716,9 +761,14 @@ fn run_worker(
     while !shared.stop.load(Ordering::Acquire) {
         if pending_offset == config.period_frames as usize {
             let render_start = clock.now()?;
-            let report =
-                render_and_publish(mixer, render, &shared.render_telemetry, &mut render_version)
-                    .map_err(LinuxError::Mixer)?;
+            let report = render_device_and_publish(
+                mixer,
+                remix,
+                render,
+                &shared.render_telemetry,
+                &mut render_version,
+            )
+            .map_err(LinuxError::Mixer)?;
             shared.cadence.record(
                 render_start.timestamp,
                 report.start_frame,
@@ -767,6 +817,21 @@ fn run_worker(
 }
 
 // Publishes only successful core rendering, before conversion/native admission.
+fn render_device_and_publish(
+    mixer: &mut Mixer,
+    remix: &mut Option<FormatConverter>,
+    output: &mut [f32],
+    telemetry: &Telemetry,
+    version: &mut u64,
+) -> Result<RenderReport, AudioError> {
+    match remix {
+        Some(converter) => converter.render(output, |source| {
+            render_and_publish(mixer, source, telemetry, version)
+        }),
+        None => render_and_publish(mixer, output, telemetry, version),
+    }
+}
+
 fn render_and_publish(
     mixer: &mut Mixer,
     output: &mut [f32],
@@ -1448,3 +1513,7 @@ mod frame_basis_fixtures;
 #[cfg(test)]
 #[path = "alsa/open_failure_fixtures.rs"]
 mod open_failure_fixtures;
+
+#[cfg(test)]
+#[path = "alsa/remix_fixtures.rs"]
+mod remix_fixtures;
