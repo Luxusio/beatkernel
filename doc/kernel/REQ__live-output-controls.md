@@ -38,6 +38,16 @@ guard or authoritative joined-owner boundary. An atomic closed signal allows
 settlement to finish after temporary control-lock contention; do not rely only
 on the code following the native run closure or overwrite already accepted
 applied replies with a later unrelated session failure.
+Cancellation rejects new requests and immediately settles commands not yet taken
+by the owner. An in-flight command retains its identity until the owner publishes
+its decided result or finishes/unwinds; UI cancellation polling must not invent
+an earlier result for that command. A decided reply is admitted before cancellation
+settlement, so later unrelated owner failure cannot replace it. The Player output
+adapter commits decided replies with a cold owner-thread mutex acquisition rather
+than a retryable try-lock, preventing a decided result from being stranded in the
+bridge when the pump exits. UI commands, polling and request acquisition remain
+nonblocking; none of these methods belongs to an audio callback. Ports with
+retryable publication retain the existing bridge retry behavior.
 Startup capability advertisement is cold owner-thread setup, not an audio
 callback. Temporary UI control-lock contention must not fail playback startup;
 wait for this bounded critical section and recheck cancellation/closure before
