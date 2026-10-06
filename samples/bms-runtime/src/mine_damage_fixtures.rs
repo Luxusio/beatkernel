@@ -10,7 +10,10 @@ use crate::{
     step_replay::{StepReplay, StepReplayConfig},
 };
 use beatkernel::{
-    audio::{AudioFormat, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId},
+    audio::{
+        AudioCommand, AudioFormat, PcmLimits, PcmSample, QueuePushError, SampleBank, SampleId,
+        VoiceId,
+    },
     input::{
         Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, ContactId, DeviceId,
         DeviceSelector, EventMeta, GameControlId, PhysicalControlId, PhysicalInputEvent, Position2,
@@ -317,7 +320,31 @@ fn live_damage_survives_committed_audio_failure_and_empty_reports_without_becomi
     assert_eq!(report.hazard_events.len(), 1);
     assert_eq!(report.hazard_events[0].value, 1295);
     assert_eq!(report.hazard_events[0].outcome, HazardOutcome::Triggered);
-    assert_eq!(report.audio_failures.len(), 1);
+    assert_eq!(report.audio_failures.len(), 4);
+    assert!(matches!(
+        report.audio_failures[0].command,
+        AudioCommand::Play { .. }
+    ));
+    assert!(
+        report
+            .audio_failures
+            .iter()
+            .all(|failure| failure.reason == QueuePushError::Full)
+    );
+    assert_eq!(
+        report.audio_failures[1..]
+            .iter()
+            .map(|failure| failure.command)
+            .collect::<Vec<_>>(),
+        source
+            .notes
+            .iter()
+            .map(|note| AudioCommand::Stop {
+                voice: VoiceId(note.object.0),
+                at: ts(OUTPUT + 2_000_000_000),
+            })
+            .collect::<Vec<_>>()
+    );
     assert!(report.audio_commands.is_empty());
     assert_eq!(game.mine_damage(), &summary(2, 0, 50, true));
     assert_eq!((game.score().hits, game.score().misses), (3, 0));
@@ -532,8 +559,8 @@ fn recorded_prefix(source: &BmsChart) -> (ReplayFile, MineDamageSummary) {
 fn replay_consumes_every_record_before_a_shared_display_target_and_never_judges_display_time() {
     let source = parse("#BPM 60\n#000D1:1EZZ5L01\n#001D1:1E", Default::default()).unwrap();
     let (file, live) = recorded_prefix(&source);
-    assert_eq!(file.records.len(), 6);
-    assert_eq!(live, summary(2, 2, 50, true));
+    assert_eq!(file.records.len(), 3); // Exact prefix through the fatal one-second advance.
+    assert_eq!(live, summary(2, 0, 50, true));
     let mut visual = ReplayVisual::new(&source, &file, limits()).unwrap();
     assert_eq!(visual.mine_damage(), &MineDamageSummary::default());
     assert!(visual.advance_to(ts(-1)).unwrap().is_empty());

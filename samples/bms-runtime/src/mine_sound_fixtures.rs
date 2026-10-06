@@ -677,10 +677,18 @@ fn real_step_solo_and_local_publish_disjoint_wav00_batches_and_keep_failure_pref
         )
         .unwrap();
     assert_eq!(fatal.hazard_events[0].value, 1295);
-    assert!(fatal.audio_commands.is_empty() && game.mine_damage().instant_death);
+    assert!(game.mine_damage().instant_death);
+    assert_eq!(
+        fatal.audio_commands,
+        [11, 91, 92, 93, 94].map(|voice| AudioCommand::Stop {
+            voice: VoiceId(voice),
+            at: ts(OUTPUT + 2_000_000_000),
+        })
+    );
+    assert!(fatal.audio_failures.is_empty());
     assert!(
         !game.failed(),
-        "sound installation does not invent a fatal-stop policy"
+        "numeric failure with accepted stops is not a technical failure"
     );
     let prepared = prepared(source(MIXED), Some(2));
     let pointer = prepared.bank.get(SampleId(0)).unwrap().samples().as_ptr();
