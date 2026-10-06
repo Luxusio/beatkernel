@@ -413,6 +413,66 @@ fn asio_driver_apply_exposes_load_notice_and_keeps_correlated_scope() {
     assert_eq!(app.navigator.active_id(), scope);
     assert_eq!(app.live_audio.as_ref().unwrap().editor.value(), new);
 }
+
+#[test]
+fn eight_field_asio_clock_panel_edits_last_page_and_applies_all_estimates() {
+    let (mut app, publisher) = prepared();
+    let cap = OutputCapability {
+        host: SettingsHost::Windows,
+        current_args: vec![
+            "--device".into(),
+            "{ABCDEF12-3456-7890-ABCD-EF1234567890}".into(),
+            "--buffer".into(),
+            "frames:64".into(),
+            "--output-channels".into(),
+            "0,1".into(),
+            "--asio-timer-error-ns".into(),
+            "0".into(),
+            "--asio-drift-error-ns".into(),
+            "0".into(),
+            "--asio-latency-error-ns".into(),
+            "100".into(),
+            "--asio-anchor-age-ns".into(),
+            "1000000000".into(),
+            "--output-matrix".into(),
+            "exact".into(),
+        ],
+    };
+    publisher.advertise_output(Some(cap)).unwrap();
+    app.open_live_audio();
+    let scope = app.navigator.active_id();
+    assert_eq!(app.live_audio.as_ref().unwrap().values.fields().len(), 8);
+    app.live_audio_key(KeyCode::PageDown, false);
+    compose(&mut app);
+    assert!(app.hits.iter().any(|(id, _)| *id == ControlId(1007)));
+    app.activate(ControlId(1006));
+    let draft = app.live_audio.as_mut().unwrap();
+    assert_eq!(draft.values.fields()[6].flag, "--asio-anchor-age-ns");
+    draft.editor.select_all();
+    draft.edit(None, Some("2000000"));
+    compose(&mut app);
+    app.apply_live_audio();
+    let request = publisher.take_output_request().unwrap().unwrap();
+    assert_eq!(request.args.len(), 16);
+    assert!(
+        request
+            .args
+            .chunks_exact(2)
+            .any(|pair| pair == ["--asio-anchor-age-ns", "2000000"])
+    );
+    publisher
+        .reply_output(&OutputReply {
+            id: request.id,
+            result: Ok(OutputCapability {
+                host: SettingsHost::Windows,
+                current_args: request.args,
+            }),
+        })
+        .unwrap();
+    app.collect_game();
+    compose(&mut app);
+    assert_eq!(app.navigator.active_id(), scope);
+}
 #[test]
 fn actual_f2_gate_refuses_replay_terminal_cancel_and_unacknowledged_resume_intent_without_changing_play_instance()
  {

@@ -164,6 +164,32 @@ mod tests {
         }
         assert_eq!(anchor.after(), host(7 * 24 * HOUR_NS));
     }
+
+    #[test]
+    fn bound_preflight_and_actual_width_use_the_same_wrap_ambiguity_rule() {
+        let age = HALF_WRAP_NS as u64 - 1;
+        assert_eq!(MultimediaClockAnchor::validate_bounds(age, 0, 0, 0), Ok(()));
+        assert_eq!(
+            MultimediaClockAnchor::validate_bounds(age, 0, 0, 2),
+            Err(MultimediaClockError::Ambiguous)
+        );
+        assert_eq!(
+            MultimediaClockAnchor::new(0, host(0), host(2), age, 0, 0),
+            Err(MultimediaClockError::Ambiguous)
+        );
+        assert_eq!(
+            MultimediaClockAnchor::validate_bounds(0, 0, 0, 0),
+            Err(MultimediaClockError::Malformed)
+        );
+        assert_eq!(
+            MultimediaClockAnchor::validate_bounds(HALF_WRAP_NS as u64, 0, 0, 0),
+            Err(MultimediaClockError::Malformed)
+        );
+        assert_eq!(
+            MultimediaClockAnchor::validate_bounds(1, u64::MAX, u64::MAX, u64::MAX),
+            Err(MultimediaClockError::Ambiguous)
+        );
+    }
 }
 
 impl std::fmt::Display for MultimediaClockError {
@@ -204,6 +230,23 @@ pub struct MultimediaClockAnchor {
 }
 
 impl MultimediaClockAnchor {
+    /// Validates explicit finite bounds against a measured acquisition width.
+    /// Width zero checks minimum feasibility only; it is not an acquired anchor.
+    pub fn validate_bounds(
+        max_age_ns: u64,
+        measurement_error_ns: u64,
+        drift_error_ns: u64,
+        bracket_width_ns: u64,
+    ) -> Result<(), MultimediaClockError> {
+        if max_age_ns == 0 || i128::from(max_age_ns) >= HALF_WRAP_NS {
+            return Err(MultimediaClockError::Malformed);
+        }
+        let errors = i128::from(measurement_error_ns) + i128::from(drift_error_ns);
+        if 2 * (i128::from(max_age_ns) + errors) + i128::from(bracket_width_ns) >= WRAP_NS {
+            return Err(MultimediaClockError::Ambiguous);
+        }
+        Ok(())
+    }
     /// Establishes a finite relation with explicit observation and drift bounds.
     ///
     /// The bracket must be chronological. Age must be positive and below half
@@ -222,13 +265,16 @@ impl MultimediaClockAnchor {
         }
         let width =
             i128::from(after.timestamp.as_nanos()) - i128::from(before.timestamp.as_nanos());
-        if width < 0 || max_age_ns == 0 || i128::from(max_age_ns) >= HALF_WRAP_NS {
+        if width < 0 {
             return Err(MultimediaClockError::Malformed);
         }
-        let errors = i128::from(measurement_error_ns) + i128::from(drift_error_ns);
-        if 2 * (i128::from(max_age_ns) + errors) + width >= WRAP_NS {
-            return Err(MultimediaClockError::Ambiguous);
-        }
+        // A chronological difference of two i64 timestamps fits in u64.
+        Self::validate_bounds(
+            max_age_ns,
+            measurement_error_ns,
+            drift_error_ns,
+            width as u64,
+        )?;
         Ok(Self {
             raw_ms,
             before,

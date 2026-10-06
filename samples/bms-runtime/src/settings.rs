@@ -422,7 +422,7 @@ impl NativeSettings {
                 .find(|field| field.flag == "--device")
             {
                 field.label = "TRUSTED ASIO DRIVER CLSID";
-                field.hint = "APPLY loads this installed driver. Use trusted drivers. Existing clock error estimates remain.";
+                field.hint = "APPLY loads this installed driver. Use trusted drivers. Clock bounds are caller estimates, not measured precision.";
             }
         }
         Ok(values)
@@ -444,6 +444,10 @@ impl NativeSettings {
                 "--period",
                 "--output-channels",
                 "--output-matrix",
+                "--asio-timer-error-ns",
+                "--asio-drift-error-ns",
+                "--asio-latency-error-ns",
+                "--asio-anchor-age-ns",
             ],
             SettingsHost::Macos => &["--device", "--buffer-frames", "--output-matrix"],
         };

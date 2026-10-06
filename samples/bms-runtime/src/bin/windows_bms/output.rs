@@ -521,6 +521,23 @@ pub(super) struct AsioLiveConfig {
     age: u64,
 }
 #[cfg(feature = "asio-sdk")]
+impl AsioLiveConfig {
+    pub(super) fn clock_bounds(&self) -> super::output_settings::AsioClockBounds {
+        super::output_settings::AsioClockBounds {
+            timer: self.timer_error,
+            drift: self.drift_error,
+            latency: self.latency_error,
+            age: self.age,
+        }
+    }
+    pub(super) fn set_clock_bounds(&mut self, bounds: super::output_settings::AsioClockBounds) {
+        self.timer_error = bounds.timer;
+        self.drift_error = bounds.drift;
+        self.latency_error = bounds.latency;
+        self.age = bounds.age;
+    }
+}
+#[cfg(feature = "asio-sdk")]
 pub(super) struct AsioOutput {
     // Drop order and explicit Drop guarantee close/drain before HWND destruction.
     pub(super) stream: AsioStream,
@@ -537,6 +554,21 @@ pub(super) struct AsioOutput {
 }
 #[cfg(feature = "asio-sdk")]
 impl AsioOutput {
+    pub(super) fn validate_clock_bounds(
+        &self,
+        bounds: super::output_settings::AsioClockBounds,
+    ) -> Result<()> {
+        let receipt = self.clock.sample_multimedia()?;
+        MultimediaClockAnchor::new(
+            receipt.milliseconds,
+            receipt.before.normalized,
+            receipt.after.normalized,
+            bounds.age,
+            bounds.timer,
+            bounds.drift,
+        )?;
+        Ok(())
+    }
     pub(super) fn applied_buffer_frames(&self) -> Result<u32> {
         self.buffer_frames
             .ok_or_else(|| "ASIO applied buffer metadata unavailable".into())

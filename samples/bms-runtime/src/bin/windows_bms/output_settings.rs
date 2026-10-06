@@ -13,6 +13,68 @@ use beatkernel_platform::audio::{
 };
 
 #[cfg(any(feature = "asio-sdk", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AsioClockBounds {
+    pub(super) timer: u64,
+    pub(super) drift: u64,
+    pub(super) latency: u64,
+    pub(super) age: u64,
+}
+#[cfg(any(feature = "asio-sdk", test))]
+pub(super) fn asio_clock_request(
+    current: AsioClockBounds,
+    args: &[String],
+) -> Result<AsioClockBounds, String> {
+    let draft = NativeSettings::output_only(args, SettingsHost::Windows)?;
+    let mut bounds = current;
+    for field in draft
+        .fields()
+        .iter()
+        .filter(|field| !field.value.is_empty())
+    {
+        let slot = match field.flag {
+            "--asio-timer-error-ns" => &mut bounds.timer,
+            "--asio-drift-error-ns" => &mut bounds.drift,
+            "--asio-latency-error-ns" => &mut bounds.latency,
+            "--asio-anchor-age-ns" => &mut bounds.age,
+            _ => continue,
+        };
+        if !field.value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("ASIO clock bounds require unsigned ASCII decimal nanoseconds".into());
+        }
+        *slot = field.value.parse::<u64>().map_err(|e| e.to_string())?;
+        if *slot > i64::MAX as u64 {
+            return Err("ASIO clock bound exceeds signed timestamp range".into());
+        }
+    }
+    beatkernel_platform::audio::asio::MultimediaClockAnchor::validate_bounds(
+        bounds.age,
+        bounds.timer,
+        bounds.drift,
+        0,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(bounds)
+}
+#[cfg(any(feature = "asio-sdk", test))]
+pub(super) fn asio_clock_capability(
+    mut cap: OutputCapability,
+    bounds: AsioClockBounds,
+) -> Result<OutputCapability, String> {
+    for (flag, value) in [
+        ("--asio-timer-error-ns", bounds.timer),
+        ("--asio-drift-error-ns", bounds.drift),
+        ("--asio-latency-error-ns", bounds.latency),
+        ("--asio-anchor-age-ns", bounds.age),
+    ] {
+        cap.current_args.extend([flag.into(), value.to_string()]);
+    }
+    asio_clock_request(bounds, &cap.current_args)?;
+    cap.validate()?;
+    Ok(cap)
+}
+
+#[cfg(any(feature = "asio-sdk", test))]
 pub(super) fn asio_driver_index<'a>(
     device: &str,
     ids: impl Iterator<Item = &'a str>,
@@ -84,6 +146,10 @@ pub(super) fn asio_request(
             "--output-channels" => {
                 selected = super::parse_output_channels(&field.value).map_err(|e| e.to_string())?
             }
+            "--asio-timer-error-ns"
+            | "--asio-drift-error-ns"
+            | "--asio-latency-error-ns"
+            | "--asio-anchor-age-ns" => {}
             _ => return Err("ASIO live replacement does not support a period field".into()),
         }
     }
@@ -766,5 +832,82 @@ mod tests {
                 .0,
             canonical
         );
+    }
+
+    #[test]
+    fn live_clock_bounds_parse_preserve_and_roundtrip_as_eight_advertised_fields() {
+        use beatkernel_platform::audio::asio::AsioBufferRequest;
+        let current = AsioClockBounds {
+            timer: 10,
+            drift: 20,
+            latency: 30,
+            age: 1_000_000_000,
+        };
+        assert_eq!(asio_clock_request(current, &[]).unwrap(), current);
+        let changed = asio_clock_request(
+            current,
+            &[
+                "--asio-timer-error-ns".into(),
+                "0".into(),
+                "--asio-latency-error-ns".into(),
+                "200".into(),
+                "--asio-anchor-age-ns".into(),
+                "1000000".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            changed,
+            AsioClockBounds {
+                timer: 0,
+                drift: 20,
+                latency: 200,
+                age: 1_000_000
+            }
+        );
+        let cap = asio_clock_capability(
+            asio_capability(DRIVER, AsioBufferRequest::Frames(64), &[0, 1], None).unwrap(),
+            changed,
+        )
+        .unwrap();
+        assert_eq!(cap.settings().unwrap().fields().len(), 8);
+        assert_eq!(
+            asio_clock_request(current, &cap.current_args).unwrap(),
+            changed
+        );
+        assert!(
+            request(
+                self::current(),
+                None,
+                &["--asio-timer-error-ns".into(), "0".into()]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn malformed_clock_bounds_and_ambiguous_horizons_refuse_before_native_io() {
+        let current = AsioClockBounds {
+            timer: 0,
+            drift: 0,
+            latency: 0,
+            age: 1000,
+        };
+        for args in [
+            vec!["--asio-anchor-age-ns", "0"],
+            vec!["--asio-anchor-age-ns", "2147483648000000"],
+            vec!["--asio-timer-error-ns", "9223372036854775808"],
+            vec!["--asio-drift-error-ns", "+1"],
+            vec!["--asio-latency-error-ns", "-1"],
+            vec!["--asio-timer-error-ns", "2147483648000000"],
+        ] {
+            assert!(
+                asio_clock_request(
+                    current,
+                    &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
+                )
+                .is_err()
+            );
+        }
     }
 }

@@ -2137,14 +2137,20 @@ currently trusted driver. Channel count changes require an explicit matrix
 whose source width remains the original Mixer width and whose target rows match
 the selected channel count. Exact reset requires explicitly selecting that
 source count again; no channels are silently truncated or inferred.
-Reopening preserves the original clock error bounds
+Reopening uses the accepted explicit clock error bounds
 and registry view; pending native cleanup retains its stream and attempt HWND.
 ASIO driver selection is explicit: Apply on TRUSTED ASIO DRIVER CLSID authorizes
 loading that installed native driver. Canonical nonzero identities must match
 exactly one registration in the original registry view before queue/retirement;
 missing/ambiguous registrations leave the existing output untouched. Source
-format/rate, QPC and caller-supplied clock/error estimates remain current, and
-native preparation validates the new driver's actual channel/buffer/rate support.
+format/rate and QPC remain current; caller-supplied clock/error estimates are
+preserved unless explicitly edited. Live ASIO exposes timer/drift/latency errors
+and anchor age, with unsigned ASCII/signed-range checks and finite wrap-horizon
+validation before queue/retirement. Minimum-bound feasibility uses no invented
+clock relation; native admission checks a real QPC-bracketed timer receipt, and
+reopened output establishes fresh anchors with the accepted bounds. These
+values are caller estimates and do not establish physical accuracy. Native
+preparation validates the new driver's actual channel/buffer/rate support.
 No driver is loaded while merely enumerating or validating its identity.
 Cross-backend controls remain pending.
 Output capability arguments declare the exact editable fields: the UI must not

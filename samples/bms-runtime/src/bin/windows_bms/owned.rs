@@ -276,12 +276,13 @@ fn capability(
         #[cfg(feature = "asio-sdk")]
         Output::Asio(native) => {
             native.applied_buffer_frames().map_err(|e| e.to_string())?;
-            super::output_settings::asio_capability(
+            let cap = super::output_settings::asio_capability(
                 &native.live.registration.id.clsid,
                 native.live.buffer,
                 &native.live.channels,
                 output.matrix.as_ref(),
-            )
+            )?;
+            super::output_settings::asio_clock_capability(cap, native.live.clock_bounds())
         }
     }
 }
@@ -330,6 +331,9 @@ impl WindowsOutputUi {
                         &native.live.channels,
                         output.matrix.as_ref(), &request.args)?;
                     let mut config = native.live.clone();
+                    let bounds = super::output_settings::asio_clock_request(config.clock_bounds(), &request.args)?;
+                    native.validate_clock_bounds(bounds).map_err(|e| e.to_string())?;
+                    config.set_clock_bounds(bounds);
                     if device != config.registration.id.clsid {
                         let drivers = beatkernel_platform::windows::asio::enumerate_asio_drivers(
                             config.registration.id.view,
