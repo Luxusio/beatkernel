@@ -82,7 +82,8 @@ impl LiveAudioView {
                 return;
             };
             for (index, field) in state.fields.iter().enumerate() {
-                let y = 120 + index * 130;
+                let spacing = if state.fields.len() == 4 { 100 } else { 130 };
+                let y = 120 + index * spacing;
                 text(scene, 24, y, field.label, 2, 0xe0e8f0);
                 let bounds = Bounds {
                     x: 24,
@@ -150,7 +151,7 @@ impl LiveAudioView {
         }
     }
     pub fn update(&self, frame: LiveAudioFrame<'_>) -> Result<(), String> {
-        if frame.fields.is_empty() || frame.fields.len() > 3 || frame.selected >= frame.fields.len()
+        if frame.fields.is_empty() || frame.fields.len() > 4 || frame.selected >= frame.fields.len()
         {
             return Err("live audio draft exceeds capability fields".into());
         }

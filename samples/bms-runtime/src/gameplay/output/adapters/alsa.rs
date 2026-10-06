@@ -36,10 +36,15 @@ impl std::error::Error for AlsaReplacementError {
 pub struct AlsaReplacementOutput {
     stream: AlsaStream,
     epoch: u64,
+    matrix: Option<beatkernel::audio::ChannelMatrix>,
 }
 impl AlsaReplacementOutput {
     pub fn from_stream(stream: AlsaStream) -> Self {
-        Self { stream, epoch: 0 }
+        Self {
+            stream,
+            epoch: 0,
+            matrix: None,
+        }
     }
     pub fn stream(&self) -> &AlsaStream {
         &self.stream
@@ -49,6 +54,9 @@ impl AlsaReplacementOutput {
     }
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+    pub fn channel_matrix(&self) -> Option<&beatkernel::audio::ChannelMatrix> {
+        self.matrix.as_ref()
     }
 }
 impl StoppedMixerSource for AlsaReplacementOutput {
@@ -73,7 +81,11 @@ impl OutputReplacementBackend for AlsaReplacementBackend {
         epoch: u64,
     ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output>> {
         AlsaStream::open_recoverable(request, mixer)
-            .map(|stream| AlsaReplacementOutput { stream, epoch })
+            .map(|stream| AlsaReplacementOutput {
+                stream,
+                epoch,
+                matrix: None,
+            })
             .map_err(|failure| {
                 let (error, mixer) = failure.into_parts();
                 OutputOpenFailure::recovered(AlsaReplacementError::Linux(error), mixer)
@@ -130,8 +142,25 @@ impl crate::gameplay::output::ports::OutputChannelRemixBackend for AlsaReplaceme
         matrix: beatkernel::audio::ChannelMatrix,
     ) -> Result<AlsaReplacementOutput, OutputOpenFailure<AlsaReplacementError, AlsaReplacementOutput>>
     {
-        AlsaStream::open_remixed_recoverable(request, mixer, matrix)
-            .map(|stream| AlsaReplacementOutput { stream, epoch })
+        let native_matrix = match beatkernel::audio::ChannelMatrix::new(
+            matrix.source_channels(),
+            matrix.target_channels(),
+            matrix.coefficients(),
+        ) {
+            Ok(copy) => copy,
+            Err(error) => {
+                return Err(OutputOpenFailure::recovered(
+                    AlsaReplacementError::Linux(LinuxError::Mixer(error)),
+                    Some(mixer),
+                ));
+            }
+        };
+        AlsaStream::open_remixed_recoverable(request, mixer, native_matrix)
+            .map(|stream| AlsaReplacementOutput {
+                stream,
+                epoch,
+                matrix: Some(matrix),
+            })
             .map_err(|failure| {
                 let (error, mixer) = failure.into_parts();
                 OutputOpenFailure::recovered(AlsaReplacementError::Linux(error), mixer)

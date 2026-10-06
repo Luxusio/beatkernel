@@ -407,7 +407,12 @@ impl NativeSettings {
     /// Bounded output-only schema; empty values preserve the current native setting.
     pub fn output_only(args: &[String], host: SettingsHost) -> Result<Self, String> {
         let allowed: &[&str] = match host {
-            SettingsHost::Linux => &["--alsa", "--period-frames", "--buffer-frames"],
+            SettingsHost::Linux => &[
+                "--alsa",
+                "--period-frames",
+                "--buffer-frames",
+                "--output-matrix",
+            ],
             SettingsHost::Windows => &["--device", "--buffer", "--period"],
             SettingsHost::Macos => &["--device", "--buffer-frames"],
         };
@@ -418,10 +423,27 @@ impl NativeSettings {
         {
             return Err("live settings contain an unsupported output field".into());
         }
-        let mut settings = Self::from_args(args, host)?;
+        let mut native = Vec::new();
+        let mut matrix = None;
+        for pair in args.chunks_exact(2) {
+            if pair[0] == "--output-matrix" {
+                if matrix.is_some() {
+                    return Err("duplicate live output matrix".into());
+                }
+                valid_value(&pair[1])?;
+                matrix = Some(pair[1].clone());
+            } else {
+                native.extend_from_slice(pair);
+            }
+        }
+        let mut settings = Self::from_args(&native, host)?;
         settings
             .fields
             .retain(|field| allowed.contains(&field.flag));
+        if host == SettingsHost::Linux {
+            settings.fields.push(field(("--output-matrix", "OUTPUT CHANNEL MATRIX",
+                "Rows separated by semicolons, source gains by commas (mono to stereo: 1;1). Empty keeps current; exact restores source channels."), matrix.unwrap_or_default()));
+        }
         for field in &mut settings.fields {
             match field.flag {
                 "--alsa" | "--device" => {
@@ -661,6 +683,25 @@ fn valid_value(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn output_matrix_is_linux_live_only_and_never_enters_initial_profile_schema() {
+        let args = args(&["--output-matrix", "1;0.5"]);
+        let live = NativeSettings::output_only(&args, SettingsHost::Linux).unwrap();
+        let row = live
+            .fields()
+            .iter()
+            .find(|row| row.flag == "--output-matrix")
+            .unwrap();
+        assert_eq!(row.label, "OUTPUT CHANNEL MATRIX");
+        assert_eq!(row.value, "1;0.5");
+        assert!(NativeSettings::from_args(&args, SettingsHost::Linux).is_err());
+        assert!(NativeSettings::output_only(&args, SettingsHost::Windows).is_err());
+        assert!(NativeSettings::output_only(&args, SettingsHost::Macos).is_err());
+        assert!(
+            NativeSettings::output_only(&[args.clone(), args].concat(), SettingsHost::Linux)
+                .is_err()
+        );
+    }
     #[test]
     fn windows_input_mode_overrides_replace_the_assignment_family() {
         let group = args(&[

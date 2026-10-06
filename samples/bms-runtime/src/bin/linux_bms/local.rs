@@ -104,7 +104,11 @@ use beatkernel_bms_runtime::{
     gameplay_output_owner::GameplayOutputOwner,
     native_alsa_replacement::{AlsaReplacementBackend, AlsaReplacementOutput},
 };
-type OwnedOutput = GameplayOutputOwner<AlsaReplacementBackend>;
+type OwnedOutput = GameplayOutputOwner<
+    beatkernel_bms_runtime::gameplay::output::adapters::remix::RemixedOutputBackend<
+        AlsaReplacementBackend,
+    >,
+>;
 struct CohortDevice<'a> {
     output: &'a mut OwnedOutput,
     output_ui: &'a mut beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi,
@@ -345,7 +349,9 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         mixer,
     )?;
     let mut output = OwnedOutput::new(
-        AlsaReplacementBackend,
+        beatkernel_bms_runtime::gameplay::output::adapters::remix::RemixedOutputBackend::new(
+            AlsaReplacementBackend,
+        ),
         AlsaReplacementOutput::from_stream(stream),
     );
     let mut output_ui = beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi::new(

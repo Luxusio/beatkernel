@@ -2097,3 +2097,25 @@ isolation, without inventing a fake successful GPU renderer. Actual successful
 GPU creation/adoption remains a later integration run. Both writers must return
 terminal STOPPED before scoped format and exactly four compile-only checks;
 assertions, native/browser execution and formal review/QA remain deferred.
+# Live channel matrix settings
+
+The Linux paused-live output panel exposes OUTPUT CHANNEL MATRIX. Each output
+channel is a semicolon-delimited row; comma-delimited coefficients address the
+original source channels in order (`1;0.5` maps mono to two channels). Accept at
+most 32 equal-width rows/columns, finite f32 values and 4096 bytes with no
+controls. No speaker-position inference or clipping-policy choice is hidden.
+Empty preserves the current matrix; explicit `exact` clears it and returns
+native channel count to the original Mixer source count. Rate remains fixed.
+
+Validate grammar/dimensions before the output owner retires the current stream.
+The native adapter retains the accepted matrix as metadata; successful replies
+advertise canonical round-trippable coefficients and actual native dimensions.
+Editing only device/buffer/period preserves that matrix. Existing original
+pause/input/clock/lifecycle ownership remains. Rejection leaves the old live
+output and transport intact under the normal output-request policy.
+
+This field is live-output-only: it is not added to initial native arguments or
+saved profile schema. Windows/macOS panels do not advertise it until their
+typed UI mappings are connected. Source/target rates cannot be changed here.
+Pure parser/mapper/retained-panel tests and an actual ALSA null request diagnostic
+are separate from physical-device/audio-sync acceptance and full player completion.

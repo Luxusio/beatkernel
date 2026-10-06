@@ -56,6 +56,68 @@ fn compose(app: &mut Desktop) {
     app.hits.clear();
     view.compose(&mut app.scene, &mut app.hits).unwrap();
 }
+
+#[test]
+fn live_channel_matrix_field_edits_apply_and_refresh_canonical_policy_in_same_scope() {
+    let (mut app, publisher) = prepared();
+    app.open_live_audio();
+    let scope = app.navigator.active_id();
+    let index = app
+        .live_audio
+        .as_ref()
+        .unwrap()
+        .values
+        .fields()
+        .iter()
+        .position(|field| field.flag == "--output-matrix")
+        .unwrap();
+    let draft = app.live_audio.as_mut().unwrap();
+    draft.select(index).unwrap();
+    draft.editor.select_all();
+    draft.edit(None, Some("1 ; 0.5"));
+    compose(&mut app);
+    let matrix_hit = app
+        .hits
+        .iter()
+        .find(|(id, _)| *id == ControlId(1000 + index as u64))
+        .unwrap()
+        .1;
+    assert!(matrix_hit.y + matrix_hit.height < 540);
+    app.apply_live_audio();
+    let request = publisher.take_output_request().unwrap().unwrap();
+    assert!(
+        request
+            .args
+            .chunks_exact(2)
+            .any(|pair| pair == ["--output-matrix", "1 ; 0.5"])
+    );
+    let mut applied = cap("applied");
+    applied
+        .current_args
+        .extend(["--output-matrix".into(), "1;0.5".into()]);
+    publisher
+        .reply_output(&OutputReply {
+            id: request.id,
+            result: Ok(applied.clone()),
+        })
+        .unwrap();
+    app.collect_game();
+    compose(&mut app);
+    let draft = app.live_audio.as_ref().unwrap();
+    assert_eq!(draft.selected, index);
+    assert_eq!(draft.editor.value(), "1;0.5");
+    assert_eq!(app.navigator.active_id(), scope);
+    assert_eq!(
+        app.game
+            .as_ref()
+            .unwrap()
+            .viewer
+            .output_capability()
+            .unwrap(),
+        Some(applied)
+    );
+    assert!(!app.game.as_ref().unwrap().cancelling);
+}
 #[test]
 fn actual_f2_gate_refuses_replay_terminal_cancel_and_unacknowledged_resume_intent_without_changing_play_instance()
  {
