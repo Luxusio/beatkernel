@@ -8,7 +8,7 @@ test("grade metadata admits only exact bounded integers and rejects malformed en
     assert.deepEqual(validateHistoricalGradeSnapshot({ page, pages }), { page, pages });
   }
   for (const value of [null, {}, { page: -1, pages: 1 }, { page: 1, pages: 1 }, { page: 0, pages: 0 },
-    { page: 0, pages: 1025 }, { page: 0.5, pages: 2 }, { page: 0, pages: 2.5 }, { page: 0n, pages: 1 },
+    { page: 0, pages: 1034 }, { page: 0.5, pages: 2 }, { page: 0, pages: 2.5 }, { page: 0n, pages: 1 },
     { page: NaN, pages: 1 }, { page: 0, pages: Infinity }]) assert.throws(() => validateHistoricalGradeSnapshot(value));
 });
 test("unselected same-page and busy requests produce no command or renewed request frontier", () => {
@@ -71,4 +71,17 @@ test("cancel clear and replacement selections invalidate stale page receipts wit
   assert.deepEqual(pager.snapshot(), { id: 8, page: 2, pages: 3, pending: true });
   pager.clear(); assert.equal(pager.snapshot(), null);
   assert.equal(pager.accept({ id: 8, rpcId: 1, gradePage: 1, gradePages: 3, error: null }), false);
+});
+
+test("total stored-detail bound includes 1024 grade pages plus nine comparisons with unchanged RPC atomicity", () => {
+  assert.deepEqual(validateHistoricalGradeSnapshot({ page: 1032, pages: 1033 }), { page: 1032, pages: 1033 });
+  assert.throws(() => validateHistoricalGradeSnapshot({ page: 0, pages: 1034 }));
+  const pager = new HistoricalGradePager(); pager.bind(7, 1023, 1033);
+  assert.deepEqual(pager.request(1024, 1), { kind: "historical-record-page", id: 7, rpcId: 1, page: 1024 });
+  assert.equal(pager.accept({ kind: "historical-record-page-result", id: 7, rpcId: 1, gradePage: 1024, gradePages: 1033, error: null }), true);
+  pager.request(1032, 2); pager.accept({ kind: "historical-record-page-result", id: 7, rpcId: 2, gradePage: 1032, gradePages: 1033, error: null });
+  const before = pager.snapshot(); assert.throws(() => pager.request(1033, 3)); assert.deepEqual(pager.snapshot(), before);
+  pager.request(0, 3); const pending = pager.snapshot();
+  assert.throws(() => pager.accept({ kind: "historical-record-page-result", id: 7, rpcId: 3, gradePage: 0, gradePages: 1034, error: null }));
+  assert.deepEqual(pager.snapshot(), pending);
 });

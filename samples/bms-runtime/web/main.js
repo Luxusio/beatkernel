@@ -2871,7 +2871,7 @@ function historicalGradeControls() {
   for (const id of ["historical-grade-prev", "historical-grade-next", "historical-grade-page"]) ui[id].hidden = !visible;
   ui["historical-grade-prev"].disabled = !visible || busy || snapshot.page === 0;
   ui["historical-grade-next"].disabled = !visible || busy || snapshot.page + 1 >= snapshot.pages;
-  const caption = visible ? `Stored grades page ${snapshot.page + 1} / ${snapshot.pages}` : "";
+  const caption = visible ? `Stored record details page ${snapshot.page + 1} / ${snapshot.pages}` : "";
   if (ui["historical-grade-page"].textContent !== caption) ui["historical-grade-page"].textContent = caption;
 }
 function requestHistoricalGradePage(forward) {
@@ -2887,8 +2887,8 @@ function requestHistoricalGradePage(forward) {
   historicalPageOperation = operation;
   operation.timer = setTimeout(() => {
     if (historicalPageOperation !== operation || historicalSelection !== operation.selection || owner !== operation.owner || worker !== operation.worker) return;
-    clearHistoricalRecord("Stored grade request timed out; selected replay remains available.");
-    status("Stored grade display timed out. Selected replay remains available.", true);
+    clearHistoricalRecord("Stored record details request timed out; selected replay remains available.");
+    status("Stored record details display timed out. Selected replay remains available.", true);
   }, 10000);
   historicalGradeControls();
   try { worker.postMessage(request); }
@@ -2896,7 +2896,7 @@ function requestHistoricalGradePage(forward) {
     if (historicalPageOperation !== operation) return;
     const diagnostic = String(error?.message ?? error).slice(0, 4096) || "Could not send the stored grade request.";
     clearHistoricalRecord(diagnostic);
-    status(`Stored grade display unavailable: ${diagnostic} Selected replay remains available.`, true);
+    status(`Stored record details display unavailable: ${diagnostic} Selected replay remains available.`, true);
   }
 }
 function receiveHistoricalGradePage(data) {
@@ -2905,11 +2905,11 @@ function receiveHistoricalGradePage(data) {
     || data.id !== operation.selection.id || data.rpcId !== operation.rpcId) return;
   try {
     if (!historicalGradePager.accept(data)) return;
-  } catch (error) { clearHistoricalRecord("Stored grade response is invalid; selected replay remains available."); status(String(error.message).slice(0, 4096), true); return; }
+  } catch (error) { clearHistoricalRecord("Stored record details response is invalid; selected replay remains available."); status(String(error.message).slice(0, 4096), true); return; }
   clearTimeout(operation.timer);
   historicalPageOperation = null;
   historicalGradeControls();
-  if (data.error !== null) status(`Stored grade request refused: ${data.error} Selected replay remains available.`, true);
+  if (data.error !== null) status(`Stored record details request refused: ${data.error} Selected replay remains available.`, true);
 }
 function clearHistoricalRecord(reason = "Historical record display was cleared.") {
   cancelHistoricalGradePage();

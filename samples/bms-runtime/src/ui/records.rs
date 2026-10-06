@@ -181,16 +181,12 @@ pub const DETAIL_BUTTONS: [(ControlId, Bounds, &str); 3] = [
     ),
 ];
 fn grade_pages(frame: &RecordsFrame<'_>) -> usize {
-    frame
-        .preview
-        .and_then(|preview| preview.historical_score.as_ref())
-        .map_or(1, |score| {
-            score
-                .grades
-                .len()
-                .div_ceil(crate::historical_record_presentation::GRADE_ROWS_PER_PAGE)
-                .max(1)
-        })
+    frame.preview.map_or(1, |preview| {
+        crate::historical_record_presentation::historical_page_count(
+            preview.historical_score.as_deref(),
+            preview.historical_comparison.as_deref(),
+        )
+    })
 }
 fn detail_available(id: ControlId, page: usize, pages: usize) -> bool {
     match id.0 {
@@ -358,6 +354,7 @@ impl From<&RecordPreview> for Preview {
 struct DetailCache {
     value: crate::record_model::HistoricalRecordValue,
     score: Option<Arc<crate::result_archive::ArchivedScore>>,
+    comparison: Option<Arc<Option<crate::competition_presentation::CompetitionSnapshot>>>,
     presentation: crate::historical_record_presentation::HistoricalRecordPresentation,
     geometry: crate::scene::GeometrySnapshot,
     grade_page: usize,
@@ -372,7 +369,7 @@ fn detail_geometry(
 ) -> Result<crate::scene::GeometrySnapshot, String> {
     let mut scene = Scene::with_capacity(960, 720, 1024);
     rect(&mut scene, 0, 0, 960, 720, 0x10151e);
-    presentation.compose_body(&mut scene)?;
+    presentation.compose_body_for_page(page, &mut scene)?;
     scene.append_geometry(grade_geometry)?;
     for (id, bounds, label) in DETAIL_BUTTONS {
         if detail_available(id, page, presentation.grade_page_count()) {
@@ -764,9 +761,14 @@ impl RecordsView {
                         (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                         _ => false,
                     }
+                    && match (&cache.comparison, &preview.historical_comparison) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                        _ => false,
+                    }
             });
             if !same {
-                let presentation = crate::historical_record_presentation::HistoricalRecordPresentation::from_record(value, preview.historical_score.as_deref())?;
+                let presentation = crate::historical_record_presentation::HistoricalRecordPresentation::from_record_with_comparisons(value, preview.historical_score.as_deref(), preview.historical_comparison.as_deref())?;
                 let grade_geometry = presentation.prepare_grade_page(frame.grade_page)?;
                 let geometry = detail_geometry(
                     &presentation,
@@ -778,6 +780,7 @@ impl RecordsView {
                 staged = Some(DetailCache {
                     value,
                     score: preview.historical_score.clone(),
+                    comparison: preview.historical_comparison.clone(),
                     presentation,
                     geometry,
                     grade_page: frame.grade_page,
@@ -1110,6 +1113,7 @@ mod fixtures {
             end: None,
             historical: None,
             historical_score: None,
+            historical_comparison: None,
             archive_error: None,
             score: ScoreSummary {
                 hits: 2,
@@ -1174,6 +1178,7 @@ mod fixtures {
             end: None,
             historical: None,
             historical_score: None,
+            historical_comparison: None,
             archive_error: None,
             score: ScoreSummary::default(),
         };
@@ -1252,6 +1257,7 @@ mod fixtures {
             end: None,
             historical: None,
             historical_score: None,
+            historical_comparison: None,
             archive_error: None,
             score: ScoreSummary::default(),
         };
@@ -1314,3 +1320,7 @@ mod records_stored_score_fixtures;
 #[cfg(test)]
 #[path = "records_grade_page_fixtures.rs"]
 mod records_grade_page_fixtures;
+
+#[cfg(test)]
+#[path = "records_comparison_page_fixtures.rs"]
+mod records_comparison_page_fixtures;

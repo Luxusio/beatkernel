@@ -28,6 +28,7 @@ fn historical(path: PathBuf) -> RecordPreview {
         end: None,
         historical: Some((PlayerId(u32::MAX), result)),
         historical_score: Some(Arc::new(ArchivedScore::from_summary(&score).unwrap())),
+        historical_comparison: None,
         archive_error: None,
         score: Default::default(),
     }

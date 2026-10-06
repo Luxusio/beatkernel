@@ -14,12 +14,30 @@ use beatkernel::{
 
 pub const GRADE_ROWS_PER_PAGE: usize = 4;
 
+pub fn historical_page_count(
+    score: Option<&crate::result_archive::ArchivedScore>,
+    comparisons: Option<&Option<crate::competition_presentation::CompetitionSnapshot>>,
+) -> usize {
+    let grades = score.map_or(1, |score| {
+        score.grades.len().div_ceil(GRADE_ROWS_PER_PAGE).max(1)
+    });
+    grades
+        + comparisons.map_or(0, |snapshot| {
+            snapshot.as_ref().map_or(1, |snapshot| {
+                (snapshot.ghosts.len() + usize::from(snapshot.network.is_some())).max(1)
+            })
+        })
+}
+
 pub struct HistoricalRecordPresentation {
     value: HistoricalRecordValue,
     start: Timestamp,
     end: Option<Timestamp>,
     score: Option<crate::result_archive::ArchivedScore>,
     geometry: GeometrySnapshot,
+    comparison_body: GeometrySnapshot,
+    comparison: Option<Option<crate::competition_presentation::CompetitionSnapshot>>,
+    comparison_pages: Vec<GeometrySnapshot>,
     grade_page: usize,
     grade_geometry: GeometrySnapshot,
 }
@@ -47,11 +65,28 @@ impl HistoricalRecordPresentation {
             crate::result_archive::decode_archive(archive).map_err(|error| error.to_string())?;
         let entry = crate::record_association::associate(&archive, &replay.header, player)
             .map_err(|error| error.to_string())?;
-        Self::from_record((entry.player, entry.result), entry.score.as_ref()).map(Some)
+        let comparison = archive.comparisons().and_then(|rows| {
+            rows.iter()
+                .find(|(id, _)| *id == entry.player)
+                .map(|(_, snapshot)| snapshot)
+        });
+        Self::from_record_with_comparisons(
+            (entry.player, entry.result),
+            entry.score.as_ref(),
+            comparison,
+        )
+        .map(Some)
     }
     pub fn from_record(
         value: HistoricalRecordValue,
         stored_score: Option<&crate::result_archive::ArchivedScore>,
+    ) -> Result<Self, String> {
+        Self::from_record_with_comparisons(value, stored_score, None)
+    }
+    pub fn from_record_with_comparisons(
+        value: HistoricalRecordValue,
+        stored_score: Option<&crate::result_archive::ArchivedScore>,
+        comparisons: Option<&Option<crate::competition_presentation::CompetitionSnapshot>>,
     ) -> Result<Self, String> {
         if value.0.0 == 0 {
             return Err("historical player ID must be nonzero".into());
@@ -71,6 +106,16 @@ impl HistoricalRecordPresentation {
                 (start, end)
             }
         };
+        let comparison = comparisons
+            .map(|snapshot| {
+                snapshot
+                    .as_ref()
+                    .map(crate::result_archive::copy_comparison)
+                    .transpose()
+            })
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let comparison_pages = build_comparison_pages(comparison.as_ref())?;
         let mut scene = Scene::with_capacity(960, 720, 1024);
         use crate::ui::atoms::text;
         text(&mut scene, 24, 65, "STORED HISTORICAL RECORD", 2, 0x9bb1cf);
@@ -132,6 +177,21 @@ impl HistoricalRecordPresentation {
             0xd8b36b,
         );
         text(&mut scene, 24, 286, "STORED HISTORICAL DATA", 1, 0x9bb1cf);
+        text(
+            &mut scene,
+            500,
+            286,
+            if comparison.is_some() {
+                "STORED COMPARISON METADATA"
+            } else {
+                "STORED COMPARISONS UNAVAILABLE"
+            },
+            1,
+            0x9bb1cf,
+        );
+        let comparison_body = scene.geometry_snapshot()?;
+        let mut scene = Scene::with_capacity(960, 720, 1024);
+        scene.append_geometry(&comparison_body)?;
         if let Some(score) = stored_score {
             for (y, label) in [
                 (
@@ -180,6 +240,9 @@ impl HistoricalRecordPresentation {
             .map_err(|error| error.to_string())?;
         let grade_geometry = build_grade_geometry(score.as_ref(), 0)?;
         Ok(Self {
+            comparison,
+            comparison_pages,
+            comparison_body,
             grade_page: 0,
             grade_geometry,
             value,
@@ -205,9 +268,15 @@ impl HistoricalRecordPresentation {
         self.grade_page
     }
     pub fn grade_page_count(&self) -> usize {
-        self.score.as_ref().map_or(1, |score| {
-            score.grades.len().div_ceil(GRADE_ROWS_PER_PAGE).max(1)
-        })
+        historical_page_count(self.score.as_ref(), self.comparison.as_ref())
+    }
+    pub fn comparison(
+        &self,
+    ) -> Option<&Option<crate::competition_presentation::CompetitionSnapshot>> {
+        self.comparison.as_ref()
+    }
+    fn score_pages(&self) -> usize {
+        historical_page_count(self.score.as_ref(), None)
     }
     pub(crate) fn prepare_grade_page(&self, page: usize) -> Result<GeometrySnapshot, String> {
         if page >= self.grade_page_count() {
@@ -215,6 +284,9 @@ impl HistoricalRecordPresentation {
         }
         if page == self.grade_page {
             return Ok(self.grade_geometry.clone());
+        }
+        if page >= self.score_pages() {
+            return Ok(self.comparison_pages[page - self.score_pages()].clone());
         }
         build_grade_geometry(self.score.as_ref(), page)
     }
@@ -233,10 +305,198 @@ impl HistoricalRecordPresentation {
     pub(crate) fn compose_body(&self, scene: &mut Scene) -> Result<(), String> {
         scene.append_geometry(&self.geometry)
     }
+    pub(crate) fn compose_body_for_page(
+        &self,
+        page: usize,
+        scene: &mut Scene,
+    ) -> Result<(), String> {
+        if page >= self.grade_page_count() {
+            return Err("stored detail page is out of range".into());
+        }
+        if page >= self.score_pages() {
+            scene.append_geometry(&self.comparison_body)
+        } else {
+            self.compose_body(scene)
+        }
+    }
     pub fn compose(&self, scene: &mut Scene) -> Result<(), String> {
-        self.compose_body(scene)?;
+        self.compose_body_for_page(self.grade_page, scene)?;
         scene.append_geometry(&self.grade_geometry)
     }
+}
+fn build_comparison_pages(
+    comparison: Option<&Option<crate::competition_presentation::CompetitionSnapshot>>,
+) -> Result<Vec<GeometrySnapshot>, String> {
+    use crate::{ui::atoms::text, competition::OpponentKind, competition_presentation::NetworkStatus};
+    let mut pages = Vec::new();
+    let Some(comparison) = comparison else {
+        return Ok(pages);
+    };
+    let count = comparison.as_ref().map_or(1, |snapshot| {
+        (snapshot.ghosts.len() + usize::from(snapshot.network.is_some())).max(1)
+    });
+    pages
+        .try_reserve_exact(count)
+        .map_err(|error| error.to_string())?;
+    if let Some(snapshot) = comparison {
+        for ghost in &snapshot.ghosts {
+            let mut scene = Scene::with_capacity(960, 720, 512);
+            text(
+                &mut scene,
+                24,
+                322,
+                "SAVED REPLAY OPERATION PREFIX",
+                1,
+                0xd8b36b,
+            );
+            text(
+                &mut scene,
+                24,
+                346,
+                match ghost.kind {
+                    OpponentKind::Own => "STORED OWNER OWN",
+                    OpponentKind::Other => "STORED OWNER OTHER",
+                },
+                1,
+                0xd8b36b,
+            );
+            text(&mut scene, 24, 370, &ghost.label, 1, 0xb6cce6);
+            text(
+                &mut scene,
+                24,
+                394,
+                &format!("STORED HITS {} MISSES {}", ghost.hits, ghost.misses),
+                1,
+                0xb6cce6,
+            );
+            text(
+                &mut scene,
+                24,
+                418,
+                &format!("STORED COMBO {} MAX COMBO {}", ghost.combo, ghost.max_combo),
+                1,
+                0xb6cce6,
+            );
+            let frontier = ghost.recorded_until.map_or_else(
+                || "RECORDED UNTIL UNAVAILABLE".into(),
+                |time| format!("RECORDED UNTIL {} NS", time.as_nanos()),
+            );
+            text(&mut scene, 24, 442, &frontier, 1, 0xb6cce6);
+            text(
+                &mut scene,
+                24,
+                466,
+                "PREFIX DOES NOT PROVE WHOLE-SONG COMPLETION",
+                1,
+                0x9bb1cf,
+            );
+            text(
+                &mut scene,
+                24,
+                514,
+                &format!("STORED COMPARISONS PAGE {} / {}", pages.len() + 1, count),
+                1,
+                0x9bb1cf,
+            );
+            pages.push(scene.geometry_snapshot()?);
+        }
+        if let Some(network) = &snapshot.network {
+            let mut scene = Scene::with_capacity(960, 720, 512);
+            text(
+                &mut scene,
+                24,
+                322,
+                "PEER-REPORTED NOT FINAL RANKING",
+                1,
+                0xd8b36b,
+            );
+            text(
+                &mut scene,
+                24,
+                346,
+                match network.status {
+                    NetworkStatus::Waiting => "NETWORK STATUS WAITING",
+                    NetworkStatus::Connected => "NETWORK STATUS CONNECTED",
+                    NetworkStatus::Disconnected => "NETWORK STATUS DISCONNECTED",
+                    NetworkStatus::Stopped => "NETWORK STATUS STOPPED",
+                },
+                1,
+                0xd8b36b,
+            );
+            if let Some(progress) = network.progress {
+                text(
+                    &mut scene,
+                    24,
+                    370,
+                    &format!("REPORTED SONG {} NS", progress.song_ns),
+                    1,
+                    0xb6cce6,
+                );
+                text(
+                    &mut scene,
+                    24,
+                    394,
+                    &format!("REPORTED HITS {} MISSES {}", progress.hits, progress.misses),
+                    1,
+                    0xb6cce6,
+                );
+                text(
+                    &mut scene,
+                    24,
+                    418,
+                    &format!(
+                        "REPORTED COMBO {} MAX COMBO {}",
+                        progress.combo, progress.max_combo
+                    ),
+                    1,
+                    0xb6cce6,
+                );
+            } else {
+                text(
+                    &mut scene,
+                    24,
+                    370,
+                    "PEER PROGRESS UNAVAILABLE",
+                    1,
+                    0x9bb1cf,
+                );
+            }
+            text(
+                &mut scene,
+                24,
+                514,
+                &format!("STORED COMPARISONS PAGE {} / {}", pages.len() + 1, count),
+                1,
+                0x9bb1cf,
+            );
+            pages.push(scene.geometry_snapshot()?);
+        }
+    }
+    if pages.is_empty() {
+        let mut scene = Scene::with_capacity(960, 720, 256);
+        text(
+            &mut scene,
+            24,
+            322,
+            if comparison.is_none() {
+                "NO SELECTED COMPARISONS"
+            } else {
+                "STORED COMPARISON SNAPSHOT EMPTY"
+            },
+            1,
+            0x9bb1cf,
+        );
+        text(
+            &mut scene,
+            24,
+            514,
+            "STORED COMPARISONS PAGE 1 / 1",
+            1,
+            0x9bb1cf,
+        );
+        pages.push(scene.geometry_snapshot()?);
+    }
+    Ok(pages)
 }
 fn build_grade_geometry(
     score: Option<&crate::result_archive::ArchivedScore>,
@@ -292,3 +552,7 @@ mod fixtures;
 #[cfg(test)]
 #[path = "historical_grade_page_fixtures.rs"]
 mod historical_grade_page_fixtures;
+
+#[cfg(test)]
+#[path = "historical_comparison_page_fixtures.rs"]
+mod historical_comparison_page_fixtures;

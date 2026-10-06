@@ -19,6 +19,8 @@ pub struct RecordPreview {
     pub start: Timestamp,
     pub end: Option<Timestamp>,
     pub historical: Option<HistoricalRecordValue>,
+    pub historical_comparison:
+        Option<std::sync::Arc<Option<crate::competition_presentation::CompetitionSnapshot>>>,
     pub historical_score: Option<std::sync::Arc<crate::result_archive::ArchivedScore>>,
     pub archive_error: Option<String>,
     pub score: ScoreSummary,

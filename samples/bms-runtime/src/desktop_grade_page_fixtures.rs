@@ -43,6 +43,7 @@ fn preview(path: PathBuf, count: Option<usize>) -> RecordPreview {
                 timing: TimingRecord::default(),
             })
         }),
+        historical_comparison: None,
         archive_error: None,
         score: Default::default(),
     }

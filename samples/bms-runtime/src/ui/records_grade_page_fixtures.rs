@@ -41,6 +41,7 @@ fn preview(count: Option<usize>) -> RecordPreview {
             },
         )),
         historical_score: score.map(Arc::new),
+        historical_comparison: None,
         archive_error: None,
         score: Default::default(),
     }

@@ -145,6 +145,7 @@ impl RecordPreview {
             end: setup.end,
             historical: None,
             historical_score: None,
+            historical_comparison: None,
             archive_error: None,
             score,
         })
@@ -161,9 +162,10 @@ impl RecordPreview {
         let association = archive.map(|archive| prepare_association(archive, &file.header, player));
         let mut preview = Self::from_file(path, source, settings, file)?;
         match association {
-            Some(Ok((historical, score))) => {
+            Some(Ok((historical, score, comparison))) => {
                 preview.historical = Some(historical);
                 preview.historical_score = score;
+                preview.historical_comparison = comparison;
             }
             Some(Err(error)) => preview.archive_error = Some(error.to_string()),
             None if player.is_some() => {
@@ -181,14 +183,16 @@ impl RecordPreview {
         player: Option<crate::local_players::PlayerId>,
     ) {
         match prepare_association(archive, header, player) {
-            Ok((historical, score)) => {
+            Ok((historical, score, comparison)) => {
                 self.historical = Some(historical);
                 self.historical_score = score;
+                self.historical_comparison = comparison;
                 self.archive_error = None;
             }
             Err(error) => {
                 self.historical = None;
                 self.historical_score = None;
+                self.historical_comparison = None;
                 self.archive_error = Some(error.to_string());
             }
         }
@@ -202,6 +206,7 @@ fn prepare_association(
     (
         crate::record_model::HistoricalRecordValue,
         Option<std::sync::Arc<crate::result_archive::ArchivedScore>>,
+        Option<std::sync::Arc<Option<crate::competition_presentation::CompetitionSnapshot>>>,
     ),
     String,
 > {
@@ -214,7 +219,22 @@ fn prepare_association(
         .transpose()
         .map_err(|error| error.to_string())?
         .map(std::sync::Arc::new);
-    Ok(((entry.player, entry.result), score))
+    let comparison = archive
+        .comparisons()
+        .map(|rows| -> Result<_, String> {
+            let (_, snapshot) = rows
+                .iter()
+                .find(|(id, _)| *id == entry.player)
+                .ok_or("associated comparison row is missing")?;
+            snapshot
+                .as_ref()
+                .map(crate::result_archive::copy_comparison)
+                .transpose()
+                .map_err(|error| error.to_string())
+        })
+        .transpose()?
+        .map(std::sync::Arc::new);
+    Ok(((entry.player, entry.result), score, comparison))
 }
 fn is_record_path(path: &Path) -> bool {
     path.extension()
@@ -547,3 +567,7 @@ mod fixtures {
 #[cfg(test)]
 #[path = "record_stored_score_fixtures.rs"]
 mod record_stored_score_fixtures;
+
+#[cfg(test)]
+#[path = "record_comparison_association_fixtures.rs"]
+mod record_comparison_association_fixtures;

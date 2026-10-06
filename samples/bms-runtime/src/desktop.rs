@@ -2500,15 +2500,10 @@ impl Desktop {
         let Some(preview) = records.valid_preview() else {
             return;
         };
-        let pages = preview.historical_score.as_ref().map_or(1, |score| {
-            score
-                .grades
-                .len()
-                .div_ceil(
-                    beatkernel_bms_runtime::historical_record_presentation::GRADE_ROWS_PER_PAGE,
-                )
-                .max(1)
-        });
+        let pages = beatkernel_bms_runtime::historical_record_presentation::historical_page_count(
+            preview.historical_score.as_deref(),
+            preview.historical_comparison.as_deref(),
+        );
         let page = requested.min(pages - 1);
         if records.grade_page != page {
             records.grade_page = page;
@@ -8240,6 +8235,7 @@ mod tests {
             end: None,
             historical: None,
             historical_score: None,
+            historical_comparison: None,
             archive_error: None,
             score: Default::default(),
         }
@@ -8785,3 +8781,7 @@ mod desktop_record_details_fixtures;
 #[cfg(test)]
 #[path = "desktop_grade_page_fixtures.rs"]
 mod desktop_grade_page_fixtures;
+
+#[cfg(test)]
+#[path = "desktop_comparison_page_fixtures.rs"]
+mod desktop_comparison_page_fixtures;

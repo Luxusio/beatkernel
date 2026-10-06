@@ -134,7 +134,7 @@ test("historical grade metadata comes from validated binding getters before disp
   const h=await catalogWorker({historicalGradePages:3});await h.send(historicalRequest());
   const reply=h.of("historical-record-result").at(-1);
   assert.equal(reply.available,true);assert.equal(reply.gradePage,0);assert.equal(reply.gradePages,3);
-  for(const fields of [{historicalGradePages:0},{historicalGradePages:1025},{historicalGradePages:1.5},{historicalGradePage:1}]){
+  for(const fields of [{historicalGradePages:0},{historicalGradePages:1034},{historicalGradePages:1.5},{historicalGradePage:1}]){
     const bad=await catalogWorker(fields);await bad.send(historicalRequest());
     const refused=bad.of("historical-record-result").at(-1);
     assert.equal(refused.available,false);assert.equal(refused.gradePage,null);assert.equal(refused.gradePages,0);assert.ok(refused.error);
@@ -198,6 +198,19 @@ test("cleared replacement and active-play owners refuse stale grade setters with
     if(next==="play")assert.equal(h.games[0].frees,0);
     assert.equal(h.of("fatal").length,0);
   }
+});
+
+test("actual Worker uses existing page bridge beyond maximum grade table through last stored comparison",async()=>{
+  const h=await catalogWorker({historicalGradePages:1033});await h.send(historicalRequest());await h.tick();const binding=h.historicalOwners[0];
+  assert.equal(h.of("historical-record-result").at(-1).gradePages,1033);
+  for(const [rpcId,page] of [[1,1024],[2,1032]]){
+    await h.send({kind:"historical-record-page",id:1,rpcId,page});const reply=h.of("historical-record-page-result").at(-1);
+    assert.equal(reply.error,null);assert.equal(reply.gradePage,page);assert.equal(reply.gradePages,1033);await h.tick();
+  }
+  await h.send({kind:"historical-record-page",id:1,rpcId:3,page:1033});assert.ok(h.of("historical-record-page-result").at(-1).error);
+  assert.deepEqual(binding.pageSetters,[1024,1032]);assert.equal(binding.frees,0);
+  await h.send({kind:"historical-record-page",id:1,rpcId:3,page:1023});assert.equal(h.of("historical-record-page-result").at(-1).error,null);
+  assert.deepEqual(binding.pageSetters,[1024,1032,1023]);assert.equal(h.games.length,0);assert.equal(h.of("fatal").length,0);
 });
 test("idle Worker forwards opaque bytes and original player to binding and owns cached drawing/disposal",async()=>{
   const h=await catalogWorker();await h.send(historicalRequest());

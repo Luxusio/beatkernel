@@ -6408,20 +6408,20 @@ function storedHistoricalFields(id = 41) {
 test("historical page controls survive completed library operation and only matching ACK changes confirmed caption", async () => {
   const h = await harness(storedHistoricalFields()); const { worker, request } = await selectedHistoricalGrades(h);
   assert.equal(h.get("historical-grade-next").hidden, false); assert.equal(h.get("historical-grade-next").disabled, false);
-  assert.equal(h.get("historical-grade-prev").disabled, true); assert.equal(h.get("historical-grade-page").textContent, "Stored grades page 1 / 3");
+  assert.equal(h.get("historical-grade-prev").disabled, true); assert.equal(h.get("historical-grade-page").textContent, "Stored record details page 1 / 3");
   h.click("historical-grade-next"); await flush(); const page = worker.last("historical-record-page");
   assert.equal(page.id, request.id); assert.equal(page.page, 1);
   assert.equal(h.get("historical-grade-next").disabled, true); assert.equal(h.get("historical-grade-prev").disabled, true);
   h.click("historical-grade-next"); await flush(); assert.equal(worker.messages("historical-record-page").length, 1);
   for (const stale of [{ id: page.id + 1, rpcId: page.rpcId }, { id: page.id, rpcId: page.rpcId - 1 }]) {
     await h.receive({ kind: "historical-record-page-result", ...stale, gradePage: 1, gradePages: 3, error: null });
-    assert.equal(h.get("historical-grade-page").textContent, "Stored grades page 1 / 3"); assert.equal(h.get("historical-grade-next").disabled, true);
+    assert.equal(h.get("historical-grade-page").textContent, "Stored record details page 1 / 3"); assert.equal(h.get("historical-grade-next").disabled, true);
   }
   await h.receive({ kind: "historical-record-page-result", id: page.id, rpcId: page.rpcId, gradePage: 1, gradePages: 3, error: null });
-  assert.equal(h.get("historical-grade-page").textContent, "Stored grades page 2 / 3"); assert.equal(h.get("historical-grade-prev").disabled, false);
+  assert.equal(h.get("historical-grade-page").textContent, "Stored record details page 2 / 3"); assert.equal(h.get("historical-grade-prev").disabled, false);
   h.click("historical-grade-next"); await flush(); const refused = worker.last("historical-record-page");
   await h.receive({ kind: "historical-record-page-result", id: refused.id, rpcId: refused.rpcId, gradePage: null, gradePages: 0, error: "cold page allocation refused" });
-  assert.equal(h.get("historical-grade-page").textContent, "Stored grades page 2 / 3"); assert.equal(h.get("historical-grade-next").disabled, false);
+  assert.equal(h.get("historical-grade-page").textContent, "Stored record details page 2 / 3"); assert.equal(h.get("historical-grade-next").disabled, false);
   assert.equal(h.opens.length, 0); await h.close();
 });
 test("page timeout post refusal and malformed matching receipt clear uncertain display but preserve selected replay", async () => {
@@ -6459,7 +6459,7 @@ test("replacement record protects its page controls from old RPC ACK and already
   queued.callback(); await flush();
   await h.receive({ kind: "historical-record-page-result", id: old.id, rpcId: old.rpcId, gradePage: 1, gradePages: 3, error: null });
   assert.equal(worker.messages("historical-record-clear").length, clears);
-  assert.equal(h.get("historical-grade-page").textContent, "Stored grades page 1 / 2"); assert.equal(h.get("historical-grade-next").disabled, false);
+  assert.equal(h.get("historical-grade-page").textContent, "Stored record details page 1 / 2"); assert.equal(h.get("historical-grade-next").disabled, false);
   await h.close();
 });
 test("saved-record selection change aborts unabortable library read before stale historical or replay replacement", async () => {
@@ -6478,4 +6478,19 @@ test("saved-record selection change aborts unabortable library read before stale
   await disposed.close();
   await disposed.receive({ kind: "historical-record-page-result", id: pending.id, rpcId: pending.rpcId, gradePage: 1, gradePages: 3, error: null }, selected.worker);
   assert.equal(disposed.get("historical-grade-next").hidden, true); assert.equal(disposed.timers.size, 0);
+});
+
+test("main stored-record detail caption admits 1033 pages while matching changed-count receipt clears display only", async () => {
+  const h = await harness(storedHistoricalFields()); const { worker, request } = await selectedHistoricalGrades(h, 1033);
+  const replay = h.get("replay-name").textContent;
+  assert.equal(h.get("historical-grade-page").textContent, "Stored record details page 1 / 1033");
+  assert.equal(h.get("historical-grade-next").disabled, false);
+  h.click("historical-grade-next"); await flush(); const page = worker.last("historical-record-page");
+  assert.equal(page.id, request.id); assert.equal(page.page, 1);
+  await h.receive({ kind: "historical-record-page-result", id: page.id, rpcId: page.rpcId, gradePage: 1, gradePages: 1033, error: null });
+  assert.equal(h.get("historical-grade-page").textContent, "Stored record details page 2 / 1033");
+  h.click("historical-grade-next"); await flush(); const malformed = worker.last("historical-record-page");
+  await h.receive({ kind: "historical-record-page-result", id: malformed.id, rpcId: malformed.rpcId, gradePage: 2, gradePages: 1034, error: null });
+  assert.equal(h.get("historical-grade-next").hidden, true); assert.equal(h.get("replay-name").textContent, replay);
+  assert.equal(h.get("replay-play").disabled, false); assert.equal(h.opens.length, 0); await h.close();
 });

@@ -50,6 +50,7 @@ fn preview(practice: bool) -> RecordPreview {
             },
         )),
         historical_score: None,
+        historical_comparison: None,
         archive_error: None,
     }
 }

@@ -412,7 +412,7 @@ fn validate_comparison(
     }
     Ok(())
 }
-fn copy_comparison(
+pub(crate) fn copy_comparison(
     snapshot: &crate::competition_presentation::CompetitionSnapshot,
 ) -> Result<crate::competition_presentation::CompetitionSnapshot, ArchiveError> {
     validate_comparison(snapshot, false)?;

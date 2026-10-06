@@ -62,7 +62,7 @@ export function nanoseconds(input) {
 }
 
 export function validateHistoricalGradeSnapshot(value) {
-  if (!value || !Number.isSafeInteger(value.pages) || value.pages < 1 || value.pages > 1024
+  if (!value || !Number.isSafeInteger(value.pages) || value.pages < 1 || value.pages > 1033
     || !Number.isSafeInteger(value.page) || value.page < 0 || value.page >= value.pages) {
     throw new Error("Historical grade page metadata is invalid.");
   }
