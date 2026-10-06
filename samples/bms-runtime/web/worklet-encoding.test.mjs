@@ -66,7 +66,7 @@ test("every partial encodeInto boundary preserves native read and byte counts an
       const actualBacking = new Uint8Array(capacity + 6).fill(0xa5);
       const expectedBacking = actualBacking.slice();
       const actualResult = actual.encodeInto(value, actualBacking.subarray(3, 3 + capacity));
-      const expectedResult = expected.encodeInto(value, expectedBacking.subarray(3, 3 + capacity));
+      const expectedResult = expected.encodeInto(text, expectedBacking.subarray(3, 3 + capacity));
       assert.deepEqual({ read: actualResult.read, written: actualResult.written }, expectedResult,
         `UTF-16 consumption for ${JSON.stringify(text)} at ${capacity} bytes`);
       assert.deepEqual(actualBacking, expectedBacking);

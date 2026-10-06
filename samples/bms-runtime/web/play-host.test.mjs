@@ -548,7 +548,7 @@ async function harness(faults = {}) {
     this.setExport("RecordsStore", RecordsStore);
   }, { context });
   const modules = new Map();
-  for (const name of ["host_model.mjs", "play-model.mjs", "settings-profile.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "pointer-input.mjs", "local-play-host.mjs", "main.js"]) {
+  for (const name of ["completed-results-model.mjs", "host_model.mjs", "play-model.mjs", "settings-profile.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "pointer-input.mjs", "local-play-host.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
     modules.set(name, new SourceTextModule(await readFile(url, "utf8"), {
       context, identifier: url.href, initializeImportMeta(meta) { meta.url = url.href; },
@@ -1533,7 +1533,7 @@ test("Window snapshots exact raw frames and output observations while leaving pr
   await h.preview(); h.get("output-rate").value = "48000";
   const session = await h.launch(), worker = h.workers[0];
   assert.equal(session.start.rate, 44100); assert.equal(h.opens[0].options.contextOptions.sampleRate, 48000);
-  assert.equal(h.audio.frameReads, 0);
+  assert.equal(h.audio.frameReads, 1); // Establish the actual output arm frame.
   h.setNow(1500);
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1500.125 });
   const down = worker.last("play-step");
@@ -1562,20 +1562,20 @@ test("Window snapshots exact raw frames and output observations while leaving pr
 
 test("raw observation acquisition failures never fall back and replay never acquires a live scheduling frame", async () => {
   for (const mode of ["live", "replay"]) {
-    const faults = { frameFailure: new Error("actual context frame unavailable"),
-      outputFailure: Object.assign(new Error("no presentation yet"), { code: "unavailable" }) };
+    const faults = { outputFailure: Object.assign(new Error("no presentation yet"), { code: "unavailable" }) };
     const h = await harness(faults); await h.preview();
     if (mode === "replay") chooseRecording(h, [selectedRecording().file]);
     const session = await h.launch(0, mode), worker = h.workers[0];
+    faults.frameFailure = new Error("actual context frame unavailable");
     await h.advance(8);
     assert.equal(worker.messages("play-step").length, 0);
     if (mode === "live") {
-      assert.equal(h.audio.frameReads, 1); assert.equal(worker.messages("play-render").length, 0);
+      assert.equal(h.audio.frameReads, 2); assert.equal(worker.messages("play-render").length, 0);
       assert.equal(worker.last("play-stop").completed, false);
       await h.receive(finalScore(session.id));
       assert.match(h.get("status").textContent, /actual context frame unavailable/);
     } else {
-      assert.equal(h.audio.frameReads, 0);
+      assert.equal(h.audio.frameReads, 1);
       const request = worker.last("play-render");
       assert.deepEqual(request, { kind: "play-render", playId: session.id, renderId: 1,
         timestamp: null, observedNowMs: 1008 });
@@ -1585,7 +1585,7 @@ test("raw observation acquisition failures never fall back and replay never acqu
       h.faults.outputFailure = Object.assign(new Error("actual output clock failed"), { code: "state" });
       await h.advance(8);
       assert.equal(worker.messages("play-render").length, 1);
-      assert.equal(worker.last("play-stop").completed, false); assert.equal(h.audio.frameReads, 0);
+      assert.equal(worker.last("play-stop").completed, false); assert.equal(h.audio.frameReads, 1);
       await h.receive(finalScore(session.id));
       assert.match(h.get("status").textContent, /actual output clock failed/);
     }
@@ -4014,7 +4014,7 @@ test("local saved targets freeze before audio acquisition and member comparisons
   assignTarget("file:1", 2);
   opening.resolve(h.audio); await flush();
   const worker = h.workers[0], start = worker.last("play-start");
-  assert.deepEqual(start.opponents.map(row => [row.player, row.own, row.label]), [[1, true, "Own prefix"], [2, false, "<Other prefix>"]]);
+  assert.deepEqual(Array.from(start.opponents, row => [row.player, row.own, row.label]), [[1, true, "Own prefix"], [2, false, "<Other prefix>"]]);
   assert.equal(start.opponents[0].file, own.file); assert.equal(start.opponents[1].file, other.file);
   assert.equal(own.reads, 0); assert.equal(other.reads, 0);
   const handoff = await h.prepared(start, 1); await h.reply(handoff, null); await h.reply(worker.last("play-activate"), null);
@@ -4045,7 +4045,8 @@ test("local saved targets freeze before audio acquisition and member comparisons
   });
   await h.receive(receipt); assert.deepEqual(writes, []); assert.equal(h.get("export").disabled, true);
   stopping.resolve(); await flush();
-  assert.equal(writes.length, 1); assert.equal(rows.children.length, 2);
+  assert.deepEqual(writes, [0, 1]); // Clear old rows, then publish one complete snapshot after cleanup.
+  assert.equal(rows.children.length, 2);
   assert.match(rows.children[0].textContent, /Player 1.*Own prefix.*18446744073709551615/);
   assert.match(rows.children[1].textContent, /Player 2.*only second comparison stopped/);
   assert.match(h.get("local-results").children[1].textContent, /second recording export failed/);
@@ -4056,7 +4057,7 @@ test("local saved targets freeze before audio acquisition and member comparisons
   assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), prefix);
   assert.equal(h.downloads.at(-1).filename, `beatkernel-${start.playId}-player-1-prefix.bkr`);
   await h.receive(receipt); await h.receive({ kind: "play-opponents", playId: start.playId, player: 2, opponents: null, error: "late old failure" });
-  assert.equal(writes.length, 1); assert.match(rows.children[1].textContent, /only second comparison stopped/);
+  assert.deepEqual(writes, [0, 1]); assert.match(rows.children[1].textContent, /only second comparison stopped/);
   assert.equal(own.reads, 0); assert.equal(other.reads, 0);
   await h.close();
 });
@@ -4624,7 +4625,7 @@ test("live section start snapshots before audio opens, retains drafts and prepar
   assert.equal(h.opens.length, 1);
   assert.equal(h.opens[0].gesture, true);
   assert.equal(draft.disabled, true);
-  assert.equal(h.opens[0].options.pcmLimits.maxSamples, 5392);
+  assert.equal(h.opens[0].options.pcmLimits.maxSamples, 7940);
   assert.equal(h.opens[0].options.pcmLimits.maxAssetBytes, 64 * 1024 * 1024);
   assert.equal(h.opens[0].options.pcmLimits.maxTotalBytes, 256 * 1024 * 1024);
   draft.value = "7.250000001";
@@ -5352,7 +5353,7 @@ test("automatic network saved comparisons target the actual sole member without 
   selectOpponent(h, other, { own: false, label: "Other prefix" });
   assert.equal(h.get("opponent-player-file:1").value, ""); assert.equal(h.get("opponent-player-file:2").value, "");
   const start = await launchPeerSession(h);
-  assert.deepEqual(start.opponents.map(row => [row.player, row.own, row.label]), [[1, true, "Own prefix"], [1, false, "Other prefix"]]);
+  assert.deepEqual(Array.from(start.opponents, row => [row.player, row.own, row.label]), [[1, true, "Own prefix"], [1, false, "Other prefix"]]);
   assert.equal(start.opponents[0].file, own.file); assert.equal(start.opponents[1].file, other.file);
   assert.equal(own.reads, 0); assert.equal(other.reads, 0);
   h.click("stop"); await flush();

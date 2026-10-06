@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { File as NodeFile } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { ROOM_SESSION_METHODS } from "./room-owner.mjs";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 
 const FileType = globalThis.File ?? NodeFile;
@@ -198,7 +199,8 @@ async function workerHarness(options = {}) {
       static open() { throw new Error("Preview fixtures must not open multiplayer connections"); }
     });
   }, { context });
-  const room = new SyntheticModule(["BrowserRoomOwner"], function () {
+  const room = new SyntheticModule(["BrowserRoomOwner", "ROOM_SESSION_METHODS"], function () {
+    this.setExport("ROOM_SESSION_METHODS", ROOM_SESSION_METHODS);
     this.setExport("BrowserRoomOwner", class {
       static open() { throw new Error("Preview fixtures must not open room connections"); }
     });

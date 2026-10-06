@@ -137,7 +137,7 @@ test("actual disposal exports one standalone archive before replay consumption a
   await h.send({kind:"play-stop",playId:7,completed:true});assert.equal(h.games[0].frees,1);
 });
 test("whole local roster transfers one archive beside exact original per-member replays",async()=>{
-  const request=startRequest({inputMode:"physical",recordReplay:true,localPlanWords:new Uint32Array([4294967295,1,1,0,7,1,2,0])});
+  const request=startRequest({inputMode:"physical-contact",recordReplay:true,localPlanWords:new Uint32Array([4294967295,1,1,0,7,1,2,0])});
   const h=await active({startRequest:request,observeOutput:()=>true});await observeDone(h);
   await h.send({kind:"play-stop",playId:7,completed:true});const final=h.of("play-stopped").at(-1);
   assert.deepEqual(Array.from(final.archivePlayers),[4294967295,7]);
