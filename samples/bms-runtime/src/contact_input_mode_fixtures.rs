@@ -630,7 +630,7 @@ fn actual_contact_live_capture_reconstructs_identical_judgments_and_finite_mixer
             .unwrap();
         commands.extend(batch.commands);
     }
-    assert_eq!(commands.len(), 3);
+    assert_eq!(commands.len(), 2); // LNTYPE1 tail is judged without another keysound.
     let mut live_pcm = [0.0; 16];
     let live_report = live_mixer.render(&mut live_pcm).unwrap();
     owner
@@ -644,8 +644,7 @@ fn actual_contact_live_capture_reconstructs_identical_judgments_and_finite_mixer
     assert_eq!(
         live_pcm,
         [
-            0.0, 0.25, -0.125, 0.0, 0.0, 0.25, -0.125, 0.0, 0.0, 0.25, -0.125, 0.0, 0.0, 0.0, 0.0,
-            0.0
+            0.0, 0.25, -0.125, 0.0, 0.0, 0.25, -0.125, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         ]
     );
     let file = recording(&mut owner);

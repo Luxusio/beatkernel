@@ -13,7 +13,7 @@ use crate::{
     native_group_competition::canonical_identity,
     native_judge::{prepare_capture, prepare_capture_for_source},
     replay_capture::LiveReplayCapture,
-    replay_playback::{decode_section_setup, reconstruct, validate_setup},
+    replay_playback::{decode_section_setup, reconstruct},
     section_start::source_at,
 };
 use beatkernel::{
@@ -253,7 +253,7 @@ fn native_source_capture_preserves_legacy_bytes_and_bounds_without_mutating_the_
             DOMAIN,
             ts(START),
             SEED,
-            Some(limits(bytes.len(), 4096))
+            Some(limits(bytes.len(), bytes.len()))
         )
         .unwrap()
         .unwrap()
@@ -261,7 +261,7 @@ fn native_source_capture_preserves_legacy_bytes_and_bounds_without_mutating_the_
         .unwrap(),
         bytes
     );
-    for bounds in [limits(bytes.len() - 1, 4096), limits(65536, 1)] {
+    for bounds in [limits(bytes.len() - 1, bytes.len() - 1), limits(65536, 1)] {
         assert!(
             prepare_capture_for_source(&source, &judge, DOMAIN, ts(START), SEED, Some(bounds))
                 .is_err()
@@ -355,7 +355,19 @@ fn actual_native_cohort_preparation_installs_identical_source_aware_captures_for
         replay_max_bytes: 65536,
         replay_max_records: 32,
     };
-    let expected = capture(&source, &judge(&source)).header().clone();
+    let expected = crate::native_judge::prepare_section_capture_for_source(
+        &source,
+        &judge(&source),
+        DOMAIN,
+        ts(START),
+        SEED,
+        Some(ts(3_000_000_000)),
+        Some(limits(65536, 4096)),
+    )
+    .unwrap()
+    .unwrap()
+    .header()
+    .clone();
     for count in [2, 3, 4, 64] {
         let assignments: Vec<_> = (0..count)
             .map(|index| {
@@ -391,8 +403,8 @@ fn actual_native_cohort_preparation_installs_identical_source_aware_captures_for
                 decode_section_setup(&captured.header().options)
                     .unwrap()
                     .end,
-                None,
-                "native capture keeps its existing end=None policy even for finite gameplay"
+                Some(ts(3_000_000_000)),
+                "finite native capture retains its original-song endpoint"
             );
         }
         for (state, (_, path)) in cohort.states.into_iter().zip(cohort.save_paths) {
@@ -401,7 +413,8 @@ fn actual_native_cohort_preparation_installs_identical_source_aware_captures_for
                 PathBuf::from(format!("not-created/native.p{}.bkr", state.player.0))
             );
             let file = state.capture.unwrap().into_file();
-            validate_setup(&source, &file, limits(65536, 4096)).unwrap();
+            crate::replay_playback::validate_section_setup(&source, &file, limits(65536, 4096))
+                .unwrap();
         }
     }
     let mut disabled = cfg;
