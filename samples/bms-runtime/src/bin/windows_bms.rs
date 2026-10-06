@@ -25,7 +25,7 @@ fn asio_pause_observation(
 ) -> beatkernel_bms_runtime::live_pause::LivePauseObservation {
     beatkernel_bms_runtime::native_replacement_observation::asio_pause_observation(observation, now)
 }
-#[cfg(any(all(target_os = "windows", feature = "asio-sdk"), test))]
+#[cfg(test)]
 fn seed_asio_resume(
     discipline: &mut beatkernel_platform::audio::presentation::discipline::PresentationDiscipline,
     original: beatkernel_platform::audio::asio::AsioPresentationObservation,
@@ -1054,53 +1054,52 @@ mod native {
         NativeStartResult, start_committed,
     };
     pub(super) struct GameplayDevice<'a> {
-        pub(super) stream: &'a mut super::live_output::Output,
+        pub(super) output: &'a mut super::owned_output::WindowsOutputOwner,
+        pub(super) output_ui: &'a mut super::owned_output::WindowsOutputUi,
         pub(super) input: &'a mut WindowsInput,
         pub(super) acquisition: &'a AcquisitionWindow,
         pub(super) clock: &'a QpcClock,
         pub(super) selected: &'a [(beatkernel::input::DeviceId, usize)],
         pub(super) retained:
             &'a mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
-        pub(super) last_evidence: Option<super::live_output::StartupEvidence>,
-        #[cfg(feature = "asio-sdk")]
-        pub(super) current_asio:
-            Option<beatkernel_platform::audio::asio::AsioPresentationObservation>,
     }
     impl NativeGameplayDevice for GameplayDevice<'_> {
         fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
-            #[cfg(feature = "asio-sdk")]
-            {
-                self.current_asio = None;
-            }
-            if let Some(observation) = self.stream.startup_observation(discipline)? {
-                #[cfg(feature = "asio-sdk")]
-                if let super::live_output::StartupEvidence::Asio(value) = observation.evidence {
-                    self.current_asio = Some(value);
-                }
-                self.last_evidence = Some(observation.evidence);
-            }
+            self.output.observe(discipline)?;
             Ok(())
+        }
+        fn output_clock_suspended(&self) -> bool {
+            self.output.output_clock_suspended()
+        }
+        fn output_replacement_pending(&self) -> bool {
+            self.output.replacement_pending() || self.output_ui.pending()
+        }
+        fn publish_paused_output(
+            &mut self,
+            context: beatkernel_bms_runtime::gameplay_presentation::GameplayOutputContext<
+                '_,
+                PresentationDiscipline,
+            >,
+        ) -> NativeGameplayResult<bool> {
+            if !self.output.has_work() && !self.output_ui.pending() {
+                return Ok(false);
+            }
+            self.output_ui
+                .service(self.output, context, self.clock.sample()?.normalized)
         }
         fn pause_observation(
             &mut self,
-            reference: beatkernel::time::ClockPair,
+            pair: beatkernel::time::ClockPair,
         ) -> NativeGameplayResult<beatkernel_bms_runtime::live_pause::LivePauseObservation>
         {
-            match self.stream {
-                super::live_output::Output::Wasapi(_) => {
-                    Ok(beatkernel_bms_runtime::live_pause::LivePauseObservation::Point(reference))
-                }
-                #[cfg(feature = "asio-sdk")]
-                super::live_output::Output::Asio(_) => Ok(super::asio_pause_observation(
-                    self.current_asio,
-                    self.clock.sample()?.normalized,
-                )),
-            }
+            Ok(self
+                .output
+                .pause_observation(pair, self.clock.sample()?.normalized)?)
         }
         fn render_report(
             &mut self,
         ) -> NativeGameplayResult<Option<beatkernel::audio::RenderReport>> {
-            self.stream.render_report()
+            Ok(self.output.render_report())
         }
         fn host_now(&self) -> NativeGameplayResult<ClockPoint> {
             Ok(self.clock.sample()?.normalized)
@@ -1135,34 +1134,19 @@ mod native {
             &mut self,
             end: &mut beatkernel_bms_runtime::native_end::NativeEnd,
             discipline: &PresentationDiscipline,
-            report: Option<beatkernel::audio::RenderReport>,
+            _report: Option<beatkernel::audio::RenderReport>,
         ) -> NativeGameplayResult<Option<beatkernel_bms_runtime::native_end::EndBoundary>> {
-            self.stream.observe_end(end, discipline, report)
+            self.output.observe_end(end, discipline)
         }
         fn seed_resume(
             &mut self,
             discipline: &mut PresentationDiscipline,
-            reference: beatkernel::time::ClockPair,
+            _reference: beatkernel::time::ClockPair,
         ) -> NativeGameplayResult<()> {
-            match self
-                .last_evidence
-                .ok_or("original native resume evidence unavailable")?
-            {
-                super::live_output::StartupEvidence::Wasapi(snapshot, basis) => {
-                    discipline.observe_with_basis(snapshot, basis)?;
-                    if discipline.latest_pair() != Some(reference) {
-                        return Err("WASAPI resume snapshot differs from accepted reference".into());
-                    }
-                }
-                #[cfg(feature = "asio-sdk")]
-                super::live_output::StartupEvidence::Asio(original) => {
-                    super::seed_asio_resume(discipline, original)?;
-                }
-            }
-            Ok(())
+            Ok(self.output.seed_resume(discipline)?)
         }
         fn fallback_schedule(&mut self, rate: u32) -> NativeGameplayResult<ClockPoint> {
-            self.stream.schedule(rate)
+            super::owned_output::stream(self.output)?.schedule(rate)
         }
     }
     pub(super) struct StartupDevice<'a> {
@@ -1470,8 +1454,13 @@ mod native {
             options.voices,
             capacity
         );
-        let mut stream = setup.open(mixer, &options, clock)?;
-        println!("requested/applied native output={:?}", stream.description());
+        let stream = setup.open(mixer, &options, clock)?;
+        let mut output = super::owned_output::owner(stream, clock);
+        let mut output_ui = super::owned_output::WindowsOutputUi::new(&output, !network_start)?;
+        println!(
+            "requested/applied native output={:?}",
+            super::owned_output::stream(&mut output)?.description()
+        );
         println!(
             "Focus the BeatKernel BMS native window and play the explicitly bound physical keys. Console prints actual grades and misses."
         );
@@ -1514,7 +1503,7 @@ mod native {
                         .ok_or("network startup owner missing")?;
                     let started = {
                         let mut device = StartupDevice {
-                            stream: &mut stream,
+                            stream: super::owned_output::stream(&mut output)?,
                             input: &mut input,
                             acquisition: &acquisition,
                             clock: &clock,
@@ -1593,18 +1582,19 @@ mod native {
                             return Ok(None);
                         }
                     }
-                    stream.start()?;
-                    let (mut transport, quality) = stream.calibrate(
-                        &options,
-                        calibration_extent(
-                            options.seconds.unwrap_or_else(|| {
-                                completion.as_ref().map_or(2, |c| c.calibration_seconds())
-                            }),
-                            options.preroll,
-                        )?,
-                        &mut bgm,
-                        &mut producer,
-                    )?;
+                    super::owned_output::stream(&mut output)?.start()?;
+                    let (mut transport, quality) = super::owned_output::stream(&mut output)?
+                        .calibrate(
+                            &options,
+                            calibration_extent(
+                                options.seconds.unwrap_or_else(|| {
+                                    completion.as_ref().map_or(2, |c| c.calibration_seconds())
+                                }),
+                                options.preroll,
+                            )?,
+                            &mut bgm,
+                            &mut producer,
+                        )?;
                     transport.set_rate(transport.anchor().host_time, Rate::NORMAL)?;
                     let mut discipline = PresentationDiscipline::new(
                         DisciplineConfig::default(),
@@ -1612,7 +1602,11 @@ mod native {
                         HOST,
                         options.song_origin()?,
                     )?;
-                    stream.seed(&mut discipline, &mut bgm, &mut producer)?;
+                    super::owned_output::stream(&mut output)?.seed(
+                        &mut discipline,
+                        &mut bgm,
+                        &mut producer,
+                    )?;
                     (transport, quality, discipline, output_origin)
                 };
                 discipline.validate_host(clock.sample()?.normalized)?;
@@ -1651,15 +1645,13 @@ mod native {
                     let gameplay_selection =
                         selected.map(|(id, handle)| (beatkernel::input::DeviceId(id), handle));
                     let mut device = GameplayDevice {
-                        stream: &mut stream,
+                        output: &mut output,
+                        output_ui: &mut output_ui,
                         input: &mut input,
                         acquisition: &acquisition,
                         clock: &clock,
                         selected: gameplay_selection.as_slice(),
                         retained: &mut startup_inputs,
-                        last_evidence: None,
-                        #[cfg(feature = "asio-sdk")]
-                        current_asio: None,
                     };
                     run_gameplay_with_result_and_score(
                         &mut device,
@@ -1704,14 +1696,14 @@ mod native {
                 pump
             })();
         // Both cleanups run before propagating any start/calibration/pump error.
-        let stop = stream.stop(); // closes/drains the selected native backend
+        let stop = output.stop(); // closes/drains the selected native backend
         let close = acquisition.registration.close();
         println!(
             "pre-output-origin physical inputs ignored without retimestamping={pre_origin_inputs}; physical latency remains unmeasured"
         );
         println!(
             "final audio snapshot={:?}; physical latency=unmeasured",
-            stream.description()
+            output.current_mut().map(|out| out.native.description())
         );
         if let Err(error) = &stop {
             eprintln!("native output stop/join error: {error}");
@@ -2281,6 +2273,13 @@ mod asio_fixtures;
 #[cfg(target_os = "windows")]
 #[path = "windows_bms/output.rs"]
 mod live_output;
+
+#[cfg(any(target_os = "windows", test))]
+#[path = "windows_bms/output_settings.rs"]
+mod output_settings;
+#[cfg(target_os = "windows")]
+#[path = "windows_bms/owned.rs"]
+mod owned_output;
 
 #[cfg(target_os = "windows")]
 #[path = "windows_bms/local.rs"]

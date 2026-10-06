@@ -282,7 +282,11 @@ impl Output {
                 // The discipline validates the actual rate/origin/grid and source.
                 // Its midpoint is never used as the startup observation. Coarse
                 // intervals can progress while that midpoint remains unchanged.
-                match discipline.observe_asio(observation)? {
+                match discipline.observe_asio_with_basis_in_epoch(
+                    discipline.epoch(),
+                    observation,
+                    output.stream.frame_basis(),
+                )? {
                     ObservationAdmission::Unchanged => Ok(None),
                     _ => Ok(Some(NativeStartObservation {
                         timing: NativeStartTiming::Interval(StartInterval::new(
@@ -357,26 +361,6 @@ impl Output {
                     None
                 })
             }
-        }
-    }
-    pub(super) fn observe_end(
-        &mut self,
-        end: &mut beatkernel_bms_runtime::native_end::NativeEnd,
-        discipline: &PresentationDiscipline,
-        rendered: Option<RenderReport>,
-    ) -> Result<Option<beatkernel_bms_runtime::native_end::EndBoundary>> {
-        match self {
-            Self::Wasapi(_) => Ok(end.observe(
-                rendered,
-                discipline
-                    .latest_pair()
-                    .ok_or("finite playback requires native clock relation")?,
-            )?),
-            #[cfg(feature = "asio-sdk")]
-            Self::Asio(stream) => match stream.observation()? {
-                Some(observation) => Ok(end.observe_asio(observation)?),
-                None => Ok(None),
-            },
         }
     }
     pub(super) fn schedule(&mut self, rate: u32) -> Result<ClockPoint> {
@@ -511,7 +495,7 @@ impl Output {
 #[cfg(feature = "asio-sdk")]
 pub(super) struct AsioOutput {
     // Drop order and explicit Drop guarantee close/drain before HWND destruction.
-    stream: AsioStream,
+    pub(super) stream: AsioStream,
     buffer_frames: u32,
     sample_rate: u32,
     _window: Window,
@@ -593,10 +577,7 @@ impl AsioOutput {
             self.anchor.as_ref().unwrap(),
             &self.clock,
             self.latency_error,
-            ClockPoint {
-                domain: OUTPUT,
-                timestamp: Timestamp::ZERO,
-            },
+            self.stream.frame_basis().origin(),
         ) {
             Ok(observation) => Ok(Some(observation)),
             Err(

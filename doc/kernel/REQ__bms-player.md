@@ -2122,8 +2122,14 @@ pause/input/clock/lifecycle ownership remains. Rejection leaves the old live
 output and transport intact under the normal output-request policy.
 
 This field is live-output-only: it is not added to initial native arguments or
-saved profile schema. Windows panels do not advertise it until their typed UI
-mapping is connected. macOS solo nonnetwork play uses the common output owner
+saved profile schema. Windows solo/local nonnetwork WASAPI play uses the common
+owner and paused-boundary policy for device/buffer/period/matrix fields. Its
+mapper preserves the current shared/exclusive mode and negotiation policy.
+ASIO solo/local observation also uses that owner while retaining the native
+HWND/message pump and original interval evidence; ASIO manual replacement and
+cross-backend controls are not advertised until their typed request composition
+is implemented. Network/Watch output controls remain unavailable.
+macOS solo nonnetwork play uses the common output owner
 and paused-boundary policy for device/buffer/matrix fields; cohort/network/Watch
 capabilities remain unavailable until their owner integration is complete.
 Matrix selection/preservation/reset rules belong to common domain functions.

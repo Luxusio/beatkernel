@@ -217,7 +217,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         }
     };
     let mut bgm = BgmSession(bgm);
-    let mut stream = match setup.open(mixer, &options, clock) {
+    let stream = match setup.open(mixer, &options, clock) {
         Ok(stream) => stream,
         Err(error) => {
             let mut failures = vec![format!("native output open: {error}")];
@@ -228,9 +228,11 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             return finish_cohort(states, save_paths, failures, save_capture);
         }
     };
+    let mut output = super::owned_output::owner(stream, clock);
+    let mut output_ui = super::owned_output::WindowsOutputUi::new(&output, !network_start)?;
     println!(
         "local players={count}; shared output={}; independent judges/captures/scores",
-        stream.description()
+        super::owned_output::stream(&mut output)?.description()
     );
     let mut before_origin = 0u64;
     let mut retained = std::collections::VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
@@ -240,7 +242,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         {
             let started = {
                 let mut device = super::native::StartupDevice {
-                    stream: &mut stream,
+                    stream: super::owned_output::stream(&mut output)?,
                     input: &mut input,
                     acquisition: &acquisition,
                     clock: &clock,
@@ -299,7 +301,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             );
             (transport, discipline, started.host_origin, playback_origin)
         } else {
-            stream.start()?;
+            super::owned_output::stream(&mut output)?.start()?;
             let mut discipline = PresentationDiscipline::new(
                 DisciplineConfig::default(),
                 ClockPoint {
@@ -309,7 +311,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 HOST,
                 song_origin,
             )?;
-            let (mut transport, quality) = stream.calibrate(
+            let (mut transport, quality) = super::owned_output::stream(&mut output)?.calibrate(
                 &options,
                 calibration_extent(
                     options.seconds.unwrap_or_else(|| {
@@ -324,7 +326,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 &mut producer,
             )?;
             transport.set_rate(transport.anchor().host_time, Rate::NORMAL)?;
-            stream.seed(&mut discipline, &mut bgm, &mut producer)?;
+            super::owned_output::stream(&mut output)?.seed(&mut discipline, &mut bgm, &mut producer)?;
             let host_origin = ClockPoint {
                 domain: HOST,
                 timestamp: transport.anchor().host_time,
@@ -348,15 +350,13 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         )?;
         let pump = {
             let mut device = super::native::GameplayDevice {
-                stream: &mut stream,
+                output: &mut output,
+                output_ui: &mut output_ui,
                 input: &mut input,
                 acquisition: &acquisition,
                 clock: &clock,
                 selected: &selected,
                 retained: &mut retained,
-                last_evidence: None,
-                #[cfg(feature = "asio-sdk")]
-                current_asio: None,
             };
             run_cohort_with_results(
                 &mut device,
@@ -401,11 +401,11 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     })();
     // Stop/join every output callback before unregistering physical acquisition,
     // finishing ghosts, and attempting every independent replay save.
-    let stop = stream.stop();
+    let stop = output.stop();
     let close = acquisition.registration.close();
     println!(
-        "shared final output={}; pre-origin ignored={before_origin}; physical delivery unverified",
-        stream.description()
+        "shared final output={:?}; pre-origin ignored={before_origin}; physical delivery unverified",
+        output.current_mut().map(|out| out.native.description())
     );
     if let Err(error) = &stop {
         eprintln!("shared native stop/join error: {error}");

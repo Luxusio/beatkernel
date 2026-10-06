@@ -413,7 +413,7 @@ impl NativeSettings {
                 "--buffer-frames",
                 "--output-matrix",
             ],
-            SettingsHost::Windows => &["--device", "--buffer", "--period"],
+            SettingsHost::Windows => &["--device", "--buffer", "--period", "--output-matrix"],
             SettingsHost::Macos => &["--device", "--buffer-frames", "--output-matrix"],
         };
         if args.len() % 2 != 0
@@ -440,10 +440,8 @@ impl NativeSettings {
         settings
             .fields
             .retain(|field| allowed.contains(&field.flag));
-        if matches!(host, SettingsHost::Linux | SettingsHost::Macos) {
-            settings.fields.push(field(("--output-matrix", "OUTPUT CHANNEL MATRIX",
+        settings.fields.push(field(("--output-matrix", "OUTPUT CHANNEL MATRIX",
                 "Rows separated by semicolons, source gains by commas (mono to stereo: 1;1). Empty keeps current; exact restores source channels."), matrix.unwrap_or_default()));
-        }
         for field in &mut settings.fields {
             match field.flag {
                 "--alsa" | "--device" => {
@@ -695,7 +693,7 @@ mod tests {
         assert_eq!(row.label, "OUTPUT CHANNEL MATRIX");
         assert_eq!(row.value, "1;0.5");
         assert!(NativeSettings::from_args(&args, SettingsHost::Linux).is_err());
-        assert!(NativeSettings::output_only(&args, SettingsHost::Windows).is_err());
+        assert!(NativeSettings::output_only(&args, SettingsHost::Windows).is_ok());
         assert!(NativeSettings::output_only(&args, SettingsHost::Macos).is_ok());
         assert!(
             NativeSettings::output_only(&[args.clone(), args].concat(), SettingsHost::Linux)
