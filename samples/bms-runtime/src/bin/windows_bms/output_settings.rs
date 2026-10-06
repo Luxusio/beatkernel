@@ -13,6 +13,25 @@ use beatkernel_platform::audio::{
 };
 
 #[cfg(any(feature = "asio-sdk", test))]
+pub(super) fn asio_driver_index<'a>(
+    device: &str,
+    ids: impl Iterator<Item = &'a str>,
+) -> Result<usize, String> {
+    let canonical = beatkernel_platform::audio::asio::canonical_asio_clsid(device)
+        .map_err(|e| e.to_string())?;
+    let mut found = None;
+    for (index, id) in ids.enumerate() {
+        if id == canonical {
+            if found.is_some() {
+                return Err("ambiguous ASIO driver registration".into());
+            }
+            found = Some(index);
+        }
+    }
+    found.ok_or_else(|| "selected ASIO driver is absent from the current registry view".into())
+}
+
+#[cfg(any(feature = "asio-sdk", test))]
 pub(super) fn asio_request(
     device: &str,
     buffer: beatkernel_platform::audio::asio::AsioBufferRequest,
@@ -21,6 +40,7 @@ pub(super) fn asio_request(
     args: &[String],
 ) -> Result<
     (
+        String,
         beatkernel_platform::audio::asio::AsioBufferRequest,
         Vec<u32>,
         Option<ChannelMatrix>,
@@ -33,6 +53,8 @@ pub(super) fn asio_request(
     }
     let draft = NativeSettings::output_only(args, SettingsHost::Windows)?;
     let mut buffer = buffer;
+    let mut device = beatkernel_platform::audio::asio::canonical_asio_clsid(device)
+        .map_err(|e| e.to_string())?;
     let mut selected = channels.to_vec();
     let mut text = "";
     for field in draft
@@ -41,9 +63,9 @@ pub(super) fn asio_request(
         .filter(|field| !field.value.is_empty())
     {
         match field.flag {
-            "--device" if field.value == device => {}
             "--device" => {
-                return Err("ASIO live replacement retains the selected trusted driver".into());
+                device = beatkernel_platform::audio::asio::canonical_asio_clsid(&field.value)
+                    .map_err(|e| e.to_string())?
             }
             "--buffer" => {
                 buffer = match super::size(&field.value).map_err(|e| e.to_string())? {
@@ -70,11 +92,12 @@ pub(super) fn asio_request(
     if target as usize != selected.len() {
         return Err("ASIO matrix target width must match selected driver channels".into());
     }
-    Ok((buffer, selected, matrix))
+    Ok((device, buffer, selected, matrix))
 }
 
 #[cfg(any(feature = "asio-sdk", test))]
 pub(super) fn asio_capability(
+    device: &str,
     buffer: beatkernel_platform::audio::asio::AsioBufferRequest,
     channels: &[u32],
     matrix: Option<&ChannelMatrix>,
@@ -92,6 +115,9 @@ pub(super) fn asio_capability(
     let cap = OutputCapability {
         host: SettingsHost::Windows,
         current_args: vec![
+            "--device".into(),
+            beatkernel_platform::audio::asio::canonical_asio_clsid(device)
+                .map_err(|e| e.to_string())?,
             "--buffer".into(),
             match buffer {
                 beatkernel_platform::audio::asio::AsioBufferRequest::DriverPreferred => {
@@ -293,6 +319,7 @@ pub(super) fn capability(
 mod tests {
     use super::*;
     use beatkernel_platform::audio::{AudioStreamMode, SampleEncoding, NegotiationPolicy};
+    const DRIVER: &str = "{ABCDEF12-3456-7890-ABCD-EF1234567890}";
     fn current() -> AudioStreamRequest {
         AudioStreamRequest::new(
             AudioDeviceId("endpoint-A".into()),
@@ -437,8 +464,8 @@ mod tests {
     fn asio_draft_preserves_trusted_driver_channels_and_matrix_when_buffer_changes() {
         use beatkernel_platform::audio::asio::AsioBufferRequest;
         let matrix = ChannelMatrix::new(2, 2, &[0., 1., 1., 0.]).unwrap();
-        let (buffer, channels, retained) = asio_request(
-            "trusted-driver",
+        let (_, buffer, channels, retained) = asio_request(
+            DRIVER,
             AsioBufferRequest::DriverPreferred,
             &[0, 1],
             Some(&matrix),
@@ -447,7 +474,7 @@ mod tests {
         .unwrap();
         assert_eq!(buffer, AsioBufferRequest::Frames(128));
         assert_eq!(retained.as_ref(), Some(&matrix));
-        let cap = asio_capability(buffer, &channels, retained.as_ref()).unwrap();
+        let cap = asio_capability(DRIVER, buffer, &channels, retained.as_ref()).unwrap();
         let fields = cap.settings().unwrap();
         assert_eq!(
             fields
@@ -455,21 +482,26 @@ mod tests {
                 .iter()
                 .map(|field| field.flag)
                 .collect::<Vec<_>>(),
-            vec!["--buffer", "--output-channels", "--output-matrix"]
+            vec![
+                "--device",
+                "--buffer",
+                "--output-channels",
+                "--output-matrix"
+            ]
         );
         assert_eq!(
             asio_request(
-                "trusted-driver",
+                DRIVER,
                 buffer,
                 &[0, 1],
                 retained.as_ref(),
                 &cap.current_args
             )
             .unwrap(),
-            (buffer, channels, retained)
+            (DRIVER.to_owned(), buffer, channels, retained)
         );
-        let (preferred, _, cleared) = asio_request(
-            "trusted-driver",
+        let (_, preferred, _, cleared) = asio_request(
+            DRIVER,
             buffer,
             &[0, 1],
             Some(&matrix),
@@ -498,7 +530,7 @@ mod tests {
         ] {
             assert!(
                 asio_request(
-                    "trusted-driver",
+                    DRIVER,
                     AsioBufferRequest::DriverPreferred,
                     &[0, 1],
                     None,
@@ -507,18 +539,28 @@ mod tests {
                 .is_err()
             );
         }
-        assert!(asio_capability(AsioBufferRequest::Frames(0), &[0, 1], None).is_err());
-        assert!(asio_capability(AsioBufferRequest::DriverPreferred, &[], None).is_err());
-        assert!(asio_capability(AsioBufferRequest::DriverPreferred, &[0, 0], None).is_err());
-        assert!(asio_capability(AsioBufferRequest::DriverPreferred, &[u32::MAX], None).is_err());
+        assert!(asio_capability(DRIVER, AsioBufferRequest::Frames(0), &[0, 1], None).is_err());
+        assert!(asio_capability(DRIVER, AsioBufferRequest::DriverPreferred, &[], None).is_err());
+        assert!(
+            asio_capability(DRIVER, AsioBufferRequest::DriverPreferred, &[0, 0], None).is_err()
+        );
+        assert!(
+            asio_capability(
+                DRIVER,
+                AsioBufferRequest::DriverPreferred,
+                &[u32::MAX],
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn asio_channel_reorder_and_resize_keep_original_source_grid_and_explicit_reset() {
         use beatkernel_platform::audio::asio::AsioBufferRequest;
         let original = [0, 1];
-        let (buffer, reordered, matrix) = asio_request(
-            "trusted",
+        let (_, buffer, reordered, matrix) = asio_request(
+            DRIVER,
             AsioBufferRequest::Frames(64),
             &original,
             None,
@@ -529,7 +571,7 @@ mod tests {
         assert!(matrix.is_none());
         assert!(
             asio_request(
-                "trusted",
+                DRIVER,
                 buffer,
                 &reordered,
                 None,
@@ -537,8 +579,8 @@ mod tests {
             )
             .is_err()
         );
-        let (_, resized, matrix) = asio_request(
-            "trusted",
+        let (_, _, resized, matrix) = asio_request(
+            DRIVER,
             buffer,
             &reordered,
             None,
@@ -552,8 +594,8 @@ mod tests {
         .unwrap();
         assert_eq!(resized, [7, 4, 2]);
         assert_eq!(matrix.as_ref().unwrap().source_channels(), 2);
-        let (_, same, retained) = asio_request(
-            "trusted",
+        let (_, _, same, retained) = asio_request(
+            DRIVER,
             buffer,
             &resized,
             matrix.as_ref(),
@@ -564,7 +606,7 @@ mod tests {
         assert_eq!(retained, matrix);
         assert!(
             asio_request(
-                "trusted",
+                DRIVER,
                 buffer,
                 &resized,
                 matrix.as_ref(),
@@ -572,8 +614,8 @@ mod tests {
             )
             .is_err()
         );
-        let (_, reset, cleared) = asio_request(
-            "trusted",
+        let (_, _, reset, cleared) = asio_request(
+            DRIVER,
             buffer,
             &resized,
             matrix.as_ref(),
@@ -597,7 +639,7 @@ mod tests {
             if !text.is_empty() {
                 assert!(
                     asio_request(
-                        "trusted",
+                        DRIVER,
                         AsioBufferRequest::DriverPreferred,
                         &[0, 1],
                         None,
@@ -684,5 +726,45 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn driver_switch_is_canonical_and_requires_exact_one_installed_registration() {
+        use beatkernel_platform::audio::asio::AsioBufferRequest;
+        let other = "11111111-2222-3333-4444-555555555555";
+        let canonical = "{11111111-2222-3333-4444-555555555555}";
+        let (selected, buffer, channels, matrix) = asio_request(
+            DRIVER,
+            AsioBufferRequest::Frames(64),
+            &[7, 4],
+            None,
+            &["--device".into(), other.into()],
+        )
+        .unwrap();
+        assert_eq!(selected, canonical);
+        assert_eq!(buffer, AsioBufferRequest::Frames(64));
+        assert_eq!(channels, [7, 4]);
+        assert!(matrix.is_none());
+        assert_eq!(
+            asio_driver_index(other, [DRIVER, canonical].into_iter()).unwrap(),
+            1
+        );
+        assert!(asio_driver_index(other, [DRIVER].into_iter()).is_err());
+        assert!(asio_driver_index(other, [canonical, canonical].into_iter()).is_err());
+        let cap = asio_capability(&selected, buffer, &channels, None).unwrap();
+        let settings = cap.settings().unwrap();
+        let field = settings
+            .fields()
+            .iter()
+            .find(|field| field.flag == "--device")
+            .unwrap();
+        assert_eq!(field.label, "TRUSTED ASIO DRIVER CLSID");
+        assert!(field.hint.contains("APPLY loads"));
+        assert_eq!(
+            asio_request(&selected, buffer, &channels, None, &cap.current_args)
+                .unwrap()
+                .0,
+            canonical
+        );
     }
 }

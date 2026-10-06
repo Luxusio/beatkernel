@@ -2139,7 +2139,14 @@ the selected channel count. Exact reset requires explicitly selecting that
 source count again; no channels are silently truncated or inferred.
 Reopening preserves the original clock error bounds
 and registry view; pending native cleanup retains its stream and attempt HWND.
-Driver selection and cross-backend controls remain pending.
+ASIO driver selection is explicit: Apply on TRUSTED ASIO DRIVER CLSID authorizes
+loading that installed native driver. Canonical nonzero identities must match
+exactly one registration in the original registry view before queue/retirement;
+missing/ambiguous registrations leave the existing output untouched. Source
+format/rate, QPC and caller-supplied clock/error estimates remain current, and
+native preparation validates the new driver's actual channel/buffer/rate support.
+No driver is loaded while merely enumerating or validating its identity.
+Cross-backend controls remain pending.
 Output capability arguments declare the exact editable fields: the UI must not
 invent a WASAPI period or device selector for an ASIO buffer-only capability.
 Network/Watch output controls remain unavailable.

@@ -197,38 +197,10 @@ fn copy_string(value: &str) -> Result<String, AsioRegistryError> {
     Ok(copy)
 }
 fn canonical_clsid(value: &str) -> Result<String, AsioRegistryError> {
-    let bytes = value.as_bytes();
-    let body = match bytes.len() {
-        36 => bytes,
-        38 if bytes[0] == b'{' && bytes[37] == b'}' => &bytes[1..37],
-        _ => return Err(malformed("CLSID")),
-    };
-    let mut nonzero = false;
-    for (index, &byte) in body.iter().enumerate() {
-        if matches!(index, 8 | 13 | 18 | 23) {
-            if byte != b'-' {
-                return Err(malformed("CLSID"));
-            }
-        } else {
-            if !byte.is_ascii_hexdigit() {
-                return Err(malformed("CLSID"));
-            }
-            nonzero |= byte != b'0';
-        }
-    }
-    if !nonzero {
-        return Err(malformed("CLSID"));
-    }
-    let mut canonical = String::new();
-    canonical
-        .try_reserve_exact(38)
-        .map_err(|_| AsioRegistryError::Capacity)?;
-    canonical.push('{');
-    for &byte in body {
-        canonical.push(char::from(byte.to_ascii_uppercase()));
-    }
-    canonical.push('}');
-    Ok(canonical)
+    crate::audio::asio::canonical_asio_clsid(value).map_err(|error| match error {
+        crate::audio::asio::AsioDriverIdError::Malformed => malformed("CLSID"),
+        crate::audio::asio::AsioDriverIdError::Capacity => AsioRegistryError::Capacity,
+    })
 }
 fn decode_string(units: &[u16], field: &'static str) -> Result<String, AsioRegistryError> {
     // Every UTF-16 unit needs at most three UTF-8 bytes; surrogate pairs need
@@ -467,7 +439,7 @@ pub fn enumerate_asio_drivers(
         Err(AsioRegistryError::Native { code })
             if matches!(code, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) =>
         {
-            return Ok(Vec::new())
+            return Ok(Vec::new());
         }
         Err(error) => return Err(error),
     };

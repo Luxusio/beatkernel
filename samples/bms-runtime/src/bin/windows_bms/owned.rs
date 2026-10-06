@@ -277,6 +277,7 @@ fn capability(
         Output::Asio(native) => {
             native.applied_buffer_frames().map_err(|e| e.to_string())?;
             super::output_settings::asio_capability(
+                &native.live.registration.id.clsid,
                 native.live.buffer,
                 &native.live.channels,
                 output.matrix.as_ref(),
@@ -324,11 +325,20 @@ impl WindowsOutputUi {
                 }),
                 #[cfg(feature = "asio-sdk")]
                 Output::Asio(native) => {
-                    let (buffer, channels, matrix) = super::output_settings::asio_request(
+                    let (device, buffer, channels, matrix) = super::output_settings::asio_request(
                         &native.live.registration.id.clsid, native.live.buffer,
                         &native.live.channels,
                         output.matrix.as_ref(), &request.args)?;
                     let mut config = native.live.clone();
+                    if device != config.registration.id.clsid {
+                        let drivers = beatkernel_platform::windows::asio::enumerate_asio_drivers(
+                            config.registration.id.view,
+                            beatkernel_platform::windows::asio::AsioEnumerationLimits::default(),
+                        ).map_err(|e| e.to_string())?;
+                        let index = super::output_settings::asio_driver_index(&device,
+                            drivers.iter().map(|driver| driver.id.clsid.as_str()))?;
+                        config.registration = drivers[index].clone();
+                    }
                     config.buffer = buffer;
                     config.channels = channels;
                     Ok(beatkernel_bms_runtime::gameplay::output::domain::remix::RemixedOutputRequest {

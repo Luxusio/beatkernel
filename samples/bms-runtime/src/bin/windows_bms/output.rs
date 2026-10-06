@@ -156,7 +156,10 @@ impl Setup {
                 );
                 let live = AsioLiveConfig {
                     registration,
-                    channels: options.output_channels.clone().ok_or("ASIO channels missing")?,
+                    channels: options
+                        .output_channels
+                        .clone()
+                        .ok_or("ASIO channels missing")?,
                     buffer: request,
                     sample_rate: format.sample_rate(),
                     timer_error: options.asio_timer_error,
@@ -538,7 +541,7 @@ impl AsioOutput {
         self.buffer_frames
             .ok_or_else(|| "ASIO applied buffer metadata unavailable".into())
     }
-    /// Reuses only the registration explicitly trusted by the initial session.
+    /// Uses the installed registration explicitly selected by session admission.
     /// Each attempt keeps its own same-thread HWND through stream cleanup.
     pub(super) fn reopen(
         live: AsioLiveConfig,
@@ -551,7 +554,10 @@ impl AsioOutput {
             Ok(window) => window,
             Err(error) => return Err(OutputOpenFailure::recovered(error, Some(mixer))),
         };
-        // SAFETY: this is the exact registration trusted at initial session open.
+        // SAFETY: application admission accepts only an explicitly selected
+        // installed registration (initial selection or the trusted-driver Apply
+        // field), in the original registry view. The UI states that Apply loads
+        // this driver; native driver trust remains a caller obligation.
         // This attempt owns its HWND on the same control thread, retained in the
         // output (including pending failures) until driver Close/Release drains.
         let control =

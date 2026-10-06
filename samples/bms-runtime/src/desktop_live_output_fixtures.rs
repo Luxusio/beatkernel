@@ -363,6 +363,56 @@ fn paged_last_field_prepares_unicode_ime_glyphs_without_committing_preview() {
     assert_eq!(app.navigator.active_id(), scope);
     compose(&mut app);
 }
+
+#[test]
+fn asio_driver_apply_exposes_load_notice_and_keeps_correlated_scope() {
+    let (mut app, publisher) = prepared();
+    let old = "{ABCDEF12-3456-7890-ABCD-EF1234567890}";
+    let new = "{11111111-2222-3333-4444-555555555555}";
+    let mut capability = OutputCapability {
+        host: SettingsHost::Windows,
+        current_args: vec![
+            "--device".into(),
+            old.into(),
+            "--buffer".into(),
+            "frames:64".into(),
+            "--output-channels".into(),
+            "0,1".into(),
+            "--output-matrix".into(),
+            "exact".into(),
+        ],
+    };
+    publisher
+        .advertise_output(Some(capability.clone()))
+        .unwrap();
+    app.open_live_audio();
+    let scope = app.navigator.active_id();
+    let draft = app.live_audio.as_mut().unwrap();
+    assert_eq!(draft.values.fields()[0].label, "TRUSTED ASIO DRIVER CLSID");
+    assert!(draft.values.fields()[0].hint.contains("APPLY loads"));
+    draft.editor.select_all();
+    draft.edit(None, Some(new));
+    compose(&mut app);
+    app.apply_live_audio();
+    let request = publisher.take_output_request().unwrap().unwrap();
+    assert!(
+        request
+            .args
+            .chunks_exact(2)
+            .any(|pair| pair == ["--device", new])
+    );
+    capability.current_args[1] = new.into();
+    publisher
+        .reply_output(&OutputReply {
+            id: request.id,
+            result: Ok(capability),
+        })
+        .unwrap();
+    app.collect_game();
+    compose(&mut app);
+    assert_eq!(app.navigator.active_id(), scope);
+    assert_eq!(app.live_audio.as_ref().unwrap().editor.value(), new);
+}
 #[test]
 fn actual_f2_gate_refuses_replay_terminal_cancel_and_unacknowledged_resume_intent_without_changing_play_instance()
  {

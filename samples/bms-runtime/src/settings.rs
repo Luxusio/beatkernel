@@ -411,6 +411,20 @@ impl NativeSettings {
         values
             .fields
             .retain(|field| args.chunks_exact(2).any(|pair| pair[0] == field.flag));
+        if host == SettingsHost::Windows
+            && args
+                .chunks_exact(2)
+                .any(|pair| pair[0] == "--output-channels")
+        {
+            if let Some(field) = values
+                .fields
+                .iter_mut()
+                .find(|field| field.flag == "--device")
+            {
+                field.label = "TRUSTED ASIO DRIVER CLSID";
+                field.hint = "APPLY loads this installed driver. Use trusted drivers. Existing clock error estimates remain.";
+            }
+        }
         Ok(values)
     }
     /// Bounded output-only schema; empty values preserve the current native setting.

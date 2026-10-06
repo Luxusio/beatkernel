@@ -5,7 +5,9 @@
 
 use std::fmt;
 
+mod driver_id;
 mod pcm;
+pub use driver_id::{canonical_asio_clsid, AsioDriverIdError};
 pub use pcm::{encode_asio_channel, AsioPcmEncoding, AsioPcmError};
 mod render;
 pub use render::{AsioBlockRenderer, AsioRenderError};
