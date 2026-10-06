@@ -24,8 +24,10 @@ remain. These checks do not execute the six tests or platform devices.
 
 ## Known ceiling
 
-Earlier transport resume is not rolled back on later refusal.
-Device-seeding failure, whole-transport rollback, and physical-device acceptance
-remain unverified. Assertions, runtime, formal review and QA remain deferred.
+At this increment, earlier transport resume was not rolled back on later refusal.
+Subsequent [resume commit order](CHANGE__resume-commit-order.md) stages the
+transport before seeding and prevents software clock publication on refusal.
+Device effects, whole-gameplay rollback and physical-device acceptance remain
+unverified. Assertions, runtime, formal review and QA remain deferred.
 Backend/buffer live handoff, physical output fences and new first-output anchors
 remain pending. Full BMS player Goal stays active.

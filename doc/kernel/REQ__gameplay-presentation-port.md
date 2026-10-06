@@ -23,6 +23,8 @@ This supplies a timing transition interface, not live device/PCM handoff.
 Same-stream resume now follows
 [resume clock identity](REQ__resume-clock-identity.md): stage a new owner with
 the actual configuration and unchanged epoch before original native reseeding.
+Seeding must leave accepted evidence before clocks are replaced, following
+[resume commit order](REQ__resume-commit-order.md).
 
 Keep original NativeGameplayDevice, NativeGameplaySession, NativeCohortSession
 and run_* compatibility APIs at their existing public paths. The outer bridge

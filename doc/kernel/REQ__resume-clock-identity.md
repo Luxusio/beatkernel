@@ -20,8 +20,10 @@ those require a strictly newer epoch, physical buffer handling and new output
 anchoring. No operating-system business branches, new crates, per-note work,
 callback allocation or live backend switch are introduced. The cold staged
 constructor allocates observation storage as before. Existing transport/pause
-chronology and seed evidence paths remain unchanged; an error after transport
-resume is not claimed to roll back the whole gameplay transaction.
+chronology and seed evidence paths remain unchanged. Clock publication follows
+[resume commit order](REQ__resume-commit-order.md): stage both clocks and require
+accepted seed evidence before replacing either. Device and NativePause effects
+are not rolled back by this software publication order.
 
 Author independent port cases for nonzero/max epochs, configuration/origin
 preservation, unsupported identity and refusal atomicity, plus actual common
