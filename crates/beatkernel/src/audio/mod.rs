@@ -39,6 +39,7 @@
 //! # Ok::<(), beatkernel::audio::AudioError>(())
 //! ```
 
+mod convert;
 mod frame_basis;
 mod handoff;
 mod mixer;
@@ -46,6 +47,7 @@ mod model;
 mod pcm;
 mod queue;
 
+pub use convert::{ChannelMatrix, FormatConverter, ResampleQuality};
 pub use frame_basis::{OutputFrameBasis, OutputFrameBasisError};
 pub use handoff::{MixerOpenFailure, OutputOpenFailure, StoppedMixerSource};
 pub use mixer::Mixer;

@@ -231,6 +231,50 @@ different arithmetic representation and corresponding real-time verification.
 - Stop and join output workers before releasing queue backing storage or assets.
   Integer timestamps remain separate from PCM/interpolation floating values.
 
+## Output format conversion
+
+- FormatConverter adapts finite interleaved f32 from a source render format,
+  normally a Mixer, to a different device rate and/or channel count. Native
+  sample encoding (PCM16, 24-in-32 or other left-aligned integer widths, float32)
+  stays with the platform encoder; this stage emits f32 in the target layout.
+- Setup validates the matrix against both channel counts, quality, the output
+  block bound (1..=MAX_RENDER_FRAMES) and the derived source block bound, then
+  preallocates the source window and kernel table. required_source_frames sizes
+  the mixer before construction; for_mixer rejects an insufficient render limit.
+- ChannelMatrix is a validated target-major finite gain matrix without speaker
+  semantics. The default is identity for equal counts, mono into the first two
+  targets, an equal-weight average into a mono target, and otherwise the shared
+  prefix; extra targets are silent and extra sources dropped. Callers that know
+  a native speaker layout supply an explicit matrix.
+- Each render checks buffer alignment and extent before any callback, then pulls
+  exactly one contiguous, possibly empty source block. The source's report,
+  pause and endpoint evidence pass through unchanged on the source frame grid.
+  A source error leaves converter phase, retained history and cursors unchanged;
+  it cannot roll back the source's external side effects or caller output.
+  Source/output cursor overflow rejects before source invocation, preserving
+  exact frame evidence instead of saturating timing counters.
+- Rate conversion uses an exact reduced rational phase: output frame k samples
+  source position k * source_rate / target_rate, so partitioning the same output
+  frames yields identical samples. Linear uses two taps; WindowedSinc uses
+  2..=32 half taps of a Blackman-windowed sinc whose cutoff follows the lower
+  Nyquist rate, normalized per frame for unity DC gain. Frames before source
+  zero are silence. source_lookahead_frames reports the kernel half-width (zero
+  when rates match), not actual pulled-frame lead or native latency. Exact
+  presentation mapping needs the stream's original source-frame basis, device
+  rate/counter, buffered conversion state and native output evidence; the
+  kernel width alone is insufficient. Downsampling also pulls
+  source frames that no output tap reads, so the source grid stays contiguous.
+- Converted samples are clamped once to [-1, 1]. Non-finite source samples are
+  replaced with silence and counted. Matching formats render directly into the
+  output buffer. Render performs no allocation, lock or dynamic dispatch.
+
+Known ceiling: native owners still compare mixer and device formats and refuse
+a mismatch; adopting the converter, mapping presentation through its lookahead
+and choosing quality per device remain integration work. Quality is bounded by
+the fixed tap count; no measured passband/stopband specification, dithering or
+speaker-mask-aware downmix is claimed. Native timing and device acceptance are
+unverified.
+
 ## Verification
 
 Tests require literal WAV/sample conversion, hostile chunk validation, capacities
