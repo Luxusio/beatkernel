@@ -33,7 +33,9 @@ This returns software state, not a physical presentation fence. Rendered-but-
 unheard device buffers can be lost on stop; callers must establish a real pause/
 output fence and account for retained/unsubmitted audio before seamless transfer.
 Reopening with a nonzero mixer cursor also needs explicit device-clock origin and
-presentation-epoch mapping. Different format/rate/render budgets require separate
+presentation-epoch mapping. Fresh-counter mapping follows
+[output frame basis](REQ__output-frame-basis.md); it does not fence unheard audio
+or complete live ownership transfer. Different format/rate/render budgets require separate
 PCM/grid/capacity work. Runtime/UI hot-swap wiring, browser-worklet transfer and
 physical latency/gapless acceptance remain pending. Do not infer them from take.
 

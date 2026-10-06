@@ -40,6 +40,9 @@ Native stopped-output ownership recovery now follows
 [stopped mixer recovery](REQ__stopped-mixer-recovery.md), retaining the original
 software state after retirement. Presentation fencing, new-device origin mapping
 and live application transfer remain separate required integrations.
+Fresh ALSA/WASAPI counters now use the captured original mixer grid through
+[output frame basis](REQ__output-frame-basis.md). This supplies counter mapping;
+actual stream fencing and automatic runtime transitions remain pending.
 
 Author independent core storage/atomicity/epoch/warmup/continuous-history cases,
 platform source-reset/tagged-refusal cases and actual generic port delegation/

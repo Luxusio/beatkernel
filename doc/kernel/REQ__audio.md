@@ -448,3 +448,6 @@ mixer can be moved once after confirmed join/callback retirement, retaining PCM,
 voices, command ownership and cursor state. This does not drain unheard device
 buffers, rebase a reopened device clock or guarantee gapless transfer. Those
 controls remain separate from [output clock epochs](REQ__output-clock-epochs.md).
+Fresh ALSA/WASAPI counters map onto the captured original physical mixer grid
+through [output frame basis](REQ__output-frame-basis.md). Automatic backend/buffer
+handoff and acoustic latency acceptance remain incomplete.
