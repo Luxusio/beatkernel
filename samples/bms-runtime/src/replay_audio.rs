@@ -248,6 +248,16 @@ fn plan_with_section(
         }
         plan.timeline()
     };
+    let gauge_profile = decode_section_setup(&file.header.options)?.gauge;
+    let observe_gauge =
+        !prepared.source.mines.is_empty() || gauge_profile != crate::gauge::GaugeProfile::default();
+    if observe_gauge && selection_judge.is_none() {
+        selection_judge = Some(if allow_finite {
+            validate_section_setup(&prepared.source, &file, limits)?
+        } else {
+            validate_setup(&prepared.source, &file, limits)?
+        });
+    }
     let session = if allow_finite {
         reconstruct_section(&prepared.source, file, limits)?
     } else {
@@ -323,8 +333,8 @@ fn plan_with_section(
             },
         ));
     }
-    if !prepared.source.mines.is_empty() {
-        let mut judge = selection_judge.expect("mines prepared a pristine judge");
+    if observe_gauge {
+        let mut judge = selection_judge.expect("gauge observation prepared a pristine judge");
         let mut voices = Vec::new();
         let voice_count = prepared
             .sounds
@@ -353,7 +363,7 @@ fn plan_with_section(
             voices.extend(timeline.bindings().iter().map(|binding| binding.voice));
         }
         let mut stops = GameplaySoundStop::new(voices);
-        let mut gauge = BmsGauge::default();
+        let mut gauge = BmsGauge::new(gauge_profile);
         for record in session.records() {
             let was_failed = gauge.snapshot().failure.is_some();
             let (results, press_command) = match &record.operation {

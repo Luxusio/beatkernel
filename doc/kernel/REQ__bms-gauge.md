@@ -28,9 +28,8 @@ without changing this runtime default. Pure custom profiles support
 other grade deltas and fail-on-empty policy. Native launchers, browser launch
 defaults and replay defaults retain the fixed documented policy. Stepped owners
 can accept resolved profiles in pristine setup and retain them in result archives
-as described below. Standalone capture identity and end-user policy selection
-remain unfinished; do not expose a policy selector without connecting replay
-configuration identity.
+and standalone capture/replay setup identity as described below.
+Native/browser end-user policy selection remains unfinished.
 
 Observe the report's normal results first, then its hazard events in original
 order. Validate every hazard value in 1..1295, including avoided outcomes and
@@ -99,8 +98,8 @@ BmsGaugeState is Copy, has no heap or dynamic dispatch, and applies one
 judgment with constant work. Player launch defaults still use the documented
 default profile. Stepped setup may consume resolved adapter rules through
 `GaugeProfile::from_bms_rules` and `configure_gauge`; end-user LR2 selection,
-historical mine compatibility, course gauges and replay/capture policy identity
-remain separate integration work.
+historical mine compatibility, course gauges and native/browser policy selection
+remain separate integration work. Recorded gauge setup is specified below.
 
 ## Actual owners and remaining terminal control
 
@@ -117,8 +116,8 @@ ReplayVisual observes normal and hazard results immediately after each actual
 recorded operation. Repeated/equal display targets, time beyond a recorded
 prefix and unrecorded display advancement produce no extra gauge changes.
 StepReplay delegates to the same gauge rather than observing results twice.
-Keep existing replay setup bytes and core judge identity unchanged; this slice
-derives the documented fixed application policy from the same recorded results.
+Legacy/default replay setup bytes and core judge identity stay unchanged.
+Policy-aware consumers use the recorded gauge wrapper described below.
 
 ## Native publication contract
 
@@ -132,7 +131,9 @@ one member; a multi-member cohort has no aggregate gauge.
 Actual replay presentation copies the authoritative ReplayVisual gauge, including
 pause-boundary publication. It must not rebuild gauge order from cumulative mine
 damage or apply incremental judgments a second time. Only the documented default
-profile is admitted by this bridge until capture policy identity is connected.
+profile is admitted by this native bridge; admitting validated recorded policies
+through that publication boundary remains unfinished even though stepped capture
+and replay now preserve policy identity.
 An unchanged absolute replay gauge remains unchanged on repeated publication.
 Legacy replay APIs lacking an authoritative gauge cannot establish mine-aware
 gauge accuracy: they observe actual normal judgments without synthesizing mine
@@ -195,13 +196,13 @@ or a surviving member's progress.
 
 Reconstruct these new failure-prefix captures through the existing validated
 replay pipeline and verify that hash, score, gauge and hazard observations match
-the actual retained prefix. No new wire policy or retrospective rewriting of
-older recordings is introduced here: legacy recordings continue to reconstruct
-their own recorded operations. Configurable gauge/failure capture identity is
-still separate work. This fixed default's only numeric failure is instant death.
-Resolved profiles in stepped setup are retained by result archives, but their
-standalone capture/replay identity integration remains unfinished; the public
-player must keep its documented default until that integration is complete.
+the actual retained prefix. Legacy recordings continue to reconstruct their own
+recorded operations without retrospective rewriting. Stepped configurable
+gauge/failure setup identity is specified below; the core replay envelope remains
+unchanged. Native/browser selection remains separate work. The fixed default's
+only numeric failure is instant death. Resolved profiles in stepped setup are
+retained by result archives and standalone capture/replay setup. Native/browser public
+launchers keep the documented default until policy selection is connected.
 
 ## Native game owner failure contract
 
@@ -294,6 +295,26 @@ exercise solo and mixed-policy local completion, including original player IDs.
 Records with nonzero dynamics use versions 4/5, preserving all resolved fields
 (and optional comparison snapshots). Legacy/default records keep versions 1/2/3
 and old decoding supplies zero dynamics. Copied profiles and decoded live-level
-invariants must preserve these fields. Native/browser/replay default policy and
-selectable judge/gauge/capture identity integration remain separate unfinished
-work; merely introducing resolved rules must not silently change old playback.
+invariants must preserve these fields. Native/browser default policy and
+selectable judge/gauge integration remain separate unfinished work; introducing
+resolved rules must not silently change old playback.
+
+## Recorded gauge setup
+
+Nondefault stepped policies must be included in capture and competition setup
+identity. A versioned `bms-gauge-setup/v1:` options wrapper carries the length of
+the existing judge options followed by the complete fixed-point gauge profile,
+sorted grade overrides and dynamics. Default policies retain exact legacy
+options bytes; a wrapped default policy or nested wrapper is noncanonical and
+must be refused. Validate exact extents, grade capacity/order, boolean tag and
+profile invariants before allocation or playback. Header budgets include the
+wrapper; a refused capture setup must not alter the owner or existing capture.
+
+Section-aware replay validation must regenerate the entire setup identity with
+the recorded policy. Tuple APIs that cannot retain gauge policy refuse wrapped
+setups. Incremental visual/stepped replay and audio sound-stop planning use the
+recorded profile, including depletion from ordinary judgments without mines.
+Record catalog comparisons must include gauge policy. The kernel replay format
+and judge hash remain unchanged: the application options own this policy.
+Public/native/browser policy selection and complete LR2 compatibility remain
+unfinished; preserving a policy does not imply those launchers select it.

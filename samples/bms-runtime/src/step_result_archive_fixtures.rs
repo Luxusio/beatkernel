@@ -170,6 +170,13 @@ fn actual_step_completion_copies_dynamic_gauge_policy_to_archive() {
         decode_archive(&bytes).unwrap().entries()[0].profile,
         profile
     );
+    let archive = decode_archive(&bytes).unwrap();
+    assert_eq!(
+        crate::replay_playback::decode_section_setup(&archive.entries()[0].header.options)
+            .unwrap()
+            .gauge,
+        profile
+    );
 }
 
 #[test]
@@ -222,6 +229,15 @@ fn actual_local_completion_keeps_distinct_dynamic_and_legacy_member_policies() {
             .unwrap();
     }
     let decoded = decode_archive(&game.completed_archive().unwrap().unwrap()).unwrap();
+    for row in decoded.entries() {
+        assert_eq!(
+            crate::replay_playback::decode_section_setup(&row.header.options)
+                .unwrap()
+                .gauge,
+            row.profile
+        );
+    }
+
     assert_eq!(
         decoded
             .entries()

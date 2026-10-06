@@ -17,6 +17,7 @@ use std::{fs::OpenOptions, io::Write, path::Path};
 /// Capture, serialization or exclusive output creation failure.
 #[derive(Debug)]
 pub enum CaptureError {
+    GaugePolicy(crate::replay_gauge_policy::PolicyError),
     /// Practice start must be a nonnegative original-song timestamp.
     InvalidStart,
     /// A finite practice end must be strictly later than its start.
@@ -48,6 +49,7 @@ impl From<std::io::Error> for CaptureError {
 impl std::fmt::Display for CaptureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::GaugePolicy(error) => write!(f, "{error}"),
             Self::InvalidStart => write!(f, "BMS replay practice start must be nonnegative"),
             Self::InvalidEnd => write!(f, "BMS replay practice end must be later than its start"),
             Self::OutsideSection => {
@@ -109,6 +111,33 @@ pub fn setup_input_header(
     setup_input_sound_header(
         judge, domain, limits, start, chart_seed, end, input_mode, None,
     )
+}
+
+/// Canonical complete application setup, retaining nondefault gauge policy.
+#[allow(clippy::too_many_arguments)]
+pub fn setup_gauge_header(
+    judge: &JudgeEngine,
+    domain: ClockDomainId,
+    limits: ReplayCodecLimits,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    input_mode: BmsInputMode,
+    input_sounds: Option<InputSoundIdentity>,
+    gauge: &crate::gauge::GaugeProfile,
+) -> Result<ReplayHeader, CaptureError> {
+    let header = setup_input_sound_header(
+        judge,
+        domain,
+        limits,
+        start,
+        chart_seed,
+        end,
+        input_mode,
+        input_sounds,
+    )?;
+    crate::replay_gauge_policy::wrap_header(header, gauge, limits)
+        .map_err(CaptureError::GaugePolicy)
 }
 
 /// Canonical setup with an optional validated invisible input-sound identity.
@@ -326,7 +355,7 @@ impl LiveReplayCapture {
         input_mode: BmsInputMode,
         input_sounds: Option<InputSoundIdentity>,
     ) -> Result<Self, CaptureError> {
-        let header = setup_input_sound_header(
+        Self::new_with_gauge(
             judge,
             domain,
             limits,
@@ -335,6 +364,33 @@ impl LiveReplayCapture {
             end,
             input_mode,
             input_sounds,
+            &crate::gauge::GaugeProfile::default(),
+        )
+    }
+
+    /// Records a resolved gauge policy in the immutable setup identity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_gauge(
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        limits: ReplayCodecLimits,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        input_sounds: Option<InputSoundIdentity>,
+        gauge: &crate::gauge::GaugeProfile,
+    ) -> Result<Self, CaptureError> {
+        let header = setup_gauge_header(
+            judge,
+            domain,
+            limits,
+            start,
+            chart_seed,
+            end,
+            input_mode,
+            input_sounds,
+            gauge,
         )?;
         let header_bytes =
             encode_replay(&ReplayFile::new(header.clone(), Vec::new()), limits)?.len();

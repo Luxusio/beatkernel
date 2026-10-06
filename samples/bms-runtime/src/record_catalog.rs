@@ -120,7 +120,8 @@ impl RecordPreview {
         if setup.chart_seed != expected.chart_seed {
             return Err("saved record chart seed differs from the current draft".into());
         }
-        if setup.profile != expected.profile
+        if setup.gauge != expected.gauge
+            || setup.profile != expected.profile
             || setup.start != expected.start
             || setup.end != expected.end
             || setup.input_mode != expected.input_mode
@@ -326,6 +327,7 @@ fn draft_section(settings: &NativeSettings) -> Result<RecordedSetup, String> {
     };
     Ok(RecordedSetup {
         profile,
+        gauge: crate::gauge::GaugeProfile::default(),
         start,
         end,
         chart_seed: settings.chart_seed()?,

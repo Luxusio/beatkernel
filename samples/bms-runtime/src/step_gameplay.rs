@@ -23,7 +23,7 @@ use crate::{
     replay_audio::{
         ReplayAudioError, before_endpoint, completed_render_cursor_with_stops, section_end_frame,
     },
-    replay_capture::{CaptureError, LiveReplayCapture, setup_input_sound_header},
+    replay_capture::{CaptureError, LiveReplayCapture, setup_gauge_header},
 };
 use beatkernel::{
     audio::{
@@ -903,7 +903,7 @@ impl StepGameplay {
                 "competition identity requires an unprocessed runtime",
             ));
         }
-        setup_input_sound_header(
+        setup_gauge_header(
             self.runtime.judge(),
             self.host_domain,
             limits,
@@ -912,6 +912,7 @@ impl StepGameplay {
             None,
             self.input_mode,
             self.input_sound_identity,
+            self.gauge.profile(),
         )
         .map_err(|error| StepGameplayError::Capture {
             error,
@@ -968,7 +969,7 @@ impl StepGameplay {
                 "capture configuration requires an unprocessed, unconfigured runtime",
             ));
         }
-        let capture = LiveReplayCapture::new_with_input_sounds(
+        let capture = LiveReplayCapture::new_with_gauge(
             self.runtime.judge(),
             self.host_domain,
             limits,
@@ -977,6 +978,7 @@ impl StepGameplay {
             self.end,
             self.input_mode,
             self.input_sound_identity,
+            self.gauge.profile(),
         )
         .map_err(|error| StepGameplayError::Capture {
             error,
@@ -1998,7 +2000,7 @@ impl StepLocalGameplay {
             )
             .into());
         }
-        setup_input_sound_header(
+        setup_gauge_header(
             self.judge(player).expect("checked member"),
             self.control.host_domain,
             limits,
@@ -2007,6 +2009,7 @@ impl StepLocalGameplay {
             None,
             self.control.input_mode,
             self.control.input_sound_identity,
+            self.members[self.member_index(player)?].gauge.profile(),
         )
         .map_err(|error| {
             StepGameplayError::Capture {
@@ -2066,7 +2069,7 @@ impl StepLocalGameplay {
             )
             .into());
         }
-        let capture = LiveReplayCapture::new_with_input_sounds(
+        let capture = LiveReplayCapture::new_with_gauge(
             self.judge(player).expect("checked member"),
             self.control.host_domain,
             limits,
@@ -2075,6 +2078,7 @@ impl StepLocalGameplay {
             self.control.end,
             self.control.input_mode,
             self.control.input_sound_identity,
+            self.members[self.member_index(player)?].gauge.profile(),
         )
         .map_err(|error| StepGameplayError::Capture {
             error,

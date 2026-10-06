@@ -3,7 +3,7 @@
 use crate::{
     input_sounds::InputSoundIdentity,
     mine_plan::prepare_judge,
-    replay_capture::{CaptureError, setup_input_sound_header},
+    replay_capture::{CaptureError, setup_gauge_header},
 };
 #[cfg(test)]
 use crate::replay_capture::LiveReplayCapture;
@@ -21,6 +21,7 @@ use std::io::{ErrorKind, Read};
 /// Invalid replay metadata, compatibility, bounded data or logical reconstruction.
 #[derive(Debug)]
 pub enum PlaybackError {
+    GaugePolicy(crate::replay_gauge_policy::PolicyError),
     /// The recorded original-song section could not be selected.
     Section(Box<dyn std::error::Error>),
     /// Invalid versioned profile layout or arithmetic extent.
@@ -122,6 +123,7 @@ pub fn read_replay(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedSetup {
     pub profile: JudgeProfile,
+    pub gauge: crate::gauge::GaugeProfile,
     pub start: Timestamp,
     pub chart_seed: u64,
     pub end: Option<Timestamp>,
@@ -147,6 +149,11 @@ pub fn decode_setup(options: &[u8]) -> Result<(JudgeProfile, Timestamp), Playbac
 /// Legacy v1/v2 imply seed zero; v3 requires a nonzero seed and nonnegative start.
 /// V4 and v5 are refused because this tuple cannot preserve endpoints/input mode.
 pub fn decode_chart_setup(options: &[u8]) -> Result<(JudgeProfile, Timestamp, u64), PlaybackError> {
+    if options.starts_with(b"bms-gauge-setup/v1:") {
+        return Err(PlaybackError::Metadata(
+            "gauge replay requires a policy-aware consumer",
+        ));
+    }
     let setup = decode_recorded_setup(options, false)?;
     Ok((setup.profile, setup.start, setup.chart_seed))
 }
@@ -160,6 +167,13 @@ fn decode_recorded_setup(
     options: &[u8],
     allow_extended: bool,
 ) -> Result<RecordedSetup, PlaybackError> {
+    let (options, gauge) =
+        crate::replay_gauge_policy::split_options(options).map_err(PlaybackError::GaugePolicy)?;
+    if !allow_extended && gauge != crate::gauge::GaugeProfile::default() {
+        return Err(PlaybackError::Metadata(
+            "gauge replay requires a policy-aware consumer",
+        ));
+    }
     let (bytes, start, chart_seed, end, input_mode) = if let Some(bytes) =
         options.strip_prefix(b"bms-judge-profile/v1:")
     {
@@ -306,6 +320,7 @@ fn decode_recorded_setup(
     }
     Ok(RecordedSetup {
         profile: JudgeProfile::new(windows, Duration::from_nanos(offset))?,
+        gauge,
         start,
         chart_seed,
         end,
@@ -389,6 +404,7 @@ fn validate_recorded_setup(
     }
     let RecordedSetup {
         profile,
+        gauge,
         start,
         chart_seed,
         end,
@@ -424,7 +440,7 @@ fn validate_recorded_setup(
     .map_err(PlaybackError::Hazards)?;
     let input_sounds =
         InputSoundIdentity::from_source(&selected).map_err(PlaybackError::InputSounds)?;
-    let expected = setup_input_sound_header(
+    let expected = setup_gauge_header(
         &judge,
         file.header.normalized_clock,
         limits,
@@ -433,6 +449,7 @@ fn validate_recorded_setup(
         end,
         input_mode,
         input_sounds,
+        &gauge,
     )?;
     if expected != file.header {
         return Err(PlaybackError::IdentityMismatch(

@@ -364,6 +364,7 @@ pub mod replay_audio;
 pub mod replay_capture;
 #[cfg(test)]
 mod replay_feeder_stop_evidence_fixtures;
+pub mod replay_gauge_policy;
 #[cfg(test)]
 mod replay_gauge_sound_stop_fixtures;
 pub mod replay_pause;

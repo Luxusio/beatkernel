@@ -86,7 +86,7 @@ impl ReplayVisual {
             observed: None,
             pressed,
             mine_damage: MineDamageSummary::default(),
-            gauge: BmsGauge::default(),
+            gauge: BmsGauge::new(setup.gauge),
             failed: false,
         })
     }
@@ -103,7 +103,7 @@ impl ReplayVisual {
     pub fn mine_damage(&self) -> &MineDamageSummary {
         &self.mine_damage
     }
-    /// Default-policy gauge from the actual recorded operation prefix.
+    /// Recorded-policy gauge from the actual recorded operation prefix.
     pub fn gauge(&self) -> &BmsGauge {
         &self.gauge
     }
