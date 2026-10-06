@@ -2123,8 +2123,13 @@ output and transport intact under the normal output-request policy.
 
 This field is live-output-only: it is not added to initial native arguments or
 saved profile schema. Windows solo/local nonnetwork WASAPI play uses the common
-owner and paused-boundary policy for device/buffer/period/matrix fields. Its
-mapper preserves the current shared/exclusive mode and negotiation policy.
+owner and paused-boundary policy for device/mode/shared-policy/buffer/period/
+matrix fields. Empty mode/policy fields preserve current behavior; explicit
+mode changes select shared engine/legacy or exclusive without changing source
+format/rate or size-negotiation permission. Legacy shared requires default period.
+Shared policy applies only in shared mode; exclusive replies expose engine as
+the next shared-mode default. Output panels page a bounded field set so every
+advertised setting remains reachable without overlapping messages or buttons.
 ASIO solo/local observation also uses that owner while retaining the native
 HWND/message pump and original interval evidence. ASIO nonnetwork live controls
 expose buffer, ordered driver-channel selection and matrix changes for the

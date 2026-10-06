@@ -246,6 +246,123 @@ fn asio_channel_field_batches_with_matrix_and_refreshes_without_replacing_screen
     assert_eq!(app.navigator.active_id(), scope);
     assert_eq!(app.live_audio.as_ref().unwrap().selected, 2);
 }
+
+#[test]
+fn six_field_live_panel_pages_clicks_last_row_and_keeps_all_values_in_apply() {
+    let (mut app, publisher) = prepared();
+    let capability = OutputCapability {
+        host: SettingsHost::Windows,
+        current_args: vec![
+            "--device".into(),
+            "endpoint".into(),
+            "--mode".into(),
+            "exclusive".into(),
+            "--buffer".into(),
+            "frames:64".into(),
+            "--period".into(),
+            "default".into(),
+            "--shared-policy".into(),
+            "engine".into(),
+            "--output-matrix".into(),
+            "exact".into(),
+        ],
+    };
+    publisher.advertise_output(Some(capability)).unwrap();
+    app.open_live_audio();
+    let scope = app.navigator.active_id();
+    compose(&mut app);
+    assert_eq!(
+        app.hits
+            .iter()
+            .filter(|(id, _)| (1000..1008).contains(&id.0))
+            .count(),
+        4
+    );
+    assert!(app.hits.iter().any(|(id, _)| *id == ControlId(95)));
+    app.activate(ControlId(95));
+    compose(&mut app);
+    assert_eq!(app.live_audio.as_ref().unwrap().selected, 4);
+    assert!(app.hits.iter().any(|(id, _)| *id == ControlId(1005)));
+    app.activate(ControlId(1005));
+    let draft = app.live_audio.as_mut().unwrap();
+    assert_eq!(draft.selected, 5);
+    draft.editor.select_all();
+    draft.edit(None, Some("1,0;0,1"));
+    compose(&mut app);
+    assert!(
+        app.hits
+            .iter()
+            .filter(|(id, _)| (1000..1008).contains(&id.0))
+            .all(|(_, bounds)| bounds.y + bounds.height < 540)
+    );
+    app.apply_live_audio();
+    let request = publisher.take_output_request().unwrap().unwrap();
+    assert_eq!(request.args.len(), 12);
+    assert!(
+        request
+            .args
+            .chunks_exact(2)
+            .any(|pair| pair == ["--output-matrix", "1,0;0,1"])
+    );
+    compose(&mut app);
+    assert!(!app.hits.iter().any(|(id, _)| matches!(id.0, 94 | 95)));
+    publisher
+        .reply_output(&OutputReply {
+            id: request.id,
+            result: Ok(OutputCapability {
+                host: SettingsHost::Windows,
+                current_args: request.args,
+            }),
+        })
+        .unwrap();
+    app.collect_game();
+    compose(&mut app);
+    assert_eq!(app.navigator.active_id(), scope);
+    app.live_audio_key(KeyCode::PageUp, false);
+    assert_eq!(app.live_audio.as_ref().unwrap().selected, 1);
+}
+
+#[test]
+fn paged_last_field_prepares_unicode_ime_glyphs_without_committing_preview() {
+    let (mut app, publisher) = prepared();
+    app.title_font = Some(Arc::new(
+        FontAtlas::new(super::font_fixture::font_bytes(), 14.0, 128, 128, 128).unwrap(),
+    ));
+    publisher
+        .advertise_output(Some(OutputCapability {
+            host: SettingsHost::Windows,
+            current_args: vec![
+                "--device".into(),
+                "endpoint".into(),
+                "--mode".into(),
+                "exclusive".into(),
+                "--buffer".into(),
+                "frames:64".into(),
+                "--period".into(),
+                "default".into(),
+                "--shared-policy".into(),
+                "engine".into(),
+                "--output-matrix".into(),
+                "exact".into(),
+            ],
+        }))
+        .unwrap();
+    app.open_live_audio();
+    let scope = app.navigator.active_id();
+    app.activate(ControlId(1005));
+    let before = app.live_audio.as_ref().unwrap().values.native_args();
+    assert!(app.title_font.as_ref().unwrap().get('가').is_none());
+    app.ime_event(Ime::Enabled);
+    app.ime_event(Ime::Preedit("가".into(), Some((0, 3))));
+    assert!(app.title_font.as_ref().unwrap().get('가').is_some());
+    assert!(app.input_font_error.is_none());
+    assert_eq!(
+        app.live_audio.as_ref().unwrap().values.native_args(),
+        before
+    );
+    assert_eq!(app.navigator.active_id(), scope);
+    compose(&mut app);
+}
 #[test]
 fn actual_f2_gate_refuses_replay_terminal_cancel_and_unacknowledged_resume_intent_without_changing_play_instance()
  {

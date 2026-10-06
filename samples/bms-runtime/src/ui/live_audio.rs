@@ -10,7 +10,8 @@ use crate::{
     scene::Scene, settings::SettingsField, screen_lifecycle::ScreenInstanceId, font_text::FontText,
 };
 use floem_reactive::{Scope, RwSignal, SignalGet, SignalWith, SignalUpdate};
-pub const BUTTONS: [(ControlId, Bounds, &str); 2] = [
+pub const VISIBLE_ROWS: usize = 4;
+pub const BUTTONS: [(ControlId, Bounds, &str); 4] = [
     (
         ControlId(90),
         Bounds {
@@ -20,6 +21,26 @@ pub const BUTTONS: [(ControlId, Bounds, &str); 2] = [
             height: 34,
         },
         "APPLY OUTPUT",
+    ),
+    (
+        ControlId(94),
+        Bounds {
+            x: 420,
+            y: 620,
+            width: 130,
+            height: 34,
+        },
+        "PREVIOUS",
+    ),
+    (
+        ControlId(95),
+        Bounds {
+            x: 570,
+            y: 620,
+            width: 130,
+            height: 34,
+        },
+        "NEXT",
     ),
     (
         ControlId(91),
@@ -81,9 +102,22 @@ impl LiveAudioView {
             let Some(state) = state else {
                 return;
             };
-            for (index, field) in state.fields.iter().enumerate() {
-                let spacing = if state.fields.len() == 4 { 100 } else { 130 };
-                let y = 120 + index * spacing;
+            let first = ((state.selected / VISIBLE_ROWS) * VISIBLE_ROWS)
+                .min(state.fields.len().saturating_sub(VISIBLE_ROWS));
+            for (row, (index, field)) in state
+                .fields
+                .iter()
+                .enumerate()
+                .skip(first)
+                .take(VISIBLE_ROWS)
+                .enumerate()
+            {
+                let spacing = if state.fields.len() >= VISIBLE_ROWS {
+                    100
+                } else {
+                    130
+                };
+                let y = 120 + row * spacing;
                 text(scene, 24, y, field.label, 2, 0xe0e8f0);
                 let bounds = Bounds {
                     x: 24,
@@ -121,6 +155,10 @@ impl LiveAudioView {
                 );
             }
             for (id, bounds, label) in BUTTONS {
+                if matches!(id.0, 94 | 95) && (state.fields.len() <= VISIBLE_ROWS || state.pending)
+                {
+                    continue;
+                }
                 button(
                     scene,
                     bounds,
@@ -151,7 +189,7 @@ impl LiveAudioView {
         }
     }
     pub fn update(&self, frame: LiveAudioFrame<'_>) -> Result<(), String> {
-        if frame.fields.is_empty() || frame.fields.len() > 4 || frame.selected >= frame.fields.len()
+        if frame.fields.is_empty() || frame.fields.len() > 8 || frame.selected >= frame.fields.len()
         {
             return Err("live audio draft exceeds capability fields".into());
         }

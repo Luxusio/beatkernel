@@ -424,6 +424,8 @@ impl NativeSettings {
             ],
             SettingsHost::Windows => &[
                 "--device",
+                "--mode",
+                "--shared-policy",
                 "--buffer",
                 "--period",
                 "--output-channels",

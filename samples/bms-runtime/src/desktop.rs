@@ -1658,7 +1658,8 @@ impl Desktop {
             }
             ScreenRoute::LiveAudio => {
                 if let Some(draft) = &self.live_audio {
-                    for (index, field) in draft.values.fields().iter().enumerate() {
+                    let count = draft.values.fields().len().min(values.len());
+                    for (index, field) in draft.values.fields().iter().take(count).enumerate() {
                         values[index] = if index == draft.selected {
                             self.ime_editor(ImeField::LiveOutput(index), &draft.editor)
                                 .value()
@@ -1666,8 +1667,10 @@ impl Desktop {
                             &field.value
                         };
                     }
+                    count
+                } else {
+                    0
                 }
-                3
             }
             ScreenRoute::Settings => {
                 if let Some(draft) = &self.settings {
@@ -1883,9 +1886,20 @@ impl Desktop {
             return;
         }
         if let Some(draft) = &mut self.live_audio {
-            if matches!(key, KeyCode::Tab | KeyCode::ArrowUp | KeyCode::ArrowDown) {
+            if matches!(
+                key,
+                KeyCode::Tab
+                    | KeyCode::ArrowUp
+                    | KeyCode::ArrowDown
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+            ) {
                 let count = draft.values.fields().len();
-                let next = if key == KeyCode::ArrowUp {
+                let next = if key == KeyCode::PageUp {
+                    draft.selected.saturating_sub(4)
+                } else if key == KeyCode::PageDown {
+                    (draft.selected + 4).min(count - 1)
+                } else if key == KeyCode::ArrowUp {
                     (draft.selected + count - 1) % count
                 } else {
                     (draft.selected + 1) % count
@@ -3340,14 +3354,19 @@ impl Desktop {
             match id.0 {
                 90 => self.apply_live_audio(),
                 91 => self.back(),
-                value if (1000..1003).contains(&value) => {
+                value if value == 94 || value == 95 || (1000..1008).contains(&value) => {
                     if !self
                         .game
                         .as_ref()
                         .is_some_and(|game| game.viewer.output_pending())
                     {
                         if let Some(draft) = &mut self.live_audio {
-                            draft.message = draft.select((value - 1000) as usize).err();
+                            let index = match value {
+                                94 => draft.selected.saturating_sub(4),
+                                95 => (draft.selected + 4).min(draft.values.fields().len() - 1),
+                                _ => (value - 1000) as usize,
+                            };
+                            draft.message = draft.select(index).err();
                         }
                         self.gesture.cancel();
                         self.invalidate_hits();

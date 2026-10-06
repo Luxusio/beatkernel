@@ -133,6 +133,11 @@ pub(super) fn request(
     let mut device = current.device().clone();
     let mut buffer = current.buffer();
     let mut period = current.period();
+    let mut shared = match current.mode() {
+        beatkernel_platform::audio::AudioStreamMode::Shared(policy) => policy,
+        _ => beatkernel_platform::audio::SharedPeriodPolicy::EnginePeriod,
+    };
+    let mut exclusive = current.mode() == beatkernel_platform::audio::AudioStreamMode::Exclusive;
     let mut text = "";
     for field in draft
         .fields()
@@ -141,6 +146,20 @@ pub(super) fn request(
     {
         match field.flag {
             "--device" => device = AudioDeviceId(field.value.clone()),
+            "--mode" => {
+                exclusive = match field.value.as_str() {
+                    "exclusive" => true,
+                    "shared" => false,
+                    _ => return Err("WASAPI mode must be shared or exclusive".into()),
+                }
+            }
+            "--shared-policy" => {
+                shared = match field.value.as_str() {
+                    "engine" => beatkernel_platform::audio::SharedPeriodPolicy::EnginePeriod,
+                    "legacy" => beatkernel_platform::audio::SharedPeriodPolicy::DeviceDefault,
+                    _ => return Err("WASAPI shared policy must be engine or legacy".into()),
+                }
+            }
             "--buffer" => {
                 buffer = match super::size(&field.value).map_err(|e| e.to_string())? {
                     None => BufferRequest::DeviceDefault,
@@ -180,7 +199,12 @@ pub(super) fn request(
             return Err("WASAPI size exceeds render capacity".into());
         }
     }
-    if current.mode()
+    let mode = if exclusive {
+        beatkernel_platform::audio::AudioStreamMode::Exclusive
+    } else {
+        beatkernel_platform::audio::AudioStreamMode::Shared(shared)
+    };
+    if mode
         == beatkernel_platform::audio::AudioStreamMode::Shared(
             beatkernel_platform::audio::SharedPeriodPolicy::DeviceDefault,
         )
@@ -201,16 +225,9 @@ pub(super) fn request(
         },
     )
     .map_err(|e| e.to_string())?;
-    let native = AudioStreamRequest::new(
-        device,
-        current.backend(),
-        current.mode(),
-        format,
-        buffer,
-        period,
-    )
-    .map_err(|e| e.to_string())?
-    .with_negotiation(current.negotiation());
+    let native = AudioStreamRequest::new(device, current.backend(), mode, format, buffer, period)
+        .map_err(|e| e.to_string())?
+        .with_negotiation(current.negotiation());
     Ok(RemixedOutputRequest { native, matrix })
 }
 fn buffer_text(size: BufferRequest) -> String {
@@ -244,6 +261,19 @@ pub(super) fn capability(
         current_args: vec![
             "--device".into(),
             applied.requested.device().0.clone(),
+            "--mode".into(),
+            if applied.requested.mode() == beatkernel_platform::audio::AudioStreamMode::Exclusive {
+                "exclusive".into()
+            } else {
+                "shared".into()
+            },
+            "--shared-policy".into(),
+            match applied.requested.mode() {
+                beatkernel_platform::audio::AudioStreamMode::Shared(
+                    beatkernel_platform::audio::SharedPeriodPolicy::DeviceDefault,
+                ) => "legacy".into(),
+                _ => "engine".into(),
+            },
             "--buffer".into(),
             buffer_text(applied.requested.buffer()),
             "--period".into(),
@@ -312,7 +342,7 @@ mod tests {
             vec!["--period", "ns:9223372036854775808"],
             vec!["--output-matrix", "1,0"],
             vec!["--device", "bad\0endpoint"],
-            vec!["--mode", "shared"],
+            vec!["--mode", "invalid"],
         ] {
             assert!(
                 request(
@@ -580,5 +610,79 @@ mod tests {
         let oversized = (0..33).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
         assert!(super::super::parse_output_channels(&oversized).is_err());
         assert!(request(current(), None, &["--output-channels".into(), "0,1".into()]).is_err());
+    }
+
+    #[test]
+    fn wasapi_live_mode_and_policy_keep_source_and_validate_final_mode_period() {
+        use beatkernel_platform::audio::{AudioStreamMode, SharedPeriodPolicy};
+        let original = current();
+        let engine = request(
+            original.clone(),
+            None,
+            &[
+                "--mode".into(),
+                "shared".into(),
+                "--shared-policy".into(),
+                "engine".into(),
+                "--period".into(),
+                "frames:32".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            engine.native.mode(),
+            AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod)
+        );
+        assert_eq!(engine.native.format(), original.format());
+        assert_eq!(engine.native.negotiation(), original.negotiation());
+        assert!(
+            request(
+                engine.native.clone(),
+                None,
+                &["--shared-policy".into(), "legacy".into()]
+            )
+            .is_err()
+        );
+        let legacy = request(
+            engine.native,
+            None,
+            &[
+                "--shared-policy".into(),
+                "legacy".into(),
+                "--period".into(),
+                "default".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.native.mode(),
+            AudioStreamMode::Shared(SharedPeriodPolicy::DeviceDefault)
+        );
+        let exclusive = request(
+            legacy.native,
+            None,
+            &[
+                "--mode".into(),
+                "exclusive".into(),
+                "--period".into(),
+                "frames:64".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(exclusive.native.mode(), AudioStreamMode::Exclusive);
+        assert_eq!(exclusive.native.period(), PeriodRequest::Frames(64));
+        for args in [
+            vec!["--mode", "invalid"],
+            vec!["--shared-policy", "invalid"],
+        ] {
+            assert!(
+                request(
+                    original.clone(),
+                    None,
+                    &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
+                )
+                .is_err()
+            );
+        }
     }
 }
