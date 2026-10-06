@@ -13,12 +13,12 @@ use crate::audio::{
     encode_pcm, telemetry::Telemetry,
 };
 use beatkernel::{
-    audio::{AudioError, Mixer, RenderReport},
+    audio::{AudioError, Mixer, MixerOpenFailure, RenderReport},
     time::{ClockDomainId, ClockPoint, Timestamp},
 };
 use std::{
     ffi::{CString, c_char, c_int, c_long, c_uint, c_ulong, c_void},
-    ptr,
+    io, ptr,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, AtomicU64, Ordering},
@@ -401,12 +401,69 @@ impl Shared {
     }
 }
 
+type WorkerExit = (Result<(), LinuxError>, Mixer);
+trait WorkerSpawner {
+    fn spawn<F>(self, work: F) -> io::Result<JoinHandle<WorkerExit>>
+    where
+        F: FnOnce() -> WorkerExit + Send + 'static;
+}
+struct NativeWorkerSpawner;
+impl WorkerSpawner for NativeWorkerSpawner {
+    fn spawn<F>(self, work: F) -> io::Result<JoinHandle<WorkerExit>>
+    where
+        F: FnOnce() -> WorkerExit + Send + 'static,
+    {
+        thread::Builder::new()
+            .name("beatkernel-alsa".into())
+            .spawn(work)
+    }
+}
+fn launch_worker<S, F>(
+    spawner: S,
+    mixer: Mixer,
+    work: F,
+) -> Result<JoinHandle<WorkerExit>, MixerOpenFailure<LinuxError>>
+where
+    S: WorkerSpawner,
+    F: FnOnce(Mixer) -> WorkerExit + Send + 'static,
+{
+    let slot = Arc::new(std::sync::Mutex::new(Some(mixer)));
+    let worker_slot = Arc::clone(&slot);
+    let launched = spawner.spawn(move || {
+        let mixer = worker_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("worker claims one launch mixer");
+        // Drop the cold launch lock/slot before native setup and all rendering.
+        drop(worker_slot);
+        work(mixer)
+    });
+    match launched {
+        Ok(worker) => Ok(worker),
+        Err(error) => {
+            let mixer = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            Err(MixerOpenFailure::new(error.into(), mixer))
+        }
+    }
+}
+fn join_open_failure(
+    worker: JoinHandle<WorkerExit>,
+    original: LinuxError,
+) -> MixerOpenFailure<LinuxError> {
+    let mixer = worker.join().ok().map(|(_, mixer)| mixer);
+    MixerOpenFailure::new(original, mixer)
+}
+
 /// Owns the worker lifecycle; worker exclusively owns ALSA handles and Mixer.
 pub struct AlsaStream {
     configuration: AlsaAppliedConfig,
     basis: beatkernel::audio::OutputFrameBasis,
     shared: Arc<Shared>,
-    worker: Option<JoinHandle<(Result<(), LinuxError>, Mixer)>>,
+    worker: Option<JoinHandle<WorkerExit>>,
     recovered_mixer: Option<Mixer>,
     retired: bool,
 }
@@ -414,106 +471,117 @@ impl AlsaStream {
     /// Opens/configures on the worker and waits for its actual startup result.
     /// Render/conversion storage is allocated before this method returns Ready.
     pub fn open(request: AlsaRequest, mixer: Mixer) -> Result<Self, LinuxError> {
+        Self::open_recoverable(request, mixer).map_err(|failure| failure.into_parts().0)
+    }
+    /// Opens normally or returns the original mixer after preflight/spawn refusal
+    /// or confirmed ordinary worker retirement. Panic recovery is unavailable.
+    pub fn open_recoverable(
+        request: AlsaRequest,
+        mixer: Mixer,
+    ) -> Result<Self, MixerOpenFailure<LinuxError>> {
         let basis = mixer.output_frame_basis();
-        super::sys::supported_abi()?;
-        if request.device.is_empty()
-            || request.device.contains('\0')
-            || request.period_frames == 0
-            || request.buffer_frames <= request.period_frames
-            || request.format.channel_mask().is_some()
-        {
-            return Err(LinuxError::InvalidConfiguration(
-                "explicit device, unspecified channel mask, and 0 < period < buffer required",
-            ));
-        }
-        if mixer.config().format() != request.format.pcm() {
-            return Err(LinuxError::InvalidConfiguration(
-                "ALSA and mixer formats must match exactly",
-            ));
+        let validation = (|| -> Result<(), LinuxError> {
+            super::sys::supported_abi()?;
+            if request.device.is_empty()
+                || request.device.contains('\0')
+                || request.period_frames == 0
+                || request.buffer_frames <= request.period_frames
+                || request.format.channel_mask().is_some()
+            {
+                return Err(LinuxError::InvalidConfiguration(
+                    "explicit device, unspecified channel mask, and 0 < period < buffer required",
+                ));
+            }
+            if mixer.config().format() != request.format.pcm() {
+                return Err(LinuxError::InvalidConfiguration(
+                    "ALSA and mixer formats must match exactly",
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(error) = validation {
+            return Err(MixerOpenFailure::new(error, Some(mixer)));
         }
         let shared = Arc::new(Shared::new());
         let worker_shared = Arc::clone(&shared);
         let (sender, receiver) = mpsc::sync_channel(1);
-        let worker = thread::Builder::new()
-            .name("beatkernel-alsa".into())
-            .spawn(move || {
-                let mut mixer = mixer;
-                let opened = NativePcm::open(&request).and_then(|(pcm, buffer, period)| {
-                    if period as usize > mixer.config().limits().max_render_frames() {
-                        return Err(LinuxError::InvalidConfiguration(
-                            "applied period exceeds preallocated mixer render limit",
-                        ));
-                    }
-                    let samples = (period as usize)
-                        .checked_mul(usize::from(request.format.channels()))
-                        .ok_or(LinuxError::Overflow)?;
-                    let bytes = samples
-                        .checked_mul(usize::from(request.format.encoding().bytes_per_sample()))
-                        .ok_or(LinuxError::Overflow)?;
-                    let render = vec![0.0; samples];
-                    let conversion = vec![0u8; bytes];
-                    let configuration = AlsaAppliedConfig {
-                        format: request.format,
-                        buffer_frames: buffer,
-                        period_frames: period,
-                        sizing_adjusted: period != request.period_frames
-                            || buffer != request.buffer_frames,
-                        output_domain: mixer.config().domain(),
-                        output_origin: mixer.config().origin(),
-                        requested: request.clone(),
-                    };
-                    Ok((pcm, configuration, render, conversion))
-                });
-                let (mut pcm, configuration, mut render, mut conversion) = match opened {
-                    Ok(opened) => opened,
-                    Err(error) => {
-                        let _ = sender.send(Err(error));
-                        return (Ok(()), mixer);
-                    }
+        let worker = launch_worker(NativeWorkerSpawner, mixer, move |mut mixer| {
+            let opened = NativePcm::open(&request).and_then(|(pcm, buffer, period)| {
+                if period as usize > mixer.config().limits().max_render_frames() {
+                    return Err(LinuxError::InvalidConfiguration(
+                        "applied period exceeds preallocated mixer render limit",
+                    ));
+                }
+                let samples = (period as usize)
+                    .checked_mul(usize::from(request.format.channels()))
+                    .ok_or(LinuxError::Overflow)?;
+                let bytes = samples
+                    .checked_mul(usize::from(request.format.encoding().bytes_per_sample()))
+                    .ok_or(LinuxError::Overflow)?;
+                let render = vec![0.0; samples];
+                let conversion = vec![0u8; bytes];
+                let configuration = AlsaAppliedConfig {
+                    format: request.format,
+                    buffer_frames: buffer,
+                    period_frames: period,
+                    sizing_adjusted: period != request.period_frames
+                        || buffer != request.buffer_frames,
+                    output_domain: mixer.config().domain(),
+                    output_origin: mixer.config().origin(),
+                    requested: request.clone(),
                 };
-                if sender.send(Ok(configuration.clone())).is_err() {
+                Ok((pcm, configuration, render, conversion))
+            });
+            let (mut pcm, configuration, mut render, mut conversion) = match opened {
+                Ok(opened) => opened,
+                Err(error) => {
+                    let _ = sender.send(Err(error));
                     return (Ok(()), mixer);
                 }
-                drop(sender);
-                while !worker_shared.start.load(Ordering::Acquire)
-                    && !worker_shared.stop.load(Ordering::Acquire)
-                {
-                    thread::park();
-                }
-                if worker_shared.stop.load(Ordering::Acquire) {
-                    return (Ok(()), mixer);
-                }
-                worker_shared.status.store(1, Ordering::Release);
-                // Worker-local unwind/return guard clears timing even on panic.
-                let _timing_guard = TimingInvalidation(&worker_shared.timing);
-                let result = run_worker(
-                    &mut pcm,
-                    &mut mixer,
-                    &configuration,
-                    &mut render,
-                    &mut conversion,
-                    &worker_shared,
-                );
-                match &result {
-                    Ok(()) => worker_shared.status.store(2, Ordering::Release),
-                    Err(error) => {
-                        let code = match error {
-                            LinuxError::Alsa { code, .. } => *code,
-                            _ => 0,
-                        };
-                        if code == -32 {
-                            increment(&worker_shared.xruns, 1);
-                        }
-                        if code == -86 {
-                            increment(&worker_shared.suspends, 1);
-                        }
-                        increment(&worker_shared.failures, 1);
-                        worker_shared.errno.store(code, Ordering::Relaxed);
-                        worker_shared.status.store(3, Ordering::Release);
+            };
+            if sender.send(Ok(configuration.clone())).is_err() {
+                return (Ok(()), mixer);
+            }
+            drop(sender);
+            while !worker_shared.start.load(Ordering::Acquire)
+                && !worker_shared.stop.load(Ordering::Acquire)
+            {
+                thread::park();
+            }
+            if worker_shared.stop.load(Ordering::Acquire) {
+                return (Ok(()), mixer);
+            }
+            worker_shared.status.store(1, Ordering::Release);
+            // Worker-local unwind/return guard clears timing even on panic.
+            let _timing_guard = TimingInvalidation(&worker_shared.timing);
+            let result = run_worker(
+                &mut pcm,
+                &mut mixer,
+                &configuration,
+                &mut render,
+                &mut conversion,
+                &worker_shared,
+            );
+            match &result {
+                Ok(()) => worker_shared.status.store(2, Ordering::Release),
+                Err(error) => {
+                    let code = match error {
+                        LinuxError::Alsa { code, .. } => *code,
+                        _ => 0,
+                    };
+                    if code == -32 {
+                        increment(&worker_shared.xruns, 1);
                     }
+                    if code == -86 {
+                        increment(&worker_shared.suspends, 1);
+                    }
+                    increment(&worker_shared.failures, 1);
+                    worker_shared.errno.store(code, Ordering::Relaxed);
+                    worker_shared.status.store(3, Ordering::Release);
                 }
-                (result, mixer)
-            })?;
+            }
+            (result, mixer)
+        })?;
         match receiver.recv() {
             Ok(Ok(configuration)) => Ok(Self {
                 configuration,
@@ -523,14 +591,8 @@ impl AlsaStream {
                 recovered_mixer: None,
                 retired: false,
             }),
-            Ok(Err(error)) => {
-                let _ = worker.join();
-                Err(error)
-            }
-            Err(_) => {
-                let _ = worker.join();
-                Err(LinuxError::WorkerPanicked)
-            }
+            Ok(Err(error)) => Err(join_open_failure(worker, error)),
+            Err(_) => Err(join_open_failure(worker, LinuxError::WorkerPanicked)),
         }
     }
 
@@ -1405,3 +1467,7 @@ mod recovery_fixtures;
 #[cfg(test)]
 #[path = "alsa/frame_basis_fixtures.rs"]
 mod frame_basis_fixtures;
+
+#[cfg(test)]
+#[path = "alsa/open_failure_fixtures.rs"]
+mod open_failure_fixtures;

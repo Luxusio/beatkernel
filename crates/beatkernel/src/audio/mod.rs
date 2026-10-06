@@ -47,7 +47,7 @@ mod pcm;
 mod queue;
 
 pub use frame_basis::{OutputFrameBasis, OutputFrameBasisError};
-pub use handoff::StoppedMixerSource;
+pub use handoff::{MixerOpenFailure, StoppedMixerSource};
 pub use mixer::Mixer;
 pub use model::{
     AudioCommand, AudioCounters, AudioError, AudioFormat, AudioLimits, MixerConfig, PcmLimits,
