@@ -4,6 +4,8 @@
 //! sources, releases events through a lagged host frontier, advances every
 //! player's deadlines at that same point, and only then commits the frontier.
 
+pub mod attachments;
+
 use beatkernel::{
     input::{DeviceId, PhysicalInputEvent},
     time::{ClockDomainId, ClockPoint, Timestamp},

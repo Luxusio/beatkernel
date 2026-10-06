@@ -597,11 +597,7 @@ mod native {
             )
             .into());
         }
-        if !input
-            .devices()
-            .iter()
-            .any(|d| d.descriptor.runtime_id == selected && d.registry_entry == Some(registry))
-        {
+        if !input.has_registry_attachment(registry, selected) {
             return Err(
                 "selected IORegistry attachment disconnected/reconnected; no automatic retarget"
                     .into(),

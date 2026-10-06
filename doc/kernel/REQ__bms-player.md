@@ -2138,6 +2138,12 @@ macOS solo and local-cohort nonnetwork play use the same static CoreAudio owner
 composition and paused-boundary policy for device/buffer/matrix fields.
 The cohort keeps its original complete HID roster, player IDs and input times;
 output replacement does not recreate input bindings or per-player game state.
+Steady-state roster verification must avoid cloning native device names or
+allocating candidate vectors/hash sets. The native adapter returns at most two
+copied numeric attachment candidates per key; pure verification preserves the
+startup resolver's ambiguity, alias, invalid assignment and roster-change
+refusals, including their precedence. A bounded stack of runtime IDs covers
+the existing 64-player limit; no callback-owned references escape runloop pumps.
 Network observation also uses the owner, with manual output controls disabled.
 Watch controls remain unavailable until their owner integration is complete.
 Matrix selection/preservation/reset rules belong to common domain functions.

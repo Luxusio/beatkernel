@@ -728,6 +728,30 @@ impl HidInput {
             .map(|record| record.info.clone())
             .collect()
     }
+    /// Copies at most two registry matches without copying names or allocating.
+    /// Two matches suffice to report ambiguity; this does not select a device.
+    /// No references to callback-owned records escape across runloop pumping.
+    pub fn registry_candidates(&self, registry: u64) -> [Option<(DeviceId, bool)>; 2] {
+        let mut matches = self
+            .state
+            .devices
+            .values()
+            .filter(|record| record.info.registry_entry == Some(registry))
+            .map(|record| {
+                (
+                    record.info.descriptor.runtime_id,
+                    record.info.descriptor.capabilities.button,
+                )
+            });
+        [matches.next(), matches.next()]
+    }
+    /// Checks an exact pinned identity without copying device metadata.
+    pub fn has_registry_attachment(&self, registry: u64, device: DeviceId) -> bool {
+        self.state.devices.values().any(|record| {
+            record.info.registry_entry == Some(registry)
+                && record.info.descriptor.runtime_id == device
+        })
+    }
     /// Removes the next acquisition-order sample without sorting native time.
     pub fn pop(&mut self) -> Option<HidSample> {
         self.state.pending.pop_front()

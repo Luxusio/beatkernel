@@ -145,37 +145,28 @@ impl NativeGameplayDevice for CohortDevice<'_> {
 
 /// Missing attachments may arrive during bounded preparation; ambiguity,
 /// incapable attachments and identity aliases are terminal setup errors.
+fn registry_error(
+    error: beatkernel_bms_runtime::local_input::attachments::AttachmentError,
+) -> Box<dyn std::error::Error> {
+    use beatkernel_bms_runtime::local_input::attachments::AttachmentError;
+    match error {
+        AttachmentError::InvalidAssignment => {
+            "invalid or duplicate local player/IORegistry assignment"
+        }
+        AttachmentError::Ambiguous => "ambiguous local IORegistry attachment",
+        AttachmentError::Unusable => "incapable or aliased local IORegistry attachment",
+        AttachmentError::Changed => {
+            "assigned IORegistry attachment retired/reconnected; restart whole cohort"
+        }
+    }
+    .into()
+}
 fn resolve_registries(
     requested: &[(PlayerId, u64)],
     attached: &[(Option<u64>, DeviceId, bool)],
 ) -> Result<Option<Vec<DeviceId>>> {
-    let mut players = HashSet::new();
-    let mut registries = HashSet::new();
-    let mut ids = HashSet::new();
-    let mut selected = Vec::with_capacity(requested.len());
-    let mut missing = false;
-    for (player, registry) in requested {
-        if player.0 == 0
-            || *registry == 0
-            || !players.insert(*player)
-            || !registries.insert(*registry)
-        {
-            return Err("invalid or duplicate local player/IORegistry assignment".into());
-        }
-        let mut matches = attached.iter().filter(|(id, _, _)| *id == Some(*registry));
-        let Some((_, id, button)) = matches.next() else {
-            missing = true;
-            continue;
-        };
-        if matches.next().is_some() {
-            return Err("ambiguous local IORegistry attachment".into());
-        }
-        if !button || id.0 == 0 || !ids.insert(*id) {
-            return Err("incapable or aliased local IORegistry attachment".into());
-        }
-        selected.push(*id);
-    }
-    Ok(if missing { None } else { Some(selected) })
+    beatkernel_bms_runtime::local_input::attachments::resolve(requested, attached)
+        .map_err(registry_error)
 }
 fn check_counters(counters: HidCounters) -> Result<()> {
     if counters.queue_full != 0
@@ -222,12 +213,11 @@ fn check_group(
     requested: &[(PlayerId, u64)],
     selected: &[DeviceId],
 ) -> Result<()> {
-    if current_ids(input, requested)?.as_deref() != Some(selected) {
-        return Err(
-            "assigned IORegistry attachment retired/reconnected; restart whole cohort".into(),
-        );
-    }
-    Ok(())
+    check_counters(input.counters())?;
+    beatkernel_bms_runtime::local_input::attachments::verify(requested, selected, |key| {
+        input.registry_candidates(key)
+    })
+    .map_err(registry_error)
 }
 /// Every seed poll validates the full roster, never just one selected member.
 fn seed_group(
