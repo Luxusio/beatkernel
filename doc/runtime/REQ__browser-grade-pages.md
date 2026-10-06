@@ -1,6 +1,6 @@
 # Browser stored grade paging
 
-Window exposes Previous/Next stored-grade controls and a page-status caption for
+Window exposes Previous/Next stored-record-detail controls and a page-status caption for
 the currently selected historical record. It sends only bounded page requests;
 it does not decode archive statistics, calculate grades, format grade counts,
 draw canvas geometry or own a rendering loop. Worker owns BrowserHistoricalRecord
@@ -9,7 +9,10 @@ and invokes its existing Rust grade-page API, using cached four-row presentation
 Use the existing shared host_model module for envelope validation and a pure
 HistoricalGradePager. Public API: bind(id,page,pages), snapshot(), request(page,rpcId),
 accept(reply), cancel() and clear(). Snapshot is null or {id,page,pages,pending}.
-Page metadata validates integers, 1..1024 pages and 0<=page<pages before mutation.
+Page metadata validates integers, 1..1033 pages and 0<=page<pages before mutation.
+The same bridge now covers grade pages followed by stored comparison pages under
+[historical comparison details](REQ__historical-comparison-pages.md). Existing
+grade-page API/command names remain compatible; Window does not inspect page content.
 Selection IDs and RPC IDs are positive safe integers; accepted request IDs increase.
 One pending request is allowed. Same-page/busy/unselected actions produce no command.
 Requests contain {kind:historical-record-page,id,rpcId,page}. Matched successful
@@ -61,4 +64,5 @@ JavaScript parsing, Node/test execution, apps, formal review, QA, verify and clo
 remain user-deferred. Text inspection and whitespace checks are available; earlier
 Rust compile evidence applies to the unchanged grade adapter, not this JS routing.
 The full BMS player Goal remains active, with platform acceptance, measurements
-and saved comparison archival still unfinished.
+and room-wide historical metadata still unfinished. Common/native/browser comparison
+archival and historical detail display are source-integrated; execution remains unproven.

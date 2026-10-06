@@ -37,6 +37,8 @@ and actual Step completed-export fixtures. Assertions remain deferred; scoped
 formatting and four sequential compile-only checks run after both paired writers
 stop. Native solo/cohort comparison attachment now follows
 [native completion association](REQ__native-archived-comparisons.md). Historical
-comparison UI and actual browser/native execution remain subsequent work. Existing UI detail
-pages continue to show stored scores and timing. Full BMS player Goal remains
+comparison detail pages now follow
+[the shared detail contract](REQ__historical-comparison-pages.md). Actual
+browser/native execution remains unproven. Existing score/timing pages remain
+available before the new comparison pages. Full BMS player Goal remains
 active; formal review and required browser/CLI/desktop QA are still outstanding.

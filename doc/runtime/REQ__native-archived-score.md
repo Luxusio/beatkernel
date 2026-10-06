@@ -54,5 +54,7 @@ Native Records now retains associated stored final score details in a cached
 subview under [the detail contract](REQ__native-record-details.md), including
 [bounded native grade pages](REQ__stored-grade-pages.md). Browser interactive
 grade paging is source-integrated; runtime acceptance remains unproven. Common,
-browser and selected native comparison archival are now source-integrated, while
-historical comparison UI and room-wide metadata remain unfinished.
+browser and selected native comparison archival are now source-integrated.
+Historical comparison UI now uses
+[shared detail pages](REQ__historical-comparison-pages.md); actual execution
+and room-wide metadata remain unfinished.

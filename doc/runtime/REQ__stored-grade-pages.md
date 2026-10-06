@@ -7,6 +7,10 @@ Do not invent friendly judge names or infer missing metadata from replay prefixe
 Unavailable legacy scores show STORED GRADES UNAVAILABLE; present empty score
 tables show STORED GRADES EMPTY. Both have one display page, with no grade rows.
 At most 4096 grades produce 1024 pages. This changes presentation, not archive bytes.
+Stored comparison metadata now adds at most nine detail pages after those grade
+pages under [historical comparison details](REQ__historical-comparison-pages.md).
+Legacy unavailable metadata adds no pages. Common page accessors and native
+navigation now cover the combined detail sequence, bounded at 1033 pages.
 
 Add GRADE_ROWS_PER_PAGE=4, grade_page(), grade_page_count() and
 set_grade_page(page)->Result<bool,String> to the common presentation. Same-page
@@ -55,5 +59,6 @@ from the desktop binary crate. No tests, JS parsing, apps or hardware execution;
 four compile-only checks follow both paired writers stopping. Assertions, formal
 review, required QA, runtime acceptance, verify and close remain deferred.
 Cold first presentation and page leaf builds may allocate; existing initial
-grade copy remains. Browser paging acceptance, saved comparison archival and
-platform acceptance remain unfinished, and the full player Goal stays active.
+grade copy remains. Comparison archival/detail rendering is source-integrated;
+browser/native execution, room-wide metadata and platform acceptance remain
+unfinished, and the full player Goal stays active.

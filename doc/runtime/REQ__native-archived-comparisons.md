@@ -47,5 +47,7 @@ Author independent pure projection, typed-completion archive association,
 actual common solo/cohort finalization and failure/call-order fixtures. Scoped
 formatting and four sequential compile-only checks follow both paired writers
 stopping. Assertions and hardware/browser/network/runtime QA remain deferred.
-Cross-target Windows/macOS acceptance, room-wide archival metadata and historical
-comparison UI remain unproven/follow-up work. Full BMS player Goal stays active.
+Historical comparison UI now uses
+[shared detail pages](REQ__historical-comparison-pages.md). Cross-target
+Windows/macOS acceptance, actual UI/runtime acceptance and room-wide archival
+metadata remain unproven/follow-up work. Full BMS player Goal stays active.
