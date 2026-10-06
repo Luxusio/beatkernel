@@ -17,14 +17,29 @@ use crate::{
 };
 use beatkernel::{
     audio::{AudioFormat, AudioLimits, ChannelMatrix},
-    time::ClockPoint,
+    time::{ClockPoint, ClockDomainId},
 };
 use beatkernel_platform::{
-    macos::audio::CoreAudioRequest, audio::presentation::discipline::PresentationDiscipline,
+    macos::{
+        audio::{CoreAudioRequest, CoreAudioStream},
+        clock::MachClock,
+    },
+    audio::presentation::discipline::PresentationDiscipline,
 };
 
 pub type NativeCoreAudioOutputOwner =
     GameplayOutputOwner<RemixedOutputBackend<CoreAudioReplacementBackend>>;
+/// Static composition shared by solo and cohort; the caller supplies one clock.
+pub fn owner(
+    stream: CoreAudioStream,
+    clock: MachClock,
+    host: ClockDomainId,
+) -> NativeCoreAudioOutputOwner {
+    NativeCoreAudioOutputOwner::new(
+        RemixedOutputBackend::new(CoreAudioReplacementBackend::new(clock, host)),
+        CoreAudioReplacementOutput::from_stream(stream),
+    )
+}
 pub fn request_for_args(
     current: CoreAudioRequest,
     matrix: Option<&ChannelMatrix>,

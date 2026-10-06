@@ -1076,15 +1076,10 @@ mod native {
             },
             capacity
         );
-        use beatkernel_bms_runtime::gameplay::output::adapters::{
-            coreaudio::{CoreAudioReplacementBackend, CoreAudioReplacementOutput},
-            coreaudio_ui::NativeCoreAudioOutputUi,
-            remix::RemixedOutputBackend,
+        use beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::{
+            owner, NativeCoreAudioOutputUi,
         };
-        let mut output = OwnedOutput::new(
-            RemixedOutputBackend::new(CoreAudioReplacementBackend::new(clock, HOST)),
-            CoreAudioReplacementOutput::from_stream(audio),
-        );
+        let mut output = owner(audio, clock, HOST);
         let mut output_ui = NativeCoreAudioOutputUi::new(&output, !network_start)?;
         let mut other_devices = 0u64;
         let mut pre_origin = 0u64;

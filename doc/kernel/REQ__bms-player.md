@@ -2134,9 +2134,12 @@ Driver/channel-selection and cross-backend controls remain pending.
 Output capability arguments declare the exact editable fields: the UI must not
 invent a WASAPI period or device selector for an ASIO buffer-only capability.
 Network/Watch output controls remain unavailable.
-macOS solo nonnetwork play uses the common output owner
-and paused-boundary policy for device/buffer/matrix fields; cohort/network/Watch
-capabilities remain unavailable until their owner integration is complete.
+macOS solo and local-cohort nonnetwork play use the same static CoreAudio owner
+composition and paused-boundary policy for device/buffer/matrix fields.
+The cohort keeps its original complete HID roster, player IDs and input times;
+output replacement does not recreate input bindings or per-player game state.
+Network observation also uses the owner, with manual output controls disabled.
+Watch controls remain unavailable until their owner integration is complete.
 Matrix selection/preservation/reset rules belong to common domain functions.
 CoreAudio rates and original frame basis remain fixed across reopen. The actual
 stream reports startup acknowledgement even when bootstrap used its raw handle.

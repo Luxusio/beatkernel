@@ -10,6 +10,9 @@ use beatkernel::{
     transport::{Rate, Transport},
 };
 use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
+use beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::{
+    owner, NativeCoreAudioOutputOwner, NativeCoreAudioOutputUi,
+};
 use beatkernel_bms_runtime::native_cohort_setup::{
     CohortPreparation, PreparedCohort, activate_cohort_with_sounds, admit_cohort as admit_mode,
     finish_cohort, finish_cohort_with_results_and_network, finish_cohort_network, prepare_cohort,
@@ -51,7 +54,8 @@ use beatkernel_platform::{
 use std::time::{Duration as WallDuration, Instant};
 
 struct CohortDevice<'a> {
-    stream: &'a mut CoreAudioStream,
+    output: &'a mut NativeCoreAudioOutputOwner,
+    output_ui: &'a mut NativeCoreAudioOutputUi,
     input: &'a mut HidInput,
     clock: &'a MachClock,
     selected: &'a [DeviceId],
@@ -62,13 +66,38 @@ impl NativeGameplayDevice for CohortDevice<'_> {
     fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
         self.input.poll(WallDuration::from_millis(1))?;
         check_group(self.input, self.assignments, self.selected)?;
-        if let Some(pair) = observe(self.stream, self.clock)? {
-            discipline.observe_clock_pair(pair)?;
-        }
+        self.output.observe(discipline)?;
         Ok(())
     }
+    fn output_clock_suspended(&self) -> bool {
+        self.output.output_clock_suspended()
+    }
+    fn output_replacement_pending(&self) -> bool {
+        self.output.replacement_pending() || self.output_ui.pending()
+    }
+    fn publish_paused_output(
+        &mut self,
+        context: beatkernel_bms_runtime::gameplay_presentation::GameplayOutputContext<
+            '_,
+            PresentationDiscipline,
+        >,
+    ) -> NativeGameplayResult<bool> {
+        if !self.output.has_work() && !self.output_ui.pending() {
+            return Ok(false);
+        }
+        self.output_ui
+            .service(self.output, context, self.clock.sample()?.normalized)
+    }
+    fn pause_observation(
+        &mut self,
+        pair: ClockPair,
+    ) -> NativeGameplayResult<beatkernel_bms_runtime::live_pause::LivePauseObservation> {
+        Ok(self
+            .output
+            .pause_observation(pair, self.clock.sample()?.normalized)?)
+    }
     fn render_report(&mut self) -> NativeGameplayResult<Option<beatkernel::audio::RenderReport>> {
-        Ok(self.stream.last_render_report())
+        Ok(self.output.render_report())
     }
     fn host_now(&self) -> NativeGameplayResult<ClockPoint> {
         Ok(self.clock.sample()?.normalized)
@@ -98,22 +127,16 @@ impl NativeGameplayDevice for CohortDevice<'_> {
         &mut self,
         end: &mut NativeEnd,
         discipline: &PresentationDiscipline,
-        report: Option<beatkernel::audio::RenderReport>,
+        _report: Option<beatkernel::audio::RenderReport>,
     ) -> NativeGameplayResult<Option<beatkernel_bms_runtime::native_end::EndBoundary>> {
-        Ok(end.observe(
-            report,
-            discipline
-                .latest_pair()
-                .ok_or("native end clock relation missing")?,
-        )?)
+        self.output.observe_end(end, discipline)
     }
     fn seed_resume(
         &mut self,
         discipline: &mut PresentationDiscipline,
-        reference: ClockPair,
+        _reference: ClockPair,
     ) -> NativeGameplayResult<()> {
-        discipline.observe_clock_pair(reference)?;
-        Ok(())
+        Ok(self.output.seed_resume(discipline)?)
     }
     fn fallback_schedule(&mut self, _: u32) -> NativeGameplayResult<ClockPoint> {
         Err("CoreAudio local cohorts use logical mixer scheduling".into())
@@ -365,7 +388,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         }
     };
     let mut bgm = BgmSession(bgm);
-    let mut stream = match CoreAudioStream::open(
+    let stream = match CoreAudioStream::open(
         CoreAudioRequest {
             device: options.device,
             format: options.format,
@@ -388,10 +411,12 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         "macOS local players={count}; shared requested/applied CoreAudio={:?}; independent judges/captures/scores",
         stream.configuration()
     );
+    let mut output = owner(stream, clock, HOST);
     let mut before_origin = 0u64;
     let mut other_devices = 0u64;
     let mut retained = std::collections::VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
     let outcome = (|| -> Result<Option<Vec<(beatkernel_bms_runtime::local_players::PlayerId,beatkernel_bms_runtime::play_result::CompletedPlayResult)>>> {
+        let mut output_ui = NativeCoreAudioOutputUi::new(&output, !network_start)?;
         check_group(&input, &options.local_players, &selected)?;
         let (mut discipline, host_origin, playback_origin) = if let Some(network) = network.as_mut()
         {
@@ -399,7 +424,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 let check_selection =
                     |input: &HidInput| check_group(input, &options.local_players, &selected);
                 let mut device = super::native::StartupDevice {
-                    audio: &mut stream,
+                    audio: output.current_mut().ok_or("initial CoreAudio output unavailable")?.stream_mut(),
                     input: &mut input,
                     clock: &clock,
                     selected: &selected,
@@ -445,7 +470,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             );
             (discipline, started.host_origin, playback_origin)
         } else {
-            stream.start()?;
+            output.current_mut().ok_or("initial CoreAudio output unavailable")?.stream_mut().start()?;
             let mut discipline = PresentationDiscipline::new(
                 DisciplineConfig::default(),
                 output_origin(),
@@ -453,7 +478,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 song_origin,
             )?;
             let pair = seed_group(
-                &stream,
+                output.current().ok_or("initial CoreAudio output unavailable")?.stream(),
                 &mut input,
                 &clock,
                 &options.local_players,
@@ -482,7 +507,8 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         )?;
         let pump = {
             let mut device = CohortDevice {
-                stream: &mut stream,
+                output: &mut output,
+                output_ui: &mut output_ui,
                 input: &mut input,
                 clock: &clock,
                 selected: &selected,
@@ -531,11 +557,11 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         pump
     })();
     // Stop native audio callbacks before unregistering HID and writing files.
-    let stop = stream.stop();
+    let stop = output.stop();
     let close = input.close();
     println!(
         "shared final CoreAudio={:?}; HID counters={:?}; pre-origin ignored={before_origin}; other-device startup inputs={other_devices}; physical delivery unverified",
-        stream.snapshot(),
+        output.current().map(|out| out.stream().snapshot()),
         input.counters()
     );
     if let Err(error) = &stop {
