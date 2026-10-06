@@ -155,6 +155,7 @@ fn interval_cohort_sparse_members_reconcile_before_backlogged_originals_at_exact
     fixture.device.pause_flow = true;
     fixture.device.viewer = Some(viewer);
     player::with_publisher(publisher, || {
+        fixture.register_presentation()?;
         run_cohort_interval(&mut fixture, false, false).map_err(|e| e.to_string())
     })
     .unwrap();
@@ -239,6 +240,7 @@ fn interval_cohort_conflicting_original_does_not_invent_a_rewound_member_prefix(
     fixture.device.pause_flow = true;
     fixture.device.viewer = Some(viewer);
     let error = player::with_publisher(publisher, || {
+        fixture.register_presentation()?;
         run_cohort_interval(&mut fixture, false, true).map_err(|e| e.to_string())
     })
     .unwrap_err();

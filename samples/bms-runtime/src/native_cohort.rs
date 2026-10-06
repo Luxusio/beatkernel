@@ -1200,6 +1200,12 @@ mod fixtures {
         pre: u64,
     }
     impl Fixture {
+        fn register_presentation(&self) -> Result<(), String> {
+            let compiled = self.source.compile().map_err(|error| error.to_string())?;
+            let players: Vec<_> = self.states.iter().map(|state| state.player).collect();
+            player::publish_local_chart(&self.source, &compiled.chart, &players)
+                .map_err(|error| error.to_string())
+        }
         fn new(finite: bool, capacity: usize) -> Self {
             let source = beatkernel_bms::parse(
                 "#BPM 3000\n#WAV01 original.wav\n#00011:00010000\n",
@@ -1267,7 +1273,7 @@ mod fixtures {
                 format,
                 ClockDomainId(2),
                 Timestamp::ZERO,
-                AudioLimits::new(8, 2, 8, 16, 8).unwrap(),
+                AudioLimits::new(capacity, 2, 8, 16, 8).unwrap(),
             );
             let mixer = Mixer::new(
                 if finite {
@@ -1422,6 +1428,7 @@ mod fixtures {
         fixture.device.pause_flow = true;
         fixture.device.viewer = Some(viewer);
         player::with_publisher(publisher, || {
+            fixture.register_presentation()?;
             fixture.run(false).map_err(|error| error.to_string())
         })
         .unwrap();
