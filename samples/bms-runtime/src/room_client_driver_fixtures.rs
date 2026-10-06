@@ -371,6 +371,7 @@ fn committed_pair_with_setup(
         assert_eq!((estimate.lower_ns(), estimate.upper_ns()), (-6, 11));
         coordinator.prepare(ids[index], estimate, 10_800).unwrap();
     }
+    let mut ready_messages = Vec::with_capacity(2);
     for index in 0..2 {
         let ready = coordinator.next(ids[index], 10_800).unwrap().unwrap();
         assert_eq!(ready, StartMessage::ClockReady(0));
@@ -381,8 +382,12 @@ fn committed_pair_with_setup(
         let RoomMessage::Start(ready) = decode_message(&ready.bytes).unwrap() else {
             panic!("actual ClockReady required")
         };
-        coordinator.receive(ids[index], ready, 10_803).unwrap();
+        ready_messages.push(ready);
     }
+    for (&id, ready) in ids.iter().zip(ready_messages) {
+        coordinator.receive(id, ready, 10_803).unwrap();
+    }
+    let mut accept_messages = Vec::with_capacity(2);
     for index in 0..2 {
         let proposal = coordinator
             .next(ids[index], 11_000 + index as i64)
@@ -398,7 +403,10 @@ fn committed_pair_with_setup(
         let RoomMessage::Start(accept) = decode_message(&accept.bytes).unwrap() else {
             panic!("actual Accept required")
         };
-        coordinator.receive(ids[index], accept, 11_090).unwrap();
+        accept_messages.push(accept);
+    }
+    for (&id, accept) in ids.iter().zip(accept_messages) {
+        coordinator.receive(id, accept, 11_090).unwrap();
     }
     for index in 0..2 {
         let commit = coordinator
@@ -425,7 +433,7 @@ fn genuine_start_and_relay_hold_peer_token_until_consumed_and_refuse_collision_a
                 .unwrap()
                 .expect("genuine Commit schedule");
             assert_eq!(schedule.target_ns, schedule.song_target_ns);
-            assert_eq!(schedule.uncertainty_ns, 17);
+            assert_eq!(schedule.uncertainty_ns, 23); // Client RTT: 29 - (13 - 7).
             assert!(schedule.target_ns > 11_200);
             assert!(client.take_start().unwrap().is_none());
         }
@@ -641,7 +649,7 @@ fn genuine_final_upload_ack_and_drain_complete_are_the_only_success_evidence() {
     for turn in 0..12 {
         let at = 13_000 + turn * 100;
         for index in 0..2 {
-            if let Some(frame) = relay.poll_write(ids[index]).unwrap() {
+            if let Some(frame) = relay.poll_write_at(ids[index], at).unwrap() {
                 let message = decode_message(&frame.bytes).unwrap();
                 receive(&mut clients[index], &message, at + 10).unwrap();
                 clients[index].consume_peer_progress();
@@ -676,7 +684,7 @@ fn genuine_final_upload_ack_and_drain_complete_are_the_only_success_evidence() {
             matches!(message, RoomMessage::DrainReady { .. }),
             "already-admitted final must not be published twice"
         );
-        relay.receive(ids[index], &message).unwrap();
+        relay.receive_at(ids[index], &message, 19_003).unwrap();
         clients[index].written(frame.id, 19_002, 19_002).unwrap();
     }
     for index in 0..2 {
@@ -731,7 +739,7 @@ fn startup_steps_return_exact_original_common_commit_schedule_only_once() {
             .unwrap()
             .expect("genuine driver schedule");
         assert_eq!(actual, expected);
-        assert_eq!(actual.uncertainty_ns, 17);
+        assert_eq!(actual.uncertainty_ns, 23); // Client RTT, not the server-side estimate.
         assert_eq!(actual.target_ns, actual.song_target_ns);
         assert_eq!(client.revision(), revision);
         for _ in 0..4 {
