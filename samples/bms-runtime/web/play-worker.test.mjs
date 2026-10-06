@@ -2407,9 +2407,9 @@ test("local saved setup refuses wrong targets and binding failures without fallb
   for (const request of [localRequest({ opponents: [entry(replayFile().file, undefined)] }),
     localRequest({ opponents: [entry(replayFile().file, 123)] }),
     startRequest({ opponents: [entry(replayFile().file, 99)] })]) {
-    const h = await catalogWorker(); await h.send(request);
+    const h = await catalogWorker(); const previews = h.preparedOwners.slice(); await h.send(request);
     assert.ok(h.of("play-reply").at(-1).error); assert.equal(h.locals.length, 0); assert.equal(h.games.length, 0);
-    assert.equal(h.preparedOwners.length, 0);
+    assert.deepEqual(h.preparedOwners, previews, "invalid replay target never prepares gameplay beyond the existing preview");
   }
   const missing = await catalogWorker({ missingLocalSavedHud: true });
   await missing.send(localRequest({ opponents: [entry(replayFile().file, 99)] }));
@@ -3263,12 +3263,18 @@ test("pointer setup rejects replay, source collisions and combined overflow befo
     startRequest({ inputMode: "physical", keyPairs: new Uint32Array(), pointerSetup: pointerSetup([[0x11, POINTER_MOUSE, 1], [0x12, POINTER_PEN, 0]]) }),
   ];
   for (const request of requests) {
-    const h = await catalogWorker(); await h.send(request);
+    const h = await catalogWorker();
+    const previews = h.preparedOwners.map(owner => ({ owner, moved: owner.moved, frees: owner.frees }));
+    await h.send(request);
     assert.equal(h.games.length + h.locals.length + h.replays.length, 0);
     assert.equal(h.physicalConstructions.length + h.contactConstructions.length + h.localConstructions.length, 0);
     assert.equal(h.of("play-error").length, 1);
     assert.equal(h.of("play-reply").some(reply => reply.result?.kind === "prepared"), false);
-    assert.ok(h.preparedOwners.every(owner => !owner.moved));
+    for (const { owner, moved, frees } of previews) {
+      assert.equal(owner.moved, moved); assert.equal(owner.frees, frees);
+    }
+    assert.ok(h.preparedOwners.slice(previews.length).every(owner => !owner.moved && owner.frees === 1),
+      "refused gameplay preparation is never consumed and is released exactly once");
   }
   const exact = await started({ startRequest: startRequest({ inputMode: "physical", keyPairs: new Uint32Array(),
     pointerSetup: pointerSetup(wideRows, wideDevices) }) });
