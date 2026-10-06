@@ -13,6 +13,10 @@ background assets. Closing retains the owner until cancellation and join finish.
 Request identity and screen-instance identity are independent. A late reply can
 update authoritative shared applied settings but cannot overwrite a different
 reopened child draft; dispose its field/IME/gesture state using the navigator.
+A reopened child whose draft still matches its loaded applied settings may
+refresh from a later successful applied capability without adopting the old
+child's request identity or notice. Independently edited values/editor and
+messages stay intact. Old-child failures do not become the new child's error.
 
 Render the panel with existing retained atoms/molecules, dirty signals and
 screen-scoped text/IME/gesture handling. Do not reconstruct Play, mutate unrelated
