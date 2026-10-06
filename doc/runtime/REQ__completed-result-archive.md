@@ -58,8 +58,9 @@ missing details remain unavailable. Version 3 optionally retains bounded
 original-ID comparison snapshots through
 [the comparison archive contract](REQ__archived-comparisons.md). Comparison-aware
 Step and browser completion exports retain Rust-owned HUD prefixes; legacy
-exports have no comparison table. Native comparison attachment and historical
-comparison UI remain pending. Stored comparisons are display metadata, not
+exports have no comparison table. Selected native comparisons now attach under
+[native comparison association](REQ__native-archived-comparisons.md); historical
+comparison UI remains pending. Stored comparisons are display metadata, not
 trusted final rankings or additional completion proof.
 Actual native completion now also uses score-bearing version 2 under
 [the native score association contract](REQ__native-archived-score.md).

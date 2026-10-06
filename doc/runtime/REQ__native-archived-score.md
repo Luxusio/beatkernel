@@ -35,6 +35,10 @@ Prepare archives before capture consumption, after cleanup and before save effec
 Always attempt replay saves before archive publication, preserving existing
 outcome/cleanup/replay/archive error precedence and exclusive-create policy.
 Original scoreless APIs continue emitting version 1.
+Selected native comparisons now add optional version-3 metadata under
+[native comparison association](REQ__native-archived-comparisons.md), retaining
+the same exact score/timing fields. Unselected comparison exports retain their
+legacy v1/v2 encodings.
 
 ## Evidence and known ceiling
 
@@ -49,4 +53,6 @@ insertion. No benchmark or globally allocation-free claim is established.
 Native Records now retains associated stored final score details in a cached
 subview under [the detail contract](REQ__native-record-details.md), including
 [bounded native grade pages](REQ__stored-grade-pages.md). Browser interactive
-grade paging and saved comparison archival remain unfinished.
+grade paging is source-integrated; runtime acceptance remains unproven. Common,
+browser and selected native comparison archival are now source-integrated, while
+historical comparison UI and room-wide metadata remain unfinished.
