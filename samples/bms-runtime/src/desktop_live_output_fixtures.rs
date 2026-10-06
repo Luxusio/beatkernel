@@ -154,7 +154,8 @@ fn field_ime_edits_use_child_scope_pending_disables_hits_and_back_cancels_compos
     assert!(!app.game.as_ref().unwrap().viewer.output_pending());
 }
 #[test]
-fn delayed_correlated_reply_after_back_and_reopen_settles_without_overwriting_new_child_draft() {
+fn delayed_correlated_reply_after_back_refreshes_clean_draft_without_overwriting_new_child_message()
+{
     let (mut app, publisher) = prepared();
     let play = app.navigator.active_id().unwrap();
     app.open_live_audio();
@@ -167,7 +168,6 @@ fn delayed_correlated_reply_after_back_and_reopen_settles_without_overwriting_ne
     let new = app.navigator.active_id().unwrap();
     assert_ne!(old, new);
     app.live_audio.as_mut().unwrap().message = Some("new child message".into());
-    let values = app.live_audio.as_ref().unwrap().values.native_args();
     publisher
         .reply_output(&OutputReply {
             id,
@@ -177,7 +177,7 @@ fn delayed_correlated_reply_after_back_and_reopen_settles_without_overwriting_ne
     app.collect_game();
     assert_eq!(
         app.live_audio.as_ref().unwrap().values.native_args(),
-        values
+        cap("actual-applied-device").current_args
     );
     assert_eq!(
         app.live_audio.as_ref().unwrap().message.as_deref(),
@@ -236,6 +236,72 @@ fn focus_loss_close_and_joined_terminal_route_dispose_or_suspend_child_without_r
     assert!(app.live_audio.is_none());
     assert!(app.game.as_ref().unwrap().cancelling);
     assert!(app.game.as_ref().unwrap().worker.is_none());
+}
+
+#[test]
+fn old_child_success_does_not_replace_an_independently_edited_reopened_draft() {
+    let (mut app, publisher) = prepared();
+    app.open_live_audio();
+    app.apply_live_audio();
+    let id = publisher.take_output_request().unwrap().unwrap().id;
+    app.back();
+    app.open_live_audio();
+    let child = app.navigator.active_id();
+    let draft = app.live_audio.as_mut().unwrap();
+    draft.editor.select_all();
+    draft.edit(None, Some("independent-new-draft"));
+    draft.message = Some("new child notice".into());
+    let edited = draft.values.native_args();
+    let editor = draft.editor.clone();
+    publisher
+        .reply_output(&OutputReply {
+            id,
+            result: Ok(cap("actual-applied-device")),
+        })
+        .unwrap();
+    app.collect_game();
+    let draft = app.live_audio.as_ref().unwrap();
+    assert_eq!(draft.values.native_args(), edited);
+    assert_eq!(draft.editor, editor);
+    assert_eq!(draft.message.as_deref(), Some("new child notice"));
+    assert_eq!(draft.request, None);
+    assert_eq!(app.navigator.active_id(), child);
+    assert_eq!(
+        app.game
+            .as_ref()
+            .unwrap()
+            .viewer
+            .output_capability()
+            .unwrap(),
+        Some(cap("actual-applied-device"))
+    );
+}
+
+#[test]
+fn old_child_refusal_does_not_change_clean_reopened_values_or_notice() {
+    let (mut app, publisher) = prepared();
+    app.open_live_audio();
+    app.apply_live_audio();
+    let id = publisher.take_output_request().unwrap().unwrap().id;
+    app.back();
+    app.open_live_audio();
+    let draft = app.live_audio.as_mut().unwrap();
+    draft.message = Some("new child notice".into());
+    let values = draft.values.native_args();
+    let editor = draft.editor.clone();
+    publisher
+        .reply_output(&OutputReply {
+            id,
+            result: Err("old request refused".into()),
+        })
+        .unwrap();
+    app.collect_game();
+    let draft = app.live_audio.as_ref().unwrap();
+    assert_eq!(draft.values.native_args(), values);
+    assert_eq!(draft.editor, editor);
+    assert_eq!(draft.message.as_deref(), Some("new child notice"));
+    assert!(app.game.as_ref().unwrap().viewer.pause_requested());
+    assert!(!app.game.as_ref().unwrap().viewer.output_pending());
 }
 
 #[test]

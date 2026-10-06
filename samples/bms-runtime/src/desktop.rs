@@ -841,12 +841,39 @@ pub(super) fn run(
 const SETTINGS_ROWS: usize = 10;
 struct LiveAudioDraft {
     values: NativeSettings,
+    loaded_args: Vec<String>,
     selected: usize,
     editor: LineEditor,
     request: Option<u64>,
     message: Option<String>,
 }
 impl LiveAudioDraft {
+    fn is_unchanged(&self) -> bool {
+        self.values.native_args() == self.loaded_args
+            && self
+                .values
+                .fields()
+                .get(self.selected)
+                .is_some_and(|field| self.editor.value() == field.value)
+    }
+    fn refresh_applied(
+        &mut self,
+        capability: &beatkernel_bms_runtime::live_output_control::OutputCapability,
+    ) -> Result<(), String> {
+        let values = NativeSettings::output_only(&capability.current_args, capability.host)?;
+        let selected = self.selected.min(values.fields().len().saturating_sub(1));
+        let field = values
+            .fields()
+            .get(selected)
+            .ok_or("output fields unavailable")?;
+        let editor = LineEditor::new(&field.value, 4096)?;
+        let loaded_args = values.native_args();
+        self.values = values;
+        self.loaded_args = loaded_args;
+        self.selected = selected;
+        self.editor = editor;
+        Ok(())
+    }
     fn select(&mut self, index: usize) -> Result<(), String> {
         let field = self
             .values
@@ -1749,6 +1776,7 @@ impl Desktop {
             Ok((
                 next,
                 LiveAudioDraft {
+                    loaded_args: values.native_args(),
                     values,
                     selected: 0,
                     editor,
@@ -3771,21 +3799,27 @@ impl Desktop {
                         if self.navigator.accepts(draft.id()) && draft.request == Some(reply.id) {
                             draft.request = None;
                             match reply.result {
-                                Ok(cap) => {
-                                    match NativeSettings::output_only(&cap.current_args, cap.host) {
-                                        Ok(values) => {
-                                            draft.values = values;
-                                            let selected = draft.selected;
-                                            let _ = draft.select(selected);
-                                            draft.message = Some(
-                                                "Output settings applied. Playback remains paused."
-                                                    .into(),
-                                            );
-                                        }
-                                        Err(error) => draft.message = Some(error),
+                                Ok(cap) => match draft.refresh_applied(&cap) {
+                                    Ok(()) => {
+                                        draft.message = Some(
+                                            "Output settings applied. Playback remains paused."
+                                                .into(),
+                                        );
                                     }
-                                }
+                                    Err(error) => draft.message = Some(error),
+                                },
                                 Err(error) => draft.message = Some(error),
+                            }
+                        } else if self.navigator.accepts(draft.id())
+                            && draft.request.is_none()
+                            && draft.is_unchanged()
+                        {
+                            // Applied state belongs to the session; the old
+                            // child's notice/identity does not belong here.
+                            if let Ok(capability) = &reply.result {
+                                if let Err(error) = draft.refresh_applied(capability) {
+                                    self.failure = Some(error);
+                                }
                             }
                         }
                     }
