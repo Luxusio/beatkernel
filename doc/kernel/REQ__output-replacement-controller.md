@@ -50,5 +50,7 @@ observe, stale epoch/wrong basis, timeout/cancel, ownership/drop probes, subsequ
 explicit attempts and held resume requests. Compile the real ALSA adapter without
 opening devices. Assertions/runtime/formal review/QA remain deferred; scoped
 Rustfmt and four sequential compile-only checks follow both paired writer stops.
-Windows/macOS adapters, native/UI pump wiring, blocking-call isolation and
+WASAPI/CoreAudio adapters now follow
+[native replacement adapters](REQ__native-replacement-adapters.md).
+ASIO controller adapter, native/UI pump wiring, blocking-call isolation and
 physical/acoustic acceptance remain pending. Full BMS player Goal stays active.
