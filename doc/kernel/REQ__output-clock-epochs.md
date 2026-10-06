@@ -46,6 +46,10 @@ actual stream fencing and automatic runtime transitions remain pending.
 Ordinary pause/resume preserves the current epoch through
 [resume clock identity](REQ__resume-clock-identity.md), rather than silently
 reconstructing epoch zero. It does not increment the output stream token.
+Paused frame evidence now has its own explicit output-epoch rebind under
+[pause output rebind](REQ__pause-output-rebind.md), preserving acknowledged
+playback/gap state while resetting the old source interpolation and kind.
+Runtime owners must coordinate these epochs and real callback retirement.
 
 Author independent core storage/atomicity/epoch/warmup/continuous-history cases,
 platform source-reset/tagged-refusal cases and actual generic port delegation/
