@@ -28,6 +28,10 @@ report and original pause evidence without admitting new-output samples into the
 old observer. Keyboard acquisition continues through the existing pump; no
 fabricated progress, clock sample or terminal boundary. Once published, all
 observation, resume seeding and end evidence must use the current epoch/output.
+Successful resume seeding requires an actually accepted latest presentation
+pair. A backend returning success without admitting a sample is a refusal,
+not permission to commit resumed transport. Preserve the existing live pause,
+transport and observer while callers stage the fresh presentation candidate.
 Both pumps defer resume requests while replacement is actively holding output;
 otherwise the old pause could enter Resuming and stop the eligible publication
 polls. Expose this through the default-false business device pending query, with
