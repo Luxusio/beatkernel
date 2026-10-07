@@ -109,6 +109,36 @@ pub struct ArchiveEntry {
     pub result: ArchivedResult,
     pub score: Option<ArchivedScore>,
 }
+impl ArchiveEntry {
+    /// Historical class score only when recorded metadata and stored counts supply it.
+    /// Does not authenticate a record or establish live completion.
+    pub fn bms_score(
+        &self,
+    ) -> Result<Option<crate::judgment_policy::BmsScoreSummary>, ArchiveError> {
+        let setup = crate::replay_playback::decode_section_setup(&self.header.options)
+            .map_err(|_| ArchiveError::Invalid("replay setup"))?;
+        self.class_score_for_setup(&setup)
+    }
+    fn class_score_for_setup(
+        &self,
+        setup: &crate::replay_playback::RecordedSetup,
+    ) -> Result<Option<crate::judgment_policy::BmsScoreSummary>, ArchiveError> {
+        let Some(classes) = &setup.judgments else {
+            return Ok(None);
+        };
+        if setup.gauge != self.profile {
+            return Err(ArchiveError::Invalid("classified gauge policy"));
+        }
+        let Some(score) = &self.score else {
+            return Ok(None);
+        };
+        score.validate()?;
+        classes
+            .project_counts(score.hits, score.misses, score.grades.iter().copied())
+            .map(Some)
+            .map_err(|_| ArchiveError::Invalid("classified score"))
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResultArchive {
     entries: Vec<ArchiveEntry>,
@@ -481,6 +511,7 @@ fn validate(archive: &ResultArchive) -> Result<(), ArchiveError> {
         };
         let setup = crate::replay_playback::decode_section_setup(&entry.header.options)
             .map_err(|_| ArchiveError::Invalid("replay setup"))?;
+        entry.class_score_for_setup(&setup)?;
         if setup.start != start || setup.end != end {
             return Err(ArchiveError::Invalid("replay extent"));
         }

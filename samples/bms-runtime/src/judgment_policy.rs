@@ -91,12 +91,25 @@ impl BmsJudgmentPolicy {
     }
     /// Projects an already committed prefix without changing it or guessing grades.
     pub fn project(&self, score: &ScoreSummary) -> Result<BmsScoreSummary, JudgmentPolicyError> {
+        self.project_counts(
+            score.hits,
+            score.misses,
+            score.grades.iter().map(|(&grade, &count)| (grade, count)),
+        )
+    }
+    /// Shared checked projection over already validated grade storage.
+    pub(crate) fn project_counts(
+        &self,
+        expected_hits: u64,
+        misses: u64,
+        grades: impl Iterator<Item = (u32, u64)>,
+    ) -> Result<BmsScoreSummary, JudgmentPolicyError> {
         let mut result = BmsScoreSummary {
-            poor: score.misses,
+            poor: misses,
             ..Default::default()
         };
         let mut hits = 0u64;
-        for (&grade, &count) in &score.grades {
+        for (grade, count) in grades {
             let target = match self
                 .class(JudgeGrade(grade))
                 .ok_or(JudgmentPolicyError::UnknownGrade)?
@@ -114,10 +127,10 @@ impl BmsJudgmentPolicy {
                 .checked_add(count)
                 .ok_or(JudgmentPolicyError::Overflow)?;
         }
-        if hits != score.hits {
+        if hits != expected_hits {
             return Err(JudgmentPolicyError::InconsistentScore);
         }
-        hits.checked_add(score.misses)
+        hits.checked_add(misses)
             .ok_or(JudgmentPolicyError::Overflow)?;
         result.ex_score = result
             .pgreat

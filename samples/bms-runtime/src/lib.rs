@@ -373,6 +373,8 @@ mod pressed_contact_fixtures;
 pub mod pressed_keys;
 /// Bounded saved-record discovery and chart/profile-compatible prefix previews.
 pub mod record_catalog;
+#[cfg(test)]
+mod recorded_class_score_fixtures;
 /// Song-time command planning from actual recorded BMS judgment.
 pub mod replay_audio;
 /// Bounded capture of the actual native runtime's accepted judgment operations.

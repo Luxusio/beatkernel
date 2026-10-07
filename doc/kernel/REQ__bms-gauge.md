@@ -479,5 +479,21 @@ Section-aware decoding/reconstruction preserves the
 mapping and regenerates the entire header; legacy tuple decoders refuse to drop
 it. Legacy unclassified recordings remain byte-compatible and acquire no guessed
 class/EX meaning. Record comparison includes class identity. Native launchers,
-UI, result archives and shared networking still require class-policy integration;
+UI, result publication and shared networking still require class-policy integration;
 adding these primitives does not claim their completion or historical LR2 timing.
+
+## Recorded class-score consumers
+
+An archived entry with explicit recorded classes may project its validated
+stored grade counts into a BMS score. Reject unknown grades, inconsistent counts,
+EX overflow and a gauge profile differing from its classified header. Unclassified
+entries and entries without stored score return unavailable class score; never
+infer it from a gauge delta. Existing archive bytes/version selection stay
+unchanged. Use stored sorted grade counts directly without rebuilding a map.
+
+The logical `replay_bms` inspector reconstructs section-aware records and reports
+actual prefix stage counts plus explicit recorded class/EX counts, or an
+unclassified marker. A diagnostic song-time seek beyond a finite recorded end
+refuses before replay execution. Core seek may still generate its documented
+diagnostic boundary advance; output is inspection, not persisted completion.
+Native launchers and retained record UI still require class-policy propagation.

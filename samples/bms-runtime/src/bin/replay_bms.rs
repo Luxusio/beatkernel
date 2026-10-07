@@ -2,7 +2,7 @@
 use beatkernel::{input::CodecLimits, replay::codec::ReplayCodecLimits, time::Timestamp};
 use beatkernel_bms_runtime::{
     competition_live::load_chart_with_seed,
-    replay_playback::{decode_chart_setup, read_replay, reconstruct},
+    replay_playback::{decode_section_setup, read_replay, reconstruct_section},
 };
 use std::{collections::HashSet, error::Error, fs::File, path::PathBuf};
 
@@ -73,7 +73,12 @@ fn parse(args: &[String]) -> Result<Options> {
     })
 }
 
-fn run(options: Options) -> Result<()> {
+struct Inspection {
+    session: beatkernel::replay::ReplaySession,
+    score: beatkernel_bms_runtime::competition::ScoreSummary,
+    bms_score: Option<beatkernel_bms_runtime::judgment_policy::BmsScoreSummary>,
+}
+fn inspect(options: Options) -> Result<Inspection> {
     let limits = ReplayCodecLimits::new(
         options.max_bytes,
         options.max_records,
@@ -81,17 +86,42 @@ fn run(options: Options) -> Result<()> {
         CodecLimits::new(65536, 32768)?,
     )?;
     let file = read_replay(&mut File::open(&options.replay)?, limits)?;
-    let (_, _, seed) = decode_chart_setup(&file.header.options)?;
-    let chart = load_chart_with_seed(&options.chart, seed)?;
+    let setup = decode_section_setup(&file.header.options)?;
+    if options
+        .song_ns
+        .is_some_and(|ns| setup.end.is_some_and(|end| ns > end.as_nanos()))
+    {
+        return Err("song-ns exceeds the recorded finite endpoint".into());
+    }
+    let chart = load_chart_with_seed(&options.chart, setup.chart_seed)?;
     for warning in &chart.warnings {
         eprintln!("BMS warning line {}: {}", warning.line, warning.message);
     }
-    let mut session = reconstruct(&chart, file, limits)?;
+    let mut session = reconstruct_section(&chart, file, limits)?;
     if let Some(cursor) = options.cursor {
         session.seek_cursor(cursor)?;
     } else if let Some(nanos) = options.song_ns {
         session.seek(Timestamp::from_nanos(nanos))?;
     }
+    let mut score = beatkernel_bms_runtime::competition::ScoreSummary::default();
+    score.observe(session.results())?;
+    let bms_score = setup
+        .judgments
+        .as_ref()
+        .map(|classes| classes.project(&score))
+        .transpose()?;
+    Ok(Inspection {
+        session,
+        score,
+        bms_score,
+    })
+}
+fn run(options: Options) -> Result<()> {
+    let Inspection {
+        session,
+        score,
+        bms_score,
+    } = inspect(options)?;
     println!(
         "logical BMS replay reconstruction only; no asset loading, native audio or physical timing claim"
     );
@@ -103,6 +133,18 @@ fn run(options: Options) -> Result<()> {
         session.engine().stable_hash()?,
         session.engine().effective_song_time(),
     );
+    println!(
+        "score_hits={} score_misses={} combo={} max_combo={}",
+        score.hits, score.misses, score.combo, score.max_combo
+    );
+    if let Some(score) = bms_score {
+        println!(
+            "bms_pgreat={} bms_great={} bms_good={} bms_bad={} bms_poor={} ex_score={}",
+            score.pgreat, score.great, score.good, score.bad, score.poor, score.ex_score
+        );
+    } else {
+        println!("bms_score=unclassified");
+    }
     for event in session.results() {
         println!("judge={event:?}");
     }
@@ -117,12 +159,16 @@ fn main() -> Result<()> {
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!(
-            "replay_bms --chart PATH --replay PATH [--max-records N] [--max-bytes N] [--cursor N | --song-ns N]\nLogical replay inspection through the same BMS JudgeEngine; no PCM assets, native devices or output writes.\nDefaults: max records 1000000, max bytes 67108864 (64 MiB); limits require positive usize values. Chart uses shared UTF-8/strict Shift-JIS decoding and default BMS parser limits (8 MiB raw and decoded text).\nCursor is an exact operation boundary including zero; song-ns is signed nanoseconds and may produce the core's explicit boundary timeout advance.\nRequires matching chart, stored profile, rules and runtime version; setup hash is noncryptographic. Physical input-to-sound timing remains unknown."
+            "replay_bms --chart PATH --replay PATH [--max-records N] [--max-bytes N] [--cursor N | --song-ns N]\nLogical section-aware replay inspection through the same BMS JudgeEngine; no PCM assets, native devices or output writes.\nReports prefix stage counts and recorded BMS class/EX scores when explicitly classified; legacy records are unclassified.\nDefaults: max records 1000000, max bytes 67108864 (64 MiB); limits require positive usize values. Chart uses shared UTF-8/strict Shift-JIS decoding and default BMS parser limits (8 MiB raw and decoded text).\nCursor is an exact operation boundary including zero; song-ns is signed nanoseconds and may produce the core's explicit boundary timeout advance, but cannot exceed a recorded finite endpoint.\nRequires matching chart, stored profile, rules and runtime version; setup hash is noncryptographic. Physical input-to-sound timing remains unknown."
         );
         return Ok(());
     }
     run(parse(args)?)
 }
+
+#[cfg(test)]
+#[path = "fixtures/replay_bms_class.rs"]
+mod class_fixtures;
 
 #[cfg(test)]
 mod fixtures {

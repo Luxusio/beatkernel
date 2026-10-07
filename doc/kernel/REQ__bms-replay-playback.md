@@ -61,13 +61,13 @@ beyond the end and input records at the end reject; advances at the end and
 valid prefixes remain supported. Original times and input offset apply once.
 
 Legacy tuple decoders and reconstruction entrypoints refuse finite metadata,
-so an end cannot be silently dropped by an unlimited consumer. Native/offline paths,
-record catalogs and multiplayer callers still use those legacy entrypoints
-until their explicit finite owner integration is connected. Portable stepped
-replay and its Rust browser binding use the explicit section-aware APIs;
+so an end cannot be silently dropped by an unlimited consumer. Consumers accepting
+finite records must use section-aware APIs. The logical inspector, saved-record
+comparison/catalogs, stepped replay and its Rust browser binding use these APIs.
 Window/Worker forward the recorded endpoint into finite audio setup after
-independent validation against the actual output rate. Finite live gameplay
-and end controls remain pending; actual browser acceptance remains unverified.
+independent validation against the actual output rate. Native finite playback
+ownership is specified in [REQ__bms-native-replay.md](REQ__bms-native-replay.md);
+actual device/browser acceptance remains separate from logical reconstruction.
 
 ## Lossless contact replay reconstruction
 
@@ -93,3 +93,16 @@ judge freshness/results described in REQ__bms-input-sounds.md. Source preparatio
 loads original referenced PCM before practice/replay composition. Runtime/device
 execution remains deferred; logical identity cannot prove original queue
 admission failures or physical output timing.
+
+## Logical inspector class scores
+
+`replay_bms` uses full section metadata and reconstruction, including optional
+recorded judgment classes. Its output includes prefix hit/miss/combo counters.
+For explicitly classified records it also reports PGREAT/GREAT/GOOD/BAD/POOR and
+checked EX points (two per PGREAT, one per GREAT). Legacy records print
+`bms_score=unclassified`; they do not receive guessed class meaning. Invalid
+class metadata or incompatible source refuses before replay operations. A
+`--song-ns` greater than the recorded finite endpoint is invalid. Exact cursors,
+signed song-time seeks within the boundary and their core diagnostic advance
+behavior are retained. This command reads chart and replay files but loads no
+PCM or native devices, and never writes a result or claims physical completion.
