@@ -1,7 +1,7 @@
 # Worklet setup silence and exact armed chronology
 
-Status: native and actual-browser development checks passed; independent final
-review/QA are pending.
+Status: independent code/document review and final CLI/browser QA passed on
+`145e221`.
 
 Before arm, WorkletAudio accepts monotonic nonoverlapping callback intervals,
 including forward gaps, while generating setup silence. This corrects the
@@ -30,6 +30,16 @@ Mixer reports across that gap. The actual arm adopted its current frame, and
 the first active report began at Mixer zero without crediting setup silence.
 All owned browser/server resources closed. Development evidence is under
 `target/wf/worklet-unarmed-startup/browser-development/`.
+
+Final independent QA passed 646 Node tests, 20 focused native tests, and the
+full app library suite (1855 passed, zero failed, two existing ignored). A fresh
+standalone WASM build and seven actual generated BrowserAudio probes passed.
+The rebuilt artifact matches the browser-used SHA256
+`4f9c3939d677901a5417a2304c2b8b825285566efacc74a6f3de9cbab5b329cb`.
+Fresh browser QA passed all six required cases; two of three cold contexts
+naturally accepted the setup gap, while the third had no observed gap. All
+owned contexts/server/browser closed. One resource404 console entry occurred,
+with no page errors. Evidence is under `target/wf/worklet-unarmed-startup/qa-*`.
 
 Source timestamps, input-domain policy, presentation authority and delayed-input
 frontiers are unchanged. This measured startup integration does not establish
