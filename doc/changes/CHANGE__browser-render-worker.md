@@ -115,3 +115,18 @@ room finalization while delaying global shutdown until capture delivery.
 Seven focused Worker/protocol suites pass 192 tests, with no failures or skips;
 WASM check and build pass with existing warnings. These are development checks,
 not final independent review or whole-application browser QA.
+
+The visible-player bridge now reuses four prepared feedback buffers and fixed
+borrowed roster/reservation arrays. Hidden player histories remain retained
+without per-draw conversion. All ten portable render-state fixtures pass,
+including populated 64-player pages, partial last pages, direct-painter parity
+and scratch/note/progress identity reuse. WASM check/build pass. Two queued
+page/resize ordering regressions also pass: older surface controls precede the
+committed page frame, and newer controls follow its exact acknowledgement.
+
+An actual main-entry development run demonstrated genuine natural completion
+and GPU Results, original replay/archive export, continuing input/audio ACKs
+with a delayed renderer, and a terminal renderer error preserving a real
+incomplete prefix. The durable browser runner is still incomplete for several
+modes and room integration; this evidence does not replace final independent
+review or required browser QA.

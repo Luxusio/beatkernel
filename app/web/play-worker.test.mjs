@@ -95,9 +95,16 @@ async function workerHarness(options = {}) {
     };
   }
   const renderPort = {
-    width:0, height:0, page:0, presentations:new Map(), posts:[], starts:0, closes:0, blocked:options.renderBlocked??false, onmessage:null,onmessageerror:null,
+    deliveries:new Map(), width:0, height:0, page:0, presentations:new Map(), posts:[], starts:0, closes:0, blocked:options.renderBlocked??false, onmessage:null,onmessageerror:null,
     start(){this.starts++;}, close(){this.closes++;},
     emit(reply){Promise.resolve().then(()=>this.onmessage?.({data:structuredClone(reply)}));},
+    async deliver(request) {
+      const dispatch=this.deliveries.get(request);
+      assert.ok(dispatch,"queued operation must exist before actual endpoint application");
+      this.deliveries.delete(request);
+      Promise.resolve().then(dispatch);
+      await flushJobs();
+    },
     ack(request,fields={}) {
       const base={generation:request.generation,content:request.content,operationId:request.operationId};
       const h=request.kind==="packet"?new DataView(request.packet.buffer):null;
@@ -106,8 +113,7 @@ async function workerHarness(options = {}) {
     },
     postMessage(request,transfer=[]) {
       const message=structuredClone(request,{transfer}); this.posts.push(message);
-      Promise.resolve().then(()=>{
-        if(this.blocked)return;
+      const dispatch=()=>{
         const view=views[0];
         if(message.kind==="packet") {
           const h=new DataView(message.packet.buffer),kind=h.getUint16(6,true),sequence=h.getBigUint64(24,true);
@@ -136,7 +142,9 @@ async function workerHarness(options = {}) {
         }
         this.ack(message);
         if(message.geometryVersion&&this.width>0&&this.height>0)this.emit({kind:"geometry-ack",generation:message.generation,content:message.content,geometryVersion:message.geometryVersion,page:this.page,width:this.width,height:this.height});
-      });
+      };
+      this.deliveries.set(message,dispatch);
+      Promise.resolve().then(()=>{if(!this.blocked)void this.deliver(message);});
     },
   };
   function renderRequest(request) {
@@ -6546,6 +6554,83 @@ test("pre-activation failure and cancelled late network opens release identity a
   await h.send({ kind: "play-stop", playId: 8 });
 });
 
+
+test("a pending resize keeps the ordered local frame ahead of a newer resize while input and audio continue", async () => {
+  const request=localRequest({keyPairs:new Uint32Array(),recordReplay:true,
+    localPlanWords:localPlan([[91,2n],[2,3n],[88,4n],[7,5n],[0xffffffff,6n]]),hidSetup:hidSetup([3n,4n,5n,6n])});
+  const {h,port}=await directActive({startRequest:request}),game=h.locals[0];
+  const base=h.of("render-geometry").at(-1).geometryVersion;
+  h.renderPort.blocked=true;
+  await h.send({kind:"resize",width:800,height:600,geometryVersion:base+1n});
+  const firstResize=h.renderPort.posts.at(-1);
+  assert.equal(firstResize.kind,"resize");assert.equal(firstResize.geometryVersion,base+1n);
+  assert.equal((await h.rpc("play-page",{page:1,geometryVersion:base+2n})).result.page,1);
+  await h.send({kind:"resize",width:960,height:720,geometryVersion:base+3n});
+  const original=hidEvent({source:3n});
+  await h.send(step({events:[original],watermark:ORIGIN+200000000n}));
+  assert.equal(h.of("play-step-done").at(-1).pendingInputs,1);
+  assert.deepEqual(game.pendingInput[0].bytes,encodeRawHidEvent(original));
+  game.batches.push(batch(71n));
+  await h.send(directObservation({presentedNs:0n,presentedHostNs:ORIGIN}));
+  await port.acknowledge({report:renderReport()});
+  if(port.posts.at(-1).kind==="commands")await port.acknowledge();
+  assert.equal(h.of("play-render-done").at(-1).renderId,1);
+  assert.ok(game.calls.some(row=>row[0]==="ack"&&row[1]===71n));
+  assert.equal(h.renderPort.posts.at(-1),firstResize,"input and audio cannot reorder or wait for renderer controls");
+  const baseline=game.visualBaseline;
+  await h.renderPort.deliver(firstResize);
+  const frame=h.renderPort.posts.at(-1);
+  assert.equal(frame.kind,"packet");assert.equal(frame.geometryVersion,base+2n);
+  const exported=h.visualExports.at(-1);
+  assert.equal(exported.kind,2);assert.equal(exported.owner,game);assert.equal(exported.page,1);
+  assert.equal(game.visualBaseline,baseline,"export alone cannot adopt pending state");
+  await h.renderPort.deliver(frame);
+  assert.equal(game.visualBaseline,exported.sequence,"exact full state ACK adopts the original snapshot");
+  const frameGeometry=h.of("render-geometry").at(-1);
+  assert.equal(frameGeometry.geometryVersion,base+2n);
+  assert.deepEqual([frameGeometry.page,frameGeometry.width,frameGeometry.height],[1,800,600]);
+  await h.tick();
+  const finalResize=h.renderPort.posts.at(-1);
+  assert.equal(finalResize.kind,"resize");assert.equal(finalResize.geometryVersion,base+3n);
+  assert.ok(h.renderPort.posts.indexOf(frame)<h.renderPort.posts.indexOf(finalResize));
+  await h.renderPort.deliver(finalResize);
+  const resized=h.of("render-geometry").at(-1);
+  assert.equal(resized.geometryVersion,base+3n);
+  assert.deepEqual([resized.page,resized.width,resized.height],[1,960,720]);
+  assert.equal(h.of("play-error").length,0);assert.equal(game.frees,0);
+  await h.send({kind:"play-stop",playId:7});
+  assert.ok(h.of("play-stopped").at(-1).replays.every(row=>row.replay instanceof Uint8Array));
+});
+
+test("a newer unsent page coalesces after an older queued resize without exporting the superseded frame", async () => {
+  const request=localRequest({keyPairs:new Uint32Array(),
+    localPlanWords:localPlan([[91,2n],[2,3n],[88,4n],[7,5n],[0xffffffff,6n]]),hidSetup:hidSetup([3n,4n,5n,6n])});
+  const h=await active({startRequest:request}),game=h.locals[0];
+  const base=h.of("render-geometry").at(-1).geometryVersion;
+  h.renderPort.blocked=true;
+  await h.send({kind:"resize",width:800,height:600,geometryVersion:base+1n});
+  const firstResize=h.renderPort.posts.at(-1),exports=h.visualExports.length;
+  assert.equal((await h.rpc("play-page",{page:1,geometryVersion:base+2n})).result.page,1);
+  await h.send({kind:"resize",width:960,height:720,geometryVersion:base+3n});
+  assert.equal((await h.rpc("play-page",{page:0,geometryVersion:base+4n})).result.page,0);
+  assert.equal(h.visualExports.length,exports);
+  await h.renderPort.deliver(firstResize);
+  const resize=h.renderPort.posts.at(-1);
+  assert.equal(resize.kind,"resize");assert.equal(resize.geometryVersion,base+3n);
+  await h.renderPort.deliver(resize);
+  const frame=h.renderPort.posts.at(-1);
+  assert.equal(frame.kind,"packet");assert.equal(frame.geometryVersion,base+4n);
+  assert.equal(h.visualExports.at(-1).page,0);
+  assert.equal(h.visualExports.length,exports+1,"unsent page1 coalesces to the latest actual page0");
+  const acknowledgedSequence=new DataView(frame.packet.buffer).getBigUint64(24,true);
+  await h.renderPort.deliver(frame);
+  assert.equal(game.visualBaseline,acknowledgedSequence,"producer adopts exactly the delivered frame even if a newer dirty snapshot is now pending");
+  const geometry=h.of("render-geometry").at(-1);
+  assert.equal(geometry.geometryVersion,base+4n);
+  assert.deepEqual([geometry.page,geometry.width,geometry.height],[0,960,720]);
+  assert.equal(h.of("play-error").length,0);
+  await h.send({kind:"play-stop",playId:7});
+});
 
 test("every game mode registers explicitly including Local1", async () => {
   for (const [mode, request] of [["live",startRequest()],["local",roomStartRequest()],

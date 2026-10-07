@@ -693,6 +693,54 @@ fn local_player_views_with_background_impl(
     visual_local_player_views(scene, &views[..players.len()], lookahead, page, show, frames, reserved)
 }
 
+/// Borrows the full roster while converting only the current page's feedback.
+pub(crate) fn visual_local_render_state(
+    scene: &mut Scene,
+    state: &crate::browser_render_state::BrowserRenderState,
+    frames: &[crate::bga_render::BgaFrame; 4],
+    recent: &mut [Vec<JudgeEvent>; crate::browser_render_state::MAX_RENDER_VISIBLE],
+) -> Result<(), String> {
+    let roster = state.roster();
+    let members = state.members();
+    let page = state.page() as usize;
+    let visible = page_range(roster.len(), page)?;
+    for (slot, events) in recent.iter_mut().enumerate() {
+        events.clear();
+        if slot < visible.len() {
+            let scalars = members[visible.start + slot].scalars.as_ref().ok_or("visual frame unavailable")?;
+            events.extend(scalars.recent.iter().map(|event| event.event()));
+        }
+    }
+    let zero = crate::browser_render_state::RenderScore {
+        hits: 0, misses: 0, combo: 0, max_combo: 0,
+        timing: crate::timing::TimingRecord::default(),
+    };
+    let member_view = |index: usize| {
+        let member = &members[index];
+        let scalar = member.scalars.as_ref();
+        let events = if visible.contains(&index) { recent[index - visible.start].as_slice() } else { &[] };
+        VisualLocalPlayerView {
+            player: roster[index], chart: Some(state.chart()),
+            song_time: scalar.map(|scalar| Timestamp::from_nanos(scalar.song_ns)),
+            score: scalar.and_then(|scalar| scalar.score).unwrap_or(zero), bms_score: None,
+            gauge: scalar.and_then(|scalar| scalar.gauge),
+            last_judge: events.last(), recent_results: events,
+            pressed_lanes: scalar.map_or(0, |scalar| scalar.pressed),
+            note_progress: Some(&member.progress),
+            competition: scalar.and_then(|scalar| scalar.competition.as_ref()),
+        }
+    };
+    let mut views = [member_view(0); crate::local_players::MAX_LOCAL_PLAYERS];
+    let mut reserved = [0; crate::local_players::MAX_LOCAL_PLAYERS];
+    for (index, destination) in views[..roster.len()].iter_mut().enumerate() {
+        *destination = member_view(index);
+        reserved[index] = members[index].scalars.as_ref().map_or(0, |scalar| {
+            i64::from(scalar.saved_comparison_height) + if scalar.peer_admitted { 28 } else { 0 }
+        });
+    }
+    visual_local_player_views(scene, &views[..roster.len()], state.lookahead_ns(), page, true, frames, Some(&reserved[..roster.len()]))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn visual_local_player_views(
     scene: &mut Scene,

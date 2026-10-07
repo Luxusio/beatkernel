@@ -532,6 +532,210 @@ fn maximum_actual_roster_has_exact_four_member_pages_and_rejects_bad_bounds() {
     assert!(BrowserRenderState::peak_progress_bytes(1, 65).is_err());
 }
 
+// Histories come from the real judge above; every retained member has admitted
+// scalars, a holding long note, and its own immutable comparison reservation.
+fn populated_local_render_state(count: usize) -> (BrowserRenderState, JudgedChart) {
+    let f = judged_chart(129);
+    let ids: Vec<_> = (0..count)
+        .map(|index| crate::local_players::PlayerId(u32::MAX - index as u32))
+        .collect();
+    let mut state = receiver(&f, &ids);
+    let pending = crate::note_progress::NoteProgress::new(f.chart.clone()).unwrap();
+    let mut producer = pending.clone();
+    producer.apply(&f.events[..130]);
+    let song_ns = f.chart.notes.last().unwrap().start.as_nanos();
+    for (page, visible) in ids.chunks(MAX_RENDER_VISIBLE).enumerate() {
+        let members = visible
+            .iter()
+            .enumerate()
+            .map(|(slot, id)| {
+                let index = page * MAX_RENDER_VISIBLE + slot;
+                let mut scalar = scalars(&f.events[..130], song_ns);
+                scalar.recent.drain(..index % 3);
+                scalar.competition = Some(comparison());
+                scalar.saved_comparison_height = if index % 2 == 0 { 14 } else { 28 };
+                scalar.peer_admitted = index % 2 != 0;
+                RenderMemberUpdate::from_progress(*id, scalar, &producer, &pending).unwrap()
+            })
+            .collect();
+        state
+            .apply_frame(&frame(page as u32, page as u64 + 1, members))
+            .unwrap();
+    }
+    (state, f)
+}
+
+fn select_retained_render_page(state: &mut BrowserRenderState, page: u32) {
+    let start = page as usize * MAX_RENDER_VISIBLE;
+    let end = (start + MAX_RENDER_VISIBLE).min(state.roster().len());
+    let members = state.roster()[start..end]
+        .iter()
+        .map(|id| {
+            let member = state.member(*id).unwrap();
+            RenderMemberUpdate::from_progress(
+                *id,
+                member.scalars.clone().unwrap(),
+                &member.progress,
+                &member.progress,
+            )
+            .unwrap()
+        })
+        .collect();
+    state.apply_frame(&frame(page, state.sequence() + 1, members)).unwrap();
+}
+
+// Independent baseline keeps the original full-roster adapter. It deliberately
+// converts all retained histories so a visible-only bridge cannot hide a page,
+// roster, reservation or feedback mapping error by sharing its selection code.
+fn paint_full_roster_baseline(state: &BrowserRenderState) -> crate::scene::Scene {
+    use crate::ui::organisms::VisualLocalPlayerView;
+    let recent: Vec<Vec<_>> = state.roster()
+        .iter()
+        .map(|id| state.member(*id).unwrap().scalars.as_ref().unwrap().recent
+            .iter().map(RenderJudgeEvent::event).collect())
+        .collect();
+    let views: Vec<_> = state.roster()
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let member = state.member(*id).unwrap();
+            let scalar = member.scalars.as_ref().unwrap();
+            VisualLocalPlayerView {
+                player: *id,
+                chart: Some(state.chart()),
+                song_time: Some(Timestamp::from_nanos(scalar.song_ns)),
+                score: scalar.score.unwrap(),
+                bms_score: None,
+                gauge: scalar.gauge,
+                last_judge: recent[index].last(),
+                recent_results: &recent[index],
+                pressed_lanes: scalar.pressed,
+                note_progress: Some(&member.progress),
+                competition: scalar.competition.as_ref(),
+            }
+        })
+        .collect();
+    let reservations: Vec<_> = state.roster()
+        .iter()
+        .map(|id| {
+            let scalar = state.member(*id).unwrap().scalars.as_ref().unwrap();
+            i64::from(scalar.saved_comparison_height) + if scalar.peer_admitted { 28 } else { 0 }
+        })
+        .collect();
+    let mut scene = crate::scene::Scene::new(960, 720);
+    crate::ui::organisms::visual_local_player_views(
+        &mut scene, &views, state.lookahead_ns(), state.page() as usize,
+        true, &[crate::bga_render::BgaFrame::default(); 4], Some(&reservations),
+    ).unwrap();
+    scene
+}
+
+fn assert_same_local_scene(actual: &crate::scene::Scene, expected: &crate::scene::Scene) {
+    assert_eq!(
+        bytemuck::cast_slice::<_, u8>(actual.rectangles()),
+        bytemuck::cast_slice::<_, u8>(expected.rectangles()),
+    );
+    let batches = |scene: &crate::scene::Scene| scene.batches()
+        .iter().map(|batch| (batch.texture, batch.first, batch.count, batch.playfield))
+        .collect::<Vec<_>>();
+    assert_eq!(batches(actual), batches(expected));
+    assert_eq!(actual.playfields().len(), expected.playfields().len());
+    for (actual, expected) in actual.playfields().iter().zip(expected.playfields()) {
+        assert_eq!(bytemuck::cast_slice::<_, u8>(&actual.instances),
+            bytemuck::cast_slice::<_, u8>(&expected.instances));
+        assert_eq!((actual.drift, actual.top, actual.bottom),
+            (expected.drift, expected.top, expected.bottom));
+    }
+}
+
+#[test]
+fn borrowed_local_render_bridge_preserves_full_roster_pages_and_visible_only_histories() {
+    let (mut state, _f) = populated_local_render_state(64);
+    let histories: Vec<_> = state.roster().iter()
+        .map(|id| state.member(*id).unwrap().scalars.as_ref().unwrap().recent.clone())
+        .collect();
+    let mut scratch: [Vec<beatkernel::judge::JudgeEvent>; MAX_RENDER_VISIBLE] =
+        std::array::from_fn(|_| Vec::with_capacity(MAX_RENDER_RECENT));
+    let storage = scratch.each_ref().map(|events| (events.as_ptr(), events.capacity()));
+    let mut scene = crate::scene::Scene::new(960, 720);
+    for page in [15, 0, 15] {
+        select_retained_render_page(&mut state, page);
+        scene.clear();
+        crate::ui::organisms::visual_local_render_state(
+            &mut scene, &state, &[crate::bga_render::BgaFrame::default(); 4], &mut scratch,
+        ).unwrap();
+        assert_same_local_scene(&scene, &paint_full_roster_baseline(&state));
+        assert_eq!(scratch.each_ref().map(|events| (events.as_ptr(), events.capacity())), storage);
+        for (slot, events) in scratch.iter().enumerate() {
+            let index = page as usize * MAX_RENDER_VISIBLE + slot;
+            let expected: Vec<_> = histories[index].iter().map(RenderJudgeEvent::event).collect();
+            assert_eq!(events, &expected);
+        }
+        // All 64 histories survive, while the converted buffer contains only
+        // the current four. Hidden histories become available on the next page.
+        assert_eq!(scratch.iter().map(Vec::len).sum::<usize>(),
+            histories[page as usize * 4..page as usize * 4 + 4].iter().map(Vec::len).sum::<usize>());
+        for (index, id) in state.roster().iter().enumerate() {
+            assert_eq!(state.member(*id).unwrap().scalars.as_ref().unwrap().recent, histories[index]);
+        }
+    }
+    let (mut partial, _f) = populated_local_render_state(5);
+    select_retained_render_page(&mut partial, 1);
+    scene.clear();
+    crate::ui::organisms::visual_local_render_state(
+        &mut scene, &partial, &[crate::bga_render::BgaFrame::default(); 4], &mut scratch,
+    ).unwrap();
+    assert_same_local_scene(&scene, &paint_full_roster_baseline(&partial));
+    assert_eq!(scene.playfields().len(), 1);
+    assert_eq!(scratch[0].len(), MAX_RENDER_RECENT - 1);
+    assert!(scratch[1..].iter().all(Vec::is_empty));
+    assert_eq!(scratch.each_ref().map(|events| (events.as_ptr(), events.capacity())), storage);
+}
+
+#[test]
+fn borrowed_local_render_bridge_reuses_scratch_note_instances_and_progress_on_scalar_redraw() {
+    let (mut state, _f) = populated_local_render_state(64);
+    let mut scratch: [Vec<beatkernel::judge::JudgeEvent>; MAX_RENDER_VISIBLE] =
+        std::array::from_fn(|_| Vec::with_capacity(MAX_RENDER_RECENT));
+    let storage = scratch.each_ref().map(|events| (events.as_ptr(), events.capacity()));
+    let mut scene = crate::scene::Scene::new(960, 720);
+    let frames = [crate::bga_render::BgaFrame::default(); 4];
+    crate::ui::organisms::visual_local_render_state(&mut scene, &state, &frames, &mut scratch).unwrap();
+    let instances: Vec<_> = scene.playfields().iter().map(|field| Arc::clone(&field.instances)).collect();
+    assert!(instances.iter().all(|notes| !notes.is_empty()));
+    let progress: Vec<_> = state.roster().iter().map(|id| state.member(*id).unwrap().progress.clone()).collect();
+    let pristine = crate::note_progress::NoteProgress::new(state.chart().clone()).unwrap();
+    let page_storage: Vec<Vec<_>> = progress.iter().map(|value| value.changed_pages_since(&pristine)
+        .unwrap().map(|page| page.packed_states().as_ptr()).collect()).collect();
+    assert!(page_storage.iter().all(|pages| !pages.is_empty()));
+    for scalar_only in [false, true, true] {
+        if scalar_only {
+            let start = state.page() as usize * MAX_RENDER_VISIBLE;
+            let members = state.roster()[start..].iter().map(|id| {
+                let member = state.member(*id).unwrap();
+                let mut scalar = member.scalars.clone().unwrap();
+                scalar.pressed = 0;
+                RenderMemberUpdate::from_progress(*id, scalar, &member.progress, &member.progress).unwrap()
+            }).collect();
+            state.apply_frame(&frame(state.page(), state.sequence() + 1, members)).unwrap();
+        }
+        scene.clear();
+        crate::ui::organisms::visual_local_render_state(&mut scene, &state, &frames, &mut scratch).unwrap();
+        assert_same_local_scene(&scene, &paint_full_roster_baseline(&state));
+        assert_eq!(scratch.each_ref().map(|events| (events.as_ptr(), events.capacity())), storage);
+        for (field, retained) in scene.playfields().iter().zip(&instances) {
+            assert!(Arc::ptr_eq(&field.instances, retained));
+        }
+        for (index, id) in state.roster().iter().enumerate() {
+            let member = state.member(*id).unwrap();
+            assert_eq!(member.progress.changed_pages_since(&progress[index]).unwrap().count(), 0);
+            let pages: Vec<_> = member.progress.changed_pages_since(&pristine).unwrap()
+                .map(|page| page.packed_states().as_ptr()).collect();
+            assert_eq!(pages, page_storage[index]);
+        }
+    }
+}
+
 fn comparison() -> crate::competition_presentation::CompetitionSnapshot {
     use crate::competition_presentation::{CompetitionSnapshot, GhostSnapshot};
     CompetitionSnapshot {

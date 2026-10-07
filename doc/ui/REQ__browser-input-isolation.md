@@ -78,6 +78,12 @@ contact ownership. Reusing the same page must not allocate or remap unrelated
 members. Feed these inputs through the ordinary prompt queue; do not hold them
 in a separate renderer-wait buffer behind an already closed input prefix.
 
+Local rendering converts recent feedback only for the at most four visible
+players. Reuse four bounded prepared scratch buffers across redraws; do not
+copy hidden members' recent events or allocate full-roster view/reservation
+vectors each frame. Keep complete stable roster identities, original page
+numbering and comparison reservations through borrowed fixed-size views.
+
 A confirmed terminal runtime graphics error retains the existing failed-stop
 behavior: gameplay exports genuine recorded prefixes and authoritative results,
 then Window joins input/audio/room cleanup before gameplay ownership terminates.

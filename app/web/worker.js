@@ -404,12 +404,17 @@ function publishVisual() {
       // Controls wait only for the visual channel; input/audio remain independent.
       while (context.controls.length) {
         if (context.client.pending) break;
+        // A committed local page frame owns its reserved version. Submit it
+        // before newer controls, while retaining older surface controls first.
+        if (context.frameGeometry !== undefined && context.controls[0].fields.geometryVersion > context.frameGeometry) break;
         const control = context.controls.shift();
         await context.client.control(control.operation, control.fields);
         if (control.operation === "resize") surfaceSentVersion = control.fields.geometryVersion;
         if (!currentVisual(context)) { pump.dirty = true; break; }
       }
-      if (!currentVisual(context) || context.controls.length) continue;
+      if (!currentVisual(context)) continue;
+      if (context.controls.length && (context.frameGeometry === undefined
+        || context.controls[0].fields.geometryVersion < context.frameGeometry)) continue;
       if (["preview", "live", "local", "replay"].includes(context.mode)) {
         context.client.publish(() => {
           if (!currentVisual(context)) throw new Error("Visual producer retired.");

@@ -22,6 +22,7 @@ pub(crate) struct BrowserCanvas {
     renderer: Renderer,
     scene: Scene,
     backgrounds: BgaTextureCache,
+    visual_recent: [Vec<beatkernel::judge::JudgeEvent>; crate::browser_render_state::MAX_RENDER_VISIBLE],
     extent: [u32; 2],
 }
 
@@ -42,6 +43,7 @@ impl BrowserCanvas {
             renderer,
             scene: Scene::new(LOGICAL_EXTENT[0], LOGICAL_EXTENT[1]),
             backgrounds: BgaTextureCache::default(),
+            visual_recent: std::array::from_fn(|_| Vec::with_capacity(crate::browser_render_state::MAX_RENDER_RECENT)),
             extent,
         })
     }
@@ -401,15 +403,17 @@ impl BrowserCanvas {
         self.prepare_surface()?;
         let frames = self.backgrounds.sync_presentations(Some(state.images()), &presentations[..visible.len()], &mut self.renderer)?;
         self.scene.clear();
-        let recent: Vec<Vec<_>> = roster.iter().map(|player| state.member(*player).and_then(|member| member.scalars.as_ref()).map_or_else(Vec::new, |scalar| scalar.recent.iter().map(|event| event.event()).collect())).collect();
         if !local {
-            let member = state.member(roster[0]).ok_or("visual member missing")?;
+            let member = &state.members()[0];
             let scalar = member.scalars.as_ref().ok_or("visual frame unavailable")?;
-            organisms::playfield_with_background(&mut self.scene, chart, Timestamp::from_nanos(scalar.song_ns), state.lookahead_ns(), &recent[0], scalar.pressed, Some(&member.progress), frames[0])?;
+            let recent = &mut self.visual_recent[0];
+            recent.clear();
+            recent.extend(scalar.recent.iter().map(|event| event.event()));
+            organisms::playfield_with_background(&mut self.scene, chart, Timestamp::from_nanos(scalar.song_ns), state.lookahead_ns(), recent, scalar.pressed, Some(&member.progress), frames[0])?;
             if let Some(score) = scalar.score {
                 if let Some(snapshot) = &scalar.competition {
                     organisms::competition_scoreboard_visual(&mut self.scene, score, snapshot, None)?;
-                } else { organisms::scoreboard_visual(&mut self.scene, score, &recent[0], None); }
+                } else { organisms::scoreboard_visual(&mut self.scene, score, recent, None); }
                 if scalar.saved_failed {
                     atoms::text(&mut self.scene, 750, 650, "SAVED COMPARISONS", 1, 0xff8e8e);
                     atoms::text(&mut self.scene, 750, 660, "UNAVAILABLE", 1, 0xff8e8e);
@@ -419,19 +423,7 @@ impl BrowserCanvas {
                 molecules::gauge_hud_visual(&mut self.scene, gauge, Bounds { x: 750, y: 110, width: 186, height: 18 })?;
             }
         } else {
-            let empty = crate::browser_render_state::RenderMemberScalars::default();
-            let zero = crate::browser_render_state::RenderScore { hits: 0, misses: 0, combo: 0, max_combo: 0, timing: crate::timing::TimingRecord::default() };
-            let views: Vec<_> = roster.iter().enumerate().map(|(index, player)| {
-                let member = state.member(*player).expect("registered visual member");
-                let scalar = member.scalars.as_ref().unwrap_or(&empty);
-                organisms::VisualLocalPlayerView { player: *player, chart: Some(chart),
-                    song_time: member.scalars.as_ref().map(|scalar| Timestamp::from_nanos(scalar.song_ns)),
-                    score: scalar.score.unwrap_or(zero), bms_score: None, gauge: scalar.gauge,
-                    last_judge: recent[index].last(), recent_results: &recent[index], pressed_lanes: scalar.pressed,
-                    note_progress: Some(&member.progress), competition: scalar.competition.as_ref() }
-            }).collect();
-            let reserved: Vec<_> = roster.iter().map(|player| state.member(*player).and_then(|member| member.scalars.as_ref()).map_or(0, |scalar| i64::from(scalar.saved_comparison_height) + if scalar.peer_admitted { 28 } else { 0 })).collect();
-            organisms::visual_local_player_views(&mut self.scene, &views, state.lookahead_ns(), state.page() as usize, true, &frames, Some(&reserved))?;
+            organisms::visual_local_render_state(&mut self.scene, state, &frames, &mut self.visual_recent)?;
             for (slot, player) in visible.iter().enumerate() {
                 let scalar = state.member(*player).and_then(|member| member.scalars.as_ref()).ok_or("visual frame unavailable")?;
                 let [x, y, _, _] = crate::playfield_layout::local_panel_bounds(visible.len(), slot)?;

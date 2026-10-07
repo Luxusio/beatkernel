@@ -549,6 +549,9 @@ impl BrowserRenderState {
             .position(|id| *id == player)
             .map(|index| &self.members[index])
     }
+    pub(crate) fn members(&self) -> &[RenderMember] {
+        &self.members
+    }
     pub fn sequence(&self) -> u64 {
         self.sequence
     }

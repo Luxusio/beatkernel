@@ -101,6 +101,14 @@ bytes. These are upper bounds for the selected representation, not routine
 allocations or measured live usage; unchanged pages and skipped frames retain
 the cumulative acknowledged baseline rather than allocating full progress anew.
 
+Painting borrows a fixed full-roster view and reservation array. Four recent-event
+scratch vectors are prepared once at the admitted 128-event capacity; only
+visible members are converted into them, and solo reuses slot zero. Hidden
+histories remain in receiver state without per-draw copies. Account separately
+for `4 * 128 * size_of::<JudgeEvent>()` scratch storage and four vector headers;
+existing Scene/GPU caches retain their own allocation budgets. Repeated paints
+must preserve scratch storage and unchanged note/progress allocation identities.
+
 The integration covers preview, solo/live, local cohorts, replay, historical
 records, completed results and room results. A solo-only transport is not the
 completed design. Actual two-Worker tests must prove input/audio acknowledgements
