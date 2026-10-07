@@ -647,10 +647,16 @@ impl Renderer {
         };
         let suboptimal = frame.suboptimal;
         let dimensions = scene.dimensions();
+        let translation = scene.ui_translation().offset();
         self.queue.write_buffer(
             &self.viewport,
             0,
-            bytemuck::cast_slice(&[dimensions[0], dimensions[1], 0.0, 0.0]),
+            bytemuck::cast_slice(&[
+                dimensions[0],
+                dimensions[1],
+                translation[0] as f32,
+                translation[1] as f32,
+            ]),
         );
         let rectangles = scene.rectangles();
         let (identity, epoch) = scene.geometry_stamp();

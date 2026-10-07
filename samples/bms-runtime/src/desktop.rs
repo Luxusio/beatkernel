@@ -3328,6 +3328,7 @@ impl Desktop {
             (size.width, size.height),
             (WIDTH as u32, HEIGHT as u32),
         )
+        .and_then(|point| self.scene.project_ui_point(point))
     }
     fn hit(&self) -> Option<ControlId> {
         if self.startup.is_some()

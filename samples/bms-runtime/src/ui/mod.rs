@@ -12,6 +12,7 @@ mod grapheme_window_fixtures;
 pub mod interaction;
 pub mod layout;
 pub mod molecules;
+pub mod motion;
 pub mod organisms;
 pub mod players;
 pub mod practice;

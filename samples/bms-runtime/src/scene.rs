@@ -55,6 +55,30 @@ pub struct GeometrySnapshot {
     batches: Arc<[DrawBatch]>,
 }
 
+/// Integer translation of the ordinary UI surface, separate from timed notes.
+/// Offsets are bounded so their GPU uniform representation is exact.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UiTranslation {
+    x: i32,
+    y: i32,
+}
+impl UiTranslation {
+    pub const MAX_OFFSET: i32 = 1 << 24;
+
+    pub fn new(x: i32, y: i32) -> Result<Self, String> {
+        if !(-Self::MAX_OFFSET..=Self::MAX_OFFSET).contains(&x)
+            || !(-Self::MAX_OFFSET..=Self::MAX_OFFSET).contains(&y)
+        {
+            return Err("UI translation exceeds exact integer GPU offset range".into());
+        }
+        Ok(Self { x, y })
+    }
+
+    pub fn offset(self) -> [i32; 2] {
+        [self.x, self.y]
+    }
+}
+
 pub struct Scene {
     width: u32,
     height: u32,
@@ -69,6 +93,7 @@ pub struct Scene {
     visible_mine_indices: Vec<usize>,
     geometry_identity: Arc<()>,
     geometry_epoch: u64,
+    ui_translation: UiTranslation,
 }
 
 impl Scene {
@@ -98,10 +123,12 @@ impl Scene {
             visible_mine_indices: Vec::new(),
             geometry_identity: Arc::new(()),
             geometry_epoch: 0,
+            ui_translation: UiTranslation::default(),
         }
     }
 
     pub fn clear(&mut self) {
+        self.ui_translation = UiTranslation::default();
         self.geometry_changed();
         self.rectangles.clear();
         self.batches.clear();
@@ -126,9 +153,42 @@ impl Scene {
         (&self.geometry_identity, self.geometry_epoch)
     }
 
+    pub fn ui_translation(&self) -> UiTranslation {
+        self.ui_translation
+    }
+
+    /// Changes presentation only: retained geometry and its upload identity stay intact.
+    pub fn set_ui_translation(&mut self, translation: UiTranslation) {
+        self.ui_translation = translation;
+    }
+
+    /// Inverse presentation projection for ordinary retained UI hit bounds.
+    /// Both the visible viewport and the original clipped surface exclude far edges.
+    pub fn project_ui_point(&self, point: (f64, f64)) -> Option<(f64, f64)> {
+        let inside = |(x, y): (f64, f64)| {
+            x.is_finite()
+                && y.is_finite()
+                && x >= 0.0
+                && y >= 0.0
+                && x < f64::from(self.width)
+                && y < f64::from(self.height)
+        };
+        if !inside(point) {
+            return None;
+        }
+        let source = (
+            point.0 - f64::from(self.ui_translation.x),
+            point.1 - f64::from(self.ui_translation.y),
+        );
+        inside(source).then_some(source)
+    }
+
     /// Freeze component geometry without cloning its rectangles or batches.
     pub fn geometry_snapshot(self) -> Result<GeometrySnapshot, String> {
         self.status()?;
+        if self.ui_translation != UiTranslation::default() {
+            return Err("translated UI surface cannot become a static geometry packet".into());
+        }
         if !self.playfields.is_empty() {
             return Err("timed playfields cannot become static UI geometry".into());
         }
@@ -843,6 +903,39 @@ mod tests {
         assert_eq!(output.geometry_epoch, epoch);
         assert_eq!(output.rectangles.len(), MAX_RECTANGLES);
         assert!(output.status().is_ok());
+    }
+
+    #[test]
+    fn ui_translation_preserves_geometry_storage_order_and_upload_identity() {
+        let mut scene = Scene::new(960, 720);
+        scene.rect(10, 20, 30, 40, 0xffaabb);
+        scene.rect(50, 60, 70, 80, 0x112233);
+        let identity = Arc::clone(scene.geometry_stamp().0);
+        let epoch = scene.geometry_stamp().1;
+        let rectangles = scene.rectangles.as_ptr();
+        let batches = scene.batches.as_ptr();
+        let data = bytemuck::cast_slice::<Rectangle, u8>(&scene.rectangles).to_vec();
+        for offset in [[50, -30], [-20, 40], [0, 0]] {
+            scene.set_ui_translation(UiTranslation::new(offset[0], offset[1]).unwrap());
+            assert!(Arc::ptr_eq(&identity, scene.geometry_stamp().0));
+            assert_eq!(scene.geometry_stamp().1, epoch);
+            assert_eq!(scene.rectangles.as_ptr(), rectangles);
+            assert_eq!(scene.batches.as_ptr(), batches);
+            assert_eq!(
+                bytemuck::cast_slice::<Rectangle, u8>(&scene.rectangles),
+                data
+            );
+            assert_eq!(scene.batches[0].first, 0);
+            assert_eq!(scene.batches[0].count, 2);
+        }
+        let before = scene.ui_translation();
+        assert!(UiTranslation::new(i32::MAX, 0).is_err());
+        assert_eq!(scene.ui_translation(), before);
+        scene.set_ui_translation(UiTranslation::new(1, 0).unwrap());
+        assert!(scene.geometry_snapshot().is_err());
+        let mut unshifted = Scene::new(960, 720);
+        unshifted.rect(0, 0, 1, 1, 0);
+        assert!(unshifted.geometry_snapshot().is_ok());
     }
 
     #[test]
