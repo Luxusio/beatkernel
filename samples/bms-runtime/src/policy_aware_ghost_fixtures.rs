@@ -56,7 +56,7 @@ fn file(
     end: Option<Timestamp>,
 ) -> ReplayFile {
     let judge = judge(source, policy);
-    let mut file = LiveReplayCapture::new_with_gauge(
+    let mut file = LiveReplayCapture::new_with_policy(
         &judge,
         ClockDomainId(17),
         replay_limits().unwrap(),
@@ -65,7 +65,7 @@ fn file(
         end,
         beatkernel_bms::BmsInputMode::ButtonOnly,
         None,
-        policy.gauge(),
+        policy,
     )
     .unwrap()
     .into_file();

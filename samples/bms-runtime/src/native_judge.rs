@@ -215,7 +215,7 @@ pub fn prepare_section_capture_for_policy(
         return Ok(None);
     };
     let identity = InputSoundIdentity::from_source(source)?;
-    Ok(Some(LiveReplayCapture::new_with_gauge(
+    Ok(Some(LiveReplayCapture::new_with_policy(
         judge,
         domain,
         limits,
@@ -224,7 +224,7 @@ pub fn prepare_section_capture_for_policy(
         end,
         BmsInputMode::ButtonOnly,
         identity,
-        policy.gauge(),
+        policy,
     )?))
 }
 

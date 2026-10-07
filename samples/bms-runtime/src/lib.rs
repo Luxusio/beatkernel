@@ -277,6 +277,8 @@ pub mod native_audio;
 pub mod native_catalog;
 /// Shared native chart loading, section slicing and retained-lane coverage.
 pub mod native_chart;
+#[cfg(test)]
+mod native_class_recording_fixtures;
 /// Shared native local-cohort gameplay and per-player report ownership.
 pub mod native_cohort;
 /// Shared local member construction, activation and recording finalization.

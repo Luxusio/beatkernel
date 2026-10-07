@@ -51,6 +51,12 @@ fn recording(settings: &NativeSettings, times: &[i64]) -> ReplayFile {
     )
     .unwrap()
     .into_file();
+    file.header = crate::replay_judgment_policy::wrap_header(
+        file.header,
+        setup.judgments.as_ref(),
+        replay_limits().unwrap(),
+    )
+    .unwrap();
     file.records = times
         .iter()
         .enumerate()
@@ -243,7 +249,19 @@ fn selected_gauge_record_comparison_matches_original_source_policy_and_refuses_o
     )
     .unwrap();
     let file = recording(&settings, &[]);
+    assert!(
+        decode_section_setup(&file.header.options)
+            .unwrap()
+            .judgments
+            .is_some()
+    );
     RecordPreview::from_file(Path::new("practice.bkr"), &source, &settings, file.clone()).unwrap();
+    let mut legacy = file.clone();
+    legacy.header.options = crate::replay_judgment_policy::split_options(&legacy.header.options)
+        .unwrap()
+        .0
+        .to_vec();
+    assert!(RecordPreview::from_file(Path::new("legacy.bkr"), &source, &settings, legacy).is_err());
     let index = settings
         .fields()
         .iter()

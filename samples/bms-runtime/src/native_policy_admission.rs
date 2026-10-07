@@ -89,6 +89,8 @@ pub(crate) fn validate_header(
         None,
         gauge,
     )?;
+    let expected =
+        crate::replay_judgment_policy::wrap_header(expected, setup.judgments.as_ref(), limits)?;
     if header.rules_identity != expected.rules_identity || header.options != expected.options {
         return Err("native policy setup is not canonical".into());
     }

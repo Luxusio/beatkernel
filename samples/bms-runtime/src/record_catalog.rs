@@ -325,13 +325,14 @@ fn draft_section(
         output: beatkernel::time::ClockDomainId(0),
         end: None,
     };
-    let (profile, gauge) = config
+    let policy = config
         .resolve_play_policy(
             &crate::play_policy::OriginalGaugeContext::from_source(source),
             selection,
         )
-        .map_err(|error| error.to_string())?
-        .into_parts();
+        .map_err(|error| error.to_string())?;
+    let judgments = policy.judgments().cloned();
+    let (profile, gauge) = policy.into_parts();
     let text = settings
         .fields()
         .iter()
@@ -354,7 +355,7 @@ fn draft_section(
         Some(end)
     };
     Ok(RecordedSetup {
-        judgments: None,
+        judgments,
         profile,
         gauge,
         start,

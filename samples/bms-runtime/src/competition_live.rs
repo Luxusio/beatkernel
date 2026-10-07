@@ -556,7 +556,7 @@ impl LiveCompetition {
             start,
             chart_seed,
             end,
-            Some(policy.gauge()),
+            Some(policy),
         )
     }
     fn prepare_member_section(
@@ -583,7 +583,7 @@ impl LiveCompetition {
         start: Timestamp,
         chart_seed: u64,
         end: Option<Timestamp>,
-        gauge: Option<&crate::gauge::GaugeProfile>,
+        policy: Option<&crate::play_policy::ResolvedPlayPolicy>,
     ) -> Result<Option<Self>> {
         if options.preroll_ns < 0 {
             return Err("native competition preroll cannot be negative".into());
@@ -599,8 +599,8 @@ impl LiveCompetition {
         }
         let limits = replay_limits()?;
         let input_sounds = InputSoundIdentity::from_source(source)?;
-        let capture = match gauge {
-            Some(gauge) => LiveReplayCapture::new_with_gauge(
+        let capture = match policy {
+            Some(policy) => LiveReplayCapture::new_with_policy(
                 judge,
                 domain,
                 limits,
@@ -609,7 +609,7 @@ impl LiveCompetition {
                 end,
                 BmsInputMode::ButtonOnly,
                 input_sounds,
-                gauge,
+                policy,
             )?,
             None => LiveReplayCapture::new_with_input_sounds(
                 judge,

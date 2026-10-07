@@ -478,8 +478,8 @@ increasing by grade. No trailing bytes or nested judgment wrapper are accepted.
 Section-aware decoding/reconstruction preserves the
 mapping and regenerates the entire header; legacy tuple decoders refuse to drop
 it. Legacy unclassified recordings remain byte-compatible and acquire no guessed
-class/EX meaning. Record comparison includes class identity. Native launchers,
-UI, result publication and shared networking still require class-policy integration;
+class/EX meaning. Record comparison includes class identity. Live host/UI score
+publication and shared networking still require class-policy integration;
 adding these primitives does not claim their completion or historical LR2 timing.
 
 ## Recorded class-score consumers
@@ -496,4 +496,23 @@ actual prefix stage counts plus explicit recorded class/EX counts, or an
 unclassified marker. A diagnostic song-time seek beyond a finite recorded end
 refuses before replay execution. Core seek may still generate its documented
 diagnostic boundary advance; output is inspection, not persisted completion.
-Native launchers and retained record UI still require class-policy propagation.
+Live class-score presentation still requires class-policy propagation.
+
+## Native selected class recording
+
+Common selected-policy preparation records explicit classes in solo and local
+member captures. Policy-aware saved comparisons use the same complete header,
+including gauge, classes, original section and endpoint. Native cold admission
+validates exact judge-grade coverage and canonical full metadata; capture and
+comparison identities must match before the common pump's device/clock operations.
+Native record drafts
+preserve the selected class identity during preview compatibility checks.
+
+Builtin selection and legacy gauge-only helpers keep their prior bytes. An old
+unclassified custom recording cannot be silently compared with a new explicitly
+classified selection, even when judge and gauge values coincide. No class is
+guessed from a delta or grade number. Disabled capture retains pristine/profile
+checks and performs no source identity acquisition. All OS launchers use the
+common preparation; custom networking remains refused. These changes preserve
+recorded meaning, but live host/HUD class scores and historical timing remain
+separate integration work.
