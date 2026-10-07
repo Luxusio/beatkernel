@@ -28,6 +28,61 @@ pub struct NoteProgress {
     pages: Arc<Vec<Arc<Page>>>,
     last_miss: Option<Timestamp>,
 }
+
+/// Borrowed packed states from one current prepared-chart page.
+/// Trailing slots beyond `valid_count` stay zero; states use two bits per note.
+pub struct NoteProgressPage<'a> {
+    index: usize,
+    valid_count: usize,
+    page: &'a Page,
+}
+impl NoteProgressPage<'_> {
+    /// Ordered page index in the exact prepared chart.
+    pub const fn index(&self) -> usize {
+        self.index
+    }
+    /// Number of chart notes represented by this page, excluding zero padding.
+    pub const fn valid_count(&self) -> usize {
+        self.valid_count
+    }
+    /// Number of completed notes among the valid slots.
+    pub const fn completed_count(&self) -> usize {
+        self.page.completed as usize
+    }
+    /// Packed Pending=0, Holding=1 and Completed=2 states, low slots first.
+    pub const fn packed_states(&self) -> &[u64; 128] {
+        &self.page.bits
+    }
+}
+
+/// Current pages that differ from a retained acknowledged snapshot.
+/// Enumeration borrows storage, compares bounded page pointers and allocates nothing.
+pub struct ChangedNoteProgressPages<'a> {
+    current: &'a NoteProgress,
+    acknowledged: &'a NoteProgress,
+    next_index: usize,
+}
+impl<'a> Iterator for ChangedNoteProgressPages<'a> {
+    type Item = NoteProgressPage<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.next_index < self.current.pages.len() {
+            let index = self.next_index;
+            self.next_index += 1;
+            if Arc::ptr_eq(&self.current.pages[index], &self.acknowledged.pages[index]) {
+                continue;
+            }
+            return Some(NoteProgressPage {
+                index,
+                valid_count: (self.current.chart.notes.len() - index * NOTES_PER_PAGE)
+                    .min(NOTES_PER_PAGE),
+                page: &self.current.pages[index],
+            });
+        }
+        None
+    }
+}
+
 impl NoteProgress {
     /// Prepares bounded zero pages for this exact chart allocation.
     pub fn new(chart: Arc<PlayerChart>) -> Result<Self, String> {
@@ -93,6 +148,28 @@ impl NoteProgress {
     pub const fn last_miss(&self) -> Option<Timestamp> {
         self.last_miss
     }
+    /// Borrows cumulative current page changes since a fully acknowledged snapshot.
+    /// Both snapshots must share the exact prepared chart allocation. A shared
+    /// directory returns an exhausted iterator immediately without scanning pages.
+    /// Keep the previous ACK baseline until the complete consumer update succeeds;
+    /// skipped frames then remain covered. `last_miss` is a separate scalar.
+    pub fn changed_pages_since<'a>(
+        &'a self,
+        acknowledged: &'a Self,
+    ) -> Result<ChangedNoteProgressPages<'a>, &'static str> {
+        if !Arc::ptr_eq(&self.chart, &acknowledged.chart) {
+            return Err("note progress belongs to another prepared chart");
+        }
+        Ok(ChangedNoteProgressPages {
+            current: self,
+            acknowledged,
+            next_index: if Arc::ptr_eq(&self.pages, &acknowledged.pages) {
+                self.pages.len()
+            } else {
+                0
+            },
+        })
+    }
     /// Returns state by prepared note index, or None outside that chart.
     pub fn state(&self, index: usize) -> Option<NoteState> {
         if index >= self.chart.notes.len() {
@@ -151,6 +228,10 @@ impl NoteProgress {
         std::ptr::eq(self.chart.as_ref(), chart)
     }
 }
+
+#[cfg(test)]
+#[path = "note_progress_transfer_fixtures.rs"]
+mod note_progress_transfer_fixtures;
 
 #[cfg(test)]
 mod fixtures {

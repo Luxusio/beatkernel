@@ -153,6 +153,26 @@ test("complete snapshots precede allocator callbacks and equal native timestamps
   h.owner.close();
 });
 
+test("native getter cancellation fences full snapshot publication without consuming acquisition sequences", () => {
+  const first = pad(0), second = pad(1);
+  const h = rig({ pads: [first, second] });
+  let getterReads = 0;
+  Object.defineProperty(second, "timestamp", { get() {
+    getterReads++;
+    assert.equal(h.samples.length, 0, "the first valid slot remains unpublished until the full snapshot exists");
+    h.owner.close();
+    return 1234.125;
+  } });
+  assert.equal(h.owner.poll(), 0);
+  assert.equal(h.reads, 1); assert.equal(getterReads, 1);
+  assert.equal(h.sequenceCalls, 0); assert.equal(h.sourceCalls, 0);
+  assert.deepEqual(h.samples, []); assert.deepEqual(h.errors, []);
+  assert.equal(h.owner.closed, true);
+  assert.equal(h.events.count("gamepadconnected"), 0); assert.equal(h.events.count("gamepaddisconnected"), 0);
+  assert.throws(() => h.owner.poll(), /closed/i);
+  assert.equal(h.reads, 1, "closed owner never revisits the native getter");
+});
+
 test("connection evidence retires exact objects and index reuse allocates fresh sources without synthetic releases", () => {
   const first = pad(0), replacement = pad(0);
   const h = rig({ pads: [first], source: 100n });

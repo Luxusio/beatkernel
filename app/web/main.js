@@ -1798,7 +1798,13 @@ async function play(mode = "live") {
     controls();
     ui.stop.focus();
     status(mode === "replay" ? "Playing recorded replay. Stop ends this session." : "Playing. Stop ends this session; leaving the page stops playback.");
-    session.timer = setInterval(() => { if (session.mode === "live") pumpInput(session); pumpPresentation(session); }, 8);
+    session.timer = setInterval(() => {
+      if (session.mode === "live") {
+        pollGamepads(session);
+        pumpInput(session);
+      }
+      pumpPresentation(session);
+    }, 8);
   } catch (error) {
     if (activePlay === session && session.phase !== "closing") await stopPlay(`Playback failed: ${String(error.message).slice(0, 4096)}`, true);
   }
@@ -2061,11 +2067,23 @@ function drainPageInput(session) {
   });
 }
 
+function pollGamepads(session) {
+  if (activePlay !== session || session.owner !== owner || session.mode !== "live"
+    || session.phase !== "playing" || session.tickPending !== null || session.inputPumping) return;
+  session.inputPumping = true;
+  try {
+    session.gamepadOwner?.poll();
+  } catch (error) {
+    if (activePlay === session && session.owner === owner && session.phase === "playing") {
+      void stopPlay(`Playback failed: ${error.message}`, true);
+    }
+  } finally { session.inputPumping = false; }
+}
+
 function pumpInput(session) {
   if (activePlay !== session || session.mode !== "live" || session.phase !== "playing" || session.tickPending !== null || session.inputPumping) return;
   session.inputPumping = true;
   try {
-    session.gamepadOwner?.poll();
     if (activePlay !== session || session.owner !== owner || session.phase !== "playing") return;
     const events = session.events.splice(0, 256);
     let lastInput = session.lastAcquiredHost;

@@ -934,7 +934,8 @@ test("Window keeps the existing twelve millisecond prefix behind a newer batch a
   assert.equal(worker.messages("play-stop").length, 0, "a different original source within the lag must not close the session");
   h.get("local-page").value = "1"; h.get("local-page").emit("change"); await flush(); await ack(second, 2);
   assert.equal(worker.messages("play-page").length, initialPages, "admission of newer events is not a drained-prefix proof");
-  const sources = second.events.filter(event => event.kind === "gamepad").map(event => event.source);
+  assert.equal(second.events.some(event => event.kind === "gamepad"), false, "touch and ACK callbacks do not sample Gamepads");
+  const sources = session.start.gamepadDevices.map(event => event.source);
   assert.equal(sources.length, 3);
   const assertPolling = (request, previous) => {
     assert.ok(request.tickId > previous.tickId);
@@ -1037,7 +1038,11 @@ test("local discovery retains actual mixed-device owners through one synchronous
   h.setNow(1300.125); chosen.timestamp = 1300.0625; ignored.timestamp = 1300.0625;
   chosen.buttons[0] = { value: 0.25, pressed: true, touched: true };
   ignored.buttons[0] = { value: 1, pressed: true, touched: true };
-  native.emit("inputreport", { device: native, reportId: 7, timeStamp: 1300.125, data: new DataView(Uint8Array.from([7, 5]).buffer) });
+  h.faults.onGamepadPoll = () => {
+    delete h.faults.onGamepadPoll;
+    native.emit("inputreport", { device: native, reportId: 7, timeStamp: 1300.125, data: new DataView(Uint8Array.from([7, 5]).buffer) });
+  };
+  await h.advance(8);
   const input = worker.last("play-step");
   assert.deepEqual(input.events.map(event => [event.kind, event.source]), [["hid", hidSource], ["gamepad", padSources[0]]]);
   assert.equal(input.events[0].hostNs, 1300125000n); assert.equal(input.events[1].hostNs, 1300062500n);
@@ -1666,7 +1671,11 @@ test("live page discovers Gamepads before gesture audio and shares genuine sourc
   h.setNow(1300.125);
   standard.timestamp = 1300.0625;
   standard.buttons[0] = { value: 0.12345678901234566, pressed: true, touched: false };
-  native.emit("inputreport", { device: native, reportId: 7, timeStamp: 1300.125, data: new DataView(Uint8Array.from([7, 255]).buffer) });
+  h.faults.onGamepadPoll = () => {
+    delete h.faults.onGamepadPoll;
+    native.emit("inputreport", { device: native, reportId: 7, timeStamp: 1300.125, data: new DataView(Uint8Array.from([7, 255]).buffer) });
+  };
+  await h.advance(8);
   const first = worker.last("play-step");
   assert.deepEqual(first.events.map(event => event.kind), ["hid", "gamepad"], "Window preserves acquisition order; Worker orders native timestamps");
   const acquired = first.events[1];
@@ -1679,24 +1688,109 @@ test("live page discovers Gamepads before gesture audio and shares genuine sourc
   assert.equal(Object.hasOwn(acquired, "bytes"), false); assert.equal(Object.hasOwn(acquired, "key"), false);
   standard.axes[0] = 0.75; standard.buttons[0].value = 0.5;
   assert.equal(acquired.axes[0], 0.12345678901234568); assert.equal(acquired.buttons[0].value, 0.12345678901234566);
-  standard.timestamp = 1300.1875; h.setNow(1300.25);
+  standard.timestamp = 1300.1875;
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.25 });
   const done = request => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: request.tickId,
     songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
   await done(first);
   const second = worker.last("play-step");
   assert.ok(second.tickId > first.tickId);
-  assert.equal(second.events[0].key, 2); assert.equal(second.events[1].kind, "gamepad");
+  assert.equal(second.events[0].key, 2); assert.equal(second.events.length, 1);
   assert.ok(second.events[0].sequence > acquired.sequence);
-  assert.equal(second.events[1].sequence, second.events[0].sequence + 1n);
-  assert.equal(second.events[1].hostNs, 1300187500n, "poll time never replaces the browser sample timestamp");
-  assert.equal(h.gamepadReads, 3, "one acquisition accompanies each available input pump");
+  assert.equal(h.gamepadReads, 2, "key and ACK callbacks perform zero acquisition reads");
+  await done(second); await h.advance(8);
+  const third = worker.last("play-step");
+  assert.equal(third.events.length, 1); assert.equal(third.events[0].kind, "gamepad");
+  assert.equal(third.events[0].sequence, second.events[0].sequence + 1n);
+  assert.equal(third.events[0].hostNs, 1300187500n, "poll time never replaces the browser sample timestamp");
+  assert.equal(h.gamepadReads, 3, "only eligible cadence acquires the next snapshot");
   assert.equal(h.layoutReads, layoutReads); assert.deepEqual(display, []);
   h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
   assert.equal(h.window.listeners.get("gamepadconnected")?.size ?? 0, 0);
   assert.equal(h.window.listeners.get("gamepaddisconnected")?.size ?? 0, 0);
   assert.equal(native.closes, 1); assert.equal(h.get("position").value, preview.position);
   await h.close();
+});
+
+test("keyboard HID touch pointer and ACK dispatch acquire zero Gamepad reads while eligible cadence alone polls", async () => {
+  const pad = nativeGamepad(0, { timestamp: 1300.0625 });
+  const h = await harness({ touchSupported: true, pointerSupported: true, gamepads: [pad], hidSupported: true,
+    hidDescriptors: [{ vendorId: 1, productId: 2 }] });
+  await h.preview(); enablePointers(h); chooseControllerProfile(h, selectedControllerProfile().file);
+  const session = await h.launch(), worker = h.workers[0], reads = h.gamepadReads;
+  h.setNow(1300.125);
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.125 });
+  const first = worker.last("play-step");
+  assert.equal(h.gamepadReads, reads, "keyboard callback must not query unrelated devices");
+  const backing = Uint8Array.from([99, 7, 255, 88]), native = h.hidDevices[0];
+  native.emit("inputreport", { device: native, reportId: 7, timeStamp: 1300.25, data: new DataView(backing.buffer, 1, 2) });
+  assert.equal(h.gamepadReads, reads, "HID callback must not query unrelated devices");
+  h.get("canvas").emit("pointerdown", { pointerType: "touch", pointerId: 91, timeStamp: 1300.375,
+    offsetX: 120.25, offsetY: 180.5, pressure: 0.375 });
+  assert.equal(h.gamepadReads, reads, "touch callback must not query unrelated devices");
+  h.get("canvas").emit("pointerdown", nativePointer({ timeStamp: 1300.5 }));
+  assert.equal(h.gamepadReads, reads, "pointer callback must not query unrelated devices");
+  backing.fill(0);
+  await h.advance(8);
+  assert.equal(h.gamepadReads, reads, "pending tick suppresses cadence acquisition");
+  assert.equal(worker.last("play-step"), first);
+  await pointerStepDone(h, first);
+  const acquired = worker.last("play-step");
+  assert.equal(h.gamepadReads, reads, "ACK-triggered dispatch must not query unrelated devices");
+  assert.deepEqual(acquired.events.map(event => event.kind), ["hid", "touch", "pointer", "pointer-button"]);
+  assert.deepEqual(Array.from(acquired.events[0].data), [7, 255]);
+  assert.deepEqual(acquired.events.map(event => event.hostNs), [1300250000n, 1300375000n, 1300500000n, 1300500000n]);
+  assert.deepEqual([acquired.events[1].x, acquired.events[1].y, acquired.events[1].pressure], [120.25, 180.5, 0.375]);
+  assert.ok(acquired.events.every(event => event.sequence > first.events[0].sequence));
+  await pointerStepDone(h, acquired);
+  assert.equal(h.gamepadReads, reads);
+  await h.advance(8);
+  const sampled = worker.last("play-step");
+  assert.equal(h.gamepadReads, reads + 1, "the existing eligible interval reads once");
+  assert.equal(sampled.events.length, 1); assert.equal(sampled.events[0].kind, "gamepad");
+  assert.equal(sampled.events[0].hostNs, 1300062500n);
+  await h.advance(8); assert.equal(h.gamepadReads, reads + 1, "unacknowledged sample applies backpressure");
+  const retiredCadence = [...h.timers.values()].find(timer => timer.interval === 8).callback;
+  h.click("stop"); await flush(); await h.receive(finalScore(session.id));
+  retiredCadence(); await flush(); assert.equal(h.gamepadReads, reads + 1, "retired cadence cannot sample");
+  await h.close();
+});
+
+test("cadence holds publication across native getter key reentry and stop cancels the entire snapshot", async () => {
+  for (const action of ["key", "stop"]) {
+    const firstPad = nativeGamepad(0), lastPad = nativeGamepad(1);
+    const h = await harness({ gamepads: [firstPad, lastPad] }); await h.preview();
+    const session = await h.launch(), worker = h.workers[0], reads = h.gamepadReads;
+    assert.equal(reads, 1, "the genuine setup snapshot precedes cadence acquisition");
+    const initialSequence = BigInt(session.start.gamepadDevices.length);
+    h.setNow(1300.125);
+    const cadence = [...h.timers.values()].find(timer => timer.interval === 8).callback;
+    let getterReads = 0;
+    Object.defineProperty(lastPad, "timestamp", { get() {
+      getterReads++;
+      if (action === "key") h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.125 });
+      else h.click("stop");
+      cadence();
+      assert.equal(h.gamepadReads, reads + 1, "reentrant cadence cannot enter an active native poll");
+      assert.equal(worker.messages("play-step").length, 0, "native snapshot acquisition cannot publish a partial or nested batch");
+      return 1300.0625;
+    } });
+    await h.advance(8);
+    assert.equal(getterReads, 1); assert.equal(h.gamepadReads, reads + 1);
+    if (action === "key") {
+      assert.equal(worker.messages("play-step").length, 1);
+      const request = worker.last("play-step");
+      assert.deepEqual(request.events.map(event => event.kind ?? "keyboard"), ["keyboard", "gamepad", "gamepad"]);
+      assert.deepEqual(request.events.map(event => event.hostNs), [1300125000n, 1000000000n, 1300062500n]);
+      assert.deepEqual(request.events.map(event => event.sequence), [1n, 2n, 3n].map(offset => initialSequence + offset));
+      await pointerStepDone(h, request); assert.equal(h.gamepadReads, reads + 1);
+      h.click("stop"); await flush();
+    } else {
+      assert.equal(worker.messages("play-step").length, 0);
+      assert.equal(worker.last("play-stop").playId, session.id);
+    }
+    await h.receive(finalScore(session.id)); await h.close();
+  }
 });
 
 test("unavailable or unsupported Gamepads preserve keyboard play while replay never acquires live device snapshots", async () => {
@@ -5340,13 +5434,16 @@ test("automatic one-player networking retains every admitted input owner and nat
   h.setNow(1700.125); standard.timestamp = 1700.0625;
   standard.buttons[0] = { value: 0.12345678901234566, pressed: true, touched: false };
   const backing = Uint8Array.from([99, 7, 255, 88]);
-  native.emit("inputreport", { device: native, reportId: 7, timeStamp: 1700.125, data: new DataView(backing.buffer, 1, 2) });
+  h.faults.onGamepadPoll = () => {
+    delete h.faults.onGamepadPoll;
+    native.emit("inputreport", { device: native, reportId: 7, timeStamp: 1700.125, data: new DataView(backing.buffer, 1, 2) });
+  };
+  await h.advance(8);
   const first = worker.last("play-step");
   assert.deepEqual(first.events.map(event => [event.kind, event.source]), [["hid", 5n], ["gamepad", 3n]]);
   assert.deepEqual(first.events.map(event => event.hostNs), [1700125000n, 1700062500n]);
   assert.equal(first.events[1].buttons[0].value, 0.12345678901234566);
   backing.fill(0); assert.deepEqual(Array.from(first.events[0].data), [7, 255]);
-  h.setNow(1700.5);
   h.get("canvas").emit("pointerdown", { pointerType: "touch", pointerId: -2, timeStamp: 1700.25,
     offsetX: 120.25, offsetY: 180.5, pressure: 0.375 });
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1700.5 });
@@ -5355,10 +5452,17 @@ test("automatic one-player networking retains every admitted input owner and nat
   const second = worker.last("play-step");
   assert.equal(second.events[0].kind, "touch"); assert.equal(second.events[0].hostNs, 1700250000n);
   assert.equal(second.events[0].code, 0xfffffffe); assert.equal(second.events[1].key, 2);
-  assert.equal(second.events[1].hostNs, 1700500000n); assert.equal(second.events[2].source, 3n);
+  assert.equal(second.events[1].hostNs, 1700500000n); assert.equal(second.events.length, 2);
   assert.ok(first.events[0].sequence < first.events[1].sequence);
   assert.ok(first.events[1].sequence < second.events[0].sequence && second.events[0].sequence < second.events[1].sequence);
-  assert.ok(second.events[1].sequence < second.events[2].sequence);
+  const reads = h.gamepadReads;
+  await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: second.tickId,
+    songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  assert.equal(h.gamepadReads, reads, "peer touch, key and ACK callbacks never poll Gamepads");
+  await h.advance(8);
+  const third = worker.last("play-step");
+  assert.equal(third.events.length, 1); assert.equal(third.events[0].source, 3n);
+  assert.ok(second.events[1].sequence < third.events[0].sequence);
   assert.deepEqual(display, []); assert.equal(h.layoutReads, layout); assert.equal(profile.reads, 0);
   h.click("stop"); await flush(); await h.receive(localFinal(start, { multiplayer: { finalWritten: true,
     finalAcknowledged: true, error: null, peers: [localPeer(1, 77)] } }));

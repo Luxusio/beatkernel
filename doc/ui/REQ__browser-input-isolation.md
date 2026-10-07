@@ -1,0 +1,49 @@
+# Browser input dispatch isolation
+
+Status: selected implementation contract. This work does not complete the
+parked audio-authority migration or its actual-browser acceptance.
+
+Keyboard, HID, touch and pointer callbacks capture their original samples and
+send already acquired input. Their dispatch path must not synchronously query
+Gamepads. Sample eligible live Gamepads on the existing 8 ms cadence immediately
+before pumping input, with no additional timer. Explicit source discovery and
+preflight verification retain their existing polls.
+
+Polling requires the current play owner and generation, live Playing mode, no
+outstanding input tick and no input pump already active. Preserve bounded
+snapshots, native timestamps, actual source identities, shared acquisition
+sequences, projection and whole-batch validation. Polling borrows the existing
+reentrancy guard: nested input capture may queue originals, but cannot send a
+partial batch during the poll. Restore the guard on every exit. Cancellation or
+failure must prevent stale reading/publication and use existing cleanup rules.
+Replay and retired owners never acquire live Gamepads. Pending ticks suppress
+polling so unchanged samples cannot grow the Window queue behind a blocked ACK.
+
+Input admission remains separate from the acknowledged partial prefix. Keep the
+existing timing policy and original metadata; do not retimestamp, widen bounds,
+silently drop events or claim an OS delivery guarantee. Pending input continues
+to block page remapping and completion. The parked startup and late-touch
+failures remain unresolved.
+
+The first retained rendering primitive is a read-only borrowed view of changed
+`NoteProgress` pages relative to a retained acknowledged snapshot. Require the
+same prepared chart allocation. An unchanged shared directory returns an empty
+iterator without allocation or page scanning; changed directories scan bounded
+page pointers and yield current changed pages in order. Expose page index, valid
+note extent, derived completed count and immutable packed states. Last-page
+padding stays zero. `last_miss` is a separate scalar; an empty page delta does
+not imply identical complete presentation state.
+
+Compare against the last fully acknowledged snapshot so coalescing cannot omit
+changes from skipped frames. Do not copy the whole chart or Scene every frame,
+add global chart identities to generic progress, or introduce Virtual DOM.
+Transport registration and receiver validation belong to the separately queued
+renderer integration; this primitive does not itself create another Worker.
+
+Verify callback Gamepad read counts separately from eligible cadence reads;
+test pending ticks, reentrant acquisition/cancellation, polling failures, replay,
+retired owners and original mixed-source metadata. Rust fixtures use real
+compiled unique object identities and accepted judge events across multiple
+pages, including no-op, holding/completion, cumulative deltas, partial padding,
+empty charts, exact identity refusal and immutable baselines. Mock and source
+results are not browser/device latency measurements.
