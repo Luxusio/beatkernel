@@ -1,5 +1,22 @@
 # Supplied-pair integer clock calibration
 
+## Observations with no numerical uncertainty bound
+
+Provide `AffineClockMapper::from_pairs_unknown(first, second, validity,
+extrapolation)` for two real ordered observations whose numerical uncertainty
+is unavailable. It must share the existing domain, chronology, finite-validity,
+extrapolation and checked-arithmetic rules, while reporting
+`ClockMappingQuality::Unknown` and no supplied uncertainty. Do not require a
+fabricated zero error, infer identical clock rates or report Exact. Existing
+bounded-uncertainty and declared exact-offset constructors retain their behavior.
+
+This is event-time correspondence, not a host-transport rate correction loop.
+The BMS player migration follows
+[audio-authoritative playback](ADR__audio-authoritative-playback.md). The core
+mapper acquires no clock, advances no gameplay, changes no Transport and grants
+no physical timing guarantee. Verify unequal-rate forward/inverse results,
+quality/provenance, validity endpoints and domain/order/envelope/overflow errors.
+
 AffineClockMapper belongs to the OS-independent time module. It consumes caller-supplied ClockPoint observation pairs; it does not read clocks, collect hardware samples, estimate physical latency, reset devices or synchronize audio restart. Live and replay judging remain the same JudgeEngine. Windows device/QPC pairs and macOS logical-output/mach presentation pairs can be represented without equating domain IDs or inventing a common origin.
 
 Two anchors must use the same two distinct domains and strictly increase in both domains. The slope is the reduced positive rational target-span/source-span, and the first anchor defines the offset. Original anchors remain inspectable. All timestamp differences, rational scaling and additions use checked integer arithmetic; only representable signed nanosecond timestamps are returned. Ordinary products use checked i128, with a bounded integer division fallback for wide products whose quotient remains representable. No floating-point interpolation or accumulating transport/seek anchors are used.

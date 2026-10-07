@@ -18,7 +18,8 @@ pub const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 /// Rejected setup, admission or frontier operation; merger state is unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MergeError {
-    /// Setup requires 1..=64 distinct devices and 1..=65536 pending slots.
+    /// Setup requires 1..=64 fixed sources or 1..=4096 dynamic source slots,
+    /// and 1..=65536 pending slots.
     InvalidConfiguration,
     /// A supplied clock point or normalized event uses another domain.
     DomainMismatch {
@@ -56,6 +57,8 @@ pub enum MergeError {
     },
     /// The configured pending entry capacity is full.
     Capacity,
+    /// The cumulative dynamic source registration capacity is full.
+    SourceCapacity,
     /// Heap storage plus owned pending payload capacities exceed 64 MiB.
     StorageCapacity,
     /// Scheduling lag must be nonnegative and at most one second.
@@ -79,7 +82,7 @@ impl fmt::Display for MergeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidConfiguration => {
-                f.write_str("input merge needs 1..64 distinct devices and 1..65536 slots")
+                f.write_str("input merge needs 1..64 fixed devices or 1..4096 dynamic source slots, and 1..65536 pending slots")
             }
             Self::DomainMismatch { expected, actual } => write!(
                 f,
@@ -132,6 +135,7 @@ impl fmt::Display for MergeError {
                 source.0
             ),
             Self::Capacity => f.write_str("local input pending capacity exhausted"),
+            Self::SourceCapacity => f.write_str("local input cumulative source capacity exhausted"),
             Self::StorageCapacity => f.write_str("local input retained storage exceeds 64 MiB"),
             Self::InvalidLag => f.write_str("input merge lag must be 0..1000000000ns"),
             Self::FrontierRegression { last, received } => write!(
@@ -197,6 +201,8 @@ pub struct InputMerger {
     domain: ClockDomainId,
     origin: Timestamp,
     sources: Vec<SourceState>,
+    source_capacity: usize,
+    dynamic_sources: bool,
     capacity: usize,
     pending: BinaryHeap<Pending>,
     fixed_bytes: usize,
@@ -212,28 +218,53 @@ impl InputMerger {
         devices: Vec<DeviceId>,
         capacity: usize,
     ) -> Result<Self, MergeError> {
+        let mut merger = Self::new_reserved(domain, origin, devices.len(), capacity, false)?;
+        for device in devices {
+            let index = merger
+                .sources
+                .binary_search_by_key(&device, |source| source.device)
+                .err()
+                .ok_or(MergeError::InvalidConfiguration)?;
+            merger
+                .sources
+                .insert(index, SourceState { device, last: None });
+        }
+        Ok(merger)
+    }
+
+    /// Starts empty with 1..=4096 cumulative source slots and 1..=65536 events.
+    /// Source storage is reserved at setup, separately from the pending-byte
+    /// budget. Explicit registration must precede admission of a source's input.
+    pub fn new_dynamic(
+        domain: ClockDomainId,
+        origin: ClockPoint,
+        max_sources: usize,
+        capacity: usize,
+    ) -> Result<Self, MergeError> {
+        Self::new_reserved(domain, origin, max_sources, capacity, true)
+    }
+
+    fn new_reserved(
+        domain: ClockDomainId,
+        origin: ClockPoint,
+        source_capacity: usize,
+        capacity: usize,
+        dynamic_sources: bool,
+    ) -> Result<Self, MergeError> {
         if origin.domain != domain {
             return Err(MergeError::DomainMismatch {
                 expected: domain,
                 actual: origin.domain,
             });
         }
-        if !(1..=64).contains(&devices.len()) || !(1..=65536).contains(&capacity) {
+        let max_sources = if dynamic_sources { 4096 } else { 64 };
+        if !(1..=max_sources).contains(&source_capacity) || !(1..=65536).contains(&capacity) {
             return Err(MergeError::InvalidConfiguration);
         }
         let mut sources = Vec::new();
         sources
-            .try_reserve_exact(devices.len())
+            .try_reserve_exact(source_capacity)
             .map_err(|_| MergeError::AllocationFailed)?;
-        for device in devices {
-            if sources
-                .iter()
-                .any(|source: &SourceState| source.device == device)
-            {
-                return Err(MergeError::InvalidConfiguration);
-            }
-            sources.push(SourceState { device, last: None });
-        }
         let mut pending = BinaryHeap::new();
         pending
             .try_reserve_exact(capacity)
@@ -249,6 +280,8 @@ impl InputMerger {
             domain,
             origin: origin.timestamp,
             sources,
+            source_capacity,
+            dynamic_sources,
             capacity,
             pending,
             fixed_bytes,
@@ -256,6 +289,39 @@ impl InputMerger {
             next_ordinal: 0,
             committed: None,
         })
+    }
+
+    /// Registers an actual acquired source without allocating or resetting its
+    /// chronology. Known IDs are idempotent in both modes; fixed mode refuses
+    /// unknown IDs. Registrations last for the session, including after device
+    /// removal, so the dynamic bound counts all IDs ever registered.
+    pub fn register_source(&mut self, device: DeviceId) -> Result<(), MergeError> {
+        let index = match self
+            .sources
+            .binary_search_by_key(&device, |source| source.device)
+        {
+            Ok(_) => return Ok(()),
+            Err(index) => index,
+        };
+        if !self.dynamic_sources {
+            return Err(MergeError::UnknownDevice(device));
+        }
+        if self.sources.len() == self.source_capacity {
+            return Err(MergeError::SourceCapacity);
+        }
+        self.sources
+            .insert(index, SourceState { device, last: None });
+        Ok(())
+    }
+
+    /// Cumulative registered source count; device removal does not lower it.
+    pub fn source_count(&self) -> usize {
+        self.sources.len()
+    }
+
+    /// Declared source bound, independent of pending event and byte capacities.
+    pub fn source_capacity(&self) -> usize {
+        self.source_capacity
     }
 
     /// Admits exact input after all validation; every failure is state-atomic.
@@ -278,9 +344,8 @@ impl InputMerger {
         }
         let source_index = self
             .sources
-            .iter()
-            .position(|source| source.device == meta.source)
-            .ok_or(MergeError::UnknownDevice(meta.source))?;
+            .binary_search_by_key(&meta.source, |source| source.device)
+            .map_err(|_| MergeError::UnknownDevice(meta.source))?;
         if meta.timestamp < self.origin {
             return Err(MergeError::BeforeOrigin {
                 timestamp: meta.timestamp,
@@ -394,6 +459,19 @@ impl InputMerger {
         }))
     }
 
+    /// Inspects the earliest exact eligible event without changing queue or accounting.
+    pub fn peek_ready(
+        &self,
+        frontier: ClockPoint,
+    ) -> Result<Option<&PhysicalInputEvent>, MergeError> {
+        self.validate_frontier(frontier)?;
+        Ok(self
+            .pending
+            .peek()
+            .filter(|item| item.key.0 <= frontier.timestamp)
+            .map(|item| &item.event))
+    }
+
     /// Removes the earliest exact event at/before a validated frontier.
     ///
     /// This does not commit deadlines. The caller must process each returned
@@ -479,6 +557,10 @@ fn owned_payload_bytes(event: &PhysicalInputEvent) -> usize {
         | PhysicalInputEvent::Pose(_) => 0,
     }
 }
+
+#[cfg(test)]
+#[path = "local_input_registration_fixtures.rs"]
+mod registration_fixtures;
 
 #[cfg(test)]
 mod tests {
@@ -650,15 +732,13 @@ mod tests {
         merge
             .admit(button(2, 2, 1, ButtonState::Down), point(10))
             .unwrap();
-        assert!(
-            InputMerger::new(
-                ClockDomainId(10),
-                point(0),
-                vec![DeviceId(1), DeviceId(1)],
-                2
-            )
-            .is_err()
-        );
+        assert!(InputMerger::new(
+            ClockDomainId(10),
+            point(0),
+            vec![DeviceId(1), DeviceId(1)],
+            2
+        )
+        .is_err());
         assert!(InputMerger::new(ClockDomainId(10), point(0), vec![], 2).is_err());
         assert!(InputMerger::new(ClockDomainId(10), point(0), vec![DeviceId(1)], 0).is_err());
         // A logically empty report still owns its allocation. Exercise the

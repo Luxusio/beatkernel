@@ -9,6 +9,8 @@ pub mod asset_source;
 #[cfg(test)]
 mod asset_source_fixtures;
 mod audio_assets;
+/// Shared finite audio-output authority and original acquired-input correspondence.
+pub mod audio_authority;
 /// Prepared original-song image selections shared by live and replay presentation.
 pub mod bga;
 /// Rolling BGM admission on an explicitly configured output frame grid.

@@ -1074,6 +1074,25 @@ or a browser. This changes no PCM callback or serialized byte format.
 
 ## Bounded input/output clock discipline
 
+This section records the prior implementation contract. The mandatory
+host-transport rate-correction policy is superseded by
+[audio-authoritative playback](ADR__audio-authoritative-playback.md). Migration
+is pending: the current browser still runs the loop below and its reproduced
+`BaseRateOutOfBounds` failure remains unresolved. Retain the generic estimator
+and original error/chronology tests as capability evidence; do not claim the
+new player architecture is implemented merely by disabling an error.
+
+The replacement shall use audio output position as play-time authority and
+retain original Window event timestamps only for explicit input-to-audio
+correlation. Host timers must not advance judged song time while audio is
+paused or unavailable. Actual presented position and rendered Worklet frames
+remain distinct. Estimated output observations must not gain an invented
+accuracy bound. Section/replay identity, accepted input chronology, output
+epochs and already committed audio remain intact. Verification must include
+pure delayed-input/paused-output/estimate-jump/epoch traces plus real current
+browser playback and recording/replay; the prior QA failure blocks completion
+until the replacement and applicable independent gates pass.
+
 The browser gameplay owner shall reuse the existing portable native
 PresentationDiscipline with preallocated bounded observations. Actual paired
 output position and Window performanceTime estimate provide its only evidence;

@@ -1,0 +1,668 @@
+//! Finite audio-output authority and original HOST input correspondence.
+//! InputMerger owns acquired payloads; this owner reads no clock or device.
+use crate::local_input::{InputMerger, MergeError};
+use beatkernel::time::{
+    AffineClockMapper, CalibrationError, ClockDomainId, ClockInterval, ClockPair, ClockPoint,
+    Duration, ExtrapolationPolicy, Timestamp, presentation::ObservationAdmission,
+};
+use std::{collections::VecDeque, fmt};
+
+/// Storage, freshness and explicit input-prediction permissions, not accuracy bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioAuthorityConfig {
+    pub history_capacity: usize,
+    pub max_observation_age: Duration,
+    pub input_extrapolation: ExtrapolationPolicy,
+    pub max_input_ahead: Duration,
+}
+impl Default for AudioAuthorityConfig {
+    fn default() -> Self {
+        Self {
+            history_capacity: 64,
+            max_observation_age: Duration::from_nanos(1_000_000_000),
+            input_extrapolation: ExtrapolationPolicy::Forbid,
+            max_input_ahead: Duration::ZERO,
+        }
+    }
+}
+
+/// Raw stream and logical audio origins remain distinct from acquisition HOST.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioAuthorityEpoch {
+    pub id: u64,
+    pub stream_origin: ClockPoint,
+    pub logical_origin: ClockPoint,
+    pub host_domain: ClockDomainId,
+}
+
+/// Rejection before changing retained observations or any watermark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioAuthorityError {
+    InvalidConfig,
+    DomainMismatch,
+    WrongEpoch,
+    ObservationRegression,
+    PrefixRegression,
+    OperationRegression,
+    HistoryExpired,
+    HistoryCapacity,
+    PendingInputs,
+    StalePreparation,
+    Overflow,
+    AllocationFailed,
+    Calibration(CalibrationError),
+    Merge(MergeError),
+}
+impl fmt::Display for AudioAuthorityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "audio authority: {self:?}")
+    }
+}
+impl std::error::Error for AudioAuthorityError {}
+impl From<CalibrationError> for AudioAuthorityError {
+    fn from(error: CalibrationError) -> Self {
+        Self::Calibration(error)
+    }
+}
+impl From<MergeError> for AudioAuthorityError {
+    fn from(error: MergeError) -> Self {
+        Self::Merge(error)
+    }
+}
+
+/// Exact semantic state relevant to preparing and committing one operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreparationState {
+    revision: u64,
+    config: AudioAuthorityConfig,
+    epoch: AudioAuthorityEpoch,
+    first: Option<ClockPair>,
+    latest: Option<ClockPair>,
+    history_len: usize,
+    acquired: Option<ClockPoint>,
+    closed: Option<ClockPoint>,
+    input_host: Option<ClockPoint>,
+    operation: Option<ClockPoint>,
+    presentation: Option<ClockPoint>,
+}
+
+/// Frozen mapping for one original acquired input. The caller retains its payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedInput {
+    state: PreparationState,
+    original: ClockPoint,
+    now: ClockPoint,
+    output: ClockPoint,
+    mapper: AffineClockMapper,
+}
+impl PreparedInput {
+    pub const fn original(&self) -> ClockPoint {
+        self.original
+    }
+    pub const fn output(&self) -> ClockPoint {
+        self.output
+    }
+    pub const fn mapper(&self) -> &AffineClockMapper {
+        &self.mapper
+    }
+    pub const fn epoch(&self) -> u64 {
+        self.state.epoch.id
+    }
+}
+
+/// Actual observed presentation joined to the entire drained acquired HOST prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedFrontier {
+    state: PreparationState,
+    now: ClockPoint,
+    host: ClockPoint,
+    observed_host: ClockPoint,
+    output: ClockPoint,
+    advance: Option<ClockPoint>,
+}
+impl PreparedFrontier {
+    pub const fn host(&self) -> ClockPoint {
+        self.host
+    }
+    pub const fn observed_host(&self) -> ClockPoint {
+        self.observed_host
+    }
+    pub const fn output(&self) -> ClockPoint {
+        self.output
+    }
+    pub const fn advance(&self) -> Option<ClockPoint> {
+        self.advance
+    }
+    pub const fn epoch(&self) -> u64 {
+        self.state.epoch.id
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedEpoch {
+    state: PreparationState,
+    next: AudioAuthorityEpoch,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedRestart {
+    state: PreparationState,
+}
+
+/// Cold-preallocated real observations; no duplicate acquired-input queue or rate loop.
+#[derive(Debug)]
+pub struct AudioAuthority {
+    config: AudioAuthorityConfig,
+    epoch: AudioAuthorityEpoch,
+    history: VecDeque<ClockPair>,
+    revision: u64,
+    acquired: Option<ClockPoint>,
+    closed: Option<ClockPoint>,
+    input_host: Option<ClockPoint>,
+    operation: Option<ClockPoint>,
+    presentation: Option<ClockPoint>,
+}
+impl AudioAuthority {
+    pub fn new(
+        config: AudioAuthorityConfig,
+        epoch: AudioAuthorityEpoch,
+    ) -> Result<Self, AudioAuthorityError> {
+        let negative_extrapolation = matches!(config.input_extrapolation,
+            ExtrapolationPolicy::Bounded { before, after } if before < Duration::ZERO || after < Duration::ZERO);
+        if !(2..=1024).contains(&config.history_capacity)
+            || config.max_observation_age <= Duration::ZERO
+            || config.max_input_ahead < Duration::ZERO
+            || negative_extrapolation
+        {
+            return Err(AudioAuthorityError::InvalidConfig);
+        }
+        validate_epoch_domains(epoch)?;
+        let mut history = VecDeque::new();
+        history
+            .try_reserve_exact(config.history_capacity)
+            .map_err(|_| AudioAuthorityError::AllocationFailed)?;
+        Ok(Self {
+            config,
+            epoch,
+            history,
+            revision: 0,
+            acquired: None,
+            closed: None,
+            input_host: None,
+            operation: None,
+            presentation: None,
+        })
+    }
+    pub const fn config(&self) -> AudioAuthorityConfig {
+        self.config
+    }
+    pub const fn epoch(&self) -> AudioAuthorityEpoch {
+        self.epoch
+    }
+    pub fn latest_observation(&self) -> Option<ClockPair> {
+        self.history.back().copied()
+    }
+    pub const fn acquired_prefix(&self) -> Option<ClockPoint> {
+        self.acquired
+    }
+    pub const fn closed_host_prefix(&self) -> Option<ClockPoint> {
+        self.closed
+    }
+    pub const fn committed_input_host(&self) -> Option<ClockPoint> {
+        self.input_host
+    }
+    pub const fn committed_operation(&self) -> Option<ClockPoint> {
+        self.operation
+    }
+    pub const fn committed_presentation(&self) -> Option<ClockPoint> {
+        self.presentation
+    }
+    pub fn history_len(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Retain only progressing original evidence. Unchanged output never refreshes age.
+    pub fn observe(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+    ) -> Result<ObservationAdmission, AudioAuthorityError> {
+        if epoch != self.epoch.id {
+            return Err(AudioAuthorityError::WrongEpoch);
+        }
+        if pair.source.domain != self.epoch.stream_origin.domain
+            || pair.target.domain != self.epoch.host_domain
+        {
+            return Err(AudioAuthorityError::DomainMismatch);
+        }
+        let output = self.logical(pair.source)?;
+        if self
+            .presentation
+            .is_some_and(|last| output.timestamp < last.timestamp)
+        {
+            return Err(AudioAuthorityError::ObservationRegression);
+        }
+        if let Some(previous) = self.latest_observation() {
+            if pair.source.timestamp < previous.source.timestamp
+                || pair.target.timestamp < previous.target.timestamp
+            {
+                return Err(AudioAuthorityError::ObservationRegression);
+            }
+            if pair.source.timestamp == previous.source.timestamp {
+                return Ok(ObservationAdmission::Unchanged);
+            }
+            if pair.target.timestamp == previous.target.timestamp {
+                return Err(AudioAuthorityError::ObservationRegression);
+            }
+            // Validate the complete new observed interval before changing storage.
+            self.mapper(
+                previous,
+                pair,
+                ClockInterval {
+                    start: previous.target.timestamp,
+                    end: pair.target.timestamp,
+                },
+                ExtrapolationPolicy::Forbid,
+            )?;
+        }
+        let retire = self.history.len() == self.config.history_capacity;
+        if retire
+            && !self
+                .closed
+                .is_some_and(|closed| self.history[1].target.timestamp <= closed.timestamp)
+        {
+            return Err(AudioAuthorityError::HistoryCapacity);
+        }
+        let revision = self.next_revision()?;
+        if retire {
+            self.history.pop_front();
+        }
+        self.history.push_back(pair);
+        self.revision = revision;
+        Ok(ObservationAdmission::Retained)
+    }
+
+    /// Acquisition coverage alone neither consumes input nor grants audio progress.
+    pub fn record_acquired_prefix(
+        &mut self,
+        prefix: ClockPoint,
+    ) -> Result<(), AudioAuthorityError> {
+        self.validate_host(prefix)?;
+        if self
+            .acquired
+            .is_some_and(|last| prefix.timestamp < last.timestamp)
+        {
+            return Err(AudioAuthorityError::PrefixRegression);
+        }
+        if self.acquired == Some(prefix) {
+            return Ok(());
+        }
+        let revision = self.next_revision()?;
+        self.acquired = Some(prefix);
+        self.revision = revision;
+        Ok(())
+    }
+
+    /// Prepare before popping the earliest merger input; retain unknown-quality mapping.
+    pub fn prepare_input(
+        &self,
+        original: ClockPoint,
+        now: ClockPoint,
+    ) -> Result<Option<PreparedInput>, AudioAuthorityError> {
+        self.validate_host(original)?;
+        self.validate_host(now)?;
+        if self
+            .closed
+            .is_some_and(|closed| original.timestamp <= closed.timestamp)
+            || self
+                .input_host
+                .is_some_and(|last| original.timestamp < last.timestamp)
+        {
+            return Err(AudioAuthorityError::OperationRegression);
+        }
+        if original.timestamp > now.timestamp
+            || self
+                .acquired
+                .is_none_or(|prefix| original.timestamp > prefix.timestamp)
+            || self.history.len() < 2
+            || !self.fresh(now)?
+        {
+            return Ok(None);
+        }
+        let first = self.history[0];
+        let latest = *self.history.back().expect("two real anchors were checked");
+        let (left, right, validity, extrapolation) = if original.timestamp < first.target.timestamp
+        {
+            let ExtrapolationPolicy::Bounded { before, .. } = self.config.input_extrapolation
+            else {
+                return Err(AudioAuthorityError::HistoryExpired);
+            };
+            let start = add(first.target.timestamp, -i128::from(before.as_nanos()))?;
+            if original.timestamp < start {
+                return Err(AudioAuthorityError::HistoryExpired);
+            }
+            (
+                first,
+                self.history[1],
+                ClockInterval {
+                    start,
+                    end: self.history[1].target.timestamp,
+                },
+                ExtrapolationPolicy::Bounded {
+                    before,
+                    after: Duration::ZERO,
+                },
+            )
+        } else if original.timestamp > latest.target.timestamp {
+            let ExtrapolationPolicy::Bounded { after, .. } = self.config.input_extrapolation else {
+                return Ok(None);
+            };
+            let end = add(latest.target.timestamp, i128::from(after.as_nanos()))?;
+            if original.timestamp > end {
+                return Ok(None);
+            }
+            let left = self.history[self.history.len() - 2];
+            (
+                left,
+                latest,
+                ClockInterval {
+                    start: left.target.timestamp,
+                    end,
+                },
+                ExtrapolationPolicy::Bounded {
+                    before: Duration::ZERO,
+                    after,
+                },
+            )
+        } else {
+            let index = (0..self.history.len() - 1)
+                .find(|&index| original.timestamp <= self.history[index + 1].target.timestamp)
+                .expect("point lies within retained real anchors");
+            let left = self.history[index];
+            let right = self.history[index + 1];
+            (
+                left,
+                right,
+                ClockInterval {
+                    start: left.target.timestamp,
+                    end: right.target.timestamp,
+                },
+                ExtrapolationPolicy::Forbid,
+            )
+        };
+        let mapper = self.mapper(left, right, validity, extrapolation)?;
+        let output = ClockPoint {
+            domain: self.epoch.logical_origin.domain,
+            timestamp: mapper.map_checked(original, self.epoch.logical_origin.domain)?,
+        };
+        if original.timestamp > latest.target.timestamp
+            && delta(output.timestamp, self.logical(latest.source)?.timestamp)
+                > i128::from(self.config.max_input_ahead.as_nanos())
+        {
+            return Ok(None);
+        }
+        if self
+            .operation
+            .is_some_and(|last| output.timestamp < last.timestamp)
+        {
+            return Err(AudioAuthorityError::OperationRegression);
+        }
+        self.next_revision()?;
+        Ok(Some(PreparedInput {
+            state: self.state(),
+            original,
+            now,
+            output,
+            mapper,
+        }))
+    }
+
+    /// Commit the actual Runtime operation once; post-report observer faults do not undo it.
+    pub fn commit_input(&mut self, prepared: PreparedInput) -> Result<(), AudioAuthorityError> {
+        if prepared.state != self.state()
+            || self.prepare_input(prepared.original, prepared.now)? != Some(prepared)
+        {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        let revision = self.next_revision()?;
+        self.input_host = Some(prepared.original);
+        self.operation = Some(prepared.output);
+        self.revision = revision;
+        Ok(())
+    }
+
+    /// Only a real observation covered by a fully drained HOST prefix grants presentation.
+    pub fn prepare_frontier(
+        &self,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<Option<PreparedFrontier>, AudioAuthorityError> {
+        self.validate_host(now)?;
+        let Some(host) = self.acquired else {
+            return Ok(None);
+        };
+        if merger.peek_ready(host)?.is_some()
+            || host.timestamp > now.timestamp
+            || self.history.len() < 2
+            || !self.fresh(now)?
+        {
+            return Ok(None);
+        }
+        let Some(pair) = self
+            .history
+            .iter()
+            .rev()
+            .find(|pair| pair.target.timestamp <= host.timestamp)
+        else {
+            return Ok(None);
+        };
+        if !self.pair_is_fresh(*pair, now) {
+            return Ok(None);
+        }
+        let output = self.logical(pair.source)?;
+        if self
+            .presentation
+            .is_some_and(|last| output.timestamp < last.timestamp)
+        {
+            return Err(AudioAuthorityError::ObservationRegression);
+        }
+        if self.closed == Some(host) && self.presentation == Some(output) {
+            return Ok(None);
+        }
+        let advance = self
+            .operation
+            .is_none_or(|last| output.timestamp > last.timestamp)
+            .then_some(output);
+        self.next_revision()?;
+        Ok(Some(PreparedFrontier {
+            state: self.state(),
+            now,
+            host,
+            observed_host: pair.target,
+            output,
+            advance,
+        }))
+    }
+
+    pub fn commit_frontier(
+        &mut self,
+        prepared: PreparedFrontier,
+        merger: &mut InputMerger,
+    ) -> Result<(), AudioAuthorityError> {
+        if prepared.state != self.state()
+            || self.prepare_frontier(prepared.now, merger)? != Some(prepared)
+        {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        let revision = self.next_revision()?;
+        // Existing commit rechecks the entire prefix before either owner changes.
+        merger.commit(prepared.host)?;
+        self.closed = Some(prepared.host);
+        self.presentation = Some(prepared.output);
+        if let Some(output) = prepared.advance {
+            self.operation = Some(output);
+        }
+        self.revision = revision;
+        Ok(())
+    }
+
+    pub fn prepare_epoch(
+        &self,
+        next: AudioAuthorityEpoch,
+        merger: &InputMerger,
+    ) -> Result<PreparedEpoch, AudioAuthorityError> {
+        validate_epoch_domains(next)?;
+        if next.id <= self.epoch.id {
+            return Err(AudioAuthorityError::WrongEpoch);
+        }
+        if next.logical_origin.domain != self.epoch.logical_origin.domain
+            || next.host_domain != self.epoch.host_domain
+        {
+            return Err(AudioAuthorityError::DomainMismatch);
+        }
+        if self
+            .operation
+            .is_some_and(|last| next.logical_origin.timestamp < last.timestamp)
+        {
+            return Err(AudioAuthorityError::OperationRegression);
+        }
+        if merger.pending() != 0 {
+            return Err(AudioAuthorityError::PendingInputs);
+        }
+        self.next_revision()?;
+        Ok(PreparedEpoch {
+            state: self.state(),
+            next,
+        })
+    }
+    pub fn commit_epoch(
+        &mut self,
+        prepared: PreparedEpoch,
+        merger: &InputMerger,
+    ) -> Result<(), AudioAuthorityError> {
+        if prepared.state != self.state() || self.prepare_epoch(prepared.next, merger)? != prepared
+        {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        let revision = self.next_revision()?;
+        self.epoch = prepared.next;
+        self.history.clear();
+        self.revision = revision;
+        Ok(())
+    }
+    pub fn prepare_correlation_restart(
+        &self,
+        merger: &InputMerger,
+    ) -> Result<PreparedRestart, AudioAuthorityError> {
+        if merger.pending() != 0 {
+            return Err(AudioAuthorityError::PendingInputs);
+        }
+        self.next_revision()?;
+        Ok(PreparedRestart {
+            state: self.state(),
+        })
+    }
+    pub fn commit_correlation_restart(
+        &mut self,
+        prepared: PreparedRestart,
+        merger: &InputMerger,
+    ) -> Result<(), AudioAuthorityError> {
+        if prepared.state != self.state() || self.prepare_correlation_restart(merger)? != prepared {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        let revision = self.next_revision()?;
+        self.history.clear();
+        self.revision = revision;
+        Ok(())
+    }
+    fn state(&self) -> PreparationState {
+        PreparationState {
+            revision: self.revision,
+            config: self.config,
+            epoch: self.epoch,
+            first: self.history.front().copied(),
+            latest: self.latest_observation(),
+            history_len: self.history.len(),
+            acquired: self.acquired,
+            closed: self.closed,
+            input_host: self.input_host,
+            operation: self.operation,
+            presentation: self.presentation,
+        }
+    }
+    fn next_revision(&self) -> Result<u64, AudioAuthorityError> {
+        self.revision
+            .checked_add(1)
+            .ok_or(AudioAuthorityError::Overflow)
+    }
+    fn validate_host(&self, point: ClockPoint) -> Result<(), AudioAuthorityError> {
+        if point.domain != self.epoch.host_domain {
+            Err(AudioAuthorityError::DomainMismatch)
+        } else {
+            Ok(())
+        }
+    }
+    fn logical(&self, stream: ClockPoint) -> Result<ClockPoint, AudioAuthorityError> {
+        if stream.domain != self.epoch.stream_origin.domain {
+            return Err(AudioAuthorityError::DomainMismatch);
+        }
+        Ok(ClockPoint {
+            domain: self.epoch.logical_origin.domain,
+            timestamp: add(
+                self.epoch.logical_origin.timestamp,
+                delta(stream.timestamp, self.epoch.stream_origin.timestamp),
+            )?,
+        })
+    }
+    fn mapper(
+        &self,
+        first: ClockPair,
+        second: ClockPair,
+        validity: ClockInterval,
+        extrapolation: ExtrapolationPolicy,
+    ) -> Result<AffineClockMapper, AudioAuthorityError> {
+        Ok(AffineClockMapper::from_pairs_unknown(
+            ClockPair {
+                source: first.target,
+                target: self.logical(first.source)?,
+            },
+            ClockPair {
+                source: second.target,
+                target: self.logical(second.source)?,
+            },
+            validity,
+            extrapolation,
+        )?)
+    }
+    fn fresh(&self, now: ClockPoint) -> Result<bool, AudioAuthorityError> {
+        self.validate_host(now)?;
+        Ok(self
+            .latest_observation()
+            .is_some_and(|pair| self.pair_is_fresh(pair, now)))
+    }
+    fn pair_is_fresh(&self, pair: ClockPair, now: ClockPoint) -> bool {
+        let age = delta(now.timestamp, pair.target.timestamp);
+        age >= 0 && age <= i128::from(self.config.max_observation_age.as_nanos())
+    }
+}
+fn validate_epoch_domains(epoch: AudioAuthorityEpoch) -> Result<(), AudioAuthorityError> {
+    if epoch.host_domain == epoch.stream_origin.domain
+        || epoch.host_domain == epoch.logical_origin.domain
+        || epoch.stream_origin.domain == epoch.logical_origin.domain
+    {
+        Err(AudioAuthorityError::DomainMismatch)
+    } else {
+        Ok(())
+    }
+}
+fn delta(later: Timestamp, earlier: Timestamp) -> i128 {
+    i128::from(later.as_nanos()) - i128::from(earlier.as_nanos())
+}
+fn add(origin: Timestamp, offset: i128) -> Result<Timestamp, AudioAuthorityError> {
+    i64::try_from(i128::from(origin.as_nanos()) + offset)
+        .map(Timestamp::from_nanos)
+        .map_err(|_| AudioAuthorityError::Overflow)
+}
+
+#[cfg(test)]
+#[path = "audio_authority_fixtures.rs"]
+mod audio_authority_fixtures;

@@ -3,6 +3,8 @@
 //! module does not sample a platform clock or infer delivery from admission.
 use crate::{
     PreparedBms,
+    audio_authority::{AudioAuthority, AudioAuthorityError, PreparedInput, PreparedFrontier},
+    local_input::InputMerger,
     bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     competition::{CompetitionError, ScoreSummary},
     completion::{CompletionError, SongCompletion},
@@ -91,6 +93,8 @@ pub enum StepGameplayError {
     Runtime(GroupError),
     /// Original clock discipline failure; committed judgments remain retained.
     Clock(DisciplineError),
+    /// Audio correspondence failure, distinct from optional legacy rate discipline.
+    AudioAuthority(AudioAuthorityError),
     /// The report's judgments remain committed even when audio admission failed.
     /// Score aggregation is atomic; its error preserves the previous score.
     Report {
@@ -177,6 +181,7 @@ impl fmt::Display for StepGameplayError {
             Self::SequenceOverflow => f.write_str("audio batch sequence exhausted"),
             Self::Runtime(error) => write!(f, "step gameplay: {error}"),
             Self::Clock(error) => write!(f, "step gameplay: {error}"),
+            Self::AudioAuthority(error) => write!(f, "step gameplay: {error}"),
             Self::Report {
                 report,
                 score_error,
@@ -262,6 +267,23 @@ impl fmt::Display for StepGameplayError {
     }
 }
 impl Error for StepGameplayError {}
+impl From<AudioAuthorityError> for StepGameplayError {
+    fn from(error: AudioAuthorityError) -> Self {
+        Self::AudioAuthority(error)
+    }
+}
+
+// Logical progression and raw scheduling points already belong to their declared
+// Runtime domains; no cross-domain conversion is supplied for deadline advancement.
+struct AudioDomains;
+impl ClockMapper for AudioDomains {
+    fn map(&self, _: ClockPoint, _: ClockDomainId) -> Option<Timestamp> {
+        None
+    }
+    fn quality(&self) -> beatkernel::time::ClockMappingQuality {
+        beatkernel::time::ClockMappingQuality::Unknown
+    }
+}
 
 enum InputSetup {
     Solo(BindingMap),
@@ -355,6 +377,7 @@ pub struct StepGameplay {
     last_render: Option<RenderReport>,
     last_presented: Option<Timestamp>,
     output_clock: Option<PresentationDiscipline>,
+    authority: Option<AudioAuthority>,
     correction_watermark: Option<ClockPoint>,
     capture: Option<LiveReplayCapture>,
     capture_configured: bool,
@@ -364,6 +387,7 @@ pub struct StepGameplay {
     completed_result: Option<CompletedPlayResult>,
     song: Timestamp,
     host_domain: ClockDomainId,
+    logical_domain: ClockDomainId,
     start: Timestamp,
     end: Option<Timestamp>,
     input_mode: BmsInputMode,
@@ -456,6 +480,28 @@ impl StepGameplay {
             start,
             end,
             input_mode,
+            None,
+        )
+    }
+
+    /// Fresh solo gameplay normalized on the logical audio timeline.
+    pub fn new_audio_section(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        bindings: BindingMap,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        authority: AudioAuthority,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            InputSetup::Solo(bindings),
+            start,
+            end,
+            input_mode,
+            Some(authority),
         )
     }
 
@@ -466,7 +512,30 @@ impl StepGameplay {
         start: Timestamp,
         end: Option<Timestamp>,
         input_mode: BmsInputMode,
+        authority: Option<AudioAuthority>,
     ) -> Result<(Self, SampleBank), StepGameplayError> {
+        let logical_origin = if let Some(authority) = &authority {
+            let epoch = authority.epoch();
+            if epoch.host_domain != config.host_origin.domain
+                || epoch.stream_origin != config.output_origin
+                || authority.committed_input_host().is_some()
+                || authority.committed_operation().is_some()
+                || authority.committed_presentation().is_some()
+                || authority.closed_host_prefix().is_some()
+                || epoch
+                    .logical_origin
+                    .timestamp
+                    .checked_add(config.preroll)
+                    .is_none()
+            {
+                return Err(StepGameplayError::InvalidConfiguration(
+                    "audio setup requires matching pristine origins",
+                ));
+            }
+            epoch.logical_origin
+        } else {
+            config.host_origin
+        };
         if config.host_origin.domain == config.output_origin.domain {
             return Err(StepGameplayError::InvalidConfiguration(
                 "host and output domains must be distinct",
@@ -762,7 +831,7 @@ impl StepGameplay {
         })?;
         let (producer, consumer) = command_queue(config.command_capacity)
             .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
-        let transport = Transport::new(config.host_origin.timestamp, song, Rate::NORMAL);
+        let transport = Transport::new(logical_origin.timestamp, song, Rate::NORMAL);
         let mut runtime = match runtime_setup {
             RuntimeSetup::Solo {
                 bindings,
@@ -771,7 +840,7 @@ impl StepGameplay {
                 hazard_sounds,
             } => {
                 let mut solo = SoloRuntime::new(
-                    config.host_origin.domain,
+                    logical_origin.domain,
                     config.output_origin.domain,
                     transport,
                     bindings,
@@ -798,7 +867,7 @@ impl StepGameplay {
                 hazard_sounds,
             } => {
                 let mut group = RuntimeGroup::new(
-                    config.host_origin.domain,
+                    logical_origin.domain,
                     config.output_origin.domain,
                     transport,
                     producer,
@@ -838,6 +907,7 @@ impl StepGameplay {
             last_render: None,
             last_presented: None,
             output_clock: None,
+            authority,
             correction_watermark: None,
             capture: None,
             capture_configured: false,
@@ -847,6 +917,7 @@ impl StepGameplay {
             completed_result: None,
             song,
             host_domain: config.host_origin.domain,
+            logical_domain: logical_origin.domain,
             start,
             end,
             input_mode,
@@ -905,7 +976,7 @@ impl StepGameplay {
         }
         setup_gauge_header(
             self.runtime.judge(),
-            self.host_domain,
+            self.logical_domain,
             limits,
             self.start,
             chart_seed,
@@ -971,7 +1042,7 @@ impl StepGameplay {
         }
         let capture = LiveReplayCapture::new_with_gauge(
             self.runtime.judge(),
-            self.host_domain,
+            self.logical_domain,
             limits,
             self.start,
             chart_seed,
@@ -1057,6 +1128,196 @@ impl StepGameplay {
             })
     }
 
+    /// Activate the pristine logical audio anchor without replacing it with HOST time.
+    pub fn activate_audio(&mut self) -> Result<(), StepGameplayError> {
+        self.ensure_usable()?;
+        if self.authority.is_none() || self.activated || self.started {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "audio activation requires pristine audio mode",
+            ));
+        }
+        self.activated = true;
+        Ok(())
+    }
+
+    pub fn audio_authority(&self) -> Option<&AudioAuthority> {
+        self.authority.as_ref()
+    }
+
+    pub fn observe_audio_output(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+    ) -> Result<ObservationAdmission, StepGameplayError> {
+        self.ensure_audio()?;
+        self.authority
+            .as_mut()
+            .expect("audio mode checked")
+            .observe(epoch, pair)
+            .map_err(Into::into)
+    }
+
+    pub fn record_audio_prefix(&mut self, prefix: ClockPoint) -> Result<(), StepGameplayError> {
+        self.ensure_audio()?;
+        self.authority
+            .as_mut()
+            .expect("audio mode checked")
+            .record_acquired_prefix(prefix)
+            .map_err(Into::into)
+    }
+
+    pub fn process_next_audio_input(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+        position: Option<Position2>,
+    ) -> Result<Option<RuntimeReport>, StepGameplayError> {
+        self.ensure_solo()?;
+        let Some(prepared) = self.prepare_audio_input(merger, now, audio_at, position)? else {
+            return Ok(None);
+        };
+        let prefix = self
+            .authority
+            .as_ref()
+            .expect("audio mode checked")
+            .acquired_prefix()
+            .expect("prepared input has acquired prefix");
+        let event = merger
+            .pop_ready(prefix)
+            .map_err(AudioAuthorityError::from)?
+            .expect("private preparation inspected this earliest input");
+        self.started = true;
+        let runtime = self.runtime.solo_mut()?;
+        let result = match position {
+            Some(position) => {
+                runtime.process_input_at(event, position, prepared.mapper(), audio_at)
+            }
+            None => runtime.process_input(event, prepared.mapper(), audio_at),
+        };
+        if result.is_ok() {
+            self.commit_audio_input(prepared);
+        }
+        self.observe(result).map(Some)
+    }
+
+    pub fn advance_audio_frontier(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<RuntimeReport>, StepGameplayError> {
+        self.ensure_solo()?;
+        self.validate_audio_operation(now, audio_at, None)?;
+        let Some(prepared) = self
+            .authority
+            .as_ref()
+            .expect("audio mode checked")
+            .prepare_frontier(now, merger)?
+        else {
+            return Ok(None);
+        };
+        let Some(output) = prepared.advance() else {
+            self.commit_audio_frontier(prepared, merger);
+            return Ok(None);
+        };
+        self.started = true;
+        let result = self
+            .runtime
+            .solo_mut()?
+            .advance_to(output, &AudioDomains, audio_at);
+        if result.is_ok() {
+            self.commit_audio_frontier(prepared, merger);
+        }
+        self.observe(result).map(Some)
+    }
+
+    fn ensure_legacy_clock(&self) -> Result<(), StepGameplayError> {
+        if self.authority.is_some() {
+            Err(StepGameplayError::InvalidConfiguration(
+                "audio mode requires audio-authoritative entrypoints",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    fn ensure_audio(&self) -> Result<&AudioAuthority, StepGameplayError> {
+        self.ensure_usable()?;
+        if !self.activated {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "audio mode requires activation",
+            ));
+        }
+        self.authority
+            .as_ref()
+            .ok_or(StepGameplayError::InvalidConfiguration(
+                "audio authority is unavailable in legacy mode",
+            ))
+    }
+    fn validate_audio_operation(
+        &self,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+        position: Option<Position2>,
+    ) -> Result<(), StepGameplayError> {
+        let authority = self.ensure_audio()?;
+        if now.domain != authority.epoch().host_domain
+            || audio_at.domain != self.output_origin.domain
+        {
+            return Err(AudioAuthorityError::DomainMismatch.into());
+        }
+        if position.is_some_and(|position| !position.x.is_finite() || !position.y.is_finite()) {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "audio input position must be finite",
+            ));
+        }
+        Ok(())
+    }
+    fn prepare_audio_input(
+        &self,
+        merger: &InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+        position: Option<Position2>,
+    ) -> Result<Option<PreparedInput>, StepGameplayError> {
+        self.validate_audio_operation(now, audio_at, position)?;
+        let authority = self.authority.as_ref().expect("audio mode checked");
+        let Some(prefix) = authority.acquired_prefix() else {
+            return Ok(None);
+        };
+        let Some(event) = merger
+            .peek_ready(prefix)
+            .map_err(AudioAuthorityError::from)?
+        else {
+            return Ok(None);
+        };
+        authority
+            .prepare_input(
+                ClockPoint {
+                    domain: event.meta().clock_domain,
+                    timestamp: event.meta().timestamp,
+                },
+                now,
+            )
+            .map_err(Into::into)
+    }
+    fn commit_audio_input(&mut self, prepared: PreparedInput) {
+        // The descriptor was prepared privately and Runtime cannot mutate this
+        // authority. Every fallible commit check was preflighted before dispatch.
+        self.authority
+            .as_mut()
+            .expect("audio mode checked")
+            .commit_input(prepared)
+            .expect("current private audio input preparation is valid");
+    }
+    fn commit_audio_frontier(&mut self, prepared: PreparedFrontier, merger: &mut InputMerger) {
+        self.authority
+            .as_mut()
+            .expect("audio mode checked")
+            .commit_frontier(prepared, merger)
+            .expect("current private audio frontier preparation is valid");
+    }
+
     /// Opt in before any processing. Configuration reserves the existing
     /// discipline's bounded storage; its accuracy remains Unknown. Atomic setup
     /// refusal leaves this owner usable and does not alter its nominal transport.
@@ -1064,6 +1325,7 @@ impl StepGameplay {
         &mut self,
         config: DisciplineConfig,
     ) -> Result<(), StepGameplayError> {
+        self.ensure_legacy_clock()?;
         self.ensure_usable()?;
         if self.started || self.output_clock.is_some() {
             return Err(StepGameplayError::InvalidConfiguration(
@@ -1085,6 +1347,7 @@ impl StepGameplay {
         &mut self,
         pair: ClockPair,
     ) -> Result<ObservationAdmission, StepGameplayError> {
+        self.ensure_legacy_clock()?;
         self.ensure_usable()?;
         if !self.activated || self.output_clock.is_none() {
             return Err(self.clock_failure(DisciplineError::InvalidConfig));
@@ -1113,6 +1376,7 @@ impl StepGameplay {
         &mut self,
         host: ClockPoint,
     ) -> Result<Option<DisciplineUpdate>, StepGameplayError> {
+        self.ensure_legacy_clock()?;
         self.ensure_usable()?;
         if self.output_clock.is_none() {
             return Ok(None);
@@ -1147,6 +1411,7 @@ impl StepGameplay {
     /// This only replaces a pristine Transport; it never resets a judge or
     /// changes the already prepared output-relative BGM and command prefix.
     pub fn activate(&mut self, host_origin: ClockPoint) -> Result<(), StepGameplayError> {
+        self.ensure_legacy_clock()?;
         self.ensure_usable()?;
         if self.activated || self.started {
             return Err(StepGameplayError::InvalidConfiguration(
@@ -1217,6 +1482,7 @@ impl StepGameplay {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, StepGameplayError> {
+        self.ensure_legacy_clock()?;
         self.ensure_solo()?;
         self.ensure_usable()?;
         self.started = true;
@@ -1235,6 +1501,7 @@ impl StepGameplay {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, StepGameplayError> {
+        self.ensure_legacy_clock()?;
         self.ensure_solo()?;
         self.ensure_usable()?;
         self.started = true;
@@ -1769,6 +2036,43 @@ impl StepLocalGameplay {
         end: Option<Timestamp>,
         input_mode: BmsInputMode,
     ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
+        Self::build(
+            prepared, config, plan, bindings, start, end, input_mode, None,
+        )
+    }
+
+    pub fn new_audio_section(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        plan: ResolvedInputPlan,
+        bindings: Vec<BindingMap>,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        authority: AudioAuthority,
+    ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            plan,
+            bindings,
+            start,
+            end,
+            input_mode,
+            Some(authority),
+        )
+    }
+
+    fn build(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        plan: ResolvedInputPlan,
+        bindings: Vec<BindingMap>,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        authority: Option<AudioAuthority>,
+    ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
         let mut players = Vec::new();
         let mut members = Vec::new();
         let mut objects = Vec::new();
@@ -1801,6 +2105,7 @@ impl StepLocalGameplay {
             start,
             end,
             input_mode,
+            authority,
         )?;
         members.extend(players.iter().map(|&player| LocalMemberState {
             player,
@@ -2002,7 +2307,7 @@ impl StepLocalGameplay {
         }
         setup_gauge_header(
             self.judge(player).expect("checked member"),
-            self.control.host_domain,
+            self.control.logical_domain,
             limits,
             self.control.start,
             chart_seed,
@@ -2071,7 +2376,7 @@ impl StepLocalGameplay {
         }
         let capture = LiveReplayCapture::new_with_gauge(
             self.judge(player).expect("checked member"),
-            self.control.host_domain,
+            self.control.logical_domain,
             limits,
             self.control.start,
             chart_seed,
@@ -2191,6 +2496,117 @@ impl StepLocalGameplay {
             })
     }
 
+    pub fn activate_audio(&mut self) -> Result<(), StepLocalGameplayError> {
+        self.control.activate_audio().map_err(Into::into)
+    }
+    pub fn audio_authority(&self) -> Option<&AudioAuthority> {
+        self.control.audio_authority()
+    }
+    pub fn observe_audio_output(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+    ) -> Result<ObservationAdmission, StepLocalGameplayError> {
+        self.control
+            .observe_audio_output(epoch, pair)
+            .map_err(Into::into)
+    }
+    pub fn record_audio_prefix(
+        &mut self,
+        prefix: ClockPoint,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control.record_audio_prefix(prefix).map_err(Into::into)
+    }
+    pub fn process_next_audio_input(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+        position: Option<Position2>,
+    ) -> Result<Option<InputResult>, StepLocalGameplayError> {
+        let Some(prepared) = self
+            .control
+            .prepare_audio_input(merger, now, audio_at, position)?
+        else {
+            return Ok(None);
+        };
+        let prefix = self
+            .control
+            .authority
+            .as_ref()
+            .expect("audio mode checked")
+            .acquired_prefix()
+            .expect("prepared input has acquired prefix");
+        let event = merger
+            .pop_ready(prefix)
+            .map_err(AudioAuthorityError::from)
+            .map_err(StepGameplayError::from)?
+            .expect("private preparation inspected this earliest input");
+        let errors = std::mem::take(&mut self.member_error_scratch);
+        let result = match position {
+            Some(position) => {
+                self.group_mut()
+                    .process_input_at(event, position, prepared.mapper(), audio_at)
+            }
+            None => self
+                .group_mut()
+                .process_input(event, prepared.mapper(), audio_at),
+        };
+        let committed = match &result {
+            Ok(InputResult::Processed(_)) => true,
+            Err(error) => !error.completed_reports.is_empty(),
+            Ok(InputResult::Ignored { .. }) => false,
+        };
+        if committed {
+            self.control.commit_audio_input(prepared);
+        }
+        match result {
+            Ok(ignored @ InputResult::Ignored { .. }) => {
+                self.member_error_scratch = errors;
+                Ok(Some(ignored))
+            }
+            Ok(InputResult::Processed(reports)) => self
+                .finish_reports(Ok(reports), errors)
+                .map(InputResult::Processed)
+                .map(Some),
+            Err(error) => self
+                .finish_reports(Err(error), errors)
+                .map(InputResult::Processed)
+                .map(Some),
+        }
+    }
+    pub fn advance_audio_frontier(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<Vec<PlayerReport>>, StepLocalGameplayError> {
+        self.control.validate_audio_operation(now, audio_at, None)?;
+        let Some(prepared) = self
+            .control
+            .authority
+            .as_ref()
+            .expect("audio mode checked")
+            .prepare_frontier(now, merger)
+            .map_err(StepGameplayError::from)?
+        else {
+            return Ok(None);
+        };
+        let Some(output) = prepared.advance() else {
+            self.control.commit_audio_frontier(prepared, merger);
+            return Ok(None);
+        };
+        let errors = std::mem::take(&mut self.member_error_scratch);
+        let result = self.group_mut().advance_to(output, &AudioDomains, audio_at);
+        if result
+            .as_ref()
+            .map_or_else(|error| !error.completed_reports.is_empty(), |_| true)
+        {
+            self.control.commit_audio_frontier(prepared, merger);
+        }
+        self.finish_reports(result, errors).map(Some)
+    }
+
     pub fn process_input(
         &mut self,
         event: PhysicalInputEvent,
@@ -2217,6 +2633,7 @@ impl StepLocalGameplay {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<InputResult, StepLocalGameplayError> {
+        self.control.ensure_legacy_clock()?;
         self.control.ensure_usable()?;
         let errors = std::mem::take(&mut self.member_error_scratch);
         let result = match position {
@@ -2247,6 +2664,7 @@ impl StepLocalGameplay {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<Vec<PlayerReport>, StepLocalGameplayError> {
+        self.control.ensure_legacy_clock()?;
         self.control.ensure_usable()?;
         let errors = std::mem::take(&mut self.member_error_scratch);
         let result = self.group_mut().advance_to(host, mapper, audio_at);
@@ -2818,3 +3236,7 @@ mod step_archived_score_fixtures;
 #[cfg(test)]
 #[path = "step_archived_comparison_fixtures.rs"]
 mod step_archived_comparison_fixtures;
+
+#[cfg(test)]
+#[path = "step_audio_authority_fixtures.rs"]
+mod step_audio_authority_fixtures;

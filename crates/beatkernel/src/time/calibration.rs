@@ -132,6 +132,25 @@ impl AffineClockMapper {
         extrapolation: ExtrapolationPolicy,
         uncertainty: CalibrationUncertainty,
     ) -> Result<Self, CalibrationError> {
+        Self::from_observed_pairs(first, second, validity, extrapolation, Some(uncertainty))
+    }
+    /// Constructs a finite observed relation without an assigned error bound.
+    /// The mapping quality remains Unknown, including for equal-rate anchors.
+    pub fn from_pairs_unknown(
+        first: ClockPair,
+        second: ClockPair,
+        validity: ClockInterval,
+        extrapolation: ExtrapolationPolicy,
+    ) -> Result<Self, CalibrationError> {
+        Self::from_observed_pairs(first, second, validity, extrapolation, None)
+    }
+    fn from_observed_pairs(
+        first: ClockPair,
+        second: ClockPair,
+        validity: ClockInterval,
+        extrapolation: ExtrapolationPolicy,
+        uncertainty: Option<CalibrationUncertainty>,
+    ) -> Result<Self, CalibrationError> {
         if first.source.domain == first.target.domain {
             return Err(CalibrationError::IdenticalDomains);
         }
@@ -148,11 +167,12 @@ impl AffineClockMapper {
             return Err(CalibrationError::NonIncreasingAnchors);
         }
         validate_interval(validity)?;
-        if uncertainty.observation_error < Duration::ZERO
-            || uncertainty
-                .residual_drift_error
-                .is_some_and(|error| error < Duration::ZERO)
-        {
+        if uncertainty.is_some_and(|uncertainty| {
+            uncertainty.observation_error < Duration::ZERO
+                || uncertainty
+                    .residual_drift_error
+                    .is_some_and(|error| error < Duration::ZERO)
+        }) {
             return Err(CalibrationError::NegativeUncertainty);
         }
         let (before, after) = match extrapolation {
@@ -181,8 +201,10 @@ impl AffineClockMapper {
             denominator,
             validity,
             extrapolation,
-            Some(uncertainty),
-            estimated_quality(numerator, denominator, uncertainty),
+            uncertainty,
+            uncertainty.map_or(ClockMappingQuality::Unknown, |uncertainty| {
+                estimated_quality(numerator, denominator, uncertainty)
+            }),
         )
     }
     /// Declares a genuinely known, exact identical-rate relation from one pair.
@@ -263,7 +285,8 @@ impl AffineClockMapper {
     pub const fn extrapolation(&self) -> ExtrapolationPolicy {
         self.extrapolation
     }
-    /// Caller-provided estimates, or None for a declared exact-offset relation.
+    /// Caller-provided estimates, or None when no error bound was assigned or
+    /// the relation is a declared exact offset. Mapping quality distinguishes them.
     pub const fn uncertainty(&self) -> Option<CalibrationUncertainty> {
         self.uncertainty
     }
