@@ -63,6 +63,21 @@ pub struct PlayerChart {
     opacity: crate::bga_opacity::BgaOpacityTimeline,
 }
 
+/// Pure immutable renderer registration; prepared indexes are receiver-local.
+#[derive(Clone, Debug)]
+pub struct PlayerChartTransfer {
+    pub title: String,
+    pub artist: String,
+    pub lanes: Vec<u8>,
+    pub notes: Vec<PlayerNote>,
+    pub duration_ns: i64,
+    pub poor_bga_mode: beatkernel_bms::PoorBgaMode,
+    pub mines: Vec<PlayerMine>,
+    pub bga: Vec<beatkernel_bms::ScheduledBga>,
+    pub initial_poor: Option<beatkernel_bms::ImageId>,
+    pub opacity: Vec<beatkernel_bms::ScheduledBgaOpacity>,
+}
+
 /// A chart/catalog preparation failure with a user-visible explanation.
 #[derive(Debug)]
 pub struct PlayerChartError(pub String);
@@ -86,6 +101,176 @@ fn lane_order(channel: u8) -> (u8, u8) {
 }
 
 impl PlayerChart {
+    /// Exports complete visual data without gameplay, audio or private indexes.
+    pub fn export_visual(&self) -> PlayerChartTransfer {
+        PlayerChartTransfer {
+            title: self.title.clone(),
+            artist: self.artist.clone(),
+            lanes: self.lanes.clone(),
+            notes: self.notes.clone(),
+            duration_ns: self.duration_ns,
+            poor_bga_mode: self.poor_bga_mode,
+            mines: self.mines.clone(),
+            bga: self.bga.export_events(),
+            initial_poor: self.bga.initial_poor(),
+            opacity: self.opacity.export_events(),
+        }
+    }
+
+    /// Checks registration before constructing the existing receiver-local indexes.
+    pub fn import_visual(data: PlayerChartTransfer) -> Result<Self, PlayerChartError> {
+        let invalid = |reason: &str| PlayerChartError(reason.into());
+        [
+            data.notes.len(),
+            data.mines.len(),
+            data.bga.len(),
+            data.opacity.len(),
+        ]
+        .into_iter()
+        .try_fold(0usize, |total, count| total.checked_add(count))
+        .filter(|total| *total <= beatkernel::chart::MAX_SOURCE_ITEMS)
+        .ok_or_else(|| invalid("visual chart source item capacity exceeded"))?;
+        // Account for all supplied owned metadata before allocating indexes.
+        data.title
+            .len()
+            .checked_add(data.artist.len())
+            .and_then(|bytes| bytes.checked_add(data.lanes.len()))
+            .and_then(|bytes| {
+                [
+                    (data.notes.len(), std::mem::size_of::<PlayerNote>()),
+                    (data.mines.len(), std::mem::size_of::<PlayerMine>()),
+                    (
+                        data.bga.len(),
+                        std::mem::size_of::<beatkernel_bms::ScheduledBga>(),
+                    ),
+                    (
+                        data.opacity.len(),
+                        std::mem::size_of::<beatkernel_bms::ScheduledBgaOpacity>(),
+                    ),
+                ]
+                .into_iter()
+                .try_fold(bytes, |total, (count, width)| {
+                    total.checked_add(count.checked_mul(width)?)
+                })
+            })
+            .ok_or_else(|| invalid("visual chart byte count overflow"))?;
+        if data.duration_ns < 0
+            || data
+                .lanes
+                .iter()
+                .any(|lane| !matches!(lane >> 4, 1 | 2) || !(1..=9).contains(&(lane & 15)))
+            || data
+                .lanes
+                .windows(2)
+                .any(|pair| lane_order(pair[0]) >= lane_order(pair[1]))
+        {
+            return Err(invalid("visual chart lane order or duration invalid"));
+        }
+        let mut previous = None;
+        for note in &data.notes {
+            let key = (note.start, note.object);
+            if note.lane_index >= data.lanes.len()
+                || note.start < Timestamp::ZERO
+                || note.end.is_some_and(|end| end < note.start)
+                || note.end.unwrap_or(note.start).as_nanos() > data.duration_ns
+                || previous.is_some_and(|old| old >= key)
+            {
+                return Err(invalid("visual note order, lane or endpoint invalid"));
+            }
+            previous = Some(key);
+        }
+        let mut previous = None;
+        for mine in &data.mines {
+            let key = (mine.at, mine.ordinal);
+            if mine.lane_index >= data.lanes.len()
+                || mine.at < Timestamp::ZERO
+                || mine.at.as_nanos() > data.duration_ns
+                || previous.is_some_and(|old| old >= key)
+            {
+                return Err(invalid("visual mine order, lane or endpoint invalid"));
+            }
+            previous = Some(key);
+        }
+        let image_valid = |id: beatkernel_bms::ImageId| {
+            usize::from(id.0) < crate::image_assets::MAX_IMAGE_REFERENCES
+        };
+        if data.initial_poor.is_some_and(|id| !image_valid(id)) {
+            return Err(invalid("initial poor image identity invalid"));
+        }
+        let mut previous = None;
+        for event in &data.bga {
+            let key = (event.at, event.ordinal);
+            if event.at < Timestamp::ZERO
+                || !image_valid(event.image)
+                || previous.is_some_and(|old| old >= key)
+            {
+                return Err(invalid("visual BGA order or identity invalid"));
+            }
+            previous = Some(key);
+        }
+        let mut previous = None;
+        for event in &data.opacity {
+            let key = (event.at, event.ordinal);
+            if event.at < Timestamp::ZERO || previous.is_some_and(|old| old >= key) {
+                return Err(invalid("visual opacity order or value invalid"));
+            }
+            previous = Some(key);
+        }
+        let mut object_index = Vec::new();
+        object_index
+            .try_reserve_exact(data.notes.len())
+            .map_err(|e| invalid(&e.to_string()))?;
+        object_index.extend(
+            data.notes
+                .iter()
+                .enumerate()
+                .map(|(index, note)| (note.object, index)),
+        );
+        object_index.sort_unstable_by_key(|entry| entry.0);
+        if object_index.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(invalid("duplicate visual object identity"));
+        }
+        let mut mine_ordinals = Vec::new();
+        mine_ordinals
+            .try_reserve_exact(data.mines.len())
+            .map_err(|e| invalid(&e.to_string()))?;
+        mine_ordinals.extend(data.mines.iter().map(|mine| mine.ordinal));
+        mine_ordinals.sort_unstable();
+        if mine_ordinals.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(invalid("duplicate visual mine ordinal"));
+        }
+        let bga =
+            crate::bga::BgaTimeline::new(data.bga, data.initial_poor).map_err(PlayerChartError)?;
+        let opacity =
+            crate::bga_opacity::BgaOpacityTimeline::new(data.opacity).map_err(PlayerChartError)?;
+        let tree_leaves = data.notes.len().max(1).next_power_of_two();
+        let mut endpoint_tree = Vec::new();
+        endpoint_tree
+            .try_reserve_exact(tree_leaves * 2)
+            .map_err(|e| invalid(&e.to_string()))?;
+        endpoint_tree.resize(tree_leaves * 2, i64::MIN);
+        for (index, note) in data.notes.iter().enumerate() {
+            endpoint_tree[tree_leaves + index] = note.end.unwrap_or(note.start).as_nanos();
+        }
+        for index in (1..tree_leaves).rev() {
+            endpoint_tree[index] = endpoint_tree[index * 2].max(endpoint_tree[index * 2 + 1]);
+        }
+        Ok(Self {
+            title: data.title,
+            artist: data.artist,
+            lanes: data.lanes,
+            notes: data.notes,
+            duration_ns: data.duration_ns,
+            poor_bga_mode: data.poor_bga_mode,
+            mines: data.mines,
+            endpoint_tree,
+            tree_leaves,
+            object_index,
+            bga,
+            opacity,
+        })
+    }
+
     /// Projects actual compiled IDs and times through adapter-owned lane data.
     pub fn from_compiled(
         source: &BmsChart,
@@ -1232,3 +1417,7 @@ mod tests {
         assert!(scan_library(&root.0.join("directory-link")).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "render_chart_transfer_fixtures.rs"]
+mod render_chart_transfer_fixtures;

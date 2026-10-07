@@ -70,6 +70,18 @@ impl BgaTimeline {
         })
     }
 
+    /// Restores acquisition order for immutable visual registration.
+    pub fn export_events(&self) -> Vec<ScheduledBga> {
+        let mut events: Vec<_> = self.channels.iter().flatten().copied().collect();
+        events.sort_unstable_by_key(|event| (event.at, event.ordinal));
+        events
+    }
+
+    /// Initial BMP00/BGA00 selection, independent of timed markers.
+    pub fn initial_poor(&self) -> Option<ImageId> {
+        self.initial_poor
+    }
+
     /// Compiles visual positions with core timing without opening image paths.
     pub fn from_chart(chart: &BmsChart) -> Result<Self, String> {
         Self::new(

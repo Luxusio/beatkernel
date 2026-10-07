@@ -2555,4 +2555,27 @@ allocation and before commit. Pump once through the existing mixed input path.
 Independent actual Host fixture sources cover getter/callback cancellation and
 replacement, shared sequence refusal, repeats/duplicates, replay and original
 fields. Preserve existing valid keyboard forwarding and mixed-input behavior.
-Test execution, actual browser/device and performance acceptance remain deferred.
+Host fixtures and scoped actual Chromium acquisition checks now execute;
+physical-device behavior and performance guarantees remain unestablished.
+
+## Separate renderer ownership integration
+
+The renderer integration moves OffscreenCanvas, Scene/GPU and visual resource
+caches to a separate Worker, with a direct bounded game-to-render channel.
+Window retains browser-required acquisition and controls. Gameplay retains
+judging, audio authority, output observations, completion, recording and room
+cleanup. Renderer acknowledgements never replace genuine audio/input evidence.
+
+Use visual-only immutable registration and cumulative changed note pages with
+bounded scalar state, not gameplay/PCM owners or per-frame Scene/chart transfer.
+Whole receiver batches validate before atomic publication. State application
+and versioned geometry submission are separate acknowledgements. Original touch
+acquisitions and geometry are retained during page/resize transitions; input and
+audio servicing continue while rendering stalls.
+
+Preserve terminal active-play graphics failure as an explicit failed stop with
+actual capture and joined cleanup before game ownership terminates. Static
+history/completed/room display errors stay presentation-only. Headless play is
+unselected. All existing presentation modes require real two-Worker evidence;
+integration is currently in development. Startup and late-touch clock failures
+remain unresolved under their separate task.

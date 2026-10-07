@@ -32,13 +32,23 @@ Stale generations, malformed or partial application never produce a success
 ACK. Retain the last acknowledged baseline through timeout or render failure;
 report an explicit renderer error or register a new generation. Renderer failure
 does not fabricate gameplay success, discard capture or replace audio evidence.
-The eventual failure policy must distinguish continued headless gameplay from
-an explicit user-requested stop and be tested in that integration.
+Preserve the existing runtime policy: rendering stalls and transient surface
+retries leave gameplay/input/audio service running; a confirmed terminal live,
+local or replay graphics error initiates a failed, capture-preserving stop.
+Gameplay must deliver its correlated capture and cleanup outcome before Window
+terminates its ownership, including asynchronous room cleanup. Static history,
+completed and room presentation errors retain their presentation-only semantics.
+Headless continuation is an optional unselected behavior; no answer to the
+earlier question is inferred. Test stalled rendering separately from terminal
+failure and from an explicit user Stop.
 
 Resize and local-page changes carry a geometry/version barrier. Preserve each
 input's original acquisition geometry while waiting for the required page or
 surface acknowledgement; do not reinterpret a retained touch using a later
-layout. Zero-size surfaces suspend drawing without inventing time. Loading,
+layout or discard newly acquired contacts. A state acknowledgement proves atomic
+application; a geometry acknowledgement proves submission for that page/surface
+version, not physical scanout. Zero-size surfaces suspend drawing without
+inventing time or successful visible-page evidence. Loading,
 ready, playing, stopping, error and disposal each retain one clear owner. Stop
 retires outstanding generations and joins only owned resources before reuse.
 

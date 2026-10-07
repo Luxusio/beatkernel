@@ -71,11 +71,25 @@ pub enum ImageUnavailable {
 pub struct ImageAssets {
     // Keep original dependencies even when a crop replaces their displayed ID.
     sources: Vec<Arc<RgbaImage>>,
+    source_ids: BTreeMap<ImageId, Option<Arc<RgbaImage>>>,
     images: BTreeMap<ImageId, Arc<RgbaImage>>,
     layers: BTreeMap<ImageId, Arc<RgbaImage>>,
     unavailable: BTreeMap<ImageId, ImageUnavailable>,
     decoded_bytes: u64,
     unique_images: usize,
+}
+
+/// Immutable resource table and receiver-local aliases for visual registration.
+/// Each resource occurs once; sources retain original crop dependencies.
+#[derive(Clone)]
+pub struct ImageAssetsTransfer {
+    pub resources: Vec<Arc<RgbaImage>>,
+    pub sources: Vec<usize>,
+    /// Original source IDs, including unavailable hidden crop dependencies.
+    pub source_ids: Vec<(ImageId, Option<usize>)>,
+    pub images: Vec<(ImageId, usize)>,
+    pub layers: Vec<(ImageId, usize)>,
+    pub unavailable: Vec<(ImageId, ImageUnavailable)>,
 }
 
 #[derive(Clone)]
@@ -155,6 +169,220 @@ impl ImagePlan {
 }
 
 impl ImageAssets {
+    /// Exports immutable pixels once and keeps sharing explicit in alias indices.
+    pub fn export_visual(&self) -> ImageAssetsTransfer {
+        let mut resources = Vec::new();
+        let mut indices = BTreeMap::new();
+        let mut alias = |image: &Arc<RgbaImage>| {
+            let address = Arc::as_ptr(image);
+            *indices.entry(address).or_insert_with(|| {
+                let index = resources.len();
+                resources.push(Arc::clone(image));
+                index
+            })
+        };
+        let sources = self.sources.iter().map(&mut alias).collect();
+        let source_ids = self
+            .source_ids
+            .iter()
+            .map(|(id, resource)| (*id, resource.as_ref().map(&mut alias)))
+            .collect();
+        let images = self
+            .images
+            .iter()
+            .map(|(id, image)| (*id, alias(image)))
+            .collect();
+        let layers = self
+            .layers
+            .iter()
+            .map(|(id, image)| (*id, alias(image)))
+            .collect();
+        ImageAssetsTransfer {
+            resources,
+            sources,
+            source_ids,
+            images,
+            layers,
+            unavailable: self
+                .unavailable
+                .iter()
+                .map(|(id, reason)| (*id, reason.clone()))
+                .collect(),
+        }
+    }
+
+    /// Validates complete dimensions, budgets and aliases before publishing a bank.
+    /// Pixel storage is immutable; transport adapters construct this table locally.
+    pub fn import_visual(
+        data: ImageAssetsTransfer,
+        limits: ImageAssetLimits,
+    ) -> Result<Self, String> {
+        limits.validate()?;
+        if data
+            .images
+            .len()
+            .checked_add(data.unavailable.len())
+            .is_none_or(|count| count > limits.max_images)
+            || data.sources.len() > limits.max_images
+            || data.source_ids.len() > limits.max_images
+            || data.layers.len() > data.images.len()
+            || data.resources.len() > limits.max_images * 3
+        {
+            return Err("image transfer count budget exceeded".into());
+        }
+        let mut decoded_bytes = 0u64;
+        for image in &data.resources {
+            let extent = u64::from(image.width())
+                .checked_mul(u64::from(image.height()))
+                .and_then(|pixels| pixels.checked_mul(4))
+                .ok_or("image transfer extent overflow")?;
+            if image.width() == 0
+                || image.height() == 0
+                || image.width() > limits.decode.max_width
+                || image.height() > limits.decode.max_height
+                || extent != image.byte_len()
+                || extent > limits.decode.max_decoded_bytes
+            {
+                return Err("image transfer extent or byte limit exceeded".into());
+            }
+            decoded_bytes = decoded_bytes
+                .checked_add(extent)
+                .filter(|bytes| *bytes <= limits.max_decoded_bytes)
+                .ok_or("image transfer aggregate byte budget exceeded")?;
+        }
+        data.unavailable
+            .iter()
+            .try_fold(0usize, |total, (_, reason)| {
+                let bytes = match reason {
+                    ImageUnavailable::InvalidData(reason) => reason.len(),
+                    _ => 0,
+                };
+                total.checked_add(bytes)
+            })
+            .ok_or("image transfer diagnostic byte count overflow")?;
+        // All numeric/byte ceilings are checked before validation scratch or maps.
+        let valid_id = |id: ImageId| usize::from(id.0) < MAX_IMAGE_REFERENCES;
+        for entries in [&data.images, &data.layers] {
+            if entries
+                .iter()
+                .any(|(id, index)| !valid_id(*id) || *index >= data.resources.len())
+                || entries.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+            {
+                return Err("image transfer alias order or reference invalid".into());
+            }
+        }
+        if data.unavailable.iter().any(|(id, _)| !valid_id(*id))
+            || data
+                .unavailable
+                .windows(2)
+                .any(|pair| pair[0].0 >= pair[1].0)
+            || data.unavailable.iter().any(|(id, _)| {
+                data.images
+                    .binary_search_by_key(id, |entry| entry.0)
+                    .is_ok()
+            })
+        {
+            return Err("image transfer unavailable role invalid".into());
+        }
+        if data.source_ids.iter().any(|(id, index)| {
+            !valid_id(*id) || index.is_some_and(|index| index >= data.resources.len())
+        }) || data
+            .source_ids
+            .windows(2)
+            .any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err("image transfer source identity or order invalid".into());
+        }
+        let hidden_source_count = data
+            .source_ids
+            .iter()
+            .filter(|(id, _)| {
+                data.images
+                    .binary_search_by_key(id, |entry| entry.0)
+                    .is_err()
+                    && data
+                        .unavailable
+                        .binary_search_by_key(id, |entry| entry.0)
+                        .is_err()
+            })
+            .count();
+        if data
+            .images
+            .len()
+            .checked_add(data.unavailable.len())
+            .and_then(|count| count.checked_add(hidden_source_count))
+            .is_none_or(|count| count > limits.max_images)
+        {
+            return Err("image transfer source and display reference budget exceeded".into());
+        }
+        for (id, index) in &data.layers {
+            let raw = data
+                .images
+                .binary_search_by_key(id, |entry| entry.0)
+                .map_err(|_| "image transfer layer has no raw role")?;
+            let raw = &data.resources[data.images[raw].1];
+            let layer = &data.resources[*index];
+            if (raw.width(), raw.height()) != (layer.width(), layer.height()) {
+                return Err("image transfer layer extent differs from raw role".into());
+            }
+        }
+        let mut referenced = vec![false; data.resources.len()];
+        let mut sources = BTreeSet::new();
+        for &index in &data.sources {
+            if index >= data.resources.len() || !sources.insert(index) {
+                return Err("image transfer source alias invalid".into());
+            }
+            referenced[index] = true;
+        }
+        let source_aliases: BTreeSet<_> =
+            data.source_ids.iter().filter_map(|entry| entry.1).collect();
+        if source_aliases != sources {
+            return Err(
+                "image transfer source identities do not cover original allocations".into(),
+            );
+        }
+        for (_, index) in data.images.iter().chain(&data.layers) {
+            referenced[*index] = true;
+        }
+        if referenced.iter().any(|used| !used) {
+            return Err("image transfer contains unreferenced resource".into());
+        }
+        let mut allocations = BTreeSet::new();
+        if data
+            .resources
+            .iter()
+            .any(|resource| !allocations.insert(Arc::as_ptr(resource)))
+        {
+            return Err("image transfer resource table contains duplicate allocation".into());
+        }
+        let unique_images = data.sources.len();
+        Ok(Self {
+            sources: data
+                .sources
+                .iter()
+                .map(|&index| Arc::clone(&data.resources[index]))
+                .collect(),
+            source_ids: data
+                .source_ids
+                .into_iter()
+                .map(|(id, index)| (id, index.map(|index| Arc::clone(&data.resources[index]))))
+                .collect(),
+            images: data
+                .images
+                .into_iter()
+                .map(|(id, index)| (id, Arc::clone(&data.resources[index])))
+                .collect(),
+            layers: data
+                .layers
+                .into_iter()
+                .map(|(id, index)| (id, Arc::clone(&data.resources[index])))
+                .collect(),
+            unavailable: data.unavailable.into_iter().collect(),
+            decoded_bytes,
+            unique_images,
+        })
+    }
+
     /// Loads referenced images, crop dependencies and initial BMP00/BGA00.
     /// Bad/missing raster data is unavailable; unsafe IO and exhausted limits
     /// reject the entire preparation. Filesystem stability is assumed, as for audio.
@@ -193,7 +421,7 @@ impl ImageAssets {
         } = plan;
         let mut bank = Self::default();
         let mut cache = BTreeMap::<PathBuf, Cached>::new();
-        for id in sources {
+        for &id in &sources {
             let Some(name) = chart.images.get(&id) else {
                 bank.unavailable.insert(id, ImageUnavailable::Undefined);
                 continue;
@@ -260,6 +488,7 @@ impl ImageAssets {
                 Cached::Unavailable(_) => None,
             }));
         let originals = std::mem::take(&mut bank.images);
+        bank.source_ids.extend(sources.into_iter().map(|id| (id, originals.get(&id).cloned())));
         let unavailable = std::mem::take(&mut bank.unavailable);
         let mut variants: Vec<(Arc<RgbaImage>, [i32; 4], [i32; 2], Arc<RgbaImage>)> = Vec::new();
         variants

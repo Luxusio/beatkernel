@@ -54,6 +54,13 @@ impl BgaOpacityTimeline {
         }
         Ok(Self { channels })
     }
+    /// Restores acquisition order for immutable visual registration.
+    pub fn export_events(&self) -> Vec<ScheduledBgaOpacity> {
+        let mut events: Vec<_> = self.channels.iter().flatten().copied().collect();
+        events.sort_unstable_by_key(|event| (event.at, event.ordinal));
+        events
+    }
+
     /// Compiles checked source positions through the shared visual timing grid.
     pub fn from_chart(chart: &BmsChart) -> Result<Self, String> {
         Self::new(chart.compile_bga_opacity().map_err(|e| e.to_string())?)

@@ -36,6 +36,14 @@ pub struct NoteProgressPage<'a> {
     valid_count: usize,
     page: &'a Page,
 }
+/// Borrowed cumulative page state for a receiver's locally registered chart.
+/// Registration and generation identities are checked by the snapshot owner.
+pub struct NoteProgressPageUpdate<'a> {
+    pub index: usize,
+    pub valid_count: usize,
+    pub completed_count: usize,
+    pub packed_states: &'a [u64],
+}
 impl NoteProgressPage<'_> {
     /// Ordered page index in the exact prepared chart.
     pub const fn index(&self) -> usize {
@@ -143,6 +151,90 @@ impl NoteProgress {
             }
         }
     }
+    /// Atomically imports cumulative presentation state against this local chart.
+    /// States and the separate effective miss timestamp cannot move backwards.
+    /// Every page is validated before copying changed pages or publishing scalars.
+    pub fn apply_page_updates(
+        &mut self,
+        updates: &[NoteProgressPageUpdate<'_>],
+        last_miss: Option<Timestamp>,
+    ) -> Result<(), String> {
+        if updates.len() > self.pages.len() {
+            return Err("note progress update exceeds page capacity".into());
+        }
+        if let Some(previous) = self.last_miss {
+            if last_miss.is_none_or(|next| next < previous) {
+                return Err("note progress miss timestamp regressed".into());
+            }
+        }
+        let mut previous_index = None;
+        let mut changed = false;
+        for update in updates {
+            if previous_index.is_some_and(|previous| update.index <= previous) {
+                return Err("note progress pages must be strictly ordered".into());
+            }
+            let Some(page) = self.pages.get(update.index) else {
+                return Err("note progress page is outside chart".into());
+            };
+            previous_index = Some(update.index);
+            let start = update.index * NOTES_PER_PAGE;
+            let valid_count = (self.chart.notes.len() - start).min(NOTES_PER_PAGE);
+            if update.valid_count != valid_count
+                || update.packed_states.len() != NOTES_PER_PAGE / 32
+                || update.completed_count > valid_count
+            {
+                return Err("note progress page shape is invalid".into());
+            }
+            let mut completed = 0;
+            for offset in 0..NOTES_PER_PAGE {
+                let shift = (offset % 32) * 2;
+                let next = (update.packed_states[offset / 32] >> shift) & 3;
+                if offset >= valid_count {
+                    if next != 0 {
+                        return Err("note progress page padding is nonzero".into());
+                    }
+                    continue;
+                }
+                if next == 3 {
+                    return Err("note progress page contains reserved state".into());
+                }
+                if next == 1 && self.chart.notes[start + offset].end.is_none() {
+                    return Err("note progress holding state requires a hold".into());
+                }
+                let old = (page.bits[offset / 32] >> shift) & 3;
+                if next < old {
+                    return Err("note progress state regressed".into());
+                }
+                completed += usize::from(next == 2);
+            }
+            if completed != update.completed_count {
+                return Err("note progress completed count is invalid".into());
+            }
+            changed |= update.packed_states != page.bits.as_slice();
+        }
+        if changed {
+            let mut pages = Vec::new();
+            pages
+                .try_reserve_exact(self.pages.len())
+                .map_err(|_| "note progress allocation failed")?;
+            pages.extend(self.pages.iter().cloned());
+            for update in updates {
+                if update.packed_states == pages[update.index].bits.as_slice() {
+                    continue;
+                }
+                let mut bits = [0; NOTES_PER_PAGE / 32];
+                bits.copy_from_slice(update.packed_states);
+                pages[update.index] = Arc::new(Page {
+                    bits,
+                    completed: update.completed_count as u16,
+                });
+            }
+            self.pages = Arc::new(pages);
+        }
+        self.last_miss = last_miss;
+        Ok(())
+    }
+
     /// Latest effective timestamp of a new accepted, known-stage miss transition.
     /// Hits never clear it; duplicate/completed objects cannot refresh it.
     pub const fn last_miss(&self) -> Option<Timestamp> {
@@ -232,6 +324,10 @@ impl NoteProgress {
 #[cfg(test)]
 #[path = "note_progress_transfer_fixtures.rs"]
 mod note_progress_transfer_fixtures;
+
+#[cfg(test)]
+#[path = "note_progress_import_fixtures.rs"]
+mod note_progress_import_fixtures;
 
 #[cfg(test)]
 mod fixtures {

@@ -47,3 +47,34 @@ compiled unique object identities and accepted judge events across multiple
 pages, including no-op, holding/completion, cumulative deltas, partial padding,
 empty charts, exact identity refusal and immutable baselines. Mock and source
 results are not browser/device latency measurements.
+
+## Separate renderer integration requirements
+
+The next integration must run gameplay and graphics in different Workers,
+connected directly by a MessageChannel. Window must not relay per-frame chart,
+Scene or progress snapshots. Audio observations and genuine completion remain
+gameplay-owned; renderer acknowledgements have no completion authority.
+
+Register immutable visual chart/image content once, including mines, BGA and
+opacity timelines, aliases and unavailable resources. Subsequent updates contain
+bounded committed display scalars and changed COW note pages. Validate the whole
+receiver update before publishing any player or scalar state, including ordered
+page ranges, counts, reserved states, padding and the receiver's local chart.
+Retain one immutable pending snapshot; adopt precisely it after its complete
+state acknowledgement and coalesce later changes against the last full baseline.
+
+State application and successful geometry submission are separate evidence.
+Retain original touch acquisitions through page and resize transitions, with
+their original time, coordinates, dimensions and contact mapping. Rendering
+stalls and transient retries must not gate keyboard/HID/gamepad acquisition,
+gameplay input/audio acknowledgements or capture. Zero extent cannot establish
+that a new page is visible.
+
+A confirmed terminal runtime graphics error retains the existing failed-stop
+behavior: gameplay exports genuine recorded prefixes and authoritative results,
+then Window joins input/audio/room cleanup before gameplay ownership terminates.
+Do not terminate the game Worker before delayed capture delivery, label an error
+natural completion, or discard genuine capture. Historical/completed/room display
+errors remain presentation-only. Headless continuation has not been selected.
+Verify these requirements with actual separate Workers as well as pure
+registration/progress tests. Integration is still under development.
