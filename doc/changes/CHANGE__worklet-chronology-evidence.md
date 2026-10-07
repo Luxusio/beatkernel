@@ -2,6 +2,14 @@
 
 Status: implemented candidate; independent review and final QA remain pending.
 
+Final QA initially passed all 646 Node tests, 14 native WorkletAudio tests and
+the four required browser diagnostic scenarios. The fresh `browser-audio`-only
+WASM build exposed a preexisting graphics-gated UI dependency in touch routing.
+The existing four-player page capacity now belongs to shared `playfield_layout`,
+with a compatible UI reexport. Input routing uses the shared constant without
+requiring graphics. Page behavior and native chronology are unchanged; fresh
+review and QA of this correction remain pending.
+
 Audio failures now preserve bounded numeric first-cause facts instead of only
 a status code. The preallocated Worklet payload records operation origin,
 processor phase, actual callback frame and extent when known, retained native

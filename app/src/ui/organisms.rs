@@ -359,7 +359,7 @@ pub fn playfield_in_with_background(
     pixels.status()
 }
 
-pub const LOCAL_PLAYERS_PER_PAGE: usize = 4;
+pub use crate::playfield_layout::LOCAL_PLAYERS_PER_PAGE;
 
 fn page_range(count: usize, page: usize) -> Result<std::ops::Range<usize>, String> {
     if !(1..=crate::local_players::MAX_LOCAL_PLAYERS).contains(&count)

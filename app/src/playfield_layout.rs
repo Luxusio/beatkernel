@@ -2,6 +2,8 @@
 
 /// Logical browser scene dimensions before viewport scaling.
 pub const LOGICAL_EXTENT: [u32; 2] = [960, 720];
+/// Shared visible-player page capacity for rendering and physical input routing.
+pub const LOCAL_PLAYERS_PER_PAGE: usize = 4;
 /// Full playfield x/y/width/height, including head overhang and lane labels.
 pub const DEFAULT_BOUNDS: [i64; 4] = [80, 106, 640, 528];
 
@@ -23,7 +25,7 @@ pub fn default_touch_bounds(lanes: &[u8]) -> Result<Vec<f32>, String> {
 /// One visible panel in the common one/two/four-field page layout.
 /// Count is the visible page size, independently of the full gameplay roster.
 pub fn local_panel_bounds(count: usize, slot: usize) -> Result<[i64; 4], String> {
-    if !(1..=4).contains(&count) || slot >= count {
+    if !(1..=LOCAL_PLAYERS_PER_PAGE).contains(&count) || slot >= count {
         return Err("local panel requires one to four visible players and a valid slot".into());
     }
     let columns = if count == 1 { 1 } else { 2 };

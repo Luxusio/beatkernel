@@ -351,7 +351,7 @@ impl LocalTouchPageRouting {
         }
         // Validate the reservation against the smallest supported visible field.
         crate::playfield_layout::local_field_bounds_with_comparison_space(
-            self.members.len().min(crate::ui::organisms::LOCAL_PLAYERS_PER_PAGE),
+            self.members.len().min(crate::playfield_layout::LOCAL_PLAYERS_PER_PAGE),
             0,
             comparison_height,
         )?;
@@ -366,7 +366,7 @@ impl LocalTouchPageRouting {
     }
 
     pub fn validate_page(&self, page: u32) -> Result<(), MergeError> {
-        if page as usize >= self.members.len().div_ceil(crate::ui::organisms::LOCAL_PLAYERS_PER_PAGE) {
+        if page as usize >= self.members.len().div_ceil(crate::playfield_layout::LOCAL_PLAYERS_PER_PAGE) {
             return Err(MergeError::InvalidTouchPage);
         }
         Ok(())
@@ -423,7 +423,7 @@ impl LocalTouchPageRouting {
         if game.failed() {
             return Err(StepGameplayError::Failed.into());
         }
-        let page_size = crate::ui::organisms::LOCAL_PLAYERS_PER_PAGE;
+        let page_size = crate::playfield_layout::LOCAL_PLAYERS_PER_PAGE;
         let first = page as usize * page_size;
         let visible = (count - first).min(page_size);
         let enabled = member.index >= first && member.index < first + visible;
