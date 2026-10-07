@@ -68,8 +68,12 @@ function scheduleDraw(reset = true) {
       } else {
         send({ kind: "drawn", generation: identity.generation, content: identity.content, sequence: identity.sequence });
         if (geometryVersion > submittedGeometry) {
+          const page = view.visual_page();
+          const [width, height] = extent;
+          if (!boundedU32(page)) throw new Error("Invalid applied visual page.");
           submittedGeometry = geometryVersion;
-          const evidence = { kind: "geometry-ack", generation: identity.generation, content: identity.content, geometryVersion };
+          const evidence = { kind: "geometry-ack", generation: identity.generation, content: identity.content, geometryVersion,
+            page, width, height };
           send(evidence);
           self.postMessage(evidence);
         }

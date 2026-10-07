@@ -114,7 +114,7 @@ test("static seq0 operations use distinct operation IDs and geometry never relea
     for (const kind of [5, 6]) {
       const done = h.client.packet(packet(kind, 0n)); await settle();
       const request = h.sent.at(-1);
-      h.reply({ kind: "geometry-ack", generation: 7n, content: 9n, geometryVersion: 1n });
+      h.reply({ kind: "geometry-ack", generation: 7n, content: 9n, geometryVersion: 1n, page: 0, width: 640, height: 480 });
       await settle(); assert.ok(h.client.pending);
       h.reply(ack(request)); await done;
     }
@@ -145,10 +145,73 @@ test("geometry controls correlate operation, generation and requested version in
     }
     h.reply(good); await done;
     assert.equal(h.geometry.length, 0);
-    h.reply({ kind: "geometry-ack", generation: 8n, content: 9n, geometryVersion: 42n });
+    h.reply({ kind: "geometry-ack", generation: 8n, content: 9n, geometryVersion: 42n, page: 0, width: 800, height: 600 });
     await settle(); assert.equal(h.geometry.length, 0);
-    h.reply({ kind: "geometry-ack", generation: 7n, content: 9n, geometryVersion: 42n });
+    h.reply({ kind: "geometry-ack", generation: 7n, content: 9n, geometryVersion: 42n, page: 0, width: 800, height: 600 });
     await settle(); assert.equal(h.geometry.length, 1);
+  } finally { h.close(); }
+});
+
+test("geometry evidence admits only complete bounded submitted tuples and freezes the snapshot", async () => {
+  const h = harness();
+  try {
+    await register(h);
+    const done = h.client.control("page", { page: 3, comparisons: true, geometryVersion: 42n });
+    await settle();
+    const good = { kind: "geometry-ack", generation: 7n, content: 9n, geometryVersion: 42n,
+      page: 2, width: 800, height: 600 };
+    const invalid = [
+      { ...good, page: undefined }, { ...good, width: undefined }, { ...good, height: undefined },
+      { ...good, page: -1 }, { ...good, page: 0x100000000 }, { ...good, page: 1.5 },
+      { ...good, page: 2n }, { ...good, page: "2" }, { ...good, page: NaN },
+      { ...good, width: 0 }, { ...good, height: 0 }, { ...good, width: -1 },
+      { ...good, height: 0x100000000 }, { ...good, width: 1.5 }, { ...good, height: Infinity },
+      { ...good, width: 800n }, { ...good, height: "600" },
+      { ...good, content: 10n }, { ...good, generation: 8n },
+      { ...good, geometryVersion: 41n }, { ...good, geometryVersion: 43n },
+      { ...good, geometryVersion: 42 },
+    ];
+    for (const tuple of invalid) {
+      h.reply(tuple); await settle();
+      assert.equal(h.geometry.length, 0); assert.ok(h.client.pending);
+    }
+    h.reply(good); await settle();
+    assert.equal(h.geometry.length, 1); assert.ok(h.client.pending, "submission does not replace control ACK");
+    assert.deepEqual(h.geometry[0], { generation: 7n, content: 9n, geometryVersion: 42n,
+      page: 2, width: 800, height: 600 });
+    assert.ok(Object.isFrozen(h.geometry[0]));
+    assert.throws(() => { h.geometry[0].page = 3; }, TypeError);
+    h.reply({ ...good, page: 3, width: 900 }); await settle();
+    assert.equal(h.geometry.length, 1, "duplicate version cannot replace acquired snapshot");
+    h.reply({ kind: "control-ack", operation: "page", operationId: h.sent[0].operationId,
+      generation: 7n, content: 9n, geometryVersion: 42n }); await done;
+    const newer = h.client.control("resize", { width: 900, height: 700, geometryVersion: 43n });
+    await settle(); h.reply(good); await settle(); assert.equal(h.geometry.length, 1);
+    h.reply({ ...good, geometryVersion: 43n, page: 0xffffffff, width: 0xffffffff, height: 1 });
+    await settle(); assert.equal(h.geometry.length, 2);
+    assert.equal(h.geometry[1].page, 0xffffffff); assert.equal(h.geometry[1].width, 0xffffffff);
+    h.reply({ kind: "control-ack", operation: "resize", operationId: h.sent.at(-1).operationId,
+      generation: 7n, content: 9n, geometryVersion: 43n }); await newer;
+    assert.equal(h.errors.length, 0);
+  } finally { h.close(); }
+});
+
+test("retired owner cannot publish geometry even with its former complete tuple", async () => {
+  const h = harness();
+  try {
+    await register(h);
+    const control = h.client.control("resize", { width: 640, height: 480, geometryVersion: 5n });
+    await settle(); h.reply({ kind: "control-ack", operation: "resize", operationId: h.sent[0].operationId,
+      generation: 7n, content: 9n, geometryVersion: 5n }); await control;
+    const retired = h.client.retire(); if (retired?.catch) retired.catch(() => {});
+    await settle();
+    h.reply({ kind: "geometry-ack", generation: 7n, content: 9n, geometryVersion: 5n,
+      page: 0, width: 640, height: 480 });
+    await settle(); assert.equal(h.geometry.length, 0);
+    const retirement = h.sent.find(message => message.kind === "retire");
+    h.reply({ kind: "control-ack", operation: "retire", operationId: retirement.operationId,
+      generation: 7n, content: 9n });
+    if (retired?.then) await retired;
   } finally { h.close(); }
 });
 

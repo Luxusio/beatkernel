@@ -38,6 +38,8 @@ lifecycle integration, final independent review and browser QA remain pending.
 
 Known ceiling: Window integration and real completed/combined rendering proof remain pending AC007/AC009.
 
+Known ceiling: 실제 WASM getter 및 전체 화면 동작 검증 미완료 — AC009 브라우저 검증에서 확인.
+
 Known ceiling: actual Worker decoding must use the trusted caller’s finite diagnostic budget before allocating or copying — already-owned Rust convenience paths preserve diagnostics.
 
 Portable frame models and display-only frozen history/results/room reconstruction
@@ -88,3 +90,12 @@ retain ownership. Unchanged pages return before allocating a replacement mapping
 Focused native verification passes all ten browser-local-input fixtures and all
 22 input-merger/attachment tests. JavaScript forwarding and Window acquisition
 integration remain pending; these checks do not establish browser acceptance.
+
+Gameplay now publishes visual state through the renderer channel without owning
+BrowserView, GPU drawing or a render animation loop. Local touch batches validate
+and forward their original acquisition page before mutation. Preview retirement
+is limited to the discarded presentation owner, and fatal errors cancel retained
+room finalization while delaying global shutdown until capture delivery.
+Seven focused Worker/protocol suites pass 192 tests, with no failures or skips;
+WASM check and build pass with existing warnings. These are development checks,
+not final independent review or whole-application browser QA.

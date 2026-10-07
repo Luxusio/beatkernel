@@ -1,3 +1,4 @@
+import { RenderClient, validateRenderLimits, unsignedIdentity } from "./render-protocol.mjs";
 import { validateCompletedResults, resultRequest } from "./completed-results-model.mjs";
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot } from "./host_model.mjs";
@@ -13,9 +14,22 @@ import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, ga
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
 import { encodeBrowserSettings, decodeBrowserSettings } from "./settings-profile.mjs";
 import { snapshotPointerSetup } from "./pointer-profile.mjs";
-const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserHistoricalRecord, BrowserView } = runtime;
+const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserHistoricalRecord } = runtime;
 let ready = null;
-let view = null;
+let cpuReady = false;
+let preview = null;
+let previewSongNs = 0n;
+let renderPort = null;
+let renderLimits = null;
+let visual = null;
+let visualGeneration = 0n;
+let visualPump = null;
+let surface = null;
+let geometryVersion = 0n;
+let surfaceSentVersion = 0n;
+let disposed = false;
+let capturesPending = 0;
+let deferredFatal = null;
 let library = null;
 let stagedLibrary = null;
 let libraryId = 0;
@@ -24,8 +38,6 @@ let importing = false;
 let pendingImport = null;
 let importPumpRunning = false;
 let selectedId = 0;
-let redraw = null;
-let retries = 0;
 let failed = false;
 let extent = [0, 0];
 let play = null;
@@ -54,7 +66,7 @@ async function settingsProfile(request) {
   }
   if (id <= lastSettingsId) return;
   lastSettingsId = id;
-  if (!view || settingsOperation || play || roomFinalization || importing || stagedLibrary) {
+  if (!cpuReady || settingsOperation || play || roomFinalization || importing || stagedLibrary) {
     report("settings-profile-error", { id, message: "Wait for an initialized idle Worker before processing settings." });
     return;
   }
@@ -114,7 +126,7 @@ function completedResultsFailure(results, error) {
   results.failed = true;
   results.page = results.pages = results.detailPages = results.comparisonPages = 0;
   results.comparisons = results.hasComparisons = false;
-  stopRedraw();
+  fenceVisual();
   report("play-completed-results", { playId: results.id, completedResults: completedResultsMetadata(results), error: message(error) });
 }
 
@@ -122,8 +134,8 @@ function discardHistoricalRecord() {
   historicalEpoch = {};
   const previous = historicalRecord;
   historicalRecord = null;
+  if (visual?.owner === previous) fenceVisual();
   try { previous?.binding.free(); } catch { /* Historical display disposal has no gameplay outcome. */ }
-  stopRedraw();
 }
 function historicalReply(id, available, error = null, grades = null) {
   report("historical-record-result", { id, available, gradePage: grades?.page ?? null, gradePages: grades?.pages ?? 0, error: error === null ? null : (message(error) || "Historical presentation failed.") });
@@ -136,7 +148,7 @@ function historicalRequestId(request) {
 }
 async function presentHistoricalRecord(request) {
   if (!historicalRequestId(request)) return;
-  if (failed || !view || play || roomFinalization || importing || stagedLibrary || settingsOperation
+  if (failed || !cpuReady || play || roomFinalization || importing || stagedLibrary || settingsOperation
     || completedResults?.shown || roomResults) {
     historicalReply(request.id, false, "Historical display requires an initialized idle preview.");
     return;
@@ -178,10 +190,10 @@ async function presentHistoricalRecord(request) {
     if (available) { historicalRecord = { id: request.id, binding, grades, lastRpc: 0 }; binding = null; }
     else { const previous = binding; binding = null; previous.free(); }
     historicalReply(request.id, available, error ?? null, grades);
-    scheduleDraw();
+    publishVisual();
   } catch (error) {
     try { binding?.free(); } catch {}
-    if (current()) { historicalReply(request.id, false, error); scheduleDraw(); }
+    if (current()) { historicalReply(request.id, false, error); publishVisual(); }
   }
 }
 function historicalPageReply(request, grades, error = null) {
@@ -191,7 +203,7 @@ function historicalPageReply(request, grades, error = null) {
 function pageHistoricalRecord(request) {
   if (!identity(request.id) || !identity(request.rpcId)) return;
   const current = historicalRecord;
-  if (failed || !view || play || roomFinalization || importing || stagedLibrary || settingsOperation
+  if (failed || !cpuReady || play || roomFinalization || importing || stagedLibrary || settingsOperation
     || completedResults?.shown || roomResults || !current || current.id !== request.id
     || request.rpcId <= current.lastRpc) {
     historicalPageReply(request, null, "Historical grade request requires the current idle selection.");
@@ -205,7 +217,7 @@ function pageHistoricalRecord(request) {
     before = validateHistoricalGradeSnapshot({ page: current.binding.grade_page, pages: current.binding.grade_pages });
     if (before.page !== current.grades.page || before.pages !== current.grades.pages) throw new Error("Historical grade binding changed unexpectedly.");
   } catch (error) {
-    discardHistoricalRecord(); historicalReply(current.id, false, error); historicalPageReply(request, null, error); scheduleDraw(); return;
+    discardHistoricalRecord(); historicalReply(current.id, false, error); historicalPageReply(request, null, error); publishVisual(); return;
   }
   if (requested.page === before.page) {
     current.lastRpc = request.rpcId;
@@ -223,9 +235,9 @@ function pageHistoricalRecord(request) {
     current.grades = after;
     current.lastRpc = request.rpcId;
     historicalPageReply(request, after);
-    scheduleDraw();
+    queueVisualControl("page", { page: after.page, comparisons: false, geometryVersion: nextGeometry(request.geometryVersion) });
   } catch (error) {
-    discardHistoricalRecord(); historicalReply(current.id, false, error); historicalPageReply(request, null, error); scheduleDraw();
+    discardHistoricalRecord(); historicalReply(current.id, false, error); historicalPageReply(request, null, error); publishVisual();
   }
 }
 
@@ -233,21 +245,23 @@ function clearHistoricalRecord(request) {
   if (!historicalRequestId(request)) return;
   discardHistoricalRecord();
   historicalReply(request.id, false);
-  scheduleDraw();
+  publishVisual();
 }
 
 function discardRoomResults() {
+  const previousCompleted = completedResults;
   discardHistoricalRecord();
+  if (visual?.owner === previousCompleted) fenceVisual();
   discardCompletedResults();
   roomResultsEpoch = {};
   const previous = roomResults;
   roomResults = null;
+  if (visual?.owner === previous) fenceVisual();
   if (previous?.binding) {
     const binding = previous.binding;
     previous.binding = null;
     try { binding.free(); } catch { /* Presentation disposal cannot change a joined gameplay outcome. */ }
   }
-  stopRedraw();
 }
 function roomResultsMetadata(results) {
   return results ? { page: results.page, pages: results.pages, failed: results.failed } : null;
@@ -258,68 +272,170 @@ function roomResultsFailure(results, error) {
   const binding = results.binding;
   results.binding = null;
   try { binding?.free(); } catch {}
-  stopRedraw();
+  fenceVisual();
   report("play-room-results", { playId: results.id, ...roomResultsMetadata(results), error: message(error) });
 }
-function stopRedraw() {
-  if (redraw === null) return;
-  if (redraw.animation) self.cancelAnimationFrame(redraw.id);
-  else clearTimeout(redraw.id);
-  redraw = null;
+function fenceVisual() {
+  // Fence producer callbacks before gameplay or prepared owners are freed.
+  if (visual) visual.retired = true;
 }
 function fatal(error) {
   if (failed) return;
+  if (capturesPending) {
+    deferredFatal ??= error;
+    // Cancel transport immediately; its retained reads/writes still join before
+    // the capture outcome and the deferred global failure are delivered.
+    cancelRoomFinalization();
+    return;
+  }
+  if (play) {
+    // failPlay joins room cleanup and delivers genuine captures first.
+    play.fatalAfterCapture = error;
+    failPlay(play, error);
+    return;
+  }
   failed = true;
   discardRoomResults();
   cancelRoomFinalization();
-  if (play) failPlay(play, error);
-  stopRedraw();
+  fenceVisual();
   report("fatal", { message: message(error) });
-  // Main terminates this owner. Do not try to reuse potentially failed GPU state.
 }
-
-function scheduleDraw(reset = true) {
-  if (failed || !view || (!selectedId && !play?.game && !roomResults?.binding && !completedResults?.shown && !historicalRecord?.binding) || extent.includes(0)) return;
-  if (reset) retries = 0;
-  if (redraw !== null) return;
-  const draw = () => {
-    redraw = null;
-    const results = !play?.game ? roomResults : null;
-    const completed = !play?.game && completedResults?.shown ? completedResults : null;
-    const historical = !play && !results && !completed ? historicalRecord : null;
-    try {
-      if (play?.game && play.mode === "replay") view.draw_replay(play.game);
-      else if (play?.game && play.localPlan) view.draw_local_game(play.game, play.localPage);
-      else if (play?.game) view.draw_game(play.game);
-      else if (completed?.binding && !completed.failed) {
-        if (results?.binding && !results.failed) view.draw_completed_room_results(completed.binding, results.binding);
-        else view.draw_completed_results(completed.binding);
-      }
-      else if (results?.binding) view.draw_room_results(results.binding);
-      else if (results) return;
-      else if (historical?.binding) view.draw_historical_record(historical.binding);
-      else view.draw();
-      if (view.needs_redraw()) {
-        if (++retries <= 3) scheduleDraw(false);
-        else report("render-wait", { selectedId, ...(play ? { playId: play.id } : {}) });
-      } else report("drawn", { selectedId, ...(play ? { playId: play.id } : {}) });
-    } catch (error) {
-      if (completed) completedResultsFailure(completed, error);
-      else if (results) roomResultsFailure(results, error);
-      else if (historical) { discardHistoricalRecord(); historicalReply(historical.id, false, error); scheduleDraw(); }
-      else fatal(error);
-    }
-  };
-  // Only schedules presentation. Its timestamp is never a song/audio clock.
-  if (typeof self.requestAnimationFrame === "function") {
-    try {
-      redraw = { animation: true, id: self.requestAnimationFrame(draw) };
-      return;
-    } catch (error) {
-      if (error?.name !== "NotSupportedError") return fatal(error);
-    }
+function captureDelivered() {
+  --capturesPending;
+  if (!capturesPending && deferredFatal) {
+    const error = deferredFatal;
+    deferredFatal = null;
+    fatal(error);
   }
-  redraw = { animation: false, id: setTimeout(draw, 16) };
+}
+function visualSelection() {
+  if (play?.game) return { owner: play, source: play.game, mode: play.mode === "replay" ? "replay" : play.localPlan ? "local" : "live" };
+  if (completedResults?.shown && completedResults.binding && !completedResults.failed) return { owner: completedResults, source: completedResults.binding, mode: "results", room: roomResults?.binding && !roomResults.failed ? roomResults.binding : null };
+  if (roomResults?.binding && !roomResults.failed) return { owner: roomResults, source: roomResults.binding, mode: "room" };
+  if (historicalRecord?.binding) return { owner: historicalRecord, source: historicalRecord.binding, mode: "history" };
+  if (preview) return { owner: preview, source: preview, mode: "preview" };
+  return null;
+}
+function currentVisual(context) {
+  const selected = visualSelection();
+  return !failed && !disposed && visual === context && !context.retired && selected?.owner === context.owner
+    && selected.source === context.source && selected.mode === context.mode && selected.room === context.room;
+}
+function visualFailure(context, error) {
+  if (!currentVisual(context)) return;
+  context.retired = true;
+  if (context.mode === "live" || context.mode === "local" || context.mode === "replay") failPlay(context.owner, error);
+  else if (context.mode === "results") completedResultsFailure(context.owner, error);
+  else if (context.mode === "room") roomResultsFailure(context.owner, error);
+  else if (context.mode === "history") { discardHistoricalRecord(); historicalReply(context.owner.id, false, error); }
+  else report("selection-error", { id: selectedId, message: message(error) });
+}
+function scopedRenderPort(context) {
+  const port = renderPort;
+  return {
+    postMessage: (...args) => port.postMessage(...args),
+    start: () => port.start(),
+    close: () => port.close(),
+    set onmessage(listener) {
+      port.onmessage = listener === null ? null : event => {
+        const evidence = event.data;
+        if (currentVisual(context) && evidence?.generation === context.generation && evidence.content === context.content
+          && ["drawn", "render-wait"].includes(evidence.kind)) {
+          report(evidence.kind, { selectedId, generation: context.generation, content: context.content,
+            ...(play === context.owner ? { playId: play.id } : {}) });
+        }
+        listener(event);
+      };
+    },
+    set onmessageerror(listener) { port.onmessageerror = listener; },
+  };
+}
+function nextGeometry(requested) {
+  if (requested !== undefined && (!unsignedIdentity(requested) || requested <= geometryVersion)) throw new Error("Geometry version must increase.");
+  const next = requested ?? geometryVersion + 1n;
+  if (!unsignedIdentity(next)) throw new Error("Geometry identity exhausted.");
+  geometryVersion = next;
+  return next;
+}
+function publishVisual() {
+  if (failed || disposed || !cpuReady || !renderPort) return;
+  if (visualPump) { visualPump.dirty = true; return; }
+  const pump = { dirty: true };
+  visualPump = pump;
+  void (async () => {
+    while (pump.dirty && !failed && !disposed) {
+      pump.dirty = false;
+      const selected = visualSelection();
+      if (!selected) continue;
+      let context = visual;
+      if (!context || !currentVisual(context)) {
+        if (context) {
+          context.retired = true;
+          try { if (context.client.state === "ready") await context.client.retire(); }
+          catch { context.client.close(); }
+          if (failed || disposed) return;
+        }
+        // Navigation during retirement selects the latest owner, never the old candidate.
+        const latest = visualSelection();
+        if (!latest) { visual = null; continue; }
+        if (visualGeneration === U64_MAX) throw new Error("Visual generation exhausted.");
+        context = { ...latest, generation: ++visualGeneration, content: visualGeneration, sequence: 0n, retired: false, controls: [] };
+        visual = context;
+        context.client = new RenderClient({ port: scopedRenderPort(context), ...renderLimits, generation: context.generation, content: context.content,
+          onError: error => visualFailure(context, error),
+          onGeometry: evidence => { if (currentVisual(context)) report("render-geometry", { ...evidence, selectedId, ...(play === context.owner ? { playId: play.id } : {}) }); } });
+        const bytes = ["preview", "live", "local", "replay"].includes(context.mode)
+          ? context.source.visual_registration(context.generation, context.content, renderLimits.maxPacketBytes, renderLimits.maxDiagnosticBytes)
+          : context.source.visual_snapshot(context.generation, context.content, renderLimits.maxPacketBytes, renderLimits.maxDiagnosticBytes);
+        await context.client.packet(bytes, { mode: context.mode });
+        if (!currentVisual(context)) { pump.dirty = true; continue; }
+        if (context.room) {
+          await context.client.packet(context.room.visual_snapshot(context.generation, context.content, renderLimits.maxPacketBytes, renderLimits.maxDiagnosticBytes));
+          if (!currentVisual(context)) { pump.dirty = true; continue; }
+        }
+        if (surface && surface.geometryVersion > surfaceSentVersion && !context.controls.some(control => control.operation === "resize")) context.controls.unshift({ operation: "resize", fields: { ...surface } });
+      }
+      if (!currentVisual(context)) { pump.dirty = true; continue; }
+      // Controls wait only for the visual channel; input/audio remain independent.
+      while (context.controls.length) {
+        if (context.client.pending) break;
+        const control = context.controls.shift();
+        await context.client.control(control.operation, control.fields);
+        if (control.operation === "resize") surfaceSentVersion = control.fields.geometryVersion;
+        if (!currentVisual(context)) { pump.dirty = true; break; }
+      }
+      if (!currentVisual(context) || context.controls.length) continue;
+      if (["preview", "live", "local", "replay"].includes(context.mode)) {
+        context.client.publish(() => {
+          if (!currentVisual(context)) throw new Error("Visual producer retired.");
+          if (context.sequence === U64_MAX) throw new Error("Visual sequence exhausted.");
+          const sequence = ++context.sequence;
+          const bytes = context.mode === "preview" ? context.source.preview_state(sequence, previewSongNs)
+            : context.source.visual_frame(sequence, context.owner.localPage ?? 0);
+          context.frameGeometry = undefined;
+          return bytes;
+        }, header => {
+          if (!currentVisual(context)) return false;
+          const accepted = context.source.acknowledge_visual(header.generation, header.content, header.sequence);
+          if (accepted && context.controls.length) setTimeout(() => { if (currentVisual(context)) publishVisual(); }, 0);
+          return accepted;
+        }, context.frameGeometry === undefined ? {} : { geometryVersion: context.frameGeometry });
+      }
+    }
+  })().catch(error => {
+    if (visual && currentVisual(visual)) visualFailure(visual, error);
+    else if (!failed && !disposed) pump.dirty = true;
+  })
+    .finally(() => { if (visualPump === pump) { visualPump = null; if (pump.dirty) publishVisual(); } });
+}
+function queueVisualControl(operation, fields) {
+  const context = visual;
+  if (context && currentVisual(context)) {
+    context.controls.push({ operation, fields });
+    // Bound repeated resize/page requests to the latest control of each kind.
+    context.controls = context.controls.filter((control, index, all) => all.findLastIndex(candidate => candidate.operation === control.operation) === index);
+  }
+  publishVisual();
 }
 
 async function importFiles(request, generation) {
@@ -388,7 +504,7 @@ async function drainImports() {
 async function selectChart(request) {
   const generation = importGeneration;
   await ready;
-  if (failed || generation !== importGeneration) return;
+  if (failed || disposed || generation !== importGeneration) return;
   let prepared = null;
   try {
     if (play) throw new Error("Stop gameplay before changing the preview chart.");
@@ -400,11 +516,15 @@ async function selectChart(request) {
       title: prepared.title, artist: prepared.artist, duration: prepared.duration_ns.toString(),
       notes: prepared.note_count, samples: prepared.sample_count, images: prepared.image_count,
     };
-    view.set_chart(prepared);
-    prepared = null; // Ownership moved into Rust; calling free would double-release.
+    fenceVisual();
+    const previous = preview;
+    preview = prepared;
+    prepared = null;
+    previewSongNs = 0n;
+    previous?.free();
     selectedId = request.id;
     report("selected", { id: request.id, libraryId, path: request.path, ...metadata });
-    scheduleDraw();
+    publishVisual();
   } catch (error) {
     report("selection-error", { id: request.id, message: message(error) });
   } finally { prepared?.free(); }
@@ -412,13 +532,14 @@ async function selectChart(request) {
 
 async function seek(request) {
   await ready;
-  if (failed || request.selectedId !== selectedId) return;
+  if (failed || disposed || request.selectedId !== selectedId) return;
   try {
     if (play) throw new Error("Stop gameplay before seeking the preview.");
     const ns = previewNanos(request.ns);
-    view.seek(ns);
+    if (!preview) throw new Error("Select a prepared preview before seeking.");
+    previewSongNs = ns;
     report("position", { id: request.id, selectedId, ns: ns.toString() });
-    scheduleDraw();
+    publishVisual();
   } catch (error) { report("seek-error", { id: request.id, selectedId, message: message(error) }); }
 }
 
@@ -426,10 +547,9 @@ async function resize(request) {
   if (![request.width, request.height].every(value => Number.isInteger(value) && value >= 0 && value <= 0xffffffff)) throw new Error("Invalid canvas extent.");
   extent = [request.width, request.height];
   await ready;
-  if (failed) return;
-  view.resize(...extent);
-  if (extent.includes(0)) stopRedraw();
-  else scheduleDraw();
+  if (failed || disposed) return;
+  surface = { width: request.width, height: request.height, geometryVersion: nextGeometry(request.geometryVersion) };
+  queueVisualControl("resize", surface);
 }
 
 function integer(value, minimum, maximum) {
@@ -545,7 +665,7 @@ function updatePeerHud(state, progress = null, member = null) {
     }
     if (member === null) state.game.update_peer_hud(peer.peerStatus, words);
     else state.game.update_peer_hud(member.player, peer.peerStatus, words);
-    scheduleDraw();
+    publishVisual();
   } catch (error) {
     peer.peerHudError = message(error) || "Peer presentation failed.";
     try {
@@ -554,7 +674,7 @@ function updatePeerHud(state, progress = null, member = null) {
     } catch (cause) { peer.peerHudError = message(`${peer.peerHudError}; disable peer HUD: ${message(cause)}`); }
     report("play-multiplayer", { playId: state.id, event: { kind: "peer-display-unavailable", error: peer.peerHudError,
       ...(member === null ? {} : { player: member.player }) } });
-    scheduleDraw();
+    publishVisual();
   }
 }
 
@@ -926,13 +1046,13 @@ function roomHudFailure(state, room, error) {
   if (play === state && state.game) {
     try { state.game.disable_room_hud(); } catch {}
     report("play-room", { playId: state.id, event: { kind: "display-unavailable", error: message(error) || "Room score display unavailable." } });
-    scheduleDraw();
+    publishVisual();
   }
 }
 
 function updateRoomHud(state, room, action) {
   if (play !== state || !state.game || !room.hudConfigured || room.hudFailed) return;
-  try { action(state.game); scheduleDraw(); }
+  try { action(state.game); publishVisual(); }
   catch (error) { roomHudFailure(state, room, error); }
 }
 
@@ -947,7 +1067,7 @@ function configureRoomHud(state, room) {
     const pages = game.room_hud_pages();
     if (!integer(pages, 1, 1008) || pages !== Math.ceil(remote / 4)) throw new Error("Room display returned an incorrect page count.");
     room.hudConfigured = true; room.hudPages = pages;
-    scheduleDraw();
+    publishVisual();
     return true;
   } catch (error) { roomHudFailure(state, room, error); return false; }
 }
@@ -981,7 +1101,7 @@ function retainRoomResults(state, natural) {
     const { words, remote } = roomRosterWords(room);
     results.pages = Math.ceil(remote / 4);
     if (!integer(results.page, 0, results.pages - 1)) throw new Error("Invalid retained room page.");
-    if (typeof BrowserRoomResults !== "function" || typeof view?.draw_room_results !== "function") {
+    if (typeof BrowserRoomResults !== "function" || typeof BrowserRoomResults?.prototype?.visual_snapshot !== "function") {
       throw new Error("Retained room Results binding unavailable.");
     }
     binding = new BrowserRoomResults(room.participant, words);
@@ -1008,7 +1128,7 @@ function retainRoomResults(state, natural) {
   }
   roomResults = results;
   state.roomResults = results;
-  scheduleDraw();
+  publishVisual();
 }
 
 function sendRoomProgress(state, final = false) {
@@ -1286,7 +1406,7 @@ function roomRequest(state, request) {
       try { state.game.set_room_hud_page(request.page); }
       catch (error) { roomHudFailure(state, room, error); throw error; }
       room.hudPage = request.page;
-      scheduleDraw();
+      publishVisual();
       reply(state, request, { kind: "room-page", page: room.hudPage, pages: room.hudPages });
       return;
     }
@@ -1422,12 +1542,13 @@ function replayTransfers(replay, replays, completedArchive) {
 
 function failPlay(state, error, request = null) {
   if (play !== state) return;
+  ++capturesPending;
   const score = statistics(state);
   const savedOpponents = finalOpponents(state);
   retainFinalGroup(state);
   sendRoomProgress(state, true);
   play = null; // Invalidates a still-awaiting preparation before releasing owners.
-  stopRedraw();
+  fenceVisual();
   closeNetwork(state.network);
   const roomClosing = state.room ? finishRoom(state, false) : null;
   const { cleanupError, replay, replayError, replays, completedArchive, archivePlayers, archiveError } = disposeGame(state);
@@ -1449,10 +1570,12 @@ function failPlay(state, error, request = null) {
     ...(state.network ? { multiplayer: multiplayerOutcome(state.network) } : {}),
     ...(state.room ? { room: roomOutcome(state.room), roomResults: roomResultsMetadata(state.roomResults) } : {}),
     ...(savedOpponents ? { savedOpponents } : {}) }, replayTransfers(replay, replays, completedArchive));
+    captureDelivered();
+    if (state.fatalAfterCapture) fatal(state.fatalAfterCapture);
   };
-  if (roomClosing) void roomClosing.then(finished).catch(fatal);
+  if (roomClosing) void roomClosing.then(finished, cause => finished(cause));
   else finished(null);
-  scheduleDraw();
+  publishVisual();
 }
 
 function stopPlay(state, request) {
@@ -1460,12 +1583,13 @@ function stopPlay(state, request) {
   const completed = request.completed === true;
   if (completed && (!state.completed || commandsPending(state) || state.audioPumping
     || state.renderObservation !== null)) throw new Error("Natural stop has no current completion evidence.");
+  ++capturesPending;
   const score = statistics(state);
   const savedOpponents = finalOpponents(state);
   retainFinalGroup(state);
   sendRoomProgress(state, true);
   play = null;
-  stopRedraw();
+  fenceVisual();
   if (state.network) {
     state.network.stopping = true;
     clearRemoteProgress(state.network);
@@ -1492,12 +1616,13 @@ function stopPlay(state, request) {
       ...result, replayComplete: false }, replayTransfers(replay, replays, completedArchive));
     else report("play-stopped", { playId: state.id, ...result,
       replayComplete: completed && replay !== null }, replayTransfers(replay, replays, completedArchive));
+    captureDelivered();
   };
-  scheduleDraw();
+  publishVisual();
   // The game and samples are already released. Network disposal cannot delay
   // local ownership release or turn its failure into an incomplete replay.
-  if (roomClosing) void roomClosing.then(error => stopped(null, error)).catch(fatal);
-  else if (state.network) void drainNetwork(state, score).then(stopped).catch(fatal);
+  if (roomClosing) void roomClosing.then(error => stopped(null, error), cause => stopped(null, cause));
+  else if (state.network) void drainNetwork(state, score).then(stopped, cause => stopped(null, cause));
   else stopped(null);
 }
 
@@ -1752,7 +1877,7 @@ async function preparePlay(state, request) {
       if (state.touchPlayer !== null && Math.floor(state.localPlan.members.findIndex(member => member.player === state.touchPlayer) / 4) !== state.localPage) {
         throw new Error("The touch player must be visible on the initial local page.");
       }
-      if (typeof BrowserLocalGame?.new_physical !== "function" || typeof view?.draw_local_game !== "function") {
+      if (typeof BrowserLocalGame?.new_physical !== "function" || typeof BrowserLocalGame?.prototype?.visual_registration !== "function") {
         throw new Error("The gameplay binding does not provide local player ownership and rendering.");
       }
     }
@@ -1763,7 +1888,7 @@ async function preparePlay(state, request) {
       throw new Error("The gameplay binding does not provide canonical physical input ownership.");
     }
     if (state.touchInput && (typeof Game?.prototype?.configure_touch_regions !== "function"
-      || typeof Game?.prototype?.queue_input_blob_on_surface !== "function"
+      || typeof Game?.prototype?.[state.localPlan ? "queue_input_blob_on_surface_on_page" : "queue_input_blob_on_surface"] !== "function"
       || typeof Game?.prototype?.preflight_touch_surface !== "function"
       || (state.localPlan && (typeof Game?.prototype?.touch_bounds !== "function"
         || typeof Game?.prototype?.set_touch_page !== "function")))) {
@@ -1915,7 +2040,7 @@ async function preparePlay(state, request) {
     state.sampleCount = samples;
     reply(state, request, { kind: "prepared", samples, opponentCount: state.opponentCount, ...metadata });
     state.startRpcId = null;
-    scheduleDraw();
+    publishVisual();
   } catch (error) {
     if (play === state) failPlay(state, error, request);
   } finally { prepared?.free(); }
@@ -2210,7 +2335,7 @@ function publishRender(state, observation, completed) {
     sendProgress(state, statistics(state));
     publishOpponents(state);
   }
-  scheduleDraw();
+  publishVisual();
 }
 
 async function drainAudio(state) {
@@ -2400,11 +2525,14 @@ function stepPlay(state, request) {
       if (!integer(event.surfaceWidth, 1, 0xffffffff) || !integer(event.surfaceHeight, 1, 0xffffffff)) {
         throw new Error("Touch input requires a positive original backing extent.");
       }
+      if (state.localPlan && !integer(event.page, 0, Math.ceil(state.localPlan.members.length / 4) - 1)) {
+        throw new Error("Local touch input requires its original admitted acquisition page.");
+      }
       const bytes = encodeTouchEvent(event); // Includes original CSS/sample validation.
       state.game.preflight_touch_surface(Math.fround(event.x), Math.fround(event.y),
         event.width, event.height, event.surfaceWidth, event.surfaceHeight);
       encoded = { kind: "touch", bytes, width: event.width, height: event.height,
-        surfaceWidth: event.surfaceWidth, surfaceHeight: event.surfaceHeight };
+        surfaceWidth: event.surfaceWidth, surfaceHeight: event.surfaceHeight, ...(state.localPlan ? { page: event.page } : {}) };
       source = 2n;
     } else {
       if (event.kind !== undefined || !integer(event.key, 1, 65535) || !state.keys.has(event.key)
@@ -2447,6 +2575,8 @@ function stepPlay(state, request) {
   for (const { event, encoded: entry } of entries) {
     if (event.hostNs >= state.origin && entry !== null) {
       if (entry.kind === "hid") state.game.queue_hid_blob(entry.bytes, received);
+      else if (entry.kind === "touch" && state.localPlan) state.game.queue_input_blob_on_surface_on_page(entry.bytes,
+        entry.width, entry.height, entry.surfaceWidth, entry.surfaceHeight, entry.page, received);
       else if (entry.kind === "touch") state.game.queue_input_blob_on_surface(entry.bytes,
         entry.width, entry.height, entry.surfaceWidth, entry.surfaceHeight, received);
       else if (entry.kind === "gamepad") for (const bytes of entry.bytes) state.game.queue_input_blob(bytes, received);
@@ -2468,7 +2598,7 @@ function stepPlay(state, request) {
   if (play !== state) return;
   report("play-step-done", { playId: state.id, tickId: request.tickId, commandsPending: commandsPending(state),
     pendingInputs: pendingInputs(state), ...score });
-  scheduleDraw();
+  publishVisual();
   sendProgress(state, score);
   sendRoomProgress(state);
   publishOpponents(state);
@@ -2530,7 +2660,8 @@ function handlePlay(request) {
       }
       Object.assign(results, next);
       reply(results, request, { kind: "completed-results", completedResults: completedResultsMetadata(results) });
-      scheduleDraw();
+      if (request.kind === "play-results-page") queueVisualControl("page", { page: results.page, comparisons: results.comparisons, geometryVersion: nextGeometry(request.geometryVersion) });
+      else publishVisual();
     } catch (error) {
       if (identity(request.rpcId)) report("play-reply", { playId: results.id, rpcId: request.rpcId, error: message(error) });
     }
@@ -2553,7 +2684,7 @@ function handlePlay(request) {
         results.page = request.page;
       } catch (error) { roomResultsFailure(results, error); throw error; }
       reply(results, request, { kind: "room-page", page: results.page, pages: results.pages });
-      scheduleDraw();
+      queueVisualControl(local?.shown ? "room-page" : "page", { page: results.page, comparisons: false, geometryVersion: nextGeometry(request.geometryVersion) });
     } catch (error) {
       closeAudioHandoff(request);
       if (identity(request.rpcId)) report("play-reply", { playId: results.id, rpcId: request.rpcId, error: message(error) });
@@ -2602,9 +2733,11 @@ function handlePlay(request) {
       }
       if (reason !== null) report("play-reply", { playId: state.id, rpcId: request.rpcId, error: reason });
       else {
+        const version = nextGeometry(request.geometryVersion);
         state.localPage = request.page;
+        if (visual && currentVisual(visual)) visual.frameGeometry = version;
         reply(state, request, { kind: "local-page", page: state.localPage, ...(touchVisible === undefined ? {} : { touchVisible }) });
-        scheduleDraw();
+        publishVisual();
       }
       return;
     }
@@ -2679,19 +2812,42 @@ function handlePlay(request) {
 
 self.addEventListener("message", event => {
   const request = event.data;
-  if (failed) { closeAudioHandoff(request); return; }
+  if (request?.kind === "dispose") {
+    if (play || roomFinalization || capturesPending) { report("dispose-error", { message: "Join gameplay capture and room cleanup before disposing the Worker." }); return; }
+    if (disposed) return;
+    disposed = true;
+    fenceVisual();
+    visual?.client.close();
+    visual = null;
+    try { renderPort?.close(); } catch {}
+    renderPort = null;
+    preview?.free(); preview = null;
+    discardRoomResults();
+    stagedLibrary?.library.free(); stagedLibrary = null;
+    library?.free(); library = null;
+    ++importGeneration; pendingImport = null;
+    settingsOperation = null;
+    report("disposed");
+    return;
+  }
+  if (failed || disposed) { closeAudioHandoff(request); return; }
   if (!request || typeof request !== "object" || typeof request.kind !== "string") {
     if (play) failPlay(play, new Error("Malformed Worker request."));
     else fatal(new Error("Malformed Worker request."));
     return;
   }
   if (request.kind === "init") {
-    if (ready) return fatal(new Error("Graphics owner is already initialized."));
+    if (ready) return fatal(new Error("Gameplay owner is already initialized."));
     ready = (async () => {
-      if (!self.isSecureContext || !self.navigator.gpu) throw new Error("This browser needs WebGPU in a secure context (HTTPS or localhost).");
+      validateRenderLimits(request.maxPacketBytes, request.maxDiagnosticBytes);
+      const port = request.renderPort;
+      if (!port || !["postMessage", "start", "close"].every(name => typeof port[name] === "function")
+        || !Number.isInteger(request.renderTimeoutMs) || request.renderTimeoutMs < 1 || request.renderTimeoutMs > 60000) throw new Error("Gameplay initialization requires a transferred render port and trusted timeout.");
+      renderPort = port;
+      renderLimits = { maxPacketBytes: request.maxPacketBytes, maxDiagnosticBytes: request.maxDiagnosticBytes, timeoutMs: request.renderTimeoutMs };
       await init();
-      view = await BrowserView.create(request.canvas);
-      view.resize(...extent);
+      if (disposed || failed) return;
+      cpuReady = true;
       report("ready");
     })();
     ready.catch(fatal);
@@ -2704,7 +2860,7 @@ self.addEventListener("message", event => {
     void settingsProfile(request).catch(() => { /* An unavailable response port leaves Window's bounded deadline authoritative. */ });
     return;
   }
-  if (!ready) { closeAudioHandoff(request); return fatal(new Error("Initialize graphics before sending commands.")); }
+  if (!ready) { closeAudioHandoff(request); return fatal(new Error("Initialize gameplay before sending commands.")); }
   if (settingsOperation && request.kind !== "resize") {
     closeAudioHandoff(request);
     if (request.kind === "play-start") {

@@ -597,6 +597,16 @@ impl BrowserView {
         model.project(requested as usize).map_err(js_error)?; *page = requested as usize;
         Ok(())
     }
+    /// Applied presentation page, independent of any requested UI page.
+    pub fn visual_page(&self) -> Result<u32, JsValue> {
+        use render::VisualPresentation;
+        match self.visual.as_ref().ok_or_else(|| js_error("visual presentation not registered"))? {
+            VisualPresentation::Preview { .. } => Ok(0),
+            VisualPresentation::Play { state, local } => Ok(if *local { state.page() } else { 0 }),
+            VisualPresentation::History(history) => u32::try_from(history.grade_page()).map_err(js_error),
+            VisualPresentation::Results { page, .. } | VisualPresentation::Room { page, .. } => u32::try_from(*page).map_err(js_error),
+        }
+    }
     pub fn draw_visual(&mut self) -> Result<(), JsValue> {
         use render::VisualPresentation;
         match self.visual.as_ref().ok_or_else(|| js_error("visual presentation not registered"))? {

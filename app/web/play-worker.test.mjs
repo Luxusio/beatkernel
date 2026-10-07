@@ -51,6 +51,101 @@ function renderReport({ available = true, cursor = 9007199254742999n, frames = 2
 
 async function workerHarness(options = {}) {
   const messages = [];
+
+  // Genuine queued port and real RenderClient; only the WASM encoder/GPU edge
+  // is mocked. The map records immutable exporter snapshots for assertions.
+  const visualExports = [], visualAcks = [], visualOwners = new Map();
+  let geometryVersion = 0n;
+  function visualPacket(owner, kind, generation, content, sequence = 0n, page = 0, songNs) {
+    assert.equal(typeof generation, "bigint"); assert.ok(generation > 0n);
+    assert.equal(typeof content, "bigint"); assert.ok(content > 0n);
+    assert.equal(typeof sequence, "bigint");
+    const packet = new Uint8Array(40); packet.set([66,75,82,86]);
+    const h = new DataView(packet.buffer); h.setUint16(4,1,true); h.setUint16(6,kind,true);
+    h.setBigUint64(8,generation,true); h.setBigUint64(16,content,true);
+    h.setBigUint64(24,sequence,true); h.setBigUint64(32,0n,true);
+    const snapshot = {owner,kind,generation,content,sequence,page:kind>=4 ? owner.page : page,songNs};
+    visualOwners.set(`${generation}:${content}:${sequence}:${kind}`,snapshot);
+    visualExports.push(snapshot); return packet;
+  }
+  function installVisualProducer(target, kind = 1) {
+    target.visual_registration = function(g,c,limit,diagnostics) {
+      assert.equal(this.frees,0); assert.ok(limit >= 40); assert.ok(diagnostics >= 0);
+      this.visualContext={g,c}; this.visualPending=null; this.visualBaseline=0n;
+      return visualPacket(this,1,g,c);
+    };
+    target.visual_frame = function(sequence,page) {
+      assert.equal(this.frees,0); assert.equal(this.visualPending,null,"one frozen snapshot until exact ACK");
+      assert.ok(sequence > this.visualBaseline); this.visualPending=sequence;
+      return visualPacket(this,2,this.visualContext.g,this.visualContext.c,sequence,page);
+    };
+    target.preview_state = function(sequence,songNs) {
+      assert.equal(this.frees,0); assert.equal(this.visualPending,null);
+      this.visualPending=sequence;
+      return visualPacket(this,3,this.visualContext.g,this.visualContext.c,sequence,0,songNs);
+    };
+    target.acknowledge_visual = function(g,c,sequence) {
+      assert.equal(this.frees,0);
+      if(g!==this.visualContext.g||c!==this.visualContext.c||sequence!==this.visualPending) return false;
+      this.visualBaseline=sequence; this.visualPending=null;
+      visualAcks.push({owner:this,generation:g,content:c,sequence}); return true;
+    };
+    if(kind!==1) target.visual_snapshot = function(g,c,limit,diagnostics) {
+      assert.equal(this.frees,0); assert.ok(limit>=40); assert.ok(diagnostics>=0);
+      return visualPacket(this,kind,g,c);
+    };
+  }
+  const renderPort = {
+    width:0, height:0, page:0, presentations:new Map(), posts:[], starts:0, closes:0, blocked:options.renderBlocked??false, onmessage:null,onmessageerror:null,
+    start(){this.starts++;}, close(){this.closes++;},
+    emit(reply){Promise.resolve().then(()=>this.onmessage?.({data:structuredClone(reply)}));},
+    ack(request,fields={}) {
+      const base={generation:request.generation,content:request.content,operationId:request.operationId};
+      const h=request.kind==="packet"?new DataView(request.packet.buffer):null;
+      this.emit({...base,...(h?{kind:"state-ack",packetKind:h.getUint16(6,true),sequence:h.getBigUint64(24,true)}
+        :{kind:"control-ack",operation:request.kind,geometryVersion:request.geometryVersion}),...fields});
+    },
+    postMessage(request,transfer=[]) {
+      const message=structuredClone(request,{transfer}); this.posts.push(message);
+      Promise.resolve().then(()=>{
+        if(this.blocked)return;
+        const view=views[0];
+        if(message.kind==="packet") {
+          const h=new DataView(message.packet.buffer),kind=h.getUint16(6,true),sequence=h.getBigUint64(24,true);
+          const s=visualOwners.get(`${message.generation}:${message.content}:${sequence}:${kind}`);
+          assert.ok(s,"actual valid BKRV exporter packet crossed the boundary");
+          if(kind!==6)this.page=s.page;
+          if(kind===6&&options.roomResultsDrawError){this.emit({kind:"render-error",generation:message.generation,content:message.content,message:options.roomResultsDrawError});return;}
+          if(kind>=4)this.presentations.set(message.generation,{...s});
+          const mode=this.posts.find(p=>p.kind==="packet"&&p.generation===message.generation&&p.mode)?.mode;
+          if(kind===1&&mode==="preview") {
+            if(view.current&&view.current!==s.owner)view.current.releasedByView=true;
+            view.current=s.owner; view.replacements?.push(s.owner);
+          }else if(kind===3){view.positions.push(s.songNs);view.draws++;}
+          else if(kind===2&&mode==="local")view.localDraws?.push({game:s.owner,page:s.page});
+          else if(kind===2&&mode==="replay")view.replayDraws?.push(s.owner);
+          else if(kind===2){view.gameDraws?.push(s.owner);view.draws++;}
+          else if(kind===4){view.historicalDraws??=[];view.historicalDraws.push(s.owner);}
+          else if(kind===5||kind===6){view.resultDraws?.push({results:s.owner,page:s.page});}
+        }else if(message.kind==="resize"){this.width=message.width;this.height=message.height;view.extents.push([message.width,message.height]);}
+        if(["page","room-page"].includes(message.kind)){
+          this.page=message.page;
+          const s=this.presentations.get(message.generation);
+          assert.ok(s,"paging follows real frozen registration");
+          if(s.kind===4){view.historicalDraws??=[];view.historicalDraws.push(s.owner);}
+          else view.resultDraws?.push({results:s.owner,page:message.page});
+        }
+        this.ack(message);
+        if(message.geometryVersion&&this.width>0&&this.height>0)this.emit({kind:"geometry-ack",generation:message.generation,content:message.content,geometryVersion:message.geometryVersion,page:this.page,width:this.width,height:this.height});
+      });
+    },
+  };
+  function renderRequest(request) {
+    if(request?.kind==="init")return {...request,canvas:undefined,renderPort:Object.hasOwn(request,"renderPort")?request.renderPort:renderPort,maxPacketBytes:request.maxPacketBytes??1024*1024,maxDiagnosticBytes:request.maxDiagnosticBytes??4096,renderTimeoutMs:request.renderTimeoutMs??60000};
+    if(["resize","play-page","play-results-page","play-room-results-page","historical-record-page"].includes(request?.kind))return {...request,geometryVersion:request.geometryVersion??++geometryVersion};
+    return request;
+  }
+
   const transfers = [];
   const libraries = [];
   const views = [];
@@ -85,6 +180,7 @@ async function workerHarness(options = {}) {
       lanes: new Uint8Array(options.lanes ?? [0x11, 0x12]), moved: false, frees: 0,
       free() { assert.equal(this.moved, false); assert.equal(++this.frees, 1); },
     };
+    installVisualProducer(prepared);
     preparedOwners.push(prepared);
     return prepared;
   }
@@ -506,6 +602,17 @@ async function workerHarness(options = {}) {
   if (options.missingHidSetup) BrowserGame.prototype.configure_hid_devices = undefined;
   if (options.missingInputHidBlob) BrowserGame.prototype.queue_hid_blob = undefined;
   class BrowserLocalGame extends BrowserGame {
+
+    queue_input_blob_on_surface_on_page(bytes, cssWidth, cssHeight, surfaceWidth, surfaceHeight, page, received) {
+      this.live(); assert.equal(this.contact, true);
+      assert.ok(Number.isInteger(page) && page >= 0 && page < Math.ceil(this.memberIds.length / 4));
+      this.calls.push(["touch", bytes.slice(), cssWidth, cssHeight, surfaceWidth, surfaceHeight, received]);
+      this.calls.push(["touch-page", page, bytes.slice(), cssWidth, cssHeight, surfaceWidth, surfaceHeight, received]);
+      options.inputBlobOnSurface?.(this, bytes, cssWidth, cssHeight, surfaceWidth, surfaceHeight, received);
+      this.retainPacket(bytes, received, { cssWidth, cssHeight, surfaceWidth, surfaceHeight });
+      this.pendingInput.at(-1).acquisitionPage = page;
+    }
+
     static new_physical(prepared, ...args) {
       localConstructions.push({ prepared, args });
       if (options.localConstructError) { prepared.moved = true; throw new Error(options.localConstructError); }
@@ -648,6 +755,7 @@ async function workerHarness(options = {}) {
       this.memberReplayBytes.set(player, bytes); return bytes;
     }
   }
+  if (options.missingLocalTouchSurfacePage) BrowserLocalGame.prototype.queue_input_blob_on_surface_on_page = undefined;
   if (options.missingLocalConstructor) BrowserLocalGame.new_physical = undefined;
   if (options.missingLocalInputBlob) BrowserLocalGame.prototype.queue_input_blob = undefined;
   if (options.missingLocalSavedHud) BrowserLocalGame.prototype.disable_saved_opponent_hud = undefined;
@@ -910,8 +1018,13 @@ async function workerHarness(options = {}) {
       } catch (error) { owner.disconnect(error); throw error; }
     }
   }
+  views.push(new BrowserView());
+  installVisualProducer(BrowserGame.prototype, 1);
+  installVisualProducer(BrowserReplay.prototype, 1);
+  installVisualProducer(BrowserLocalGame.prototype, 1);
+  installVisualProducer(BrowserRoomResults.prototype, 6);
   const self = {
-    isSecureContext: true, navigator: { gpu: {} },
+    isSecureContext: false, navigator: {},
     postMessage(value, transfer = []) {
       transfers.push([...transfer]);
       messages.push(structuredClone(value, { transfer }));
@@ -919,7 +1032,7 @@ async function workerHarness(options = {}) {
     addEventListener(name, callback) { assert.equal(name, "message"); receive = callback; },
   };
   const context = createContext({
-    self, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
+    self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
     performance: { timeOrigin: 10000, now() { return networkNow; } },
     setTimeout(callback, delay = 0) {
       const id = ++timerId; timers.set(id, callback); timerDelays.set(id, delay); return id;
@@ -927,10 +1040,9 @@ async function workerHarness(options = {}) {
     clearTimeout(id) { timers.delete(id); timerDelays.delete(id); },
   });
   self.performance = context.performance;
-  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame", "BrowserReplay", "BrowserMultiplayer", "BrowserLocalGame", "BrowserRoomClient", "BrowserRoomResults"], function () {
-    this.setExport("default", async () => { if (options.initGate) await options.initGate.promise; });
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserGame", "BrowserReplay", "BrowserMultiplayer", "BrowserLocalGame", "BrowserRoomClient", "BrowserRoomResults"], function () {
+    this.setExport("default", async () => { if (options.initGate) await options.initGate.promise; if (options.viewGate) await options.viewGate.promise; });
     this.setExport("BrowserLibrary", BrowserLibrary);
-    this.setExport("BrowserView", BrowserView);
     this.setExport("BrowserGame", BrowserGame);
     this.setExport("BrowserReplay", BrowserReplay);
     this.setExport("BrowserMultiplayer", BrowserMultiplayer);
@@ -957,8 +1069,10 @@ async function workerHarness(options = {}) {
   const roomTransport = new SyntheticModule(["WebTransportChannel"], function () {
     this.setExport("WebTransportChannel", RoomChannel);
   }, { context });
+  const renderClient = new SourceTextModule(await readFile(new URL("./render-protocol.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
+    if (specifier === "./render-protocol.mjs") return renderClient;
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./host_model.mjs") return helper;
     if (specifier === "./completed-results-model.mjs") return completedHelper;
@@ -979,7 +1093,7 @@ async function workerHarness(options = {}) {
   });
   await worker.evaluate();
   return {
-    messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
+    renderPort, visualExports, visualAcks, messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
     roomSessions, roomChannels, roomWrappers, roomResults,
     // Existing cadence fixtures specify elapsed control time from their initial
     // 1000ms reading; a future scheduled activation first waits for that target.
@@ -990,8 +1104,9 @@ async function workerHarness(options = {}) {
     },
     windowNowNs() { return 10000000000n + millisecondsToNanos(networkNow) - windowOrigin; },
     acquisitionNowNs() { return acquisitionNow; },
-    post(request) { receive({ data: request }); },
+    post(request) { receive({ data: renderRequest(request) }); },
     async send(request) {
+      request = renderRequest(request);
       if (request?.kind === "play-start" && typeof request.windowOriginNs === "bigint") windowOrigin = request.windowOriginNs;
       if (request?.kind === "play-step" && !Object.hasOwn(request, "nowNs")) request = { ...request, nowNs: request.watermark };
       if (request?.kind === "play-step") acquisitionNow = request.nowNs;
@@ -1008,9 +1123,9 @@ async function workerHarness(options = {}) {
       receive({ data: request }); await flushJobs();
     },
     async tick() {
-      const entry = timers.entries().next().value;
-      assert.ok(entry, "expected presentation callback");
-      timers.delete(entry[0]); entry[1](); await flushJobs();
+      const entry = [...timers].find(([id]) => timerDelays.get(id) < 60000);
+      if (entry) { timers.delete(entry[0]); entry[1](); }
+      await flushJobs();
     },
     async expireNetwork() {
       const entry = [...timers].find(([id]) => timerDelays.get(id) === 2000);
@@ -1220,7 +1335,7 @@ function assertReleased(h, score = SCORE) {
 function touchEvent(fields = {}) {
   return { kind: "touch", hostNs: ORIGIN, sequence: 1n, contact: 18446744073709551615n,
     phase: 0, code: 0xfffffffe, x: 120, y: 90, pressure: 0.5, width: 480, height: 360,
-    surfaceWidth: 960, surfaceHeight: 720, ...fields };
+    surfaceWidth: 960, surfaceHeight: 720, page: 0, ...fields };
 }
 
 // Platform endpoint only: the actual AudioCommandClient owns validation,
@@ -2686,7 +2801,7 @@ test("local capability and coverage refusals preserve prepared ownership while o
     assert.equal(h.preparedOwners.length, preparations); assert.equal(h.locals.length, 0);
     assert.equal(h.of("play-error").length, 1);
   }
-  for (const options of [{ missingLocalExport: true }, { missingLocalConstructor: true }, { missingLocalInputBlob: true }]) {
+  for (const options of [{ missingLocalExport: true }, { missingLocalConstructor: true }, { missingLocalInputBlob: true }, { missingLocalTouchSurfacePage: true }]) {
     const h = await catalogWorker(options); await h.send(localRequest());
     assert.equal(h.preparedOwners.at(-1).moved, false); assert.equal(h.preparedOwners.at(-1).frees, 1);
     assert.equal(h.locals.length, 0); assert.equal(h.games.length, 0); assert.equal(h.of("play-error").length, 1);
@@ -2732,12 +2847,13 @@ test("local touch page RPC retains the input owner and rejects failed or contrad
   await legacyWitness(h, 2, 101n, ORIGIN + 1n);
   assert.deepEqual((await h.rpc("play-page", { page: 1 })).result, { kind: "local-page", page: 1, touchVisible: false });
   await h.tick(); assert.equal(h.views[0].localDraws.at(-1).page, 1);
-  const hidden = touchEvent({ sequence: 2n, contact: 77n, hostNs: ORIGIN + 1n });
-  const release = touchEvent({ sequence: 3n, phase: 2, contact: first.contact, hostNs: ORIGIN + 2n, x: -50 });
+  const hidden = touchEvent({ sequence: 2n, contact: 77n, hostNs: ORIGIN + 1n, page: 1 });
+  const release = touchEvent({ sequence: 3n, phase: 2, contact: first.contact, hostNs: ORIGIN + 2n, x: -50, page: 1 });
   await h.send(step({ tickId: 2, watermark: ORIGIN + 2n, events: [hidden, release] }));
   await legacyWitness(h, 3, 102n, ORIGIN + 2n);
   const inputs = game.calls.filter(call => call[0] === "touch");
   assert.deepEqual(inputs.map(call => call[1]), [first, hidden, release].map(encodeTouchEvent));
+  assert.deepEqual(game.calls.filter(call => call[0] === "touch-page").map(call => call[1]), [0, 1, 1]);
   assert.equal(game.calls.filter(call => call[0] === "local-touch").length, 1, "paging never installs a fresh contact owner");
   assert.equal(game.calls.filter(call => call[0] === "member-capture").length, 5);
   assert.ok(game.calls.findIndex(call => call[0] === "touch") < game.calls.findIndex(call => call[0] === "local-touch-page"));
@@ -2964,6 +3080,72 @@ async function directActive(options = {}) {
 function directObservation(fields = {}) {
   return { kind: "play-render", playId: 7, renderId: 1, presentedNs: null, presentedHostNs: null, ...fields };
 }
+
+test("a blocked renderer preserves original pending input, direct audio ACK and capture", async () => {
+  const { h, port, game } = await directActive({ recordReplay: true });
+  h.renderPort.blocked = true;
+  const key = { hostNs: ORIGIN, sequence: 9007199254740993n, key: 2, down: true };
+  await h.send(step({ events: [key], watermark: ORIGIN + 200000000n }));
+  const pending = h.renderPort.posts.at(-1);
+  assert.equal(pending.kind, "packet");
+  const exports = h.visualExports.length, baseline = game.visualBaseline;
+  await h.send(directObservation({ presentedNs: 0n, presentedHostNs: ORIGIN }));
+  await port.acknowledge({ report: renderReport() });
+  assert.equal(game.pendingInput.length, 1, "one genuine audio anchor retains independently acquired input");
+  game.batches.push(batch(71n));
+  await h.send(directObservation({ renderId: 2, presentedNs: 100000000n, presentedHostNs: ORIGIN + 100000000n }));
+  await port.acknowledge({ report: renderReport({ cursor: 9007199254744000n }) });
+  if (port.posts.at(-1).kind === "commands") await port.acknowledge();
+  assert.equal(game.processedInput.length, 1);
+  assert.equal(game.processedInput[0].hostNs ?? game.processedInput[0].host, ORIGIN);
+  assert.ok(game.calls.some(call => call[0] === "ack" && call[1] === 71n), "core audio acknowledgement never waits for visual ACK");
+  assert.equal(game.visualBaseline, baseline);
+  assert.equal(h.visualExports.length, exports, "latest dirty state cannot replace the frozen unacknowledged snapshot");
+  assert.equal(h.of("play-step-done").at(-1).tickId, 1);
+  assert.equal(h.of("play-render-done").at(-1).renderId, 2);
+  assert.equal(game.frees, 0);
+  h.renderPort.ack(pending, { sequence: new DataView(pending.packet.buffer).getBigUint64(24, true) + 1n }); await flushJobs();
+  assert.equal(game.visualBaseline, baseline);
+  h.renderPort.ack(pending); await flushJobs();
+  assert.ok(game.visualBaseline > baseline);
+  assert.equal(h.visualExports.length, exports + 1);
+  await h.send({ kind: "play-stop", playId: 7 });
+  assert.equal(game.replayTakes, 1);
+  assert.ok(h.of("play-stopped").at(-1).replay instanceof Uint8Array);
+  const acks = h.visualAcks.length;
+  h.renderPort.ack(pending); await flushJobs();
+  assert.equal(h.visualAcks.length, acks, "retired ACK never reads the freed gameplay owner");
+});
+
+test("terminal graphics failure delivers actual room capture before delayed cleanup permits global fatal", async () => {
+  const h = await roomPrepared({ roomHoldAfterClose: true });
+  const game = h.locals[0], event = await committedRoom(h);
+  await h.rpc("play-activate", { hostNs: event.targetHostNs, targetHostNs: event.targetHostNs, startFrame: START });
+  const session = h.roomSessions[0], channel = h.roomChannels[0];
+  session.onPublish = (_, finalPrefix) => {
+    assert.equal(finalPrefix, true); assert.equal(game.stops, 0); assert.equal(game.frees, 0);
+  };
+  const visual = h.renderPort.posts.findLast(row => row.kind === "packet");
+  h.renderPort.emit({ kind: "render-error", generation: visual.generation, content: visual.content,
+    message: "GPU device lost" }); await flushJobs();
+  assert.equal(game.groupProgressReads, 1);
+  assert.equal(game.frees, 1);
+  assert.equal(h.of("play-error").length, 0, "correlated receipt joins the retained room read");
+  await h.send(null);
+  assert.equal(h.of("fatal").length, 0, "global termination cannot erase a pending capture");
+  await h.send({ kind: "dispose" });
+  assert.equal(h.of("disposed").length, 0);
+  channel.reads.at(-1).gate.resolve(Uint8Array.of(1)); await flushJobs();
+  const final = h.of("play-error").find(row => row.playId === 7);
+  assert.ok(final); assert.match(final.message, /GPU device lost/);
+  assert.equal(final.replays[0].replayComplete, false);
+  assert.ok(final.replays[0].replay instanceof Uint8Array);
+  assert.equal(final.room.localComplete, false);
+  assert.equal(final.room.finalQueued, true);
+  assert.deepEqual(game.disposals, ["group-progress", "stop", "take:4294967295", "free"]);
+  const fatalIndex = h.messages.findIndex(row => row.kind === "fatal");
+  assert.ok(fatalIndex < 0 || h.messages.indexOf(final) < fatalIndex);
+});
 
 test("actual direct polls fairly retire reports between retained command ACK and new live or replay batches", async () => {
   for (const mode of ["live", "replay"]) {
@@ -4980,7 +5162,10 @@ test("prepared ownership, original-rate PCM transfers and setup batches retain t
   assertReleased(h);
   assert.equal(h.preparedOwners[1].frees, 0, "consumed preparation is not explicitly freed twice");
   await h.tick();
-  assert.equal(h.views[0].draws, 1);
+  const restored = h.visualExports.findLast(snapshot => snapshot.kind === 3);
+  assert.equal(restored.owner, h.preparedOwners[0]);
+  assert.equal(restored.songNs, 0n);
+  assert.equal(h.visualAcks.at(-1).owner, restored.owner, "restored preview is fully acknowledged");
   assert.equal(h.views[0].current, h.preparedOwners[0], "accepted preview survives gameplay");
 });
 
@@ -5253,6 +5438,7 @@ test("stop cancels reserved asynchronous setup before any late preparation or ow
 test("live owners reject library and preview mutations while stale play identities do nothing", async () => {
   const h = await active();
   const game = h.games[0];
+  const positions = [...h.views[0].positions], exports = h.visualExports.length;
   let reads = 0;
   await h.send({ kind: "import", id: 8, files: [selectedFile("new.bms", () => { reads++; throw new Error("must not acquire while playing"); })] });
   await h.send({ kind: "accept-library", id: 8 });
@@ -5260,7 +5446,8 @@ test("live owners reject library and preview mutations while stale play identiti
   await h.send({ kind: "seek", id: 10, selectedId: 2, ns: "100" });
   assert.equal(reads, 0);
   assert.equal(h.libraries[0].preparations.length, 2);
-  assert.equal(h.views[0].positions.length, 0);
+  assert.deepEqual(h.views[0].positions, positions, "rejected seek cannot alter the renderer preview snapshot");
+  assert.equal(h.visualExports.length, exports, "rejected library/preview work publishes no visual state");
   assert.equal(h.of("import-error").length, 2);
   assert.equal(h.of("selection-error").length, 1);
   assert.equal(h.of("seek-error").length, 1);
@@ -5276,7 +5463,10 @@ test("live owners reject library and preview mutations while stale play identiti
   await h.send({ kind: "play-stop", playId: 7 });
   assertReleased(h);
   await h.tick();
-  assert.equal(h.views[0].draws, 1);
+  const restored = h.visualExports.findLast(snapshot => snapshot.kind === 3);
+  assert.equal(restored.owner, h.preparedOwners[0]);
+  assert.equal(restored.songNs, 0n, "rejected live seek never changes the restored preview position");
+  assert.equal(h.visualAcks.at(-1).owner, restored.owner);
 });
 
 test("RPC, tick and report fences prevent repeated consumption and reject faulty Mixer evidence", async () => {
@@ -6356,4 +6546,65 @@ test("pre-activation failure and cancelled late network opens release identity a
   assert.equal(h.messages.length, messages);
   assert.equal(h.games[1].stops, 0);
   await h.send({ kind: "play-stop", playId: 8 });
+});
+
+
+test("every game mode registers explicitly including Local1", async () => {
+  for (const [mode, request] of [["live",startRequest()],["local",roomStartRequest()],
+    ["local",localRequest()],["replay",replayRequest(replayFile().file)]]) {
+    const h=await started({startRequest:request});
+    const registration=h.renderPort.posts.findLast(row=>row.kind==="packet"&&row.mode===mode);
+    assert.ok(registration,`missing ${mode} registration`);
+    assert.equal(new DataView(registration.packet.buffer).getUint16(6,true),1);
+    const source=h.locals[0]??h.replays[0]??h.games[0];
+    assert.equal(h.visualExports.findLast(row=>row.kind===1).owner,source);
+    if(request.localPlanWords?.length===4)assert.equal(source.memberIds.length,1);
+    assert.equal(h.of("fatal").length,0);
+    await h.send({kind:"play-stop",playId:7});
+  }
+});
+
+test("delayed local contacts retain their acquisition page after the current page changes", async () => {
+  const request = localRequest({ keyPairs: new Uint32Array(), recordReplay: true,
+    localPlanWords: localPlan([[91,2n],[2,3n],[88,4n],[7,5n],[0xffffffff,6n]]),
+    hidSetup: hidSetup([3n,4n,5n,6n]) });
+  const h = await active({ startRequest: request }), game = h.locals[0];
+  const original = touchEvent({ page: 0, width: 320, height: 240, surfaceWidth: 640, surfaceHeight: 480,
+    x: 101.25, y: 99.5, contact: 9007199254740993n });
+  const move = { ...original, phase: 1, sequence: 2n, hostNs: ORIGIN + 1n, x: 115.75 };
+  const release = { ...original, phase: 2, sequence: 3n, hostNs: ORIGIN + 2n, pressure: null };
+  assert.equal((await h.rpc("play-page", { page: 1 })).result.page, 1);
+  await h.send({ kind: "resize", width: 1920, height: 1080 });
+  h.renderPort.blocked = true;
+  await h.send(step({ events: [original, move, release], watermark: ORIGIN + 2n }));
+  const routes = game.calls.filter(call => call[0] === "touch-page");
+  assert.equal(routes.length, 3);
+  assert.deepEqual(routes.map(call => call[1]), [0,0,0], "current page1 cannot reinterpret the original acquisition page0");
+  for (const [index, event] of [original, move, release].entries()) {
+    assert.deepEqual(routes[index][2], encodeTouchEvent(event));
+    assert.deepEqual(routes[index].slice(3,7), [event.width,event.height,event.surfaceWidth,event.surfaceHeight]);
+    assert.equal(game.pendingInput[index].host, event.hostNs);
+    assert.equal(game.pendingInput[index].sequence, event.sequence);
+    assert.equal(game.pendingInput[index].acquisitionPage, event.page);
+  }
+  assert.equal(h.of("play-error").length, 0);
+  assert.equal(h.of("play-step-done").at(-1).pendingInputs, 3);
+  await h.send({ kind: "play-stop", playId: 7 });
+  assert.ok(h.of("play-stopped").at(-1).replays.every(row => row.replay instanceof Uint8Array));
+});
+
+test("invalid or missing local acquisition page refuses the entire batch before any input mutation and preserves captures", async () => {
+  for (const page of [undefined, null, -1, 0.5, 1, 4294967296, 0n, "0"]) {
+    const h = await active({ startRequest: localRequest({recordReplay:true}) }), game = h.locals[0];
+    const valid = touchEvent({page:0}), bad = touchEvent({page,hostNs:ORIGIN+1n,sequence:2n,contact:77n});
+    if (page === undefined) delete bad.page;
+    await h.send(step({events:[valid,bad],watermark:ORIGIN+1n}));
+    assert.equal(game.calls.filter(call => ["input","blob","touch","touch-page"].includes(call[0])).length, 0);
+    assert.equal(game.pendingInput.length, 0);
+    const error = h.of("play-error").at(-1);
+    assert.ok(error); assert.match(error.message, /page/i);
+    assert.equal(game.frees, 1);
+    assert.ok(error.replays.every(row => row.replay instanceof Uint8Array && row.replayComplete === false));
+    assert.equal(h.of("play-step-done").length, 0);
+  }
 });

@@ -144,13 +144,14 @@ export class RenderClient {
   }
   #message(input) {
     if (this.#state !== "ready" || !input || typeof input !== "object") return;
-    const { kind, generation, content, operationId, sequence, packetKind, operation, geometryVersion, message } = input;
+    const { kind, generation, content, operationId, sequence, packetKind, operation, geometryVersion, page, width, height, message } = input;
     if (kind === "ready") return;
     if (generation !== this.#generation || content !== this.#content) return;
     if (kind === "geometry-ack") {
-      if (!unsignedIdentity(geometryVersion) || geometryVersion !== this.#geometryRequested || geometryVersion <= this.#geometryAcknowledged) return;
+      if (this.#retiring || !unsignedIdentity(geometryVersion) || geometryVersion !== this.#geometryRequested || geometryVersion <= this.#geometryAcknowledged
+        || !boundedU32(page) || !boundedU32(width) || !boundedU32(height) || width === 0 || height === 0) return;
       this.#geometryAcknowledged = geometryVersion;
-      try { this.#onGeometry?.(Object.freeze({ generation, content, geometryVersion })); } catch (error) { this.#fail(error); }
+      try { this.#onGeometry?.(Object.freeze({ generation, content, geometryVersion, page, width, height })); } catch (error) { this.#fail(error); }
       return;
     }
     if (kind === "render-wait") return;

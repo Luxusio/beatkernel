@@ -306,6 +306,101 @@ async function workerHarness(options = {}) {
   const trace = [];
   const completedOwners = [];
   const messages = [];
+
+  // Genuine queued port and real RenderClient; only the WASM encoder/GPU edge
+  // is mocked. The map records immutable exporter snapshots for assertions.
+  const visualExports = [], visualAcks = [], visualOwners = new Map();
+  let geometryVersion = 0n;
+  function visualPacket(owner, kind, generation, content, sequence = 0n, page = 0, songNs) {
+    assert.equal(typeof generation, "bigint"); assert.ok(generation > 0n);
+    assert.equal(typeof content, "bigint"); assert.ok(content > 0n);
+    assert.equal(typeof sequence, "bigint");
+    const packet = new Uint8Array(40); packet.set([66,75,82,86]);
+    const h = new DataView(packet.buffer); h.setUint16(4,1,true); h.setUint16(6,kind,true);
+    h.setBigUint64(8,generation,true); h.setBigUint64(16,content,true);
+    h.setBigUint64(24,sequence,true); h.setBigUint64(32,0n,true);
+    const snapshot = {owner,kind,generation,content,sequence,page:kind>=4 ? owner.page : page,songNs};
+    visualOwners.set(`${generation}:${content}:${sequence}:${kind}`,snapshot);
+    visualExports.push(snapshot); return packet;
+  }
+  function installVisualProducer(target, kind = 1) {
+    target.visual_registration = function(g,c,limit,diagnostics) {
+      assert.equal(this.frees,0); assert.ok(limit >= 40); assert.ok(diagnostics >= 0);
+      this.visualContext={g,c}; this.visualPending=null; this.visualBaseline=0n;
+      return visualPacket(this,1,g,c);
+    };
+    target.visual_frame = function(sequence,page) {
+      assert.equal(this.frees,0); assert.equal(this.visualPending,null,"one frozen snapshot until exact ACK");
+      assert.ok(sequence > this.visualBaseline); this.visualPending=sequence;
+      return visualPacket(this,2,this.visualContext.g,this.visualContext.c,sequence,page);
+    };
+    target.preview_state = function(sequence,songNs) {
+      assert.equal(this.frees,0); assert.equal(this.visualPending,null);
+      this.visualPending=sequence;
+      return visualPacket(this,3,this.visualContext.g,this.visualContext.c,sequence,0,songNs);
+    };
+    target.acknowledge_visual = function(g,c,sequence) {
+      assert.equal(this.frees,0);
+      if(g!==this.visualContext.g||c!==this.visualContext.c||sequence!==this.visualPending) return false;
+      this.visualBaseline=sequence; this.visualPending=null;
+      visualAcks.push({owner:this,generation:g,content:c,sequence}); return true;
+    };
+    if(kind!==1) target.visual_snapshot = function(g,c,limit,diagnostics) {
+      assert.equal(this.frees,0); assert.ok(limit>=40); assert.ok(diagnostics>=0);
+      return visualPacket(this,kind,g,c);
+    };
+  }
+  const renderPort = {
+    width:0, height:0, page:0, presentations:new Map(), posts:[], starts:0, closes:0, blocked:options.renderBlocked??false, onmessage:null,onmessageerror:null,
+    start(){this.starts++;}, close(){this.closes++;},
+    emit(reply){Promise.resolve().then(()=>this.onmessage?.({data:structuredClone(reply)}));},
+    ack(request,fields={}) {
+      const base={generation:request.generation,content:request.content,operationId:request.operationId};
+      const h=request.kind==="packet"?new DataView(request.packet.buffer):null;
+      this.emit({...base,...(h?{kind:"state-ack",packetKind:h.getUint16(6,true),sequence:h.getBigUint64(24,true)}
+        :{kind:"control-ack",operation:request.kind,geometryVersion:request.geometryVersion}),...fields});
+    },
+    postMessage(request,transfer=[]) {
+      const message=structuredClone(request,{transfer}); this.posts.push(message);
+      Promise.resolve().then(()=>{
+        if(this.blocked)return;
+        const view=views[0];
+        if(message.kind==="packet") {
+          const h=new DataView(message.packet.buffer),kind=h.getUint16(6,true),sequence=h.getBigUint64(24,true);
+          const s=visualOwners.get(`${message.generation}:${message.content}:${sequence}:${kind}`);
+          assert.ok(s,"actual valid BKRV exporter packet crossed the boundary");
+          if(kind!==6)this.page=s.page;
+          if(kind===6&&options.roomResultsDrawError){this.emit({kind:"render-error",generation:message.generation,content:message.content,message:options.roomResultsDrawError});return;}
+          if(kind>=4)this.presentations.set(message.generation,{...s});
+          const mode=this.posts.find(p=>p.kind==="packet"&&p.generation===message.generation&&p.mode)?.mode;
+          if(kind===1&&mode==="preview") {
+            if(view.current&&view.current!==s.owner)view.current.releasedByView=true;
+            view.current=s.owner; view.replacements?.push(s.owner);
+          }else if(kind===3){view.positions.push(s.songNs);view.draws++;}
+          else if(kind===2&&mode==="local")view.localDraws?.push({game:s.owner,page:s.page});
+          else if(kind===2&&mode==="replay")view.replayDraws?.push(s.owner);
+          else if(kind===2){view.gameDraws?.push(s.owner);view.draws++;}
+          else if(kind===4){view.historicalDraws??=[];view.historicalDraws.push(s.owner);trace.push("draw-historical");}
+          else if(kind===5||kind===6){view.resultDraws?.push({results:s.owner,page:s.page});trace.push("draw-results");}
+        }else if(message.kind==="resize"){this.width=message.width;this.height=message.height;view.extents.push([message.width,message.height]);}
+        if(["page","room-page"].includes(message.kind)){
+          this.page=message.page;
+          const s=this.presentations.get(message.generation);
+          assert.ok(s,"paging follows real frozen registration");
+          if(s.kind===4){view.historicalDraws??=[];view.historicalDraws.push(s.owner);}
+          else view.resultDraws?.push({results:s.owner,page:message.page});
+        }
+        this.ack(message);
+        if(message.geometryVersion&&this.width>0&&this.height>0)this.emit({kind:"geometry-ack",generation:message.generation,content:message.content,geometryVersion:message.geometryVersion,page:this.page,width:this.width,height:this.height});
+      });
+    },
+  };
+  function renderRequest(request) {
+    if(request?.kind==="init")return {...request,canvas:undefined,renderPort:Object.hasOwn(request,"renderPort")?request.renderPort:renderPort,maxPacketBytes:request.maxPacketBytes??1024*1024,maxDiagnosticBytes:request.maxDiagnosticBytes??4096,renderTimeoutMs:request.renderTimeoutMs??60000};
+    if(["resize","play-page","play-results-page","play-room-results-page","historical-record-page"].includes(request?.kind))return {...request,geometryVersion:request.geometryVersion??++geometryVersion};
+    return request;
+  }
+
   const transfers = [];
   const libraries = [];
   const views = [];
@@ -337,6 +432,7 @@ async function workerHarness(options = {}) {
       lanes: new Uint8Array(options.lanes ?? [0x11, 0x12]), moved: false, frees: 0,
       free() { assert.equal(this.moved, false); assert.equal(++this.frees, 1); },
     };
+    installVisualProducer(prepared);
     preparedOwners.push(prepared);
     return prepared;
   }
@@ -802,6 +898,17 @@ async function workerHarness(options = {}) {
   if (options.missingHidSetup) BrowserGame.prototype.configure_hid_devices = undefined;
   if (options.missingInputHidBlob) BrowserGame.prototype.queue_hid_blob = undefined;
   class BrowserLocalGame extends BrowserGame {
+
+    queue_input_blob_on_surface_on_page(bytes, cssWidth, cssHeight, surfaceWidth, surfaceHeight, page, received) {
+      this.live(); assert.equal(this.contact, true);
+      assert.ok(Number.isInteger(page) && page >= 0 && page < Math.ceil(this.memberIds.length / 4));
+      this.calls.push(["touch", bytes.slice(), cssWidth, cssHeight, surfaceWidth, surfaceHeight, received]);
+      this.calls.push(["touch-page", page, bytes.slice(), cssWidth, cssHeight, surfaceWidth, surfaceHeight, received]);
+      options.inputBlobOnSurface?.(this, bytes, cssWidth, cssHeight, surfaceWidth, surfaceHeight, received);
+      this.retainPacket(bytes, received, { cssWidth, cssHeight, surfaceWidth, surfaceHeight });
+      this.pendingInput.at(-1).acquisitionPage = page;
+    }
+
     static new_physical(prepared, ...args) {
       localConstructions.push({ prepared, args });
       if (options.localConstructError) { prepared.moved = true; throw new Error(options.localConstructError); }
@@ -945,6 +1052,7 @@ async function workerHarness(options = {}) {
       this.memberReplayBytes.set(player, bytes); return bytes;
     }
   }
+  if (options.missingLocalTouchSurfacePage) BrowserLocalGame.prototype.queue_input_blob_on_surface_on_page = undefined;
   if (options.missingLocalConstructor) BrowserLocalGame.new_physical = undefined;
   if (options.missingLocalInputBlob) BrowserLocalGame.prototype.queue_input_blob = undefined;
   if (options.missingLocalSavedHud) BrowserLocalGame.prototype.disable_saved_opponent_hud = undefined;
@@ -1152,8 +1260,15 @@ async function workerHarness(options = {}) {
       } catch (error) { owner.disconnect(error); throw error; }
     }
   }
+  views.push(new BrowserView());
+  installVisualProducer(BrowserGame.prototype, 1);
+  installVisualProducer(BrowserReplay.prototype, 1);
+  installVisualProducer(BrowserLocalGame.prototype, 1);
+  installVisualProducer(BrowserRoomResults.prototype, 6);
+  installVisualProducer(BrowserCompletedResults.prototype, 5);
+  installVisualProducer(BrowserHistoricalRecord.prototype, 4);
   const self = {
-    isSecureContext: true, navigator: { gpu: {} },
+    isSecureContext: false, navigator: {},
     postMessage(value, transfer = []) {
       transfers.push([...transfer]);
       messages.push(structuredClone(value, { transfer }));
@@ -1161,7 +1276,7 @@ async function workerHarness(options = {}) {
     addEventListener(name, callback) { assert.equal(name, "message"); receive = callback; },
   };
   const context = createContext({
-    self, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
+    self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
     performance: { timeOrigin: 10000, now() {
       return networkNow;
     } },
@@ -1171,12 +1286,11 @@ async function workerHarness(options = {}) {
     clearTimeout(id) { timers.delete(id); timerDelays.delete(id); },
   });
   self.performance = context.performance;
-  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame", "BrowserReplay", "BrowserMultiplayer", "BrowserLocalGame", "BrowserRoomClient", "BrowserRoomResults", "BrowserCompletedResults", "BrowserHistoricalRecord"], function () {
-    this.setExport("default", async () => { if (options.initGate) await options.initGate.promise; });
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserGame", "BrowserReplay", "BrowserMultiplayer", "BrowserLocalGame", "BrowserRoomClient", "BrowserRoomResults", "BrowserCompletedResults", "BrowserHistoricalRecord"], function () {
+    this.setExport("default", async () => { if (options.initGate) await options.initGate.promise; if (options.viewGate) await options.viewGate.promise; });
     this.setExport("BrowserHistoricalRecord",BrowserHistoricalRecord);
     this.setExport("BrowserCompletedResults", BrowserCompletedResults);
     this.setExport("BrowserLibrary", BrowserLibrary);
-    this.setExport("BrowserView", BrowserView);
     this.setExport("BrowserGame", BrowserGame);
     this.setExport("BrowserReplay", BrowserReplay);
     this.setExport("BrowserMultiplayer", BrowserMultiplayer);
@@ -1203,8 +1317,10 @@ async function workerHarness(options = {}) {
   const roomTransport = new SyntheticModule(["WebTransportChannel"], function () {
     this.setExport("WebTransportChannel", RoomChannel);
   }, { context });
+  const renderClient = new SourceTextModule(await readFile(new URL("./render-protocol.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
+    if (specifier === "./render-protocol.mjs") return renderClient;
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./completed-results-model.mjs") return resultsModel;
     if (specifier === "./host_model.mjs") return helper;
@@ -1225,11 +1341,12 @@ async function workerHarness(options = {}) {
   });
   await worker.evaluate();
   return {
-    historicalOwners, trace, completedOwners, messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
+    renderPort, visualExports, visualAcks, historicalOwners, trace, completedOwners, messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
     roomSessions, roomChannels, roomWrappers, roomResults,
     setNetworkNow(value) { assert.ok(value >= networkNow); networkNow = value; },
-    post(request) { receive({ data: request }); },
+    post(request) { receive({ data: renderRequest(request) }); },
     async send(request) {
+      request = renderRequest(request);
       if (request?.kind === "play-start" && typeof request.windowOriginNs === "bigint") windowOrigin = request.windowOriginNs;
       if (request?.kind === "play-step" && !Object.hasOwn(request, "nowNs")) request = { ...request, nowNs: request.watermark };
       const host = request?.nowNs ?? request?.watermark ?? request?.hostNs ?? request?.presentedHostNs;
@@ -1239,9 +1356,9 @@ async function workerHarness(options = {}) {
       receive({ data: request }); await flushJobs();
     },
     async tick() {
-      const entry = timers.entries().next().value;
-      assert.ok(entry, "expected presentation callback");
-      timers.delete(entry[0]); entry[1](); await flushJobs();
+      const entry = [...timers].find(([id]) => timerDelays.get(id) < 60000);
+      if (entry) { timers.delete(entry[0]); entry[1](); }
+      await flushJobs();
     },
     async expireNetwork() {
       const entry = [...timers].find(([id]) => timerDelays.get(id) === 2000);
@@ -1256,3 +1373,15 @@ async function workerHarness(options = {}) {
     of(kind) { return messages.filter(value => value.kind === kind); },
   };
 }
+
+
+test("historical renderer failure preserves selected bytes without gameplay authority", async () => {
+  const h=await catalogWorker(),request=historicalRequest(),archive=request.completedArchive.slice();
+  await h.send(request);
+  const packet=h.renderPort.posts.findLast(row=>row.kind==="packet");
+  assert.equal(new DataView(packet.packet.buffer).getUint16(6,true),4);
+  h.renderPort.emit({kind:"render-error",generation:packet.generation,content:packet.content,message:"historical surface lost"});await flushJobs();
+  assert.equal(h.historicalOwners[0].frees,1);assert.equal(h.of("fatal").length,0);
+  assert.equal(h.of("play-error").length,0);assert.equal(h.games.length,0);
+  assert.deepEqual(request.completedArchive,archive);assert.equal(h.of("historical-record-result").at(-1).available,false);
+});

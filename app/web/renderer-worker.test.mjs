@@ -31,7 +31,7 @@ async function rendererHarness(options = {}) {
       if (options.createGate) await options.createGate.promise;
       const view = new BrowserView(); views.push(view); return view;
     }
-    model = null; frees = 0; retired = 0;
+    model = null; frees = 0; retired = 0; appliedPage = 0;
     import_visual_packet(bytes, maxPacketBytes, maxDiagnosticBytes) {
       calls.push(["import", bytes[6], maxPacketBytes, maxDiagnosticBytes]);
       assert.ok(bytes instanceof Uint8Array);
@@ -40,11 +40,17 @@ async function rendererHarness(options = {}) {
       if (bytes.at(-1) === 255 || options.importError) throw new Error("malformed final member/page");
       const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
       this.model = { kind: v.getUint16(6, true), sequence: v.getBigUint64(24, true), final: bytes.at(-1) };
+      if (this.model.kind === 2) this.appliedPage = bytes[40];
+      else if (this.model.kind !== 6) this.appliedPage = 0;
       return this.model.sequence;
     }
     set_visual_local(local) { calls.push(["local", local]); }
-    set_visual_page(page, comparisons) { calls.push(["page", page, comparisons]); }
+    set_visual_page(page, comparisons) {
+      calls.push(["page", page, comparisons]);
+      this.appliedPage = options.appliedPage ?? page;
+    }
     set_visual_room_page(page) { calls.push(["room-page", page]); }
+    visual_page() { calls.push(["visual-page", this.appliedPage]); return this.appliedPage; }
     resize(width, height) { calls.push(["resize", width, height]); }
     draw_visual() { calls.push(["draw", this.model?.kind]); if (options.drawError) throw new Error(options.drawError); }
     needs_redraw() { return options.needsRedraw ?? false; }
@@ -158,7 +164,69 @@ test("state ACK is importer evidence; geometry ACK follows successful requested-
     await h.draw();
     const geometry = ofKind(h, "geometry-ack").filter(message => message.geometryVersion === 12n);
     assert.equal(geometry.length, 1); assert.equal(geometry[0].generation, 7n); assert.equal(geometry[0].content, 9n);
+    assert.equal(geometry[0].page, 0); assert.equal(geometry[0].width, 800); assert.equal(geometry[0].height, 600);
     assert.ok(h.calls.some(call => call[0] === "draw"));
+  } finally { await h.close(); }
+});
+
+test("geometry reports the applied static page and admitted backing extent after successful draw", async () => {
+  const h = await rendererHarness({ appliedPage: 2 });
+  try {
+    await h.init(); await h.send(request(1n, 5, 0n));
+    await h.send({ kind: "page", operationId: 2n, generation: 7n, content: 9n,
+      page: 99, comparisons: true, geometryVersion: 10n });
+    await h.send({ kind: "resize", operationId: 3n, generation: 7n, content: 9n,
+      width: 913, height: 517, geometryVersion: 11n });
+    assert.equal(ofKind(h, "geometry-ack").length, 0);
+    await h.draw();
+    assert.deepEqual(ofKind(h, "geometry-ack"), [{ kind: "geometry-ack", generation: 7n,
+      content: 9n, geometryVersion: 11n, page: 2, width: 913, height: 517 }]);
+    const drawIndex = h.calls.findIndex(call => call[0] === "draw");
+    const pageIndex = h.calls.findIndex(call => call[0] === "visual-page");
+    assert.ok(pageIndex > drawIndex, "evidence samples validated page after draw, never requested page 99");
+    await h.draw(); assert.equal(ofKind(h, "geometry-ack").length, 1);
+    await h.send(request(4n, 6, 0n, undefined));
+    await h.send({ kind: "room-page", operationId: 5n, generation: 7n, content: 9n,
+      page: 7, geometryVersion: 12n });
+    await h.draw();
+    assert.equal(ofKind(h, "geometry-ack").at(-1).page, 2, "combined footer page is not outer selected page");
+    assert.equal(ofKind(h, "geometry-ack").at(-1).geometryVersion, 12n);
+  } finally { await h.close(); }
+});
+
+test("live packet submission derives page from committed frame and retains actual resized extent", async () => {
+  const h = await rendererHarness();
+  try {
+    await h.init(); await h.send(request(1n, 1, 0n, "local"));
+    await h.send({ kind: "resize", operationId: 2n, generation: 7n, content: 9n,
+      width: 1024, height: 768, geometryVersion: 5n });
+    await h.draw(); assert.equal(ofKind(h, "geometry-ack").length, 0, "registration is not a drawable live frame");
+    await h.send({ ...request(3n, 2, 1n, "local", 7n, 9n, [3]), geometryVersion: 6n });
+    assert.equal(ofKind(h, "geometry-ack").length, 0);
+    await h.draw();
+    assert.deepEqual(ofKind(h, "geometry-ack"), [{ kind: "geometry-ack", generation: 7n,
+      content: 9n, geometryVersion: 6n, page: 3, width: 1024, height: 768 }]);
+    await h.send({ ...request(4n, 2, 2n, "local", 7n, 9n, [1]), geometryVersion: 7n });
+    await h.draw(); assert.equal(ofKind(h, "geometry-ack").at(-1).page, 1);
+    assert.equal(ofKind(h, "geometry-ack").at(-1).width, 1024);
+  } finally { await h.close(); }
+});
+
+test("replacement before pending draw reports only replacement owner and committed page", async () => {
+  const h = await rendererHarness();
+  try {
+    await h.init(); await h.send(request(1n, 1, 0n, "local"));
+    await h.send({ ...request(2n, 2, 1n, "local", 7n, 9n, [3]), geometryVersion: 1n });
+    await h.send(request(3n, 1, 0n, "local", 8n, 10n));
+    await h.send({ ...request(4n, 2, 1n, "local", 8n, 10n, [1]), geometryVersion: 2n });
+    await h.draw();
+    assert.deepEqual(ofKind(h, "geometry-ack"), [{ kind: "geometry-ack", generation: 8n,
+      content: 10n, geometryVersion: 2n, page: 1, width: 640, height: 480 }]);
+    const before = h.calls.length;
+    await h.send({ kind: "page", operationId: 5n, generation: 7n, content: 9n,
+      page: 9, comparisons: false, geometryVersion: 3n });
+    await h.draw(); assert.equal(ofKind(h, "geometry-ack").length, 1);
+    assert.equal(h.calls.slice(before).filter(call => call[0] === "page").length, 0);
   } finally { await h.close(); }
 });
 
@@ -173,6 +241,18 @@ for (const condition of ["zero", "retry", "fault"]) test(`${condition} surface c
     assert.equal(ofKind(h, "state-ack").length, 1);
     if (condition === "fault") assert.ok(ofKind(h, "render-error").length > 0);
     if (condition === "zero") assert.equal(h.calls.filter(call => call[0] === "draw").length, 0);
+    assert.equal(h.calls.filter(call => call[0] === "visual-page").length, 0);
+    if (condition === "retry") {
+      await h.draw(); await h.draw(); await h.draw();
+      assert.equal(ofKind(h, "geometry-ack").length, 0);
+      assert.ok(ofKind(h, "render-wait").length > 0);
+      h.options.needsRedraw = false;
+      await h.send({ kind: "resize", operationId: 3n, generation: 7n, content: 9n,
+        width: 801, height: 601, geometryVersion: 23n });
+      await h.draw();
+      assert.deepEqual(ofKind(h, "geometry-ack"), [{ kind: "geometry-ack", generation: 7n,
+        content: 9n, geometryVersion: 23n, page: 0, width: 801, height: 601 }]);
+    }
   } finally { await h.close(); }
 });
 

@@ -30,6 +30,101 @@ function selectedFile(path, content = "#BPM 120", acquire) {
 
 async function workerHarness(options = {}) {
   const messages = [];
+
+  // Genuine queued port and real RenderClient; only the WASM encoder/GPU edge
+  // is mocked. The map records immutable exporter snapshots for assertions.
+  const visualExports = [], visualAcks = [], visualOwners = new Map();
+  let geometryVersion = 0n;
+  function visualPacket(owner, kind, generation, content, sequence = 0n, page = 0, songNs) {
+    assert.equal(typeof generation, "bigint"); assert.ok(generation > 0n);
+    assert.equal(typeof content, "bigint"); assert.ok(content > 0n);
+    assert.equal(typeof sequence, "bigint");
+    const packet = new Uint8Array(40); packet.set([66,75,82,86]);
+    const h = new DataView(packet.buffer); h.setUint16(4,1,true); h.setUint16(6,kind,true);
+    h.setBigUint64(8,generation,true); h.setBigUint64(16,content,true);
+    h.setBigUint64(24,sequence,true); h.setBigUint64(32,0n,true);
+    const snapshot = {owner,kind,generation,content,sequence,page:kind>=4 ? owner.page : page,songNs};
+    visualOwners.set(`${generation}:${content}:${sequence}:${kind}`,snapshot);
+    visualExports.push(snapshot); return packet;
+  }
+  function installVisualProducer(target, kind = 1) {
+    target.visual_registration = function(g,c,limit,diagnostics) {
+      assert.equal(this.frees,0); assert.ok(limit >= 40); assert.ok(diagnostics >= 0);
+      this.visualContext={g,c}; this.visualPending=null; this.visualBaseline=0n;
+      return visualPacket(this,1,g,c);
+    };
+    target.visual_frame = function(sequence,page) {
+      assert.equal(this.frees,0); assert.equal(this.visualPending,null,"one frozen snapshot until exact ACK");
+      assert.ok(sequence > this.visualBaseline); this.visualPending=sequence;
+      return visualPacket(this,2,this.visualContext.g,this.visualContext.c,sequence,page);
+    };
+    target.preview_state = function(sequence,songNs) {
+      assert.equal(this.frees,0); assert.equal(this.visualPending,null);
+      this.visualPending=sequence;
+      return visualPacket(this,3,this.visualContext.g,this.visualContext.c,sequence,0,songNs);
+    };
+    target.acknowledge_visual = function(g,c,sequence) {
+      assert.equal(this.frees,0);
+      if(g!==this.visualContext.g||c!==this.visualContext.c||sequence!==this.visualPending) return false;
+      this.visualBaseline=sequence; this.visualPending=null;
+      visualAcks.push({owner:this,generation:g,content:c,sequence}); return true;
+    };
+    if(kind!==1) target.visual_snapshot = function(g,c,limit,diagnostics) {
+      assert.equal(this.frees,0); assert.ok(limit>=40); assert.ok(diagnostics>=0);
+      return visualPacket(this,kind,g,c);
+    };
+  }
+  const renderPort = {
+    width:0, height:0, page:0, presentations:new Map(), posts:[], starts:0, closes:0, blocked:options.renderBlocked??false, onmessage:null,onmessageerror:null,
+    start(){this.starts++;}, close(){this.closes++;},
+    emit(reply){Promise.resolve().then(()=>this.onmessage?.({data:structuredClone(reply)}));},
+    ack(request,fields={}) {
+      const base={generation:request.generation,content:request.content,operationId:request.operationId};
+      const h=request.kind==="packet"?new DataView(request.packet.buffer):null;
+      this.emit({...base,...(h?{kind:"state-ack",packetKind:h.getUint16(6,true),sequence:h.getBigUint64(24,true)}
+        :{kind:"control-ack",operation:request.kind,geometryVersion:request.geometryVersion}),...fields});
+    },
+    postMessage(request,transfer=[]) {
+      const message=structuredClone(request,{transfer}); this.posts.push(message);
+      Promise.resolve().then(()=>{
+        if(this.blocked)return;
+        const view=views[0];
+        if(message.kind==="packet") {
+          const h=new DataView(message.packet.buffer),kind=h.getUint16(6,true),sequence=h.getBigUint64(24,true);
+          const s=visualOwners.get(`${message.generation}:${message.content}:${sequence}:${kind}`);
+          assert.ok(s,"actual valid BKRV exporter packet crossed the boundary");
+          if(kind!==6)this.page=s.page;
+          if(kind===6&&options.roomResultsDrawError){this.emit({kind:"render-error",generation:message.generation,content:message.content,message:options.roomResultsDrawError});return;}
+          if(kind>=4)this.presentations.set(message.generation,{...s});
+          const mode=this.posts.find(p=>p.kind==="packet"&&p.generation===message.generation&&p.mode)?.mode;
+          if(kind===1&&mode==="preview") {
+            if(view.current&&view.current!==s.owner)view.current.releasedByView=true;
+            view.current=s.owner; view.replacements?.push(s.owner);
+          }else if(kind===3){view.positions.push(s.songNs);view.draws++;}
+          else if(kind===2&&mode==="local")view.localDraws?.push({game:s.owner,page:s.page});
+          else if(kind===2&&mode==="replay")view.replayDraws?.push(s.owner);
+          else if(kind===2){view.gameDraws?.push(s.owner);view.draws++;}
+          else if(kind===4){view.historicalDraws??=[];view.historicalDraws.push(s.owner);}
+          else if(kind===5||kind===6){view.resultDraws?.push({results:s.owner,page:s.page});}
+        }else if(message.kind==="resize"){this.width=message.width;this.height=message.height;view.extents.push([message.width,message.height]);}
+        if(["page","room-page"].includes(message.kind)){
+          this.page=message.page;
+          const s=this.presentations.get(message.generation);
+          assert.ok(s,"paging follows real frozen registration");
+          if(s.kind===4){view.historicalDraws??=[];view.historicalDraws.push(s.owner);}
+          else view.resultDraws?.push({results:s.owner,page:message.page});
+        }
+        this.ack(message);
+        if(message.geometryVersion&&this.width>0&&this.height>0)this.emit({kind:"geometry-ack",generation:message.generation,content:message.content,geometryVersion:message.geometryVersion,page:this.page,width:this.width,height:this.height});
+      });
+    },
+  };
+  function renderRequest(request) {
+    if(request?.kind==="init")return {...request,canvas:undefined,renderPort:Object.hasOwn(request,"renderPort")?request.renderPort:renderPort,maxPacketBytes:request.maxPacketBytes??1024*1024,maxDiagnosticBytes:request.maxDiagnosticBytes??4096,renderTimeoutMs:request.renderTimeoutMs??60000};
+    if(["resize","play-page","play-results-page","play-room-results-page","historical-record-page"].includes(request?.kind))return {...request,geometryVersion:request.geometryVersion??++geometryVersion};
+    return request;
+  }
+
   const libraries = [];
   const views = [];
   const games = [];
@@ -46,6 +141,7 @@ async function workerHarness(options = {}) {
       free() { assert.equal(this.moved, false); assert.equal(++this.frees, 1); },
     };
     if (!options.omitPreparedStart) prepared.start_ns = Object.hasOwn(options, "preparedStart") ? options.preparedStart : start;
+    installVisualProducer(prepared);
     preparedOwners.push(prepared);
     return prepared;
   }
@@ -198,9 +294,11 @@ async function workerHarness(options = {}) {
     take_replay() { calls.push(["take-replay"]); return Uint8Array.from([66, 75, 82]); }
     free() { this.frees++; assert.equal(this.frees, 1); calls.push(["free"]); }
   }
+  views.push(new BrowserView());
+  installVisualProducer(BrowserGame.prototype, 1);
   const self = {
-    isSecureContext: true,
-    navigator: { gpu: {} },
+    isSecureContext: false,
+    navigator: {},
     performance: { timeOrigin: 0, now: () => now + (options.gameplay ? 1000 : 0) },
     postMessage(value) { messages.push(value); },
     addEventListener(name, callback) {
@@ -209,17 +307,16 @@ async function workerHarness(options = {}) {
     },
   };
   const context = createContext({
-    self, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer,
+    self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer,
     performance: self.performance,
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
   });
-  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame", "BrowserReplay"], function () {
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserGame", "BrowserReplay"], function () {
     this.setExport("default", async () => {
       if (options.initError) throw new Error(options.initError);
     });
     this.setExport("BrowserLibrary", BrowserLibrary);
-    this.setExport("BrowserView", BrowserView);
     this.setExport("BrowserGame", BrowserGame);
     this.setExport("BrowserReplay", BrowserGame);
   }, { context });
@@ -246,8 +343,10 @@ async function workerHarness(options = {}) {
   const pointerProfileHelpers = new SourceTextModule(await readFile(new URL("./pointer-profile.mjs", import.meta.url), "utf8"), { context });
   const commandClient = new SourceTextModule(await readFile(new URL("./audio-command-client.mjs", import.meta.url), "utf8"), { context });
   const sampleClient = new SourceTextModule(await readFile(new URL("./audio-sample-client.mjs", import.meta.url), "utf8"), { context });
+  const renderClient = new SourceTextModule(await readFile(new URL("./render-protocol.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
+    if (specifier === "./render-protocol.mjs") return renderClient;
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./host_model.mjs") return helpers;
     if (specifier === "./completed-results-model.mjs") return completedHelpers;
@@ -267,9 +366,10 @@ async function workerHarness(options = {}) {
   });
   await worker.evaluate();
   return {
-    messages, libraries, views, timers, games, preparedOwners, calls,
+    renderPort, visualExports, visualAcks, messages, libraries, views, timers, games, preparedOwners, calls,
     setNow(value) { assert.ok(value >= now); now = value; },
     async send(request) {
+      request = renderRequest(request);
       if (request.kind === "play-step" && !Object.hasOwn(request, "nowNs")) {
         request = { ...request, nowNs: request.watermark };
       }
@@ -704,6 +804,7 @@ test("preparation failure retains the old view and its selected identity", async
   await worker.send({ kind: "accept-library", id: 1 });
   await worker.send({ kind: "select", id: 2, libraryId: 1, path: "good.bms", rate: 48000, seed: "7" });
   const original = worker.views[0].current;
+  const exports = worker.visualExports.length;
   await worker.send({ kind: "select", id: 3, libraryId: 1, path: "bad.bms", rate: 48000, seed: "7" });
   assert.equal(worker.views[0].current, original);
   assert.equal(original.frees, 0);
@@ -712,13 +813,17 @@ test("preparation failure retains the old view and its selected identity", async
   assert.deepEqual(worker.of("selected").map(message => message.id), [2]);
   assert.equal(worker.of("selection-error")[0].id, 3);
   assert.match(worker.of("selection-error")[0].message, /sample rate mismatch/);
+  assert.equal(worker.visualExports.length, exports, "failed preparation cannot replace the visual registration");
   await worker.send({ kind: "seek", id: 4, selectedId: 2, ns: "604800000000001" });
-  assert.deepEqual(worker.views[0].positions, [604800000000001n]);
+  assert.equal(worker.visualExports.at(-1).owner, original);
+  assert.equal(worker.visualExports.at(-1).kind, 3);
+  assert.equal(worker.visualExports.at(-1).songNs, 604800000000001n);
+  assert.equal(worker.visualAcks.at(-1).sequence, worker.visualExports.at(-1).sequence);
   assert.equal(worker.of("position")[0].selectedId, 2);
 });
 
-test("WASM or GPU initialization failure never reports readiness or admits later work", async () => {
-  for (const options of [{ initError: "missing WASM" }, { createError: "GPU unavailable" }]) {
+test("CPU initialization failure never reports readiness or admits later work", async () => {
+  for (const options of [{ initError: "missing WASM" }]) {
     const worker = await workerHarness(options);
     await worker.send({ kind: "init", canvas: {} });
     assert.equal(worker.of("ready").length, 0);
@@ -732,23 +837,74 @@ test("WASM or GPU initialization failure never reports readiness or admits later
   }
 });
 
-test("surface retries are bounded and zero extent cancels the pending callback", async () => {
-  const worker = await readyWorker({ needsRedraw: true });
-  await worker.send({ kind: "resize", width: 960, height: 720 });
+test("CPU readiness needs neither GPU nor canvas nor a renderer acknowledgement", async () => {
+  const worker = await readyWorker({ createError: "must never initialize GPU", renderBlocked: true });
+  assert.equal(worker.renderPort.posts.length, 0);
+  assert.equal(worker.renderPort.starts, 0);
+  assert.equal(worker.views.length, 1, "observation endpoint only; no game-owned BrowserView");
+  await worker.send({ kind: "dispose" });
+  assert.equal(worker.renderPort.closes, 1);
+  assert.equal(worker.of("disposed").length, 1);
+});
+
+test("CPU init rejects missing transferred render port and invalid trusted bounds before WASM ownership", async () => {
+  for (const fields of [{renderPort:null}, {maxPacketBytes:39}, {maxDiagnosticBytes:-1},
+    {renderTimeoutMs:0}, {renderTimeoutMs:60001}]) {
+    const worker = await workerHarness();
+    await worker.send({kind:"init", ...fields});
+    assert.equal(worker.of("ready").length, 0);
+    assert.equal(worker.of("fatal").length, 1);
+    assert.equal(worker.renderPort.posts.length, 0);
+    assert.equal(worker.libraries.length, 0);
+  }
+});
+
+test("missing renderer ACK deadline fails play with its actual incomplete captured prefix", async () => {
+  const worker = await gameWorker();
+  await startGame(worker, [], {recordReplay:true});
+  await worker.send({kind:"play-activate",playId:1,rpcId:2,hostNs:1000000000n,startFrame:48000n});
+  worker.renderPort.blocked = true;
+  await worker.send({kind:"play-step",playId:1,tickId:1,events:[],watermark:1000000000n,audioNs:0n});
+  const count = worker.visualAcks.length;
+  const timeout = worker.timers.entries().next().value;
+  assert.ok(timeout, "bounded visual ACK deadline exists");
+  worker.timers.delete(timeout[0]); timeout[1](); await flushJobs();
+  const final = worker.of("play-error").at(-1);
+  assert.ok(final); assert.match(final.message, /acknowledgement timed out/);
+  assert.equal(final.hits, 17n); assert.equal(final.misses, 3n);
+  assert.equal(final.replayComplete, false);
+  assert.deepEqual(Array.from(final.replay), [66,75,82]);
+  assert.equal(worker.games[0].frees, 1);
+  assert.equal(worker.visualAcks.length, count, "timeout does not fabricate producer baseline adoption");
+});
+
+test("missing visual ACK coalesces preview changes until exact full acknowledgement", async () => {
+  const worker = await readyWorker();
   await worker.send({ kind: "import", id: 1, files: [selectedFile("a.bms")] });
   await worker.send({ kind: "accept-library", id: 1 });
   await worker.send({ kind: "select", id: 2, libraryId: 1, path: "a.bms", rate: 48000, seed: "0" });
-  assert.equal(worker.timers.size, 1);
-  for (let index = 0; index < 4; index++) await worker.tick();
-  assert.equal(worker.views[0].draws, 4);
-  assert.equal(worker.timers.size, 0);
-  assert.equal(worker.of("render-wait").length, 1);
-  assert.equal(worker.of("drawn").length, 0);
+  worker.renderPort.blocked = true;
   await worker.send({ kind: "seek", id: 3, selectedId: 2, ns: "1" });
-  assert.equal(worker.timers.size, 1);
-  await worker.send({ kind: "resize", width: 0, height: 720 });
-  assert.equal(worker.timers.size, 0);
-  assert.equal(worker.views[0].draws, 4);
-  await worker.send({ kind: "resize", width: 960, height: 720 });
-  assert.equal(worker.timers.size, 1);
+  const pending = worker.renderPort.posts.at(-1);
+  assert.equal(pending.kind, "packet");
+  const count = worker.visualExports.length, acks = worker.visualAcks.length;
+  await worker.send({ kind: "seek", id: 4, selectedId: 2, ns: "2" });
+  await worker.send({ kind: "seek", id: 5, selectedId: 2, ns: "3" });
+  assert.equal(worker.visualExports.length, count, "busy producer retains the frozen pending snapshot");
+  worker.renderPort.ack(pending, { operationId: pending.operationId + 1n }); await flushJobs();
+  worker.renderPort.ack(pending, { content: pending.content + 1n }); await flushJobs();
+  worker.renderPort.ack(pending, { packetKind: 2 }); await flushJobs();
+  assert.equal(worker.visualAcks.length, acks);
+  assert.equal(worker.visualExports.length, count);
+  worker.renderPort.ack(pending); await flushJobs();
+  assert.equal(worker.visualAcks.length, acks + 1);
+  assert.equal(worker.visualExports.length, count + 1);
+  assert.equal(worker.visualExports.at(-1).songNs, 3n, "coalesced state exports the latest authoritative seek");
+  worker.renderPort.ack(pending); await flushJobs();
+  assert.equal(worker.visualAcks.length, acks + 1, "duplicate old ACK cannot adopt a newer snapshot");
+  await worker.send({ kind: "dispose" });
+  const finalCount = worker.visualExports.length;
+  worker.renderPort.ack(worker.renderPort.posts.at(-1)); await flushJobs();
+  assert.equal(worker.visualExports.length, finalCount);
+  assert.equal(worker.renderPort.closes, 1);
 });
