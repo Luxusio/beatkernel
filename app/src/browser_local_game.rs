@@ -82,10 +82,15 @@ impl BrowserLocalMember {
 #[wasm_bindgen]
 pub struct BrowserLocalGame {
     pub(crate) game: StepLocalGameplay,
+    pub(crate) render_producer: crate::browser::render::RenderProducer,
+    render_packet_budget: u32,
+    render_diagnostic_budget: u32,
     pub(crate) chart: Arc<PlayerChart>,
     pub(crate) images: Arc<ImageAssets>,
     pub(crate) members: Vec<BrowserLocalMember>,
     pub(crate) room_hud: Option<RoomOpponentHud>,
+    room_lobby: Option<Arc<crate::room_presentation::RoomLobby>>,
+    room_render_status: crate::room_presentation::RoomStatus,
     pub(crate) room_hud_disabled: bool,
     input_limits: CodecLimits,
     input_bindings: Vec<Binding>,
@@ -250,9 +255,14 @@ impl BrowserLocalGame {
         Ok(Self {
             game,
             chart,
+            render_producer: crate::browser::render::RenderProducer::default(),
+            render_packet_budget: 0,
+            render_diagnostic_budget: 0,
             images: prepared.images,
             members,
             room_hud: None,
+            room_lobby: None,
+            room_render_status: crate::room_presentation::RoomStatus::Waiting,
             room_hud_disabled: false,
             input_limits: input.limits,
             input_bindings,
@@ -564,6 +574,9 @@ impl BrowserLocalGame {
             return Err(error("room HUD changed the actual local roster"));
         }
         let hud = RoomOpponentHud::new(ParticipantId(own), &members).map_err(error)?;
+        let lobby = crate::room_presentation::RoomLobby::new(Some(ParticipantId(own)), 1,
+            Some(crate::multiplayer_group_rooms::GroupRoomPhase::Prepared), None, members).map_err(error)?;
+        self.room_lobby = Some(Arc::new(lobby));
         self.room_hud = Some(hud);
         Ok(())
     }
@@ -602,7 +615,13 @@ impl BrowserLocalGame {
             .as_mut()
             .ok_or_else(|| error("room HUD is not configured"))?
             .set_status(status)
-            .map_err(error)
+            .map_err(error)?;
+        self.room_render_status = match status {
+            RoomHudStatus::Waiting => crate::room_presentation::RoomStatus::Waiting,
+            RoomHudStatus::Connected => crate::room_presentation::RoomStatus::Connected,
+            RoomHudStatus::Disconnected => crate::room_presentation::RoomStatus::Disconnected,
+        };
+        Ok(())
     }
     pub fn set_room_hud_page(&mut self, page: u32) -> Result<(), JsValue> {
         self.room_hud
@@ -1284,3 +1303,47 @@ impl BrowserLocalGame {
 #[cfg(test)]
 #[path = "gauge_pressed_browser_local_fixtures.rs"]
 mod gauge_pressed_fixtures;
+
+#[wasm_bindgen]
+impl BrowserLocalGame {
+    pub fn visual_registration(&mut self, generation: u64, content: u64, max_packet_bytes: u32, max_diagnostic_bytes: u32) -> Result<Vec<u8>, JsValue> {
+        let roster = self.members.iter().map(|member| member.player).collect::<Vec<_>>();
+        let bytes = crate::browser::render::registration(&self.chart, &self.images, &roster, generation, content, max_packet_bytes, max_diagnostic_bytes).map_err(error)?;
+        self.render_producer.register(generation, content, &self.chart, &roster).map_err(error)?;
+        self.render_packet_budget = max_packet_bytes;
+        self.render_diagnostic_budget = max_diagnostic_bytes;
+        Ok(bytes)
+    }
+    pub fn acknowledge_visual(&mut self, generation: u64, content: u64, sequence: u64) -> bool {
+        self.render_producer.acknowledge(generation, content, sequence)
+    }
+}
+#[wasm_bindgen]
+impl BrowserLocalGame {
+    pub fn visual_frame(&mut self, sequence: u64, page: u32) -> Result<Vec<u8>, JsValue> {
+        use crate::browser_render_state::{RenderMemberScalars, RenderScore, RenderGauge, RenderJudgeEvent};
+        if page as usize >= self.members.len().div_ceil(4) { return Err(error("invalid local visual page")); }
+        let start = page as usize * 4;
+        let visible = self.members.get(start..(start + 4).min(self.members.len())).ok_or_else(|| error("invalid local visual page"))?;
+        let members = visible.iter().map(|member| {
+            let scalars = RenderMemberScalars {
+                song_ns: self.game.member_song_time(member.player).ok_or("local member song frontier unavailable")?.as_nanos(),
+                pressed: member.pressed,
+                recent: member.recent.iter().map(RenderJudgeEvent::from_event).collect(),
+                score: Some(RenderScore::from_summary(self.game.score(member.player).ok_or("local member score unavailable")?)),
+                gauge: self.game.gauge(member.player).map(RenderGauge::from_gauge),
+                competition: member.saved_hud.snapshot().cloned(),
+                saved_comparison_height: member.saved_comparison_height() as u32,
+                peer_admitted: member.peer_admitted,
+                saved_failed: member.saved_hud.failed(), peer_failed: member.saved_hud.peer_failed(),
+            };
+            Ok((member.player, scalars, &member.progress))
+        }).collect::<Result<Vec<_>, String>>().map_err(error)?;
+        let room = match (&self.room_lobby, &self.room_hud) {
+            (Some(lobby), Some(hud)) => Some(crate::room_presentation::RoomPresentation::new(lobby.clone(), self.room_render_status, Some(hud), None).map_err(error)?),
+            _ => None,
+        };
+        let frame = self.render_producer.frame(sequence, page, &members, room, self.room_hud_disabled).map_err(error)?;
+        self.render_producer.encode_frame(frame, self.render_packet_budget, self.render_diagnostic_budget).map_err(error)
+    }
+}

@@ -19,6 +19,9 @@ use crate::{
     prepare_from_source,
 };
 
+#[path = "browser_render.rs"]
+pub(crate) mod render;
+
 const LOOKAHEAD_NS: i64 = 2_000_000_000;
 
 /// Joined presentation only. It owns no game, samples, transport or clocks.
@@ -181,6 +184,7 @@ impl BrowserLibrary {
         );
         Ok(BrowserPrepared {
             prepared,
+            visual_preview: None,
             chart,
             images,
             chart_seed: seed,
@@ -227,6 +231,7 @@ impl BrowserLibrary {
             .map_err(js_error)?;
         Ok(BrowserPrepared {
             prepared,
+            visual_preview: None,
             chart,
             images: original.images,
             chart_seed: seed,
@@ -279,6 +284,7 @@ impl BrowserLibrary {
             .map_err(js_error)?;
         Ok(BrowserPrepared {
             prepared,
+            visual_preview: None,
             chart,
             images: original.images,
             chart_seed: seed,
@@ -292,6 +298,7 @@ impl BrowserLibrary {
 #[wasm_bindgen]
 pub struct BrowserPrepared {
     pub(crate) prepared: PreparedBms,
+    visual_preview: Option<(u64, u64, u64, u32, u32, bool)>,
     pub(crate) chart: PlayerChart,
     pub(crate) images: Arc<ImageAssets>,
     pub(crate) chart_seed: u64,
@@ -340,8 +347,11 @@ impl BrowserPrepared {
 #[wasm_bindgen]
 pub struct BrowserView {
     canvas: BrowserCanvas,
-    current: Option<BrowserPrepared>,
+    current: Option<(Arc<PlayerChart>, Arc<ImageAssets>)>,
     song: Timestamp,
+    visual: Option<render::VisualPresentation>,
+    visual_identity: Option<(u64, u64, u64)>,
+    visual_generation_floor: u64,
 }
 
 #[wasm_bindgen]
@@ -351,11 +361,14 @@ impl BrowserView {
             canvas: BrowserCanvas::create(canvas).await.map_err(js_error)?,
             current: None,
             song: Timestamp::ZERO,
+            visual: None,
+            visual_identity: None,
+            visual_generation_floor: 0,
         })
     }
 
     pub fn set_chart(&mut self, prepared: BrowserPrepared) {
-        self.current = Some(prepared);
+        self.current = Some((Arc::new(prepared.chart), prepared.images));
         self.song = Timestamp::ZERO;
     }
 
@@ -380,7 +393,7 @@ impl BrowserView {
     pub fn draw(&mut self) -> Result<(), JsValue> {
         if let Some(current) = &self.current {
             self.canvas
-                .present_chart(&current.chart, &current.images, self.song, LOOKAHEAD_NS)
+                .present_chart(&current.0, &current.1, self.song, LOOKAHEAD_NS)
                 .map_err(js_error)?;
         }
         Ok(())
@@ -454,5 +467,152 @@ impl BrowserView {
 
     pub fn needs_redraw(&self) -> bool {
         self.canvas.needs_redraw()
+    }
+}
+
+#[wasm_bindgen]
+impl BrowserPrepared {
+    pub fn visual_registration(&mut self, generation: u64, content: u64, max_packet_bytes: u32, max_diagnostic_bytes: u32) -> Result<Vec<u8>, JsValue> {
+        let bytes = render::registration(&self.chart, &self.images, &[], generation, content, max_packet_bytes, max_diagnostic_bytes).map_err(js_error)?;
+        self.visual_preview = Some((generation, content, 0, max_packet_bytes, max_diagnostic_bytes, false));
+        Ok(bytes)
+    }
+    pub fn preview_state(&mut self, sequence: u64, song_ns: i64) -> Result<Vec<u8>, JsValue> {
+        let (generation, content, previous, packet, diagnostics, pending) = self.visual_preview.ok_or_else(|| js_error("register preview before exporting state"))?;
+        if pending || sequence <= previous || song_ns < 0 || song_ns.checked_add(LOOKAHEAD_NS).is_none() { return Err(js_error("invalid or pending preview state")); }
+        let bytes = render::wire::encode_packet(render::header(render::wire::PREVIEW, generation, content, sequence), &render::wire::WirePacket::Preview(render::wire::PreviewState { song_ns, lookahead_ns: LOOKAHEAD_NS }), render::limits(packet, diagnostics)).map_err(js_error)?;
+        self.visual_preview = Some((generation, content, sequence, packet, diagnostics, true));
+        Ok(bytes)
+    }
+    pub fn acknowledge_visual(&mut self, generation: u64, content: u64, sequence: u64) -> bool {
+        if let Some((registered, resource, pending_sequence, _, _, pending)) = self.visual_preview.as_mut() {
+            if *registered == generation && *resource == content && *pending && *pending_sequence == sequence { *pending = false; return true; }
+        }
+        false
+    }
+}
+#[wasm_bindgen]
+impl BrowserRoomResults {
+    pub fn visual_snapshot(&self, generation: u64, content: u64, max_packet_bytes: u32, max_diagnostic_bytes: u32) -> Result<Vec<u8>, JsValue> {
+        let model = self.builder.export_visual().map_err(js_error)?.ok_or_else(|| js_error("room Results unavailable"))?;
+        render::wire::encode_packet(render::header(render::wire::ROOM, generation, content, 0), &render::wire::WirePacket::Room(model), render::limits(max_packet_bytes, max_diagnostic_bytes)).map_err(js_error)
+    }
+}
+
+#[wasm_bindgen]
+impl BrowserView {
+    /// Only the fixed header is copied before trusted byte admission. Generated
+    /// bindings therefore cannot allocate an attacker-sized Rust input first.
+    pub fn import_visual_packet(&mut self, bytes: js_sys::Uint8Array, max_packet_bytes: u32, max_diagnostic_bytes: u32) -> Result<u64, JsValue> {
+        use render::{wire, VisualPresentation};
+        let packet_len = bytes.length() as usize;
+        if packet_len < wire::HEADER_BYTES { return Err(js_error("truncated visual packet header")); }
+        let mut fixed = [0u8; wire::HEADER_BYTES];
+        for (index, destination) in fixed.iter_mut().enumerate() { *destination = bytes.get_index(index as u32); }
+        let limits = render::limits(max_packet_bytes, max_diagnostic_bytes);
+        let admitted = wire::preflight_header(&fixed, packet_len, limits).map_err(js_error)?;
+        let registration = matches!(admitted.kind, wire::REGISTRATION | wire::HISTORY | wire::RESULTS | wire::ROOM);
+        let combined_room = admitted.kind == wire::ROOM && self.visual_identity.is_some_and(|(generation, content, _)| generation == admitted.generation && content == admitted.content) && matches!(self.visual, Some(VisualPresentation::Results { .. }));
+        if registration {
+            if admitted.generation <= self.visual_generation_floor && !combined_room { return Err(js_error("stale visual registration")); }
+        } else if self.visual_identity.is_none_or(|(generation, content, sequence)| generation != admitted.generation || content != admitted.content || admitted.sequence <= sequence) {
+            return Err(js_error("stale or foreign visual state"));
+        }
+        let (header, packet) = wire::decode_packet(&bytes.to_vec(), limits).map_err(js_error)?;
+        if header.kind != admitted.kind || header.generation != admitted.generation || header.content != admitted.content || header.sequence != admitted.sequence || header.payload_len != admitted.payload_len {
+            return Err(js_error("visual packet header changed during admission"));
+        }
+        match packet {
+            wire::WirePacket::Registration(registration) => {
+                let replacement = if registration.roster.is_empty() {
+                    let chart = Arc::new(PlayerChart::import_visual(registration.chart).map_err(js_error)?);
+                    let images = Arc::new(ImageAssets::import_visual(registration.images, limits.image).map_err(js_error)?);
+                    VisualPresentation::Preview { chart, images, song: Timestamp::ZERO, lookahead: LOOKAHEAD_NS }
+                } else {
+                    // One member is still local when its stable ID differs from
+                    // the canonical solo ID; caller may select local explicitly.
+                    let local = registration.roster.len() > 1 || registration.roster[0].0 != 1;
+                    let state = crate::browser_render_state::BrowserRenderState::import_visual_with_budget(header.generation, header.content, registration.chart, registration.images, registration.roster, limits.image, limits.max_diagnostic_bytes).map_err(js_error)?;
+                    VisualPresentation::Play { state, local }
+                };
+                self.visual = Some(replacement);
+                self.current = None;
+            }
+            wire::WirePacket::Frame(frame) => {
+                let Some(VisualPresentation::Play { state, .. }) = self.visual.as_mut() else { return Err(js_error("live state requires visual chart registration")); };
+                state.apply_frame(&frame).map_err(js_error)?;
+            }
+            wire::WirePacket::Preview(preview) => {
+                if preview.song_ns < 0 || preview.lookahead_ns <= 0 || preview.song_ns.checked_add(preview.lookahead_ns).is_none() { return Err(js_error("invalid preview song position or lookahead")); }
+                let Some(VisualPresentation::Preview { song, lookahead, .. }) = self.visual.as_mut() else { return Err(js_error("preview state requires preview registration")); };
+                *song = Timestamp::from_nanos(preview.song_ns);
+                *lookahead = preview.lookahead_ns;
+            }
+            wire::WirePacket::History(model) => {
+                let presentation = crate::historical_record_presentation::HistoricalRecordPresentation::import_visual(model).map_err(js_error)?;
+                self.visual = Some(VisualPresentation::History(presentation));
+                self.current = None;
+            }
+            wire::WirePacket::Results(model) => {
+                let view = crate::ui::results::FrozenResultsView::from_model(model).map_err(js_error)?;
+                self.visual = Some(VisualPresentation::Results { view, page: 0, comparisons: false, room: None });
+                self.current = None;
+            }
+            wire::WirePacket::Room(model) => {
+                model.validate().map_err(js_error)?;
+                let page = model.initial_page;
+                if combined_room {
+                    let Some(VisualPresentation::Results { room, .. }) = self.visual.as_mut() else { unreachable!() };
+                    *room = Some((model, page));
+                } else { self.visual = Some(VisualPresentation::Room { model, page }); self.current = None; }
+            }
+        }
+        self.visual_generation_floor = self.visual_generation_floor.max(header.generation);
+        self.visual_identity = Some((header.generation, header.content, header.sequence));
+        Ok(header.sequence)
+    }
+
+    /// Local cohorts may contain one P1. Mode is admitted independently of ID.
+    pub fn set_visual_local(&mut self, local: bool) -> Result<(), JsValue> {
+        let Some(render::VisualPresentation::Play { state, local: mode }) = self.visual.as_mut() else { return Err(js_error("local mode requires live visual registration")); };
+        if !local && state.roster().len() != 1 { return Err(js_error("solo visual mode requires one member")); }
+        *mode = local;
+        Ok(())
+    }
+    pub fn set_visual_page(&mut self, requested: u32, comparisons: bool) -> Result<(), JsValue> {
+        use render::VisualPresentation;
+        match self.visual.as_mut() {
+            Some(VisualPresentation::History(history)) if !comparisons => { history.set_grade_page(requested as usize).map_err(js_error)?; }
+            Some(VisualPresentation::Results { view, page, comparisons: mode, .. }) => {
+                if (comparisons && !view.has_comparisons()) || requested as usize >= view.page_count_for(comparisons) { return Err(js_error("invalid visual Results page/mode")); }
+                *page = requested as usize; *mode = comparisons;
+            }
+            Some(VisualPresentation::Room { model, page }) if !comparisons => { model.project(requested as usize).map_err(js_error)?; *page = requested as usize; }
+            _ => return Err(js_error("visual presentation does not support this page")),
+        }
+        Ok(())
+    }
+    pub fn set_visual_room_page(&mut self, requested: u32) -> Result<(), JsValue> {
+        let Some(render::VisualPresentation::Results { room: Some((model, page)), .. }) = self.visual.as_mut() else { return Err(js_error("combined room Results unavailable")); };
+        model.project(requested as usize).map_err(js_error)?; *page = requested as usize;
+        Ok(())
+    }
+    pub fn draw_visual(&mut self) -> Result<(), JsValue> {
+        use render::VisualPresentation;
+        match self.visual.as_ref().ok_or_else(|| js_error("visual presentation not registered"))? {
+            VisualPresentation::Preview { chart, images, song, lookahead } => self.canvas.present_chart(chart, images, *song, *lookahead),
+            VisualPresentation::Play { state, local } => self.canvas.present_visual(state, *local),
+            VisualPresentation::History(history) => self.canvas.present_frozen_history(history),
+            VisualPresentation::Results { view, page, comparisons, room } => {
+                let room = room.as_ref().map(|(model, page)| model.project(*page)).transpose().map_err(js_error)?;
+                self.canvas.present_frozen_results(view, *page, *comparisons, room)
+            }
+            VisualPresentation::Room { model, page } => self.canvas.present_room_results(model.project(*page).map_err(js_error)?),
+        }.map_err(js_error)
+    }
+    pub fn retire_visual(&mut self) {
+        self.visual = None;
+        self.visual_identity = None;
+        self.current = None;
     }
 }

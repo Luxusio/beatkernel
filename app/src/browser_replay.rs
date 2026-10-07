@@ -32,6 +32,9 @@ fn point(ns: i64) -> ClockPoint {
 #[wasm_bindgen]
 pub struct BrowserReplay {
     pub(crate) replay: StepReplay,
+    pub(crate) render_producer: crate::browser::render::RenderProducer,
+    render_packet_budget: u32,
+    render_diagnostic_budget: u32,
     pub(crate) chart: Arc<PlayerChart>,
     pub(crate) images: Arc<ImageAssets>,
     pub(crate) progress: NoteProgress,
@@ -66,6 +69,9 @@ impl BrowserReplay {
         Ok(Self {
             replay,
             chart,
+            render_producer: crate::browser::render::RenderProducer::default(),
+            render_packet_budget: 0,
+            render_diagnostic_budget: 0,
             images: prepared.images,
             progress,
             recent: Vec::with_capacity(128),
@@ -188,5 +194,35 @@ impl BrowserReplay {
     #[wasm_bindgen(getter)]
     pub fn failed(&self) -> bool {
         self.replay.failed()
+    }
+}
+
+#[wasm_bindgen]
+impl BrowserReplay {
+    pub fn visual_registration(&mut self, generation: u64, content: u64, max_packet_bytes: u32, max_diagnostic_bytes: u32) -> Result<Vec<u8>, JsValue> {
+        let roster = vec![crate::local_players::PlayerId(1)];
+        let bytes = crate::browser::render::registration(&self.chart, &self.images, &roster, generation, content, max_packet_bytes, max_diagnostic_bytes).map_err(error)?;
+        self.render_producer.register(generation, content, &self.chart, &roster).map_err(error)?;
+        self.render_packet_budget = max_packet_bytes;
+        self.render_diagnostic_budget = max_diagnostic_bytes;
+        Ok(bytes)
+    }
+    pub fn acknowledge_visual(&mut self, generation: u64, content: u64, sequence: u64) -> bool {
+        self.render_producer.acknowledge(generation, content, sequence)
+    }
+}
+#[wasm_bindgen]
+impl BrowserReplay {
+    pub fn visual_frame(&mut self, sequence: u64, page: u32) -> Result<Vec<u8>, JsValue> {
+        use crate::browser_render_state::{RenderMemberScalars, RenderScore, RenderGauge, RenderJudgeEvent};
+        let scalars = RenderMemberScalars {
+            song_ns: self.replay.song_time().as_nanos(), pressed: self.replay.pressed_lanes(),
+            recent: self.recent.iter().map(RenderJudgeEvent::from_event).collect(),
+            score: Some(RenderScore::from_summary(self.replay.score())),
+            gauge: Some(RenderGauge::from_gauge(self.replay.gauge())),
+            ..RenderMemberScalars::default()
+        };
+        let frame = self.render_producer.frame(sequence, page, &[(crate::local_players::PlayerId(1), scalars, &self.progress)], None, false).map_err(error)?;
+        self.render_producer.encode_frame(frame, self.render_packet_budget, self.render_diagnostic_budget).map_err(error)
     }
 }

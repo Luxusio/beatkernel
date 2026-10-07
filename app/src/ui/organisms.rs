@@ -591,6 +591,30 @@ impl<'a> From<&'a LocalPlayerSnapshot> for LocalPlayerView<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct VisualLocalPlayerView<'a> {
+    pub player: crate::local_players::PlayerId,
+    pub chart: Option<&'a PlayerChart>,
+    pub song_time: Option<Timestamp>,
+    pub score: crate::browser_render_state::RenderScore,
+    pub bms_score: Option<crate::judgment_policy::BmsScoreSummary>,
+    pub gauge: Option<crate::browser_render_state::RenderGauge>,
+    pub last_judge: Option<&'a JudgeEvent>,
+    pub recent_results: &'a [JudgeEvent],
+    pub pressed_lanes: u32,
+    pub note_progress: Option<&'a crate::note_progress::NoteProgress>,
+    pub competition: Option<&'a CompetitionSnapshot>,
+}
+impl<'a> From<LocalPlayerView<'a>> for VisualLocalPlayerView<'a> {
+    fn from(view: LocalPlayerView<'a>) -> Self {
+        Self { player: view.player, chart: view.chart, song_time: view.song_time,
+            score: crate::browser_render_state::RenderScore::from_summary(view.score),
+            bms_score: view.bms_score, gauge: view.gauge.map(crate::browser_render_state::RenderGauge::from_gauge),
+            last_judge: view.last_judge, recent_results: view.recent_results,
+            pressed_lanes: view.pressed_lanes, note_progress: view.note_progress, competition: view.competition }
+    }
+}
+
 /// Visible member slots share the bounded image cache without mixing clocks.
 pub fn local_players_with_background(
     scene: &mut Scene,
@@ -663,6 +687,25 @@ fn local_player_views_with_background_impl(
     frames: &[crate::bga_render::BgaFrame; 4],
     reserved: Option<&[i64]>,
 ) -> Result<(), String> {
+    page_range(players.len(), page)?;
+    let mut views = [VisualLocalPlayerView::from(players[0]); crate::local_players::MAX_LOCAL_PLAYERS];
+    for (destination, player) in views.iter_mut().zip(players) { *destination = (*player).into(); }
+    visual_local_player_views(scene, &views[..players.len()], lookahead, page, show, frames, reserved)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn visual_local_player_views(
+    scene: &mut Scene,
+    players: &[VisualLocalPlayerView<'_>],
+    lookahead: i64,
+    page: usize,
+    show: bool,
+    frames: &[crate::bga_render::BgaFrame; 4],
+    reserved: Option<&[i64]>,
+) -> Result<(), String> {
+    if reserved.is_some_and(|spaces| spaces.len() != players.len()) {
+        return Err("local comparison reservations differ from roster".into());
+    }
     let visible = page_range(players.len(), page)?;
     if lookahead <= 0 {
         return Err("local playfield lookahead must be positive".into());
@@ -790,7 +833,7 @@ fn local_player_views_with_background_impl(
             clipped_text(scene, judge_bounds, &label, 1, color);
         }
         if let Some(gauge) = player.gauge {
-            molecules::gauge_hud(
+            molecules::gauge_hud_visual(
                 scene,
                 gauge,
                 Bounds {
@@ -891,6 +934,13 @@ fn bms_score_hud(
     }
 }
 
+fn visual_timing_summary(timing: crate::timing::TimingRecord) -> (String, String) {
+    let mean = (timing.count != 0).then(|| i64::try_from(timing.sum / i128::from(timing.count)).ok()).flatten();
+    let absolute = (timing.count != 0).then(|| u64::try_from(timing.absolute_sum / u128::from(timing.count)).ok()).flatten();
+    (format!("BIAS {}", mean.map_or("--".into(), crate::timing_display::signed_ms)),
+     format!("MEAN ABS {}", absolute.map_or("--".into(), crate::timing_display::unsigned_ms)))
+}
+
 pub fn scoreboard(pixels: &mut Scene, score: &ScoreSummary, recent_results: &[JudgeEvent]) {
     scoreboard_with_bms_score(pixels, score, recent_results, None);
 }
@@ -898,6 +948,15 @@ pub fn scoreboard(pixels: &mut Scene, score: &ScoreSummary, recent_results: &[Ju
 pub fn scoreboard_with_bms_score(
     pixels: &mut Scene,
     score: &ScoreSummary,
+    recent_results: &[JudgeEvent],
+    bms_score: Option<&crate::judgment_policy::BmsScoreSummary>,
+) {
+    scoreboard_visual(pixels, crate::browser_render_state::RenderScore::from_summary(score), recent_results, bms_score);
+}
+
+pub fn scoreboard_visual(
+    pixels: &mut Scene,
+    score: crate::browser_render_state::RenderScore,
     recent_results: &[JudgeEvent],
     bms_score: Option<&crate::judgment_policy::BmsScoreSummary>,
 ) {
@@ -931,7 +990,7 @@ pub fn scoreboard_with_bms_score(
             color,
         );
     }
-    let (bias, absolute) = crate::timing_display::summary(&score.timing);
+    let (bias, absolute) = visual_timing_summary(score.timing);
     clipped_text(
         pixels,
         Bounds {
@@ -972,6 +1031,16 @@ pub fn competition_scoreboard_with_bms_score(
     snapshot: &CompetitionSnapshot,
     bms_score: Option<&crate::judgment_policy::BmsScoreSummary>,
 ) -> Result<(), String> {
+    competition_scoreboard_visual(scene, crate::browser_render_state::RenderScore::from_summary(score), snapshot, bms_score)
+}
+
+pub fn competition_scoreboard_visual(
+    scene: &mut Scene,
+    score: crate::browser_render_state::RenderScore,
+    snapshot: &CompetitionSnapshot,
+    bms_score: Option<&crate::judgment_policy::BmsScoreSummary>,
+) -> Result<(), String> {
+    score.validate()?;
     let class_height = if let Some(bms_score) = bms_score {
         bms_score
             .validate_for(score.hits, score.misses)
@@ -1026,7 +1095,7 @@ pub fn competition_scoreboard_with_bms_score(
         );
     }
 
-    let (bias, absolute) = crate::timing_display::summary(&score.timing);
+    let (bias, absolute) = visual_timing_summary(score.timing);
     clipped_text(
         scene,
         Bounds {

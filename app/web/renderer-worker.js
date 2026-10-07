@@ -1,0 +1,219 @@
+import init, { BrowserView } from "./pkg/beatkernel_bms_runtime.js";
+import { preflightPacket, nativePacketView, validateRenderLimits, unsignedIdentity, boundedU32 } from "./render-protocol.mjs";
+
+let view = null;
+let port = null;
+let loading = false;
+let disposed = false;
+let failed = false;
+let epoch = 0;
+let maxPacketBytes = 0;
+let maxDiagnosticBytes = 0;
+let generationFloor = 0n;
+let current = null;
+let extent = [0, 0];
+let geometryVersion = 0n;
+let submittedGeometry = 0n;
+let redraw = null;
+let retries = 0;
+let initTimer = null;
+
+function send(message) { port?.postMessage(message); }
+function stopDraw() {
+  if (redraw === null) return;
+  if (redraw.animation) self.cancelAnimationFrame(redraw.id);
+  else clearTimeout(redraw.id);
+  redraw = null;
+}
+function release(binding) {
+  if (!binding) return;
+  try { binding.retire_visual(); } finally { binding.free(); }
+}
+function diagnostic(error) {
+  const text = error instanceof Error ? error.message : String(error);
+  // Bound UTF-8 diagnostics as well as JS code units.
+  const encoder = new TextEncoder();
+  let output = text.slice(0, maxDiagnosticBytes);
+  while (encoder.encode(output).length > maxDiagnosticBytes) output = output.slice(0, Math.floor(output.length / 2));
+  return output;
+}
+function fail(error, operationId = null, identity = current) {
+  if (failed || disposed) return;
+  failed = true;
+  stopDraw();
+  const report = { kind: "render-error", generation: identity?.generation ?? 0n, content: identity?.content ?? 0n,
+    operationId, mode: identity?.mode ?? "initializing", message: diagnostic(error) };
+  try { send(report); } catch {}
+  try { self.postMessage(report); } catch {}
+  // Gameplay decides capture-preserving failed stop. This owner has no game.
+}
+function wait(identity) {
+  send({ kind: "render-wait", generation: identity.generation, content: identity.content, geometryVersion });
+}
+function scheduleDraw(reset = true) {
+  if (disposed || failed || !view || !current || !current.drawable) return;
+  if (reset) retries = 0;
+  if (extent.includes(0)) { stopDraw(); wait(current); return; }
+  if (redraw !== null) return;
+  const identity = current;
+  const ownerEpoch = epoch;
+  const draw = () => {
+    redraw = null;
+    if (disposed || failed || epoch !== ownerEpoch || current !== identity) return;
+    try {
+      view.draw_visual();
+      if (view.needs_redraw()) {
+        if (++retries <= 3) scheduleDraw(false);
+        else wait(identity);
+      } else {
+        send({ kind: "drawn", generation: identity.generation, content: identity.content, sequence: identity.sequence });
+        if (geometryVersion > submittedGeometry) {
+          submittedGeometry = geometryVersion;
+          const evidence = { kind: "geometry-ack", generation: identity.generation, content: identity.content, geometryVersion };
+          send(evidence);
+          self.postMessage(evidence);
+        }
+      }
+    } catch (error) { fail(error, null, identity); }
+  };
+  if (typeof self.requestAnimationFrame === "function") {
+    try { redraw = { animation: true, id: self.requestAnimationFrame(draw) }; return; }
+    catch (error) { if (error?.name !== "NotSupportedError") { fail(error); return; } }
+  }
+  redraw = { animation: false, id: setTimeout(draw, 16) };
+}
+function packet(message) {
+  const { packet: input, operationId, mode } = message;
+  const header = preflightPacket(input, maxPacketBytes);
+  if (!unsignedIdentity(operationId)) throw new Error("Invalid render operation identity.");
+  if (message.generation !== header.generation || message.content !== header.content) throw new Error("Render message and packet identities differ.");
+  const cold = [1, 4, 5, 6].includes(header.kind);
+  const combinedRoom = header.kind === 6 && current?.mode === "results"
+    && current.generation === header.generation && current.content === header.content;
+  if (cold) {
+    if (header.generation <= generationFloor && !combinedRoom) return;
+    if (header.kind === 1 && !["preview", "live", "local", "replay"].includes(mode)) throw new Error("Visual registration requires explicit mode.");
+  } else {
+    if (!current || header.generation !== current.generation || header.content !== current.content) return;
+    if (header.sequence <= current.sequence || operationId <= current.operationId) return;
+    if ((header.kind === 3) !== (current.mode === "preview")) throw new Error("Visual state does not match presentation mode.");
+  }
+  if (combinedRoom && operationId <= current.operationId) return;
+  const version = message.geometryVersion;
+  if (version !== undefined && (!unsignedIdentity(version) || version <= geometryVersion)) throw new Error("Packet geometry version must increase.");
+  // Pass a fresh native view: caller properties cannot change WASM admission.
+  const bytes = nativePacketView(input);
+  const applied = view.import_visual_packet(bytes, maxPacketBytes, maxDiagnosticBytes);
+  if (applied !== header.sequence) throw new Error("Visual importer returned a different applied sequence.");
+  if (header.kind === 1 && mode !== "preview") view.set_visual_local(mode === "local");
+  if (cold && !combinedRoom) {
+    stopDraw();
+    current = { generation: header.generation, content: header.content, sequence: header.sequence, operationId,
+      mode: header.kind === 1 ? mode : ({ 4: "history", 5: "results", 6: "room" }[header.kind]),
+      drawable: header.kind !== 1 || mode === "preview" };
+    submittedGeometry = 0n;
+    generationFloor = header.generation;
+  } else {
+    current.sequence = header.sequence;
+    current.operationId = operationId;
+    current.drawable = true;
+  }
+  if (version !== undefined) geometryVersion = version;
+  send({ kind: "state-ack", operationId, generation: header.generation, content: header.content,
+    sequence: header.sequence, packetKind: header.kind });
+  scheduleDraw();
+}
+function control(message) {
+  const { kind, generation, content, operationId, width, height, page, comparisons, geometryVersion: version } = message;
+  if (!current || generation !== current.generation || content !== current.content) return;
+  if (!unsignedIdentity(operationId)) throw new Error("Invalid render control identity.");
+  if (operationId <= current.operationId) return;
+  if (kind === "retire") {
+    stopDraw();
+    view.retire_visual();
+    generationFloor = generationFloor > generation ? generationFloor : generation;
+    current = null;
+    send({ kind: "control-ack", operation: kind, operationId, generation, content });
+    return;
+  }
+  if (!unsignedIdentity(version) || version <= geometryVersion) throw new Error("Geometry version must increase.");
+  if (kind === "resize") {
+    if (!boundedU32(width) || !boundedU32(height)) throw new Error("Invalid surface extent.");
+    view.resize(width, height);
+    extent = [width, height];
+  } else if (kind === "page") {
+    if (!boundedU32(page) || typeof comparisons !== "boolean") throw new Error("Invalid visual page.");
+    view.set_visual_page(page, comparisons);
+  } else if (kind === "room-page") {
+    if (!boundedU32(page)) throw new Error("Invalid room page.");
+    view.set_visual_room_page(page);
+  } else throw new Error("Unknown render control.");
+  geometryVersion = version;
+  current.operationId = operationId;
+  send({ kind: "control-ack", operation: kind, operationId, generation, content, geometryVersion: version });
+  scheduleDraw();
+}
+function receive(event) {
+  if (disposed || failed) return;
+  const input = event.data;
+  if (!input || typeof input !== "object") { fail(new Error("Invalid render message.")); return; }
+  // Snapshot accessor-bearing records once before invoking native/WASM work.
+  let message;
+  try {
+    message = { kind: input.kind, packet: input.packet, operationId: input.operationId, generation: input.generation,
+      content: input.content, mode: input.mode, width: input.width, height: input.height, page: input.page,
+      comparisons: input.comparisons, geometryVersion: input.geometryVersion };
+    if (unsignedIdentity(message.generation) && message.generation < generationFloor) return;
+    if (!current && unsignedIdentity(message.generation) && message.generation <= generationFloor) return;
+    if (message.kind === "packet") packet(message);
+    else control(message);
+  } catch (error) {
+    const identity = unsignedIdentity(message?.generation) && unsignedIdentity(message?.content) ? message : current;
+    fail(error, message?.operationId, identity);
+  }
+}
+function dispose() {
+  if (disposed) return;
+  disposed = true;
+  ++epoch;
+  clearTimeout(initTimer);
+  stopDraw();
+  current = null;
+  const owned = view;
+  view = null;
+  try { release(owned); } catch (error) { try { self.postMessage({ kind: "dispose-error", message: diagnostic(error) }); } catch {} }
+  try { if (port) { port.onmessage = null; port.onmessageerror = null; port.close(); } } catch {}
+  self.postMessage({ kind: "disposed" });
+}
+async function initialize(input) {
+  if (loading || view || disposed || failed) return;
+  const { canvas, port: channel, maxPacketBytes: packetLimit, maxDiagnosticBytes: diagnosticLimit, timeoutMs = 10000 } = input;
+  validateRenderLimits(packetLimit, diagnosticLimit);
+  if (!channel || !["postMessage", "start", "close"].every(name => typeof channel[name] === "function")
+    || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw new Error("Invalid renderer initialization.");
+  loading = true;
+  port = channel;
+  maxPacketBytes = packetLimit;
+  maxDiagnosticBytes = diagnosticLimit;
+  const ownerEpoch = ++epoch;
+  const currentOwner = () => !disposed && !failed && epoch === ownerEpoch;
+  initTimer = setTimeout(() => { if (currentOwner()) fail(new Error("Renderer initialization timed out.")); }, timeoutMs);
+  await init();
+  if (!currentOwner()) return;
+  const created = await BrowserView.create(canvas);
+  if (!currentOwner()) { release(created); return; }
+  view = created;
+  extent = [canvas.width, canvas.height];
+  if (!extent.every(boundedU32)) throw new Error("Invalid initial canvas extent.");
+  clearTimeout(initTimer);
+  port.onmessage = receive;
+  port.onmessageerror = () => fail(new Error("Visual transport message could not be decoded."));
+  port.start();
+  send({ kind: "ready" });
+  self.postMessage({ kind: "ready" });
+}
+self.onmessage = event => {
+  const input = event.data;
+  if (input?.kind === "dispose") { dispose(); return; }
+  if (input?.kind === "init") initialize(input).catch(error => fail(error));
+};

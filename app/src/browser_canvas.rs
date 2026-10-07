@@ -387,6 +387,89 @@ impl BrowserCanvas {
         self.renderer.render(&self.scene)
     }
 
+    pub(crate) fn present_visual(&mut self, state: &crate::browser_render_state::BrowserRenderState, local: bool) -> Result<(), String> {
+        let chart = state.chart();
+        let roster = state.roster();
+        let first = state.page() as usize * 4;
+        let visible = &roster[first..(first + 4).min(roster.len())];
+        let mut presentations = [crate::poor_background::BgaPresentation::default(); 4];
+        for (slot, player) in visible.iter().enumerate() {
+            let member = state.member(*player).ok_or("visual member missing")?;
+            let scalars = member.scalars.as_ref().ok_or("visual frame unavailable")?;
+            presentations[slot] = PoorBackgroundPolicy::default().select(chart, Timestamp::from_nanos(scalars.song_ns), Some(&member.progress))?;
+        }
+        self.prepare_surface()?;
+        let frames = self.backgrounds.sync_presentations(Some(state.images()), &presentations[..visible.len()], &mut self.renderer)?;
+        self.scene.clear();
+        let recent: Vec<Vec<_>> = roster.iter().map(|player| state.member(*player).and_then(|member| member.scalars.as_ref()).map_or_else(Vec::new, |scalar| scalar.recent.iter().map(|event| event.event()).collect())).collect();
+        if !local {
+            let member = state.member(roster[0]).ok_or("visual member missing")?;
+            let scalar = member.scalars.as_ref().ok_or("visual frame unavailable")?;
+            organisms::playfield_with_background(&mut self.scene, chart, Timestamp::from_nanos(scalar.song_ns), state.lookahead_ns(), &recent[0], scalar.pressed, Some(&member.progress), frames[0])?;
+            if let Some(score) = scalar.score {
+                if let Some(snapshot) = &scalar.competition {
+                    organisms::competition_scoreboard_visual(&mut self.scene, score, snapshot, None)?;
+                } else { organisms::scoreboard_visual(&mut self.scene, score, &recent[0], None); }
+                if scalar.saved_failed {
+                    atoms::text(&mut self.scene, 750, 650, "SAVED COMPARISONS", 1, 0xff8e8e);
+                    atoms::text(&mut self.scene, 750, 660, "UNAVAILABLE", 1, 0xff8e8e);
+                }
+            }
+            if let Some(gauge) = scalar.gauge {
+                molecules::gauge_hud_visual(&mut self.scene, gauge, Bounds { x: 750, y: 110, width: 186, height: 18 })?;
+            }
+        } else {
+            let empty = crate::browser_render_state::RenderMemberScalars::default();
+            let zero = crate::browser_render_state::RenderScore { hits: 0, misses: 0, combo: 0, max_combo: 0, timing: crate::timing::TimingRecord::default() };
+            let views: Vec<_> = roster.iter().enumerate().map(|(index, player)| {
+                let member = state.member(*player).expect("registered visual member");
+                let scalar = member.scalars.as_ref().unwrap_or(&empty);
+                organisms::VisualLocalPlayerView { player: *player, chart: Some(chart),
+                    song_time: member.scalars.as_ref().map(|scalar| Timestamp::from_nanos(scalar.song_ns)),
+                    score: scalar.score.unwrap_or(zero), bms_score: None, gauge: scalar.gauge,
+                    last_judge: recent[index].last(), recent_results: &recent[index], pressed_lanes: scalar.pressed,
+                    note_progress: Some(&member.progress), competition: scalar.competition.as_ref() }
+            }).collect();
+            let reserved: Vec<_> = roster.iter().map(|player| state.member(*player).and_then(|member| member.scalars.as_ref()).map_or(0, |scalar| i64::from(scalar.saved_comparison_height) + if scalar.peer_admitted { 28 } else { 0 })).collect();
+            organisms::visual_local_player_views(&mut self.scene, &views, state.lookahead_ns(), state.page() as usize, true, &frames, Some(&reserved))?;
+            for (slot, player) in visible.iter().enumerate() {
+                let scalar = state.member(*player).and_then(|member| member.scalars.as_ref()).ok_or("visual frame unavailable")?;
+                let [x, y, _, _] = crate::playfield_layout::local_panel_bounds(visible.len(), slot)?;
+                if scalar.saved_failed && scalar.saved_comparison_height > 0 { atoms::text(&mut self.scene, (x + 10) as usize, (y + 72) as usize, "SAVED COMPARISONS UNAVAILABLE", 1, 0xff8e8e); }
+                if scalar.peer_admitted && scalar.peer_failed { atoms::text(&mut self.scene, (x + 10) as usize, (y + 72 + i64::from(scalar.saved_comparison_height)) as usize, "PEER DISPLAY UNAVAILABLE", 1, 0xff8e8e); }
+            }
+        }
+        if let Some(room) = state.room() { organisms::room_presentation_footer(&mut self.scene, room)?; }
+        else if state.room_disabled() { atoms::text(&mut self.scene, 12, 646, "ROOM SCORES UNAVAILABLE", 1, 0xff8e8e); }
+        self.renderer.render(&self.scene)
+    }
+
+    fn prepare_surface(&mut self) -> Result<(), String> {
+        if self.renderer.needs_surface_recreation() {
+            let surface = self.instance.create_surface(wgpu::SurfaceTarget::OffscreenCanvas(self.canvas.clone())).map_err(|error| format!("recreate browser canvas surface: {error}"))?;
+            self.renderer.replace_surface(surface)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn present_frozen_history(&mut self, history: &crate::historical_record_presentation::HistoricalRecordPresentation) -> Result<(), String> {
+        self.prepare_surface()?;
+        self.backgrounds.sync_presentations(None, &[], &mut self.renderer)?;
+        self.scene.clear();
+        history.compose(&mut self.scene)?;
+        self.renderer.render(&self.scene)
+    }
+
+    pub(crate) fn present_frozen_results(&mut self, results: &crate::ui::results::FrozenResultsView, page: usize, comparisons: bool, room: Option<&crate::room_presentation::RoomPresentation>) -> Result<(), String> {
+        self.prepare_surface()?;
+        self.backgrounds.sync_presentations(None, &[], &mut self.renderer)?;
+        self.scene.clear();
+        atoms::text(&mut self.scene, 24, 65, if results.has_comparisons() { "COMPLETED RESULTS - C COMPARISONS" } else { "COMPLETED RESULTS" }, 2, 0x9bb1cf);
+        results.compose_mode(&mut self.scene, page, comparisons)?;
+        if let Some(room) = room { organisms::room_presentation_footer(&mut self.scene, room)?; }
+        self.renderer.render(&self.scene)
+    }
+
     /// The host owns bounded retry scheduling after transient surface failures.
     pub(crate) fn needs_redraw(&self) -> bool {
         self.renderer.needs_redraw()

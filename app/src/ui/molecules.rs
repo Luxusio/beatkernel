@@ -13,6 +13,11 @@ use std::ops::RangeInclusive;
 /// Draws only the borrowed gauge snapshot; READY is not song completion.
 /// Bounds are validated before geometry and the ASCII label uses stack storage.
 pub fn gauge_hud(scene: &mut Scene, gauge: &BmsGauge, bounds: Bounds) -> Result<(), String> {
+    gauge_hud_visual(scene, crate::browser_render_state::RenderGauge::from_gauge(gauge), bounds)
+}
+
+pub fn gauge_hud_visual(scene: &mut Scene, gauge: crate::browser_render_state::RenderGauge, bounds: Bounds) -> Result<(), String> {
+    gauge.validate()?;
     if bounds.x < 0 || bounds.y < 0 || bounds.width <= 0 || bounds.height < 14 {
         return Err(
             "gauge HUD requires nonnegative origin, positive width and height at least 14".into(),
@@ -29,11 +34,11 @@ pub fn gauge_hud(scene: &mut Scene, gauge: &BmsGauge, bounds: Bounds) -> Result<
         .ok_or("gauge bar y overflow")?;
     scene.status()?;
 
-    let snapshot = gauge.snapshot();
+    let snapshot = &gauge.snapshot;
     let (prefix, color) = match snapshot.failure {
         Some(GaugeFailure::InstantDeath) => ("DEAD", 0xef6372),
         Some(GaugeFailure::Depleted) => ("EMPTY", 0xd8b36b),
-        None if gauge.can_clear() => ("READY", 0x61d69a),
+        None if snapshot.level_units >= gauge.clear_units => ("READY", 0x61d69a),
         None => ("GAUGE", 0x4f92db),
     };
     let hundredths = snapshot.level_units / (GAUGE_UNITS_PER_PERCENT / 100);

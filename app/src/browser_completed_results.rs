@@ -84,3 +84,10 @@ impl BrowserCompletedResults {
         Ok(())
     }
 }
+#[wasm_bindgen]
+impl BrowserCompletedResults {
+    pub fn visual_snapshot(&self, generation: u64, content: u64, max_packet_bytes: u32, max_diagnostic_bytes: u32) -> Result<Vec<u8>, JsValue> {
+        let model = self.presentation.export_visual().map_err(|error| JsValue::from_str(&error))?.ok_or_else(|| JsValue::from_str("completed Results unavailable"))?;
+        crate::browser::render::wire::encode_packet(crate::browser::render::header(crate::browser::render::wire::RESULTS, generation, content, 0), &crate::browser::render::wire::WirePacket::Results(model), crate::browser::render::limits(max_packet_bytes, max_diagnostic_bytes)).map_err(|error| JsValue::from_str(&error))
+    }
+}

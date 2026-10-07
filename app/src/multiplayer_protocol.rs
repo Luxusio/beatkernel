@@ -75,7 +75,9 @@ pub fn encode_frame(tag: u8, payload: &[u8]) -> Result<Vec<u8>, MultiplayerError
     Ok(frame(tag, payload))
 }
 
-pub(crate) fn validate_progress(
+/// Checks self-reported counts and optional prefix transitions without admitting
+/// room membership, changing an owner or proving gameplay completion.
+pub fn validate_progress(
     previous: Option<Progress>,
     next: Progress,
 ) -> Result<(), MultiplayerError> {

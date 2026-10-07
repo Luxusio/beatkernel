@@ -76,5 +76,12 @@ then Window joins input/audio/room cleanup before gameplay ownership terminates.
 Do not terminate the game Worker before delayed capture delivery, label an error
 natural completion, or discard genuine capture. Historical/completed/room display
 errors remain presentation-only. Headless continuation has not been selected.
+The shared render byte codec must enforce the trusted caller's aggregate UTF-8
+diagnostic allowance for image errors, nested frame room errors and every frozen
+room page error before allocation/publication. Preserve original strings;
+decorative headings, labels and counters do not consume diagnostic allowance.
+The public self-reported progress validator checks counts and optional prefix
+transitions without admitting membership or proving completion.
+
 Verify these requirements with actual separate Workers as well as pure
 registration/progress tests. Integration is still under development.
