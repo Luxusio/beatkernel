@@ -287,6 +287,12 @@ pub(super) fn stream(owner: &mut WindowsOutputOwner) -> Result<&mut Output> {
         .ok_or("current Windows output unavailable")?
         .native)
 }
+pub(super) fn basis(owner: &WindowsOutputOwner) -> Result<OutputFrameBasis> {
+    Ok(owner
+        .current()
+        .ok_or("current Windows output unavailable")?
+        .basis())
+}
 fn capability(
     output: &OwnedOutput,
 ) -> std::result::Result<

@@ -211,6 +211,14 @@ impl NativeAudioPresentation {
         self.basis
     }
 
+    /// Checked logical coordinate of a point on the current raw output epoch.
+    pub fn logical_output(
+        &self,
+        raw: beatkernel::time::ClockPoint,
+    ) -> NativeGameplayResult<beatkernel::time::ClockPoint> {
+        Ok(self.authority.checked_logical_output(raw)?)
+    }
+
     fn validate_identity(&self) -> NativeGameplayResult<()> {
         let epoch = self.authority.epoch();
         if self.validator.epoch() != epoch.id

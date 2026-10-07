@@ -470,6 +470,27 @@ fn startup_observation<D: NativeStartDevice>(
     Ok(Some(observation))
 }
 
+/// Bounded time for two separated observations on the actual callback frame grid.
+pub(crate) fn native_calibration_timeout(
+    buffer_frames: u32,
+    sample_rate: u32,
+) -> Result<std::time::Duration, Box<dyn std::error::Error>> {
+    if buffer_frames == 0 || sample_rate == 0 {
+        return Err("native calibration requires a nonzero frame grid".into());
+    }
+    let numerator = u128::from(buffer_frames) * 1_000_000_000;
+    let quantum = numerator.div_ceil(u128::from(sample_rate));
+    let budget = quantum
+        .checked_mul(4)
+        .and_then(|v| v.checked_add(100_000_000))
+        .ok_or("native calibration timeout overflow")?
+        .max(2_000_000_000);
+    Ok(std::time::Duration::from_nanos(
+        u64::try_from(budget)
+            .map_err(|_| "native calibration timeout exceeds nanoseconds")?,
+    ))
+}
+
 /// Calibrate a silent device, arm one committed frame, and await actual presentation.
 /// Cancellation returns None; the caller always owns native stop/input cleanup.
 /// Point interpolation and assessed interval bounds do not prove physical sync.
@@ -498,7 +519,7 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
         return Err("native startup buffer is empty".into());
     }
     let calibration_deadline = Instant::now()
-        .checked_add(Duration::from_secs(2))
+        .checked_add(native_calibration_timeout(buffer, config.sample_rate)?)
         .ok_or("native calibration deadline overflow")?;
     device.start()?;
     let mut previous = None;

@@ -380,6 +380,9 @@ pub(crate) trait PumpTiming<D: GameplayDevice> {
     ) -> NativeGameplayResult<Option<DisciplineUpdate>>;
     fn quality(&self) -> ClockMappingQuality;
     fn logical_domain(&self, config: NativeGameplayConfig) -> ClockDomainId;
+    fn section_start(&self) -> Option<Timestamp> {
+        None
+    }
     fn audio(&self) -> Option<&crate::native_audio_presentation::NativeAudioPresentation> {
         None
     }
@@ -421,6 +424,7 @@ pub(crate) trait PumpTiming<D: GameplayDevice> {
 pub(crate) struct LegacyTiming<'a, P>(pub &'a mut P);
 pub(crate) struct AudioTiming<'a>(
     pub &'a mut crate::native_audio_presentation::NativeAudioPresentation,
+    pub Timestamp,
 );
 impl<D: GameplayDevice> PumpTiming<D> for LegacyTiming<'_, D::Presentation> {
     const AUDIO: bool = false;
@@ -527,6 +531,9 @@ impl<D: GameplayDevice> PumpTiming<D> for AudioTiming<'_> {
     }
     fn logical_domain(&self, _: NativeGameplayConfig) -> ClockDomainId {
         self.0.authority().epoch().logical_origin.domain
+    }
+    fn section_start(&self) -> Option<Timestamp> {
+        Some(self.1)
     }
     fn audio(&self) -> Option<&crate::native_audio_presentation::NativeAudioPresentation> {
         Some(self.0)

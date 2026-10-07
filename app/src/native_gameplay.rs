@@ -78,6 +78,12 @@ pub struct NativeGameplayConfig {
     pub pause_supported: bool,
     pub logical_schedule: bool,
 }
+/// Audio gameplay clocks together with the original requested chart section identity.
+#[derive(Clone, Copy, Debug)]
+pub struct AudioGameplayConfig {
+    pub gameplay: NativeGameplayConfig,
+    pub section_start: Timestamp,
+}
 /// Borrowed gameplay state with an explicitly selected competition observer.
 pub struct GameplaySession<'a, S, P> {
     pub runtime: &'a mut SoloRuntime,
@@ -519,7 +525,8 @@ fn run_gameplay_timed<
             != Some((epoch.logical_origin.domain, epoch.stream_origin.domain))
             || epoch.host_domain != config.origin.domain
             || epoch.stream_origin != config.stream_origin
-            || session.runtime.transport_mut().anchor().host_time != epoch.logical_origin.timestamp
+            || session.runtime.transport_mut().anchor().host_time
+                != epoch.logical_output(config.playback_origin)?.timestamp
             || session.runtime.transport_mut().anchor().song_time != config.song_origin
             || session.runtime.transport_mut().anchor().rate != beatkernel::transport::Rate::NORMAL
             || session.runtime.poisoned()
@@ -532,6 +539,7 @@ fn run_gameplay_timed<
         }
     }
     let logical_domain = session.discipline.logical_domain(config);
+    let section_start = session.discipline.section_start();
     let custom_policy = session.gauge.profile() != &GaugeProfile::default();
     if config.origin.domain == config.stream_origin.domain
         || config.stream_origin.domain != config.playback_origin.domain
@@ -554,6 +562,7 @@ fn run_gameplay_timed<
             session.capture.as_ref(),
             &config,
             logical_domain,
+            section_start,
         )?;
         if let Some(competition) = session
             .competition
@@ -569,6 +578,7 @@ fn run_gameplay_timed<
                 header,
                 &config,
                 logical_domain,
+                section_start,
             )?;
             if session
                 .capture
@@ -1827,12 +1837,15 @@ pub fn run_gameplay_audio_with_result_and_ports<
 >(
     device: &mut D,
     audio: AudioGameplaySession<'_, S>,
-    config: NativeGameplayConfig,
+    config: AudioGameplayConfig,
     control: &mut C,
     host: &mut H,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    crate::native_policy_admission::validate_audio_config(&config)?;
+    let section_start = config.section_start;
+    let config = config.gameplay;
     let session = audio.session;
-    let mut timing = AudioTiming(session.discipline);
+    let mut timing = AudioTiming(session.discipline, section_start);
     let session = GameplaySession {
         runtime: session.runtime,
         gauge: session.gauge,
@@ -1856,12 +1869,15 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports<
 >(
     device: &mut D,
     mut audio: AudioGameplaySession<'_, S>,
-    config: NativeGameplayConfig,
+    config: AudioGameplayConfig,
     control: &mut C,
     host: &mut H,
     score: &mut crate::competition::ScoreSummary,
     policy: &crate::play_policy::ResolvedPlayPolicy,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    crate::native_policy_admission::validate_audio_config(&config)?;
+    let section_start = config.section_start;
+    let config = config.gameplay;
     if score != &crate::competition::ScoreSummary::default() {
         return Err("native scored audio gameplay requires a fresh score".into());
     }
@@ -1871,7 +1887,8 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports<
         != Some((epoch.logical_origin.domain, epoch.stream_origin.domain))
         || epoch.host_domain != config.origin.domain
         || epoch.stream_origin != config.stream_origin
-        || session.runtime.transport_mut().anchor().host_time != epoch.logical_origin.timestamp
+        || session.runtime.transport_mut().anchor().host_time
+            != epoch.logical_output(config.playback_origin)?.timestamp
         || session.runtime.transport_mut().anchor().song_time != config.song_origin
         || session.runtime.transport_mut().anchor().rate != beatkernel::transport::Rate::NORMAL
         || audio.merger.source_capacity() != 4096
@@ -1898,6 +1915,7 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports<
         header,
         &config,
         epoch.logical_origin.domain,
+        Some(section_start),
     )?;
     if session.runtime.poisoned() || session.runtime.gameplay_fence().is_some() {
         return Err("selected audio Runtime is poisoned or fenced".into());
@@ -1910,7 +1928,16 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports<
         policies: &rows,
     };
     let mut observer = crate::native_gameplay_host::NativeScoreHost::new(&mut resolved, score);
-    run_gameplay_audio_with_result_and_ports(device, audio, config, control, &mut observer)
+    run_gameplay_audio_with_result_and_ports(
+        device,
+        audio,
+        AudioGameplayConfig {
+            gameplay: config,
+            section_start,
+        },
+        control,
+        &mut observer,
+    )
 }
 
 #[cfg(test)]

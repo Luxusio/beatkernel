@@ -377,6 +377,88 @@ impl Output {
             }
         }
     }
+    pub(super) fn startup_native_observation(
+        &mut self,
+        validator: &mut beatkernel_platform::audio::presentation::validation::NativePresentationValidator,
+    ) -> Result<Option<NativeStartObservation<StartupEvidence>>> {
+        use beatkernel_platform::audio::presentation::validation::{
+            NativeObservationAdmission, OriginalNativePresentationEvidence,
+        };
+        let Some(snapshot) = self.native_observation(validator.epoch())? else {
+            return Ok(None);
+        };
+        if snapshot.basis.point_at_stream_frame(0)? != validator.output_origin() {
+            return Err("native startup frame basis changed".into());
+        }
+        let (prepared, evidence, interval) = match snapshot.evidence {
+            OriginalNativePresentationEvidence::Wasapi {
+                snapshot: original,
+                basis,
+            } => {
+                if basis != Some(snapshot.basis) {
+                    return Err("native startup WASAPI basis differs".into());
+                }
+                (
+                    validator.prepare_wasapi(snapshot.epoch, original, basis)?,
+                    StartupEvidence::Wasapi(original, snapshot.basis),
+                    None,
+                )
+            }
+            #[cfg(feature = "asio-sdk")]
+            OriginalNativePresentationEvidence::Asio { observation, basis } => {
+                if basis != Some(snapshot.basis) {
+                    return Err("native startup ASIO basis differs".into());
+                }
+                let interval = NativeStartTiming::Interval(StartInterval::new(
+                    observation.output,
+                    observation.host.before,
+                    observation.host.after,
+                )?);
+                (
+                    validator.prepare_asio(snapshot.epoch, observation, basis)?,
+                    StartupEvidence::Asio(observation),
+                    Some(interval),
+                )
+            }
+            _ => return Err("native startup source kind is unsupported".into()),
+        };
+        let pair = prepared.correlation_pair();
+        let admission = validator.commit(prepared)?;
+        if admission == NativeObservationAdmission::Unchanged {
+            return Ok(None);
+        }
+        let timing = match interval {
+            Some(interval) => interval,
+            None => match pair {
+                Some(pair) => NativeStartTiming::Point(pair),
+                None => return Ok(None),
+            },
+        };
+        Ok(Some(NativeStartObservation { timing, evidence }))
+    }
+    /// A finite startup/freshness allowance derived from the applied callback quantum.
+    pub(super) fn audio_startup_bound(&self, sample_rate: u32) -> Result<Duration> {
+        if sample_rate == 0 {
+            return Err("native output has zero sample rate".into());
+        }
+        let rate = i128::from(sample_rate);
+        let period = (i128::from(self.startup_buffer_frames()?) * 1_000_000_000 + rate - 1) / rate;
+        let mut bound = period
+            .checked_mul(4)
+            .and_then(|value| value.checked_add(2_000_000_000))
+            .ok_or("native startup bound overflow")?;
+        #[cfg(feature = "asio-sdk")]
+        if let Self::Asio(output) = self {
+            let latency =
+                (i128::from(output.stream.latencies().output_frames) * 1_000_000_000 + rate - 1)
+                    / rate;
+            bound = bound
+                .checked_add(latency)
+                .and_then(|value| value.checked_add(i128::from(output.latency_error)))
+                .ok_or("ASIO startup latency bound overflow")?;
+        }
+        Ok(Duration::from_nanos(i64::try_from(bound)?))
+    }
     pub(super) fn startup_buffer_frames(&self) -> Result<u32> {
         match self {
             Self::Wasapi(stream) => Ok(stream.configuration().buffer_frames),
@@ -444,9 +526,17 @@ impl Output {
     }
     pub(super) fn render_report(&mut self) -> Result<Option<RenderReport>> {
         match self {
-            Self::Wasapi(s) => Ok(s.snapshot().render),
+            Self::Wasapi(s) => {
+                let snapshot = s.snapshot();
+                match snapshot.status {
+                    beatkernel_platform::audio::AudioStreamStatus::Ready => Ok(None),
+                    beatkernel_platform::audio::AudioStreamStatus::Running => Ok(snapshot.render),
+                    status => Err(format!("native output render terminated: {status:?}").into()),
+                }
+            }
             #[cfg(feature = "asio-sdk")]
             Self::Asio(s) => {
+                s.pump_driver_messages()?;
                 let snapshot = s.checked()?;
                 Ok(if snapshot.telemetry_available {
                     snapshot.render

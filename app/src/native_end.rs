@@ -35,6 +35,7 @@ pub struct NativeEnd {
     last_report: Option<RenderReport>,
     physical: Option<u64>,
     emitted: bool,
+    deferred_boundary: Option<EndBoundary>,
     start_frame: u64,
     start_configured: bool,
 }
@@ -60,12 +61,42 @@ impl NativeEnd {
             last_report: None,
             physical: None,
             emitted: false,
+            deferred_boundary: None,
             start_frame: 0,
             start_configured: false,
         };
         result.point(end)?;
         Ok(result)
     }
+    /// Preserve an original startup observation without discarding early completion.
+    pub fn prime(
+        &mut self,
+        report: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> Result<(), EndError> {
+        if self.emitted || self.deferred_boundary.is_some() {
+            return Err(EndError("finite startup boundary is already committed"));
+        }
+        let mut next = self.clone();
+        next.deferred_boundary = next.observe(report, pair)?;
+        *self = next;
+        Ok(())
+    }
+
+    /// Preserve full ASIO startup evidence and defer any actual boundary delivery.
+    pub fn prime_asio(
+        &mut self,
+        observation: beatkernel_platform::audio::asio::AsioPresentationObservation,
+    ) -> Result<(), EndError> {
+        if self.emitted || self.deferred_boundary.is_some() {
+            return Err(EndError("finite startup boundary is already committed"));
+        }
+        let mut next = self.clone();
+        next.deferred_boundary = next.observe_asio(observation)?;
+        *self = next;
+        Ok(())
+    }
+
     /// Stages a fresh stream relation while retaining the original finite frame grid.
     /// Reached endpoints and regressed actual render/host history refuse atomically.
     pub fn restart_for_output(
@@ -349,6 +380,9 @@ impl NativeEnd {
         }
         self.lower.get_or_insert(pair);
         self.last_pair = Some(pair);
+        if let Some(boundary) = self.deferred_boundary.take() {
+            return Ok(Some(boundary));
+        }
         let Some(frame) = self.physical else {
             return Ok(None);
         };

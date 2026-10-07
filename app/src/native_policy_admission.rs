@@ -25,12 +25,20 @@ pub(crate) fn validate_capture_in_domain(
     capture: Option<&LiveReplayCapture>,
     config: &NativeGameplayConfig,
     logical_domain: ClockDomainId,
+    section_start: Option<Timestamp>,
 ) -> NativeGameplayResult<()> {
     if let Some(capture) = capture {
         if !capture.records().is_empty() {
             return Err("native policy capture is already processed".into());
         }
-        validate_header_in_domain(judge, gauge, capture.header(), config, logical_domain)?;
+        validate_header_in_domain(
+            judge,
+            gauge,
+            capture.header(),
+            config,
+            logical_domain,
+            section_start,
+        )?;
     }
     Ok(())
 }
@@ -40,7 +48,7 @@ pub(crate) fn validate_header(
     header: &ReplayHeader,
     config: &NativeGameplayConfig,
 ) -> NativeGameplayResult<()> {
-    validate_header_in_domain(judge, gauge, header, config, config.origin.domain)
+    validate_header_in_domain(judge, gauge, header, config, config.origin.domain, None)
 }
 pub(crate) fn validate_header_in_domain(
     judge: &JudgeEngine,
@@ -48,6 +56,7 @@ pub(crate) fn validate_header_in_domain(
     header: &ReplayHeader,
     config: &NativeGameplayConfig,
     logical_domain: ClockDomainId,
+    section_start: Option<Timestamp>,
 ) -> NativeGameplayResult<()> {
     if header.version != REPLAY_VERSION
         || header.seed != 0
@@ -57,12 +66,18 @@ pub(crate) fn validate_header_in_domain(
         return Err("native policy header version, capacity or clock differs".into());
     }
     let setup = crate::replay_playback::decode_section_setup(&header.options)?;
-    let start = i128::from(config.song_origin.as_nanos())
-        + i128::from(config.playback_origin.timestamp.as_nanos())
-        - i128::from(config.stream_origin.timestamp.as_nanos());
-    let start = Timestamp::from_nanos(
-        i64::try_from(start).map_err(|_| "native policy original start overflow")?,
-    );
+    let start = match section_start {
+        Some(start) => start,
+        None => {
+            let start = i128::from(config.song_origin.as_nanos())
+                + i128::from(config.playback_origin.timestamp.as_nanos())
+                - i128::from(config.stream_origin.timestamp.as_nanos());
+            let start = Timestamp::from_nanos(
+                i64::try_from(start).map_err(|_| "native policy original start overflow")?,
+            );
+            start
+        }
+    };
     if setup.profile != *judge.profile()
         || setup.gauge != *gauge
         || setup.start != start
@@ -124,6 +139,7 @@ pub(crate) fn validate_selected(
         competition,
         config,
         config.origin.domain,
+        None,
     )
 }
 pub(crate) fn validate_selected_in_domain(
@@ -134,18 +150,33 @@ pub(crate) fn validate_selected_in_domain(
     competition: Option<&ReplayHeader>,
     config: &NativeGameplayConfig,
     logical_domain: ClockDomainId,
+    section_start: Option<Timestamp>,
 ) -> NativeGameplayResult<()> {
     validate_initial(judge, gauge)?;
     if judge.profile() != policy.judge() || gauge.profile() != policy.gauge() {
         return Err("selected native policy differs from actual judge or gauge".into());
     }
-    validate_capture_in_domain(judge, gauge.profile(), capture, config, logical_domain)?;
+    validate_capture_in_domain(
+        judge,
+        gauge.profile(),
+        capture,
+        config,
+        logical_domain,
+        section_start,
+    )?;
     for header in capture
         .map(LiveReplayCapture::header)
         .into_iter()
         .chain(competition)
     {
-        validate_header_in_domain(judge, gauge.profile(), header, config, logical_domain)?;
+        validate_header_in_domain(
+            judge,
+            gauge.profile(),
+            header,
+            config,
+            logical_domain,
+            section_start,
+        )?;
         if crate::replay_playback::decode_section_setup(&header.options)?
             .judgments
             .as_ref()
@@ -171,6 +202,28 @@ pub(crate) fn validate_config(config: &NativeGameplayConfig) -> NativeGameplayRe
         || !(0..=1_000_000_000).contains(&config.advance_lag.as_nanos())
     {
         return Err("invalid selected native gameplay clocks/rate/lag".into());
+    }
+    Ok(())
+}
+
+/// Validates an explicitly declared original section independently of physical output origins.
+pub(crate) fn validate_audio_config(
+    config: &crate::native_gameplay::AudioGameplayConfig,
+) -> NativeGameplayResult<()> {
+    validate_config(&config.gameplay)?;
+    let preroll = config
+        .section_start
+        .as_nanos()
+        .checked_sub(config.gameplay.song_origin.as_nanos())
+        .ok_or("audio section preroll difference overflows")?;
+    if config.section_start.as_nanos() < 0
+        || preroll < 0
+        || config
+            .gameplay
+            .end_song
+            .is_some_and(|end| end < config.section_start)
+    {
+        return Err("invalid original audio section identity".into());
     }
     Ok(())
 }

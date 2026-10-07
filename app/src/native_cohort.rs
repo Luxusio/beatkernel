@@ -21,7 +21,9 @@ use crate::{
     offline::OwnedStopEvidence,
     multiplayer_group::{MemberProgress, validate_members},
     multiplayer::Progress,
-    native_gameplay::{MAX_PENDING_INPUT_EVENTS, NativeGameplayConfig, NativeGameplayResult},
+    native_gameplay::{
+        MAX_PENDING_INPUT_EVENTS, NativeGameplayConfig, NativeGameplayResult, AudioGameplayConfig,
+    },
     playback_pause::{NativePause, PauseKeyboard, PausePhase},
     play_result::{CompletedPlayResult, CompletedLocalPublicationError},
     replay_capture::LiveReplayCapture,
@@ -732,6 +734,7 @@ fn run_cohort_timed<
     host_port: &mut H,
 ) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
     let logical_domain = session.discipline.logical_domain(config);
+    let section_start = session.discipline.section_start();
     if let Some(epoch) = session
         .discipline
         .audio()
@@ -800,6 +803,7 @@ fn run_cohort_timed<
                 state.capture.as_ref(),
                 &config,
                 logical_domain,
+                section_start,
             )?;
             if let Some(competition) = state
                 .competition
@@ -815,6 +819,7 @@ fn run_cohort_timed<
                     header,
                     &config,
                     logical_domain,
+                    section_start,
                 )?;
                 if state
                     .capture
@@ -1849,7 +1854,8 @@ fn validate_audio_cohort_start<S: SoloCompetitionPort, G: GroupCompetitionPort, 
         != Some((epoch.logical_origin.domain, epoch.stream_origin.domain))
         || epoch.host_domain != config.origin.domain
         || epoch.stream_origin != config.stream_origin
-        || session.group.transport_mut().anchor().host_time != epoch.logical_origin.timestamp
+        || session.group.transport_mut().anchor().host_time
+            != epoch.logical_output(config.playback_origin)?.timestamp
         || session.group.transport_mut().anchor().song_time != config.song_origin
         || session.group.transport_mut().anchor().rate != beatkernel::transport::Rate::NORMAL
         || session.group.poisoned()
@@ -2206,11 +2212,14 @@ pub fn run_cohort_audio_with_results_and_ports<
 >(
     device: &mut D,
     session: AudioCohortSession<'_, S, G>,
-    config: NativeGameplayConfig,
+    config: AudioGameplayConfig,
     control: &mut C,
     host: &mut H,
 ) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
-    let mut timing = AudioTiming(session.discipline);
+    crate::native_policy_admission::validate_audio_config(&config)?;
+    let section_start = config.section_start;
+    let config = config.gameplay;
+    let mut timing = AudioTiming(session.discipline, section_start);
     run_cohort_timed(
         device,
         CohortSession {
@@ -2240,11 +2249,14 @@ pub fn run_cohort_audio_with_policies_and_results_and_ports<
 >(
     device: &mut D,
     mut session: AudioCohortSession<'_, S, G>,
-    config: NativeGameplayConfig,
+    config: AudioGameplayConfig,
     control: &mut C,
     host: &mut H,
     policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
 ) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    crate::native_policy_admission::validate_audio_config(&config)?;
+    let section_start = config.section_start;
+    let config = config.gameplay;
     let epoch = session.discipline.authority().epoch();
     validate_audio_cohort_start(&mut session, &config, epoch)?;
     crate::native_gameplay_host::validate_play_policy_members(policies)?;
@@ -2298,11 +2310,21 @@ pub fn run_cohort_audio_with_policies_and_results_and_ports<
             header,
             &config,
             epoch.logical_origin.domain,
+            Some(section_start),
         )?;
     }
     if !custom {
         host.prepare_play_policies(policies)?;
     }
     let mut resolved = crate::native_gameplay_bridge::ResolvedGameplayHost { host, policies };
-    run_cohort_audio_with_results_and_ports(device, session, config, control, &mut resolved)
+    run_cohort_audio_with_results_and_ports(
+        device,
+        session,
+        AudioGameplayConfig {
+            gameplay: config,
+            section_start,
+        },
+        control,
+        &mut resolved,
+    )
 }

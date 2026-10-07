@@ -16,8 +16,9 @@ use crate::{
     },
     native_end::{EndBoundary, NativeEnd},
     native_gameplay::{
-        AudioGameplaySession, GameplaySession, InputBatch, NativeGameplayConfig,
-        NativeGameplayResult, run_gameplay_audio_with_policy_and_result_and_score_and_ports,
+        AudioGameplayConfig, AudioGameplaySession, GameplaySession, InputBatch,
+        NativeGameplayConfig, NativeGameplayResult,
+        run_gameplay_audio_with_policy_and_result_and_score_and_ports,
         run_gameplay_audio_with_result_and_ports,
     },
     native_gameplay_host::{
@@ -32,7 +33,7 @@ use crate::{
 use beatkernel::{
     audio::{
         AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample, RenderReport,
-        SampleBank, SampleId, VoiceId, command_queue,
+        SampleBank, SampleId, VoiceId, command_queue, command_queue_with_start_gate,
     },
     input::{
         Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId, DeviceSelector,
@@ -134,6 +135,12 @@ fn config(finite: bool, pause: bool) -> NativeGameplayConfig {
         logical_schedule: true,
     }
 }
+fn audio_config(finite: bool, pause: bool) -> AudioGameplayConfig {
+    AudioGameplayConfig {
+        gameplay: config(finite, pause),
+        section_start: Timestamp::ZERO,
+    }
+}
 fn bindings(device: Option<DeviceId>, fanout: bool) -> BindingMap {
     BindingMap::from_bindings((0..if fanout { 3 } else { 2 }).map(|i| Binding {
         device: device.map_or(DeviceSelector::Any, DeviceSelector::Exact),
@@ -171,6 +178,9 @@ struct Device {
     sources: Vec<DeviceId>,
     finite: bool,
     backlog_three: bool,
+    first_input_at: i64,
+    stop_after: Option<usize>,
+    extra_normal_input: bool,
     pcm: Vec<f32>,
     observed_pairs: Vec<ClockPair>,
 }
@@ -206,11 +216,13 @@ impl GameplayDevice for Device {
         let report = self.mixer.render(&mut pcm)?;
         self.report = Some(report);
         self.pcm.extend(pcm);
-        let stop = if matches!(self.mode, Mode::PausePoint | Mode::PauseAsio) {
-            18
-        } else {
-            7
-        };
+        let stop =
+            self.stop_after
+                .unwrap_or(if matches!(self.mode, Mode::PausePoint | Mode::PauseAsio) {
+                    18
+                } else {
+                    7
+                });
         if !self.finite && self.step >= stop {
             self.cancel.set(true);
         }
@@ -323,17 +335,35 @@ impl GameplayDevice for Device {
         }
         if self.step == 2 {
             for &source in &self.sources {
-                events.push_back(input(10_000_000, source, 7, 0, ButtonState::Down));
+                events.push_back(input(self.first_input_at, source, 7, 0, ButtonState::Down));
             }
         }
         if self.step == 3 {
             for &source in &self.sources {
-                events.push_back(input(10_000_000, source, 7, 1, ButtonState::Up));
+                events.push_back(input(self.first_input_at, source, 7, 1, ButtonState::Up));
             }
         }
         if matches!(self.mode, Mode::PausePoint | Mode::PauseAsio) && self.step == 14 {
             for &source in &self.sources {
                 events.push_back(input(65_000_000, source, 8, 2, ButtonState::Down));
+            }
+        }
+        if self.mode == Mode::Normal
+            && self.extra_normal_input
+            && (self.step == 8 || self.step == 9)
+        {
+            for &source in &self.sources {
+                events.push_back(input(
+                    40_000_000,
+                    source,
+                    8,
+                    if self.step == 8 { 2 } else { 3 },
+                    if self.step == 8 {
+                        ButtonState::Down
+                    } else {
+                        ButtonState::Up
+                    },
+                ));
             }
         }
         Ok(InputBatch {
@@ -497,6 +527,9 @@ fn device(
             sources,
             finite,
             backlog_three: false,
+            first_input_at: 10_000_000,
+            stop_after: None,
+            extra_normal_input: false,
             pcm: vec![],
             observed_pairs: vec![],
         },
@@ -623,6 +656,20 @@ impl Solo {
         NativeGameplayResult<Option<CompletedPlayResult>>,
         ScoreSummary,
     ) {
+        let cfg = audio_config(
+            self.device.finite,
+            matches!(self.device.mode, Mode::PausePoint | Mode::PauseAsio),
+        );
+        self.run_config(scored, cfg)
+    }
+    fn run_config(
+        &mut self,
+        scored: bool,
+        cfg: AudioGameplayConfig,
+    ) -> (
+        NativeGameplayResult<Option<CompletedPlayResult>>,
+        ScoreSummary,
+    ) {
         let session = AudioGameplaySession {
             session: GameplaySession {
                 runtime: &mut self.runtime,
@@ -640,10 +687,6 @@ impl Solo {
             merger: &mut self.merger,
         };
         let mut score = ScoreSummary::default();
-        let cfg = config(
-            self.device.finite,
-            matches!(self.device.mode, Mode::PausePoint | Mode::PauseAsio),
-        );
         let result = if scored {
             run_gameplay_audio_with_policy_and_result_and_score_and_ports(
                 &mut self.device,
@@ -985,7 +1028,7 @@ fn actual_local_reported_audio_failure_commits_processed_member_prefix_once() {
         run_cohort_audio_with_results_and_ports(
             &mut device,
             session,
-            config(false, false),
+            audio_config(false, false),
             &mut Control::default(),
             &mut host_port
         )
@@ -1178,7 +1221,7 @@ impl Cohort {
         run_cohort_audio_with_results_and_ports(
             &mut self.device,
             session,
-            config(false, false),
+            audio_config(false, false),
             &mut Control::default(),
             &mut self.host,
         )
@@ -1285,4 +1328,303 @@ fn native_future_asio_association_keeps_older_covered_authority_without_advancin
             .timestamp
             <= f.device.now().timestamp
     );
+}
+
+fn selected_section_fixture() -> (Solo, AudioGameplayConfig) {
+    let mut f = Solo::new(Mode::Normal, false, true);
+    let format = AudioFormat::new(1000, 1).unwrap();
+    let pcm = PcmLimits::new(64, 256, 1).unwrap();
+    let mut bank = SampleBank::new(format, pcm).unwrap();
+    bank.insert(
+        SampleId(1),
+        PcmSample::new(format, vec![0.25; 8], pcm).unwrap(),
+    )
+    .unwrap();
+    let (mut producer, consumer) = command_queue_with_start_gate(16).unwrap();
+    producer.schedule_start_at(10).unwrap();
+    let mixer = Mixer::new(
+        MixerConfig::new(
+            format,
+            ClockDomainId(2),
+            raw(0).timestamp,
+            AudioLimits::new(16, 8, 16, 16, 16).unwrap(),
+        ),
+        bank,
+        consumer,
+    )
+    .unwrap();
+    f.device.creation_basis = mixer.output_frame_basis();
+    f.device.mixer = mixer;
+    f.device.first_input_at = 7_500_000;
+    let source = source(false);
+    let judge = JudgeEngine::new(
+        source.compile().unwrap().chart,
+        source.rules(),
+        f.selected.judge().clone(),
+    )
+    .unwrap();
+    let capture = LiveReplayCapture::new_with_policy(
+        &judge,
+        ClockDomainId(3),
+        limits(),
+        Timestamp::from_nanos(20_000_000),
+        0,
+        None,
+        beatkernel_bms::BmsInputMode::ButtonOnly,
+        None,
+        &f.selected,
+    )
+    .unwrap();
+    f.competition = Some(Observer {
+        header: capture.header().clone(),
+        times: vec![],
+        marks: 0,
+    });
+    f.capture = Some(capture);
+    f.runtime = SoloRuntime::new(
+        ClockDomainId(3),
+        ClockDomainId(2),
+        Transport::new(
+            logical(10_000_000).timestamp,
+            Timestamp::from_nanos(15_000_000),
+            Rate::NORMAL,
+        ),
+        bindings(None, false),
+        judge,
+        producer,
+        sounds(&source, 0),
+        8,
+    )
+    .unwrap();
+    f.runtime
+        .set_processing_clock(RuntimeProcessingClock::Disabled);
+    f.pause = NativePause::new(raw(0), ClockDomainId(1), 1000)
+        .unwrap()
+        .with_start_frame(10)
+        .unwrap();
+    f.merger = InputMerger::new_dynamic(ClockDomainId(1), host(5_000_000), 4096, 16).unwrap();
+    let mut gameplay = config(false, false);
+    gameplay.origin = host(5_000_000);
+    gameplay.playback_origin = raw(10_000_000);
+    gameplay.song_origin = Timestamp::from_nanos(15_000_000);
+    (
+        f,
+        AudioGameplayConfig {
+            gameplay,
+            section_start: Timestamp::from_nanos(20_000_000),
+        },
+    )
+}
+
+#[test]
+fn actual_selected_frame_preroll_keeps_requested_section_and_original_grade_identity() {
+    let (mut f, cfg) = selected_section_fixture();
+    let anchor = f.runtime.transport_mut().anchor();
+    let (result, score) = f.run_config(true, cfg);
+    assert!(result.unwrap().is_none());
+    assert_eq!(f.device.mixer.applied_start_frame(), Some(10));
+    assert_eq!(f.device.creation_basis.start_physical_frame(), 0);
+    assert_eq!(anchor.host_time, logical(10_000_000).timestamp);
+    assert_eq!(anchor.song_time, Timestamp::from_nanos(15_000_000));
+    assert_eq!(anchor.rate, Rate::NORMAL);
+    assert_eq!(f.runtime.transport_mut().anchor(), anchor);
+    assert_eq!(score.hits, 1);
+    assert_eq!(score.misses, 0);
+    assert_eq!(score.grades.get(&91), Some(&1));
+    let hit = f
+        .host
+        .reports
+        .iter()
+        .find(|r| {
+            r.judge_events
+                .iter()
+                .any(|e| matches!(e.outcome, JudgeOutcome::Hit { .. }))
+        })
+        .unwrap();
+    assert_eq!(hit.song_time, Timestamp::from_nanos(20_000_000));
+    assert_eq!(
+        hit.input.as_ref().unwrap().meta().original_clock_point,
+        Some(host(7_500_000))
+    );
+    assert_eq!(
+        hit.input.as_ref().unwrap().meta().timestamp,
+        logical(15_000_000).timestamp
+    );
+    assert_eq!(hit.audio_at.domain, ClockDomainId(2));
+    assert!(f.device.pcm.iter().any(|v| *v == 0.25));
+    let file = f.capture.take().unwrap().into_file();
+    let setup = crate::replay_playback::decode_section_setup(&file.header.options).unwrap();
+    assert_eq!(setup.start, Timestamp::from_nanos(20_000_000));
+    assert_eq!(&setup.profile, f.selected.judge());
+    assert_eq!(setup.judgments.as_ref(), f.selected.judgments());
+    assert_eq!(file.header.normalized_clock, ClockDomainId(3));
+    assert!(
+        file.records
+            .iter()
+            .any(|r| r.song_time == Timestamp::from_nanos(15_000_000))
+    );
+    assert!(
+        file.records
+            .iter()
+            .any(|r| r.song_time == Timestamp::from_nanos(20_000_000)
+                && matches!(r.operation, ReplayOperation::Input(_)))
+    );
+}
+
+#[test]
+fn tampered_explicit_section_start_refuses_before_io_or_policy_publication() {
+    let (mut f, mut cfg) = selected_section_fixture();
+    cfg.section_start = Timestamp::from_nanos(21_000_000);
+    let authority = format!("{:?}", f.presentation.authority());
+    let anchor = f.runtime.transport_mut().anchor();
+    let (result, score) = f.run_config(true, cfg);
+    assert!(result.is_err());
+    assert_eq!(score, ScoreSummary::default());
+    assert_eq!(f.device.step, 0);
+    assert_eq!(f.device.mixer.frame_cursor(), 0);
+    assert_eq!(f.runtime.judge().effective_song_time(), None);
+    assert_eq!(f.runtime.transport_mut().anchor(), anchor);
+    assert_eq!(format!("{:?}", f.presentation.authority()), authority);
+    assert!(f.host.prepared.is_empty());
+    assert!(f.host.reports.is_empty());
+    assert!(f.capture.as_ref().unwrap().records().is_empty());
+}
+
+#[test]
+fn joined_native_capture_codec_reconstruction_and_replay_audio_preserve_logical_play() {
+    let mut f = Solo::new(Mode::Normal, false, true);
+    f.device.extra_normal_input = true;
+    f.device.stop_after = Some(12);
+    let (result, live_score) = f.run(true);
+    assert!(result.unwrap().is_none());
+    assert_eq!(live_score.hits, 2);
+    assert_eq!(live_score.misses, 0);
+    let live_events = f
+        .host
+        .reports
+        .iter()
+        .flat_map(|r| r.judge_events.iter().copied())
+        .collect::<Vec<_>>();
+    assert_eq!(live_events.len(), 2);
+    let live_hash = f.runtime.judge().stable_hash().unwrap();
+    let live_gauge = f.gauge.clone();
+    let file = f.capture.take().unwrap().into_file();
+    assert_eq!(file.header.normalized_clock, ClockDomainId(3));
+    let encoded = beatkernel::replay::codec::encode_replay(&file, limits()).unwrap();
+    let decoded = beatkernel::replay::codec::decode_replay(&encoded, limits()).unwrap();
+    assert_eq!(decoded, file);
+    let saved_inputs = decoded
+        .records
+        .iter()
+        .filter_map(|record| match &record.operation {
+            ReplayOperation::Input(input) => Some(input),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(saved_inputs.len(), 4);
+    for (index, input) in saved_inputs.iter().enumerate() {
+        let original = if index < 2 {
+            host(10_000_000)
+        } else {
+            host(40_000_000)
+        };
+        let normalized = if index < 2 {
+            logical(20_000_000)
+        } else {
+            logical(80_000_000)
+        };
+        assert_eq!(input.physical.meta().original_clock_point, Some(original));
+        assert_eq!(input.physical.meta().clock_domain, ClockDomainId(3));
+        assert_eq!(input.physical.meta().timestamp, normalized.timestamp);
+        assert_eq!(input.physical.meta().source, DeviceId(u64::MAX));
+        assert_eq!(input.physical.meta().sequence, index as u64);
+    }
+    let original_source = source(false);
+    let reconstructed =
+        crate::replay_playback::reconstruct_section(&original_source, decoded.clone(), limits())
+            .unwrap();
+    assert_eq!(reconstructed.results(), live_events);
+    assert_eq!(reconstructed.engine().stable_hash().unwrap(), live_hash);
+    let mut rebuilt_gauge = BmsGauge::new(f.selected.gauge().try_copy().unwrap());
+    rebuilt_gauge.observe(reconstructed.results(), &[]).unwrap();
+    assert_eq!(rebuilt_gauge, live_gauge);
+    let mut rebuilt_score = ScoreSummary::default();
+    rebuilt_score.observe(reconstructed.results()).unwrap();
+    assert_eq!(rebuilt_score, live_score);
+    let classes = f.selected.judgments().unwrap();
+    let rebuilt_classes = classes.project(&rebuilt_score).unwrap();
+    assert_eq!(rebuilt_classes, classes.project(&live_score).unwrap());
+    assert_eq!(rebuilt_classes.pgreat, 2);
+    assert_eq!(rebuilt_classes.ex_score, 4);
+    assert_eq!(rebuilt_classes.poor, 0);
+    let format = AudioFormat::new(1000, 1).unwrap();
+    let pcm = PcmLimits::new(64, 256, 1).unwrap();
+    let mut bank = SampleBank::new(format, pcm).unwrap();
+    bank.insert(
+        SampleId(1),
+        PcmSample::new(format, vec![0.25; 8], pcm).unwrap(),
+    )
+    .unwrap();
+    let prepared = crate::PreparedBms {
+        compiled: original_source.compile().unwrap(),
+        sounds: sounds(&original_source, 0),
+        source: original_source,
+        bank,
+        bgm_commands: vec![],
+    };
+    let replay_origin = point(77, 2_000_000_000);
+    let replay_preroll = Duration::from_nanos(7_000_000);
+    let planned = crate::replay_audio::plan_section_audio(
+        &prepared,
+        decoded,
+        limits(),
+        replay_origin,
+        replay_preroll,
+    )
+    .unwrap();
+    assert_eq!(planned.output_origin, replay_origin);
+    assert_eq!(planned.judge_events, live_events);
+    assert_eq!(planned.final_judge_hash, live_hash);
+    assert_eq!(planned.commands.len(), 2);
+    let live_identities = f
+        .host
+        .reports
+        .iter()
+        .flat_map(|r| r.audio_commands.iter())
+        .filter_map(|command| match command {
+            beatkernel::audio::AudioCommand::Play {
+                voice,
+                sample,
+                gain,
+                ..
+            } => Some((*voice, *sample, *gain)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut planned_identities = Vec::new();
+    let mut planned_times = Vec::new();
+    for command in &planned.commands {
+        let beatkernel::audio::AudioCommand::Play {
+            voice,
+            sample,
+            at,
+            gain,
+        } = *command
+        else {
+            panic!("expected original judged keysound")
+        };
+        planned_identities.push((voice, sample, gain));
+        planned_times.push(at);
+    }
+    assert_eq!(planned_identities, live_identities);
+    // Replay schedules recorded song times relative to its own explicit origin
+    // and preroll. Native queue admission timestamps are not replay wire data.
+    assert_eq!(
+        planned_times,
+        vec![
+            Timestamp::from_nanos(2_027_000_000),
+            Timestamp::from_nanos(2_087_000_000)
+        ]
+    );
+    assert!(planned_times.windows(2).all(|times| times[0] < times[1]));
 }

@@ -94,9 +94,12 @@ epoch faults, failed replacement, same-epoch restart, stale and cross-owner
 descriptors. Assert complete state preservation on rejection.
 
 These fixtures establish the boundary only. Shared Step/native/browser owners,
-capture/replay and lifecycle still require migration and independent CLI,
-desktop and actual current-browser QA. The previous browser playback failure
-remains unresolved until those real production paths pass.
+native startup and lifecycle now select the authority; capture/replay has a
+joined native roundtrip fixture. The earlier browser playback refusal was
+corrected and passed three independent pre-review Chromium smoke executions.
+Fresh full regression, replay compatibility and independent CLI, desktop and
+actual current-browser QA remain required; development diagnostics do not
+establish final acceptance.
 
 ## Shared Step gameplay integration
 
@@ -173,8 +176,9 @@ alongside the separate conservative HOST acquisition cutoff. Rebase that native
 boundary into the logical audio domain for control operations; a HOST midpoint
 cannot replace it. Control-operation commitment must not claim a physical input
 occurrence. Servicing paused presentation/prefixes must not invent a Runtime
-operation. These lifecycle integration rules are selected requirements; the
-production consumer implementation remains pending.
+operation. Shared native audio loops and held-output publication implement these
+lifecycle rules; production launchers select them. Physical device execution and
+independent lifecycle QA remain pending.
 
 The additive native pause update carries the original HOST window/cutoff, output
 epoch and raw output point from the committed physical transition frame.
@@ -223,8 +227,9 @@ bounded interval, rather than remain indefinitely playing. HOST acquisition and
 closed-prefix gates remain separate from logical Runtime operations. Actual
 native end evidence, complete original input closure, logical judge completion
 and stop/drain evidence all remain necessary for finite completion. The shared
-loop migration is implemented and portably tested; production constructor and
-startup selection are being integrated.
+loop migration and production constructor/startup selection are connected in
+Linux, Windows and macOS solo/local launchers. Portable fixtures establish
+development behavior; platform checks and actual native QA remain separate.
 
 An original native association may describe output whose assessed presentation
 HOST time is still future, as with explicit ASIO driver latency. Retain it
@@ -252,3 +257,69 @@ and the actual control operation. Bind this purpose into the descriptor and
 check it when staging Transport. Do not pop equality into another queue or
 classify it as paused. Its original HOST metadata is recorded only when the
 actual input report commits.
+
+Production startup constructs one cold native authority/validator from the actual
+stream frame basis and explicit distinct HOST/raw/logical domains. Retain two
+original progressing associations; while a future second association is waiting
+for coverage, keep those two fixed and continue actual render credits, terminal
+status checks and retained input service. A positive bounded timeout, host
+domain/chronology and association freshness remain required. Cancellation
+returns without inventing startup permission. The input-service boolean denotes
+continuation only and never certifies a drained prefix.
+
+Offline software acquisition origin may use the two original associations with
+unknown accuracy and explicit finite backward projection; do not substitute a
+nominal rate or claim an exact acoustic start. Network startup retains its
+existing observed frame plan and conservative HOST window. Transport anchors at
+the logical coordinate of the actual selected raw playback origin. Keep retained
+startup inputs until the real input owner drains them before prefix closure.
+Cold Runtime anchor validation uses the logical coordinate of the actual
+selected playback frame, which can differ from the epoch's raw stream-zero
+coordinate. Preserve stream zero and require checked domains, exact song anchor,
+normal rate and pristine state. Backward projection permission also extends its
+explicit raw validity interval; it never grants unbounded or forward prediction.
+
+Audio gameplay configuration carries the original requested section start
+separately from its clock/pause configuration. Preroll changes the initial song
+anchor, and gated startup changes the physical playback frame; neither changes
+the requested chart section. Validate capture and competition setup against this
+explicit start, with unchanged exact chart/profile/gauge/class/clock identity.
+Require a nonnegative section start, a valid initial song anchor at or before it
+and an endpoint at or after it. Do not derive section identity from the physical
+frame, copy it from an unvalidated header or change stored record interpretation.
+Legacy generic configuration APIs retain their existing behavior.
+
+Finite offline startup preserves its first original native lower observation.
+If that observation establishes an actual zero/short endpoint boundary, retain
+the boundary for normal gameplay observation to deliver once; priming must not
+consume and discard completion. Invalid later observation retains deferred
+delivery. A genuinely missing lower bracket remains an explicit failure, and
+original ASIO intervals are never replaced by a midpoint. Network startup keeps
+its existing pre-arm lower-observation seed.
+
+Negotiated device callback bounds govern local observation preparation only.
+Preserve the user's network setup deadline and session-clock maximum age on
+every platform; device latency must not silently widen these independent
+network policies. A configured deadline that cannot accommodate the selected
+device remains an explicit startup refusal.
+
+## Current development evidence and limits
+
+The focused native-audio library/bin run passes 36 tests: 14 startup, 14 gameplay
+and eight owner fixtures. Native-end and native-start filters pass 15 and 20
+tests respectively. One joined native capture codec/reconstruction/replay fixture
+preserves actual judgment events, hash, gauge, EX, logical timestamps, original
+HOST provenance and replay keysound identity/order. These filters overlap and
+are not a full-suite count. The current Node browser regression passes 524 tests;
+it does not replace actual-browser QA.
+
+The launcher macOS all-target Rust check passed using C/archive stubs before
+two warning cleanups; it is source/type evidence, not actual SDK or hardware
+execution. The first Windows launcher check failed with 39 import/scope errors;
+the repaired public imports pass the C/archive-stub all-target recheck. Fresh
+browser WASM checking passes. App library/bin regression with desktop and
+WebTransport passes 2,175 tests with two existing ignored tests; legacy
+capture/playback/native-feed integration regression passes 21 tests with
+unchanged assertions. Fresh full-workspace checks, formal independent review and ordered CLI,
+desktop and browser QA remain pending. Correlation accuracy remains explicitly
+unknown. No AC, migration task or broad player Goal is declared complete.

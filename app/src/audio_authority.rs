@@ -34,6 +34,12 @@ pub struct AudioAuthorityEpoch {
     pub logical_origin: ClockPoint,
     pub host_domain: ClockDomainId,
 }
+impl AudioAuthorityEpoch {
+    /// Checked coordinate on this epoch's logical timeline.
+    pub(crate) fn logical_output(self, raw: ClockPoint) -> Result<ClockPoint, AudioAuthorityError> {
+        AudioAuthority::logical_in_epoch(self, raw)
+    }
+}
 
 /// Rejection before changing retained observations or any watermark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

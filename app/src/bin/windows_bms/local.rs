@@ -1,5 +1,5 @@
 //! Actual Windows local cohort: one Raw Input pump and one shared native output.
-use super::native::{AcquisitionWindow, HOST, OUTPUT};
+use super::native::{AcquisitionWindow, HOST, LOGICAL, OUTPUT};
 use super::*;
 #[cfg(test)]
 use beatkernel::input::PhysicalControlId;
@@ -11,9 +11,9 @@ use beatkernel::{
 };
 use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
 use beatkernel_bms_runtime::native_cohort_setup::{
-    CohortPreparation, PreparedCohort, activate_cohort_with_sounds, admit_cohort as admit_mode,
-    finish_cohort, finish_cohort_network, finish_cohort_with_results_and_network,
-    prepare_cohort_with_policy,
+    activate_audio_cohort_with_sounds, admit_cohort as admit_mode, finish_cohort,
+    finish_cohort_network, finish_cohort_with_results_and_network,
+    prepare_audio_cohort_with_policy, CohortPreparation, PreparedCohort,
 };
 use beatkernel_bms_runtime::native_start::{
     MAX_START_INPUT_EVENTS, NativeStartConfig, start_committed,
@@ -32,8 +32,8 @@ use beatkernel_bms_runtime::{
     native_cohort::{PlayerState, replay_path},
 };
 use beatkernel_bms_runtime::{
-    native_cohort::{NativeCohortSession, run_cohort_with_policies_and_results},
-    native_gameplay::NativeGameplayConfig,
+    native_cohort::{NativeAudioCohortSession, run_cohort_audio_with_policies_and_results},
+    native_gameplay::{AudioGameplayConfig, NativeGameplayConfig},
 };
 #[cfg(test)]
 use beatkernel_bms_runtime::{
@@ -41,7 +41,7 @@ use beatkernel_bms_runtime::{
     playback_pause::{PauseKeyboard, PausePhase},
 };
 use beatkernel_platform::{
-    audio::presentation::discipline::{DisciplineConfig, PresentationDiscipline},
+    audio::presentation::{discipline::DisciplineConfig, validation::NativePresentationValidator},
     raw_input::RawDeviceKind,
     windows::{clock::QpcClock, input::WindowsInput},
 };
@@ -182,7 +182,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         mut states,
         save_paths,
         reserved,
-    } = prepare_cohort_with_policy(
+    } = prepare_audio_cohort_with_policy(
         &prepared,
         &assignments,
         &competition_options,
@@ -201,6 +201,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             replay_max_bytes: options.replay_max_bytes,
             replay_max_records: options.replay_max_records,
         },
+        LOGICAL,
         &policy,
     )?;
     let network_start = network.is_some();
@@ -254,7 +255,9 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     let mut before_origin = 0u64;
     let mut retained = std::collections::VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
     let outcome = (|| -> Result<Option<Vec<(beatkernel_bms_runtime::local_players::PlayerId,beatkernel_bms_runtime::play_result::CompletedPlayResult)>>> {
-        let (transport, mut discipline, host_origin, playback_origin) = if let Some(network) =
+        let start_basis = super::owned_output::basis(&output)?;
+        let creation_epoch = output.last_issued_epoch();
+        let committed_start = if let Some(network) =
             network.as_mut()
         {
             let started = {
@@ -266,12 +269,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                     selected: &selected,
                     pre_origin: &mut before_origin,
                     retained: &mut retained,
-                    physical: PresentationDiscipline::new(
-                        DisciplineConfig::default(),
-                        output_origin,
-                        HOST,
-                        song_origin,
-                    )?,
+                    physical: NativePresentationValidator::new(creation_epoch, start_basis.point_at_stream_frame(0)?, HOST),
                 };
                 start_committed(
                     &mut device,
@@ -296,69 +294,25 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 return Ok(None);
             };
             let playback_origin = started.plan.selected_output();
-            let mut discipline = PresentationDiscipline::new_with_playback_origin(
-                DisciplineConfig::default(),
-                output_origin,
-                playback_origin,
-                HOST,
-                song_origin,
-            )?;
-            started
-                .observation
-                .evidence
-                .seed_discipline(&mut discipline)?;
-            let transport = beatkernel::transport::Transport::new(
-                started.host_origin.timestamp,
-                song_origin,
-                Rate::NORMAL,
-            );
-            println!(
-                "shared native applied start={:?}; host={:?}; host window={:?}; physical accuracy unmeasured",
-                started.plan, started.host_origin, started.host_window
-            );
-            (transport, discipline, started.host_origin, playback_origin)
+            println!("shared native applied start={:?}; HOST acquisition={:?}; host window={:?}; physical accuracy unmeasured", started.plan, started.host_origin, started.host_window);
+            Some((started.host_origin, playback_origin))
         } else {
             super::owned_output::stream(&mut output)?.start()?;
-            let mut discipline = PresentationDiscipline::new(
-                DisciplineConfig::default(),
-                ClockPoint {
-                    domain: OUTPUT,
-                    timestamp: Timestamp::ZERO,
-                },
-                HOST,
-                song_origin,
-            )?;
-            let (mut transport, quality) = super::owned_output::stream(&mut output)?.calibrate(
-                &options,
-                calibration_extent(
-                    options.seconds.unwrap_or_else(|| {
-                        states[0]
-                            .completion
-                            .as_ref()
-                            .map_or(2, |c| c.calibration_seconds())
-                    }),
-                    options.preroll,
-                )?,
-                &mut bgm,
-                &mut producer,
-            )?;
-            transport.set_rate(transport.anchor().host_time, Rate::NORMAL)?;
-            super::owned_output::stream(&mut output)?.seed(&mut discipline, &mut bgm, &mut producer)?;
-            let host_origin = ClockPoint {
-                domain: HOST,
-                timestamp: transport.anchor().host_time,
-            };
-            println!(
-                "shared output origin={host_origin:?}; mapping quality={quality:?}; physical latency unmeasured"
-            );
-            (transport, discipline, host_origin, output_origin)
+            None
         };
-        discipline.validate_host(clock.sample()?.normalized)?;
-        let (mut group, mut merger) = activate_cohort_with_sounds(
+        let Some((mut presentation, seed, before)) = super::native::prime_output(&mut output, &mut input, &acquisition,
+            &clock, &selected, &mut before_origin, &mut retained, &mut bgm, &mut producer, &mut native_end, committed_start.is_none())? else { return Ok(None); };
+        let playback_origin = committed_start.map_or(output_origin, |(_, playback)| playback);
+        let host_origin = match committed_start { Some((host, _)) => host, None => seed.host_for_output(playback_origin, before)? };
+        let logical_origin = presentation.logical_output(playback_origin)?;
+        let transport = beatkernel::transport::Transport::new(logical_origin.timestamp, song_origin, Rate::NORMAL);
+        println!("shared audio-authoritative logical anchor={:?}; original associations={:?}; HOST acquisition={host_origin:?}; physical accuracy Unknown", transport.anchor(), seed.observations);
+        let (mut group, mut merger) = activate_audio_cohort_with_sounds(
             configs,
             &reserved,
             host_origin,
             OUTPUT,
+            logical_origin,
             transport,
             producer,
             options.end_ns.map(Timestamp::from_nanos),
@@ -379,21 +333,23 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 .iter()
                 .map(|(player, _)| (*player, &policy))
                 .collect();
-            run_cohort_with_policies_and_results(
+            run_cohort_audio_with_policies_and_results(
                 &mut device,
-                NativeCohortSession {
+                NativeAudioCohortSession {
                     network: network.as_mut(),
                     group: &mut group,
                     states: &mut states,
                     merger: &mut merger,
                     bgm: &mut bgm,
-                    discipline: &mut discipline,
+                    discipline: &mut presentation,
                     pause: &mut pause,
                     end: &mut native_end,
                     delivery: &mut delivery,
                     pre_origin_inputs: &mut before_origin,
                 },
-                NativeGameplayConfig {
+                AudioGameplayConfig {
+                    section_start: Timestamp::from_nanos(options.start_ns),
+                    gameplay: NativeGameplayConfig {
                     origin: host_origin,
                     stream_origin: output_origin,
                     playback_origin,
@@ -404,6 +360,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                     seconds: options.seconds,
                     pause_supported: !network_start,
                     logical_schedule: true,
+                    },
                 },
                 &selected_policies,
             )

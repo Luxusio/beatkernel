@@ -581,7 +581,7 @@ pub type NativeAudioCohortSession<'a> =
 pub fn run_gameplay_audio_with_result<D: NativeGameplayDevice>(
     device: &mut D,
     session: NativeAudioGameplaySession<'_>,
-    config: NativeGameplayConfig,
+    config: crate::native_gameplay::AudioGameplayConfig,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
     crate::native_gameplay::run_gameplay_audio_with_result_and_ports(
         device,
@@ -595,7 +595,7 @@ pub fn run_gameplay_audio_with_result<D: NativeGameplayDevice>(
 pub fn run_gameplay_audio_with_policy_and_result_and_score<D: NativeGameplayDevice>(
     device: &mut D,
     session: NativeAudioGameplaySession<'_>,
-    config: NativeGameplayConfig,
+    config: crate::native_gameplay::AudioGameplayConfig,
     score: &mut crate::competition::ScoreSummary,
     policy: &crate::play_policy::ResolvedPlayPolicy,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
@@ -613,7 +613,7 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score<D: NativeGameplayDevi
 pub fn run_cohort_audio_with_results<D: NativeGameplayDevice>(
     device: &mut D,
     session: NativeAudioCohortSession<'_>,
-    config: NativeGameplayConfig,
+    config: crate::native_gameplay::AudioGameplayConfig,
 ) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
     crate::native_cohort::run_cohort_audio_with_results_and_ports(
         device,
@@ -627,7 +627,7 @@ pub fn run_cohort_audio_with_results<D: NativeGameplayDevice>(
 pub fn run_cohort_audio_with_policies_and_results<D: NativeGameplayDevice>(
     device: &mut D,
     session: NativeAudioCohortSession<'_>,
-    config: NativeGameplayConfig,
+    config: crate::native_gameplay::AudioGameplayConfig,
     policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
 ) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
     crate::native_cohort::run_cohort_audio_with_policies_and_results_and_ports(
