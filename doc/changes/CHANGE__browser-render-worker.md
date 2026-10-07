@@ -43,6 +43,12 @@ whole-application browser portion of this ceiling remains open.
 
 Known ceiling: 실제 두 Worker의 전체 모드·GPU 동작은 미검증 — AC009 브라우저 검증에서 확인해야 함.
 
+Known ceiling: bounded linear member lookups still yield quadratic roster traversal — upgrade when profiling establishes material cost
+
+This proposal-stage ceiling is resolved in AC013: the borrowed bridge traverses
+the validated member slice once. Visible BGA/error-overlay lookups remain
+bounded to four players; they do not recreate a full-roster quadratic traversal.
+
 Known ceiling: 실제 WASM getter 및 전체 화면 동작 검증 미완료 — AC009 브라우저 검증에서 확인.
 
 The getter portion of this reported ceiling is now resolved by the actual
@@ -130,3 +136,25 @@ with a delayed renderer, and a terminal renderer error preserving a real
 incomplete prefix. The durable browser runner is still incomplete for several
 modes and room integration; this evidence does not replace final independent
 review or required browser QA.
+
+The completed development runner now exercises every required presentation
+mode, actual renderer execution pause, cumulative packed progress, body-level
+atomic refusal, preserved prefixes and real two-client WebTransport rooms.
+The final full run passed 12 of 13 required checks; local touch encountered the
+already parked late-delivery refusal. One unchanged scoped local repeat passed
+with original timestamps/page and both member prefixes intact. The failure did
+not reproduce consecutively and is not presented as fixed or waived. Final
+independent review and QA remain outstanding.
+
+Known ceiling: original browser touch delivery can arrive behind the accepted
+input watermark; a real peer also reported AudioWorklet context-chronology
+status 6 during an earlier room run. Both remain unresolved under the separate
+audio-authority Goal work. A later run naturally completed both real hosts;
+that observation does not establish a clock repair or delivery guarantee.
+
+Local WebTransport verification uses an explicitly recorded owned-test-browser
+certificate bootstrap. Chromium distinguishes WebTransport system-root anchoring
+from the ordinary certificate test flags; the runner enables the development
+mode only when requested. Production TLS acceptance is not claimed. See the
+[Chromium configuration definition](https://chromium.googlesource.com/chromium/src/net/+/refs/heads/main/quic/quic_context.h)
+and the [official local WebTransport sample](https://github.com/GoogleChrome/samples/blob/gh-pages/webtransport/webtransport_server.py).
