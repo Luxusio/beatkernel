@@ -3,6 +3,7 @@ use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
     molecules::{button, text_field_with_font},
+    layout::{Node, TextStyle, resolve},
     retained::RetainedNodes,
     text_input::LineEditor,
 };
@@ -33,6 +34,178 @@ pub const BUTTONS: [(ControlId, Bounds, &'static str); 2] = [
         "BACK",
     ),
 ];
+// Named visual styles and the complete screen hierarchy live together here.
+const TITLE: TextStyle = TextStyle {
+    scale: 3,
+    color: 0xf0f4ff,
+};
+const SUBTITLE: TextStyle = TextStyle {
+    scale: 2,
+    color: 0x9bb1cf,
+};
+const LABEL: TextStyle = TextStyle {
+    scale: 1,
+    color: 0xf0f4ff,
+};
+const HELP: TextStyle = TextStyle {
+    scale: 1,
+    color: 0x9bb1cf,
+};
+const ERROR: TextStyle = TextStyle {
+    scale: 1,
+    color: 0xff8e8e,
+};
+#[derive(Clone, Copy)]
+enum Component {
+    Background(u32),
+    Header(&'static str, TextStyle),
+    FieldLabel(usize, &'static str),
+    Editor(usize, ControlId),
+    Hint(&'static str),
+    Action(ControlId, &'static str),
+    Error,
+}
+type N = Node<'static, Component>;
+// Fixed logical coordinates anchor sections; rows/columns express their contents.
+const SCREEN: N =
+    N::layer(
+        [960, 720],
+        &[
+            N::leaf([960, 720], Component::Background(0x10151e)).at(0, 0),
+            N::column(
+                [936, 59],
+                24,
+                &[
+                    N::leaf([936, 21], Component::Header("BEATKERNEL BMS PLAYER", TITLE)),
+                    N::leaf(
+                        [936, 14],
+                        Component::Header("DISPLAY - ENTER DONE - ESC BACK", SUBTITLE),
+                    ),
+                ],
+            )
+            .at(24, 20),
+            N::column(
+                [906, 259],
+                41,
+                &[
+                    N::row(
+                        [906, 34],
+                        24,
+                        &[
+                            N::layer(
+                                [232, 34],
+                                &[N::leaf([232, 7], Component::FieldLabel(0, "GPU BACKEND"))
+                                    .at(0, 10)],
+                            ),
+                            N::leaf([650, 34], Component::Editor(0, ControlId(40000))),
+                        ],
+                    ),
+                    N::row(
+                        [906, 34],
+                        24,
+                        &[
+                            N::layer(
+                                [232, 34],
+                                &[N::leaf([232, 7], Component::FieldLabel(1, "PRESENT MODE"))
+                                    .at(0, 10)],
+                            ),
+                            N::leaf([650, 34], Component::Editor(1, ControlId(40001))),
+                        ],
+                    ),
+                    N::row(
+                        [906, 34],
+                        24,
+                        &[
+                            N::layer(
+                                [232, 34],
+                                &[N::leaf([232, 7], Component::FieldLabel(2, "UI FPS")).at(0, 10)],
+                            ),
+                            N::leaf([650, 34], Component::Editor(2, ControlId(40002))),
+                        ],
+                    ),
+                    N::row(
+                        [906, 34],
+                        24,
+                        &[
+                            N::layer(
+                                [232, 34],
+                                &[N::leaf([232, 7], Component::FieldLabel(3, "LOOKAHEAD MS"))
+                                    .at(0, 10)],
+                            ),
+                            N::leaf([650, 34], Component::Editor(3, ControlId(40003))),
+                        ],
+                    ),
+                ],
+            )
+            .at(24, 130),
+            N::column(
+                [936, 77],
+                18,
+                &[
+                    N::column(
+                        [936, 37],
+                        8,
+                        &[
+                            N::leaf(
+                                [936, 7],
+                                Component::Hint("BACKEND: AUTO / VULKAN / DX12 / METAL / GL"),
+                            ),
+                            N::leaf(
+                                [936, 7],
+                                Component::Hint("PRESENT: FIFO / IMMEDIATE / MAILBOX"),
+                            ),
+                            N::leaf(
+                                [936, 7],
+                                Component::Hint("UI FPS: 30..240   LOOKAHEAD: 100..10000 MS"),
+                            ),
+                        ],
+                    ),
+                    N::column(
+                        [936, 22],
+                        8,
+                        &[
+                            N::leaf(
+                                [936, 7],
+                                Component::Hint("SAVE PROFILE + RESTART FOR GPU BACKEND"),
+                            ),
+                            N::leaf(
+                                [936, 7],
+                                Component::Hint("DONE UPDATES DRAFT - APPLY IS SEPARATE"),
+                            ),
+                        ],
+                    ),
+                ],
+            )
+            .at(24, 445),
+            // The public button definitions are also consumed by desktop hover handling.
+            N::row(
+                [358, 34],
+                BUTTONS[1].1.x - BUTTONS[0].1.x - BUTTONS[0].1.width,
+                &[
+                    N::leaf(
+                        [BUTTONS[0].1.width, BUTTONS[0].1.height],
+                        Component::Action(BUTTONS[0].0, BUTTONS[0].2),
+                    ),
+                    N::leaf(
+                        [BUTTONS[1].1.width, BUTTONS[1].1.height],
+                        Component::Action(BUTTONS[1].0, BUTTONS[1].2),
+                    ),
+                ],
+            )
+            .at(BUTTONS[0].1.x, BUTTONS[0].1.y),
+            N::leaf([936, 7], Component::Error).at(24, 690),
+        ],
+    );
+fn paint_text(scene: &mut Scene, bounds: Bounds, value: &str, style: TextStyle) {
+    text(
+        scene,
+        bounds.x as usize,
+        bounds.y as usize,
+        value,
+        style.scale,
+        style.color,
+    );
+}
 pub struct DisplayFrame<'a> {
     pub editors: &'a [LineEditor; 4],
     pub selected: usize,
@@ -57,6 +230,7 @@ pub struct DisplayView {
 impl DisplayView {
     pub fn new(id: ScreenInstanceId, width: u32, height: u32) -> Result<Self, String> {
         let nodes = RetainedNodes::new(width, height)?;
+        let layout = resolve(SCREEN)?;
         let editors = [
             LineEditor::new("auto", 32)?,
             LineEditor::new("fifo", 32)?,
@@ -76,23 +250,49 @@ impl DisplayView {
             armed: scope.create_rw_signal(None),
             nodes,
         };
-        view.nodes.static_node(|scene, _| {
-            rect(scene, 0, 0, 960, 720, 0x10151e);
-            text(scene, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
-            text(
-                scene,
-                24,
-                65,
-                "DISPLAY - ENTER DONE - ESC BACK",
-                2,
-                0x9bb1cf,
-            );
-        });
-        for (index, label) in ["GPU BACKEND", "PRESENT MODE", "UI FPS", "LOOKAHEAD MS"]
+        let header: Vec<_> = layout
             .iter()
             .copied()
-            .enumerate()
-        {
+            .filter(|leaf| {
+                matches!(
+                    leaf.component,
+                    Component::Background(_) | Component::Header(..)
+                )
+            })
+            .collect();
+        view.nodes.static_node(move |scene, _| {
+            for leaf in header {
+                match leaf.component {
+                    Component::Background(color) => rect(
+                        scene,
+                        leaf.bounds.x,
+                        leaf.bounds.y,
+                        leaf.bounds.width,
+                        leaf.bounds.height,
+                        color,
+                    ),
+                    Component::Header(value, style) => paint_text(scene, leaf.bounds, value, style),
+                    _ => unreachable!(),
+                }
+            }
+        });
+        for index in 0..4 {
+            let label = layout
+                .iter()
+                .find_map(|leaf| match leaf.component {
+                    Component::FieldLabel(field, value) if field == index => {
+                        Some((leaf.bounds, value))
+                    }
+                    _ => None,
+                })
+                .ok_or("Display field label missing")?;
+            let (bounds, id) = layout
+                .iter()
+                .find_map(|leaf| match leaf.component {
+                    Component::Editor(field, id) if field == index => Some((leaf.bounds, id)),
+                    _ => None,
+                })
+                .ok_or("Display editor missing")?;
             let editor = view.editors[index];
             let selected = view.selected;
             let pending = view.pending;
@@ -104,14 +304,7 @@ impl DisplayView {
                 scope,
                 memo,
                 move |(editor, focused, pending, font), scene, hits| {
-                    let y = 130 + index as i64 * 75;
-                    text(scene, 24, (y + 10) as usize, label, 1, 0xf0f4ff);
-                    let bounds = Bounds {
-                        x: 280,
-                        y,
-                        width: 650,
-                        height: 34,
-                    };
+                    paint_text(scene, label.0, label.1, LABEL);
                     text_field_with_font(
                         scene,
                         &editor,
@@ -120,23 +313,28 @@ impl DisplayView {
                         font.as_ref(),
                     );
                     if !pending {
-                        hits.push((ControlId(40000 + index as u64), bounds));
+                        hits.push((id, bounds));
                     }
                 },
             );
         }
-        view.nodes.static_node(|scene, _| {
-            for (y, hint) in [
-                (445, "BACKEND: AUTO / VULKAN / DX12 / METAL / GL"),
-                (460, "PRESENT: FIFO / IMMEDIATE / MAILBOX"),
-                (475, "UI FPS: 30..240   LOOKAHEAD: 100..10000 MS"),
-                (500, "SAVE PROFILE + RESTART FOR GPU BACKEND"),
-                (515, "DONE UPDATES DRAFT - APPLY IS SEPARATE"),
-            ] {
-                text(scene, 24, y, hint, 1, 0x9bb1cf);
+        let hints: Vec<_> = layout
+            .iter()
+            .copied()
+            .filter(|leaf| matches!(leaf.component, Component::Hint(_)))
+            .collect();
+        view.nodes.static_node(move |scene, _| {
+            for leaf in hints {
+                if let Component::Hint(value) = leaf.component {
+                    paint_text(scene, leaf.bounds, value, HELP);
+                }
             }
         });
-        for (id, bounds, label) in BUTTONS {
+        for leaf in &layout {
+            let Component::Action(id, label) = leaf.component else {
+                continue;
+            };
+            let bounds = leaf.bounds;
             let hovered = view.hovered;
             let armed = view.armed;
             let pending = view.pending;
@@ -158,11 +356,16 @@ impl DisplayView {
                 },
             );
         }
+        let error_bounds = layout
+            .iter()
+            .find(|leaf| matches!(leaf.component, Component::Error))
+            .ok_or("Display error region missing")?
+            .bounds;
         let error = view.error;
         let memo = scope.create_memo(move |_| error.get());
-        view.nodes.bind(scope, memo, |error, scene, _| {
+        view.nodes.bind(scope, memo, move |error, scene, _| {
             if let Some(error) = error {
-                text(scene, 24, 690, &error, 1, 0xff8e8e);
+                paint_text(scene, error_bounds, &error, ERROR);
             }
         });
         view.nodes.validate()?;
@@ -238,6 +441,134 @@ mod fixtures {
             pending: false,
             hovered: None,
             armed: None,
+        }
+    }
+    // Independent coordinates from the renderer before this migration.
+    fn legacy_scene(frame: &DisplayFrame<'_>) -> (Scene, Vec<(ControlId, Bounds)>) {
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        rect(&mut scene, 0, 0, 960, 720, 0x10151e);
+        text(&mut scene, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
+        text(
+            &mut scene,
+            24,
+            65,
+            "DISPLAY - ENTER DONE - ESC BACK",
+            2,
+            0x9bb1cf,
+        );
+        for (index, label) in ["GPU BACKEND", "PRESENT MODE", "UI FPS", "LOOKAHEAD MS"]
+            .into_iter()
+            .enumerate()
+        {
+            let y = 130 + index as i64 * 75;
+            text(&mut scene, 24, (y + 10) as usize, label, 1, 0xf0f4ff);
+            let bounds = Bounds {
+                x: 280,
+                y,
+                width: 650,
+                height: 34,
+            };
+            text_field_with_font(
+                &mut scene,
+                &frame.editors[index],
+                bounds,
+                frame.selected == index && !frame.pending,
+                None,
+            );
+            if !frame.pending {
+                hits.push((ControlId(40000 + index as u64), bounds));
+            }
+        }
+        for (y, value) in [
+            (445, "BACKEND: AUTO / VULKAN / DX12 / METAL / GL"),
+            (460, "PRESENT: FIFO / IMMEDIATE / MAILBOX"),
+            (475, "UI FPS: 30..240   LOOKAHEAD: 100..10000 MS"),
+            (500, "SAVE PROFILE + RESTART FOR GPU BACKEND"),
+            (515, "DONE UPDATES DRAFT - APPLY IS SEPARATE"),
+        ] {
+            text(&mut scene, 24, y, value, 1, 0x9bb1cf);
+        }
+        for (id, x, label) in [(ControlId(40), 24, "DONE"), (ControlId(41), 212, "BACK")] {
+            let bounds = Bounds {
+                x,
+                y: 620,
+                width: 170,
+                height: 34,
+            };
+            button(
+                &mut scene,
+                bounds,
+                label,
+                !frame.pending && frame.hovered == Some(id),
+                !frame.pending && frame.armed == Some(id),
+            );
+            if !frame.pending {
+                hits.push((id, bounds));
+            }
+        }
+        if let Some(error) = frame.error {
+            text(&mut scene, 24, 690, error, 1, 0xff8e8e);
+        }
+        (scene, hits)
+    }
+    #[test]
+    fn declarative_screen_matches_all_legacy_geometry_and_hit_bounds() {
+        let view = DisplayView::new(ScreenInstanceId(8), 960, 720).unwrap();
+        let mut editors = editors();
+        editors[2].left();
+        for (selected, pending, hovered, armed, error) in [
+            (0, false, None, None, None),
+            (2, false, Some(ControlId(40)), None, None),
+            (
+                3,
+                false,
+                Some(ControlId(41)),
+                Some(ControlId(41)),
+                Some("INVALID VALUE"),
+            ),
+            (
+                1,
+                true,
+                Some(ControlId(40)),
+                Some(ControlId(40)),
+                Some("SAVING"),
+            ),
+            (0, false, None, None, None),
+        ] {
+            let update = DisplayFrame {
+                editors: &editors,
+                selected,
+                pending,
+                hovered,
+                armed,
+                error,
+            };
+            let (expected, expected_hits) = legacy_scene(&update);
+            view.update(update).unwrap();
+            let mut scene = Scene::new(960, 720);
+            let mut hits = Vec::new();
+            view.compose(&mut scene, &mut hits).unwrap();
+            let geometry = |scene: &Scene| {
+                scene
+                    .rectangles()
+                    .iter()
+                    .map(|r| (r.bounds, r.color, r.uv))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(geometry(&scene), geometry(&expected));
+            let regions = |hits: &[(ControlId, Bounds)]| {
+                hits.iter()
+                    .map(|(id, b)| (*id, b.x, b.y, b.width, b.height))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(regions(&hits), regions(&expected_hits));
+            if !pending {
+                assert_eq!(
+                    regions(&hits[4..]),
+                    regions(&BUTTONS.map(|(id, b, _)| (id, b)))
+                );
+            }
         }
     }
     #[test]

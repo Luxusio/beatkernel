@@ -10,10 +10,12 @@ existing retained renderer with per-frame tree construction.
 
 `ui/atoms`, `ui/molecules` and `ui/organisms` provide reusable drawing components.
 Views such as `ui/records.rs` retain geometry packets and reactive subscriptions
-through `ui/retained.rs`. Their source still mixes absolute coordinates, signal
-binding, painting and interactions. There is no complete, concise declarative
-layout/view-tree authoring API yet. Do not describe the current source as already
-meeting this requirement completely.
+through `ui/retained.rs`. Most screen sources still mix absolute coordinates,
+signal binding, painting and interactions. The first authoring foundation in
+`ui/layout.rs` supplies typed rows, columns, positioned layers and component
+leaves; `ui/display.rs` declares its complete static screen hierarchy with it.
+Bindings and retained packet ownership remain explicit mount code. This is one
+screen migration, not completion of the requirement across all screens.
 
 ## Intended authoring model
 
@@ -45,9 +47,11 @@ zero overhead nor complete hexagonal isolation.
 ## Incremental implementation and verification
 
 Start with reusable layout/style primitives and a single existing screen. Keep
-current behavior, action IDs and lifecycle semantics during migration. The new
-authoring layer is pending implementation; this ADR does not name a fabricated
-public API or claim that all screens have migrated.
+current behavior, action IDs and lifecycle semantics during migration. Display
+is the first migrated screen; its requirements and actual authoring API are
+documented in [the Display requirement](../ui/REQ__display-declarative-ui.md) and
+[the authoring guide](../ui/GUIDE__declarative-ui.md). Fixed sizes and section
+anchors are the current scope; responsive layout remains future work.
 
 Review the screen declaration for readable hierarchy and recognizable design.
 Verify shared draw/hit bounds, resize/clip behavior, malformed-state refusal and
