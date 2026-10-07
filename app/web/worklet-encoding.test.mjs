@@ -1,4 +1,4 @@
-// Deferred: node --experimental-vm-modules --test samples/bms-runtime/web/*.test.mjs
+// Deferred: node --experimental-vm-modules --test app/web/*.test.mjs
 // Native Node encoders are the oracle; the actual bootstrap runs in an isolated realm.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";

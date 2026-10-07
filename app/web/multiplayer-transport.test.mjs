@@ -1,4 +1,4 @@
-// Deferred: node --experimental-vm-modules --test samples/bms-runtime/web/multiplayer-transport.test.mjs
+// Deferred: node --experimental-vm-modules --test app/web/multiplayer-transport.test.mjs
 // Real adapter source with controlled platform streams; no sockets or protocol model.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";

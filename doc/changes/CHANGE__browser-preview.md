@@ -63,7 +63,7 @@ WebGPU without an implicit WebGL fallback. Folder selection preserves relative
 paths; flat-file selection can resolve only names actually supplied.
 
 Build and usage commands are documented in the
-[web host README](../../samples/bms-runtime/web/README.md). They use the optional
+[web host README](../../app/web/README.md). They use the optional
 `browser` feature and `wasm-bindgen-cli` 0.2.129. Generated `web/pkg/` bindings are
 local build artifacts. The durable scope and limits are in the
 [browser requirements](../kernel/REQ__bms-browser.md).

@@ -57,7 +57,7 @@ beatkernel/
 ```
 
 The native library dependency direction is `beatkernel-platform → beatkernel`.
-`adapters/beatkernel-bms` depends only on core; `samples/bms-runtime` composes all
+`adapters/beatkernel-bms` depends only on core; `app` composes all
 three at the executable boundary. The kernel has
 no OS dependency, no game-specific assumptions, no unsafe code, and no third-party
 dependencies. The platform uses pinned `windows-sys` and generated `windows`
@@ -91,7 +91,7 @@ Browser output latency hints and optional requested context rates are configurab
 for live and replay, with actual context rate governing audio preparation.
 Retained browser output capacities configure queue, voices, pending commands,
 render storage and command processing budgets; Worker batches follow the queue bound.
-See the [browser host instructions](samples/bms-runtime/web/README.md).
+See the [browser host instructions](app/web/README.md).
 Browser source compilation does not establish playable browser behavior.
 
 The existing `beatkernel-bms-runtime` crate now provides one primary executable
@@ -340,7 +340,7 @@ browser replay launch now reuses the audio host. Explicit saved-record storage
 and selection are source-integrated. Explicit live multiplayer uses the shared
 session and WebTransport in the Play host; the optional HTTP/3 relay is
 source-implemented. Ranked competition remains follow-on work. See the
-[browser build and usage instructions](samples/bms-runtime/web/README.md) and
+[browser build and usage instructions](app/web/README.md) and
 [browser contract](doc/kernel/REQ__bms-browser.md). Generated bindings and actual
 browser/GPU execution remain unverified. Check the reusable graphics library with:
 
@@ -355,7 +355,7 @@ and stale handles are rejected. Image decoding and multilingual font shaping
 remain separate preparation work.
 
 Headless commands build with `--no-default-features`. Project-authored code is
-MIT; preserve the [graphics dependency notices](samples/bms-runtime/THIRD_PARTY_NOTICES.md),
+MIT; preserve the [graphics dependency notices](app/THIRD_PARTY_NOTICES.md),
 including winit's Apache-2.0 license, when distributing binaries.
 
 ## Build and verify
@@ -1034,7 +1034,7 @@ preparation, applies one committed output start to audio and gameplay, and keeps
 peer-reported scores separate from local judgment. Solo and replay remain local.
 The optional `webtransport` feature supplies a paired HTTP/3 relay. Generated
 browser bindings and actual network/audio execution remain unverified; see the
-[browser host](samples/bms-runtime/web/README.md#multiplayer-live-play).
+[browser host](app/web/README.md#multiplayer-live-play).
 
 
 A std-only room ownership component in the existing application crate prepares

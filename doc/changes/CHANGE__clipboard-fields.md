@@ -51,7 +51,7 @@ unexpected exit uses the worker's joining destructor.
 
 arboard is optional under `desktop`, with image support disabled. The core and
 BMS adapter have no clipboard dependency. Newly resolved dependency notices and
-exact upstream provenance are in the [application notices](../../samples/bms-runtime/THIRD_PARTY_NOTICES.md).
+exact upstream provenance are in the [application notices](../../app/THIRD_PARTY_NOTICES.md).
 
 Portable transaction, fake-worker and actual desktop routing fixtures are
 authored for later execution. They cover selected UTF-8 replacement, private

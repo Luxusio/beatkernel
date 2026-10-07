@@ -268,7 +268,7 @@ WASAPI/ASIO/ALSA/CoreAudio device control is not promised in a browser.
 
 Project-authored code stays MIT. wgpu/bytemuck/pollster use their MIT options;
 winit is Apache-2.0 and its license must be retained. See the application's
-[third-party notices](../../samples/bms-runtime/THIRD_PARTY_NOTICES.md).
+[third-party notices](../../app/THIRD_PARTY_NOTICES.md).
 The renderer pins wgpu 27.0.1: source compilation found a Windows DX12 binding
 type mismatch in the published wgpu 30.0.1 dependency graph. The compatible
 published version preserves all selected native backends without a local

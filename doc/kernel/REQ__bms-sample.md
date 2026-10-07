@@ -1,7 +1,7 @@
 # BMS runtime composition sample
 
 The BMS runtime must remain a separate Cargo package/crate from `beatkernel`.
-The existing package is `beatkernel-bms-runtime` at `samples/bms-runtime`, with
+The existing package is `beatkernel-bms-runtime` at `app`, with
 its own `Cargo.toml`, preparation library and executable composition roots.
 `beatkernel` owns reusable game-independent timing, judging, audio and replay;
 `beatkernel-bms` owns the BMS parser/rules adapter; `beatkernel-platform` owns
@@ -9,7 +9,7 @@ native OS input/output. BMS-specific loading, bindings and application loops
 belong to the runtime package. Core and platform must not depend on either BMS
 package. Sharing a workspace does not merge these crate boundaries.
 
-`samples/bms-runtime` is a final composition package depending on adapter, core and
+`app` is a final composition package depending on adapter, core and
 platform. Neither adapter nor core depends on platform. Its default offline binary loads an actual UTF-8 or strict Shift-JIS
 BMS file through the shared bounded chart decoder and bounded RIFF WAV/native FLAC assets, supplies synthetic button input at compiled note times
 through BindingMap/Runtime, schedules BGM and accepted note head sounds, and renders PCM using Mixer and platform encoding. It does not acquire

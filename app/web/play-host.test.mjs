@@ -1,4 +1,4 @@
-// Deferred: node --experimental-vm-modules --test samples/bms-runtime/web/play-host.test.mjs
+// Deferred: node --experimental-vm-modules --test app/web/play-host.test.mjs
 // Actual main.js and numeric helpers; controlled DOM/Worker/AudioHost endpoints.
 // No browser, audio device, generated binding or WASM instance is used.
 import assert from "node:assert/strict";

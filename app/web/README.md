@@ -124,7 +124,7 @@ Rust dependency:
 
 ```sh
 cargo install wasm-bindgen-cli --version 0.2.129 --locked
-wasm-bindgen --target web --out-dir samples/bms-runtime/web/pkg target/wasm32-unknown-unknown/release/beatkernel_bms_runtime.wasm
+wasm-bindgen --target web --out-dir app/web/pkg target/wasm32-unknown-unknown/release/beatkernel_bms_runtime.wasm
 ```
 
 The generated `pkg/` directory is a local build artifact and is not committed.
@@ -132,7 +132,7 @@ The static host loads its generated JavaScript and WASM from that directory.
 Serve the directory over localhost, for example:
 
 ```sh
-python3 -m http.server 8080 --bind 127.0.0.1 --directory samples/bms-runtime/web
+python3 -m http.server 8080 --bind 127.0.0.1 --directory app/web
 ```
 
 Open `http://127.0.0.1:8080/`. Use HTTPS when hosting elsewhere. The host requires
@@ -190,14 +190,14 @@ Rendering is event driven with bounded surface retries. Page teardown terminates
 the Worker and releases presentation callbacks and layout observers; restoring
 the page creates a fresh canvas owner and requires selecting files again.
 
-See the [browser contract](../../../doc/kernel/REQ__bms-browser.md) for the full
+See the [browser contract](../../doc/kernel/REQ__bms-browser.md) for the full
 boundary. Portable fixtures are authored for the shared source/preparation path.
 The deferred JavaScript regressions use Node's built-in test runner and VM module
 mocks of WASM ownership. They cover the actual host helpers and Worker without
 requiring a GPU or generated bindings. Run later from the repository root:
 
 ```sh
-node --experimental-vm-modules --test samples/bms-runtime/web/host_model.test.mjs samples/bms-runtime/web/worker.test.mjs
+node --experimental-vm-modules --test app/web/host_model.test.mjs app/web/worker.test.mjs
 ```
 
 This command has not been executed. It does not replace real DOM/Worker/WebGPU
@@ -301,7 +301,7 @@ so generate each feature's bindings immediately after its own build:
 
 ```sh
 cargo build -p beatkernel-bms-runtime --lib --target wasm32-unknown-unknown --no-default-features --features browser-audio --release --locked
-wasm-bindgen --target web --out-dir samples/bms-runtime/web/audio-pkg target/wasm32-unknown-unknown/release/beatkernel_bms_runtime.wasm
+wasm-bindgen --target web --out-dir app/web/audio-pkg target/wasm32-unknown-unknown/release/beatkernel_bms_runtime.wasm
 ```
 
 `audio-pkg/` is ignored generated output. These commands have not been executed.
@@ -349,7 +349,7 @@ The host regressions are authored for Node's VM runner with mocked WebAudio
 globals. They have not been executed and do not establish actual browser output:
 
 ```sh
-node --experimental-vm-modules --test samples/bms-runtime/web/audio-host.test.mjs
+node --experimental-vm-modules --test app/web/audio-host.test.mjs
 ```
 
 Prepared-resource wiring and the shared nonblocking gameplay owner are authored
@@ -457,7 +457,7 @@ Worker adapter and shared numeric helpers. Execute only when the deferred test
 phase is resumed:
 
 ```sh
-node --experimental-vm-modules --test samples/bms-runtime/web/play-model.test.mjs samples/bms-runtime/web/play-worker.test.mjs samples/bms-runtime/web/play-host.test.mjs samples/bms-runtime/web/audio-host.test.mjs samples/bms-runtime/web/worker.test.mjs
+node --experimental-vm-modules --test app/web/play-model.test.mjs app/web/play-worker.test.mjs app/web/play-host.test.mjs app/web/audio-host.test.mjs app/web/worker.test.mjs
 ```
 
 No JS assertions, browser runtime, generated bindings or audio output have been
@@ -605,7 +605,7 @@ expires only waiters and fences stale disconnects from newer same-key rooms.
 The registry performs no socket/TLS/HTTP/3 work; the optional adapter owns
 actual sessions and applies those closure leases. Current BKMP remains bilateral; local-player extensibility does not
 by itself provide a multi-party network protocol. See the
-[room ownership component](../../../doc/changes/CHANGE__multiplayer-room-ownership.md).
+[room ownership component](../../doc/changes/CHANGE__multiplayer-room-ownership.md).
 
 
 ## Optional HTTP/3 relay
@@ -633,7 +633,7 @@ opposite direction has at most two seconds to drain; abnormal failure closes
 both participants. Ctrl+C closes the sessions and joins outstanding tasks.
 Server limits and configuration are listed by `serve-multiplayer --help`.
 These commands and browser/TLS/network interoperability remain unexecuted.
-See the [adapter contract](../../../doc/changes/CHANGE__webtransport-relay.md).
+See the [adapter contract](../../doc/changes/CHANGE__webtransport-relay.md).
 
 
 A native participant can join the same room using the optional `webtransport`
@@ -643,7 +643,7 @@ setup and opposite start roles. The native client supplies the exact configured
 Origin and verifies the HTTPS URL server identity against its explicit CA.
 These source paths share the existing BKMP session; actual native/browser
 interoperability remains unexecuted. See the
-[native adapter contract](../../../doc/changes/CHANGE__native-webtransport.md).
+[native adapter contract](../../doc/changes/CHANGE__native-webtransport.md).
 
 
 ## Saved-opponent component boundary
@@ -658,7 +658,7 @@ when live play passes its final operation. Admission and comparison failures
 do not become ranked proof or change capture completion. Window/Worker selection
 controls now compose these bindings as described below. Browser execution is
 unverified. See the
-[component contract](../../../doc/changes/CHANGE__browser-saved-opponents.md).
+[component contract](../../doc/changes/CHANGE__browser-saved-opponents.md).
 
 
 ## Live saved-record competition
@@ -688,7 +688,7 @@ closing play owners cannot replace another session's readout.
 JavaScript boundary fixtures are authored but unparsed/unexecuted. Generated
 bindings, actual browser/audio behavior, interoperability and formal acceptance
 remain deferred. See the
-[host contract](../../../doc/changes/CHANGE__browser-saved-opponents-play.md).
+[host contract](../../doc/changes/CHANGE__browser-saved-opponents-play.md).
 
 
 ## Live judge timing

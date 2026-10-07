@@ -1,7 +1,7 @@
 # Browser audio host ownership
 
 The browser audio component gains an actual AudioContext/AudioWorkletNode owner
-in `samples/bms-runtime/web/audio-host.mjs`, using the existing Worklet protocol.
+in `app/web/audio-host.mjs`, using the existing Worklet protocol.
 Opening from a user gesture requests resume before asynchronous initialization.
 The host uses a precompiled audio module, the actual context sample rate, explicit
 bounded configuration and a finite setup deadline with cancellation.

@@ -20,9 +20,9 @@ webtransport = ["dep:wtransport", "dep:url", "tokio/sync", "tokio/macros", "toki
 asio-sdk = ["beatkernel-platform/asio-sdk"]
 
 [dependencies]
-beatkernel = { path = "../../crates/beatkernel" }
-beatkernel-platform = { path = "../../crates/beatkernel-platform" }
-beatkernel-bms = { path = "../../adapters/beatkernel-bms" }
+beatkernel = { path = "../crates/beatkernel" }
+beatkernel-platform = { path = "../crates/beatkernel-platform" }
+beatkernel-bms = { path = "../adapters/beatkernel-bms" }
 encoding_rs = "=0.8.35"
 claxon = "=0.4.3"
 lewton = "=0.10.2"

@@ -1,5 +1,16 @@
 # Domain modules inside the single BMS application
 
+## Application directory
+
+The production player belongs in the root `app/` directory. The user selected
+this on 2026-10-07 because the application is not a sample. Move the former
+`samples/bms-runtime` tree and update Cargo membership, relative dependencies,
+test/build paths and current documentation links together. Keep one application
+crate with its existing package, library and executable identities; directory
+naming does not require extra crates or a public API rename. Core and native
+libraries remain under `crates/`, and the BMS format adapter under `adapters/`.
+Do not keep a legacy sample-path alias or recovery copy.
+
 On 2026-10-06 the user approved organizing the application by domain to improve
 maintenance, independent testing and separation of concerns. Keep the existing
 core/platform/BMS-adapter/app crate boundaries and organize the app internally.

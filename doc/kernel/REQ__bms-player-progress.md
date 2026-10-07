@@ -42,43 +42,43 @@
 | BK-014 | Native IO | 선택형 ASIO backend | S | H | [경로](../../crates/beatkernel-platform/src/windows/asio/stream.rs) — 외부 SDK/C++ bridge source; 실제 MSVC/SDK/driver 실행 미확인 |
 | BK-015 | Native IO | Linux evdev/hidraw/ALSA | S | H | [경로](../../crates/beatkernel-platform/src/linux/alsa.rs) — 네이티브 구현; ALSA null이 물리 presentation 증거는 아님 |
 | BK-016 | Native IO | macOS IOHID/CoreAudio | S | H | [경로](../../crates/beatkernel-platform/src/macos/audio.rs) — 구현 경로/타입 검사와 실제 장치 실행 구분 |
-| BK-017 | Native IO | buffer/channel/rate 설정·live output 제어 | P | Q | [경로](../../samples/bms-runtime/src/gameplay/output/domain/control.rs) — 포트/요청/교체·같은 rate 채널 정책 구현; 전체 native 조합/수명 검증 필요 |
-| BK-018 | Native IO | 독립 키 입력 수집 스레드 | N | Q | [경로](../../samples/bms-runtime/src/native_gameplay_host.rs) — 전용 입력 collector를 찾지 못함; native/game owner 수집과 UI/audio 분리만으로 충족되지 않음 |
+| BK-017 | Native IO | buffer/channel/rate 설정·live output 제어 | P | Q | [경로](../../app/src/gameplay/output/domain/control.rs) — 포트/요청/교체·같은 rate 채널 정책 구현; 전체 native 조합/수명 검증 필요 |
+| BK-018 | Native IO | 독립 키 입력 수집 스레드 | N | Q | [경로](../../app/src/native_gameplay_host.rs) — 전용 입력 collector를 찾지 못함; native/game owner 수집과 UI/audio 분리만으로 충족되지 않음 |
 | BK-019 | Native IO | native rate 변환 phase/history/frontier 연결 | P | Q | [경로](../../crates/beatkernel-platform/src/audio/channel_remix.rs) — source.sample_rate != target.sample_rate를 거부; 순수 converter 존재만으로 연결 완료 아님 |
-| BK-020 | Native IO | WASAPI↔ASIO 등 cross-backend live 교체 | U | Q | [경로](../../samples/bms-runtime/src/gameplay/output/application/replacement.rs) — 교체 상태 머신 존재; 서로 다른 backend 전환 전체 계약은 이번 조사에서 증명하지 못함 |
+| BK-020 | Native IO | WASAPI↔ASIO 등 cross-backend live 교체 | U | Q | [경로](../../app/src/gameplay/output/application/replacement.rs) — 교체 상태 머신 존재; 서로 다른 backend 전환 전체 계약은 이번 조사에서 증명하지 못함 |
 | BK-021 | Native IO | audio master clock·변경된 latency 대응 | P | H | [경로](../../crates/beatkernel/src/time/presentation.rs) — presentation/보정 모델·native adapter 존재; 전 backend/rate/buffer 교체 및 음향 증거 필요 |
 | BK-022 | BMS | 별도 BMS adapter/runtime 경계·parser | S | L | [경로](../../adapters/beatkernel-bms/src/lib.rs) — adapter/core/app crate 경계; parser fixture와 특수 방언 준수 구분 |
 | BK-023 | BMS | BPM/STOP/분기/long-note/mine 처리 | P | Q | [경로](../../adapters/beatkernel-bms/src/lib.rs) — 여러 처리 경로와 fixture 존재; 모든 legacy dialect/판정 호환성 완성은 아님 |
-| BK-024 | BMS | WAV/FLAC/Vorbis/MP3 asset decode | S | L | [경로](../../samples/bms-runtime/src/lib.rs) — DefaultAssetDecoder의 flac_decode/vorbis_decode/mp3_decode 경로 구현; chained Ogg 등 전 포맷 준수는 아님 |
-| BK-025 | BMS | static BGA·opacity/crop/canvas | S | L | [경로](../../samples/bms-runtime/src/image_assets.rs) — BMP/PNG/JPEG·layer/crop/opacity 경로; video/full ARGB는 별도 |
+| BK-024 | BMS | WAV/FLAC/Vorbis/MP3 asset decode | S | L | [경로](../../app/src/lib.rs) — DefaultAssetDecoder의 flac_decode/vorbis_decode/mp3_decode 경로 구현; chained Ogg 등 전 포맷 준수는 아님 |
+| BK-025 | BMS | static BGA·opacity/crop/canvas | S | L | [경로](../../app/src/image_assets.rs) — BMP/PNG/JPEG·layer/crop/opacity 경로; video/full ARGB는 별도 |
 | BK-026 | BMS | BGA video·EXBMP RGB/color-key 완전 지원 | P | Q | [경로](../../doc/kernel/REQ__bms-adapter.md) — 정적 이미지와 일부 EXBMP metadata 존재; video/ARGB RGB/color-key 명시적으로 미완성 |
-| BK-027 | BMS | native 라이브 플레이·finite completion | S | H | [경로](../../samples/bms-runtime/src/native_gameplay_host.rs) — native pump/완료·custody 코드; 실제 입력/오디오 전체 실행 필요 |
-| BK-028 | BMS | gauge·판정 class·EX 계산 기반 | S | L | [경로](../../samples/bms-runtime/src/judgment_policy.rs) — 명시 class mapping·gauge·EX projection 구현; opaque grade로 class 추정하지 않음 |
-| BK-029 | BMS | 완전한 표준 BMS timing windows/empty POOR 호환 | P | Q | [경로](../../samples/bms-runtime/src/bin/linux_bms.rs) — native 도움말은 한 PGREAT window와 POOR misses, full LR2 windows 아님을 명시 |
-| BK-030 | BMS | 실시간 member별 class/EX snapshot·HUD | P | Q | [경로](../../samples/bms-runtime/src/player.rs) — 선택 정책 cold admission과 member별 scalar class/EX snapshot·HUD, 공통 native 호출부 작성됨; 새 fixture·독립 review/QA 검증 진행 중 |
-| BK-031 | 기록/연습 | accepted-operation capture·logical replay | S | L | [경로](../../samples/bms-runtime/src/replay_capture.rs) — 원래 선택/operation과 policy metadata 보존; 실제 장치 지연 역재현은 아님 |
-| BK-032 | 기록/연습 | 기록 catalog/archive·과거 등급/EX 상세 | S | D | [경로](../../samples/bms-runtime/src/record_catalog.rs) — prefix와 stored score 분리 구현; local fixture/관찰 증거, broad Goal 완료 아님 |
-| BK-033 | 기록/연습 | Watch replay·native audio drain | S | H | [경로](../../samples/bms-runtime/src/replay_audio.rs) — 공유 Renderer/Runtime와 출력 playback; backend별 실제 terminal presentation 검증 필요 |
-| BK-034 | 기록/연습 | 특정 구간 시작·논리 seek/restart | S | L | [경로](../../samples/bms-runtime/src/section_start.rs) — 원래 song 범위·입력/키음 policy 유지; 실제 음향 alignment는 별도 |
-| BK-035 | 기록/연습 | gapless loop/scrub·음향 sync 보증 | P | H | [경로](../../samples/bms-runtime/src/practice_loop.rs) — practice/retry/loop 구조 존재; reopen gap·sample-exact seamless/acoustic 검증 미완성 |
-| BK-036 | 로컬/경쟁 | single-player 기본 장치 선택 | S | H | [경로](../../samples/bms-runtime/src/desktop.rs) — 일반 UI에서 device 선택 강제하지 않는 경로; OS별 실제 자동 장치 확인 필요 |
-| BK-037 | 로컬/경쟁 | 2..64 roster·장치 할당·같은 출력 | S | H | [경로](../../samples/bms-runtime/src/local_players.rs) — original member IDs/장치·공유 출력 구조; 실제 여러 장치 실행 필요 |
-| BK-038 | 로컬/경쟁 | 자기 과거 기록과 경쟁 | S | L | [경로](../../samples/bms-runtime/src/saved_opponents.rs) — 실제 기록 prefix 재구성/적합성 검사 |
-| BK-039 | 로컬/경쟁 | 타인 저장 기록과 경쟁 | S | L | [경로](../../samples/bms-runtime/src/saved_opponents.rs) — 동일 기록 engine, own/other 표시는 인증된 identity 아님 |
-| BK-040 | 로컬/경쟁 | 공통 QUIC transport | S | Q | [경로](../../samples/bms-runtime/src/multiplayer_quic.rs) — transport/프로토콜 코드와 fixture; 실제 플랫폼 상호운용 범위 확인 필요 |
-| BK-041 | 로컬/경쟁 | WebTransport transport | S | Q | [경로](../../samples/bms-runtime/src/multiplayer_webtransport.rs) — Rust 서버/client/JS bridge; current scoped browser rendering은 network 검증 아님 |
-| BK-042 | 로컬/경쟁 | room/start/progress/results·local cohort 연결 | P | Q | [경로](../../samples/bms-runtime/src/multiplayer_room_start.rs) — room/통합 경로 다수 존재; 실제 N-member native/browser 전체 실행/정책 조합 검증 필요 |
-| BK-043 | 로컬/경쟁 | custom class/gauge policy의 network 전면 연동 | P | Q | [경로](../../samples/bms-runtime/src/native_policy_admission.rs) — 선택형 local/replay 기반 존재; native 도움말은 nondefault multiplayer 제한 명시 |
-| BK-044 | UI | 단일 app·winit/wgpu 렌더러 | S | D | [경로](../../samples/bms-runtime/src/graphics.rs) — current native Renderer와 browser Worker 실제 관찰; hardware/perf 보증 아님 |
-| BK-045 | UI | screen/fragment 수명·back stack·취소/cleanup | S | L | [경로](../../samples/bms-runtime/src/screen_lifecycle.rs) — Navigator/owner lifecycle 구현과 fixture; 모든 화면 조합 검증은 남음 |
-| BK-046 | UI | typed 선언형/retained/무 Virtual DOM 기본층 | S | D | [경로](../../samples/bms-runtime/src/ui/layout.rs) — Display 첫 migration·mount-only resolve·부분 packet 갱신 |
-| BK-047 | UI | 모든 화면 선언형 이전·동적 layout invalidation | P | Q | [경로](../../samples/bms-runtime/src/ui/display.rs) — 현재 하나의 완전한 static 화면; 다른 화면/resize reflow/parent-child 갱신 필요 |
-| BK-048 | UI | 개별 component transform·animation scheduling | P | Q | [경로](../../samples/bms-runtime/src/ui/motion.rs) — scene 전체 integer translation/pure sampler만 구현; per-node/fraction/easing/scheduler 없음 |
-| BK-049 | UI | font/IME/clipboard/text input | S | L | [경로](../../samples/bms-runtime/src/ui/text_input.rs) — 편집/IME/clipboard 경로·fixture; native 입력 방법별 실제 확인 별도 |
-| BK-050 | Browser | WASM·OffscreenCanvas Worker 렌더링 | S | D | [경로](../../samples/bms-runtime/web/worker.js) — current 실제 WASM/Worker shader default-offset 관찰; nonzero browser motion 아님 |
-| BK-051 | Browser | AudioWorklet·오디오 시계/playback | S | Q | [경로](../../samples/bms-runtime/web/audio-worklet.js) — source/JS fixture; 실제 browser audio/latency/end-to-end 검증 필요 |
-| BK-052 | Browser | keyboard/touch/HID·local players | S | Q | [경로](../../samples/bms-runtime/src/browser_input.rs) — 각 입력 owner와 fixture 존재; 실제 장치/브라우저 제한/표현력 검증 필요 |
-| BK-053 | Browser | Window는 입력 중심·모든 UI/render worker화 | P | Q | [경로](../../samples/bms-runtime/web/main.js) — Canvas worker화 됐지만 Window DOM controls/status와 browser/native feature parity 남음 |
+| BK-027 | BMS | native 라이브 플레이·finite completion | S | H | [경로](../../app/src/native_gameplay_host.rs) — native pump/완료·custody 코드; 실제 입력/오디오 전체 실행 필요 |
+| BK-028 | BMS | gauge·판정 class·EX 계산 기반 | S | L | [경로](../../app/src/judgment_policy.rs) — 명시 class mapping·gauge·EX projection 구현; opaque grade로 class 추정하지 않음 |
+| BK-029 | BMS | 완전한 표준 BMS timing windows/empty POOR 호환 | P | Q | [경로](../../app/src/bin/linux_bms.rs) — native 도움말은 한 PGREAT window와 POOR misses, full LR2 windows 아님을 명시 |
+| BK-030 | BMS | 실시간 member별 class/EX snapshot·HUD | P | Q | [경로](../../app/src/player.rs) — 선택 정책 cold admission과 member별 scalar class/EX snapshot·HUD, 공통 native 호출부 작성됨; 새 fixture·독립 review/QA 검증 진행 중 |
+| BK-031 | 기록/연습 | accepted-operation capture·logical replay | S | L | [경로](../../app/src/replay_capture.rs) — 원래 선택/operation과 policy metadata 보존; 실제 장치 지연 역재현은 아님 |
+| BK-032 | 기록/연습 | 기록 catalog/archive·과거 등급/EX 상세 | S | D | [경로](../../app/src/record_catalog.rs) — prefix와 stored score 분리 구현; local fixture/관찰 증거, broad Goal 완료 아님 |
+| BK-033 | 기록/연습 | Watch replay·native audio drain | S | H | [경로](../../app/src/replay_audio.rs) — 공유 Renderer/Runtime와 출력 playback; backend별 실제 terminal presentation 검증 필요 |
+| BK-034 | 기록/연습 | 특정 구간 시작·논리 seek/restart | S | L | [경로](../../app/src/section_start.rs) — 원래 song 범위·입력/키음 policy 유지; 실제 음향 alignment는 별도 |
+| BK-035 | 기록/연습 | gapless loop/scrub·음향 sync 보증 | P | H | [경로](../../app/src/practice_loop.rs) — practice/retry/loop 구조 존재; reopen gap·sample-exact seamless/acoustic 검증 미완성 |
+| BK-036 | 로컬/경쟁 | single-player 기본 장치 선택 | S | H | [경로](../../app/src/desktop.rs) — 일반 UI에서 device 선택 강제하지 않는 경로; OS별 실제 자동 장치 확인 필요 |
+| BK-037 | 로컬/경쟁 | 2..64 roster·장치 할당·같은 출력 | S | H | [경로](../../app/src/local_players.rs) — original member IDs/장치·공유 출력 구조; 실제 여러 장치 실행 필요 |
+| BK-038 | 로컬/경쟁 | 자기 과거 기록과 경쟁 | S | L | [경로](../../app/src/saved_opponents.rs) — 실제 기록 prefix 재구성/적합성 검사 |
+| BK-039 | 로컬/경쟁 | 타인 저장 기록과 경쟁 | S | L | [경로](../../app/src/saved_opponents.rs) — 동일 기록 engine, own/other 표시는 인증된 identity 아님 |
+| BK-040 | 로컬/경쟁 | 공통 QUIC transport | S | Q | [경로](../../app/src/multiplayer_quic.rs) — transport/프로토콜 코드와 fixture; 실제 플랫폼 상호운용 범위 확인 필요 |
+| BK-041 | 로컬/경쟁 | WebTransport transport | S | Q | [경로](../../app/src/multiplayer_webtransport.rs) — Rust 서버/client/JS bridge; current scoped browser rendering은 network 검증 아님 |
+| BK-042 | 로컬/경쟁 | room/start/progress/results·local cohort 연결 | P | Q | [경로](../../app/src/multiplayer_room_start.rs) — room/통합 경로 다수 존재; 실제 N-member native/browser 전체 실행/정책 조합 검증 필요 |
+| BK-043 | 로컬/경쟁 | custom class/gauge policy의 network 전면 연동 | P | Q | [경로](../../app/src/native_policy_admission.rs) — 선택형 local/replay 기반 존재; native 도움말은 nondefault multiplayer 제한 명시 |
+| BK-044 | UI | 단일 app·winit/wgpu 렌더러 | S | D | [경로](../../app/src/graphics.rs) — current native Renderer와 browser Worker 실제 관찰; hardware/perf 보증 아님 |
+| BK-045 | UI | screen/fragment 수명·back stack·취소/cleanup | S | L | [경로](../../app/src/screen_lifecycle.rs) — Navigator/owner lifecycle 구현과 fixture; 모든 화면 조합 검증은 남음 |
+| BK-046 | UI | typed 선언형/retained/무 Virtual DOM 기본층 | S | D | [경로](../../app/src/ui/layout.rs) — Display 첫 migration·mount-only resolve·부분 packet 갱신 |
+| BK-047 | UI | 모든 화면 선언형 이전·동적 layout invalidation | P | Q | [경로](../../app/src/ui/display.rs) — 현재 하나의 완전한 static 화면; 다른 화면/resize reflow/parent-child 갱신 필요 |
+| BK-048 | UI | 개별 component transform·animation scheduling | P | Q | [경로](../../app/src/ui/motion.rs) — scene 전체 integer translation/pure sampler만 구현; per-node/fraction/easing/scheduler 없음 |
+| BK-049 | UI | font/IME/clipboard/text input | S | L | [경로](../../app/src/ui/text_input.rs) — 편집/IME/clipboard 경로·fixture; native 입력 방법별 실제 확인 별도 |
+| BK-050 | Browser | WASM·OffscreenCanvas Worker 렌더링 | S | D | [경로](../../app/web/worker.js) — current 실제 WASM/Worker shader default-offset 관찰; nonzero browser motion 아님 |
+| BK-051 | Browser | AudioWorklet·오디오 시계/playback | S | Q | [경로](../../app/web/audio-worklet.js) — source/JS fixture; 실제 browser audio/latency/end-to-end 검증 필요 |
+| BK-052 | Browser | keyboard/touch/HID·local players | S | Q | [경로](../../app/src/browser_input.rs) — 각 입력 owner와 fixture 존재; 실제 장치/브라우저 제한/표현력 검증 필요 |
+| BK-053 | Browser | Window는 입력 중심·모든 UI/render worker화 | P | Q | [경로](../../app/web/main.js) — Canvas worker화 됐지만 Window DOM controls/status와 browser/native feature parity 남음 |
 | BK-054 | 구조/출시 | DDD·UI/business/native IO 포트/DI 전면 분리 | P | Q | [경로](../../doc/kernel/ADR__application-domain-modules.md) — gameplay/output부터 이전; 모든 context/layer 경계의 완전한 분리 아님 |
 | BK-055 | 구조/출시 | zero-cost hot path·세계 최고 성능 입증 | P | H | [경로](../../doc/kernel/REQ__runtime-benchmark.md) — 설계 목표/계측 도구; 비용/alloc/lock audit과 비교 workload·실측 결과 필요 |
 | BK-056 | 구조/출시 | SQLite급 계층/결정론/fuzz/stress 안정성 | P | Q | [경로](../../doc/kernel/REQ__plan-acceptance-evidence.md) — 2,724 current Rust tests는 유한 corpus, 지속 fuzz/chaos/경계 완전성 보증 아님 |

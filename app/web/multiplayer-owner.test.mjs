@@ -1,4 +1,4 @@
-// Deferred: node --experimental-vm-modules --test samples/bms-runtime/web/multiplayer-owner.test.mjs
+// Deferred: node --experimental-vm-modules --test app/web/multiplayer-owner.test.mjs
 // Actual owner module; scripted WASM/transport edges exercise ownership, not a BKMP implementation.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";

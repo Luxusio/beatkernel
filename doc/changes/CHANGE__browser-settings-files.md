@@ -26,7 +26,7 @@ Window JSON processing is introduced.
 
 ## Source evidence and deferred verification
 
-The actual codec is `samples/bms-runtime/web/settings-profile.mjs`. The actual
+The actual codec is `app/web/settings-profile.mjs`. The actual
 page and Worker handlers in `main.js` and `worker.js` use its bounded DTO and
 File helpers; `index.html` supplies explicit save/load controls. Independent
 deferred fixtures add four codec groups, three actual Host groups and two

@@ -1,4 +1,4 @@
-// Deferred: node --experimental-vm-modules --test samples/bms-runtime/web/play-worker.test.mjs
+// Deferred: node --experimental-vm-modules --test app/web/play-worker.test.mjs
 // Actual Worker and numeric helpers; only generated WASM owners and browser APIs are mocked.
 import assert from "node:assert/strict";
 import { File as NodeFile } from "node:buffer";

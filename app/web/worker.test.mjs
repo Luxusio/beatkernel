@@ -1,4 +1,4 @@
-// Deferred: node --experimental-vm-modules --test samples/bms-runtime/web/*.test.mjs
+// Deferred: node --experimental-vm-modules --test app/web/*.test.mjs
 // Loads the actual Worker and helper sources; no generated WASM or browser.
 import assert from "node:assert/strict";
 import { File as NodeFile } from "node:buffer";

@@ -1,4 +1,4 @@
-// Deferred: node --experimental-vm-modules --test samples/bms-runtime/web/room-owner.test.mjs
+// Deferred: node --experimental-vm-modules --test app/web/room-owner.test.mjs
 // Actual owner/transport modules; scripted WASM and channel edges are not a BKMR model.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";

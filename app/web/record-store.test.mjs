@@ -1,4 +1,4 @@
-// Deferred: node --experimental-vm-modules --test samples/bms-runtime/web/record-store.test.mjs
+// Deferred: node --experimental-vm-modules --test app/web/record-store.test.mjs
 // Actual store source; manually delivered IDB events, with no persistence algorithm mock.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";

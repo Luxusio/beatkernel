@@ -40,7 +40,7 @@ guarantee or measured acoustic accuracy. The full player Goal remains active.
 The durable contracts are [Runtime](../kernel/REQ__runtime.md) and
 [browser ownership](../kernel/REQ__bms-browser.md). Build commands for separate
 graphics/audio generated artifacts are in the
-[browser README](../../samples/bms-runtime/web/README.md).
+[browser README](../../app/web/README.md).
 
 ## Verification status
 

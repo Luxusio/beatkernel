@@ -1,6 +1,6 @@
 # Authoring retained screens with static layout
 
-`samples/bms-runtime/src/ui/layout.rs` supplies typed `Node` declarations:
+`app/src/ui/layout.rs` supplies typed `Node` declarations:
 `leaf` identifies a component, `row` and `column` arrange children with a gap,
 and `layer` positions sections with `.at(x, y)`. Each node declares its size.
 The component payload is a screen-owned Rust type; layout has no knowledge of

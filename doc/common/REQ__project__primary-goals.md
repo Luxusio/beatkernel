@@ -34,7 +34,7 @@ BMS-adapter dependency boundaries. One primary application entry point should
 expose the modes; existing diagnostic/sample binaries may remain development
 tools. Multiple execution threads do not require multiple crates.
 
-The existing application source is `samples/bms-runtime`. Moving it to
+The existing application source is `app`. Moving it to
 `apps/bms-runtime` is a proposed layout, not an implemented migration.
 Native input acquisition and judging currently share the game owner; the desktop
 main thread and audio output workers are independent of it.

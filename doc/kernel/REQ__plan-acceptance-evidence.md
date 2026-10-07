@@ -23,7 +23,7 @@ current revision, even where historical earlier-revision results exist.
 | Required end state | Current source evidence | Remaining proof |
 | --- | --- | --- |
 | Core has no direct native OS dependency | `crates/beatkernel/Cargo.toml` has empty dependencies; `src/lib.rs` exports logical modules | Current dependency/build inspection is static evidence; target builds and architecture review still need final verification |
-| Platform and game adapter meet only in final app | Platform depends on core; `adapters/beatkernel-bms/Cargo.toml` depends only on core; `samples/bms-runtime/Cargo.toml` composes them | Current manifests establish declared direction; final adapter-only suite and composition execution pending |
+| Platform and game adapter meet only in final app | Platform depends on core; `adapters/beatkernel-bms/Cargo.toml` depends only on core; `app/Cargo.toml` composes them | Current manifests establish declared direction; final adapter-only suite and composition execution pending |
 | Windows plus another platform native input/audio operates | Windows Raw Input/WASAPI/optional ASIO, Linux evdev/hidraw/ALSA, macOS IOHID/CoreAudio source and native BMS hosts | Actual current Windows and Linux/macOS acquisition/output; SDK-enabled ASIO C++/MSVC build and device execution pending |
 | Standard keys converge to canonical HID identity | `keyboard/` maps; `tests/key_mapping.rs` enumerates convergence and documented aliases | Current fixtures and physical native comparisons unexecuted |
 | Separate device binding for identical controls | Core `input/binding.rs`; `tests/binding.rs`, `tests/runtime.rs` | Execute exact/any-device and two-source end-to-end assertions |

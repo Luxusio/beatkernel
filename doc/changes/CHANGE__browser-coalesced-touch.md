@@ -25,10 +25,10 @@ ownership, page transition and session cleanup remain the lifecycle authority.
 
 ## Source evidence and deferred verification
 
-`samples/bms-runtime/web/main.js::touch` implements the common solo/local
+`app/web/main.js::touch` implements the common solo/local
 acquisition path. The implementation producer and independent test author
 both returned actual terminal STOPPED finals before coordinator checks.
-`samples/bms-runtime/web/play-host.test.mjs` adds four independent groups;
+`app/web/play-host.test.mjs` adds four independent groups;
 the existing 104 groups remain, for 108 total source groups. The new groups
 cover original sample forwarding and fallback, malformed whole-list refusal,
 256/1024 capacity boundaries and held-contact paging/cancellation/replacement.

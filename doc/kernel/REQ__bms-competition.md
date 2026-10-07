@@ -205,7 +205,7 @@ timed driver with explicit StartPolicy and audio preroll, alongside admission-on
 compatibility. Full native app lobby/output activation, multi-host progress and
 final acknowledgement still require integration and runtime acceptance.
 
-The BMS application stays one crate (`samples/bms-runtime`) with internal
+The BMS application stays one crate (`app`) with internal
 modules and one primary executable. It composes the core, platform and BMS
 adapter crates. Existing diagnostic binaries remain available. Native play,
 offline rendering, replay inspection/output, saved-record competition and

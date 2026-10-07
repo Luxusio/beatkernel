@@ -1,4 +1,4 @@
-// Deferred: node --experimental-vm-modules --test samples/bms-runtime/web/audio-host.test.mjs
+// Deferred: node --experimental-vm-modules --test app/web/audio-host.test.mjs
 // The real host module runs against controlled WebAudio endpoints, never an audio device.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";

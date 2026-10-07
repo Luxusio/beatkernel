@@ -1,4 +1,4 @@
-// Deferred: node --experimental-vm-modules --test samples/bms-runtime/web/*.test.mjs
+// Deferred: node --experimental-vm-modules --test app/web/*.test.mjs
 // Executes the actual processor against binding spies, without audio or WASM execution.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
