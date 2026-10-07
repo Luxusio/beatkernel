@@ -1868,8 +1868,13 @@ Worker-admitted Gamepad sources against actual owned eligible descriptors
 before output activation. New connections wait for a fresh session setup;
 a participating disconnection stops the current session. Preserve native
 sample timestamps and the common acquisition sequence, without Main-thread
-control interpretation or additional render/poll timers. Poll as part of the
-existing available live input pump. Pending input remains bounded at 1024
+control interpretation or additional render/poll timers. Poll eligible live
+Gamepads on the existing 8 ms cadence immediately before input dispatch.
+Keyboard, HID, touch, pointer and ACK-triggered input pumps send acquired
+samples without polling Gamepads. Require the current owner, Playing phase,
+no pending input tick and no active input pump; cancellation or revision change
+during a native read ends acquisition before later fields or slots are read.
+Explicit discovery/preflight polls remain. Pending input remains bounded at 1024
 samples. Stop detaches owners before joining Worker/audio release; failed
 cleanup requires reload. Constructor-time acquisition failure retains actual
 cleanupError evidence if listener removal also fails, so Window can apply the
