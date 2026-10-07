@@ -27,7 +27,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const out = resolve(process.env.RENDER_INTEGRATION_OUT ?? resolve(root, "target/wf/browser-render-worker/integration-development-1"));
 const port = Number(process.env.RENDER_INTEGRATION_PORT ?? 8101);
 const selectedCase = process.env.RENDER_INTEGRATION_CASE ?? null;
-const required = ["ready-preview", "surface-zero-resize", "genuine-completed", "history", "replay", "live-stalled-input-audio", "local-touch", "cumulative-after-ack", "terminal-capture-cleanup", "stale-owner", "room", "combined-results-room", "malformed-atomic"];
+const required = ["ready-preview", "surface-zero-resize", "genuine-completed", "history", "replay", "live-stalled-input-audio", "local-touch", "cumulative-after-ack", "terminal-capture-cleanup", "stale-owner", "room", "combined-results-room", "malformed-atomic", "cold-sequence-atomic"];
 const evidence = { kind: "development-browser-integration", selectedCase, required, checks: [], scenarios: [], ceiling: [], source: {}, workers: [] };
 let browser, server, backend, tls, browserOptions;
 const browsers = new Set();
@@ -249,9 +249,22 @@ function workerObservation() {
       if (binding.needs_redraw()) throw Error("Atomic mirror did not submit GPU geometry");
       return Array.from(new Uint8Array(await (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer()));
     };
+    const imageHash = async bytes => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes)))).map(byte => byte.toString(16).padStart(2, "0")).join("");
     try {
       for (const packet of original.slice(0, candidateIndex + 1)) binding.import_visual_packet(Uint8Array.from(packet.bytes), 16777216, 1024);
       const before = await image(), candidate = original[candidateIndex], corrupted = Uint8Array.from(candidate.bytes), h = new DataView(corrupted.buffer);
+      const registration = original.find(packet => packet.packet.kind === 1);
+      if (!registration || registration.packet.sequence !== "0") throw Error("No genuine sequence-zero cold registration for native mirror");
+      const currentGeneration = BigInt(registration.packet.generation), rejectedGeneration = currentGeneration + 2n, replacementGeneration = currentGeneration + 1n;
+      if (rejectedGeneration > 18446744073709551615n) throw Error("Observed generation cannot support bounded next-generation fixture");
+      const coldBeforeHash = await imageHash(before), coldRefusals = [];
+      for (const sequence of [1n, 18446744073709551615n]) {
+        const invalidCold = Uint8Array.from(registration.bytes), header = new DataView(invalidCold.buffer);
+        header.setBigUint64(8, rejectedGeneration, true); header.setBigUint64(24, sequence, true);
+        let refusal = null;
+        try { binding.import_visual_packet(invalidCold, 16777216, 1024); } catch (error) { refusal = String(error); }
+        coldRefusals.push({ sequence: String(sequence), generation: String(rejectedGeneration), refusal, afterHash: await imageHash(await image()) });
+      }
       const member = candidate.frame.members[0], progress = member.pages.at(-1);
       h.setBigUint64(24, BigInt(candidate.packet.sequence) + 100n, true);
       h.setBigUint64(member.missOffset, 0n, true);
@@ -262,7 +275,23 @@ function workerObservation() {
       const after = await image();
       const next = original[candidateIndex + 1];
       const applied = binding.import_visual_packet(Uint8Array.from(next.bytes), 16777216, 1024);
-      return { before, after, refusal, candidate: candidate.packet, progress, next: next.packet, applied: String(applied), changedEarlierMisses: true, malformedFinalPackedSlot: lastSlot };
+      const nextStateHash = await imageHash(await image());
+      const replacement = Uint8Array.from(registration.bytes), replacementHeader = new DataView(replacement.buffer);
+      replacementHeader.setBigUint64(8, replacementGeneration, true);
+      const replacementApplied = binding.import_visual_packet(replacement, 16777216, 1024);
+      let replacementNextApplied = null;
+      // Replay genuine committed packets under the valid replacement identity.
+      // No time, judgment, capture or completion evidence is constructed here.
+      for (const observed of original.slice(0, candidateIndex + 2)) {
+        if (observed.packet.kind !== 2) continue;
+        const bytes = Uint8Array.from(observed.bytes); new DataView(bytes.buffer).setBigUint64(8, replacementGeneration, true);
+        replacementNextApplied = binding.import_visual_packet(bytes, 16777216, 1024);
+      }
+      const coldSequence = { registration: registration.packet, coldBeforeHash, refusals: coldRefusals,
+        originalNextApplied: String(applied), originalNextSequence: next.packet.sequence, nextStateHash,
+        replacementGeneration: String(replacementGeneration), replacementApplied: String(replacementApplied),
+        replacementNextApplied: String(replacementNextApplied), replacementStateHash: await imageHash(await image()) };
+      return { before, after, refusal, candidate: candidate.packet, progress, next: next.packet, applied: String(applied), changedEarlierMisses: true, malformedFinalPackedSlot: lastSlot, coldSequence };
     } finally { binding.free(); }
   };
   if (typeof WebTransport === "function") {
@@ -528,9 +557,19 @@ async function main() {
       assert(atomic.refusal, "Malformed final progress slot was accepted");
       assert.deepEqual(atomic.after, atomic.before, "Malformed final page changed earlier score or retained visible state");
       assert.equal(atomic.applied, atomic.next.sequence, "Rejected higher sequence changed the applied sequence floor");
+      assert.equal(atomic.coldSequence.refusals.length, 2);
+      for (const rejected of atomic.coldSequence.refusals) {
+        assert(rejected.refusal, `Direct generated WASM accepted cold sequence ${rejected.sequence}`);
+        assert.equal(rejected.afterHash, atomic.coldSequence.coldBeforeHash, "Invalid cold sequence changed actual native GPU presentation");
+      }
+      assert.equal(atomic.coldSequence.originalNextApplied, atomic.coldSequence.originalNextSequence, "Invalid cold sequence changed the original state sequence floor");
+      assert.equal(atomic.coldSequence.replacementApplied, "0", "Valid replacement cold registration was fenced by the refused higher generation");
+      assert.equal(atomic.coldSequence.replacementNextApplied, atomic.coldSequence.originalNextSequence, "Valid replacement did not accept original committed frame sequence");
+      assert.equal(atomic.coldSequence.replacementStateHash, atomic.coldSequence.nextStateHash, "Valid replacement lost the genuine committed visual model");
+      check("cold-sequence-atomic", true, { ...atomic.coldSequence, scope: "Direct generated BrowserView imports captured original cold/frame packets; invalid cold1/MAX preserves GPU image and generation/sequence admission" });
       const { before, after, ...details } = atomic;
       check("malformed-atomic", true, { ...details, identicalGPUImages: true, scope: "Actual BrowserView mirror imports original actual-main packets; no gameplay authority constructed" });
-    } catch (error) { check("malformed-atomic", false, `Actual retained-state comparison incomplete: ${error}`); }
+    } catch (error) { check("malformed-atomic", false, `Actual retained-state comparison incomplete: ${error}`); check("cold-sequence-atomic", false, `Direct generated-WASM sequence admission comparison incomplete: ${error}`); }
     const injection = await renderer.evaluate(() => __renderPortProbe.malformed()); await stopped(page);
     await page.waitForFunction(() => __renderIntegration.messages.some(x => x.direction === "audio-context-closed"));
     const failed = await snapshot(page, "terminal-capture-cleanup");

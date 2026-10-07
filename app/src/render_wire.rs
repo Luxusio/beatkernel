@@ -91,6 +91,13 @@ impl WirePacket {
         }
     }
 }
+fn valid_sequence(kind: u16, sequence: u64) -> bool {
+    match kind {
+        REGISTRATION | HISTORY | RESULTS | ROOM => sequence == 0,
+        FRAME | PREVIEW => sequence > 0,
+        _ => false,
+    }
+}
 fn kind_limit(kind: u16, limits: WireLimits) -> Result<usize, String> {
     limits.image.validate()?;
     let bound = match kind {
@@ -130,6 +137,7 @@ pub fn preflight_header(
     };
     if h.generation == 0
         || h.content == 0
+        || !valid_sequence(h.kind, h.sequence)
         || packet_len > kind_limit(h.kind, limits)?
         || usize::try_from(h.payload_len)
             .ok()
@@ -1150,7 +1158,11 @@ fn write_body(w: &mut Writer, p: &WirePacket) -> Result<(), String> {
     }
 }
 fn validate_packet(h: WireHeader, p: &WirePacket, limits: WireLimits) -> Result<(), String> {
-    if h.kind != p.kind() || h.generation == 0 || h.content == 0 {
+    if h.kind != p.kind()
+        || h.generation == 0
+        || h.content == 0
+        || !valid_sequence(h.kind, h.sequence)
+    {
         return Err("visual packet/header context mismatch".into());
     }
     // Charge each transported diagnostic, including repeated frozen-page errors.

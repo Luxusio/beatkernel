@@ -30,7 +30,11 @@ fn header(kind: u16) -> WireHeader {
         kind,
         generation: u64::MAX,
         content: u64::MAX - 1,
-        sequence: 1,
+        sequence: if matches!(kind, FRAME | PREVIEW) {
+            1
+        } else {
+            0
+        },
         payload_len: 0,
     }
 }
@@ -808,6 +812,59 @@ fn invalid_utf8_final_fields_and_optional_tags_refuse_before_publication() {
         .unwrap()
         .player = PlayerId(0);
     assert!(encode_packet(header(ROOM), &WirePacket::Room(room), limits()).is_err());
+}
+
+#[test]
+fn every_kind_sequence_boundary_is_checked_by_encoder_decoder_and_preflight() {
+    for (valid_header, packet) in packets() {
+        let valid_bytes = encode_packet(valid_header, &packet, limits()).unwrap();
+        for sequence in [0, 1, u64::MAX] {
+            let expected = if matches!(valid_header.kind, FRAME | PREVIEW) {
+                sequence > 0
+            } else {
+                sequence == 0
+            };
+            let mut h = valid_header;
+            h.sequence = sequence;
+            let mut candidate = packet.clone();
+            if let WirePacket::Frame(frame) = &mut candidate {
+                frame.sequence = sequence;
+            }
+            let encoded = encode_packet(h, &candidate, limits());
+            assert_eq!(
+                encoded.is_ok(),
+                expected,
+                "encoder kind {} sequence {sequence}",
+                h.kind
+            );
+            // Keep the complete genuine payload intact while changing only its envelope.
+            let mut bytes = valid_bytes.clone();
+            bytes[24..32].copy_from_slice(&sequence.to_le_bytes());
+            let preflight = preflight_header(&bytes[..HEADER_BYTES], bytes.len(), limits());
+            assert_eq!(
+                preflight.is_ok(),
+                expected,
+                "preflight kind {} sequence {sequence}",
+                h.kind
+            );
+            let decoded = decode_packet(&bytes, limits());
+            assert_eq!(
+                decoded.is_ok(),
+                expected,
+                "decoder kind {} sequence {sequence}",
+                h.kind
+            );
+            if expected {
+                let (actual, received) = decoded.unwrap();
+                assert_eq!(actual.sequence, sequence);
+                assert_eq!(actual.kind, h.kind);
+                assert_eq!(actual.generation, h.generation);
+                assert_eq!(actual.content, h.content);
+                assert_eq!(encode_packet(actual, &received, limits()).unwrap(), bytes);
+                assert_eq!(encoded.unwrap(), bytes);
+            }
+        }
+    }
 }
 
 #[test]

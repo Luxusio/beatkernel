@@ -84,6 +84,12 @@ copy hidden members' recent events or allocate full-roster view/reservation
 vectors each frame. Keep complete stable roster identities, original page
 numbering and comparison reservations through borrowed fixed-size views.
 
+Both Rust/WASM admission and the JavaScript channel enforce the same envelope
+sequence rule: registration, history, completed Results and room snapshots use
+zero; live frames and preview updates use a positive u64 sequence. Reject an
+invalid sequence before payload copying or publishing presentation identity.
+Refusal must preserve the prior presentation and generation/sequence floors.
+
 A confirmed terminal runtime graphics error retains the existing failed-stop
 behavior: gameplay exports genuine recorded prefixes and authoritative results,
 then Window joins input/audio/room cleanup before gameplay ownership terminates.

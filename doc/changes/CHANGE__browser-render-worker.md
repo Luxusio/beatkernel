@@ -158,3 +158,12 @@ from the ordinary certificate test flags; the runner enables the development
 mode only when requested. Production TLS acceptance is not claimed. See the
 [Chromium configuration definition](https://chromium.googlesource.com/chromium/src/net/+/refs/heads/main/quic/quic_context.h)
 and the [official local WebTransport sample](https://github.com/GoogleChrome/samples/blob/gh-pages/webtransport/webtransport_server.py).
+
+The first full code review found one sequence-admission mismatch between Rust
+and JavaScript. Rust preflight and encoding now share the zero-cold/positive-state
+rule. All ten native wire fixtures pass, including every kind at zero, one and
+u64 maximum. Rebuilt actual WASM rejects bad cold sequences at generation four
+without changing GPU images; the original next sequence still applies, and valid
+generation three then accepts the original committed frames with matching final
+GPU output. This targeted selected run leaves unrelated modes unrun and exits
+one intentionally. Fresh independent reviews and required QA are still pending.
