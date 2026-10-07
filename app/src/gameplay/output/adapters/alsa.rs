@@ -111,17 +111,7 @@ impl OutputReplacementBackend for AlsaReplacementBackend {
         if presentation.epoch() != output.epoch {
             return Err(AlsaReplacementError::EpochMismatch);
         }
-        match output.stream.snapshot().status {
-            AlsaStatus::Ready => return Ok(()),
-            AlsaStatus::Running => {}
-            status => return Err(AlsaReplacementError::Status(status)),
-        }
-        let Some(snapshot) = output.stream.timing_snapshot() else {
-            return Ok(());
-        };
-        if let Some(pair) = alsa_presentation_pair_with_basis(snapshot, output.stream.frame_basis())
-            .map_err(AlsaReplacementError::Linux)?
-        {
+        if let Some(pair) = self.original_pair(output)? {
             presentation
                 .observe_clock_pair_in_epoch(output.epoch, pair)
                 .map_err(AlsaReplacementError::Discipline)?;
@@ -165,5 +155,35 @@ impl crate::gameplay::output::ports::OutputChannelRemixBackend for AlsaReplaceme
                 let (error, mixer) = failure.into_parts();
                 OutputOpenFailure::recovered(AlsaReplacementError::Linux(error), mixer)
             })
+    }
+}
+
+impl AlsaReplacementBackend {
+    fn original_pair(
+        &mut self,
+        output: &mut AlsaReplacementOutput,
+    ) -> Result<Option<beatkernel::time::ClockPair>, AlsaReplacementError> {
+        match output.stream.snapshot().status {
+            AlsaStatus::Ready => return Ok(None),
+            AlsaStatus::Running => {}
+            status => return Err(AlsaReplacementError::Status(status)),
+        }
+        let Some(snapshot) = output.stream.timing_snapshot() else {
+            return Ok(None);
+        };
+        alsa_presentation_pair_with_basis(snapshot, output.stream.frame_basis())
+            .map_err(AlsaReplacementError::Linux)
+    }
+}
+
+impl crate::gameplay::output::ports::OriginalNativeOutputBackend for AlsaReplacementBackend {
+    fn observe_native(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<crate::native_audio_presentation::NativeAudioSnapshot>, Self::Error> {
+        Ok(self.original_pair(output)?.map(|pair| crate::native_audio_presentation::NativeAudioSnapshot {
+            epoch: output.epoch, basis: output.stream.frame_basis(),
+            evidence: beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::SuppliedPair(pair),
+        }))
     }
 }

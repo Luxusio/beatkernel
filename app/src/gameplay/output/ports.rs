@@ -48,6 +48,14 @@ pub trait OutputReplacementBackend {
     }
 }
 
+/// Original native evidence without invoking the optional legacy estimator.
+pub trait OriginalNativeOutputBackend: OutputReplacementBackend {
+    fn observe_native(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<crate::native_audio_presentation::NativeAudioSnapshot>, Self::Error>;
+}
+
 /// Explicit same-rate channel conversion; no default can silently ignore a matrix.
 pub trait OutputChannelRemixBackend: OutputReplacementBackend {
     fn open_remixed(

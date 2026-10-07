@@ -154,32 +154,7 @@ impl OutputReplacementBackend for CoreAudioReplacementBackend {
         if presentation.epoch() != output.epoch {
             return Err(CoreAudioReplacementError::EpochMismatch);
         }
-        let snapshot = output.stream.snapshot();
-        if snapshot.configuration_changed {
-            return Err(CoreAudioReplacementError::Native(
-                CoreAudioError::ConfigurationChanged,
-            ));
-        }
-        if snapshot.callback_failures != 0 {
-            return Err(CoreAudioReplacementError::CallbackFailure(
-                snapshot.callback_failures,
-            ));
-        }
-        if !output.stream.is_started() {
-            return Ok(());
-        }
-        let Some(observation) = snapshot.presentation else {
-            return Ok(());
-        };
-        // CoreAudio observations already carry absolute original-grid frames.
-        if let Some(pair) = coreaudio_presentation_pair(
-            observation,
-            output.stream.configuration(),
-            self.host_domain,
-            &self.clock,
-        )
-        .map_err(CoreAudioReplacementError::Presentation)?
-        {
+        if let Some(pair) = self.original_pair(output)? {
             presentation
                 .observe_clock_pair_in_epoch(output.epoch, pair)
                 .map_err(CoreAudioReplacementError::Discipline)?;
@@ -227,3 +202,47 @@ impl crate::gameplay::output::ports::OutputChannelRemixBackend for CoreAudioRepl
 #[cfg(test)]
 #[path = "coreaudio_fixtures.rs"]
 mod fixtures;
+
+impl CoreAudioReplacementBackend {
+    fn original_pair(
+        &mut self,
+        output: &mut CoreAudioReplacementOutput,
+    ) -> Result<Option<beatkernel::time::ClockPair>, CoreAudioReplacementError> {
+        let snapshot = output.stream.snapshot();
+        if snapshot.configuration_changed {
+            return Err(CoreAudioReplacementError::Native(
+                CoreAudioError::ConfigurationChanged,
+            ));
+        }
+        if snapshot.callback_failures != 0 {
+            return Err(CoreAudioReplacementError::CallbackFailure(
+                snapshot.callback_failures,
+            ));
+        }
+        if !output.stream.is_started() {
+            return Ok(None);
+        }
+        let Some(observation) = snapshot.presentation else {
+            return Ok(None);
+        };
+        coreaudio_presentation_pair(
+            observation,
+            output.stream.configuration(),
+            self.host_domain,
+            &self.clock,
+        )
+        .map_err(CoreAudioReplacementError::Presentation)
+    }
+}
+
+impl crate::gameplay::output::ports::OriginalNativeOutputBackend for CoreAudioReplacementBackend {
+    fn observe_native(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<crate::native_audio_presentation::NativeAudioSnapshot>, Self::Error> {
+        Ok(self.original_pair(output)?.map(|pair| crate::native_audio_presentation::NativeAudioSnapshot {
+            epoch: output.epoch, basis: output.stream.frame_basis(),
+            evidence: beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::SuppliedPair(pair),
+        }))
+    }
+}

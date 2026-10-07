@@ -8,7 +8,9 @@ use crate::{
         ReplacementState, ReadyOutput, publish_ready_output,
     },
 };
-use crate::gameplay::output::ports::OutputReplacementBackend;
+use crate::gameplay::output::ports::{OutputReplacementBackend, OriginalNativeOutputBackend};
+use crate::native_audio_presentation::NativeAudioPresentation;
+use beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence;
 use beatkernel::{
     audio::{Mixer, RenderReport, OutputFrameBasis},
     time::{ClockPair, ClockPoint},
@@ -197,6 +199,151 @@ impl<B: OutputReplacementBackend> GameplayOutputOwner<B> {
         cancellation.map(|_| ()).and(retirement)
     }
 }
+impl<B: OriginalNativeOutputBackend> GameplayOutputOwner<B> {
+    fn audio_identity(
+        &self,
+        presentation: &NativeAudioPresentation,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        let Some(output) = self.current.as_ref() else {
+            return Ok(());
+        };
+        let epoch = presentation.authority().epoch();
+        if epoch.id != self.controller.backend().epoch(output)
+            || self.controller.backend().basis(output) != self.basis
+            || presentation
+                .basis()
+                .is_some_and(|basis| basis != self.basis)
+        {
+            return Err(ReplacementFailure {
+                cause: ReplacementCause::Policy("published audio epoch or basis differs"),
+                cleanup: None,
+                recovery: None,
+            });
+        }
+        let origin = self
+            .basis
+            .point_at_stream_frame(0)
+            .map_err(|error| ReplacementFailure {
+                cause: ReplacementCause::Timing(Box::new(error)),
+                cleanup: None,
+                recovery: None,
+            })?;
+        if origin != epoch.stream_origin {
+            return Err(ReplacementFailure {
+                cause: ReplacementCause::Policy("published raw audio origin differs"),
+                cleanup: None,
+                recovery: None,
+            });
+        }
+        Ok(())
+    }
+    /// Acquire both IO results before changing application history or the report cache.
+    pub fn observe_native(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        self.audio_identity(presentation)?;
+        let Some(output) = self.current.as_mut() else {
+            return Ok(());
+        };
+        let snapshot = self
+            .controller
+            .backend_mut()
+            .observe_native(output)
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
+        let reported = self
+            .controller
+            .backend()
+            .render_report(output)
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
+        let mut original_report = None;
+        if let Some(snapshot) = snapshot {
+            if snapshot.epoch != self.controller.backend().epoch(output)
+                || snapshot.basis != self.basis
+            {
+                return Err(ReplacementFailure {
+                    cause: ReplacementCause::Timing(
+                        "native snapshot differs from published epoch or basis".into(),
+                    ),
+                    cleanup: None,
+                    recovery: None,
+                });
+            }
+            original_report = match snapshot.evidence {
+                OriginalNativePresentationEvidence::Asio { observation, .. } => {
+                    Some(observation.render)
+                }
+                OriginalNativePresentationEvidence::Wasapi { snapshot, .. } => snapshot.render,
+                OriginalNativePresentationEvidence::SuppliedPair(_) => None,
+            };
+            presentation
+                .admit(snapshot)
+                .map_err(|error| ReplacementFailure {
+                    cause: ReplacementCause::Timing(error),
+                    cleanup: None,
+                    recovery: None,
+                })?;
+        }
+        if let Some(report) = original_report.or(reported) {
+            self.report = Some(report);
+        }
+        Ok(())
+    }
+    /// Preserve full original interval evidence; held outputs reuse only committed pause data.
+    pub fn audio_pause_observation(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        now: ClockPoint,
+    ) -> Result<LivePauseObservation, ReplacementFailure<B::Error>> {
+        self.audio_identity(presentation)?;
+        if self.current.is_none() {
+            return self.pause_evidence.ok_or(ReplacementFailure {
+                cause: ReplacementCause::Policy("waiting output has no committed pause evidence"),
+                cleanup: None,
+                recovery: None,
+            });
+        }
+        let record = presentation.latest_record().ok_or(ReplacementFailure {
+            cause: ReplacementCause::Policy("audio output has no accepted pause evidence"),
+            cleanup: None,
+            recovery: None,
+        })?;
+        let evidence = match record.evidence() {
+            OriginalNativePresentationEvidence::Asio { observation, .. } => {
+                crate::gameplay::output::adapters::observation::asio_pause_observation(
+                    Some(*observation),
+                    now,
+                )
+            }
+            _ => LivePauseObservation::Point(record.pair()),
+        };
+        self.pause_evidence = Some(evidence);
+        Ok(evidence)
+    }
+    pub fn observe_audio_end(
+        &mut self,
+        end: &mut NativeEnd,
+        presentation: &NativeAudioPresentation,
+    ) -> crate::native_gameplay::NativeGameplayResult<Option<EndBoundary>>
+    where
+        B::Error: std::error::Error + 'static,
+    {
+        self.audio_identity(presentation)?;
+        if self.current.is_none() {
+            return Ok(None);
+        }
+        let Some(record) = presentation.latest_record() else {
+            return Ok(None);
+        };
+        match record.evidence() {
+            OriginalNativePresentationEvidence::Asio { observation, .. } => {
+                Ok(end.observe_asio(*observation)?)
+            }
+            _ => Ok(end.observe(self.report, record.pair())?),
+        }
+    }
+}
+
 impl<B: OutputReplacementBackend> GameplayOutputOwner<B>
 where
     B::Error: std::error::Error + 'static,
@@ -291,3 +438,7 @@ where
 #[cfg(test)]
 #[path = "owner_fixtures.rs"]
 pub(crate) mod fixtures;
+
+#[cfg(test)]
+#[path = "native_observation_fixtures.rs"]
+mod native_observation_fixtures;

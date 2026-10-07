@@ -114,6 +114,11 @@ impl NativeAudioPresentation {
         self.validator.latest_record()
     }
 
+    /// Exact frame grid pinned by the first successfully admitted native progress.
+    pub const fn basis(&self) -> Option<OutputFrameBasis> {
+        self.basis
+    }
+
     fn validate_identity(&self) -> NativeGameplayResult<()> {
         let epoch = self.authority.epoch();
         if self.validator.epoch() != epoch.id

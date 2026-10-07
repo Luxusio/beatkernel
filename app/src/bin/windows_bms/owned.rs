@@ -238,6 +238,30 @@ impl OutputReplacementBackend for WindowsReplacementBackend {
         }
     }
 }
+impl beatkernel_bms_runtime::gameplay::output::ports::OriginalNativeOutputBackend
+    for WindowsReplacementBackend
+{
+    fn observe_native(
+        &mut self,
+        output: &mut OwnedOutput,
+    ) -> std::result::Result<
+        Option<beatkernel_bms_runtime::native_audio_presentation::NativeAudioSnapshot>,
+        Self::Error,
+    > {
+        let snapshot = output
+            .native
+            .native_observation(output.epoch)
+            .map_err(NativeOutputError)?;
+        // This is raw native IO telemetry, not accepted ASIO pause/end evidence.
+        // Both reads complete before the shared application owner admits a pair.
+        let report = output
+            .native
+            .native_render_report()
+            .map_err(NativeOutputError)?;
+        output.report = report;
+        Ok(snapshot)
+    }
+}
 impl OutputChannelRemixBackend for WindowsReplacementBackend {
     fn open_remixed(
         &mut self,

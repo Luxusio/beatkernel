@@ -159,3 +159,19 @@ validate immediately before committing and make only infallible ownership swaps
 after commit; release the held output last. The existing clear-and-wait APIs
 remain available for explicitly selected consumers. Pure staging fixtures do
 not establish native replacement or resume acceptance.
+
+Ordinary pause/resume on the same output epoch and frame basis retains continuous
+raw physical-output/HOST correlation: physical counters progress while playback
+frames are frozen. Do not reset correlation merely because playback resumes.
+Explicit correlation restart or new-epoch publication occurs while output is
+acknowledged paused and held, after paused inputs have drained through the
+existing keyboard reconciliation path. Do not request unpause and then attempt
+to prime while post-resume inputs are already pending.
+
+The native pause transition must retain its original physical output boundary
+alongside the separate conservative HOST acquisition cutoff. Rebase that native
+boundary into the logical audio domain for control operations; a HOST midpoint
+cannot replace it. Control-operation commitment must not claim a physical input
+occurrence. Servicing paused presentation/prefixes must not invent a Runtime
+operation. These lifecycle integration rules are selected requirements; the
+production consumer implementation remains pending.

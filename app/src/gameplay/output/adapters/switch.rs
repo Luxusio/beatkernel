@@ -233,3 +233,21 @@ where
 #[cfg(test)]
 #[path = "switch_fixtures.rs"]
 mod fixtures;
+
+impl<A, B> crate::gameplay::output::ports::OriginalNativeOutputBackend for OutputBackendSwitch<A, B>
+where
+    A: crate::gameplay::output::ports::OriginalNativeOutputBackend,
+    B: crate::gameplay::output::ports::OriginalNativeOutputBackend<Presentation = A::Presentation>,
+{
+    fn observe_native(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<crate::native_audio_presentation::NativeAudioSnapshot>, Self::Error> {
+        match output {
+            Switched::First(output) => self.first.observe_native(output).map_err(Switched::First),
+            Switched::Second(output) => {
+                self.second.observe_native(output).map_err(Switched::Second)
+            }
+        }
+    }
+}

@@ -248,6 +248,69 @@ impl StartupEvidence {
     }
 }
 impl Output {
+    /// Original native metadata for audio authority; no correction observer or accepted cache.
+    pub(super) fn native_observation(
+        &mut self,
+        epoch: u64,
+    ) -> Result<Option<beatkernel_bms_runtime::native_audio_presentation::NativeAudioSnapshot>>
+    {
+        use beatkernel_bms_runtime::native_audio_presentation::NativeAudioSnapshot;
+        use beatkernel_platform::audio::presentation::{
+            observation_with_basis, PresentationError,
+            validation::OriginalNativePresentationEvidence,
+        };
+        match self {
+            Self::Wasapi(stream) => {
+                let snapshot = stream.snapshot();
+                match snapshot.status {
+                    beatkernel_platform::audio::AudioStreamStatus::Ready => return Ok(None),
+                    beatkernel_platform::audio::AudioStreamStatus::Running => {}
+                    status => {
+                        return Err(
+                            format!("native output observation terminated: {status:?}").into()
+                        );
+                    }
+                }
+                let basis = stream.frame_basis();
+                if matches!(
+                    observation_with_basis(snapshot, basis),
+                    Err(PresentationError::Unavailable | PresentationError::BeforePresentation)
+                ) {
+                    return Ok(None);
+                }
+                Ok(Some(NativeAudioSnapshot {
+                    epoch,
+                    basis,
+                    evidence: OriginalNativePresentationEvidence::Wasapi {
+                        snapshot,
+                        basis: Some(basis),
+                    },
+                }))
+            }
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio(output) => {
+                let Some(observation) = output.observation_with_readiness(true)? else {
+                    return Ok(None);
+                };
+                if output
+                    .buffer_frames
+                    .is_none_or(|frames| observation.render.frames != frames as usize)
+                    || observation.sample_rate != output.sample_rate
+                {
+                    return Err("ASIO native render configuration changed".into());
+                }
+                let basis = output.stream.frame_basis();
+                Ok(Some(NativeAudioSnapshot {
+                    epoch,
+                    basis,
+                    evidence: OriginalNativePresentationEvidence::Asio {
+                        observation,
+                        basis: Some(basis),
+                    },
+                }))
+            }
+        }
+    }
     /// Preserve native counters or the complete ASIO interval and render evidence.
     pub(super) fn startup_observation(
         &mut self,
@@ -364,6 +427,20 @@ impl Output {
                 s.stream.snapshot()
             ),
         }
+    }
+    /// The original-observation path can wait on a valid unstarted ASIO stream.
+    pub(super) fn native_render_report(&mut self) -> Result<Option<RenderReport>> {
+        #[cfg(feature = "asio-sdk")]
+        if let Self::Asio(output) = self {
+            let snapshot = output.stream.snapshot()?;
+            if snapshot.phase == AsioStreamPhase::Ready
+                && snapshot.native.faults.0 == 0
+                && snapshot.native.render_error == 0
+            {
+                return Ok(None);
+            }
+        }
+        self.render_report()
     }
     pub(super) fn render_report(&mut self) -> Result<Option<RenderReport>> {
         match self {
@@ -714,7 +791,22 @@ impl AsioOutput {
         Ok(snapshot)
     }
     fn observation(&mut self) -> Result<Option<AsioPresentationObservation>> {
+        self.observation_with_readiness(false)
+    }
+    fn observation_with_readiness(
+        &mut self,
+        allow_ready: bool,
+    ) -> Result<Option<AsioPresentationObservation>> {
         self.pump_driver_messages()?;
+        if allow_ready {
+            let snapshot = self.stream.snapshot()?;
+            if snapshot.phase == AsioStreamPhase::Ready
+                && snapshot.native.faults.0 == 0
+                && snapshot.native.render_error == 0
+            {
+                return Ok(None);
+            }
+        }
         self.checked()?;
         let now = self.clock.sample()?.normalized;
         let refresh = match self.anchor.as_ref() {

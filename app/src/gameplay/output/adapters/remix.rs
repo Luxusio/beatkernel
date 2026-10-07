@@ -83,3 +83,15 @@ impl<B: OutputChannelRemixBackend> OutputReplacementBackend for RemixedOutputBac
 #[cfg(test)]
 #[path = "remix_fixtures.rs"]
 mod remix_fixtures;
+
+impl<B> crate::gameplay::output::ports::OriginalNativeOutputBackend for RemixedOutputBackend<B>
+where
+    B: OutputChannelRemixBackend + crate::gameplay::output::ports::OriginalNativeOutputBackend,
+{
+    fn observe_native(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<crate::native_audio_presentation::NativeAudioSnapshot>, Self::Error> {
+        self.inner.observe_native(output)
+    }
+}

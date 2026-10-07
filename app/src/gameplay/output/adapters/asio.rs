@@ -196,57 +196,8 @@ impl OutputReplacementBackend for AsioReplacementBackend {
             output.stream.frame_basis(),
         )
         .map_err(AsioReplacementError::Observation)?;
-        let snapshot = output
-            .stream
-            .snapshot()
-            .map_err(AsioReplacementError::Native)?;
-        if snapshot.native.faults.0 != 0 || snapshot.native.render_error != 0 {
-            return Err(AsioReplacementError::Native(
-                AsioStreamError::ReopenRequired(snapshot.native),
-            ));
-        }
-        match snapshot.phase {
-            AsioStreamPhase::Ready => return Ok(()),
-            AsioStreamPhase::Running => {}
-            phase => return Err(AsioReplacementError::Status(phase)),
-        }
-        let now = self
-            .clock
-            .sample()
-            .map_err(AsioReplacementError::Host)?
-            .normalized;
-        if self.anchor.refresh_due(now).map_err(|error| {
-            AsioReplacementError::Presentation(AsioPresentationError::Clock(error))
-        })? {
-            let receipt = self
-                .clock
-                .sample_multimedia()
-                .map_err(AsioReplacementError::Host)?;
-            self.anchor = self
-                .anchor
-                .refreshed(
-                    receipt.milliseconds,
-                    receipt.before.normalized,
-                    receipt.after.normalized,
-                )
-                .map_err(|error| {
-                    AsioReplacementError::Presentation(AsioPresentationError::Clock(error))
-                })?;
-        }
-        let output_origin = output.stream.frame_basis().origin();
-        let observation = match output.stream.presentation_observation(
-            &self.anchor,
-            &self.clock,
-            self.latency_error_ns,
-            output_origin,
-        ) {
-            Ok(observation) => observation,
-            Err(AsioPresentationError::Unavailable)
-                if !snapshot.telemetry_available || snapshot.buffer_observation.is_none() =>
-            {
-                return Ok(());
-            }
-            Err(error) => return Err(AsioReplacementError::Presentation(error)),
+        let Some(observation) = self.original_observation(output)? else {
+            return Ok(());
         };
         if observe_asio_with_basis(
             presentation,
@@ -317,3 +268,77 @@ impl crate::gameplay::output::ports::OutputChannelRemixBackend for AsioReplaceme
 #[cfg(test)]
 #[path = "asio_fixtures.rs"]
 mod fixtures;
+
+impl AsioReplacementBackend {
+    fn original_observation(
+        &mut self,
+        output: &mut AsioReplacementOutput,
+    ) -> Result<Option<AsioPresentationObservation>, AsioReplacementError> {
+        let snapshot = output
+            .stream
+            .snapshot()
+            .map_err(AsioReplacementError::Native)?;
+        if snapshot.native.faults.0 != 0 || snapshot.native.render_error != 0 {
+            return Err(AsioReplacementError::Native(
+                AsioStreamError::ReopenRequired(snapshot.native),
+            ));
+        }
+        match snapshot.phase {
+            AsioStreamPhase::Ready => return Ok(None),
+            AsioStreamPhase::Running => {}
+            phase => return Err(AsioReplacementError::Status(phase)),
+        }
+        let now = self
+            .clock
+            .sample()
+            .map_err(AsioReplacementError::Host)?
+            .normalized;
+        if self.anchor.refresh_due(now).map_err(|error| {
+            AsioReplacementError::Presentation(AsioPresentationError::Clock(error))
+        })? {
+            let receipt = self
+                .clock
+                .sample_multimedia()
+                .map_err(AsioReplacementError::Host)?;
+            self.anchor = self
+                .anchor
+                .refreshed(
+                    receipt.milliseconds,
+                    receipt.before.normalized,
+                    receipt.after.normalized,
+                )
+                .map_err(|error| {
+                    AsioReplacementError::Presentation(AsioPresentationError::Clock(error))
+                })?;
+        }
+        let output_origin = output.stream.frame_basis().origin();
+        let observation = match output.stream.presentation_observation(
+            &self.anchor,
+            &self.clock,
+            self.latency_error_ns,
+            output_origin,
+        ) {
+            Ok(observation) => observation,
+            Err(AsioPresentationError::Unavailable)
+                if !snapshot.telemetry_available || snapshot.buffer_observation.is_none() =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(AsioReplacementError::Presentation(error)),
+        };
+        Ok(Some(observation))
+    }
+}
+impl crate::gameplay::output::ports::OriginalNativeOutputBackend for AsioReplacementBackend {
+    fn observe_native(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<crate::native_audio_presentation::NativeAudioSnapshot>, Self::Error> {
+        Ok(self.original_observation(output)?.map(|observation| crate::native_audio_presentation::NativeAudioSnapshot {
+            epoch: output.epoch, basis: output.stream.frame_basis(),
+            evidence: beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::Asio {
+                observation, basis: Some(output.stream.frame_basis()),
+            },
+        }))
+    }
+}

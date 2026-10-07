@@ -60,3 +60,32 @@ identity, source mixing, high-frequency quantization, duplicate/stale/token
 atomicity, ASIO rates/overlap/output extents and bracket preservation, coarse
 HOST deferral, epoch replacement and unchanged legacy estimator behavior.
 Existing fixture assertions remain intact; Rust tests are not hardware/SDK QA.
+
+## Actual output observation port
+
+An explicitly implemented static backend port supplies an optional original
+native snapshot through the existing output owner. It does not call the legacy
+estimator. Remix and backend switching forward the exact snapshot and typed
+errors. Keep native readiness, unavailable evidence, terminal stream faults,
+configuration changes and original host-anchor refresh rules intact.
+
+Before acquisition or admission, the output owner checks its published creation
+epoch and exact frame basis against the presentation owner. Acquire the snapshot
+and render evidence before committing application state. Refuse a mismatched
+snapshot, backend read error or invalid presentation without updating accepted
+presentation or the owner's cached report. Native IO itself is not rolled back.
+Unavailable evidence grants no presentation progress. A missing render report
+does not erase the last cached report.
+An already pinned presentation basis must match before IO or lifecycle access.
+Prefer the original ASIO snapshot's render evidence, or the WASAPI snapshot's
+available render, after the backend read succeeds. Do not populate a legacy
+accepted-observation cache to make the audio-authoritative path obtain a report.
+
+Pause and end read the combined owner's accepted original record. ASIO uses its
+full bracket/render evidence, while point sources use the accepted pair. Recheck
+published identity before this access; held replacement may retain previously
+committed pause evidence but cannot sample a retired source. Static fake-IO tests
+must prove the legacy estimator entry point is unused and cover both switching
+branches, remix forwarding, read failures and interval preservation. This port
+does not by itself select audio authority in the production gameplay pumps or
+implement held-output publication.

@@ -57,6 +57,18 @@ committed watermark on publication. Seven new priming tests pass within the
 alone grants gameplay advancement. These foundations are not yet connected to
 the native production pumps or held-output replacement state machine.
 
+Original observation acquisition now runs through an opt-in static output port
+implemented by the native adapters and selected Windows output owner. Remix and
+switching preserve exact snapshots and errors; the output owner admits evidence
+only after snapshot/render acquisition succeeds and reads accepted ASIO brackets
+for pause/end. Seven new pure port tests pass within the 53-test output regression
+filter (two existing tests ignored). Windows without optional ASIO and macOS
+all-target Rust checks pass using C/archive stubs: these are source/type checks,
+not native SDK builds or hardware execution. Optional ASIO SDK compilation
+remains unverified. Linux all-target and browser WASM checks also pass. This port
+is implemented but not yet selected by the native
+gameplay pumps, and held-output audio publication still needs integration.
+
 ## Known ceiling
 
 Native pumps still need to select the new authority and join actual output

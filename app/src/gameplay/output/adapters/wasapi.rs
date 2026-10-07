@@ -145,3 +145,36 @@ impl crate::gameplay::output::ports::OutputChannelRemixBackend for WasapiReplace
 #[cfg(test)]
 #[path = "wasapi_fixtures.rs"]
 mod fixtures;
+
+impl crate::gameplay::output::ports::OriginalNativeOutputBackend for WasapiReplacementBackend {
+    fn observe_native(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<crate::native_audio_presentation::NativeAudioSnapshot>, Self::Error> {
+        use beatkernel_platform::audio::{
+            AudioStreamStatus,
+            presentation::{PresentationError, observation_with_basis},
+        };
+        let snapshot = output.stream.snapshot();
+        match snapshot.status {
+            AudioStreamStatus::Ready => return Ok(None),
+            AudioStreamStatus::Running => {}
+            status => {
+                return Err(WasapiReplacementError::Observation(
+                    ReplacementObservationError::Status(status),
+                ));
+            }
+        }
+        let basis = output.stream.frame_basis();
+        if matches!(
+            observation_with_basis(snapshot, basis),
+            Err(PresentationError::Unavailable | PresentationError::BeforePresentation)
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(crate::native_audio_presentation::NativeAudioSnapshot {
+            epoch: output.epoch, basis,
+            evidence: beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::Wasapi { snapshot, basis: Some(basis) },
+        }))
+    }
+}
