@@ -8,10 +8,65 @@ import {
   parseTimingMilliseconds, timingFromMilliseconds, validateTiming,
   ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, startFromSeconds, validateStart, validateEnd, sectionFromSeconds,
   audioOutputFromFields, audioLimitsFromFields, replayOutputFromMetadata,
+  presentationAvailability, audioClockExpired,
 } from "./play-model.mjs";
 
 const U64_MAX = 18446744073709551615n;
 const I64_MAX = 9223372036854775807n;
+
+test("unknown-quality association regression is explicit and does not replace accepted history", () => {
+  const previous = Object.freeze({ outputNs: 100n, hostNs: 200n });
+  for (const pair of [{ outputNs: 99n, hostNs: 201n }, { outputNs: 101n, hostNs: 199n }]) {
+    const result = presentationAvailability(previous, pair);
+    assert.deepEqual(result, { pair: null, reason: "regressing-estimate", progressed: false });
+    assert.deepEqual(previous, { outputNs: 100n, hostNs: 200n });
+  }
+  assert.deepEqual(presentationAvailability(previous, null), { pair: null, reason: null, progressed: false });
+  const recovered = { outputNs: 101n, hostNs: 201n };
+  assert.deepEqual(presentationAvailability(previous, recovered), { pair: recovered, reason: null, progressed: true });
+});
+
+test("repeated output never refreshes accepted association progress or grants timer extrapolation", () => {
+  const previous = { outputNs: 100n, hostNs: 200n };
+  for (const pair of [previous, { outputNs: 100n, hostNs: 201n }]) {
+    assert.equal(presentationAvailability(previous, pair).progressed, false);
+  }
+  const first = { outputNs: 0n, hostNs: 200n };
+  assert.deepEqual(presentationAvailability(null, first), { pair: first, reason: null, progressed: true });
+});
+
+test("clock watchdog measures progressing association age and honors future arm and selected latency", () => {
+  const second = 1000000000n;
+  const armed = 20n * second;
+  assert.equal(audioClockExpired(0n, armed, null), false, "future network arm consumes no startup time");
+  assert.equal(audioClockExpired(armed + 10n * second - 1n, armed, null), false);
+  assert.equal(audioClockExpired(armed + 10n * second, armed, null), true);
+  assert.equal(audioClockExpired(armed + 10n * second + 1n, armed, null), true);
+  assert.equal(audioClockExpired(armed + 70n * second - 1n, armed, null, 60), false);
+  assert.equal(audioClockExpired(armed + 70n * second, armed, null, 60), true);
+  assert.equal(audioClockExpired(armed + 70n * second + 1n, armed, null, 60), true);
+  assert.equal(audioClockExpired(armed + 10499999999n, armed, null, 0.5), false);
+  assert.equal(audioClockExpired(armed + 10500000000n, armed, null, 0.5), true);
+  assert.equal(audioClockExpired(armed + 10500000001n, armed, null, 0.5), true);
+  for (const category of [undefined, "interactive", "balanced", "playback"]) {
+    assert.equal(audioClockExpired(armed + 10n * second + 1n, armed, null, category), true);
+  }
+  const progressing = armed + second;
+  assert.equal(audioClockExpired(progressing + second - 1n, armed, progressing, 60), false);
+  assert.equal(audioClockExpired(progressing + second, armed, progressing, 60), true);
+  assert.equal(audioClockExpired(progressing + second + 1n, armed, progressing, 60), true,
+    "requested output latency extends startup only, never a stopped running clock");
+});
+
+test("clock watchdog refuses malformed origins and numeric latency without changing policy", () => {
+  for (const latency of [-1, 60.000001, NaN, Infinity, null, "custom", 1n]) {
+    assert.throws(() => audioClockExpired(0n, 0n, null, latency));
+  }
+  for (const value of [-1n, I64_MAX + 1n, 0, "0", null]) {
+    assert.throws(() => audioClockExpired(value, 0n, null));
+    assert.throws(() => audioClockExpired(0n, value, null));
+  }
+});
 
 test("raw context frames project on the actual armed grid with conservative lookahead and exact long-duration flooring", () => {
   for (const [context, start, rate, expected] of [

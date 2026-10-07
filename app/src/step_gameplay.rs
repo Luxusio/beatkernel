@@ -1730,6 +1730,22 @@ impl StepGameplay {
         }
     }
 
+    /// Retain validated chronology without evaluating readiness or the drain barrier.
+    pub fn admit_output_evidence(
+        &mut self,
+        rendered: Option<RenderReport>,
+        presented: Option<ClockPoint>,
+    ) -> Result<(), StepGameplayError> {
+        let normalized = self.validate_completion_evidence(rendered, presented)?;
+        if let Some(report) = rendered.filter(|report| report.frames != 0) {
+            self.last_render = Some(report);
+        }
+        if let Some(point) = normalized {
+            self.last_presented = Some(point.timestamp);
+        }
+        Ok(())
+    }
+
     /// Binding preflight before a report is allowed to advance BGM admission.
     /// Successful validation does not adopt the observation or change readiness.
     pub(crate) fn validate_completion_evidence(
@@ -2871,6 +2887,16 @@ impl StepLocalGameplay {
             }
         }
         Ok(completed)
+    }
+
+    pub fn admit_output_evidence(
+        &mut self,
+        rendered: Option<RenderReport>,
+        presented: Option<ClockPoint>,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control
+            .admit_output_evidence(rendered, presented)
+            .map_err(Into::into)
     }
 
     /// Validate genuine output evidence before a browser adapter publishes BGM

@@ -857,7 +857,7 @@ test("touch paging waits for the acquired input prefix while retaining held rele
   const { h, session, worker, surface } = await pagedTouchSession();
   const pointer = (type, fields = {}) => surface.emit(type, { pointerType: "touch", pointerId: -2,
     timeStamp: 1300, offsetX: 120.25, offsetY: 180.5, pressure: 0.375, ...fields });
-  const ack = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+  const ack = (request, pendingInputs = 0) => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs, playId: session.id, tickId: request.tickId,
     songNs: 1n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
   assert.equal(h.get("local-page").disabled, false);
   const layoutReads = h.layoutReads;
@@ -869,7 +869,7 @@ test("touch paging waits for the acquired input prefix while retaining held rele
   const captures = h.captures.length;
   pointer("pointerdown", { pointerId: 91, timeStamp: 1300.25 });
   assert.equal(h.captures.length, captures, "a new contact is suppressed during the page transition");
-  await h.receive({ kind: "play-step-done", playId: session.id - 1, tickId: down.tickId,
+  await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id - 1, tickId: down.tickId,
     songNs: 1n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
   assert.equal(worker.messages("play-page").length, 0);
   await ack(down);
@@ -877,7 +877,14 @@ test("touch paging waits for the acquired input prefix while retaining held rele
   assert.ok(moved.tickId > down.tickId); assert.equal(move.phase, 1); assert.equal(move.contact, original.contact);
   assert.equal(move.hostNs, 1300125000n); assert.equal(move.x, 200.5);
   assert.equal(worker.messages("play-page").length, 0, "the first ACK alone does not cover the already queued Move");
-  await ack(moved);
+  await ack(moved, 1);
+  assert.equal(worker.messages("play-page").length, 0, "admission ACK cannot remap a touch still held for audio correspondence");
+  await h.advance(8);
+  const joinedTick = worker.last("play-step");
+  if (joinedTick.tickId > moved.tickId) await ack(joinedTick, 1);
+  const joined = worker.last("play-render");
+  await h.receive({ kind: "play-render-done", playId: session.id, renderId: joined.renderId,
+    completed: false, commandsPending: false, observedTick: worker.last("play-step").tickId, pendingInputs: 0 });
   const page = worker.last("play-page"); assert.ok(page); assert.equal(page.page, 1);
   const posts = worker.posts.map(post => post.value);
   assert.ok(posts.indexOf(page) > posts.indexOf(moved));
@@ -915,7 +922,7 @@ test("page choice errors preserve held input but cancellation and invalid visibi
       offsetX: 100, offsetY: 200, pressure: 0.5 });
     const down = worker.last("play-step");
     h.get("local-page").value = "1"; h.get("local-page").emit("change"); await flush();
-    const ack = () => h.receive({ kind: "play-step-done", playId: session.id, tickId: down.tickId,
+    const ack = () => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: down.tickId,
       songNs: 1n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
     if (fault === "cancel-before-ack") {
       h.click("stop"); await flush();
@@ -934,7 +941,7 @@ test("page choice errors preserve held input but cancellation and invalid visibi
           offsetX: 800, offsetY: 700, pressure: 0 });
         const release = worker.last("play-step");
         assert.equal(release.events.find(event => event.kind === "touch").contact, down.events.find(event => event.kind === "touch").contact);
-        await h.receive({ kind: "play-step-done", playId: session.id, tickId: release.tickId,
+        await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: release.tickId,
           songNs: 2n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
         h.click("stop"); await flush(); await h.receive(localFinal(session.start));
       } else if (fault === "wrong-visibility") {
@@ -1360,22 +1367,22 @@ test("natural completion requires the latest issued tick and settled direct comm
   const stopGate = deferred(), h = await harness({ stopGate }); await h.preview();
   const session = await h.launch(), worker = h.workers[0];
   h.setNow(1300); await h.advance(8);
-  const done = (request, commandsPending = false) => h.receive({ kind: "play-step-done", playId: session.id,
+  const done = (request, commandsPending = false) => h.receive({ kind: "play-step-done", pendingInputs: 0, playId: session.id,
     tickId: request.tickId, commandsPending, songNs: 0n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
   const firstTick = worker.last("play-step"), firstRender = worker.last("play-render");
-  await h.receive({ kind: "play-render-done", playId: session.id, renderId: firstRender.renderId,
+  await h.receive({ kind: "play-render-done", pendingInputs: 0, playId: session.id, renderId: firstRender.renderId,
     completed: true, commandsPending: false, observedTick: 0 });
   await done(firstTick);
   assert.equal(worker.messages("play-stop").length, 0, "earlier completion cannot cover even a newer empty watermark");
   await h.advance(8);
   const pendingTick = worker.last("play-step"), pendingRender = worker.last("play-render");
-  await h.receive({ kind: "play-render-done", playId: session.id, renderId: pendingRender.renderId,
+  await h.receive({ kind: "play-render-done", pendingInputs: 0, playId: session.id, renderId: pendingRender.renderId,
     completed: false, commandsPending: true, observedTick: pendingTick.tickId });
   await done(pendingTick, true);
   assert.equal(worker.messages("play-stop").length, 0);
   await h.advance(8);
   const beforeInput = worker.last("play-step"), beforeInputRender = worker.last("play-render");
-  await h.receive({ kind: "play-render-done", playId: session.id, renderId: beforeInputRender.renderId,
+  await h.receive({ kind: "play-render-done", pendingInputs: 0, playId: session.id, renderId: beforeInputRender.renderId,
     completed: true, commandsPending: false, observedTick: beforeInput.tickId });
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1324 });
   await done(beforeInput);
@@ -1385,7 +1392,7 @@ test("natural completion requires the latest issued tick and settled direct comm
   assert.equal(worker.messages("play-stop").length, 0, "issuing input invalidates the retained completion");
   await h.advance(8);
   const finalTick = worker.last("play-step"), finalRender = worker.last("play-render");
-  await h.receive({ kind: "play-render-done", playId: session.id, renderId: finalRender.renderId,
+  await h.receive({ kind: "play-render-done", pendingInputs: 0, playId: session.id, renderId: finalRender.renderId,
     completed: true, commandsPending: false, observedTick: finalTick.tickId });
   assert.equal(worker.messages("play-stop").length, 0, "the correlated input receipt still has to join");
   await done(finalTick);
@@ -1402,7 +1409,7 @@ test("natural completion requires the latest issued tick and settled direct comm
     const replay = await harness(); await replay.preview(); chooseRecording(replay, [selectedRecording().file]);
     const playing = await replay.launch(0, "replay"); await replay.advance(8);
     const endpoint = replay.workers[0];
-    await replay.receive({ kind: "play-render-done", playId: playing.id, renderId: endpoint.last("play-render").renderId,
+    await replay.receive({ kind: "play-render-done", commandsPending: false, pendingInputs: 0, playId: playing.id, renderId: endpoint.last("play-render").renderId,
       completed: true, ...malformed });
     assert.equal(endpoint.last("play-stop").completed, false);
     assert.equal(endpoint.messages("play-step").length, 0);
@@ -1432,19 +1439,19 @@ test("live and replay send only original raw presentation observations while one
     if (mode === "live") {
       const firstTick = worker.last("play-step");
       h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1756 });
-      await h.receive({ kind: "play-step-done", playId: session.id, tickId: firstTick.tickId,
+      await h.receive({ kind: "play-step-done", pendingInputs: 0, playId: session.id, tickId: firstTick.tickId,
         commandsPending: false, songNs: 0n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
       const input = worker.last("play-step");
       assert.equal(input.events[0].hostNs, 1756000000n); assert.equal(input.events[0].sequence, 1n);
       assert.equal(worker.last("play-render"), first, "input keeps its own provenance while the output read waits");
     } else assert.equal(worker.messages("play-step").length, 0);
-    await h.receive({ kind: "play-render-done", playId: session.id, renderId: first.renderId,
+    await h.receive({ kind: "play-render-done", observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id, renderId: first.renderId,
       completed: false, commandsPending: mode === "live" });
     await h.advance(8);
     const second = worker.last("play-render");
     assert.equal(second.renderId, 2); assert.deepEqual(second.timestamp, { contextTime: 1.75, performanceTime: 1750 });
     assert.equal(Object.hasOwn(second, "presentedNs"), false); assert.equal(Object.hasOwn(second, "report"), false);
-    await h.receive({ kind: "play-render-done", playId: session.id, renderId: second.renderId, completed: false });
+    await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id, renderId: second.renderId, completed: false });
     h.faults.outputFailure = Object.assign(new Error("temporarily unavailable"), { code: "unavailable" });
     await h.advance(8);
     const absent = worker.last("play-render");
@@ -1494,7 +1501,7 @@ test("cancelled direct observations cannot finish a closing session or a later p
     const session = await h.launch(), oldWorker = h.workers[0], oldAudio = h.audio;
     await h.advance(8);
     const pending = oldWorker.last("play-render");
-    const late = { kind: "play-render-done", playId: session.id, renderId: pending.renderId,
+    const late = { kind: "play-render-done", pendingInputs: 0, playId: session.id, renderId: pending.renderId,
       completed: true, commandsPending: false, observedTick: oldWorker.last("play-step").tickId };
     if (transition === "stop") { h.click("stop"); await flush(); }
     else { h.window.emit("pagehide"); h.window.emit("pageshow", { persisted: true }); await flush(); }
@@ -1513,7 +1520,7 @@ test("cancelled direct observations cannot finish a closing session or a later p
     await h.receive(late, oldWorker);
     assert.equal(currentWorker.messages("play-stop").length, stops);
     assert.equal(audio.stopStarts, 0); assert.equal(audio.polls, 0);
-    await h.receive({ kind: "play-render-done", playId: next.id, renderId: current.renderId,
+    await h.receive({ kind: "play-render-done", pendingInputs: 0, playId: next.id, renderId: current.renderId,
       completed: true, commandsPending: false, observedTick: 0 });
     assert.equal(currentWorker.last("play-stop").completed, true);
     await h.receive(finalScore(next.id));
@@ -1541,7 +1548,7 @@ test("Window snapshots exact raw frames and output observations while leaving pr
   assert.deepEqual(down.events, [{ hostNs: 1500125000n, key: 2, down: true, sequence: 1n }]);
   h.faults.contextFrame = 4294967300n;
   h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1500.25 });
-  await h.receive({ kind: "play-step-done", playId: session.id, tickId: down.tickId,
+  await h.receive({ kind: "play-step-done", pendingInputs: 0, playId: session.id, tickId: down.tickId,
     commandsPending: false, songNs: 0n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
   const up = worker.last("play-step");
   assert.equal(up.contextFrame, 4294967300n); assert.equal(down.contextFrame, 4294967299n);
@@ -1580,7 +1587,7 @@ test("raw observation acquisition failures never fall back and replay never acqu
       assert.deepEqual(request, { kind: "play-render", playId: session.id, renderId: 1,
         timestamp: null, observedNowMs: 1008 });
       assert.equal(worker.messages("play-stop").length, 0);
-      await h.receive({ kind: "play-render-done", playId: session.id, renderId: request.renderId,
+      await h.receive({ kind: "play-render-done", pendingInputs: 0, playId: session.id, renderId: request.renderId,
         completed: false, commandsPending: false, observedTick: 0 });
       h.faults.outputFailure = Object.assign(new Error("actual output clock failed"), { code: "state" });
       await h.advance(8);
@@ -1632,7 +1639,7 @@ test("live page discovers Gamepads before gesture audio and shares genuine sourc
   assert.equal(acquired.axes[0], 0.12345678901234568); assert.equal(acquired.buttons[0].value, 0.12345678901234566);
   standard.timestamp = 1300.1875; h.setNow(1300.25);
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.25 });
-  const done = request => h.receive({ kind: "play-step-done", playId: start.playId, tickId: request.tickId,
+  const done = request => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: request.tickId,
     songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
   await done(first);
   const second = worker.last("play-step");
@@ -1905,7 +1912,7 @@ function pointerListenerCount(canvas) {
     .reduce((sum, kind) => sum + (canvas.listeners.get(kind)?.size ?? 0), 0);
 }
 async function pointerStepDone(h, request) {
-  await h.receive({ kind: "play-step-done", playId: request.playId, tickId: request.tickId,
+  await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: request.playId, tickId: request.tickId,
     songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
 }
 
@@ -2224,7 +2231,7 @@ test("live HID discovers authorized interfaces automatically and queues original
   buffer.fill(0); assert.deepEqual(Array.from(first.events[0].data), [7, 255, 0]);
   h.get("canvas").emit("pointerdown", { pointerType: "touch", pointerId: 1, timeStamp: 1300.25, offsetX: 120, offsetY: 180, pressure: 0.5 });
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.5 });
-  const done = request => h.receive({ kind: "play-step-done", playId: start.playId, tickId: request.tickId,
+  const done = request => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: request.tickId,
     songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
   await done(first); const mixed = worker.last("play-step");
   assert.deepEqual(mixed.events.map(event => event.sequence), [2n, 3n]);
@@ -2519,7 +2526,7 @@ test("replay selection retains bounded File metadata, opens in the gesture and p
   const render = worker.last("play-render");
   assert.deepEqual(render.timestamp, { contextTime: 1.3, performanceTime: 1300 });
   assert.equal(Object.hasOwn(render, "presentedNs"), false);
-  await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+  await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: start.playId, renderId: render.renderId,
     completed: false, songNs: 2350000000n, hits: 23n, misses: 4n, combo: 11n, preOriginInputs: 0 });
   assert.equal(h.get("status").textContent, retainedDisplay.status);
   assert.equal(h.get("position").value, retainedDisplay.position);
@@ -2637,7 +2644,7 @@ test("recorded-prefix completion joins both owners and a fresh live session rega
   h.setNow(1300);
   await h.advance(8);
   const render = worker.last("play-render");
-  await h.receive({ kind: "play-render-done", playId: replay.id, renderId: render.renderId,
+  await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: replay.id, renderId: render.renderId,
     completed: true, songNs: 2350000000n, hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
   assert.equal(worker.last("play-stop").completed, true);
   assert.equal(worker.messages("play-step").length, 0);
@@ -2774,9 +2781,9 @@ test("only natural completion labels a joined replay complete and real cleanup f
     const worker = h.workers[0];
     h.setNow(1300);
     await h.advance(8);
-    await h.receive({ kind: "play-render-done", playId: session.id,
+    await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id,
       renderId: worker.last("play-render").renderId, completed: true });
-    await h.receive({ kind: "play-step-done", playId: session.id,
+    await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id,
       tickId: worker.last("play-step").tickId, songNs: 50000000n,
       hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
     assert.equal(worker.last("play-stop").completed, true);
@@ -2888,7 +2895,7 @@ test("touch acquisition snapshots cached CSS and backing extents across resize a
   h.setNow(1300);
   const pointer = (kind, fields = {}) => surface.emit(kind, { pointerType: "touch", pointerId: 11,
     offsetX: 100.125, offsetY: 300.5, pressure: 0.375, timeStamp: 1300, ...fields });
-  const ack = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+  const ack = request => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: request.tickId,
     songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
   const display = watchPlayDisplay(h), firstReads = h.layoutReads;
   const renderRequests = worker.messages("play-render").length;
@@ -2945,7 +2952,7 @@ test("touch capture preserves original samples and shared keyboard order without
   h.setNow(1300);
   const pointer = (type, overrides = {}) => surface.emit(type, { pointerType: "touch", pointerId: -2,
     offsetX: 120, offsetY: 90, pressure: 0.5, timeStamp: 1300, ...overrides });
-  const done = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+  const done = request => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: request.tickId,
     songNs: 50000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
   assert.equal(pointer("pointerdown", { pointerType: "mouse" }).defaultPrevented, false);
   assert.equal(pointer("pointerdown", { pointerType: "pen" }).defaultPrevented, false);
@@ -3016,7 +3023,7 @@ test("coalesced touch movement forwards original ordered samples from the parent
   const pointer = (kind, fields = {}) => surface.emit(kind, { pointerType: "touch", pointerId: -2,
     isPrimary: true, offsetX: 120.25, offsetY: 180.5, clientX: 100, clientY: 200,
     pressure: 0.5, timeStamp: 1300, ...fields });
-  const ack = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+  const ack = request => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: request.tickId,
     songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
   let acquired = 0, predictions = 0;
   const noPredictions = () => { predictions++; assert.fail("predicted input cannot enter acquisition"); };
@@ -3088,7 +3095,7 @@ test("a malformed coalesced list refuses its whole prefix before publication or 
     const pointer = (kind, fields = {}) => surface.emit(kind, { pointerType: "touch", pointerId: 7, isPrimary: true,
       offsetX: 120.25, offsetY: 180.5, clientX: 100, clientY: 200, pressure: 0.5, timeStamp: 1300, ...fields });
     pointer("pointerdown"); const down = worker.last("play-step");
-    await h.receive({ kind: "play-step-done", playId: session.id, tickId: down.tickId,
+    await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: down.tickId,
       songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
     const first = { pointerType: "touch", pointerId: 7, isPrimary: true, timeStamp: 1300.125, clientX: 101, clientY: 201, pressure: 0.25 };
     const last = { ...first, timeStamp: 1300.25, clientX: 102, pressure: 0.75 };
@@ -3137,7 +3144,7 @@ test("256 coalesced samples share the exact 1024 pending boundary with keyboard 
     const session = await h.launch(), worker = h.workers[0], surface = h.get("canvas"); h.setNow(1301);
     const pointer = (kind, fields = {}) => surface.emit(kind, { pointerType: "touch", pointerId: 11, isPrimary: true,
       timeStamp: 1300, offsetX: 120.25, offsetY: 180.5, clientX: 100, clientY: 200, pressure: 0.5, ...fields });
-    const ack = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+    const ack = request => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: request.tickId,
       songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
     pointer("pointerdown"); const down = worker.last("play-step"), reads = h.layoutReads;
     for (let batch = 0; batch < 3; batch++) {
@@ -3197,7 +3204,7 @@ test("coalesced movement retains held contact through paging and lost capture wh
   const { h, session, worker, surface } = await pagedTouchSession();
   const pointer = (kind, fields = {}) => surface.emit(kind, { pointerType: "touch", pointerId: -2, isPrimary: true,
     timeStamp: 1300, offsetX: 120.25, offsetY: 180.5, clientX: 100, clientY: 200, pressure: 0.5, ...fields });
-  const ack = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+  const ack = request => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: request.tickId,
     songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
   pointer("pointerdown"); const down = worker.last("play-step"), original = down.events.find(event => event.kind === "touch");
   pointer("pointermove", { timeStamp: 1300.5, getCoalescedEvents: () => [
@@ -3331,7 +3338,7 @@ test("Window explicitly negotiates physical input before PCM and preserves nativ
   assert.deepEqual(down.events, [{ hostNs: 1300000000n, key: 19, down: true, sequence: 1n }]);
   h.window.emit("keyup", { code: "KeyA", repeat: false, timeStamp: 1300.125 });
   assert.equal(worker.last("play-step").tickId, down.tickId);
-  const done = tick => h.receive({ kind: "play-step-done", playId: start.playId, tickId: tick.tickId,
+  const done = tick => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: tick.tickId,
     songNs: 50000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
   await done(down);
   const up = worker.last("play-step");
@@ -3552,9 +3559,9 @@ test("missing stop receipt and rejected audio cleanup terminate Worker and requi
     const worker = h.workers[0];
     if (natural) {
       await h.advance(8);
-      await h.receive({ kind: "play-render-done", playId: session.id,
+      await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id,
         renderId: worker.last("play-render").renderId, completed: true });
-      await h.receive({ kind: "play-step-done", playId: session.id,
+      await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id,
         tickId: worker.last("play-step").tickId, songNs: 2350000000n,
         hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
     } else { h.click("stop"); await flush(); }
@@ -3609,7 +3616,7 @@ test("live progress acknowledgements leave Window display untouched while queued
   const session = await h.launch(), worker = h.workers[0];
   const writes = watchPlayDisplay(h);
   let lastTick = 0, lastRender = 0;
-  const acknowledge = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+  const acknowledge = request => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: request.tickId,
     songNs: 604800000000001n + BigInt(request.tickId), hits: BigInt(request.tickId), misses: 2n, combo: 3n, preOriginInputs: 0 });
   h.setNow(1300);
   for (let index = 0; index < 8; index++) {
@@ -3635,13 +3642,13 @@ test("live progress acknowledgements leave Window display untouched while queued
       lastTick = captured.tickId;
       await acknowledge(captured);
     }
-    await h.receive({ kind: "play-render-done", playId: session.id, renderId: render.renderId, completed: false });
+    await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id, renderId: render.renderId, completed: false });
     assert.deepEqual(writes, [], "committed progress must not perform even redundant status, position or canvas-caption DOM writes");
     assert.equal(worker.messages("play-stop").length, 0);
   }
   await h.advance(8);
   const tick = worker.last("play-step"), render = worker.last("play-render");
-  await h.receive({ kind: "play-render-done", playId: session.id, renderId: render.renderId, completed: true });
+  await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id, renderId: render.renderId, completed: true });
   assert.equal(worker.messages("play-stop").length, 0, "completion cannot erase the pending actual input response");
   assert.deepEqual(writes, []);
   await acknowledge(tick);
@@ -3675,7 +3682,7 @@ test("replay progress stays on the Worker HUD while correlated completion and ma
       const render = worker.last("play-render");
       assert.ok(render.renderId > lastRender);
       lastRender = render.renderId;
-      await h.receive({ kind: "play-render-done", playId: session.id, renderId: render.renderId, completed: false,
+      await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id, renderId: render.renderId, completed: false,
         songNs: 604800000000001n + BigInt(index), hits: 9007199254740993n + BigInt(index), misses: 4n, combo: 11n, preOriginInputs: 0 });
       assert.equal(worker.messages("play-step").length, 0);
       assert.equal(worker.messages("play-stop").length, 0);
@@ -3683,10 +3690,10 @@ test("replay progress stays on the Worker HUD while correlated completion and ma
     }
     await h.advance(8);
     const render = worker.last("play-render");
-    await h.receive({ kind: "play-render-done", playId: session.id + 100, renderId: render.renderId, completed: true });
+    await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id + 100, renderId: render.renderId, completed: true });
     assert.equal(worker.messages("play-stop").length, 0, "a different playback owner cannot finish the current recording");
     assert.deepEqual(writes, []);
-    await h.receive({ kind: "play-render-done", playId: session.id,
+    await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id,
       renderId: render.renderId + (outcome === "uncorrelated" ? 1 : 0), completed: true,
       songNs: 604800000000008n, hits: 9007199254741000n, misses: 4n, combo: 11n, preOriginInputs: 0 });
     assert.equal(worker.messages("play-stop").length, 1);
@@ -3722,7 +3729,7 @@ test("input and render reports each have one in-flight request and watermarks ca
   }
   assert.equal(worker.messages("play-step").length, 1);
   async function done(step) {
-    await h.receive({ kind: "play-step-done", playId: session.id, tickId: step.tickId,
+    await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: step.tickId,
       songNs: 50000000n, hits: 2n, misses: 0n, combo: 2n, preOriginInputs: 0 });
   }
   await done(worker.last("play-step"));
@@ -3742,7 +3749,7 @@ test("input and render reports each have one in-flight request and watermarks ca
   assert.equal(final.events.at(-1).sequence, 600n);
   assert.equal(final.watermark, 1300000000n);
   const report = worker.last("play-render");
-  await h.receive({ kind: "play-render-done", playId: session.id, renderId: report.renderId, completed: false });
+  await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id, renderId: report.renderId, completed: false });
   await h.advance(8);
   assert.equal(h.audio.polls, 0);
   assert.equal(worker.messages("play-render").length, 2);
@@ -3793,11 +3800,11 @@ test("natural completion joins captured input and command admission before the n
   const firstTick = worker.last("play-step");
   const firstReport = worker.last("play-render");
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1308 });
-  await h.receive({ kind: "play-render-done", playId: session.id,
+  await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id,
     renderId: firstReport.renderId, completed: true });
   assert.equal(worker.messages("play-stop").length, 0, "captured input and its earlier watermark must join");
   h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1308 });
-  const stepDone = (request, commandsPending = false) => h.receive({ kind: "play-step-done", playId: session.id,
+  const stepDone = (request, commandsPending = false) => h.receive({ kind: "play-step-done", pendingInputs: 0, playId: session.id,
     tickId: request.tickId, commandsPending, songNs: 58000000n, hits: 4n, misses: 1n, combo: 3n, preOriginInputs: 0 });
   await stepDone(firstTick);
   const captured = worker.last("play-step");
@@ -3813,7 +3820,7 @@ test("natural completion joins captured input and command admission before the n
   const finalReport = worker.last("play-render");
   const finalTick = worker.last("play-step");
   assert.ok(finalReport.renderId > firstReport.renderId);
-  await h.receive({ kind: "play-render-done", playId: session.id,
+  await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id,
     renderId: finalReport.renderId, completed: true });
   assert.equal(worker.messages("play-stop").length, 0);
   await stepDone(finalTick);
@@ -3848,12 +3855,12 @@ test("output observations retain original raw time without host polling, extrapo
   const requestIndex = h.traces.findIndex(row => row[0] === "post" && row[1] === "play-render");
   assert.ok(outputIndex >= 0 && outputIndex < requestIndex);
   assert.equal(Object.hasOwn(first, "report"), false);
-  await h.receive({ kind: "play-render-done", playId: session.id, renderId: first.renderId, completed: false });
+  await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id, renderId: first.renderId, completed: false });
   h.faults.outputEvidence = { contextTime: 1.29, performanceTime: 1308 };
   await h.advance(8);
   const regressed = worker.last("play-render");
   assert.deepEqual(regressed.timestamp, { contextTime: 1.29, performanceTime: 1308 });
-  await h.receive({ kind: "play-render-done", playId: session.id, renderId: regressed.renderId, completed: false });
+  await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id, renderId: regressed.renderId, completed: false });
   h.faults.outputEvidence = { contextTime: 1.3, performanceTime: 1316 };
   await h.advance(8);
   assert.deepEqual(worker.last("play-render").timestamp, { contextTime: 1.3, performanceTime: 1316 });
@@ -3872,8 +3879,8 @@ test("unavailable output keeps completion pending while malformed evidence and r
       const report = worker.last("play-render");
       assert.equal(report.timestamp, null);
       assert.equal(typeof report.observedNowMs, "number");
-      await h.receive({ kind: "play-render-done", playId: session.id, renderId: report.renderId, completed: false });
-      await h.receive({ kind: "play-step-done", playId: session.id,
+      await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id, renderId: report.renderId, completed: false });
+      await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id,
         tickId: worker.last("play-step").tickId, songNs: 604800000000000n,
         hits: 10000n, misses: 0n, combo: 10000n, preOriginInputs: 0 });
       assert.equal(worker.messages("play-stop").length, 0, "song age and finished score do not invent presentation");
@@ -3897,7 +3904,7 @@ test("unavailable output keeps completion pending while malformed evidence and r
     const session = await h.launch();
     await h.advance(8);
     const worker = h.workers[0];
-    await h.receive({ kind: "play-render-done", playId: session.id,
+    await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id,
       renderId: worker.last("play-render").renderId, completed });
     assert.equal(worker.messages("play-stop").length, 1);
     await h.receive(finalScore(session.id));
@@ -3921,7 +3928,7 @@ test("Window forwards coarse and regressing raw observations so the Worker owns 
     [1.5, 1504], [1.5009765625, 1500], [1.5009765625, 1502.125], [1.5, 1510],
     [1.501953125, 1501], [1.501953125, 1502.125], [1.501953125, 1510],
   ]) {
-    await h.receive({ kind: "play-render-done", playId: session.id,
+    await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id,
       renderId: previous.renderId, completed: false });
     h.faults.outputEvidence = { contextTime, performanceTime };
     await h.advance(8);
@@ -4030,7 +4037,7 @@ test("local saved targets freeze before audio acquisition and member comparisons
   assert.equal(h.get("stop").disabled, false); assert.equal(worker.messages("play-stop").length, 0);
   h.setNow(1300); h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300 });
   const input = worker.last("play-step"); assert.equal(input.events[0].down, true);
-  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: input.tickId,
+  await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: input.tickId,
     songNs: 1n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
   h.click("stop"); await flush();
   const prefix = Uint8Array.from([66, 75, 82, 1]);
@@ -4143,7 +4150,7 @@ test("Window ignores periodic comparison counters and displays the exact final p
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300 });
   const down = worker.last("play-step");
   h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1300.125 });
-  const acknowledge = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+  const acknowledge = request => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: request.tickId,
     songNs: 50000000n, hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
   await acknowledge(down);
   const up = worker.last("play-step");
@@ -4357,9 +4364,9 @@ test("opponent preparation mismatches stop setup while malformed or failed live 
     await h.receive(comparison(session.id));
     assert.equal(h.get("opponents-status").textContent, comparisonFailure);
     h.setNow(1300); await h.advance(8);
-    await h.receive({ kind: "play-render-done", playId: session.id,
+    await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id,
       renderId: worker.last("play-render").renderId, completed: true });
-    await h.receive({ kind: "play-step-done", playId: session.id, tickId: worker.last("play-step").tickId,
+    await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: worker.last("play-step").tickId,
       songNs: 50000000n, hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
     assert.equal(worker.last("play-stop").completed, true);
     await h.receive(finalScore(session.id, { replay: Uint8Array.from([66, 75, 82]), replayComplete: true, replayError: null,
@@ -4509,9 +4516,9 @@ test("finite live controls capture one pre-gesture section and join input, outpu
   const firstTick = worker.last("play-step"), firstReport = worker.last("play-render");
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1408 });
   h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1408 });
-  await h.receive({ kind: "play-render-done", playId: start.playId, renderId: firstReport.renderId, completed: true });
+  await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: start.playId, renderId: firstReport.renderId, completed: true });
   assert.equal(worker.messages("play-stop").length, 0);
-  const stepDone = (request, commandsPending = false) => h.receive({ kind: "play-step-done", playId: start.playId, tickId: request.tickId,
+  const stepDone = (request, commandsPending = false) => h.receive({ kind: "play-step-done", pendingInputs: 0, playId: start.playId, tickId: request.tickId,
     commandsPending, songNs: 1000000001n, hits: 4n, misses: 1n, combo: 3n, preOriginInputs: 0 });
   await stepDone(firstTick);
   const captured = worker.last("play-step");
@@ -4524,7 +4531,7 @@ test("finite live controls capture one pre-gesture section and join input, outpu
   assert.equal(worker.messages("play-ack").length, 0);
   assert.equal(worker.messages("play-stop").length, 0, "new input and commands invalidate the earlier completion receipt");
   await h.advance(8);
-  await h.receive({ kind: "play-render-done", playId: start.playId, renderId: worker.last("play-render").renderId, completed: true });
+  await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: start.playId, renderId: worker.last("play-render").renderId, completed: true });
   assert.equal(worker.messages("play-stop").length, 0, "the final actual input watermark must still join");
   await stepDone(worker.last("play-step"));
   assert.equal(worker.last("play-stop").completed, true);
@@ -4860,7 +4867,7 @@ test("one pre-audio binding snapshot supplies Worker pairs, displayed keys and p
   assert.deepEqual(down.events, [{ hostNs: 1300000000n, key: 19, down: true, sequence: 1n }]);
   h.window.emit("keydown", { code: "KeyA", repeat: true, timeStamp: 1300 });
   h.window.emit("keyup", { code: "KeyA", key: "z", timeStamp: 1300 });
-  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: down.tickId,
+  await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: down.tickId,
     songNs: 50000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
   const up = worker.last("play-step");
   assert.deepEqual(up.events, [{ hostNs: 1300000000n, key: 19, down: false, sequence: 2n }]);
@@ -5298,7 +5305,7 @@ test("automatic one-player networking retains every admitted input owner and nat
   h.get("canvas").emit("pointerdown", { pointerType: "touch", pointerId: -2, timeStamp: 1700.25,
     offsetX: 120.25, offsetY: 180.5, pressure: 0.375 });
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1700.5 });
-  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: first.tickId,
+  await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: first.tickId,
     songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
   const second = worker.last("play-step");
   assert.equal(second.events[0].kind, "touch"); assert.equal(second.events[0].hostNs, 1700250000n);
@@ -5382,10 +5389,10 @@ test("one automatic member records and saves its actual cohort row while an inde
   assert.deepEqual(Array.from(start.localPlanWords), [1, 0, 0, 0]); assert.equal(start.recordReplay, true);
   h.setNow(1700); await h.advance(8);
   const tick = worker.last("play-step"), render = worker.last("play-render");
-  await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+  await h.receive({ kind: "play-render-done", pendingInputs: 0, playId: start.playId, renderId: render.renderId,
     completed: true, commandsPending: false, observedTick: tick.tickId });
   assert.equal(worker.messages("play-stop").length, 0);
-  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: tick.tickId,
+  await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: tick.tickId,
     songNs: 2350000000n, hits: 9007199254740993n, misses: 1n, combo: 2n, preOriginInputs: 0 });
   assert.equal(worker.last("play-stop").completed, true);
   const bytes = Uint8Array.from([66, 75, 82, 1, 255]);
@@ -5482,7 +5489,7 @@ test("discovered local sources and network settings freeze together before audio
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1700 });
   const tick = worker.last("play-step");
   assert.ok(tick.events.some(event => event.key === 2 && event.down === true && event.hostNs === 1700000000n));
-  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: tick.tickId,
+  await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: tick.tickId,
     songNs: 100000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
   assert.equal(worker.messages("play-commands").length, 0); assert.equal(worker.messages("play-ack").length, 0);
   assert.equal(h.audio.polls, 0);
@@ -5572,10 +5579,10 @@ test("joined local network results retain separate full-width peer prefixes and 
   ];
   h.setNow(1700); await h.advance(8);
   const tick = worker.last("play-step"), render = worker.last("play-render");
-  await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+  await h.receive({ kind: "play-render-done", pendingInputs: 0, playId: start.playId, renderId: render.renderId,
     completed: true, commandsPending: false, observedTick: tick.tickId });
   assert.equal(worker.messages("play-stop").length, 0, "even a group final report cannot skip input acknowledgement");
-  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: tick.tickId,
+  await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: tick.tickId,
     songNs: 2350000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
   assert.equal(worker.last("play-stop").completed, true);
   const final = localFinal(start, { replays: [
@@ -5926,11 +5933,11 @@ test("an early committed room event survives the open reply and activates one ex
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1699.125 });
   const input = worker.last("play-step");
   assert.ok(input.events.some(event => event.key === 2 && event.hostNs === 1699125000n));
-  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: input.tickId,
+  await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: input.tickId,
     songNs: 200000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
   await h.advance(8);
   const render = worker.last("play-render"); assert.ok(render);
-  await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+  await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: start.playId, renderId: render.renderId,
     songNs: 200000000n, hits: 1n, misses: 0n, combo: 1n, completed: false });
   assert.deepEqual(display, []); assert.equal(h.layoutReads, layout);
   assert.equal(h.get("multiplayer-status").textContent, lobbyText);
@@ -5999,9 +6006,9 @@ test("room score controls page the Worker HUD through one correlated choice whil
     for (let index = 0; index < 4; index++) {
       await h.advance(8);
       const tick = worker.last("play-step"), render = worker.last("play-render");
-      await h.receive({ kind: "play-step-done", playId: start.playId, tickId: tick.tickId,
+      await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: tick.tickId,
         songNs: BigInt(index), hits: 18446744073709551615n, misses: 0n, combo: 1n, preOriginInputs: 0 });
-      await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+      await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: start.playId, renderId: render.renderId,
         songNs: BigInt(index), hits: 18446744073709551615n, misses: 0n, combo: 1n, completed: false });
     }
     assert.deepEqual(writes, []); assert.deepEqual(pageWrites, []);
@@ -6074,12 +6081,12 @@ test("a valid playing room closure preserves Window input and output while final
     h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1699.125 });
     const input = worker.last("play-step");
     assert.ok(input.events.some(event => event.key === 2 && event.hostNs === 1699125000n));
-    await h.receive({ kind: "play-step-done", playId: start.playId, tickId: input.tickId,
+    await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: input.tickId,
       songNs: 200000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
     await h.advance(8);
     const render = worker.last("play-render"); assert.ok(render);
     assert.equal(Object.hasOwn(render, "report"), false);
-    await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+    await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: start.playId, renderId: render.renderId,
       songNs: 200000000n, hits: 1n, misses: 0n, combo: 1n, completed: false });
     assert.deepEqual(display, []); assert.equal(h.layoutReads, layout);
     assert.equal(h.get("multiplayer-status").textContent, disconnected);
@@ -6128,11 +6135,11 @@ test("joined room drain outcomes remain distinct while the natural cleanup wait 
     const display = watchPlayDisplay(h), layout = h.layoutReads;
     h.setNow(1700); await h.advance(8);
     const tick = worker.last("play-step"), render = worker.last("play-render");
-    await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+    await h.receive({ kind: "play-render-done", pendingInputs: 0, playId: start.playId, renderId: render.renderId,
       completed: true, commandsPending: false, observedTick: tick.tickId });
     assert.equal(worker.messages("play-stop").length, 0);
     assert.deepEqual(display, []); assert.equal(h.layoutReads, layout); assert.deepEqual(writes, []);
-    await h.receive({ kind: "play-step-done", playId: start.playId, tickId: tick.tickId,
+    await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: start.playId, tickId: tick.tickId,
       songNs: 2350000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
     assert.equal(worker.last("play-stop").completed, true); assert.equal(h.audio.stopStarts, 1);
     assert.deepEqual(display.filter(write => write.id !== "status"), []);

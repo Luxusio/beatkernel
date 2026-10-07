@@ -20,6 +20,8 @@ pub mod browser;
 /// Numeric bindings for the separate AudioWorklet WASM owner.
 #[cfg(all(target_arch = "wasm32", feature = "browser-audio"))]
 pub mod browser_audio;
+#[cfg(test)]
+mod browser_audio_authority_fixtures;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 mod browser_canvas;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]

@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 import { encodeKeyboardEvent, encodeTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
+import { millisecondsToNanos } from "./play-model.mjs";
 
 const FileType = globalThis.File ?? NodeFile;
 const ORIGIN = 9007199254740993n;
@@ -70,6 +71,10 @@ async function workerHarness(options = {}) {
   const roomWrappers = [];
   const roomResults = [];
   let networkNow = 1000;
+  let cadenceNow = 1000;
+  let cadenceOffset = 0;
+  let acquisitionNow = null;
+  let windowOrigin = 10000000000n;
   let timerId = 0;
   let receive;
   function makePrepared(path) {
@@ -233,6 +238,13 @@ async function workerHarness(options = {}) {
       this.args = args;
       this.score = { ...SCORE };
       this.calls = [];
+      this.pendingInput = [];
+      this.processedInput = [];
+      this.presentations = [];
+      this.closedPrefix = null;
+      this.outputEvidence = null;
+      this.lastService = null;
+      this.inputOrdinal = 0;
       this.endpointReads = { end: 0, frame: 0 };
       this.frees = 0;
       this.stops = 0;
@@ -339,7 +351,83 @@ async function workerHarness(options = {}) {
       return this.replayBytes;
     }
     next_sample() { this.live(); this.calls.push(["sample"]); return this.samples[this.sampleIndex++] ?? null; }
-    activate(host) { this.live(); this.calls.push(["activate", host]); }
+    activate(host) { this.live(); this.activationHost = host; this.calls.push(["activate", host]); }
+    queue_input(host, key, down, sequence, received) {
+      this.live();
+      assert.ok(host <= received, "acquisition cannot follow current Window receipt");
+      this.calls.push(["input", host, key, down, sequence, received]);
+      this.pendingInput.push({ host, key, down, sequence, received, ordinal: this.inputOrdinal++ });
+    }
+    queue_input_blob(bytes, received) {
+      this.live(); assert.equal(this.physical, true);
+      this.calls.push(["blob", bytes.slice(), received]);
+      options.inputBlob?.(this, bytes, received);
+      this.retainPacket(bytes, received);
+    }
+    queue_hid_blob(bytes, received) {
+      this.live(); assert.equal(this.physical, true);
+      this.calls.push(["hid", bytes.slice(), received]);
+      options.inputHidBlob?.(this, bytes, received);
+      this.retainPacket(bytes, received);
+    }
+    queue_input_blob_on_surface(bytes, cssWidth, cssHeight, surfaceWidth, surfaceHeight, received) {
+      this.live(); assert.equal(this.contact, true);
+      this.calls.push(["touch", bytes.slice(), cssWidth, cssHeight, surfaceWidth, surfaceHeight, received]);
+      options.inputBlobOnSurface?.(this, bytes, cssWidth, cssHeight, surfaceWidth, surfaceHeight, received);
+      this.retainPacket(bytes, received, { cssWidth, cssHeight, surfaceWidth, surfaceHeight });
+    }
+    retainPacket(bytes, received, geometry = null) {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const host = view.getBigInt64(15, true);
+      assert.ok(host <= received);
+      this.pendingInput.push({ bytes: bytes.slice(), host, sequence: view.getBigUint64(27, true),
+        source: view.getBigUint64(7, true), received, geometry, ordinal: this.inputOrdinal++ });
+    }
+    close_input_prefix(host) {
+      this.live(); this.calls.push(["close", host]);
+      assert.ok(this.closedPrefix === null || host >= this.closedPrefix);
+      this.closedPrefix = host;
+    }
+    pending_inputs() { this.live(); return this.pendingInput.length; }
+    service_audio(now, audio) {
+      this.live(); this.calls.push(["service", now, audio]);
+      this.lastService = { now, audio };
+      let processed = 0;
+      if (this.presentations.length >= 2 && this.closedPrefix !== null) {
+        const first = this.presentations.at(-2), last = this.presentations.at(-1);
+        if (now >= last.host && now - last.host <= 1000000000n) {
+          this.pendingInput.sort((a, b) => a.host < b.host ? -1 : a.host > b.host ? 1 :
+            (a.source ?? 0n) < (b.source ?? 0n) ? -1 : (a.source ?? 0n) > (b.source ?? 0n) ? 1 :
+            a.sequence < b.sequence ? -1 : a.sequence > b.sequence ? 1 : a.ordinal - b.ordinal);
+          while (this.pendingInput[0]?.host <= this.closedPrefix
+            && this.pendingInput[0].host <= now && this.pendingInput[0].host <= last.host) {
+            const event = this.pendingInput.shift();
+            event.output = first.output + (event.host - first.host) * (last.output - first.output) / (last.host - first.host);
+            event.audio = audio;
+            this.processedInput.push(event);
+            this.calls.push(["processed", event.host, event.output, audio]);
+            if (event.key !== undefined) options.input?.(this, [event.host, event.key, event.down, event.sequence, audio]);
+            processed++;
+          }
+          if (!this.pendingInput.length && this.closedPrefix <= now && last.host <= this.closedPrefix) {
+            this.logicalOutput = last.output;
+          }
+        }
+      }
+      options.service?.(this, now, audio);
+      return processed;
+    }
+    admit_output(words, presentedNs) {
+      this.live(); this.calls.push(["output", words.slice(), presentedNs]);
+      this.outputEvidence = { words: words.slice(), presentedNs };
+      options.admitOutput?.(this, words, presentedNs);
+    }
+    evaluate_completion() {
+      this.live(); this.calls.push(["completion"]);
+      assert.ok(this.lastService, "live completion must follow joined audio service");
+      if (this.pendingInput.length || !this.outputEvidence || this.outputEvidence.presentedNs === null) return false;
+      return options.observeOutput?.(this, this.outputEvidence.words, this.outputEvidence.presentedNs) ?? false;
+    }
     input(...args) {
       this.live();
       assert.notEqual(this.physical, true, "physical owners must not fall back to the legacy key method");
@@ -372,16 +460,22 @@ async function workerHarness(options = {}) {
       this.calls.push(["hid", bytes.slice(), audioNs]);
       options.inputHidBlob?.(this, bytes, audioNs);
     }
-    advance(...args) { this.live(); this.calls.push(["advance", ...args]); options.advance?.(this, args); }
+    advance(...args) { this.live(); this.calls.push(["close", ...args]); options.advance?.(this, args); }
     observe_output(words, presentedNs) {
       this.live();
       this.calls.push(["output", words.slice(), presentedNs]);
+      options.admitOutput?.(this, words, presentedNs);
       return options.observeOutput?.(this, words, presentedNs) ?? false;
     }
     observe_presentation(outputNs, hostNs) {
       this.live();
       this.calls.push(["presentation", outputNs, hostNs]);
       options.observePresentation?.(this, outputNs, hostNs);
+      const previous = this.presentations.at(-1);
+      assert.ok(!previous || (hostNs >= previous.host && outputNs >= previous.output));
+      if (!previous || (outputNs > previous.output && hostNs > previous.host)) {
+        this.presentations.push({ output: outputNs, host: hostNs });
+      }
     }
     commands(max) { this.live(); this.calls.push(["commands", max]); return this.batches.shift() ?? null; }
     acknowledge(...args) { this.live(); this.calls.push(["ack", ...args]); options.ack?.(this, args); }
@@ -404,13 +498,13 @@ async function workerHarness(options = {}) {
   if (options.missingPeerUpdate) BrowserGame.prototype.update_peer_hud = undefined;
   if (options.missingPeerDisable) BrowserGame.prototype.disable_peer_hud = undefined;
   if (options.missingPhysicalConstructor) BrowserGame.new_physical = undefined;
-  if (options.missingInputBlob) BrowserGame.prototype.input_blob = undefined;
+  if (options.missingInputBlob) BrowserGame.prototype.queue_input_blob = undefined;
   if (options.missingContactConstructor) BrowserGame.new_physical_contact = undefined;
   if (options.missingTouchSetup) BrowserGame.prototype.configure_touch_regions = undefined;
-  if (options.missingInputBlobOnSurface) BrowserGame.prototype.input_blob_on_surface = undefined;
+  if (options.missingInputBlobOnSurface) BrowserGame.prototype.queue_input_blob_on_surface = undefined;
   if (options.missingPreflightTouchSurface) BrowserGame.prototype.preflight_touch_surface = undefined;
   if (options.missingHidSetup) BrowserGame.prototype.configure_hid_devices = undefined;
-  if (options.missingInputHidBlob) BrowserGame.prototype.input_hid_blob = undefined;
+  if (options.missingInputHidBlob) BrowserGame.prototype.queue_hid_blob = undefined;
   class BrowserLocalGame extends BrowserGame {
     static new_physical(prepared, ...args) {
       localConstructions.push({ prepared, args });
@@ -555,7 +649,7 @@ async function workerHarness(options = {}) {
     }
   }
   if (options.missingLocalConstructor) BrowserLocalGame.new_physical = undefined;
-  if (options.missingLocalInputBlob) BrowserLocalGame.prototype.input_blob = undefined;
+  if (options.missingLocalInputBlob) BrowserLocalGame.prototype.queue_input_blob = undefined;
   if (options.missingLocalSavedHud) BrowserLocalGame.prototype.disable_saved_opponent_hud = undefined;
   if (options.missingLocalTouchPage) BrowserLocalGame.prototype.set_touch_page = undefined;
   if (options.missingLocalIdentity) BrowserLocalGame.prototype.competition_identity = undefined;
@@ -584,6 +678,12 @@ async function workerHarness(options = {}) {
     input() { assert.fail("replay must not accept live input"); }
     advance() { assert.fail("replay must not synthesize live advances"); }
     observe_presentation() { assert.fail("replay must not discipline a live input clock"); }
+    queue_input() { assert.fail("replay must not queue live input"); }
+    queue_input_blob() { assert.fail("replay must not queue live physical input"); }
+    close_input_prefix() { assert.fail("replay must not close live acquisition prefixes"); }
+    service_audio() { assert.fail("replay must preserve its recorded-domain output path"); }
+    admit_output() { assert.fail("replay must preserve observe_output completion semantics"); }
+    evaluate_completion() { assert.fail("replay must not use live split completion"); }
     configure_capture() { assert.fail("replay must not recapture a recording"); }
     take_replay() { assert.fail("replay playback must not re-export its input bytes"); }
     competition_identity() { assert.fail("replay playback must stay local"); }
@@ -650,7 +750,10 @@ async function workerHarness(options = {}) {
       if (this.setupPhase === "prepared" && this.schedules.length) { this.setupPhase = "complete"; return -1n; }
       return this.setupPhase === "lobby" ? -2n : this.setupExpires - elapsed;
     }
-    begin_drain(elapsed, timeout) { this.live(); this.drainExpires = elapsed + timeout; this.drainAdmitted = false; this.drainSteps = []; }
+    begin_drain(elapsed, timeout) {
+      this.live(); this.drainStarted = elapsed; this.drainTimeout = timeout;
+      this.drainExpires = elapsed + timeout; this.drainAdmitted = false; this.drainSteps = [];
+    }
     drain_requested() { this.live(); return this.drainAdmitted === true; }
     drain_wait_step(elapsed) {
       this.live(); this.drainSteps.push(elapsed);
@@ -817,10 +920,7 @@ async function workerHarness(options = {}) {
   };
   const context = createContext({
     self, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
-    performance: { timeOrigin: 10000, now() {
-      if (!options.allowNetworkClock) throw new Error("Solo Worker timestamps cannot replace Window provenance");
-      return networkNow;
-    } },
+    performance: { timeOrigin: 10000, now() { return networkNow; } },
     setTimeout(callback, delay = 0) {
       const id = ++timerId; timers.set(id, callback); timerDelays.set(id, delay); return id;
     },
@@ -881,9 +981,32 @@ async function workerHarness(options = {}) {
   return {
     messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
     roomSessions, roomChannels, roomWrappers, roomResults,
-    setNetworkNow(value) { assert.ok(value >= networkNow); networkNow = value; },
+    // Existing cadence fixtures specify elapsed control time from their initial
+    // 1000ms reading; a future scheduled activation first waits for that target.
+    setNetworkNow(value) { assert.ok(value >= cadenceNow); cadenceNow = value; networkNow = value + cadenceOffset; },
+    setWindowNowNs(value) {
+      networkNow = Number(value + windowOrigin - 10000000000n) / 1000000;
+      if (!options.manualClock && options.allowNetworkClock) cadenceOffset = networkNow - cadenceNow;
+    },
+    windowNowNs() { return 10000000000n + millisecondsToNanos(networkNow) - windowOrigin; },
+    acquisitionNowNs() { return acquisitionNow; },
     post(request) { receive({ data: request }); },
-    async send(request) { receive({ data: request }); await flushJobs(); },
+    async send(request) {
+      if (request?.kind === "play-start" && typeof request.windowOriginNs === "bigint") windowOrigin = request.windowOriginNs;
+      if (request?.kind === "play-step" && !Object.hasOwn(request, "nowNs")) request = { ...request, nowNs: request.watermark };
+      if (request?.kind === "play-step") acquisitionNow = request.nowNs;
+      if (!options.manualClock && options.allowNetworkClock && request?.kind === "play-step"
+        && typeof request.nowNs === "bigint" && request.nowNs > 10000000000n + millisecondsToNanos(networkNow) - windowOrigin) {
+        networkNow = Math.ceil(Number(request.nowNs + windowOrigin - 10000000000n) / 1000000);
+        cadenceOffset = networkNow - cadenceNow;
+      }
+      if (!options.manualClock && !options.allowNetworkClock) {
+        const host = request?.nowNs ?? request?.watermark ?? request?.hostNs ?? request?.presentedHostNs;
+        if (typeof host === "bigint" && host >= 0n) networkNow = Math.ceil(Number(host + windowOrigin - 10000000000n) / 1000000);
+        else if (Number.isFinite(request?.observedNowMs)) networkNow = request.observedNowMs;
+      }
+      receive({ data: request }); await flushJobs();
+    },
     async tick() {
       const entry = timers.entries().next().value;
       assert.ok(entry, "expected presentation callback");
@@ -1024,7 +1147,7 @@ test("Worker settings ownership remains exclusive through actual read settlement
 
 function startRequest(fields = {}) {
   return { kind: "play-start", playId: 7, rpcId: 1, libraryId: 1, path: "song/chart.bms", rate: 48000,
-    seed: "18446744073709551615", keyPairs: pairs(), ...fields };
+    seed: "18446744073709551615", keyPairs: pairs(), windowOriginNs: fields.multiplayer?.windowOriginNs ?? 10000000000n, ...fields };
 }
 
 function replayFile(acquire = null, size = 6) {
@@ -1072,13 +1195,14 @@ function withPlayRpc(h) {
 
 async function active(options = {}) {
   const h = await started(options);
-  const reply = await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
+  const reply = await h.rpc("play-activate", { hostNs: options.activationHost ?? ORIGIN, startFrame: options.activationFrame ?? START });
   assert.equal(reply.result, null);
   return h;
 }
 
 function step(fields = {}) {
-  return { kind: "play-step", playId: 7, tickId: 1, events: [], watermark: ORIGIN, audioNs: 100000000n, ...fields };
+  return { kind: "play-step", playId: 7, tickId: 1, events: [], watermark: ORIGIN, audioNs: 100000000n,
+    nowNs: fields.watermark ?? ORIGIN, ...fields };
 }
 
 function assertReleased(h, score = SCORE) {
@@ -1350,10 +1474,11 @@ function localRequest(fields = {}) {
 
 const ROOM_URL = "https://example.test:4433/rooms/fixture";
 function roomStartRequest(fields = {}) {
-  return startRequest({ inputMode: "physical", localPlanWords: localPlan([[0xffffffff, null]]), recordReplay: true, ...fields });
+  return startRequest({ inputMode: "physical", localPlanWords: localPlan([[0xffffffff, null]]), recordReplay: true, windowOriginNs: 0n, ...fields });
 }
 async function roomPrepared(options = {}) {
-  const h = await started({ allowNetworkClock: true, ...options, startRequest: options.startRequest ?? roomStartRequest() });
+  const request = { ...(options.startRequest ?? roomStartRequest()), windowOriginNs: options.windowOriginNs ?? 0n };
+  const h = await started({ allowNetworkClock: true, ...options, startRequest: request });
   h.roomPort = commandPort();
   const rpc = await attachCommands(h, h.roomPort);
   assert.equal(h.of("play-reply").find(value => value.rpcId === rpc).result.kind, "audio-ready");
@@ -1437,9 +1562,10 @@ test("finalQueued follows accepted Rust admission so refusal retries before disp
   for (const firstRefused of [false, true]) {
     const h = await roomPrepared({ observeOutput: () => true }); const event = await committedRoom(h);
     await h.rpc("play-activate", { hostNs: event.targetHostNs, targetHostNs: event.targetHostNs, startFrame: START });
+    h.setWindowNowNs(event.targetHostNs);
     const game = h.locals[0], session = h.roomSessions[0]; session.publicationOutputs.push(...(firstRefused ? [false, true] : [true]));
     session.onPublish = (_, finalPrefix) => { assert.equal(finalPrefix, true); assert.equal(game.stops, 0); assert.equal(game.frees, 0); };
-    await h.send(directObservation()); await h.roomPort.acknowledge({ report: renderReport() });
+    await h.send(directObservation({ presentedNs: 0n, presentedHostNs: (h.locals[0] ?? h.games[0]).activationHost })); await h.roomPort.acknowledge({ report: renderReport() });
     assert.equal(h.of("play-render-done").at(-1).completed, true);
     assert.equal(session.publications.length, firstRefused ? 0 : 1);
     await h.send({ kind: "play-stop", playId: 7 });
@@ -1450,7 +1576,7 @@ test("finalQueued follows accepted Rust admission so refusal retries before disp
 });
 
 test("room acquisition uses every actual local identity only after samples and direct command ACK drain", async () => {
-  for (const request of [roomStartRequest(), localRequest({ recordReplay: true })]) {
+  for (const request of [roomStartRequest(), localRequest({ recordReplay: true, windowOriginNs: 0n })]) {
     const h = await started({ allowNetworkClock: true, batches: [batch(771n)], startRequest: request });
     const game = h.locals[0];
     let rpc = await requestRoom(h);
@@ -1585,7 +1711,7 @@ test("room snapshots carry actual participant and ordered full-width DTOs withou
   assert.deepEqual(event.event.snapshot, snapshot);
   assert.deepEqual([...event.event.snapshot.members[0].players], game.memberIds);
   assert.equal(game.memberPeerUpdates.length, 0); assert.equal(h.networks.length, 0);
-  assert.equal(game.calls.some(call => call[0] === "advance" || call[0] === "activate"), false);
+  assert.equal(game.calls.some(call => call[0] === "close" || call[0] === "activate"), false);
   const activation = await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
   assert.ok(activation.error);
   assert.equal(game.calls.some(call => call[0] === "activate"), false);
@@ -1651,8 +1777,9 @@ test("fatal room I/O and malformed complete snapshots retain capture prefixes wh
 });
 
 test("actual room owner delivers only the committed full-width start and Worker translates the original Window origin", async () => {
-  const h = await roomPrepared();
-  const game = h.locals[0], windowOriginNs = 10000000003n;
+  const windowOriginNs = 10000000003n;
+  const h = await roomPrepared({ windowOriginNs });
+  const game = h.locals[0];
   const rpc = await requestRoom(h, "play-room-open", { windowOriginNs });
   assert.deepEqual(roomReply(h, rpc).result, { kind: "room-opened" });
   const session = h.roomSessions[0], channel = h.roomChannels[0];
@@ -1684,7 +1811,8 @@ test("actual room owner delivers only the committed full-width start and Worker 
     watermark: hostNs + 11n, audioNs: 100000000n }));
   const blob = game.calls.find(row => row[0] === "blob");
   assert.deepEqual(blob[1], encodeKeyboardEvent({ hostNs: hostNs + 11n, key: 2, down: true, sequence: 18446744073709551615n }));
-  assert.equal(blob[2], 100000000n);
+  assert.equal(blob[2], h.acquisitionNowNs(), "queue admission carries the same-Window acquisition receipt");
+  assert.equal(game.lastService.audio, 100000000n, "scheduling remains a separate raw-audio coordinate");
   assert.equal(h.of("play-step-done").at(-1).tickId, 1);
   await roomReceive(h, () => {});
   assert.equal(h.of("play-room").filter(row => row.event.kind === "start").length, 1);
@@ -1923,7 +2051,7 @@ test("room HUD capability and binding failures fence only presentation and prese
     assert.equal(h.of("play-error").length, 0); assert.equal(channel.closes, 0); assert.equal(game.stops, 0);
     await h.send(step({ watermark: start.targetHostNs }));
     assert.equal(h.of("play-step-done").length, 1); assert.equal(session.publications.length, 1);
-    assert.equal(game.calls.some(call => call[0] === "advance"), true);
+    assert.equal(game.calls.some(call => call[0] === "close"), true);
     await h.send({ kind: "play-stop", playId: 7 });
     const final = h.of("play-stopped").at(-1);
     assert.equal(game.frees, 1); assert.equal(h.roomSessions[0].frees, 1); assert.equal(final.room.error, null);
@@ -1948,7 +2076,7 @@ test("a completed output publishes one final room prefix outside cadence while a
   await h.send(step({ watermark: event.targetHostNs }));
   assert.deepEqual(session.publications.map(row => row.finalPrefix), [false]);
   h.setNetworkNow(1001); complete = true;
-  await h.send(directObservation());
+  await h.send(directObservation({ presentedNs: 1000000n, presentedHostNs: h.windowNowNs() }));
   assert.equal(session.publications.length, 1, "a requested poll is not output evidence");
   await h.roomPort.acknowledge({ report: renderReport() });
   assert.equal(h.of("play-render-done").at(-1).completed, true);
@@ -2021,7 +2149,15 @@ test("an activated room fault fences only publication and joins stale continuati
   const key = { hostNs: event.targetHostNs + 9n, sequence: 18446744073709551615n, key: 2, down: true };
   await h.send(step({ tickId: 2, watermark: key.hostNs, events: [key] }));
   assert.deepEqual(game.calls.find(row => row[0] === "blob")[1], encodeKeyboardEvent(key));
-  await h.send(directObservation()); await h.roomPort.acknowledge({ report: renderReport() });
+  const presentedHost = h.windowNowNs();
+  await h.send(directObservation({ presentedNs: presentedHost - event.targetHostNs, presentedHostNs: presentedHost }));
+  await h.roomPort.acknowledge({ report: renderReport() });
+  assert.equal(game.processedInput.length, 0, "one actual anchor retains acquired input");
+  h.setWindowNowNs(presentedHost + 1000000n);
+  await h.send(directObservation({ renderId: 2, presentedNs: presentedHost - event.targetHostNs + 1000000n,
+    presentedHostNs: presentedHost + 1000000n }));
+  await h.roomPort.acknowledge({ report: renderReport() });
+  assert.equal(game.processedInput.length, 1, "local processing survives the isolated room transport fault");
   assert.equal(h.of("play-render-done").at(-1).observedTick, 2);
   assert.equal(game.groupProgressReads, 1, "fenced transport cannot reacquire or publish further gameplay words");
   const credits = [...session.credits], oldEvents = h.of("play-room").length;
@@ -2060,6 +2196,7 @@ async function naturalRoomDrain(options = {}) {
     assert.equal(roomReply(h, rpc).result.page, options.roomInitialPage);
   }
   await h.rpc("play-activate", { hostNs: event.targetHostNs, targetHostNs: event.targetHostNs, startFrame: START });
+  h.setWindowNowNs(event.targetHostNs);
   const session = h.roomSessions[0], channel = h.roomChannels[0];
   session.onPublish = (_, finalPrefix) => {
     assert.equal(finalPrefix, true); assert.equal(game.stops, 0); assert.equal(game.frees, 0);
@@ -2069,7 +2206,7 @@ async function naturalRoomDrain(options = {}) {
   session.onRequest = kind => {
     assert.equal(kind, "drain"); session.frames.push({ kind: 1, id: 52n, bytes: new Uint8Array(11) });
   };
-  await h.send(directObservation());
+  await h.send(directObservation({ presentedNs: 0n, presentedHostNs: (h.locals[0] ?? h.games[0]).activationHost }));
   assert.deepEqual(session.publications, []);
   await h.roomPort.acknowledge({ report: renderReport() });
   assert.equal(h.of("play-render-done").at(-1).completed, true);
@@ -2286,7 +2423,11 @@ test("room drain failure preserves genuine local completion while actual gamepla
     const final = h.of(mode === "cleanup" ? "play-error" : "play-stopped").at(-1);
     assert.ok(final); assert.equal(final.room.finalDrain, "failed");
     assert.match(final.room.error, mode === "transport" ? /Room write failed/ : /Room drain failed/);
-    if (mode !== "transport") assert.equal(session.drainSteps.at(-1), 10000000000n);
+    if (mode !== "transport") {
+      assert.equal(session.drainTimeout, 10000000000n);
+      assert.equal(session.drainSteps.at(-1) - session.drainStarted, 10000000000n,
+        "the ten-second deadline starts when actual drain begins, after waiting for the armed target");
+    }
     assert.equal(final.room.finalQueued, true); assert.equal(final.room.finalWritten, false);
     assert.equal(final.room.finalAcknowledged, false); assert.equal(final.room.localComplete, false);
     assert.equal(final.replays[0].replayComplete, mode !== "cleanup"); assert.ok(final.replays[0].replay instanceof Uint8Array);
@@ -2297,9 +2438,10 @@ test("room drain failure preserves genuine local completion while actual gamepla
   const h = await roomPrepared({ observeOutput: () => true, freeError: "actual gameplay free failed" });
   const event = await committedRoom(h);
   await h.rpc("play-activate", { hostNs: event.targetHostNs, targetHostNs: event.targetHostNs, startFrame: START });
+  h.setWindowNowNs(event.targetHostNs);
   const session = h.roomSessions[0], channel = h.roomChannels[0];
   session.onPublish = () => session.frames.push({ kind: 1, id: 51n, bytes: new Uint8Array(11) });
-  await h.send(directObservation()); await h.roomPort.acknowledge({ report: renderReport() });
+  await h.send(directObservation({ presentedNs: 0n, presentedHostNs: (h.locals[0] ?? h.games[0]).activationHost })); await h.roomPort.acknowledge({ report: renderReport() });
   await h.send({ kind: "play-stop", playId: 7, completed: true });
   if (h.of("play-error").length === 0) { h.setNetworkNow(11000); await h.runTimer(1); }
   const failed = h.of("play-error").at(-1);
@@ -2508,11 +2650,15 @@ test("local players snapshot exact sources and share one PCM, command and report
   assert.equal(stepped.songNs, -9223372036854775808n);
   assert.deepEqual(stepped.localScores.map(row => [row.player, row.hits]), [[99, 18446744073709551615n], [7, 7n], [31, 31n], [0xffffffff, 4294967295n]]);
   assert.equal(stepped.commandsPending, true);
-  await h.send({ kind: "play-render", playId: 7, renderId: 1, presentedNs: null, presentedHostNs: null });
+  await h.send({ kind: "play-render", playId: 7, renderId: 1, presentedNs: 0n, presentedHostNs: ORIGIN });
   assert.equal(port.posts.at(-1).kind, "commands"); assert.equal(h.of("play-render-done").length, 0);
   await port.acknowledge();
   assert.equal(port.posts.at(-1).kind, "poll"); assert.equal(port.posts.at(-1).sequence, 3);
   complete = true;
+  await port.acknowledge({ report: renderReport() });
+  assert.equal(h.of("play-render-done").at(-1).completed, false);
+  assert.equal(h.of("play-render-done").at(-1).pendingInputs, 3);
+  await h.send({ kind: "play-render", playId: 7, renderId: 2, presentedNs: 1n, presentedHostNs: ORIGIN + 1n });
   await port.acknowledge({ report: renderReport() });
   const rendered = h.of("play-render-done").at(-1);
   assert.equal(rendered.completed, true); assert.equal(rendered.commandsPending, false); assert.equal(rendered.observedTick, 1);
@@ -2582,11 +2728,14 @@ test("local touch page RPC retains the input owner and rejects failed or contrad
   const h = await active({ startRequest: request(), localTouchPageError: () => refused });
   const game = h.locals[0], first = touchEvent({ contact: 0xffffffffffffffffn });
   await h.send(step({ events: [first] }));
+  await legacyWitness(h, 1, 100n, ORIGIN);
+  await legacyWitness(h, 2, 101n, ORIGIN + 1n);
   assert.deepEqual((await h.rpc("play-page", { page: 1 })).result, { kind: "local-page", page: 1, touchVisible: false });
   await h.tick(); assert.equal(h.views[0].localDraws.at(-1).page, 1);
   const hidden = touchEvent({ sequence: 2n, contact: 77n, hostNs: ORIGIN + 1n });
   const release = touchEvent({ sequence: 3n, phase: 2, contact: first.contact, hostNs: ORIGIN + 2n, x: -50 });
   await h.send(step({ tickId: 2, watermark: ORIGIN + 2n, events: [hidden, release] }));
+  await legacyWitness(h, 3, 102n, ORIGIN + 2n);
   const inputs = game.calls.filter(call => call[0] === "touch");
   assert.deepEqual(inputs.map(call => call[1]), [first, hidden, release].map(encodeTouchEvent));
   assert.equal(game.calls.filter(call => call[0] === "local-touch").length, 1, "paging never installs a fresh contact owner");
@@ -2655,7 +2804,7 @@ test("local captures preserve independent member prefixes through setup, seriali
   await partial.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: true, sequence: 1n }, hidEvent({ sequence: 2n }), touchEvent({ sequence: 3n })] }));
   const failed = partial.of("play-error").at(-1), game = partial.locals[0];
   assert.match(failed.message, /actual committed member report failure/); assert.equal(failed.hits, 18n);
-  assert.deepEqual(game.calls.filter(row => ["blob", "hid", "touch", "advance"].includes(row[0])).map(row => row[0]), ["blob", "hid"]);
+  assert.deepEqual(game.calls.filter(row => ["blob", "hid", "touch", "close"].includes(row[0])).map(row => row[0]), ["blob", "hid"]);
   assert.ok(failed.replays.every(row => row.replay !== null && row.replayComplete === false));
   const trace = game.calls.length;
   await partial.send(step({ tickId: 2 })); assert.equal(game.calls.length, trace); assert.equal(game.frees, 1);
@@ -2711,9 +2860,14 @@ test("direct live and replay commands wait for actual client ACKs using core ide
     assert.equal(h.of("play-commands").length, 0, "no batch returns through Window");
     await port.acknowledge();
     assert.deepEqual(game.calls.filter(row => row[0] === "ack").at(-1), ["ack", coreSequence + 1n, 1, true]);
+    if (mode === "live") {
+      await h.send({ kind: "play-render", playId: 7, renderId: 1, presentedNs: 0n, presentedHostNs: ORIGIN });
+      await port.acknowledge({ report: renderReport() });
+      assert.equal(h.of("play-render-done").at(-1).pendingInputs, 1);
+    }
     complete = true;
     await h.send({ kind: "play-render", playId: 7, renderId: 2,
-      presentedNs: null, presentedHostNs: null });
+      presentedNs: mode === "live" ? 1n : null, presentedHostNs: mode === "live" ? ORIGIN + 1n : null });
     assert.equal(port.posts.at(-1).kind, "poll");
     await port.acknowledge({ report: renderReport() });
     const final = h.of("play-render-done").at(-1);
@@ -2803,7 +2957,7 @@ async function directActive(options = {}) {
   const rpcId = await attachCommands(h, port);
   assert.deepEqual(h.of("play-reply").find(value => value.rpcId === rpcId).result,
     { kind: "audio-ready", commandsPending: false });
-  await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: options.activationFrame ?? START });
+  await h.rpc("play-activate", { hostNs: options.activationHost ?? ORIGIN, startFrame: options.activationFrame ?? START });
   return { h, port, game: h.replays[0] ?? h.games[0] };
 }
 
@@ -2817,7 +2971,7 @@ test("actual direct polls fairly retire reports between retained command ACK and
     const first = batch(9007199254740993n), waiting = batch(9007199254740994n), fed = batch(9007199254740995n);
     const { h, port, game } = await directActive({
       ...(mode === "replay" ? { startRequest: replayRequest(replayFile().file) } : {}),
-      observeOutput(owner) { owner.batches.push(++outputs === 1 ? first : fed); return false; },
+      admitOutput(owner) { owner.batches.push(++outputs === 1 ? first : fed); },
     });
     await h.send(directObservation());
     assert.deepEqual(port.posts, [{ kind: "poll", generation: 7, sequence: 1 }]);
@@ -2879,16 +3033,22 @@ test("awaited reports preserve original presentation pairs and apply to the curr
   const output = game.calls.find(row => row[0] === "output");
   assert.deepEqual(Array.from(output[1]), Array.from(actual.words)); assert.equal(output[2], point.output);
   assert.deepEqual(game.calls.find(row => row[0] === "presentation"), ["presentation", point.output, point.host]);
-  assert.ok(game.calls.findIndex(row => row[0] === "advance") < game.calls.findIndex(row => row[0] === "output"));
+  assert.ok(game.calls.findIndex(row => row[0] === "close") < game.calls.findIndex(row => row[0] === "output"));
   const reply = h.of("play-render-done").at(-1);
-  assert.equal(reply.observedTick, 1); assert.equal(reply.commandsPending, true); assert.equal(reply.completed, false);
+  assert.equal(reply.observedTick, 1); assert.equal(reply.commandsPending, false); assert.equal(reply.completed, false);
+  assert.equal(reply.pendingInputs, 1, "first anchor holds queued input without manufacturing commands");
+  assert.equal(game.processedInput.length, 0);
+  await h.send(directObservation({ renderId: 2, presentedNs: point.output + 10n, presentedHostNs: point.host + 10n }));
+  await port.acknowledge({ report: renderReport({ cursor: 9007199254746257n }) });
+  assert.equal(game.processedInput.length, 1);
+  assert.equal(h.of("play-render-done").at(-1).commandsPending, true);
   assert.equal(port.posts.at(-1).kind, "commands"); assert.deepEqual(port.posts.at(-1).commands, next.commands);
   assert.equal(game.calls.filter(row => row[0] === "ack").length, 0);
   await port.acknowledge();
   complete = true;
-  await h.send(directObservation({ renderId: 2, presentedNs: point.output + 1n, presentedHostNs: point.host + 10n }));
-  assert.equal(h.of("play-render-done").length, 1);
-  await port.acknowledge({ report: renderReport({ cursor: 9007199254746257n }) });
+  await h.send(directObservation({ renderId: 3, presentedNs: point.output + 20n, presentedHostNs: point.host + 20n }));
+  assert.equal(h.of("play-render-done").length, 2);
+  await port.acknowledge({ report: renderReport({ cursor: 9007199254746514n }) });
   const final = h.of("play-render-done").at(-1);
   assert.equal(final.completed, true); assert.equal(final.commandsPending, false); assert.equal(final.observedTick, 1);
   await h.send({ kind: "play-stop", playId: 7, completed: true });
@@ -2898,15 +3058,15 @@ test("awaited reports preserve original presentation pairs and apply to the curr
 test("direct report overlap, external payloads, bad evidence and cancelled polling fence without late writes or core ACKs", async () => {
   for (const scenario of ["overlap", "duplicate", "stale", "external", "pair", "shape", "semantic", "rust",
     "timeout", "terminal", "cancel", "pending-natural"]) {
-    const { h, port, game } = await directActive({ observeOutput() {
-      if (scenario === "rust") throw new Error("actual Rust output evidence refusal");
-      return scenario === "pending-natural";
-    } });
+    const { h, port, game } = await directActive({
+      admitOutput() { if (scenario === "rust") throw new Error("actual Rust output evidence refusal"); },
+      observeOutput() { return scenario === "pending-natural"; },
+    });
     const stale = port.onmessage;
     if (scenario === "external") await h.send(directObservation({ report: undefined }));
     else if (scenario === "pair") await h.send(directObservation({ presentedNs: 1n }));
     else {
-      await h.send(directObservation());
+      await h.send(directObservation(scenario === "pending-natural" ? { presentedNs: 0n, presentedHostNs: ORIGIN } : {}));
       assert.equal(port.posts.at(-1).kind, "poll");
       if (scenario === "overlap") await h.send(directObservation({ renderId: 2 }));
       else if (scenario === "duplicate") await h.send(directObservation());
@@ -2939,8 +3099,306 @@ test("direct report overlap, external payloads, bad evidence and cancelled polli
   }
 });
 
+// Live authority fixtures use small exact clocks, separate from long-width wire tests.
+const AUDIO_ARM = 1000000000n;
+const AUDIO_START = 48000n;
+async function authorityActive(extra = {}) {
+  return active({ manualClock: true, activationHost: AUDIO_ARM, activationFrame: AUDIO_START, ...extra });
+}
+function authorityStep(fields = {}) {
+  return step({ watermark: 1200000000n, nowNs: 1200000000n, audioNs: 220000000n, ...fields });
+}
+async function authorityRender(h, id, output, host) {
+  await h.send({ kind: "play-render", playId: 7, renderId: id,
+    report: renderReport({ start: AUDIO_START, cursor: AUDIO_START + BigInt(id) * 257n + 129n }),
+    presentedNs: output, presentedHostNs: host });
+}
+async function legacyWitness(h, id, output, host) {
+  await h.send({ kind: "play-render", playId: 7, renderId: id,
+    report: renderReport(), presentedNs: output, presentedHostNs: host });
+}
+
+test("live acquisition and render reordering preserves exact occurrence and accepted prefix", async () => {
+  const histories = [];
+  for (const renderFirst of [false, true]) {
+    const h = await authorityActive();
+    const game = h.games[0];
+    h.setWindowNowNs(1200000000n);
+    const request = authorityStep({ events: [{ hostNs: 1150000000n, key: 2, down: true, sequence: 7n }] });
+    if (!renderFirst) {
+      await h.send(request);
+      assert.equal(game.pending_inputs(), 1);
+      assert.equal(game.processedInput.length, 0, "submission and moving HOST do not judge");
+      assert.equal(h.of("play-step-done").at(-1).pendingInputs, 1);
+    }
+    await authorityRender(h, 1, 100000000n, 1100000000n);
+    assert.equal(game.processedInput.length, 0, "one real anchor is insufficient");
+    await authorityRender(h, 2, 200000000n, 1200000000n);
+    if (renderFirst) await h.send(request);
+    assert.equal(game.pending_inputs(), 0);
+    assert.equal(game.processedInput.length, 1);
+    assert.equal(game.processedInput[0].host, 1150000000n);
+    assert.equal(game.processedInput[0].output, 150000000n);
+    assert.equal(game.logicalOutput, 200000000n);
+    histories.push(game.processedInput.map(event => [event.host, event.output, event.key, event.sequence]));
+    await h.send({ kind: "play-stop", playId: 7 });
+  }
+  assert.deepEqual(histories[0], histories[1]);
+});
+
+test("null-prefix chunks accept earlier events from another genuine source and closed prefixes refuse late input", async () => {
+  const histories = [];
+  for (const split of [false, true]) {
+    const h = await authorityActive({ startRequest: startRequest({ inputMode: "physical-contact" }) });
+    const game = h.games[0]; h.setWindowNowNs(1200000000n);
+    const key = { hostNs: 1180000000n, key: 2, down: true, sequence: 1n };
+    const contact = touchEvent({ hostNs: 1150000000n, sequence: 2n });
+    if (split) {
+      await h.send(authorityStep({ tickId: 1, watermark: null, events: [key] }));
+      await h.send(authorityStep({ tickId: 2, watermark: null, events: [contact] }));
+      assert.equal(h.of("play-error").length, 0, "another source can arrive earlier before a prefix closes");
+      assert.equal(game.closedPrefix, null);
+      await h.send(authorityStep({ tickId: 3 }));
+    } else await h.send(authorityStep({ events: [key, contact] }));
+    assert.equal(game.pending_inputs(), 2);
+    await authorityRender(h, 1, 100000000n, 1100000000n);
+    await authorityRender(h, 2, 200000000n, 1200000000n);
+    assert.deepEqual(game.processedInput.map(event => event.host), [1150000000n, 1180000000n]);
+    histories.push(game.processedInput.map(event => [event.host, event.source, event.output]));
+    const before = game.processedInput.length;
+    await h.send(authorityStep({ tickId: split ? 4 : 2,
+      events: [touchEvent({ hostNs: 1170000000n, sequence: 3n })] }));
+    assert.equal(h.of("play-error").length, 1, "an already closed actual prefix still rejects late input");
+    assert.equal(game.processedInput.length, before);
+  }
+  assert.deepEqual(histories[0], histories[1]);
+});
+
+test("generated cursor and lookahead provide scheduling while missing and stale output hold input", async () => {
+  const h = await authorityActive();
+  const game = h.games[0];
+  h.setWindowNowNs(1200000000n);
+  const raw = authorityStep({ events: [{ hostNs: 1150000000n, key: 2, down: true, sequence: 1n }],
+    contextFrame: 96000n });
+  delete raw.audioNs;
+  await h.send(raw);
+  assert.equal(h.of("play-error").length, 0);
+  assert.equal(game.calls.filter(row => row[0] === "service").at(-1)[2], 1020000000n);
+  assert.equal(game.processedInput.length, 0);
+  await h.send({ kind: "play-stop", playId: 7 });
+  const second = await authorityActive();
+  const owner = second.games[0];
+  second.setWindowNowNs(1200000000n);
+  await second.send(authorityStep({ events: [{ hostNs: 1150000000n, key: 2, down: true, sequence: 1n }] }));
+  await authorityRender(second, 1, null, null);
+  assert.equal(owner.processedInput.length, 0);
+  assert.equal(owner.logicalOutput, undefined);
+  assert.equal(owner.pending_inputs(), 1);
+  assert.equal(second.of("play-render-done").at(-1).completed, false);
+  assert.ok(owner.calls.some(call => call[0] === "service" && call[2] > 0n), "generated credit still services scheduling");
+  await authorityRender(second, 2, 100000000n, 1100000000n);
+  await authorityRender(second, 3, 100000000n, 1150000000n);
+  assert.equal(owner.presentations.length, 1, "repetition is not a new anchor");
+  assert.equal(owner.processedInput.length, 0);
+  second.setWindowNowNs(2200000000n);
+  await second.send(authorityStep({ tickId: 2, watermark: 2200000000n, nowNs: 2200000000n }));
+  assert.equal(owner.processedInput.length, 0);
+  assert.equal(owner.pendingInput.length, 1);
+  assert.match(second.of("play-error").at(-1).message, /clock.*unavailable|unavailable.*clock/i);
+  await second.send({ kind: "play-stop", playId: 7 });
+});
+
+test("fresh Window receipt after awaited Worklet poll retains original pair and input timestamp", async () => {
+  const { h, port, game } = await directActive({ manualClock: true, activationHost: AUDIO_ARM, activationFrame: AUDIO_START });
+  h.setWindowNowNs(1200000000n);
+  await h.send(authorityStep({ events: [{ hostNs: 1150000000n, key: 2, down: true, sequence: 9n }] }));
+  await h.send(rawObservation({ timestamp: { contextTime: 1.1, performanceTime: 1100 }, observedNowMs: 1100 }));
+  h.setWindowNowNs(1500000000n);
+  await port.acknowledge({ report: renderReport({ start: AUDIO_START, cursor: 48386n }) });
+  assert.deepEqual(game.calls.find(row => row[0] === "presentation"), ["presentation", 100000000n, 1100000000n]);
+  assert.equal(game.calls.filter(row => row[0] === "service").at(-1)[1], 1500000000n,
+    "neither request observedNowMs nor Worker-relative origin is the current Window time");
+  assert.equal(game.pendingInput[0].host, 1150000000n);
+  assert.equal(game.pendingInput[0].received, 1200000000n);
+  await h.send({ kind: "play-stop", playId: 7 });
+});
+
+test("unavailable regressing estimates keep history, recover explicitly and do not refresh watchdog", async () => {
+  const h = await authorityActive();
+  const game = h.games[0];
+  h.setWindowNowNs(1200000000n);
+  await authorityRender(h, 1, 100000000n, 1100000000n);
+  await authorityRender(h, 2, 200000000n, 1200000000n);
+  const accepted = game.presentations.map(pair => ({ ...pair }));
+  h.setWindowNowNs(1300000000n);
+  await authorityRender(h, 3, 190000000n, 1300000000n);
+  assert.deepEqual(game.presentations, accepted);
+  assert.deepEqual(h.of("play-presentation-unavailable").at(-1),
+    { kind: "play-presentation-unavailable", playId: 7, reason: "regressing-estimate" });
+  h.setWindowNowNs(1400000000n);
+  await authorityRender(h, 4, 300000000n, 1400000000n);
+  assert.equal(h.of("play-presentation-unavailable").at(-1).reason, null);
+  assert.equal(game.presentations.at(-1).output, 300000000n);
+  h.setWindowNowNs(2399000000n);
+  await authorityRender(h, 5, 300000000n, 2399000000n);
+  assert.equal(h.of("play-error").length, 0);
+  h.setWindowNowNs(2400000000n);
+  await authorityRender(h, 6, 299000000n, 2400000000n);
+  assert.match(h.of("play-error").at(-1).message, /clock.*unavailable|unavailable.*clock/i);
+  assert.equal(game.presentations.at(-1).host, 1400000000n);
+});
+
+test("completion follows held input service and cannot complete an admission-only prefix", async () => {
+  const h = await authorityActive({ observeOutput() { return true; } });
+  const game = h.games[0];
+  h.setWindowNowNs(1200000000n);
+  await h.send(authorityStep({ events: [{ hostNs: 1150000000n, key: 2, down: true, sequence: 1n }] }));
+  await authorityRender(h, 1, 100000000n, 1100000000n);
+  assert.equal(h.of("play-render-done").at(-1).completed, false);
+  await authorityRender(h, 2, 200000000n, 1200000000n);
+  assert.equal(h.of("play-render-done").at(-1).completed, true);
+  const operations = game.calls.map(row => row[0]);
+  const processed = operations.lastIndexOf("processed"), completion = operations.lastIndexOf("completion");
+  assert.ok(operations.lastIndexOf("output") < processed);
+  assert.ok(processed < completion);
+  assert.equal(game.pending_inputs(), 0);
+  await h.send({ kind: "play-stop", playId: 7, completed: true });
+});
+
+test("pending Rust touch prevents page remap after input ACK and keeps acquisition geometry", async () => {
+  const request = localRequest({ keyPairs: new Uint32Array(),
+    localPlanWords: localPlan([[91, 2n], [2, 3n], [88, 4n], [7, 5n], [0xffffffff, 6n]]),
+    hidSetup: hidSetup([3n, 4n, 5n, 6n]) });
+  const h = await authorityActive({ startRequest: request });
+  const game = h.locals[0];
+  h.setWindowNowNs(1200000000n);
+  const original = touchEvent({ hostNs: 1150000000n });
+  await h.send(authorityStep({ events: [original] }));
+  assert.equal(h.of("play-step-done").at(-1).pendingInputs, 1);
+  const before = game.calls.filter(row => row[0] === "local-touch-page").length;
+  assert.match((await h.rpc("play-page", { page: 1 })).error, /pending|input|drain/i);
+  assert.equal(game.calls.filter(row => row[0] === "local-touch-page").length, before);
+  await h.send({ kind: "resize", width: 1920, height: 1080 });
+  await authorityRender(h, 1, 100000000n, 1100000000n);
+  await authorityRender(h, 2, 200000000n, 1200000000n);
+  assert.equal(game.pending_inputs(), 0);
+  assert.deepEqual(game.processedInput[0].bytes, encodeTouchEvent(original));
+  assert.deepEqual(game.processedInput[0].geometry,
+    { cssWidth: original.width, cssHeight: original.height, surfaceWidth: original.surfaceWidth, surfaceHeight: original.surfaceHeight });
+  assert.equal((await h.rpc("play-page", { page: 1 })).result.page, 1);
+  await h.send({ kind: "play-stop", playId: 7 });
+});
+
+test("wrong Window origin and future or malformed complete batches fail before any queue effect", async () => {
+  for (const origin of [undefined, -1n, 1, 9223372036854775808n]) {
+    const h = await catalogWorker();
+    await h.send(startRequest({ windowOriginNs: origin }));
+    assert.equal(h.games.length, 0);
+    assert.equal(h.of("play-error").length, 1);
+  }
+  for (const extra of [
+    { events: [{ hostNs: 1100000000n, key: 2, down: true, sequence: 1n },
+      { hostNs: 1300000000n, key: 3, down: true, sequence: 2n }] },
+    { events: [{ hostNs: 1100000000n, key: 2, down: true, sequence: 1n },
+      { hostNs: 1150000000n, key: 3, down: "yes", sequence: 2n }] },
+  ]) {
+    const h = await authorityActive();
+    const game = h.games[0]; h.setWindowNowNs(1200000000n);
+    await h.send(authorityStep(extra));
+    assert.equal(h.of("play-error").length, 1);
+    assert.equal(game.pendingInput.length, 0);
+    assert.equal(game.processedInput.length, 0);
+    assert.equal(game.closedPrefix, null);
+    assert.equal(game.calls.filter(row => ["input", "close", "service"].includes(row[0])).length, 0);
+  }
+});
+
+test("same-Window acquisition envelope ahead of reconstructed service time retains original input until actual coverage", async () => {
+  const h = await authorityActive({ startRequest: startRequest({ inputMode: "physical-contact" }) });
+  const game = h.games[0];
+  const serviceNow = 1200000000n;
+  const envelope = 1200125000n;
+  h.setWindowNowNs(serviceNow);
+  await authorityRender(h, 1, 100000000n, 1100000000n);
+  await authorityRender(h, 2, 200000000n, serviceNow);
+  const original = touchEvent({ hostNs: envelope, sequence: 18446744073709551615n });
+  const expectedPacket = encodeTouchEvent(original);
+  await h.send(authorityStep({ nowNs: envelope, watermark: envelope, events: [original] }));
+  assert.equal(h.of("play-error").length, 0);
+  assert.equal(game.pendingInput.length, 1);
+  assert.equal(game.pendingInput[0].host, envelope);
+  assert.equal(game.pendingInput[0].received, envelope, "merger admission uses the same-Window acquisition receipt");
+  assert.deepEqual(game.pendingInput[0].bytes, expectedPacket);
+  assert.equal(game.lastService.now, serviceNow, "the acquisition receipt cannot clamp or replace fresh service time");
+  assert.equal(game.processedInput.length, 0);
+  assert.equal(game.logicalOutput, undefined);
+  assert.equal(h.of("play-step-done").at(-1).pendingInputs, 1);
+  h.setWindowNowNs(envelope);
+  await h.send(authorityStep({ tickId: 2, nowNs: envelope, watermark: envelope }));
+  assert.equal(game.processedInput.length, 0, "timer catch-up alone cannot grant an unobserved audio position");
+  h.setWindowNowNs(1300000000n);
+  await authorityRender(h, 3, 300000000n, 1300000000n);
+  assert.equal(h.of("play-error").length, 0);
+  assert.equal(game.pending_inputs(), 0);
+  assert.equal(game.processedInput.length, 1);
+  assert.equal(game.processedInput[0].host, envelope);
+  assert.equal(game.processedInput[0].received, envelope);
+  assert.equal(game.processedInput[0].output, 200125000n);
+  assert.deepEqual(game.processedInput[0].bytes, expectedPacket, "canonical original/native provenance is unchanged after holding");
+  await h.send({ kind: "play-stop", playId: 7 });
+});
+
+test("future acquired prefix alone cannot advance presentation until fresh service time covers it", async () => {
+  const h = await authorityActive();
+  const game = h.games[0];
+  const envelope = 1200125000n;
+  h.setWindowNowNs(1200000000n);
+  await authorityRender(h, 1, 100000000n, 1100000000n);
+  await authorityRender(h, 2, 200000000n, 1200000000n);
+  await h.send(authorityStep({ nowNs: envelope, watermark: envelope }));
+  assert.equal(h.of("play-error").length, 0);
+  assert.equal(game.closedPrefix, envelope);
+  assert.equal(game.pending_inputs(), 0);
+  assert.equal(game.logicalOutput, undefined, "a complete acquired prefix still cannot substitute for current service evidence");
+  h.setWindowNowNs(envelope);
+  await h.send(authorityStep({ tickId: 2, nowNs: envelope, watermark: envelope }));
+  assert.equal(game.logicalOutput, 200000000n, "only the previously accepted actual presentation becomes eligible");
+  await h.send({ kind: "play-stop", playId: 7 });
+});
+
+test("one Any-source group retains its original member and accepts genuine automatic device identities", async () => {
+  const h = await authorityActive({ startRequest: roomStartRequest({ windowOriginNs: 10000000000n }) });
+  const game = h.locals[0];
+  h.setWindowNowNs(1200000000n);
+  await h.send(authorityStep({ events: [{ hostNs: 1150000000n, key: 2, down: true, sequence: 1n }] }));
+  assert.deepEqual(game.memberIds, [0xffffffff]);
+  assert.equal(game.pending_inputs(), 1);
+  assert.equal(game.pendingInput[0].source, 1n);
+  assert.equal(h.of("play-error").length, 0);
+  await h.send({ kind: "play-stop", playId: 7 });
+});
+
+test("live startup carries selected long numeric latency and does not time out before future arm", async () => {
+  const armed = 20000000000n;
+  const h = await authorityActive({ activationHost: armed,
+    startRequest: startRequest({ latencyHint: 60 }) });
+  const game = h.games[0];
+  h.setWindowNowNs(1000000000n);
+  await h.send(authorityStep({ tickId: 1, nowNs: 1000000000n, watermark: null }));
+  assert.equal(h.of("play-error").length, 0);
+  assert.equal(game.processedInput.length, 0);
+  h.setWindowNowNs(89999000000n);
+  await h.send(authorityStep({ tickId: 2, nowNs: 89999000000n, watermark: 89999000000n }));
+  assert.equal(h.of("play-error").length, 0, "selected 60s latency grants 70s startup after arm");
+  h.setWindowNowNs(90000000000n);
+  await h.send(authorityStep({ tickId: 3, nowNs: 90000000000n, watermark: 90000000000n }));
+  assert.match(h.of("play-error").at(-1).message, /clock.*unavailable|unavailable.*clock/i);
+  assert.equal(game.processedInput.length, 0);
+});
+
 function rawStep(fields = {}) {
-  return { kind: "play-step", playId: 7, tickId: 1, events: [], watermark: ORIGIN, contextFrame: 48000n, ...fields };
+  return { kind: "play-step", playId: 7, tickId: 1, events: [], watermark: ORIGIN, contextFrame: 48000n,
+    nowNs: fields.watermark ?? ORIGIN, ...fields };
 }
 function rawObservation(fields = {}) {
   return { kind: "play-render", playId: 7, renderId: 1, timestamp: null, observedNowMs: 1000, ...fields };
@@ -2957,8 +3415,8 @@ test("Worker projects raw frame and presentation observations without replacing 
   await h.send(rawStep({ contextFrame: armed + 4800n,
     events: [{ hostNs: ORIGIN + 7n, key: 2, down: true, sequence: 9007199254740993n }], watermark: ORIGIN + 9n }));
   assert.deepEqual(game.calls.find(row => row[0] === "input"),
-    ["input", ORIGIN + 7n, 2, true, 9007199254740993n, 120000000n]);
-  assert.deepEqual(game.calls.find(row => row[0] === "advance"), ["advance", ORIGIN + 9n, 120000000n]);
+    ["input", ORIGIN + 7n, 2, true, 9007199254740993n, h.acquisitionNowNs()]);
+  assert.deepEqual(game.calls.find(row => row[0] === "close"), ["close", ORIGIN + 9n]);
   assert.equal(h.of("play-step-done").at(-1).commandsPending, true, "the in-flight report has not probed new core work yet");
   assert.equal(game.calls.filter(row => row[0] === "output").length, 0);
   await port.acknowledge({ report: renderReport({ start: armed }) });
@@ -2968,7 +3426,7 @@ test("Worker projects raw frame and presentation observations without replacing 
   assert.equal(h.of("play-render-done").at(-1).commandsPending, false);
   let renderId = 1;
   for (const [timestamp, now, output, host] of [
-    [{ contextTime: 604800.25, performanceTime: 9007199254.875 }, 9007199255, 125000000n, 9007199254875000n],
+    [{ contextTime: 604800.25, performanceTime: 9007199254.875 }, 9007199255, null, null],
     [{ contextTime: 604800.2509765625, performanceTime: 9007199254.75 }, 9007199255, null, null],
     // Equal output above must not retain its newer host coordinate as fresh progress.
     [{ contextTime: 604800.2509765625, performanceTime: 9007199254.8125 }, 9007199255, 125976562n, 9007199254812500n],
@@ -2976,7 +3434,6 @@ test("Worker projects raw frame and presentation observations without replacing 
     [{ contextTime: 604800.251953125, performanceTime: 9007199254.75 }, 9007199255, null, null],
     [{ contextTime: 604800.251953125, performanceTime: 9007199254.8125 }, 9007199255, null, null],
     [{ contextTime: 604800.251953125, performanceTime: 9007199255 }, 9007199255, 126953125n, 9007199255000000n],
-    [{ contextTime: 604800.2529296875, performanceTime: 9007199255 }, 9007200255.125, null, null],
     [{ contextTime: 604800.2529296875, performanceTime: 9007199256 }, 9007199255, null, null],
     [{ contextTime: 604800, performanceTime: 9007199255 }, 9007199255, null, null],
     [{ contextTime: 0, performanceTime: 0 }, 9007199255, null, null],
@@ -2991,8 +3448,12 @@ test("Worker projects raw frame and presentation observations without replacing 
     if (output !== null) assert.deepEqual(presented.at(-1), ["presentation", output, host]);
     assert.equal(h.of("play-render-done").at(-1).observedTick, 1);
   }
-  assert.equal(h.of("play-error").length, 0, "the Worker clock throws if any projection tries to acquire it");
-  await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+  assert.equal(h.of("play-error").length, 0, "unavailable estimates retain accepted history within its finite lifetime");
+  await h.send(rawObservation({ renderId: ++renderId,
+    timestamp: { contextTime: 604800.2529296875, performanceTime: 9007199255 }, observedNowMs: 9007200255.125 }));
+  await port.acknowledge({ report: renderReport({ start: armed }) });
+  assert.match(h.of("play-error").at(-1).message, /clock.*unavailable|unavailable.*clock/i);
+  assertReleased(h);
 });
 
 test("malformed or mixed raw observations refuse before input mutation or report polling and cancelled raw reads cannot revive owners", async () => {
@@ -3013,7 +3474,7 @@ test("malformed or mixed raw observations refuse before input mutation or report
     const { h, port, game } = await directActive({ activationFrame: 48000n });
     await h.send(request);
     assert.equal(h.of("play-error").length, 1); assert.equal(port.posts.length, 0);
-    assert.deepEqual(game.calls.filter(row => ["input", "advance", "output", "presentation", "ack"].includes(row[0])), []);
+    assert.deepEqual(game.calls.filter(row => ["input", "close", "output", "presentation", "ack"].includes(row[0])), []);
     assertReleased(h);
   }
   for (const mode of ["live", "replay"]) {
@@ -3116,19 +3577,24 @@ test("comparison errors hide the HUD once and remain separate from actual local 
   }
   const selected = replayFile();
   const h = await active({ allowNetworkClock: true, freeError: "actual free failure",
-    input() { throw new Error("actual committed local input failure"); },
+    service(game) { if (game.processedInput.length === 1) throw new Error("actual committed local input failure"); },
     startRequest: startRequest({ recordReplay: true,
       opponents: [{ file: selected.file, sourceKey: "file:1", own: false, label: "prefix" }] }) });
   await h.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: true, sequence: 1n, audioNs: 100000000n }] }));
+  assert.equal(h.games[0].processedInput.length, 0);
+  await legacyWitness(h, 1, 100n, ORIGIN);
+  await legacyWitness(h, 2, 101n, ORIGIN + 1n);
   const failed = h.of("play-error").at(-1), game = h.games[0];
+  assert.equal(game.processedInput.length, 1, "the error follows actual processing rather than admission");
   assert.match(failed.message, /actual committed local input failure/);
   assert.equal(failed.released, false); assert.equal(failed.savedOpponents.error, null);
   assert.equal(failed.savedOpponents.opponents[0].label, "prefix");
-  assert.deepEqual(game.disposals, ["opponents", "stop", "take", "free"]);
-  assert.equal(game.savedReads, 1); assert.equal(failed.replayComplete, false);
+  assert.deepEqual(game.disposals, ["opponents", "opponents", "stop", "take", "free"]);
+  assert.equal(game.savedReads, 2, "initial HUD read and fresh final accepted-prefix capture remain separate");
+  assert.equal(failed.replayComplete, false);
   assert.equal(failed.replayError, null); assertReleased(h);
   await h.send(step({ tickId: 2 }));
-  assert.equal(game.savedReads, 1); assert.equal(h.of("play-error").length, 1);
+  assert.equal(game.savedReads, 2); assert.equal(h.of("play-error").length, 1);
 });
 
 const POINTER_MOUSE = 0xfedcba9876543210n;
@@ -3184,8 +3650,8 @@ test("Worker snapshots pointer namespaces and sends original mixed acquisitions 
     await h.send(step({ events, watermark: ORIGIN + 3n, audioNs: 100000003n }));
     const game = h.games[0], calls = inputCalls(game);
     assert.deepEqual(calls.map(call => call[0]), inputMode === "physical-contact"
-      ? ["blob", "blob", "blob", "blob", "hid", "touch", "blob", "advance"]
-      : ["blob", "blob", "blob", "blob", "hid", "blob", "advance"]);
+      ? ["blob", "blob", "blob", "blob", "hid", "touch", "blob", "close"]
+      : ["blob", "blob", "blob", "blob", "hid", "blob", "close"]);
     const expected = [
       [77, 3, POINTER_MOUSE, ORIGIN, 18446744073709551614n, 0x574d4f55, 0x12345678, 0],
       [69, 0, POINTER_MOUSE, ORIGIN, 18446744073709551615n, 0x574d4f55, 0xffffffff, 1],
@@ -3205,7 +3671,8 @@ test("Worker snapshots pointer namespaces and sends original mixed acquisitions 
     assert.equal(calls[1][1][68], 2); assert.equal(calls[2][1][68], 0);
     assert.equal(new DataView(calls[3][1].buffer).getFloat32(68, true), 1.5);
     assert.equal(new DataView(calls[3][1].buffer).getFloat32(72, true), -2.25); assert.equal(calls[3][1][76], 0);
-    assert.ok(calls.every(call => call.at(-1) === 100000003n));
+    assert.ok(calls.filter(call => call[0] !== "close").every(call => call.at(-1) === h.acquisitionNowNs()));
+    assert.equal(game.lastService.audio, 100000003n);
     assert.equal(h.of("play-step-done").at(-1).hits, SCORE.hits, "scripted binding scores do not claim position-based judgment");
     await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
   }
@@ -3233,7 +3700,7 @@ test("exact local pointer rosters retain player-qualified rows and exclude unass
   assert.equal((await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START })).result, null);
   await h.send(step({ events: [pointerEvent(), pointerButton({ source: POINTER_PEN, pointerType: "pen", control: 32, sequence: 0n })] }));
   const game = h.locals[0];
-  assert.deepEqual(inputCalls(game).map(call => call[0]), ["blob", "blob", "advance"]);
+  assert.deepEqual(inputCalls(game).map(call => call[0]), ["blob", "blob", "close"]);
   assert.deepEqual(inputCalls(game).slice(0, 2).map(call => new DataView(call[1].buffer).getBigUint64(7, true)), [POINTER_MOUSE, POINTER_PEN]);
   const before = inputCalls(game).length;
   await h.send(step({ tickId: 2, events: [pointerButton(), pointerButton({ source: 3n, sequence: 0n })] }));
@@ -3311,7 +3778,7 @@ test("pointer batches keep atomic validation, original source order, fanout and 
   const prior = await pointerActive();
   await prior.send(step({ events: [pointerEvent({ hostNs: ORIGIN - 1n })] }));
   assert.equal(prior.of("play-step-done").at(-1).preOriginInputs, 1);
-  assert.deepEqual(inputCalls(prior.games[0]).map(call => call[0]), ["advance"]);
+  assert.deepEqual(inputCalls(prior.games[0]).map(call => call[0]), ["close"]);
   await prior.send(step({ tickId: 2, events: [pointerButton({ sequence: 2n })], watermark: ORIGIN + 10n }));
   const committedCalls = inputCalls(prior.games[0]).length;
   await prior.send(step({ tickId: 3, events: [pointerEvent({ sequence: 3n, hostNs: ORIGIN + 5n })], watermark: ORIGIN + 10n }));
@@ -3401,7 +3868,7 @@ test("Worker snapshots exact Gamepad native bindings and sends mixed physical fa
   const audioNs = 9007199254741222n;
   await h.send(step({ events: [key, acquired, touch, hid], watermark: GAMEPAD_HOST + 3n, audioNs }));
   const calls = inputCalls(game);
-  assert.deepEqual(calls.map(call => call[0]), ["blob", "blob", "blob", "blob", "blob", "touch", "hid", "advance"]);
+  assert.deepEqual(calls.map(call => call[0]), ["blob", "blob", "blob", "blob", "blob", "touch", "hid", "close"]);
   assert.deepEqual(Array.from(calls[0][1]), Array.from(encodeKeyboardEvent(key)));
   const gamepadPackets = calls.slice(1, 5).map(call => call[1]);
   assert.deepEqual(gamepadPackets.map(bytes => new DataView(bytes.buffer).getUint32(64, true)), [0, 0x10000, 0x20000, 0x30000]);
@@ -3424,7 +3891,8 @@ test("Worker snapshots exact Gamepad native bindings and sends mixed physical fa
   assert.equal(new DataView(gamepadPackets[2].buffer).getFloat32(68, true), 0.5);
   assert.deepEqual(Array.from(calls[5][1]), Array.from(encodeTouchEvent(touch)));
   assert.deepEqual(Array.from(calls[6][1]), Array.from(encodeRawHidEvent(hid)));
-  assert.ok(calls.every(call => call.at(-1) === audioNs));
+  assert.ok(calls.filter(call => call[0] !== "close").every(call => call.at(-1) === h.acquisitionNowNs()));
+  assert.equal(game.lastService.audio, audioNs);
   assert.equal(h.of("play-step-done").at(-1).hits, SCORE.hits, "the routing fixture does not manufacture judge results");
   await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
 
@@ -3432,7 +3900,7 @@ test("Worker snapshots exact Gamepad native bindings and sends mixed physical fa
   assert.deepEqual(only.of("play-reply")[0].result.gamepadSources, [GAMEPAD_SOURCE]);
   assert.equal(only.physicalConstructions[0].args[5].length, 14, "pressed Gamepad bindings alone cover the actual prepared lanes");
   await only.send(step({ events: [gamepadEvent()], watermark: GAMEPAD_HOST }));
-  assert.deepEqual(inputCalls(only.games[0]).map(call => call[0]), ["blob", "advance"]);
+  assert.deepEqual(inputCalls(only.games[0]).map(call => call[0]), ["blob", "close"]);
   await only.send({ kind: "play-stop", playId: 7 }); assertReleased(only);
   const ordinary = await started({ startRequest: startRequest({ inputMode: "physical" }) });
   assert.equal(Object.hasOwn(ordinary.of("play-reply")[0].result, "gamepadSources"), false);
@@ -3458,7 +3926,7 @@ test("touched-only numeric and file profiles cover prepared lanes and route orig
     const idle = gamepadEvent({ id: "custom pad", mapping: "",
       buttons: [{ value: 1, pressed: true, touched: false }, { value: 1, pressed: true, touched: false }] });
     await h.send(step({ events: [idle], watermark: GAMEPAD_HOST }));
-    assert.deepEqual(inputCalls(h.games[0]).map(call => call[0]), ["advance"]);
+    assert.deepEqual(inputCalls(h.games[0]).map(call => call[0]), ["close"]);
     const sequence = 0x0102030405060708n;
     const down = { ...idle, sequence,
       buttons: [{ value: 0, pressed: false, touched: false }, { value: 0, pressed: false, touched: true }] };
@@ -3467,7 +3935,7 @@ test("touched-only numeric and file profiles cover prepared lanes and route orig
     await h.send(step({ tickId: 4, events: [{ ...idle, sequence: sequence + 2n, timestampMs: 1001, hostNs: 1001000000n }],
       watermark: 1001000000n }));
     const calls = inputCalls(h.games[0]), packets = calls.filter(call => call[0] === "blob").map(call => call[1]);
-    assert.deepEqual(calls.map(call => call[0]), ["advance", "blob", "advance", "advance", "blob", "advance"]);
+    assert.deepEqual(calls.map(call => call[0]), ["close", "blob", "close", "close", "blob", "close"]);
     assert.deepEqual(packets.map(bytes => [bytes.length, bytes[6], new DataView(bytes.buffer).getUint32(64, true), bytes[68]]),
       [[69, 0, 0x30001, 0], [69, 0, 0x30001, 1]]);
     for (const [index, bytes] of packets.entries()) {
@@ -3533,7 +4001,7 @@ test("Worker refuses invalid Gamepad ownership or batches atomically and keeps p
   const before = await gamepadActive();
   const held = gamepadEvent({ timestampMs: 999, hostNs: 999000000n });
   await before.send(step({ events: [held, { ...held, sequence: 2n }], watermark: GAMEPAD_HOST }));
-  assert.deepEqual(inputCalls(before.games[0]).map(call => call[0]), ["advance"]);
+  assert.deepEqual(inputCalls(before.games[0]).map(call => call[0]), ["close"]);
   assert.equal(before.of("play-step-done").at(-1).preOriginInputs, 2, "a pre-origin sample counts once even when it emits no transition");
   await before.send(step({ tickId: 2, events: [gamepadEvent({ sequence: 3n })], watermark: GAMEPAD_HOST }));
   assert.equal(inputCalls(before.games[0]).filter(call => call[0] === "blob").length, 0,
@@ -3550,7 +4018,7 @@ test("Worker refuses invalid Gamepad ownership or batches atomically and keeps p
   await unchanged.send(step({ events: [idle], watermark: 1100000000n }));
   await unchanged.send(step({ tickId: 2, events: [{ ...idle, sequence: 2n }], watermark: 1200000000n }));
   assert.equal(unchanged.of("play-step-done").length, 2);
-  assert.deepEqual(inputCalls(unchanged.games[0]).map(call => call[0]), ["advance", "advance"]);
+  assert.deepEqual(inputCalls(unchanged.games[0]).map(call => call[0]), ["close", "close"]);
   await unchanged.send(step({ tickId: 3, events: [gamepadEvent({ sequence: 3n })], watermark: 1200000000n }));
   assert.equal(inputCalls(unchanged.games[0]).length, 2, "a newly changed old sample is refused rather than moved to the latest watermark");
   assertReleased(unchanged);
@@ -3609,7 +4077,7 @@ test("automatic Gamepad device setup retains real identities and Worker orders d
   const hid = hidEvent({ source: 3n, hostNs: 1001000000n, sequence: 0n });
   await h.send(step({ events: [key, acquired, touch, hid], watermark: 1004000000n }));
   const calls = inputCalls(h.games[0]);
-  assert.deepEqual(calls.map(call => call[0]), ["blob", "hid", "touch", "blob", "advance"]);
+  assert.deepEqual(calls.map(call => call[0]), ["blob", "hid", "touch", "blob", "close"]);
   assert.deepEqual(calls.slice(0, 4).map(call => new DataView(call[1].buffer).getBigUint64(7, true)), [GAMEPAD_SOURCE, 3n, 2n, 1n]);
   assert.deepEqual(calls.slice(0, 4).map(call => new DataView(call[1].buffer).getBigUint64(27, true)), [2n, 0n, 9n, 100n]);
   assert.deepEqual(calls.slice(0, 4).map(call => new DataView(call[1].buffer).getBigInt64(15, true)),
@@ -3769,7 +4237,7 @@ function hidEvent(fields = {}) {
     reportId: 9, data: Uint8Array.from([9, 255, 0]), ...fields };
 }
 function inputCalls(game) {
-  return game.calls.filter(call => ["input", "blob", "touch", "hid", "advance"].includes(call[0]));
+  return game.calls.filter(call => ["input", "blob", "touch", "hid", "close"].includes(call[0]));
 }
 
 function controllerProfile(acquire, suppliedBytes) {
@@ -3971,17 +4439,17 @@ test("mixed keyboard contact and numbered or zero-ID HID inputs use the actual c
   const up = touchEvent({ hostNs: ORIGIN + 4n, sequence: sequence + 4n, phase: 2, pressure: null });
   await h.send(step({ events: [key, down, numbered, zero, up], watermark: ORIGIN + 5n, audioNs: 9007199254741222n }));
   const calls = inputCalls(h.games[0]);
-  assert.deepEqual(calls.map(call => call[0]), ["blob", "touch", "hid", "hid", "touch", "advance"]);
+  assert.deepEqual(calls.map(call => call[0]), ["blob", "touch", "hid", "hid", "touch", "close"]);
   for (const [index, encoded] of [[0, encodeKeyboardEvent(key)], [1, encodeTouchEvent(down)], [2, encodeRawHidEvent(numbered)], [3, encodeRawHidEvent(zero)], [4, encodeTouchEvent(up)]]) {
     assert.deepEqual(Array.from(calls[index][1]), Array.from(encoded));
-    assert.equal(calls[index].at(-1), 9007199254741222n);
+    assert.equal(calls[index].at(-1), h.acquisitionNowNs());
   }
-  assert.deepEqual(calls[1].slice(2), [480, 360, 960, 720, 9007199254741222n]);
+  assert.deepEqual(calls[1].slice(2), [480, 360, 960, 720, h.acquisitionNowNs()]);
   assert.equal(new DataView(calls[2][1].buffer).getBigUint64(7, true), HID_SOURCE);
   assert.deepEqual(Array.from(calls[2][1].slice(69)), [9, 255, 0], "a payload byte equal to report ID remains payload");
   assert.equal(calls[3][1].length, 68); assert.equal(calls[3][1][59], 0);
   backing.fill(0); assert.deepEqual(Array.from(calls[2][1].slice(69)), [9, 255, 0]);
-  assert.deepEqual(calls[5], ["advance", ORIGIN + 5n, 9007199254741222n]);
+  assert.deepEqual(calls[5], ["close", ORIGIN + 5n]);
   assert.equal(h.of("play-step-done")[0].tickId, 1);
   await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
 });
@@ -4020,7 +4488,7 @@ test("pre-origin HID remains validated and zero-transition acquisitions advance 
   const zeroTransition = hidEvent({ sequence: 1n, data: Uint8Array.from([0]) });
   await h.send(step({ events: [before, zeroTransition], watermark: ORIGIN + 2n }));
   const calls = inputCalls(h.games[0]);
-  assert.deepEqual(calls.map(call => call[0]), ["hid", "advance"]);
+  assert.deepEqual(calls.map(call => call[0]), ["hid", "close"]);
   assert.deepEqual(Array.from(calls[0][1]), Array.from(encodeRawHidEvent(zeroTransition)));
   assert.equal(h.of("play-step-done")[0].preOriginInputs, 1);
   assert.equal(h.of("play-step-done")[0].hits, SCORE.hits, "the Worker never fabricates a key or a hit for a raw acquisition");
@@ -4070,7 +4538,7 @@ test("contact mode configures actual geometry before capture and forwards mixed 
     const contacts = game.calls.filter(call => call[0] === "touch");
     assert.equal(contacts.length, 2);
     assert.deepEqual(contacts.map(call => Array.from(call[1])), [down, up].map(event => Array.from(encodeTouchEvent(event))));
-    assert.deepEqual(contacts.map(call => call.slice(2)), [[480, 360, 960, 720, 100000000n], [480, 360, 960, 720, 100000000n]]);
+    assert.deepEqual(contacts.map(call => call.slice(2)), [[480, 360, 960, 720, h.acquisitionNowNs()], [480, 360, 960, 720, h.acquisitionNowNs()]]);
     assert.equal(game.calls.filter(call => call[0] === "input").length, 0);
     assert.equal(h.of("play-step-done").at(-1).tickId, 1);
     await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
@@ -4100,9 +4568,9 @@ test("touch surface snapshots reach the shared binding with original bytes after
     const contacts = inputCalls(game).filter(call => call[0] === "touch");
     assert.deepEqual(contacts.map(call => call[1]), inputs.map(encodeTouchEvent));
     assert.deepEqual(contacts.map(call => call.slice(2)), [
-      [1280, 720, 2560, 1440, 9007199254741222n],
-      [1000, 1000, 1001, 1001, 9007199254741222n],
-      [1280, 720, 1280, 720, 9007199254741222n],
+      [1280, 720, 2560, 1440, h.acquisitionNowNs()],
+      [1000, 1000, 1001, 1001, h.acquisitionNowNs()],
+      [1280, 720, 1280, 720, h.acquisitionNowNs()],
     ]);
     assert.equal(h.of("play-step-done").length, 1); assert.equal(h.of("play-error").length, 0);
     assert.equal(h.views[0].extents.at(-1)[0], 1920);
@@ -4173,19 +4641,19 @@ test("mixed touch batches preflight all packets and preserve a committed binding
     const h = await active({ startRequest: startRequest({ inputMode: "physical-contact" }) });
     const key = { hostNs: ORIGIN - 1n, key: 2, down: true, sequence: 0n };
     await h.send(step({ events: [key, bad] }));
-    assert.equal(h.games[0].calls.filter(call => ["blob", "touch", "input", "advance"].includes(call[0])).length, 0);
+    assert.equal(h.games[0].calls.filter(call => ["blob", "touch", "input", "close"].includes(call[0])).length, 0);
     assert.equal(h.of("play-step-done").length, 0);
     assertReleased(h);
   }
   const plain = await active({ startRequest: startRequest({ inputMode: "physical" }) });
   await plain.send(step({ events: [touchEvent()] }));
-  assert.equal(plain.games[0].calls.filter(call => ["blob", "touch", "advance"].includes(call[0])).length, 0);
+  assert.equal(plain.games[0].calls.filter(call => ["blob", "touch", "close"].includes(call[0])).length, 0);
   assertReleased(plain);
   const h = await active({ startRequest: startRequest({ inputMode: "physical-contact" }),
     inputBlobOnSurface(game, bytes) { if (bytes[76] === 1) throw new Error("actual contact binding rejected later input"); } });
   await h.send(step({ events: [touchEvent(), touchEvent({ hostNs: ORIGIN + 1n, sequence: 2n, phase: 1 })], watermark: ORIGIN + 1n }));
   assert.equal(h.games[0].calls.filter(call => call[0] === "touch").length, 2);
-  assert.equal(h.games[0].calls.filter(call => call[0] === "advance").length, 0);
+  assert.equal(h.games[0].calls.filter(call => call[0] === "close").length, 0);
   assert.equal(h.of("play-step-done").length, 0);
   assert.match(h.of("play-error")[0].message, /actual contact binding rejected/);
   assertReleased(h);
@@ -4220,9 +4688,9 @@ test("explicit physical keyboard ownership uses native bindings and canonical bl
     const blobs = game.calls.filter(row => row[0] === "blob");
     assert.equal(blobs.length, 2, "fully validated pre-origin input remains ignored rather than retimestamped");
     assert.deepEqual(blobs.map(row => Array.from(row[1])), [Array.from(encodeKeyboardEvent(down)), Array.from(encodeKeyboardEvent(up))]);
-    assert.deepEqual(blobs.map(row => row[2]), [100000000n, 100000000n]);
+    assert.deepEqual(blobs.map(row => row[2]), [h.acquisitionNowNs(), h.acquisitionNowNs()]);
     assert.equal(game.calls.filter(row => row[0] === "input").length, 0);
-    assert.deepEqual(game.calls.find(row => row[0] === "advance"), ["advance", ORIGIN + 1n, 100000000n]);
+    assert.deepEqual(game.calls.find(row => row[0] === "close"), ["close", ORIGIN + 1n]);
     assert.equal(h.of("play-step-done")[0].preOriginInputs, 1);
     await h.send({ kind: "play-stop", playId: 7 });
     assertReleased(h);
@@ -4274,7 +4742,7 @@ test("physical capability and whole-batch admission fail before consumption whil
     { hostNs: ORIGIN, key: 2, down: true, sequence: 1n },
     { hostNs: ORIGIN + 1n, key: 3, down: false, sequence: 18446744073709551616n },
   ], watermark: ORIGIN + 1n }));
-  assert.equal(malformed.games[0].calls.filter(row => ["input", "blob", "advance"].includes(row[0])).length, 0);
+  assert.equal(malformed.games[0].calls.filter(row => ["input", "blob", "close"].includes(row[0])).length, 0);
   assert.equal(malformed.of("play-step-done").length, 0);
   assertReleased(malformed);
   const staged = await active({ startRequest: startRequest({ inputMode: "physical" }) });
@@ -4297,7 +4765,7 @@ test("physical capability and whole-batch admission fail before consumption whil
     { hostNs: ORIGIN + 1n, key: 3, down: true, sequence: 2n },
   ], watermark: ORIGIN + 1n }));
   assert.equal(partial.games[0].calls.filter(row => row[0] === "blob").length, 1);
-  assert.equal(partial.games[0].calls.filter(row => row[0] === "advance").length, 0);
+  assert.equal(partial.games[0].calls.filter(row => row[0] === "close").length, 0);
   assertReleased(partial, { ...SCORE, hits: 18n });
   await partial.send(step({ tickId: 2 }));
   assert.equal(partial.games[0].calls.filter(row => row[0] === "blob").length, 1);
@@ -4337,9 +4805,11 @@ test("finite live ownership uses the consuming static constructor and snapshots 
     assert.equal((await h.rpc("play-sample")).result.kind, "samples-end");
     assert.equal((await h.rpc("play-commands")).result, null);
     await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
-    await h.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: true, sequence: 1n }] }));
-    assert.deepEqual(game.calls.find(row => row[0] === "input"), ["input", ORIGIN, 2, true, 1n, 100000000n]);
-    await h.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 100022676n, presentedHostNs: ORIGIN });
+    await h.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: true, sequence: 1n }], watermark: ORIGIN + 1n }));
+    assert.deepEqual(game.calls.find(row => row[0] === "input"), ["input", ORIGIN, 2, true, 1n, h.acquisitionNowNs()]);
+    await legacyWitness(h, 1, 0n, ORIGIN);
+    assert.equal(h.of("play-render-done").at(-1).completed, false);
+    await h.send({ kind: "play-render", playId: 7, renderId: 2, report: renderReport(), presentedNs: 100022676n, presentedHostNs: ORIGIN + 1n });
     assert.equal(h.of("play-render-done").at(-1).completed, true);
     assert.equal(game.stops, 0, "the returned completion proof still waits for the explicit owner stop");
     await h.send({ kind: "play-stop", playId: 7, completed: true });
@@ -4539,9 +5009,9 @@ test("remapped physical IDs reach the existing constructor and input path while 
     { hostNs: ORIGIN + 2n, key: 101, down: true, sequence: 3n },
   ], watermark: ORIGIN + 2n }));
   assert.deepEqual(game.calls.filter(call => call[0] === "input"), [
-    ["input", ORIGIN, 100, true, 1n, 100000000n],
-    ["input", ORIGIN + 1n, 100, false, 2n, 100000000n],
-    ["input", ORIGIN + 2n, 101, true, 3n, 100000000n],
+    ["input", ORIGIN, 100, true, 1n, h.acquisitionNowNs()],
+    ["input", ORIGIN + 1n, 100, false, 2n, h.acquisitionNowNs()],
+    ["input", ORIGIN + 2n, 101, true, 3n, h.acquisitionNowNs()],
   ]);
   await h.send(step({ tickId: 2, events: [
     { hostNs: ORIGIN + 3n, key: 2, down: true, sequence: 4n },
@@ -4576,10 +5046,10 @@ test("Window input provenance, pre-origin count and actual rendered cursor survi
     { hostNs: ORIGIN + 9n, key: 3, down: true, sequence: 9007199254740994n },
   ];
   await h.send(step({ events, watermark: ORIGIN + 10n, audioNs: 987654321n }));
-  assert.deepEqual(game.calls.filter(value => ["input", "advance"].includes(value[0])), [
-    ["input", ORIGIN, 2, false, 9007199254740994n, 987654321n],
-    ["input", ORIGIN + 9n, 3, true, 9007199254740994n, 987654321n],
-    ["advance", ORIGIN + 10n, 987654321n],
+  assert.deepEqual(game.calls.filter(value => ["input", "close"].includes(value[0])), [
+    ["input", ORIGIN, 2, false, 9007199254740994n, h.acquisitionNowNs()],
+    ["input", ORIGIN + 9n, 3, true, 9007199254740994n, h.acquisitionNowNs()],
+    ["close", ORIGIN + 10n],
   ]);
   assert.equal(h.of("play-step-done")[0].preOriginInputs, 1);
   assert.equal(h.of("play-step-done")[0].hits, SCORE.hits);
@@ -4589,7 +5059,8 @@ test("Window input provenance, pre-origin count and actual rendered cursor survi
   await h.send({ kind: "play-render", playId: 7, renderId: 1, report: unavailable, presentedNs: null, presentedHostNs: null });
   assert.deepEqual(game.calls.find(value => value[0] === "output"), ["output", unavailable.words, null]);
   assert.deepEqual(h.of("play-render-done")[0], { kind: "play-render-done", playId: 7, renderId: 1,
-    completed: false, commandsPending: true, observedTick: 1 });
+    completed: false, commandsPending: true, observedTick: 1, pendingInputs: 2,
+    songNs: SCORE.song_ns, hits: SCORE.hits, misses: SCORE.misses, combo: SCORE.combo, maxCombo: SCORE.max_combo, preOriginInputs: 1 });
   const actual = renderReport();
   await h.send({ kind: "play-render", playId: 7, renderId: 2, report: actual,
     presentedNs: 9007199254742999n, presentedHostNs: ORIGIN });
@@ -4616,7 +5087,7 @@ test("a malformed later input rejects the whole bounded step before any binding 
   for (const request of cases) {
     const h = await active();
     await h.send(request);
-    assert.equal(h.games[0].calls.filter(value => ["input", "advance", "output", "commands"].includes(value[0])).length, 0);
+    assert.equal(h.games[0].calls.filter(value => ["input", "close", "output", "commands"].includes(value[0])).length, 0);
     assert.equal(h.of("play-step-done").length, 0);
     assert.equal(h.of("play-error").length, 1);
     assertReleased(h);
@@ -4627,11 +5098,16 @@ test("partial binding failures and rejected admitted prefixes retain real score 
   const partial = { song_ns: 9007199254742999n, hits: 18n, misses: 4n, combo: 0n };
   const h = await active({ input(game) {
     game.score = { ...partial };
-    if (game.calls.filter(value => value[0] === "input").length === 2) throw new Error("actual queue rejected committed prefix");
+    if (game.processedInput.length === 2) throw new Error("actual processing rejected committed prefix");
   } });
   await h.send(step({ events: [0n, 1n, 2n].map(offset => ({ hostNs: ORIGIN + offset, key: 2, down: true, sequence: offset })), watermark: ORIGIN + 3n }));
-  assert.equal(h.games[0].calls.filter(value => value[0] === "input").length, 2);
-  assert.equal(h.games[0].calls.filter(value => value[0] === "advance").length, 0);
+  assert.equal(h.games[0].calls.filter(value => value[0] === "input").length, 3);
+  assert.equal(h.games[0].processedInput.length, 0, "admission alone cannot mutate score");
+  await legacyWitness(h, 1, 100n, ORIGIN);
+  await legacyWitness(h, 2, 103n, ORIGIN + 3n);
+  assert.equal(h.games[0].processedInput.length, 2);
+  assert.equal(h.games[0].pendingInput.length, 1);
+  assert.equal(h.games[0].calls.filter(value => value[0] === "close").length, 1);
   assert.match(h.of("play-error")[0].message, /committed prefix/);
   assertReleased(h, partial);
   await h.send(step({ tickId: 2 }));
@@ -4743,7 +5219,7 @@ test("RPC, tick and report fences prevent repeated consumption and reject faulty
     const h = await active();
     await h.send(step());
     await h.send(next);
-    assert.equal(h.games[0].calls.filter(value => value[0] === "advance").length, 1);
+    assert.equal(h.games[0].calls.filter(value => value[0] === "close").length, 1);
     assert.equal(h.of("play-step-done").length, 1);
     assertReleased(h);
   }
@@ -4766,6 +5242,8 @@ test("RPC, tick and report fences prevent repeated consumption and reject faulty
   }
   const bounded = await active({ input() { throw new Error("x".repeat(5000)); } });
   await bounded.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: true, sequence: 1n }] }));
+  await legacyWitness(bounded, 1, 100n, ORIGIN);
+  await legacyWitness(bounded, 2, 101n, ORIGIN + 1n);
   assert.equal(bounded.of("play-error")[0].message.length, 4096);
   assertReleased(bounded);
 });
@@ -4776,7 +5254,8 @@ test("actual completion result is correlated without disposing gameplay before i
   await h.send({ kind: "play-render", playId: 7, renderId: 1, report,
     presentedNs: 9223372036854775807n, presentedHostNs: ORIGIN });
   assert.deepEqual(h.of("play-render-done")[0], { kind: "play-render-done", playId: 7, renderId: 1,
-    completed: true, commandsPending: false, observedTick: 0 });
+    completed: true, commandsPending: false, observedTick: 0, pendingInputs: 0,
+    songNs: SCORE.song_ns, hits: SCORE.hits, misses: SCORE.misses, combo: SCORE.combo, maxCombo: SCORE.max_combo, preOriginInputs: 0 });
   assert.equal(h.games[0].frees, 0);
   assert.equal(h.of("play-stopped").length, 0);
   await h.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: false, sequence: 1n }] }));
@@ -4825,7 +5304,8 @@ test("malformed presentation and contradictory or failed completion cannot publi
   assert.equal(failed.of("play-render-done").length, 0);
   assert.match(failed.of("play-error")[0].message, /output domain/);
   assert.equal(failed.of("play-error")[0].released, true);
-  assert.equal(failed.games[0].calls.filter(value => value[0] === "presentation").length, 0);
+  assert.equal(failed.games[0].calls.filter(value => value[0] === "presentation").length, 1,
+    "admitted evidence precedes the independently fallible completion evaluation");
   assertReleased(failed, retained);
 });
 
@@ -4935,6 +5415,8 @@ test("complete capture requires current actual completion, while stale proof and
     throw new Error("committed input capture failed");
   } });
   await partial.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: true, sequence: 1n }] }));
+  await legacyWitness(partial, 1, 100n, ORIGIN);
+  await legacyWitness(partial, 2, 101n, ORIGIN + 1n);
   const receipt = partial.of("play-error")[0];
   assert.match(receipt.message, /committed input capture failed/);
   assert.equal(receipt.replayComplete, false);
@@ -5165,7 +5647,7 @@ test("replay rejects live steps and preserves output/ACK failures without invent
     report: renderReport(), presentedNs: -1n }]) {
     const h = await active({ startRequest: start() });
     await h.send(request);
-    assert.equal(h.replays[0].calls.filter(row => ["input", "advance", "output"].includes(row[0])).length, 0);
+    assert.equal(h.replays[0].calls.filter(row => ["input", "close", "output"].includes(row[0])).length, 0);
     assert.equal(h.of("play-error")[0].replay, null);
     assertReleased(h);
   }

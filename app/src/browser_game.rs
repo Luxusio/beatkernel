@@ -6,10 +6,11 @@ use std::{
 
 use crate::{
     browser::BrowserPrepared,
+    audio_authority::{AudioAuthority, AudioAuthorityConfig, AudioAuthorityEpoch},
     browser_hid_input::BrowserHidSetup,
     browser_input::{
-        PhysicalInputSetup, TouchInputSetup, decode_input, project_touch_on_surface,
-        project_touch_position_on_surface,
+        BrowserInputQueue, PhysicalInputSetup, TouchInputSetup, decode_input,
+        project_touch_on_surface, project_touch_position_on_surface,
     },
     competition::OpponentKind,
     image_assets::ImageAssets,
@@ -19,7 +20,7 @@ use crate::{
     saved_opponents::SavedOpponents,
     saved_opponent_hud::SavedOpponentHud,
     step_gameplay::{StepAudioBatch, StepGameplay, StepGameplayConfig, StepGameplayError},
-    worklet_audio::{decode_output, decode_section_output},
+    worklet_audio::{OutputEvidence, decode_output, decode_section_output},
 };
 use beatkernel::{
     audio::{AudioCommand, PcmSample, SampleId},
@@ -30,25 +31,14 @@ use beatkernel::{
     judge::JudgeEvent,
     replay::codec::ReplayCodecLimits,
     runtime::RuntimeReport,
-    time::{
-        ClockDomainId, ClockMapper, ClockMappingQuality, ClockPair, ClockPoint, Duration, Timestamp,
-    },
+    time::{ClockDomainId, ClockPair, ClockPoint, Duration, ExtrapolationPolicy, Timestamp},
 };
 use beatkernel_bms::BmsInputMode;
-use beatkernel_platform::audio::presentation::discipline::DisciplineConfig;
 use wasm_bindgen::prelude::*;
 
 const HOST: ClockDomainId = ClockDomainId(0x57494e);
 pub(crate) const OUTPUT: ClockDomainId = ClockDomainId(0x57415544);
-struct Explicit;
-impl ClockMapper for Explicit {
-    fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
-        (from.domain == to).then_some(from.timestamp)
-    }
-    fn quality(&self) -> ClockMappingQuality {
-        ClockMappingQuality::Exact
-    }
-}
+pub(crate) const LOGICAL: ClockDomainId = ClockDomainId(0x574c4f47);
 fn point(domain: ClockDomainId, ns: i64) -> ClockPoint {
     ClockPoint {
         domain,
@@ -126,6 +116,8 @@ pub struct BrowserGame {
     samples: VecDeque<(SampleId, PcmSample)>,
     output_start: Option<u64>,
     output_context: Option<u64>,
+    output_evidence: Option<(OutputEvidence, Option<ClockPoint>)>,
+    input_queue: Option<BrowserInputQueue>,
     chart_seed: u64,
     opponent_source: Option<beatkernel_bms::BmsChart>,
     opponents: Option<SavedOpponents>,
@@ -399,19 +391,33 @@ impl BrowserGame {
         // Comparison admission reconstructs genuine records from this source.
         // Clone only during preparation and release it after activation.
         let opponent_source = prepared.prepared.source.clone();
-        let (mut game, bank) = StepGameplay::new_section_with_input_mode(
+        let authority = AudioAuthority::new(
+            AudioAuthorityConfig {
+                // Permission covers the maximum existing latency hint plus startup;
+                // this never assigns an observation accuracy or forward prediction.
+                input_extrapolation: ExtrapolationPolicy::Bounded {
+                    before: Duration::from_nanos(70_000_000_000),
+                    after: Duration::ZERO,
+                },
+                ..AudioAuthorityConfig::default()
+            },
+            AudioAuthorityEpoch {
+                id: 1,
+                stream_origin: point(OUTPUT, 0),
+                logical_origin: point(LOGICAL, 0),
+                host_domain: HOST,
+            },
+        )
+        .map_err(error)?;
+        let (game, bank) = StepGameplay::new_audio_section(
             prepared.prepared,
             config,
             input.bindings,
             prepared.start,
             end,
             input_mode,
+            authority,
         )
-        .map_err(error)?;
-        game.configure_output_clock(DisciplineConfig {
-            max_observation_age: Duration::from_nanos(1_000_000_000),
-            ..DisciplineConfig::default()
-        })
         .map_err(error)?;
         Ok(Self {
             game,
@@ -429,6 +435,8 @@ impl BrowserGame {
             samples: bank.into_samples().collect(),
             output_start: None,
             output_context: None,
+            output_evidence: None,
+            input_queue: None,
             chart_seed: prepared.chart_seed,
             opponent_source: Some(opponent_source),
             opponents: None,
@@ -595,7 +603,12 @@ impl BrowserGame {
         self.game.take_replay().map_err(error)
     }
     pub fn activate(&mut self, host_ns: i64) -> Result<(), JsValue> {
-        self.game.activate(point(HOST, host_ns)).map_err(error)?;
+        if host_ns < 0 || self.input_queue.is_some() {
+            return Err(error("activation requires a fresh nonnegative HOST origin"));
+        }
+        let queue = BrowserInputQueue::solo(point(HOST, host_ns)).map_err(error)?;
+        self.game.activate_audio().map_err(error)?;
+        self.input_queue = Some(queue);
         self.opponent_source = None;
         Ok(())
     }
@@ -606,98 +619,44 @@ impl BrowserGame {
     }
     pub fn input(
         &mut self,
-        host_ns: i64,
-        key: u16,
-        down: bool,
-        sequence: u64,
-        audio_ns: i64,
+        _host_ns: i64,
+        _key: u16,
+        _down: bool,
+        _sequence: u64,
+        _audio_ns: i64,
     ) -> Result<(), JsValue> {
-        if !self.keys.iter().any(|entry| entry.1 == key) {
-            return Err(error("browser input key is not bound"));
-        }
-        let input = PhysicalInputEvent::Button(ButtonEvent {
-            meta: EventMeta::new(DeviceId(1), point(HOST, host_ns), sequence),
-            control: PhysicalControlId::keyboard(key),
-            state: if down {
-                ButtonState::Down
-            } else {
-                ButtonState::Up
-            },
-        });
-        self.process_physical(input, audio_ns)
+        Err(error(
+            "live playback requires queued input and audio service",
+        ))
     }
     /// Admit a canonical physical event with its original variant and provenance.
     /// Decoding refusal happens before runtime mutation or chronology adoption.
-    pub fn input_blob(&mut self, bytes: Vec<u8>, audio_ns: i64) -> Result<(), JsValue> {
-        let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
-        self.process_physical(input, audio_ns)
+    pub fn input_blob(&mut self, _bytes: Vec<u8>, _audio_ns: i64) -> Result<(), JsValue> {
+        Err(error(
+            "live playback requires queued input and audio service",
+        ))
     }
     /// Decode a genuine raw report completely, then process its typed fanout
     /// through ordinary runtime/capture/feedback paths with original metadata.
     /// Zero-emission reports still enter Runtime as their original unbound raw
     /// input. Gameplay failure preserves its committed prefix and prevents retry.
-    pub fn input_hid_blob(&mut self, bytes: Vec<u8>, audio_ns: i64) -> Result<(), JsValue> {
-        let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
-        let PhysicalInputEvent::RawHidReport(report) = input else {
-            return Err(error("HID profile input requires a genuine raw HID report"));
-        };
-        if self.game.failed() {
-            return Err(error(StepGameplayError::Failed));
-        }
-        if self.hid_setup.is_none() {
-            return Err(error("HID profile input requires configured device owners"));
-        }
-        let mut events = std::mem::take(&mut self.hid_events);
-        events.clear();
-        let result = (|| {
-            self.hid_setup
-                .as_mut()
-                .expect("HID setup checked before taking scratch")
-                .decode_report(&report, &mut events)
-                .map_err(error)?;
-            if events.is_empty() {
-                if let Err(failure) =
-                    self.process_physical(PhysicalInputEvent::RawHidReport(report), audio_ns)
-                {
-                    self.game.fail();
-                    return Err(failure);
-                }
-            } else {
-                for input in events.drain(..) {
-                    if let Err(failure) = self.process_physical(input, audio_ns) {
-                        self.game.fail();
-                        return Err(failure);
-                    }
-                }
-            }
-            Ok(())
-        })();
-        events.clear();
-        self.hid_events = events;
-        result
+    pub fn input_hid_blob(&mut self, _bytes: Vec<u8>, _audio_ns: i64) -> Result<(), JsValue> {
+        Err(error(
+            "live playback requires queued input and audio service",
+        ))
     }
     /// Route a canonical touch using a separate projected point. Original payload
     /// and acquisition provenance remain in the actual runtime/capture report.
     pub fn input_blob_at(
         &mut self,
-        bytes: Vec<u8>,
-        x: f32,
-        y: f32,
-        audio_ns: i64,
+        _bytes: Vec<u8>,
+        _x: f32,
+        _y: f32,
+        _audio_ns: i64,
     ) -> Result<(), JsValue> {
-        let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
-        if !matches!(&input, PhysicalInputEvent::Touch(_)) || !x.is_finite() || !y.is_finite() {
-            return Err(error(
-                "projected browser input requires a genuine touch and finite hit position",
-            ));
-        }
-        let result = self.game.process_input_at(
-            input,
-            Position2 { x, y },
-            &Explicit,
-            point(OUTPUT, audio_ns),
-        );
-        self.accept_report(result)
+        Err(error(
+            "live playback requires queued input and audio service",
+        ))
     }
     /// Read-only scalar preflight lets a whole batch reject invalid geometry before dispatch.
     pub fn preflight_touch_surface(
@@ -721,49 +680,37 @@ impl BrowserGame {
     /// Decode the original sample once and use the same viewport as presentation.
     pub fn input_blob_on_surface(
         &mut self,
-        bytes: Vec<u8>,
-        css_width: f64,
-        css_height: f64,
-        surface_width: u32,
-        surface_height: u32,
-        audio_ns: i64,
+        _bytes: Vec<u8>,
+        _css_width: f64,
+        _css_height: f64,
+        _surface_width: u32,
+        _surface_height: u32,
+        _audio_ns: i64,
     ) -> Result<(), JsValue> {
-        let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
-        let position = project_touch_on_surface(
-            &input,
-            [css_width, css_height],
-            [surface_width, surface_height],
-            crate::playfield_layout::LOGICAL_EXTENT,
-        )
-        .map_err(error)?;
-        let result =
-            self.game
-                .process_input_at(input, position, &Explicit, point(OUTPUT, audio_ns));
-        self.accept_report(result)
+        Err(error(
+            "live playback requires queued input and audio service",
+        ))
     }
-    pub fn advance(&mut self, host_ns: i64, audio_ns: i64) -> Result<(), JsValue> {
-        let result = self
-            .game
-            .advance_to(point(HOST, host_ns), &Explicit, point(OUTPUT, audio_ns));
-        self.accept_report(result)?;
-        self.game
-            .update_output_clock(point(HOST, host_ns))
-            .map(|_| ())
-            .map_err(error)
+    pub fn advance(&mut self, _host_ns: i64, _audio_ns: i64) -> Result<(), JsValue> {
+        Err(error(
+            "live playback requires queued input and audio service",
+        ))
     }
-    /// Actual paired browser presentation estimate, in the original Window
-    /// host domain and armed-start-relative output domain. Admission alone never
-    /// corrects transport; only a successful later watermark may apply a rate.
+    /// Retain an original Window/audio correspondence for queued input.
+    /// Only serviced actual output evidence advances gameplay; no rate is applied.
     pub fn observe_presentation(&mut self, output_ns: i64, host_ns: i64) -> Result<(), JsValue> {
         if output_ns < 0 || host_ns < 0 {
             self.game.fail();
             return Err(error("browser presentation points must be nonnegative"));
         }
         self.game
-            .observe_output_clock(ClockPair {
-                source: point(OUTPUT, output_ns),
-                target: point(HOST, host_ns),
-            })
+            .observe_audio_output(
+                1,
+                ClockPair {
+                    source: point(OUTPUT, output_ns),
+                    target: point(HOST, host_ns),
+                },
+            )
             .map(|_| ())
             .map_err(error)
     }
@@ -777,9 +724,19 @@ impl BrowserGame {
     /// relative to the immutable armed start. No timer substitutes for either.
     pub fn observe_output(
         &mut self,
+        _words: Vec<u32>,
+        _presented_ns: Option<i64>,
+    ) -> Result<bool, JsValue> {
+        Err(error(
+            "live playback requires queued input and audio service",
+        ))
+    }
+    /// Admit actual output and scheduling credit before servicing the acquired prefix.
+    pub fn admit_output(
+        &mut self,
         words: Vec<u32>,
         presented_ns: Option<i64>,
-    ) -> Result<bool, JsValue> {
+    ) -> Result<(), JsValue> {
         if self.game.failed() {
             return Err(error(StepGameplayError::Failed));
         }
@@ -810,20 +767,213 @@ impl BrowserGame {
         // Validate all clocks, counters and report chronology before BGM can
         // publish commands. Shared completion adopts evidence only afterwards.
         self.game
-            .validate_completion_evidence(evidence.report, presented)
+            .admit_output_evidence(evidence.report, presented)
             .map_err(error)?;
         if let Some(report) = evidence.report {
             self.game
                 .feed_audio(report.counters.rendered_frames, 256)
                 .map_err(error)?;
         }
-        let completed = self
-            .game
-            .observe_completion(evidence.report, presented)
-            .map_err(error)?;
         self.output_start = Some(evidence.start);
         self.output_context = evidence.context;
-        Ok(completed)
+        self.output_evidence = Some((evidence, presented));
+        Ok(())
+    }
+    pub fn evaluate_completion(&mut self) -> Result<bool, JsValue> {
+        let Some(queue) = &self.input_queue else {
+            return Err(error("input queue is not activated"));
+        };
+        let authority = self
+            .game
+            .audio_authority()
+            .expect("browser owns audio authority");
+        if queue.pending() != 0
+            || authority.closed_host_prefix().is_none()
+            || authority.closed_host_prefix() != authority.acquired_prefix()
+        {
+            return Ok(false);
+        }
+        let Some((evidence, presented)) = &self.output_evidence else {
+            return Ok(false);
+        };
+        self.game
+            .observe_completion(evidence.report, *presented)
+            .map_err(error)
+    }
+    pub fn queue_hid_blob(&mut self, bytes: Vec<u8>, received_host_ns: i64) -> Result<(), JsValue> {
+        let result = (|| {
+            let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
+            let PhysicalInputEvent::RawHidReport(report) = input else {
+                return Err(error("HID profile input requires a genuine raw HID report"));
+            };
+            if self.game.failed() {
+                return Err(error(StepGameplayError::Failed));
+            }
+            if self.hid_setup.is_none() {
+                return Err(error("HID profile input requires configured device owners"));
+            }
+            let mut events = std::mem::take(&mut self.hid_events);
+            events.clear();
+            let result = (|| {
+                self.hid_setup
+                    .as_mut()
+                    .expect("HID setup checked before taking scratch")
+                    .decode_report(&report, &mut events)
+                    .map_err(error)?;
+                if events.is_empty() {
+                    if let Err(failure) = self.queue_physical(
+                        PhysicalInputEvent::RawHidReport(report),
+                        received_host_ns,
+                        None,
+                    ) {
+                        self.game.fail();
+                        return Err(failure);
+                    }
+                } else {
+                    for input in events.drain(..) {
+                        if let Err(failure) = self.queue_physical(input, received_host_ns, None) {
+                            self.game.fail();
+                            return Err(failure);
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            events.clear();
+            self.hid_events = events;
+            result
+        })();
+        self.queue_result(result)
+    }
+    pub fn queue_input(
+        &mut self,
+        host_ns: i64,
+        key: u16,
+        down: bool,
+        sequence: u64,
+        received_host_ns: i64,
+    ) -> Result<(), JsValue> {
+        let result = (|| {
+            if !self.keys.iter().any(|entry| entry.1 == key) {
+                return Err(error("browser input key is not bound"));
+            }
+            self.queue_physical(
+                PhysicalInputEvent::Button(ButtonEvent {
+                    meta: EventMeta::new(DeviceId(1), point(HOST, host_ns), sequence),
+                    control: PhysicalControlId::keyboard(key),
+                    state: if down {
+                        ButtonState::Down
+                    } else {
+                        ButtonState::Up
+                    },
+                }),
+                received_host_ns,
+                None,
+            )
+        })();
+        self.queue_result(result)
+    }
+    pub fn queue_input_blob(
+        &mut self,
+        bytes: Vec<u8>,
+        received_host_ns: i64,
+    ) -> Result<(), JsValue> {
+        let result = (|| {
+            let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
+            self.queue_physical(input, received_host_ns, None)
+        })();
+        self.queue_result(result)
+    }
+    pub fn queue_input_blob_at(
+        &mut self,
+        bytes: Vec<u8>,
+        x: f32,
+        y: f32,
+        received_host_ns: i64,
+    ) -> Result<(), JsValue> {
+        let result = (|| {
+            let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
+            if !matches!(&input, PhysicalInputEvent::Touch(_)) || !x.is_finite() || !y.is_finite() {
+                return Err(error(
+                    "projected input requires a genuine touch and finite position",
+                ));
+            }
+            self.queue_physical(input, received_host_ns, Some(Position2 { x, y }))
+        })();
+        self.queue_result(result)
+    }
+    pub fn queue_input_blob_on_surface(
+        &mut self,
+        bytes: Vec<u8>,
+        css_width: f64,
+        css_height: f64,
+        surface_width: u32,
+        surface_height: u32,
+        received_host_ns: i64,
+    ) -> Result<(), JsValue> {
+        let result = (|| {
+            let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
+            let position = project_touch_on_surface(
+                &input,
+                [css_width, css_height],
+                [surface_width, surface_height],
+                crate::playfield_layout::LOGICAL_EXTENT,
+            )
+            .map_err(error)?;
+            self.queue_physical(input, received_host_ns, Some(position))
+        })();
+        self.queue_result(result)
+    }
+    pub fn close_input_prefix(&mut self, host_ns: i64) -> Result<(), JsValue> {
+        if self.input_queue.is_none() || host_ns < 0 {
+            return Err(error("input prefix requires activated HOST input"));
+        }
+        self.game
+            .record_audio_prefix(point(HOST, host_ns))
+            .map_err(error)
+    }
+    pub fn pending_inputs(&self) -> u32 {
+        self.input_queue
+            .as_ref()
+            .map_or(0, |queue| queue.pending() as u32)
+    }
+    pub fn service_audio(&mut self, now_host_ns: i64, audio_ns: i64) -> Result<u32, JsValue> {
+        if now_host_ns < 0 || audio_ns < 0 {
+            return Err(error(
+                "audio service requires nonnegative HOST and raw scheduling points",
+            ));
+        }
+        let now = point(HOST, now_host_ns);
+        let audio_at = point(OUTPUT, audio_ns);
+        let mut count = 0;
+        loop {
+            let result = self
+                .input_queue
+                .as_mut()
+                .ok_or_else(|| error("input queue is not activated"))?
+                .process_next_solo(&mut self.game, now, audio_at);
+            match result {
+                Ok(Some(report)) => {
+                    self.accept_report(Ok(report))?;
+                    count += 1;
+                }
+                Ok(None) => break,
+                Err(failure) => {
+                    return self.accept_report(Err(failure)).map(|_| count);
+                }
+            }
+        }
+        let result = self
+            .input_queue
+            .as_mut()
+            .expect("activated queue was checked")
+            .advance_solo(&mut self.game, now, audio_at);
+        match result {
+            Ok(Some(reports)) => self.accept_report(Ok(reports))?,
+            Ok(None) => {}
+            Err(failure) => return self.accept_report(Err(failure)).map(|_| count),
+        }
+        Ok(count)
     }
     pub fn commands(&mut self, max: u32) -> Result<JsValue, JsValue> {
         let Some(batch) = self.game.take_commands(max as usize).map_err(error)? else {
@@ -846,6 +996,8 @@ impl BrowserGame {
             .map_err(error)
     }
     pub fn stop(&mut self) {
+        self.input_queue = None;
+        self.output_evidence = None;
         self.game.fail();
         self.opponent_source = None;
         self.samples.clear();
@@ -887,15 +1039,31 @@ impl BrowserGame {
 }
 
 impl BrowserGame {
-    fn process_physical(
+    fn queue_physical(
         &mut self,
         input: PhysicalInputEvent,
-        audio_ns: i64,
+        received_host_ns: i64,
+        position: Option<Position2>,
     ) -> Result<(), JsValue> {
-        let result = self
-            .game
-            .process_input(input, &Explicit, point(OUTPUT, audio_ns));
-        self.accept_report(result)
+        if self.game.failed() || received_host_ns < 0 {
+            return Err(error(
+                "input queue requires usable nonnegative HOST acquisition",
+            ));
+        }
+        let queue = self
+            .input_queue
+            .as_mut()
+            .ok_or_else(|| error("input queue is not activated"))?;
+        queue.register_source(input.meta().source).map_err(error)?;
+        queue
+            .admit(input, point(HOST, received_host_ns), position)
+            .map_err(error)
+    }
+    fn queue_result(&mut self, result: Result<(), JsValue>) -> Result<(), JsValue> {
+        if result.is_err() {
+            self.game.fail();
+        }
+        result
     }
 
     fn accept_report(

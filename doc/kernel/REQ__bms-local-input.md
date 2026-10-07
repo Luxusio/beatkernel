@@ -17,6 +17,23 @@ The source bound is cumulative for a session, separate from the existing
 64-MiB pending heap/blob budget. Each explicit registration/admission operation
 is atomic; rejected events cannot reset an existing source's history.
 
+## Acquisition-time projection metadata
+
+Pending entries may retain one optional finite projected `Position2` beside the
+original event. Existing admission supplies no projection; `admit_at` validates
+the supplied point before changing any event, ordinal, byte count or source
+chronology. Reject NaN/infinity explicitly and retain finite negative positions
+without clipping. Canonical touch coordinates and native metadata stay unchanged.
+
+Projection belongs to the same admission ordinal as its payload, including
+fanout with equal source, timestamp and sequence. `peek_ready_position` validates
+the same frontier and returns the earliest eligible entry's stored point without
+popping. Read it synchronously before dispatch. Pending fixed-storage accounting
+includes the new record size; no additional payload queue or ambiguous side map
+is permitted. Browser resize/page changes must not reinterpret a held event's
+acquisition geometry; a page-change barrier must wait for processed input, not
+only submission acknowledgement.
+
 For [audio-authoritative playback](REQ__audio-authority.md), this merger still
 owns original HOST acquisition and the fully processed prefix. Runtime's judged
 deadline belongs to the separately admitted logical audio frontier. Drain input

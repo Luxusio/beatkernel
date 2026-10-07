@@ -129,3 +129,12 @@ legacy constructors remain available; BMS production selects the audio path.
 Verify genuine Runtime/RuntimeGroup, captures and command queues, including
 three-domain provenance, delayed input, stationary output, partial/post-report
 errors and unchanged state on forbidden generic operations.
+
+Output-evidence admission is separate from completion evaluation. Validate each
+report and presented point with the existing stop-aware validator, then retain
+the latest nonempty render report and normalized presentation for chronology.
+Admission must not evaluate readiness, create completed results or update drain
+state. Local owners delegate to their shared control. Validate before BGM credit
+or replacing the binding's evidence DTO, even while queued inputs prevent
+completion. A newer context cursor cannot hide regressing render counters or
+presentation; verify rejection before any new input or BGM effects.

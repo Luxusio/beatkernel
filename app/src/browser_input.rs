@@ -1,13 +1,19 @@
 //! Bounded physical bindings and canonical input decoding for browser owners.
 //! Acquisition, permissions and device report interpretation belong to adapters.
-use crate::local_players::{PlayerId, ResolvedInputPlan};
+use crate::{
+    local_players::{PlayerId, ResolvedInputPlan},
+    local_input::{InputMerger, MergeError},
+    local_runtime::InputResult,
+    step_gameplay::{StepGameplay, StepGameplayError, StepLocalGameplay, StepLocalGameplayError},
+};
 use beatkernel::{
     input::{
         BackendId, Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId,
         PhysicalInputEvent, Position2, TouchRegion, TouchRouter, VendorNamespaceId,
         codec::{CodecLimits, decode_event},
     },
-    time::ClockDomainId,
+    time::{ClockDomainId, ClockPoint},
+    runtime::RuntimeReport,
 };
 
 /// Projects original CSS touch coordinates through the renderer's integer viewport.
@@ -291,4 +297,89 @@ pub fn decode_input(
         );
     }
     Ok(event)
+}
+
+/// One bounded original-input queue shared by portable and WASM browser owners.
+#[derive(Debug)]
+pub struct BrowserInputQueue {
+    merger: InputMerger,
+}
+impl BrowserInputQueue {
+    pub fn solo(origin: ClockPoint) -> Result<Self, MergeError> {
+        Ok(Self {
+            merger: InputMerger::new_dynamic(origin.domain, origin, 4096, 65536)?,
+        })
+    }
+    pub fn local(origin: ClockPoint, sources: Vec<DeviceId>) -> Result<Self, MergeError> {
+        Ok(Self {
+            merger: InputMerger::new(origin.domain, origin, sources, 65536)?,
+        })
+    }
+    pub fn register_source(&mut self, source: DeviceId) -> Result<(), MergeError> {
+        self.merger.register_source(source)
+    }
+    pub fn admit(
+        &mut self,
+        event: PhysicalInputEvent,
+        received: ClockPoint,
+        position: Option<Position2>,
+    ) -> Result<(), MergeError> {
+        self.merger.admit_at(event, received, position)
+    }
+    pub fn pending(&self) -> usize {
+        self.merger.pending()
+    }
+    pub fn process_next_solo(
+        &mut self,
+        game: &mut StepGameplay,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<RuntimeReport>, StepGameplayError> {
+        let position = match game
+            .audio_authority()
+            .and_then(|authority| authority.acquired_prefix())
+        {
+            Some(prefix) => self
+                .merger
+                .peek_ready_position(prefix)
+                .map_err(crate::audio_authority::AudioAuthorityError::from)?,
+            None => None,
+        };
+        game.process_next_audio_input(&mut self.merger, now, audio_at, position)
+    }
+    pub fn process_next_local(
+        &mut self,
+        game: &mut StepLocalGameplay,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<InputResult>, StepLocalGameplayError> {
+        let position = match game
+            .audio_authority()
+            .and_then(|authority| authority.acquired_prefix())
+        {
+            Some(prefix) => self
+                .merger
+                .peek_ready_position(prefix)
+                .map_err(crate::audio_authority::AudioAuthorityError::from)
+                .map_err(StepGameplayError::from)?,
+            None => None,
+        };
+        game.process_next_audio_input(&mut self.merger, now, audio_at, position)
+    }
+    pub fn advance_solo(
+        &mut self,
+        game: &mut StepGameplay,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<RuntimeReport>, StepGameplayError> {
+        game.advance_audio_frontier(&mut self.merger, now, audio_at)
+    }
+    pub fn advance_local(
+        &mut self,
+        game: &mut StepLocalGameplay,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<Vec<crate::local_runtime::PlayerReport>>, StepLocalGameplayError> {
+        game.advance_audio_frontier(&mut self.merger, now, audio_at)
+    }
 }

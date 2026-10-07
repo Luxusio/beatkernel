@@ -133,6 +133,10 @@ async function workerHarness(options = {}) {
       this.combo = 4n;
       this.max_combo = 9n;
       this.recorded_until_ns = 1000000000n;
+      this.pendingInput = [];
+      this.presentations = [];
+      this.closedPrefix = null;
+      this.processedInput = [];
       games.push(this);
       calls.push(["new-game"]);
     }
@@ -164,7 +168,32 @@ async function workerHarness(options = {}) {
     input(...values) { calls.push(["input", ...values]); }
     advance(host, audio) { calls.push(["advance", host, audio]); this.song_ns = options.songNs ?? host; }
     observe_output() { return false; }
-    observe_presentation() {}
+    queue_input(host, key, down, sequence, received) {
+      assert.ok(host <= received);
+      calls.push(["queue-input", host, key, down, sequence, received]);
+      this.pendingInput.push({ host, key, down, sequence });
+    }
+    close_input_prefix(host) { calls.push(["close-prefix", host]); this.closedPrefix = host; }
+    pending_inputs() { return this.pendingInput.length; }
+    admit_output(words, presented) { this.outputEvidence = { words, presented }; calls.push(["admit-output", presented]); }
+    observe_presentation(output, host) {
+      calls.push(["presentation", output, host]);
+      const previous = this.presentations.at(-1);
+      if (!previous || (output > previous.output && host > previous.host)) this.presentations.push({ output, host });
+    }
+    service_audio(now, audio) {
+      calls.push(["service", now, audio]);
+      let count = 0;
+      const latest = this.presentations.at(-1);
+      if (this.presentations.length >= 2 && now >= latest.host && now - latest.host <= 1000000000n) {
+        while (this.pendingInput[0]?.host <= this.closedPrefix && this.pendingInput[0].host <= latest.host) {
+          this.processedInput.push(this.pendingInput.shift()); count++;
+        }
+        if (!this.pendingInput.length && latest.host <= this.closedPrefix) this.song_ns = options.songNs ?? latest.output;
+      }
+      return count;
+    }
+    evaluate_completion() { calls.push(["completion"]); return false; }
     stop() { this.stops++; calls.push(["stop"]); }
     take_replay() { calls.push(["take-replay"]); return Uint8Array.from([66, 75, 82]); }
     free() { this.frees++; assert.equal(this.frees, 1); calls.push(["free"]); }
@@ -172,7 +201,7 @@ async function workerHarness(options = {}) {
   const self = {
     isSecureContext: true,
     navigator: { gpu: {} },
-    performance: { timeOrigin: 0, now: () => now },
+    performance: { timeOrigin: 0, now: () => now + (options.gameplay ? 1000 : 0) },
     postMessage(value) { messages.push(value); },
     addEventListener(name, callback) {
       assert.equal(name, "message");
@@ -240,7 +269,12 @@ async function workerHarness(options = {}) {
   return {
     messages, libraries, views, timers, games, preparedOwners, calls,
     setNow(value) { assert.ok(value >= now); now = value; },
-    async send(request) { receive({ data: request }); await flushJobs(); },
+    async send(request) {
+      if (request.kind === "play-step" && !Object.hasOwn(request, "nowNs")) {
+        request = { ...request, nowNs: request.watermark };
+      }
+      receive({ data: request }); await flushJobs();
+    },
     async tick() {
       const next = timers.entries().next().value;
       assert.ok(next, "expected a scheduled presentation callback");
@@ -279,7 +313,7 @@ async function gameWorker(options = {}) {
 function startGame(worker, opponents, extra = {}) {
   return worker.send({ kind: "play-start", playId: 1, rpcId: 1, libraryId: 1,
     path: "song/chart.bms", rate: 48000, seed: "0", keyPairs: new Uint32Array([0x11, 4]),
-    opponents, ...extra });
+    opponents, windowOriginNs: 0n, ...extra });
 }
 
 test("section start routes fresh preparations and exact source metadata before capture while zero remains compatible", async () => {
@@ -508,7 +542,8 @@ test("actual comparison snapshots are throttled independently and comparison fau
   await step(1, 1000000000);
   assert.equal(worker.games[0].snapshots, 1);
   assert.equal(worker.of("play-opponents").length, 0, "successful comparison prefixes stay in the Worker HUD");
-  assert.ok(worker.calls.some(call => call[0] === "snapshot" && call[1] === 999999990n));
+  assert.ok(worker.calls.some(call => call[0] === "snapshot" && call[1] === -100000000n),
+    "without real output, comparisons retain the actual initial song prefix");
   worker.setNow(249);
   await step(2, 1000000001);
   assert.equal(worker.games[0].snapshots, 1);

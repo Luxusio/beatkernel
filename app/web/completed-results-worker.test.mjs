@@ -7,6 +7,8 @@ import test from "node:test";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 import { encodeKeyboardEvent, encodeTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
 
+import { millisecondsToNanos } from "./play-model.mjs";
+
 const FileType = globalThis.File ?? NodeFile;
 const ORIGIN = 9007199254740993n;
 const START = 9007199254741999n;
@@ -17,7 +19,7 @@ const batch = sequence => ({ sequence, commands: [command(sequence), command(seq
 
 function startRequest(fields = {}) {
   return { kind: "play-start", playId: 7, rpcId: 1, libraryId: 1, path: "song/chart.bms", rate: 48000,
-    seed: "18446744073709551615", keyPairs: pairs(), ...fields };
+    seed: "18446744073709551615", keyPairs: pairs(), windowOriginNs: fields.multiplayer?.windowOriginNs ?? 10000000000n, ...fields };
 }
 
 function replayFile(acquire = null, size = 6) {
@@ -71,7 +73,7 @@ async function active(options = {}) {
 }
 
 function step(fields = {}) {
-  return { kind: "play-step", playId: 7, tickId: 1, events: [], watermark: ORIGIN, audioNs: 100000000n, ...fields };
+  return { kind: "play-step", playId: 7, tickId: 1, events: [], watermark: ORIGIN, nowNs: fields.watermark ?? ORIGIN, audioNs: 100000000n, ...fields };
 }
 
 const multiplayer = () => ({ url: "https://example.test:4433/competition", host: true, windowOriginNs: 9000000000n });
@@ -111,8 +113,18 @@ async function activeNetwork(options = {}) {
 }
 
 async function completeOutput(h, fields = {}) {
-  await h.send({ kind: "play-render", playId: 7, renderId: 1,
-    presentedNs: 100000000n, presentedHostNs: ORIGIN, report: renderReport(), ...fields });
+  const replay = h.replays.length !== 0;
+  const origin = fields.presentedHostNs ?? ORIGIN;
+  const report = fields.report ?? renderReport();
+  if (!replay) {
+    // Join a fully acquired prefix to two genuine increasing presentation pairs.
+    await h.send(step({ watermark: origin + 200000000n, nowNs: origin + 200000000n }));
+    await h.send({ kind: "play-render", playId: 7, renderId: 1,
+      presentedNs: 0n, presentedHostNs: origin, report });
+    assert.equal(h.of("play-render-done").at(-1).completed, false);
+  }
+  await h.send({ kind: "play-render", playId: 7, renderId: replay ? 1 : 2,
+    ...fields, presentedNs: 100000000n, presentedHostNs: replay ? origin : origin + 100000000n, report });
   assert.equal(h.of("play-render-done").at(-1).completed, true);
 }
 async function showResults(h) {
@@ -270,6 +282,7 @@ async function workerHarness(options = {}) {
   const roomWrappers = [];
   const roomResults = [];
   let networkNow = 1000;
+  let windowOrigin = 10000000000n;
   let timerId = 0;
   let receive;
   function makePrepared(path) {
@@ -452,6 +465,8 @@ async function workerHarness(options = {}) {
       this.args = args;
       this.score = { ...SCORE };
       this.calls = [];
+      this.pendingInput = []; this.processedInput = []; this.inputOrdinal = 0;
+      this.closedPrefix = null; this.presentations = [];
       this.endpointReads = { end: 0, frame: 0 };
       this.frees = 0;
       this.stops = 0;
@@ -558,7 +573,85 @@ async function workerHarness(options = {}) {
       return this.replayBytes;
     }
     next_sample() { this.live(); this.calls.push(["sample"]); return this.samples[this.sampleIndex++] ?? null; }
-    activate(host) { this.live(); this.calls.push(["activate", host]); }
+    activate(host) { this.live(); this.activationHost = host; this.calls.push(["activate", host]); }
+    queue_input(host, key, down, sequence, received) {
+      this.live();
+      assert.ok(host <= received, "acquisition cannot follow current Window receipt");
+      this.calls.push(["input", host, key, down, sequence, received]);
+      this.pendingInput.push({ host, key, down, sequence, received, ordinal: this.inputOrdinal++ });
+    }
+    queue_input_blob(bytes, received) {
+      this.live(); assert.equal(this.physical, true);
+      this.calls.push(["blob", bytes.slice(), received]);
+      options.inputBlob?.(this, bytes, received);
+      this.retainPacket(bytes, received);
+    }
+    queue_hid_blob(bytes, received) {
+      this.live(); assert.equal(this.physical, true);
+      this.calls.push(["hid", bytes.slice(), received]);
+      options.inputHidBlob?.(this, bytes, received);
+      this.retainPacket(bytes, received);
+    }
+    queue_input_blob_on_surface(bytes, cssWidth, cssHeight, surfaceWidth, surfaceHeight, received) {
+      this.live(); assert.equal(this.contact, true);
+      this.calls.push(["touch", bytes.slice(), cssWidth, cssHeight, surfaceWidth, surfaceHeight, received]);
+      options.inputBlobOnSurface?.(this, bytes, cssWidth, cssHeight, surfaceWidth, surfaceHeight, received);
+      this.retainPacket(bytes, received, { cssWidth, cssHeight, surfaceWidth, surfaceHeight });
+    }
+    retainPacket(bytes, received, geometry = null) {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const host = view.getBigInt64(15, true);
+      assert.ok(host <= received);
+      this.pendingInput.push({ bytes: bytes.slice(), host, sequence: view.getBigUint64(27, true),
+        source: view.getBigUint64(7, true), received, geometry, ordinal: this.inputOrdinal++ });
+    }
+    close_input_prefix(host) {
+      this.live(); this.calls.push(["close", host]);
+      assert.ok(this.closedPrefix === null || host >= this.closedPrefix);
+      this.closedPrefix = host;
+    }
+    pending_inputs() { this.live(); return this.pendingInput.length; }
+    service_audio(now, audio) {
+      this.live(); this.calls.push(["service", now, audio]);
+      this.lastService = { now, audio };
+      let processed = 0;
+      if (this.presentations.length >= 2 && this.closedPrefix !== null) {
+        const first = this.presentations.at(-2), last = this.presentations.at(-1);
+        if (now >= last.host && now - last.host <= 1000000000n) {
+          this.pendingInput.sort((a, b) => a.host < b.host ? -1 : a.host > b.host ? 1 :
+            (a.source ?? 0n) < (b.source ?? 0n) ? -1 : (a.source ?? 0n) > (b.source ?? 0n) ? 1 :
+            a.sequence < b.sequence ? -1 : a.sequence > b.sequence ? 1 : a.ordinal - b.ordinal);
+          while (this.pendingInput[0]?.host <= this.closedPrefix && this.pendingInput[0].host <= last.host) {
+            const event = this.pendingInput.shift();
+            event.output = first.output + (event.host - first.host) * (last.output - first.output) / (last.host - first.host);
+            event.audio = audio;
+            this.processedInput.push(event);
+            this.calls.push(["processed", event.host, event.output, audio]);
+            if (event.key !== undefined) options.input?.(this, [event.host, event.key, event.down, event.sequence, audio]);
+            processed++;
+          }
+          if (!this.pendingInput.length && last.host <= this.closedPrefix) {
+            this.logicalOutput = last.output;
+          }
+        }
+      }
+      options.service?.(this, now, audio);
+      return processed;
+    }
+    admit_output(words, presentedNs) {
+      this.live(); this.calls.push(["output", words.slice(), presentedNs]);
+      this.outputEvidence = { words: words.slice(), presentedNs };
+      options.admitOutput?.(this, words, presentedNs);
+    }
+    evaluate_completion() {
+      this.live(); this.calls.push(["completion"]);
+      assert.ok(this.lastService, "live completion must follow joined audio service");
+      if (this.pendingInput.length || !this.outputEvidence || this.outputEvidence.presentedNs === null) return false;
+      this.completedEvidence = this.presentations.length >= 2 && this.closedPrefix !== null
+        && this.presentations.at(-1).host <= this.closedPrefix
+        && (options.observeOutput?.(this, this.outputEvidence.words, this.outputEvidence.presentedNs) ?? false);
+      return this.completedEvidence;
+    }
     input(...args) {
       this.live();
       assert.notEqual(this.physical, true, "physical owners must not fall back to the legacy key method");
@@ -603,6 +696,9 @@ async function workerHarness(options = {}) {
       this.live();
       this.calls.push(["presentation", outputNs, hostNs]);
       options.observePresentation?.(this, outputNs, hostNs);
+      const previous = this.presentations.at(-1);
+      assert.ok(!previous || (hostNs >= previous.host && outputNs >= previous.output));
+      if (!previous || (hostNs > previous.host && outputNs > previous.output)) this.presentations.push({ output: outputNs, host: hostNs });
     }
     commands(max) { this.live(); this.calls.push(["commands", max]); return this.batches.shift() ?? null; }
     acknowledge(...args) { this.live(); this.calls.push(["ack", ...args]); options.ack?.(this, args); }
@@ -625,13 +721,13 @@ async function workerHarness(options = {}) {
   if (options.missingPeerUpdate) BrowserGame.prototype.update_peer_hud = undefined;
   if (options.missingPeerDisable) BrowserGame.prototype.disable_peer_hud = undefined;
   if (options.missingPhysicalConstructor) BrowserGame.new_physical = undefined;
-  if (options.missingInputBlob) BrowserGame.prototype.input_blob = undefined;
+  if (options.missingInputBlob) BrowserGame.prototype.queue_input_blob = undefined;
   if (options.missingContactConstructor) BrowserGame.new_physical_contact = undefined;
   if (options.missingTouchSetup) BrowserGame.prototype.configure_touch_regions = undefined;
-  if (options.missingInputBlobOnSurface) BrowserGame.prototype.input_blob_on_surface = undefined;
+  if (options.missingInputBlobOnSurface) BrowserGame.prototype.queue_input_blob_on_surface = undefined;
   if (options.missingPreflightTouchSurface) BrowserGame.prototype.preflight_touch_surface = undefined;
   if (options.missingHidSetup) BrowserGame.prototype.configure_hid_devices = undefined;
-  if (options.missingInputHidBlob) BrowserGame.prototype.input_hid_blob = undefined;
+  if (options.missingInputHidBlob) BrowserGame.prototype.queue_hid_blob = undefined;
   class BrowserLocalGame extends BrowserGame {
     static new_physical(prepared, ...args) {
       localConstructions.push({ prepared, args });
@@ -776,7 +872,7 @@ async function workerHarness(options = {}) {
     }
   }
   if (options.missingLocalConstructor) BrowserLocalGame.new_physical = undefined;
-  if (options.missingLocalInputBlob) BrowserLocalGame.prototype.input_blob = undefined;
+  if (options.missingLocalInputBlob) BrowserLocalGame.prototype.queue_input_blob = undefined;
   if (options.missingLocalSavedHud) BrowserLocalGame.prototype.disable_saved_opponent_hud = undefined;
   if (options.missingLocalTouchPage) BrowserLocalGame.prototype.set_touch_page = undefined;
   if (options.missingLocalIdentity) BrowserLocalGame.prototype.competition_identity = undefined;
@@ -993,7 +1089,6 @@ async function workerHarness(options = {}) {
   const context = createContext({
     self, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
     performance: { timeOrigin: 10000, now() {
-      if (!options.allowNetworkClock) throw new Error("Solo Worker timestamps cannot replace Window provenance");
       return networkNow;
     } },
     setTimeout(callback, delay = 0) {
@@ -1059,7 +1154,15 @@ async function workerHarness(options = {}) {
     roomSessions, roomChannels, roomWrappers, roomResults,
     setNetworkNow(value) { assert.ok(value >= networkNow); networkNow = value; },
     post(request) { receive({ data: request }); },
-    async send(request) { receive({ data: request }); await flushJobs(); },
+    async send(request) {
+      if (request?.kind === "play-start" && typeof request.windowOriginNs === "bigint") windowOrigin = request.windowOriginNs;
+      if (request?.kind === "play-step" && !Object.hasOwn(request, "nowNs")) request = { ...request, nowNs: request.watermark };
+      const host = request?.nowNs ?? request?.watermark ?? request?.hostNs ?? request?.presentedHostNs;
+      if (typeof host === "bigint" && host >= 0n && (request.kind !== "play-activate" || !options.allowNetworkClock)) {
+        networkNow = Math.max(networkNow, Math.ceil(Number(host + windowOrigin - 10000000000n) / 1000000));
+      }
+      receive({ data: request }); await flushJobs();
+    },
     async tick() {
       const entry = timers.entries().next().value;
       assert.ok(entry, "expected presentation callback");

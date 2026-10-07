@@ -1,7 +1,7 @@
 import { validateCompletedResults, resultRequest } from "./completed-results-model.mjs";
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot } from "./host_model.mjs";
-import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, renderedCursor } from "./play-model.mjs";
+import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { BrowserRoomOwner, ROOM_SESSION_METHODS } from "./room-owner.mjs";
 import { validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
@@ -1137,7 +1137,7 @@ function openRoom(state, request) {
     throw new Error("Room admission requires one pristine local game with completed audio preparation and no existing network.");
   }
   const windowOriginNs = request.windowOriginNs;
-  if (!hostTime(windowOriginNs)) throw new Error("Room start requires the actual Window clock origin.");
+  if (!hostTime(windowOriginNs) || windowOriginNs !== state.windowOriginNs) throw new Error("Room start requires the actual live Window clock origin.");
   const url = request.url;
   if (typeof url !== "string" || url.length === 0 || url.length > 4096) {
     throw new Error("Room admission requires a canonical HTTPS room URL.");
@@ -1551,6 +1551,13 @@ async function preparePlay(state, request) {
     state.commandBatchLimit = commandBatchLimit;
     if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
     state.mode = request.mode ?? "live";
+    if (state.mode === "live") {
+      if (!hostTime(request.windowOriginNs)) throw new Error("Live gameplay requires the actual Window clock origin.");
+      state.windowOriginNs = request.windowOriginNs;
+      state.latencyHint = request.latencyHint;
+      // Validate the selected startup allowance without reading any clock.
+      audioClockExpired(0n, 0n, null, state.latencyHint);
+    }
     if (request.inputMode !== undefined && (!["physical", "physical-contact"].includes(request.inputMode) || state.mode !== "live")) {
       throw new Error("Invalid live gameplay input mode.");
     }
@@ -1624,6 +1631,9 @@ async function preparePlay(state, request) {
     const requestedStart = state.mode === "live" ? validateStart(request.startNs) : null;
     const requestedEnd = state.mode === "live" ? validateEnd(requestedStart, request.endNs) : undefined;
     state.network = multiplayerConfiguration(request.multiplayer, state.mode, state.localPlan);
+    if (state.network && state.network.windowOriginNs !== state.windowOriginNs) {
+      throw new Error("Multiplayer and live input Window clock origins differ.");
+    }
     const opponents = state.mode === "live" && request.opponents !== undefined
       ? validateSelections(request.opponents) : NO_OPPONENTS;
     validateOpponentTargets(opponents, state.localPlan ? state.localPlan.members.map(member => member.player) : null);
@@ -1749,19 +1759,23 @@ async function preparePlay(state, request) {
     const Game = state.localPlan ? BrowserLocalGame : BrowserGame;
     const physicalConstructor = state.localPlan || !state.touchInput ? Game?.new_physical : Game?.new_physical_contact;
     if (state.physicalInput && (typeof physicalConstructor !== "function"
-      || typeof Game?.prototype?.input_blob !== "function")) {
+      || typeof Game?.prototype?.queue_input_blob !== "function")) {
       throw new Error("The gameplay binding does not provide canonical physical input ownership.");
     }
     if (state.touchInput && (typeof Game?.prototype?.configure_touch_regions !== "function"
-      || typeof Game?.prototype?.input_blob_on_surface !== "function"
+      || typeof Game?.prototype?.queue_input_blob_on_surface !== "function"
       || typeof Game?.prototype?.preflight_touch_surface !== "function"
       || (state.localPlan && (typeof Game?.prototype?.touch_bounds !== "function"
         || typeof Game?.prototype?.set_touch_page !== "function")))) {
       throw new Error("The gameplay binding does not provide contact routing ownership.");
     }
     if (hid !== null && (typeof Game?.prototype?.configure_hid_devices !== "function"
-      || typeof Game?.prototype?.input_hid_blob !== "function")) {
+      || typeof Game?.prototype?.queue_hid_blob !== "function")) {
       throw new Error("The gameplay binding does not provide HID profile ownership.");
+    }
+    if (state.mode === "live" && !["queue_input", "close_input_prefix", "service_audio", "pending_inputs",
+      "admit_output", "observe_presentation", "evaluate_completion"].every(name => typeof Game?.prototype?.[name] === "function")) {
+      throw new Error("The gameplay binding does not provide joined audio and acquired-input ownership.");
     }
     if (opponents.length && (typeof Game?.prototype?.add_saved_opponent !== "function"
       || typeof Game?.prototype?.saved_opponents !== "function"
@@ -2089,17 +2103,68 @@ function attachAudio(state, request) {
   }
 }
 
+function currentWindowHost(state) {
+  const now = networkNow() - state.windowOriginNs;
+  if (!hostTime(now)) throw new Error("Current Window-equivalent HOST time is invalid.");
+  return now;
+}
+
+function pendingInputs(state) {
+  const pending = state.mode === "live" ? state.game.pending_inputs() : 0;
+  if (!integer(pending, 0, 65536)) throw new Error("Invalid retained input count.");
+  return pending;
+}
+
+function presentationUnavailable(state, reason) {
+  if (state.presentationReason === reason) return;
+  state.presentationReason = reason;
+  report("play-presentation-unavailable", { playId: state.id, reason });
+}
+
+function serviceLiveAudio(state, now, audioNs) {
+  const processed = state.game.service_audio(now, audioNs);
+  if (!integer(processed, 0, 65536)) throw new Error("Invalid processed input count.");
+  if (audioClockExpired(now, state.origin, state.lastPresentation?.hostNs ?? null, state.latencyHint)) {
+    throw new Error("Audio presentation clock unavailable: no progressing accepted association within the declared timeout.");
+  }
+  return processed;
+}
+
 function observeOutput(state, observation, output) {
   renderedCursor(output, state.startFrame);
-  const completed = state.game.observe_output(output.words, observation.presentedNs);
+  let completed;
+  if (state.mode === "replay") {
+    completed = state.game.observe_output(output.words, observation.presentedNs);
+  } else {
+    // An asynchronous Worklet poll may outlive the original request timestamp.
+    // Refresh Window-equivalent time while retaining the original association.
+    const now = currentWindowHost(state);
+    let pair = Object.hasOwn(observation, "timestamp")
+      ? observation.timestamp === null ? null
+        : presentationPair(observation.timestamp, state.startFrame, state.rate, Number(now) / 1000000)
+      : observation.presentedNs === null ? null
+        : { outputNs: observation.presentedNs, hostNs: observation.presentedHostNs };
+    if (pair !== null && (pair.hostNs > now || now - pair.hostNs > 1000000000n)) pair = null;
+    const availability = presentationAvailability(state.lastPresentation, pair);
+    pair = availability.pair;
+    state.game.admit_output(output.words, pair?.outputNs ?? null);
+    if (pair !== null) {
+      state.game.observe_presentation(pair.outputNs, pair.hostNs);
+      state.lastPresentation = pair;
+      if (state.presentationReason !== null) presentationUnavailable(state, null);
+    } else if (availability.reason !== null) presentationUnavailable(state, availability.reason);
+    if (reportWord(output.words, 23) === 1n) {
+      const audioNs = audioScheduleFromFrame(reportWord(output.words, 24), state.startFrame, state.rate);
+      if (audioNs > state.audioNs) state.audioNs = audioNs;
+    }
+    serviceLiveAudio(state, now, state.audioNs);
+    completed = state.game.evaluate_completion();
+  }
   if (typeof completed !== "boolean" || (completed && (state.batch !== null || state.commandPumping))) {
     throw new Error("Invalid completion with outstanding gameplay commands.");
   }
   state.completed = completed;
   if (completed && state.mode === "live") captureCompletedResults(state);
-  if (state.mode === "live" && observation.presentedNs !== null) {
-    state.game.observe_presentation(observation.presentedNs, observation.presentedHostNs);
-  }
   state.commandsDrained = false; // Actual output may admit more BGM work.
   state.completed = completed;
   state.lastRender = observation.renderId;
@@ -2121,15 +2186,10 @@ function snapshotPresentation(state, request, direct) {
     const timestamp = input === null ? null : Object.freeze({
       contextTime: input.contextTime, performanceTime: input.performanceTime,
     });
-    let pair = timestamp === null ? null : presentationPair(timestamp, state.startFrame, state.rate, observedNowMs);
-    const previous = state.lastPresentation;
-    if (pair !== null && previous !== null && (pair.outputNs < previous.outputNs
-      || pair.hostNs < previous.hostNs || (pair.outputNs > previous.outputNs && pair.hostNs === previous.hostNs))) pair = null;
-    // Keep the original host age when output has not advanced. Worker arrival
-    // time never replaces the Window-domain observation used by this guard.
-    if (pair !== null && (previous === null || pair.outputNs > previous.outputNs)) state.lastPresentation = pair;
+    const nowMs = state.mode === "live" ? Number(currentWindowHost(state)) / 1000000 : observedNowMs;
+    const pair = timestamp === null ? null : presentationPair(timestamp, state.startFrame, state.rate, nowMs);
     return Object.freeze({ renderId: request.renderId,
-      presentedNs: pair?.outputNs ?? null, presentedHostNs: pair?.hostNs ?? null });
+      timestamp, presentedNs: pair?.outputNs ?? null, presentedHostNs: pair?.hostNs ?? null });
   }
   if (Object.hasOwn(request, "observedNowMs")) throw new Error("Raw presentation time requires its timestamp snapshot.");
   if (!direct && state.mode === "replay") {
@@ -2144,9 +2204,13 @@ function publishRender(state, observation, completed) {
   if (completed && commandsPending(state)) throw new Error("Completion produced outstanding gameplay commands.");
   sendRoomProgress(state, completed);
   report("play-render-done", { playId: state.id, renderId: observation.renderId, completed,
-    commandsPending: commandsPending(state), observedTick: state.lastTick,
-    ...(state.mode === "replay" || state.localPlan ? statistics(state) : {}) });
-  if (state.mode === "replay") scheduleDraw();
+    commandsPending: commandsPending(state), pendingInputs: pendingInputs(state), observedTick: state.lastTick,
+    ...statistics(state) });
+  if (state.mode === "live") {
+    sendProgress(state, statistics(state));
+    publishOpponents(state);
+  }
+  scheduleDraw();
 }
 
 async function drainAudio(state) {
@@ -2278,6 +2342,7 @@ function stepPlay(state, request) {
   if (state.mode !== "live") throw new Error("Replay playback cannot accept live gameplay steps.");
   if (!state.active || !identity(request.tickId) || request.tickId <= state.lastTick
     || !Array.isArray(request.events) || request.events.length > 256
+    || !hostTime(request.nowNs)
     || !(request.watermark === null || hostTime(request.watermark))) throw new Error("Invalid active gameplay step.");
   const rawFrame = Object.hasOwn(request, "contextFrame");
   if (rawFrame === Object.hasOwn(request, "audioNs")) throw new Error("Choose exactly one raw or projected audio schedule.");
@@ -2301,7 +2366,7 @@ function stepPlay(state, request) {
         ? { kind, pointerType, hostNs, source, sequence, code, control, mode: event.mode, x: event.x, y: event.y }
         : { kind, pointerType, hostNs, source, sequence, code, control, state: event.state };
     }
-    if (!hostTime(event.hostNs) || !unsigned(event.sequence)) {
+    if (!hostTime(event.hostNs) || event.hostNs > request.nowNs || !unsigned(event.sequence)) {
       throw new Error("Invalid gameplay input or source chronology.");
     }
     let encoded = null;
@@ -2362,12 +2427,19 @@ function stepPlay(state, request) {
   // Core sequences belong to each DeviceId. Different sources may be sampled
   // in another order; preserve all original metadata while ordering timestamps.
   entries.sort((a, b) => a.event.hostNs < b.event.hostNs ? -1 : a.event.hostNs > b.event.hostNs ? 1 : a.index - b.index);
-  if (entries.length && state.lastHost !== null && entries[0].event.hostNs < state.lastHost) {
-    throw new Error("Changed gameplay input precedes the committed global chronology.");
+  const firstLive = entries.find(entry => entry.event.hostNs >= state.origin);
+  if (firstLive && state.acquiredPrefix !== null && firstLive.event.hostNs < state.acquiredPrefix) {
+    throw new Error("Changed gameplay input precedes the closed acquired prefix.");
   }
   const host = entries.at(-1)?.event.hostNs ?? state.lastHost;
-  if (request.watermark !== null && host !== null && request.watermark < host) throw new Error("Gameplay watermark precedes its input prefix.");
+  if (request.watermark !== null && (request.watermark > request.nowNs
+    || (host !== null && request.watermark < host)
+    || (state.lastHost !== null && request.watermark < state.lastHost))) throw new Error("Gameplay watermark precedes its input prefix or exceeds acquisition time.");
   if (!Number.isSafeInteger(state.preOriginInputs + ignored)) throw new Error("Pre-origin input count overflow.");
+  // The envelope samples the same Window clock after its original events.
+  // Reconstructed Worker time need not preserve that cross-global causal order;
+  // fresh service below holds input until its own current sample covers it.
+  const received = request.nowNs;
   if (gamepadDraft !== null) state.gamepadAdapter = gamepadDraft;
   state.sourceOrder = sourceOrder;
   state.preOriginInputs += ignored;
@@ -2376,23 +2448,27 @@ function stepPlay(state, request) {
   state.commandsDrained = false;
   for (const { event, encoded: entry } of entries) {
     if (event.hostNs >= state.origin && entry !== null) {
-      if (entry.kind === "hid") state.game.input_hid_blob(entry.bytes, audioNs);
-      else if (entry.kind === "touch") state.game.input_blob_on_surface(entry.bytes,
-        entry.width, entry.height, entry.surfaceWidth, entry.surfaceHeight, audioNs);
-      else if (entry.kind === "gamepad") for (const bytes of entry.bytes) state.game.input_blob(bytes, audioNs);
-      else state.game.input_blob(entry.bytes, audioNs);
-    } else if (event.hostNs >= state.origin) state.game.input(event.hostNs, event.key, event.down, event.sequence, audioNs);
-    state.lastHost = event.hostNs;
+      if (entry.kind === "hid") state.game.queue_hid_blob(entry.bytes, received);
+      else if (entry.kind === "touch") state.game.queue_input_blob_on_surface(entry.bytes,
+        entry.width, entry.height, entry.surfaceWidth, entry.surfaceHeight, received);
+      else if (entry.kind === "gamepad") for (const bytes of entry.bytes) state.game.queue_input_blob(bytes, received);
+      else state.game.queue_input_blob(entry.bytes, received);
+    } else if (event.hostNs >= state.origin) state.game.queue_input(event.hostNs, event.key, event.down, event.sequence, received);
+    if (state.lastHost === null || event.hostNs > state.lastHost) state.lastHost = event.hostNs;
     state.lastSequence = event.sequence;
   }
   if (request.watermark !== null) {
-    if (request.watermark >= state.origin) state.game.advance(request.watermark, audioNs);
+    if (request.watermark >= state.origin) state.game.close_input_prefix(request.watermark);
     state.lastHost = request.watermark;
+    state.acquiredPrefix = request.watermark;
   }
+  if (audioNs > state.audioNs) state.audioNs = audioNs;
+  serviceLiveAudio(state, currentWindowHost(state), state.audioNs);
   const score = statistics(state);
   pumpAudio(state);
   if (play !== state) return;
-  report("play-step-done", { playId: state.id, tickId: request.tickId, commandsPending: commandsPending(state), ...score });
+  report("play-step-done", { playId: state.id, tickId: request.tickId, commandsPending: commandsPending(state),
+    pendingInputs: pendingInputs(state), ...score });
   scheduleDraw();
   sendProgress(state, score);
   sendRoomProgress(state);
@@ -2416,8 +2492,9 @@ function handlePlay(request) {
       batch: null, commandClient: null, commandPumping: false, audioPumping: false,
       sampleMode: null, sampleClient: null, sampleRpcId: null, sampleCount: null, commandStarted: false,
       audioRpcId: null, renderObservation: null, lastPresentation: null,
+      windowOriginNs: null, latencyHint: undefined, audioNs: 0n, presentationReason: null,
       lastRpc: 0, lastTick: 0, lastRender: 0,
-      lastHost: null, lastSequence: null, sourceOrder: new Map(), preOriginInputs: 0,
+      lastHost: null, acquiredPrefix: null, lastSequence: null, sourceOrder: new Map(), preOriginInputs: 0,
       recordReplay: false, completed: false,
       localPlan: null, localPage: 0, touchPlayer: null, recordLimits: null,
       mode: "live", physicalInput: false, touchInput: false, touchWidth: null, touchHeight: null,
@@ -2516,6 +2593,7 @@ function handlePlay(request) {
       let reason = null;
       if (!state.localPlan || !state.game || !state.prepared) reason = "Wait for actual local player preparation before paging.";
       else if (!integer(request.page, 0, Math.ceil(state.localPlan.members.length / 4) - 1)) reason = "Invalid local player page.";
+      else if (state.active && pendingInputs(state) !== 0) reason = "Wait for acquired input to be processed before changing the local page.";
       let touchVisible;
       if (reason === null && state.touchPlayer !== null && state.touchPlayer !== undefined) {
         try { touchVisible = state.game.set_touch_page(state.touchPlayer, request.page); }

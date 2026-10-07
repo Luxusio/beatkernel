@@ -206,6 +206,42 @@ export function presentationPair(timestamp, start, rate, nowMs, maxAgeMs = 1000)
   const relative = contextNs - startNs;
   return relative < 0n ? null : { outputNs: relative, hostNs: millisecondsToNanos(timestamp.performanceTime) };
 }
+// Estimated associations are not proof of a physical clock reset. Retain the
+// accepted history when an estimate regresses; repeated output grants no progress.
+export function presentationAvailability(previous, pair) {
+  for (const value of [previous, pair]) {
+    if (value !== null && (!value || typeof value.outputNs !== "bigint" || typeof value.hostNs !== "bigint"
+      || value.outputNs < 0n || value.outputNs > I64_MAX || value.hostNs < 0n || value.hostNs > I64_MAX)) {
+      throw new Error("Invalid presentation association.");
+    }
+  }
+  if (pair === null) return { pair: null, reason: null, progressed: false };
+  if (previous !== null && (pair.outputNs < previous.outputNs || pair.hostNs < previous.hostNs
+    || (pair.outputNs > previous.outputNs && pair.hostNs === previous.hostNs))) {
+    return { pair: null, reason: "regressing-estimate", progressed: false };
+  }
+  if (previous !== null && pair.outputNs === previous.outputNs) return { pair: null, reason: null, progressed: false };
+  return { pair, reason: null, progressed: true };
+}
+export function audioClockExpired(nowNs, armedHostNs, lastProgressHostNs, latencyHint = undefined) {
+  for (const value of [nowNs, armedHostNs, lastProgressHostNs]) {
+    if (value !== null && (typeof value !== "bigint" || value < 0n || value > I64_MAX)) {
+      throw new Error("Invalid audio clock watchdog point.");
+    }
+  }
+  if (nowNs === null || armedHostNs === null) throw new Error("Audio clock watchdog needs current and armed HOST points.");
+  let latencyNs = 0n;
+  if (typeof latencyHint === "number") {
+    if (!Number.isFinite(latencyHint) || latencyHint < 0 || latencyHint > 60) throw new Error("Invalid requested audio latency.");
+    latencyNs = secondsToNanos(latencyHint);
+  } else if (latencyHint !== undefined && !["interactive", "balanced", "playback"].includes(latencyHint)) {
+    throw new Error("Invalid requested audio latency.");
+  }
+  if (nowNs < armedHostNs) return false;
+  return lastProgressHostNs === null
+    ? nowNs - armedHostNs >= 10000000000n + latencyNs
+    : nowNs - lastProgressHostNs >= 1000000000n;
+}
 export function reportWord(words, index) {
   if (!(words instanceof Uint32Array) || words.length !== 56 || !Number.isInteger(index) || index < 0 || index >= 28) throw new Error("Invalid audio report words.");
   return BigInt(words[index * 2]) | BigInt(words[index * 2 + 1]) << 32n;

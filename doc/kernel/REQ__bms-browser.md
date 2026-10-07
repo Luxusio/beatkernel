@@ -1074,11 +1074,78 @@ or a browser. This changes no PCM callback or serialized byte format.
 
 ## Bounded input/output clock discipline
 
+### Output-authoritative live composition
+
+The replacement live binding owns one Step audio authority and one portable
+input queue backed by the existing InputMerger. Raw stream scheduling, logical
+audio normalization and original Window acquisition use distinct domains.
+Stage the queue at actual activation HOST origin; constructor placeholder zero
+must not admit pre-activation input. Preserve whole HID fanout, raw zero-emission
+reports, actual source identities and local recording/routing.
+The existing one-player network group has an Any-source member and no selected
+device. Preserve automatic acquisition through the dynamic registry in that
+group; configured local rosters use their fixed actual source IDs.
+Valid activated input can precede the first real output association. After two
+real anchors, allow finite backward mapping up to seventy seconds, covering the
+existing maximum sixty-second numeric latency hint plus ten-second startup
+allowance. Keep forward permission and maximum predicted input-ahead zero.
+This is correlation permission, not an accuracy bound. The actual activation
+origin still excludes earlier input, and the watchdog uses the selected latency
+rather than always allowing seventy seconds.
+
+Admission queues original events and acquisition-time projection. Only a whole
+validated acquired batch may close its original HOST watermark.
+Input maxima and closed-prefix guards remain separate. A backlog chunk with
+no watermark does not close global chronology: a later chunk from another
+source may contain an earlier original occurrence and must still be sorted.
+Preserve per-source sequence/time checks, future-input checks and rejection
+at or before a genuinely closed prefix.
+Window samples the acquisition-envelope time after collecting its original
+events. Validate every event and watermark against that same-Window sample
+before admission, and use it as the merger's acquisition receipt. It is neither
+a complete prefix by itself nor current service time. A rebased Worker clock
+sample can numerically precede this envelope because the two globals expose
+separately represented origins and reduced clock precision. Do not infer a
+causal numeric ordering between those samples, clamp either sample, add an
+error tolerance, or rewrite original event times. Service uses its fresh
+Window-equivalent sample and holds pending input/frontier until that sample
+covers them.
+Service then processes eligible held input before the actual audio frontier. Submission ACK
+does not establish a drained Rust queue; local page/region remap waits for both
+the acquired barrier and no pending Rust input. Never reinterpret held touches
+after resize or page change.
+
+Validate/admit Worklet reports, admit the original output presentation pair,
+service queued input/frontier, and only then evaluate completion. Rendered and
+current Worklet frames remain scheduling/drain evidence. Preserve immutable
+armed-start origin. Carry the original Window time origin for every live
+session; asynchronous service uses a freshly sampled Window-equivalent current
+time, never Worker-relative time or old request time as current HOST time.
+
+Regressing Unknown-quality browser estimates do not establish physical reset.
+Emit an explicit unavailable-estimate diagnostic and retain prior accepted
+mapping/history while withholding new presentation progress. Worklet
+start/context/render counter regressions remain fatal. Rejected or repeated
+estimates do not refresh availability. Fail explicitly after the declared
+one-second unavailable interval; startup uses a separate bounded ten-second
+allowance after the armed HOST origin plus the selected numeric latency hint
+when present, retaining existing zero-to-sixty-second latency settings. Do not
+count waiting before a future agreed start as stalled playback. No numerical
+jitter/ppm allowance or hidden reset is introduced.
+
+The portable input service contains no JS values, browser clock reads or
+renderer; WASM adapters supply effects and serialize reports. Verify genuine
+Step/queue/capture fixtures, message-order/freshness/page-barrier Node tests and
+actual current browser live playback. The target is implemented and has passed
+bounded actual-play diagnostics, but final independent review and browser QA
+remain pending. Diagnostics do not close the preceding failed QA task.
+
 This section records the prior implementation contract. The mandatory
 host-transport rate-correction policy is superseded by
-[audio-authoritative playback](ADR__audio-authoritative-playback.md). Migration
-is pending: the current browser still runs the loop below and its reproduced
-`BaseRateOutOfBounds` failure remains unresolved. Retain the generic estimator
+[audio-authoritative playback](ADR__audio-authoritative-playback.md). The current
+browser selects audio authority; the loop below describes the legacy capability
+and does not govern current live playback. The earlier `BaseRateOutOfBounds`
+QA failure still requires renewed ordered acceptance. Retain the generic estimator
 and original error/chronology tests as capability evidence; do not claim the
 new player architecture is implemented merely by disabling an error.
 

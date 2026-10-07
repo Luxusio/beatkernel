@@ -1483,7 +1483,8 @@ async function play(mode = "live") {
     chartPath: ui.chart.value,
     preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } }, acquired,
     { localPlan, localSources: localPlan && localPlan.automatic !== true ? new Set(localPlan.sources) : null, localReplays: null, localScores: null, recordLimits: null,
-      localPage: localPlan?.page ?? 0, pageChanging: false, pageInputWaiter: null, lastAckSequence: 0n });
+      localPage: localPlan?.page ?? 0, pageChanging: false, pageInputWaiter: null, lastAckSequence: 0n,
+      pendingInputs: 0, lastAcquiredHost: 0n, windowOriginNs: millisecondsToNanos(performance.timeOrigin) });
   clearRoomResults();
   activePlay = session;
   controls();
@@ -1598,7 +1599,8 @@ async function play(mode = "live") {
         ...(session.pointerSetup ? { pointerSetup: session.pointerSetup } : {}),
         keyPairs: Uint32Array.from(session.bindingSelection.flatMap(row => [row[0], row[2]])) };
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
-      rate: session.audio.sampleRate, commandBatchLimit: session.commandBatchLimit, ...source });
+      rate: session.audio.sampleRate, commandBatchLimit: session.commandBatchLimit, ...source,
+      ...(mode === "live" ? { windowOriginNs: session.windowOriginNs, latencyHint: session.contextOptions.latencyHint } : {}) });
     if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
     if (mode === "replay" ? prepared.mode !== "replay" : prepared.mode !== undefined && prepared.mode !== "live") throw new Error("Playback preparation mode changed.");
     if (mode === "live" && prepared.inputMode !== session.inputMode) throw new Error("Preparation did not admit the requested physical input route.");
@@ -2030,14 +2032,14 @@ function outputTimestamp(session) {
 function finishPlay(session) {
   if (activePlay === session && session.phase === "playing" && session.completionReady
     && session.events.length === 0 && session.tickPending === null && session.renderPending === null
-    && !session.commandsPending && !session.pageChanging && session.completionTick === session.tickId) {
+    && session.pendingInputs === 0 && !session.commandsPending && !session.pageChanging && session.completionTick === session.tickId) {
     void stopPlay(session.mode === "replay" ? "Recorded replay ended."
       : session.endNs === undefined ? "Song completed." : "Section completed.", false, true);
   }
 }
 function settlePageInput(session) {
   const waiter = session.pageInputWaiter;
-  if (!waiter || session.lastAckSequence < waiter.boundary) return;
+  if (!waiter || session.lastAckSequence < waiter.boundary || session.pendingInputs !== 0) return;
   session.pageInputWaiter = null;
   clearTimeout(waiter.timer);
   waiter.resolve();
@@ -2046,7 +2048,7 @@ function settlePageInput(session) {
 function drainPageInput(session) {
   let boundary = session.tickPending?.lastSequence ?? session.lastAckSequence;
   for (const event of session.events) if (event.sequence > boundary) boundary = event.sequence;
-  if (session.lastAckSequence >= boundary) return Promise.resolve();
+  if (session.lastAckSequence >= boundary && session.pendingInputs === 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const waiter = { boundary, resolve, reject, timer: null };
     waiter.timer = setTimeout(() => {
@@ -2066,7 +2068,7 @@ function pumpInput(session) {
     session.gamepadOwner?.poll();
     if (activePlay !== session || session.owner !== owner || session.phase !== "playing") return;
     const events = session.events.splice(0, 256);
-    let lastInput = session.lastHost;
+    let lastInput = session.lastAcquiredHost;
     for (const event of events) if (event.hostNs > lastInput) lastInput = event.hostNs;
     let watermark = null;
     if (!session.events.length) {
@@ -2080,7 +2082,8 @@ function pumpInput(session) {
     let lastSequence = session.lastAckSequence;
     for (const event of events) if (event.sequence > lastSequence) lastSequence = event.sequence;
     session.tickPending = { tickId, timer, watermark, lastInput, lastSequence };
-    worker.postMessage({ kind: "play-step", playId: session.id, tickId, events, watermark, contextFrame: session.audio.currentFrame });
+    worker.postMessage({ kind: "play-step", playId: session.id, tickId, events, watermark,
+      nowNs: millisecondsToNanos(performance.now()), contextFrame: session.audio.currentFrame });
   } catch (error) { void stopPlay(`Playback failed: ${error.message}`, true); }
   finally { session.inputPumping = false; }
 }
@@ -2371,13 +2374,21 @@ function receivePlay(data) {
     void stopPlay(`Playback failed: ${data.message}` + (session.localPlan ? "" : ` · Hits ${data.hits}, misses ${data.misses}`), true);
   } else if (data.kind === "play-commands" && session.phase !== "closing") {
     void stopPlay("Unexpected Window command relay after direct audio handoff.", true);
+  } else if (data.kind === "play-presentation-unavailable" && session.phase === "playing") {
+    if (data.reason !== null && data.reason !== "regressing-estimate") { void stopPlay("Invalid presentation availability diagnostic.", true); return; }
+    status(data.reason === null ? "Audio presentation clock recovered."
+      : "Audio presentation estimate regressed; waiting for a progressing association.");
   } else if (data.kind === "play-render-done" && session.phase === "playing") {
     if (!session.renderPending || data.renderId !== session.renderPending.renderId) { void stopPlay("Audio report response was not correlated.", true); return; }
     if (typeof data.completed !== "boolean" || typeof data.commandsPending !== "boolean"
       || !Number.isSafeInteger(data.observedTick) || data.observedTick < 0 || data.observedTick > session.tickId
+      || !Number.isInteger(data.pendingInputs) || data.pendingInputs < 0 || data.pendingInputs > 65536
+      || (data.completed && data.pendingInputs !== 0)
       || (data.completed && data.commandsPending)) { void stopPlay("Song completion evidence was malformed.", true); return; }
     clearTimeout(session.renderPending.timer);
     session.renderPending = null;
+    session.pendingInputs = data.pendingInputs;
+    settlePageInput(session);
     session.commandsPending = data.commandsPending;
     session.completionTick = data.observedTick;
     session.completionReady = data.completed && data.observedTick === session.tickId && !data.commandsPending;
@@ -2385,12 +2396,15 @@ function receivePlay(data) {
   } else if (data.kind === "play-step-done" && session.phase === "playing") {
     const pending = session.tickPending;
     if (!pending || data.tickId !== pending.tickId) { void stopPlay("Gameplay step response was not correlated.", true); return; }
-    if (typeof data.commandsPending !== "boolean") { void stopPlay("Gameplay command ownership was malformed.", true); return; }
+    if (typeof data.commandsPending !== "boolean" || !Number.isInteger(data.pendingInputs)
+      || data.pendingInputs < 0 || data.pendingInputs > 65536) { void stopPlay("Gameplay command or input ownership was malformed.", true); return; }
     clearTimeout(pending.timer);
     session.tickPending = null;
     session.lastAckSequence = pending.lastSequence;
+    session.pendingInputs = data.pendingInputs;
     settlePageInput(session);
-    session.lastHost = pending.watermark ?? pending.lastInput;
+    session.lastAcquiredHost = pending.lastInput;
+    if (pending.watermark !== null) session.lastHost = pending.watermark;
     session.commandsPending = data.commandsPending;
     if (data.commandsPending) session.completionReady = false;
     if (session.events.length) pumpInput(session);

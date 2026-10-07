@@ -7,7 +7,7 @@
 pub mod attachments;
 
 use beatkernel::{
-    input::{DeviceId, PhysicalInputEvent},
+    input::{DeviceId, PhysicalInputEvent, Position2},
     time::{ClockDomainId, ClockPoint, Timestamp},
 };
 use std::{cmp::Ordering, collections::BinaryHeap, fmt};
@@ -21,6 +21,8 @@ pub enum MergeError {
     /// Setup requires 1..=64 fixed sources or 1..=4096 dynamic source slots,
     /// and 1..=65536 pending slots.
     InvalidConfiguration,
+    /// A supplied projected position contains NaN or infinity.
+    InvalidPosition,
     /// A supplied clock point or normalized event uses another domain.
     DomainMismatch {
         expected: ClockDomainId,
@@ -84,6 +86,7 @@ impl fmt::Display for MergeError {
             Self::InvalidConfiguration => {
                 f.write_str("input merge needs 1..64 fixed devices or 1..4096 dynamic source slots, and 1..65536 pending slots")
             }
+            Self::InvalidPosition => f.write_str("input merge projected position must be finite"),
             Self::DomainMismatch { expected, actual } => write!(
                 f,
                 "input merge domain mismatch: expected {}, received {}",
@@ -169,6 +172,7 @@ struct SourceState {
 struct Pending {
     key: (Timestamp, DeviceId, u64, u64),
     event: PhysicalInputEvent,
+    position: Option<Position2>,
     payload_bytes: usize,
 }
 // BinaryHeap is a max heap: reverse only the complete stable ordering key.
@@ -334,6 +338,21 @@ impl InputMerger {
         event: PhysicalInputEvent,
         received: ClockPoint,
     ) -> Result<(), MergeError> {
+        self.admit_at(event, received, None)
+    }
+
+    /// Admits exact input and its acquisition-time projection in one entry.
+    /// Finite positions are retained without clipping or rewriting the event;
+    /// nonfinite positions are rejected before any admission state changes.
+    pub fn admit_at(
+        &mut self,
+        event: PhysicalInputEvent,
+        received: ClockPoint,
+        position: Option<Position2>,
+    ) -> Result<(), MergeError> {
+        if position.is_some_and(|position| !position.x.is_finite() || !position.y.is_finite()) {
+            return Err(MergeError::InvalidPosition);
+        }
         self.validate_point(received)?;
         let meta = *event.meta();
         if meta.clock_domain != self.domain {
@@ -411,6 +430,7 @@ impl InputMerger {
                 self.next_ordinal,
             ),
             event,
+            position,
             payload_bytes,
         });
         self.sources[source_index].last = Some((meta.timestamp, meta.sequence));
@@ -470,6 +490,21 @@ impl InputMerger {
             .peek()
             .filter(|item| item.key.0 <= frontier.timestamp)
             .map(|item| &item.event))
+    }
+
+    /// Reads the earliest eligible entry's acquisition-time projection.
+    /// Use `peek_ready` to distinguish no eligible event from no projection,
+    /// and read this point synchronously before dispatch pops that event.
+    pub fn peek_ready_position(
+        &self,
+        frontier: ClockPoint,
+    ) -> Result<Option<Position2>, MergeError> {
+        self.validate_frontier(frontier)?;
+        Ok(self
+            .pending
+            .peek()
+            .filter(|item| item.key.0 <= frontier.timestamp)
+            .and_then(|item| item.position))
     }
 
     /// Removes the earliest exact event at/before a validated frontier.
@@ -561,6 +596,10 @@ fn owned_payload_bytes(event: &PhysicalInputEvent) -> usize {
 #[cfg(test)]
 #[path = "local_input_registration_fixtures.rs"]
 mod registration_fixtures;
+
+#[cfg(test)]
+#[path = "local_input_position_fixtures.rs"]
+mod position_fixtures;
 
 #[cfg(test)]
 mod tests {
