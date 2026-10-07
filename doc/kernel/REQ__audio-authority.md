@@ -92,6 +92,24 @@ owns Transport pause/resume; neither resume nor restart resets judged history.
 
 ## Verification cues
 
+AudioWorklet terminal diagnostics must retain the first failure's original
+status, operation origin, processor phase, actual callback frame and block
+extent when known, and native retained expected/start frame words with explicit
+presence. The successful arm's exact context frame may be retained as operation
+evidence. These fields never authorize output, judgment, capture completion or
+clock correction. Preserve unknown values as absence rather than inferred zero.
+Preallocate the payload; successful process callbacks do not poll diagnostic
+reports, allocate views/objects or convert BigInt values. First-failure scalar
+reads preserve the original status even if a getter fails. Host, command and
+sample owners validate and retain the bounded snapshot through errors and
+cleanup; legacy status-only terminals remain compatible. Later failures and
+retirement cannot overwrite the original cause. Verify exact high/low words,
+zero versus absence, malformed/stale terminals and all owned delivery ports.
+Rejected control ACKs retain their existing order and admitted-prefix fields.
+Capture first-cause facts before posting the ACK and include the same bounded
+snapshot as optional diagnostics, so a client that retires on the rejection
+still retains the evidence. A later terminal must not replace that error.
+
 Use pure memory fixtures with actual `InputMerger`: two-anchor startup, analytic
 unequal-rate mapping, original input provenance, backward/forward permission
 limits, prefix lag, equality ordering, predicted-input catch-up, stationary and

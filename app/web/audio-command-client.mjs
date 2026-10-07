@@ -1,4 +1,5 @@
 // One Worker-owned command producer. Host stop alone proves processor cleanup.
+import { readAudioFailureDiagnostics } from "./audio-failure.mjs";
 const U64_MAX = 18446744073709551615n;
 const I64_MIN = -9223372036854775808n;
 const I64_MAX = 9223372036854775807n;
@@ -21,7 +22,9 @@ function validReport(report) {
 
 function failure(code, message, generation = null, details = {}) {
   const error = new Error(message, details.cause === undefined ? undefined : { cause: details.cause });
-  Object.assign(error, { code, generation, sequence: null, status: null, admitted: null }, details);
+  Object.assign(error, { code, generation, sequence: details.sequence ?? null,
+    status: details.status ?? null, admitted: details.admitted ?? null,
+    diagnostics: details.diagnostics ?? null });
   return error;
 }
 
@@ -127,38 +130,65 @@ export class AudioCommandClient {
 
   #message(message) {
     if (this.#state !== "ready") return;
-    if (message !== null && typeof message === "object"
-      && integer(message.generation, 1, Number.MAX_SAFE_INTEGER) && message.generation !== this.#generation) return;
-    const malformed = () => this.#dispose(this.#error("protocol", "Malformed or uncorrelated command response."));
-    if (!message || typeof message !== "object" || message.generation !== this.#generation) { malformed(); return; }
-    if (message.kind === "closed") {
+    const pending = this.#pending;
+    const current = () => this.#state === "ready" && this.#pending === pending;
+    const malformed = cause => {
+      if (current()) this.#dispose(this.#error("protocol", "Malformed or uncorrelated command response.", { cause }));
+    };
+    if (!message || typeof message !== "object") { malformed(); return; }
+    let fields;
+    try {
+      const generation = message.generation;
+      if (integer(generation, 1, Number.MAX_SAFE_INTEGER) && generation !== this.#generation) return;
+      fields = { generation, kind: message.kind, operation: message.operation, sequence: message.sequence,
+        status: message.status, admitted: message.admitted, error: message.error, report: message.report };
+    } catch (cause) { malformed(cause); return; }
+    if (!current()) return;
+    if (fields.generation !== this.#generation) { malformed(); return; }
+    if (fields.kind === "closed") {
       this.#dispose(this.#error("closed", "The audio host stopped the command owner."), "closed");
       return;
     }
-    if (message.kind === "terminal") {
-      if (!integer(message.status, 1, 0xffffffff)) { malformed(); return; }
-      this.#dispose(this.#error("processor", `Audio processor reported a terminal failure (status ${message.status}).`, { status: message.status }));
+    if (fields.kind === "terminal") {
+      if (!integer(fields.status, 1, 0xffffffff)) { malformed(); return; }
+      let diagnostics;
+      try { diagnostics = readAudioFailureDiagnostics(message); }
+      catch (cause) { malformed(cause); return; }
+      if (!current()) return;
+      this.#dispose(this.#error("processor", `Audio processor reported a terminal failure (status ${fields.status}).`,
+        { status: fields.status, diagnostics }));
       return;
     }
-    const pending = this.#pending;
-    if (message.kind !== "ack" || pending === null || message.operation !== pending.operation
-      || message.sequence !== pending.sequence || !integer(message.status, 0, 0xffffffff)
-      || !integer(message.admitted, 0, pending.count)
-      || !(message.error === null || (typeof message.error === "string" && message.error.length <= 4096))
-      || (message.status === 0 && (message.admitted !== pending.count || message.error !== null))
-      || (pending.operation === "poll" && message.status === 0
-        ? !validReport(message.report) : message.report !== null)) {
-      malformed();
-      return;
-    }
-    if (message.status !== 0) {
-      this.#dispose(this.#error("remote", `Audio processor rejected ${pending.operation} (status ${message.status})${message.error ? `: ${message.error}` : "."}`,
-        { sequence: pending.sequence, status: message.status, admitted: message.admitted }));
+    let valid;
+    try {
+      valid = fields.kind === "ack" && pending !== null && fields.operation === pending.operation
+        && fields.sequence === pending.sequence && integer(fields.status, 0, 0xffffffff)
+        && integer(fields.admitted, 0, pending.count)
+        && (fields.error === null || (typeof fields.error === "string" && fields.error.length <= 4096))
+        && (fields.status !== 0 || (fields.admitted === pending.count && fields.error === null))
+        && (pending.operation === "poll" && fields.status === 0
+          ? validReport(fields.report) : fields.report === null);
+    } catch (cause) { malformed(cause); return; }
+    if (!current()) return;
+    if (!valid) { malformed(); return; }
+    let diagnostics = null;
+    try {
+      const supplied = message.diagnostics;
+      if (supplied !== undefined) {
+        if (fields.status === 0) throw new TypeError("unexpected audio failure diagnostics");
+        diagnostics = readAudioFailureDiagnostics(supplied);
+        if (diagnostics === null) throw new TypeError("missing audio failure diagnostic version");
+      }
+    } catch (cause) { malformed(cause); return; }
+    if (!current()) return;
+    if (fields.status !== 0) {
+      this.#dispose(this.#error("remote", `Audio processor rejected ${pending.operation} (status ${fields.status})${fields.error ? `: ${fields.error}` : "."}`,
+        { sequence: pending.sequence, status: fields.status, admitted: fields.admitted, diagnostics }));
       return;
     }
     this.#pending = null;
     clearTimeout(pending.timer);
-    pending.resolve(pending.operation === "poll" ? message.report : message);
+    pending.resolve(pending.operation === "poll" ? fields.report : fields);
   }
 
   #dispose(error, state = "failed") {

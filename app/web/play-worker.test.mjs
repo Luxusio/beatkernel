@@ -1107,6 +1107,7 @@ async function workerHarness(options = {}) {
   const gamepadProfileHelper = new SourceTextModule(await readFile(new URL("./gamepad-profile.mjs", import.meta.url), "utf8"), { context });
   const pointerProfileHelper = new SourceTextModule(await readFile(new URL("./pointer-profile.mjs", import.meta.url), "utf8"), { context });
   const commandClient = new SourceTextModule(await readFile(new URL("./audio-command-client.mjs", import.meta.url), "utf8"), { context });
+  const audioFailure = new SourceTextModule(await readFile(new URL("./audio-failure.mjs", import.meta.url), "utf8"), { context });
   const sampleClient = new SourceTextModule(await readFile(new URL("./audio-sample-client.mjs", import.meta.url), "utf8"), { context });
   const localHelper = new SourceTextModule(await readFile(new URL("./local-play-model.mjs", import.meta.url), "utf8"), { context });
   const roomOwner = new SourceTextModule(await readFile(new URL("./room-owner.mjs", import.meta.url), "utf8"), { context });
@@ -1129,6 +1130,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./gamepad-profile.mjs") return gamepadProfileHelper;
     if (specifier === "./pointer-profile.mjs") return pointerProfileHelper;
     if (specifier === "./audio-command-client.mjs") return commandClient;
+    if (specifier === "./audio-failure.mjs") return audioFailure;
     if (specifier === "./audio-sample-client.mjs") return sampleClient;
     if (specifier === "./local-play-model.mjs") return localHelper;
     if (specifier === "./room-owner.mjs") return roomOwner;

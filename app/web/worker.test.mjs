@@ -352,6 +352,7 @@ async function workerHarness(options = {}) {
   const gamepadProfileHelpers = new SourceTextModule(await readFile(new URL("./gamepad-profile.mjs", import.meta.url), "utf8"), { context });
   const pointerProfileHelpers = new SourceTextModule(await readFile(new URL("./pointer-profile.mjs", import.meta.url), "utf8"), { context });
   const commandClient = new SourceTextModule(await readFile(new URL("./audio-command-client.mjs", import.meta.url), "utf8"), { context });
+  const audioFailure = new SourceTextModule(await readFile(new URL("./audio-failure.mjs", import.meta.url), "utf8"), { context });
   const sampleClient = new SourceTextModule(await readFile(new URL("./audio-sample-client.mjs", import.meta.url), "utf8"), { context });
   const renderClient = new SourceTextModule(await readFile(new URL("./render-protocol.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
@@ -371,6 +372,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./gamepad-profile.mjs") return gamepadProfileHelpers;
     if (specifier === "./pointer-profile.mjs") return pointerProfileHelpers;
     if (specifier === "./audio-command-client.mjs") return commandClient;
+    if (specifier === "./audio-failure.mjs") return audioFailure;
     if (specifier === "./audio-sample-client.mjs") return sampleClient;
     throw new Error(`Unexpected Worker import: ${specifier}`);
   });

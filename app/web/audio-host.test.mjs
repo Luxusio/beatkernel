@@ -7,6 +7,262 @@ import { createContext, SourceTextModule } from "node:vm";
 
 const sourceUrl = new URL("./audio-host.mjs", import.meta.url);
 const source = await readFile(sourceUrl, "utf8");
+const failureUrl = new URL("./audio-failure.mjs", import.meta.url);
+const failureSource = await readFile(failureUrl, "utf8");
+
+test("malformed terminal during pending stop reports a distinct cleanup protocol error while retaining original diagnostics", async () => {
+  const h = await harness(), owner = await open(h);
+  await acknowledged(h, () => owner.finish());
+  const pending = observe(() => owner.commands([command(), command({ kind: 1 })]));
+  h.reply(h.last(), { status: 6, admitted: 1, error: "chronology", diagnostics: diagnosticFacts() });
+  const original = failure(await pending.result, "remote");
+  const retained = original.diagnostics;
+  const first = owner.stop(), stopping = observe(() => first);
+  assert.equal(owner.stop(), first);
+  assert.equal(h.last().kind, "stop");
+  h.nodes[0].port.emit("message", diagnosticTerminal({ diagnosticVersion: 2 }));
+  const cleanup = failure(await stopping.result, "protocol");
+  assert.notEqual(cleanup, original);
+  assert.equal(cleanup.operation, "receive");
+  assert.equal(cleanup.diagnostics, null);
+  assert.equal(cleanup.cause.name, "TypeError");
+  assert.equal(failure(await observe(() => owner.poll()).result), original);
+  assert.equal(original.status, 6); assert.equal(original.sequence, 2); assert.equal(original.admitted, 1);
+  assert.equal(original.diagnostics, retained);
+  assert.deepEqual({ ...retained }, diagnosticFacts());
+  assert.equal(owner.stop(), first); assert.equal(owner.state, "failed");
+  assertClean(h);
+});
+
+test("reentrant rejected ACK diagnostic getters cannot replace the first terminal cause or revive a closed owner", async () => {
+  for (const action of ["close", "terminal"]) {
+    const h = await harness(), owner = await open(h); await acknowledged(h, () => owner.finish());
+    const pending = observe(() => owner.commands([command(), command({ kind: 1 })]));
+    const stale = h.nodes[0].port.onmessage;
+    const packet = { kind: "ack", generation: 17, sequence: 2, operation: "commands",
+      status: 6, admitted: 1, error: "chronology", report: null };
+    let reads = 0;
+    Object.defineProperty(packet, "diagnostics", { get() {
+      reads++;
+      if (action === "close") owner.stop();
+      else stale({ data: { kind: "terminal", generation: 17, status: 9 } });
+      return diagnosticFacts();
+    } });
+    h.nodes[0].port.emit("message", packet);
+    const original = failure(await pending.result);
+    assert.equal(reads, 1); assert.equal(original.code, action === "close" ? "closed" : "processor");
+    assert.equal(original.diagnostics, null);
+    if (action === "terminal") assert.equal(original.status, 9);
+    if (action === "close") { const stopping = observe(() => owner.stop()); h.reply(h.last()); assert.equal((await stopping.result).ok, true); assert.equal(owner.state, "closed"); assertClean(h); } else { await stop(h, owner, "failed"); assert.equal(failure(await observe(() => owner.poll()).result), original); }
+    assert.equal(h.timers.size, 0);
+  }
+});
+
+
+test("rejected ACK preserves its actual sequence and admitted prefix with immutable diagnostics before terminal cleanup", async () => {
+  for (const hasDiagnostics of [false, true]) {
+    const h = await harness(), owner = await open(h); await acknowledged(h, () => owner.finish());
+    const pending = observe(() => owner.commands([command(), command({ kind: 1 })]));
+    const stale = h.nodes[0].port.onmessage;
+    const diagnostics = diagnosticFacts();
+    const fields = { status: 6, admitted: 1, error: "chronology", ...(hasDiagnostics ? { diagnostics } : {}) };
+    h.reply(h.last(), fields);
+    const original = failure(await pending.result);
+    assert.equal(original.code, "remote"); assert.equal(original.status, 6);
+    assert.equal(original.generation, 17); assert.equal(original.sequence, 2);
+    assert.equal(original.admitted, 1); assert.ok(original.message.includes("chronology"));
+    if (hasDiagnostics) { assert.deepEqual({ ...original.diagnostics }, diagnosticFacts()); assert.ok(Object.isFrozen(original.diagnostics)); }
+    else assert.equal(original.diagnostics, null);
+    const retained = original.diagnostics;
+    diagnostics.expectedFrameHigh = 0; diagnostics.currentFrame = 0;
+    stale({ data: diagnosticTerminal({ status: 9 }) });
+    assert.equal(failure(await observe(() => owner.poll()).result), original); assert.equal(original.diagnostics, retained);
+    if (hasDiagnostics) assert.deepEqual({ ...retained }, diagnosticFacts());
+    await stop(h, owner, "failed"); assertClean(h);
+    stale({ data: diagnosticTerminal({ diagnosticVersion: 2 }) });
+    assert.equal(failure(await observe(() => owner.poll()).result), original); assert.equal(original.diagnostics, retained);
+  }
+});
+
+test("malformed rejected ACK diagnostics and unsolicited success diagnostics are protocol failures", async () => {
+  for (const [status, diagnostics] of [
+    [6, {}], [6, null], [6, diagnosticFacts({ diagnosticVersion: 2 })],
+    [6, diagnosticFacts({ expectedFrameHigh: "0" })],
+    [6, diagnosticFacts({ successfulArmFramePresent: 0, successfulArmFrame: 1 })],
+    [0, diagnosticFacts()],
+  ]) {
+    const h = await harness(), owner = await open(h); await acknowledged(h, () => owner.finish());
+    const pending = observe(() => owner.commands([command(), command({ kind: 1 })]));
+    const fields = { status, admitted: status === 0 ? 2 : 0,
+      error: status === 0 ? null : "chronology", diagnostics };
+    h.reply(h.last(), fields);
+    const original = failure(await pending.result);
+    assert.equal(original.code, "protocol"); assert.equal(original.diagnostics, null);
+    await stop(h, owner, "failed"); assertClean(h);
+    assert.equal(failure(await observe(() => owner.poll()).result), original);
+  }
+});
+
+test("stale rejected ACK never reads nested diagnostics while hostile correlated diagnostics fail closed", async () => {
+  const h = await harness(), owner = await open(h); await acknowledged(h, () => owner.finish());
+  const pending = observe(() => owner.commands([command(), command({ kind: 1 })]));
+  let reads = 0;
+  // Deliver a raw packet so the fixture itself does not observe the hostile property.
+  const terminal = { kind: "ack", generation: 16, sequence: 2,
+    operation: "commands", status: 6, admitted: 0, error: "chronology", report: null };
+  Object.defineProperty(terminal, "diagnostics", { get() { reads++; throw new Error("stale diagnostics"); } });
+  h.nodes[0].port.emit("message", terminal);
+  await flush(); assert.equal(reads, 0); assert.equal(pending.settled, false);
+  terminal.generation = 17;
+  h.nodes[0].port.emit("message", terminal);
+  const original = failure(await pending.result);
+  assert.equal(reads, 1); assert.equal(original.code, "protocol");
+  await stop(h, owner, "failed"); assertClean(h);
+  assert.equal(failure(await observe(() => owner.poll()).result), original);
+});
+
+
+test("each diagnostic field is observed once and a missing versioned numeric field fails closed", async () => {
+  for (const missing of [false, true]) {
+    const h = await harness(), owner = await open(h);
+    const pending = observe(() => owner.poll());
+    const facts = diagnosticFacts(), reads = new Map();
+    const terminal = { kind: "terminal", generation: 17, status: 6 };
+    for (const [field, value] of Object.entries(facts)) {
+      if (missing && field === "expectedFrameHigh") continue;
+      Object.defineProperty(terminal, field, { enumerable: true, get() {
+        reads.set(field, (reads.get(field) ?? 0) + 1); return value;
+      } });
+    }
+    h.nodes[0].port.emit("message", terminal);
+    const original = failure(await pending.result);
+    assert.equal(original.code, missing ? "protocol" : "processor");
+    for (const [field, count] of reads) assert.equal(count, 1, field + " must be read once");
+    if (!missing) assert.deepEqual({ ...original.diagnostics }, facts);
+    await stop(h, owner, "failed"); assertClean(h);
+    assert.equal(failure(await observe(() => owner.poll()).result), original);
+  }
+});
+
+
+function diagnosticFacts(fields = {}) {
+  return { diagnosticVersion: 1, origin: 2, ownerPhase: 3,
+    currentFramePresent: 1, currentFrame: 9007199254740991,
+    blockFramesPresent: 1, blockFrames: 128,
+    expectedFramePresent: 1, expectedFrameLow: 0xffffffff, expectedFrameHigh: 0x80000000,
+    startFramePresent: 1, startFrameLow: 0, startFrameHigh: 0xffffffff,
+    successfulArmFramePresent: 1, successfulArmFrame: 4294967297, ...fields };
+}
+function diagnosticTerminal(fields = {}) {
+  return { kind: "terminal", generation: 17, status: 6, ...diagnosticFacts(), ...fields };
+}
+
+test("versioned terminal retains exact immutable known-only high-word facts through pending failure and cleanup", async () => {
+  const h = await harness(), owner = await open(h);
+  const pending = observe(() => owner.poll());
+  const stale = h.nodes[0].port.onmessage;
+  const terminal = diagnosticTerminal();
+  Object.defineProperty(terminal, "untrustedExtra", { enumerable: true, get() { throw new Error("unknown fields must not be read"); } });
+  h.nodes[0].port.emit("message", terminal);
+  const original = failure(await pending.result);
+  assert.equal(original.code, "processor"); assert.equal(original.status, 6);
+  assert.equal(original.generation, 17); assert.equal(original.sequence, null); assert.equal(original.admitted, null);
+  assert.deepEqual({ ...original.diagnostics }, diagnosticFacts());
+  assert.ok(Object.isFrozen(original.diagnostics)); assert.notEqual(original.diagnostics, terminal);
+  assert.throws(() => { original.diagnostics.expectedFrameHigh = 0; }, TypeError);
+  terminal.expectedFrameHigh = 0; terminal.startFrameHigh = 1; terminal.currentFrame = 0;
+  const retained = original.diagnostics;
+  stale({ data: diagnosticTerminal({ status: 9, expectedFrameHigh: 7 }) });
+  assert.equal(failure(await observe(() => owner.poll()).result), original);
+  assert.equal(original.diagnostics, retained);
+  assert.deepEqual({ ...retained }, diagnosticFacts());
+  await stop(h, owner, "failed"); assertClean(h);
+  assert.equal(failure(await observe(() => owner.poll()).result), original); assert.equal(original.diagnostics, retained);
+  assert.equal(h.sent.filter(row => row.message.kind === "poll").length, 1); assert.equal(h.timers.size, 0);
+});
+
+test("legacy terminals and canonical absent or present-zero diagnostic facts remain distinct", async () => {
+  for (const fields of [null,
+    diagnosticFacts({ origin: 0, ownerPhase: 0, currentFramePresent: 0, currentFrame: 0,
+      blockFramesPresent: 0, blockFrames: 0, expectedFramePresent: 0, expectedFrameLow: 0, expectedFrameHigh: 0,
+      startFramePresent: 0, startFrameLow: 0, startFrameHigh: 0, successfulArmFramePresent: 0, successfulArmFrame: 0 }),
+    diagnosticFacts({ currentFrame: 0, blockFrames: 0, expectedFrameLow: 0, expectedFrameHigh: 0,
+      startFrameLow: 0, startFrameHigh: 0, successfulArmFrame: 0 })]) {
+    const h = await harness(), owner = await open(h);
+    const pending = observe(() => owner.poll());
+    const terminal = { kind: "terminal", generation: 17, status: 6, ...(fields ?? {}) };
+    h.nodes[0].port.emit("message", terminal);
+    const original = failure(await pending.result);
+    assert.equal(original.code, "processor"); assert.equal(original.status, 6);
+    if (fields === null) assert.equal(original.diagnostics, null);
+    else { assert.deepEqual({ ...original.diagnostics }, fields); assert.ok(Object.isFrozen(original.diagnostics)); }
+    await stop(h, owner, "failed"); assertClean(h);
+    assert.equal(failure(await observe(() => owner.poll()).result), original);
+  }
+});
+
+test("malformed diagnostic version, types, presence and absent values produce sticky protocol failure", async () => {
+  for (const fields of [
+    { diagnosticVersion: 2 }, { diagnosticVersion: null }, { diagnosticVersion: "1" },
+    { origin: 3 }, { ownerPhase: 4 }, { currentFramePresent: true }, { currentFrame: 1n },
+    { currentFrame: Number.MAX_SAFE_INTEGER + 1 }, { blockFrames: 4294967296 },
+    { expectedFrameHigh: -1 }, { startFrameLow: "0" }, { successfulArmFrame: Infinity },
+    { currentFramePresent: 0, currentFrame: 1 }, { blockFramesPresent: 0, blockFrames: 128 },
+    { expectedFramePresent: 0, expectedFrameHigh: 1 }, { startFramePresent: 0, startFrameLow: 1 },
+    { successfulArmFramePresent: 0, successfulArmFrame: 1 },
+  ]) {
+    const h = await harness(), owner = await open(h);
+    const pending = observe(() => owner.poll());
+    const terminal = diagnosticTerminal(fields);
+    h.nodes[0].port.emit("message", terminal);
+    const original = failure(await pending.result);
+    assert.equal(original.code, "protocol");
+    assert.equal(original.diagnostics, null);
+    await stop(h, owner, "failed"); assertClean(h);
+    assert.equal(failure(await observe(() => owner.poll()).result), original); assert.equal(h.timers.size, 0);
+  }
+});
+
+test("old generation never reads diagnostics or settles pending work", async () => {
+  const h = await harness(), owner = await open(h);
+  const pending = observe(() => owner.poll());
+  let reads = 0;
+  const terminal = { kind: "terminal", generation: 16, status: 6 };
+  Object.defineProperty(terminal, "diagnosticVersion", { get() { reads++; throw new Error("obsolete diagnostics"); } });
+  h.nodes[0].port.emit("message", terminal);
+  await flush(); assert.equal(reads, 0); assert.equal(pending.settled, false);
+  h.reply(h.last());
+  assert.equal((await pending.result).ok, true);
+  await stop(h, owner);
+});
+
+test("hostile diagnostic getter rejects once while reentrant close or terminal preserves its first cause", async () => {
+  for (const action of ["throw", "close", "terminal"]) {
+    const h = await harness(), owner = await open(h);
+    const pending = observe(() => owner.poll());
+    const stale = h.nodes[0].port.onmessage;
+    const terminal = diagnosticTerminal();
+    let reads = 0;
+    Object.defineProperty(terminal, "expectedFrameLow", { get() {
+      reads++;
+      if (action === "throw") throw new Error("hostile diagnostic read");
+      if (action === "close") owner.stop();
+      else stale({ data: { kind: "terminal", generation: 17, status: 9 } });
+      return 0xffffffff;
+    } });
+    h.nodes[0].port.emit("message", terminal);
+    const original = failure(await pending.result);
+    assert.equal(reads, 1);
+    assert.equal(original.code, action === "throw" ? "protocol" : action === "close" ? "closed" : "processor");
+    assert.equal(original.diagnostics, null);
+    if (action === "terminal") assert.equal(original.status, 9);
+    if (action === "close") { const joined = observe(() => owner.stop()); h.reply(h.last()); assert.equal((await joined.result).ok, true); assert.equal(owner.state, "closed"); assertClean(h); } else { await stop(h, owner, "failed"); assertClean(h); }
+    stale({ data: diagnosticTerminal({ diagnosticVersion: 2 }) });
+    if (action !== "close") assert.equal(failure(await observe(() => owner.poll()).result), original);
+    assert.equal(h.timers.size, 0);
+  }
+});
+
 const emptyModule = new WebAssembly.Module(Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0]));
 const U64_MAX = 18446744073709551615n;
 const I64_MIN = -9223372036854775808n;
@@ -202,7 +458,12 @@ async function harness(faults = {}) {
     context, identifier: sourceUrl.href,
     initializeImportMeta(meta) { meta.url = sourceUrl.href; },
   });
-  await actual.link(specifier => { throw new Error(`Unexpected host import: ${specifier}`); });
+  await actual.link(specifier => {
+    if (specifier === "./audio-failure.mjs") return new SourceTextModule(failureSource, {
+      context, identifier: failureUrl.href,
+    });
+    throw new Error(`Unexpected host import: ${specifier}`);
+  });
   await actual.evaluate();
   return {
     AudioHost: actual.namespace.AudioHost, AudioHostError: actual.namespace.AudioHostError,
@@ -296,6 +557,7 @@ async function stop(h, owner, expectedState = "closed") {
   assert.equal(owner.state, expectedState);
   assertClean(h);
 }
+
 
 test("sample handoff requires empty setup and transfers exclusive upload authority only after its own ACK", async () => {
   const h = await harness(), owner = await open(h);
@@ -841,7 +1103,7 @@ test("remote command failure exposes the exact admitted prefix, fences, and neve
     const pending = observe(() => owner.commands([command(), command({ kind: 1 }), command({ kind: 2 })]));
     const sent = h.last();
     h.reply(sent, { status, admitted, error: "admission" });
-    h.nodes[0].port.emit("message", { kind: "terminal", generation: 17, status });
+    h.nodes[0].port.emit("message", diagnosticTerminal({ status }));
     const error = failure(await pending.result, "remote");
     assert.ok(error instanceof h.AudioHostError);
     assert.equal(error.operation, "commands");

@@ -1,5 +1,9 @@
 import "./worklet-encoding.mjs";
 import { initSync, BrowserAudio } from "./audio-pkg/beatkernel_bms_runtime.js";
+import {
+  AUDIO_FAILURE_DIAGNOSTIC_VERSION, AUDIO_FAILURE_ORIGIN_CONTROL,
+  AUDIO_FAILURE_ORIGIN_ARM, AUDIO_FAILURE_ORIGIN_PROCESS,
+} from "./audio-failure.mjs";
 
 // The generated glue owns module-global WASM state. A second live processor
 // must never initialize or replace it. Only an acknowledged stop releases it.
@@ -87,11 +91,22 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     this.phase = 0; // 0 setup, 1 allocated, 2 armed, 3 stopped.
     this.failed = false;
     this.diagnosed = false;
+    this.terminalReady = false;
+    this.terminalPosted = false;
     this.memory = null;
     this.buffer = null;
     this.output = null;
     // Preallocated because even terminal process paths must not build objects.
-    this.terminal = { kind: "terminal", generation: this.generation, status: 0 };
+    this.terminal = {
+      kind: "terminal", generation: this.generation, status: 0,
+      diagnosticVersion: AUDIO_FAILURE_DIAGNOSTIC_VERSION,
+      origin: AUDIO_FAILURE_ORIGIN_CONTROL, ownerPhase: 0,
+      currentFramePresent: 0, currentFrame: 0,
+      blockFramesPresent: 0, blockFrames: 0,
+      expectedFramePresent: 0, expectedFrameLow: 0, expectedFrameHigh: 0,
+      startFramePresent: 0, startFrameLow: 0, startFrameHigh: 0,
+      successfulArmFramePresent: 0, successfulArmFrame: 0,
+    };
     liveOwner = this;
     try {
       initSync({ module: config.module });
@@ -115,32 +130,76 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     }
   }
 
-  fence(status) {
+  captureFailure(status, origin, frame, framePresent, frames, framesPresent) {
     this.failed = true;
     if (!this.diagnosed) {
       this.diagnosed = true;
-      this.terminal.status = status;
+      const terminal = this.terminal;
+      terminal.status = status;
+      terminal.origin = origin;
+      terminal.ownerPhase = this.phase;
+      terminal.currentFrame = frame;
+      terminal.currentFramePresent = framePresent;
+      terminal.blockFrames = frames;
+      terminal.blockFramesPresent = framesPresent;
+      // A presence flag is committed only after both native words succeed.
+      // A getter failure preserves the original status and remaining absence.
+      try {
+        if (this.owner !== null && this.owner.report_word(23, false) === 1) {
+          const low = this.owner.report_word(24, false);
+          const high = this.owner.report_word(24, true);
+          if (integer(low, 0, 0xffffffff) && integer(high, 0, 0xffffffff)) {
+            terminal.expectedFrameLow = low;
+            terminal.expectedFrameHigh = high;
+            terminal.expectedFramePresent = 1;
+          }
+        }
+        if (this.owner !== null && this.owner.report_word(25, false) === 1) {
+          const low = this.owner.report_word(26, false);
+          const high = this.owner.report_word(26, true);
+          if (integer(low, 0, 0xffffffff) && integer(high, 0, 0xffffffff)) {
+            terminal.startFrameLow = low;
+            terminal.startFrameHigh = high;
+            terminal.startFramePresent = 1;
+          }
+        }
+      } catch {}
+      this.terminalReady = true;
+    }
+  }
+
+  fence(status, origin = AUDIO_FAILURE_ORIGIN_CONTROL, frame = 0, framePresent = 0, frames = 0, framesPresent = 0) {
+    this.captureFailure(status, origin, frame, framePresent, frames, framesPresent);
+    if (this.terminalReady && !this.terminalPosted) {
+      this.terminalPosted = true;
+      const commandPort = this.commandPort;
+      const samplePort = this.samplePort;
       try { this.port.postMessage(this.terminal); } catch {}
-      try { this.commandPort?.postMessage(this.terminal); } catch {}
-      try { this.samplePort?.postMessage(this.terminal); } catch {}
+      try { commandPort?.postMessage(this.terminal); } catch {}
+      try { samplePort?.postMessage(this.terminal); } catch {}
     }
   }
 
   ack(message, status, admitted = 0, error = null, report = null, port = this.port) {
-    port.postMessage({ kind: "ack", generation: this.generation,
+    const acknowledgement = { kind: "ack", generation: this.generation,
       sequence: Number.isSafeInteger(message?.sequence) ? message.sequence : null,
       operation: typeof message?.kind === "string" ? message.kind : null,
-      status, admitted, error, report });
+      status, admitted, error, report };
+    if (status !== 0) acknowledgement.diagnostics = this.terminal;
+    port.postMessage(acknowledgement);
   }
 
-  reject(message, status, error, admitted = 0, port = this.port) {
+  reject(message, status, error, admitted = 0, port = this.port,
+    origin = AUDIO_FAILURE_ORIGIN_CONTROL, frame = 0, framePresent = 0) {
+    // Preserve ACK admission ordering while latching before any port callback.
+    this.captureFailure(status, origin, frame, framePresent, 0, 0);
     // A refused transfer still owns its received endpoint, not a live producer.
     if ((message?.kind === "attach-commands" || message?.kind === "attach-samples")
       && message.port !== this.commandPort && message.port !== this.samplePort && message.port !== this.port) {
       try { message.port?.close(); } catch {}
     }
     try { this.ack(message, status, admitted, error, null, port); } catch {}
-    this.fence(status);
+    this.fence(status, origin, frame, framePresent);
   }
 
   closeCommandPort() {
@@ -351,20 +410,31 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
 
   control(message) {
     let admitted = 0;
+    let origin = AUDIO_FAILURE_ORIGIN_CONTROL;
+    let frame = 0;
+    let framePresent = 0;
     try {
       if (message === null || typeof message !== "object" || typeof message.kind !== "string") {
         this.reject(message, INVALID, "message");
         return;
       }
+      if (message.kind === "arm") {
+        origin = AUDIO_FAILURE_ORIGIN_ARM;
+        const actualFrame = currentFrame;
+        if (integer(actualFrame, 0, Number.MAX_SAFE_INTEGER)) {
+          frame = actualFrame;
+          framePresent = 1;
+        }
+      }
       if (message.generation !== this.generation) {
-        this.reject(message, GENERATION, "generation");
+        this.reject(message, GENERATION, "generation", 0, this.port, origin, frame, framePresent);
         return;
       }
       // A fenced owner still accepts explicit cleanup. Its sequence must be
       // fresh; it need not fill a gap that was itself the cause of fencing.
       if (!integer(message.sequence, 1, Number.MAX_SAFE_INTEGER)
         || (this.failed && message.kind === "stop" ? message.sequence <= this.sequence : message.sequence !== this.sequence + 1)) {
-        this.reject(message, SEQUENCE, "sequence");
+        this.reject(message, SEQUENCE, "sequence", 0, this.port, origin, frame, framePresent);
         return;
       }
       this.sequence = message.sequence;
@@ -373,7 +443,7 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
         return;
       }
       if (this.failed || this.phase === 3) {
-        this.reject(message, STATE, "fenced");
+        this.reject(message, STATE, "fenced", 0, this.port, origin, frame, framePresent);
         return;
       }
       let status = 0;
@@ -434,12 +504,18 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
         port.onmessageerror = () => this.fence(INVALID);
         port.start();
       } else if (message.kind === "arm") {
-        if (this.phase !== 1 || !unsigned(message.frame) || !integer(currentFrame, 0, Number.MAX_SAFE_INTEGER)) {
-          this.reject(message, INVALID, "arm");
+        if (this.phase !== 1 || !unsigned(message.frame) || framePresent !== 1) {
+          this.reject(message, INVALID, "arm", 0, this.port, origin, frame, framePresent);
           return;
         }
-        status = this.owner.arm(message.frame, BigInt(currentFrame));
-        if (status === 0) this.phase = 2;
+        status = this.owner.arm(message.frame, BigInt(frame));
+        if (status === 0) {
+          this.phase = 2;
+          if (!this.diagnosed) {
+            this.terminal.successfulArmFrame = frame;
+            this.terminal.successfulArmFramePresent = 1;
+          }
+        }
       } else if (message.kind === "commands") {
         if (this.commandPort !== null) {
           this.reject(message, STATE, "transferred-command-owner");
@@ -454,10 +530,10 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
         this.reject(message, INVALID, "operation");
         return;
       }
-      if (status !== 0) this.reject(message, status, "audio");
+      if (status !== 0) this.reject(message, status, "audio", 0, this.port, origin, frame, framePresent);
       else this.ack(message, 0);
     } catch {
-      this.reject(message, EXCEPTION, "exception", admitted);
+      this.reject(message, EXCEPTION, "exception", admitted, this.port, origin, frame, framePresent);
     }
   }
 
@@ -472,38 +548,53 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     // owner destruction here. Browser messaging/GC still has no hard deadline.
     this.silence(outputs);
     if (this.failed || this.phase === 3) return false;
+    let frame = 0;
+    let framePresent = 0;
+    let frames = 0;
+    let framesPresent = 0;
     try {
+      const actualFrame = currentFrame;
+      if (integer(actualFrame, 0, Number.MAX_SAFE_INTEGER)) {
+        frame = actualFrame;
+        framePresent = 1;
+      }
+      if (outputs.length > 0 && outputs[0].length > 0) {
+        const actualFrames = outputs[0][0].length;
+        if (integer(actualFrames, 0, 0xffffffff)) {
+          frames = actualFrames;
+          framesPresent = 1;
+        }
+      }
       if (outputs.length !== 1 || outputs[0].length !== this.channels) {
-        this.fence(LAYOUT);
+        this.fence(LAYOUT, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
         return false;
       }
-      const frames = outputs[0][0].length;
       if (frames > this.maxFrames) {
-        this.fence(LAYOUT);
+        this.fence(LAYOUT, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
         return false;
       }
       for (let channel = 0; channel < this.channels; channel++) {
         if (outputs[0][channel].length !== frames) {
-          this.fence(LAYOUT);
+          this.fence(LAYOUT, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
           return false;
         }
       }
       if (this.phase === 0) return true;
       if (this.memory.buffer !== this.buffer || this.output.byteLength !== this.maxFrames * this.channels * 4) {
-        this.fence(MEMORY);
+        this.fence(MEMORY, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
         return false;
       }
-      if (!integer(currentFrame, 0, Number.MAX_SAFE_INTEGER) || !Number.isSafeInteger(currentFrame + frames)) {
-        this.fence(FRAME);
+      if (framePresent !== 1 || !Number.isSafeInteger(frame + frames)) {
+        this.fence(FRAME, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
         return false;
       }
-      const status = this.owner.render(currentFrame % WORD, Math.floor(currentFrame / WORD), frames);
+      const status = this.owner.render(frame % WORD, Math.floor(frame / WORD), frames);
       if (status !== 0) {
-        this.fence(status);
+        this.fence(status, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
         return false;
       }
       if (this.memory.buffer !== this.buffer) {
-        this.fence(MEMORY);
+        this.fence(MEMORY, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
         return false;
       }
       for (let channel = 0; channel < this.channels; channel++) {
@@ -512,7 +603,7 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
       return true;
     } catch {
       this.silence(outputs);
-      this.fence(EXCEPTION);
+      this.fence(EXCEPTION, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
       return false;
     }
   }

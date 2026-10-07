@@ -1,11 +1,14 @@
 // One setup sample producer. Ending this port does not free the audio owner.
+import { readAudioFailureDiagnostics } from "./audio-failure.mjs";
 const U64_MAX = 18446744073709551615n;
 const integer = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
 const unsigned = value => typeof value === "bigint" && value >= 0n && value <= U64_MAX;
 
 function failure(code, message, generation = null, details = {}) {
   const error = new Error(message, details.cause === undefined ? undefined : { cause: details.cause });
-  Object.assign(error, { code, generation, sequence: null, status: null, admitted: null }, details);
+  Object.assign(error, { code, generation, sequence: details.sequence ?? null,
+    status: details.status ?? null, admitted: details.admitted ?? null,
+    diagnostics: details.diagnostics ?? null });
   return error;
 }
 
@@ -134,19 +137,22 @@ export class AudioSampleClient {
 
   #message(message) {
     if (this.#state !== "ready") return;
-    const malformed = () => this.#dispose(this.#error("protocol", "Malformed or uncorrelated sample response."));
-    if (!message || typeof message !== "object") { malformed(); return; }
     const pending = this.#pending;
+    const current = () => this.#state === "ready" && this.#pending === pending;
+    const malformed = cause => {
+      if (current()) this.#dispose(this.#error("protocol", "Malformed or uncorrelated sample response.", { cause }));
+    };
+    if (!message || typeof message !== "object") { malformed(); return; }
     let fields;
     try {
       const generation = message.generation;
       if (integer(generation, 1, Number.MAX_SAFE_INTEGER) && generation !== this.#generation) return;
       fields = { generation, kind: message.kind, operation: message.operation, sequence: message.sequence,
         status: message.status, admitted: message.admitted, error: message.error, report: message.report };
-    } catch { malformed(); return; }
+    } catch (cause) { malformed(cause); return; }
     // Read response fields only once. Getters cannot revive a closed owner or
     // settle a different operation admitted while the response was inspected.
-    if (this.#state !== "ready" || this.#pending !== pending) return;
+    if (!current()) return;
     if (fields.generation !== this.#generation) { malformed(); return; }
     if (fields.kind === "closed") {
       this.#dispose(this.#error("closed", "The audio host stopped the sample owner."), "closed");
@@ -154,7 +160,11 @@ export class AudioSampleClient {
     }
     if (fields.kind === "terminal") {
       if (!integer(fields.status, 1, 0xffffffff)) { malformed(); return; }
-      this.#dispose(this.#error("processor", "Audio processor reported a terminal failure.", { status: fields.status }));
+      let diagnostics;
+      try { diagnostics = readAudioFailureDiagnostics(message); }
+      catch (cause) { malformed(cause); return; }
+      if (!current()) return;
+      this.#dispose(this.#error("processor", "Audio processor reported a terminal failure.", { status: fields.status, diagnostics }));
       return;
     }
     if (fields.kind !== "ack" || pending === null || fields.operation !== pending.operation
@@ -165,9 +175,19 @@ export class AudioSampleClient {
       malformed();
       return;
     }
+    let diagnostics = null;
+    try {
+      const supplied = message.diagnostics;
+      if (supplied !== undefined) {
+        if (fields.status === 0) throw new TypeError("unexpected audio failure diagnostics");
+        diagnostics = readAudioFailureDiagnostics(supplied);
+        if (diagnostics === null) throw new TypeError("missing audio failure diagnostic version");
+      }
+    } catch (cause) { malformed(cause); return; }
+    if (!current()) return;
     if (fields.status !== 0) {
       this.#dispose(this.#error("remote", `Audio processor rejected ${pending.operation}${fields.error ? `: ${fields.error}` : "."}`,
-        { sequence: pending.sequence, status: fields.status, admitted: fields.admitted }));
+        { sequence: pending.sequence, status: fields.status, admitted: fields.admitted, diagnostics }));
       return;
     }
     this.#pending = null;

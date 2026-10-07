@@ -1,5 +1,6 @@
 // DOM-side ownership only. Gameplay and audio presentation evidence remain in
 // the shared runtime and the actual Worklet reports, not UI timers.
+import { readAudioFailureDiagnostics } from "./audio-failure.mjs";
 const OWNER = Symbol("AudioHost owner");
 const U64_MAX = 18446744073709551615n;
 const I64_MIN = -9223372036854775808n;
@@ -17,6 +18,7 @@ export class AudioHostError extends Error {
     this.status = details.status ?? null;
     this.admitted = details.admitted ?? null;
     this.remoteError = details.remoteError?.slice(0, 4096) ?? null;
+    this.diagnostics = details.diagnostics ?? null;
   }
 }
 
@@ -476,18 +478,39 @@ export class AudioHost {
   }
 
   #message(message) {
-    if (message !== null && typeof message === "object"
-      && integer(message.generation, 1, Number.MAX_SAFE_INTEGER) && message.generation !== this.generation) return;
-    const malformed = () => this.#fail(this.#error("protocol", "receive", "Malformed or uncorrelated AudioWorklet response."));
-    if (message === null || typeof message !== "object" || message.generation !== this.generation) {
-      malformed();
-      return;
-    }
-    if (message.kind === "terminal") {
-      if (!integer(message.status, 1, 0xffffffff)) { malformed(); return; }
-      // A rejected control is followed by its one terminal notice. The fresh
-      // stop ACK still owns cleanup; the original admitted-prefix error stays.
-      const error = this.#error("processor", "render", `AudioWorklet reported a terminal failure (status ${message.status}).`, { status: message.status });
+    if (this.#node === null) return;
+    const pending = this.#pending;
+    const cancelled = this.#cancelled;
+    const stopPromise = this.#stopPromise;
+    const state = this.#state;
+    const failure = this.#failure;
+    const current = () => this.#node !== null && this.#pending === pending
+      && this.#cancelled === cancelled && this.#stopPromise === stopPromise
+      && this.#state === state && this.#failure === failure;
+    const malformed = cause => {
+      if (current()) this.#fail(this.#error("protocol", "receive", "Malformed or uncorrelated AudioWorklet response.", { cause }));
+    };
+    if (message === null || typeof message !== "object") { malformed(); return; }
+    let fields;
+    try {
+      const generation = message.generation;
+      if (integer(generation, 1, Number.MAX_SAFE_INTEGER) && generation !== this.generation) return;
+      fields = { generation, kind: message.kind, operation: message.operation, sequence: message.sequence,
+        status: message.status, admitted: message.admitted, error: message.error, report: message.report,
+        sampleRate: message.sampleRate, channels: message.channels };
+    } catch (cause) { malformed(cause); return; }
+    if (!current()) return;
+    if (fields.generation !== this.generation) { malformed(); return; }
+    if (fields.kind === "terminal") {
+      if (!integer(fields.status, 1, 0xffffffff)) { malformed(); return; }
+      let diagnostics;
+      try { diagnostics = readAudioFailureDiagnostics(message); }
+      catch (cause) { malformed(cause); return; }
+      if (!current()) return;
+      // The fresh stop ACK owns cleanup after a rejected control; the
+      // original error retains its status, diagnostics and admitted prefix.
+      const error = this.#error("processor", "render", `AudioWorklet reported a terminal failure (status ${fields.status}).`,
+        { status: fields.status, diagnostics });
       if (this.#stopPromise) {
         this.#failure ??= error;
         this.#state = "failed";
@@ -496,34 +519,50 @@ export class AudioHost {
       this.#fail(error);
       return;
     }
-    if (message.kind === "ready") {
-      if (message.sampleRate !== this.sampleRate || message.channels !== this.channels) { malformed(); return; }
+    if (fields.kind === "ready") {
+      if (fields.sampleRate !== this.sampleRate || fields.channels !== this.channels) { malformed(); return; }
       if (this.#stopPromise) return;
       if (this.#state !== "opening" || this.#ready === null || this.#readyReceived) { malformed(); return; }
       this.#readyReceived = true;
       this.#ready.resolve();
       return;
     }
-    if (message.kind !== "ack") { malformed(); return; }
-    if (this.#cancelled && this.#ackValid(message, this.#cancelled)) {
+    if (fields.kind !== "ack") { malformed(); return; }
+    let cancelledAck;
+    let valid;
+    try {
+      cancelledAck = cancelled !== null && this.#ackValid(fields, cancelled);
+      valid = cancelledAck || (pending !== null && this.#ackValid(fields, pending));
+    } catch (cause) { malformed(cause); return; }
+    if (!current()) return;
+    if (cancelledAck) {
       this.#cancelled = null;
       return;
     }
-    const pending = this.#pending;
-    if (pending === null || !this.#ackValid(message, pending)) { malformed(); return; }
+    if (!valid) { malformed(); return; }
+    let diagnostics = null;
+    try {
+      const supplied = message.diagnostics;
+      if (supplied !== undefined) {
+        if (fields.status === 0) throw new TypeError("unexpected audio failure diagnostics");
+        diagnostics = readAudioFailureDiagnostics(supplied);
+        if (diagnostics === null) throw new TypeError("missing audio failure diagnostic version");
+      }
+    } catch (cause) { malformed(cause); return; }
+    if (!current()) return;
     clearTimeout(pending.timer);
     this.#pending = null;
-    if (message.status !== 0) {
-      const error = this.#error("remote", pending.operation, `AudioWorklet rejected the operation (status ${message.status})${message.error ? `: ${message.error.slice(0, 4096)}` : "."}`, {
-        sequence: pending.sequence, status: message.status, admitted: message.admitted,
-        remoteError: message.error,
+    if (fields.status !== 0) {
+      const error = this.#error("remote", pending.operation, `AudioWorklet rejected the operation (status ${fields.status})${fields.error ? `: ${fields.error.slice(0, 4096)}` : "."}`, {
+        sequence: pending.sequence, status: fields.status, admitted: fields.admitted,
+        remoteError: fields.error, diagnostics,
       });
       pending.reject(error);
       this.#fail(error);
       return;
     }
     if (pending.commit) pending.commit();
-    pending.resolve(message);
+    pending.resolve(fields);
   }
 
   #fail(error) {
