@@ -44,7 +44,7 @@ use std::{
 };
 pub use crate::native_gameplay_bridge::{
     NativeCohortSession, PlayerState, finite_cohort_done, member_progress, run_cohort,
-    run_cohort_with_control, run_cohort_with_results,
+    run_cohort_with_control, run_cohort_with_results, run_cohort_with_policies_and_results,
 };
 #[cfg(test)]
 use crate::native_group_competition::NativeGroupCompetition;
@@ -594,6 +594,88 @@ fn complete_cohort<S: SoloCompetitionPort, G: GroupCompetitionPort, P, H: Native
 
 /// Runs the actual cohort policy with explicit device, clock/wait and host effects.
 /// Acquired input and native presentation keep their original clock domains.
+/// Full selected original-ID policy admission, independent of capture availability.
+pub fn run_cohort_with_policies_and_results_and_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+>(
+    device: &mut D,
+    session: CohortSession<'_, S, G, D::Presentation>,
+    config: NativeGameplayConfig,
+    control: &mut C,
+    host_port: &mut H,
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    crate::native_gameplay_host::validate_play_policy_members(policies)?;
+    crate::native_policy_admission::validate_config(&config)?;
+    if !(2..=64).contains(&session.states.len())
+        || session.group.poisoned()
+        || !session
+            .group
+            .player_ids()
+            .eq(session.states.iter().map(|state| state.player))
+        || !session
+            .states
+            .iter()
+            .map(|state| state.player)
+            .eq(policies.iter().map(|(id, _)| *id))
+    {
+        return Err("selected cohort requires the exact pristine original-ID roster".into());
+    }
+    let custom = policies
+        .iter()
+        .any(|(_, policy)| policy.gauge() != &GaugeProfile::default());
+    if custom
+        && session
+            .network
+            .as_ref()
+            .is_some_and(|network| !network.policy_agnostic())
+    {
+        return Err("nondefault cohort networking requires policy-aware member identities".into());
+    }
+    for (state, (_, policy)) in session.states.iter().zip(policies) {
+        if state.score != ScoreSummary::default()
+            || state.last_song != config.song_origin
+            || session.group.player_gameplay_fence(state.player).is_some()
+        {
+            return Err("selected cohort requires pristine member state".into());
+        }
+        let judge = session
+            .group
+            .member_judge(state.player)
+            .ok_or("selected cohort missing judge")?;
+        let competition = state
+            .competition
+            .as_ref()
+            .filter(|port| !port.policy_agnostic());
+        let header = competition
+            .map(|port| {
+                port.expected_policy_header()
+                    .ok_or("selected member competition has no policy identity")
+            })
+            .transpose()?;
+        crate::native_policy_admission::validate_selected(
+            judge,
+            &state.gauge,
+            policy,
+            state.capture.as_ref(),
+            header,
+            &config,
+        )?;
+    }
+    if !custom {
+        host_port.prepare_play_policies(policies)?;
+    }
+    let mut host = crate::native_gameplay_bridge::ResolvedGameplayHost {
+        host: host_port,
+        policies,
+    };
+    run_cohort_with_results_and_ports(device, session, config, control, &mut host)
+}
+
 pub fn run_cohort_with_results_and_ports<
     D: crate::gameplay_presentation::GameplayDevice,
     C: NativePumpControl,

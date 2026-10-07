@@ -487,6 +487,7 @@ fn four_member_peer_and_saved_geometry_does_not_change_actual_cohort_capture_or_
                 .iter()
                 .enumerate()
                 .map(|(index, player)| LocalPlayerView {
+                    bms_score: None,
                     player: *player,
                     chart: Some(&chart),
                     song_time: live.member_song_time(*player),
@@ -847,6 +848,7 @@ fn member_admission_and_presentation_failures_preserve_sibling_prefixes_and_actu
             .iter()
             .enumerate()
             .map(|(index, player)| LocalPlayerView {
+                bms_score: None,
                 player: *player,
                 chart: Some(&chart),
                 song_time: live.member_song_time(*player),

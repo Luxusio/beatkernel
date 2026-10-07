@@ -37,6 +37,7 @@ use std::{collections::VecDeque, error::Error, fmt, time::Duration as WallDurati
 pub use crate::native_gameplay_bridge::{
     NativeGameplayDevice, NativeGameplaySession, run_gameplay, run_gameplay_with_control,
     run_gameplay_with_result, run_gameplay_with_result_and_score,
+    run_gameplay_with_policy_and_result_and_score,
 };
 
 pub type NativeGameplayResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -399,6 +400,58 @@ pub fn run_gameplay_with_result_and_score_and_ports<
     }
     let mut observer = crate::native_gameplay_host::NativeScoreHost::new(host_port, score);
     run_gameplay_with_result_and_ports(device, session, config, control, &mut observer)
+}
+
+/// Admits the full selected setup before entering the existing native pump.
+pub fn run_gameplay_with_policy_and_result_and_score_and_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+>(
+    device: &mut D,
+    session: GameplaySession<'_, S, D::Presentation>,
+    config: NativeGameplayConfig,
+    control: &mut C,
+    host_port: &mut H,
+    score: &mut crate::competition::ScoreSummary,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    let policies = [(crate::local_players::PlayerId(1), policy)];
+    crate::native_gameplay_host::validate_play_policy_members(&policies)?;
+    crate::native_policy_admission::validate_config(&config)?;
+    if score != &crate::competition::ScoreSummary::default()
+        || session.runtime.poisoned()
+        || session.runtime.gameplay_fence().is_some()
+    {
+        return Err("selected native gameplay requires a pristine runtime and score".into());
+    }
+    let competition = session
+        .competition
+        .as_ref()
+        .filter(|port| !port.policy_agnostic());
+    let header = competition
+        .map(|port| {
+            port.expected_policy_header()
+                .ok_or("selected native competition has no policy identity")
+        })
+        .transpose()?;
+    crate::native_policy_admission::validate_selected(
+        session.runtime.judge(),
+        session.gauge,
+        policy,
+        session.capture.as_ref(),
+        header,
+        &config,
+    )?;
+    if policy.gauge() == &GaugeProfile::default() {
+        host_port.prepare_play_policies(&policies)?;
+    }
+    let mut host = crate::native_gameplay_bridge::ResolvedGameplayHost {
+        host: host_port,
+        policies: &policies,
+    };
+    run_gameplay_with_result_and_score_and_ports(device, session, config, control, &mut host, score)
 }
 
 pub fn run_gameplay_with_result_and_ports<

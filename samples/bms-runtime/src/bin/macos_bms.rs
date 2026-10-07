@@ -706,7 +706,7 @@ mod native {
     }
     use beatkernel_bms_runtime::native_gameplay::{
         InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
-        NativeGameplaySession, retain_input, run_gameplay_with_result_and_score,
+        NativeGameplaySession, retain_input, run_gameplay_with_policy_and_result_and_score,
     };
     type OwnedOutput = beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::NativeCoreAudioOutputOwner;
     struct GameplayDevice<'a> {
@@ -1242,7 +1242,7 @@ mod native {
                         other_devices: &mut other_devices,
                         retained: &mut startup_inputs,
                     };
-                    run_gameplay_with_result_and_score(
+                    run_gameplay_with_policy_and_result_and_score(
                         &mut device,
                         NativeGameplaySession {
                             runtime: &mut runtime,
@@ -1270,6 +1270,7 @@ mod native {
                             logical_schedule: true,
                         },
                         &mut score,
+                        &policy,
                     )
                 };
                 println!(

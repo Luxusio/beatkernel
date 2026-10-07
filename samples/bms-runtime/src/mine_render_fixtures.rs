@@ -530,6 +530,7 @@ mod rendering {
         for count in [32usize, 64] {
             let players: Vec<_> = (0..count)
                 .map(|index| LocalPlayerSnapshot {
+                    bms_score: None,
                     player: PlayerId(if index + 1 == count {
                         u32::MAX
                     } else {

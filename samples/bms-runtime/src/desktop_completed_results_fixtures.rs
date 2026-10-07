@@ -92,6 +92,7 @@ fn completed(end: Option<i64>) -> (CompletedPlayResult, BmsGauge) {
 }
 fn member(player: PlayerId, gauge: BmsGauge) -> player::LocalPlayerSnapshot {
     player::LocalPlayerSnapshot {
+        bms_score: None,
         player,
         chart: None,
         song_time: Some(Timestamp::ZERO),

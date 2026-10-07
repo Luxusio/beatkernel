@@ -409,6 +409,7 @@ fn local_snapshot_pages_borrow_independent_gauges_without_changing_fields_touch_
             let mut gauge = BmsGauge::default();
             gauge.observe(&events, &[]).unwrap();
             LocalPlayerSnapshot {
+                bms_score: None,
                 player: PlayerId(if index == 63 {
                     u32::MAX
                 } else {

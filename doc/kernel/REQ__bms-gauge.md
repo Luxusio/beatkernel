@@ -334,8 +334,8 @@ reuse geometry and shared score storage. Header decoding and score projection
 stay in preparation; rendering consumes scalar summaries and no native IO.
 Prefix labels fit left of the catalogue page buttons, and stored counts use the
 detail right column without changing pagination/hit ownership. These are record
-views; live host/HUD propagation and historical combo/window compatibility remain
-separate work.
+views; selected native live host/HUD propagation follows the live contract
+above. Historical combo/window compatibility remains separate work.
 
 ## Resolved dynamic policy and record identity
 
@@ -422,8 +422,8 @@ Preparation is control-side; owning judge/gauge parts needs no dynamic dispatch
 or extra runtime wrapper. Replay capture retains the resulting windows/deltas
 and dynamics through the existing full setup identity. Native simple selection
 uses this builder as described below. Browser/per-member/live selection,
-nondefault multiplayer, class-aware score labels and complete mine/empty
-compatibility remain unfinished.
+nondefault multiplayer and complete mine/empty compatibility remain unfinished.
+Selected native class-score labels follow the live contract above.
 
 ## Native policy preparation ports
 
@@ -445,8 +445,9 @@ existing ButtonOnly native setup and records the complete gauge through its
 canonical wrapper; limits/refusal preserve the judge and policy. Legacy helper
 and default host behavior remain unchanged. These preparation APIs are invoked
 by the guarded common pumps and native launchers described below. Custom
-multiplayer identity, richer/per-member/live/browser selectors and class-aware
-scores remain separate integration work.
+multiplayer identity and richer/per-member/live/browser selectors remain separate
+integration work. Selected native class-score propagation follows the live
+publication contract above.
 
 ## Native nondefault admission
 
@@ -495,8 +496,9 @@ network competition is explicitly rejected while shared policy preparation is
 unfinished; do not silently disable it or start its resources. Saved ghosts use
 the policy-aware preparation contract below.
 Current-draft record comparison resolves the same policy from original source.
-Live gauge changes, per-member selectors, graded timing presets/class-aware
-scores, custom multiplayer and browser selection remain separate work.
+Live gauge changes, per-member selectors, graded timing presets, custom
+multiplayer and browser selection remain separate work. Selected native live
+class scores follow the publication contract above.
 
 ## Policy-aware saved ghosts
 
@@ -535,9 +537,9 @@ increasing by grade. No trailing bytes or nested judgment wrapper are accepted.
 Section-aware decoding/reconstruction preserves the
 mapping and regenerates the entire header; legacy tuple decoders refuse to drop
 it. Legacy unclassified recordings remain byte-compatible and acquire no guessed
-class/EX meaning. Record comparison includes class identity. Live host/UI score
-publication and shared networking still require class-policy integration;
-adding these primitives does not claim their completion or historical LR2 timing.
+class/EX meaning. Record comparison includes class identity. Selected native live host/UI score publication follows the contract above;
+shared networking still requires class-policy integration. These primitives
+do not establish historical LR2 timing compatibility.
 
 ## Recorded class-score consumers
 
@@ -553,7 +555,8 @@ actual prefix stage counts plus explicit recorded class/EX counts, or an
 unclassified marker. A diagnostic song-time seek beyond a finite recorded end
 refuses before replay execution. Core seek may still generate its documented
 diagnostic boundary advance; output is inspection, not persisted completion.
-Live class-score presentation still requires class-policy propagation.
+Selected native live presentation follows the publication contract above;
+recorded projection alone does not establish live publication.
 
 ## Native selected class recording
 
@@ -571,5 +574,5 @@ classified selection, even when judge and gauge values coincide. No class is
 guessed from a delta or grade number. Disabled capture retains pristine/profile
 checks and performs no source identity acquisition. All OS launchers use the
 common preparation; custom networking remains refused. These changes preserve
-recorded meaning, but live host/HUD class scores and historical timing remain
-separate integration work.
+recorded meaning. Selected native host/HUD scores follow the live contract
+above; historical timing remains separate integration work.

@@ -1,6 +1,8 @@
 //! Latest-state presentation bridge; never called from the audio callback.
 use crate::{
     competition::ScoreSummary,
+    judgment_policy::{BmsJudgmentPolicy, BmsScoreSummary},
+    play_policy::ResolvedPlayPolicy,
     gauge::{BmsGauge, GaugeFailure, GaugeProfile},
     local_players::PlayerId,
     local_runtime::PlayerReport,
@@ -62,6 +64,7 @@ pub struct LocalPlayerSnapshot {
     pub chart: Option<Arc<PlayerChart>>,
     pub song_time: Option<Timestamp>,
     pub score: ScoreSummary,
+    pub bms_score: Option<BmsScoreSummary>,
     /// Exact committed mine evidence, independent of ordinary-note score.
     pub mine_damage: MineDamageSummary,
     /// Independent policy observations for this actual member (default until setup).
@@ -81,6 +84,7 @@ impl LocalPlayerSnapshot {
             chart,
             song_time: None,
             score: ScoreSummary::default(),
+            bms_score: None,
             mine_damage: MineDamageSummary::default(),
             gauge: BmsGauge::default(),
             last_judge: None,
@@ -259,6 +263,7 @@ pub struct PlayerSnapshot {
     pub images: Option<Arc<crate::image_assets::ImageAssets>>,
     pub song_time: Option<Timestamp>,
     pub score: ScoreSummary,
+    pub bms_score: Option<BmsScoreSummary>,
     /// Mirrors the sole member only; multiple members have no aggregate damage.
     pub mine_damage: MineDamageSummary,
     /// Mirrors one member; the default value is not a multi-member aggregate.
@@ -289,6 +294,7 @@ impl Default for PlayerSnapshot {
             images: None,
             song_time: None,
             score: ScoreSummary::default(),
+            bms_score: None,
             mine_damage: MineDamageSummary::default(),
             gauge: BmsGauge::default(),
             last_judge: None,
@@ -715,6 +721,7 @@ struct Session {
     chart_published: bool,
     replay_policy: Option<GaugeProfile>,
     live_policy_prepared: bool,
+    live_classes: Vec<Option<BmsJudgmentPolicy>>,
     pause_dirty: bool,
     room_dirty: bool,
 }
@@ -776,6 +783,7 @@ pub fn with_publisher<T>(
             chart_published: false,
             replay_policy: None,
             live_policy_prepared: false,
+            live_classes: Vec::new(),
             pause_dirty: false,
             room_dirty: false,
         });
@@ -1160,6 +1168,29 @@ fn register_chart(
 pub fn prepare_native_policies(
     policies: &[(PlayerId, &GaugeProfile)],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    prepare_native_policy_rows(policies, Vec::new())
+}
+
+/// Cold complete selected policies, independently of replay recording.
+pub fn prepare_native_play_policies(
+    policies: &[(PlayerId, &ResolvedPlayPolicy)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    crate::native_gameplay_host::validate_play_policy_members(policies)?;
+    let mut gauges = Vec::new();
+    let mut classes = Vec::new();
+    gauges.try_reserve_exact(policies.len())?;
+    classes.try_reserve_exact(policies.len())?;
+    for (player, policy) in policies {
+        gauges.push((*player, policy.gauge()));
+        classes.push(policy.judgments().cloned());
+    }
+    prepare_native_policy_rows(&gauges, classes)
+}
+
+fn prepare_native_policy_rows(
+    policies: &[(PlayerId, &GaugeProfile)],
+    classes: Vec<Option<BmsJudgmentPolicy>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     crate::native_gameplay_host::validate_policy_members(policies)?;
     SESSION.with(|session| {
         let mut session = session.borrow_mut();
@@ -1197,6 +1228,10 @@ pub fn prepare_native_policies(
         for (member, gauge) in current.snapshot.players.iter_mut().zip(gauges) {
             member.gauge = gauge;
         }
+        for (member, class) in current.snapshot.players.iter_mut().zip(&classes) {
+            member.bms_score = class.as_ref().map(|_| BmsScoreSummary::default());
+        }
+        current.live_classes = classes;
         current.live_policy_prepared = true;
         current.observe_cancellation(false);
         current.publish_latest(true);
@@ -1384,6 +1419,16 @@ fn publish_solo(
             score.observe(events)?;
             Some(score)
         };
+        let bms_score = if let Some(score) = &score {
+            current
+                .live_classes
+                .first()
+                .and_then(Option::as_ref)
+                .map(|policy| policy.project(score))
+                .transpose()?
+        } else {
+            member.bms_score
+        };
         let mine_damage = if let Some(summary) = replay_mines {
             validate_mine_summary(member.mine_damage, summary)?;
             summary
@@ -1414,6 +1459,7 @@ fn publish_solo(
         if let Some(score) = score {
             member.score = score;
         }
+        member.bms_score = bms_score;
         member.mine_damage = mine_damage;
         if let Some(gauge) = gauge {
             member.gauge = gauge;
@@ -1486,7 +1532,13 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
             if !report.report.judge_events.is_empty() {
                 let mut score = current.snapshot.players[index].score.clone();
                 score.observe(&report.report.judge_events)?;
-                changed_scores.push((index, score));
+                let bms_score = current
+                    .live_classes
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .map(|policy| policy.project(&score))
+                    .transpose()?;
+                changed_scores.push((index, score, bms_score));
             }
             if !report.report.hazard_events.is_empty() {
                 let mut summary = current.snapshot.players[index].mine_damage;
@@ -1521,8 +1573,9 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
                 current.pressed[index].mask = mask;
             }
         }
-        for (index, score) in changed_scores {
+        for (index, score, bms_score) in changed_scores {
             current.snapshot.players[index].score = score;
+            current.snapshot.players[index].bms_score = bms_score;
         }
         for report in reports {
             let (index, member) = current
@@ -1631,6 +1684,7 @@ impl PlayerSnapshot {
             self.pressed_lanes = member.pressed_lanes;
             self.song_time = member.song_time;
             self.score = member.score.clone();
+            self.bms_score = member.bms_score;
             self.mine_damage = member.mine_damage;
             self.gauge.clone_from(&member.gauge);
             self.last_judge = member.last_judge;
@@ -1640,6 +1694,7 @@ impl PlayerSnapshot {
             self.pressed_lanes = 0;
             self.song_time = None;
             self.score = ScoreSummary::default();
+            self.bms_score = None;
             self.mine_damage = MineDamageSummary::default();
             self.gauge = BmsGauge::default();
             self.last_judge = None;
@@ -2394,3 +2449,7 @@ mod live_output_channel_fixtures {
 #[cfg(test)]
 #[path = "player_output_startup_fixtures.rs"]
 mod output_startup_fixtures;
+
+#[cfg(test)]
+#[path = "native_live_class_fixtures.rs"]
+mod native_live_class_fixtures;

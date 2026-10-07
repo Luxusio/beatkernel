@@ -6482,9 +6482,19 @@ fn draw_game_with_background(
         .first()
         .and_then(|player| player.competition.as_ref())
     {
-        organisms::competition_scoreboard(pixels, &snapshot.score, competition)?;
+        organisms::competition_scoreboard_with_bms_score(
+            pixels,
+            &snapshot.score,
+            competition,
+            snapshot.bms_score.as_ref(),
+        )?;
     } else {
-        organisms::scoreboard(pixels, &snapshot.score, &snapshot.recent_results);
+        organisms::scoreboard_with_bms_score(
+            pixels,
+            &snapshot.score,
+            &snapshot.recent_results,
+            snapshot.bms_score.as_ref(),
+        );
     }
     if let (Some(chart), Some(now)) = (&snapshot.chart, snapshot.song_time) {
         organisms::playfield_with_background(
@@ -6584,7 +6594,7 @@ mod tests {
             let chart = Arc::new(player_chart::PlayerChart::from_compiled(&source, &source.compile().unwrap().chart).unwrap());
             let mut progress = beatkernel_bms_runtime::note_progress::NoteProgress::new(chart.clone()).unwrap();
             progress.apply(&[JudgeEvent { object: chart.notes[0].object, stage: JudgeStage::Instant, outcome: JudgeOutcome::Miss { reason: MissReason::HeadTimeout }, at: Timestamp::ZERO, input: None }]);
-            player::LocalPlayerSnapshot { player: PlayerId(mode + 1), chart: Some(chart), song_time: Some(Timestamp::from_nanos(i64::from(mode) * 125_000_000)), score: Default::default(), mine_damage: Default::default(), gauge: Default::default(), last_judge: None, recent_results: vec![], pressed_lanes: 0, note_progress: Some(progress), competition: None }
+            player::LocalPlayerSnapshot { bms_score: None, player: PlayerId(mode + 1), chart: Some(chart), song_time: Some(Timestamp::from_nanos(i64::from(mode) * 125_000_000)), score: Default::default(), mine_damage: Default::default(), gauge: Default::default(), last_judge: None, recent_results: vec![], pressed_lanes: 0, note_progress: Some(progress), competition: None }
         }).collect();
         let mut snapshot = player::PlayerSnapshot {
             players: members,
@@ -6670,6 +6680,7 @@ mod tests {
             players: [7, u32::MAX, 2]
                 .into_iter()
                 .map(|id| player::LocalPlayerSnapshot {
+                    bms_score: None,
                     player: PlayerId(id),
                     chart: Some(chart.clone()),
                     mine_damage: Default::default(),
@@ -6740,6 +6751,7 @@ mod tests {
                     1_000_000_000,
                 ])
                 .map(|(id, ns)| player::LocalPlayerSnapshot {
+                    bms_score: None,
                     mine_damage: Default::default(),
                     gauge: Default::default(),
                     player: PlayerId(id),
@@ -8636,6 +8648,7 @@ mod tests {
         let snapshot = player::PlayerSnapshot {
             players: (1..=5)
                 .map(|id| player::LocalPlayerSnapshot {
+                    bms_score: None,
                     player: PlayerId(id),
                     chart: None,
                     mine_damage: Default::default(),
@@ -8941,6 +8954,7 @@ mod tests {
     fn comparison_toggle_is_available_only_for_groups_with_retained_comparisons() {
         let mut players: Vec<_> = (1..=2)
             .map(|id| player::LocalPlayerSnapshot {
+                bms_score: None,
                 player: beatkernel_bms_runtime::local_players::PlayerId(id),
                 mine_damage: Default::default(),
                 gauge: Default::default(),

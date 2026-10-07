@@ -130,6 +130,7 @@ fn snapshot(
         players: ids
             .iter()
             .map(|&player| player::LocalPlayerSnapshot {
+                bms_score: None,
                 player,
                 chart: None,
                 song_time: Some(Timestamp::ZERO),

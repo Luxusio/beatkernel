@@ -34,7 +34,7 @@ use beatkernel_bms_runtime::{
     playback_pause::PauseKeyboard,
 };
 use beatkernel_bms_runtime::{
-    native_cohort::{NativeCohortSession, run_cohort_with_results},
+    native_cohort::{NativeCohortSession, run_cohort_with_policies_and_results},
     native_gameplay::{
         InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult, retain_input,
     },
@@ -464,7 +464,11 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 backlogged: &mut backlogged,
                 retained: &mut startup_inputs,
             };
-            run_cohort_with_results(
+            let selected_policies: Vec<_> = assignments
+                .iter()
+                .map(|(player, _)| (*player, &policy))
+                .collect();
+            run_cohort_with_policies_and_results(
                 &mut device,
                 NativeCohortSession {
                     network: network.as_mut(),
@@ -490,6 +494,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                     pause_supported: competition_options.network.is_none(),
                     logical_schedule: true,
                 },
+                &selected_policies,
             )
         };
         for state in &states {

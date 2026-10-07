@@ -241,6 +241,12 @@ pub fn finite_cohort_done(
 pub(crate) struct PlayerGameplayHost;
 
 impl NativeGameplayHost for PlayerGameplayHost {
+    fn prepare_play_policies(
+        &mut self,
+        policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    ) -> NativeGameplayResult<()> {
+        player::prepare_native_play_policies(policies)
+    }
     fn prepare_policies(
         &mut self,
         policies: &[(PlayerId, &crate::gauge::GaugeProfile)],
@@ -408,5 +414,102 @@ pub fn run_cohort_with_results<D: NativeGameplayDevice>(
         config,
         &mut SystemControl,
         &mut PlayerGameplayHost,
+    )
+}
+
+/// Static cold-setup interceptor; report/publication effects stay with the original host.
+pub(crate) struct ResolvedGameplayHost<'a, 'p, H> {
+    pub(crate) host: &'a mut H,
+    pub(crate) policies: &'a [(PlayerId, &'p crate::play_policy::ResolvedPlayPolicy)],
+}
+impl<H: NativeGameplayHost> NativeGameplayHost for ResolvedGameplayHost<'_, '_, H> {
+    fn prepare_policies(
+        &mut self,
+        gauges: &[(PlayerId, &crate::gauge::GaugeProfile)],
+    ) -> NativeGameplayResult<()> {
+        if !gauges
+            .iter()
+            .zip(self.policies)
+            .all(|((id, gauge), (selected_id, policy))| {
+                id == selected_id && *gauge == policy.gauge()
+            })
+            || gauges.len() != self.policies.len()
+        {
+            return Err("native pump preparation differs from selected policy roster".into());
+        }
+        self.host.prepare_play_policies(self.policies)
+    }
+    fn prepare_play_policies(
+        &mut self,
+        policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    ) -> NativeGameplayResult<()> {
+        self.host.prepare_play_policies(policies)
+    }
+    fn cancelled(&self) -> bool {
+        self.host.cancelled()
+    }
+    fn pause_requested(&self) -> bool {
+        self.host.pause_requested()
+    }
+    fn retry_pause_publication(&mut self) {
+        self.host.retry_pause_publication();
+    }
+    fn publish_pause(&mut self, pause: PauseState) {
+        self.host.publish_pause(pause);
+    }
+    fn publish_section_end(&mut self, end: Timestamp) {
+        self.host.publish_section_end(end);
+    }
+    fn publish_report(&mut self, report: &RuntimeReport) -> NativeGameplayResult<()> {
+        self.host.publish_report(report)
+    }
+    fn publish_local_reports(&mut self, reports: &[PlayerReport]) -> NativeGameplayResult<()> {
+        self.host.publish_local_reports(reports)
+    }
+    fn diagnostic(&mut self, diagnostic: NativeGameplayDiagnostic<'_>) {
+        self.host.diagnostic(diagnostic);
+    }
+    fn publish_completed_solo(&mut self, result: CompletedPlayResult) -> NativeGameplayResult<()> {
+        self.host.publish_completed_solo(result)
+    }
+    fn publish_completed_local(
+        &mut self,
+        results: &[(PlayerId, CompletedPlayResult)],
+    ) -> NativeGameplayResult<()> {
+        self.host.publish_completed_local(results)
+    }
+}
+
+pub fn run_gameplay_with_policy_and_result_and_score<D: NativeGameplayDevice>(
+    device: &mut D,
+    session: NativeGameplaySession<'_>,
+    config: NativeGameplayConfig,
+    score: &mut crate::competition::ScoreSummary,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    crate::native_gameplay::run_gameplay_with_policy_and_result_and_score_and_ports(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+        score,
+        policy,
+    )
+}
+
+pub fn run_cohort_with_policies_and_results<D: NativeGameplayDevice>(
+    device: &mut D,
+    session: NativeCohortSession<'_>,
+    config: NativeGameplayConfig,
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    crate::native_cohort::run_cohort_with_policies_and_results_and_ports(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+        policies,
     )
 }

@@ -302,6 +302,7 @@ fn cached_presentation_contains_only_four_qualified_rows_and_retains_shared_lobb
         for count in [3, 4] {
             let views = (0..count)
                 .map(|slot| LocalPlayerView {
+                    bms_score: None,
                     player: PlayerId(u32::MAX - slot as u32),
                     chart: Some(&chart),
                     song_time: Some(Timestamp::ZERO),

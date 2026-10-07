@@ -96,3 +96,52 @@ pub(crate) fn validate_header(
     }
     Ok(())
 }
+
+/// Compare selected meanings as well as the recorded judge/gauge setup.
+pub(crate) fn validate_selected(
+    judge: &JudgeEngine,
+    gauge: &BmsGauge,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    capture: Option<&LiveReplayCapture>,
+    competition: Option<&ReplayHeader>,
+    config: &NativeGameplayConfig,
+) -> NativeGameplayResult<()> {
+    validate_initial(judge, gauge)?;
+    if judge.profile() != policy.judge() || gauge.profile() != policy.gauge() {
+        return Err("selected native policy differs from actual judge or gauge".into());
+    }
+    validate_capture(judge, gauge.profile(), capture, config)?;
+    for header in capture
+        .map(LiveReplayCapture::header)
+        .into_iter()
+        .chain(competition)
+    {
+        validate_header(judge, gauge.profile(), header, config)?;
+        if crate::replay_playback::decode_section_setup(&header.options)?
+            .judgments
+            .as_ref()
+            != policy.judgments()
+        {
+            return Err("selected native judgment classes differ from recorded policy".into());
+        }
+    }
+    if let (Some(capture), Some(header)) = (capture, competition) {
+        if capture.header() != header {
+            return Err("native capture and competition policy identities differ".into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_config(config: &NativeGameplayConfig) -> NativeGameplayResult<()> {
+    if config.origin.domain == config.stream_origin.domain
+        || config.stream_origin.domain != config.playback_origin.domain
+        || config.playback_origin.timestamp < config.stream_origin.timestamp
+        || config.sample_rate == 0
+        || config.sample_rate > 1_000_000_000
+        || !(0..=1_000_000_000).contains(&config.advance_lag.as_nanos())
+    {
+        return Err("invalid selected native gameplay clocks/rate/lag".into());
+    }
+    Ok(())
+}

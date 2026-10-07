@@ -21,3 +21,15 @@ different source/test paths; native platform wrappers consume common business
 interfaces. Preserve current HEAD when creating worktrees and use separate
 scratch directories per lane. Source progress does not replace required
 independent review and QA.
+
+## Branch cleanup and commit boundaries
+
+When removing obsolete development branches, integrate useful commits into the
+main branch first and then delete the branch, or discard the branch directly.
+The user explicitly rejects archive branches, recovery tags, bundles and other
+backup artifacts for this cleanup. Preserve unrelated current work. Do not
+rewrite master history or push unless explicitly authorized.
+
+Group a working feature with its relevant tests and documentation into a
+meaningful commit. Avoid commits for every small progress step; keep each
+commit reviewable and the code buildable.

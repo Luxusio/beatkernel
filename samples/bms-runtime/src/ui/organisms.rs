@@ -565,6 +565,7 @@ pub struct LocalPlayerView<'a> {
     pub chart: Option<&'a PlayerChart>,
     pub song_time: Option<Timestamp>,
     pub score: &'a ScoreSummary,
+    pub bms_score: Option<crate::judgment_policy::BmsScoreSummary>,
     pub gauge: Option<&'a crate::gauge::BmsGauge>,
     pub last_judge: Option<&'a JudgeEvent>,
     pub recent_results: &'a [JudgeEvent],
@@ -579,6 +580,7 @@ impl<'a> From<&'a LocalPlayerSnapshot> for LocalPlayerView<'a> {
             chart: player.chart.as_deref(),
             song_time: player.song_time,
             score: &player.score,
+            bms_score: player.bms_score,
             gauge: Some(&player.gauge),
             last_judge: player.last_judge.as_ref(),
             recent_results: &player.recent_results,
@@ -699,6 +701,37 @@ fn local_player_views_with_background_impl(
                 return Err("comparison exceeds its fixed reservation".into());
             }
         }
+        if let Some(score) = player.bms_score {
+            score
+                .validate_for(player.score.hits, player.score.misses)
+                .map_err(|error| error.to_string())?;
+        }
+        let class_height = if player.bms_score.is_some() { 24 } else { 0 };
+        let comparison_height = reserved
+            .map_or_else(
+                || {
+                    if show {
+                        player
+                            .competition
+                            .map(|snapshot| {
+                                competition_height(snapshot, panel_bounds(slot, count).width - 20)
+                            })
+                            .transpose()
+                    } else {
+                        Ok(None)
+                    }
+                },
+                |spaces| Ok(Some(spaces[visible.start + slot])),
+            )?
+            .unwrap_or(0);
+        let field = crate::playfield_layout::local_field_bounds_with_comparison_space(
+            count,
+            slot,
+            comparison_height,
+        )?;
+        if field[3] - class_height <= 16 {
+            return Err("local class display leaves insufficient playfield height".into());
+        }
         if let (Some(chart), Some(now)) = (player.chart, player.song_time) {
             if player
                 .note_progress
@@ -768,6 +801,12 @@ fn local_player_views_with_background_impl(
                 },
             )?;
         }
+        let class_height = if let Some(score) = player.bms_score {
+            bms_score_hud(scene, &score, line(72, 24));
+            24
+        } else {
+            0
+        };
         let comparisons = if show { player.competition } else { None };
         let summary_height = comparisons
             .map(|snapshot| competition_height(snapshot, bounds.width - 20))
@@ -784,11 +823,11 @@ fn local_player_views_with_background_impl(
             competition_summary_with_peer_offset(
                 scene,
                 snapshot,
-                line(72, summary_height),
+                line(72 + class_height, summary_height),
                 peer_offset,
             )?;
         }
-        let field_offset = 72 + summary_height;
+        let field_offset = 72 + class_height + summary_height;
         let [field_x, field_y, field_width, field_height] =
             crate::playfield_layout::local_field_bounds(count, index)?;
         match (player.chart, player.song_time) {
@@ -799,9 +838,9 @@ fn local_player_views_with_background_impl(
                 lookahead,
                 Bounds {
                     x: field_x,
-                    y: field_y + summary_height,
+                    y: field_y + class_height + summary_height,
                     width: field_width,
-                    height: field_height - summary_height,
+                    height: field_height - class_height - summary_height,
                 },
                 player.recent_results,
                 player.pressed_lanes,
@@ -819,21 +858,85 @@ fn local_player_views_with_background_impl(
     }
     scene.status()
 }
+/// Scalar-only two-row class display, clipped independently within each column.
+fn bms_score_hud(
+    scene: &mut Scene,
+    score: &crate::judgment_policy::BmsScoreSummary,
+    bounds: Bounds,
+) {
+    let values = [
+        ("EX", score.ex_score),
+        ("PG", score.pgreat),
+        ("G", score.great),
+        ("GOOD", score.good),
+        ("BAD", score.bad),
+        ("POOR", score.poor),
+    ];
+    for (index, (label, value)) in values.iter().enumerate() {
+        let column = index % 3;
+        let left = bounds.width * column as i64 / 3;
+        let right = bounds.width * (column + 1) as i64 / 3;
+        clipped_text(
+            scene,
+            Bounds {
+                x: bounds.x + left,
+                y: bounds.y + (index / 3) as i64 * 12,
+                width: right - left,
+                height: 7,
+            },
+            &format!("{label} {value}"),
+            1,
+            0x9bb1cf,
+        );
+    }
+}
+
 pub fn scoreboard(pixels: &mut Scene, score: &ScoreSummary, recent_results: &[JudgeEvent]) {
+    scoreboard_with_bms_score(pixels, score, recent_results, None);
+}
+
+pub fn scoreboard_with_bms_score(
+    pixels: &mut Scene,
+    score: &ScoreSummary,
+    recent_results: &[JudgeEvent],
+    bms_score: Option<&crate::judgment_policy::BmsScoreSummary>,
+) {
+    let class_height = if let Some(bms_score) = bms_score {
+        bms_score_hud(
+            pixels,
+            bms_score,
+            Bounds {
+                x: 750,
+                y: 490,
+                width: 186,
+                height: 24,
+            },
+        );
+        24
+    } else {
+        0
+    };
     molecules::counter(pixels, 750, 145, "HITS", score.hits, 0x74e5c5);
     molecules::counter(pixels, 750, 235, "MISSES", score.misses, 0xff8e8e);
     molecules::counter(pixels, 750, 325, "COMBO", score.combo, 0x9bb1cf);
     molecules::counter(pixels, 750, 415, "MAX COMBO", score.max_combo, 0x9bb1cf);
     for (index, event) in recent_results.iter().rev().take(4).enumerate() {
         let (label, color) = crate::timing_display::judge_label(event);
-        text(pixels, 750, 520 + index * 22, &label, 1, color);
+        text(
+            pixels,
+            750,
+            520 + class_height as usize + index * 22,
+            &label,
+            1,
+            color,
+        );
     }
     let (bias, absolute) = crate::timing_display::summary(&score.timing);
     clipped_text(
         pixels,
         Bounds {
             x: 750,
-            y: 620,
+            y: 620 + class_height,
             width: 186,
             height: 7,
         },
@@ -845,7 +948,7 @@ pub fn scoreboard(pixels: &mut Scene, score: &ScoreSummary, recent_results: &[Ju
         pixels,
         Bounds {
             x: 750,
-            y: 634,
+            y: 634 + class_height,
             width: 186,
             height: 7,
         },
@@ -860,6 +963,33 @@ pub fn competition_scoreboard(
     score: &ScoreSummary,
     snapshot: &CompetitionSnapshot,
 ) -> Result<(), String> {
+    competition_scoreboard_with_bms_score(scene, score, snapshot, None)
+}
+
+pub fn competition_scoreboard_with_bms_score(
+    scene: &mut Scene,
+    score: &ScoreSummary,
+    snapshot: &CompetitionSnapshot,
+    bms_score: Option<&crate::judgment_policy::BmsScoreSummary>,
+) -> Result<(), String> {
+    let class_height = if let Some(bms_score) = bms_score {
+        bms_score
+            .validate_for(score.hits, score.misses)
+            .map_err(|error| error.to_string())?;
+        bms_score_hud(
+            scene,
+            bms_score,
+            Bounds {
+                x: 750,
+                y: 280,
+                width: 186,
+                height: 24,
+            },
+        );
+        24
+    } else {
+        0
+    };
     for (index, (label, value, color)) in [
         ("HITS", score.hits, 0x74e5c5),
         ("MISSES", score.misses, 0xff8e8e),
@@ -926,9 +1056,9 @@ pub fn competition_scoreboard(
         snapshot,
         Bounds {
             x: 750,
-            y: 280,
+            y: 280 + class_height,
             width: 186,
-            height: 360,
+            height: 360 - class_height,
         },
     )
 }
@@ -1115,6 +1245,7 @@ mod tests {
             .map(|(id, event)| LocalPlayerSnapshot {
                 mine_damage: Default::default(),
                 gauge: Default::default(),
+                bms_score: None,
                 player: crate::local_players::PlayerId(id),
                 chart: Some(std::sync::Arc::clone(&chart)),
                 song_time: Some(Timestamp::ZERO),
@@ -1217,6 +1348,7 @@ mod tests {
             .map(|(id, pressed_lanes)| LocalPlayerSnapshot {
                 mine_damage: Default::default(),
                 gauge: Default::default(),
+                bms_score: None,
                 player: crate::local_players::PlayerId(id),
                 chart: Some(std::sync::Arc::clone(&chart)),
                 song_time: Some(Timestamp::ZERO),
@@ -1373,6 +1505,7 @@ mod tests {
             .map(|(id, note_progress)| LocalPlayerSnapshot {
                 mine_damage: Default::default(),
                 gauge: Default::default(),
+                bms_score: None,
                 player: crate::local_players::PlayerId(id),
                 chart: Some(std::sync::Arc::clone(&chart)),
                 song_time: Some(Timestamp::ZERO),
@@ -1479,6 +1612,7 @@ mod tests {
             .map(|index| LocalPlayerSnapshot {
                 mine_damage: Default::default(),
                 gauge: Default::default(),
+                bms_score: None,
                 player: crate::local_players::PlayerId(if index == 63 {
                     u32::MAX
                 } else {
@@ -1658,6 +1792,7 @@ mod tests {
                 },
                 mine_damage: Default::default(),
                 gauge: Default::default(),
+                bms_score: None,
                 last_judge: None,
                 recent_results: Vec::new(),
                 competition: None,
@@ -1798,6 +1933,7 @@ mod tests {
                 score: ScoreSummary::default(),
                 mine_damage: Default::default(),
                 gauge: Default::default(),
+                bms_score: None,
                 last_judge: None,
                 recent_results: Vec::new(),
                 competition: Some(comparisons(NetworkStatus::Connected, i64::MIN)),
@@ -1924,3 +2060,7 @@ pub fn device_list(
         text(scene, 24, 585, &choice.detail, 1, 0x9bb1cf);
     }
 }
+
+#[cfg(test)]
+#[path = "live_class_hud_fixtures.rs"]
+mod live_class_hud_fixtures;

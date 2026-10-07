@@ -306,6 +306,7 @@ fn status_failure_and_paging_preserve_the_fixed_local_field_and_touch_geometry()
             for count in [3, 4] {
                 let views = (0..count)
                     .map(|slot| LocalPlayerView {
+                        bms_score: None,
                         player: PlayerId(u32::MAX - slot as u32),
                         chart: Some(&chart),
                         song_time: Some(Timestamp::ZERO),

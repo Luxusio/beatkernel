@@ -36,7 +36,7 @@ use beatkernel_bms_runtime::{
     native_cohort::{PlayerState, replay_path},
 };
 use beatkernel_bms_runtime::{
-    native_cohort::{NativeCohortSession, run_cohort_with_results},
+    native_cohort::{NativeCohortSession, run_cohort_with_policies_and_results},
     native_gameplay::{
         InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult, retain_input,
     },
@@ -522,7 +522,11 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 assignments: &options.local_players,
                 retained: &mut retained,
             };
-            run_cohort_with_results(
+            let selected_policies: Vec<_> = assignments
+                .iter()
+                .map(|(player, _)| (*player, &policy))
+                .collect();
+            run_cohort_with_policies_and_results(
                 &mut device,
                 NativeCohortSession {
                     network: network.as_mut(),
@@ -548,6 +552,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                     pause_supported: !network_start,
                     logical_schedule: true,
                 },
+                &selected_policies,
             )
         };
         for state in &states {

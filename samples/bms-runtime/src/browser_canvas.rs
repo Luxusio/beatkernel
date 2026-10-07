@@ -137,6 +137,7 @@ impl BrowserCanvas {
         let member_view = |index: usize| {
             let member = &game.members[index];
             organisms::LocalPlayerView {
+                bms_score: None,
                 player: member.player,
                 chart: Some(&game.chart),
                 song_time: game.game.member_song_time(member.player),

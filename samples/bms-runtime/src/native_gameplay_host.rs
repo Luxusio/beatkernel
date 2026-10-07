@@ -56,6 +56,35 @@ pub(crate) fn validate_policy_members(
     Ok(())
 }
 
+pub(crate) fn validate_play_policy_members(
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+) -> NativeGameplayResult<()> {
+    if !(1..=64).contains(&policies.len())
+        || policies
+            .iter()
+            .enumerate()
+            .any(|(i, (id, _))| id.0 == 0 || policies[..i].iter().any(|(prior, _)| prior == id))
+    {
+        return Err("native selected policies require 1..64 unique nonzero player IDs".into());
+    }
+    for (_, policy) in policies {
+        if let Some(classes) = policy.judgments() {
+            classes.validate_profile(policy.judge())?;
+            if policy.gauge() == &crate::gauge::GaugeProfile::default()
+                || policy.gauge().grades().len() != classes.entries().len()
+                || policy
+                    .gauge()
+                    .grades()
+                    .iter()
+                    .any(|entry| classes.class(entry.grade).is_none())
+            {
+                return Err("classified native policy requires a nondefault covered gauge".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The application supplies commands and consumes actual committed evidence.
 /// Publication refusal is a technical error, not gameplay completion or rollback.
 pub trait NativeGameplayHost {
@@ -72,6 +101,22 @@ pub trait NativeGameplayHost {
             return Err("native host does not support nondefault policy preparation".into());
         }
         Ok(())
+    }
+    fn prepare_play_policies(
+        &mut self,
+        policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    ) -> NativeGameplayResult<()> {
+        validate_play_policy_members(policies)?;
+        if policies
+            .iter()
+            .any(|(_, policy)| policy.judgments().is_some())
+        {
+            return Err("native host does not support classified policy preparation".into());
+        }
+        let mut gauges = Vec::new();
+        gauges.try_reserve_exact(policies.len())?;
+        gauges.extend(policies.iter().map(|(id, policy)| (*id, policy.gauge())));
+        self.prepare_policies(&gauges)
     }
     fn cancelled(&self) -> bool;
     fn pause_requested(&self) -> bool;
@@ -97,6 +142,12 @@ pub trait NativeGameplayHost {
 pub struct NoopGameplayHost;
 
 impl NativeGameplayHost for NoopGameplayHost {
+    fn prepare_play_policies(
+        &mut self,
+        policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    ) -> NativeGameplayResult<()> {
+        validate_play_policy_members(policies)
+    }
     fn prepare_policies(
         &mut self,
         policies: &[(PlayerId, &crate::gauge::GaugeProfile)],
@@ -132,6 +183,12 @@ impl<'a, H: NativeGameplayHost> NativeScoreHost<'a, H> {
     }
 }
 impl<H: NativeGameplayHost> NativeGameplayHost for NativeScoreHost<'_, H> {
+    fn prepare_play_policies(
+        &mut self,
+        policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    ) -> NativeGameplayResult<()> {
+        self.host.prepare_play_policies(policies)
+    }
     fn prepare_policies(
         &mut self,
         policies: &[(PlayerId, &crate::gauge::GaugeProfile)],

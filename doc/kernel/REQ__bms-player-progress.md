@@ -1,10 +1,10 @@
 # BMS player 구현/검증 현황 — 2026-10-07
 
-조사 상태: 독립 사실/범위 리뷰 대기. 현재 host agent 슬롯 제한으로 리뷰
-에이전트를 시작하지 못했다. 아래 숫자는 재현 가능한 source 조사 집계이며,
+조사 상태: 독립 사실/범위 리뷰 대기. 이전 슬롯 제한은 재시작 후 해제됐지만
+이 인벤토리 자체의 독립 리뷰는 아직 완료되지 않았다. 아래 숫자는 source 조사 집계이며,
 독립 검토된 기능 완료 개수로 인용하면 안 된다.
 
-기준 source revision: `5ddc850`. 아래는 현재 알려진 요청/기능을 묶은 **기능 단위 1차 인벤토리**다. 전체 목표는 `bms player개발해`이며 [원래 계획](../../plan.md), [BMS player 요구사항](REQ__bms-player.md), native/browser/competition/gauge/adapter 계약의 모든 세부 조건을 유지한다. 이 표가 그 조건을 삭제하거나 새로운 축소된 성공 기준을 만들지 않는다. 각 기능 내부의 세부 TODO를 전부 원자화한 목록은 아직 아니다. 향후 세부 audit 또는 새 요구사항이 생기면 stable ID와 근거를 추가한다.
+기존 조사 기준 source revision: `5ddc850`. BK-030은 `50d088d` 이후 현재 작업 트리의 연동 상태를 반영한다. 아래는 현재 알려진 요청/기능을 묶은 **기능 단위 1차 인벤토리**다. 전체 목표는 `bms player개발해`이며 [원래 계획](../../plan.md), [BMS player 요구사항](REQ__bms-player.md), native/browser/competition/gauge/adapter 계약의 모든 세부 조건을 유지한다. 이 표가 그 조건을 삭제하거나 새로운 축소된 성공 기준을 만들지 않는다. 각 기능 내부의 세부 TODO를 전부 원자화한 목록은 아직 아니다. 향후 세부 audit 또는 새 요구사항이 생기면 stable ID와 근거를 추가한다.
 
 ## 집계의 의미
 
@@ -20,7 +20,7 @@
 활성 상태 집계: S 39, P 18, N 1, U 1.
 이는 source survey이며, S를 완료 개수로 바꾸거나 P를 임의로 50% 가중해 전체 구현률을 계산하지 않는다. **최종 완료 개수/전체 완료율은 아직 증명되지 않았다.**
 
-현재 fresh Rust workspace/all-targets 증거는 2,724 passed / 0 failed / 6 ignored다. 기존 hardware/relay ignored 사례는 통과로 계산하지 않았다. 명시 desktop,webtransport runtime lib/bins는 2,028 passed / 0 failed / 2 ignored다. 해당 실행은 [로그](../../target/wf/ui-motion-qa-cli/workspace-tests.log)에 있으며 다른 언어·물리 장치·전체 Goal acceptance까지 확장하지 않는다.
+이전 `5ddc850`/retained-ui-motion 조사에서 Rust workspace/all-targets 결과는 2,724 passed / 0 failed / 6 ignored였다. 기존 hardware/relay ignored 사례는 통과로 계산하지 않았다. 명시 desktop,webtransport runtime lib/bins는 2,028 passed / 0 failed / 2 ignored다. 해당 이전 실행은 [로그](../../target/wf/ui-motion-qa-cli/workspace-tests.log)에 있다. 새 live-class 작업은 Runtime/Player 10개와 HUD 3개 scoped fixture가 통과했으며 현재 작업 트리 전체 회귀 검증은 아직 진행 전이다. 이전 결과를 새 소스의 전체 통과로 인용하거나 다른 언어·물리 장치·전체 Goal acceptance까지 확장하지 않는다.
 
 ## 기능별 source / 남은 작업
 
@@ -55,7 +55,7 @@
 | BK-027 | BMS | native 라이브 플레이·finite completion | S | H | [경로](../../samples/bms-runtime/src/native_gameplay_host.rs) — native pump/완료·custody 코드; 실제 입력/오디오 전체 실행 필요 |
 | BK-028 | BMS | gauge·판정 class·EX 계산 기반 | S | L | [경로](../../samples/bms-runtime/src/judgment_policy.rs) — 명시 class mapping·gauge·EX projection 구현; opaque grade로 class 추정하지 않음 |
 | BK-029 | BMS | 완전한 표준 BMS timing windows/empty POOR 호환 | P | Q | [경로](../../samples/bms-runtime/src/bin/linux_bms.rs) — native 도움말은 한 PGREAT window와 POOR misses, full LR2 windows 아님을 명시 |
-| BK-030 | BMS | 실시간 member별 class/EX snapshot·HUD | P | Q | [경로](../../samples/bms-runtime/src/player.rs) — LocalPlayerSnapshot/PlayerSnapshot에 class summary 없음; host.prepare_policies는 GaugeProfile만 수신 |
+| BK-030 | BMS | 실시간 member별 class/EX snapshot·HUD | P | Q | [경로](../../samples/bms-runtime/src/player.rs) — 선택 정책 cold admission과 member별 scalar class/EX snapshot·HUD, 공통 native 호출부 작성됨; 새 fixture·독립 review/QA 검증 진행 중 |
 | BK-031 | 기록/연습 | accepted-operation capture·logical replay | S | L | [경로](../../samples/bms-runtime/src/replay_capture.rs) — 원래 선택/operation과 policy metadata 보존; 실제 장치 지연 역재현은 아님 |
 | BK-032 | 기록/연습 | 기록 catalog/archive·과거 등급/EX 상세 | S | D | [경로](../../samples/bms-runtime/src/record_catalog.rs) — prefix와 stored score 분리 구현; local fixture/관찰 증거, broad Goal 완료 아님 |
 | BK-033 | 기록/연습 | Watch replay·native audio drain | S | H | [경로](../../samples/bms-runtime/src/replay_audio.rs) — 공유 Renderer/Runtime와 출력 playback; backend별 실제 terminal presentation 검증 필요 |
@@ -89,13 +89,13 @@
 
 ## 조사 근거와 최신성
 
-Native rate 변환 연결은 `audio/channel_remix.rs::validate`가 rate 불일치를 거부하는 실제 분기로 확인했다. Live class HUD는 `LocalPlayerSnapshot`/`PlayerSnapshot`의 scalar class summary 부재와 `NativeGameplayHost::prepare_policies`의 gauge-only 입력을 확인했다. 별도 input collector는 관련 native/플랫폼 input 코드의 owner/thread 경로에서 찾지 못했다. Video/EXBMP RGB/color-key는 adapter 계약에 미완성으로 명시돼 있다. 개별 UI transform/layout는 현재 whole-scene uniform과 mount-only Node resolver 범위를 대조했다.
+Native rate 변환 연결은 `audio/channel_remix.rs::validate`가 rate 불일치를 거부하는 실제 분기로 확인했다. 기존 조사에서 확인한 live class HUD 부재는 현재 작업 트리에서 `prepare_play_policies`, scalar `bms_score`, policy-aware 공통 native bridge 및 HUD 연동으로 보완됐다. 현재 독립 검증이 끝나지 않아 BK-030은 P/Q를 유지한다. 별도 input collector는 관련 native/플랫폼 input 코드의 owner/thread 경로에서 찾지 못했다. Video/EXBMP RGB/color-key는 adapter 계약에 미완성으로 명시돼 있다. 개별 UI transform/layout는 현재 whole-scene uniform과 mount-only Node resolver 범위를 대조했다.
 
 Source module/manifest/symbol inspection은 소스 존재 증거다. 모든 구현의 correctness를 증명한 audit가 아니다. 위 broad 기능과 underlying 세부 REQ 사이의 미검증 조건을 없애지 않는다. 기존 parent PLAN의 AC reference/제목 숫자와 이 기능 단위 행은 서로 다른 분모이므로 합산하지 않는다. 이 문서는 제품 source 현황이며 Harness acceptance ledger가 아니다; task PLAN과 ordered review/QA가 해당 task의 완료 권한이다.
 
 ## 확인된 우선 구현 / 검증 항목
 
-1. BK-030: immutable 판정 class policy를 cold native host/Player에 전달하고 member별 live class/EX scalar snapshot과 HUD를 구현. recorded/historical score와 live score를 혼동하지 않게 한다.
+1. BK-030: 작성된 live class/EX 경로의 Runtime/Player/HUD 및 native/WASM 회귀 검증과 독립 review/QA를 완료한다. recorded/historical score와 live score를 혼동하지 않게 한다.
 2. BK-018: source clock/provenance를 유지하는 bounded 입력 collector와 게임 처리 owner 분리; overflow/late/cancel/join 순수 fixture 및 실제 native 검증 준비.
 3. BK-019/BK-020/BK-021: rate conversion과 backend 교체에 대한 source/output frame·history/phase·clock/latency lifetime을 연결하고 검증.
 4. BK-047/BK-048: retained layout invalidation과 per-component transform을 실제 UI 입력/클리핑과 함께 추가. Virtual DOM은 도입하지 않는다.

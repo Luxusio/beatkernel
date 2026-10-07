@@ -230,6 +230,7 @@ fn archive_is_a_snapshot_and_failed_presentation_stays_unavailable_with_original
             let mut scene = Scene::new(960, 720);
             let views = (0..4)
                 .map(|slot| LocalPlayerView {
+                    bms_score: None,
                     player: PlayerId(u32::MAX - slot as u32),
                     chart: Some(&chart),
                     song_time: Some(beatkernel::time::Timestamp::ZERO),
