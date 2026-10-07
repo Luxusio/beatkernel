@@ -17,6 +17,8 @@ use std::{fs::OpenOptions, io::Write, path::Path};
 /// Capture, serialization or exclusive output creation failure.
 #[derive(Debug)]
 pub enum CaptureError {
+    JudgmentPolicy(crate::replay_judgment_policy::PolicyError),
+    InvalidPolicy(&'static str),
     GaugePolicy(crate::replay_gauge_policy::PolicyError),
     /// Practice start must be a nonnegative original-song timestamp.
     InvalidStart,
@@ -49,6 +51,8 @@ impl From<std::io::Error> for CaptureError {
 impl std::fmt::Display for CaptureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::JudgmentPolicy(error) => write!(f, "{error}"),
+            Self::InvalidPolicy(error) => write!(f, "BMS replay policy: {error}"),
             Self::GaugePolicy(error) => write!(f, "{error}"),
             Self::InvalidStart => write!(f, "BMS replay practice start must be nonnegative"),
             Self::InvalidEnd => write!(f, "BMS replay practice end must be later than its start"),
@@ -138,6 +142,37 @@ pub fn setup_gauge_header(
     )?;
     crate::replay_gauge_policy::wrap_header(header, gauge, limits)
         .map_err(CaptureError::GaugePolicy)
+}
+
+/// Opt-in complete class identity; gauge-only capture stays byte-compatible.
+#[allow(clippy::too_many_arguments)]
+pub fn setup_play_policy_header(
+    judge: &JudgeEngine,
+    domain: ClockDomainId,
+    limits: ReplayCodecLimits,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    input_mode: BmsInputMode,
+    input_sounds: Option<InputSoundIdentity>,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+) -> Result<ReplayHeader, CaptureError> {
+    if judge.profile() != policy.judge() {
+        return Err(CaptureError::InvalidPolicy("judge profile differs"));
+    }
+    let header = setup_gauge_header(
+        judge,
+        domain,
+        limits,
+        start,
+        chart_seed,
+        end,
+        input_mode,
+        input_sounds,
+        policy.gauge(),
+    )?;
+    crate::replay_judgment_policy::wrap_header(header, policy.judgments(), limits)
+        .map_err(CaptureError::JudgmentPolicy)
 }
 
 /// Canonical setup with an optional validated invisible input-sound identity.
@@ -391,6 +426,41 @@ impl LiveReplayCapture {
             input_mode,
             input_sounds,
             gauge,
+        )?;
+        let header_bytes =
+            encode_replay(&ReplayFile::new(header.clone(), Vec::new()), limits)?.len();
+        Ok(Self {
+            recorder: ReplayRecorder::new(header)?,
+            limits,
+            header_bytes,
+            encoded_bytes: header_bytes,
+            end,
+        })
+    }
+
+    /// Records explicit grade meaning together with judge, gauge and section.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_policy(
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        limits: ReplayCodecLimits,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        input_sounds: Option<InputSoundIdentity>,
+        policy: &crate::play_policy::ResolvedPlayPolicy,
+    ) -> Result<Self, CaptureError> {
+        let header = setup_play_policy_header(
+            judge,
+            domain,
+            limits,
+            start,
+            chart_seed,
+            end,
+            input_mode,
+            input_sounds,
+            policy,
         )?;
         let header_bytes =
             encode_replay(&ReplayFile::new(header.clone(), Vec::new()), limits)?.len();

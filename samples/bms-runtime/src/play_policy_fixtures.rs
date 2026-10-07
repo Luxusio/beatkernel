@@ -80,7 +80,7 @@ fn explicit_classes_reach_actual_judge_capture_replay_and_all_six_gauges() {
             1024,
         )
         .unwrap();
-        let mut capture = LiveReplayCapture::new_with_gauge(
+        let mut capture = LiveReplayCapture::new_with_policy(
             &engine,
             ClockDomainId(17),
             limits,
@@ -89,7 +89,7 @@ fn explicit_classes_reach_actual_judge_capture_replay_and_all_six_gauges() {
             None,
             beatkernel_bms::BmsInputMode::ButtonOnly,
             None,
-            resolved.gauge(),
+            &resolved,
         )
         .unwrap();
         let bindings = BindingMap::from_bindings([Binding {
@@ -138,6 +138,38 @@ fn explicit_classes_reach_actual_judge_capture_replay_and_all_six_gauges() {
         let setup = crate::replay_playback::decode_section_setup(&file.header.options).unwrap();
         assert_eq!(&setup.profile, resolved.judge());
         assert_eq!(&setup.gauge, resolved.gauge());
+        assert_eq!(setup.judgments.as_ref(), resolved.judgments());
+        assert!(crate::replay_playback::decode_chart_setup(&file.header.options).is_err());
+        let mut score = crate::competition::ScoreSummary::default();
+        score.observe(&events).unwrap();
+        assert_eq!(
+            resolved.judgments().unwrap().project(&score).unwrap(),
+            crate::judgment_policy::BmsScoreSummary {
+                pgreat: 1,
+                great: 1,
+                good: 1,
+                bad: 1,
+                poor: 0,
+                ex_score: 3,
+            }
+        );
+        assert_eq!(score.hits, 4);
+        assert_eq!(score.combo, 4);
+        let pristine =
+            crate::replay_playback::validate_section_setup(&source, &file, limits).unwrap();
+        let regenerated = LiveReplayCapture::new_with_policy(
+            &pristine,
+            ClockDomainId(17),
+            limits,
+            Timestamp::ZERO,
+            0,
+            None,
+            beatkernel_bms::BmsInputMode::ButtonOnly,
+            None,
+            &resolved,
+        )
+        .unwrap();
+        assert_eq!(regenerated.header(), &file.header);
         let mut visual =
             crate::replay_visual::ReplayVisual::new_section(&source, &file, limits).unwrap();
         assert_eq!(
@@ -183,6 +215,7 @@ fn builtin_and_exact_selection_names_preserve_legacy_policy_and_invalid_aliases_
     );
     assert_eq!(policy.gauge(), &GaugeProfile::default());
     assert_eq!(policy.total(), None);
+    assert_eq!(policy.judgments(), None);
     let (judge, gauge) = policy.into_parts();
     assert_eq!(judge.windows()[0].grade, JudgeGrade(1));
     assert_eq!(gauge, GaugeProfile::default());
@@ -239,4 +272,102 @@ fn native_builtin_boundary_retains_original_judge_error_type_and_text() {
         Some(JudgeError::InvalidProfile)
     ));
     assert_eq!(error.to_string(), JudgeError::InvalidProfile.to_string());
+}
+
+#[test]
+fn policy_capture_preserves_builtin_bytes_and_keeps_equal_gauge_classes_distinct() {
+    let source = source();
+    let limits =
+        ReplayCodecLimits::new(65536, 128, 4096, CodecLimits::new(4096, 1024).unwrap()).unwrap();
+    let prepare = |policy: &ResolvedPlayPolicy| {
+        crate::mine_plan::prepare_judge(
+            &source,
+            source.compile().unwrap().chart,
+            policy.judge().clone(),
+            beatkernel_bms::BmsInputMode::ButtonOnly,
+            1024,
+        )
+        .unwrap()
+    };
+    let capture = |policy: &ResolvedPlayPolicy| {
+        let engine = prepare(policy);
+        LiveReplayCapture::new_with_policy(
+            &engine,
+            ClockDomainId(17),
+            limits,
+            Timestamp::ZERO,
+            0,
+            None,
+            beatkernel_bms::BmsInputMode::ButtonOnly,
+            None,
+            policy,
+        )
+        .unwrap()
+        .into_file()
+    };
+    let old_capture = |policy: &ResolvedPlayPolicy| {
+        let engine = prepare(policy);
+        LiveReplayCapture::new_with_gauge(
+            &engine,
+            ClockDomainId(17),
+            limits,
+            Timestamp::ZERO,
+            0,
+            None,
+            beatkernel_bms::BmsInputMode::ButtonOnly,
+            None,
+            policy.gauge(),
+        )
+        .unwrap()
+        .into_file()
+    };
+    let builtin = ResolvedPlayPolicy::builtin(4, 4, -19).unwrap();
+    let new_builtin = capture(&builtin);
+    let old_builtin = old_capture(&builtin);
+    assert_eq!(new_builtin, old_builtin);
+    assert_eq!(
+        beatkernel::replay::codec::encode_replay(&new_builtin, limits).unwrap(),
+        beatkernel::replay::codec::encode_replay(&old_builtin, limits).unwrap()
+    );
+    assert_eq!(
+        crate::replay_playback::decode_section_setup(&new_builtin.header.options)
+            .unwrap()
+            .judgments,
+        None
+    );
+
+    let pgreat = ResolvedPlayPolicy::bms(&source, BmsGaugeKind::Groove, &windows(), -19).unwrap();
+    let mut changed = windows();
+    changed[0].judgment = BmsJudgment::Great;
+    let great = ResolvedPlayPolicy::bms(&source, BmsGaugeKind::Groove, &changed, -19).unwrap();
+    assert_eq!(pgreat.judge(), great.judge());
+    assert_eq!(pgreat.gauge(), great.gauge());
+    assert_ne!(pgreat.judgments(), great.judgments());
+    assert_ne!(capture(&pgreat).header, capture(&great).header);
+    assert_eq!(old_capture(&pgreat).header, old_capture(&great).header);
+    let legacy = old_capture(&pgreat);
+    let legacy_setup =
+        crate::replay_playback::decode_section_setup(&legacy.header.options).unwrap();
+    assert_eq!(legacy_setup.judgments, None);
+    assert_eq!(&legacy_setup.gauge, pgreat.gauge());
+    let file = capture(&pgreat);
+    for refuses in [
+        crate::replay_playback::decode_profile(&file.header.options).is_err(),
+        crate::replay_playback::decode_setup(&file.header.options).is_err(),
+        crate::replay_playback::decode_chart_setup(&file.header.options).is_err(),
+    ] {
+        assert!(refuses);
+    }
+    // Canonical but incomplete classes cannot be admitted for a four-grade judge.
+    let (_, full_classes) =
+        crate::replay_judgment_policy::split_options(&file.header.options).unwrap();
+    let partial =
+        crate::judgment_policy::BmsJudgmentPolicy::new(&full_classes.unwrap().entries()[..3])
+            .unwrap();
+    let mut malformed = legacy;
+    malformed.header =
+        crate::replay_judgment_policy::wrap_header(malformed.header, Some(&partial), limits)
+            .unwrap();
+    assert!(crate::replay_playback::decode_section_setup(&malformed.header.options).is_err());
+    assert!(crate::replay_playback::validate_section_setup(&source, &malformed, limits).is_err());
 }

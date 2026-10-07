@@ -458,3 +458,26 @@ enabling saved ghosts must not imply custom multiplayer readiness. Same header
 preparation serves solo and each local member, retaining original player IDs.
 Generic stage/grade score accounting remains unchanged; class-weighted scoring
 and complete LR2 timing/mine/empty compatibility are separate unfinished work.
+
+## Explicit judgment and EX projection
+
+Resolved BMS policies retain a bounded (1..64), unique opaque-grade mapping to
+PGREAT/GREAT/GOOD/BAD, independently of gauge deltas. A class policy must cover
+exactly the judge's hit grades; POOR remains an actual missed-stage count, and
+empty POOR is not synthesized. Projection of actual generic score counts checks
+unknown grades, count consistency and every addition/multiplication: PGREAT
+contributes two EX points, GREAT one, and other outcomes zero. This projection
+does not change core stage counts, generic combo semantics or judgment windows.
+
+Policy-aware capture may explicitly wrap complete gauge/section options in
+`bms-judgment-setup/v1:` metadata. Canonical ordered class tags and all extents
+are validated before use. Its body is a little-endian u32 inner-options length,
+the unchanged complete inner options, a u8 count, and that many five-byte rows:
+little-endian u32 grade and u8 class (0 PGREAT, 1 GREAT, 2 GOOD, 3 BAD), strictly
+increasing by grade. No trailing bytes or nested judgment wrapper are accepted.
+Section-aware decoding/reconstruction preserves the
+mapping and regenerates the entire header; legacy tuple decoders refuse to drop
+it. Legacy unclassified recordings remain byte-compatible and acquire no guessed
+class/EX meaning. Record comparison includes class identity. Native launchers,
+UI, result archives and shared networking still require class-policy integration;
+adding these primitives does not claim their completion or historical LR2 timing.

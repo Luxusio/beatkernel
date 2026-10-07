@@ -122,6 +122,7 @@ pub fn read_replay(
 /// Explicit recorded setup retaining section bounds and input interaction mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedSetup {
+    pub judgments: Option<crate::judgment_policy::BmsJudgmentPolicy>,
     pub profile: JudgeProfile,
     pub gauge: crate::gauge::GaugeProfile,
     pub start: Timestamp,
@@ -167,6 +168,13 @@ fn decode_recorded_setup(
     options: &[u8],
     allow_extended: bool,
 ) -> Result<RecordedSetup, PlaybackError> {
+    let (options, judgments) = crate::replay_judgment_policy::split_options(options)
+        .map_err(|_| PlaybackError::Metadata("invalid judgment policy"))?;
+    if !allow_extended && judgments.is_some() {
+        return Err(PlaybackError::Metadata(
+            "classified replay requires a policy-aware consumer",
+        ));
+    }
     let (options, gauge) =
         crate::replay_gauge_policy::split_options(options).map_err(PlaybackError::GaugePolicy)?;
     if !allow_extended && gauge != crate::gauge::GaugeProfile::default() {
@@ -318,8 +326,15 @@ fn decode_recorded_setup(
             )),
         });
     }
+    let profile = JudgeProfile::new(windows, Duration::from_nanos(offset))?;
+    if let Some(judgments) = &judgments {
+        judgments
+            .validate_profile(&profile)
+            .map_err(|_| PlaybackError::Metadata("judgment classes differ from judge profile"))?;
+    }
     Ok(RecordedSetup {
-        profile: JudgeProfile::new(windows, Duration::from_nanos(offset))?,
+        profile,
+        judgments,
         gauge,
         start,
         chart_seed,
@@ -403,6 +418,7 @@ fn validate_recorded_setup(
         return Err(PlaybackError::IdentityMismatch("BMS rule seed"));
     }
     let RecordedSetup {
+        judgments,
         profile,
         gauge,
         start,
@@ -451,6 +467,8 @@ fn validate_recorded_setup(
         input_sounds,
         &gauge,
     )?;
+    let expected = crate::replay_judgment_policy::wrap_header(expected, judgments.as_ref(), limits)
+        .map_err(|_| PlaybackError::Metadata("invalid judgment header"))?;
     if expected != file.header {
         return Err(PlaybackError::IdentityMismatch(
             "compiled judge setup/profile",

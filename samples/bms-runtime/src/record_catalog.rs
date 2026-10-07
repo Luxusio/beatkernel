@@ -120,7 +120,8 @@ impl RecordPreview {
         if setup.chart_seed != expected.chart_seed {
             return Err("saved record chart seed differs from the current draft".into());
         }
-        if setup.gauge != expected.gauge
+        if setup.judgments != expected.judgments
+            || setup.gauge != expected.gauge
             || setup.profile != expected.profile
             || setup.start != expected.start
             || setup.end != expected.end
@@ -353,6 +354,7 @@ fn draft_section(
         Some(end)
     };
     Ok(RecordedSetup {
+        judgments: None,
         profile,
         gauge,
         start,

@@ -72,6 +72,7 @@ pub struct ResolvedPlayPolicy {
     judge: JudgeProfile,
     gauge: GaugeProfile,
     total: Option<ResolvedTotal>,
+    judgments: Option<crate::judgment_policy::BmsJudgmentPolicy>,
 }
 impl ResolvedPlayPolicy {
     pub fn builtin(early: i64, late: i64, offset: i64) -> Result<Self, PolicyError> {
@@ -90,6 +91,7 @@ impl ResolvedPlayPolicy {
                 .map_err(PolicyError::Judge)?,
             gauge: GaugeProfile::default(),
             total: None,
+            judgments: None,
         })
     }
     /// Resolve from the original source; callers retain this policy when selecting practice heads.
@@ -147,11 +149,25 @@ impl ResolvedPlayPolicy {
             .map_err(PolicyError::Bms)?;
         let gauge = GaugeProfile::from_bms_rules(rules, BmsJudgment::PGreat, &grades)
             .map_err(PolicyError::Gauge)?;
+        let mut entries = [crate::judgment_policy::GradeClass {
+            grade: JudgeGrade(0),
+            class: BmsJudgment::Bad,
+        }; MAX_GAUGE_GRADES];
+        for (entry, classified) in entries.iter_mut().zip(classified) {
+            *entry = crate::judgment_policy::GradeClass {
+                grade: classified.window.grade,
+                class: classified.judgment,
+            };
+        }
+        let judgments =
+            crate::judgment_policy::BmsJudgmentPolicy::new(&entries[..classified.len()])
+                .map_err(|_| PolicyError::Invalid("invalid judgment classes"))?;
         Ok(Self {
             selection: GaugeSelection::Bms(kind),
             judge,
             gauge,
             total: Some(total),
+            judgments: Some(judgments),
         })
     }
     pub const fn selection(&self) -> GaugeSelection {
@@ -166,6 +182,10 @@ impl ResolvedPlayPolicy {
     pub const fn total(&self) -> Option<ResolvedTotal> {
         self.total
     }
+    pub fn judgments(&self) -> Option<&crate::judgment_policy::BmsJudgmentPolicy> {
+        self.judgments.as_ref()
+    }
+    /// Legacy judge/gauge extraction does not assign class semantics to consumers.
     pub fn into_parts(self) -> (JudgeProfile, GaugeProfile) {
         (self.judge, self.gauge)
     }

@@ -154,6 +154,10 @@ mod invisible_lane_fixtures;
 mod invisible_source_fixtures;
 /// Fixed-capacity lane feedback from actual local judge results and song time.
 pub mod judge_feedback;
+/// Explicit bounded hit-class mapping and checked BMS EX-score projection.
+pub mod judgment_policy;
+#[cfg(test)]
+mod judgment_policy_fixtures;
 pub mod live_pause;
 #[cfg(test)]
 mod local_fence_fixtures;
@@ -378,6 +382,8 @@ mod replay_feeder_stop_evidence_fixtures;
 pub mod replay_gauge_policy;
 #[cfg(test)]
 mod replay_gauge_sound_stop_fixtures;
+/// Canonical optional recorded judgment-class identity.
+pub mod replay_judgment_policy;
 pub mod replay_pause;
 /// Checked durable replay reconstruction through the same builtin BMS judge.
 pub mod replay_playback;
