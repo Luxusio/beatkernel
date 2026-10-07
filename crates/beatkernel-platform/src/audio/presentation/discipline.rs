@@ -1,5 +1,11 @@
 //! Native presentation evidence admission over the pure bounded core estimator.
-use super::{PresentationError, observation, observation_with_basis};
+use super::{
+    PresentationError,
+    validation::{
+        NativePresentationValidator, NativeObservationAdmission, PreparedNativePresentation,
+        OriginalNativePresentationEvidence,
+    },
+};
 use crate::audio::AudioStreamSnapshot;
 use beatkernel::{
     time::{
@@ -85,30 +91,11 @@ impl From<EstimatorError> for DisciplineError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ObservationSource {
-    Wasapi {
-        basis: Option<beatkernel::audio::OutputFrameBasis>,
-        frequency: u64,
-        position: u64,
-        qpc: u64,
-    },
-    SuppliedPair,
-    Asio {
-        basis: Option<beatkernel::audio::OutputFrameBasis>,
-        sample_rate: u32,
-        start_frame: u64,
-        end_frame: u64,
-    },
-}
-
 /// Native metadata owner; the core estimator alone retains the observation ring.
 #[derive(Clone, Debug)]
 pub struct PresentationDiscipline {
     estimator: PresentationEstimator,
-    output_origin: ClockPoint,
-    host_domain: ClockDomainId,
-    latest_source: Option<ObservationSource>,
+    validator: NativePresentationValidator,
 }
 impl PresentationDiscipline {
     /// Validates explicit configuration and reserves all observation storage.
@@ -145,9 +132,7 @@ impl PresentationDiscipline {
         )?;
         Ok(Self {
             estimator,
-            output_origin,
-            host_domain,
-            latest_source: None,
+            validator: NativePresentationValidator::new(0, output_origin, host_domain),
         })
     }
 
@@ -168,10 +153,12 @@ impl PresentationDiscipline {
         playback_origin: ClockPoint,
         song_origin: Timestamp,
     ) -> Result<(), DisciplineError> {
+        let prepared = self.validator.prepare_rebind(epoch, output_origin)?;
         self.estimator
             .rebind_output(epoch, output_origin, playback_origin, song_origin)?;
-        self.output_origin = output_origin;
-        self.latest_source = None;
+        self.validator
+            .commit_rebind(prepared)
+            .expect("private native rebind preparation remains current after core admission");
         Ok(())
     }
     /// The token must come from the creating stream, never from a delayed callback's admission.
@@ -252,68 +239,10 @@ impl PresentationDiscipline {
         snapshot: AudioStreamSnapshot,
         basis: Option<beatkernel::audio::OutputFrameBasis>,
     ) -> Result<ObservationAdmission, DisciplineError> {
-        if let Some(basis) = basis {
-            if basis
-                .point_at_native_counter(0, 1)
-                .map_err(|_| DisciplineError::Overflow)?
-                != self.output_origin
-            {
-                return Err(DisciplineError::DomainMismatch);
-            }
-        }
-        if self.latest_source == Some(ObservationSource::SuppliedPair) {
-            return Err(DisciplineError::ObservationSourceChanged);
-        }
-        let (pair, frequency, position, qpc) = if let Some(basis) = basis {
-            observation_with_basis(snapshot, basis)?
-        } else {
-            observation(snapshot, self.output_origin)?
-        };
-        if pair.target.domain != self.host_domain {
-            return Err(DisciplineError::DomainMismatch);
-        }
-        let source = ObservationSource::Wasapi {
-            basis,
-            frequency,
-            position,
-            qpc,
-        };
-        if let Some(previous_source) = self.latest_source {
-            let ObservationSource::Wasapi {
-                basis: previous_basis,
-                frequency: previous_frequency,
-                position: previous_position,
-                qpc: previous_qpc,
-            } = previous_source
-            else {
-                return Err(DisciplineError::ObservationSourceChanged);
-            };
-            if basis != previous_basis {
-                return Err(DisciplineError::ObservationSourceChanged);
-            }
-            let previous = self
-                .estimator
-                .latest_pair()
-                .expect("source metadata follows admitted pair");
-            if frequency != previous_frequency {
-                return Err(DisciplineError::FrequencyChanged);
-            }
-            if source == previous_source && pair == previous {
-                return Ok(ObservationAdmission::Unchanged);
-            }
-            if position < previous_position
-                || qpc <= previous_qpc
-                || pair.target.timestamp <= previous.target.timestamp
-            {
-                return Err(DisciplineError::NonIncreasing);
-            }
-            if position == previous_position {
-                return Ok(ObservationAdmission::Unchanged);
-            }
-        }
-        let admission = self.estimator.observe_progress_pair(pair)?;
-        self.latest_source = Some(source);
-        Ok(admission)
+        let prepared = self
+            .validator
+            .prepare_wasapi(self.epoch(), snapshot, basis)?;
+        self.admit_native(prepared)
     }
 
     /// Admit an explicitly supplied output/host relation without fabricating
@@ -323,19 +252,8 @@ impl PresentationDiscipline {
         &mut self,
         pair: ClockPair,
     ) -> Result<ObservationAdmission, DisciplineError> {
-        if pair.source.domain != self.output_origin.domain || pair.target.domain != self.host_domain
-        {
-            return Err(DisciplineError::DomainMismatch);
-        }
-        if self
-            .latest_source
-            .is_some_and(|source| source != ObservationSource::SuppliedPair)
-        {
-            return Err(DisciplineError::ObservationSourceChanged);
-        }
-        let admission = self.estimator.observe_clock_pair(pair)?;
-        self.latest_source = Some(ObservationSource::SuppliedPair);
-        Ok(admission)
+        let prepared = self.validator.prepare_pair(self.epoch(), pair)?;
+        self.admit_native(prepared)
     }
 
     /// Admits an ASIO rendered block using its bounded host interval midpoint.
@@ -368,110 +286,36 @@ impl PresentationDiscipline {
         observation: crate::audio::asio::AsioPresentationObservation,
         basis: Option<beatkernel::audio::OutputFrameBasis>,
     ) -> Result<ObservationAdmission, DisciplineError> {
-        use crate::audio::asio::{AsioPresentationError, AsioPresentationObservation};
-        let expected_origin = if let Some(basis) = basis {
-            if basis.sample_rate() != observation.sample_rate
-                || observation.render.start_frame < basis.start_physical_frame()
-            {
-                return Err(DisciplineError::AsioPresentation(
-                    AsioPresentationError::Malformed,
-                ));
-            }
-            if basis
-                .point_at_stream_frame(0)
-                .map_err(|_| DisciplineError::Overflow)?
-                != self.output_origin
-            {
-                return Err(DisciplineError::DomainMismatch);
-            }
-            basis.origin()
+        let prepared = self
+            .validator
+            .prepare_asio(self.epoch(), observation, basis)?;
+        self.admit_native(prepared)
+    }
+
+    fn admit_native(
+        &mut self,
+        prepared: PreparedNativePresentation,
+    ) -> Result<ObservationAdmission, DisciplineError> {
+        let Some(pair) = prepared.correlation_pair() else {
+            return Ok(match prepared.admission() {
+                NativeObservationAdmission::Unchanged => ObservationAdmission::Unchanged,
+                NativeObservationAdmission::AwaitingHostProgress => {
+                    ObservationAdmission::AwaitingHostProgress
+                }
+                NativeObservationAdmission::Progress => unreachable!("progress supplies a pair"),
+            });
+        };
+        let admission = if matches!(
+            prepared.evidence(),
+            OriginalNativePresentationEvidence::Wasapi { .. }
+        ) {
+            self.estimator.observe_progress_pair(pair)?
         } else {
-            self.output_origin
+            self.estimator.observe_clock_pair(pair)?
         };
-        if observation.output_origin != expected_origin
-            || observation.host.before.domain != self.host_domain
-            || observation.host.after.domain != self.host_domain
-        {
-            return Err(DisciplineError::DomainMismatch);
-        }
-        let validated = AsioPresentationObservation::from_render(
-            observation.render,
-            observation.sample_rate,
-            observation.host,
-            0,
-            0,
-            observation.output_origin,
-        )
-        .map_err(DisciplineError::AsioPresentation)?;
-        if validated.output != observation.output {
-            return Err(DisciplineError::AsioPresentation(
-                AsioPresentationError::Malformed,
-            ));
-        }
-        let midpoint = i128::from(observation.host.before.timestamp.as_nanos())
-            + (i128::from(observation.host.after.timestamp.as_nanos())
-                - i128::from(observation.host.before.timestamp.as_nanos()))
-                / 2;
-        let target = ClockPoint {
-            domain: self.host_domain,
-            timestamp: Timestamp::from_nanos(
-                i64::try_from(midpoint).map_err(|_| DisciplineError::Overflow)?,
-            ),
-        };
-        let pair = ClockPair {
-            source: observation.output,
-            target,
-        };
-        let end_frame = observation
-            .render
-            .start_frame
-            .checked_add(
-                u64::try_from(observation.render.frames).map_err(|_| DisciplineError::Overflow)?,
-            )
-            .ok_or(DisciplineError::Overflow)?;
-        if let Some(previous_source) = self.latest_source {
-            let ObservationSource::Asio {
-                basis: previous_basis,
-                sample_rate,
-                start_frame,
-                end_frame,
-            } = previous_source
-            else {
-                return Err(DisciplineError::ObservationSourceChanged);
-            };
-            if basis != previous_basis {
-                return Err(DisciplineError::ObservationSourceChanged);
-            }
-            let previous = self
-                .estimator
-                .latest_pair()
-                .expect("source metadata follows admitted pair");
-            if sample_rate != observation.sample_rate {
-                return Err(DisciplineError::FrequencyChanged);
-            }
-            if observation.render.start_frame < start_frame {
-                return Err(DisciplineError::NonIncreasing);
-            }
-            if observation.render.start_frame == start_frame {
-                return Ok(ObservationAdmission::Unchanged);
-            }
-            if observation.render.start_frame < end_frame
-                || pair.source.timestamp <= previous.source.timestamp
-                || pair.target.timestamp < previous.target.timestamp
-            {
-                return Err(DisciplineError::NonIncreasing);
-            }
-            if pair.target.timestamp == previous.target.timestamp {
-                return Ok(ObservationAdmission::AwaitingHostProgress);
-            }
-        }
-        let admission = self.estimator.observe_clock_pair(pair)?;
-        self.latest_source = Some(ObservationSource::Asio {
-            basis,
-            sample_rate: observation.sample_rate,
-            start_frame: observation.render.start_frame,
-            end_frame,
-        });
+        self.validator
+            .commit(prepared)
+            .expect("private native preparation remains current after core admission");
         Ok(admission)
     }
 

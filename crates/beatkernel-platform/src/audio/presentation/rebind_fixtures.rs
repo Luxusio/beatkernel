@@ -75,23 +75,23 @@ fn new_epoch_resets_wasapi_frequency_and_rejects_delayed_old_snapshot_before_sou
             Timestamp::from_nanos(604_800_000_000_000),
         )
         .unwrap();
-    assert!(discipline.latest_source.is_none());
+    assert!(discipline.validator.latest_record().is_none());
     assert!(discipline.latest_pair().is_none());
     assert_eq!(
         discipline.observe_in_epoch(0, snapshot(3, 0, 9_000_000_000)),
         Err(DisciplineError::EpochMismatch)
     );
-    assert!(discipline.latest_source.is_none());
+    assert!(discipline.validator.latest_record().is_none());
     discipline
         .observe_in_epoch(1, snapshot(48_000, 48_000, 5_000_000_000))
         .unwrap();
-    let source = discipline.latest_source;
+    let source = discipline.validator.latest_record();
     let pair = discipline.latest_pair();
     assert_eq!(
         discipline.observe_in_epoch(1, snapshot(48_001, 44_100, 5_100_000_000)),
         Err(DisciplineError::FrequencyChanged)
     );
-    assert_eq!(discipline.latest_source, source);
+    assert_eq!(discipline.validator.latest_record(), source);
     assert_eq!(discipline.latest_pair(), pair);
 }
 #[test]
@@ -100,14 +100,14 @@ fn refused_rebind_preserves_original_identity_and_mixing_remains_refused_within_
     discipline
         .observe_in_epoch(0, snapshot(1_000_000_000, 1_000_000_000, 1_000_000_000))
         .unwrap();
-    let source = discipline.latest_source;
+    let source = discipline.validator.latest_record();
     let pair = discipline.latest_pair();
     assert_eq!(
         discipline.rebind_output(1, point(3, 1), point(4, 1), Timestamp::ZERO),
         Err(DisciplineError::DomainMismatch)
     );
     assert_eq!(discipline.epoch(), 0);
-    assert_eq!(discipline.latest_source, source);
+    assert_eq!(discipline.validator.latest_record(), source);
     assert_eq!(discipline.latest_pair(), pair);
     discipline
         .rebind_output(1, point(2, 0), point(2, 0), Timestamp::ZERO)
@@ -139,14 +139,14 @@ fn asio_rate_transition_needs_rebind_and_old_epoch_refusal_retains_new_block_evi
     discipline
         .observe_asio_in_epoch(0, asio(48_000, 0, 1_000))
         .unwrap();
-    let source = discipline.latest_source;
+    let source = discipline.validator.latest_record();
     let pair = discipline.latest_pair();
     assert!(
         discipline
             .observe_asio_in_epoch(0, asio(44_100, 64, 2_000))
             .is_err()
     );
-    assert_eq!(discipline.latest_source, source);
+    assert_eq!(discipline.validator.latest_record(), source);
     assert_eq!(discipline.latest_pair(), pair);
     discipline
         .rebind_output(1, point(2, 0), point(2, 0), Timestamp::ZERO)
@@ -154,13 +154,13 @@ fn asio_rate_transition_needs_rebind_and_old_epoch_refusal_retains_new_block_evi
     discipline
         .observe_asio_in_epoch(1, asio(44_100, 0, 2_000))
         .unwrap();
-    let source = discipline.latest_source;
+    let source = discipline.validator.latest_record();
     let pair = discipline.latest_pair();
     assert_eq!(
         discipline.observe_asio_in_epoch(0, asio(48_000, 64, 9_000)),
         Err(DisciplineError::EpochMismatch)
     );
-    assert_eq!(discipline.latest_source, source);
+    assert_eq!(discipline.validator.latest_record(), source);
     assert_eq!(discipline.latest_pair(), pair);
     discipline
         .observe_asio_in_epoch(1, asio(44_100, 64, 3_000))
@@ -175,7 +175,7 @@ fn maximum_epoch_and_failed_origin_order_leave_source_pair_and_retention_unchang
         Err(DisciplineError::InvalidConfig)
     );
     assert_eq!(discipline.epoch(), 0);
-    assert!(discipline.latest_source.is_none());
+    assert!(discipline.validator.latest_record().is_none());
     discipline
         .rebind_output(
             u64::MAX,
@@ -194,7 +194,7 @@ fn maximum_epoch_and_failed_origin_order_leave_source_pair_and_retention_unchang
         )
         .unwrap();
     let pair = discipline.latest_pair();
-    let source = discipline.latest_source;
+    let source = discipline.validator.latest_record();
     let retained = discipline.retained_len();
     assert_eq!(
         discipline.rebind_output(u64::MAX, point(2, 0), point(2, 0), Timestamp::ZERO),
@@ -205,6 +205,6 @@ fn maximum_epoch_and_failed_origin_order_leave_source_pair_and_retention_unchang
         Err(DisciplineError::InvalidEpoch)
     );
     assert_eq!(discipline.latest_pair(), pair);
-    assert_eq!(discipline.latest_source, source);
+    assert_eq!(discipline.validator.latest_record(), source);
     assert_eq!(discipline.retained_len(), retained);
 }
