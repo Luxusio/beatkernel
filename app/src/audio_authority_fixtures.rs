@@ -1088,3 +1088,135 @@ fn exhausted_revision_refuses_input_and_frontier_permission_before_caller_effect
     drained.admit(event(200, 0), host(200)).unwrap();
     assert_eq!(drained.pending(), 1);
 }
+
+fn owner_with_unused_interior(interior_raw: i64) -> (AudioAuthority, InputMerger) {
+    let mut authority = owner();
+    let mut merger = merger();
+    authority.observe(1, observation(1100, 100)).unwrap();
+    authority
+        .observe(1, observation(interior_raw, 150))
+        .unwrap();
+    authority.observe(1, observation(1300, 200)).unwrap();
+    merger.admit(event(100, 0), host(100)).unwrap();
+    authority.record_acquired_prefix(host(100)).unwrap();
+    let input = authority
+        .prepare_input(host(100), host(200))
+        .unwrap()
+        .unwrap();
+    merger.pop_ready(host(100)).unwrap().unwrap();
+    authority.commit_input(input).unwrap();
+    let frontier = authority
+        .prepare_frontier(host(200), &merger)
+        .unwrap()
+        .unwrap();
+    authority.commit_frontier(frontier, &mut merger).unwrap();
+    authority.record_acquired_prefix(host(175)).unwrap();
+    (authority, merger)
+}
+fn watermarks(authority: &AudioAuthority) -> [Option<ClockPoint>; 5] {
+    [
+        authority.acquired_prefix(),
+        authority.closed_host_prefix(),
+        authority.committed_input_host(),
+        authority.committed_operation(),
+        authority.committed_presentation(),
+    ]
+}
+fn assert_equal_outer_state_distinct_interior(a: &AudioAuthority, b: &AudioAuthority) {
+    assert_eq!(state(a), state(b));
+    assert_eq!(a.revision, b.revision);
+    assert_eq!(a.history.front(), b.history.front());
+    assert_eq!(a.latest_observation(), b.latest_observation());
+    assert_ne!(a.history, b.history);
+    assert_eq!(
+        watermarks(a),
+        [
+            Some(host(175)),
+            Some(host(100)),
+            Some(host(100)),
+            Some(point(3, 5100)),
+            Some(point(3, 5100))
+        ]
+    );
+}
+
+#[test]
+fn clearing_tokens_accept_equivalent_owners_with_distinct_unused_interior_observations() {
+    for restart in [false, true] {
+        let (a, a_merger) = owner_with_unused_interior(1200);
+        let (mut b, b_merger) = owner_with_unused_interior(1250);
+        assert_equal_outer_state_distinct_interior(&a, &b);
+        let retained = watermarks(&b);
+        let config = b.config();
+        let old_revision = b.revision;
+        if restart {
+            let token = a.prepare_correlation_restart(&a_merger).unwrap();
+            b.commit_correlation_restart(token, &b_merger).unwrap();
+            assert_eq!(b.epoch(), a.epoch());
+        } else {
+            let next = crate::audio_authority::AudioAuthorityEpoch {
+                id: 2,
+                stream_origin: point(4, 0),
+                logical_origin: point(3, 5600),
+                host_domain: ClockDomainId(1),
+            };
+            let token = a.prepare_epoch(next, &a_merger).unwrap();
+            b.commit_epoch(token, &b_merger).unwrap();
+            assert_eq!(b.epoch(), next);
+        }
+        assert_eq!(b.history_len(), 0);
+        assert_eq!(b.latest_observation(), None);
+        assert_eq!(watermarks(&b), retained);
+        assert_eq!(b.config(), config);
+        assert_eq!(b.revision, old_revision + 1);
+        assert_eq!(a.history_len(), 3);
+        assert_eq!(watermarks(&a), retained);
+    }
+}
+
+#[test]
+fn relevant_interior_input_and_frontier_differences_reject_cross_owner_commit_atomically() {
+    for frontier in [false, true] {
+        let (a, mut a_merger) = owner_with_unused_interior(1200);
+        let (mut b, mut b_merger) = owner_with_unused_interior(1250);
+        assert_equal_outer_state_distinct_interior(&a, &b);
+        let before_a = format!("{:?}", a);
+        let before_b = format!("{:?}", b);
+        if frontier {
+            let token = a.prepare_frontier(host(200), &a_merger).unwrap().unwrap();
+            let different = b.prepare_frontier(host(200), &b_merger).unwrap().unwrap();
+            assert_eq!(token.observed_host(), host(150));
+            assert_eq!(different.observed_host(), host(150));
+            assert_eq!(token.output(), point(3, 5200));
+            assert_eq!(different.output(), point(3, 5250));
+            assert_eq!(
+                b.commit_frontier(token, &mut b_merger),
+                Err(AudioAuthorityError::StalePreparation)
+            );
+            assert_eq!(format!("{:?}", a), before_a);
+            assert_eq!(format!("{:?}", b), before_b);
+            // A rejected frontier must not silently close the acquisition queue.
+            let original = event(125, 1);
+            b_merger.admit(original.clone(), host(175)).unwrap();
+            assert_eq!(b_merger.peek_ready(host(175)).unwrap(), Some(&original));
+        } else {
+            let original = event(125, 1);
+            a_merger.admit(original.clone(), host(175)).unwrap();
+            b_merger.admit(original.clone(), host(175)).unwrap();
+            let token = a.prepare_input(host(125), host(200)).unwrap().unwrap();
+            let different = b.prepare_input(host(125), host(200)).unwrap().unwrap();
+            assert_eq!(token.output(), point(3, 5150));
+            assert_eq!(different.output(), point(3, 5175));
+            assert_eq!(
+                b.commit_input(token),
+                Err(AudioAuthorityError::StalePreparation)
+            );
+            assert_eq!(format!("{:?}", a), before_a);
+            assert_eq!(format!("{:?}", b), before_b);
+            assert_eq!(a_merger.pending(), 1);
+            assert_eq!(b_merger.pending(), 1);
+            assert_eq!(a_merger.peek_ready(host(175)).unwrap(), Some(&original));
+            assert_eq!(b_merger.peek_ready(host(175)).unwrap(), Some(&original));
+        }
+    }
+}

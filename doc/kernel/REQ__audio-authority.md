@@ -53,9 +53,10 @@ nonnegative finite prediction limits. Repeated, absent or stale output cannot
 gain progress from host timers. Wrong domain, epoch, regressing observations,
 arithmetic overflow, expired required history or full pinned storage refuse
 explicitly before mutating admitted state.
-Freshness applies to the selected covered observation as well as the newest
-retained evidence. Its age at the declared query time must be nonnegative and
-within the configured limit. An input occurrence or acquired prefix beyond
+Freshness applies to the selected covered observation. A newer association
+whose original HOST target is still future does not invalidate older retained
+evidence that is due and fresh. The selected age at the declared query time must
+be nonnegative and within the configured limit. An input occurrence or acquired prefix beyond
 that declared current HOST time cannot authorize an operation yet; hold without
 changing the queue, mapping history or watermarks.
 
@@ -65,11 +66,15 @@ the most recent two real anchors. Never evict a segment needed by pending input.
 event without popping it or changing byte/sequence accounting. Prepare its
 mapping before removal and dispatch it once through the real Runtime.
 
-Preparation descriptors are immutable and record exact semantic state. Commit
-rejects stale revision, wrong epoch and mismatched mapping/state, including a
-descriptor prepared by another owner with different history. Equivalent exact
-semantic state may accept; no global counter, hash, clock read or allocation is
-needed. Rejections preserve every prior watermark and retained observation.
+Preparation descriptors are immutable and record the exact state relevant to
+their operation. Commit rejects stale revision, wrong epoch and mismatched
+configuration, watermarks, guards or selected mapping/result. Re-prepare that
+operation before committing, including its actual mapping or frontier when it
+depends on retained history. Operation-equivalent owners may accept: clearing
+operations need not distinguish unused interior observations that they discard.
+An interior change that alters the selected mapping/result must refuse. No
+global counter, hash, clock read, full-history token copy or allocation is needed.
+Rejections preserve every prior watermark and retained observation.
 
 Output replacement requires a strictly newer epoch, unchanged HOST and logical domains,
 logical origin at or beyond the committed operation and zero pending input.
@@ -79,10 +84,11 @@ Retained acquisition watermarks belong to the same original HOST domain and
 merger. A different HOST clock requires a new session and merger; output
 replacement must not retimestamp that provenance.
 
-Same-stream resume uses a separate correlation restart: retain physical epoch,
-configuration and all acquired/closed/committed watermarks, clear only observation
-history using reserved storage, and require two fresh pairs. Consumer lifecycle
-owns Transport pause/resume; restarting correlation never resets judged history.
+Ordinary same-stream resume retains the physical epoch, correlation history,
+configuration and all acquired/closed/committed watermarks. An explicitly
+requested correlation restart is a separate operation: clear only observation
+history using reserved storage and require two fresh pairs. Consumer lifecycle
+owns Transport pause/resume; neither resume nor restart resets judged history.
 
 ## Verification cues
 

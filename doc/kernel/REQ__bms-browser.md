@@ -607,8 +607,11 @@ one pending render deadline. Missing presentation remains null; Worker arrival
 time cannot substitute for original output or input evidence.
 
 The attached gameplay Worker reads the real report through AudioCommandClient
-poll() and passes its actual words through the existing renderedCursor and Rust
-observe_output/observe_presentation path. Commands and report reads share one
+poll() and validates its actual words through renderedCursor. Live play admits
+them through admit_output, observes original presentation through
+observe_presentation, then services audio and evaluates completion through
+service_audio/evaluate_completion. Replay retains its recorded-clock
+observe_output path. Commands and report reads share one
 bounded operation owner, with no simultaneous client requests or hidden queues.
 One pending render observation is allowed; repeated, overlapping, stale or
 out-of-order observations refuse. A pending command batch receives its actual

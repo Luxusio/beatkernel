@@ -61,7 +61,9 @@ resumes through the same ReplayVisual/JudgeEngine operations. No pause command
 is added to the recording, and original live wall-pause history is not reproduced.
 Assets are preloaded and
 the finite command plan is allocated off-thread; source/log limits do not bound
-all process memory. Tests, examples, native execution, reviews and QA stay deferred.
+all process memory. Executed development regressions provide the scoped evidence
+described above. Actual native hardware execution, formal review and ordered
+independent QA remain unproven; existing examples are not completion evidence.
 
 
 ## Explicit finite section planning

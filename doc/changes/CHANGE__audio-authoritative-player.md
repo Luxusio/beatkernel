@@ -40,6 +40,17 @@ formal review. The next queued browser-isolation task starts by removing
 gamepad sampling from keyboard/HID/touch dispatch; splitting rendering from
 the gameplay Worker requires a separately verified bounded visual-state port.
 
+Independent review clarified preparation tokens as operation-relevant semantic
+state: commits re-prepare their actual guards and mapping/result, while clearing
+operations may accept different unused interior observations that they discard.
+Two new regressions prove both clearing equivalence with retained watermarks
+and atomic refusal when an interior observation changes the selected input or
+frontier result. The focused authority/native/Step filter passes 54 tests. No
+production logic, hot allocation or recording schema changed. The 2,175-test
+full app run above precedes these two added fixtures; final independent QA is
+still required. Stale freshness, ordinary-resume, live/replay browser method and
+blanket test-deferral descriptions were reconciled with the actual callers.
+
 The core can map two supplied clock observations with explicitly unknown
 accuracy, without inventing an error bound. The application's finite authority
 joins original acquired HOST input with raw output observations on a separate
