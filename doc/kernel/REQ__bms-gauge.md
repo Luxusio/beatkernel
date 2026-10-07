@@ -1,5 +1,41 @@
 # Common BMS gauge observations
 
+## Live selected class score publication and HUD
+
+The native cold host receives the complete explicitly selected play policy,
+including judge profile, gauge and optional PGREAT/GREAT/GOOD/BAD mapping,
+independently of replay recording. Validate the actual pristine runtime judge,
+initial gauge, full original-ID roster and any capture/competition class
+metadata before device/control effects. Equal gauge deltas do not prove equal
+class meanings. Legacy gauge-only hosts must reject classified setup rather
+than silently discard it; the explicit no-publication host may accept it.
+
+The game-owned Player stores immutable bounded class policies at cold setup.
+Published local snapshots expose only optional scalar PGREAT/GREAT/GOOD/BAD,
+POOR and EX counters. No class metadata means unavailable, never inferred zero
+or a mapping guessed from grade ID/gauge. Projection uses actual staged generic
+score counts and rejects unknown grade/overflow before any score, gauge, mine,
+pressed state, history, time, progress, status or publication mutation. A local
+batch rejects atomically across all members; unchanged empty deadline reports
+reuse the admitted scalar. A solo top-level snapshot mirrors its member;
+cohorts have no fabricated aggregate class score. Session teardown clears policy.
+
+The live HUD labels are EX, PG, G, GOOD, BAD and POOR. Renderer inputs are scalar
+values, not events/policies. Classified panels reserve a shared 24-pixel two-row
+region after judge/gauge information, moving competition reservations and
+playfield bounds together. Unclassified panels retain their existing geometry.
+Values and original sparse member IDs remain associated through visible-page
+selection; clip large counters within the panel. Existing generic hits/misses,
+combo, gauge, replay and competition semantics remain separate.
+
+Use common policy-aware native bridge functions on Linux, Windows WASAPI and
+optional ASIO, and macOS. Do not duplicate classification in OS adapters or
+introduce Virtual DOM or UI-owned clocks. Verify recording enabled/disabled,
+all selected gauge kinds, genuine Runtime reports, cold mismatches and atomic
+publication failures, plus bounded HUD geometry and available native/WASM paths.
+This addition does not supply full LR2 timing presets/empty-POOR rules, custom
+network policy interoperability, or physical output/performance acceptance.
+
 Gauge state belongs to the BMS runtime and consumes actual committed judge and
 hazard reports. It does not reinterpret opaque grade numbers, judge inputs,
 emit sounds, rewrite scores or infer new input. Use one shared BmsGauge policy
