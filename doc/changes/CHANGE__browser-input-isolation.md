@@ -2,6 +2,16 @@
 
 Status: implementation candidates under development verification; independent
 review and final QA are pending. The broader player Goal remains active.
+The first formal code review found a cancellation gap in the pre-existing
+Gamepad owner: after a native getter closes the owner, later native fields could
+still be read before publication was suppressed. Acquisition now checks the
+existing closed/revision invariant after each native read and exits immediately
+on invalidation. Direct owner and actual Window regressions verify early and
+middle-slot cancellation, zero subsequent native reads/source or sequence
+allocation/publication, and unchanged getter-once behavior when eligible.
+The fresh focused Node run passes all 139 tests; the subsequent complete web
+Node run passes all 540 tests, with no failures or skipped tests. Fresh review and final QA are
+still required; this task is not accepted yet.
 
 Window input callbacks now send acquired data without synchronously polling
 Gamepads. The existing 8 ms cadence performs eligible polling before input

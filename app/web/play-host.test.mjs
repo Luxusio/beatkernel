@@ -1793,6 +1793,43 @@ test("cadence holds publication across native getter key reentry and stop cancel
   }
 });
 
+test("actual main stop inside early or middle native getters ends acquisition before downstream controls and slots", async () => {
+  const readOrder = ["index", "id", "mapping", "connected", "timestamp", "axes", "buttons",
+    "axis0", "axis1", "button0", "pressed", "touched", "value", "button1"];
+  for (const slot of [0, 1]) for (const boundary of ["id", "timestamp", "axis0", "pressed"]) {
+    const pads = [0, 1, 2].map(index => nativeGamepad(index, { axes: [0, 0.5] }));
+    const h = await harness({ gamepads: pads }); await h.preview();
+    const session = await h.launch(), worker = h.workers[0], initialReads = h.gamepadReads;
+    const native = pads[slot], reads = new Map(), axes = [0, 0.5];
+    const firstButton = { pressed: false, touched: false, value: 0 };
+    const buttons = Array.from({ length: 9 }, () => ({ pressed: false, touched: false, value: 0 }));
+    buttons[0] = firstButton;
+    const getter = (target, property, label, value) => Object.defineProperty(target, property, { get() {
+      reads.set(label, (reads.get(label) ?? 0) + 1);
+      if (label === boundary) h.click("stop");
+      return value;
+    } });
+    for (const property of ["index", "id", "mapping", "connected", "timestamp"]) getter(native, property, property, native[property]);
+    getter(native, "axes", "axes", axes); getter(native, "buttons", "buttons", buttons);
+    getter(axes, 0, "axis0", 0); getter(axes, 1, "axis1", 0.5);
+    getter(buttons, 0, "button0", firstButton); getter(buttons, 1, "button1", buttons[1]);
+    for (const property of ["pressed", "touched", "value"]) getter(firstButton, property, property, firstButton[property]);
+    let laterSlotReads = 0;
+    Object.defineProperty(pads, slot + 1, { get() { laterSlotReads++; return nativeGamepad(slot + 1); } });
+    h.setNow(1300); await h.advance(8);
+    assert.equal(h.gamepadReads, initialReads + 1);
+    assert.equal(reads.get(boundary), 1, `${slot}:${boundary}`);
+    for (const downstream of readOrder.slice(readOrder.indexOf(boundary) + 1)) {
+      assert.equal(reads.get(downstream) ?? 0, 0, `${slot}:${boundary} must not read ${downstream}`);
+    }
+    assert.equal(laterSlotReads, 0, "stopped session cannot acquire another native slot");
+    assert.equal(worker.messages("play-step").length, 0, "neither the valid earlier device nor cancelled device may publish");
+    assert.equal(worker.last("play-stop").playId, session.id);
+    assert.equal(h.window.listeners.get("gamepaddisconnected")?.size ?? 0, 0);
+    await h.receive(finalScore(session.id)); await h.close();
+  }
+});
+
 test("unavailable or unsupported Gamepads preserve keyboard play while replay never acquires live device snapshots", async () => {
   const unavailable = await harness(); await unavailable.preview();
   const solo = await unavailable.launch();

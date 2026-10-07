@@ -173,6 +173,74 @@ test("native getter cancellation fences full snapshot publication without consum
   assert.equal(h.reads, 1, "closed owner never revisits the native getter");
 });
 
+test("early and middle native getter cancellation stops every subsequent slot metadata and control read", () => {
+  const readOrder = ["index", "id", "mapping", "connected", "timestamp", "axes", "buttons",
+    "axis0", "axis1", "button0", "pressed", "touched", "value", "button1"];
+  for (const slot of [0, 1]) for (const boundary of readOrder) {
+    const reads = new Map(), native = pad(slot), axes = [0, 0.5];
+    const firstButton = { pressed: false, touched: false, value: 0 };
+    const buttons = [firstButton, { pressed: true, touched: true, value: 1 }];
+    let h;
+    const getter = (target, property, label, value) => Object.defineProperty(target, property, { get() {
+      reads.set(label, (reads.get(label) ?? 0) + 1);
+      if (label === boundary) h.owner.close();
+      return value;
+    } });
+    for (const property of ["index", "id", "mapping", "connected", "timestamp"]) getter(native, property, property, native[property]);
+    getter(native, "axes", "axes", axes); getter(native, "buttons", "buttons", buttons);
+    getter(axes, 0, "axis0", 0); getter(axes, 1, "axis1", 0.5);
+    getter(buttons, 0, "button0", firstButton); getter(buttons, 1, "button1", buttons[1]);
+    for (const property of ["pressed", "touched", "value"]) getter(firstButton, property, property, firstButton[property]);
+    const slots = slot === 0 ? [native] : [pad(0), native];
+    let nextSlotReads = 0;
+    Object.defineProperty(slots, slot + 1, { get() { nextSlotReads++; return pad(slot + 1); } });
+    h = rig({ pads: slots });
+    assert.equal(h.owner.poll(), 0, `${slot}:${boundary}`);
+    assert.equal(reads.get(boundary), 1, `${slot}:${boundary} cancels exactly once`);
+    for (const downstream of readOrder.slice(readOrder.indexOf(boundary) + 1)) {
+      assert.equal(reads.get(downstream) ?? 0, 0, `${slot}:${boundary} must not read ${downstream}`);
+    }
+    assert.equal(nextSlotReads, 0, `${slot}:${boundary} must not touch another native slot`);
+    assert.equal(h.sourceCalls, 0); assert.equal(h.sequenceCalls, 0);
+    assert.deepEqual(h.samples, []); assert.deepEqual(h.errors, []);
+    assert.equal(h.owner.closed, true);
+    assert.equal(h.events.count("gamepadconnected"), 0); assert.equal(h.events.count("gamepaddisconnected"), 0);
+  }
+});
+
+test("eligible native snapshot reads each getter once and lifecycle revision invalidation stops later reads", () => {
+  const native = pad(0), next = pad(1), reads = new Map();
+  const countGetter = (target, property, label, value) => Object.defineProperty(target, property, { configurable: true, get() {
+    reads.set(label, (reads.get(label) ?? 0) + 1); return value;
+  } });
+  for (const property of ["index", "id", "mapping", "connected", "timestamp", "axes", "buttons"]) countGetter(native, property, property, native[property]);
+  countGetter(native.axes, 0, "axis0", 0);
+  const buttons = native.buttons, button = buttons[0];
+  countGetter(buttons, 0, "button0", button);
+  for (const property of ["pressed", "touched", "value"]) countGetter(button, property, property, button[property]);
+  reads.clear();
+  const h = rig({ pads: [native, next] });
+  assert.equal(h.owner.poll(), 2);
+  assert.ok(reads.size >= 12); assert.ok([...reads.values()].every(value => value === 1));
+  const sourceCalls = h.sourceCalls, sequenceCalls = h.sequenceCalls;
+  reads.clear();
+  Object.defineProperty(native, "timestamp", { get() {
+    reads.set("timestamp", (reads.get("timestamp") ?? 0) + 1);
+    Object.defineProperty(native, "connected", { value: false });
+    h.events.emit("gamepaddisconnected", native);
+    return 1234.125;
+  } });
+  let nextReads = 0;
+  Object.defineProperty(next, "index", { get() { nextReads++; return 1; } });
+  assert.equal(h.owner.poll(), 0);
+  assert.equal(reads.get("timestamp"), 1);
+  for (const property of ["axes", "buttons", "axis0", "button0", "pressed", "touched", "value"]) assert.equal(reads.get(property) ?? 0, 0, property);
+  assert.equal(nextReads, 0); assert.equal(h.sourceCalls, sourceCalls); assert.equal(h.sequenceCalls, sequenceCalls);
+  assert.equal(h.samples.length, 2); assert.equal(h.disconnects.length, 1);
+  assert.equal(h.owner.closed, false); assert.deepEqual(h.errors, []);
+  h.owner.close();
+});
+
 test("connection evidence retires exact objects and index reuse allocates fresh sources without synthetic releases", () => {
   const first = pad(0), replacement = pad(0);
   const h = rig({ pads: [first], source: 100n });

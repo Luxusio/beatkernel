@@ -66,9 +66,16 @@ export class GamepadInputOwner {
       Object.freeze({ source, index, id, mapping })));
   }
 
-  #metadata(gamepad) {
+  #metadata(gamepad, current) {
     if (!gamepad || typeof gamepad !== "object" || Array.isArray(gamepad)) throw new Error("Invalid Gamepad object.");
-    const { index, id, mapping, connected } = gamepad;
+    const index = gamepad.index;
+    if (!current()) return null;
+    const id = gamepad.id;
+    if (!current()) return null;
+    const mapping = gamepad.mapping;
+    if (!current()) return null;
+    const connected = gamepad.connected;
+    if (!current()) return null;
     if (!integer(index, 0, this.#limits.maxSlots - 1) || typeof id !== "string" || id.length > 1024
       || (mapping !== "" && mapping !== "standard") || typeof connected !== "boolean") {
       throw new Error("Invalid Gamepad index, bounded identity, mapping or connection state.");
@@ -76,30 +83,48 @@ export class GamepadInputOwner {
     return { index, id, mapping, connected };
   }
 
-  #snapshot() {
-    const gamepads = this.#navigator.getGamepads();
-    if (this.#closed) return [];
-    if (!Array.isArray(gamepads) || gamepads.length > this.#limits.maxSlots) throw new Error("Gamepad slot capacity exceeded or invalid slot array.");
+  #snapshot(current) {
+    const getGamepads = this.#navigator.getGamepads;
+    if (!current()) return null;
+    const gamepads = Reflect.apply(getGamepads, this.#navigator, []);
+    if (!current()) return null;
+    if (!Array.isArray(gamepads)) throw new Error("Gamepad slot capacity exceeded or invalid slot array.");
     const slots = gamepads.length;
+    if (!current()) return null;
+    if (slots > this.#limits.maxSlots) throw new Error("Gamepad slot capacity exceeded or invalid slot array.");
     const samples = [];
     for (let index = 0; index < slots; index++) {
-      if (!Object.hasOwn(gamepads, index)) continue;
+      const present = Object.hasOwn(gamepads, index);
+      if (!current()) return null;
+      if (!present) continue;
       const gamepad = gamepads[index];
+      if (!current()) return null;
       if (gamepad === null) continue;
-      const metadata = this.#metadata(gamepad);
+      const metadata = this.#metadata(gamepad, current);
+      if (metadata === null) return null;
       if (metadata.index !== index) throw new Error("Gamepad index does not match its slot.");
       if (!metadata.connected) continue;
       if (samples.length === this.#limits.maxDevices) throw new Error("Gamepad device capacity exceeded.");
       const timestampMs = gamepad.timestamp;
+      if (!current()) return null;
       const hostNs = millisecondsToNanos(timestampMs);
       const nativeAxes = gamepad.axes;
+      if (!current()) return null;
       const nativeButtons = gamepad.buttons;
-      if (!Array.isArray(nativeAxes) || nativeAxes.length > this.#limits.maxAxes
-        || !Array.isArray(nativeButtons) || nativeButtons.length > this.#limits.maxButtons) {
+      if (!current()) return null;
+      if (!Array.isArray(nativeAxes)) {
         throw new Error("Invalid Gamepad control arrays or control capacity exceeded.");
       }
       const axisCount = nativeAxes.length;
+      if (!current()) return null;
+      if (axisCount > this.#limits.maxAxes || !Array.isArray(nativeButtons)) {
+        throw new Error("Invalid Gamepad control arrays or control capacity exceeded.");
+      }
       const buttonCount = nativeButtons.length;
+      if (!current()) return null;
+      if (buttonCount > this.#limits.maxButtons) {
+        throw new Error("Invalid Gamepad control arrays or control capacity exceeded.");
+      }
       const previous = this.#devices.get(index);
       if (previous?.gamepad === gamepad && (timestampMs < previous.timestampMs || metadata.id !== previous.id
         || metadata.mapping !== previous.mapping || axisCount !== previous.axes
@@ -110,13 +135,20 @@ export class GamepadInputOwner {
       const buttons = [];
       for (let control = 0; control < axisCount; control++) {
         const axis = nativeAxes[control];
+        if (!current()) return null;
         if (typeof axis !== "number" || !Number.isFinite(axis) || axis < -1 || axis > 1) throw new Error("Invalid Gamepad axis value.");
         axes.push(axis);
       }
       for (let control = 0; control < buttonCount; control++) {
         const button = nativeButtons[control];
+        if (!current()) return null;
         if (!button || typeof button !== "object" || Array.isArray(button)) throw new Error("Invalid Gamepad button.");
-        const { pressed, touched, value } = button;
+        const pressed = button.pressed;
+        if (!current()) return null;
+        const touched = button.touched;
+        if (!current()) return null;
+        const value = button.value;
+        if (!current()) return null;
         if (typeof pressed !== "boolean" || typeof touched !== "boolean"
           || typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) throw new Error("Invalid Gamepad button state.");
         buttons.push(Object.freeze({ pressed, touched, value }));
@@ -137,7 +169,7 @@ export class GamepadInputOwner {
     try {
       // Validate and copy every device before calling external allocators or
       // publishing any prefix. Equal timestamps never suppress changed values.
-      const samples = this.#snapshot();
+      const samples = this.#snapshot(current);
       if (!current()) return 0;
       const next = new Map();
       const records = [];
@@ -187,9 +219,13 @@ export class GamepadInputOwner {
 
   #lifecycle(event, connected) {
     if (this.#closed) return;
+    const revision = this.#revision;
+    const current = () => !this.#closed && this.#revision === revision;
     try {
       const gamepad = event?.gamepad;
-      const metadata = this.#metadata(gamepad);
+      if (!current()) return;
+      const metadata = this.#metadata(gamepad, current);
+      if (metadata === null) return;
       if (metadata.connected !== connected) {
         if (connected) return; // A delayed connection event for an already gone object.
         throw new Error("Gamepad disconnect event still reports a connected device.");
