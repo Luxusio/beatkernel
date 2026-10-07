@@ -10,6 +10,7 @@ mod grapheme_editing_fixtures;
 #[cfg(test)]
 mod grapheme_window_fixtures;
 pub mod interaction;
+pub mod layout;
 pub mod molecules;
 pub mod organisms;
 pub mod players;
