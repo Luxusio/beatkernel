@@ -38,7 +38,21 @@ lifecycle integration, final independent review and browser QA remain pending.
 
 Known ceiling: Window integration and real completed/combined rendering proof remain pending AC007/AC009.
 
+Window integration now passes the 133-test host suite; the completed/combined
+whole-application browser portion of this ceiling remains open.
+
+Known ceiling: 실제 두 Worker의 전체 모드·GPU 동작은 미검증 — AC009 브라우저 검증에서 확인해야 함.
+
 Known ceiling: 실제 WASM getter 및 전체 화면 동작 검증 미완료 — AC009 브라우저 검증에서 확인.
+
+The getter portion of this reported ceiling is now resolved by the actual
+HEAD `8e47047` development probe. Generated WASM returned preview page zero,
+room page zero then one, and genuine five-member local pages one then zero.
+Actual renderer submissions carried 640×480 and restored 960×720 extents;
+zero extent emitted no geometry success. Genuine 64-member frames submitted
+pages fifteen then zero, with the last-page GPU screenshot showing P61–P64.
+Whole-application and genuine completed/combined Results acceptance remains
+AC009; this probe is not a formal browser QA verdict.
 
 Known ceiling: actual Worker decoding must use the trusted caller’s finite diagnostic budget before allocating or copying — already-owned Rust convenience paths preserve diagnostics.
 
@@ -78,10 +92,12 @@ diagnostic-free waiting room HUD also imports at allowance zero and accepts its
 exact state ACK. No actual completed-owner RESULTS
 or same-generation combined RESULTS/ROOM runtime acceptance is claimed yet.
 
-The shipped Window/game Worker is not yet wired to this separate renderer.
-Gameplay-only Worker integration, original input/page/resize lifecycle barriers,
-capture-preserving terminal failure ordering, final independent review and
-whole-flow browser QA remain required.
+Window startup now creates distinct gameplay and renderer Workers with a direct
+MessageChannel and renderer-only canvas transfer. Joined capture/audio/input
+cleanup precedes disposal and termination, while stale presentation publication
+is fenced immediately. The host suite passes all 133 tests. This is an
+implemented candidate; final independent review and whole-flow browser QA
+remain required.
 
 The ordered local-touch helper retains acquisition page and projected position
 on the same bounded input entry. Actual audio-authorized dispatch applies that

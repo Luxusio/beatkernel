@@ -133,6 +133,9 @@ function chooseSettings(h, size = 128) {
 async function harness(faults = {}) {
   const elements = new Map();
   const workers = [];
+  const renderers = [];
+  const allWorkers = [];
+  const channels = [];
   const traces = [];
   const unexpected = [];
   const timers = new Map();
@@ -225,7 +228,11 @@ async function harness(faults = {}) {
       // before this can attempt to create another cancellation.
       this.emit("lostpointercapture", { pointerId: id, timeStamp: now });
     }
-    transferControlToOffscreen() { return { surface: this.id }; }
+    transferControlToOffscreen() {
+      assert.equal(this.transferred, undefined, "a transferred HTML canvas cannot be transferred twice");
+      this.transferred = { surface: this.id, width: this.width, height: this.height };
+      return this.transferred;
+    }
     focus() { this.focuses++; }
   }
   class HidDevice extends Events {
@@ -312,7 +319,10 @@ async function harness(faults = {}) {
       this.posts = [];
       this.terminations = 0;
       this.failKind = null;
-      workers.push(this);
+      this.geometryVersion = 0n;
+      this.role = /renderer-worker\.js(?:$|\?)/.test(this.url) ? "renderer" : "game";
+      allWorkers.push(this);
+      (this.role === "renderer" ? renderers : workers).push(this);
     }
     postMessage(value, transfer = []) {
       traces.push(["post", value.kind]);
@@ -320,12 +330,15 @@ async function harness(faults = {}) {
       assert.equal(this.terminations, 0, "posting after Worker termination");
       // The fake canvas has no native transferable. Other data follows the real
       // structured-clone shape, including BigInt and typed event arrays.
-      const portHandoff = ["play-audio", "play-samples-upload"].includes(value.kind);
-      const posted = portHandoff ? { ...structuredClone({ ...value, port: undefined }), port: value.port }
+      const portKey = value.renderPort ? "renderPort" : value.port ? "port" : null;
+      const portHandoff = portKey !== null;
+      const posted = portHandoff ? { ...structuredClone({ ...value, [portKey]: undefined, canvas: undefined }),
+        [portKey]: value[portKey], ...(value.canvas ? { canvas: value.canvas } : {}) }
         : structuredClone(value);
       if (portHandoff) {
-        assert.deepEqual(Array.from(transfer), [value.port]);
-        value.port.transfers++;
+        assert.ok(transfer.includes(value[portKey]), "native channel endpoint is transferred");
+        value[portKey].transfers++;
+        if (value.canvas) assert.ok(transfer.includes(value.canvas), "only renderer receives the native canvas transfer");
       }
       // Node versions may clone File as Blob. Preserve the selected immutable
       // File endpoint here; this fake Worker never acquires its bytes.
@@ -337,6 +350,8 @@ async function harness(faults = {}) {
         ...posted.opponents[index], file: entry.file,
       }));
       this.posts.push({ value: posted, transferCount: transfer.length, transfer: [...transfer] });
+      if (this.role === "game" && ["resize", "play-page"].includes(value.kind)) this.geometryVersion++;
+      if (value.kind === "dispose" && !faults.holdDispose) queueMicrotask(() => this.emit("message", { data: { kind: "disposed" } }));
       // Mechanical legacy compatibility: the actual Worker acknowledges clear
       // with unavailable metadata. Page RPC replies remain explicitly scripted.
       if (value.kind === "historical-record-clear") queueMicrotask(() => this.emit("message", { data: {
@@ -347,13 +362,29 @@ async function harness(faults = {}) {
     messages(kind) { return this.posts.map(entry => entry.value).filter(value => value.kind === kind); }
     last(kind) { return this.messages(kind).at(-1); }
   }
+  class MessageChannel {
+    constructor() {
+      class Port extends Events {
+        constructor() { super(); this.transfers = 0; this.closes = 0; this.posts = []; }
+        start() {}
+        postMessage(value) {
+          this.posts.push(structuredClone(value));
+          queueMicrotask(() => this.peer.emit("message", { data: structuredClone(value) }));
+        }
+        close() { this.closes++; }
+      }
+      this.port1 = new Port(); this.port2 = new Port();
+      this.port1.peer = this.port2; this.port2.peer = this.port1;
+      channels.push(this);
+    }
+  }
   class ResizeObserver {
     constructor(callback) { this.callback = callback; resizeObservers.push(this); }
     observe() {}
     disconnect() { traces.push(["observer-disconnect"]); }
   }
   const window = new Events();
-  Object.assign(window, { isSecureContext: true, devicePixelRatio: 1, Worker,
+  Object.assign(window, { isSecureContext: true, devicePixelRatio: 1, Worker, MessageChannel,
     OffscreenCanvas: class {}, ResizeObserver, matchMedia: () => new Events() });
   if (faults.touchSupported || faults.pointerSupported) window.PointerEvent = class {};
   const addWindowListener = window.addEventListener.bind(window);
@@ -466,7 +497,7 @@ async function harness(faults = {}) {
     return faults.gamepads;
   };
   const context = createContext({
-    document, window, Worker, ResizeObserver, Option,
+    document, window, Worker, MessageChannel, ResizeObserver, Option,
     navigator: browserNavigator,
     AbortController, AbortSignal, URL: ControlledURL, Blob, TextEncoder, TextDecoder, File, Uint8Array, Uint32Array, Float32Array, DataView,
     ArrayBuffer, structuredClone, performance: { timeOrigin: 9000, now: () => now },
@@ -563,6 +594,7 @@ async function harness(faults = {}) {
     return linked;
   });
   await main.evaluate();
+  await flush();
   const get = id => document.getElementById(id);
   function click(id) {
     const element = get(id);
@@ -592,8 +624,10 @@ async function harness(faults = {}) {
     await receive({ kind: "play-samples-admitted", playId: request.playId, rpcId: request.rpcId, count });
   }
   async function preview() {
+    await flush();
     const worker = workers.at(-1);
     await receive({ kind: "ready" });
+    if (!faults.holdRendererReady) await receive({ kind: "ready" }, renderers.at(-1));
     get("files").files = [new File(["#BPM 120"], "chart.bms")];
     get("files").emit("change");
     const imported = worker.last("import");
@@ -603,6 +637,7 @@ async function harness(faults = {}) {
     await receive({ kind: "selected", id: selected.id, libraryId: imported.id, path: "chart.bms",
       title: "Accepted preview", artist: "Preview artist", notes: 6, samples: 1, images: 0, duration: "6000000000" });
     await receive({ kind: "drawn", selectedId: selected.id });
+    if (!faults.holdGeometry) await geometry({ selectedId: selected.id });
     get("position").value = "12.345678901";
     get("seek-form").emit("submit");
     const seek = worker.last("seek");
@@ -649,7 +684,18 @@ async function harness(faults = {}) {
     const activation = worker.last("play-activate");
     await reply(activation, null);
     assert.equal(get("stop").disabled, false);
+    if (!faults.holdGeometry) await geometry({ playId: start.playId, page: start.localPage ?? 0 });
     return { id: start.playId, start, activation };
+  }
+  async function geometry(fields = {}, target = workers.at(-1)) {
+    const resize = target.last("resize");
+    const play = target.last("play-start");
+    await receive({ kind: "render-geometry", generation: 1n, content: 1n,
+      geometryVersion: fields.geometryVersion ?? target.geometryVersion,
+      selectedId: target.last("select")?.id,
+      mode: fields.playId === undefined ? "preview" : play?.localPlanWords ? "local" : play?.mode ?? "live",
+      page: 0, width: resize?.width ?? 960, height: resize?.height ?? 720,
+      ...fields, geometryVersion: fields.geometryVersion ?? target.geometryVersion }, target);
   }
   async function advance(milliseconds) {
     const until = now + milliseconds;
@@ -669,16 +715,18 @@ async function harness(faults = {}) {
     now = until;
     await flush();
   }
-  return { get, workers, get audio() { return audio; }, opens, traces, faults, timers, moduleToken, window, document, urls, revoked, downloads,
+  return { get, workers, renderers, allWorkers, channels, get audio() { return audio; }, opens, traces, faults, timers, moduleToken, window, document, urls, revoked, downloads,
     recordOpens, recordCalls, recordOwners, captures, releases, hid, hidDevices, get layoutReads() { return layoutReads; },
     get gamepadReads() { return gamepadReads; },
     resize(width, height) { viewport = { width, height }; resizeObservers.at(-1).callback(); },
-    click, receive, reply, admitSamples, preview, begin, prepared, launch, advance,
+    click, receive, reply, admitSamples, preview, begin, prepared, launch, geometry, advance,
     setNow(value) { assert.ok(value >= now); now = value; },
     setTimeOrigin(value) { context.performance.timeOrigin = value; },
     async close() {
       window.emit("pagehide");
       await flush();
+      const game = workers.at(-1), pending = game?.last("play-stop");
+      if (pending && game.terminations === 0) await receive(finalScore(pending.playId), game);
       assert.deepEqual(unexpected, []);
       assert.equal(timers.size, 0, "page teardown must clear host deadlines and intervals");
     },
@@ -712,6 +760,135 @@ async function pagedTouchSession() {
   h.setNow(1300);
   return { h, session, worker: h.workers[0], surface: h.get("canvas") };
 }
+
+test("two owners transfer only renderer canvas and CPU readiness does not wait for GPU readiness", async () => {
+  const h = await harness({ holdRendererReady: true });
+  assert.equal(h.workers.length, 1); assert.equal(h.renderers.length, 1);
+  const game = h.workers[0], renderer = h.renderers[0];
+  const gameInit = game.last("init"), renderInit = renderer.last("init");
+  assert.equal(gameInit.canvas, undefined);
+  assert.equal(renderInit.canvas, h.get("canvas").transferred);
+  assert.equal(gameInit.renderPort.peer, renderInit.port);
+  assert.equal(h.channels.length, 1);
+  assert.equal(gameInit.renderPort.transfers, 1); assert.equal(renderInit.port.transfers, 1);
+  assert.equal(gameInit.maxPacketBytes, renderInit.maxPacketBytes);
+  assert.equal(gameInit.maxDiagnosticBytes, renderInit.maxDiagnosticBytes);
+  await h.preview(); const session = await h.launch();
+  assert.equal(h.audio.arms.length, 1, "real setup continues while renderer readiness is pending");
+  h.setNow(1301); h.window.emit("keydown", { code: "KeyZ", timeStamp: 1300.125 });
+  const tick = game.last("play-step");
+  assert.equal(tick.events.find(event => event.key === 2).hostNs, 1300125000n);
+  assert.equal(renderer.messages("play-step").length, 0);
+  await h.receive({ kind: "ready" }, renderer);
+  assert.equal(h.audio.arms.length, 1, "late GPU readiness does not restart audio");
+  h.click("stop"); await flush(); await h.receive(finalScore(session.id)); await h.close();
+  assert.equal(game.terminations, 1); assert.equal(renderer.terminations, 1);
+});
+
+test("requested resize and invalid geometry never reinterpret touch before an actual submitted tuple", async () => {
+  const { h, session, worker, surface } = await pagedTouchSession();
+  const oldResize = worker.last("resize");
+  const oldVersion = worker.geometryVersion;
+  const pointer = (id, timeStamp) => surface.emit("pointerdown", { pointerType: "touch", pointerId: id,
+    timeStamp, offsetX: 80.25, offsetY: 120.5, pressure: 0.375 });
+  h.resize(400, 300); const resize = worker.last("resize");
+  const requestedVersion = worker.geometryVersion;
+  assert.ok(requestedVersion > oldVersion);
+  pointer(201, 1300); const first = worker.last("play-step");
+  const acquired = first.events.find(event => event.kind === "touch");
+  assert.equal(acquired.width, 400); assert.equal(acquired.height, 300);
+  assert.equal(acquired.surfaceWidth, oldResize.width); assert.equal(acquired.surfaceHeight, oldResize.height);
+  assert.equal(acquired.page, 0); assert.equal(acquired.hostNs, 1300000000n);
+  await h.receive({ kind: "play-step-done", playId: session.id, tickId: first.tickId, pendingInputs: 0,
+    songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  for (const fields of [
+    { playId: session.id + 1 }, { selectedId: -1 }, { width: 0 }, { height: 0 },
+    { geometryVersion: oldVersion },
+    { mode: "history" }, { mode: "results" }, { mode: "room" }, { mode: "live" }, { mode: "replay" },
+  ]) await h.geometry({ playId: session.id, geometryVersion: requestedVersion,
+    width: 400, height: 300, ...fields });
+  pointer(202, 1300.125); const second = worker.last("play-step");
+  assert.equal(second.events.find(event => event.kind === "touch").surfaceWidth, oldResize.width);
+  await h.receive({ kind: "play-step-done", playId: session.id, tickId: second.tickId, pendingInputs: 0,
+    songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  await h.geometry({ playId: session.id, geometryVersion: requestedVersion, width: 400, height: 300 });
+  pointer(203, 1300.25); const third = worker.last("play-step");
+  const submitted = third.events.find(event => event.kind === "touch");
+  assert.equal(submitted.surfaceWidth, 400); assert.equal(submitted.surfaceHeight, 300);
+  assert.equal(submitted.hostNs, 1300250000n);
+  h.click("stop"); await flush(); await h.receive(localFinal(session.start)); await h.close();
+});
+
+test("renderer transport failure joins capture receipt and audio cleanup before terminating gameplay", async () => {
+  const stopping = deferred(), h = await harness({ stopGate: stopping });
+  await h.preview(); const session = await h.launch();
+  const game = h.workers[0], renderer = h.renderers[0];
+  renderer.emit("error", { message: "renderer transport lost", preventDefault() {} }); await flush();
+  assert.equal(game.last("play-stop").playId, session.id);
+  assert.equal(h.audio.stopStarts, 1); assert.equal(game.terminations, 0);
+  await h.receive(finalScore(session.id, { kind: "play-error", message: "renderer transport lost",
+    replay: Uint8Array.from([9, 8, 7]), replayComplete: false, replayError: null }));
+  assert.equal(game.terminations, 0, "capture receipt alone cannot release pending audio cleanup");
+  stopping.resolve(); await flush();
+  assert.equal(game.terminations, 1); assert.equal(renderer.terminations, 1);
+  assert.match(h.get("status").textContent, /renderer transport lost/);
+  await h.close();
+});
+
+test("local coalesced movement and lost capture retain the acquired page through an unsubmitted choice", async () => {
+  const { h, session, worker, surface } = await pagedTouchSession();
+  const ack = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId, pendingInputs: 0,
+    songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  surface.emit("pointerdown", { pointerType: "touch", pointerId: 8, timeStamp: 1300,
+    isPrimary: true, clientX: 100, clientY: 200,
+    offsetX: 100, offsetY: 200, pressure: 0.5 }); const down = worker.last("play-step");
+  h.get("local-page").value = "1"; h.get("local-page").emit("change"); await flush();
+  const children = [
+    { pointerType: "touch", pointerId: 8, isPrimary: true, timeStamp: 1300.125, clientX: 110, clientY: 210, pressure: 0.25 },
+    { pointerType: "touch", pointerId: 8, isPrimary: true, timeStamp: 1300.25, clientX: 120, clientY: 220, pressure: 0.75 },
+  ];
+  surface.emit("pointermove", { pointerType: "touch", pointerId: 8, timeStamp: 1300.375,
+    isPrimary: true, clientX: 150, clientY: 250,
+    offsetX: 150, offsetY: 250, pressure: 1, getCoalescedEvents() { return children; } });
+  children[0].timeStamp = 9999; children[0].pressure = 0;
+  surface.emit("lostpointercapture", { pointerId: 8, timeStamp: 1300.5 });
+  await ack(down); const batch = worker.last("play-step");
+  assert.deepEqual(batch.events.map(event => [event.phase, event.page, event.hostNs]), [
+    [1, 0, 1300125000n], [1, 0, 1300250000n], [3, 0, 1300500000n],
+  ]);
+  assert.equal(batch.events[0].pressure, 0.25);
+  assert.ok(batch.events.every(event => event.contact === down.events[0].contact));
+  await ack(batch); const page = worker.last("play-page"); assert.ok(page);
+  await h.reply(page, { kind: "local-page", page: 1, touchVisible: false });
+  surface.emit("pointerdown", { pointerType: "touch", pointerId: 9, timeStamp: 1300.625,
+    offsetX: 10, offsetY: 20, pressure: 0.5 }); const fresh = worker.last("play-step");
+  assert.equal(fresh.events[0].page, 0, "RPC acknowledgement alone never means page was submitted");
+  assert.equal(fresh.events[0].hostNs, 1300625000n);
+  h.click("stop"); await flush(); await h.receive(localFinal(session.start)); await h.close();
+});
+
+test("pre-first-live touch may use matching preview submission but never static record or stale selection geometry", async () => {
+  for (const mode of ["preview", "history", "results", "room", "stale-preview"]) {
+    const h = await harness({ touchSupported: true, holdGeometry: true });
+    await h.preview(); const game = h.workers[0];
+    await h.geometry({ mode: mode === "stale-preview" ? "preview" : mode,
+      ...(mode === "stale-preview" ? { selectedId: game.last("select").id + 1 } : {}) });
+    const session = await h.launch(); h.setNow(1300);
+    h.get("canvas").emit("pointerdown", { pointerType: "touch", pointerId: 55,
+      timeStamp: 1300, offsetX: 100, offsetY: 200, pressure: 0.5 }); await flush();
+    if (mode === "preview") {
+      const contact = game.last("play-step").events.find(event => event.kind === "touch");
+      assert.ok(contact); assert.equal(contact.hostNs, 1300000000n);
+      assert.equal(contact.surfaceWidth, game.last("resize").width);
+      assert.equal(game.messages("play-stop").length, 0);
+      h.click("stop"); await flush();
+    } else {
+      assert.equal(game.messages("play-step").flatMap(request => request.events).some(event => event.kind === "touch"), false);
+      assert.equal(game.last("play-stop").playId, session.id, "missing valid acquisition geometry fails explicitly");
+    }
+    await h.receive(finalScore(session.id)); await h.close();
+  }
+});
 
 test("portable settings save downloads exact Worker bytes and a correlated load governs the next actual launch", async () => {
   const h = await harness({ noWindowSettingsJson: true, actualRate: 44100 });
@@ -853,7 +1030,7 @@ test("settings pending ownership blocks overlapping actions and stale responses 
   await local.close();
 });
 
-test("touch paging waits for the acquired input prefix while retaining held releases and original sample metadata", async () => {
+test("touch paging retains new contacts and original page while waiting for acquired prefix and submitted geometry", async () => {
   const { h, session, worker, surface } = await pagedTouchSession();
   const pointer = (type, fields = {}) => surface.emit(type, { pointerType: "touch", pointerId: -2,
     timeStamp: 1300, offsetX: 120.25, offsetY: 180.5, pressure: 0.375, ...fields });
@@ -868,7 +1045,7 @@ test("touch paging waits for the acquired input prefix while retaining held rele
   assert.equal(h.get("local-page").disabled, true); assert.equal(worker.messages("play-page").length, 0);
   const captures = h.captures.length;
   pointer("pointerdown", { pointerId: 91, timeStamp: 1300.25 });
-  assert.equal(h.captures.length, captures, "a new contact is suppressed during the page transition");
+  assert.equal(h.captures.length, captures + 1, "a new contact is acquired during the page transition");
   await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id - 1, tickId: down.tickId,
     songNs: 1n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
   assert.equal(worker.messages("play-page").length, 0);
@@ -876,6 +1053,9 @@ test("touch paging waits for the acquired input prefix while retaining held rele
   const moved = worker.last("play-step"), move = moved.events.find(event => event.kind === "touch");
   assert.ok(moved.tickId > down.tickId); assert.equal(move.phase, 1); assert.equal(move.contact, original.contact);
   assert.equal(move.hostNs, 1300125000n); assert.equal(move.x, 200.5);
+  const admittedDown = moved.events.find(event => event.kind === "touch" && event.phase === 0);
+  assert.ok(admittedDown); assert.equal(admittedDown.hostNs, 1300250000n);
+  assert.equal(admittedDown.page, 0); assert.equal(move.page, 0);
   assert.equal(worker.messages("play-page").length, 0, "the first ACK alone does not cover the already queued Move");
   await ack(moved, 1);
   assert.equal(worker.messages("play-page").length, 0, "admission ACK cannot remap a touch still held for audio correspondence");
@@ -896,17 +1076,23 @@ test("touch paging waits for the acquired input prefix while retaining held rele
   assert.equal(h.releases.length, 1); assert.equal(h.releases[0].id, -2);
   assert.equal(released.events.filter(event => event.kind === "touch").length, 1, "synchronous lost capture must not manufacture Cancel");
   pointer("pointerdown", { pointerId: 92, timeStamp: 1300.625 });
-  assert.equal(h.captures.length, captures);
+  assert.equal(h.captures.length, captures + 2, "pending page submission cannot discard the next contact");
   await ack(released); await h.reply(page, { kind: "local-page", page: 1, touchVisible: false });
+  const pendingDown = worker.last("play-step");
+  assert.equal(pendingDown.events.find(event => event.kind === "touch" && event.phase === 0).page, 0);
+  await ack(pendingDown);
+  await h.geometry({ playId: session.id, page: 1, geometryVersion: page.geometryVersion });
   assert.equal(h.get("local-page").value, "1"); assert.equal(h.get("local-page").disabled, false);
   assert.match(h.get("local-status").textContent, /unbound.*offscreen.*held contacts retain/);
   pointer("pointerdown", { pointerId: 93, timeStamp: 1300.75 });
   const hidden = worker.last("play-step"), hiddenDown = hidden.events.find(event => event.kind === "touch");
-  assert.equal(hiddenDown.phase, 0); assert.equal(hiddenDown.contact, original.contact + 1n);
+  assert.equal(hiddenDown.phase, 0); assert.equal(hiddenDown.contact, original.contact + 3n);
+  assert.equal(hiddenDown.page, 1);
   assert.equal(hiddenDown.hostNs, 1300750000n); assert.equal(hiddenDown.sequence > up.sequence, true);
   await ack(hidden);
   h.get("local-page").value = "0"; h.get("local-page").emit("change"); await flush();
   const back = worker.last("play-page"); await h.reply(back, { kind: "local-page", page: 0, touchVisible: true });
+  await h.geometry({ playId: session.id, page: 0, geometryVersion: back.geometryVersion });
   pointer("pointerup", { pointerId: 93, timeStamp: 1300.875 });
   const hiddenUp = worker.last("play-step");
   assert.equal(hiddenUp.events.find(event => event.kind === "touch").contact, hiddenDown.contact);
@@ -3065,6 +3251,7 @@ test("touch acquisition snapshots cached CSS and backing extents across resize a
   });
   h.window.devicePixelRatio = 1.5; h.resize(1280, 720);
   assert.deepEqual(worker.last("resize"), { kind: "resize", width: 1920, height: 1080 });
+  await h.geometry({ playId: session.id });
   h.setNow(1300);
   const pointer = (kind, fields = {}) => surface.emit(kind, { pointerType: "touch", pointerId: 11,
     offsetX: 100.125, offsetY: 300.5, pressure: 0.375, timeStamp: 1300, ...fields });
@@ -3081,6 +3268,7 @@ test("touch acquisition snapshots cached CSS and backing extents across resize a
   assert.equal(h.layoutReads, firstReads);
   h.resize(1001.5, 701.25);
   assert.deepEqual(worker.last("resize"), { kind: "resize", width: 1502, height: 1052 });
+  await h.geometry({ playId: session.id });
   const resizedReads = h.layoutReads;
   pointer("pointerup", { offsetX: -25.5, offsetY: 900.25, timeStamp: 1300.25 });
   assert.equal(h.layoutReads, resizedReads);
@@ -3121,6 +3309,7 @@ test("touch capture preserves original samples and shared keyboard order without
   assert.equal(surface.dataset.touchInput, "true");
   h.get("touch-input").checked = false; // A programmatic draft change cannot change this owner.
   h.resize(480, 360);
+  await h.geometry({ playId: session.id });
   const layoutReads = h.layoutReads, display = watchPlayDisplay(h);
   h.setNow(1300);
   const pointer = (type, overrides = {}) => surface.emit(type, { pointerType: "touch", pointerId: -2,
@@ -3156,6 +3345,7 @@ test("touch capture preserves original samples and shared keyboard order without
   assert.equal(mixed.events.length, 3, "release-triggered lost capture must not append a second terminal event");
   await done(mixed);
   h.resize(960, 720);
+  await h.geometry({ playId: session.id });
   const resizedReads = h.layoutReads;
   h.setNow(1301);
   pointer("pointerdown", { timeStamp: 1301 });
@@ -3192,7 +3382,7 @@ test("touch capture preserves original samples and shared keyboard order without
 test("coalesced touch movement forwards original ordered samples from the parent anchor and keeps absent or empty fallback", async () => {
   const h = await harness({ touchSupported: true }); await h.preview();
   const session = await h.launch(), worker = h.workers[0], surface = h.get("canvas");
-  h.window.devicePixelRatio = 1.5; h.resize(480, 360); h.setNow(1301);
+  h.window.devicePixelRatio = 1.5; h.resize(480, 360); await h.geometry({ playId: session.id }); h.setNow(1301);
   const pointer = (kind, fields = {}) => surface.emit(kind, { pointerType: "touch", pointerId: -2,
     isPrimary: true, offsetX: 120.25, offsetY: 180.5, clientX: 100, clientY: 200,
     pressure: 0.5, timeStamp: 1300, ...fields });
@@ -3220,6 +3410,7 @@ test("coalesced touch movement forwards original ordered samples from the parent
   h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.375 });
   assert.equal(h.layoutReads, reads);
   h.resize(960, 720); const resizedReads = h.layoutReads;
+  await h.geometry({ playId: session.id });
   pointer("pointerup", { timeStamp: 1300.75, offsetX: -10.25, pressure: 0, getCoalescedEvents: notMovement });
   await ack(down);
   const batch = worker.last("play-step");
@@ -3387,13 +3578,15 @@ test("coalesced movement retains held contact through paging and lost capture wh
   h.get("local-page").value = "1"; h.get("local-page").emit("change"); await flush();
   const captured = h.captures.length;
   pointer("pointerdown", { pointerId: 91, timeStamp: 1300.5 });
-  assert.equal(h.captures.length, captured); assert.equal(worker.messages("play-page").length, 0);
+  assert.equal(h.captures.length, captured + 1); assert.equal(worker.messages("play-page").length, 0);
   await ack(down);
   const moves = worker.last("play-step"), touches = moves.events.filter(event => event.kind === "touch");
   assert.deepEqual(touches.map(event => [event.phase, event.hostNs, event.contact, event.x, event.y, event.pressure]), [
     [1, 1300125000n, original.contact, 121.25, 182.5, 0.25],
     [1, 1300250000n, original.contact, 124.25, 183.5, 0.75],
+    [0, 1300500000n, original.contact + 1n, 120.25, 180.5, 0.5],
   ]);
+  assert.ok(touches.every(event => event.page === 0), "pending choice retains acquisition page for every original sample");
   assert.equal(worker.messages("play-page").length, 0);
   await ack(moves); const page = worker.last("play-page"); assert.equal(page.page, 1);
   await h.reply(page, { kind: "local-page", page: 1, touchVisible: false });
@@ -3710,12 +3903,10 @@ test("missing stop receipt and rejected audio cleanup terminate Worker and requi
     h.click("stop");
     await flush();
     const worker = h.workers[0];
-    if (!audioFailure) {
-      await h.advance(9999);
-      assert.equal(worker.terminations, 0);
-      assert.equal(h.get("play").disabled, true);
-      await h.advance(1);
-    }
+    await h.advance(9999);
+    assert.equal(worker.terminations, 0, "audio cleanup failure cannot terminate the pending genuine capture");
+    assert.equal(h.get("play").disabled, true);
+    await h.advance(1);
     assert.equal(worker.terminations, 1);
     assert.equal(h.get("play").disabled, true);
     assert.equal(h.get("files").disabled, true);
@@ -3755,7 +3946,7 @@ test("missing stop receipt and rejected audio cleanup terminate Worker and requi
   }
 });
 
-test("pagehide releases the Worker waiter and late audio cleanup cannot restore an older page generation", async () => {
+test("pagehide joins the old capture and audio owners before replacing both Workers and transferred canvas", async () => {
   const stopGate = deferred();
   const h = await harness({ stopGate });
   await h.preview();
@@ -3763,21 +3954,28 @@ test("pagehide releases the Worker waiter and late audio cleanup cannot restore 
   h.click("stop");
   await flush();
   const oldWorker = h.workers[0];
+  const oldRenderer = h.renderers[0], oldCanvas = h.get("canvas");
   h.window.emit("pagehide");
   h.window.emit("pageshow", { persisted: true });
   await flush();
-  assert.equal(oldWorker.terminations, 1);
-  assert.equal(h.workers.length, 2);
-  const freshCanvas = h.get("canvas");
-  assert.equal(h.get("title").textContent, "No chart prepared");
+  assert.equal(oldWorker.terminations, 0);
+  assert.equal(h.workers.length, 1);
+  assert.equal(h.get("canvas"), oldCanvas);
   await h.receive(finalScore(session.id), oldWorker);
+  assert.equal(oldWorker.terminations, 0, "capture cannot cancel the real pending output cleanup");
   stopGate.resolve();
   await flush();
+  assert.equal(oldWorker.terminations, 1); assert.equal(oldRenderer.terminations, 1);
+  assert.equal(h.workers.length, 2); assert.equal(h.renderers.length, 2);
+  const freshCanvas = h.get("canvas"); assert.notEqual(freshCanvas, oldCanvas);
+  await h.receive(finalScore(session.id), oldWorker);
+  await h.geometry({ playId: session.id, width: 1, height: 1 }, oldWorker);
   assert.equal(h.get("canvas"), freshCanvas);
   assert.equal(h.get("title").textContent, "No chart prepared");
   assert.equal(h.get("position").value, "0");
   assert.doesNotMatch(h.get("status").textContent, /Hits 3|Playback stopped/);
   assert.equal(h.get("play").disabled, true);
+  await h.receive({ kind: "ready" }); await h.receive({ kind: "ready" }, h.renderers.at(-1));
   assert.equal(h.timers.size, 0, "pagehide releases the stop deadline rather than waiting ten seconds");
   await h.close();
 });
@@ -4958,7 +5156,10 @@ test("keyboard getter and preventDefault retirement discards the old event and c
     } });
     dispatchKeyboard(h, "keydown", probe.event); await flush();
     assert.equal(formatted, 0, "a retired native exception cannot invoke diagnostics against replacement ownership");
-    assert.equal(oldWorker.messages("play-step").length, 0); assert.equal(oldWorker.terminations, 1);
+    assert.equal(oldWorker.messages("play-step").length, 0); assert.equal(oldWorker.terminations, 0);
+    assert.equal(h.workers.length, 1);
+    await h.receive(finalScore(old.id), oldWorker);
+    assert.equal(oldWorker.terminations, 1);
     assert.equal(h.workers.length, 2); await h.preview(); const fresh = await h.launch(), current = h.workers[1];
     await h.receive(finalScore(old.id), oldWorker);
     assert.equal(current.messages("play-stop").length, 0);

@@ -2573,6 +2573,18 @@ and versioned geometry submission are separate acknowledgements. Original touch
 acquisitions and geometry are retained during page/resize transitions; input and
 audio servicing continue while rendering stalls.
 
+Submitted geometry evidence includes generation/content/version, the actual
+applied page, and nonzero backing width/height. Window accepts it only for the
+current selection/play owner and retains it separately from requested geometry.
+Capture the original CSS geometry and submitted backing/page with every local
+touch, including coalesced movement and cancellation. Store the acquisition
+page beside its projected position on the same ordered entry and apply that
+page at audio-authorized dispatch. A pending page change must not discard a new
+Down or hold original input outside the ordinary prompt queue. Held and unbound
+contacts preserve their existing owners; unchanged routing pages allocate no
+replacement mapping. Zero extent, retry, failure and stale messages must never
+claim a newly visible page.
+
 Preserve terminal active-play graphics failure as an explicit failed stop with
 actual capture and joined cleanup before game ownership terminates. Static
 history/completed/room display errors stay presentation-only. Headless play is

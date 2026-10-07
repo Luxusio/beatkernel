@@ -383,11 +383,16 @@ function publishVisual() {
         visual = context;
         context.client = new RenderClient({ port: scopedRenderPort(context), ...renderLimits, generation: context.generation, content: context.content,
           onError: error => visualFailure(context, error),
-          onGeometry: evidence => { if (currentVisual(context)) report("render-geometry", { ...evidence, selectedId, ...(play === context.owner ? { playId: play.id } : {}) }); } });
+          onGeometry: evidence => { if (currentVisual(context)) report("render-geometry", { ...evidence, mode: context.mode, selectedId, ...(play === context.owner ? { playId: play.id } : {}) }); } });
         const bytes = ["preview", "live", "local", "replay"].includes(context.mode)
           ? context.source.visual_registration(context.generation, context.content, renderLimits.maxPacketBytes, renderLimits.maxDiagnosticBytes)
           : context.source.visual_snapshot(context.generation, context.content, renderLimits.maxPacketBytes, renderLimits.maxDiagnosticBytes);
-        await context.client.packet(bytes, { mode: context.mode });
+        // A new content owner needs its own geometry submission evidence even
+        // when the renderer keeps the same surface. Preserve an unsent resize's
+        // reserved version; its control supplies the new owner's evidence.
+        const registrationGeometry = surface && surfaceSentVersion >= surface.geometryVersion ? nextGeometry() : undefined;
+        await context.client.packet(bytes, { mode: context.mode,
+          ...(registrationGeometry === undefined ? {} : { geometryVersion: registrationGeometry }) });
         if (!currentVisual(context)) { pump.dirty = true; continue; }
         if (context.room) {
           await context.client.packet(context.room.visual_snapshot(context.generation, context.content, renderLimits.maxPacketBytes, renderLimits.maxDiagnosticBytes));

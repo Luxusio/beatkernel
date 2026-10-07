@@ -34,7 +34,6 @@ async function workerHarness(options = {}) {
   // Genuine queued port and real RenderClient; only the WASM encoder/GPU edge
   // is mocked. The map records immutable exporter snapshots for assertions.
   const visualExports = [], visualAcks = [], visualOwners = new Map();
-  let geometryVersion = 0n;
   function visualPacket(owner, kind, generation, content, sequence = 0n, page = 0, songNs) {
     assert.equal(typeof generation, "bigint"); assert.ok(generation > 0n);
     assert.equal(typeof content, "bigint"); assert.ok(content > 0n);
@@ -121,7 +120,6 @@ async function workerHarness(options = {}) {
   };
   function renderRequest(request) {
     if(request?.kind==="init")return {...request,canvas:undefined,renderPort:Object.hasOwn(request,"renderPort")?request.renderPort:renderPort,maxPacketBytes:request.maxPacketBytes??1024*1024,maxDiagnosticBytes:request.maxDiagnosticBytes??4096,renderTimeoutMs:request.renderTimeoutMs??60000};
-    if(["resize","play-page","play-results-page","play-room-results-page","historical-record-page"].includes(request?.kind))return {...request,geometryVersion:request.geometryVersion??++geometryVersion};
     return request;
   }
 
@@ -835,6 +833,72 @@ test("CPU initialization failure never reports readiness or admits later work", 
     assert.equal(worker.timers.size, 0);
     assert.equal(worker.of("fatal").length, 1);
   }
+});
+
+test("submitted geometry forwarding identifies the actual visual mode and play owner", async () => {
+  const worker = await gameWorker();
+  await worker.send({ kind: "select", id: 2, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0" });
+  await worker.send({ kind: "resize", width: 640, height: 480 });
+  const preview = worker.of("render-geometry").at(-1);
+  assert.equal(preview.mode, "preview");
+  assert.equal(preview.selectedId, 2);
+  assert.equal(preview.playId, undefined);
+  assert.deepEqual([preview.page, preview.width, preview.height], [0, 640, 480]);
+  const resizes = worker.renderPort.posts.filter(row => row.kind === "resize").length;
+  await startGame(worker, []);
+  const unchangedLive = worker.of("render-geometry").at(-1);
+  assert.equal(unchangedLive.mode, "live");
+  assert.equal(unchangedLive.playId, 1);
+  assert.notEqual(unchangedLive.generation, preview.generation);
+  assert.ok(unchangedLive.geometryVersion > preview.geometryVersion);
+  assert.deepEqual([unchangedLive.page, unchangedLive.width, unchangedLive.height], [0, 640, 480]);
+  const liveRegistration = worker.renderPort.posts.findLast(row => row.kind === "packet" && row.mode === "live");
+  assert.equal(liveRegistration.geometryVersion, unchangedLive.geometryVersion);
+  assert.equal(worker.renderPort.posts.filter(row => row.kind === "resize").length, resizes,
+    "new content acknowledges the retained extent without a duplicate resize");
+  await worker.send({ kind: "resize", width: 960, height: 720 });
+  const live = worker.of("render-geometry").at(-1);
+  assert.equal(live.mode, "live");
+  assert.equal(live.playId, 1);
+  assert.notEqual(live.generation, preview.generation);
+  assert.deepEqual([live.page, live.width, live.height], [0, 960, 720]);
+  await worker.send({ kind: "play-stop", playId: 1 });
+  const restored = worker.of("render-geometry").at(-1);
+  assert.equal(restored.mode, "preview");
+  assert.equal(restored.playId, undefined);
+  assert.notEqual(restored.generation, live.generation);
+  assert.ok(restored.geometryVersion > live.geometryVersion);
+  assert.deepEqual([restored.page, restored.width, restored.height], [0,960,720]);
+  await worker.send({kind:"select",id:3,libraryId:1,path:"song/chart.bms",rate:48000,seed:"0"});
+  const replacement = worker.of("render-geometry").at(-1);
+  assert.equal(replacement.mode,"preview");assert.equal(replacement.selectedId,3);
+  assert.notEqual(replacement.generation,restored.generation);
+  assert.ok(replacement.geometryVersion>restored.geometryVersion);
+  assert.deepEqual([replacement.page,replacement.width,replacement.height],[0,960,720]);
+  worker.renderPort.emit({kind:"geometry-ack",generation:preview.generation,content:preview.content,
+    geometryVersion:preview.geometryVersion,page:0,width:640,height:480});await flushJobs();
+  assert.equal(worker.of("render-geometry").at(-1),replacement,"stale owner tuple cannot replace current geometry");
+});
+
+test("new content preserves an unsent explicit surface version then stamps later generations freshly", async () => {
+  const worker = await gameWorker();
+  await worker.send({kind:"resize",width:640,height:480,geometryVersion:41n});
+  assert.equal(worker.renderPort.posts.length,0,"surface reservation waits for actual content");
+  await worker.send({kind:"select",id:2,libraryId:1,path:"song/chart.bms",rate:48000,seed:"0"});
+  const registration=worker.renderPort.posts.find(row=>row.kind==="packet");
+  assert.equal(registration.geometryVersion,undefined,"pending explicit resize keeps its original ordered version");
+  const resize=worker.renderPort.posts.find(row=>row.kind==="resize");
+  assert.equal(resize.geometryVersion,41n);
+  const preview=worker.of("render-geometry").at(-1);
+  assert.equal(preview.geometryVersion,41n);assert.equal(preview.mode,"preview");
+  await startGame(worker,[]);
+  const liveRegistration=worker.renderPort.posts.findLast(row=>row.kind==="packet"&&row.mode==="live");
+  assert.ok(liveRegistration.geometryVersion>41n);
+  const live=worker.of("render-geometry").at(-1);
+  assert.equal(live.geometryVersion,liveRegistration.geometryVersion);assert.equal(live.mode,"live");
+  assert.deepEqual([live.page,live.width,live.height],[0,640,480]);
+  assert.equal(worker.renderPort.posts.filter(row=>row.kind==="resize").length,1);
+  await worker.send({kind:"play-stop",playId:1});
 });
 
 test("CPU readiness needs neither GPU nor canvas nor a renderer acknowledgement", async () => {

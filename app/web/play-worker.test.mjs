@@ -55,7 +55,6 @@ async function workerHarness(options = {}) {
   // Genuine queued port and real RenderClient; only the WASM encoder/GPU edge
   // is mocked. The map records immutable exporter snapshots for assertions.
   const visualExports = [], visualAcks = [], visualOwners = new Map();
-  let geometryVersion = 0n;
   function visualPacket(owner, kind, generation, content, sequence = 0n, page = 0, songNs) {
     assert.equal(typeof generation, "bigint"); assert.ok(generation > 0n);
     assert.equal(typeof content, "bigint"); assert.ok(content > 0n);
@@ -142,7 +141,6 @@ async function workerHarness(options = {}) {
   };
   function renderRequest(request) {
     if(request?.kind==="init")return {...request,canvas:undefined,renderPort:Object.hasOwn(request,"renderPort")?request.renderPort:renderPort,maxPacketBytes:request.maxPacketBytes??1024*1024,maxDiagnosticBytes:request.maxDiagnosticBytes??4096,renderTimeoutMs:request.renderTimeoutMs??60000};
-    if(["resize","play-page","play-results-page","play-room-results-page","historical-record-page"].includes(request?.kind))return {...request,geometryVersion:request.geometryVersion??++geometryVersion};
     return request;
   }
 
@@ -2909,7 +2907,7 @@ test("local captures preserve independent member prefixes through setup, seriali
     assert.match(receipt.replays[1].replayError, /codec failure|transferable layout/);
     assert.equal(receipt.replays[0].replayError, null); assert.equal(receipt.replays[2].replayError, null);
     assert.equal(game.memberReplayTakes.size, 3); assert.equal(game.stops, 1); assert.equal(game.frees, 1);
-    const transfer = h.transfers.at(-1);
+    const transfer = h.transfers[h.messages.indexOf(receipt)];
     assert.equal(transfer.length, 2); assert.equal(new Set(transfer).size, 2);
     assert.equal(transfer[0], game.memberReplayBytes.get(99).buffer); assert.equal(transfer[1], game.memberReplayBytes.get(31).buffer);
     assert.equal(transfer.every(buffer => buffer.byteLength === 0), true);

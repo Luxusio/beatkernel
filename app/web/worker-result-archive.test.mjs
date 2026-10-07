@@ -141,7 +141,7 @@ test("actual disposal exports one standalone archive before replay consumption a
   assert.deepEqual(Array.from(final.archivePlayers),[1]);assert.equal(final.archiveError,null);
   assert.ok(h.trace.indexOf("archive-export")<h.trace.indexOf("stop-game"));
   assert.ok(h.trace.indexOf("archive-export")<h.trace.indexOf("take-replay"));
-  const transfers=h.transfers.at(-1);assert.equal(transfers.length,2);assert.equal(new Set(transfers).size,2);
+  const transfers=h.transfers[h.messages.indexOf(final)];assert.equal(transfers.length,2);assert.equal(new Set(transfers).size,2);
   assert.equal(h.games[0].frees,1);assert.equal(h.trace.filter(value=>value==="archive-export").length,1);
   await h.send({kind:"play-stop",playId:7,completed:true});assert.equal(h.games[0].frees,1);
 });
@@ -151,7 +151,8 @@ test("whole local roster transfers one archive beside exact original per-member 
   await h.send({kind:"play-stop",playId:7,completed:true});const final=h.of("play-stopped").at(-1);
   assert.deepEqual(Array.from(final.archivePlayers),[4294967295,7]);
   assert.deepEqual(Array.from(final.replays,row=>row.player),[4294967295,7]);
-  assert.equal(h.transfers.at(-1).length,3);assert.equal(new Set(h.transfers.at(-1)).size,3);
+  const transfers=h.transfers[h.messages.indexOf(final)];
+  assert.equal(transfers.length,3);assert.equal(new Set(transfers).size,3);
   assert.equal(h.trace.filter(value=>value==="archive-export").length,1);
   assert.ok(h.trace.indexOf("archive-export")<h.trace.indexOf("take-replay:4294967295"));
   assert.equal(h.locals[0].frees,1);
@@ -223,7 +224,6 @@ async function workerHarness(options = {}) {
   // Genuine queued port and real RenderClient; only the WASM encoder/GPU edge
   // is mocked. The map records immutable exporter snapshots for assertions.
   const visualExports = [], visualAcks = [], visualOwners = new Map();
-  let geometryVersion = 0n;
   function visualPacket(owner, kind, generation, content, sequence = 0n, page = 0, songNs) {
     assert.equal(typeof generation, "bigint"); assert.ok(generation > 0n);
     assert.equal(typeof content, "bigint"); assert.ok(content > 0n);
@@ -310,7 +310,6 @@ async function workerHarness(options = {}) {
   };
   function renderRequest(request) {
     if(request?.kind==="init")return {...request,canvas:undefined,renderPort:Object.hasOwn(request,"renderPort")?request.renderPort:renderPort,maxPacketBytes:request.maxPacketBytes??1024*1024,maxDiagnosticBytes:request.maxDiagnosticBytes??4096,renderTimeoutMs:request.renderTimeoutMs??60000};
-    if(["resize","play-page","play-results-page","play-room-results-page","historical-record-page"].includes(request?.kind))return {...request,geometryVersion:request.geometryVersion??++geometryVersion};
     return request;
   }
 

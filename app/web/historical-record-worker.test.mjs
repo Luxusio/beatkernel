@@ -225,10 +225,19 @@ test("actual Worker uses existing page bridge beyond maximum grade table through
   assert.deepEqual(binding.pageSetters,[1024,1032,1023]);assert.equal(h.games.length,0);assert.equal(h.of("fatal").length,0);
 });
 test("idle Worker forwards opaque bytes and original player to binding and owns cached drawing/disposal",async()=>{
-  const h=await catalogWorker();await h.send(historicalRequest());
+  const h=await catalogWorker();
+  const previewGeometry=h.of("render-geometry").at(-1);
+  const resizeCount=h.renderPort.posts.filter(row=>row.kind==="resize").length;
+  await h.send(historicalRequest());
   const reply=h.of("historical-record-result").at(-1);assert.equal(reply.id,1);assert.equal(reply.available,true);assert.equal(reply.error,null);
   const binding=h.historicalOwners[0];assert.equal(binding.player,4294967295);
   assert.deepEqual(Array.from(binding.replay),[66,75,82,0]);assert.deepEqual(Array.from(binding.archive),[66,75,82,69,83,85,76,84]);
+  const historyGeometry=h.of("render-geometry").at(-1);
+  assert.equal(historyGeometry.mode,"history");
+  assert.notEqual(historyGeometry.generation,previewGeometry.generation);
+  assert.ok(historyGeometry.geometryVersion>previewGeometry.geometryVersion);
+  assert.deepEqual([historyGeometry.page,historyGeometry.width,historyGeometry.height],[0,640,480]);
+  assert.equal(h.renderPort.posts.filter(row=>row.kind==="resize").length,resizeCount);
   await h.tick();assert.equal(h.views[0].historicalDraws.at(-1),binding);
   await h.send({kind:"resize",width:800,height:600});await h.tick();assert.equal(h.views[0].historicalDraws.at(-1),binding);
   await h.send({kind:"historical-record-clear",id:2});assert.equal(binding.frees,1);
@@ -310,7 +319,6 @@ async function workerHarness(options = {}) {
   // Genuine queued port and real RenderClient; only the WASM encoder/GPU edge
   // is mocked. The map records immutable exporter snapshots for assertions.
   const visualExports = [], visualAcks = [], visualOwners = new Map();
-  let geometryVersion = 0n;
   function visualPacket(owner, kind, generation, content, sequence = 0n, page = 0, songNs) {
     assert.equal(typeof generation, "bigint"); assert.ok(generation > 0n);
     assert.equal(typeof content, "bigint"); assert.ok(content > 0n);
@@ -397,7 +405,6 @@ async function workerHarness(options = {}) {
   };
   function renderRequest(request) {
     if(request?.kind==="init")return {...request,canvas:undefined,renderPort:Object.hasOwn(request,"renderPort")?request.renderPort:renderPort,maxPacketBytes:request.maxPacketBytes??1024*1024,maxDiagnosticBytes:request.maxDiagnosticBytes??4096,renderTimeoutMs:request.renderTimeoutMs??60000};
-    if(["resize","play-page","play-results-page","play-room-results-page","historical-record-page"].includes(request?.kind))return {...request,geometryVersion:request.geometryVersion??++geometryVersion};
     return request;
   }
 

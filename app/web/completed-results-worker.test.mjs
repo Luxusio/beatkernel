@@ -147,9 +147,17 @@ test("actual Worker captures before game disposal and waits for explicit Window 
   assert.equal(h.views[0].resultDraws.length, 0);
   await h.tick();
   assert.equal(h.views[0].resultDraws.length, 0, "Worker stop receipt alone cannot bypass Window audio/input cleanup");
+  const beforeResults = h.of("render-geometry").at(-1);
+  const resizeCount = h.renderPort.posts.filter(row => row.kind === "resize").length;
   await showResults(h);
   assert.equal(h.views[0].resultDraws.at(-1).results, h.completedOwners[0]);
   assert.equal(h.completedOwners[0].frees, 0);
+  const resultsGeometry = h.of("render-geometry").at(-1);
+  assert.equal(resultsGeometry.mode,"results");
+  assert.notEqual(resultsGeometry.generation,beforeResults.generation);
+  assert.ok(resultsGeometry.geometryVersion>beforeResults.geometryVersion);
+  assert.deepEqual([resultsGeometry.page,resultsGeometry.width,resultsGeometry.height],[0,640,480]);
+  assert.equal(h.renderPort.posts.filter(row=>row.kind==="resize").length,resizeCount);
 });
 test("Results page/mode refusal is atomic and consumes RPC without rendering stale requests", async () => {
   const h = await active({ observeOutput: () => true });
@@ -266,7 +274,6 @@ async function workerHarness(options = {}) {
   // Genuine queued port and real RenderClient; only the WASM encoder/GPU edge
   // is mocked. The map records immutable exporter snapshots for assertions.
   const visualExports = [], visualAcks = [], visualOwners = new Map();
-  let geometryVersion = 0n;
   function visualPacket(owner, kind, generation, content, sequence = 0n, page = 0, songNs) {
     assert.equal(typeof generation, "bigint"); assert.ok(generation > 0n);
     assert.equal(typeof content, "bigint"); assert.ok(content > 0n);
@@ -353,7 +360,6 @@ async function workerHarness(options = {}) {
   };
   function renderRequest(request) {
     if(request?.kind==="init")return {...request,canvas:undefined,renderPort:Object.hasOwn(request,"renderPort")?request.renderPort:renderPort,maxPacketBytes:request.maxPacketBytes??1024*1024,maxDiagnosticBytes:request.maxDiagnosticBytes??4096,renderTimeoutMs:request.renderTimeoutMs??60000};
-    if(["resize","play-page","play-results-page","play-room-results-page","historical-record-page"].includes(request?.kind))return {...request,geometryVersion:request.geometryVersion??++geometryVersion};
     return request;
   }
 

@@ -20,9 +20,18 @@ for (const id of ["pointer-input", "pointer-bindings"]) ui[id] = byId(id);
 for (const id of ["historical-grade-prev", "historical-grade-next", "historical-grade-page"]) ui[id] = byId(id);
 let canvas = byId("canvas");
 let cssExtent = [0, 0];
-let surfaceExtent = [0, 0];
 ui["touch-input"].checked = typeof window.PointerEvent === "function" && globalThis.navigator?.maxTouchPoints > 0;
 let worker = null;
+let renderer = null;
+let rendererReady = false;
+let submittedGeometry = null;
+let shuttingDown = false;
+let shutdown = null;
+let closingOwner = null;
+let startRequest = 0;
+const renderLimits = Object.freeze({ maxPacketBytes: 577598288, maxDiagnosticBytes: 268435456, timeoutMs: 10000 });
+const disposal = new WeakMap();
+const terminated = new WeakSet();
 let observer = null;
 let density = null;
 let owner = 0;
@@ -778,6 +787,16 @@ function controls() {
   historicalGradeControls();
 }
 function stop() {
+  ++startRequest;
+  if (shutdown) return shutdown;
+  shuttingDown = true;
+  initialized = false;
+  closingOwner = owner++;
+  let settled;
+  shutdown = new Promise(resolve => { settled = resolve; });
+  const closing = shutdown;
+  const game = worker, graphics = renderer;
+  let cleanupError = null;
   cancelSettings("Settings request cancelled with the page.");
   revokeSettingsURL();
   seeking = false;
@@ -785,12 +804,8 @@ function stop() {
   revokeReplayURL();
   closeRecords();
   cancelHidPermission();
-  void releaseLocalSources("Local sources released with the page.");
-  if (activePlay?.phase !== "closing") void stopPlay("Playback stopped with the page.");
-  ++owner;
-  worker?.terminate();
-  if (activePlay) releasePlayWorker(activePlay);
-  worker = null;
+  const sourcesStopped = releaseLocalSources("Local sources released with the page.");
+  const playStopped = stopPlay("Playback stopped with the page.");
   observer?.disconnect();
   observer = null;
   density?.removeEventListener("change", densityChanged);
@@ -803,24 +818,61 @@ function stop() {
   opponents.clear();
   showOpponentSelection();
   clearOpponentResults("No saved opponents selected.");
-  initialized = false;
   controls();
+  void (async () => {
+    try {
+      await Promise.all([sourcesStopped, playStopped]);
+      const errors = await Promise.all([disposeOwner(game, "Gameplay"), disposeOwner(graphics, "Renderer")]);
+      cleanupError = errors.filter(error => error !== null).join(" ") || null;
+    } finally {
+      terminateOwner(game);
+      terminateOwner(graphics);
+      if (worker === game) worker = null;
+      if (renderer === graphics) renderer = null;
+      rendererReady = false;
+      submittedGeometry = null;
+      closingOwner = null;
+      shuttingDown = false;
+      if (shutdown === closing) shutdown = null;
+      controls();
+      if (cleanupError) status(`${cleanupError} Worker ownership was released by termination.`, true);
+      settled(cleanupError);
+    }
+  })();
+  return closing;
+}
+function disposeOwner(target, label) {
+  if (!target || terminated.has(target)) return Promise.resolve(null);
+  return new Promise(resolve => {
+    const finish = error => { clearTimeout(timer); disposal.delete(target); resolve(error ?? null); };
+    const timer = setTimeout(() => finish(`${label} disposal timed out.`), renderLimits.timeoutMs);
+    disposal.set(target, finish);
+    try { target.postMessage({ kind: "dispose" }); }
+    catch (error) { finish(`${label} disposal failed: ${String(error?.message ?? error).slice(0, 4096)}`); }
+  });
+}
+function terminateOwner(target) {
+  if (!target || terminated.has(target)) return;
+  terminated.add(target);
+  target.terminate();
 }
 function fatal(error) {
-  stop();
+  const stopped = stop();
+  const request = startRequest;
+  const message = `${String(error?.message ?? error).slice(0, 4096)} Reload this page to initialize a new preview.`;
   canvas.hidden = true;
-  status(`${String(error?.message ?? error).slice(0, 4096)} Reload this page to initialize a new preview.`, true);
+  status(message, true);
+  void stopped.then(cleanupError => { if (request === startRequest) status(message + (cleanupError ? ` ${cleanupError}` : ""), true); });
 }
 
 function resize() {
-  if (!worker) return;
+  if (!worker || shuttingDown) return;
   const box = ui.viewport.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   // Do not assign canvas backing dimensions here; the renderer validates first.
   const dimensions = [box.width, box.height].map(value => Math.round(value * dpr));
   if (dimensions.some(value => !Number.isSafeInteger(value) || value < 0 || value > 0xffffffff)) return fatal(new Error("Canvas dimensions are outside the supported range."));
   cssExtent = [box.width, box.height];
-  surfaceExtent = dimensions;
   worker.postMessage({ kind: "resize", width: dimensions[0], height: dimensions[1] });
 }
 function densityChanged() {
@@ -851,6 +903,8 @@ function prepare() {
 }
 
 function received(data) {
+  if (data?.kind === "render-geometry") { receiveGeometry(data); return; }
+  if (shuttingDown && !data?.kind?.startsWith("play-")) return;
   if (data?.kind === "historical-record-page-result") { receiveHistoricalGradePage(data); return; }
   if (data?.kind === "historical-record-result") { receiveHistoricalRecord(data); return; }
   if ((settingsOperation && data?.id === settingsOperation.id)
@@ -859,7 +913,7 @@ function received(data) {
   if (data.kind === "ready") {
     initialized = true;
     controls();
-    status("Choose a song folder, or select a chart and its resources together.");
+    status("Choose a song folder, or select a chart and its resources together." + (rendererReady ? "" : " Graphics are initializing independently."));
     void loadAudio(owner);
   } else if (data.kind === "fatal") fatal(new Error(data.message));
   else if (data.kind === "import-progress" && data.id === importId) status(`Reading files: ${data.read} / ${data.total}`);
@@ -911,8 +965,34 @@ function received(data) {
   else if (data.kind === "render-wait" && data.selectedId === selectedId) status("The graphics surface is not ready. Resize the view or choose Show position to retry.", true);
 }
 
-function start() {
-  stop();
+function receiveGeometry(data) {
+  if (shuttingDown || typeof data.generation !== "bigint" || data.generation <= 0n || data.generation > 18446744073709551615n
+    || typeof data.content !== "bigint" || data.content <= 0n || data.content > 18446744073709551615n
+    || typeof data.geometryVersion !== "bigint" || data.geometryVersion <= 0n || data.geometryVersion > 18446744073709551615n
+    || !Number.isInteger(data.page) || data.page < 0 || data.page > 0xffffffff
+    || !Number.isInteger(data.width) || data.width <= 0 || data.width > 0xffffffff
+    || !Number.isInteger(data.height) || data.height <= 0 || data.height > 0xffffffff) return;
+  const session = activePlay;
+  if (session ? data.playId !== session.id || data.selectedId !== selectedId || session.owner !== owner || session.phase === "closing"
+    : data.playId !== undefined || data.selectedId !== selectedId || preparing) return;
+  if (session && data.mode !== (session.mode === "replay" ? "replay" : session.localPlan ? "local" : "live")) return;
+  if (!session && !["preview", "history", "results", "room"].includes(data.mode)) return;
+  if (session?.localPlan && data.page >= Math.ceil(session.localPlan.players.length / 4)) return;
+  if (submittedGeometry && (data.generation < submittedGeometry.generation
+    || (data.generation === submittedGeometry.generation && data.content !== submittedGeometry.content)
+    || data.geometryVersion <= submittedGeometry.geometryVersion)) return;
+  const evidence = Object.freeze({ generation: data.generation, content: data.content,
+    geometryVersion: data.geometryVersion, page: data.page, width: data.width, height: data.height,
+    selectedId: data.selectedId, playId: data.playId, mode: data.mode });
+  submittedGeometry = evidence;
+  if (session) session.geometry = evidence;
+}
+
+async function start() {
+  const stopped = stop();
+  const request = ++startRequest;
+  await stopped;
+  if (request !== startRequest) return;
   if (hidOwnershipFailed) { status("Input cleanup failed. Reload the page before playing again.", true); return; }
   libraryId = importId = selectId = selectedId = seekId = 0;
   importing = preparing = hasPreview = seeking = false;
@@ -942,7 +1022,7 @@ function start() {
   canvas.replaceWith(fresh);
   canvas = fresh;
   cssExtent = [0, 0];
-  surfaceExtent = [0, 0];
+  submittedGeometry = null;
   for (const [name, phase] of [["pointerdown", 0], ["pointermove", 1], ["pointerup", 2], ["pointercancel", 3]]) {
     fresh.addEventListener(name, event => touch(event, phase, fresh), { passive: false });
   }
@@ -966,18 +1046,57 @@ function start() {
   controls();
   status("Initializing graphics…");
   try {
-    if (!window.isSecureContext || !window.Worker || !window.OffscreenCanvas || !canvas.transferControlToOffscreen || !window.ResizeObserver) throw new Error("This preview needs a secure context, Workers and OffscreenCanvas support.");
+    if (!window.isSecureContext || !window.Worker || !window.OffscreenCanvas || !canvas.transferControlToOffscreen || !window.ResizeObserver || typeof MessageChannel !== "function") throw new Error("This preview needs a secure context, Workers, MessageChannel and OffscreenCanvas support.");
     const generation = owner;
     worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
-    worker.addEventListener("message", event => { if (generation === owner) received(event.data); });
+    const game = worker;
+    const gameReadyTimer = setTimeout(() => {
+      if (generation === owner && worker === game && !initialized && !shuttingDown) fatal(new Error("Gameplay initialization timed out."));
+    }, renderLimits.timeoutMs);
+    worker.addEventListener("message", event => {
+      if (["ready", "disposed", "dispose-error", "fatal"].includes(event.data?.kind)) clearTimeout(gameReadyTimer);
+      if (event.data?.kind === "disposed" || event.data?.kind === "dispose-error") {
+        disposal.get(game)?.(event.data.kind === "dispose-error" ? `Gameplay disposal failed: ${String(event.data.message).slice(0, 4096)}` : null);
+        return;
+      }
+      if (worker === game && (generation === owner
+        || (shuttingDown && generation === closingOwner && event.data?.kind?.startsWith("play-")))) received(event.data);
+    });
     worker.addEventListener("error", event => {
       if (generation !== owner) return;
+      clearTimeout(gameReadyTimer);
       event.preventDefault();
+      if (activePlay) releasePlayWorker(activePlay);
       fatal(new Error(event.message || "Could not load the browser Worker and generated WASM package."));
     });
-    worker.addEventListener("messageerror", () => { if (generation === owner) fatal(new Error("Could not receive a Worker response.")); });
+    worker.addEventListener("messageerror", () => { if (generation === owner) { clearTimeout(gameReadyTimer); if (activePlay) releasePlayWorker(activePlay); fatal(new Error("Could not receive a Worker response.")); } });
+    renderer = new Worker(new URL("./renderer-worker.js", import.meta.url), { type: "module" });
+    const graphics = renderer;
+    renderer.addEventListener("message", event => {
+      const data = event.data;
+      if (data?.kind === "disposed" || data?.kind === "dispose-error") {
+        disposal.get(graphics)?.(data.kind === "dispose-error" ? `Renderer disposal failed: ${String(data.message).slice(0, 4096)}` : null);
+        return;
+      }
+      if (generation !== owner || renderer !== graphics || shuttingDown) return;
+      if (data?.kind === "ready") rendererReady = true;
+      // Correlated content errors reach gameplay over its direct port first.
+      else if (data?.kind === "render-error" && data.generation === 0n) fatal(new Error(data.message || "Could not initialize the renderer."));
+    });
+    renderer.addEventListener("error", event => {
+      if (generation !== owner || renderer !== graphics) return;
+      event.preventDefault();
+      fatal(new Error(event.message || "Could not load the renderer Worker."));
+    });
+    renderer.addEventListener("messageerror", () => { if (generation === owner && renderer === graphics) fatal(new Error("Could not receive a renderer response.")); });
+    const channel = new MessageChannel();
     const surface = canvas.transferControlToOffscreen();
-    worker.postMessage({ kind: "init", canvas: surface }, [surface]);
+    renderer.postMessage({ kind: "init", canvas: surface, port: channel.port2,
+      maxPacketBytes: renderLimits.maxPacketBytes, maxDiagnosticBytes: renderLimits.maxDiagnosticBytes,
+      timeoutMs: renderLimits.timeoutMs }, [surface, channel.port2]);
+    worker.postMessage({ kind: "init", renderPort: channel.port1,
+      maxPacketBytes: renderLimits.maxPacketBytes, maxDiagnosticBytes: renderLimits.maxDiagnosticBytes,
+      renderTimeoutMs: renderLimits.timeoutMs }, [channel.port1]);
     observer = new ResizeObserver(resize);
     observer.observe(ui.viewport);
     densityChanged();
@@ -1483,7 +1602,8 @@ async function play(mode = "live") {
     chartPath: ui.chart.value,
     preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } }, acquired,
     { localPlan, localSources: localPlan && localPlan.automatic !== true ? new Set(localPlan.sources) : null, localReplays: null, localScores: null, recordLimits: null,
-      localPage: localPlan?.page ?? 0, pageChanging: false, pageInputWaiter: null, lastAckSequence: 0n,
+      localPage: localPlan?.page ?? 0, geometry: submittedGeometry?.selectedId === selectedId && submittedGeometry.mode === "preview" ? submittedGeometry : null,
+      pageChanging: false, pageInputWaiter: null, lastAckSequence: 0n,
       pendingInputs: 0, lastAcquiredHost: 0n, windowOriginNs: millisecondsToNanos(performance.timeOrigin) });
   clearRoomResults();
   activePlay = session;
@@ -1893,7 +2013,6 @@ function touch(event, phase, surface, lost = false) {
     if (!lost && event.pointerType !== "touch") return;
     const id = event.pointerId;
     const previous = session.contacts.get(id);
-    if (phase === 0 && session.pageChanging && !previous) return;
     if ((phase === 0 && previous) || (phase !== 0 && !previous)) return;
     const owned = () => activePlay === session && session.phase === "playing" && session.owner === owner
       && surface === canvas && surface === session.canvas;
@@ -1908,7 +2027,8 @@ function touch(event, phase, surface, lost = false) {
     const hostNs = millisecondsToNanos(timeStamp);
     if (hostNs < session.lastHost) throw new Error("Touch input arrived behind the accepted gameplay watermark.");
     const [cssWidth, cssHeight] = cssExtent;
-    const [backingWidth, backingHeight] = surfaceExtent;
+    const geometry = session.geometry;
+    const backingWidth = geometry?.width ?? 0, backingHeight = geometry?.height ?? 0;
     const geometryAvailable = Number.isFinite(cssWidth) && cssWidth > 0 && Number.isFinite(cssHeight) && cssHeight > 0
       && Number.isInteger(backingWidth) && backingWidth > 0 && backingWidth <= 0xffffffff
       && Number.isInteger(backingHeight) && backingHeight > 0 && backingHeight <= 0xffffffff;
@@ -1916,6 +2036,7 @@ function touch(event, phase, surface, lost = false) {
     const height = lost && !geometryAvailable ? previous.height : cssHeight;
     const surfaceWidth = lost && !geometryAvailable ? previous.surfaceWidth : backingWidth;
     const surfaceHeight = lost && !geometryAvailable ? previous.surfaceHeight : backingHeight;
+    const page = lost && !geometryAvailable ? previous.page : geometry?.page;
     if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0
       || !Number.isInteger(surfaceWidth) || surfaceWidth <= 0 || surfaceWidth > 0xffffffff
       || !Number.isInteger(surfaceHeight) || surfaceHeight <= 0 || surfaceHeight > 0xffffffff) {
@@ -1959,7 +2080,8 @@ function touch(event, phase, surface, lost = false) {
           // Children were not dispatched on canvas: use the parent's CSS anchor.
           const x = offsetX + (sampleX - clientX), y = offsetY + (sampleY - clientY);
           if (!finiteTouchSample(x) || !finiteTouchSample(y)) throw new Error("Coalesced touch coordinates exceed the physical input range.");
-          snapshots.push(Object.freeze({ hostNs: sampleNs, x, y, pressure, width, height, surfaceWidth, surfaceHeight }));
+          snapshots.push(Object.freeze({ hostNs: sampleNs, x, y, pressure, width, height, surfaceWidth, surfaceHeight,
+            ...(session.localPlan ? { page } : {}) }));
           previousTime = sampleTime;
         }
         Object.freeze(snapshots);
@@ -1977,7 +2099,7 @@ function touch(event, phase, surface, lost = false) {
         session.sequence = lastSequence;
         session.events.push(...batch);
         session.contacts.set(id, Object.freeze({ contact, x: last.x, y: last.y, pressure: last.pressure,
-          width, height, surfaceWidth, surfaceHeight }));
+          width, height, surfaceWidth, surfaceHeight, ...(session.localPlan ? { page } : {}) }));
         session.completionReady = false;
         pumpInput(session);
         return;
@@ -1993,7 +2115,7 @@ function touch(event, phase, surface, lost = false) {
     }
     const contact = previous?.contact ?? session.nextContact + 1n;
     if (contact > 18446744073709551615n) throw new Error("Touch acquisition identity exhausted.");
-    const sample = { contact, x, y, pressure, width, height, surfaceWidth, surfaceHeight };
+    const sample = { contact, x, y, pressure, width, height, surfaceWidth, surfaceHeight, ...(session.localPlan ? { page } : {}) };
     if (phase === 0) {
       // Capture belongs to this contact before any event can reach the Worker.
       surface.setPointerCapture(id);
@@ -2008,7 +2130,7 @@ function touch(event, phase, surface, lost = false) {
     } else session.contacts.set(id, sample);
     const sequence = nextInputSequence(session);
     session.events.push({ kind: "touch", hostNs, sequence, contact, phase, code: id >>> 0,
-      x, y, pressure, width, height, surfaceWidth, surfaceHeight });
+      x, y, pressure, width, height, surfaceWidth, surfaceHeight, ...(session.localPlan ? { page } : {}) });
     session.completionReady = false;
     pumpInput(session);
   } catch (error) {
@@ -2386,6 +2508,7 @@ function receivePlay(data) {
     replayReceipt(session, data);
     if (data.released === false) {
       session.cleanupError = String(data.message).slice(0, 4096);
+      releasePlayWorker(session);
       stop();
     } else releasePlayWorker(session);
     void stopPlay(`Playback failed: ${data.message}` + (session.localPlan ? "" : ` · Hits ${data.hits}, misses ${data.misses}`), true);
@@ -2496,6 +2619,8 @@ function stopPlay(reason, failed = false, completed = false) {
     workerStopped = new Promise(resolve => {
       const timer = setTimeout(() => {
         // Termination establishes ownership release if the stop receipt never arrives.
+        terminateOwner(worker);
+        releasePlayWorker(session);
         stop();
         failed = true;
         reason = "Gameplay cleanup timed out. Reload the page before playing again.";
@@ -2503,7 +2628,7 @@ function stopPlay(reason, failed = false, completed = false) {
       session.workerStop = { timer, resolve };
     });
     try { worker.postMessage({ kind: "play-stop", playId: session.id, completed }); }
-    catch { stop(); failed = true; reason = "Gameplay Worker could not stop. Reload the page."; }
+    catch { terminateOwner(worker); releasePlayWorker(session); stop(); failed = true; reason = "Gameplay Worker could not stop. Reload the page."; }
   }
   controls();
   status(reason, failed);
@@ -2597,12 +2722,14 @@ function stopPlay(reason, failed = false, completed = false) {
         if (session.archiveError != null) {
           reason += ` Completed archive export failed: ${session.archiveError}`;
         }
-        if (session.localPlan && session.owner === owner) {
-          showLocalResults(session, failed);
-          localRoster.clearSources();
-          showLocalRoster();
-          ui["local-status"].textContent = session.localPlan.automatic === true ? "Automatic input sources released."
-            : "Local input sources released. Discover again before the next local session.";
+        if (session.localPlan) {
+          showLocalResults(session, failed, session.owner === owner);
+          if (session.owner === owner) {
+            localRoster.clearSources();
+            showLocalRoster();
+            ui["local-status"].textContent = session.localPlan.automatic === true ? "Automatic input sources released."
+              : "Local input sources released. Discover again before the next local session.";
+          }
         } else if (session.replay !== null) {
           revokeReplayURL();
           lastReplay = { bytes: session.replay.bytes, complete: session.replay.complete && !failed, id: session.id,
@@ -2631,7 +2758,7 @@ function stopPlay(reason, failed = false, completed = false) {
 
 function archiveReceipt(session, data) {
   try {
-    if (session.owner !== owner) throw new Error("Completed archive belongs to a previous library owner.");
+    if (session.owner !== owner && !(shuttingDown && session.owner === closingOwner && activePlay === session)) throw new Error("Completed archive belongs to a previous library owner.");
     const archive = validateCompletedArchive(data, { playId: session.id,
       players: session.localPlan?.players ?? [1], recording: session.recordReplay, mode: session.mode });
     session.completedArchive = archive.bytes;
@@ -2700,7 +2827,7 @@ function showCapturedReplays(selectSolo = false) {
   if (!selectSolo) { lastReplay = null; ui.export.textContent = "Choose a captured replay"; }
 }
 
-function showLocalResults(session, failed) {
+function showLocalResults(session, failed, publish = true) {
   const scores = session.localScores ?? localScoreRows(session.localPlan, null);
   const rows = document.createDocumentFragment();
   const recordings = [];
@@ -2719,7 +2846,7 @@ function showLocalResults(session, failed) {
       id: session.id, chartPath: session.chartPath, hits: score.hits, misses: score.misses, combo: score.combo,
       ...(session.completedArchive ? { completedArchive: session.completedArchive, archivePlayer: player } : {}) });
   }
-  ui["local-results"].replaceChildren(rows);
+  if (publish) ui["local-results"].replaceChildren(rows);
   if (session.recordReplay) {
     revokeReplayURL();
     capturedReplays = recordings;
