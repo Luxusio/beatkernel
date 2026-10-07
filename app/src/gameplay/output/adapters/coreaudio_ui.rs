@@ -3,28 +3,28 @@ use crate::{
     gameplay::output::{
         adapters::{
             coreaudio::{CoreAudioReplacementBackend, CoreAudioReplacementOutput},
-            remix::RemixedOutputBackend,
             player::PlayerOutputUi,
+            remix::RemixedOutputBackend,
         },
         application::{owner::GameplayOutputOwner, requests::GameplayOutputUi},
         domain::{
             control::OutputCapability,
-            remix::{RemixedOutputRequest, select_matrix, matrix_text},
+            remix::{matrix_text, select_matrix, RemixedOutputRequest},
         },
     },
-    gameplay_presentation::GameplayOutputContext,
+    gameplay_presentation::{GameplayAudioOutputContext, GameplayOutputContext},
     settings::{NativeSettings, SettingsHost},
 };
 use beatkernel::{
     audio::{AudioFormat, AudioLimits, ChannelMatrix},
-    time::{ClockPoint, ClockDomainId},
+    time::{ClockDomainId, ClockPoint},
 };
 use beatkernel_platform::{
+    audio::presentation::discipline::PresentationDiscipline,
     macos::{
         audio::{CoreAudioRequest, CoreAudioStream},
         clock::MachClock,
     },
-    audio::presentation::discipline::PresentationDiscipline,
 };
 
 pub type NativeCoreAudioOutputOwner =
@@ -129,25 +129,34 @@ impl NativeCoreAudioOutputUi {
     pub fn pending(&self) -> bool {
         self.bridge.pending()
     }
+    fn map_request(
+        request: &crate::gameplay::output::domain::control::OutputRequest,
+        output: &CoreAudioReplacementOutput,
+    ) -> Result<RemixedOutputRequest<CoreAudioRequest>, String> {
+        request_for_args(
+            output.stream().configuration().request,
+            output.channel_matrix(),
+            &request.args,
+        )
+    }
+
     pub fn service(
         &mut self,
         owner: &mut NativeCoreAudioOutputOwner,
         context: GameplayOutputContext<'_, PresentationDiscipline>,
         now: ClockPoint,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        self.bridge.service(
-            owner,
-            context,
-            now,
-            &mut |request, output| {
-                request_for_args(
-                    output.stream().configuration().request,
-                    output.channel_matrix(),
-                    &request.args,
-                )
-            },
-            &mut capability,
-        )
+        self.bridge
+            .service(owner, context, now, &mut Self::map_request, &mut capability)
+    }
+    pub fn service_audio(
+        &mut self,
+        owner: &mut NativeCoreAudioOutputOwner,
+        context: GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        self.bridge
+            .service_audio(owner, context, now, &mut Self::map_request, &mut capability)
     }
 }
 
@@ -172,14 +181,12 @@ mod fixtures {
         .unwrap();
         assert_eq!(buffer.matrix, request.matrix);
         assert_eq!(buffer.native.format.sample_rate(), 48_000);
-        assert!(
-            request_for_args(
-                request.native,
-                request.matrix.as_ref(),
-                &["--output-matrix".into(), "1,0".into()]
-            )
-            .is_err()
-        );
+        assert!(request_for_args(
+            request.native,
+            request.matrix.as_ref(),
+            &["--output-matrix".into(), "1,0".into()]
+        )
+        .is_err());
         let exact = request_for_args(
             request.native,
             request.matrix.as_ref(),

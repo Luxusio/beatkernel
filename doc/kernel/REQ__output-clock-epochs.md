@@ -56,3 +56,10 @@ platform source-reset/tagged-refusal cases and actual generic port delegation/
 unsupported cases. Assertions/runtime/hardware/formal review/QA remain deferred;
 scoped formatting and four sequential compile-only checks run after both paired
 writers stop. Full BMS player Goal remains active and unproven.
+
+Audio-authoritative held replacement preserves the original native evidence
+kind. Finite ASIO endpoint rebind validates the immutable frame grid, held render
+and old HOST chronology using the original upper endpoint, then seeds a staged
+endpoint owner through the full ASIO observation. A midpoint pair cannot replace
+that interval. Malformed, reached or regressing candidates leave the active
+endpoint owner unchanged. The point rebind API retains its existing behavior.

@@ -209,3 +209,46 @@ the same freshness, ready-input and semantic-token rules before commit. This
 permits finite history retirement during a long pause without fabricated reports
 or song progression. The ordinary operational frontier retains its existing
 behavior; callers must select held servicing only in the held lifecycle state.
+
+The shared native gameplay loops select timing through static wrappers. Legacy
+entry points retain their HOST/correction and FIFO behavior; explicitly selected
+audio entry points own native validation/authority and a retained input merger,
+with no instantiated legacy estimator. Both paths share judge, gauge, recording,
+competition, pause, completion and stop handling. Audio input mapping precedes
+consumption, and actual reports commit authority before fallible observers.
+Partial group reports commit once; a pre-report failure commits nothing.
+
+Native audio clock unavailability must fail explicitly after its configured
+bounded interval, rather than remain indefinitely playing. HOST acquisition and
+closed-prefix gates remain separate from logical Runtime operations. Actual
+native end evidence, complete original input closure, logical judge completion
+and stop/drain evidence all remain necessary for finite completion. The shared
+loop migration is implemented and portably tested; production constructor and
+startup selection are being integrated.
+
+An original native association may describe output whose assessed presentation
+HOST time is still future, as with explicit ASIO driver latency. Retain it
+unchanged as calibration evidence. Freshness may come from any retained actual
+association already due within the configured age; a newer future association
+must not block an older fresh covered one. Frontier selection still requires
+the chosen association to be covered by the acquired prefix and fresh at the
+current sample, and the prefix itself cannot be future. All-future or stale-past
+history grants no operation. Preserve event-future, validity and input-ahead
+checks; do not clamp timestamps, remove driver latency or treat future evidence
+as current presentation.
+
+Cold native audio admission reads actual Runtime normalized and audio scheduling
+domains before device or host effects, even when capture is disabled. Every
+cohort member must agree with the authority's logical timeline and raw output
+domain. A shared runtime getter verifies actual members rather than cached
+construction metadata. Equal origin timestamps, headers or a successful probe
+report cannot establish this identity; refusal must not dispatch input or alter
+Runtime. Generic legacy consumers retain their existing domain interpretation.
+
+Pause control preparation requires no pending input at or before its HOST
+cutoff. Resume preparation blocks only strictly earlier input; an original event
+at the resume cutoff remains in the merger and dispatches after reconciliation
+and the actual control operation. Bind this purpose into the descriptor and
+check it when staging Transport. Do not pop equality into another queue or
+classify it as paused. Its original HOST metadata is recorded only when the
+actual input report commits.

@@ -1,27 +1,31 @@
 //! One static output owner shared by gameplay adapters; input and clocks stay external.
+use crate::gameplay::output::ports::{OriginalNativeOutputBackend, OutputReplacementBackend};
+use crate::native_audio_presentation::NativeAudioPresentation;
 use crate::{
+    gameplay::output::application::replacement::{
+        publish_ready_audio_output_held, publish_ready_output, OutputReplacement, ReadyAudioOutput,
+        ReadyOutput, ReplacementCause, ReplacementFailure, ReplacementPhase, ReplacementState,
+    },
     gameplay_presentation::{GameplayOutputContext, GameplayPresentationPort},
     live_pause::LivePauseObservation,
-    native_end::{NativeEnd, EndBoundary},
-    gameplay::output::application::replacement::{
-        OutputReplacement, ReplacementFailure, ReplacementCause, ReplacementPhase,
-        ReplacementState, ReadyOutput, publish_ready_output,
-    },
+    native_end::{EndBoundary, NativeEnd},
 };
-use crate::gameplay::output::ports::{OutputReplacementBackend, OriginalNativeOutputBackend};
-use crate::native_audio_presentation::NativeAudioPresentation;
-use beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence;
 use beatkernel::{
-    audio::{Mixer, RenderReport, OutputFrameBasis},
+    audio::{Mixer, OutputFrameBasis, RenderReport},
     time::{ClockPair, ClockPoint},
 };
+use beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence;
 
+enum RejectedReady<P: GameplayPresentationPort, O> {
+    Legacy(ReadyOutput<P, O>),
+    Audio(ReadyAudioOutput<O>),
+}
 pub struct GameplayOutputOwner<B: OutputReplacementBackend> {
     current: Option<B::Output>,
     basis: OutputFrameBasis,
     controller: OutputReplacement<B>,
     pending: Option<(B::Request, u64)>,
-    rejected: Option<ReadyOutput<B::Presentation, B::Output>>,
+    rejected: Option<RejectedReady<B::Presentation, B::Output>>,
     report: Option<RenderReport>,
     pause_evidence: Option<LivePauseObservation>,
 }
@@ -45,7 +49,16 @@ impl<B: OutputReplacementBackend> GameplayOutputOwner<B> {
         self.current.as_mut()
     }
     pub fn rejected_ready(&self) -> Option<&ReadyOutput<B::Presentation, B::Output>> {
-        self.rejected.as_ref()
+        match self.rejected.as_ref() {
+            Some(RejectedReady::Legacy(ready)) => Some(ready),
+            _ => None,
+        }
+    }
+    pub fn rejected_audio_ready(&self) -> Option<&ReadyAudioOutput<B::Output>> {
+        match self.rejected.as_ref() {
+            Some(RejectedReady::Audio(ready)) => Some(ready),
+            _ => None,
+        }
     }
     pub fn state(&self) -> ReplacementState {
         if self.current.is_some() {
@@ -179,7 +192,10 @@ impl<B: OutputReplacementBackend> GameplayOutputOwner<B> {
     pub fn cancel(&mut self) -> Result<bool, ReplacementFailure<B::Error>> {
         self.pending = None;
         if let Some(ready) = self.rejected.take() {
-            let ReadyOutput { output, hold, .. } = ready;
+            let (output, hold) = match ready {
+                RejectedReady::Legacy(ReadyOutput { output, hold, .. }) => (output, hold),
+                RejectedReady::Audio(ReadyAudioOutput { output, hold, .. }) => (output, hold),
+            };
             let result = self.controller.retire_owned_output(output);
             drop(hold);
             return result.map(|_| true);
@@ -343,6 +359,78 @@ impl<B: OriginalNativeOutputBackend> GameplayOutputOwner<B> {
         }
     }
 }
+impl<B: OriginalNativeOutputBackend> GameplayOutputOwner<B>
+where
+    B::Error: std::error::Error + 'static,
+{
+    pub fn publish_paused_audio(
+        &mut self,
+        mut context: crate::gameplay_presentation::GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.rejected.is_some() {
+            return Err(
+                "ready output publication was refused; explicit cancellation required".into(),
+            );
+        }
+        if context.merger.pending() != 0 {
+            return Ok(false);
+        }
+        self.audio_identity(context.presentation)?;
+        if let Some((request, wait_ns)) = self.pending.take() {
+            if let Some(output) = self.current.take() {
+                if let Err(output) = self.controller.attach(output) {
+                    self.current = Some(output);
+                    self.pending = Some((request, wait_ns));
+                    return Err("replacement controller already owns an output".into());
+                }
+            }
+            self.controller.begin_audio(
+                request,
+                context.presentation,
+                context.pause,
+                context.merger,
+                context.config.song_origin,
+                wait_ns,
+                || context.control.hold_audio_pause(),
+            )?;
+        }
+        if self.controller.state() != ReplacementState::Waiting {
+            return Ok(false);
+        }
+        let Some(ready) = self
+            .controller
+            .poll_audio(context.presentation, context.merger, now)?
+        else {
+            return Ok(false);
+        };
+        let basis = ready.basis;
+        let report = ready.pause.last_render_report();
+        let record = ready.prepared.latest_record();
+        let evidence = match *record.evidence() {
+            OriginalNativePresentationEvidence::Asio { observation, .. } => {
+                crate::gameplay::output::adapters::observation::asio_pause_observation(
+                    Some(observation),
+                    now,
+                )
+            }
+            _ => LivePauseObservation::Point(record.pair()),
+        };
+        match publish_ready_audio_output_held(ready, &mut self.current, context, now) {
+            Ok(hold) => {
+                self.basis = basis;
+                self.report = report;
+                self.pause_evidence = Some(evidence);
+                drop(hold);
+                Ok(true)
+            }
+            Err(failure) => {
+                self.rejected = Some(RejectedReady::Audio(failure.ready));
+                Err(failure.error)
+            }
+        }
+    }
+}
 
 impl<B: OutputReplacementBackend> GameplayOutputOwner<B>
 where
@@ -406,7 +494,7 @@ where
         let pair = match ready.timing.presentation.latest_pair() {
             Some(pair) => pair,
             None => {
-                self.rejected = Some(ready);
+                self.rejected = Some(RejectedReady::Legacy(ready));
                 return Err("ready output has no accepted relation".into());
             }
         };
@@ -417,7 +505,7 @@ where
         let evidence = match evidence {
             Ok(evidence) => evidence,
             Err(error) => {
-                self.rejected = Some(ready);
+                self.rejected = Some(RejectedReady::Legacy(ready));
                 return Err(Box::new(Self::failure(ReplacementPhase::Observe, error)));
             }
         };
@@ -429,7 +517,7 @@ where
                 Ok(true)
             }
             Err(failure) => {
-                self.rejected = Some(failure.ready);
+                self.rejected = Some(RejectedReady::Legacy(failure.ready));
                 Err(failure.error)
             }
         }

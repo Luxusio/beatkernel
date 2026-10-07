@@ -2,7 +2,7 @@
 use crate::{
     live_pause::LivePauseObservation,
     native_end::{EndBoundary, NativeEnd},
-    native_gameplay::{InputBatch, NativeGameplayResult},
+    native_gameplay::{InputBatch, NativeGameplayResult, NativeGameplayConfig},
 };
 use beatkernel::{
     audio::RenderReport,
@@ -251,6 +251,16 @@ pub struct GameplayOutputContext<'a, P: GameplayPresentationPort> {
     pub config: &'a mut crate::native_gameplay::NativeGameplayConfig,
     pub end: &'a mut Option<NativeEnd>,
 }
+/// Original-evidence held-output publication uses the active acquisition merger.
+pub struct GameplayAudioOutputContext<'a> {
+    pub control: GameplayPauseControl<'a>,
+    pub presentation: &'a mut crate::native_audio_presentation::NativeAudioPresentation,
+    pub merger: &'a crate::local_input::InputMerger,
+    pub pause: &'a mut crate::playback_pause::NativePause,
+    pub config: &'a mut crate::native_gameplay::NativeGameplayConfig,
+    pub end: &'a mut Option<NativeEnd>,
+}
+
 pub trait GameplayDevice {
     type Presentation: GameplayPresentationPort;
     /// No published output clock while a held replacement waits for native evidence.
@@ -267,6 +277,34 @@ pub trait GameplayDevice {
         _: GameplayOutputContext<'_, Self::Presentation>,
     ) -> NativeGameplayResult<bool> {
         Ok(false)
+    }
+    fn observe_audio(
+        &mut self,
+        _: &mut crate::native_audio_presentation::NativeAudioPresentation,
+    ) -> NativeGameplayResult<()> {
+        Err("device does not support original audio presentation".into())
+    }
+    fn audio_pause_observation(
+        &mut self,
+        _: &crate::native_audio_presentation::NativeAudioPresentation,
+        _: ClockPoint,
+    ) -> NativeGameplayResult<LivePauseObservation> {
+        Err("device does not support original audio pause evidence".into())
+    }
+    fn observe_audio_end(
+        &mut self,
+        _: &mut NativeEnd,
+        _: &crate::native_audio_presentation::NativeAudioPresentation,
+        _: Option<RenderReport>,
+    ) -> NativeGameplayResult<Option<EndBoundary>> {
+        Err("device does not support original audio end evidence".into())
+    }
+    fn publish_paused_audio_output(
+        &mut self,
+        _: GameplayAudioOutputContext<'_>,
+        _: ClockPoint,
+    ) -> NativeGameplayResult<bool> {
+        Err("device does not support held audio output publication".into())
     }
     fn observe(&mut self, discipline: &mut Self::Presentation) -> NativeGameplayResult<()>;
     /// Interval owners override this with original coherent evidence;
@@ -328,3 +366,237 @@ mod presentation_resume_port_fixtures;
 #[cfg(test)]
 #[path = "presentation_output_rebind_fixtures.rs"]
 mod presentation_output_rebind_fixtures;
+
+/// Static pump timing dispatch; audio ownership never implements the legacy correction port.
+pub(crate) trait PumpTiming<D: GameplayDevice> {
+    const AUDIO: bool;
+    fn observe(&mut self, device: &mut D) -> NativeGameplayResult<()>;
+    fn latest_pair(&self) -> Option<ClockPair>;
+    fn validate_host(&self, point: ClockPoint) -> NativeGameplayResult<()>;
+    fn correction(
+        &mut self,
+        now: ClockPoint,
+        transport: &mut Transport,
+    ) -> NativeGameplayResult<Option<DisciplineUpdate>>;
+    fn quality(&self) -> ClockMappingQuality;
+    fn logical_domain(&self, config: NativeGameplayConfig) -> ClockDomainId;
+    fn audio(&self) -> Option<&crate::native_audio_presentation::NativeAudioPresentation> {
+        None
+    }
+    fn audio_mut(
+        &mut self,
+    ) -> Option<&mut crate::native_audio_presentation::NativeAudioPresentation> {
+        None
+    }
+    fn pause_evidence(
+        &mut self,
+        device: &mut D,
+        reference: ClockPair,
+        now: ClockPoint,
+    ) -> NativeGameplayResult<LivePauseObservation>;
+    fn end(
+        &mut self,
+        device: &mut D,
+        end: &mut NativeEnd,
+        rendered: Option<RenderReport>,
+    ) -> NativeGameplayResult<Option<EndBoundary>>;
+    fn resume(
+        &mut self,
+        device: &mut D,
+        config: NativeGameplayConfig,
+        pause: &crate::playback_pause::NativePause,
+        reference: ClockPair,
+    ) -> NativeGameplayResult<()>;
+    fn publish(
+        &mut self,
+        device: &mut D,
+        control: GameplayPauseControl<'_>,
+        merger: Option<&crate::local_input::InputMerger>,
+        pause: &mut crate::playback_pause::NativePause,
+        config: &mut NativeGameplayConfig,
+        end: &mut Option<NativeEnd>,
+        now: ClockPoint,
+    ) -> NativeGameplayResult<bool>;
+}
+pub(crate) struct LegacyTiming<'a, P>(pub &'a mut P);
+pub(crate) struct AudioTiming<'a>(
+    pub &'a mut crate::native_audio_presentation::NativeAudioPresentation,
+);
+impl<D: GameplayDevice> PumpTiming<D> for LegacyTiming<'_, D::Presentation> {
+    const AUDIO: bool = false;
+    fn observe(&mut self, device: &mut D) -> NativeGameplayResult<()> {
+        device.observe(self.0)
+    }
+    fn latest_pair(&self) -> Option<ClockPair> {
+        self.0.latest_pair()
+    }
+    fn validate_host(&self, point: ClockPoint) -> NativeGameplayResult<()> {
+        self.0.validate_host(point)
+    }
+    fn correction(
+        &mut self,
+        now: ClockPoint,
+        transport: &mut Transport,
+    ) -> NativeGameplayResult<Option<DisciplineUpdate>> {
+        self.0.update(now, transport).map(Some)
+    }
+    fn quality(&self) -> ClockMappingQuality {
+        self.0.quality()
+    }
+    fn logical_domain(&self, config: NativeGameplayConfig) -> ClockDomainId {
+        config.origin.domain
+    }
+    fn pause_evidence(
+        &mut self,
+        device: &mut D,
+        reference: ClockPair,
+        _: ClockPoint,
+    ) -> NativeGameplayResult<LivePauseObservation> {
+        device.pause_observation(reference)
+    }
+    fn end(
+        &mut self,
+        device: &mut D,
+        end: &mut NativeEnd,
+        rendered: Option<RenderReport>,
+    ) -> NativeGameplayResult<Option<EndBoundary>> {
+        device.observe_end(end, self.0, rendered)
+    }
+    fn resume(
+        &mut self,
+        device: &mut D,
+        config: NativeGameplayConfig,
+        pause: &crate::playback_pause::NativePause,
+        reference: ClockPair,
+    ) -> NativeGameplayResult<()> {
+        let mut next = self.0.restart_for_resume(
+            config.stream_origin,
+            config.playback_origin,
+            config.origin.domain,
+            pause.song_origin_for_presentation(config.song_origin, config.playback_origin)?,
+        )?;
+        device.seed_resume(&mut next, reference)?;
+        if next.latest_pair().is_none() {
+            return Err("resume presentation seed has no accepted observation".into());
+        }
+        *self.0 = next;
+        Ok(())
+    }
+    fn publish(
+        &mut self,
+        device: &mut D,
+        control: GameplayPauseControl<'_>,
+        _: Option<&crate::local_input::InputMerger>,
+        pause: &mut crate::playback_pause::NativePause,
+        config: &mut NativeGameplayConfig,
+        end: &mut Option<NativeEnd>,
+        _: ClockPoint,
+    ) -> NativeGameplayResult<bool> {
+        device.publish_paused_output(GameplayOutputContext {
+            control,
+            presentation: self.0,
+            pause,
+            config,
+            end,
+        })
+    }
+}
+impl<D: GameplayDevice> PumpTiming<D> for AudioTiming<'_> {
+    const AUDIO: bool = true;
+    fn observe(&mut self, device: &mut D) -> NativeGameplayResult<()> {
+        device.observe_audio(self.0)
+    }
+    fn latest_pair(&self) -> Option<ClockPair> {
+        self.0.authority().latest_observation()
+    }
+    fn validate_host(&self, point: ClockPoint) -> NativeGameplayResult<()> {
+        if point.domain != self.0.authority().epoch().host_domain {
+            return Err("audio acquisition HOST domain differs".into());
+        }
+        Ok(())
+    }
+    fn correction(
+        &mut self,
+        _: ClockPoint,
+        _: &mut Transport,
+    ) -> NativeGameplayResult<Option<DisciplineUpdate>> {
+        Ok(None)
+    }
+    fn quality(&self) -> ClockMappingQuality {
+        ClockMappingQuality::Unknown
+    }
+    fn logical_domain(&self, _: NativeGameplayConfig) -> ClockDomainId {
+        self.0.authority().epoch().logical_origin.domain
+    }
+    fn audio(&self) -> Option<&crate::native_audio_presentation::NativeAudioPresentation> {
+        Some(self.0)
+    }
+    fn audio_mut(
+        &mut self,
+    ) -> Option<&mut crate::native_audio_presentation::NativeAudioPresentation> {
+        Some(self.0)
+    }
+    fn pause_evidence(
+        &mut self,
+        device: &mut D,
+        _: ClockPair,
+        now: ClockPoint,
+    ) -> NativeGameplayResult<LivePauseObservation> {
+        device.audio_pause_observation(self.0, now)
+    }
+    fn end(
+        &mut self,
+        device: &mut D,
+        end: &mut NativeEnd,
+        rendered: Option<RenderReport>,
+    ) -> NativeGameplayResult<Option<EndBoundary>> {
+        device.observe_audio_end(end, self.0, rendered)
+    }
+    fn resume(
+        &mut self,
+        _: &mut D,
+        _: NativeGameplayConfig,
+        _: &crate::playback_pause::NativePause,
+        _: ClockPair,
+    ) -> NativeGameplayResult<()> {
+        Ok(())
+    }
+    fn publish(
+        &mut self,
+        device: &mut D,
+        control: GameplayPauseControl<'_>,
+        merger: Option<&crate::local_input::InputMerger>,
+        pause: &mut crate::playback_pause::NativePause,
+        config: &mut NativeGameplayConfig,
+        end: &mut Option<NativeEnd>,
+        now: ClockPoint,
+    ) -> NativeGameplayResult<bool> {
+        device.publish_paused_audio_output(
+            GameplayAudioOutputContext {
+                control,
+                presentation: self.0,
+                merger: merger.expect("audio timing owns an acquisition merger"),
+                pause,
+                config,
+                end,
+            },
+            now,
+        )
+    }
+}
+
+pub(crate) fn validate_pump_host<D: GameplayDevice, T: PumpTiming<D>>(
+    device: &D,
+    timing: &T,
+    point: ClockPoint,
+    committed_pause: Option<ClockPoint>,
+) -> NativeGameplayResult<()> {
+    if device.output_clock_suspended()
+        && committed_pause.is_some_and(|boundary| {
+            point.domain == boundary.domain && point.timestamp >= boundary.timestamp
+        })
+    {
+        return Ok(());
+    }
+    timing.validate_host(point)
+}

@@ -1,9 +1,14 @@
 //! Original native evidence admitted into one audio-authoritative gameplay owner.
-use crate::{audio_authority::AudioAuthority, native_gameplay::NativeGameplayResult};
+use crate::{
+    audio_authority::{AudioAuthority, AudioAuthorityEpoch, PreparedPrimedCorrelation},
+    local_input::InputMerger,
+    native_gameplay::NativeGameplayResult,
+};
 use beatkernel::audio::OutputFrameBasis;
+use beatkernel::time::ClockPoint;
 use beatkernel_platform::audio::presentation::validation::{
     NativeObservationAdmission, NativePresentationRecord, NativePresentationValidator,
-    OriginalNativePresentationEvidence,
+    OriginalNativePresentationEvidence, PreparedNativePresentation,
 };
 
 /// One caller-supplied native observation on its actual creation epoch and frame basis.
@@ -15,6 +20,34 @@ pub struct NativeAudioSnapshot {
     pub basis: OutputFrameBasis,
     /// Complete native source metadata, including ASIO's original HOST bracket.
     pub evidence: OriginalNativePresentationEvidence,
+}
+
+/// Opaque original-evidence candidate bound to the current live owners.
+#[derive(Clone, Debug)]
+pub struct PreparedNativeAudioEpoch {
+    previous_epoch: AudioAuthorityEpoch,
+    previous_record: Option<NativePresentationRecord>,
+    previous_basis: Option<OutputFrameBasis>,
+    validator: NativePresentationValidator,
+    basis: OutputFrameBasis,
+    snapshots: [NativeAudioSnapshot; 2],
+    correlation: PreparedPrimedCorrelation,
+}
+impl PreparedNativeAudioEpoch {
+    pub(crate) fn latest_record(&self) -> NativePresentationRecord {
+        self.validator
+            .latest_record()
+            .expect("two original observations were staged")
+    }
+    pub(crate) fn epoch(&self) -> u64 {
+        self.validator.epoch()
+    }
+    pub(crate) fn basis(&self) -> OutputFrameBasis {
+        self.basis
+    }
+    pub(crate) fn snapshots(&self) -> [NativeAudioSnapshot; 2] {
+        self.snapshots
+    }
 }
 
 /// Exclusive native validation and finite gameplay correlation; no estimator or rate loop.
@@ -63,28 +96,7 @@ impl NativeAudioPresentation {
         {
             return Err("native audio snapshot differs from its original frame basis".into());
         }
-        let prepared = match snapshot.evidence {
-            OriginalNativePresentationEvidence::Wasapi {
-                snapshot: native,
-                basis,
-            } => {
-                if basis != Some(snapshot.basis) {
-                    return Err("native WASAPI evidence requires the exact snapshot basis".into());
-                }
-                self.validator
-                    .prepare_wasapi(snapshot.epoch, native, basis)?
-            }
-            OriginalNativePresentationEvidence::SuppliedPair(pair) => {
-                self.validator.prepare_pair(snapshot.epoch, pair)?
-            }
-            OriginalNativePresentationEvidence::Asio { observation, basis } => {
-                if basis != Some(snapshot.basis) {
-                    return Err("native ASIO evidence requires the exact snapshot basis".into());
-                }
-                self.validator
-                    .prepare_asio(snapshot.epoch, observation, basis)?
-            }
-        };
+        let prepared = prepare_native_snapshot(&self.validator, snapshot)?;
         if let Some(pair) = prepared.correlation_pair() {
             self.authority.observe(snapshot.epoch, pair)?;
         }
@@ -95,6 +107,86 @@ impl NativeAudioPresentation {
             self.basis = Some(snapshot.basis);
         }
         Ok(admission)
+    }
+
+    pub fn prepare_output_epoch(
+        &self,
+        next: AudioAuthorityEpoch,
+        basis: OutputFrameBasis,
+        snapshots: [NativeAudioSnapshot; 2],
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<PreparedNativeAudioEpoch> {
+        self.validate_identity()?;
+        if basis.point_at_stream_frame(0)? != next.stream_origin {
+            return Err("replacement basis differs from raw epoch origin".into());
+        }
+        let staged = self.authority.prepare_epoch(next, merger)?;
+        let mut validator =
+            NativePresentationValidator::new(next.id, next.stream_origin, next.host_domain);
+        let mut pairs = [None; 2];
+        for (index, snapshot) in snapshots.into_iter().enumerate() {
+            if snapshot.epoch != next.id || snapshot.basis != basis {
+                return Err("replacement snapshots differ from creation epoch/basis".into());
+            }
+            let prepared = prepare_native_snapshot(&validator, snapshot)?;
+            pairs[index] = Some(
+                prepared
+                    .correlation_pair()
+                    .ok_or("replacement requires two progressing original observations")?,
+            );
+            validator.commit(prepared)?;
+        }
+        let correlation = self.authority.prepare_primed_epoch(
+            staged,
+            [
+                pairs[0].expect("first original pair"),
+                pairs[1].expect("second original pair"),
+            ],
+            now,
+            merger,
+        )?;
+        Ok(PreparedNativeAudioEpoch {
+            previous_epoch: self.authority.epoch(),
+            previous_record: self.validator.latest_record(),
+            previous_basis: self.basis,
+            validator,
+            basis,
+            snapshots,
+            correlation,
+        })
+    }
+
+    pub fn validate_output_epoch(
+        &self,
+        prepared: &PreparedNativeAudioEpoch,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<()> {
+        self.validate_identity()?;
+        if prepared.previous_epoch != self.authority.epoch()
+            || prepared.previous_record != self.validator.latest_record()
+            || prepared.previous_basis != self.basis
+        {
+            return Err("replacement native owner changed after preparation".into());
+        }
+        self.authority
+            .validate_primed_correlation(&prepared.correlation, now, merger)?;
+        Ok(())
+    }
+
+    pub fn commit_output_epoch(
+        &mut self,
+        prepared: PreparedNativeAudioEpoch,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<()> {
+        self.validate_output_epoch(&prepared, now, merger)?;
+        self.authority
+            .commit_primed_correlation(prepared.correlation, now, merger)?;
+        self.validator = prepared.validator;
+        self.basis = Some(prepared.basis);
+        Ok(())
     }
 
     /// Read actual correlation and committed gameplay/presentation watermarks.
@@ -131,4 +223,35 @@ impl NativeAudioPresentation {
         }
         Ok(())
     }
+}
+
+pub(crate) fn prepare_native_snapshot(
+    validator: &NativePresentationValidator,
+    snapshot: NativeAudioSnapshot,
+) -> NativeGameplayResult<PreparedNativePresentation> {
+    if snapshot.epoch != validator.epoch()
+        || snapshot.basis.point_at_stream_frame(0)? != validator.output_origin()
+    {
+        return Err("native snapshot creation epoch or raw basis differs".into());
+    }
+    Ok(match snapshot.evidence {
+        OriginalNativePresentationEvidence::Wasapi {
+            snapshot: native,
+            basis,
+        } => {
+            if basis != Some(snapshot.basis) {
+                return Err("native WASAPI evidence requires the exact snapshot basis".into());
+            }
+            validator.prepare_wasapi(snapshot.epoch, native, basis)?
+        }
+        OriginalNativePresentationEvidence::SuppliedPair(pair) => {
+            validator.prepare_pair(snapshot.epoch, pair)?
+        }
+        OriginalNativePresentationEvidence::Asio { observation, basis } => {
+            if basis != Some(snapshot.basis) {
+                return Err("native ASIO evidence requires the exact snapshot basis".into());
+            }
+            validator.prepare_asio(snapshot.epoch, observation, basis)?
+        }
+    })
 }

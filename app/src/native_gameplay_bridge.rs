@@ -52,6 +52,34 @@ pub trait NativeGameplayDevice {
     ) -> NativeGameplayResult<bool> {
         Ok(false)
     }
+    fn observe_audio(
+        &mut self,
+        _: &mut crate::native_audio_presentation::NativeAudioPresentation,
+    ) -> NativeGameplayResult<()> {
+        Err("native device does not support original audio presentation".into())
+    }
+    fn audio_pause_observation(
+        &mut self,
+        _: &crate::native_audio_presentation::NativeAudioPresentation,
+        _: ClockPoint,
+    ) -> NativeGameplayResult<LivePauseObservation> {
+        Err("native device does not support original audio pause evidence".into())
+    }
+    fn observe_audio_end(
+        &mut self,
+        _: &mut NativeEnd,
+        _: &crate::native_audio_presentation::NativeAudioPresentation,
+        _: Option<RenderReport>,
+    ) -> NativeGameplayResult<Option<EndBoundary>> {
+        Err("native device does not support original audio end evidence".into())
+    }
+    fn publish_paused_audio_output(
+        &mut self,
+        _: crate::gameplay_presentation::GameplayAudioOutputContext<'_>,
+        _: ClockPoint,
+    ) -> NativeGameplayResult<bool> {
+        Err("native device does not support held audio output publication".into())
+    }
     fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()>;
     /// Native interval owners override this with original coherent evidence;
     /// correction-only midpoint pairs cannot establish their pause boundary.
@@ -150,6 +178,34 @@ impl<D: NativeGameplayDevice> GameplayDevice for D {
         context: crate::gameplay_presentation::GameplayOutputContext<'_, Self::Presentation>,
     ) -> NativeGameplayResult<bool> {
         NativeGameplayDevice::publish_paused_output(self, context)
+    }
+    fn observe_audio(
+        &mut self,
+        presentation: &mut crate::native_audio_presentation::NativeAudioPresentation,
+    ) -> NativeGameplayResult<()> {
+        NativeGameplayDevice::observe_audio(self, presentation)
+    }
+    fn audio_pause_observation(
+        &mut self,
+        presentation: &crate::native_audio_presentation::NativeAudioPresentation,
+        now: ClockPoint,
+    ) -> NativeGameplayResult<LivePauseObservation> {
+        NativeGameplayDevice::audio_pause_observation(self, presentation, now)
+    }
+    fn observe_audio_end(
+        &mut self,
+        end: &mut NativeEnd,
+        presentation: &crate::native_audio_presentation::NativeAudioPresentation,
+        rendered: Option<RenderReport>,
+    ) -> NativeGameplayResult<Option<EndBoundary>> {
+        NativeGameplayDevice::observe_audio_end(self, end, presentation, rendered)
+    }
+    fn publish_paused_audio_output(
+        &mut self,
+        context: crate::gameplay_presentation::GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+    ) -> NativeGameplayResult<bool> {
+        NativeGameplayDevice::publish_paused_audio_output(self, context, now)
     }
     fn observe(&mut self, discipline: &mut Self::Presentation) -> NativeGameplayResult<()> {
         NativeGameplayDevice::observe(self, discipline)
@@ -505,6 +561,76 @@ pub fn run_cohort_with_policies_and_results<D: NativeGameplayDevice>(
     policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
 ) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
     crate::native_cohort::run_cohort_with_policies_and_results_and_ports(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+        policies,
+    )
+}
+
+/// Native solo composition using one audio authority and original HOST merger.
+pub type NativeAudioGameplaySession<'a> =
+    crate::native_gameplay::AudioGameplaySession<'a, LiveCompetition>;
+/// Native local composition using one shared audio authority.
+pub type NativeAudioCohortSession<'a> =
+    crate::native_cohort::AudioCohortSession<'a, LiveCompetition, NativeGroupCompetition>;
+
+/// Runs actual native audio-authoritative solo play and returns completion evidence.
+pub fn run_gameplay_audio_with_result<D: NativeGameplayDevice>(
+    device: &mut D,
+    session: NativeAudioGameplaySession<'_>,
+    config: NativeGameplayConfig,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    crate::native_gameplay::run_gameplay_audio_with_result_and_ports(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+    )
+}
+/// Runs selected native policy with actual accepted-score observation.
+pub fn run_gameplay_audio_with_policy_and_result_and_score<D: NativeGameplayDevice>(
+    device: &mut D,
+    session: NativeAudioGameplaySession<'_>,
+    config: NativeGameplayConfig,
+    score: &mut crate::competition::ScoreSummary,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    crate::native_gameplay::run_gameplay_audio_with_policy_and_result_and_score_and_ports(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+        score,
+        policy,
+    )
+}
+/// Runs the native cohort with original member identity and one output authority.
+pub fn run_cohort_audio_with_results<D: NativeGameplayDevice>(
+    device: &mut D,
+    session: NativeAudioCohortSession<'_>,
+    config: NativeGameplayConfig,
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    crate::native_cohort::run_cohort_audio_with_results_and_ports(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+    )
+}
+/// Runs selected member policies on the native audio-authoritative cohort.
+pub fn run_cohort_audio_with_policies_and_results<D: NativeGameplayDevice>(
+    device: &mut D,
+    session: NativeAudioCohortSession<'_>,
+    config: NativeGameplayConfig,
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    crate::native_cohort::run_cohort_audio_with_policies_and_results_and_ports(
         device,
         session,
         config,

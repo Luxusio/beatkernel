@@ -147,8 +147,13 @@ pub struct PreparedControlCutoff {
     host_cutoff: ClockPoint,
     now: ClockPoint,
     output: ClockPoint,
+    resume: bool,
 }
 impl PreparedControlCutoff {
+    /// Whether pending input at the exact cutoff belongs to resumed playback.
+    pub const fn is_resume(&self) -> bool {
+        self.resume
+    }
     /// Output creation epoch validated when preparing this native control boundary.
     pub const fn epoch(&self) -> u64 {
         self.epoch
@@ -381,6 +386,9 @@ impl AudioAuthority {
         if original.timestamp > now.timestamp
             || self
                 .acquired
+                .is_some_and(|prefix| prefix.timestamp > now.timestamp)
+            || self
+                .acquired
                 .is_none_or(|prefix| original.timestamp > prefix.timestamp)
             || self.history.len() < 2
             || !self.fresh(now)?
@@ -575,6 +583,30 @@ impl AudioAuthority {
         now: ClockPoint,
         merger: &InputMerger,
     ) -> Result<Option<PreparedControlCutoff>, AudioAuthorityError> {
+        self.prepare_control_inner(epoch, raw_output, host_cutoff, now, merger, false)
+    }
+
+    /// Prepare resume without consuming original input at the exact HOST cutoff.
+    pub fn prepare_resume_control_cutoff(
+        &self,
+        epoch: u64,
+        raw_output: ClockPoint,
+        host_cutoff: ClockPoint,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<Option<PreparedControlCutoff>, AudioAuthorityError> {
+        self.prepare_control_inner(epoch, raw_output, host_cutoff, now, merger, true)
+    }
+
+    fn prepare_control_inner(
+        &self,
+        epoch: u64,
+        raw_output: ClockPoint,
+        host_cutoff: ClockPoint,
+        now: ClockPoint,
+        merger: &InputMerger,
+        resume: bool,
+    ) -> Result<Option<PreparedControlCutoff>, AudioAuthorityError> {
         if epoch != self.epoch.id {
             return Err(AudioAuthorityError::WrongEpoch);
         }
@@ -611,10 +643,10 @@ impl AudioAuthority {
         }
         // The cutoff may precede an already closed prefix. Inspect at the full
         // acquired prefix, then compare the earliest exact event to the cutoff.
-        if merger
-            .peek_ready(prefix)?
-            .is_some_and(|event| event.meta().timestamp <= host_cutoff.timestamp)
-        {
+        if merger.peek_ready(prefix)?.is_some_and(|event| {
+            event.meta().timestamp < host_cutoff.timestamp
+                || (!resume && event.meta().timestamp == host_cutoff.timestamp)
+        }) {
             return Ok(None);
         }
         self.next_revision()?;
@@ -625,6 +657,7 @@ impl AudioAuthority {
             host_cutoff,
             now,
             output,
+            resume,
         }))
     }
 
@@ -636,12 +669,13 @@ impl AudioAuthority {
         merger: &InputMerger,
     ) -> Result<(), AudioAuthorityError> {
         if prepared.state != self.state()
-            || self.prepare_control_cutoff(
+            || self.prepare_control_inner(
                 prepared.epoch,
                 prepared.raw_output,
                 prepared.host_cutoff,
                 prepared.now,
                 merger,
+                prepared.resume,
             )? != Some(prepared)
         {
             return Err(AudioAuthorityError::StalePreparation);
@@ -917,6 +951,12 @@ impl AudioAuthority {
     fn logical(&self, stream: ClockPoint) -> Result<ClockPoint, AudioAuthorityError> {
         Self::logical_in_epoch(self.epoch, stream)
     }
+    pub(crate) fn checked_logical_output(
+        &self,
+        raw: ClockPoint,
+    ) -> Result<ClockPoint, AudioAuthorityError> {
+        self.logical(raw)
+    }
     fn logical_in_epoch(
         epoch: AudioAuthorityEpoch,
         stream: ClockPoint,
@@ -964,8 +1004,17 @@ impl AudioAuthority {
     fn fresh(&self, now: ClockPoint) -> Result<bool, AudioAuthorityError> {
         self.validate_host(now)?;
         Ok(self
-            .latest_observation()
-            .is_some_and(|pair| self.pair_is_fresh(pair, now)))
+            .history
+            .iter()
+            .rev()
+            .any(|pair| self.pair_is_fresh(*pair, now)))
+    }
+    /// Read-only availability from retained, already due native associations.
+    pub(crate) fn has_fresh_observation(
+        &self,
+        now: ClockPoint,
+    ) -> Result<bool, AudioAuthorityError> {
+        self.fresh(now)
     }
     fn pair_is_fresh(&self, pair: ClockPair, now: ClockPoint) -> bool {
         let age = delta(now.timestamp, pair.target.timestamp);

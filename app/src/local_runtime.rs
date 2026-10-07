@@ -116,6 +116,15 @@ impl Drop for OwnerGuard<'_> {
 }
 
 impl RuntimeGroup {
+    /// Actual member clock identity, only when every member agrees.
+    pub fn clock_domains(&self) -> Option<(ClockDomainId, ClockDomainId)> {
+        let domains = self.members.first()?.runtime.clock_domains();
+        self.members
+            .iter()
+            .all(|member| member.runtime.clock_domains() == domains)
+            .then_some(domains)
+    }
+
     /// Selects only software profiling for every actual member Runtime.
     /// Browser hosts must configure this before processing any member.
     pub fn set_processing_clock(&mut self, clock: RuntimeProcessingClock) {
@@ -586,6 +595,11 @@ impl RuntimeGroup {
 /// Production solo adapter uses exactly the same cohort execution path.
 pub struct SoloRuntime(RuntimeGroup);
 impl SoloRuntime {
+    /// Actual normalized timeline and raw scheduling identity of the solo member.
+    pub fn clock_domains(&self) -> Option<(ClockDomainId, ClockDomainId)> {
+        self.0.clock_domains()
+    }
+
     /// Uses the same atomic one-member hazard-sound installation as local play.
     pub fn configure_hazard_sounds(&mut self, timeline: HazardSoundTimeline) -> Result<(), String> {
         self.0

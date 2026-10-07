@@ -1,24 +1,24 @@
 //! ALSA-only output conversion on the native play thread, before retirement.
 use crate::{
-    gameplay::output::domain::control::{OutputCapability, OutputRequest},
-    settings::{NativeSettings, SettingsHost},
     gameplay::output::adapters::alsa::{AlsaReplacementBackend, AlsaReplacementOutput},
-    gameplay::output::application::requests::GameplayOutputUi,
     gameplay::output::adapters::player::PlayerOutputUi,
     gameplay::output::application::owner::GameplayOutputOwner,
+    gameplay::output::application::requests::GameplayOutputUi,
+    gameplay::output::domain::control::{OutputCapability, OutputRequest},
     gameplay::output::{
         adapters::remix::RemixedOutputBackend,
-        domain::remix::{RemixedOutputRequest, select_matrix, matrix_text},
+        domain::remix::{matrix_text, select_matrix, RemixedOutputRequest},
     },
-    gameplay_presentation::GameplayOutputContext,
+    gameplay_presentation::{GameplayAudioOutputContext, GameplayOutputContext},
+    settings::{NativeSettings, SettingsHost},
 };
 use beatkernel::{
     audio::{AudioLimits, ChannelMatrix},
     time::ClockPoint,
 };
 use beatkernel_platform::{
-    linux::{AlsaRequest, AlsaAppliedConfig},
-    audio::{DeviceFormat, presentation::discipline::PresentationDiscipline},
+    audio::{presentation::discipline::PresentationDiscipline, DeviceFormat},
+    linux::{AlsaAppliedConfig, AlsaRequest},
 };
 pub fn request_for_args(current: &AlsaRequest, args: &[String]) -> Result<AlsaRequest, String> {
     let draft = NativeSettings::output_only(args, SettingsHost::Linux)?;
@@ -145,6 +145,17 @@ impl NativeAlsaOutputUi {
     pub fn pending(&self) -> bool {
         self.bridge.pending()
     }
+    fn map_request(
+        request: &OutputRequest,
+        output: &AlsaReplacementOutput,
+    ) -> Result<RemixedOutputRequest<AlsaRequest>, String> {
+        let applied = output.stream().configuration();
+        let mut current = applied.requested.clone();
+        current.buffer_frames = applied.buffer_frames;
+        current.period_frames = applied.period_frames;
+        remixed_request_for_args(&current, output.channel_matrix(), &request.args)
+    }
+
     pub fn service(
         &mut self,
         owner: &mut NativeAlsaOutputOwner,
@@ -155,13 +166,21 @@ impl NativeAlsaOutputUi {
             owner,
             context,
             now,
-            &mut |req: &OutputRequest, out: &AlsaReplacementOutput| {
-                let applied = out.stream().configuration();
-                let mut current = applied.requested.clone();
-                current.buffer_frames = applied.buffer_frames;
-                current.period_frames = applied.period_frames;
-                remixed_request_for_args(&current, out.channel_matrix(), &req.args)
-            },
+            &mut Self::map_request,
+            &mut capability_for_output,
+        )
+    }
+    pub fn service_audio(
+        &mut self,
+        owner: &mut NativeAlsaOutputOwner,
+        context: GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        self.bridge.service_audio(
+            owner,
+            context,
+            now,
+            &mut Self::map_request,
             &mut capability_for_output,
         )
     }
@@ -290,14 +309,12 @@ mod fixtures {
                 )
                 .unwrap();
                 assert_eq!(preserved.matrix.as_ref(), output.channel_matrix());
-                assert!(
-                    remixed_request_for_args(
-                        &output.stream().configuration().requested,
-                        output.channel_matrix(),
-                        &args("--output-matrix", "1,0")
-                    )
-                    .is_err()
-                );
+                assert!(remixed_request_for_args(
+                    &output.stream().configuration().requested,
+                    output.channel_matrix(),
+                    &args("--output-matrix", "1,0")
+                )
+                .is_err());
             }
             backend.retire(&mut output).unwrap();
             mixer = output.take_stopped_mixer().unwrap().unwrap();

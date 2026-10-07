@@ -80,6 +80,74 @@ fn state(authority: &AudioAuthority) -> String {
 }
 
 #[test]
+fn future_native_latency_association_keeps_past_covered_evidence_usable() {
+    let mut authority = owner();
+    let merger = merger();
+    paired(&mut authority);
+    authority.record_acquired_prefix(host(150)).unwrap();
+    let before = state(&authority);
+    let input = authority
+        .prepare_input(host(125), host(150))
+        .unwrap()
+        .unwrap();
+    assert_eq!(input.original(), host(125));
+    assert_eq!(input.output(), logical(5150));
+    assert_eq!(input.mapper().quality(), ClockMappingQuality::Unknown);
+    let frontier = authority
+        .prepare_frontier(host(150), &merger)
+        .unwrap()
+        .unwrap();
+    assert_eq!(frontier.observed_host(), host(100));
+    assert_eq!(frontier.output(), logical(5100));
+    assert_eq!(frontier.advance(), Some(logical(5100)));
+    assert_eq!(
+        state(&authority),
+        before,
+        "permission does not dispatch or commit"
+    );
+    assert_eq!(authority.latest_observation(), Some(observation(1300, 200)));
+    authority.record_acquired_prefix(host(200)).unwrap();
+    let future_prefix = state(&authority);
+    assert!(authority
+        .prepare_input(host(125), host(150))
+        .unwrap()
+        .is_none());
+    assert_eq!(state(&authority), future_prefix);
+    assert!(authority
+        .prepare_frontier(host(150), &merger)
+        .unwrap()
+        .is_none());
+
+    let mut all_future = owner();
+    all_future.observe(1, observation(1100, 200)).unwrap();
+    all_future.observe(1, observation(1300, 300)).unwrap();
+    all_future.record_acquired_prefix(host(150)).unwrap();
+    assert!(all_future
+        .prepare_input(host(125), host(150))
+        .unwrap()
+        .is_none());
+    assert!(all_future
+        .prepare_frontier(host(150), &merger)
+        .unwrap()
+        .is_none());
+
+    let mut stale_past = owner();
+    stale_past.observe(1, observation(1100, 100)).unwrap();
+    stale_past.observe(1, observation(1300, 5000)).unwrap();
+    stale_past.record_acquired_prefix(host(1201)).unwrap();
+    let stale_before = state(&stale_past);
+    assert!(stale_past
+        .prepare_input(host(125), host(1201))
+        .unwrap()
+        .is_none());
+    assert!(stale_past
+        .prepare_frontier(host(1201), &merger)
+        .unwrap()
+        .is_none());
+    assert_eq!(state(&stale_past), stale_before);
+}
+
+#[test]
 fn startup_requires_two_real_pairs_then_maps_three_distinct_domains_analytically() {
     let mut authority = owner();
     let mut merger = merger();

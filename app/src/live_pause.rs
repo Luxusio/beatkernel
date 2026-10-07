@@ -222,6 +222,7 @@ pub fn prepare_live_audio_transport(
     if boundary.epoch != control.epoch()
         || boundary.raw_output != control.raw_output()
         || boundary.original.at != control.host()
+        || boundary.original.paused == control.is_resume()
     {
         return Err(PauseError(
             "audio pause boundary differs from prepared control",

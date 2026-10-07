@@ -20,9 +20,9 @@ use crate::{
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
     transport::{Transport, TransportError},
 };
-use std::{collections::HashMap, fmt, time::Instant};
 use hazard_sound::{HazardSoundError, HazardSoundTimeline};
 use input_sound::InputSoundTimeline;
+use std::{collections::HashMap, fmt, time::Instant};
 
 /// Explicit sound associated with one accepted chart stage.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -212,6 +212,12 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Configured normalized timeline and raw audio scheduling domains.
+    /// Reading identity never processes input or changes transport/judge state.
+    pub const fn clock_domains(&self) -> (ClockDomainId, ClockDomainId) {
+        (self.host_domain, self.audio_domain)
+    }
+
     /// Composes existing owners and validates sound gains before accepting input.
     #[allow(clippy::too_many_arguments)]
     pub fn new(

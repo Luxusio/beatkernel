@@ -4,10 +4,12 @@ use crate::{
     competition::ScoreSummary,
     completion::SongCompletion,
     gameplay_competition::{GroupCompetitionPort, SoloCompetitionPort},
-    gameplay_presentation::GameplayPresentationPort,
+    gameplay_presentation::{PumpTiming, LegacyTiming, AudioTiming},
     gauge::{BmsGauge, GaugeProfile},
     live_pause::{
-        LivePauseBoundary, prepare_live_transport, update_live_pause, validate_pre_pause_input,
+        LivePauseBoundary, AudioLivePauseBoundary, prepare_live_transport,
+        prepare_live_audio_transport, update_live_pause, update_live_audio_pause,
+        validate_pre_pause_input,
     },
     local_input::InputMerger,
     local_players::PlayerId,
@@ -45,6 +47,8 @@ use std::{
 pub use crate::native_gameplay_bridge::{
     NativeCohortSession, PlayerState, finite_cohort_done, member_progress, run_cohort,
     run_cohort_with_control, run_cohort_with_results, run_cohort_with_policies_and_results,
+    NativeAudioCohortSession, run_cohort_audio_with_results,
+    run_cohort_audio_with_policies_and_results,
 };
 #[cfg(test)]
 use crate::native_group_competition::NativeGroupCompetition;
@@ -77,9 +81,9 @@ fn point(event: &PhysicalInputEvent) -> ClockPoint {
         timestamp: event.meta().timestamp,
     }
 }
-fn schedule<D: crate::gameplay_presentation::GameplayDevice, S, G>(
+fn schedule<D: crate::gameplay_presentation::GameplayDevice, S, G, P>(
     device: &mut D,
-    session: &CohortSession<'_, S, G, D::Presentation>,
+    session: &CohortSession<'_, S, G, P>,
     config: NativeGameplayConfig,
 ) -> NativeGameplayResult<ClockPoint> {
     if config.logical_schedule {
@@ -130,9 +134,10 @@ fn process_with_host<
     S: SoloCompetitionPort,
     G: GroupCompetitionPort,
     H: NativeGameplayHost,
+    P,
 >(
     device: &mut D,
-    session: &mut CohortSession<'_, S, G, D::Presentation>,
+    session: &mut CohortSession<'_, S, G, P>,
     config: NativeGameplayConfig,
     event: PhysicalInputEvent,
     evidence: &mut OwnedStopEvidence,
@@ -173,9 +178,10 @@ fn advance<
     S: SoloCompetitionPort,
     G: GroupCompetitionPort,
     H: NativeGameplayHost,
+    P,
 >(
     device: &mut D,
-    session: &mut CohortSession<'_, S, G, D::Presentation>,
+    session: &mut CohortSession<'_, S, G, P>,
     config: NativeGameplayConfig,
     at: ClockPoint,
     evidence: &mut OwnedStopEvidence,
@@ -213,9 +219,10 @@ fn reconcile<
     S: SoloCompetitionPort,
     G: GroupCompetitionPort,
     H: NativeGameplayHost,
+    P,
 >(
     device: &mut D,
-    session: &mut CohortSession<'_, S, G, D::Presentation>,
+    session: &mut CohortSession<'_, S, G, P>,
     config: NativeGameplayConfig,
     keyboard: &mut PauseKeyboard,
     at: ClockPoint,
@@ -684,11 +691,54 @@ pub fn run_cohort_with_results_and_ports<
     G: GroupCompetitionPort,
 >(
     device: &mut D,
-    mut session: CohortSession<'_, S, G, D::Presentation>,
+    session: CohortSession<'_, S, G, D::Presentation>,
+    config: NativeGameplayConfig,
+    control: &mut C,
+    host_port: &mut H,
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    let mut timing = LegacyTiming(session.discipline);
+    run_cohort_timed(
+        device,
+        CohortSession {
+            group: session.group,
+            network: session.network,
+            states: session.states,
+            merger: session.merger,
+            bgm: session.bgm,
+            discipline: &mut timing,
+            pause: session.pause,
+            end: session.end,
+            delivery: session.delivery,
+            pre_origin_inputs: session.pre_origin_inputs,
+        },
+        config,
+        control,
+        host_port,
+    )
+}
+
+fn run_cohort_timed<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+    T: PumpTiming<D>,
+>(
+    device: &mut D,
+    mut session: CohortSession<'_, S, G, T>,
     mut config: NativeGameplayConfig,
     control: &mut C,
     host_port: &mut H,
 ) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    let logical_domain = session.discipline.logical_domain(config);
+    if let Some(epoch) = session
+        .discipline
+        .audio()
+        .map(|presentation| presentation.authority().epoch())
+    {
+        validate_audio_cohort_start(&mut session, &config, epoch)?;
+    }
     let custom_policy = session
         .states
         .iter()
@@ -744,11 +794,12 @@ pub fn run_cohort_with_results_and_ports<
                 .member_judge(state.player)
                 .expect("roster checked");
             crate::native_policy_admission::validate_initial(judge, &state.gauge)?;
-            crate::native_policy_admission::validate_capture(
+            crate::native_policy_admission::validate_capture_in_domain(
                 judge,
                 state.gauge.profile(),
                 state.capture.as_ref(),
                 &config,
+                logical_domain,
             )?;
             if let Some(competition) = state
                 .competition
@@ -758,11 +809,12 @@ pub fn run_cohort_with_results_and_ports<
                 let header = competition
                     .expected_policy_header()
                     .ok_or("nondefault member competition has no policy identity")?;
-                crate::native_policy_admission::validate_header(
+                crate::native_policy_admission::validate_header_in_domain(
                     judge,
                     state.gauge.profile(),
                     header,
                     &config,
+                    logical_domain,
                 )?;
                 if state
                     .capture
@@ -800,48 +852,80 @@ pub fn run_cohort_with_results_and_ports<
     let mut end_rendered =
         initial_rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
     let mut end_boundary = if let Some(end) = session.end.as_mut() {
-        device.observe_end(end, session.discipline, initial_rendered)?
+        session.discipline.end(device, end, initial_rendered)?
     } else {
         None
     };
     let mut committed = None;
     let mut keyboard = PauseKeyboard::new();
     let mut paused_boundary: Option<LivePauseBoundary> = None;
+    let mut audio_boundary: Option<AudioLivePauseBoundary> = None;
     let mut resume_boundary = None;
     let mut pause_committed = false;
     let mut pause_lag_reached = false;
     let mut pause_announced = false;
     while !host_port.cancelled() && deadline.active(control)? {
         host_port.retry_pause_publication();
-        device.observe(session.discipline)?;
-        let reference = session
-            .discipline
-            .latest_pair()
-            .ok_or("cohort requires native clock relation")?;
+        session.discipline.observe(device)?;
+        let reference = session.discipline.latest_pair();
+        if !T::AUDIO && reference.is_none() {
+            return Err("cohort requires native clock relation".into());
+        }
+        let pause_now = if T::AUDIO {
+            Some(device.host_now()?)
+        } else {
+            None
+        };
         let rendered = device.render_report()?;
         validate_stop_evidence(rendered, &stop_evidence)?;
         if let Some(end) = session.end.as_mut() {
             end_rendered |=
                 rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
-            if let Some(boundary) = device.observe_end(end, session.discipline, rendered)? {
+            if let Some(boundary) = session.discipline.end(device, end, rendered)? {
                 end_boundary = Some(boundary);
             }
         }
-        if config.logical_schedule || config.pause_supported {
+        if let Some(reference) =
+            reference.filter(|_| config.logical_schedule || config.pause_supported)
+        {
             let desired = (config.pause_supported
                 && !end_rendered
                 && (session.pause.phase() == PausePhase::Running || pause_committed)
                 && resume_boundary.is_none())
             .then(|| host_port.pause_requested())
             .filter(|desired| *desired || !device.output_replacement_pending());
-            let update = update_live_pause(
-                session.pause,
-                device.pause_observation(reference)?,
-                rendered,
-                desired,
-                config.song_origin,
-                config.sample_rate,
+            let evidence = session.discipline.pause_evidence(
+                device,
+                reference,
+                pause_now.unwrap_or(reference.target),
             )?;
+            let update = if T::AUDIO {
+                let update = update_live_audio_pause(
+                    session.pause,
+                    evidence,
+                    rendered,
+                    desired,
+                    config.song_origin,
+                    config.sample_rate,
+                )?;
+                if let Some(boundary) = update.boundary {
+                    audio_boundary = Some(boundary);
+                }
+                crate::live_pause::LivePauseUpdate {
+                    requested: update.requested,
+                    boundary: update.boundary.map(|boundary| boundary.original),
+                    observed: update.observed,
+                }
+            } else {
+                update_live_pause(
+                    session.pause,
+                    evidence,
+                    rendered,
+                    desired,
+                    config.song_origin,
+                    config.sample_rate,
+                )?
+            };
             if update.observed && config.pause_supported && !pause_announced {
                 pause_announced = true;
                 host_port.publish_pause(PauseState::Running);
@@ -875,34 +959,30 @@ pub fn run_cohort_with_results_and_ports<
                 }
                 if boundary.paused {
                     if !end_rendered {
-                        let transport = prepare_live_transport(
-                            session.group.transport_mut(),
-                            boundary,
-                            last_song,
-                        )?;
-                        *session.group.transport_mut() = transport;
+                        if !T::AUDIO {
+                            let transport = prepare_live_transport(
+                                session.group.transport_mut(),
+                                boundary,
+                                last_song,
+                            )?;
+                            *session.group.transport_mut() = transport;
+                        }
                         paused_boundary = Some(boundary);
                         pause_committed = false;
                         pause_lag_reached = false;
                     }
                 } else {
-                    let transport =
-                        prepare_live_transport(session.group.transport_mut(), boundary, last_song)?;
-                    let mut discipline = session.discipline.restart_for_resume(
-                        config.stream_origin,
-                        config.playback_origin,
-                        config.origin.domain,
-                        session.pause.song_origin_for_presentation(
-                            config.song_origin,
-                            config.playback_origin,
-                        )?,
-                    )?;
-                    device.seed_resume(&mut discipline, reference)?;
-                    if discipline.latest_pair().is_none() {
-                        return Err("resume presentation seed has no accepted observation".into());
+                    if !T::AUDIO {
+                        let transport = prepare_live_transport(
+                            session.group.transport_mut(),
+                            boundary,
+                            last_song,
+                        )?;
+                        session
+                            .discipline
+                            .resume(device, config, session.pause, reference)?;
+                        *session.group.transport_mut() = transport;
                     }
-                    *session.group.transport_mut() = transport;
-                    *session.discipline = discipline;
                     resume_boundary = Some(boundary.at);
                     paused_boundary = None;
                     pause_committed = false;
@@ -928,12 +1008,18 @@ pub fn run_cohort_with_results_and_ports<
             return Err("cohort host clock changed/regressed".into());
         }
         last_host = Some(now);
+        crate::native_gameplay::validate_audio_availability(
+            device,
+            session.discipline,
+            now,
+            config.origin,
+        )?;
         let frozen_pause = paused_boundary
             .filter(|_| {
                 pause_committed && session.pause.phase() == PausePhase::Paused && !end_rendered
             })
             .map(|boundary| boundary.at);
-        crate::gameplay_presentation::validate_gameplay_host(
+        crate::gameplay_presentation::validate_pump_host(
             device,
             session.discipline,
             now,
@@ -951,7 +1037,7 @@ pub fn run_cohort_with_results_and_ports<
                     .ok_or("cohort pre-origin counter overflow")?;
                 continue;
             }
-            crate::gameplay_presentation::validate_gameplay_host(
+            crate::gameplay_presentation::validate_pump_host(
                 device,
                 session.discipline,
                 host,
@@ -959,6 +1045,16 @@ pub fn run_cohort_with_results_and_ports<
             )?;
             session.delivery.observe(host, now)?;
             session.merger.admit(event, now)?;
+        }
+        if T::AUDIO {
+            if let Some(prefix) = session.merger.watermark(now, lag, batch.backlog)? {
+                session
+                    .discipline
+                    .audio_mut()
+                    .expect("audio timing")
+                    .authority_mut()
+                    .record_acquired_prefix(prefix)?;
+            }
         }
         if (config.logical_schedule || config.pause_supported)
             && (session.pause.last_render_report().is_none()
@@ -974,19 +1070,143 @@ pub fn run_cohort_with_results_and_ports<
             control.wait(WallDuration::from_millis(1))?;
             continue;
         }
-        if session.pause.phase() == PausePhase::Paused && !end_rendered {
-            let boundary = paused_boundary.ok_or("cohort paused boundary unavailable")?;
-            let at = boundary.at;
-            if !pause_committed && lag_reaches(now, at, lag)? {
-                while let Some(event) = session.merger.pop_ready(at)? {
-                    if point(&event).timestamp >= at.timestamp {
-                        keyboard.observe_paused(event)?;
-                    } else if keyboard.accept(&event)? {
-                        validate_pre_pause_input(
-                            session.group.transport_mut(),
-                            boundary,
-                            point(&event),
+        if T::AUDIO {
+            service_audio_cohort(
+                device,
+                &mut session,
+                &mut config,
+                now,
+                batch.backlog,
+                &mut keyboard,
+                &mut paused_boundary,
+                &mut audio_boundary,
+                &mut pause_committed,
+                &mut committed,
+                end_rendered,
+                end_boundary,
+                &mut stop_evidence,
+                host_port,
+            )?;
+            resume_boundary = audio_boundary
+                .filter(|boundary| !boundary.original.paused)
+                .map(|boundary| boundary.original.at);
+            if session.pause.phase() != PausePhase::Running || audio_boundary.is_some() {
+                control.wait(WallDuration::from_millis(1))?;
+                continue;
+            }
+        } else {
+            if session.pause.phase() == PausePhase::Paused && !end_rendered {
+                let boundary = paused_boundary.ok_or("cohort paused boundary unavailable")?;
+                let at = boundary.at;
+                if !pause_committed && lag_reaches(now, at, lag)? {
+                    while let Some(event) = session.merger.pop_ready(at)? {
+                        if point(&event).timestamp >= at.timestamp {
+                            keyboard.observe_paused(event)?;
+                        } else if keyboard.accept(&event)? {
+                            validate_pre_pause_input(
+                                session.group.transport_mut(),
+                                boundary,
+                                point(&event),
+                            )?;
+                            process_with_host(
+                                device,
+                                &mut session,
+                                config,
+                                event,
+                                &mut stop_evidence,
+                                host_port,
+                            )?;
+                        }
+                    }
+                    advance(
+                        device,
+                        &mut session,
+                        config,
+                        at,
+                        &mut stop_evidence,
+                        host_port,
+                    )?;
+                    session.merger.commit(at)?;
+                    committed = Some(at);
+                    pause_committed = true;
+                    host_port.publish_pause(PauseState::Paused);
+                }
+                if pause_committed {
+                    if !pause_lag_reached {
+                        pause_lag_reached = lag_reaches(now, at, lag)?;
+                    }
+                    if pause_lag_reached {
+                        if let Some(frontier) = session.merger.watermark(now, lag, false)? {
+                            while let Some(event) = session.merger.pop_ready(frontier)? {
+                                keyboard.observe_paused(event)?;
+                            }
+                        }
+                    }
+                }
+                if pause_committed
+                    && end_boundary.is_none()
+                    && resume_boundary.is_none()
+                    && !host_port.cancelled()
+                {
+                    session.discipline.publish(
+                        device,
+                        crate::gameplay_presentation::GameplayPauseControl::cohort(session.group),
+                        None,
+                        session.pause,
+                        &mut config,
+                        session.end,
+                        now,
+                    )?;
+                }
+                control.wait(WallDuration::from_millis(1))?;
+                continue;
+            }
+            if let Some(at) = resume_boundary {
+                if !lag_reaches(now, at, lag)? {
+                    control.wait(WallDuration::from_millis(1))?;
+                    continue;
+                }
+            }
+            let frontier = session.merger.watermark(now, lag, false)?;
+            if resume_boundary
+                .is_some_and(|at| frontier.is_none_or(|frontier| frontier.timestamp < at.timestamp))
+            {
+                control.wait(WallDuration::from_millis(1))?;
+                continue;
+            }
+            let was_resuming = resume_boundary.is_some();
+            if !was_resuming {
+                session
+                    .discipline
+                    .correction(now, session.group.transport_mut())?;
+            }
+            if let Some(frontier) = frontier {
+                while let Some(event) = session.merger.pop_ready(frontier)? {
+                    let host = point(&event);
+                    session.discipline.validate_host(host)?;
+                    if let Some(at) = resume_boundary {
+                        if host.timestamp < at.timestamp {
+                            keyboard.observe_paused(event)?;
+                            continue;
+                        }
+                        reconcile(
+                            device,
+                            &mut session,
+                            config,
+                            &mut keyboard,
+                            at,
+                            &mut stop_evidence,
+                            host_port,
                         )?;
+                        resume_boundary = None;
+                        host_port.publish_pause(PauseState::Running);
+                    }
+                    if end_boundary
+                        .is_some_and(|boundary| host.timestamp >= boundary.host.timestamp)
+                    {
+                        continue;
+                    }
+                    if !config.pause_supported || keyboard.accept(&event)? {
                         process_with_host(
                             device,
                             &mut session,
@@ -997,79 +1217,7 @@ pub fn run_cohort_with_results_and_ports<
                         )?;
                     }
                 }
-                advance(
-                    device,
-                    &mut session,
-                    config,
-                    at,
-                    &mut stop_evidence,
-                    host_port,
-                )?;
-                session.merger.commit(at)?;
-                committed = Some(at);
-                pause_committed = true;
-                host_port.publish_pause(PauseState::Paused);
-            }
-            if pause_committed {
-                if !pause_lag_reached {
-                    pause_lag_reached = lag_reaches(now, at, lag)?;
-                }
-                if pause_lag_reached {
-                    if let Some(frontier) = session.merger.watermark(now, lag, false)? {
-                        while let Some(event) = session.merger.pop_ready(frontier)? {
-                            keyboard.observe_paused(event)?;
-                        }
-                    }
-                }
-            }
-            if pause_committed
-                && end_boundary.is_none()
-                && resume_boundary.is_none()
-                && !host_port.cancelled()
-            {
-                device.publish_paused_output(
-                    crate::gameplay_presentation::GameplayOutputContext {
-                        control: crate::gameplay_presentation::GameplayPauseControl::cohort(
-                            session.group,
-                        ),
-                        presentation: session.discipline,
-                        pause: session.pause,
-                        config: &mut config,
-                        end: session.end,
-                    },
-                )?;
-            }
-            control.wait(WallDuration::from_millis(1))?;
-            continue;
-        }
-        if let Some(at) = resume_boundary {
-            if !lag_reaches(now, at, lag)? {
-                control.wait(WallDuration::from_millis(1))?;
-                continue;
-            }
-        }
-        let frontier = session.merger.watermark(now, lag, false)?;
-        if resume_boundary
-            .is_some_and(|at| frontier.is_none_or(|frontier| frontier.timestamp < at.timestamp))
-        {
-            control.wait(WallDuration::from_millis(1))?;
-            continue;
-        }
-        let was_resuming = resume_boundary.is_some();
-        if !was_resuming {
-            session
-                .discipline
-                .update(now, session.group.transport_mut())?;
-        }
-        if let Some(frontier) = frontier {
-            while let Some(event) = session.merger.pop_ready(frontier)? {
-                let host = point(&event);
-                session.discipline.validate_host(host)?;
-                if let Some(at) = resume_boundary {
-                    if host.timestamp < at.timestamp {
-                        keyboard.observe_paused(event)?;
-                        continue;
-                    }
+                if let Some(at) = resume_boundary.take() {
                     reconcile(
                         device,
                         &mut session,
@@ -1079,50 +1227,24 @@ pub fn run_cohort_with_results_and_ports<
                         &mut stop_evidence,
                         host_port,
                     )?;
-                    resume_boundary = None;
                     host_port.publish_pause(PauseState::Running);
                 }
-                if end_boundary.is_some_and(|boundary| host.timestamp >= boundary.host.timestamp) {
-                    continue;
+                if was_resuming {
+                    session
+                        .discipline
+                        .correction(now, session.group.transport_mut())?;
                 }
-                if !config.pause_supported || keyboard.accept(&event)? {
-                    process_with_host(
-                        device,
-                        &mut session,
-                        config,
-                        event,
-                        &mut stop_evidence,
-                        host_port,
-                    )?;
-                }
-            }
-            if let Some(at) = resume_boundary.take() {
-                reconcile(
+                advance(
                     device,
                     &mut session,
                     config,
-                    &mut keyboard,
-                    at,
+                    frontier,
                     &mut stop_evidence,
                     host_port,
                 )?;
-                host_port.publish_pause(PauseState::Running);
+                session.merger.commit(frontier)?;
+                committed = Some(frontier);
             }
-            if was_resuming {
-                session
-                    .discipline
-                    .update(now, session.group.transport_mut())?;
-            }
-            advance(
-                device,
-                &mut session,
-                config,
-                frontier,
-                &mut stop_evidence,
-                host_port,
-            )?;
-            session.merger.commit(frontier)?;
-            committed = Some(frontier);
         }
         let rendered = device.render_report()?;
         validate_stop_evidence(rendered, &stop_evidence)?;
@@ -1713,4 +1835,474 @@ mod fixtures {
         );
         assert!(replay_path(Path::new("run.bkr"), PlayerId(0)).is_err());
     }
+}
+/// Cohort session using original native evidence and one shared audio authority.
+pub type AudioCohortSession<'a, S, G> =
+    CohortSession<'a, S, G, crate::native_audio_presentation::NativeAudioPresentation>;
+
+fn validate_audio_cohort_start<S: SoloCompetitionPort, G: GroupCompetitionPort, P>(
+    session: &mut CohortSession<'_, S, G, P>,
+    config: &NativeGameplayConfig,
+    epoch: crate::audio_authority::AudioAuthorityEpoch,
+) -> NativeGameplayResult<()> {
+    if session.group.clock_domains()
+        != Some((epoch.logical_origin.domain, epoch.stream_origin.domain))
+        || epoch.host_domain != config.origin.domain
+        || epoch.stream_origin != config.stream_origin
+        || session.group.transport_mut().anchor().host_time != epoch.logical_origin.timestamp
+        || session.group.transport_mut().anchor().song_time != config.song_origin
+        || session.group.transport_mut().anchor().rate != beatkernel::transport::Rate::NORMAL
+        || session.group.poisoned()
+        || session
+            .states
+            .iter()
+            .any(|state| session.group.player_gameplay_fence(state.player).is_some())
+    {
+        return Err("audio cohort requires pristine actual logical/raw domains and origin".into());
+    }
+    Ok(())
+}
+
+fn observe_audio_group_result<
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+    T,
+    H: NativeGameplayHost,
+>(
+    result: Result<Vec<PlayerReport>, GroupError>,
+    session: &mut CohortSession<'_, S, G, T>,
+    commit: impl FnOnce(&mut T, &mut InputMerger),
+    stops: &mut OwnedStopEvidence,
+    host: &mut H,
+) -> NativeGameplayResult<()> {
+    match result {
+        Ok(mut reports) => {
+            commit(session.discipline, session.merger);
+            observe_reports_with_competition(
+                &mut reports,
+                session.states,
+                session.group,
+                session.network.as_deref_mut(),
+                stops,
+                host,
+            )
+        }
+        Err(mut error) => {
+            if !error.completed_reports.is_empty() {
+                commit(session.discipline, session.merger);
+            }
+            let observation_error = observe_reports_with_competition(
+                &mut error.completed_reports,
+                session.states,
+                session.group,
+                session.network.as_deref_mut(),
+                stops,
+                host,
+            )
+            .err();
+            Err(Box::new(NativeCohortProcessingError {
+                group_error: error,
+                observation_error,
+            }))
+        }
+    }
+}
+
+fn service_audio_cohort<
+    D: crate::gameplay_presentation::GameplayDevice,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+    H: NativeGameplayHost,
+    T: PumpTiming<D>,
+>(
+    device: &mut D,
+    session: &mut CohortSession<'_, S, G, T>,
+    config: &mut NativeGameplayConfig,
+    now: ClockPoint,
+    backlog: bool,
+    keyboard: &mut PauseKeyboard,
+    paused: &mut Option<LivePauseBoundary>,
+    transition: &mut Option<AudioLivePauseBoundary>,
+    pause_committed: &mut bool,
+    committed: &mut Option<ClockPoint>,
+    end_rendered: bool,
+    end_boundary: Option<crate::native_end::EndBoundary>,
+    stops: &mut OwnedStopEvidence,
+    host: &mut H,
+) -> NativeGameplayResult<()> {
+    let Some(prefix) = session
+        .discipline
+        .audio()
+        .expect("audio timing")
+        .authority()
+        .acquired_prefix()
+    else {
+        return Ok(());
+    };
+    loop {
+        let Some(event) = session.merger.peek_ready(prefix)? else {
+            break;
+        };
+        let at = point(event);
+        if transition.is_some_and(|boundary| {
+            !boundary.original.paused && at.timestamp >= boundary.original.at.timestamp
+        }) {
+            break;
+        }
+        if paused.is_some_and(|boundary| at.timestamp >= boundary.at.timestamp) {
+            keyboard.observe_paused(
+                session
+                    .merger
+                    .pop_ready(prefix)?
+                    .expect("peeked paused input"),
+            )?;
+            continue;
+        }
+        if end_boundary.is_some_and(|boundary| at.timestamp >= boundary.host.timestamp) {
+            session.merger.pop_ready(prefix)?;
+            continue;
+        }
+        let Some(prepared) = session
+            .discipline
+            .audio()
+            .expect("audio timing")
+            .authority()
+            .prepare_input(at, now)?
+        else {
+            break;
+        };
+        if config.pause_supported && !keyboard.accept(event)? {
+            session.merger.pop_ready(prefix)?;
+            continue;
+        }
+        let audio_at = schedule(device, session, *config)?;
+        if audio_at.domain != config.stream_origin.domain {
+            return Err("cohort audio scheduling domain differs".into());
+        }
+        let event = session
+            .merger
+            .pop_ready(prefix)?
+            .expect("prepared earliest original input");
+        let result = match session
+            .group
+            .process_input(event, prepared.mapper(), audio_at)
+        {
+            Ok(InputResult::Processed(reports)) => Ok(reports),
+            Ok(InputResult::Ignored { device }) => {
+                return Err(format!("merged source {device:?} has no cohort owner").into());
+            }
+            Err(error) => Err(error),
+        };
+        observe_audio_group_result(
+            result,
+            session,
+            |timing, _| {
+                timing
+                    .audio_mut()
+                    .expect("audio timing")
+                    .authority_mut()
+                    .commit_input(prepared)
+                    .expect("private current group input token was preflighted");
+            },
+            stops,
+            host,
+        )?;
+    }
+    if !backlog {
+        if let Some(boundary) = *transition {
+            let authority = session
+                .discipline
+                .audio()
+                .expect("audio timing")
+                .authority();
+            let prepared = if boundary.original.paused {
+                authority.prepare_control_cutoff(
+                    boundary.epoch,
+                    boundary.raw_output,
+                    boundary.original.at,
+                    now,
+                    session.merger,
+                )?
+            } else {
+                authority.prepare_resume_control_cutoff(
+                    boundary.epoch,
+                    boundary.raw_output,
+                    boundary.original.at,
+                    now,
+                    session.merger,
+                )?
+            };
+            if let Some(prepared) = prepared {
+                let last_song = session
+                    .states
+                    .iter()
+                    .map(|state| state.last_song)
+                    .max()
+                    .ok_or("audio cohort has no member prefix")?;
+                let transport = prepare_live_audio_transport(
+                    session.group.transport_mut(),
+                    boundary,
+                    &prepared,
+                    last_song,
+                )?;
+                let audio_at = schedule(device, session, *config)?;
+                *session.group.transport_mut() = transport;
+                let result =
+                    session
+                        .group
+                        .advance_to(prepared.output(), &ExplicitDomains, audio_at);
+                observe_audio_group_result(
+                    result,
+                    session,
+                    |timing, merger| {
+                        timing
+                            .audio_mut()
+                            .expect("audio timing")
+                            .authority_mut()
+                            .commit_control_cutoff(prepared, merger)
+                            .expect("private current group control token was preflighted");
+                        *committed = Some(boundary.original.at);
+                    },
+                    stops,
+                    host,
+                )?;
+                if boundary.original.paused {
+                    *pause_committed = true;
+                    host.publish_pause(PauseState::Paused);
+                } else {
+                    for event in keyboard.resume(boundary.original.at)? {
+                        let prepared = session
+                            .discipline
+                            .audio()
+                            .expect("audio timing")
+                            .authority()
+                            .prepare_resume_control_cutoff(
+                                boundary.epoch,
+                                boundary.raw_output,
+                                boundary.original.at,
+                                now,
+                                session.merger,
+                            )?
+                            .ok_or("accepted cohort resume lost authorized control mapping")?;
+                        let mapper = crate::native_gameplay::AudioControlMapper(prepared);
+                        let result = match session.group.process_input(event, &mapper, audio_at) {
+                            Ok(InputResult::Processed(reports)) => Ok(reports),
+                            Ok(InputResult::Ignored { device }) => {
+                                return Err(format!(
+                                    "resume source {device:?} has no cohort owner"
+                                )
+                                .into());
+                            }
+                            Err(error) => Err(error),
+                        };
+                        observe_audio_group_result(
+                            result,
+                            session,
+                            |timing, merger| {
+                                timing
+                                    .audio_mut()
+                                    .expect("audio timing")
+                                    .authority_mut()
+                                    .commit_control_cutoff(prepared, merger)
+                                    .expect("private reconciliation token remains current");
+                            },
+                            stops,
+                            host,
+                        )?;
+                    }
+                    *paused = None;
+                    *pause_committed = false;
+                    host.publish_pause(PauseState::Running);
+                }
+                *transition = None;
+            }
+        }
+    }
+    if *pause_committed && session.pause.phase() == PausePhase::Paused && !end_rendered {
+        if !device.output_clock_suspended() {
+            if let Some(frontier) = session
+                .discipline
+                .audio()
+                .expect("audio timing")
+                .authority()
+                .prepare_held_frontier(now, session.merger)?
+            {
+                *committed = Some(frontier.host());
+                session
+                    .discipline
+                    .audio_mut()
+                    .expect("audio timing")
+                    .authority_mut()
+                    .commit_held_frontier(frontier, session.merger)
+                    .expect("private group held frontier remains current");
+            }
+        }
+        if end_boundary.is_none() && !host.cancelled() {
+            session.discipline.publish(
+                device,
+                crate::gameplay_presentation::GameplayPauseControl::cohort(session.group),
+                Some(session.merger),
+                session.pause,
+                config,
+                session.end,
+                now,
+            )?;
+        }
+        return Ok(());
+    }
+    if transition.is_some()
+        || matches!(
+            session.pause.phase(),
+            PausePhase::Pausing | PausePhase::Resuming
+        )
+    {
+        return Ok(());
+    }
+    if let Some(frontier) = session
+        .discipline
+        .audio()
+        .expect("audio timing")
+        .authority()
+        .prepare_frontier(now, session.merger)?
+    {
+        if let Some(output) = frontier.advance() {
+            let audio_at = schedule(device, session, *config)?;
+            let result = session.group.advance_to(output, &ExplicitDomains, audio_at);
+            observe_audio_group_result(
+                result,
+                session,
+                |timing, merger| {
+                    timing
+                        .audio_mut()
+                        .expect("audio timing")
+                        .authority_mut()
+                        .commit_frontier(frontier, merger)
+                        .expect("private current group frontier was preflighted");
+                    *committed = Some(frontier.host());
+                },
+                stops,
+                host,
+            )?;
+        } else {
+            session
+                .discipline
+                .audio_mut()
+                .expect("audio timing")
+                .authority_mut()
+                .commit_frontier(frontier, session.merger)
+                .expect("private group closure frontier remains current");
+            *committed = Some(frontier.host());
+        }
+    }
+    Ok(())
+}
+
+pub fn run_cohort_audio_with_results_and_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+>(
+    device: &mut D,
+    session: AudioCohortSession<'_, S, G>,
+    config: NativeGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    let mut timing = AudioTiming(session.discipline);
+    run_cohort_timed(
+        device,
+        CohortSession {
+            group: session.group,
+            network: session.network,
+            states: session.states,
+            merger: session.merger,
+            bgm: session.bgm,
+            discipline: &mut timing,
+            pause: session.pause,
+            end: session.end,
+            delivery: session.delivery,
+            pre_origin_inputs: session.pre_origin_inputs,
+        },
+        config,
+        control,
+        host,
+    )
+}
+
+pub fn run_cohort_audio_with_policies_and_results_and_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+>(
+    device: &mut D,
+    mut session: AudioCohortSession<'_, S, G>,
+    config: NativeGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    let epoch = session.discipline.authority().epoch();
+    validate_audio_cohort_start(&mut session, &config, epoch)?;
+    crate::native_gameplay_host::validate_play_policy_members(policies)?;
+    crate::native_policy_admission::validate_config(&config)?;
+    if !(2..=64).contains(&session.states.len())
+        || !session
+            .group
+            .player_ids()
+            .eq(session.states.iter().map(|state| state.player))
+        || !session
+            .states
+            .iter()
+            .map(|state| state.player)
+            .eq(policies.iter().map(|(id, _)| *id))
+    {
+        return Err("selected audio cohort requires exact original-ID roster".into());
+    }
+    let custom = policies
+        .iter()
+        .any(|(_, policy)| policy.gauge() != &GaugeProfile::default());
+    if custom
+        && session
+            .network
+            .as_ref()
+            .is_some_and(|network| !network.policy_agnostic())
+    {
+        return Err("nondefault cohort networking requires policy-aware identities".into());
+    }
+    for (state, (_, policy)) in session.states.iter().zip(policies) {
+        if state.score != ScoreSummary::default() || state.last_song != config.song_origin {
+            return Err("selected audio cohort requires pristine member scores".into());
+        }
+        let judge = session
+            .group
+            .member_judge(state.player)
+            .ok_or("selected audio member lacks judge")?;
+        let header = state
+            .competition
+            .as_ref()
+            .filter(|port| !port.policy_agnostic())
+            .map(|port| {
+                port.expected_policy_header()
+                    .ok_or("selected audio competition lacks identity")
+            })
+            .transpose()?;
+        crate::native_policy_admission::validate_selected_in_domain(
+            judge,
+            &state.gauge,
+            policy,
+            state.capture.as_ref(),
+            header,
+            &config,
+            epoch.logical_origin.domain,
+        )?;
+    }
+    if !custom {
+        host.prepare_play_policies(policies)?;
+    }
+    let mut resolved = crate::native_gameplay_bridge::ResolvedGameplayHost { host, policies };
+    run_cohort_audio_with_results_and_ports(device, session, config, control, &mut resolved)
 }

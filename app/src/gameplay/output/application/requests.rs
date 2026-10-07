@@ -1,13 +1,13 @@
 //! Cold correlated UI admission, separate from output retirement and publication.
+use crate::gameplay::output::ports::OutputUiPort;
 use crate::{
-    gameplay::output::domain::control::{OutputCapability, OutputRequest, OutputReply},
     gameplay::output::application::owner::GameplayOutputOwner,
-    gameplay_presentation::GameplayOutputContext,
-    gameplay::output::ports::OutputReplacementBackend,
+    gameplay::output::domain::control::{OutputCapability, OutputReply, OutputRequest},
+    gameplay::output::ports::{OriginalNativeOutputBackend, OutputReplacementBackend},
+    gameplay_presentation::{GameplayAudioOutputContext, GameplayOutputContext},
 };
 use beatkernel::time::ClockPoint;
 use std::io;
-use crate::gameplay::output::ports::OutputUiPort;
 pub struct GameplayOutputUi<U: OutputUiPort> {
     ui: U,
     flight: Option<u64>,
@@ -51,6 +51,36 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
     where
         B::Error: std::error::Error + 'static,
     {
+        self.service_with(owner, map, applied, |owner| {
+            owner.publish_paused(context, now)
+        })
+    }
+    /// Join the same correlated UI request to original-evidence audio publication.
+    pub fn service_audio<B: OriginalNativeOutputBackend>(
+        &mut self,
+        owner: &mut GameplayOutputOwner<B>,
+        context: GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+        map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
+        applied: &mut impl FnMut(&B::Output) -> Result<OutputCapability, String>,
+    ) -> Result<bool, Box<dyn std::error::Error>>
+    where
+        B::Error: std::error::Error + 'static,
+    {
+        self.service_with(owner, map, applied, |owner| {
+            owner.publish_paused_audio(context, now)
+        })
+    }
+    fn service_with<B: OutputReplacementBackend>(
+        &mut self,
+        owner: &mut GameplayOutputOwner<B>,
+        map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
+        applied: &mut impl FnMut(&B::Output) -> Result<OutputCapability, String>,
+        publish: impl FnOnce(&mut GameplayOutputOwner<B>) -> Result<bool, Box<dyn std::error::Error>>,
+    ) -> Result<bool, Box<dyn std::error::Error>>
+    where
+        B::Error: std::error::Error + 'static,
+    {
         if !self.flush()? {
             return Ok(false);
         }
@@ -88,7 +118,7 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
                 return Ok(false);
             }
         }
-        match owner.publish_paused(context, now) {
+        match publish(owner) {
             Ok(false) => Ok(false),
             Ok(true) => {
                 let id = self.flight.take().expect("accepted output request");
@@ -117,3 +147,7 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "audio_requests_fixtures.rs"]
+mod audio_fixtures;

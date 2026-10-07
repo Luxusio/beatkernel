@@ -7,7 +7,7 @@ use crate::{
 use beatkernel::{
     judge::JudgeEngine,
     replay::{ReplayHeader, REPLAY_VERSION},
-    time::Timestamp,
+    time::{Timestamp, ClockDomainId},
 };
 
 pub(crate) fn validate_initial(judge: &JudgeEngine, gauge: &BmsGauge) -> NativeGameplayResult<()> {
@@ -19,17 +19,18 @@ pub(crate) fn validate_initial(judge: &JudgeEngine, gauge: &BmsGauge) -> NativeG
     }
     Ok(())
 }
-pub(crate) fn validate_capture(
+pub(crate) fn validate_capture_in_domain(
     judge: &JudgeEngine,
     gauge: &GaugeProfile,
     capture: Option<&LiveReplayCapture>,
     config: &NativeGameplayConfig,
+    logical_domain: ClockDomainId,
 ) -> NativeGameplayResult<()> {
     if let Some(capture) = capture {
         if !capture.records().is_empty() {
             return Err("native policy capture is already processed".into());
         }
-        validate_header(judge, gauge, capture.header(), config)?;
+        validate_header_in_domain(judge, gauge, capture.header(), config, logical_domain)?;
     }
     Ok(())
 }
@@ -39,10 +40,19 @@ pub(crate) fn validate_header(
     header: &ReplayHeader,
     config: &NativeGameplayConfig,
 ) -> NativeGameplayResult<()> {
+    validate_header_in_domain(judge, gauge, header, config, config.origin.domain)
+}
+pub(crate) fn validate_header_in_domain(
+    judge: &JudgeEngine,
+    gauge: &GaugeProfile,
+    header: &ReplayHeader,
+    config: &NativeGameplayConfig,
+    logical_domain: ClockDomainId,
+) -> NativeGameplayResult<()> {
     if header.version != REPLAY_VERSION
         || header.seed != 0
         || header.options.len() > 4096
-        || header.normalized_clock != config.origin.domain
+        || header.normalized_clock != logical_domain
     {
         return Err("native policy header version, capacity or clock differs".into());
     }
@@ -106,17 +116,36 @@ pub(crate) fn validate_selected(
     competition: Option<&ReplayHeader>,
     config: &NativeGameplayConfig,
 ) -> NativeGameplayResult<()> {
+    validate_selected_in_domain(
+        judge,
+        gauge,
+        policy,
+        capture,
+        competition,
+        config,
+        config.origin.domain,
+    )
+}
+pub(crate) fn validate_selected_in_domain(
+    judge: &JudgeEngine,
+    gauge: &BmsGauge,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    capture: Option<&LiveReplayCapture>,
+    competition: Option<&ReplayHeader>,
+    config: &NativeGameplayConfig,
+    logical_domain: ClockDomainId,
+) -> NativeGameplayResult<()> {
     validate_initial(judge, gauge)?;
     if judge.profile() != policy.judge() || gauge.profile() != policy.gauge() {
         return Err("selected native policy differs from actual judge or gauge".into());
     }
-    validate_capture(judge, gauge.profile(), capture, config)?;
+    validate_capture_in_domain(judge, gauge.profile(), capture, config, logical_domain)?;
     for header in capture
         .map(LiveReplayCapture::header)
         .into_iter()
         .chain(competition)
     {
-        validate_header(judge, gauge.profile(), header, config)?;
+        validate_header_in_domain(judge, gauge.profile(), header, config, logical_domain)?;
         if crate::replay_playback::decode_section_setup(&header.options)?
             .judgments
             .as_ref()

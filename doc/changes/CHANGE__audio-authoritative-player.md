@@ -1,7 +1,8 @@
 # Audio-authoritative player migration
 
 Status: shared foundation, Step integration and browser adapter migration are
-implemented; native production migration, lifecycle integration and independent
+implemented, as are common native audio loops and held-output publication;
+native launcher/startup selection and independent
 final QA remain pending. The browser acquisition-envelope refusal has been
 corrected and passed three independent pre-review Chromium smoke executions.
 
@@ -37,7 +38,7 @@ acquisition/service samples.
 These are development diagnostics, not ordered independent QA acceptance.
 
 Current Rust app library/bin regression with desktop and WebTransport passes
-2,091 tests with two existing ignored tests. This does not replace the pending
+2,158 tests with two existing ignored tests. This does not replace the pending
 full workspace and platform-target checks or formal QA.
 
 The native presentation validator stages original WASAPI, supplied-pair and
@@ -54,8 +55,8 @@ and authority refusal without native metadata mutation. Primed replacement and
 same-epoch restart stage two original associations inline and preserve every
 committed watermark on publication. Seven new priming tests pass within the
 43-test authority/Step/browser filter. Neither priming nor a native observation
-alone grants gameplay advancement. These foundations are not yet connected to
-the native production pumps or held-output replacement state machine.
+alone grants gameplay advancement. The shared loop and publication integration
+below connects these foundations; actual native launcher selection is pending.
 
 Original observation acquisition now runs through an opt-in static output port
 implemented by the native adapters and selected Windows output owner. Remix and
@@ -66,8 +67,8 @@ filter (two existing tests ignored). Windows without optional ASIO and macOS
 all-target Rust checks pass using C/archive stubs: these are source/type checks,
 not native SDK builds or hardware execution. Optional ASIO SDK compilation
 remains unverified. Linux all-target and browser WASM checks also pass. This port
-is implemented but not yet selected by the native
-gameplay pumps, and held-output audio publication still needs integration.
+is selected by the new common audio loop/publication APIs; the existing native
+launchers still need to select those APIs.
 
 Native pause/resume now exposes the committed original physical output cutoff
 alongside its conservative HOST boundary and epoch. Logical Transport staging
@@ -77,13 +78,33 @@ Control commitment records only an actual Runtime operation, while explicit held
 frontier servicing closes acquisition/presentation without advancing Runtime or
 inventing an input occurrence. The 17 new lifecycle/control tests pass within
 the 60-test audio-authority filter; the 79-test pause filter also passes. These
-overlapping filters are not summed. Browser WASM checking also passes. The native gameplay pumps and held-output
-publication still need to select these APIs; AC008 remains partial.
+overlapping filters are not summed. Browser WASM checking also passes. Common
+audio loops and held publication select these APIs; platform startup/entrypoint
+selection is still pending, so full production AC008 acceptance remains partial.
+
+The existing solo/cohort business loops now use static legacy/audio timing
+wrappers, with no duplicate judge/pause/completion loop or instantiated legacy
+estimator in audio sessions. Twelve genuine memory-device tests pass for mapped
+original inputs, raw scheduling, logical capture/score, future ASIO associations,
+pause/resume, finite completion and report/observer failure ordering. Actual
+Runtime domain identity is checked before IO even without capture. Original
+input at a resume cutoff remains queued until after the control operation.
+
+The same output controller stages held audio replacement using two original
+associations, preserves committed watermarks and original ASIO end evidence,
+and releases the lease after all ownership/cache swaps. Ten independent
+publication tests pass. Four genuine UI request tests pass for correlated audio
+publication, mapping refusal, reply backpressure and error sanitization. All
+new tests also pass in the full app library/bin regression above. Windows and
+macOS all-target source/type checks and browser WASM checking pass; optional
+ASIO SDK/hardware execution is still unverified. Generic native launchers have
+not yet switched their startup/calibration, normalized headers and live calls.
 
 ## Known ceiling
 
-Native pumps still need to select the new authority and join actual output
-evidence with acquired prefixes. Browser production selects the authority and
+Native launchers still need to select the tested common audio loops, replace
+legacy startup/calibration and construct logical-domain capture/competition.
+Browser production selects the authority and
 has passed bounded actual-play diagnostics; final independent review and QA
 remain required. Generated frames cannot replace presentation.
 Generic estimator APIs remain available for explicit legacy consumers; this is

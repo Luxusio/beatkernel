@@ -74,6 +74,46 @@ impl NativeEnd {
         report: RenderReport,
         pair: ClockPair,
     ) -> Result<Self, EndError> {
+        self.validate_output_restart(basis, report, pair)?;
+        let mut next = self.restart_relation();
+        next.observe(Some(report), pair)?;
+        Ok(next)
+    }
+
+    /// Stages an ASIO stream relation with its original render and HOST upper frontier.
+    /// The active owner remains unchanged if any configuration or chronology check fails.
+    pub fn restart_for_output_asio(
+        &self,
+        basis: beatkernel::audio::OutputFrameBasis,
+        observation: beatkernel_platform::audio::asio::AsioPresentationObservation,
+    ) -> Result<Self, EndError> {
+        self.validate_output_restart(
+            basis,
+            observation.render,
+            ClockPair {
+                source: observation.output,
+                target: observation.host.after,
+            },
+        )?;
+        let mut next = self.restart_relation();
+        next.observe_asio(observation)?;
+        Ok(next)
+    }
+
+    fn restart_relation(&self) -> Self {
+        let mut next = self.clone();
+        next.lower = None;
+        next.last_pair = None;
+        next.last_report = None;
+        next
+    }
+
+    fn validate_output_restart(
+        &self,
+        basis: beatkernel::audio::OutputFrameBasis,
+        report: RenderReport,
+        pair: ClockPair,
+    ) -> Result<(), EndError> {
         if self.physical.is_some()
             || self.emitted
             || report.playback_end_physical_frame.is_some()
@@ -99,12 +139,7 @@ impl NativeEnd {
             return Err(EndError("replacement pair precedes new stream"));
         }
         self.check_report(report)?;
-        let mut next = self.clone();
-        next.lower = None;
-        next.last_pair = None;
-        next.last_report = None;
-        next.observe(Some(report), pair)?;
-        Ok(next)
+        Ok(())
     }
     /// Configures an immutable initial physical-frame prefix before observation.
     pub fn with_start_frame(mut self, frame: u64) -> Result<Self, EndError> {

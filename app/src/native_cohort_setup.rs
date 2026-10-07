@@ -66,7 +66,14 @@ pub fn prepare_cohort(
     competition: &CompetitionOptions,
     config: &CohortPreparation<'_>,
 ) -> NativeGameplayResult<PreparedCohort> {
-    prepare_cohort_inner(prepared, assignments, competition, config, None)
+    prepare_cohort_inner(
+        prepared,
+        assignments,
+        competition,
+        config,
+        config.host,
+        None,
+    )
 }
 pub fn prepare_cohort_with_policy(
     prepared: &PreparedBms,
@@ -82,13 +89,49 @@ pub fn prepare_cohort_with_policy(
     {
         return Err("cohort policy windows differ from native configuration".into());
     }
-    prepare_cohort_inner(prepared, assignments, competition, config, Some(policy))
+    prepare_cohort_inner(
+        prepared,
+        assignments,
+        competition,
+        config,
+        config.host,
+        Some(policy),
+    )
 }
+/// Prepares audio-authoritative cohort identities on the normalized logical domain.
+pub fn prepare_audio_cohort_with_policy(
+    prepared: &PreparedBms,
+    assignments: &[(PlayerId, DeviceId)],
+    competition: &CompetitionOptions,
+    config: &CohortPreparation<'_>,
+    logical_domain: ClockDomainId,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+) -> NativeGameplayResult<PreparedCohort> {
+    crate::native_judge::validate_policy_competition(policy.selection(), competition)?;
+    if policy.judge().max_early().as_nanos() != config.early
+        || policy.judge().max_late().as_nanos() != config.late
+        || policy.judge().input_offset().as_nanos() != config.offset
+        || logical_domain == config.host
+        || logical_domain == config.output
+    {
+        return Err("audio cohort policy or clock configuration differs".into());
+    }
+    prepare_cohort_inner(
+        prepared,
+        assignments,
+        competition,
+        config,
+        logical_domain,
+        Some(policy),
+    )
+}
+
 fn prepare_cohort_inner(
     prepared: &PreparedBms,
     assignments: &[(PlayerId, DeviceId)],
     competition: &CompetitionOptions,
     config: &CohortPreparation<'_>,
+    logical_domain: ClockDomainId,
     policy: Option<&crate::play_policy::ResolvedPlayPolicy>,
 ) -> NativeGameplayResult<PreparedCohort> {
     admit_cohort(assignments.len(), false)?;
@@ -186,7 +229,7 @@ fn prepare_cohort_inner(
                 &prepared.source,
                 &member.judge,
                 policy,
-                config.host,
+                logical_domain,
                 config.start,
                 config.chart_seed,
                 config.end,
@@ -195,7 +238,7 @@ fn prepare_cohort_inner(
             None => prepare_section_capture_for_source(
                 &prepared.source,
                 &member.judge,
-                config.host,
+                logical_domain,
                 config.start,
                 config.chart_seed,
                 config.end,
@@ -227,7 +270,7 @@ fn prepare_cohort_inner(
                 &prepared.source,
                 &member.judge,
                 policy,
-                config.host,
+                logical_domain,
                 config.start,
                 config.chart_seed,
                 config.end,
@@ -237,7 +280,7 @@ fn prepare_cohort_inner(
                 &saved_options,
                 &prepared.source,
                 &member.judge,
-                config.host,
+                logical_domain,
                 config.start,
                 config.chart_seed,
             )?,
@@ -248,7 +291,7 @@ fn prepare_cohort_inner(
             competition,
             &prepared.source,
             &configs,
-            config.host,
+            logical_domain,
             config.start,
             config.chart_seed,
             config.end,
@@ -360,6 +403,59 @@ pub fn activate_cohort_with_sounds(
     }
     Ok((group, merger))
 }
+/// Activates a cohort with original HOST acquisition and distinct logical/audio axes.
+#[allow(clippy::too_many_arguments)]
+pub fn activate_audio_cohort_with_sounds(
+    configs: Vec<MemberConfig>,
+    reserved: &[VoiceId],
+    host_origin: ClockPoint,
+    raw_output: ClockDomainId,
+    logical_origin: ClockPoint,
+    transport: Transport,
+    producer: CommandProducer,
+    end: Option<Timestamp>,
+    input_sounds: Vec<(PlayerId, InputSoundTimeline)>,
+    hazard_sounds: Vec<(PlayerId, HazardSoundTimeline)>,
+) -> NativeGameplayResult<(RuntimeGroup, InputMerger)> {
+    admit_cohort(configs.len(), false)?;
+    if host_origin.domain == raw_output
+        || logical_origin.domain == raw_output
+        || logical_origin.domain == host_origin.domain
+        || transport.anchor().host_time != logical_origin.timestamp
+        || transport.anchor().rate != beatkernel::transport::Rate::NORMAL
+    {
+        return Err("invalid audio cohort activation axes or anchor".into());
+    }
+    let devices = configs
+        .iter()
+        .map(|member| {
+            member
+                .device
+                .ok_or("cohort member lacks assigned native device")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let merger = InputMerger::new(host_origin.domain, host_origin, devices, 65536)?;
+    let mut group = RuntimeGroup::new(
+        logical_origin.domain,
+        raw_output,
+        transport,
+        producer,
+        configs,
+        4096,
+        reserved,
+    )?;
+    if !input_sounds.is_empty() {
+        group.configure_input_sounds(input_sounds)?;
+    }
+    if !hazard_sounds.is_empty() {
+        group.configure_hazard_sounds(hazard_sounds)?;
+    }
+    if let Some(end) = end {
+        group.set_song_end(end)?;
+    }
+    Ok((group, merger))
+}
+
 /// Call after both output and acquisition cleanup, before independent saves.
 /// A malformed terminal snapshot still invokes owner cleanup and retains errors.
 pub fn finish_cohort_network(

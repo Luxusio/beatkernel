@@ -89,3 +89,39 @@ must prove the legacy estimator entry point is unused and cover both switching
 branches, remix forwarding, read failures and interval preservation. This port
 does not by itself select audio authority in the production gameplay pumps or
 implement held-output publication.
+
+Held replacement uses the existing retire/recover/open/start/cancel controller
+with an audio timing variant. Collect two original progressing associations and
+validate an actually paused render while retaining the producer lease. Stage
+native metadata with a cold one-record validator and inline candidate evidence;
+do not construct a new active authority or discard its committed watermarks.
+Prepare the authority publication token against current state at readiness,
+after paused input drains, so continued acquisition while waiting does not bind
+the candidate to an obsolete prefix.
+
+Publication revalidates current native identity, exact frame basis, epoch,
+freshness and pending input, and stages pause/config/end checks before commit.
+Commit authority then swap native metadata and ownership without another
+fallible operation or callback. Release the held producer last. Refusal returns
+the ready output and lease with active owners unchanged. One association or a
+future/stale candidate cannot authorize publication. Original ASIO intervals
+remain necessary for pause/end; midpoint substitution is forbidden. This
+publication variant is implemented and portably tested; its native production
+selection is being integrated.
+
+Retain the selected two original candidate associations while waiting for their
+HOST/ASIO upper coverage; continually chasing newer latency-shifted future pairs
+can starve readiness. Keep status/render/timeout checks bounded. Once old output
+is retired, pin its committed presentation and closed input prefix while
+acquisition and paused keyboard reconciliation continue. Build readiness tokens
+against current acquisition state after draining. The replacement controller's
+bounded timeout governs this suspension; old source observations cannot gain
+authority and playback cannot resume while publication is pending.
+
+Output-setting UI service forwards explicitly to the audio publication context
+through the same correlated request/reply lifecycle. Preserve typed device,
+buffer, remix and clock-bound mapping, capability reporting, busy refusal and
+reply backpressure. A blocked reply cannot consume a new request or publish the
+same epoch again. Keep existing sanitization and legacy service behavior; no
+second UI queue or estimator context is introduced. Concrete native UI adapters
+select this forwarding before production audio playback can switch output.

@@ -181,6 +181,96 @@ fn marks(authority: &AudioAuthority) -> [Option<ClockPoint>; 5] {
 }
 
 #[test]
+fn resume_control_preserves_equal_cutoff_original_until_after_real_control_report() {
+    let mut seed = genuine_seed(false, 4);
+    let pause = seed
+        .authority
+        .prepare_control_cutoff(1, raw(1200), host(150), host(250), &seed.merger)
+        .unwrap()
+        .unwrap();
+    seed.runtime
+        .transport_mut()
+        .pause(pause.output().timestamp)
+        .unwrap();
+    let paused = seed
+        .runtime
+        .advance_to(pause.output(), &Identity, raw(1400))
+        .unwrap();
+    assert_eq!(paused.song_time, Timestamp::from_nanos(200));
+    seed.authority
+        .commit_control_cutoff(pause, &seed.merger)
+        .unwrap();
+    let mut original = event(200, 2);
+    if let PhysicalInputEvent::Button(button) = &mut original {
+        button.state = ButtonState::Up;
+    }
+    seed.merger.admit(original.clone(), host(250)).unwrap();
+    let before = state(&seed.authority);
+    assert!(
+        seed.authority
+            .prepare_control_cutoff(1, raw(1300), host(200), host(250), &seed.merger)
+            .unwrap()
+            .is_none(),
+        "pause retains its inclusive input guard"
+    );
+    let resume = seed
+        .authority
+        .prepare_resume_control_cutoff(1, raw(1300), host(200), host(250), &seed.merger)
+        .unwrap()
+        .unwrap();
+    assert!(resume.is_resume());
+    assert_eq!(state(&seed.authority), before);
+    assert_eq!(seed.merger.pending(), 1);
+    assert_eq!(seed.merger.peek_ready(host(250)).unwrap(), Some(&original));
+    seed.runtime
+        .transport_mut()
+        .resume(resume.output().timestamp)
+        .unwrap();
+    let resumed = seed
+        .runtime
+        .advance_to(resume.output(), &Identity, raw(1450))
+        .unwrap();
+    assert_eq!(resumed.song_time, paused.song_time);
+    assert!(resumed.input.is_none());
+    seed.authority
+        .commit_control_cutoff(resume, &seed.merger)
+        .unwrap();
+    assert_eq!(seed.authority.committed_input_host(), Some(host(125)));
+    assert_eq!(seed.merger.pending(), 1);
+    let mapped = seed
+        .authority
+        .prepare_input(host(200), host(250))
+        .unwrap()
+        .unwrap();
+    let packet = seed.merger.pop_ready(host(250)).unwrap().unwrap();
+    assert_eq!(packet, original);
+    let input = seed
+        .runtime
+        .process_input(packet, mapped.mapper(), raw(1450))
+        .unwrap();
+    let recorded = input.input.as_ref().unwrap().meta();
+    assert_eq!(recorded.clock_domain, ClockDomainId(3));
+    assert_eq!(recorded.timestamp, logical(5300).timestamp);
+    assert_eq!(recorded.original_clock_point, Some(host(200)));
+    assert_eq!(recorded.source, DeviceId(u64::MAX));
+    assert_eq!(recorded.sequence, 2);
+    seed.authority.commit_input(mapped).unwrap();
+    assert_eq!(seed.authority.committed_input_host(), Some(host(200)));
+    assert_eq!(seed.merger.pending(), 0);
+
+    let mut earlier = genuine_seed(false, 4);
+    earlier.merger.admit(event(199, 2), host(250)).unwrap();
+    let unchanged = state(&earlier.authority);
+    assert!(earlier
+        .authority
+        .prepare_resume_control_cutoff(1, raw(1300), host(200), host(250), &earlier.merger)
+        .unwrap()
+        .is_none());
+    assert_eq!(state(&earlier.authority), unchanged);
+    assert_eq!(earlier.merger.pending(), 1);
+}
+
+#[test]
 fn native_control_uses_direct_raw_boundary_after_real_runtime_report_and_only_commits_operation() {
     let mut seed = genuine_seed(true, 4);
     assert_eq!(

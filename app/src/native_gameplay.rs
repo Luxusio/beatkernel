@@ -3,10 +3,13 @@ use crate::{
     bgm::{BgmFeedReport, BgmFeeder},
     completion::SongCompletion,
     gameplay_competition::SoloCompetitionPort,
-    gameplay_presentation::GameplayPresentationPort,
+    gameplay_presentation::{PumpTiming, LegacyTiming, AudioTiming},
+    local_input::InputMerger,
+    native_audio_presentation::NativeAudioPresentation,
     gauge::{BmsGauge, GaugeError, GaugeProfile},
     live_pause::{
-        LivePauseBoundary, prepare_live_transport, update_live_pause, validate_pre_pause_input,
+        LivePauseBoundary, AudioLivePauseBoundary, prepare_live_transport, update_live_pause,
+        update_live_audio_pause, prepare_live_audio_transport, validate_pre_pause_input,
     },
     local_runtime::SoloRuntime,
     native_end::{EndBoundary, NativeEnd},
@@ -37,7 +40,8 @@ use std::{collections::VecDeque, error::Error, fmt, time::Duration as WallDurati
 pub use crate::native_gameplay_bridge::{
     NativeGameplayDevice, NativeGameplaySession, run_gameplay, run_gameplay_with_control,
     run_gameplay_with_result, run_gameplay_with_result_and_score,
-    run_gameplay_with_policy_and_result_and_score,
+    run_gameplay_with_policy_and_result_and_score, NativeAudioGameplaySession,
+    run_gameplay_audio_with_result, run_gameplay_audio_with_policy_and_result_and_score,
 };
 
 pub type NativeGameplayResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -87,6 +91,12 @@ pub struct GameplaySession<'a, S, P> {
     pub competition: &'a mut Option<S>,
     pub delivery: &'a mut InputDeliveryTelemetry,
     pub pre_origin_inputs: &'a mut u64,
+}
+
+/// Original-audio solo state with its one retained acquisition merger.
+pub struct AudioGameplaySession<'a, S> {
+    pub session: GameplaySession<'a, S, NativeAudioPresentation>,
+    pub merger: &'a mut InputMerger,
 }
 
 /// Independent observation failures retain the complete committed operation.
@@ -179,9 +189,9 @@ fn watermark(
         timestamp: Timestamp::from_nanos(i64::try_from(at)?),
     }))
 }
-fn schedule<D: crate::gameplay_presentation::GameplayDevice, S>(
+fn schedule<D: crate::gameplay_presentation::GameplayDevice, S, P>(
     device: &mut D,
-    session: &GameplaySession<'_, S, D::Presentation>,
+    session: &GameplaySession<'_, S, P>,
     config: NativeGameplayConfig,
 ) -> NativeGameplayResult<ClockPoint> {
     if config.logical_schedule {
@@ -280,9 +290,10 @@ fn process<
     D: crate::gameplay_presentation::GameplayDevice,
     S: SoloCompetitionPort,
     H: NativeGameplayHost,
+    P,
 >(
     device: &mut D,
-    session: &mut GameplaySession<'_, S, D::Presentation>,
+    session: &mut GameplaySession<'_, S, P>,
     config: NativeGameplayConfig,
     event: PhysicalInputEvent,
     evidence: &mut OwnedStopEvidence,
@@ -461,11 +472,66 @@ pub fn run_gameplay_with_result_and_ports<
     S: SoloCompetitionPort,
 >(
     device: &mut D,
-    mut session: GameplaySession<'_, S, D::Presentation>,
+    session: GameplaySession<'_, S, D::Presentation>,
+    config: NativeGameplayConfig,
+    control: &mut C,
+    host_port: &mut H,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    let mut timing = LegacyTiming(session.discipline);
+    let session = GameplaySession {
+        runtime: session.runtime,
+        gauge: session.gauge,
+        bgm: session.bgm,
+        pause: session.pause,
+        end: session.end,
+        completion: session.completion,
+        capture: session.capture,
+        competition: session.competition,
+        delivery: session.delivery,
+        pre_origin_inputs: session.pre_origin_inputs,
+        discipline: &mut timing,
+    };
+    run_gameplay_timed(device, session, None, config, control, host_port)
+}
+
+fn run_gameplay_timed<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    T: PumpTiming<D>,
+>(
+    device: &mut D,
+    mut session: GameplaySession<'_, S, T>,
+    mut merger: Option<&mut InputMerger>,
     mut config: NativeGameplayConfig,
     control: &mut C,
     host_port: &mut H,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    if T::AUDIO {
+        let epoch = session
+            .discipline
+            .audio()
+            .expect("audio timing")
+            .authority()
+            .epoch();
+        if session.runtime.clock_domains()
+            != Some((epoch.logical_origin.domain, epoch.stream_origin.domain))
+            || epoch.host_domain != config.origin.domain
+            || epoch.stream_origin != config.stream_origin
+            || session.runtime.transport_mut().anchor().host_time != epoch.logical_origin.timestamp
+            || session.runtime.transport_mut().anchor().song_time != config.song_origin
+            || session.runtime.transport_mut().anchor().rate != beatkernel::transport::Rate::NORMAL
+            || session.runtime.poisoned()
+            || session.runtime.gameplay_fence().is_some()
+        {
+            return Err("audio gameplay requires the actual pristine logical/raw Runtime domains and origin".into());
+        }
+        if merger.as_ref().expect("audio merger").source_capacity() != 4096 {
+            return Err("audio solo requires the bounded dynamic actual-source merger".into());
+        }
+    }
+    let logical_domain = session.discipline.logical_domain(config);
     let custom_policy = session.gauge.profile() != &GaugeProfile::default();
     if config.origin.domain == config.stream_origin.domain
         || config.stream_origin.domain != config.playback_origin.domain
@@ -482,11 +548,12 @@ pub fn run_gameplay_with_result_and_ports<
             return Err("nondefault native runtime is poisoned or already fenced".into());
         }
         crate::native_policy_admission::validate_initial(session.runtime.judge(), session.gauge)?;
-        crate::native_policy_admission::validate_capture(
+        crate::native_policy_admission::validate_capture_in_domain(
             session.runtime.judge(),
             session.gauge.profile(),
             session.capture.as_ref(),
             &config,
+            logical_domain,
         )?;
         if let Some(competition) = session
             .competition
@@ -496,11 +563,12 @@ pub fn run_gameplay_with_result_and_ports<
             let header = competition
                 .expected_policy_header()
                 .ok_or("nondefault native competition has no policy identity")?;
-            crate::native_policy_admission::validate_header(
+            crate::native_policy_admission::validate_header_in_domain(
                 session.runtime.judge(),
                 session.gauge.profile(),
                 header,
                 &config,
+                logical_domain,
             )?;
             if session
                 .capture
@@ -525,6 +593,7 @@ pub fn run_gameplay_with_result_and_ports<
     let mut last_progress = None;
     let mut last_host = None;
     let mut keyboard = PauseKeyboard::new();
+    let mut audio_boundary: Option<AudioLivePauseBoundary> = None;
     let mut paused_boundary: Option<LivePauseBoundary> = None;
     let mut resume_boundary: Option<ClockPoint> = None;
     let mut pause_committed = false;
@@ -535,35 +604,65 @@ pub fn run_gameplay_with_result_and_ports<
     let mut stop_barrier = NativeStopBarrier::default();
     while !host_port.cancelled() && deadline.active(control)? {
         host_port.retry_pause_publication();
-        device.observe(session.discipline)?;
-        let reference = session
-            .discipline
-            .latest_pair()
-            .ok_or("gameplay requires native clock relation")?;
+        session.discipline.observe(device)?;
+        let reference = session.discipline.latest_pair();
+        if !T::AUDIO && reference.is_none() {
+            return Err("gameplay requires native clock relation".into());
+        }
+        let pause_now = if T::AUDIO {
+            Some(device.host_now()?)
+        } else {
+            None
+        };
         let rendered = device.render_report()?;
         validate_stop_evidence(rendered, &stop_evidence)?;
         if let Some(end) = session.end.as_mut() {
             end_rendered |=
                 rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
-            if let Some(boundary) = device.observe_end(end, session.discipline, rendered)? {
+            if let Some(boundary) = session.discipline.end(device, end, rendered)? {
                 end_boundary = Some(boundary);
             }
         }
-        if config.logical_schedule || config.pause_supported {
+        if (config.logical_schedule || config.pause_supported) && reference.is_some() {
             let desired = (config.pause_supported
                 && !end_rendered
                 && (session.pause.phase() == PausePhase::Running || pause_committed)
                 && resume_boundary.is_none())
             .then(|| host_port.pause_requested())
             .filter(|desired| *desired || !device.output_replacement_pending());
-            let update = update_live_pause(
-                session.pause,
-                device.pause_observation(reference)?,
-                rendered,
-                desired,
-                config.song_origin,
-                config.sample_rate,
+            let reference = reference.expect("pause has accepted reference");
+            let evidence = session.discipline.pause_evidence(
+                device,
+                reference,
+                pause_now.unwrap_or(reference.target),
             )?;
+            let update = if T::AUDIO {
+                let update = update_live_audio_pause(
+                    session.pause,
+                    evidence,
+                    rendered,
+                    desired,
+                    config.song_origin,
+                    config.sample_rate,
+                )?;
+                if let Some(boundary) = update.boundary {
+                    audio_boundary = Some(boundary);
+                }
+                crate::live_pause::LivePauseUpdate {
+                    requested: update.requested,
+                    boundary: update.boundary.map(|value| value.original),
+                    observed: update.observed,
+                }
+            } else {
+                update_live_pause(
+                    session.pause,
+                    evidence,
+                    rendered,
+                    desired,
+                    config.song_origin,
+                    config.sample_rate,
+                )?
+            };
             if update.observed && config.pause_supported && !pause_announced {
                 pause_announced = true;
                 host_port.publish_pause(PauseState::Running);
@@ -581,7 +680,12 @@ pub fn run_gameplay_with_result_and_ports<
                     local: false,
                     boundary,
                 });
-                if boundary.paused {
+                if T::AUDIO {
+                    if boundary.paused && !end_rendered {
+                        paused_boundary = Some(boundary);
+                        pause_committed = false;
+                    }
+                } else if boundary.paused {
                     if !end_rendered {
                         let transport = prepare_live_transport(
                             session.runtime.transport_mut(),
@@ -598,21 +702,10 @@ pub fn run_gameplay_with_result_and_ports<
                         boundary,
                         last_song,
                     )?;
-                    let mut discipline = session.discipline.restart_for_resume(
-                        config.stream_origin,
-                        config.playback_origin,
-                        config.origin.domain,
-                        session.pause.song_origin_for_presentation(
-                            config.song_origin,
-                            config.playback_origin,
-                        )?,
-                    )?;
-                    device.seed_resume(&mut discipline, reference)?;
-                    if discipline.latest_pair().is_none() {
-                        return Err("resume presentation seed has no accepted observation".into());
-                    }
+                    session
+                        .discipline
+                        .resume(device, config, session.pause, reference)?;
                     *session.runtime.transport_mut() = transport;
-                    *session.discipline = discipline;
                     resume_boundary = Some(boundary.at);
                     paused_boundary = None;
                     pause_committed = false;
@@ -635,12 +728,13 @@ pub fn run_gameplay_with_result_and_ports<
                 pause_committed && session.pause.phase() == PausePhase::Paused && !end_rendered
             })
             .map(|boundary| boundary.at);
-        crate::gameplay_presentation::validate_gameplay_host(
+        crate::gameplay_presentation::validate_pump_host(
             device,
             session.discipline,
             received,
             frozen_pause,
         )?;
+        validate_audio_availability::<D, T>(device, session.discipline, received, config.origin)?;
         let old_len = pending.len();
         let batch = device.acquire(&mut pending)?;
         if batch.closed {
@@ -652,7 +746,7 @@ pub fn run_gameplay_with_result_and_ports<
         let received = device.host_now()?;
         chronology(received, last_host.unwrap())?;
         last_host = Some(received);
-        crate::gameplay_presentation::validate_gameplay_host(
+        crate::gameplay_presentation::validate_pump_host(
             device,
             session.discipline,
             received,
@@ -673,9 +767,11 @@ pub fn run_gameplay_with_result_and_ports<
                 pending.remove(index);
                 continue;
             }
-            chronology(host, last_acquired)?;
-            last_acquired = host;
-            crate::gameplay_presentation::validate_gameplay_host(
+            if !T::AUDIO {
+                chronology(host, last_acquired)?;
+                last_acquired = host;
+            }
+            crate::gameplay_presentation::validate_pump_host(
                 device,
                 session.discipline,
                 host,
@@ -683,6 +779,23 @@ pub fn run_gameplay_with_result_and_ports<
             )?;
             session.delivery.observe(host, received)?;
             index += 1;
+        }
+        if T::AUDIO {
+            let input_merger = merger.as_deref_mut().expect("audio merger");
+            while let Some(event) = pending.pop_front() {
+                input_merger.register_source(event.meta().source)?;
+                input_merger.admit(event, received)?;
+            }
+            if let Some(prefix) =
+                input_merger.watermark(received, config.advance_lag.as_nanos(), batch.backlog)?
+            {
+                session
+                    .discipline
+                    .audio_mut()
+                    .expect("audio timing")
+                    .authority_mut()
+                    .record_acquired_prefix(prefix)?;
+            }
         }
         if (config.logical_schedule || config.pause_supported)
             && (session.pause.last_render_report().is_none()
@@ -694,20 +807,80 @@ pub fn run_gameplay_with_result_and_ports<
             control.wait(WallDuration::from_millis(1))?;
             continue;
         }
-        if let Some(at) = resume_boundary {
-            while pending
-                .front()
-                .is_some_and(|event| point(event).timestamp < at.timestamp)
+        if T::AUDIO {
+            let input_merger = merger.as_deref_mut().expect("audio merger");
+            service_audio_solo(
+                device,
+                &mut session,
+                &mut config,
+                input_merger,
+                received,
+                batch.backlog,
+                &mut keyboard,
+                &mut paused_boundary,
+                &mut audio_boundary,
+                &mut pause_committed,
+                &mut last_song,
+                &mut last_operation,
+                end_rendered,
+                end_boundary,
+                &mut stop_evidence,
+                host_port,
+            )?;
+            if (session.pause.phase() == PausePhase::Paused && !end_rendered)
+                || audio_boundary.is_some()
+                || matches!(
+                    session.pause.phase(),
+                    PausePhase::Pausing | PausePhase::Resuming
+                )
             {
-                keyboard.observe_paused(pending.pop_front().unwrap())?;
-            }
-            if batch.backlog || received.timestamp < at.timestamp {
                 control.wait(WallDuration::from_millis(1))?;
                 continue;
             }
-            // Reconciliation precedes every post-resume input, including equal time.
-            chronology(at, last_operation)?;
-            for event in keyboard.resume(at)? {
+        } else {
+            if let Some(at) = resume_boundary {
+                while pending
+                    .front()
+                    .is_some_and(|event| point(event).timestamp < at.timestamp)
+                {
+                    keyboard.observe_paused(pending.pop_front().unwrap())?;
+                }
+                if batch.backlog || received.timestamp < at.timestamp {
+                    control.wait(WallDuration::from_millis(1))?;
+                    continue;
+                }
+                // Reconciliation precedes every post-resume input, including equal time.
+                chronology(at, last_operation)?;
+                for event in keyboard.resume(at)? {
+                    last_song = process(
+                        device,
+                        &mut session,
+                        config,
+                        event,
+                        &mut stop_evidence,
+                        host_port,
+                    )?;
+                }
+                last_operation = at;
+                resume_boundary = None;
+                host_port.publish_pause(PauseState::Running);
+            }
+            while let Some(event) = pending.pop_front() {
+                let host = point(&event);
+                if paused_boundary.is_some_and(|boundary| host.timestamp >= boundary.at.timestamp) {
+                    keyboard.observe_paused(event)?;
+                    continue;
+                }
+                if end_boundary.is_some_and(|end| host.timestamp >= end.host.timestamp) {
+                    continue;
+                }
+                chronology(host, last_operation)?;
+                if let Some(boundary) = paused_boundary {
+                    validate_pre_pause_input(session.runtime.transport_mut(), boundary, host)?;
+                }
+                if config.pause_supported && !keyboard.accept(&event)? {
+                    continue;
+                }
                 last_song = process(
                     device,
                     &mut session,
@@ -716,117 +889,91 @@ pub fn run_gameplay_with_result_and_ports<
                     &mut stop_evidence,
                     host_port,
                 )?;
+                last_operation = host;
             }
-            last_operation = at;
-            resume_boundary = None;
-            host_port.publish_pause(PauseState::Running);
-        }
-        while let Some(event) = pending.pop_front() {
-            let host = point(&event);
-            if paused_boundary.is_some_and(|boundary| host.timestamp >= boundary.at.timestamp) {
-                keyboard.observe_paused(event)?;
-                continue;
-            }
-            if end_boundary.is_some_and(|end| host.timestamp >= end.host.timestamp) {
-                continue;
-            }
-            chronology(host, last_operation)?;
-            if let Some(boundary) = paused_boundary {
-                validate_pre_pause_input(session.runtime.transport_mut(), boundary, host)?;
-            }
-            if config.pause_supported && !keyboard.accept(&event)? {
-                continue;
-            }
-            last_song = process(
-                device,
-                &mut session,
-                config,
-                event,
-                &mut stop_evidence,
-                host_port,
-            )?;
-            last_operation = host;
-        }
-        if !batch.backlog {
-            if let Some(boundary) = paused_boundary.filter(|_| !pause_committed) {
-                let at = boundary.at;
-                if received.timestamp >= at.timestamp {
-                    chronology(at, last_operation)?;
-                    let audio_at = schedule(device, &session, config)?;
-                    let report = session.runtime.advance_to(at, &ExplicitDomains, audio_at)?;
-                    last_song = report.song_time;
-                    publish_with_host(&mut session, report, &mut stop_evidence, host_port)?;
-                    last_operation = at;
-                    pause_committed = true;
-                    host_port.publish_pause(PauseState::Paused);
+            if !batch.backlog {
+                if let Some(boundary) = paused_boundary.filter(|_| !pause_committed) {
+                    let at = boundary.at;
+                    if received.timestamp >= at.timestamp {
+                        chronology(at, last_operation)?;
+                        let audio_at = schedule(device, &session, config)?;
+                        let report = session.runtime.advance_to(at, &ExplicitDomains, audio_at)?;
+                        last_song = report.song_time;
+                        publish_with_host(&mut session, report, &mut stop_evidence, host_port)?;
+                        last_operation = at;
+                        pause_committed = true;
+                        host_port.publish_pause(PauseState::Paused);
+                    }
                 }
             }
-        }
-        if pause_committed
-            && session.pause.phase() == PausePhase::Paused
-            && !end_rendered
-            && end_boundary.is_none()
-            && resume_boundary.is_none()
-            && !host_port.cancelled()
-        {
-            device.publish_paused_output(crate::gameplay_presentation::GameplayOutputContext {
-                control: crate::gameplay_presentation::GameplayPauseControl::solo(session.runtime),
-                presentation: session.discipline,
-                pause: session.pause,
-                config: &mut config,
-                end: session.end,
-            })?;
-        }
-        if (session.pause.phase() == PausePhase::Paused && !end_rendered)
-            || resume_boundary.is_some()
-        {
-            control.wait(WallDuration::from_millis(1))?;
-            continue;
-        }
-        let now = device.host_now()?;
-        chronology(now, last_host.unwrap())?;
-        last_host = Some(now);
-        session.discipline.validate_host(now)?;
-        if now.timestamp < config.origin.timestamp {
-            control.wait(WallDuration::from_millis(1))?;
-            continue;
-        }
-        if let DisciplineUpdate::Applied {
-            base_rate_ppm,
-            correction_ppm,
-            applied_rate_ppm,
-            phase_error_ns,
-            limited,
-        } = session
-            .discipline
-            .update(now, session.runtime.transport_mut())?
-        {
-            host_port.diagnostic(NativeGameplayDiagnostic::Discipline {
+            if pause_committed
+                && session.pause.phase() == PausePhase::Paused
+                && !end_rendered
+                && end_boundary.is_none()
+                && resume_boundary.is_none()
+                && !host_port.cancelled()
+            {
+                session.discipline.publish(
+                    device,
+                    crate::gameplay_presentation::GameplayPauseControl::solo(session.runtime),
+                    None,
+                    session.pause,
+                    &mut config,
+                    session.end,
+                    received,
+                )?;
+            }
+            if (session.pause.phase() == PausePhase::Paused && !end_rendered)
+                || resume_boundary.is_some()
+            {
+                control.wait(WallDuration::from_millis(1))?;
+                continue;
+            }
+            let now = device.host_now()?;
+            chronology(now, last_host.unwrap())?;
+            last_host = Some(now);
+            session.discipline.validate_host(now)?;
+            if now.timestamp < config.origin.timestamp {
+                control.wait(WallDuration::from_millis(1))?;
+                continue;
+            }
+            if let Some(DisciplineUpdate::Applied {
                 base_rate_ppm,
                 correction_ppm,
                 applied_rate_ppm,
                 phase_error_ns,
                 limited,
-                quality: session.discipline.quality(),
-            });
-        }
-        if let Some(at) = watermark(
-            config.origin,
-            last_operation,
-            now,
-            config.advance_lag,
-            batch.backlog,
-        )? {
-            let audio_at = schedule(device, &session, config)?;
-            let report = session.runtime.advance_to(at, &ExplicitDomains, audio_at)?;
-            last_song = report.song_time;
-            last_operation = at;
-            let second = last_song.as_nanos().div_euclid(1_000_000_000);
-            if last_progress != Some(second) {
-                host_port.diagnostic(NativeGameplayDiagnostic::SongProgress(last_song));
-                last_progress = Some(second);
+            }) = session
+                .discipline
+                .correction(now, session.runtime.transport_mut())?
+            {
+                host_port.diagnostic(NativeGameplayDiagnostic::Discipline {
+                    base_rate_ppm,
+                    correction_ppm,
+                    applied_rate_ppm,
+                    phase_error_ns,
+                    limited,
+                    quality: session.discipline.quality(),
+                });
             }
-            publish_with_host(&mut session, report, &mut stop_evidence, host_port)?;
+            if let Some(at) = watermark(
+                config.origin,
+                last_operation,
+                now,
+                config.advance_lag,
+                batch.backlog,
+            )? {
+                let audio_at = schedule(device, &session, config)?;
+                let report = session.runtime.advance_to(at, &ExplicitDomains, audio_at)?;
+                last_song = report.song_time;
+                last_operation = at;
+                let second = last_song.as_nanos().div_euclid(1_000_000_000);
+                if last_progress != Some(second) {
+                    host_port.diagnostic(NativeGameplayDiagnostic::SongProgress(last_song));
+                    last_progress = Some(second);
+                }
+                publish_with_host(&mut session, report, &mut stop_evidence, host_port)?;
+            }
         }
         // Read after this iteration's admissions. A pre-admission idle block
         // cannot establish that newly queued Stops reached the mixer.
@@ -858,6 +1005,7 @@ pub fn run_gameplay_with_result_and_ports<
         if config.end_song.is_none()
             && !batch.backlog
             && pending.is_empty()
+            && merger.as_ref().is_none_or(|value| value.pending() == 0)
             && resume_boundary.is_none()
             && session.pause.phase() == PausePhase::Running
         {
@@ -1382,3 +1530,389 @@ mod fixtures {
 #[cfg(test)]
 #[path = "native_scored_play_fixtures.rs"]
 mod native_scored_play_fixtures;
+
+pub(crate) fn validate_audio_availability<
+    D: crate::gameplay_presentation::GameplayDevice,
+    T: PumpTiming<D>,
+>(
+    device: &D,
+    timing: &T,
+    now: ClockPoint,
+    origin: ClockPoint,
+) -> NativeGameplayResult<()> {
+    let Some(presentation) = timing.audio() else {
+        return Ok(());
+    };
+    if device.output_clock_suspended() {
+        return Ok(());
+    }
+    if !presentation.authority().has_fresh_observation(now)?
+        && i128::from(now.timestamp.as_nanos()) - i128::from(origin.timestamp.as_nanos())
+            > i128::from(
+                presentation
+                    .authority()
+                    .config()
+                    .max_observation_age
+                    .as_nanos(),
+            )
+    {
+        return Err("native audio observation is unavailable beyond its declared age bound".into());
+    }
+    Ok(())
+}
+
+/// Reconciliation maps only the authorized control occurrence, not a new physical input clock.
+pub(crate) struct AudioControlMapper(pub crate::audio_authority::PreparedControlCutoff);
+impl ClockMapper for AudioControlMapper {
+    fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+        (from == self.0.host() && to == self.0.output().domain).then_some(self.0.output().timestamp)
+    }
+    fn quality(&self) -> ClockMappingQuality {
+        ClockMappingQuality::Unknown
+    }
+}
+
+fn service_audio_solo<
+    D: crate::gameplay_presentation::GameplayDevice,
+    S: SoloCompetitionPort,
+    H: NativeGameplayHost,
+    T: PumpTiming<D>,
+>(
+    device: &mut D,
+    session: &mut GameplaySession<'_, S, T>,
+    config: &mut NativeGameplayConfig,
+    merger: &mut InputMerger,
+    now: ClockPoint,
+    backlog: bool,
+    keyboard: &mut PauseKeyboard,
+    paused: &mut Option<LivePauseBoundary>,
+    transition: &mut Option<AudioLivePauseBoundary>,
+    pause_committed: &mut bool,
+    last_song: &mut Timestamp,
+    last_host_operation: &mut ClockPoint,
+    end_rendered: bool,
+    end_boundary: Option<EndBoundary>,
+    stops: &mut OwnedStopEvidence,
+    host: &mut H,
+) -> NativeGameplayResult<()> {
+    let Some(prefix) = session
+        .discipline
+        .audio()
+        .expect("audio timing")
+        .authority()
+        .acquired_prefix()
+    else {
+        return Ok(());
+    };
+    loop {
+        let Some(event) = merger.peek_ready(prefix)? else {
+            break;
+        };
+        let at = point(event);
+        if transition.is_some_and(|boundary| {
+            !boundary.original.paused && at.timestamp >= boundary.original.at.timestamp
+        }) {
+            break;
+        }
+        if paused.is_some_and(|boundary| at.timestamp >= boundary.at.timestamp) {
+            keyboard.observe_paused(merger.pop_ready(prefix)?.expect("peeked paused input"))?;
+            continue;
+        }
+        if end_boundary.is_some_and(|boundary| at.timestamp >= boundary.host.timestamp) {
+            merger.pop_ready(prefix)?;
+            continue;
+        }
+        let Some(prepared) = session
+            .discipline
+            .audio()
+            .expect("audio timing")
+            .authority()
+            .prepare_input(at, now)?
+        else {
+            break;
+        };
+        if config.pause_supported && !keyboard.accept(event)? {
+            merger.pop_ready(prefix)?;
+            continue;
+        }
+        let audio_at = schedule(device, session, *config)?;
+        if audio_at.domain != config.stream_origin.domain {
+            return Err("native audio scheduling domain differs".into());
+        }
+        let event = merger
+            .pop_ready(prefix)?
+            .expect("prepared earliest original input");
+        let report = session
+            .runtime
+            .process_input(event, prepared.mapper(), audio_at)?;
+        session
+            .discipline
+            .audio_mut()
+            .expect("audio timing")
+            .authority_mut()
+            .commit_input(prepared)
+            .expect("private current input token was preflighted");
+        *last_song = report.song_time;
+        *last_host_operation = at;
+        publish_with_host(session, report, stops, host)?;
+    }
+    if !backlog {
+        if let Some(boundary) = *transition {
+            let prepared = if boundary.original.paused {
+                session
+                    .discipline
+                    .audio()
+                    .expect("audio timing")
+                    .authority()
+                    .prepare_control_cutoff(
+                        boundary.epoch,
+                        boundary.raw_output,
+                        boundary.original.at,
+                        now,
+                        merger,
+                    )?
+            } else {
+                session
+                    .discipline
+                    .audio()
+                    .expect("audio timing")
+                    .authority()
+                    .prepare_resume_control_cutoff(
+                        boundary.epoch,
+                        boundary.raw_output,
+                        boundary.original.at,
+                        now,
+                        merger,
+                    )?
+            };
+            if let Some(prepared) = prepared {
+                let transport = prepare_live_audio_transport(
+                    session.runtime.transport_mut(),
+                    boundary,
+                    &prepared,
+                    *last_song,
+                )?;
+                let audio_at = schedule(device, session, *config)?;
+                *session.runtime.transport_mut() = transport;
+                let report =
+                    session
+                        .runtime
+                        .advance_to(prepared.output(), &ExplicitDomains, audio_at)?;
+                session
+                    .discipline
+                    .audio_mut()
+                    .expect("audio timing")
+                    .authority_mut()
+                    .commit_control_cutoff(prepared, merger)
+                    .expect("private current native control token was preflighted");
+                *last_song = report.song_time;
+                *last_host_operation = boundary.original.at;
+                publish_with_host(session, report, stops, host)?;
+                if boundary.original.paused {
+                    *pause_committed = true;
+                    host.publish_pause(PauseState::Paused);
+                } else {
+                    for event in keyboard.resume(boundary.original.at)? {
+                        let prepared = session
+                            .discipline
+                            .audio()
+                            .expect("audio timing")
+                            .authority()
+                            .prepare_resume_control_cutoff(
+                                boundary.epoch,
+                                boundary.raw_output,
+                                boundary.original.at,
+                                now,
+                                merger,
+                            )?
+                            .ok_or("accepted resume lost its authorized control mapping")?;
+                        let mapper = AudioControlMapper(prepared);
+                        let report = session.runtime.process_input(event, &mapper, audio_at)?;
+                        session
+                            .discipline
+                            .audio_mut()
+                            .expect("audio timing")
+                            .authority_mut()
+                            .commit_control_cutoff(prepared, merger)
+                            .expect("private reconciliation control token remains current");
+                        *last_song = report.song_time;
+                        publish_with_host(session, report, stops, host)?;
+                    }
+                    *paused = None;
+                    *pause_committed = false;
+                    host.publish_pause(PauseState::Running);
+                }
+                *transition = None;
+            }
+        }
+    }
+    if *pause_committed && session.pause.phase() == PausePhase::Paused && !end_rendered {
+        if !device.output_clock_suspended() {
+            if let Some(frontier) = session
+                .discipline
+                .audio()
+                .expect("audio timing")
+                .authority()
+                .prepare_held_frontier(now, merger)?
+            {
+                *last_host_operation = frontier.host();
+                session
+                    .discipline
+                    .audio_mut()
+                    .expect("audio timing")
+                    .authority_mut()
+                    .commit_held_frontier(frontier, merger)
+                    .expect("private held frontier remains current");
+            }
+        }
+        if end_boundary.is_none() && !host.cancelled() {
+            session.discipline.publish(
+                device,
+                crate::gameplay_presentation::GameplayPauseControl::solo(session.runtime),
+                Some(merger),
+                session.pause,
+                config,
+                session.end,
+                now,
+            )?;
+        }
+        return Ok(());
+    }
+    if transition.is_some()
+        || matches!(
+            session.pause.phase(),
+            PausePhase::Pausing | PausePhase::Resuming
+        )
+    {
+        return Ok(());
+    }
+    if let Some(frontier) = session
+        .discipline
+        .audio()
+        .expect("audio timing")
+        .authority()
+        .prepare_frontier(now, merger)?
+    {
+        let report = if let Some(output) = frontier.advance() {
+            let audio_at = schedule(device, session, *config)?;
+            Some(
+                session
+                    .runtime
+                    .advance_to(output, &ExplicitDomains, audio_at)?,
+            )
+        } else {
+            None
+        };
+        *last_host_operation = frontier.host();
+        session
+            .discipline
+            .audio_mut()
+            .expect("audio timing")
+            .authority_mut()
+            .commit_frontier(frontier, merger)
+            .expect("private current frontier was preflighted");
+        if let Some(report) = report {
+            *last_song = report.song_time;
+            publish_with_host(session, report, stops, host)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn run_gameplay_audio_with_result_and_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+>(
+    device: &mut D,
+    audio: AudioGameplaySession<'_, S>,
+    config: NativeGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    let session = audio.session;
+    let mut timing = AudioTiming(session.discipline);
+    let session = GameplaySession {
+        runtime: session.runtime,
+        gauge: session.gauge,
+        bgm: session.bgm,
+        discipline: &mut timing,
+        pause: session.pause,
+        end: session.end,
+        completion: session.completion,
+        capture: session.capture,
+        competition: session.competition,
+        delivery: session.delivery,
+        pre_origin_inputs: session.pre_origin_inputs,
+    };
+    run_gameplay_timed(device, session, Some(audio.merger), config, control, host)
+}
+pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+>(
+    device: &mut D,
+    mut audio: AudioGameplaySession<'_, S>,
+    config: NativeGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    score: &mut crate::competition::ScoreSummary,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    if score != &crate::competition::ScoreSummary::default() {
+        return Err("native scored audio gameplay requires a fresh score".into());
+    }
+    let session = &mut audio.session;
+    let epoch = session.discipline.authority().epoch();
+    if session.runtime.clock_domains()
+        != Some((epoch.logical_origin.domain, epoch.stream_origin.domain))
+        || epoch.host_domain != config.origin.domain
+        || epoch.stream_origin != config.stream_origin
+        || session.runtime.transport_mut().anchor().host_time != epoch.logical_origin.timestamp
+        || session.runtime.transport_mut().anchor().song_time != config.song_origin
+        || session.runtime.transport_mut().anchor().rate != beatkernel::transport::Rate::NORMAL
+        || audio.merger.source_capacity() != 4096
+    {
+        return Err("selected audio Runtime domains, anchor or acquisition bound differ".into());
+    }
+    let rows = [(crate::local_players::PlayerId(1), policy)];
+    crate::native_gameplay_host::validate_play_policy_members(&rows)?;
+    crate::native_policy_admission::validate_config(&config)?;
+    let header = session
+        .competition
+        .as_ref()
+        .filter(|port| !port.policy_agnostic())
+        .map(|port| {
+            port.expected_policy_header()
+                .ok_or("selected audio competition has no policy identity")
+        })
+        .transpose()?;
+    crate::native_policy_admission::validate_selected_in_domain(
+        session.runtime.judge(),
+        session.gauge,
+        policy,
+        session.capture.as_ref(),
+        header,
+        &config,
+        epoch.logical_origin.domain,
+    )?;
+    if session.runtime.poisoned() || session.runtime.gameplay_fence().is_some() {
+        return Err("selected audio Runtime is poisoned or fenced".into());
+    }
+    if policy.gauge() == &GaugeProfile::default() {
+        host.prepare_play_policies(&rows)?;
+    }
+    let mut resolved = crate::native_gameplay_bridge::ResolvedGameplayHost {
+        host,
+        policies: &rows,
+    };
+    let mut observer = crate::native_gameplay_host::NativeScoreHost::new(&mut resolved, score);
+    run_gameplay_audio_with_result_and_ports(device, audio, config, control, &mut observer)
+}
+
+#[cfg(test)]
+#[path = "native_audio_authority_fixtures.rs"]
+mod native_audio_authority_fixtures;

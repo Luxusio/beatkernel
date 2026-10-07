@@ -591,7 +591,7 @@ fn prepared_resume_transport_keeps_frozen_song_until_actual_logical_physical_res
         .record_acquired_prefix(original_host(22_000_000))
         .unwrap();
     let control = authority
-        .prepare_control_cutoff(
+        .prepare_resume_control_cutoff(
             0,
             boundary.raw_output,
             boundary.original.at,
@@ -661,6 +661,25 @@ fn logical_transport_stage_refuses_boundary_token_identity_and_frozen_prefix_mis
         .unwrap();
     let before_transport = format!("{:?}", transport);
     let before_authority = format!("{:?}", authority);
+    let wrong_purpose = authority
+        .prepare_resume_control_cutoff(
+            boundary.epoch,
+            boundary.raw_output,
+            boundary.original.at,
+            original_host(14_000_000),
+            &merger,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(prepare_live_audio_transport(
+        &transport,
+        boundary,
+        &wrong_purpose,
+        Timestamp::from_nanos(3_000_000),
+    )
+    .is_err());
+    assert_eq!(format!("{:?}", transport), before_transport);
+    assert_eq!(format!("{:?}", authority), before_authority);
     let mut shifted_host = boundary;
     shifted_host.original.window =
         HostStartWindow::new(original_host(8_000_001), original_host(8_000_001)).unwrap();
