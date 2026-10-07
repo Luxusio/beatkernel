@@ -915,6 +915,48 @@ test("touch paging waits for the acquired input prefix while retaining held rele
   h.click("stop"); await flush(); await h.receive(localFinal(session.start)); await h.close();
 });
 
+test("Window keeps the existing twelve millisecond prefix behind a newer batch and accepts another source within that lag", async () => {
+  const { h, session, worker, surface } = await pagedTouchSession();
+  const initialPages = worker.messages("play-page").length;
+  const ack = (request, pendingInputs) => h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs, playId: session.id, tickId: request.tickId,
+    songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  h.setNow(1300.125); const key = observedKeyboard({ timeStamp: 1300.125 }); dispatchKeyboard(h, "keydown", key.event);
+  const first = worker.last("play-step"); const keyboard = first.events.find(event => event.key === 2);
+  assert.ok(keyboard); assert.equal(keyboard.hostNs, 1300125000n); assert.equal(first.nowNs, 1300125000n);
+  assert.equal(first.watermark, 1288125000n); assert.ok(first.watermark < keyboard.hostNs);
+  await ack(first, 1);
+  h.setNow(1300.25); surface.emit("pointerdown", { pointerType: "touch", pointerId: 91, timeStamp: 1300,
+    offsetX: 120.25, offsetY: 180.5, pressure: 0.375 });
+  const second = worker.last("play-step"); const touch = second.events.find(event => event.kind === "touch");
+  assert.ok(second.tickId > first.tickId); assert.ok(touch); assert.equal(touch.hostNs, 1300000000n);
+  assert.equal(touch.x, 120.25); assert.equal(touch.y, 180.5); assert.equal(second.nowNs, 1300250000n);
+  assert.equal(second.watermark, 1288250000n); assert.ok(touch.hostNs > first.watermark && touch.hostNs < keyboard.hostNs);
+  assert.equal(worker.messages("play-stop").length, 0, "a different original source within the lag must not close the session");
+  h.get("local-page").value = "1"; h.get("local-page").emit("change"); await flush(); await ack(second, 2);
+  assert.equal(worker.messages("play-page").length, initialPages, "admission of newer events is not a drained-prefix proof");
+  const sources = second.events.filter(event => event.kind === "gamepad").map(event => event.source);
+  assert.equal(sources.length, 3);
+  const assertPolling = (request, previous) => {
+    assert.ok(request.tickId > previous.tickId);
+    assert.deepEqual(request.events, sources.map((source, index) => ({ kind: "gamepad", source, index,
+      id: "standard gamepad", mapping: "standard", hostNs: 1000000000n, timestampMs: 1000,
+      sequence: previous.events.at(-1).sequence + BigInt(index + 1), axes: [0.12345678901234568],
+      buttons: Array.from({ length: 9 }, () => ({ value: 0, pressed: false, touched: false })) })));
+  };
+  await h.advance(8);
+  const polling = worker.last("play-step"); assertPolling(polling, second); await ack(polling, 2);
+  assert.equal(worker.messages("play-page").length, initialPages, "unchanged device polling does not drain held key and touch input");
+  h.setNow(1313); await h.advance(8); const later = worker.last("play-step");
+  assertPolling(later, polling); assert.ok(later.watermark >= keyboard.hostNs);
+  await ack(later, 0);
+  if (worker.messages("play-page").length === initialPages) { const render = worker.last("play-render"); await h.receive({ kind: "play-render-done", playId: session.id,
+    renderId: render.renderId, completed: false, commandsPending: false, observedTick: later.tickId, pendingInputs: 0 }); }
+  assert.equal(worker.messages("play-page").length, initialPages + 1);
+  const page = worker.last("play-page"); assert.ok(page); assert.equal(page.page, 1);
+  await h.reply(page, { kind: "local-page", page: 1, touchVisible: false });
+  h.click("stop"); await flush(); await h.receive(localFinal(session.start)); await h.close();
+});
+
 test("page choice errors preserve held input but cancellation and invalid visibility cannot apply a late page", async () => {
   for (const fault of ["choice-error", "wrong-visibility", "cancel-before-ack", "cancel-pending-rpc"]) {
     const { h, session, worker, surface } = await pagedTouchSession();
@@ -1553,7 +1595,7 @@ test("Window snapshots exact raw frames and output observations while leaving pr
   const up = worker.last("play-step");
   assert.equal(up.contextFrame, 4294967300n); assert.equal(down.contextFrame, 4294967299n);
   assert.deepEqual(up.events, [{ hostNs: 1500250000n, key: 2, down: false, sequence: 2n }]);
-  assert.equal(up.watermark, 1500250000n); assert.equal(Object.hasOwn(up, "audioNs"), false);
+  assert.equal(up.watermark, up.nowNs - 12000000n); assert.equal(Object.hasOwn(up, "audioNs"), false);
   await h.advance(8);
   const render = worker.last("play-render");
   assert.deepEqual(render.timestamp, { contextTime: 1.5, performanceTime: 1499.875 });
@@ -2072,7 +2114,7 @@ test("pointer admission, whole-batch queue limits and capture cleanup refuse saf
   const moves = [...(h.get("canvas").listeners.get("pointermove") ?? [])];
   h.setNow(1500); h.get("canvas").emit("pointermove", nativePointer({ timeStamp: 1500, buttons: 0 }));
   const frontier = worker.last("play-step"); await pointerStepDone(h, frontier);
-  h.get("canvas").emit("pointermove", nativePointer({ timeStamp: 1499, buttons: 1 })); await flush();
+  h.get("canvas").emit("pointermove", nativePointer({ timeStamp: Number(frontier.watermark) / 1000000 - 0.125, buttons: 1 })); await flush();
   assert.equal(worker.last("play-stop").playId, replacement.id);
   await h.receive(finalScore(replacement.id));
   const count = worker.messages("play-step").length;
@@ -3120,7 +3162,7 @@ test("a malformed coalesced list refuses its whole prefix before publication or 
       case "descending": last.timeStamp = 1300.0625; break;
       case "raw-descending": first.timeStamp = 1300.0000002; last.timeStamp = 1300.0000001; break;
       case "after-parent": last.timeStamp = 1300.75; break;
-      case "watermark": first.timeStamp = 1299.875; break;
+      case "watermark": first.timeStamp = Number(down.watermark) / 1000000 - 0.125; break;
     }
     const reads = h.layoutReads, before = worker.messages("play-step").length;
     pointer("pointermove", parent); await flush();
@@ -3179,7 +3221,7 @@ test("256 coalesced samples share the exact 1024 pending boundary with keyboard 
         assert.equal(request.events.length, 256);
         assert.equal(request.events[0].sequence, [2n, 258n, 514n, 770n][index]);
         assert.equal(request.events.at(-1).sequence, [257n, 513n, 769n, 1025n][index]);
-        assert.equal(request.watermark, index === 3 ? 1300500000n : null);
+        assert.equal(request.watermark, index === 3 ? request.nowNs - 12000000n : null);
         admitted.push(...request.events);
         await ack(request);
       }
@@ -3344,7 +3386,7 @@ test("Window explicitly negotiates physical input before PCM and preserves nativ
   const up = worker.last("play-step");
   assert.ok(up.tickId > down.tickId);
   assert.deepEqual(up.events, [{ hostNs: 1300125000n, key: 19, down: false, sequence: 2n }]);
-  assert.equal(up.watermark, 1300125000n);
+  assert.equal(up.watermark, up.nowNs - 12000000n);
   assert.equal(down.contextFrame, 62400n); assert.equal(up.contextFrame, 62400n);
   assert.equal(Object.hasOwn(down, "audioNs"), false); assert.equal(Object.hasOwn(up, "audioNs"), false);
   await done(up);
@@ -3638,7 +3680,7 @@ test("live progress acknowledgements leave Window display untouched while queued
         { hostNs: 1425000000n, key: 2, down: true, sequence: 1n },
         { hostNs: 1425000000n, key: 2, down: false, sequence: 2n },
       ]);
-      assert.equal(captured.watermark, 1425000000n);
+      assert.equal(captured.watermark, captured.nowNs - 12000000n);
       lastTick = captured.tickId;
       await acknowledge(captured);
     }
@@ -3747,7 +3789,7 @@ test("input and render reports each have one in-flight request and watermarks ca
   const final = worker.last("play-step");
   assert.equal(final.events.length, 88);
   assert.equal(final.events.at(-1).sequence, 600n);
-  assert.equal(final.watermark, 1300000000n);
+  assert.equal(final.watermark, final.nowNs - 12000000n);
   const report = worker.last("play-render");
   await h.receive({ kind: "play-render-done", commandsPending: false, observedTick: h.workers[0].last("play-step")?.tickId ?? 0, pendingInputs: 0, playId: session.id, renderId: report.renderId, completed: false });
   await h.advance(8);
@@ -4821,12 +4863,15 @@ test("keyboard mode and source gates avoid gameplay fields while malformed curre
   }
   for (const failure of ["code", "repeat", "timeStamp", "preventDefault", "call", "negative", "nonfinite", "behind"]) {
     const h = await harness(); await h.preview(); const session = await h.launch(), worker = h.workers[0]; h.setNow(1301);
+    let closedPrefix;
     if (failure === "behind") {
       dispatchKeyboard(h, "keydown", observedKeyboard({ timeStamp: 1301 }).event);
-      await pointerStepDone(h, worker.last("play-step"));
+      const accepted = worker.last("play-step"); closedPrefix = accepted.watermark;
+      await pointerStepDone(h, accepted);
     }
     const before = worker.messages("play-step").length;
-    const fields = { timeStamp: failure === "negative" ? -1 : failure === "nonfinite" ? NaN : 1300.125 };
+    const fields = { timeStamp: failure === "negative" ? -1 : failure === "nonfinite" ? NaN
+      : failure === "behind" ? Number(closedPrefix) / 1000000 - 0.125 : 1300.125 };
     const effects = ["code", "repeat", "timeStamp", "preventDefault", "call"].includes(failure)
       ? { [failure]() { throw new Error(`native ${failure} refused`); } } : {};
     dispatchKeyboard(h, failure === "behind" ? "keyup" : "keydown", observedKeyboard(fields, effects).event); await flush();

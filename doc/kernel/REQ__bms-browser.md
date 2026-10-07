@@ -1025,6 +1025,14 @@ accepted input-prefix coverage; it does not continuously correct a HOST Transpor
 An initial projection remains an estimate and past judgments are not revised.
 
 The DOM admits at most 1,024 queued key events and sends at most 256 per step.
+Input admission and prefix closure are separate. Keep the existing 12 ms
+Window prefix policy without raising that prefix to a newly admitted event's
+timestamp. A batch may contain original inputs newer than its partial prefix;
+retain them unchanged until a later prefix covers them. Validate a supplied
+prefix against the original Window receipt and previous acquired prefix, while
+keeping the admitted maximum separate. Preserve source chronology, real
+behind-closed-prefix refusal and pending-input page/completion barriers. This
+policy does not prove an absolute OS input-delivery bound.
 Only one step, one render-report request and one outgoing audio batch await
 correlated acknowledgement at each boundary. No unbounded MessagePort backlog
 is used to hide a delayed Worker. Deadline or capacity failure stops the owner.

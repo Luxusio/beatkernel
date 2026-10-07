@@ -2073,7 +2073,6 @@ function pumpInput(session) {
     let watermark = null;
     if (!session.events.length) {
       watermark = millisecondsToNanos(Math.max(0, performance.now() - 12));
-      if (watermark < lastInput) watermark = lastInput;
     }
     const tickId = ++session.tickId;
     if (!Number.isSafeInteger(tickId)) throw new Error("Gameplay step identity exhausted.");

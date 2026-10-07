@@ -2431,10 +2431,8 @@ function stepPlay(state, request) {
   if (firstLive && state.acquiredPrefix !== null && firstLive.event.hostNs < state.acquiredPrefix) {
     throw new Error("Changed gameplay input precedes the closed acquired prefix.");
   }
-  const host = entries.at(-1)?.event.hostNs ?? state.lastHost;
   if (request.watermark !== null && (request.watermark > request.nowNs
-    || (host !== null && request.watermark < host)
-    || (state.lastHost !== null && request.watermark < state.lastHost))) throw new Error("Gameplay watermark precedes its input prefix or exceeds acquisition time.");
+    || (state.acquiredPrefix !== null && request.watermark < state.acquiredPrefix))) throw new Error("Gameplay watermark regressed or exceeds acquisition time.");
   if (!Number.isSafeInteger(state.preOriginInputs + ignored)) throw new Error("Pre-origin input count overflow.");
   // The envelope samples the same Window clock after its original events.
   // Reconstructed Worker time need not preserve that cross-global causal order;
@@ -2458,8 +2456,9 @@ function stepPlay(state, request) {
     state.lastSequence = event.sequence;
   }
   if (request.watermark !== null) {
+    // Freshly acquired events may lie beyond this lagged prefix. Their original
+    // entries stay pending until a later complete prefix covers them.
     if (request.watermark >= state.origin) state.game.close_input_prefix(request.watermark);
-    state.lastHost = request.watermark;
     state.acquiredPrefix = request.watermark;
   }
   if (audioNs > state.audioNs) state.audioNs = audioNs;

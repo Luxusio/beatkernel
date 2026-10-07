@@ -1,5 +1,32 @@
 # Audio-authoritative player migration
 
+Current independent QA at `7aa209d` remains FAIL. Browser testing reproduces
+immediate-keyboard startup `Transport(BeforeOrigin)` and a real keyboard/touch
+cohort closing an input prefix ahead of a later delivered original event. A
+separate command-owner error occurred once and is not yet reproduced. Successful
+24-second playback, complete recording/replay score parity and historical views
+do not clear these failures. CLI QA passes 2,177 app tests, 2,889 workspace tests
+and 524 Node tests but its corresponding workspace check remains unrun. Desktop
+QA passes its declared software/interactive tier, with native hardware absent.
+The two browser boundaries are being corrected without widening timing bounds,
+retimestamping acquired events or swallowing the errors. Final review and QA
+must follow the corrected implementation.
+The partial-prefix correction separates newly admitted inputs from the existing
+12 ms closure policy. Three pre-review two-player diagnostics remain mixed:
+one complete 4–9 second section with both players scoring and complete records,
+one later Window touch-watermark refusal, and one pre-input audio-processor
+terminal failure. Startup was deliberately excluded by a one-second delay in
+these diagnostics. They do not clear either original QA failure or establish a
+guaranteed OS input-delivery bound. BeforeOrigin behavior is unchanged pending
+the pre-play input policy; processor-cause observability is under investigation.
+The paired prefix regression run passed 248 tests and exposed one new-fixture
+timer assumption; the corrected named Host regression then passed independently.
+Worker tests cover partial/equal/null prefixes, original cross-source ordering,
+real late/regressive/future refusal, and pending-input page/completion barriers.
+Window tests preserve genuine periodic Gamepad samples and the unchanged 12 ms
+policy. These results are scoped development evidence, not a fresh full Node or
+actual-browser QA PASS.
+
 Status: shared foundation, Step integration and browser adapter migration are
 implemented, as are common native audio loops and held-output publication;
 native launcher/startup selection is now connected and its wider platform

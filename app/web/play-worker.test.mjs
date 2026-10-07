@@ -3146,6 +3146,76 @@ test("live acquisition and render reordering preserves exact occurrence and acce
   assert.deepEqual(histories[0], histories[1]);
 });
 
+test("partial prefixes retain newer original input and permit older cross-source input within the fixed lag", async () => {
+  const h = await authorityActive({ startRequest: startRequest({ inputMode: "physical-contact" }) });
+  const game = h.games[0]; h.setWindowNowNs(1200000000n);
+  const keyboard = { hostNs: 1195000000n, key: 2, down: true, sequence: 1n };
+  const contact = touchEvent({ hostNs: 1190000000n, sequence: 2n });
+  await h.send(authorityStep({ events: [keyboard], watermark: 1188000000n }));
+  assert.equal(h.of("play-error").length, 0); assert.equal(game.closedPrefix, 1188000000n);
+  assert.equal(game.pending_inputs(), 1); assert.equal(game.pendingInput[0].host, keyboard.hostNs);
+  await h.send(authorityStep({ tickId: 2, events: [contact], watermark: 1188000000n }));
+  assert.equal(h.of("play-error").length, 0, "batch maximum is not a closed-prefix proof for another source");
+  await h.send(authorityStep({ tickId: 3, watermark: null }));
+  assert.equal(game.closedPrefix, 1188000000n); assert.equal(game.calls.filter(row => row[0] === "close").length, 2);
+  await authorityRender(h, 1, 100000000n, 1100000000n);
+  await authorityRender(h, 2, 200000000n, 1200000000n);
+  assert.equal(game.pending_inputs(), 2); assert.equal(game.processedInput.length, 0, "known audio does not cover input newer than the declared prefix");
+  await h.send(authorityStep({ tickId: 4, watermark: 1190000000n }));
+  assert.equal(game.pending_inputs(), 1); assert.deepEqual(game.processedInput[0].bytes, encodeTouchEvent(contact));
+  assert.equal(game.processedInput[0].host, 1190000000n); assert.equal(game.processedInput[0].output, 190000000n);
+  const laterContact = touchEvent({ hostNs: 1193000000n, sequence: 3n, phase: 1 });
+  await h.send(authorityStep({ tickId: 5, events: [laterContact], watermark: 1190000000n }));
+  assert.equal(h.of("play-error").length, 0, "a lower partial prefix does not discard the separately admitted keyboard maximum");
+  assert.equal(game.pending_inputs(), 2);
+  await h.send(authorityStep({ tickId: 6, watermark: 1195000000n }));
+  assert.equal(game.pending_inputs(), 0);
+  assert.deepEqual(game.processedInput.map(event => event.host), [1190000000n, 1193000000n, 1195000000n]);
+  assert.deepEqual(game.processedInput.map(event => event.output), [190000000n, 193000000n, 195000000n]);
+  assert.equal(game.processedInput.at(-1).sequence, keyboard.sequence);
+  await h.send(authorityStep({ tickId: 7, watermark: 1200000000n })); assert.equal(game.logicalOutput, 200000000n);
+  const mutations = game.calls.filter(row => ["blob", "touch", "input", "close", "service"].includes(row[0])).length;
+  await h.send(authorityStep({ tickId: 8, events: [touchEvent({ hostNs: 1199000000n, sequence: 4n, phase: 1 })] }));
+  assert.equal(h.of("play-error").length, 1, "an event truly behind the closed prefix still refuses");
+  assert.equal(game.calls.filter(row => ["blob", "touch", "input", "close", "service"].includes(row[0])).length, mutations);
+  assert.equal(game.processedInput.length, 3);
+});
+
+test("regressive or future partial-prefix envelopes refuse before admitting their otherwise valid tail", async () => {
+  for (const invalid of [1187999999n, 1200000001n, "not a prefix", 1188000000]) {
+    const h = await authorityActive({ startRequest: startRequest({ inputMode: "physical-contact" }) });
+    const game = h.games[0]; h.setWindowNowNs(1200000000n);
+    await h.send(authorityStep({ events: [{ hostNs: 1195000000n, key: 2, down: true, sequence: 1n }], watermark: 1188000000n }));
+    assert.equal(h.of("play-error").length, 0); const original = game.pendingInput[0];
+    const before = game.calls.filter(row => ["input", "blob", "touch", "close", "service", "commands"].includes(row[0])).length;
+    await h.send(authorityStep({ tickId: 2, events: [touchEvent({ hostNs: 1190000000n, sequence: 2n })], watermark: invalid }));
+    assert.equal(h.of("play-error").length, 1); assert.equal(game.pendingInput.length, 1); assert.equal(game.pendingInput[0], original);
+    assert.equal(game.closedPrefix, 1188000000n); assert.equal(game.processedInput.length, 0);
+    assert.equal(game.calls.filter(row => ["input", "blob", "touch", "close", "service", "commands"].includes(row[0])).length, before);
+  }
+});
+
+test("input beyond a partial prefix blocks local page and completion after two audio anchors until coverage advances", async () => {
+  const request = localRequest({ keyPairs: new Uint32Array(), localPlanWords: localPlan([[91, 2n], [2, 3n], [88, 4n], [7, 5n], [0xffffffff, 6n]]),
+    hidSetup: hidSetup([3n, 4n, 5n, 6n]) });
+  const h = await authorityActive({ startRequest: request });
+  const game = h.locals[0]; h.setWindowNowNs(1200000000n); const original = touchEvent({ hostNs: 1195000000n });
+  await h.send(authorityStep({ events: [original], watermark: 1188000000n }));
+  await authorityRender(h, 1, 100000000n, 1100000000n); await authorityRender(h, 2, 200000000n, 1200000000n);
+  assert.equal(game.presentations.length, 2); assert.equal(game.pending_inputs(), 1); assert.equal(game.processedInput.length, 0);
+  assert.equal(h.of("play-render-done").at(-1).completed, false);
+  const pageCalls = game.calls.filter(row => row[0] === "local-touch-page").length;
+  assert.match((await h.rpc("play-page", { page: 1 })).error, /pending|input|drain/i);
+  assert.equal(game.calls.filter(row => row[0] === "local-touch-page").length, pageCalls);
+  await h.send(authorityStep({ tickId: 2, watermark: 1200000000n }));
+  assert.equal(game.pending_inputs(), 0); assert.deepEqual(game.processedInput[0].bytes, encodeTouchEvent(original));
+  assert.equal(game.processedInput[0].host, original.hostNs); assert.equal(game.processedInput[0].output, 195000000n);
+  assert.equal((await h.rpc("play-page", { page: 1 })).result.page, 1);
+  await authorityRender(h, 3, 200000000n, 1200000000n);
+  assert.equal(h.of("play-render-done").at(-1).completed, false, "draining the input prefix does not supply actual end and audio-drain evidence");
+  await h.send({ kind: "play-stop", playId: 7 });
+});
+
 test("null-prefix chunks accept earlier events from another genuine source and closed prefixes refuse late input", async () => {
   const histories = [];
   for (const split of [false, true]) {
