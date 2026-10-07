@@ -2,8 +2,8 @@
 //! InputMerger owns acquired payloads; this owner reads no clock or device.
 use crate::local_input::{InputMerger, MergeError};
 use beatkernel::time::{
-    AffineClockMapper, CalibrationError, ClockDomainId, ClockInterval, ClockPair, ClockPoint,
-    Duration, ExtrapolationPolicy, Timestamp, presentation::ObservationAdmission,
+    presentation::ObservationAdmission, AffineClockMapper, CalibrationError, ClockDomainId,
+    ClockInterval, ClockPair, ClockPoint, Duration, ExtrapolationPolicy, Timestamp,
 };
 use std::{collections::VecDeque, fmt};
 
@@ -146,6 +146,21 @@ pub struct PreparedEpoch {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedRestart {
     state: PreparationState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrimedCorrelationStage {
+    Epoch(PreparedEpoch),
+    Restart(PreparedRestart),
+}
+
+/// Two original observations staged for atomic correlation publication.
+/// Gameplay watermarks remain with the active owner until and after commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedPrimedCorrelation {
+    stage: PrimedCorrelationStage,
+    pairs: [ClockPair; 2],
+    now: ClockPoint,
 }
 
 /// Cold-preallocated real observations; no duplicate acquired-input queue or rate loop.
@@ -574,6 +589,141 @@ impl AudioAuthority {
         self.revision = revision;
         Ok(())
     }
+
+    /// Stages two real anchors for a prepared replacement without changing history.
+    pub fn prepare_primed_epoch(
+        &self,
+        staged: PreparedEpoch,
+        pairs: [ClockPair; 2],
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<PreparedPrimedCorrelation, AudioAuthorityError> {
+        self.prepare_primed_correlation(PrimedCorrelationStage::Epoch(staged), pairs, now, merger)
+    }
+
+    /// Stages a same-epoch restart while retaining every accepted gameplay watermark.
+    pub fn prepare_primed_restart(
+        &self,
+        staged: PreparedRestart,
+        pairs: [ClockPair; 2],
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<PreparedPrimedCorrelation, AudioAuthorityError> {
+        self.prepare_primed_correlation(PrimedCorrelationStage::Restart(staged), pairs, now, merger)
+    }
+
+    fn prepare_primed_correlation(
+        &self,
+        stage: PrimedCorrelationStage,
+        pairs: [ClockPair; 2],
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<PreparedPrimedCorrelation, AudioAuthorityError> {
+        let prepared = PreparedPrimedCorrelation { stage, pairs, now };
+        self.validate_primed_correlation(&prepared, now, merger)?;
+        Ok(prepared)
+    }
+
+    /// Rechecks staged identity, pending input, chronological bounds and freshness.
+    /// Publication may be later than staging, but may not rewind its HOST sample.
+    pub fn validate_primed_correlation(
+        &self,
+        prepared: &PreparedPrimedCorrelation,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<(), AudioAuthorityError> {
+        let epoch = match prepared.stage {
+            PrimedCorrelationStage::Epoch(staged) => {
+                if staged.state != self.state()
+                    || self.prepare_epoch(staged.next, merger)? != staged
+                {
+                    return Err(AudioAuthorityError::StalePreparation);
+                }
+                staged.next
+            }
+            PrimedCorrelationStage::Restart(staged) => {
+                if staged.state != self.state()
+                    || self.prepare_correlation_restart(merger)? != staged
+                {
+                    return Err(AudioAuthorityError::StalePreparation);
+                }
+                self.epoch
+            }
+        };
+        self.validate_host(prepared.now)?;
+        self.validate_host(now)?;
+        if now.timestamp < prepared.now.timestamp {
+            return Err(AudioAuthorityError::ObservationRegression);
+        }
+        let [first, second] = prepared.pairs;
+        for pair in prepared.pairs {
+            if pair.source.domain != epoch.stream_origin.domain
+                || pair.target.domain != epoch.host_domain
+            {
+                return Err(AudioAuthorityError::DomainMismatch);
+            }
+            if pair.target.timestamp > now.timestamp {
+                return Err(AudioAuthorityError::ObservationRegression);
+            }
+            let output = Self::logical_in_epoch(epoch, pair.source)?;
+            if self
+                .presentation
+                .is_some_and(|last| output.timestamp < last.timestamp)
+            {
+                return Err(AudioAuthorityError::ObservationRegression);
+            }
+        }
+        if first.source.timestamp >= second.source.timestamp
+            || first.target.timestamp >= second.target.timestamp
+        {
+            return Err(AudioAuthorityError::ObservationRegression);
+        }
+        for last in [
+            self.input_host,
+            self.closed,
+            self.latest_observation().map(|pair| pair.target),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if second.target.timestamp < last.timestamp {
+                return Err(AudioAuthorityError::ObservationRegression);
+            }
+        }
+        if !self.pair_is_fresh(second, now) {
+            return Err(AudioAuthorityError::HistoryExpired);
+        }
+        Self::mapper_in_epoch(
+            epoch,
+            first,
+            second,
+            ClockInterval {
+                start: first.target.timestamp,
+                end: second.target.timestamp,
+            },
+            ExtrapolationPolicy::Forbid,
+        )?;
+        Ok(())
+    }
+
+    /// Publishes the staged two-anchor correlation using reserved history storage.
+    /// This never advances the judged operation or committed presentation/prefix.
+    pub fn commit_primed_correlation(
+        &mut self,
+        prepared: PreparedPrimedCorrelation,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<(), AudioAuthorityError> {
+        self.validate_primed_correlation(&prepared, now, merger)?;
+        let revision = self.next_revision()?;
+        if let PrimedCorrelationStage::Epoch(staged) = prepared.stage {
+            self.epoch = staged.next;
+        }
+        self.history.clear();
+        self.history.extend(prepared.pairs);
+        self.revision = revision;
+        Ok(())
+    }
     fn state(&self) -> PreparationState {
         PreparationState {
             revision: self.revision,
@@ -602,14 +752,20 @@ impl AudioAuthority {
         }
     }
     fn logical(&self, stream: ClockPoint) -> Result<ClockPoint, AudioAuthorityError> {
-        if stream.domain != self.epoch.stream_origin.domain {
+        Self::logical_in_epoch(self.epoch, stream)
+    }
+    fn logical_in_epoch(
+        epoch: AudioAuthorityEpoch,
+        stream: ClockPoint,
+    ) -> Result<ClockPoint, AudioAuthorityError> {
+        if stream.domain != epoch.stream_origin.domain {
             return Err(AudioAuthorityError::DomainMismatch);
         }
         Ok(ClockPoint {
-            domain: self.epoch.logical_origin.domain,
+            domain: epoch.logical_origin.domain,
             timestamp: add(
-                self.epoch.logical_origin.timestamp,
-                delta(stream.timestamp, self.epoch.stream_origin.timestamp),
+                epoch.logical_origin.timestamp,
+                delta(stream.timestamp, epoch.stream_origin.timestamp),
             )?,
         })
     }
@@ -620,14 +776,23 @@ impl AudioAuthority {
         validity: ClockInterval,
         extrapolation: ExtrapolationPolicy,
     ) -> Result<AffineClockMapper, AudioAuthorityError> {
+        Self::mapper_in_epoch(self.epoch, first, second, validity, extrapolation)
+    }
+    fn mapper_in_epoch(
+        epoch: AudioAuthorityEpoch,
+        first: ClockPair,
+        second: ClockPair,
+        validity: ClockInterval,
+        extrapolation: ExtrapolationPolicy,
+    ) -> Result<AffineClockMapper, AudioAuthorityError> {
         Ok(AffineClockMapper::from_pairs_unknown(
             ClockPair {
                 source: first.target,
-                target: self.logical(first.source)?,
+                target: Self::logical_in_epoch(epoch, first.source)?,
             },
             ClockPair {
                 source: second.target,
-                target: self.logical(second.source)?,
+                target: Self::logical_in_epoch(epoch, second.source)?,
             },
             validity,
             extrapolation,
@@ -666,3 +831,7 @@ fn add(origin: Timestamp, offset: i128) -> Result<Timestamp, AudioAuthorityError
 #[cfg(test)]
 #[path = "audio_authority_fixtures.rs"]
 mod audio_authority_fixtures;
+
+#[cfg(test)]
+#[path = "audio_authority_priming_fixtures.rs"]
+mod priming_fixtures;

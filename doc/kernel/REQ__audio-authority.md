@@ -138,3 +138,24 @@ state. Local owners delegate to their shared control. Validate before BGM credit
 or replacing the binding's evidence DTO, even while queued inputs prevent
 completion. A newer context cursor cannot hide regressing render counters or
 presentation; verify rejection before any new input or BGM effects.
+
+## Primed replacement and resume correlation
+
+Stage two strictly progressing original raw-output/HOST associations inline
+before publishing a replacement epoch or restarting correlation in the same
+epoch. Preparation changes no active state and allocates no new history.
+Publication revalidates the staging token, domains, checked origins/arithmetic,
+current freshness and absence of pending acquired input. Reject repeated output,
+future or stale evidence and regressing committed presentation/HOST history.
+Evidence may precede the current acquired prefix; acquisition itself must not
+force an invented observation. A same-epoch restart preserves the existing
+distinction between actual presentation and a permitted predicted operation.
+
+Install the two associations in already reserved history while preserving all
+acquired, closed, original-input, operation and presentation watermarks. Priming
+alone neither consumes input nor advances gameplay, song or presentation.
+Refusal retains the previous active epoch and history. Lifecycle consumers must
+validate immediately before committing and make only infallible ownership swaps
+after commit; release the held output last. The existing clear-and-wait APIs
+remain available for explicitly selected consumers. Pure staging fixtures do
+not establish native replacement or resume acceptance.

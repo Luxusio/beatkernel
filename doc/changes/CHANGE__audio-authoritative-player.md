@@ -47,6 +47,16 @@ for lifecycle consumers. Platform library and integration tests pass, including
 test ignored).
 This extraction is not yet selected by the production native player.
 
+The application now combines original native validation and audio-authority
+admission under one exclusive owner. Eight pure integration tests pass,
+including genuine Runtime mapping, original ASIO brackets, exact basis identity
+and authority refusal without native metadata mutation. Primed replacement and
+same-epoch restart stage two original associations inline and preserve every
+committed watermark on publication. Seven new priming tests pass within the
+43-test authority/Step/browser filter. Neither priming nor a native observation
+alone grants gameplay advancement. These foundations are not yet connected to
+the native production pumps or held-output replacement state machine.
+
 ## Known ceiling
 
 Native pumps still need to select the new authority and join actual output

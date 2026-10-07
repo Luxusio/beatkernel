@@ -276,6 +276,10 @@ mod multiplayer_webtransport_client_fixtures;
 mod multiplayer_webtransport_fixtures;
 /// Common queue, rolling BGM and mixer construction/replenishment.
 pub mod native_audio;
+/// Original native evidence coupled to the shared audio-authoritative gameplay boundary.
+pub mod native_audio_presentation;
+#[cfg(test)]
+mod native_audio_presentation_fixtures;
 /// Owned native background scanning and CPU catalog preparation.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_catalog;
