@@ -38,8 +38,9 @@ Current browser WASM type checking also passes; it does not prove hardware or
 complete renderer-worker isolation.
 
 Interactive Chromium QA recorded 13 trusted keyboard/touch/capture callbacks
-with zero Gamepad reads, 321 eligible cadence reads plus three discovery/preflight
-reads, and eight acquired DTOs preserving original timestamps and metadata.
+with zero Gamepad reads, 321 eligible cadence reads, two setup/preflight reads
+and one QA environment probe, and eight acquired DTOs preserving original
+timestamps and metadata.
 Holding an actual Worker ACK suppressed polling and retained queued input until
 release. Stop, restart and saved-prefix replay preserved ownership; a software
 polling exception exercised explicit cleanup. Desktop/mobile screenshots were
