@@ -3,6 +3,8 @@
  * PUPPETEER_MODULE=/path/to/puppeteer-core CHROMIUM=/path/to/chromium \
  *   node app/web/worklet-chronology.browser.mjs
  * Optional WORKLET_CHRONOLOGY_OUT, WORKLET_CHRONOLOGY_PORT, TLS_CERT, TLS_KEY.
+ * WORKLET_CHRONOLOGY_REQUIRE_COLD=1 requires three fresh, healthy cold contexts;
+ * the default remains the historical diagnostic-only acceptance mode.
  * No dependency installs or external services. The owned HTTPS test response
  * wraps registerProcessor; repository production bytes and native clocks stay
  * unchanged. A deliberately omitted native callback is fault injection, not
@@ -20,9 +22,12 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const out = resolve(process.env.WORKLET_CHRONOLOGY_OUT ?? resolve(root, "target/wf/worklet-chronology-browser-development"));
 const port = Number(process.env.WORKLET_CHRONOLOGY_PORT ?? 8121);
+const requireCold = process.env.WORKLET_CHRONOLOGY_REQUIRE_COLD === "1";
+const coldCases = requireCold ? ["cold-1", "cold-2", "cold-3"] : ["normal"];
 const evidence = { kind: "development-worklet-chronology-browser", checks: [], scenarios: [],
-  ceiling: ["Deliberate single native-callback omission; no natural gap repair, gameplay completion, replay-prefix or acoustic-output claim."], cleanup: {} };
-const required = ["diagnostic-cold-observation", "native-gap", "late-arm", "sample-control"];
+  mode: requireCold ? "required-healthy-cold" : "historical-diagnostic",
+  ceiling: ["Measured cold-context acceptance only; no universal browser scheduling, high-frame performance, gameplay completion, replay-prefix or acoustic-output claim."], cleanup: {} };
+const required = [...(requireCold ? coldCases : ["diagnostic-cold-observation"]), "native-gap", "late-arm", "sample-control"];
 evidence.required = required;
 let browser, server;
 
@@ -33,14 +38,24 @@ const actualRegister = globalThis.registerProcessor.bind(globalThis);
 globalThis.registerProcessor = (name, Production) => actualRegister(name, class extends Production {
   constructor(options) {
     super(options);
-    this.probe = { successful: [], skipped: null, armedAt: null };
+    this.probe = { successful: [], skipped: null, armedAt: null,
+      firstUnarmedGap: null, armSnapshot: null, firstMixer: null };
+    this.previousUnarmedEnd = null;
+    this.mixerProbeAttempts = 0;
     const post = this.port.postMessage.bind(this.port);
     this.port.postMessage = (message, transfer) => post({ ...message, chronologyProbe: this.probe }, transfer);
   }
   control(message) {
     if (message?.kind === '__chronology-skip-one') { this.skipRequested = true; return; }
     const result = super.control(message);
-    if (message?.kind === 'arm' && !this.failed && this.phase === 2) this.probe.armedAt = currentFrame;
+    if (message?.kind === 'arm' && !this.failed && this.phase === 2) {
+      this.probe.armedAt = currentFrame;
+      this.probe.armSnapshot = { currentFrame, reportAvailable: this.owner.report_word(0, false),
+        expectedPresent: this.owner.report_word(23, false),
+        expectedLow: this.owner.report_word(24, false), expectedHigh: this.owner.report_word(24, true),
+        startPresent: this.owner.report_word(25, false),
+        startLow: this.owner.report_word(26, false), startHigh: this.owner.report_word(26, true) };
+    }
     return result;
   }
   process(inputs, outputs) {
@@ -52,9 +67,29 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
     }
     const phase = this.phase;
     const frame = currentFrame;
+    const frames = outputs[0][0].length;
+    if (phase === 1 && frames > 0 && this.previousUnarmedEnd !== null
+      && frame > this.previousUnarmedEnd && this.probe.firstUnarmedGap === null) {
+      this.probe.firstUnarmedGap = { previousEnd: this.previousUnarmedEnd, currentFrame: frame,
+        blockFrames: frames, reportAvailableBefore: this.owner.report_word(0, false), accepted: false };
+    }
     const result = super.process(inputs, outputs);
     if (result && phase > 0 && !this.failed) {
-      this.probe.successful.push({ currentFrame: frame, blockFrames: outputs[0][0].length, phase });
+      if (phase === 1 && frames > 0) {
+        this.previousUnarmedEnd = frame + frames;
+        if (this.probe.firstUnarmedGap?.currentFrame === frame) {
+          this.probe.firstUnarmedGap.accepted = true;
+          this.probe.firstUnarmedGap.reportAvailableAfter = this.owner.report_word(0, false);
+        }
+      }
+      if (phase === 2 && this.probe.firstMixer === null && this.mixerProbeAttempts++ < 2048
+        && this.owner.report_word(0, false) === 1) {
+        this.probe.firstMixer = { currentFrame: frame, blockFrames: frames,
+          startLow: this.owner.report_word(1, false), startHigh: this.owner.report_word(1, true),
+          frames: this.owner.report_word(2, false),
+          renderedLow: this.owner.report_word(12, false), renderedHigh: this.owner.report_word(12, true) };
+      }
+      this.probe.successful.push({ currentFrame: frame, blockFrames: frames, phase });
       if (this.probe.successful.length > 32) this.probe.successful.shift();
     }
     return result;
@@ -95,9 +130,12 @@ async function serve() {
 
 async function runCase(name) {
   const page = await browser.newPage();
+  const consoleMessages = [], pageErrors = [];
+  page.on("console", message => { if (consoleMessages.length < 32) consoleMessages.push({ type: message.type(), text: message.text().slice(0, 2000) }); });
+  page.on("pageerror", error => { if (pageErrors.length < 16) pageErrors.push(String(error).slice(0, 2000)); });
   try {
     await page.goto(`https://127.0.0.1:${port}/__chronology.html`);
-    return await page.evaluate(async name => {
+    const result = await page.evaluate(async ({ name, requireCold }) => {
       const { AudioHost } = await import("/app/web/audio-host.mjs");
       const { AudioCommandClient } = await import("/app/web/audio-command-client.mjs");
       const { AudioSampleClient } = await import("/app/web/audio-sample-client.mjs");
@@ -115,7 +153,7 @@ async function runCase(name) {
       };
       const snapshotError = error => error && ({ code: error.code, status: error.status, admitted: error.admitted, sequence: error.sequence,
         diagnostics: error.diagnostics, frozen: error.diagnostics === null || Object.isFrozen(error.diagnostics) });
-      let host, commands, samples, caught = null, retained = null, report = null;
+      let host, commands, samples, caught = null, retained = null, report = null, setupReport = null;
       try {
         host = await AudioHost.open({ module, generation: 1, channels: 2, timeoutMs: 5000,
           contextOptions: { latencyHint: "interactive", sampleRate: 48000 },
@@ -139,6 +177,7 @@ async function runCase(name) {
           const setup = await host.openCommandPort();
           setup.port.addEventListener("message", e => observed.push({ ...e.data, deliveredTo: "command" }));
           commands = new AudioCommandClient(setup);
+          if (name === "normal" && requireCold) setupReport = await commands.poll();
           try { await host.arm(name === "late-arm" ? 0n : host.currentFrame + BigInt(host.sampleRate)); }
           catch (error) { caught = error; }
           if (name === "native-gap") {
@@ -168,6 +207,7 @@ async function runCase(name) {
         }
         return { name, sampleRate: host.sampleRate, hostState: host.state, caught: snapshotError(caught), retained: snapshotError(retained),
           messages: observed, report: report && { available: report.available, words: Array.from(report.words) },
+          setupReport: setupReport && { available: setupReport.available, words: Array.from(setupReport.words) },
           legacyDiagnostics: readAudioFailureDiagnostics({ kind: "terminal", generation: 1, status: 6 }),
           contexts: contexts.map(x => x.state) };
       } catch (error) {
@@ -186,12 +226,16 @@ async function runCase(name) {
         if (host) await host.stop();
         if (contexts.some(x => x.state !== "closed")) throw Error("Owned AudioContext did not close");
       }
-    }, name);
+    }, { name, requireCold });
+    return { ...result, consoleMessages, pageErrors };
   } finally { await page.close(); }
 }
 
-function verify(result) {
+const pair = (low, high) => BigInt(low) | BigInt(high) << 32n;
+function verify(result, id = result.name) {
+  assert.equal(result.pageErrors.length, 0, "Unexpected browser page error");
   if (result.name === "normal") {
+    if (requireCold) assert(!result.unexpected, `Required healthy ${id} failed: ${JSON.stringify(result.unexpected)}`);
     if (result.unexpected) {
       const terminal = result.messages.find(x => x.kind === "terminal" && !x.deliveredTo);
       assert(terminal, "Cold failure has no actual terminal");
@@ -225,9 +269,35 @@ function verify(result) {
       const callbacks = result.messages.flatMap(x => x.chronologyProbe?.successful ?? []);
       assert(callbacks.some(x => x.phase === 2), "No actual successful armed callbacks");
       assert(!result.messages.some(x => x.kind === "terminal"));
+      if (requireCold) {
+        assert.equal(result.setupReport.available, false, "Setup credited a Mixer report");
+        const probe = result.messages.findLast(x => x.chronologyProbe?.firstMixer)?.chronologyProbe;
+        assert(probe, "No actual first Mixer callback snapshot");
+        assert.equal(probe.skipped, null, "Cold lane injected an omitted callback");
+        const arm = probe.armSnapshot;
+        assert(arm, "No actual post-control arm snapshot");
+        assert.equal(arm.reportAvailable, 0, "Arm fabricated a Mixer report");
+        assert.equal(arm.expectedPresent, 1); assert.equal(arm.startPresent, 1);
+        assert.equal(pair(arm.expectedLow, arm.expectedHigh), BigInt(arm.currentFrame), "Arm did not adopt exact actual currentFrame");
+        assert.equal(arm.currentFrame, probe.armedAt);
+        const start = pair(arm.startLow, arm.startHigh);
+        const first = probe.firstMixer;
+        assert.equal(pair(first.startLow, first.startHigh), 0n, "Setup gap credited to Mixer origin");
+        assert.equal(pair(first.renderedLow, first.renderedHigh), BigInt(first.frames), "First Mixer counters credited setup frames");
+        assert(first.frames > 0 && first.frames <= first.blockFrames);
+        assert(BigInt(first.currentFrame) <= start && start < BigInt(first.currentFrame + first.blockFrames));
+        assert.equal(BigInt(first.currentFrame + first.blockFrames) - start, BigInt(first.frames));
+        const words = result.report.words;
+        assert.equal(pair(words[48], words[49]) - start, pair(words[2], words[3]) + pair(words[4], words[5]), "Actual report left the start-relative Mixer grid");
+        if (probe.firstUnarmedGap) {
+          const gap = probe.firstUnarmedGap;
+          assert(gap.currentFrame > gap.previousEnd && gap.blockFrames > 0);
+          assert.equal(gap.accepted, true); assert.equal(gap.reportAvailableBefore, 0); assert.equal(gap.reportAvailableAfter, 0);
+        }
+      }
       evidence.checks.push({ id: "normal", passed: true, supplemental: true });
     }
-    evidence.checks.push({ id: "diagnostic-cold-observation", passed: true });
+    evidence.checks.push({ id: requireCold ? id : "diagnostic-cold-observation", passed: true });
     return;
   } else {
     assert(!result.unexpected, JSON.stringify(result.unexpected));
@@ -276,10 +346,11 @@ try {
   const puppeteer = require(process.env.PUPPETEER_MODULE ?? "puppeteer-core");
   browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
     args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required", `--ignore-certificate-errors-spki-list=${spki}`] });
-  for (const name of ["normal", "native-gap", "late-arm", "sample-control"]) {
-    const result = await runCase(name); evidence.scenarios.push(result);
-    try { verify(result); }
-    catch (error) { evidence.checks.push({ id: name === "normal" ? "diagnostic-cold-observation" : name, passed: false, detail: String(error) }); process.exitCode = 1; }
+  for (const id of [...coldCases, "native-gap", "late-arm", "sample-control"]) {
+    const name = coldCases.includes(id) ? "normal" : id;
+    const result = await runCase(name); evidence.scenarios.push({ ...result, id });
+    try { verify(result, id); }
+    catch (error) { evidence.checks.push({ id: name === "normal" && !requireCold ? "diagnostic-cold-observation" : id, passed: false, detail: String(error) }); process.exitCode = 1; }
   }
   if (required.some(id => !evidence.checks.some(x => x.id === id && x.passed))) process.exitCode = 1;
 } catch (error) { evidence.fatal = { message: String(error), stack: error.stack }; process.exitCode = 1; }
