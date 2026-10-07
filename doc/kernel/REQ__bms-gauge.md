@@ -365,7 +365,7 @@ Preparation is control-side; owning judge/gauge parts needs no dynamic dispatch
 or extra runtime wrapper. Replay capture retains the resulting windows/deltas
 and dynamics through the existing full setup identity. Native simple selection
 uses this builder as described below. Browser/per-member/live selection,
-nondefault competition, class-aware score labels and complete mine/empty
+nondefault multiplayer, class-aware score labels and complete mine/empty
 compatibility remain unfinished.
 
 ## Native policy preparation ports
@@ -388,7 +388,7 @@ existing ButtonOnly native setup and records the complete gauge through its
 canonical wrapper; limits/refusal preserve the judge and policy. Legacy helper
 and default host behavior remain unchanged. These preparation APIs are invoked
 by the guarded common pumps and native launchers described below. Custom
-competition identity, richer/per-member/live/browser selectors and class-aware
+multiplayer identity, richer/per-member/live/browser selectors and class-aware
 scores remain separate integration work.
 
 ## Native nondefault admission
@@ -434,8 +434,27 @@ count before excluding earlier heads. Resolve the selected policy from that
 context once, then use the same windows/gauge in solo or every local member,
 capture and host admission. Original context uses no additional asset read.
 Builtin behavior and recordings stay byte-compatible. Nondefault selection with
-ghost or network competition is explicitly rejected while competition preparation
-still uses legacy identities; do not silently disable it or start its resources.
+network competition is explicitly rejected while shared policy preparation is
+unfinished; do not silently disable it or start its resources. Saved ghosts use
+the policy-aware preparation contract below.
 Current-draft record comparison resolves the same policy from original source.
 Live gauge changes, per-member selectors, graded timing presets/class-aware
-scores, custom competition and browser selection remain separate work.
+scores, custom multiplayer and browser selection remain separate work.
+
+## Policy-aware saved ghosts
+
+Nondefault native solo and local members may load saved own/other recordings
+under the exact resolved judge/gauge setup. Policy-aware preparation requires a
+pristine matching judge and emits the canonical gauge wrapper with the exact
+original-song endpoint. Compare the full semantic header (excluding the other
+recording's original clock domain as before), then reconstruct every operation
+through section-aware replay validation. Different gauge/profile/section/source
+identities refuse; failed admission preserves existing opponents. No operations
+or score events are synthesized to complete a shorter recorded prefix.
+
+Builtin preparation retains its existing default identity and finite/full-ghost
+behavior. Nondefault shared networking is still refused before connection setup;
+enabling saved ghosts must not imply custom multiplayer readiness. Same header
+preparation serves solo and each local member, retaining original player IDs.
+Generic stage/grade score accounting remains unchanged; class-weighted scoring
+and complete LR2 timing/mine/empty compatibility are separate unfinished work.

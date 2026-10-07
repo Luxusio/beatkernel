@@ -59,7 +59,7 @@ fn practice_keeps_original_total_and_stage_count_for_every_selected_gauge() {
     assert_eq!(builtin.gauge(), &crate::gauge::GaugeProfile::default());
 }
 #[test]
-fn custom_competition_refuses_before_resources_and_settings_roundtrip_all_hosts() {
+fn custom_ghosts_are_admitted_network_refuses_and_settings_roundtrip_all_hosts() {
     use crate::{
         competition_live::CompetitionOptions,
         competition::OpponentKind,
@@ -74,9 +74,18 @@ fn custom_competition_refuses_before_resources_and_settings_roundtrip_all_hosts(
             GaugeSelection::Bms(beatkernel_bms::BmsGaugeKind::Hard),
             &options
         )
-        .is_err()
+        .is_ok()
     );
     crate::native_judge::validate_policy_competition(GaugeSelection::BeatKernel, &options).unwrap();
+    let (network, _) =
+        CompetitionOptions::extract(&["--mp-host".into(), "127.0.0.1:34567".into()]).unwrap();
+    assert!(
+        crate::native_judge::validate_policy_competition(
+            GaugeSelection::Bms(beatkernel_bms::BmsGaugeKind::Hard),
+            &network
+        )
+        .is_err()
+    );
     for host in [
         SettingsHost::Linux,
         SettingsHost::Windows,

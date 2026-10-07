@@ -4,7 +4,7 @@
 //! a truncated file does not synthesize an advance or its timeout misses.
 
 use crate::{
-    replay_playback::{PlaybackError, reconstruct},
+    replay_playback::{PlaybackError, reconstruct_section},
     timing::{TimingError, TimingSummary},
 };
 use beatkernel::{
@@ -320,7 +320,7 @@ impl Competition {
         }
         // Canonical validation includes runtime version, actual source compilation
         // and pristine judge fingerprint, even for directly assembled ReplayFiles.
-        let mut replay = reconstruct(source, file, limits)?;
+        let mut replay = reconstruct_section(source, file, limits)?;
         let recorded_until = replay.records().last().map(|record| record.song_time);
         replay.seek_cursor(0).map_err(PlaybackError::from)?;
         let origin = replay

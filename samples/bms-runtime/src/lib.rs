@@ -356,6 +356,8 @@ mod player_chart_scan_fixtures;
 mod playfield_gpu;
 /// Shared playfield partitions for rendering and projected physical touch routing.
 pub mod playfield_layout;
+#[cfg(test)]
+mod policy_aware_ghost_fixtures;
 /// Exact original-song practice positions and native-setting draft updates.
 pub mod practice;
 pub mod practice_loop;

@@ -487,6 +487,78 @@ impl LiveCompetition {
         )
     }
 
+    /// Canonical native saved comparisons for the selected resolved policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_native_section_with_policy(
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        judge: &JudgeEngine,
+        policy: &crate::play_policy::ResolvedPlayPolicy,
+        domain: ClockDomainId,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+        preroll_ns: i64,
+    ) -> Result<Option<Self>> {
+        if judge.effective_song_time().is_some() || judge.profile() != policy.judge() {
+            return Err("policy-aware competition requires a pristine matching judge".into());
+        }
+        if policy.selection() == crate::play_policy::GaugeSelection::BeatKernel {
+            return Self::prepare_native_section_at_with_chart_seed(
+                options, source, judge, domain, start, chart_seed, end, preroll_ns,
+            );
+        }
+        if preroll_ns < 0 {
+            return Err("native competition preroll cannot be negative".into());
+        }
+        let mut native_options = options.clone();
+        native_options.preroll_ns = preroll_ns;
+        Self::prepare_member_section_with_policy(
+            PlayerId(1),
+            &native_options,
+            source,
+            judge,
+            policy,
+            domain,
+            start,
+            chart_seed,
+            end,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_member_section_with_policy(
+        player: PlayerId,
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        judge: &JudgeEngine,
+        policy: &crate::play_policy::ResolvedPlayPolicy,
+        domain: ClockDomainId,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+    ) -> Result<Option<Self>> {
+        if judge.effective_song_time().is_some() || judge.profile() != policy.judge() {
+            return Err("policy-aware competition requires a pristine matching judge".into());
+        }
+        if policy.selection() == crate::play_policy::GaugeSelection::BeatKernel {
+            return Self::prepare_member_section(
+                player, options, source, judge, domain, start, chart_seed, end,
+            );
+        }
+        crate::native_judge::validate_policy_competition(policy.selection(), options)?;
+
+        Self::prepare_member_section_inner(
+            player,
+            options,
+            source,
+            judge,
+            domain,
+            start,
+            chart_seed,
+            end,
+            Some(policy.gauge()),
+        )
+    }
     fn prepare_member_section(
         player: PlayerId,
         options: &CompetitionOptions,
@@ -496,6 +568,22 @@ impl LiveCompetition {
         start: Timestamp,
         chart_seed: u64,
         end: Option<Timestamp>,
+    ) -> Result<Option<Self>> {
+        Self::prepare_member_section_inner(
+            player, options, source, judge, domain, start, chart_seed, end, None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_member_section_inner(
+        player: PlayerId,
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+        gauge: Option<&crate::gauge::GaugeProfile>,
     ) -> Result<Option<Self>> {
         if options.preroll_ns < 0 {
             return Err("native competition preroll cannot be negative".into());
@@ -511,16 +599,29 @@ impl LiveCompetition {
         }
         let limits = replay_limits()?;
         let input_sounds = InputSoundIdentity::from_source(source)?;
-        let capture = LiveReplayCapture::new_with_input_sounds(
-            judge,
-            domain,
-            limits,
-            start,
-            chart_seed,
-            None,
-            BmsInputMode::ButtonOnly,
-            input_sounds,
-        )?;
+        let capture = match gauge {
+            Some(gauge) => LiveReplayCapture::new_with_gauge(
+                judge,
+                domain,
+                limits,
+                start,
+                chart_seed,
+                end,
+                BmsInputMode::ButtonOnly,
+                input_sounds,
+                gauge,
+            )?,
+            None => LiveReplayCapture::new_with_input_sounds(
+                judge,
+                domain,
+                limits,
+                start,
+                chart_seed,
+                None,
+                BmsInputMode::ButtonOnly,
+                input_sounds,
+            )?,
+        };
         let header = capture.header().clone();
         let network_end = if options.network.is_some() { end } else { None };
         let identity = competition_identity_for_section(

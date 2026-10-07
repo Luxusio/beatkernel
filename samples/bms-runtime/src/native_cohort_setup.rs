@@ -220,15 +220,28 @@ fn prepare_cohort_inner(
     let mut saved_options = competition.clone();
     saved_options.network = None;
     for (state, member) in states.iter_mut().zip(&configs) {
-        state.competition = LiveCompetition::prepare_for_at_with_chart_seed(
-            state.player,
-            &saved_options,
-            &prepared.source,
-            &member.judge,
-            config.host,
-            config.start,
-            config.chart_seed,
-        )?;
+        state.competition = match policy {
+            Some(policy) => LiveCompetition::prepare_member_section_with_policy(
+                state.player,
+                &saved_options,
+                &prepared.source,
+                &member.judge,
+                policy,
+                config.host,
+                config.start,
+                config.chart_seed,
+                config.end,
+            )?,
+            None => LiveCompetition::prepare_for_at_with_chart_seed(
+                state.player,
+                &saved_options,
+                &prepared.source,
+                &member.judge,
+                config.host,
+                config.start,
+                config.chart_seed,
+            )?,
+        };
     }
     let network = if competition.network.is_some() {
         NativeGroupCompetition::prepare(

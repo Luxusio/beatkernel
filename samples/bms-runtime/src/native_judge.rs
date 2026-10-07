@@ -118,12 +118,8 @@ pub fn validate_policy_competition(
     selection: crate::play_policy::GaugeSelection,
     options: &crate::competition_live::CompetitionOptions,
 ) -> NativeGameplayResult<()> {
-    if selection != crate::play_policy::GaugeSelection::BeatKernel
-        && (!options.ghosts.is_empty() || options.network.is_some())
-    {
-        return Err(
-            "nondefault gauges currently require disabled ghost and multiplayer competition".into(),
-        );
+    if selection != crate::play_policy::GaugeSelection::BeatKernel && options.network.is_some() {
+        return Err("nondefault gauges currently require disabled multiplayer competition".into());
     }
     Ok(())
 }

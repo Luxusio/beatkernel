@@ -456,7 +456,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
         println!(
-            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nGauge timing: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Nondefault gauges reject ghost/network competition.\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and supports solo or local-cohort network peers with the same section endpoint; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; local groups use one shared QUIC/WebTransport connection and committed native start. Native float32 ALSA, no fallback. Physical timing Unknown."
+            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nGauge timing: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Saved ghosts must match the chosen policy. Nondefault multiplayer remains unavailable.\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and supports solo or local-cohort network peers with the same section endpoint; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; local groups use one shared QUIC/WebTransport connection and committed native start. Native float32 ALSA, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
@@ -827,10 +827,11 @@ mod native {
         let judge =
             judge_config.judge_with_policy(&prepared.source, prepared.compiled.chart, &policy)?;
         let mut competition =
-            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_native_section_at_with_chart_seed(
+            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_native_section_with_policy(
                 &competition_options,
                 &prepared.source,
                 &judge,
+                &policy,
                 HOST,
                 Timestamp::from_nanos(options.start_ns),
                 options.chart_seed,
@@ -1949,7 +1950,11 @@ mod fixtures {
             supplied.extend([flag.into(), value.into()]);
             assert!(validate_args(&supplied).is_ok());
             supplied.extend(["--gauge".into(), "hard".into()]);
-            assert!(validate_args(&supplied).is_err());
+            if flag.starts_with("--ghost") {
+                assert!(validate_args(&supplied).is_ok());
+            } else {
+                assert!(validate_args(&supplied).is_err());
+            }
         }
     }
 }

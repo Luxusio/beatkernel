@@ -94,7 +94,7 @@ const COMMON: &[Spec] = &[
     (
         "--gauge",
         "GAUGE POLICY",
-        "Empty uses beatkernel. Choices: beatkernel, assist-easy, easy, groove, hard, ex-hard, hazard. Native simple timing uses one PGREAT hit window and POOR misses; nondefault competition is unavailable.",
+        "Empty=beatkernel. assist-easy / easy / groove / hard / ex-hard / hazard. One PGREAT window + POOR misses. No custom multiplayer.",
     ),
     (
         "--chart-seed",
