@@ -2219,7 +2219,7 @@ async function drainAudio(state) {
   const current = () => play === state && state.game === game && state.commandClient === client;
   try {
     while (current()) {
-      if (client.state !== "ready") throw new Error("Direct audio command owner is unavailable.");
+      if (client.state !== "ready") throw client.failure ?? new Error("Direct audio command owner is unavailable.");
       let batch;
       if (state.active && state.renderObservation !== null) {
         const observation = state.renderObservation;

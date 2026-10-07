@@ -58,6 +58,7 @@ export class AudioCommandClient {
   }
 
   get state() { return this.#state; }
+  get failure() { return this.#failure; }
 
   #error(code, message, details = {}) {
     return failure(code, message, this.#generation, details);
@@ -136,7 +137,7 @@ export class AudioCommandClient {
     }
     if (message.kind === "terminal") {
       if (!integer(message.status, 1, 0xffffffff)) { malformed(); return; }
-      this.#dispose(this.#error("processor", "Audio processor reported a terminal failure.", { status: message.status }));
+      this.#dispose(this.#error("processor", `Audio processor reported a terminal failure (status ${message.status}).`, { status: message.status }));
       return;
     }
     const pending = this.#pending;
@@ -151,7 +152,7 @@ export class AudioCommandClient {
       return;
     }
     if (message.status !== 0) {
-      this.#dispose(this.#error("remote", `Audio processor rejected ${pending.operation}${message.error ? `: ${message.error}` : "."}`,
+      this.#dispose(this.#error("remote", `Audio processor rejected ${pending.operation} (status ${message.status})${message.error ? `: ${message.error}` : "."}`,
         { sequence: pending.sequence, status: message.status, admitted: message.admitted }));
       return;
     }

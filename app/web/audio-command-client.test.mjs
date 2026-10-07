@@ -22,6 +22,7 @@ function watch(action) {
 async function flush() { for (let index = 0; index < 24; index++) await Promise.resolve(); }
 async function harness(faults = {}) {
   const timers = new Map(); let serial = 0;
+  let clockReads = 0;
   const port = {
     onmessage: null, onmessageerror: null, messages: [], raw: [], starts: 0, closes: 0,
     postMessage(message, transfer = []) {
@@ -34,6 +35,8 @@ async function harness(faults = {}) {
     receive(data) { this.onmessage?.({ data }); },
   };
   const context = createContext({ Uint32Array, ArrayBuffer, structuredClone,
+    Date: class extends Date { static now() { clockReads++; return 0; } },
+    performance: { now() { clockReads++; return 0; } },
     setTimeout(callback, delay) { assert.ok(delay > 0 && delay <= 60000); const id = ++serial; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); } });
   const actual = new SourceTextModule(source, { context, identifier: url.href });
@@ -41,6 +44,7 @@ async function harness(faults = {}) {
   await actual.evaluate();
   const descriptor = { port, generation: 17, queueCapacity: 4, timeoutMs: 50 };
   return { Client: actual.namespace.AudioCommandClient, port, timers, descriptor,
+    get clockReads() { return clockReads; },
     create(fields = {}) { return new actual.namespace.AudioCommandClient({ ...descriptor, ...fields }); },
     reply(fields = {}) {
       const request = port.messages.at(-1);
@@ -234,4 +238,69 @@ test("malformed replies, terminal delivery, deadlines and close fence pending cl
   const start = await harness({ startError: new Error("actual port start failed") });
   assert.throws(() => start.create(), /start/i); assert.equal(start.port.closes, 1);
   assert.equal(start.port.onmessage, null); assert.equal(start.port.onmessageerror, null);
+});
+
+test("failure getter is read-only and healthy reads perform no port or deadline operation", async () => {
+  const h = await harness(), client = h.create();
+  const originalClockReads = h.clockReads;
+  for (let index = 0; index < 32; index++) assert.equal(client.failure, null);
+  assert.throws(() => { client.failure = new Error("replacement"); }, TypeError);
+  assert.equal(client.state, "ready"); assert.equal(h.port.starts, 1);
+  assert.equal(h.port.messages.length, 0); assert.equal(h.port.closes, 0);
+  assert.equal(h.timers.size, 0);
+  assert.equal(h.clockReads, originalClockReads);
+  client.close();
+});
+
+test("validated rejected ACK status and bounded descriptor preserve one sticky first cause", async () => {
+  for (const descriptor of [null, "", "queue-admission", "x".repeat(4096)]) {
+    const h = await harness(), client = h.create(), stale = h.port.onmessage;
+    const pending = watch(() => client.commands([command(), command({ kind: 1 })]));
+    h.reply({ status: 4294967295, admitted: 1, error: descriptor });
+    const error = (await pending.promise).error;
+    assert.equal(error.code, "remote"); assert.equal(error.status, 4294967295);
+    assert.equal(error.generation, 17); assert.equal(error.sequence, 1); assert.equal(error.admitted, 1);
+    assert.ok(error.message.includes("4294967295"));
+    if (descriptor !== null && descriptor.length > 0) {
+      assert.ok(error.message.includes(descriptor));
+      assert.ok(error.message.indexOf("4294967295") < error.message.indexOf(descriptor));
+    }
+    assert.equal(client.failure, error);
+    stale({ data: { kind: "terminal", generation: 17, status: 8 } });
+    client.close();
+    assert.equal(client.failure, error);
+    assert.equal((await watch(() => client.poll()).promise).error, error);
+    assert.equal((await watch(() => client.commands([command()])).promise).error, error);
+    assert.equal(h.port.messages.length, 1); assert.equal(h.port.closes, 1); assert.equal(h.timers.size, 0);
+  }
+});
+
+test("terminal first cause exposes numeric status while stale and malformed packets retain their guards", async () => {
+  const h = await harness(), client = h.create(), stale = h.port.onmessage;
+  const pending = watch(() => client.poll());
+  h.port.receive({ kind: "terminal", generation: 16, status: "unvalidated" });
+  await flush(); assert.equal(pending.settled, false); assert.equal(client.failure, null);
+  h.port.receive({ kind: "terminal", generation: 17, status: 4294967295 });
+  const original = (await pending.promise).error;
+  assert.equal(original.code, "processor"); assert.equal(original.generation, 17);
+  assert.equal(original.status, 4294967295); assert.ok(original.message.includes("4294967295"));
+  assert.equal(client.failure, original);
+  stale({ data: { kind: "terminal", generation: 17, status: 2 } });
+  client.close(); assert.equal(client.failure, original);
+  assert.equal((await watch(() => client.poll()).promise).error, original);
+  assert.equal(h.port.messages.length, 1); assert.equal(h.port.closes, 1);
+  for (const fields of [
+    { kind: "terminal", status: 0 }, { kind: "terminal", status: "8" },
+    { kind: "terminal", status: 4294967296 },
+    { kind: "ack", error: "x".repeat(4097) }, { kind: "ack", error: { message: "unvalidated" } },
+  ]) {
+    const invalid = await harness(), owner = invalid.create();
+    const request = watch(() => owner.commands([command()]));
+    if (fields.kind === "terminal") invalid.port.receive({ generation: 17, ...fields });
+    else invalid.reply({ status: 8, admitted: 0, ...fields });
+    const error = (await request.promise).error;
+    assert.equal(error.code, "protocol"); assert.equal(owner.failure, error);
+    owner.close(); assert.equal(owner.failure, error);
+    assert.equal(invalid.port.messages.length, 1); assert.equal(invalid.port.closes, 1);
+  }
 });

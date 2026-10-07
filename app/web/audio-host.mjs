@@ -16,6 +16,7 @@ export class AudioHostError extends Error {
     this.sequence = details.sequence ?? null;
     this.status = details.status ?? null;
     this.admitted = details.admitted ?? null;
+    this.remoteError = details.remoteError?.slice(0, 4096) ?? null;
   }
 }
 
@@ -486,7 +487,7 @@ export class AudioHost {
       if (!integer(message.status, 1, 0xffffffff)) { malformed(); return; }
       // A rejected control is followed by its one terminal notice. The fresh
       // stop ACK still owns cleanup; the original admitted-prefix error stays.
-      const error = this.#error("processor", "render", "AudioWorklet reported a terminal failure.", { status: message.status });
+      const error = this.#error("processor", "render", `AudioWorklet reported a terminal failure (status ${message.status}).`, { status: message.status });
       if (this.#stopPromise) {
         this.#failure ??= error;
         this.#state = "failed";
@@ -513,8 +514,9 @@ export class AudioHost {
     clearTimeout(pending.timer);
     this.#pending = null;
     if (message.status !== 0) {
-      const error = this.#error("remote", pending.operation, "AudioWorklet rejected the operation.", {
+      const error = this.#error("remote", pending.operation, `AudioWorklet rejected the operation (status ${message.status})${message.error ? `: ${message.error.slice(0, 4096)}` : "."}`, {
         sequence: pending.sequence, status: message.status, admitted: message.admitted,
+        remoteError: message.error,
       });
       pending.reject(error);
       this.#fail(error);

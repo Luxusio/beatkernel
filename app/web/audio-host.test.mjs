@@ -926,6 +926,75 @@ test("processor, message, terminal and posting failures reject pending work and 
   }
 });
 
+test("rejected ACK diagnostics retain bounded descriptor and exact first cause across terminal and cleanup", async () => {
+  for (const descriptor of [null, "", "queue-admission", "x".repeat(4096), "x".repeat(8192)]) {
+    const h = await harness(), owner = await open(h);
+    await acknowledged(h, () => owner.finish());
+    const pending = observe(() => owner.commands([command(), command({ kind: 1 })]));
+    const request = h.last();
+    h.reply(request, { status: 4294967295, admitted: 1, error: descriptor });
+    const original = failure(await pending.result, "remote");
+    assert.equal(original.operation, "commands"); assert.equal(original.status, 4294967295);
+    assert.equal(original.generation, 17); assert.equal(original.sequence, request.sequence);
+    const boundedDescriptor = descriptor === null ? null : descriptor.slice(0, 4096);
+    assert.equal(original.admitted, 1); assert.equal(original.remoteError, boundedDescriptor);
+    assert.ok(original.message.includes("4294967295"));
+    if (boundedDescriptor !== null && boundedDescriptor.length > 0) {
+      assert.ok(original.message.includes(boundedDescriptor));
+      assert.ok(original.message.indexOf("4294967295") < original.message.indexOf(boundedDescriptor));
+      if (descriptor.length > 4096) assert.equal(original.message.includes(descriptor), false);
+    }
+    h.nodes[0].port.emit("message", { kind: "terminal", generation: 17, status: 8 });
+    assert.equal(await localError(h, () => owner.poll(), "remote"), original);
+    await stop(h, owner, "failed");
+    assert.equal(await localError(h, () => owner.poll(), "remote"), original);
+    assert.equal(original.remoteError, boundedDescriptor); assert.equal(original.status, 4294967295);
+    assert.equal(h.sent.filter(row => row.message.kind === "commands").length, 1);
+    assert.equal(h.sent.filter(row => row.message.kind === "stop").length, 1);
+  }
+});
+
+test("terminal diagnostics expose the validated original numeric cause without inventing ACK evidence", async () => {
+  const h = await harness(), owner = await open(h);
+  const pending = observe(() => owner.poll());
+  h.nodes[0].port.emit("message", { kind: "terminal", generation: 16, status: "unvalidated" });
+  await flush(); assert.equal(pending.settled, false); assert.equal(h.sent.length, 1);
+  h.nodes[0].port.emit("message", { kind: "terminal", generation: 17, status: 4294967295 });
+  const original = failure(await pending.result, "processor");
+  assert.equal(original.operation, "render"); assert.equal(original.generation, 17);
+  assert.equal(original.status, 4294967295); assert.equal(original.sequence, null);
+  assert.equal(original.admitted, null); assert.equal(original.remoteError, null);
+  assert.ok(original.message.includes("4294967295"));
+  h.nodes[0].port.emit("message", { kind: "terminal", generation: 17, status: 2 });
+  assert.equal(await localError(h, () => owner.poll(), "processor"), original);
+  await stop(h, owner, "failed");
+  assert.equal(await localError(h, () => owner.poll(), "processor"), original);
+  assert.equal(h.sent.filter(row => row.message.kind === "poll").length, 1);
+  assert.equal(h.sent.filter(row => row.message.kind === "stop").length, 1);
+});
+
+test("diagnostic propagation cannot admit malformed descriptors or terminal statuses", async () => {
+  for (const fields of [
+    { kind: "terminal", status: 0 }, { kind: "terminal", status: "8" },
+    { kind: "terminal", status: 4294967296 },
+    { kind: "ack", error: { message: "unvalidated" } },
+  ]) {
+    const h = await harness(), owner = await open(h);
+    await acknowledged(h, () => owner.finish());
+    const pending = observe(() => owner.commands([command()]));
+    const request = h.last();
+    h.reply(request, { generation: 16, status: 8, admitted: 0, ...fields });
+    await flush(); assert.equal(pending.settled, false);
+    assert.equal(h.sent.filter(row => row.message.kind === "stop").length, 0);
+    h.reply(request, { status: 8, admitted: 0, ...fields });
+    const original = failure(await pending.result, "protocol");
+    assert.equal(original.remoteError, null);
+    assert.equal(await localError(h, () => owner.poll(), "protocol"), original);
+    await stop(h, owner, "failed");
+    assert.equal(h.sent.filter(row => row.message.kind === "commands").length, 1);
+  }
+});
+
 test("operation and shutdown deadlines remain finite even when ACK or close never settles", async () => {
   const h = await harness();
   const owner = await open(h);

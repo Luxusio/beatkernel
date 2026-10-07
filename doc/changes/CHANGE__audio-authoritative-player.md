@@ -26,6 +26,14 @@ real late/regressive/future refusal, and pending-input page/completion barriers.
 Window tests preserve genuine periodic Gamepad samples and the unchanged 12 ms
 policy. These results are scoped development evidence, not a fresh full Node or
 actual-browser QA PASS.
+The subsequent complete Node run passes all 534 tests after the partial-prefix
+and first-cause diagnostic changes. Audio terminal/rejection messages retain
+validated status, rejected Host ACKs retain at most 4,096 descriptor characters,
+and Worker rethrows the command client's original sticky failure. Six added
+diagnostic tests verify identity, bounded retention and unchanged stale/malformed
+packet handling. The audio callback/protocol, retries and timing bounds are
+unchanged. The processor's underlying cause and actual browser startup/late
+delivery failures remain unresolved; no migration or Goal completion follows.
 
 Status: shared foundation, Step integration and browser adapter migration are
 implemented, as are common native audio loops and held-output publication;

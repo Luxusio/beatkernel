@@ -1033,6 +1033,13 @@ prefix against the original Window receipt and previous acquired prefix, while
 keeping the admitted maximum separate. Preserve source chronology, real
 behind-closed-prefix refusal and pending-input page/completion barriers. This
 policy does not prove an absolute OS input-delivery bound.
+Audio failure reporting must preserve its first validated processor cause.
+Terminal and rejected-operation messages retain the original numeric status;
+rejected ACKs retain their bounded error descriptor and admitted prefix. A
+failed command client exposes its sticky error for the Worker to rethrow rather
+than replacing it with a generic unavailable-owner message. Later terminal or
+cleanup notices must not overwrite that first error. Diagnostic visibility does
+not grant retry, change rendering/clock behavior or establish a processor fix.
 Only one step, one render-report request and one outgoing audio batch await
 correlated acknowledgement at each boundary. No unbounded MessagePort backlog
 is used to hide a delayed Worker. Deadline or capacity failure stops the owner.
