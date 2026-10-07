@@ -1,10 +1,11 @@
 # Separate browser acquisition, gameplay and rendering ownership
 
-Status: integration in progress in `TASK__browser-render-worker`. The gameplay
+Status: integration accepted in `TASK__browser-render-worker`. The gameplay
 Worker now exports visual-only packets; a separate renderer implementation owns
-`BrowserView`. Window startup/lifecycle wiring is an implemented candidate;
-whole-application browser acceptance remains unfinished. Component checks do
-not establish deployed isolation.
+`BrowserView`. Window startup/lifecycle wiring passed fresh independent reviews
+and actual two-Worker browser QA, including paused-renderer input/audio service
+and joined cleanup. Hardware performance, production TLS and the separate
+audio-authority acceptance remain unestablished.
 
 Window owns browser-required input acquisition, permission gestures, DOM
 configuration and acquisition geometry. The gameplay Worker owns Runtime,

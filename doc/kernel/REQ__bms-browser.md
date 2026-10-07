@@ -2589,5 +2589,7 @@ Preserve terminal active-play graphics failure as an explicit failed stop with
 actual capture and joined cleanup before game ownership terminates. Static
 history/completed/room display errors stay presentation-only. Headless play is
 unselected. All existing presentation modes require real two-Worker evidence;
-integration is currently in development. Startup and late-touch clock failures
+renderer integration has passed fresh actual two-Worker browser QA. This does
+not complete the overall player Goal or physical/performance acceptance.
+Startup and late-touch clock failures
 remain unresolved under their separate task.

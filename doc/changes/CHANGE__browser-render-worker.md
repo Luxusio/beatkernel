@@ -1,6 +1,22 @@
 # Separate browser renderer Worker
 
-Status: implementation in progress; no integration acceptance claimed.
+Status: implementation accepted for this renderer task. Final independent
+DEEP code/security reviews, documentation review and CLI/browser QA passed at
+`b5202e5`; Harness verification passed. The broader player Goal remains active.
+
+Fresh final verification passed 593 JavaScript tests, 2,216 app native tests
+with two existing ignored cases, and 2,938 workspace tests with six existing
+ignored cases. Workspace check, browser WASM build and scratch binding
+instantiation passed. Interactive browser QA passed all 15 required checks on
+its first full run, with actual keyboard/touch, paused renderer execution,
+all presentation modes, native atomic refusal, and two genuine room peers.
+These suite counts overlap and must not be summed. Browser console output was
+not captured; zero page exceptions were recorded. Software GPU submission,
+local certificate bootstrap and native fixture proof do not establish physical
+devices, production TLS, measured superiority, or repair of prior clock failures.
+
+The entries below retain staged development and reported-ceiling history;
+this final status takes precedence over their earlier pending-review statements.
 
 The selected implementation separates GPU/Scene ownership from gameplay and
 audio through a direct bounded Worker channel. Cold visual registration retains

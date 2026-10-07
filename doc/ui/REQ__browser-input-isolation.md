@@ -118,4 +118,6 @@ The public self-reported progress validator checks counts and optional prefix
 transitions without admitting membership or proving completion.
 
 Verify these requirements with actual separate Workers as well as pure
-registration/progress tests. Integration is still under development.
+registration/progress tests. Renderer integration passed task-scoped independent
+review and actual browser QA. Separate clock, physical-device and performance
+acceptance remain unestablished.
