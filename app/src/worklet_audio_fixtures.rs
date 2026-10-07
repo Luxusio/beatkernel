@@ -1,5 +1,7 @@
 //! Portable AudioWorklet owner fixtures using actual core Mixer output.
-use crate::worklet_audio::{WorkletAudio, WorkletAudioBuilder, WorkletAudioConfig, WorkletAudioError};
+use crate::worklet_audio::{
+    WorkletAudio, WorkletAudioBuilder, WorkletAudioConfig, WorkletAudioError,
+};
 use beatkernel::{
     audio::{AudioCommand, AudioFormat, AudioLimits, PcmLimits, QueuePushError, SampleId, VoiceId},
     time::Timestamp,
@@ -30,6 +32,230 @@ fn play(sample: u64, voice: u64, ns: i64) -> AudioCommand {
         at: Timestamp::from_nanos(ns),
         gain: 1.0,
     }
+}
+
+#[test]
+fn natural_setup_gap_retains_queue_and_first_active_suffix_starts_at_mixer_zero() {
+    let mut audio = audio(128, 1);
+    let pointer = audio.output_ptr();
+    audio.enqueue(play(1, 1, 0)).unwrap();
+    let rejected = play(1, 2, 0);
+    // Actual observed cold-start intervals, followed by a contiguous callback.
+    for (current, frames) in [(0, 128), (1664, 128), (1792, 3)] {
+        audio.render(current, frames).unwrap();
+        assert_eq!(audio.context_frame(), Some(current + frames as u64));
+        assert_eq!(audio.start_frame(), None);
+        assert_eq!(audio.report(), None);
+        assert_eq!(&audio.output()[..frames], vec![0.0; frames]);
+        let error = audio.enqueue(rejected).unwrap_err();
+        assert_eq!(
+            (error.reason, error.command),
+            (QueuePushError::Full, rejected)
+        );
+        assert_eq!(audio.output_ptr(), pointer);
+        assert!(!audio.failed());
+    }
+    // Arm adopts the actual current context, rather than the last setup end.
+    audio.arm(2003, 2000).unwrap();
+    assert_eq!(audio.context_frame(), Some(2000));
+    audio.render(2000, 2).unwrap();
+    assert_eq!(&audio.output()[..2], &[0.0, 0.0]);
+    assert_eq!(audio.report(), None);
+    assert_eq!(
+        audio.enqueue(rejected).unwrap_err().reason,
+        QueuePushError::Full
+    );
+    audio.render(2002, 3).unwrap();
+    assert_eq!(&audio.output()[..3], &[0.0, 0.25, 0.5]);
+    let report = audio.report().unwrap();
+    assert_eq!(
+        (
+            report.start_frame,
+            report.frames,
+            report.playback_start_frame,
+            report.playback_frames
+        ),
+        (0, 2, 0, 2)
+    );
+    assert_eq!(
+        (
+            report.counters.rendered_frames,
+            report.counters.commands_consumed,
+            report.counters.commands_applied
+        ),
+        (2, 1, 1)
+    );
+    assert_eq!(report.counters.late_commands, 0);
+    audio.render(2005, 2).unwrap();
+    assert_eq!(&audio.output()[..2], &[0.75, 1.0]);
+    let report = audio.report().unwrap();
+    assert_eq!(
+        (
+            report.start_frame,
+            report.counters.rendered_frames,
+            report.counters.commands_consumed,
+            report.counters.commands_applied
+        ),
+        (2, 4, 1, 1)
+    );
+    assert_eq!(audio.context_frame(), Some(2007));
+    assert_eq!(audio.output_ptr(), pointer);
+    assert_eq!(audio.output_len(), 128);
+    audio.enqueue(rejected).unwrap();
+}
+
+#[test]
+fn setup_overlap_repeat_and_regression_are_terminal_and_retain_last_cursor() {
+    for bad in [103, 100, 99] {
+        let mut audio = audio(8, 1);
+        let pointer = audio.output_ptr();
+        audio.enqueue(play(1, 1, 0)).unwrap();
+        audio.render(100, 4).unwrap();
+        assert_eq!(audio.render(bad, 1), Err(WorkletAudioError::Chronology));
+        assert!(audio.failed());
+        assert_eq!(audio.context_frame(), Some(104));
+        assert_eq!(audio.start_frame(), None);
+        assert_eq!(audio.report(), None);
+        assert!(audio.output().iter().all(|sample| *sample == 0.0));
+        assert_eq!(audio.output_ptr(), pointer);
+        assert_eq!(audio.render(104, 1), Err(WorkletAudioError::Failed));
+        assert_eq!(audio.arm(104, 104), Err(WorkletAudioError::Failed));
+        assert_eq!(audio.context_frame(), Some(104));
+        let command = play(1, 2, 0);
+        let error = audio.enqueue(command).unwrap_err();
+        assert_eq!(
+            (error.reason, error.command),
+            (QueuePushError::Disconnected, command)
+        );
+    }
+}
+
+#[test]
+fn successful_arm_adopts_exact_current_with_no_equal_or_forward_setup_cursor() {
+    for setup in [None, Some(98), Some(90)] {
+        let mut audio = audio(8, 1);
+        audio.enqueue(play(1, 1, 0)).unwrap();
+        if let Some(current) = setup {
+            audio.render(current, 2).unwrap();
+        }
+        audio.arm(102, 100).unwrap();
+        assert_eq!(audio.context_frame(), Some(100));
+        assert_eq!(audio.start_frame(), Some(102));
+        assert_eq!(audio.report(), None);
+        audio.render(u64::MAX, 0).unwrap();
+        assert_eq!(audio.context_frame(), Some(100));
+        audio.render(100, 3).unwrap();
+        assert_eq!(&audio.output()[..3], &[0.0, 0.0, 0.25]);
+        assert_eq!(audio.report().unwrap().counters.rendered_frames, 1);
+    }
+}
+
+#[test]
+fn rejected_arm_preserves_setup_and_queue_then_valid_retry_uses_actual_current() {
+    let mut builder = WorkletAudioBuilder::new(config(1000, 1, 8, 1)).unwrap();
+    builder
+        .insert_sample(SampleId(1), AudioFormat::new(1000, 1).unwrap(), vec![0.25])
+        .unwrap();
+    let mut audio = builder.finish_at(5).unwrap();
+    let pointer = audio.output_ptr();
+    audio.enqueue(play(1, 1, 0)).unwrap();
+    audio.render(100, 4).unwrap();
+    for (start, current, error) in [
+        (120, 103, WorkletAudioError::Chronology),
+        (119, 120, WorkletAudioError::StaleStart),
+        (u64::MAX - 4, 120, WorkletAudioError::Overflow),
+    ] {
+        assert_eq!(audio.arm(start, current), Err(error));
+        assert_eq!(
+            (audio.context_frame(), audio.start_frame(), audio.report()),
+            (Some(104), None, None)
+        );
+        assert_eq!(audio.playback_end_frame(), Some(5));
+        assert!(!audio.failed());
+        assert_eq!(audio.output(), &[0.0; 8]);
+        assert_eq!(audio.output_ptr(), pointer);
+        let rejected = play(1, 2, 0);
+        let error = audio.enqueue(rejected).unwrap_err();
+        assert_eq!(
+            (error.reason, error.command),
+            (QueuePushError::Full, rejected)
+        );
+    }
+    audio.arm(120, 120).unwrap();
+    audio.render(120, 1).unwrap();
+    assert_eq!(audio.output()[0], 0.25);
+    assert_eq!(audio.report().unwrap().counters.commands_consumed, 1);
+}
+
+#[test]
+fn first_armed_callback_and_reportless_prestart_stay_strict() {
+    for prior_setup in [false, true] {
+        for bad in [99, 101, 111] {
+            let mut audio = audio(8, 1);
+            if prior_setup {
+                audio.render(90, 2).unwrap();
+            }
+            audio.arm(110, 100).unwrap();
+            assert_eq!(audio.render(bad, 1), Err(WorkletAudioError::Chronology));
+            assert!(audio.failed());
+            assert_eq!(
+                (audio.context_frame(), audio.start_frame(), audio.report()),
+                (Some(100), Some(110), None)
+            );
+            assert!(audio.output().iter().all(|sample| *sample == 0.0));
+        }
+    }
+    // No Mixer report exists yet, but the owner has already been armed.
+    for bad in [105, 100, 99, 121] {
+        let mut audio = audio(8, 1);
+        audio.enqueue(play(1, 1, 0)).unwrap();
+        audio.arm(120, 100).unwrap();
+        audio.render(100, 4).unwrap();
+        assert_eq!(audio.report(), None);
+        assert_eq!(audio.render(bad, 1), Err(WorkletAudioError::Chronology));
+        assert_eq!(
+            (audio.context_frame(), audio.start_frame(), audio.report()),
+            (Some(104), Some(120), None)
+        );
+        assert!(audio.failed());
+        assert_eq!(audio.output(), &[0.0; 8]);
+    }
+}
+
+#[test]
+fn unarmed_zero_blocks_are_inert_and_high_context_gaps_remain_exact() {
+    for base in [(1u64 << 53) + 123, u64::MAX - 64] {
+        let mut audio = audio(8, 1);
+        let pointer = audio.output_ptr();
+        audio.render(u64::MAX, 0).unwrap();
+        assert_eq!(audio.context_frame(), None);
+        audio.render(base, 2).unwrap();
+        audio.render(0, 0).unwrap();
+        audio.render(u64::MAX, 0).unwrap();
+        assert_eq!(audio.context_frame(), Some(base + 2));
+        audio.render(base + 16, 2).unwrap();
+        assert_eq!(audio.context_frame(), Some(base + 18));
+        assert_eq!(audio.report(), None);
+        audio.enqueue(play(1, 1, 0)).unwrap();
+        audio.arm(base + 33, base + 32).unwrap();
+        assert_eq!(audio.context_frame(), Some(base + 32));
+        audio.render(base + 32, 3).unwrap();
+        assert_eq!(&audio.output()[..3], &[0.0, 0.25, 0.5]);
+        assert_eq!(audio.context_frame(), Some(base + 35));
+        assert_eq!(audio.report().unwrap().counters.rendered_frames, 2);
+        assert_eq!(audio.output_ptr(), pointer);
+    }
+    let mut audio = audio(8, 1);
+    audio.render(u64::MAX - 3, 1).unwrap();
+    assert_eq!(
+        audio.render(u64::MAX - 1, 2),
+        Err(WorkletAudioError::Overflow)
+    );
+    assert_eq!(audio.context_frame(), Some(u64::MAX - 2));
+    assert_eq!(audio.start_frame(), None);
+    assert_eq!(audio.report(), None);
+    assert!(audio.failed());
+    assert_eq!(audio.output(), &[0.0; 8]);
 }
 
 #[test]

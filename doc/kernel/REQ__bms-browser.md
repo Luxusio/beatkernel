@@ -914,8 +914,14 @@ decoding or application allocation. Setup/destruction remain outside `process`.
 The Worklet uses the actual AudioContext sample rate. Its one-shot start target
 is an absolute context frame, acknowledged separately from a posted request.
 Prestart silence and a partial first block are exact on that grid. Mixer frame
-zero starts at the selected absolute frame; subsequent context blocks must be
-contiguous. Invalid/duplicate/late start, discontinuity, overflow, mismatched
+zero starts at the selected absolute frame. Before successful arm, nonempty
+setup-silence callbacks must be monotonic and nonoverlapping; forward gaps are
+valid because no Mixer frames or commands traverse them. Successful arm commits
+the actual current context frame as the exact next callback frame, after all
+admission checks pass. Every subsequent nonempty callback must be contiguous,
+including armed prestart silence. Zero-length callbacks never adopt a clock.
+Failed arm admission preserves the prior setup cursor and absent start.
+Invalid/duplicate/late start, armed discontinuity, setup overlap, overflow, mismatched
 channels or oversized blocks produce explicit failure. Actual callback lengths
 are used; 128 frames is not a permanent assumption. A fixed interleaved WASM
 view is copied into the browser's supplied planar outputs. Unexpected memory

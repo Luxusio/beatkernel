@@ -122,7 +122,7 @@ impl WorkletAudio {
         if self.start.is_some() {
             return Err(WorkletAudioError::AlreadyArmed);
         }
-        if self.expected.is_some_and(|expected| expected != current) {
+        if self.expected.is_some_and(|expected| current < expected) {
             return Err(WorkletAudioError::Chronology);
         }
         if start < current {
@@ -136,6 +136,7 @@ impl WorkletAudio {
         }
         self.start = Some(start);
         self.armed_current = Some(current);
+        self.expected = Some(current);
         Ok(())
     }
     pub fn enqueue(&mut self, command: AudioCommand) -> Result<(), CommandPushError> {
@@ -152,8 +153,9 @@ impl WorkletAudio {
         self.failed = true;
         error
     }
-    /// Valid nonempty context blocks must be contiguous. Failure permanently
-    /// fences this owner and clears its entire fixed output, without dropping PCM.
+    /// Unarmed nonempty blocks must not overlap; armed blocks must be contiguous.
+    /// Failure permanently fences this owner and clears its entire fixed output,
+    /// without dropping PCM.
     pub fn render(&mut self, current: u64, frames: usize) -> Result<(), WorkletAudioError> {
         if self.failed {
             return Err(self.fail(WorkletAudioError::Failed));
@@ -168,8 +170,13 @@ impl WorkletAudio {
         let end = current
             .checked_add(extent)
             .ok_or_else(|| self.fail(WorkletAudioError::Overflow))?;
-        if self.expected.is_some_and(|expected| expected != current)
-            || self.armed_current.is_some_and(|minimum| current < minimum)
+        if self.expected.is_some_and(|expected| {
+            if self.start.is_some() {
+                current != expected
+            } else {
+                current < expected
+            }
+        }) || self.armed_current.is_some_and(|minimum| current < minimum)
         {
             return Err(self.fail(WorkletAudioError::Chronology));
         }

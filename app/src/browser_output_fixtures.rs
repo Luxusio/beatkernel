@@ -113,7 +113,7 @@ fn finite_decoder_preserves_actual_partial_worklet_reports_across_exact_crossing
             let absent = decode_section_output(&actual_words(&audio), Some(endpoint)).unwrap();
             assert!(absent.report.is_none());
             assert_eq!(absent.start, base + 2);
-            assert_eq!(absent.context, None);
+            assert_eq!(absent.context, Some(base));
             let mut current = base;
             for frames in parts {
                 audio.render(current, frames).unwrap();

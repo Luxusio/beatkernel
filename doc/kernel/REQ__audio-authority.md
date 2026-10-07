@@ -6,6 +6,20 @@ It reads no native clock or device and performs no rendering or Transport rate
 correction. Existing `InputMerger` owns event ordering, source sequences,
 pending storage and byte limits; do not duplicate that queue.
 
+## Unarmed Worklet setup silence
+
+Before successful arm, nonempty silent callbacks accept monotonic, nonoverlapping
+actual context intervals, including forward gaps. They neither drain commands
+nor produce Mixer reports. Successful arm, after every admission check, sets
+the exact next callback frame to its actual current frame. Armed prestart and
+active callbacks must remain contiguous; repeat, overlap, regression and gaps
+still fail. Zero-length callbacks are inert. Rejected arm preserves native
+setup state; the existing browser control failure still fences its owner.
+
+Setup cursor and arm facts are operation evidence, never presentation, command
+execution, input correlation or completion evidence. This correction does not
+select the domain policy for input acquired before playback begins.
+
 ## Clock and progress ownership
 
 Keep three distinct domains: original HOST acquisition time, raw stream output
