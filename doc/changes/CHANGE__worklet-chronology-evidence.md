@@ -1,6 +1,6 @@
 # First-failure AudioWorklet grid evidence
 
-Status: implemented candidate; independent review and final QA remain pending.
+Status: independently reviewed; final CLI and browser QA passed on `f22b55e`.
 
 Final QA initially passed all 646 Node tests, 14 native WorkletAudio tests and
 the four required browser diagnostic scenarios. The fresh `browser-audio`-only
@@ -8,7 +8,15 @@ WASM build exposed a preexisting graphics-gated UI dependency in touch routing.
 The existing four-player page capacity now belongs to shared `playfield_layout`,
 with a compatible UI reexport. Input routing uses the shared constant without
 requiring graphics. Page behavior and native chronology are unchanged; fresh
-review and QA of this correction remain pending.
+review and QA of this correction passed.
+
+Final verification: 646 Node tests, 14 native WorkletAudio tests, seven browser
+input and ten local-input tests passed. The separate browser-audio WASM built
+successfully; scratch generated bindings instantiated the actual BrowserAudio
+and verified absent/high-frame words plus strict armed gap/repeat/backward
+failure retention. Actual Chromium diagnostic checks passed 4/4. Evidence is
+under `target/wf/worklet-chronology-qa-{cli,browser}-2/`. The successful cold
+observation in this run does not establish reliability or repair earlier gaps.
 
 Audio failures now preserve bounded numeric first-cause facts instead of only
 a status code. The preallocated Worklet payload records operation origin,
@@ -29,7 +37,7 @@ checks do not establish a timing repair. The implemented
 [owned-browser probe](../../app/web/worklet-chronology.browser.mjs)
 has exercised the unchanged native frame chronology validator through a
 declared test-only skipped callback and verified actual diagnostic delivery.
-Independent final browser QA remains pending.
+Independent final browser diagnostic QA passed.
 
 The original sporadic status6, pre-play domain choice and delayed-input frontier
 issues remain unresolved and unwaived. Diagnostic fields never authorize
@@ -54,7 +62,7 @@ and128-frame extent, with start57728 and arm9728 retained identically by Host
 and command errors. Late-arm and sample rejection preserved ACK sequence,
 admitted prefix and absence facts. The normal cold path again failed without
 injection. Diagnostic acceptance records that failure accurately; healthy
-cold-start audio remains a separate failed outcome for the broader player Goal.
+cold-start reliability remains unresolved for the broader player Goal.
 
 ## Known ceiling
 
