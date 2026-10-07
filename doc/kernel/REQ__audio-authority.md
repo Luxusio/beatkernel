@@ -110,6 +110,22 @@ Capture first-cause facts before posting the ACK and include the same bounded
 snapshot as optional diagnostics, so a client that retires on the rejection
 still retains the evidence. A later terminal must not replace that error.
 
+Diagnostic v1 is a flat known-field snapshot. `diagnosticVersion` is 1;
+`origin` is 0 for control, 1 for arm, 2 for process; `ownerPhase` is 0 for setup,
+1 for allocated, 2 for armed, 3 for stopped. `currentFramePresent/currentFrame`
+and `successfulArmFramePresent/successfulArmFrame` use 0/1 flags with nonnegative
+safe JavaScript integer frames. `blockFramesPresent/blockFrames` uses a 0/1 flag
+and unsigned32 extent. `expectedFramePresent/expectedFrameLow/expectedFrameHigh`
+and `startFramePresent/startFrameLow/startFrameHigh` use 0/1 flags and unsigned32
+halves of the original unsigned64 grid. Every absent value and half is zero;
+present zero remains valid evidence. Consumers read each known field once,
+copy no unknown fields, and freeze the validated snapshot on `error.diagnostics`.
+Legacy terminals or rejected ACKs without diagnostics retain `diagnostics === null`.
+Unsupported versions, missing/malformed versioned fields, noncanonical absence,
+or unsolicited success-ACK diagnostics cause an explicit protocol failure.
+Rejected ACK `diagnostics` contains the same versioned snapshot nested on the
+control response; it does not alter sequence, status, admitted count or report.
+
 Use pure memory fixtures with actual `InputMerger`: two-anchor startup, analytic
 unequal-rate mapping, original input provenance, backward/forward permission
 limits, prefix lag, equality ordering, predicted-input catch-up, stationary and

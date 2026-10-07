@@ -17,9 +17,11 @@ the original processor error. Legacy status-only messages stay compatible.
 
 Focused actual-source Node fixtures pass all 114 tests, including high words,
 absence, hostile getters, reentrancy, first-cause and cleanup behavior. These
-checks do not establish actual browser delivery or a timing repair. A separate
-owned-browser probe is being prepared to exercise the unchanged native frame
-chronology validator through a declared test-only skipped callback.
+checks do not establish a timing repair. The implemented
+[owned-browser probe](../../app/web/worklet-chronology.browser.mjs)
+has exercised the unchanged native frame chronology validator through a
+declared test-only skipped callback and verified actual diagnostic delivery.
+Independent final browser QA remains pending.
 
 The original sporadic status6, pre-play domain choice and delayed-input frontier
 issues remain unresolved and unwaived. Diagnostic fields never authorize
