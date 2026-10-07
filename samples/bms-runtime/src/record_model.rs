@@ -13,6 +13,8 @@ pub struct RecordCatalog {
 /// Reconstructed accepted-prefix statistics and separately associated historical data.
 #[derive(Clone, Debug)]
 pub struct RecordPreview {
+    pub bms_score: Option<crate::judgment_policy::BmsScoreSummary>,
+    pub historical_bms_score: Option<crate::judgment_policy::BmsScoreSummary>,
     pub path: PathBuf,
     pub records: usize,
     pub recorded_until: Option<Timestamp>,

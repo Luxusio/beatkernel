@@ -41,6 +41,8 @@ fn preview(count: Option<usize>) -> RecordPreview {
             },
         )),
         historical_score: score.map(Arc::new),
+        bms_score: None,
+        historical_bms_score: None,
         historical_comparison: None,
         archive_error: None,
         score: Default::default(),

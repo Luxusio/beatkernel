@@ -50,6 +50,8 @@ fn preview(comparison: Option<Option<CompetitionSnapshot>>) -> RecordPreview {
             grades: (0..5).map(|grade| (grade, 1)).collect(),
             timing: TimingRecord::default(),
         })),
+        bms_score: None,
+        historical_bms_score: None,
         historical_comparison: comparison.map(Arc::new),
         archive_error: None,
         score: Default::default(),

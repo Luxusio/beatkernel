@@ -139,7 +139,15 @@ impl RecordPreview {
         score
             .observe(replay.results())
             .map_err(|error| error.to_string())?;
+        let bms_score = setup
+            .judgments
+            .as_ref()
+            .map(|classes| classes.project(&score))
+            .transpose()
+            .map_err(|error| error.to_string())?;
         Ok(Self {
+            bms_score,
+            historical_bms_score: None,
             path: path.into(),
             records: replay.records().len(),
             recorded_until: replay.records().last().map(|record| record.song_time),
@@ -164,10 +172,11 @@ impl RecordPreview {
         let association = archive.map(|archive| prepare_association(archive, &file.header, player));
         let mut preview = Self::from_file(path, source, settings, file)?;
         match association {
-            Some(Ok((historical, score, comparison))) => {
+            Some(Ok((historical, score, comparison, bms_score))) => {
                 preview.historical = Some(historical);
                 preview.historical_score = score;
                 preview.historical_comparison = comparison;
+                preview.historical_bms_score = bms_score;
             }
             Some(Err(error)) => preview.archive_error = Some(error.to_string()),
             None if player.is_some() => {
@@ -185,16 +194,18 @@ impl RecordPreview {
         player: Option<crate::local_players::PlayerId>,
     ) {
         match prepare_association(archive, header, player) {
-            Ok((historical, score, comparison)) => {
+            Ok((historical, score, comparison, bms_score)) => {
                 self.historical = Some(historical);
                 self.historical_score = score;
                 self.historical_comparison = comparison;
+                self.historical_bms_score = bms_score;
                 self.archive_error = None;
             }
             Err(error) => {
                 self.historical = None;
                 self.historical_score = None;
                 self.historical_comparison = None;
+                self.historical_bms_score = None;
                 self.archive_error = Some(error.to_string());
             }
         }
@@ -209,6 +220,7 @@ fn prepare_association(
         crate::record_model::HistoricalRecordValue,
         Option<std::sync::Arc<crate::result_archive::ArchivedScore>>,
         Option<std::sync::Arc<Option<crate::competition_presentation::CompetitionSnapshot>>>,
+        Option<crate::judgment_policy::BmsScoreSummary>,
     ),
     String,
 > {
@@ -236,7 +248,8 @@ fn prepare_association(
         })
         .transpose()?
         .map(std::sync::Arc::new);
-    Ok(((entry.player, entry.result), score, comparison))
+    let bms_score = entry.bms_score().map_err(|error| error.to_string())?;
+    Ok(((entry.player, entry.result), score, comparison, bms_score))
 }
 fn is_record_path(path: &Path) -> bool {
     path.extension()

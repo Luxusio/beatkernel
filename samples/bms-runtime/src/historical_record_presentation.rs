@@ -34,6 +34,7 @@ pub struct HistoricalRecordPresentation {
     start: Timestamp,
     end: Option<Timestamp>,
     score: Option<crate::result_archive::ArchivedScore>,
+    bms_score: Option<crate::judgment_policy::BmsScoreSummary>,
     geometry: GeometrySnapshot,
     comparison_body: GeometrySnapshot,
     comparison: Option<Option<crate::competition_presentation::CompetitionSnapshot>>,
@@ -70,10 +71,11 @@ impl HistoricalRecordPresentation {
                 .find(|(id, _)| *id == entry.player)
                 .map(|(_, snapshot)| snapshot)
         });
-        Self::from_record_with_comparisons(
+        Self::from_record_with_class_score(
             (entry.player, entry.result),
             entry.score.as_ref(),
             comparison,
+            entry.bms_score().map_err(|error| error.to_string())?,
         )
         .map(Some)
     }
@@ -88,11 +90,25 @@ impl HistoricalRecordPresentation {
         stored_score: Option<&crate::result_archive::ArchivedScore>,
         comparisons: Option<&Option<crate::competition_presentation::CompetitionSnapshot>>,
     ) -> Result<Self, String> {
+        Self::from_record_with_class_score(value, stored_score, comparisons, None)
+    }
+    pub fn from_record_with_class_score(
+        value: HistoricalRecordValue,
+        stored_score: Option<&crate::result_archive::ArchivedScore>,
+        comparisons: Option<&Option<crate::competition_presentation::CompetitionSnapshot>>,
+        bms_score: Option<crate::judgment_policy::BmsScoreSummary>,
+    ) -> Result<Self, String> {
         if value.0.0 == 0 {
             return Err("historical player ID must be nonzero".into());
         }
         if let Some(score) = stored_score {
             score.validate().map_err(|error| error.to_string())?;
+        }
+        if let Some(classes) = bms_score {
+            let score = stored_score.ok_or("stored class score requires stored counts")?;
+            classes
+                .validate_for(score.hits, score.misses)
+                .map_err(|error| error.to_string())?;
         }
         let (start, end) = match value.1.scope {
             PlayResultScope::FullSong => (Timestamp::ZERO, None),
@@ -192,7 +208,36 @@ impl HistoricalRecordPresentation {
         let comparison_body = scene.geometry_snapshot()?;
         let mut scene = Scene::with_capacity(960, 720, 1024);
         scene.append_geometry(&comparison_body)?;
+        if let Some(classes) = bms_score {
+            for (y, name, value) in [
+                (322, "EX", classes.ex_score),
+                (346, "PGREAT", classes.pgreat),
+                (370, "GREAT", classes.great),
+                (394, "GOOD", classes.good),
+                (418, "BAD", classes.bad),
+                (442, "POOR", classes.poor),
+            ] {
+                text(
+                    &mut scene,
+                    500,
+                    y,
+                    &format!("STORED {name} {value}"),
+                    1,
+                    0xd8b36b,
+                );
+            }
+        } else {
+            text(
+                &mut scene,
+                500,
+                322,
+                "STORED CLASS SCORE UNAVAILABLE",
+                1,
+                0x9bb1cf,
+            );
+        }
         if let Some(score) = stored_score {
+            let score_clip = crate::scene::ClipRect::new([24, 300, 452, 200])?;
             for (y, label) in [
                 (
                     322,
@@ -218,7 +263,7 @@ impl HistoricalRecordPresentation {
                     format!("TIMING ABSOLUTE SUM {} NS", score.timing.absolute_sum),
                 ),
             ] {
-                text(&mut scene, 24, y, &label, 1, 0xb6cce6);
+                crate::ui::atoms::text_clipped(&mut scene, 24, y, &label, 1, 0xb6cce6, score_clip)?;
             }
             for (y, name, value) in [
                 (442, "LAST", score.timing.last),
@@ -229,7 +274,7 @@ impl HistoricalRecordPresentation {
                     || format!("TIMING {name} UNAVAILABLE"),
                     |value| format!("TIMING {name} {value} NS"),
                 );
-                text(&mut scene, 24, y, &label, 1, 0xb6cce6);
+                crate::ui::atoms::text_clipped(&mut scene, 24, y, &label, 1, 0xb6cce6, score_clip)?;
             }
         } else {
             text(&mut scene, 24, 322, "STORED SCORE UNAVAILABLE", 1, 0x9bb1cf);
@@ -249,6 +294,7 @@ impl HistoricalRecordPresentation {
             start,
             end,
             score,
+            bms_score,
             geometry: scene.geometry_snapshot()?,
         })
     }
@@ -263,6 +309,9 @@ impl HistoricalRecordPresentation {
     }
     pub fn score(&self) -> Option<&crate::result_archive::ArchivedScore> {
         self.score.as_ref()
+    }
+    pub const fn bms_score(&self) -> Option<crate::judgment_policy::BmsScoreSummary> {
+        self.bms_score
     }
     pub const fn grade_page(&self) -> usize {
         self.grade_page

@@ -405,6 +405,8 @@ fn record_directory_commit_invalidates_old_catalog_and_preview_only_when_the_com
             end: None,
             historical: None,
             historical_score: None,
+            bms_score: None,
+            historical_bms_score: None,
             historical_comparison: None,
             archive_error: None,
             score: Default::default(),

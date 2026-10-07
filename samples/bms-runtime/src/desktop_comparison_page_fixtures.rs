@@ -63,6 +63,8 @@ fn prepared(grades: usize, comparison: Option<Option<CompetitionSnapshot>>) -> D
             grades: (0..grades).map(|grade| (grade as u32, 1)).collect(),
             timing: TimingRecord::default(),
         })),
+        bms_score: None,
+        historical_bms_score: None,
         historical_comparison: comparison.map(Arc::new),
         archive_error: None,
         score: Default::default(),

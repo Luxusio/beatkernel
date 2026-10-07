@@ -375,6 +375,8 @@ mod pressed_contact_fixtures;
 pub mod pressed_keys;
 /// Bounded saved-record discovery and chart/profile-compatible prefix previews.
 pub mod record_catalog;
+#[cfg(all(test, feature = "graphics"))]
+mod record_class_score_ui_fixtures;
 #[cfg(test)]
 mod recorded_class_score_fixtures;
 /// Song-time command planning from actual recorded BMS judgment.

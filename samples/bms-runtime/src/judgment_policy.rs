@@ -44,6 +44,28 @@ pub struct BmsScoreSummary {
     pub poor: u64,
     pub ex_score: u64,
 }
+impl BmsScoreSummary {
+    /// Checks a prepared summary at a presentation boundary without reading grades.
+    pub fn validate_for(&self, hits: u64, misses: u64) -> Result<(), JudgmentPolicyError> {
+        let sum = self
+            .pgreat
+            .checked_add(self.great)
+            .and_then(|n| n.checked_add(self.good))
+            .and_then(|n| n.checked_add(self.bad))
+            .ok_or(JudgmentPolicyError::Overflow)?;
+        let ex = self
+            .pgreat
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(self.great))
+            .ok_or(JudgmentPolicyError::Overflow)?;
+        hits.checked_add(misses)
+            .ok_or(JudgmentPolicyError::Overflow)?;
+        if sum != hits || self.poor != misses || self.ex_score != ex {
+            return Err(JudgmentPolicyError::InconsistentScore);
+        }
+        Ok(())
+    }
+}
 impl BmsJudgmentPolicy {
     pub fn new(entries: &[GradeClass]) -> Result<Self, JudgmentPolicyError> {
         if entries.is_empty()

@@ -303,6 +303,21 @@ fn validate_frame(frame: &RecordsFrame<'_>) -> Result<(), String> {
         return Err("Records frame exceeds catalog or index bounds".into());
     }
     if let Some(preview) = frame.preview {
+        if let Some(classes) = preview.bms_score {
+            classes
+                .validate_for(preview.score.hits, preview.score.misses)
+                .map_err(|error| error.to_string())?;
+        }
+        if let Some(classes) = preview.historical_bms_score {
+            let score = preview
+                .historical_score
+                .as_deref()
+                .filter(|_| preview.historical.is_some())
+                .ok_or("stored class score requires associated historical counts")?;
+            classes
+                .validate_for(score.hits, score.misses)
+                .map_err(|error| error.to_string())?;
+        }
         let selected = frame
             .selected
             .and_then(|index| frame.catalog?.entries.get(index));
@@ -321,6 +336,7 @@ struct Row {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Preview {
+    bms_score: Option<crate::judgment_policy::BmsScoreSummary>,
     records: usize,
     start: Timestamp,
     end: Option<Timestamp>,
@@ -336,6 +352,7 @@ struct Preview {
 impl From<&RecordPreview> for Preview {
     fn from(value: &RecordPreview) -> Self {
         Self {
+            bms_score: value.bms_score,
             records: value.records,
             start: value.start,
             end: value.end,
@@ -352,6 +369,7 @@ impl From<&RecordPreview> for Preview {
 }
 /// Fixed node tree per Records instance, with only visible row labels retained.
 struct DetailCache {
+    bms_score: Option<crate::judgment_policy::BmsScoreSummary>,
     value: crate::record_model::HistoricalRecordValue,
     score: Option<Arc<crate::result_archive::ArchivedScore>>,
     comparison: Option<Arc<Option<crate::competition_presentation::CompetitionSnapshot>>>,
@@ -521,7 +539,7 @@ impl RecordsView {
                 text(
                     scene,
                     24,
-                    485,
+                    472,
                     &format!(
                         "{} RECORDS{}",
                         count,
@@ -553,6 +571,33 @@ impl RecordsView {
                 if pending {
                     text(scene, 24, 520, "LOADING RECORDS", 2, 0xd8b36b);
                 } else if let Some(preview) = preview {
+                    if let Some(classes) = preview.bms_score {
+                        for (y, label) in [
+                            (482, format!("PREFIX EX {}", classes.ex_score)),
+                            (
+                                492,
+                                format!("PGREAT {} GREAT {}", classes.pgreat, classes.great),
+                            ),
+                            (
+                                502,
+                                format!(
+                                    "GOOD {} BAD {} POOR {}",
+                                    classes.good, classes.bad, classes.poor
+                                ),
+                            ),
+                        ] {
+                            text(scene, 24, y, &label, 1, 0xd8b36b);
+                        }
+                    } else {
+                        text(
+                            scene,
+                            24,
+                            482,
+                            "PREFIX CLASS SCORE UNAVAILABLE",
+                            1,
+                            0x9bb1cf,
+                        );
+                    }
                     text(
                         scene,
                         24,
@@ -756,6 +801,7 @@ impl RecordsView {
             let value = preview.historical.expect("validated historical value");
             let same = self.detail_cache.borrow().as_ref().is_some_and(|cache| {
                 cache.value == value
+                    && cache.bms_score == preview.historical_bms_score
                     && match (&cache.score, &preview.historical_score) {
                         (None, None) => true,
                         (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -768,7 +814,7 @@ impl RecordsView {
                     }
             });
             if !same {
-                let presentation = crate::historical_record_presentation::HistoricalRecordPresentation::from_record_with_comparisons(value, preview.historical_score.as_deref(), preview.historical_comparison.as_deref())?;
+                let presentation = crate::historical_record_presentation::HistoricalRecordPresentation::from_record_with_class_score(value, preview.historical_score.as_deref(), preview.historical_comparison.as_deref(), preview.historical_bms_score)?;
                 let grade_geometry = presentation.prepare_grade_page(frame.grade_page)?;
                 let geometry = detail_geometry(
                     &presentation,
@@ -778,6 +824,7 @@ impl RecordsView {
                     frame.armed,
                 )?;
                 staged = Some(DetailCache {
+                    bms_score: preview.historical_bms_score,
                     value,
                     score: preview.historical_score.clone(),
                     comparison: preview.historical_comparison.clone(),
@@ -1113,6 +1160,8 @@ mod fixtures {
             end: None,
             historical: None,
             historical_score: None,
+            bms_score: None,
+            historical_bms_score: None,
             historical_comparison: None,
             archive_error: None,
             score: ScoreSummary {
@@ -1188,6 +1237,8 @@ mod fixtures {
             end: None,
             historical: None,
             historical_score: None,
+            bms_score: None,
+            historical_bms_score: None,
             historical_comparison: None,
             archive_error: None,
             score: ScoreSummary::default(),
@@ -1267,6 +1318,8 @@ mod fixtures {
             end: None,
             historical: None,
             historical_score: None,
+            bms_score: None,
+            historical_bms_score: None,
             historical_comparison: None,
             archive_error: None,
             score: ScoreSummary::default(),

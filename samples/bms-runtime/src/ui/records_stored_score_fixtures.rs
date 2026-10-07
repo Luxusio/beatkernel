@@ -32,6 +32,8 @@ fn preview(scored: bool) -> RecordPreview {
             },
         )),
         historical_score: scored.then(|| Arc::new(ArchivedScore::from_summary(&score).unwrap())),
+        bms_score: None,
+        historical_bms_score: None,
         historical_comparison: None,
         archive_error: None,
         score: Default::default(),

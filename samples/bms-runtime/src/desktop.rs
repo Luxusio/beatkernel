@@ -8672,6 +8672,8 @@ mod tests {
             end: None,
             historical: None,
             historical_score: None,
+            bms_score: None,
+            historical_bms_score: None,
             historical_comparison: None,
             archive_error: None,
             score: Default::default(),

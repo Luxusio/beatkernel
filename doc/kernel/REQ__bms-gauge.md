@@ -274,11 +274,32 @@ The [portable gameplay fence](REQ__gameplay-fence.md) is an explicit control
 component for that integration. Its stepped and native connections above preserve
 new capture prefixes; broader replay policy and per-player audio cleanup remain
 separate integration work.
+
 InstantDeath state alone does not establish playback termination. Keep the
 high-level mine file admission guard until those owners are connected. Author
 independent deferred fixed-point/configuration/atomicity and real solo/local/
 replay prefix/failure fixtures; no application, browser, device or performance
 acceptance is established by source compilation.
+
+## Retained record class-score presentation
+
+The metadata worker projects explicitly recorded classes into separate optional
+prefix and stored historical summaries. The record preview model retains those
+fixed scalar values. Prefix EX/PGREAT/GREAT/GOOD/BAD/POOR labels describe actual
+reconstructed operations; detail labels with `STORED` describe associated archive
+counts. They must not conflate a short recording with historical completion.
+Missing class metadata or missing stored score displays class-score unavailable,
+never an inferred zero or guessed class.
+
+Frame updates validate summary arithmetic and its hit/miss counters before
+changing cache state. Prefix identity and stored detail cache keys include class
+summary values; changing only class meaning must repaint, while identical frames
+reuse geometry and shared score storage. Header decoding and score projection
+stay in preparation; rendering consumes scalar summaries and no native IO.
+Prefix labels fit left of the catalogue page buttons, and stored counts use the
+detail right column without changing pagination/hit ownership. These are record
+views; live host/HUD propagation and historical combo/window compatibility remain
+separate work.
 
 ## Resolved dynamic policy and record identity
 
