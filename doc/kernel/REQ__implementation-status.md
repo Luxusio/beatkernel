@@ -1,5 +1,19 @@
 # Implementation inventory and outstanding acceptance
 
+## Current authority and historical boundary
+
+The current feature-level source/verification survey is
+[BMS player progress](REQ__bms-player-progress.md), inspected at revision
+`5ddc850` on 2026-10-07. The sections below are historical source observations
+from 2026-10-01 and subsequent dated continuations, not a current completion
+ledger. In particular, old WAV-only, unavailable-backend or deferred-execution
+statements must not override current source and fresh evidence. The user lifted
+verification deferral on 2026-10-06; historical deferral text below is superseded.
+Neither the old inventory nor the current survey establishes full-player,
+native hardware or measured performance acceptance.
+
+## Historical source inventory
+
 This inventory maps the ordered [plan](../../plan.md) to source present on
 2026-10-01, including native BMS replay, live ASIO composition and the
 subsequent Runtime-driven visual example.
