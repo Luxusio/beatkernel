@@ -38,7 +38,10 @@ desktop pointer adapter uses it after physical-to-logical projection.
 `ui::motion::TranslationMotion` samples a linear integer-pixel offset from a
 caller-supplied `Duration`. It owns no timer, clock or scheduling loop. Zero
 duration completes immediately; elapsed time past the endpoint clamps to the
-destination. The presentation owner composes local geometry, applies the
+destination. Intermediate displacement truncates toward zero, rounding toward
+the starting offset; this is integer-pixel movement, not subpixel interpolation.
+Sampling supports `Duration::MAX` without arithmetic overflow. The presentation
+owner composes local geometry, applies the
 sampled offset and requests a redraw. Clearing a scene resets translation;
 geometry snapshots reject nonzero translation instead of losing it silently.
 Offsets beyond ±2^24 logical pixels reject to preserve exact integer uniform

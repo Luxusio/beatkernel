@@ -14,9 +14,14 @@ and keyboard/navigation ownership remain valid. Invalid transform input must
 reject before mutating the admitted state.
 
 Provide a pure translation sampler driven by caller-supplied elapsed duration.
-It owns no timer, thread, transport clock or IO. It must return exact starting
-and ending offsets, clamp after completion and handle extreme durations and
-coordinate differences without overflow. Admit offsets only within ±2^24
+It owns no timer, thread, transport clock or IO. For a positive duration it
+must return the exact starting offset at elapsed zero and the exact ending
+offset at completion, clamping after completion. Zero duration returns the
+destination immediately, including at elapsed zero. Intermediate displacement
+truncates toward zero, rounding movement toward the starting offset: moving
+from (0,0) to (-3,3) at one quarter of the duration yields (0,0). Sampling must
+handle `Duration::MAX` and extreme coordinate differences without overflow.
+Admit offsets only within ±2^24
 logical pixels so integer offsets have an exact f32 uniform representation;
 reject larger offsets atomically. Initial integer-pixel translation
 matches the existing bitmap UI; fractional transforms and easing are future
