@@ -1,5 +1,12 @@
 # Pure presentation time estimator
 
+This is a reusable legacy HOST/transport-correction capability. The current BMS
+player selects [audio authority](REQ__audio-authority.md) instead: raw output
+supplies scheduling, logical output owns normal-rate Transport and Runtime,
+and original HOST input uses bounded unknown-quality correlation. The correction
+requirements below apply to explicitly selected legacy consumers, not current
+native/browser play-time authority. Preserve their APIs and regression behavior.
+
 Move backend-independent presentation observation retention, freshness, drift
 and phase calculation and continuous transport correction into the BeatKernel
 core time layer. Its public estimator, config, admission/update values and error

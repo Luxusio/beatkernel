@@ -5,6 +5,17 @@ are not complete. This decision supersedes mandatory host-transport rate
 correction in the BMS player's browser playback contract. Existing generic
 clock-calibration and presentation-estimator APIs remain reusable capabilities.
 
+Current source at `394c2c0` connects this authority through shared Step/browser
+owners and Linux, Windows and macOS solo/local startup and gameplay. Raw output
+remains the scheduling grid; a distinct logical output timeline owns Runtime
+normalization and normal-rate Transport. Original HOST input is correlated with
+explicitly unknown accuracy. Held output publication and native pause/control
+consume original physical evidence. Existing recordings retain their recorded
+domain and wire interpretation. Development regressions and Rust/WASM type
+checks pass; formal review, current CLI/desktop/browser QA and physical
+SDK/hardware acceptance remain pending. This is implementation progress, not
+migration or full Goal completion.
+
 ## Decision
 
 The BMS player's play position shall be determined by the active audio output
@@ -51,7 +62,7 @@ host-rate correction loop has been removed.
 Browser QA at `979f668` reproduced `BaseRateOutOfBounds`: supplied output elapsed
 1.296468 seconds while supplied host elapsed 1.308 seconds, about -8816ppm,
 exceeding the existing 1000ppm limit. These observations establish a failure of
-the current path; they do not distinguish physical drift from timestamp
+the former HOST/correction path; they do not distinguish physical drift from timestamp
 estimation error. No performance or hardware superiority is inferred.
 
 Before implementation, trace actual shared/native/browser progression, input

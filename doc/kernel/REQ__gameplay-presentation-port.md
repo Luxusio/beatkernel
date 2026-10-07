@@ -1,5 +1,14 @@
 # Gameplay presentation dependency injection
 
+The estimator-based port below remains the explicit legacy compatibility path.
+Current BMS solo/cohort launchers select static audio timing wrappers and the
+exclusive native validator/audio-authority owner described in
+[audio authority](REQ__audio-authority.md). Browser play uses the same logical
+audio frontier. Audio sessions instantiate no legacy correction estimator and
+never grant host timers independent judged progression. Common judge, gauge,
+capture, pause and completion processing remains shared; native evidence enters
+through the outer adapters rather than OS branches in business policy.
+
 The actual common solo and local-cohort gameplay loops must depend only on a
 business-owned presentation contract using core clock/transport values. Their
 production policy cannot import platform PresentationDiscipline or native

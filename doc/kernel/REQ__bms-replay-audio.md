@@ -17,6 +17,16 @@ order follows actual judge results and sound bindings. Finite gains and referenc
 assets are required. The plan exposes origin metadata, actual judge events and
 final logical hash separately from audio execution.
 
+Current audio-authoritative native captures normalize accepted Runtime inputs
+and operations on the logical output timeline while retaining original HOST
+acquisition provenance. Replay decodes each recording's own normalized domain
+and setup; legacy records are not reinterpreted and this migration adds no wire
+schema. A joined native fixture roundtrips two real hits through codec and
+reconstruction with matching events, hash, gauge, EX and logical timestamps,
+then verifies keysound identities/order under an explicit replay origin/preroll.
+The 21 legacy capture/playback/native-feed integration regressions pass. These
+development fixtures do not establish physical replay timing or final QA.
+
 The offline renderer uses the actual core Mixer and shared PCM block writer.
 Timestamp-to-frame selection rounds upward with integer arithmetic. It admits
 only one target-frame group before rendering toward the next group; total notes

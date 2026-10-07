@@ -20,7 +20,9 @@
 활성 상태 집계: S 39, P 18, N 1, U 1.
 이는 source survey이며, S를 완료 개수로 바꾸거나 P를 임의로 50% 가중해 전체 구현률을 계산하지 않는다. **최종 완료 개수/전체 완료율은 아직 증명되지 않았다.**
 
-이전 `5ddc850`/retained-ui-motion 조사에서 Rust workspace/all-targets 결과는 2,724 passed / 0 failed / 6 ignored였다. 기존 hardware/relay ignored 사례는 통과로 계산하지 않았다. 명시 desktop,webtransport runtime lib/bins는 2,028 passed / 0 failed / 2 ignored다. 해당 이전 실행은 [로그](../../target/wf/ui-motion-qa-cli/workspace-tests.log)에 있다. 새 live-class 작업은 Runtime/Player 10개와 HUD 3개 scoped fixture가 통과했으며 현재 작업 트리 전체 회귀 검증은 아직 진행 전이다. 이전 결과를 새 소스의 전체 통과로 인용하거나 다른 언어·물리 장치·전체 Goal acceptance까지 확장하지 않는다.
+이전 `5ddc850`/retained-ui-motion 조사에서 Rust workspace/all-targets 결과는 2,724 passed / 0 failed / 6 ignored였다. 기존 hardware/relay ignored 사례는 통과로 계산하지 않았다. 당시 명시 desktop,webtransport runtime lib/bins는 2,028 passed / 0 failed / 2 ignored였다. 해당 이전 실행은 [로그](../../target/wf/ui-motion-qa-cli/workspace-tests.log)에 있다. 새 live-class 작업의 Runtime/Player 10개와 HUD 3개 scoped fixture도 통과했다. 이전 결과를 새 소스의 전체 workspace 통과로 인용하거나 다른 언어·물리 장치·전체 Goal acceptance까지 확장하지 않는다.
+
+현재 `394c2c0` audio-authority 연동에서는 명시 desktop,webtransport app lib/bins가 2,175 passed / 0 failed / 2 ignored다([로그](../../target/wf/audio-authority/runtime-launcher-regression.log)). Legacy capture/playback/native-feed integration 21개와 Node browser 524개가 통과했고 Windows GNU/macOS all-targets C/archive-stub 및 browser WASM 검사도 통과했다. 이들은 개발 회귀·source/type 증거다. 새 full workspace 및 formal review/독립 CLI·desktop·browser QA는 아직 완료되지 않았고 실제 SDK/hardware·음향 정확도/성능을 증명하지 않는다. 다음 행의 상태 집계나 전체 Goal 완료 판정은 바꾸지 않는다.
 
 ## 기능별 source / 남은 작업
 
@@ -46,7 +48,7 @@
 | BK-018 | Native IO | 독립 키 입력 수집 스레드 | N | Q | [경로](../../app/src/native_gameplay_host.rs) — 전용 입력 collector를 찾지 못함; native/game owner 수집과 UI/audio 분리만으로 충족되지 않음 |
 | BK-019 | Native IO | native rate 변환 phase/history/frontier 연결 | P | Q | [경로](../../crates/beatkernel-platform/src/audio/channel_remix.rs) — source.sample_rate != target.sample_rate를 거부; 순수 converter 존재만으로 연결 완료 아님 |
 | BK-020 | Native IO | WASAPI↔ASIO 등 cross-backend live 교체 | U | Q | [경로](../../app/src/gameplay/output/application/replacement.rs) — 교체 상태 머신 존재; 서로 다른 backend 전환 전체 계약은 이번 조사에서 증명하지 못함 |
-| BK-021 | Native IO | audio master clock·변경된 latency 대응 | P | H | [경로](../../crates/beatkernel/src/time/presentation.rs) — presentation/보정 모델·native adapter 존재; 전 backend/rate/buffer 교체 및 음향 증거 필요 |
+| BK-021 | Native IO | audio master clock·변경된 latency 대응 | P | H | [경로](../../app/src/native_audio_presentation.rs) — native/browser raw OUTPUT scheduling·logical OUTPUT Runtime/Transport 및 unknown HOST input correlation 연동; 전 backend/rate/buffer 교체 및 음향 증거 필요 |
 | BK-022 | BMS | 별도 BMS adapter/runtime 경계·parser | S | L | [경로](../../adapters/beatkernel-bms/src/lib.rs) — adapter/core/app crate 경계; parser fixture와 특수 방언 준수 구분 |
 | BK-023 | BMS | BPM/STOP/분기/long-note/mine 처리 | P | Q | [경로](../../adapters/beatkernel-bms/src/lib.rs) — 여러 처리 경로와 fixture 존재; 모든 legacy dialect/판정 호환성 완성은 아님 |
 | BK-024 | BMS | WAV/FLAC/Vorbis/MP3 asset decode | S | L | [경로](../../app/src/lib.rs) — DefaultAssetDecoder의 flac_decode/vorbis_decode/mp3_decode 경로 구현; chained Ogg 등 전 포맷 준수는 아님 |

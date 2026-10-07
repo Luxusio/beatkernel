@@ -784,8 +784,9 @@ timestamps are presentation scheduling only, never an audio clock. The shared
 visible-note query, retained GPU note cache and BGA opacity rules are reused.
 
 The host now contains a playable start/stop source path through the common
-Runtime and separate AudioWorklet Mixer. The bounded native presentation
-observer is reused for continuous input-transport correction. Optional shared
+Runtime and separate AudioWorklet Mixer. The shared audio authority joins actual
+output presentation with acquired HOST input using unknown-quality correlation;
+logical audio owns normal-rate Transport rather than host-rate correction. Optional shared
 capture/export, local replay viewing and explicit saved-record catalog are
 source-integrated. Explicit live WebTransport Play is source-integrated;
 the compatible HTTP/3 relay is also source-integrated. Ranked browser competition
@@ -1016,7 +1017,8 @@ activation reanchors the same shared runtime after setup; this is not a seek.
 Window performance and AudioContext time are bracketed for a nominal software
 start projection. This projection does not compensate acoustic latency or clock
 drift. The AudioHost outputTimestamp accessor supplies genuine browser pairs
-to bounded continuous rate correction after accepted gameplay watermarks.
+to bounded audio-authority correlation and actual presentation admission after
+accepted input-prefix coverage; it does not continuously correct a HOST Transport.
 An initial projection remains an estimate and past judgments are not revised.
 
 The DOM admits at most 1,024 queued key events and sends at most 256 per step.
@@ -1182,7 +1184,8 @@ positions independently of transport correction.
 Recording shall be an explicit optional choice, disabled by default. The shared
 StepGameplay owner shall reuse LiveReplayCapture and the canonical replay codec,
 retaining actual RuntimeReport inputs, original provenance and accepted song
-time, including continuous clock correction. The prepared chart's actual branch
+time on the admitted logical audio timeline. Legacy consumers retain their
+recorded clock-domain interpretation. The prepared chart's actual branch
 seed shall be carried into the existing versioned replay metadata. Native/shared
 callers remain opt-in and audio callbacks acquire no recording work.
 

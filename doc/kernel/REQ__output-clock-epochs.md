@@ -1,5 +1,16 @@
 # Explicit output clock epochs
 
+The estimator rebind contract below remains available to explicit legacy
+HOST/correction consumers. Current BMS audio-authoritative sessions distinguish
+raw stream origins from a stable logical output timeline. Held-output publication
+stages two original associations, validates a newer physical epoch and preserves
+committed acquisition/input/operation/presentation watermarks before ownership
+swaps and lease release. Same-stream ordinary resume retains continuous
+correlation. These connected paths follow [audio authority](REQ__audio-authority.md);
+the earlier pending-integration statements below describe the reusable helper's
+scope. Cross-backend/rate matrices, actual SDK/hardware execution and independent
+QA remain unproven; no gapless or acoustic-accuracy guarantee follows.
+
 PresentationEstimator and its platform discipline expose an explicit output
 observation epoch, initially zero for existing constructors. A caller can rebind
 to a strictly newer u64 epoch with an explicit new stream origin, playback origin

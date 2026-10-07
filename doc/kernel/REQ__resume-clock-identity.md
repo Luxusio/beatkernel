@@ -1,5 +1,9 @@
 # Preserve output identity during gameplay resume
 
+The discipline reconstruction below applies to explicit legacy HOST/correction
+consumers; current BMS launchers select the audio-authoritative contract at the
+end of this document.
+
 An ordinary pause/resume on an unchanged output stream must not reset its
 observation epoch to zero or replace user-selected clock discipline settings
 with defaults. Actual common solo and local-cohort loops stage a fresh
@@ -47,6 +51,8 @@ physical evidence; playback/song frames cannot substitute for it. No transition
 is emitted while awaiting evidence. Malformed/refused updates retain the owner
 and marker. Clear the old marker only on successful output rebind.
 
-This boundary retention is a prerequisite being implemented. Logical Transport
-control, shared native pump selection and atomic held-output publication remain
-pending; the wrapper alone does not establish full resume acceptance.
+Logical Transport control, shared native audio pump selection and atomic
+held-output publication now consume this boundary. Production solo/local
+launchers select those paths. Portable lifecycle/publication fixtures pass;
+physical execution and ordered independent QA remain required for full resume
+acceptance. Neither boundary retention nor type checks prove acoustic accuracy.
