@@ -133,6 +133,52 @@ async function showResults(h) {
   await h.tick();
   return reply;
 }
+test("cold Results restore the latest successful comparison choice across retirement and registration", async () => {
+  for (const changeDuringRegistration of [false,true]) {
+    const h=await active({recordReplay:true,observeOutput:()=>true});
+    await completeOutput(h);
+    h.renderPort.blocked=true;
+    await h.send({kind:"play-stop",playId:7,completed:true});
+    const capture=h.of("play-stopped").at(-1),retire=h.renderPort.posts.at(-1);
+    assert.equal(capture.completedResults.proof,true);assert.equal(retire.kind,"retire");
+    const presented=await h.rpc("play-results-present");
+    assert.equal(presented.result.kind,"completed-results");
+    assert.equal((await h.rpc("play-results-page",{page:1,comparisons:true})).result.completedResults.page,1);
+    assert.equal(h.renderPort.posts.at(-1),retire,"successful choice is retained while the old generation retires");
+    await h.renderPort.deliver(retire);
+    const cold=h.renderPort.posts.at(-1);
+    assert.equal(cold.kind,"packet");assert.equal(new DataView(cold.packet.buffer).getUint16(6,true),5);
+    const snapshot=h.visualExports.at(-1);
+    assert.equal(snapshot.page,0);assert.equal(snapshot.comparisons,false,"actual cold RESULTS always start in detail mode");
+    const selected=changeDuringRegistration?2:1;
+    if(changeDuringRegistration){
+      const chosen=await h.rpc("play-results-page",{page:selected,comparisons:true});
+      assert.equal(chosen.result.completedResults.page,selected);assert.equal(chosen.result.completedResults.comparisons,true);
+    }
+    await h.renderPort.deliver(cold);
+    const initialized=h.renderPort.presentations.get(cold.generation);
+    assert.equal(initialized.page,0);assert.equal(initialized.comparisons,false);
+    assert.equal(initialized.drawable,false);
+    assert.equal(h.views[0].resultDraws.length,0,"cold import cannot draw default detail before the selected page is committed");
+    assert.notEqual(h.of("render-geometry").at(-1).generation,cold.generation);
+    const control=h.renderPort.posts.at(-1);
+    assert.equal(control.kind,"page");assert.equal(control.page,selected);assert.equal(control.comparisons,true);
+    assert.equal(control.generation,cold.generation);assert.ok(control.geometryVersion>cold.geometryVersion);
+    await h.renderPort.deliver(control);
+    assert.equal(initialized.page,selected);assert.equal(initialized.comparisons,true);
+    assert.equal(initialized.drawable,true);
+    assert.deepEqual(h.views[0].resultDraws,[{results:h.completedOwners[0],page:selected}],"first Results presentation is the latest successful choice");
+    assert.equal(h.completedOwners[0].page,selected);assert.equal(h.completedOwners[0].comparisons,true);
+    const geometry=h.of("render-geometry").at(-1);
+    assert.equal(geometry.generation,cold.generation);assert.equal(geometry.content,cold.content);
+    assert.equal(geometry.geometryVersion,control.geometryVersion);
+    assert.deepEqual([geometry.mode,geometry.page,geometry.width,geometry.height],["results",selected,640,480]);
+    assert.equal(h.of("play-error").length,0);assert.equal(h.of("fatal").length,0);
+    assert.equal(capture.completedResults.proof,true);assert.ok(capture.replay instanceof Uint8Array);
+    await h.send({kind:"dispose"});assert.equal(h.completedOwners[0].frees,1);
+  }
+});
+
 test("actual Worker captures before game disposal and waits for explicit Window cleanup acknowledgement", async () => {
   const h = await active({ observeOutput: () => true });
   await completeOutput(h);
@@ -152,6 +198,10 @@ test("actual Worker captures before game disposal and waits for explicit Window 
   await showResults(h);
   assert.equal(h.views[0].resultDraws.at(-1).results, h.completedOwners[0]);
   assert.equal(h.completedOwners[0].frees, 0);
+  const defaultSelection=h.renderPort.posts.findLast(row=>row.kind==="page");
+  assert.equal(defaultSelection.page,0);assert.equal(defaultSelection.comparisons,false);
+  assert.equal(h.renderPort.presentations.get(defaultSelection.generation).drawable,true);
+  assert.equal(h.views[0].resultDraws.length,1,"default Results become drawable only after the actual default page control");
   const resultsGeometry = h.of("render-geometry").at(-1);
   assert.equal(resultsGeometry.mode,"results");
   assert.notEqual(resultsGeometry.generation,beforeResults.generation);
@@ -282,7 +332,7 @@ async function workerHarness(options = {}) {
     const h = new DataView(packet.buffer); h.setUint16(4,1,true); h.setUint16(6,kind,true);
     h.setBigUint64(8,generation,true); h.setBigUint64(16,content,true);
     h.setBigUint64(24,sequence,true); h.setBigUint64(32,0n,true);
-    const snapshot = {owner,kind,generation,content,sequence,page:kind>=4 ? owner.page : page,songNs};
+    const snapshot = {owner,kind,generation,content,sequence,page:kind===5 ? 0 : kind>=4 ? owner.page : page,comparisons:kind===5 ? false : undefined,songNs};
     visualOwners.set(`${generation}:${content}:${sequence}:${kind}`,snapshot);
     visualExports.push(snapshot); return packet;
   }
@@ -314,9 +364,14 @@ async function workerHarness(options = {}) {
     };
   }
   const renderPort = {
-    width:0, height:0, page:0, presentations:new Map(), posts:[], starts:0, closes:0, blocked:options.renderBlocked??false, onmessage:null,onmessageerror:null,
+    deliveries:new Map(), comparisons:false, width:0, height:0, page:0, presentations:new Map(), posts:[], starts:0, closes:0, blocked:options.renderBlocked??false, onmessage:null,onmessageerror:null,
     start(){this.starts++;}, close(){this.closes++;},
     emit(reply){Promise.resolve().then(()=>this.onmessage?.({data:structuredClone(reply)}));},
+    async deliver(request) {
+      const dispatch=this.deliveries.get(request);
+      assert.ok(dispatch,"queued endpoint operation must exist");this.deliveries.delete(request);
+      Promise.resolve().then(dispatch);await flushJobs();
+    },
     ack(request,fields={}) {
       const base={generation:request.generation,content:request.content,operationId:request.operationId};
       const h=request.kind==="packet"?new DataView(request.packet.buffer):null;
@@ -325,16 +380,20 @@ async function workerHarness(options = {}) {
     },
     postMessage(request,transfer=[]) {
       const message=structuredClone(request,{transfer}); this.posts.push(message);
-      Promise.resolve().then(()=>{
-        if(this.blocked)return;
+      const dispatch=()=>{
         const view=views[0];
         if(message.kind==="packet") {
           const h=new DataView(message.packet.buffer),kind=h.getUint16(6,true),sequence=h.getBigUint64(24,true);
           const s=visualOwners.get(`${message.generation}:${message.content}:${sequence}:${kind}`);
           assert.ok(s,"actual valid BKRV exporter packet crossed the boundary");
           if(kind!==6)this.page=s.page;
+          if(kind===5)this.comparisons=false;
           if(kind===6&&options.roomResultsDrawError){this.emit({kind:"render-error",generation:message.generation,content:message.content,message:options.roomResultsDrawError});return;}
-          if(kind>=4)this.presentations.set(message.generation,{...s});
+          if(kind>=4){
+            const existing=this.presentations.get(message.generation);
+            if(kind===6&&existing?.kind===5)existing.room={...s};
+            else this.presentations.set(message.generation,{...s,drawable:kind!==5});
+          }
           const mode=this.posts.find(p=>p.kind==="packet"&&p.generation===message.generation&&p.mode)?.mode;
           if(kind===1&&mode==="preview") {
             if(view.current&&view.current!==s.owner)view.current.releasedByView=true;
@@ -344,18 +403,27 @@ async function workerHarness(options = {}) {
           else if(kind===2&&mode==="replay")view.replayDraws?.push(s.owner);
           else if(kind===2){view.gameDraws?.push(s.owner);view.draws++;}
           else if(kind===4){view.historicalDraws??=[];view.historicalDraws.push(s.owner);trace.push("draw-historical");}
-          else if(kind===5||kind===6){view.resultDraws?.push({results:s.owner,page:s.page});trace.push("draw-results");}
+          else if(kind===6&&this.presentations.get(message.generation)?.drawable){view.resultDraws?.push({results:s.owner,page:s.page});trace.push("draw-results");}
         }else if(message.kind==="resize"){this.width=message.width;this.height=message.height;view.extents.push([message.width,message.height]);}
         if(["page","room-page"].includes(message.kind)){
-          this.page=message.page;
           const s=this.presentations.get(message.generation);
           assert.ok(s,"paging follows real frozen registration");
+          if(message.kind==="room-page"){
+            assert.ok(s.room,"combined footer has its separate frozen room registration");
+            s.room.page=message.page;
+          }else{
+            this.page=message.page;s.page=message.page;
+            if(s.kind===5){this.comparisons=message.comparisons;s.comparisons=message.comparisons;s.drawable=true;}
+          }
           if(s.kind===4){view.historicalDraws??=[];view.historicalDraws.push(s.owner);}
-          else view.resultDraws?.push({results:s.owner,page:message.page});
+          else if(s.drawable){view.resultDraws?.push({results:s.owner,page:s.page});trace.push("draw-results");}
         }
         this.ack(message);
-        if(message.geometryVersion&&this.width>0&&this.height>0)this.emit({kind:"geometry-ack",generation:message.generation,content:message.content,geometryVersion:message.geometryVersion,page:this.page,width:this.width,height:this.height});
-      });
+        const registered=this.presentations.get(message.generation);
+        if(message.geometryVersion&&this.width>0&&this.height>0&&!(registered?.kind===5&&!registered.drawable))this.emit({kind:"geometry-ack",generation:message.generation,content:message.content,geometryVersion:message.geometryVersion,page:this.page,width:this.width,height:this.height});
+      };
+      this.deliveries.set(message,dispatch);
+      Promise.resolve().then(()=>{if(!this.blocked)void this.deliver(message);});
     },
   };
   function renderRequest(request) {

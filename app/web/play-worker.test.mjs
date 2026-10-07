@@ -50,6 +50,7 @@ function renderReport({ available = true, cursor = 9007199254742999n, frames = 2
 }
 
 async function workerHarness(options = {}) {
+  const completedOwners = [];
   const messages = [];
 
   // Genuine queued port and real RenderClient; only the WASM encoder/GPU edge
@@ -63,7 +64,7 @@ async function workerHarness(options = {}) {
     const h = new DataView(packet.buffer); h.setUint16(4,1,true); h.setUint16(6,kind,true);
     h.setBigUint64(8,generation,true); h.setBigUint64(16,content,true);
     h.setBigUint64(24,sequence,true); h.setBigUint64(32,0n,true);
-    const snapshot = {owner,kind,generation,content,sequence,page:kind>=4 ? owner.page : page,songNs};
+    const snapshot = {owner,kind,generation,content,sequence,page:kind===5 ? 0 : kind>=4 ? owner.page : page,comparisons:kind===5 ? false : undefined,songNs};
     visualOwners.set(`${generation}:${content}:${sequence}:${kind}`,snapshot);
     visualExports.push(snapshot); return packet;
   }
@@ -95,7 +96,7 @@ async function workerHarness(options = {}) {
     };
   }
   const renderPort = {
-    deliveries:new Map(), width:0, height:0, page:0, presentations:new Map(), posts:[], starts:0, closes:0, blocked:options.renderBlocked??false, onmessage:null,onmessageerror:null,
+    deliveries:new Map(), comparisons:false, width:0, height:0, page:0, presentations:new Map(), posts:[], starts:0, closes:0, blocked:options.renderBlocked??false, onmessage:null,onmessageerror:null,
     start(){this.starts++;}, close(){this.closes++;},
     emit(reply){Promise.resolve().then(()=>this.onmessage?.({data:structuredClone(reply)}));},
     async deliver(request) {
@@ -120,8 +121,13 @@ async function workerHarness(options = {}) {
           const s=visualOwners.get(`${message.generation}:${message.content}:${sequence}:${kind}`);
           assert.ok(s,"actual valid BKRV exporter packet crossed the boundary");
           if(kind!==6)this.page=s.page;
+          if(kind===5)this.comparisons=false;
           if(kind===6&&options.roomResultsDrawError){this.emit({kind:"render-error",generation:message.generation,content:message.content,message:options.roomResultsDrawError});return;}
-          if(kind>=4)this.presentations.set(message.generation,{...s});
+          if(kind>=4){
+            const existing=this.presentations.get(message.generation);
+            if(kind===6&&existing?.kind===5)existing.room={...s};
+            else this.presentations.set(message.generation,{...s,drawable:kind!==5});
+          }
           const mode=this.posts.find(p=>p.kind==="packet"&&p.generation===message.generation&&p.mode)?.mode;
           if(kind===1&&mode==="preview") {
             if(view.current&&view.current!==s.owner)view.current.releasedByView=true;
@@ -131,17 +137,24 @@ async function workerHarness(options = {}) {
           else if(kind===2&&mode==="replay")view.replayDraws?.push(s.owner);
           else if(kind===2){view.gameDraws?.push(s.owner);view.draws++;}
           else if(kind===4){view.historicalDraws??=[];view.historicalDraws.push(s.owner);}
-          else if(kind===5||kind===6){view.resultDraws?.push({results:s.owner,page:s.page});}
+          else if(kind===6&&this.presentations.get(message.generation)?.drawable){view.resultDraws?.push({results:s.owner,page:s.page});}
         }else if(message.kind==="resize"){this.width=message.width;this.height=message.height;view.extents.push([message.width,message.height]);}
         if(["page","room-page"].includes(message.kind)){
-          this.page=message.page;
           const s=this.presentations.get(message.generation);
           assert.ok(s,"paging follows real frozen registration");
+          if(message.kind==="room-page"){
+            assert.ok(s.room,"combined footer has its separate frozen room registration");
+            s.room.page=message.page;
+          }else{
+            this.page=message.page;s.page=message.page;
+            if(s.kind===5){this.comparisons=message.comparisons;s.comparisons=message.comparisons;s.drawable=true;}
+          }
           if(s.kind===4){view.historicalDraws??=[];view.historicalDraws.push(s.owner);}
-          else view.resultDraws?.push({results:s.owner,page:message.page});
+          else if(s.drawable){view.resultDraws?.push({results:s.owner,page:s.page});}
         }
         this.ack(message);
-        if(message.geometryVersion&&this.width>0&&this.height>0)this.emit({kind:"geometry-ack",generation:message.generation,content:message.content,geometryVersion:message.geometryVersion,page:this.page,width:this.width,height:this.height});
+        const registered=this.presentations.get(message.generation);
+        if(message.geometryVersion&&this.width>0&&this.height>0&&!(registered?.kind===5&&!registered.drawable))this.emit({kind:"geometry-ack",generation:message.generation,content:message.content,geometryVersion:message.geometryVersion,page:this.page,width:this.width,height:this.height});
       };
       this.deliveries.set(message,dispatch);
       Promise.resolve().then(()=>{if(!this.blocked)void this.deliver(message);});
@@ -300,9 +313,31 @@ async function workerHarness(options = {}) {
     get failed() { this.live(); return this.failedValue; }
     free() { this.live(); assert.equal(++this.frees, 1); }
   }
+  class BrowserCompletedResults {
+    constructor(players = [1]) { this.playersValue = players; this.pageValue = 0; this.mode = false; this.frees = 0; completedOwners.push(this); }
+    live() { assert.equal(this.frees, 0); }
+    get players() { this.live(); return new Uint32Array(this.playersValue); }
+    get page() { this.live(); return this.pageValue; }
+    get pages() { this.live(); return this.mode ? 3 : 1; }
+    get detail_pages() { this.live(); return 1; }
+    get comparison_pages() { this.live(); return 3; }
+    get comparisons() { this.live(); return this.mode; }
+    get has_comparisons() { this.live(); return true; }
+    get failed() { this.live(); return false; }
+    set_presentation(page, comparisons) {
+      this.live();
+      if (!Number.isInteger(page) || page < 0 || page >= (comparisons ? 3 : 1)) throw new Error("Result page outside retained packets");
+      this.pageValue = page; this.mode = comparisons;
+    }
+    free() { this.live(); assert.equal(++this.frees, 1);  }
+  }
   class BrowserGame {
     completed_archive() { return null; }
-    completed_results() { return null; }
+    completed_results() {
+      this.live();assert.equal(this.stops,0);
+      if(!options.completedResults || !this.completedEvidence)return null;
+      return new BrowserCompletedResults(this.memberIds??[1]);
+    }
     static new_physical_contact(prepared, ...args) {
       contactConstructions.push({ prepared, args });
       if (options.contactConstructError) { prepared.moved = true; throw new Error(options.contactConstructError); }
@@ -528,7 +563,8 @@ async function workerHarness(options = {}) {
       this.live(); this.calls.push(["completion"]);
       assert.ok(this.lastService, "live completion must follow joined audio service");
       if (this.pendingInput.length || !this.outputEvidence || this.outputEvidence.presentedNs === null) return false;
-      return options.observeOutput?.(this, this.outputEvidence.words, this.outputEvidence.presentedNs) ?? false;
+      this.completedEvidence=options.observeOutput?.(this, this.outputEvidence.words, this.outputEvidence.presentedNs) ?? false;
+      return this.completedEvidence;
     }
     input(...args) {
       this.live();
@@ -1029,6 +1065,7 @@ async function workerHarness(options = {}) {
   installVisualProducer(BrowserReplay.prototype, 1);
   installVisualProducer(BrowserLocalGame.prototype, 1);
   installVisualProducer(BrowserRoomResults.prototype, 6);
+  installVisualProducer(BrowserCompletedResults.prototype,5);
   const self = {
     isSecureContext: false, navigator: {},
     postMessage(value, transfer = []) {
@@ -1046,7 +1083,7 @@ async function workerHarness(options = {}) {
     clearTimeout(id) { timers.delete(id); timerDelays.delete(id); },
   });
   self.performance = context.performance;
-  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserGame", "BrowserReplay", "BrowserMultiplayer", "BrowserLocalGame", "BrowserRoomClient", "BrowserRoomResults"], function () {
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserGame", "BrowserReplay", "BrowserMultiplayer", "BrowserLocalGame", "BrowserRoomClient", "BrowserRoomResults", "BrowserCompletedResults"], function () {
     this.setExport("default", async () => { if (options.initGate) await options.initGate.promise; if (options.viewGate) await options.viewGate.promise; });
     this.setExport("BrowserLibrary", BrowserLibrary);
     this.setExport("BrowserGame", BrowserGame);
@@ -1054,6 +1091,7 @@ async function workerHarness(options = {}) {
     this.setExport("BrowserMultiplayer", BrowserMultiplayer);
     this.setExport("BrowserLocalGame", options.missingLocalExport ? undefined : BrowserLocalGame);
     this.setExport("BrowserRoomClient", options.missingRoomExport ? undefined : BrowserRoomClient);
+    this.setExport("BrowserCompletedResults",BrowserCompletedResults);
     this.setExport("BrowserRoomResults", options.missingRoomResultsExport ? undefined : BrowserRoomResults);
   }, { context });
   const network = new SyntheticModule(["BrowserMultiplayerOwner"], function () {
@@ -1099,7 +1137,7 @@ async function workerHarness(options = {}) {
   });
   await worker.evaluate();
   return {
-    renderPort, visualExports, visualAcks, messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
+    completedOwners, renderPort, visualExports, visualAcks, messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
     roomSessions, roomChannels, roomWrappers, roomResults,
     // Existing cadence fixtures specify elapsed control time from their initial
     // 1000ms reading; a future scheduled activation first waits for that target.
@@ -2391,6 +2429,77 @@ async function completeRoomDrain({ h, session, channel }) {
   assert.equal(session.drainComplete, false);
   channel.writes.at(-1).gate.resolve(); await flushJobs();
 }
+
+test("cold combined Results retain comparison selection and a separate frozen room footer", async () => {
+  const members=[
+    {participant:18446744073709551615n,players:Uint32Array.of(0xffffffff),prepared:false},
+    {participant:9007199254740993n,players:Uint32Array.of(800,4,0xffffffff),prepared:false},
+    {participant:18446744073709551614n,players:Uint32Array.of(0xffffffff,7,9),prepared:false},
+  ];
+  const fixture=await naturalRoomDrain({completedResults:true,roomMembers:members,roomHudPages:2}),{h}=fixture;
+  assert.equal(h.completedOwners.length,1,"actual audio completion captures Results before local ownership is freed");
+  h.renderPort.blocked=true;
+  await completeRoomDrain(fixture);
+  const capture=h.of("play-stopped").at(-1);
+  assert.equal(capture.completedResults.proof,true);assert.equal(capture.room.finalDrain,"complete");
+  let precedingRoom;
+  for(let index=0;index<32;index++){
+    const queued=h.renderPort.deliveries.keys().next().value;
+    if(queued)await h.renderPort.deliver(queued);
+    else await h.tick();
+    const candidate=h.renderPort.posts.findLast(row=>row.kind==="packet"&&row.mode==="room");
+    if(candidate&&!h.renderPort.deliveries.size&&h.of("render-geometry").at(-1)?.mode==="room"){
+      precedingRoom=candidate;break;
+    }
+  }
+  assert.ok(precedingRoom,JSON.stringify({
+    posts:h.renderPort.posts.map(row=>({kind:row.kind,mode:row.mode,generation:row.generation?.toString(),
+      packetKind:row.kind==="packet"?new DataView(row.packet.buffer).getUint16(6,true):undefined})),
+    geometry:h.of("render-geometry"),errors:h.messages.filter(row=>/error|fatal/.test(row.kind)),
+    roomOwners:h.roomResults.length,deliveryCount:h.renderPort.deliveries.size,
+  },(_,value)=>typeof value==="bigint"?value.toString():value));
+  assert.equal(new DataView(precedingRoom.packet.buffer).getUint16(6,true),6);
+  assert.equal(h.renderPort.presentations.get(precedingRoom.generation).owner,h.roomResults[0]);
+  assert.equal((await h.rpc("play-results-present")).result.kind,"completed-results");
+  const retire=h.renderPort.posts.at(-1);
+  assert.equal(retire.kind,"retire");assert.equal(retire.generation,precedingRoom.generation);
+  assert.equal((await h.rpc("play-results-page",{page:2,comparisons:true})).result.completedResults.page,2);
+  assert.equal((await h.rpc("play-room-page",{page:1})).result.page,1);
+  assert.equal(h.renderPort.posts.at(-1),retire,"latest accepted choices remain held behind the actual preceding retire ACK");
+  assert.equal(h.completedOwners[0].page,2);assert.equal(h.completedOwners[0].comparisons,true);
+  await h.renderPort.deliver(retire);
+  const results=h.renderPort.posts.at(-1);
+  assert.equal(new DataView(results.packet.buffer).getUint16(6,true),5);
+  assert.equal(h.visualExports.at(-1).page,0);assert.equal(h.visualExports.at(-1).comparisons,false);
+  await h.renderPort.deliver(results);
+  const room=h.renderPort.posts.at(-1);
+  assert.equal(room.kind,"packet");assert.equal(new DataView(room.packet.buffer).getUint16(6,true),6);
+  assert.equal(room.generation,results.generation);assert.equal(room.content,results.content);
+  assert.equal(h.visualExports.at(-1).page,1,"room wire already preserves its frozen initial footer choice");
+  await h.renderPort.deliver(room);
+  const model=h.renderPort.presentations.get(results.generation);
+  assert.equal(model.page,0);assert.equal(model.comparisons,false);assert.equal(model.room.page,1);
+  assert.equal(model.drawable,false);
+  const completedDraws=()=>h.views[0].resultDraws.filter(row=>row.results===h.completedOwners[0]);
+  assert.deepEqual(completedDraws(),[],"neither preceding standalone ROOM nor combined ROOM imports can unlock unselected completed Results");
+  const restore=h.renderPort.posts.at(-1);
+  assert.equal(restore.kind,"page");assert.equal(restore.page,2);assert.equal(restore.comparisons,true);
+  await h.renderPort.deliver(restore);
+  assert.equal(model.page,2);assert.equal(model.comparisons,true);assert.equal(model.room.page,1);
+  assert.equal(model.drawable,true);
+  assert.deepEqual(completedDraws(),[{results:h.completedOwners[0],page:2}],"the first completed Results draw is the latest successful comparison page");
+  const geometry=h.of("render-geometry").at(-1);
+  assert.equal(geometry.generation,results.generation);assert.equal(geometry.geometryVersion,restore.geometryVersion);
+  assert.deepEqual([geometry.mode,geometry.page,geometry.width,geometry.height],["results",2,640,480]);
+  assert.equal((await h.rpc("play-room-page",{page:0})).result.page,0);
+  const footer=h.renderPort.posts.at(-1);assert.equal(footer.kind,"room-page");
+  await h.renderPort.deliver(footer);
+  assert.equal(model.room.page,0);assert.equal(model.page,2);assert.equal(model.comparisons,true);
+  assert.equal(h.completedOwners[0].page,2);assert.equal(h.completedOwners[0].comparisons,true);
+  assert.equal(h.of("play-error").length,0);assert.equal(h.of("fatal").length,0);
+  assert.equal(capture.replays[0].replayComplete,true);
+  await h.send({kind:"dispose"});assert.equal(h.completedOwners[0].frees,1);assert.equal(h.roomResults[0].frees,1);
+});
 
 test("joined room Results freeze the latest accepted peer prefix after gameplay disposal and retain one bounded paged archive", async () => {
   const members = [

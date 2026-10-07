@@ -399,6 +399,12 @@ function publishVisual() {
           if (!currentVisual(context)) { pump.dirty = true; continue; }
         }
         if (surface && surface.geometryVersion > surfaceSentVersion && !context.controls.some(control => control.operation === "resize")) context.controls.unshift({ operation: "resize", fields: { ...surface } });
+        // Frozen Results transport omits selection. Admit the latest owner
+        // selection explicitly before the receiver can submit its first draw.
+        if (context.mode === "results" && !context.controls.some(control => control.operation === "page")) {
+          context.controls.push({ operation: "page", fields: { page: context.owner.page,
+            comparisons: context.owner.comparisons, geometryVersion: nextGeometry() } });
+        }
       }
       if (!currentVisual(context)) { pump.dirty = true; continue; }
       // Controls wait only for the visual channel; input/audio remain independent.

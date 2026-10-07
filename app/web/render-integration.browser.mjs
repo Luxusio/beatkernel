@@ -27,7 +27,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const out = resolve(process.env.RENDER_INTEGRATION_OUT ?? resolve(root, "target/wf/browser-render-worker/integration-development-1"));
 const port = Number(process.env.RENDER_INTEGRATION_PORT ?? 8101);
 const selectedCase = process.env.RENDER_INTEGRATION_CASE ?? null;
-const required = ["ready-preview", "surface-zero-resize", "genuine-completed", "history", "replay", "live-stalled-input-audio", "local-touch", "cumulative-after-ack", "terminal-capture-cleanup", "stale-owner", "room", "combined-results-room", "malformed-atomic", "cold-sequence-atomic"];
+const required = ["ready-preview", "surface-zero-resize", "genuine-completed", "history", "replay", "live-stalled-input-audio", "local-touch", "cumulative-after-ack", "terminal-capture-cleanup", "stale-owner", "room", "combined-results-room", "malformed-atomic", "cold-sequence-atomic", "mode-admission-atomic"];
 const evidence = { kind: "development-browser-integration", selectedCase, required, checks: [], scenarios: [], ceiling: [], source: {}, workers: [] };
 let browser, server, backend, tls, browserOptions;
 const browsers = new Set();
@@ -192,7 +192,7 @@ function workerObservation() {
   const observed = new WeakSet();
   const summarize = message => {
     const value = {};
-    for (const key of ["kind", "operationId", "generation", "content", "sequence", "packetKind", "geometryVersion", "page", "width", "height", "status", "message"]) if (message?.[key] !== undefined) value[key] = typeof message[key] === "bigint" ? String(message[key]) : message[key];
+    for (const key of ["kind", "mode", "operationId", "generation", "content", "sequence", "packetKind", "geometryVersion", "page", "width", "height", "status", "message"]) if (message?.[key] !== undefined) value[key] = typeof message[key] === "bigint" ? String(message[key]) : message[key];
     if (message?.packet instanceof Uint8Array) {
       const bytes = message.packet, h = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
       value.packet = { byteLength: bytes.length, kind: h.getUint16(6, true), generation: String(h.getBigUint64(8, true)), content: String(h.getBigUint64(16, true)), sequence: String(h.getBigUint64(24, true)) };
@@ -293,6 +293,86 @@ function workerObservation() {
         replacementNextApplied: String(replacementNextApplied), replacementStateHash: await imageHash(await image()) };
       return { before, after, refusal, candidate: candidate.packet, progress, next: next.packet, applied: String(applied), changedEarlierMisses: true, malformedFinalPackedSlot: lastSlot, coldSequence };
     } finally { binding.free(); }
+  };
+  probe.modeAdmission = async fixtures => {
+    const { BrowserView } = await import(new URL("./pkg/beatkernel_bms_runtime.js", self.location.href).href);
+    const cap = 16777216, diagnostics = 1024;
+    const retarget = (observed, generation, sequence = null) => {
+      const bytes = Uint8Array.from(observed.bytes), header = new DataView(bytes.buffer);
+      header.setBigUint64(8, generation, true); header.setBigUint64(16, 9n, true);
+      if (sequence !== null) header.setBigUint64(24, sequence, true);
+      return bytes;
+    };
+    const imageHash = async (binding, canvas) => {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        binding.draw_visual(); if (!binding.needs_redraw()) break;
+        await new Promise(resolveDraw => setTimeout(resolveDraw, 16));
+      }
+      if (binding.needs_redraw()) throw Error("Mode admission mirror did not submit GPU geometry");
+      const bytes = await (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer();
+      return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))).map(byte => byte.toString(16).padStart(2, "0")).join("");
+    };
+    const cases = [
+      { name: "two-member-live", packet: fixtures.local, mode: 1 },
+      { name: "two-member-replay", packet: fixtures.local, mode: 3 },
+      { name: "empty-local", packet: fixtures.preview, mode: 2 },
+      { name: "nonempty-preview", packet: fixtures.solo, mode: 0 },
+      { name: "unknown-mode", packet: fixtures.solo, mode: 4 },
+      { name: "nonregistration-kind", packet: fixtures.previewState, mode: 0 },
+    ];
+    const refusals = [];
+    for (const entry of cases) {
+      const canvas = new OffscreenCanvas(960, 720), binding = await BrowserView.create(canvas);
+      try {
+        const baselineApplied = binding.import_visual_registration(retarget(fixtures.preview, 100n), cap, diagnostics, 0);
+        binding.import_visual_packet(retarget(fixtures.previewState, 100n, 1n), cap, diagnostics);
+        const beforeHash = await imageHash(binding, canvas);
+        let refusal = null;
+        try { binding.import_visual_registration(retarget(entry.packet, 200n), cap, diagnostics, entry.mode); }
+        catch (error) { refusal = String(error); }
+        const afterHash = await imageHash(binding, canvas);
+        // Only envelope identities/sequence change; every chart and committed
+        // visual body remains genuinely captured from the actual game owner.
+        const originalNextApplied = binding.import_visual_packet(retarget(fixtures.previewState, 100n, 2n), cap, diagnostics);
+        const recoveries = [];
+        for (const generation of [199n, 200n, 201n]) {
+          const registrationApplied = binding.import_visual_registration(retarget(fixtures.preview, generation), cap, diagnostics, 0);
+          const nextApplied = binding.import_visual_packet(retarget(fixtures.previewState, generation, 1n), cap, diagnostics);
+          recoveries.push({ generation: String(generation), registrationApplied: String(registrationApplied),
+            nextApplied: String(nextApplied), imageHash: await imageHash(binding, canvas) });
+        }
+        refusals.push({ name: entry.name, mode: entry.mode, baselineApplied: String(baselineApplied), refusal,
+          beforeHash, afterHash, originalNextApplied: String(originalNextApplied), recoveries });
+      } finally { binding.free(); }
+    }
+    // Compare valid canonical P1 LOCAL against the preserved legacy local
+    // painter using the very same original solo registration/frame bodies.
+    const localCanvas = new OffscreenCanvas(960, 720), referenceCanvas = new OffscreenCanvas(960, 720);
+    const local = await BrowserView.create(localCanvas);
+    let reference = null;
+    try {
+      reference = await BrowserView.create(referenceCanvas);
+      const localApplied = local.import_visual_registration(retarget(fixtures.solo, 300n), cap, diagnostics, 2);
+      const frameApplied = local.import_visual_packet(retarget(fixtures.soloState, 300n), cap, diagnostics);
+      reference.import_visual_packet(retarget(fixtures.solo, 300n), cap, diagnostics);
+      reference.set_visual_local(true);
+      reference.import_visual_packet(retarget(fixtures.soloState, 300n), cap, diagnostics);
+      return { refusals, oneMemberLocal: { registrationApplied: String(localApplied), frameApplied: String(frameApplied),
+        frameSequence: fixtures.soloState.packet.sequence, imageHash: await imageHash(local, localCanvas),
+        legacyLocalImageHash: await imageHash(reference, referenceCanvas) },
+        captured: Object.fromEntries(Object.entries(fixtures).map(([name, observed]) => [name, observed.packet])) };
+    } finally { local.free(); reference?.free(); }
+  };
+  probe.modeRefusal = observed => {
+    if (!probe.port || !probe.identity) throw Error("No actual renderer owner for incompatible-mode injection");
+    const generation = probe.identity.generation + 100n, content = probe.identity.content;
+    const packet = Uint8Array.from(observed.bytes), header = new DataView(packet.buffer);
+    header.setBigUint64(8, generation, true); header.setBigUint64(16, content, true);
+    const operationId = 18446744073709551615n;
+    probe.port.dispatchEvent(new MessageEvent("message", { data: { kind: "packet", packet,
+      mode: "live", generation, content, operationId } }));
+    return { generation: String(generation), content: String(content), operationId: String(operationId),
+      mode: "live", captured: observed.packet };
   };
   if (typeof WebTransport === "function") {
     const NativeTransport = WebTransport;
@@ -508,6 +588,61 @@ async function main() {
     assert.equal(new Set(captures.map(x => x.player)).size, 2);
     check("local-touch", true, { submitted, captures, originalAcquisitions: info.window.input.filter(x => x.trusted && (x.pointerType === "touch" || x.kind === "keydown")) });
     await closePage(page);
+  });
+  await scenario("mode-admission-atomic", async () => {
+    const page = await observedPage("mode-admission"); await prepare(page, "long.bms");
+    const renderer = [...page.probeWorkers.values()].find(x => x.url().endsWith("/renderer-worker.js"));
+    const capture = async (mode, stateKind) => renderer.evaluate(async ({ mode, stateKind }) => {
+      for (let attempt = 0; attempt < 250; attempt++) {
+        const cold = __renderPortProbe.packets.findLast(x => x.packet.kind === 1 && x.mode === mode);
+        const state = __renderPortProbe.packets.findLast(x => x.packet.kind === stateKind && x.packet.generation === cold?.packet.generation);
+        if (cold && state) return { cold, state };
+        await new Promise(resolvePacket => setTimeout(resolvePacket, 20));
+      }
+      throw Error(`No genuine ${mode} registration/state for mode admission`);
+    }, { mode, stateKind });
+    const preview = await capture("preview", 3);
+    await page.click("#play"); await playing(page);
+    const solo = await capture("live", 2);
+    await page.click("#stop"); await stopped(page);
+    await prepare(page, "long.bms");
+    await page.click("#touch-input");
+    await page.$eval("#local-count", x => { x.closest("details").open = true; x.value = "2"; x.dispatchEvent(new Event("change", { bubbles: true })); });
+    await page.waitForFunction(() => !document.querySelector("#local-discover").disabled);
+    await page.click("#local-discover");
+    await page.waitForFunction(() => document.querySelector("#local-source-1")?.options.length >= 3 && !document.querySelector("#local-source-1").disabled);
+    await page.select("#local-source-1", "1"); await page.select("#local-source-2", "2");
+    await page.click("#play"); await playing(page);
+    const local = (await capture("local", 2)).cold;
+    await page.click("#stop"); await stopped(page);
+    const fixtures = { preview: preview.cold, previewState: preview.state, solo: solo.cold, soloState: solo.state, local };
+    const admission = await renderer.evaluate(values => __renderPortProbe.modeAdmission(values), fixtures);
+    assert.equal(admission.refusals.length, 6);
+    for (const refused of admission.refusals) {
+      assert(refused.refusal, `Generated WASM accepted ${refused.name}`);
+      assert.equal(refused.baselineApplied, "0");
+      assert.equal(refused.afterHash, refused.beforeHash, `${refused.name} changed native presentation before refusal`);
+      assert.equal(refused.originalNextApplied, "2", `${refused.name} changed prior identity or sequence admission`);
+      assert.deepEqual(refused.recoveries.map(x => x.generation), ["199", "200", "201"]);
+      for (const recovery of refused.recoveries) {
+        assert.equal(recovery.registrationApplied, "0", `${refused.name} fenced valid recovery ${recovery.generation}`);
+        assert.equal(recovery.nextApplied, "1");
+        assert.equal(recovery.imageHash, refused.beforeHash, "Valid recovery did not retain original captured preview state");
+      }
+    }
+    assert.equal(admission.oneMemberLocal.registrationApplied, "0");
+    assert.equal(admission.oneMemberLocal.frameApplied, admission.oneMemberLocal.frameSequence);
+    assert.equal(admission.oneMemberLocal.imageHash, admission.oneMemberLocal.legacyLocalImageHash,
+      "Explicit canonical P1 LOCAL differs from the preserved native local painter");
+    const injection = await renderer.evaluate(observed => __renderPortProbe.modeRefusal(observed), local);
+    await delay(100);
+    const records = await renderer.evaluate(() => __renderPortProbe.records);
+    assert(records.some(x => x.kind === "render-error" && x.operationId === injection.operationId
+      && x.generation === injection.generation && x.content === injection.content), "Actual renderer did not correlate incompatible mode refusal");
+    assert(!records.some(x => x.kind === "state-ack" && x.operationId === injection.operationId), "Actual renderer ACKed incompatible two-member live mode");
+    check("mode-admission-atomic", true, { ...admission, actualRendererRefusal: injection,
+      scope: "Fresh generated BrowserView and production renderer; captured original preview/solo/two-member local bodies, GPU preservation and sequence/generation recovery; no constructed gameplay/completion authority" });
+    await snapshot(page, "mode-admission-atomic"); await closePage(page);
   });
   await scenario("live-stalled-input-audio", async () => {
     const page = await observedPage("stall"); await prepare(page, "long.bms");

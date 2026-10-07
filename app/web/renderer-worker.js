@@ -107,20 +107,22 @@ function packet(message) {
   if (version !== undefined && (!unsignedIdentity(version) || version <= geometryVersion)) throw new Error("Packet geometry version must increase.");
   // Pass a fresh native view: caller properties cannot change WASM admission.
   const bytes = nativePacketView(input);
-  const applied = view.import_visual_packet(bytes, maxPacketBytes, maxDiagnosticBytes);
+  const applied = header.kind === 1
+    ? view.import_visual_registration(bytes, maxPacketBytes, maxDiagnosticBytes,
+      { preview: 0, live: 1, local: 2, replay: 3 }[mode])
+    : view.import_visual_packet(bytes, maxPacketBytes, maxDiagnosticBytes);
   if (applied !== header.sequence) throw new Error("Visual importer returned a different applied sequence.");
-  if (header.kind === 1 && mode !== "preview") view.set_visual_local(mode === "local");
   if (cold && !combinedRoom) {
     stopDraw();
     current = { generation: header.generation, content: header.content, sequence: header.sequence, operationId,
       mode: header.kind === 1 ? mode : ({ 4: "history", 5: "results", 6: "room" }[header.kind]),
-      drawable: header.kind !== 1 || mode === "preview" };
+      drawable: header.kind !== 5 && (header.kind !== 1 || mode === "preview") };
     submittedGeometry = 0n;
     generationFloor = header.generation;
   } else {
     current.sequence = header.sequence;
     current.operationId = operationId;
-    current.drawable = true;
+    if (!combinedRoom) current.drawable = true;
   }
   if (version !== undefined) geometryVersion = version;
   send({ kind: "state-ack", operationId, generation: header.generation, content: header.content,
@@ -148,6 +150,7 @@ function control(message) {
   } else if (kind === "page") {
     if (!boundedU32(page) || typeof comparisons !== "boolean") throw new Error("Invalid visual page.");
     view.set_visual_page(page, comparisons);
+    if (current.mode === "results") current.drawable = true;
   } else if (kind === "room-page") {
     if (!boundedU32(page)) throw new Error("Invalid room page.");
     view.set_visual_room_page(page);

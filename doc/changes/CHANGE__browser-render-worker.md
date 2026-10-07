@@ -167,3 +167,14 @@ without changing GPU images; the original next sequence still applies, and valid
 generation three then accepts the original committed frames with matching final
 GPU output. This targeted selected run leaves unrelated modes unrun and exits
 one intentionally. Fresh independent reviews and required QA are still pending.
+
+The second full review found two more boundary cases. Cold Results now waits
+for its latest validated page/comparison control before first drawing, including
+default selection and combined-room presentation. Production-faithful queued
+fixtures cover delayed retirement and registration without losing the accepted
+choice. Explicit registration mode is validated with its staged roster before
+Rust publishes presentation or floors; the legacy importer and wire v1 remain.
+The rebuilt direct-WASM/GPU test rejects incompatible roster/mode combinations,
+unknown mode and wrong packet kind with identical before/after images, then
+accepts original state and valid generation recovery. A single P1 local cohort
+matches the legacy local painter. Fresh full formal review and QA remain pending.

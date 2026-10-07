@@ -504,6 +504,17 @@ impl BrowserView {
     /// Only the fixed header is copied before trusted byte admission. Generated
     /// bindings therefore cannot allocate an attacker-sized Rust input first.
     pub fn import_visual_packet(&mut self, bytes: js_sys::Uint8Array, max_packet_bytes: u32, max_diagnostic_bytes: u32) -> Result<u64, JsValue> {
+        self.import_visual_packet_with_mode(bytes, max_packet_bytes, max_diagnostic_bytes, None)
+    }
+
+    /// Explicit mode admission is part of the atomic registration, including a
+    /// one-member local cohort whose stable identity is P1.
+    pub fn import_visual_registration(&mut self, bytes: js_sys::Uint8Array, max_packet_bytes: u32, max_diagnostic_bytes: u32, mode: u32) -> Result<u64, JsValue> {
+        if mode > 3 { return Err(js_error("invalid visual registration mode")); }
+        self.import_visual_packet_with_mode(bytes, max_packet_bytes, max_diagnostic_bytes, Some(mode))
+    }
+
+    fn import_visual_packet_with_mode(&mut self, bytes: js_sys::Uint8Array, max_packet_bytes: u32, max_diagnostic_bytes: u32, mode: Option<u32>) -> Result<u64, JsValue> {
         use render::{wire, VisualPresentation};
         let packet_len = bytes.length() as usize;
         if packet_len < wire::HEADER_BYTES { return Err(js_error("truncated visual packet header")); }
@@ -511,6 +522,9 @@ impl BrowserView {
         for (index, destination) in fixed.iter_mut().enumerate() { *destination = bytes.get_index(index as u32); }
         let limits = render::limits(max_packet_bytes, max_diagnostic_bytes);
         let admitted = wire::preflight_header(&fixed, packet_len, limits).map_err(js_error)?;
+        if mode.is_some() && admitted.kind != wire::REGISTRATION {
+            return Err(js_error("mode admission requires a visual registration packet"));
+        }
         let registration = matches!(admitted.kind, wire::REGISTRATION | wire::HISTORY | wire::RESULTS | wire::ROOM);
         let combined_room = admitted.kind == wire::ROOM && self.visual_identity.is_some_and(|(generation, content, _)| generation == admitted.generation && content == admitted.content) && matches!(self.visual, Some(VisualPresentation::Results { .. }));
         if registration {
@@ -524,14 +538,24 @@ impl BrowserView {
         }
         match packet {
             wire::WirePacket::Registration(registration) => {
+                let count = registration.roster.len();
+                if mode.is_some_and(|mode| match mode {
+                    0 => count != 0,
+                    1 | 3 => count != 1,
+                    2 => !(1..=crate::browser_render_state::MAX_RENDER_PLAYERS).contains(&count),
+                    _ => true,
+                }) {
+                    return Err(js_error("visual roster does not match registration mode"));
+                }
                 let replacement = if registration.roster.is_empty() {
                     let chart = Arc::new(PlayerChart::import_visual(registration.chart).map_err(js_error)?);
                     let images = Arc::new(ImageAssets::import_visual(registration.images, limits.image).map_err(js_error)?);
                     VisualPresentation::Preview { chart, images, song: Timestamp::ZERO, lookahead: LOOKAHEAD_NS }
                 } else {
-                    // One member is still local when its stable ID differs from
-                    // the canonical solo ID; caller may select local explicitly.
-                    let local = registration.roster.len() > 1 || registration.roster[0].0 != 1;
+                    let local = mode.map_or_else(
+                        || registration.roster.len() > 1 || registration.roster[0].0 != 1,
+                        |mode| mode == 2,
+                    );
                     let state = crate::browser_render_state::BrowserRenderState::import_visual_with_budget(header.generation, header.content, registration.chart, registration.images, registration.roster, limits.image, limits.max_diagnostic_bytes).map_err(js_error)?;
                     VisualPresentation::Play { state, local }
                 };

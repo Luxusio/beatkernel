@@ -90,6 +90,20 @@ zero; live frames and preview updates use a positive u64 sequence. Reject an
 invalid sequence before payload copying or publishing presentation identity.
 Refusal must preserve the prior presentation and generation/sequence floors.
 
+Explicit preview/live/local/replay registration mode is admitted in the same
+transaction as its roster and visual content. Preview requires no player,
+live/replay exactly one, and local one to 64; a one-player local cohort remains
+local. Incompatible mode refusal must leave the prior presentation and floors
+unchanged. Never validate mode through a fallible setter after publication.
+
+Results page/comparison choices accepted during previous-owner retirement must
+survive replacement registration. Apply the latest validated choice through
+the existing renderer control before its submitted geometry is reported; a
+successful UI reply must not leave the renderer at the default detail page.
+Cold Results waits for its first valid page/comparison control before drawing,
+including when the desired selection is the default. A combined room packet
+or resize does not unlock a pending Results selection.
+
 A confirmed terminal runtime graphics error retains the existing failed-stop
 behavior: gameplay exports genuine recorded prefixes and authoritative results,
 then Window joins input/audio/room cleanup before gameplay ownership terminates.

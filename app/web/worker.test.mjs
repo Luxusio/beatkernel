@@ -42,7 +42,7 @@ async function workerHarness(options = {}) {
     const h = new DataView(packet.buffer); h.setUint16(4,1,true); h.setUint16(6,kind,true);
     h.setBigUint64(8,generation,true); h.setBigUint64(16,content,true);
     h.setBigUint64(24,sequence,true); h.setBigUint64(32,0n,true);
-    const snapshot = {owner,kind,generation,content,sequence,page:kind>=4 ? owner.page : page,songNs};
+    const snapshot = {owner,kind,generation,content,sequence,page:kind===5 ? 0 : kind>=4 ? owner.page : page,comparisons:kind===5 ? false : undefined,songNs};
     visualOwners.set(`${generation}:${content}:${sequence}:${kind}`,snapshot);
     visualExports.push(snapshot); return packet;
   }
@@ -74,7 +74,7 @@ async function workerHarness(options = {}) {
     };
   }
   const renderPort = {
-    width:0, height:0, page:0, presentations:new Map(), posts:[], starts:0, closes:0, blocked:options.renderBlocked??false, onmessage:null,onmessageerror:null,
+    comparisons:false, width:0, height:0, page:0, presentations:new Map(), posts:[], starts:0, closes:0, blocked:options.renderBlocked??false, onmessage:null,onmessageerror:null,
     start(){this.starts++;}, close(){this.closes++;},
     emit(reply){Promise.resolve().then(()=>this.onmessage?.({data:structuredClone(reply)}));},
     ack(request,fields={}) {
@@ -93,8 +93,13 @@ async function workerHarness(options = {}) {
           const s=visualOwners.get(`${message.generation}:${message.content}:${sequence}:${kind}`);
           assert.ok(s,"actual valid BKRV exporter packet crossed the boundary");
           if(kind!==6)this.page=s.page;
+          if(kind===5)this.comparisons=false;
           if(kind===6&&options.roomResultsDrawError){this.emit({kind:"render-error",generation:message.generation,content:message.content,message:options.roomResultsDrawError});return;}
-          if(kind>=4)this.presentations.set(message.generation,{...s});
+          if(kind>=4){
+            const existing=this.presentations.get(message.generation);
+            if(kind===6&&existing?.kind===5)existing.room={...s};
+            else this.presentations.set(message.generation,{...s,drawable:kind!==5});
+          }
           const mode=this.posts.find(p=>p.kind==="packet"&&p.generation===message.generation&&p.mode)?.mode;
           if(kind===1&&mode==="preview") {
             if(view.current&&view.current!==s.owner)view.current.releasedByView=true;
@@ -104,17 +109,24 @@ async function workerHarness(options = {}) {
           else if(kind===2&&mode==="replay")view.replayDraws?.push(s.owner);
           else if(kind===2){view.gameDraws?.push(s.owner);view.draws++;}
           else if(kind===4){view.historicalDraws??=[];view.historicalDraws.push(s.owner);}
-          else if(kind===5||kind===6){view.resultDraws?.push({results:s.owner,page:s.page});}
+          else if(kind===6&&this.presentations.get(message.generation)?.drawable){view.resultDraws?.push({results:s.owner,page:s.page});}
         }else if(message.kind==="resize"){this.width=message.width;this.height=message.height;view.extents.push([message.width,message.height]);}
         if(["page","room-page"].includes(message.kind)){
-          this.page=message.page;
           const s=this.presentations.get(message.generation);
           assert.ok(s,"paging follows real frozen registration");
+          if(message.kind==="room-page"){
+            assert.ok(s.room,"combined footer has its separate frozen room registration");
+            s.room.page=message.page;
+          }else{
+            this.page=message.page;s.page=message.page;
+            if(s.kind===5){this.comparisons=message.comparisons;s.comparisons=message.comparisons;s.drawable=true;}
+          }
           if(s.kind===4){view.historicalDraws??=[];view.historicalDraws.push(s.owner);}
-          else view.resultDraws?.push({results:s.owner,page:message.page});
+          else if(s.drawable){view.resultDraws?.push({results:s.owner,page:s.page});}
         }
         this.ack(message);
-        if(message.geometryVersion&&this.width>0&&this.height>0)this.emit({kind:"geometry-ack",generation:message.generation,content:message.content,geometryVersion:message.geometryVersion,page:this.page,width:this.width,height:this.height});
+        const registered=this.presentations.get(message.generation);
+        if(message.geometryVersion&&this.width>0&&this.height>0&&!(registered?.kind===5&&!registered.drawable))this.emit({kind:"geometry-ack",generation:message.generation,content:message.content,geometryVersion:message.geometryVersion,page:this.page,width:this.width,height:this.height});
       });
     },
   };
