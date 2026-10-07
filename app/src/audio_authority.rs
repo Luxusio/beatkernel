@@ -138,6 +138,50 @@ impl PreparedFrontier {
     }
 }
 
+/// Native-authorized raw control boundary, separate from physical input history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedControlCutoff {
+    state: PreparationState,
+    epoch: u64,
+    raw_output: ClockPoint,
+    host_cutoff: ClockPoint,
+    now: ClockPoint,
+    output: ClockPoint,
+}
+impl PreparedControlCutoff {
+    /// Output creation epoch validated when preparing this native control boundary.
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub const fn host(&self) -> ClockPoint {
+        self.host_cutoff
+    }
+    pub const fn output(&self) -> ClockPoint {
+        self.output
+    }
+    pub const fn raw_output(&self) -> ClockPoint {
+        self.raw_output
+    }
+}
+
+/// Actual presentation and acquired-prefix closure while the producer is held.
+/// This descriptor grants no Runtime operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedHeldFrontier {
+    frontier: PreparedFrontier,
+}
+impl PreparedHeldFrontier {
+    pub const fn host(&self) -> ClockPoint {
+        self.frontier.host
+    }
+    pub const fn output(&self) -> ClockPoint {
+        self.frontier.output
+    }
+    pub const fn observed_host(&self) -> ClockPoint {
+        self.frontier.observed_host
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedEpoch {
     state: PreparationState,
@@ -520,6 +564,125 @@ impl AudioAuthority {
         Ok(())
     }
 
+    /// Prepares an operation from a validated native physical pause boundary.
+    /// The caller supplies native authorization; HOST does not infer raw output.
+    /// Missing evidence or undrained pre-cutoff input holds without consumption.
+    pub fn prepare_control_cutoff(
+        &self,
+        epoch: u64,
+        raw_output: ClockPoint,
+        host_cutoff: ClockPoint,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<Option<PreparedControlCutoff>, AudioAuthorityError> {
+        if epoch != self.epoch.id {
+            return Err(AudioAuthorityError::WrongEpoch);
+        }
+        self.validate_host(host_cutoff)?;
+        self.validate_host(now)?;
+        let output = self.logical(raw_output)?;
+        if raw_output.timestamp < self.epoch.stream_origin.timestamp {
+            return Err(AudioAuthorityError::ObservationRegression);
+        }
+        if self
+            .operation
+            .is_some_and(|last| output.timestamp < last.timestamp)
+            || self
+                .input_host
+                .is_some_and(|last| host_cutoff.timestamp < last.timestamp)
+        {
+            return Err(AudioAuthorityError::OperationRegression);
+        }
+        let Some(prefix) = self.acquired else {
+            return Ok(None);
+        };
+        if host_cutoff.timestamp > now.timestamp
+            || host_cutoff.timestamp > prefix.timestamp
+            || self.history.len() < 2
+            || !self.fresh(now)?
+            || raw_output.timestamp
+                > self
+                    .latest_observation()
+                    .expect("two anchors were checked")
+                    .source
+                    .timestamp
+        {
+            return Ok(None);
+        }
+        // The cutoff may precede an already closed prefix. Inspect at the full
+        // acquired prefix, then compare the earliest exact event to the cutoff.
+        if merger
+            .peek_ready(prefix)?
+            .is_some_and(|event| event.meta().timestamp <= host_cutoff.timestamp)
+        {
+            return Ok(None);
+        }
+        self.next_revision()?;
+        Ok(Some(PreparedControlCutoff {
+            state: self.state(),
+            epoch,
+            raw_output,
+            host_cutoff,
+            now,
+            output,
+        }))
+    }
+
+    /// Commits only a genuine accepted Runtime control operation, before observers.
+    /// No input occurrence, presentation, prefix or correlation history is invented.
+    pub fn commit_control_cutoff(
+        &mut self,
+        prepared: PreparedControlCutoff,
+        merger: &InputMerger,
+    ) -> Result<(), AudioAuthorityError> {
+        if prepared.state != self.state()
+            || self.prepare_control_cutoff(
+                prepared.epoch,
+                prepared.raw_output,
+                prepared.host_cutoff,
+                prepared.now,
+                merger,
+            )? != Some(prepared)
+        {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        let revision = self.next_revision()?;
+        self.operation = Some(prepared.output);
+        self.revision = revision;
+        Ok(())
+    }
+
+    /// Prepares actual presentation/prefix closure without granting Runtime advance.
+    /// The caller must hold the acknowledged producer throughout this operation.
+    pub fn prepare_held_frontier(
+        &self,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<Option<PreparedHeldFrontier>, AudioAuthorityError> {
+        Ok(self
+            .prepare_frontier(now, merger)?
+            .map(|frontier| PreparedHeldFrontier { frontier }))
+    }
+
+    /// Closes only the acquired HOST prefix and actual presentation while held.
+    pub fn commit_held_frontier(
+        &mut self,
+        prepared: PreparedHeldFrontier,
+        merger: &mut InputMerger,
+    ) -> Result<(), AudioAuthorityError> {
+        if prepared.frontier.state != self.state()
+            || self.prepare_held_frontier(prepared.frontier.now, merger)? != Some(prepared)
+        {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        let revision = self.next_revision()?;
+        merger.commit(prepared.frontier.host)?;
+        self.closed = Some(prepared.frontier.host);
+        self.presentation = Some(prepared.frontier.output);
+        self.revision = revision;
+        Ok(())
+    }
+
     pub fn prepare_epoch(
         &self,
         next: AudioAuthorityEpoch,
@@ -835,3 +998,7 @@ mod audio_authority_fixtures;
 #[cfg(test)]
 #[path = "audio_authority_priming_fixtures.rs"]
 mod priming_fixtures;
+
+#[cfg(test)]
+#[path = "audio_authority_control_fixtures.rs"]
+mod control_fixtures;

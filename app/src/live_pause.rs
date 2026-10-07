@@ -33,7 +33,83 @@ pub struct LivePauseUpdate {
     pub observed: bool,
 }
 
+/// Existing HOST pause boundary plus its actual epoch-bound physical output cutoff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioLivePauseBoundary {
+    pub original: LivePauseBoundary,
+    pub epoch: u64,
+    pub raw_output: ClockPoint,
+}
+/// A staged native pause update; waiting observations never invent a transition marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioLivePauseUpdate {
+    pub requested: Option<bool>,
+    pub boundary: Option<AudioLivePauseBoundary>,
+    pub observed: bool,
+}
+
 pub fn update_live_pause(
+    pause: &mut NativePause,
+    evidence: LivePauseObservation,
+    rendered: Option<RenderReport>,
+    desired: Option<bool>,
+    song_origin: Timestamp,
+    sample_rate: u32,
+) -> Result<LivePauseUpdate, PauseError> {
+    let mut next = pause.clone();
+    let update = update_live_pause_inner(
+        &mut next,
+        evidence,
+        rendered,
+        desired,
+        song_origin,
+        sample_rate,
+    )?;
+    *pause = next;
+    Ok(update)
+}
+
+/// Retain the conservative original HOST cutoff and the real physical frame independently.
+/// The entire update commits only after all existing validation and raw conversion succeeds.
+pub fn update_live_audio_pause(
+    pause: &mut NativePause,
+    evidence: LivePauseObservation,
+    rendered: Option<RenderReport>,
+    desired: Option<bool>,
+    song_origin: Timestamp,
+    sample_rate: u32,
+) -> Result<AudioLivePauseUpdate, PauseError> {
+    let mut next = pause.clone();
+    let update = update_live_pause_inner(
+        &mut next,
+        evidence,
+        rendered,
+        desired,
+        song_origin,
+        sample_rate,
+    )?;
+    let boundary = update
+        .boundary
+        .map(|original| -> Result<AudioLivePauseBoundary, PauseError> {
+            let raw_output = next.last_transition_output()?.ok_or(PauseError(
+                "committed native pause transition lacks its physical frame",
+            ))?;
+            Ok(AudioLivePauseBoundary {
+                original,
+                epoch: next.epoch(),
+                raw_output,
+            })
+        })
+        .transpose()?;
+    *pause = next;
+    Ok(AudioLivePauseUpdate {
+        requested: update.requested,
+        boundary,
+        observed: update.observed,
+    })
+}
+
+fn update_live_pause_inner(
     pause: &mut NativePause,
     evidence: LivePauseObservation,
     rendered: Option<RenderReport>,
@@ -46,16 +122,15 @@ pub fn update_live_pause(
             "live pause requires a representable nonzero frame grid",
         ));
     }
-    let mut next = pause.clone();
     let mut requested = None;
     let (boundary, observed) = match evidence {
         LivePauseObservation::Point(pair) => {
             if let Some(desired) = desired {
-                if next.request(desired, pair)? {
+                if pause.request(desired, pair)? {
                     requested = Some(desired);
                 }
             }
-            let boundary = next
+            let boundary = pause
                 .observe(rendered, pair)?
                 .map(|boundary| {
                     HostStartWindow::new(boundary.host, boundary.host)
@@ -72,11 +147,11 @@ pub fn update_live_pause(
                 ));
             }
             if let (Some(desired), Some(reference)) = (desired, observation) {
-                if next.request_interval(desired, reference)? {
+                if pause.request_interval(desired, reference)? {
                     requested = Some(desired);
                 }
             }
-            let boundary = next
+            let boundary = pause
                 .observe_interval(observation, now)?
                 .map(|boundary| (boundary.paused, boundary.host, boundary.playback_frame));
             (boundary, observation.is_some())
@@ -104,7 +179,6 @@ pub fn update_live_pause(
             },
         )
         .transpose()?;
-    *pause = next;
     Ok(LivePauseUpdate {
         requested,
         boundary,
@@ -133,6 +207,40 @@ pub fn prepare_live_transport(
     last_song: Timestamp,
 ) -> Result<Transport, PauseError> {
     validate_boundary(boundary)?;
+    prepare_transport_at(transport, boundary, boundary.at.timestamp, last_song)
+}
+
+/// Stage pause or resume on the logical point of the original native transition.
+/// The caller still validates the authority token and commits the actual Runtime effect.
+pub fn prepare_live_audio_transport(
+    transport: &Transport,
+    boundary: AudioLivePauseBoundary,
+    control: &crate::audio_authority::PreparedControlCutoff,
+    last_song: Timestamp,
+) -> Result<Transport, PauseError> {
+    validate_boundary(boundary.original)?;
+    if boundary.epoch != control.epoch()
+        || boundary.raw_output != control.raw_output()
+        || boundary.original.at != control.host()
+    {
+        return Err(PauseError(
+            "audio pause boundary differs from prepared control",
+        ));
+    }
+    prepare_transport_at(
+        transport,
+        boundary.original,
+        control.output().timestamp,
+        last_song,
+    )
+}
+
+fn prepare_transport_at(
+    transport: &Transport,
+    boundary: LivePauseBoundary,
+    at: Timestamp,
+    last_song: Timestamp,
+) -> Result<Transport, PauseError> {
     let mut next = transport.clone();
     if boundary.paused {
         if last_song > boundary.song {
@@ -143,10 +251,10 @@ pub fn prepare_live_transport(
         if transport.is_paused() {
             return Err(PauseError("live pause requires a running transport"));
         }
-        next.pause(boundary.at.timestamp).map_err(|_| {
+        next.pause(at).map_err(|_| {
             PauseError("live pause transport cutoff violates chronology or mapping")
         })?;
-        next.seek(boundary.at.timestamp, boundary.song)
+        next.seek(at, boundary.song)
             .map_err(|_| PauseError("live pause exact song anchor violates chronology"))?;
     } else {
         if !transport.is_paused() || last_song != boundary.song {
@@ -155,7 +263,7 @@ pub fn prepare_live_transport(
             ));
         }
         if transport
-            .position_at(boundary.at.timestamp)
+            .position_at(at)
             .map_err(|_| PauseError("live resume transport mapping is invalid"))?
             != boundary.song
         {
@@ -163,7 +271,7 @@ pub fn prepare_live_transport(
                 "live resume transport differs from the frozen song",
             ));
         }
-        next.resume(boundary.at.timestamp)
+        next.resume(at)
             .map_err(|_| PauseError("live resume cutoff violates transport chronology"))?;
     }
     Ok(next)
@@ -199,3 +307,7 @@ pub fn validate_pre_pause_input(
 #[cfg(test)]
 #[path = "live_pause_fixtures.rs"]
 mod fixtures;
+
+#[cfg(test)]
+#[path = "audio_authority_lifecycle_fixtures.rs"]
+mod audio_authority_lifecycle_fixtures;

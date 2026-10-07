@@ -175,3 +175,37 @@ cannot replace it. Control-operation commitment must not claim a physical input
 occurrence. Servicing paused presentation/prefixes must not invent a Runtime
 operation. These lifecycle integration rules are selected requirements; the
 production consumer implementation remains pending.
+
+The additive native pause update carries the original HOST window/cutoff, output
+epoch and raw output point from the committed physical transition frame.
+Retain that physical marker privately after both point and interval admission;
+do not reconstruct it from playback frames or song time. A waiting or unchanged
+observation emits no transition, and rejected updates retain the prior marker
+and all pause state. Successful output rebind clears retired transition evidence;
+failed rebind preserves it. The audio update stages conversion with the existing
+pause validation before changing the caller's owner. Existing HOST pause APIs
+retain their behavior until their consumers explicitly select audio authority.
+Stage audio Transport pause/seek/resume at the prepared logical control point.
+Require matching boundary epoch, raw output point and original HOST cutoff;
+retain the exact frozen-song guards. Preparation returns a candidate without
+mutating active Transport, pause or authority. Installing the candidate and
+committing a genuine Runtime report remain the lifecycle consumer's transaction.
+
+Prepare native control operations from the validated raw physical boundary and
+separate original HOST cutoff. Require current epoch/domains, checked rebasing,
+nonregressing actual operation and accepted input chronology, acquired HOST
+coverage, two fresh real anchors, observed raw coverage and no pending input at
+or before the cutoff. Preparation grants no operation; commit follows a genuine
+Runtime control report and changes only the logical operation and revision.
+Preserve original input, acquisition, closure and presentation history. A cutoff
+may precede an already closed acquired prefix or held presentation; neither
+implies an already committed gameplay operation. This seam trusts the validated
+native boundary provider and makes no physical accuracy assertion.
+
+While the producer is acknowledged held, an explicit observation-only frontier
+may close the complete acquired prefix and retain actual presentation without
+changing the committed Runtime operation or original input occurrence. Validate
+the same freshness, ready-input and semantic-token rules before commit. This
+permits finite history retirement during a long pause without fabricated reports
+or song progression. The ordinary operational frontier retains its existing
+behavior; callers must select held servicing only in the held lifecycle state.

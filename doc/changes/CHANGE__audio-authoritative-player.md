@@ -69,6 +69,17 @@ remains unverified. Linux all-target and browser WASM checks also pass. This por
 is implemented but not yet selected by the native
 gameplay pumps, and held-output audio publication still needs integration.
 
+Native pause/resume now exposes the committed original physical output cutoff
+alongside its conservative HOST boundary and epoch. Logical Transport staging
+checks that boundary against an authority-prepared control descriptor and uses
+the logical output point; active owners remain unchanged during preparation.
+Control commitment records only an actual Runtime operation, while explicit held
+frontier servicing closes acquisition/presentation without advancing Runtime or
+inventing an input occurrence. The 17 new lifecycle/control tests pass within
+the 60-test audio-authority filter; the 79-test pause filter also passes. These
+overlapping filters are not summed. Browser WASM checking also passes. The native gameplay pumps and held-output
+publication still need to select these APIs; AC008 remains partial.
+
 ## Known ceiling
 
 Native pumps still need to select the new authority and join actual output

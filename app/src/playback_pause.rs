@@ -70,6 +70,7 @@ pub struct NativePause {
     last_pair: Option<ClockPair>,
     last_report: Option<RenderReport>,
     boundary: Option<PendingBoundary>,
+    last_transition_physical: Option<u64>,
     playback_end: Option<u64>,
     end_marker: Option<u64>,
     setup_locked: bool,
@@ -106,6 +107,7 @@ impl NativePause {
             last_pair: None,
             last_report: None,
             boundary: None,
+            last_transition_physical: None,
             playback_end: None,
             end_marker: None,
             setup_locked: false,
@@ -120,6 +122,12 @@ impl NativePause {
     }
     pub const fn epoch(&self) -> u64 {
         self.epoch
+    }
+    /// Actual physical frame of the last committed transition on this output epoch.
+    pub(crate) fn last_transition_output(&self) -> Result<Option<ClockPoint>, PauseError> {
+        self.last_transition_physical
+            .map(|frame| self.point(frame))
+            .transpose()
     }
     /// Validates a fully observed candidate without changing either pause owner.
     pub fn validate_replacement(
@@ -270,6 +278,7 @@ impl NativePause {
         self.last_pair = None;
         self.last_report = None;
         self.boundary = None;
+        self.last_transition_physical = None;
         self.evidence_kind = None;
         self.interval_reference = None;
         self.last_interval = None;
@@ -864,6 +873,7 @@ impl NativePause {
             self.gap = boundary.gap;
             PausePhase::Running
         };
+        self.last_transition_physical = Some(boundary.physical);
         self.boundary = None;
         self.reference = None;
         self.interval_reference = None;

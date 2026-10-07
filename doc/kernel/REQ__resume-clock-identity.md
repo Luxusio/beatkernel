@@ -31,3 +31,22 @@ solo/cohort memory-loop resume cases. Assertions and runtime/formal review/QA
 remain deferred. Run scoped formatting and the four existing sequential
 compile-only configurations only after both paired writers stop. Full BMS
 player Goal and automatic live handoff remain incomplete.
+
+## Audio-authoritative native migration
+
+The earlier discipline reconstruction describes the legacy HOST/correction
+consumer. Audio-authoritative playback on an unchanged output epoch/basis retains
+continuous physical-output/HOST correlation during ordinary pause/resume. Reset
+only for an explicit correlation reset while fully paused/drained or a newly
+published output epoch; preserve committed input and logical operation history.
+
+An additive audio pause boundary carries the existing conservative original HOST
+window and cutoff, plus the actual raw output point from the committed physical
+transition frame and its epoch. Point and ASIO interval paths preserve this same
+physical evidence; playback/song frames cannot substitute for it. No transition
+is emitted while awaiting evidence. Malformed/refused updates retain the owner
+and marker. Clear the old marker only on successful output rebind.
+
+This boundary retention is a prerequisite being implemented. Logical Transport
+control, shared native pump selection and atomic held-output publication remain
+pending; the wrapper alone does not establish full resume acceptance.
