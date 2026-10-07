@@ -23,6 +23,28 @@ Frame updates change signals, and composition reuses the existing geometry;
 neither path rebuilds or resolves the declaration. The navigator still owns
 screen instances and disposal. Rhythm notes retain their specialized GPU path.
 
+Virtual DOM snapshots and tree reconciliation are excluded by the confirmed
+design direction, including for animation and layout changes. Reactivity binds
+state to existing properties; future dynamic layout must invalidate affected
+retained regions rather than construct replacement virtual trees.
+
+For scene-wide movement, construct `scene::UiTranslation` and set it with
+`Scene::set_ui_translation`. The rectangle renderer applies its offset through
+the existing viewport uniform, leaving cached rectangle/batch data and geometry
+upload identity unchanged. `Scene::project_ui_point` applies the inverse offset
+inside both the visible viewport and the original local surface clip; the
+desktop pointer adapter uses it after physical-to-logical projection.
+
+`ui::motion::TranslationMotion` samples a linear integer-pixel offset from a
+caller-supplied `Duration`. It owns no timer, clock or scheduling loop. Zero
+duration completes immediately; elapsed time past the endpoint clamps to the
+destination. The presentation owner composes local geometry, applies the
+sampled offset and requests a redraw. Clearing a scene resets translation;
+geometry snapshots reject nonzero translation instead of losing it silently.
+Offsets beyond ±2^24 logical pixels reject to preserve exact integer uniform
+representation. This primitive moves all ordinary scene geometry together;
+individual component transforms and dynamic sibling layout remain future work.
+
 Display keeps its existing packet groups and public button definitions because
 desktop hover projection consumes those definitions. Its migration tests must
 cover agreement between resolved actions and those shared button bounds, along

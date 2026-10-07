@@ -6,6 +6,13 @@ design, and identify design improvements without reconstructing scattered paint
 and event code. This is an authoring requirement, not permission to replace the
 existing retained renderer with per-frame tree construction.
 
+On 2026-10-07 the user explicitly confirmed continuing without Virtual DOM.
+Do not introduce Virtual DOM snapshots or tree reconciliation for state,
+layout changes or animation. Update retained properties directly, invalidate
+affected layout when needed, and animate presentation properties separately.
+Dependency tracking and layout calculation have real costs; this decision is
+not a claim of zero overhead or measured performance superiority.
+
 ## Current state
 
 `ui/atoms`, `ui/molecules` and `ui/organisms` provide reusable drawing components.
