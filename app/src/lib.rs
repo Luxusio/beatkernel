@@ -17,6 +17,11 @@ pub mod bga;
 pub mod bgm;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser;
+/// Portable committed visual snapshots and atomic receiver state.
+#[cfg(feature = "graphics")]
+pub mod browser_render_state;
+#[cfg(all(feature = "graphics", test))]
+mod browser_render_state_fixtures;
 /// Numeric bindings for the separate AudioWorklet WASM owner.
 #[cfg(all(target_arch = "wasm32", feature = "browser-audio"))]
 pub mod browser_audio;

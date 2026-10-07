@@ -72,17 +72,7 @@ impl ResultsView {
                 );
             }
         }
-        let scope_label = match scope {
-            PlayResultScope::FullSong => "WHOLE SONG".into(),
-            PlayResultScope::PracticeSection { start, end } => match end {
-                Some(end) => format!(
-                    "PRACTICE START {} NS END {} NS",
-                    start.as_nanos(),
-                    end.as_nanos()
-                ),
-                None => format!("PRACTICE START {} NS END UNBOUNDED", start.as_nanos()),
-            },
-        };
+        let scope_label = result_scope_label(scope);
         let mut rows = Vec::new();
         rows.try_reserve_exact(roster.len())
             .map_err(|error| error.to_string())?;
@@ -92,62 +82,15 @@ impl ResultsView {
                 .find(|(id, _)| id == player)
                 .ok_or("completed Results omitted a registered player")?
                 .1;
-            let outcome_label = match result.outcome() {
-                PlayResultOutcome::Cleared if matches!(scope, PlayResultScope::FullSong) => {
-                    "CLEARED"
-                }
-                PlayResultOutcome::Cleared => "PRACTICE - CLEAR THRESHOLD MET",
-                PlayResultOutcome::BelowClearThreshold => "BELOW CLEAR THRESHOLD",
-                PlayResultOutcome::Failed(GaugeFailure::InstantDeath) => "FAILED - INSTANT DEATH",
-                PlayResultOutcome::Failed(GaugeFailure::Depleted) => "FAILED - DEPLETED",
-            }
-            .into();
-            let level = result.gauge().level_units;
-            rows.push(ResultRow {
-                player: *player,
-                result,
-                identity_label: format!("PLAYER {}", player.0),
-                outcome_label,
-                gauge_label: format!(
-                    "GAUGE {}.{:06}%",
-                    level / GAUGE_UNITS_PER_PERCENT,
-                    level % GAUGE_UNITS_PER_PERCENT
-                ),
-            });
+            let archived = crate::result_archive::ArchivedResult { scope: result.scope(), outcome: result.outcome(), gauge: result.gauge() };
+            let (identity_label, outcome_label, gauge_label) = result_labels(*player, archived);
+            rows.push(ResultRow { player: *player, result, identity_label, outcome_label, gauge_label });
         }
         let mut pages = Vec::new();
-        pages
-            .try_reserve_exact(rows.len().div_ceil(PLAYERS_PER_PAGE))
-            .map_err(|error| error.to_string())?;
         if simple {
-            for (page, visible) in rows.chunks(PLAYERS_PER_PAGE).enumerate() {
-                let mut scene = Scene::with_capacity(960, 720, 512);
-                text(&mut scene, 24, 100, &scope_label, 1, 0x9bb1cf);
-                for (index, row) in visible.iter().enumerate() {
-                    let y = 140 + index * 110;
-                    text(&mut scene, 24, y, &row.identity_label, 2, 0xf0f4ff);
-                    let color = match row.result.outcome() {
-                        PlayResultOutcome::Cleared => 0x74e5c5,
-                        PlayResultOutcome::BelowClearThreshold => 0xd8b36b,
-                        PlayResultOutcome::Failed(_) => 0xff8e8e,
-                    };
-                    text(&mut scene, 24, y + 28, &row.outcome_label, 2, color);
-                    text(&mut scene, 24, y + 55, &row.gauge_label, 2, 0x9bb1cf);
-                }
-                text(
-                    &mut scene,
-                    24,
-                    600,
-                    &format!(
-                        "LOCAL RESULTS PAGE {}/{} - PGUP/PGDN",
-                        page + 1,
-                        rows.len().div_ceil(PLAYERS_PER_PAGE)
-                    ),
-                    1,
-                    0x9bb1cf,
-                );
-                pages.push(scene.geometry_snapshot()?);
-            }
+            let display_rows: Vec<_> = rows.iter().map(|row| FrozenResultRow { player: row.player,
+                result: crate::result_archive::ArchivedResult { scope: row.result.scope(), outcome: row.result.outcome(), gauge: row.result.gauge() } }).collect();
+            pages = simple_result_pages(&scope_label, &display_rows)?;
         }
         Ok(Self {
             rows,
@@ -197,76 +140,11 @@ impl ResultsView {
                 .iter()
                 .find(|detail| detail.player == row.player)
                 .ok_or("Results details omitted a registered player")?;
-            let (bias, absolute) = crate::timing_display::summary(&detail.score.timing);
-            detail_cards.push(vec![
-                row.identity_label.clone(),
-                row.outcome_label.clone(),
-                row.gauge_label.clone(),
-                counters(
-                    detail.score.hits,
-                    detail.score.misses,
-                    detail.score.combo,
-                    detail.score.max_combo,
-                ),
-                bias,
-                absolute,
-            ]);
-            // Opaque grade identities are exact counts, with every supplied grade reachable.
-            let grades: Vec<_> = detail
-                .score
-                .grades
-                .iter()
-                .map(|(grade, count)| format!("GRADE G{grade} COUNT {count}"))
-                .collect();
-            for chunk in grades.chunks(8) {
-                let mut card = vec![format!("{} GRADE COUNTS", row.identity_label)];
-                card.extend_from_slice(chunk);
-                detail_cards.push(card);
-            }
-            if let Some(competition) = detail.competition {
-                for ghost in &competition.ghosts {
-                    comparison_cards.push(vec![
-                        row.identity_label.clone(),
-                        match ghost.kind {
-                            OpponentKind::Own => "OWN RECORDED PREFIX",
-                            OpponentKind::Other => "OTHER RECORDED PREFIX",
-                        }
-                        .into(),
-                        ghost.label.clone(),
-                        counters(ghost.hits, ghost.misses, ghost.combo, ghost.max_combo),
-                        ghost
-                            .recorded_until
-                            .map_or("RECORDED UNTIL UNKNOWN".into(), |time| {
-                                format!("RECORDED UNTIL {} NS", time.as_nanos())
-                            }),
-                    ]);
-                }
-                if let Some(network) = &competition.network {
-                    let mut card = vec![
-                        row.identity_label.clone(),
-                        "SELF-REPORTED PEER PREFIX".into(),
-                        match network.status {
-                            NetworkStatus::Waiting => "NETWORK WAITING",
-                            NetworkStatus::Connected => "NETWORK CONNECTED",
-                            NetworkStatus::Disconnected => "NETWORK DISCONNECTED",
-                            NetworkStatus::Stopped => "NETWORK STOPPED",
-                        }
-                        .into(),
-                    ];
-                    if let Some(progress) = network.progress {
-                        card.push(counters(
-                            progress.hits,
-                            progress.misses,
-                            progress.combo,
-                            progress.max_combo,
-                        ));
-                        card.push(format!("PREFIX SONG {} NS", progress.song_ns));
-                    } else {
-                        card.push("PEER PREFIX UNAVAILABLE".into());
-                    }
-                    comparison_cards.push(card);
-                }
-            }
+            append_result_cards(&row.identity_label, &row.outcome_label, &row.gauge_label,
+                detail.score.hits, detail.score.misses, detail.score.combo, detail.score.max_combo,
+                crate::timing_display::summary(&detail.score.timing),
+                detail.score.grades.iter().map(|(grade, count)| format!("GRADE G{grade} COUNT {count}")).collect(),
+                detail.competition, &mut detail_cards, &mut comparison_cards);
             view.details.push(FrozenResultDetails {
                 player: row.player,
                 score: detail.score.clone(),
@@ -276,6 +154,18 @@ impl ResultsView {
         view.pages = card_pages(&view.scope_label, &detail_cards, "DETAILS")?;
         view.comparison_pages = card_pages(&view.scope_label, &comparison_cards, "COMPARISONS")?;
         Ok(view)
+    }
+    pub fn export_visual(&self) -> Result<FrozenResultsModel, String> {
+        let model = FrozenResultsModel {
+            roster: self.rows.iter().map(|row| row.player).collect(),
+            rows: self.rows.iter().map(|row| FrozenResultRow { player: row.player,
+                result: crate::result_archive::ArchivedResult { scope: row.result.scope(), outcome: row.result.outcome(), gauge: row.result.gauge() } }).collect(),
+            details: self.details.iter().map(|detail| Ok(FrozenScoreDetails { player: detail.player,
+                score: crate::result_archive::ArchivedScore::from_summary(&detail.score).map_err(|error| error.to_string())?,
+                competition: detail.competition.clone() })).collect::<Result<_, String>>()?,
+        };
+        model.validate()?;
+        Ok(model)
     }
     pub fn details(&self) -> &[FrozenResultDetails] {
         &self.details
@@ -380,3 +270,338 @@ mod detail_fixtures;
 #[cfg(test)]
 #[path = "results_fixtures.rs"]
 mod fixtures;
+
+fn append_result_cards(
+    identity_label: &String,
+    outcome_label: &String,
+    gauge_label: &String,
+    hits: u64,
+    misses: u64,
+    combo: u64,
+    max_combo: u64,
+    timing: (String, String),
+    grades: Vec<String>,
+    competition: Option<&CompetitionSnapshot>,
+    detail_cards: &mut Vec<Vec<String>>,
+    comparison_cards: &mut Vec<Vec<String>>,
+) {
+    let (bias, absolute) = timing;
+    detail_cards.push(vec![
+        identity_label.clone(),
+        outcome_label.clone(),
+        gauge_label.clone(),
+        counters(hits, misses, combo, max_combo),
+        bias,
+        absolute,
+    ]);
+    // Opaque grade identities are exact counts, with every supplied grade reachable.
+    for chunk in grades.chunks(8) {
+        let mut card = vec![format!("{} GRADE COUNTS", identity_label)];
+        card.extend_from_slice(chunk);
+        detail_cards.push(card);
+    }
+    if let Some(competition) = competition {
+        for ghost in &competition.ghosts {
+            comparison_cards.push(vec![
+                identity_label.clone(),
+                match ghost.kind {
+                    OpponentKind::Own => "OWN RECORDED PREFIX",
+                    OpponentKind::Other => "OTHER RECORDED PREFIX",
+                }
+                .into(),
+                ghost.label.clone(),
+                counters(ghost.hits, ghost.misses, ghost.combo, ghost.max_combo),
+                ghost
+                    .recorded_until
+                    .map_or("RECORDED UNTIL UNKNOWN".into(), |time| {
+                        format!("RECORDED UNTIL {} NS", time.as_nanos())
+                    }),
+            ]);
+        }
+        if let Some(network) = &competition.network {
+            let mut card = vec![
+                identity_label.clone(),
+                "SELF-REPORTED PEER PREFIX".into(),
+                match network.status {
+                    NetworkStatus::Waiting => "NETWORK WAITING",
+                    NetworkStatus::Connected => "NETWORK CONNECTED",
+                    NetworkStatus::Disconnected => "NETWORK DISCONNECTED",
+                    NetworkStatus::Stopped => "NETWORK STOPPED",
+                }
+                .into(),
+            ];
+            if let Some(progress) = network.progress {
+                card.push(counters(
+                    progress.hits,
+                    progress.misses,
+                    progress.combo,
+                    progress.max_combo,
+                ));
+                card.push(format!("PREFIX SONG {} NS", progress.song_ns));
+            } else {
+                card.push("PEER PREFIX UNAVAILABLE".into());
+            }
+            comparison_cards.push(card);
+        }
+    }
+}
+fn result_scope_label(scope: PlayResultScope) -> String {
+    match scope {
+        PlayResultScope::FullSong => "WHOLE SONG".into(),
+        PlayResultScope::PracticeSection { start, end } => match end {
+            Some(end) => format!(
+                "PRACTICE START {} NS END {} NS",
+                start.as_nanos(),
+                end.as_nanos()
+            ),
+            None => format!("PRACTICE START {} NS END UNBOUNDED", start.as_nanos()),
+        },
+    }
+}
+fn result_labels(
+    player: PlayerId,
+    result: crate::result_archive::ArchivedResult,
+) -> (String, String, String) {
+    let outcome = match result.outcome {
+        PlayResultOutcome::Cleared if matches!(result.scope, PlayResultScope::FullSong) => {
+            "CLEARED"
+        }
+        PlayResultOutcome::Cleared => "PRACTICE - CLEAR THRESHOLD MET",
+        PlayResultOutcome::BelowClearThreshold => "BELOW CLEAR THRESHOLD",
+        PlayResultOutcome::Failed(GaugeFailure::InstantDeath) => "FAILED - INSTANT DEATH",
+        PlayResultOutcome::Failed(GaugeFailure::Depleted) => "FAILED - DEPLETED",
+    };
+    let level = result.gauge.level_units;
+    (
+        format!("PLAYER {}", player.0),
+        outcome.into(),
+        format!(
+            "GAUGE {}.{:06}%",
+            level / GAUGE_UNITS_PER_PERCENT,
+            level % GAUGE_UNITS_PER_PERCENT
+        ),
+    )
+}
+/// Display data cannot be supplied to any live completion API.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrozenResultRow {
+    pub player: PlayerId,
+    pub result: crate::result_archive::ArchivedResult,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrozenScoreDetails {
+    pub player: PlayerId,
+    pub score: crate::result_archive::ArchivedScore,
+    pub competition: Option<CompetitionSnapshot>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrozenResultsModel {
+    pub roster: Vec<PlayerId>,
+    pub rows: Vec<FrozenResultRow>,
+    pub details: Vec<FrozenScoreDetails>,
+}
+pub(crate) fn validate_frozen_result(
+    result: &crate::result_archive::ArchivedResult,
+) -> Result<(), String> {
+    if result.gauge.level_units > crate::gauge::MAX_GAUGE_UNITS
+        || match result.outcome {
+            PlayResultOutcome::Failed(reason) => result.gauge.failure != Some(reason),
+            _ => result.gauge.failure.is_some(),
+        }
+    {
+        return Err("invalid frozen display result gauge or outcome".into());
+    }
+    if let PlayResultScope::PracticeSection { start, end } = result.scope {
+        if start < beatkernel::time::Timestamp::ZERO
+            || end.is_some_and(|end| end <= start)
+            || (start == beatkernel::time::Timestamp::ZERO && end.is_none())
+        {
+            return Err("invalid frozen display result scope".into());
+        }
+    }
+    Ok(())
+}
+impl FrozenResultsModel {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=64).contains(&self.roster.len())
+            || self.rows.len() != self.roster.len()
+            || (!self.details.is_empty() && self.details.len() != self.roster.len())
+        {
+            return Err("frozen Results require entire bounded roster".into());
+        }
+        for (index, player) in self.roster.iter().enumerate() {
+            if player.0 == 0
+                || self.roster[..index].contains(player)
+                || self.rows[index].player != *player
+                || self.rows[index].result.scope != self.rows[0].result.scope
+            {
+                return Err("frozen Results contain foreign, duplicate or mixed-scope rows".into());
+            }
+            validate_frozen_result(&self.rows[index].result)?;
+            if let Some(detail) = self.details.get(index) {
+                if detail.player != *player {
+                    return Err("frozen Results detail identity mismatch".into());
+                }
+                detail.score.validate().map_err(|error| error.to_string())?;
+                if let Some(snapshot) = &detail.competition {
+                    crate::browser_render_state::validate_comparison(snapshot)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Rows48+score128+grade12; comparison labels256+64 metadata per ghost and network64.
+    pub fn encoded_bytes(&self) -> Result<usize, String> {
+        self.validate()?;
+        Ok(64
+            + self.roster.len() * 4
+            + self.rows.len() * 48
+            + self
+                .details
+                .iter()
+                .map(|detail| {
+                    128 + detail.score.grades.len() * 12
+                        + detail.competition.as_ref().map_or(0, |snapshot| {
+                            64 + snapshot
+                                .ghosts
+                                .iter()
+                                .map(|ghost| 64 + ghost.label.len())
+                                .sum::<usize>()
+                        })
+                })
+                .sum::<usize>())
+    }
+}
+/// Retained visual reconstruction uses common labels/cards, without creating completion evidence.
+pub struct FrozenResultsView {
+    model: FrozenResultsModel,
+    pages: Vec<GeometrySnapshot>,
+    comparison_pages: Vec<GeometrySnapshot>,
+}
+impl FrozenResultsView {
+    pub fn from_model(model: FrozenResultsModel) -> Result<Self, String> {
+        model.validate()?;
+        let scope = result_scope_label(model.rows[0].result.scope);
+        let mut detail_cards = Vec::new();
+        let mut comparison_cards = Vec::new();
+        let pages = if model.details.is_empty() {
+            simple_result_pages(&scope, &model.rows)?
+        } else {
+            for (row, detail) in model.rows.iter().zip(&model.details) {
+                let (identity, outcome, gauge) = result_labels(row.player, row.result);
+                let timing = detail.score.timing;
+                let bias = if timing.count == 0 {
+                    None
+                } else {
+                    i64::try_from(timing.sum / i128::from(timing.count)).ok()
+                };
+                let absolute = if timing.count == 0 {
+                    None
+                } else {
+                    u64::try_from(timing.absolute_sum / u128::from(timing.count)).ok()
+                };
+                append_result_cards(
+                    &identity,
+                    &outcome,
+                    &gauge,
+                    detail.score.hits,
+                    detail.score.misses,
+                    detail.score.combo,
+                    detail.score.max_combo,
+                    (
+                        format!(
+                            "BIAS {}",
+                            bias.map_or("--".into(), crate::timing_display::signed_ms)
+                        ),
+                        format!(
+                            "MEAN ABS {}",
+                            absolute.map_or("--".into(), crate::timing_display::unsigned_ms)
+                        ),
+                    ),
+                    detail
+                        .score
+                        .grades
+                        .iter()
+                        .map(|(grade, count)| format!("GRADE G{grade} COUNT {count}"))
+                        .collect(),
+                    detail.competition.as_ref(),
+                    &mut detail_cards,
+                    &mut comparison_cards,
+                );
+            }
+            card_pages(&scope, &detail_cards, "DETAILS")?
+        };
+        let comparison_pages = card_pages(&scope, &comparison_cards, "COMPARISONS")?;
+        Ok(Self {
+            model,
+            pages,
+            comparison_pages,
+        })
+    }
+    pub fn model(&self) -> &FrozenResultsModel {
+        &self.model
+    }
+    pub fn has_comparisons(&self) -> bool {
+        !self.comparison_pages.is_empty()
+    }
+    pub fn page_count_for(&self, comparisons: bool) -> usize {
+        if comparisons && self.has_comparisons() {
+            self.comparison_pages.len()
+        } else {
+            self.pages.len()
+        }
+    }
+    pub fn compose_mode(
+        &self,
+        scene: &mut Scene,
+        page: usize,
+        comparisons: bool,
+    ) -> Result<(), String> {
+        let pages = if comparisons && self.has_comparisons() {
+            &self.comparison_pages
+        } else {
+            &self.pages
+        };
+        scene.append_geometry(pages.get(page).ok_or("frozen Results page out of range")?)
+    }
+}
+
+fn simple_result_pages(
+    scope: &str,
+    rows: &[FrozenResultRow],
+) -> Result<Vec<GeometrySnapshot>, String> {
+    let mut pages = Vec::new();
+    pages
+        .try_reserve_exact(rows.len().div_ceil(PLAYERS_PER_PAGE))
+        .map_err(|error| error.to_string())?;
+    for (page, visible) in rows.chunks(PLAYERS_PER_PAGE).enumerate() {
+        let mut scene = Scene::with_capacity(960, 720, 512);
+        text(&mut scene, 24, 100, scope, 1, 0x9bb1cf);
+        for (index, row) in visible.iter().enumerate() {
+            let (identity, outcome, gauge) = result_labels(row.player, row.result);
+            let color = match row.result.outcome {
+                PlayResultOutcome::Cleared => 0x74e5c5,
+                PlayResultOutcome::BelowClearThreshold => 0xd8b36b,
+                PlayResultOutcome::Failed(_) => 0xff8e8e,
+            };
+            let y = 140 + index * 110;
+            text(&mut scene, 24, y, &identity, 2, 0xf0f4ff);
+            text(&mut scene, 24, y + 28, &outcome, 2, color);
+            text(&mut scene, 24, y + 55, &gauge, 2, 0x9bb1cf);
+        }
+        text(
+            &mut scene,
+            24,
+            600,
+            &format!(
+                "LOCAL RESULTS PAGE {}/{} - PGUP/PGDN",
+                page + 1,
+                rows.len().div_ceil(PLAYERS_PER_PAGE)
+            ),
+            1,
+            0x9bb1cf,
+        );
+        pages.push(scene.geometry_snapshot()?);
+    }
+    Ok(pages)
+}

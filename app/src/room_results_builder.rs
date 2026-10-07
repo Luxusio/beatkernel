@@ -155,3 +155,97 @@ impl RoomResultsBuilder {
             .is_some_and(|archive| archive.failed())
     }
 }
+
+/// Frozen checked page projections of actual joined-room results, never ranking evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrozenRoomResults {
+    pub pages: Vec<RoomPresentation>,
+    pub initial_page: usize,
+}
+impl FrozenRoomResults {
+    pub fn from_archive(archive: &RoomResults) -> Result<Self, String> {
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(archive.page_count())
+            .map_err(|error| error.to_string())?;
+        for page in 0..archive.page_count() {
+            pages.push(archive.project(page)?);
+        }
+        let model = Self {
+            pages,
+            initial_page: archive.initial_page(),
+        };
+        model.validate()?;
+        Ok(model)
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if self.pages.is_empty() || self.pages.len() > 1008 || self.initial_page >= self.pages.len()
+        {
+            return Err("frozen room page capacity exceeded".into());
+        }
+        let first = &self.pages[0];
+        for (index, page) in self.pages.iter().enumerate() {
+            page.validate()?;
+            if page.page != index
+                || page.pages != self.pages.len()
+                || page.status != crate::room_presentation::RoomStatus::Closed
+                || page.lobby != first.lobby
+                || page.failed != first.failed
+                || page.error != first.error
+            {
+                return Err("frozen room pages differ from actual shared registration".into());
+            }
+        }
+        Ok(())
+    }
+    pub fn project(&self, page: usize) -> Result<&RoomPresentation, String> {
+        self.validate()?;
+        self.pages
+            .get(page)
+            .ok_or_else(|| "frozen room page out of range".into())
+    }
+    /// Shared lobby encoded once; up to4032 rows with three bounded128-byte labels.
+    pub fn encoded_bytes(&self) -> Result<usize, String> {
+        self.validate()?;
+        let lobby = &self.pages[0].lobby;
+        Ok(128
+            + lobby
+                .members
+                .iter()
+                .map(|member| 32 + member.players.len() * 4)
+                .sum::<usize>()
+            + self
+                .pages
+                .iter()
+                .map(|page| {
+                    64 + page.heading.len()
+                        + page.error.as_ref().map_or(0, String::len)
+                        + page
+                            .rows
+                            .iter()
+                            .map(|row| {
+                                64 + row.label.len()
+                                    + row.counters.iter().map(String::len).sum::<usize>()
+                            })
+                            .sum::<usize>()
+                })
+                .sum::<usize>())
+    }
+}
+impl RoomResultsBuilder {
+    pub fn export_visual(&self) -> Result<Option<FrozenRoomResults>, String> {
+        self.archive
+            .as_ref()
+            .map(|archive| {
+                let mut model = FrozenRoomResults::from_archive(archive)?;
+                model.initial_page = self
+                    .presentation
+                    .as_ref()
+                    .ok_or("frozen room current page missing")?
+                    .page;
+                model.validate()?;
+                Ok(model)
+            })
+            .transpose()
+    }
+}

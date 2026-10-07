@@ -113,6 +113,10 @@ impl CompletedResultsPresentation {
             }
         }
     }
+    /// Export captured display values without exporting a live completion constructor.
+    pub fn export_visual(&self) -> Result<Option<crate::ui::results::FrozenResultsModel>, String> {
+        self.view.as_ref().map(ResultsView::export_visual).transpose()
+    }
     pub fn results(&self) -> Option<&[(PlayerId, CompletedPlayResult)]> {
         self.results.as_deref()
     }

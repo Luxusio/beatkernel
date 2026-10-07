@@ -29,6 +29,37 @@ pub fn historical_page_count(
         })
 }
 
+/// Frozen authoritative stored values; geometry and replay acquisition stay local.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrozenHistoricalRecord {
+    pub value: HistoricalRecordValue,
+    pub score: Option<crate::result_archive::ArchivedScore>,
+    pub bms_score: Option<crate::judgment_policy::BmsScoreSummary>,
+    pub comparison: Option<Option<crate::competition_presentation::CompetitionSnapshot>>,
+    pub grade_page: usize,
+}
+impl FrozenHistoricalRecord {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.value.0.0 == 0 { return Err("frozen historical player identity is zero".into()); }
+        crate::ui::results::validate_frozen_result(&self.value.1)?;
+        if let Some(score) = &self.score { score.validate().map_err(|error| error.to_string())?; }
+        if let Some(classes) = self.bms_score {
+            let score = self.score.as_ref().ok_or("frozen historical class score requires counts")?;
+            classes.validate_for(score.hits, score.misses).map_err(|error| error.to_string())?;
+        }
+        if let Some(Some(snapshot)) = &self.comparison { crate::browser_render_state::validate_comparison(snapshot)?; }
+        if self.grade_page >= historical_page_count(self.score.as_ref(), self.comparison.as_ref()) {
+            return Err("frozen historical page out of range".into());
+        }
+        Ok(())
+    }
+    pub fn encoded_bytes(&self) -> Result<usize, String> {
+        self.validate()?;
+        Ok(128 + self.score.as_ref().map_or(0, |score| 128 + score.grades.len() * 12)
+            + self.comparison.as_ref().and_then(Option::as_ref).map_or(0, |snapshot|
+                64 + snapshot.ghosts.iter().map(|ghost| 64 + ghost.label.len()).sum::<usize>()))
+    }
+}
 pub struct HistoricalRecordPresentation {
     value: HistoricalRecordValue,
     start: Timestamp,
@@ -43,6 +74,16 @@ pub struct HistoricalRecordPresentation {
     grade_geometry: GeometrySnapshot,
 }
 impl HistoricalRecordPresentation {
+    pub fn export_visual(&self) -> FrozenHistoricalRecord {
+        FrozenHistoricalRecord { value: self.value, score: self.score.clone(),
+            bms_score: self.bms_score, comparison: self.comparison.clone(), grade_page: self.grade_page }
+    }
+    pub fn import_visual(model: FrozenHistoricalRecord) -> Result<Self, String> {
+        model.validate()?;
+        let mut presentation = Self::from_record_with_class_score(model.value, model.score.as_ref(), model.comparison.as_ref(), model.bms_score)?;
+        presentation.set_grade_page(model.grade_page)?;
+        Ok(presentation)
+    }
     pub fn new(
         replay: &[u8],
         archive: Option<&[u8]>,
