@@ -1884,8 +1884,10 @@ inputs retain captured order. Source sequences and native provenance are never
 rewritten by sorting. The committed global timestamp frontier still applies,
 so changed late input fails explicitly; unchanged Gamepad samples do not move
 that frontier. Commit bounded draft source/adapter state only after complete
-validation. Main pending cursor/watermark must use the bounded batch's maximum
-original time and prior cursor, never a stale last Gamepad sample.
+validation. Main retains the bounded batch's maximum original time separately
+from the acknowledged lagged prefix. Neither a stale last Gamepad sample nor a
+newer admitted event may replace that prefix; newer events remain queued until
+the declared partial prefix covers them.
 
 Known ceiling: Actual browser/device execution and measured latency remain
 unverified. Snapshot polling cannot recover intermediate transitions.

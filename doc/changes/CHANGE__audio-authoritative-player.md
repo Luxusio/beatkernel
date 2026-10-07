@@ -19,6 +19,16 @@ terminal failure. Startup was deliberately excluded by a one-second delay in
 these diagnostics. They do not clear either original QA failure or establish a
 guaranteed OS input-delivery bound. BeforeOrigin behavior is unchanged pending
 the pre-play input policy; processor-cause observability is under investigation.
+At `c828021`, four new processor diagnostics did not reproduce a terminal
+processor code: one input run failed on touch closure, one input run and two
+empty-input runs completed naturally. A subsequent bounded passive trace caught
+a trusted touch at 5210.675 ms delivered at 5228.805 ms, after matched ACK tick
+520 closed 5215.115 ms from an original 5227.125 ms acquisition sample. The
+18.13 ms delivery age exceeded the declared 12 ms policy and the touch was
+4.44 ms behind the acknowledged prefix; rendering still reported incomplete
+play, so this occurrence was not a completion race. Observer overhead applies.
+This establishes the guard's causal comparison, not an OS-wide latency bound
+or a processor fix. The original unobserved touch failures remain relevant.
 The paired prefix regression run passed 248 tests and exposed one new-fixture
 timer assumption; the corrected named Host regression then passed independently.
 Worker tests cover partial/equal/null prefixes, original cross-source ordering,
