@@ -395,6 +395,255 @@ fn replay_limits() -> ReplayCodecLimits {
     ReplayCodecLimits::new(65_536, 64, 4096, CodecLimits::new(4096, 1024).unwrap()).unwrap()
 }
 
+// These fixtures exercise the portable dispatch used by WASM service_audio.
+// Page and projection are acquisition context; the physical event is unchanged.
+fn paged_member(index: usize) -> PlayerId { PlayerId(index as u32 + 1) }
+fn paged_source(index: usize) -> DeviceId { DeviceId(index as u64 + 10) }
+fn paged_center(count: usize, index: usize, lane: usize, space: i64) -> Position2 {
+    let first = index / 4 * 4;
+    let bounds = crate::playfield_layout::local_touch_bounds_with_comparison_space(
+        &[0x11, 0x12], (count - first).min(4), index - first, space,
+    ).unwrap();
+    Position2 { x: (bounds[lane * 4] + bounds[lane * 4 + 2]) / 2.0,
+        y: (bounds[lane * 4 + 1] + bounds[lane * 4 + 3]) / 2.0 }
+}
+fn paged_event(index: usize, delta: i64, sequence: u64, contact: u64, phase: TouchPhase) -> PhysicalInputEvent {
+    let mut event = touch(paged_source(index).0, ORIGIN + delta, sequence);
+    let PhysicalInputEvent::Touch(value) = &mut event else { unreachable!() };
+    value.contact = ContactId(contact);
+    value.phase = phase;
+    event
+}
+fn paged_normalized(original: &PhysicalInputEvent) -> PhysicalInputEvent {
+    // Preserve the existing Runtime audio-domain normalization, independently
+    // of the page context. Every other field must match the acquisition exactly.
+    let mut expected = original.clone();
+    expected.meta_mut().clock_domain = ClockDomainId(33);
+    expected.meta_mut().timestamp = Timestamp::from_nanos(original.meta().timestamp.as_nanos() - ORIGIN);
+    expected
+}
+fn paged_owner(count: usize) -> (
+    StepLocalGameplay, crate::browser_input::BrowserInputQueue,
+    crate::browser_input::LocalTouchPageRouting,
+) {
+    use crate::{audio_authority::{AudioAuthority, AudioAuthorityConfig, AudioAuthorityEpoch},
+        browser_input::{BrowserInputQueue, LocalTouchPageRouting}};
+    use beatkernel::{input::{TouchRegion, TouchRouter}, time::ExtrapolationPolicy};
+    let plan_words = (0..count).flat_map(|i| exact_plan(paged_member(i).0, paged_source(i).0)).collect::<Vec<_>>();
+    let bindings = (0..count).flat_map(|i| [
+        row(paged_member(i).0, 0x11, paged_source(i).0, [0, 7, 4]),
+        row(paged_member(i).0, 0x12, paged_source(i).0, [1, 0x5754_4f55, 0]),
+    ].concat()).collect::<Vec<_>>();
+    let setup = setup(&plan_words, &bindings, &[0x11, 0x12]).unwrap();
+    let mut routing = LocalTouchPageRouting::new(&setup.plan, &[0x11, 0x12]).unwrap();
+    let config = StepGameplayConfig {
+        host_origin: point(HOST, ORIGIN), output_origin: point(OUTPUT, 17),
+        preroll: Duration::ZERO, early_ns: 0, late_ns: 0, offset_ns: 0,
+        command_capacity: 32, bgm_pending: 2,
+        bgm_lookahead: Duration::from_nanos(1_000_000_000), telemetry_capacity: 0,
+    };
+    let authority = AudioAuthority::new(AudioAuthorityConfig {
+        history_capacity: 8, max_observation_age: Duration::from_nanos(1_000_000_000),
+        input_extrapolation: ExtrapolationPolicy::Forbid, max_input_ahead: Duration::ZERO,
+    }, AudioAuthorityEpoch {
+        id: 1, stream_origin: config.output_origin,
+        logical_origin: point(ClockDomainId(33), 0), host_domain: HOST,
+    }).unwrap();
+    let (mut game, _) = StepLocalGameplay::new_audio_section(
+        prepared(), config, setup.plan, setup.bindings, Timestamp::ZERO, None,
+        BmsInputMode::ButtonOrContact, authority,
+    ).unwrap();
+    for index in 0..count {
+        // Distinct comparison reservations must remain attached to each member.
+        let space = if index % 2 == 0 { 40 } else { 0 };
+        let first = index / 4 * 4;
+        let bounds = crate::playfield_layout::local_touch_bounds_with_comparison_space(
+            &[0x11, 0x12], (count - first).min(4), index - first, space,
+        ).unwrap();
+        let regions = [0x11, 0x12].into_iter().enumerate().map(|(lane, control)| TouchRegion {
+            device: DeviceSelector::Exact(paged_source(index)),
+            physical: PhysicalControlId::Native { backend: BackendId(0x5754_4f55), code: 0 },
+            game_control: GameControlId(control),
+            min: Position2 { x: bounds[lane * 4], y: bounds[lane * 4 + 1] },
+            max: Position2 { x: bounds[lane * 4 + 2], y: bounds[lane * 4 + 3] },
+        }).collect::<Vec<_>>();
+        game.configure_touch_router(paged_member(index), TouchRouter::new(regions.clone(), 8).unwrap()).unwrap();
+        routing.configure(paged_member(index), regions, space).unwrap();
+        routing.set_page(&mut game, paged_member(index), 0).unwrap();
+        game.configure_capture(paged_member(index), replay_limits(), u64::MAX).unwrap();
+    }
+    game.activate_audio().unwrap();
+    let queue = BrowserInputQueue::local(config.host_origin, (0..count).map(paged_source).collect()).unwrap();
+    (game, queue, routing)
+}
+fn paged_evidence(game: &mut StepLocalGameplay) {
+    use beatkernel::time::ClockPair;
+    for delta in [0, 100_000_000] {
+        game.observe_audio_output(1, ClockPair {
+            source: point(OUTPUT, 17 + delta), target: point(HOST, ORIGIN + delta),
+        }).unwrap();
+    }
+    game.record_audio_prefix(point(HOST, ORIGIN + 100_000_000)).unwrap();
+}
+
+#[test]
+fn acquisition_pages_and_positions_follow_the_same_ordered_entries_after_current_page_changes() {
+    let (mut game, mut queue, mut routing) = paged_owner(5);
+    // Fresh hidden Down, visible Down, held/unbound Move and Up cross page changes.
+    let cases = [
+        (0, 10_000_000, 1, 1, TouchPhase::Down, 0, Some(0x11)),
+        (4, 11_000_000, 1, 8, TouchPhase::Down, 0, None),
+        (4, 12_000_000, 2, 9, TouchPhase::Down, 1, Some(0x12)),
+        (0, 13_000_000, 2, 1, TouchPhase::Move, 1, Some(0x11)),
+        (4, 14_000_000, 3, 8, TouchPhase::Move, 1, None),
+        (0, 15_000_000, 3, 1, TouchPhase::Up, 1, Some(0x11)),
+        (4, 16_000_000, 4, 8, TouchPhase::Up, 1, None),
+        (4, 17_000_000, 5, 9, TouchPhase::Up, 0, Some(0x12)),
+    ];
+    let originals = cases.iter().map(|&(i, time, seq, contact, phase, _, _)|
+        paged_event(i, time, seq, contact, phase)).collect::<Vec<_>>();
+    for (event, &(index, _, _, _, _, page, lane)) in originals.iter().zip(&cases) {
+        let position = paged_center(5, index, if lane == Some(0x12) { 1 } else { 0 }, if index % 2 == 0 { 40 } else { 0 });
+        queue.admit_on_page(event.clone(), point(HOST, ORIGIN + 100_000_000), Some(position), page, &routing).unwrap();
+    }
+    // The newest requested page is intentionally wrong for the first queued Down.
+    for index in 0..5 { routing.set_page(&mut game, paged_member(index), 1).unwrap(); }
+    assert_eq!(queue.pending(), originals.len());
+    assert!(queue.process_next_local_on_page(&mut game, &mut routing,
+        point(HOST, ORIGIN + 100_000_000), point(OUTPUT, 100_000_017)).unwrap().is_none());
+    assert_eq!(queue.pending(), originals.len(), "page metadata cannot fabricate acquired/audio evidence");
+    paged_evidence(&mut game);
+    let mut resolved = vec![Vec::new(); 5];
+    for (original, &(index, _, _, _, _, page, lane)) in originals.iter().zip(&cases) {
+        let Some(InputResult::Processed(reports)) = queue.process_next_local_on_page(
+            &mut game, &mut routing, point(HOST, ORIGIN + 100_000_000), point(OUTPUT, 100_000_017),
+        ).unwrap() else { panic!("acquired local entry must dispatch through actual owner") };
+        assert_eq!(reports.len(), 1);
+        let row = &reports[0];
+        assert_eq!(row.player, paged_member(index));
+        let normalized = paged_normalized(original);
+        assert_eq!(row.report.input.as_ref(), Some(&normalized));
+        assert_eq!(routing.applied_page(paged_member(index)), Some(page));
+        assert_eq!(row.report.bound_inputs.iter().map(|bound| bound.game_control.0).collect::<Vec<_>>(), lane.into_iter().collect::<Vec<_>>());
+        for bound in &row.report.bound_inputs { assert_eq!(bound.physical, normalized); }
+        resolved[index].extend(row.report.bound_inputs.clone());
+    }
+    assert_eq!(queue.pending(), 0);
+    for index in 0..5 {
+        assert!(game.completed_result(paged_member(index)).unwrap().is_none());
+    }
+    game.fail();
+    for index in 0..5 {
+        let file = decode_replay(&game.take_replay(paged_member(index)).unwrap().unwrap(), replay_limits()).unwrap();
+        let captured = file.records.iter().filter_map(|row| match &row.operation {
+            ReplayOperation::Input(input) => Some(input.clone()), ReplayOperation::Advance => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(captured, resolved[index], "only genuine resolved prefix enters capture");
+    }
+}
+
+#[test]
+fn equal_time_page_context_preserves_source_sequence_and_stable_contact_order() {
+    let (mut game, mut queue, mut routing) = paged_owner(5);
+    let entries = [
+        (paged_event(4, 10_000_000, 1, 1, TouchPhase::Down), 1, paged_center(5, 4, 1, 40), Some(0x12)),
+        (paged_event(0, 10_000_000, 7, 1, TouchPhase::Down), 0, paged_center(5, 0, 0, 40), Some(0x11)),
+        (paged_event(0, 10_000_000, 7, 1, TouchPhase::Up), 1, paged_center(5, 0, 1, 40), Some(0x11)),
+        (paged_event(0, 10_000_000, 8, 2, TouchPhase::Down), 1, paged_center(5, 0, 0, 40), None),
+    ];
+    for (event, page, position, _) in &entries {
+        queue.admit_on_page(event.clone(), point(HOST, ORIGIN + 100_000_000), Some(*position), *page, &routing).unwrap();
+    }
+    for index in 0..5 { routing.set_page(&mut game, paged_member(index), 1).unwrap(); }
+    paged_evidence(&mut game);
+    for index in [1, 2, 3, 0] {
+        let Some(InputResult::Processed(reports)) = queue.process_next_local_on_page(
+            &mut game, &mut routing, point(HOST, ORIGIN + 100_000_000), point(OUTPUT, 100_000_017),
+        ).unwrap() else { panic!("ready equal-time entry required") };
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].report.input.as_ref(), Some(&paged_normalized(&entries[index].0)));
+        assert_eq!(reports[0].report.bound_inputs.iter().map(|input| input.game_control.0).collect::<Vec<_>>(), entries[index].3.into_iter().collect::<Vec<_>>());
+    }
+    assert_eq!(queue.pending(), 0);
+}
+
+#[test]
+fn invalid_page_context_is_atomic_and_same_page_retains_configured_region_storage() {
+    use crate::local_input::{InputMerger, MergeError};
+    let (mut game, mut queue, mut routing) = paged_owner(64);
+    let pointer = routing.configured_regions(paged_member(63)).unwrap().as_ptr();
+    let original_regions = routing.configured_regions(paged_member(63)).unwrap().to_vec();
+    assert!(routing.set_page(&mut game, paged_member(63), 15).unwrap());
+    for _ in 0..3 {
+        assert!(routing.set_page(&mut game, paged_member(63), 15).unwrap());
+        assert_eq!(routing.applied_page(paged_member(63)), Some(15));
+        assert_eq!(routing.configured_regions(paged_member(63)).unwrap().as_ptr(), pointer);
+        assert_eq!(routing.configured_regions(paged_member(63)).unwrap(), original_regions);
+    }
+    let valid = paged_event(63, 10_000_000, 1, 9, TouchPhase::Down);
+    let position = paged_center(64, 63, 1, 0);
+    queue.admit_on_page(valid.clone(), point(HOST, ORIGIN + 100_000_000), Some(position), 15, &routing).unwrap();
+    let before_queue = format!("{queue:?}");
+    let before_routing = format!("{routing:?}");
+    let before_authority = format!("{:?}", game.audio_authority());
+    let before_judge = game.judge(paged_member(63)).unwrap().stable_hash().unwrap();
+    for (event, page) in [
+        (paged_event(63, 11_000_000, 999, 10, TouchPhase::Down), 16),
+        (button(paged_source(63).0, PhysicalControlId::keyboard(4), ORIGIN + 11_000_000, 999), 15),
+    ] {
+        assert!(matches!(queue.admit_on_page(event, point(HOST, ORIGIN + 100_000_000), Some(position), page, &routing), Err(MergeError::InvalidTouchPage)));
+        assert_eq!(format!("{queue:?}"), before_queue);
+        assert_eq!(format!("{routing:?}"), before_routing);
+        assert_eq!(format!("{:?}", game.audio_authority()), before_authority);
+        assert_eq!(game.judge(paged_member(63)).unwrap().stable_hash().unwrap(), before_judge);
+    }
+    assert!(routing.set_page(&mut game, paged_member(63), 16).is_err());
+    assert_eq!(format!("{routing:?}"), before_routing);
+    // Rejected sequence 999 must not poison the valid source chronology.
+    let up = paged_event(63, 11_000_000, 2, 9, TouchPhase::Up);
+    queue.admit_on_page(up.clone(), point(HOST, ORIGIN + 100_000_000), Some(position), 0, &routing).unwrap();
+    paged_evidence(&mut game);
+    for event in [&valid, &up] {
+        let Some(InputResult::Processed(reports)) = queue.process_next_local_on_page(
+            &mut game, &mut routing, point(HOST, ORIGIN + 100_000_000), point(OUTPUT, 100_000_017),
+        ).unwrap() else { panic!("accepted prefix required") };
+        assert_eq!(reports[0].player, paged_member(63));
+        assert_eq!(reports[0].report.input.as_ref(), Some(&paged_normalized(event)));
+        assert_eq!(reports[0].report.bound_inputs[0].game_control, GameControlId(0x12));
+    }
+    for index in 0..63 {
+        assert_eq!(routing.applied_page(paged_member(index)), Some(0),
+            "dispatch applies the configured acquisition source, not the full roster");
+    }
+    game.fail();
+    for index in 0..64 {
+        let file = decode_replay(&game.take_replay(paged_member(index)).unwrap().unwrap(), replay_limits()).unwrap();
+        let captured = file.records.iter().filter_map(|row| match &row.operation {
+            ReplayOperation::Input(input) => Some(input.clone()), ReplayOperation::Advance => None,
+        }).collect::<Vec<_>>();
+        if index == 63 {
+            assert_eq!(captured.len(), 2, "rejected context cannot enter a genuine capture");
+            for (input, event) in captured.iter().zip([&valid, &up]) {
+                assert_eq!(input.game_control, GameControlId(0x12));
+                assert_eq!(input.physical, paged_normalized(event));
+            }
+        } else {
+            assert!(captured.is_empty());
+        }
+    }
+    let mut merger = InputMerger::new(HOST, point(HOST, ORIGIN), vec![paged_source(0)], 2).unwrap();
+    let event = paged_event(0, 10_000_000, 1, 1, TouchPhase::Down);
+    merger.admit_at_on_page(event.clone(), point(HOST, ORIGIN + 100_000_000), Some(position), Some(0)).unwrap();
+    let frontier = point(HOST, ORIGIN + 100_000_000);
+    assert_eq!(merger.peek_ready(frontier).unwrap(), Some(&event));
+    assert_eq!(merger.peek_ready_projection(frontier).unwrap(), Some((Some(position), Some(0))));
+    assert!(matches!(merger.admit_at_on_page(button(paged_source(0).0, PhysicalControlId::keyboard(4), ORIGIN + 11_000_000, 999), frontier, None, Some(0)), Err(MergeError::InvalidTouchPage)));
+    assert_eq!(merger.pending(), 1);
+    assert_eq!(merger.peek_ready_projection(frontier).unwrap(), Some((Some(position), Some(0))));
+    assert_eq!(merger.pop_ready(frontier).unwrap(), Some(event));
+    assert_eq!(merger.peek_ready_projection(frontier).unwrap(), None);
+}
+
 #[test]
 fn actual_three_and_four_member_owners_route_identical_controls_independently_with_original_capture_and_shared_pcm()
  {

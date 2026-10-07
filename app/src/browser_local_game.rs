@@ -7,7 +7,7 @@ use crate::{
     browser_game::{BrowserSample, OUTPUT, LOGICAL, encode_batch, encode_saved_opponents},
     browser_hid_input::BrowserHidSetup,
     browser_input::{
-        BrowserInputQueue, LocalPhysicalInputSetup, TouchInputSetup, decode_input,
+        BrowserInputQueue, LocalPhysicalInputSetup, LocalTouchPageRouting, TouchInputSetup, decode_input,
         project_touch_on_surface, project_touch_position_on_surface,
     },
     competition::OpponentKind,
@@ -29,7 +29,7 @@ use beatkernel::{
     audio::{PcmSample, SampleId},
     input::{
         Binding, ButtonEvent, ButtonState, DeviceId, EventMeta, PhysicalControlId,
-        PhysicalInputEvent, Position2, TouchRegion, codec::CodecLimits,
+        PhysicalInputEvent, Position2, codec::CodecLimits,
     },
     judge::JudgeEvent,
     replay::codec::ReplayCodecLimits,
@@ -60,7 +60,7 @@ pub(crate) struct BrowserLocalMember {
     opponent_error: Option<String>,
     source: Option<DeviceId>,
     pressed_owners: PressedKeys,
-    touch_regions: Option<Vec<TouchRegion>>,
+    touch_configured: bool,
 }
 
 impl BrowserLocalMember {
@@ -101,6 +101,7 @@ pub struct BrowserLocalGame {
     output_context: Option<u64>,
     output_evidence: Option<(OutputEvidence, Option<ClockPoint>)>,
     input_queue: Option<BrowserInputQueue>,
+    touch_page_routing: LocalTouchPageRouting,
     chart_seed: u64,
     opponent_source: Option<beatkernel_bms::BmsChart>,
     opponent_count: usize,
@@ -182,6 +183,8 @@ impl BrowserLocalGame {
             input_bindings.extend_from_slice(bindings.bindings());
         }
         let chart = Arc::new(prepared.chart);
+        let touch_page_routing = LocalTouchPageRouting::new(&input.plan, &chart.lanes)
+            .map_err(error)?;
         let mut members = Vec::new();
         members
             .try_reserve_exact(input.plan.members().len())
@@ -202,7 +205,7 @@ impl BrowserLocalGame {
                 opponents: None,
                 opponent_error: None,
                 pressed_owners: PressedKeys::default(),
-                touch_regions: None,
+                touch_configured: false,
             });
         }
         let config = StepGameplayConfig {
@@ -273,6 +276,7 @@ impl BrowserLocalGame {
             output_context: None,
             output_evidence: None,
             input_queue: None,
+            touch_page_routing,
             chart_seed: prepared.chart_seed,
             opponent_source: Some(opponent_source),
             opponent_count: 0,
@@ -383,7 +387,7 @@ impl BrowserLocalGame {
             .iter()
             .position(|member| member.player == PlayerId(player))
             .ok_or_else(|| error("unknown local player"))?;
-        if self.members[index].touch_regions.is_some() {
+        if self.members[index].touch_configured {
             return Err(error(
                 "saved opponents must be admitted before touch configuration",
             ));
@@ -506,7 +510,7 @@ impl BrowserLocalGame {
                 "peer display must be admitted before activation or gameplay",
             ));
         }
-        if member.touch_regions.is_some() {
+        if member.touch_configured {
             return Err(error(
                 "peer display must be admitted before touch configuration",
             ));
@@ -674,68 +678,18 @@ impl BrowserLocalGame {
         self.game
             .configure_touch_router(PlayerId(player), setup.router)
             .map_err(error)?;
-        self.members[index].touch_regions = Some(regions);
+        self.touch_page_routing.configure(
+            PlayerId(player), regions, self.members[index].comparison_height(),
+        ).map_err(error)?;
+        self.members[index].touch_configured = true;
         Ok(())
     }
 
     /// Move only the configured router's bounds for a visible page. Hidden
     /// members admit new contacts as unbound while retaining every held owner.
     pub fn set_touch_page(&mut self, player: u32, page: u32) -> Result<bool, JsValue> {
-        let index = self
-            .members
-            .iter()
-            .position(|member| member.player == PlayerId(player))
-            .ok_or_else(|| error("unknown local touch player"))?;
-        let count = self.members.len();
-        let page_size = crate::ui::organisms::LOCAL_PLAYERS_PER_PAGE;
-        if page as usize >= count.div_ceil(page_size) {
-            return Err(error("invalid local touch page"));
-        }
-        let original = self.members[index]
-            .touch_regions
-            .as_ref()
-            .ok_or_else(|| error("local player has no configured touch router"))?;
-        let first = page as usize * page_size;
-        if index < first || index >= (first + page_size).min(count) {
-            self.game
-                .set_touch_routing_enabled(PlayerId(player), false)
-                .map_err(error)?;
-            return Ok(false);
-        }
-        let bounds = self.touch_bounds(player, page)?;
-        let mut regions = Vec::new();
-        regions
-            .try_reserve_exact(original.len())
-            .map_err(|_| error("local touch remapping allocation failed"))?;
-        for region in original {
-            let lane = self
-                .chart
-                .lanes
-                .iter()
-                .position(|lane| u32::from(*lane) == region.game_control.0)
-                .ok_or_else(|| {
-                    error("configured touch destination is absent from the prepared chart")
-                })?;
-            let offset = lane * 4;
-            regions.push(TouchRegion {
-                min: Position2 {
-                    x: bounds[offset],
-                    y: bounds[offset + 1],
-                },
-                max: Position2 {
-                    x: bounds[offset + 2],
-                    y: bounds[offset + 3],
-                },
-                ..*region
-            });
-        }
-        self.game
-            .remap_touch_regions(PlayerId(player), regions)
-            .map_err(error)?;
-        self.game
-            .set_touch_routing_enabled(PlayerId(player), true)
-            .map_err(error)?;
-        Ok(true)
+        self.touch_page_routing.set_page(&mut self.game, PlayerId(player), page)
+            .map_err(error)
     }
 
     /// Prepared lane regions for this member's actual visible field. Coordinates
@@ -1110,6 +1064,40 @@ impl BrowserLocalGame {
         })();
         self.queue_result(result)
     }
+    /// Admit the original acquisition surface and page on the same ordered input.
+    pub fn queue_input_blob_on_surface_on_page(
+        &mut self,
+        bytes: Vec<u8>,
+        css_width: f64,
+        css_height: f64,
+        surface_width: u32,
+        surface_height: u32,
+        page: u32,
+        received_host_ns: i64,
+    ) -> Result<(), JsValue> {
+        let result = (|| {
+            let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
+            // Page and event checks precede even dynamic source registration.
+            self.touch_page_routing.validate_page(page).map_err(error)?;
+            let position = project_touch_on_surface(
+                &input,
+                [css_width, css_height],
+                [surface_width, surface_height],
+                crate::playfield_layout::LOGICAL_EXTENT,
+            ).map_err(error)?;
+            if self.game.failed() || received_host_ns < 0 {
+                return Err(error("input queue requires usable nonnegative HOST acquisition"));
+            }
+            let queue = self.input_queue.as_mut()
+                .ok_or_else(|| error("input queue is not activated"))?;
+            queue.register_source(input.meta().source).map_err(error)?;
+            queue.admit_on_page(
+                input, point(HOST, received_host_ns), Some(position), page, &self.touch_page_routing,
+            ).map_err(error)
+        })();
+        self.queue_result(result)
+    }
+
     pub fn close_input_prefix(&mut self, host_ns: i64) -> Result<(), JsValue> {
         if self.input_queue.is_none() || host_ns < 0 {
             return Err(error("input prefix requires activated HOST input"));
@@ -1137,7 +1125,7 @@ impl BrowserLocalGame {
                 .input_queue
                 .as_mut()
                 .ok_or_else(|| error("input queue is not activated"))?
-                .process_next_local(&mut self.game, now, audio_at);
+                .process_next_local_on_page(&mut self.game, &mut self.touch_page_routing, now, audio_at);
             match result {
                 Ok(Some(report)) => {
                     self.accept_input(Ok(report))?;

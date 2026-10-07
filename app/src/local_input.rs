@@ -23,6 +23,8 @@ pub enum MergeError {
     InvalidConfiguration,
     /// A supplied projected position contains NaN or infinity.
     InvalidPosition,
+    /// Acquisition pages belong only to genuine touch input and valid local pages.
+    InvalidTouchPage,
     /// A supplied clock point or normalized event uses another domain.
     DomainMismatch {
         expected: ClockDomainId,
@@ -87,6 +89,7 @@ impl fmt::Display for MergeError {
                 f.write_str("input merge needs 1..64 fixed devices or 1..4096 dynamic source slots, and 1..65536 pending slots")
             }
             Self::InvalidPosition => f.write_str("input merge projected position must be finite"),
+            Self::InvalidTouchPage => f.write_str("input acquisition page requires genuine touch and a valid local page"),
             Self::DomainMismatch { expected, actual } => write!(
                 f,
                 "input merge domain mismatch: expected {}, received {}",
@@ -173,6 +176,7 @@ struct Pending {
     key: (Timestamp, DeviceId, u64, u64),
     event: PhysicalInputEvent,
     position: Option<Position2>,
+    page: Option<u32>,
     payload_bytes: usize,
 }
 // BinaryHeap is a max heap: reverse only the complete stable ordering key.
@@ -350,6 +354,21 @@ impl InputMerger {
         received: ClockPoint,
         position: Option<Position2>,
     ) -> Result<(), MergeError> {
+        self.admit_at_on_page(event, received, position, None)
+    }
+
+    /// Keeps acquisition layout metadata on the same stable ordered entry.
+    /// Roster-specific page bounds are validated by the local browser owner.
+    pub fn admit_at_on_page(
+        &mut self,
+        event: PhysicalInputEvent,
+        received: ClockPoint,
+        position: Option<Position2>,
+        page: Option<u32>,
+    ) -> Result<(), MergeError> {
+        if page.is_some() && !matches!(&event, PhysicalInputEvent::Touch(_)) {
+            return Err(MergeError::InvalidTouchPage);
+        }
         if position.is_some_and(|position| !position.x.is_finite() || !position.y.is_finite()) {
             return Err(MergeError::InvalidPosition);
         }
@@ -431,6 +450,7 @@ impl InputMerger {
             ),
             event,
             position,
+            page,
             payload_bytes,
         });
         self.sources[source_index].last = Some((meta.timestamp, meta.sequence));
@@ -505,6 +525,17 @@ impl InputMerger {
             .peek()
             .filter(|item| item.key.0 <= frontier.timestamp)
             .and_then(|item| item.position))
+    }
+
+    /// Reads both projections of precisely the earliest eligible entry.
+    pub fn peek_ready_projection(
+        &self,
+        frontier: ClockPoint,
+    ) -> Result<Option<(Option<Position2>, Option<u32>)>, MergeError> {
+        self.validate_frontier(frontier)?;
+        Ok(self.pending.peek()
+            .filter(|item| item.key.0 <= frontier.timestamp)
+            .map(|item| (item.position, item.page)))
     }
 
     /// Removes the earliest exact event at/before a validated frontier.

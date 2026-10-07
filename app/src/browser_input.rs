@@ -299,6 +299,162 @@ pub fn decode_input(
     Ok(event)
 }
 
+/// Configured local touch geometry, independent of the renderer's current page.
+#[derive(Debug)]
+pub struct LocalTouchPageRouting {
+    members: Vec<(PlayerId, Option<DeviceId>)>,
+    lanes: Vec<u8>,
+    configured: Vec<LocalTouchMember>,
+}
+
+#[derive(Debug)]
+struct LocalTouchMember {
+    player: PlayerId,
+    source: Option<DeviceId>,
+    index: usize,
+    comparison_height: i64,
+    original: Vec<TouchRegion>,
+    applied_page: Option<u32>,
+}
+
+impl LocalTouchPageRouting {
+    pub fn new(plan: &ResolvedInputPlan, lanes: &[u8]) -> Result<Self, String> {
+        crate::playfield_layout::default_touch_bounds(lanes)?;
+        let mut members = Vec::new();
+        members.try_reserve_exact(plan.members().len())
+            .map_err(|_| "local touch member allocation failed")?;
+        members.extend_from_slice(plan.members());
+        let mut prepared_lanes = Vec::new();
+        prepared_lanes.try_reserve_exact(lanes.len())
+            .map_err(|_| "local touch lane allocation failed")?;
+        prepared_lanes.extend_from_slice(lanes);
+        let mut configured = Vec::new();
+        configured.try_reserve_exact(members.len())
+            .map_err(|_| "local touch routing allocation failed")?;
+        Ok(Self { members, lanes: prepared_lanes, configured })
+    }
+
+    pub fn configure(
+        &mut self,
+        player: PlayerId,
+        original: Vec<TouchRegion>,
+        comparison_height: i64,
+    ) -> Result<(), String> {
+        let index = self.members.iter().position(|(id, _)| *id == player)
+            .ok_or("unknown local touch player")?;
+        let source = self.members[index].1;
+        if original.iter().any(|region| {
+            !self.lanes.iter().any(|lane| u32::from(*lane) == region.game_control.0)
+                || source.is_some_and(|source| region.device != DeviceSelector::Exact(source))
+        }) {
+            return Err("local touch regions differ from the prepared member identities".into());
+        }
+        // Validate the reservation against the smallest supported visible field.
+        crate::playfield_layout::local_field_bounds_with_comparison_space(
+            self.members.len().min(crate::ui::organisms::LOCAL_PLAYERS_PER_PAGE),
+            0,
+            comparison_height,
+        )?;
+        let member = LocalTouchMember {
+            player, source, index, comparison_height, original, applied_page: None,
+        };
+        match self.configured.binary_search_by_key(&source, |member| member.source) {
+            Ok(index) => self.configured[index] = member,
+            Err(index) => self.configured.insert(index, member),
+        }
+        Ok(())
+    }
+
+    pub fn validate_page(&self, page: u32) -> Result<(), MergeError> {
+        if page as usize >= self.members.len().div_ceil(crate::ui::organisms::LOCAL_PLAYERS_PER_PAGE) {
+            return Err(MergeError::InvalidTouchPage);
+        }
+        Ok(())
+    }
+
+    pub fn applied_page(&self, player: PlayerId) -> Option<u32> {
+        self.configured.iter().find(|member| member.player == player)
+            .and_then(|member| member.applied_page)
+    }
+
+    pub fn configured_regions(&self, player: PlayerId) -> Option<&[TouchRegion]> {
+        self.configured.iter().find(|member| member.player == player)
+            .map(|member| member.original.as_slice())
+    }
+
+    pub fn set_page(
+        &mut self,
+        game: &mut StepLocalGameplay,
+        player: PlayerId,
+        page: u32,
+    ) -> Result<bool, StepLocalGameplayError> {
+        self.validate_page(page)
+            .map_err(crate::audio_authority::AudioAuthorityError::from)
+            .map_err(StepGameplayError::from)?;
+        let member = self.configured.iter_mut().find(|member| member.player == player)
+            .ok_or(StepLocalGameplayError::UnknownPlayer(player))?;
+        Self::apply_member(game, &self.lanes, self.members.len(), member, page)
+    }
+
+    fn apply_source(
+        &mut self,
+        game: &mut StepLocalGameplay,
+        source: DeviceId,
+        page: u32,
+    ) -> Result<(), StepLocalGameplayError> {
+        let index = if self.members.len() == 1 && self.members[0].1.is_none() {
+            self.configured.binary_search_by_key(&None, |member| member.source)
+        } else {
+            self.configured.binary_search_by_key(&Some(source), |member| member.source)
+        };
+        if let Ok(index) = index {
+            Self::apply_member(game, &self.lanes, self.members.len(), &mut self.configured[index], page)?;
+        }
+        Ok(())
+    }
+
+    fn apply_member(
+        game: &mut StepLocalGameplay,
+        lanes: &[u8],
+        count: usize,
+        member: &mut LocalTouchMember,
+        page: u32,
+    ) -> Result<bool, StepLocalGameplayError> {
+        if game.failed() {
+            return Err(StepGameplayError::Failed.into());
+        }
+        let page_size = crate::ui::organisms::LOCAL_PLAYERS_PER_PAGE;
+        let first = page as usize * page_size;
+        let visible = (count - first).min(page_size);
+        let enabled = member.index >= first && member.index < first + visible;
+        if member.applied_page == Some(page) {
+            return Ok(enabled);
+        }
+        if enabled {
+            let bounds = crate::playfield_layout::local_touch_bounds_with_comparison_space(
+                lanes, visible, member.index - first, member.comparison_height,
+            ).map_err(StepGameplayError::Setup)?;
+            let mut regions = Vec::new();
+            regions.try_reserve_exact(member.original.len())
+                .map_err(|_| StepGameplayError::Setup("local touch remapping allocation failed".into()))?;
+            for region in &member.original {
+                let lane = lanes.iter().position(|lane| u32::from(*lane) == region.game_control.0)
+                    .expect("configured destinations were validated");
+                let offset = lane * 4;
+                regions.push(TouchRegion {
+                    min: Position2 { x: bounds[offset], y: bounds[offset + 1] },
+                    max: Position2 { x: bounds[offset + 2], y: bounds[offset + 3] },
+                    ..*region
+                });
+            }
+            game.remap_touch_regions(member.player, regions)?;
+        }
+        game.set_touch_routing_enabled(member.player, enabled)?;
+        member.applied_page = Some(page);
+        Ok(enabled)
+    }
+}
+
 /// One bounded original-input queue shared by portable and WASM browser owners.
 #[derive(Debug)]
 pub struct BrowserInputQueue {
@@ -328,6 +484,43 @@ impl BrowserInputQueue {
     }
     pub fn pending(&self) -> usize {
         self.merger.pending()
+    }
+    pub fn admit_on_page(
+        &mut self,
+        event: PhysicalInputEvent,
+        received: ClockPoint,
+        position: Option<Position2>,
+        page: u32,
+        routing: &LocalTouchPageRouting,
+    ) -> Result<(), MergeError> {
+        routing.validate_page(page)?;
+        self.merger.admit_at_on_page(event, received, position, Some(page))
+    }
+
+    pub fn process_next_local_on_page(
+        &mut self,
+        game: &mut StepLocalGameplay,
+        routing: &mut LocalTouchPageRouting,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<InputResult>, StepLocalGameplayError> {
+        let projection = match game.audio_authority().and_then(|authority| authority.acquired_prefix()) {
+            Some(prefix) => {
+                let projection = self.merger.peek_ready_projection(prefix)
+                    .map_err(crate::audio_authority::AudioAuthorityError::from)
+                    .map_err(StepGameplayError::from)?;
+                if let Some((_, Some(page))) = projection {
+                    let source = self.merger.peek_ready(prefix)
+                        .map_err(crate::audio_authority::AudioAuthorityError::from)
+                        .map_err(StepGameplayError::from)?
+                        .expect("projection and event share the same ready entry").meta().source;
+                    routing.apply_source(game, source, page)?;
+                }
+                projection.and_then(|(position, _)| position)
+            }
+            None => None,
+        };
+        game.process_next_audio_input(&mut self.merger, now, audio_at, projection)
     }
     pub fn process_next_solo(
         &mut self,

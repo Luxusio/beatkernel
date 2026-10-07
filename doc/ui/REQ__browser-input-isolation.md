@@ -70,6 +70,14 @@ stalls and transient retries must not gate keyboard/HID/gamepad acquisition,
 gameplay input/audio acknowledgements or capture. Zero extent cannot establish
 that a new page is visible.
 
+Local fresh-contact routing must use the acquisition page stored on the same
+ordered queue entry as its projected position. Setting the current page before
+queue admission is insufficient: the entry may be dispatched after another page
+change. Apply its retained page at actual dispatch, preserving held/unbound
+contact ownership. Reusing the same page must not allocate or remap unrelated
+members. Feed these inputs through the ordinary prompt queue; do not hold them
+in a separate renderer-wait buffer behind an already closed input prefix.
+
 A confirmed terminal runtime graphics error retains the existing failed-stop
 behavior: gameplay exports genuine recorded prefixes and authoritative results,
 then Window joins input/audio/room cleanup before gameplay ownership terminates.

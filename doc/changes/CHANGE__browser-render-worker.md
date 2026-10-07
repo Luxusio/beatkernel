@@ -36,6 +36,8 @@ lifecycle integration, final independent review and browser QA remain pending.
 
 ## Known ceiling
 
+Known ceiling: Window integration and real completed/combined rendering proof remain pending AC007/AC009.
+
 Known ceiling: actual Worker decoding must use the trusted caller’s finite diagnostic budget before allocating or copying — already-owned Rust convenience paths preserve diagnostics.
 
 Portable frame models and display-only frozen history/results/room reconstruction
@@ -78,3 +80,11 @@ The shipped Window/game Worker is not yet wired to this separate renderer.
 Gameplay-only Worker integration, original input/page/resize lifecycle barriers,
 capture-preserving terminal failure ordering, final independent review and
 whole-flow browser QA remain required.
+
+The ordered local-touch helper retains acquisition page and projected position
+on the same bounded input entry. Actual audio-authorized dispatch applies that
+page to the relevant touch source before routing; held and unbound contacts
+retain ownership. Unchanged pages return before allocating a replacement mapping.
+Focused native verification passes all ten browser-local-input fixtures and all
+22 input-merger/attachment tests. JavaScript forwarding and Window acquisition
+integration remain pending; these checks do not establish browser acceptance.
