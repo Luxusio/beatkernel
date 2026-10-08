@@ -15,6 +15,15 @@ pub struct FiniteReplayCompletion {
     endpoint: u64,
     last_render: Option<RenderReport>,
     last_presented: Option<Timestamp>,
+    target: Option<TargetFiniteReplay>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TargetFiniteReplay {
+    epoch: u64,
+    basis: beatkernel::audio::TargetFrameBasis,
+    end: crate::native_end::NativeEnd,
+    telemetry: Option<crate::gameplay::output::ports::TargetOutputTelemetry>,
+    crossed: bool,
 }
 impl FiniteReplayCompletion {
     pub fn new(origin: ClockPoint, rate: u32, endpoint: u64) -> Result<Self, CompletionError> {
@@ -27,9 +36,100 @@ impl FiniteReplayCompletion {
             endpoint,
             last_render: None,
             last_presented: None,
+            target: None,
         };
         value.point(endpoint)?;
         Ok(value)
+    }
+    pub fn with_target_basis(
+        mut self,
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
+        host: beatkernel::time::ClockDomainId,
+    ) -> Result<Self, CompletionError> {
+        if self.target.is_some()
+            || self.last_render.is_some()
+            || self.last_presented.is_some()
+            || basis.origin() != self.origin
+        {
+            return Err(CompletionError(
+                "finite target replay requires cold original identity",
+            ));
+        }
+        let end = crate::native_end::NativeEnd::new(self.origin, host, self.rate, self.endpoint)
+            .map_err(|_| CompletionError("finite target replay endpoint differs"))?
+            .with_target_basis(epoch, basis)
+            .map_err(|_| CompletionError("finite target replay basis differs"))?;
+        self.target = Some(TargetFiniteReplay {
+            epoch,
+            basis,
+            end,
+            telemetry: None,
+            crossed: false,
+        });
+        Ok(self)
+    }
+    /// A source endpoint never acknowledges converted target/native delivery by itself.
+    pub fn observe_target(
+        &mut self,
+        records_finished: bool,
+        feeder: &BgmFeeder,
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
+        telemetry: Option<crate::gameplay::output::ports::TargetOutputTelemetry>,
+        pair: Option<beatkernel::time::ClockPair>,
+    ) -> Result<bool, CompletionError> {
+        let mut next = self.clone();
+        let mut target = next
+            .target
+            .take()
+            .ok_or(CompletionError("finite replay has no target identity"))?;
+        if (epoch, basis) != (target.epoch, target.basis)
+            || feeder.config().sample_rate != next.rate
+            || feeder.config().output_origin != next.origin
+        {
+            return Err(CompletionError(
+                "finite target replay source or creation identity differs",
+            ));
+        }
+        if let Some(tuple) = telemetry {
+            crate::completion::validate_replay_target_telemetry(tuple, basis, next.rate)?;
+            crate::completion::validate_replay_target_generation(target.telemetry, tuple)?;
+            next.observe_source(
+                false,
+                feeder,
+                tuple.source.filter(|source| source.frames != 0),
+                None,
+            )?;
+            target.telemetry = Some(tuple);
+        } else {
+            next.observe_source(false, feeder, None, None)?;
+        }
+        if let Some(pair) = pair {
+            if let Some(tuple) = target.telemetry {
+                if target
+                    .end
+                    .observe_target(epoch, basis, tuple.facts, next.last_render, pair)
+                    .map_err(|_| CompletionError("finite target replay native endpoint differs"))?
+                    .is_some()
+                {
+                    target.crossed = true;
+                }
+            } else {
+                target
+                    .end
+                    .prime_target_clock(epoch, basis, pair)
+                    .map_err(|_| {
+                        CompletionError("finite target replay native lower bracket differs")
+                    })?;
+            }
+        }
+        let feed = feeder.report();
+        let complete =
+            records_finished && feed.remaining == 0 && feed.outstanding == 0 && target.crossed;
+        next.target = Some(target);
+        *self = next;
+        Ok(complete)
     }
     fn point(&self, frame: u64) -> Result<Timestamp, CompletionError> {
         let ns =
@@ -42,6 +142,20 @@ impl FiniteReplayCompletion {
     /// Refusal is atomic. Feeder callbacks must be the actual retained producer's.
     /// Missing evidence waits; it never substitutes a scheduling/wall clock.
     pub fn observe(
+        &mut self,
+        records_finished: bool,
+        feeder: &BgmFeeder,
+        rendered: Option<RenderReport>,
+        presented: Option<ClockPoint>,
+    ) -> Result<bool, CompletionError> {
+        if self.target.is_some() {
+            return Err(CompletionError(
+                "finite target replay requires typed observations",
+            ));
+        }
+        self.observe_source(records_finished, feeder, rendered, presented)
+    }
+    fn observe_source(
         &mut self,
         records_finished: bool,
         feeder: &BgmFeeder,

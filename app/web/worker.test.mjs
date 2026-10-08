@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { ROOM_SESSION_METHODS } from "./room-owner.mjs";
 import { preflightMenuPacket } from "./render-protocol.mjs";
+import { LocalRoster } from "./local-play-host.mjs";
 import { createContext, SourceTextModule, SyntheticModule, runInContext } from "node:vm";
 
 const FileType = globalThis.File ?? NodeFile;
@@ -346,7 +347,22 @@ async function workerHarness(options = {}) {
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
   });
-  const MenuOwner = options.actualMenu ? await realMenuOwner() : class {
+  const ActualMenuOwner = options.actualMenu ? await realMenuOwner() : null;
+  const MenuOwner = options.actualMenu ? class {
+    constructor(generation) {
+      const owner = new ActualMenuOwner(generation);
+      if (options.menuAdmissionFault) {
+        for (const method of ["set_fields", "navigate_with_fields"]) {
+          const actual = owner[method].bind(owner);
+          owner[method] = (...args) => {
+            options.menuAdmissionFault(method, owner, args);
+            return actual(...args);
+          };
+        }
+      }
+      return owner;
+    }
+  } : class {
     constructor() { assert.fail("menu business fixtures must opt into the actual generated WASM owner"); }
   };
   const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserGame", "BrowserReplay", "BrowserMenuOwner"], function () {
@@ -435,6 +451,160 @@ async function readyWorker(options) {
   assert.equal(worker.of("fatal").length, 0);
   return worker;
 }
+
+const acquiredMenuToken = state => ({ menuGeneration: state.menuGeneration, screen: state.screen, revision: state.revision });
+const acquiredSource = (id, kind = "hid") => [String(id), kind, `Acquired ${id}`, `Original source ${id}`, "1"];
+function acquiredMenuFields(sources, members = [[999, "42"]]) {
+  return ["1", "1", String(members.length), ...members.flatMap(([id, source]) => [String(id), source]),
+    String(sources.length), ...sources.flat()];
+}
+async function acquiredPlayersWorker(options = {}) {
+  const worker = await readyWorker({ ...options, actualMenu: true });
+  const roster = new LocalRoster();
+  roster.importState({ players: [7, 11], nextPlayerId: 12, assignments: [] });
+  await worker.send({ kind: "menu-open", fields: ["song/chart.bms"], roster: roster.exportState() });
+  await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(worker.of("menu-state").at(-1)), route: 2, fields: ["accepted settings"] });
+  await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(worker.of("menu-state").at(-1)), route: 5,
+    fields: acquiredMenuFields([acquiredSource(1, "keyboard"), acquiredSource(41), acquiredSource(42)]) });
+  return { worker, roster };
+}
+
+test("actual Worker acquired inventory retires only absent assignments while preserving canonical player IDs", async () => {
+  const { worker, roster } = await acquiredPlayersWorker();
+  try {
+    for (const [player, source] of [[7, 1n], [11, 41n]]) {
+      await worker.send({ kind: "menu-roster-assign", ...acquiredMenuToken(worker.of("menu-state").at(-1)), player, source });
+      roster.assign(player, source);
+    }
+    const assigned = worker.of("menu-state").at(-1);
+    assert.deepEqual(structuredClone(assigned.roster), structuredClone(roster.exportState()));
+    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(assigned), fields: acquiredMenuFields([acquiredSource(41)]) });
+    roster.assign(7, null);
+    const partial = worker.of("menu-state").at(-1);
+    assert.equal(partial.screen, assigned.screen);
+    assert.equal(partial.route, 5);
+    assert.ok(partial.revision > assigned.revision);
+    assert.deepEqual(structuredClone(partial.roster), structuredClone(roster.exportState()));
+    assert.deepEqual(Array.from(partial.fields.slice(0, 8)), ["1", "1", "2", "7", "", "11", "41", "1"],
+      "Window member IDs and assignments cannot overwrite the canonical roster");
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(partial), actionId: 1n, control: 34n });
+    const devices = worker.of("menu-state").at(-1);
+    assert.equal(devices.route, 9);
+    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(devices), fields: acquiredMenuFields([]) });
+    roster.assign(11, null);
+    const empty = worker.of("menu-state").at(-1);
+    assert.equal(empty.screen, devices.screen);
+    assert.equal(empty.route, 9);
+    assert.deepEqual(structuredClone(empty.roster), structuredClone(roster.exportState()));
+    assert.deepEqual(Array.from(empty.fields), ["1", "1", "2", "7", "", "11", "", "0"]);
+    await worker.send({ kind: "menu-roster-count", ...acquiredMenuToken(empty), count: 3 });
+    roster.setCount(3);
+    assert.deepEqual(structuredClone(worker.of("menu-state").at(-1).roster), structuredClone(roster.exportState()));
+    assert.deepEqual(Array.from(worker.of("menu-state").at(-1).roster.players), [7, 11, 12]);
+    assert.equal(worker.of("menu-error").length, 0);
+  } finally { await worker.send({ kind: "dispose" }); }
+});
+
+test("actual Worker rejects stale and malformed acquired inventories without publishing a valid prefix", async () => {
+  const { worker } = await acquiredPlayersWorker();
+  try {
+    await worker.send({ kind: "menu-roster-assign", ...acquiredMenuToken(worker.of("menu-state").at(-1)), player: 7, source: 1n });
+    const accepted = worker.of("menu-state").at(-1);
+    const menuPublications = () => worker.renderPort.posts.filter(post => post.kind === "menu").length;
+    const publicationCount = menuPublications();
+    const malformed = [
+      acquiredMenuFields([acquiredSource(41), acquiredSource(41)]),
+      acquiredMenuFields([acquiredSource(41, "native-path")]),
+      acquiredMenuFields([["41", "hid", "source", "detail", "2"]]),
+      ["2", ...acquiredMenuFields([acquiredSource(41)]).slice(1)],
+      ["1", "2", ...acquiredMenuFields([acquiredSource(41)]).slice(2)],
+      [...acquiredMenuFields([acquiredSource(41)]), "foreign trailing field"],
+      acquiredMenuFields([acquiredSource(41)]).slice(0, -1),
+      ["1", "1", "0", "1025"],
+    ];
+    for (const fields of malformed) {
+      const errors = worker.of("menu-error").length;
+      await worker.send({ kind: "menu-fields", ...acquiredMenuToken(accepted), fields });
+      assert.equal(worker.of("menu-error").length, errors + 1);
+      assert.deepEqual(worker.of("menu-state").at(-1), accepted);
+      assert.equal(menuPublications(), publicationCount);
+    }
+    for (const token of [
+      { ...acquiredMenuToken(accepted), menuGeneration: accepted.menuGeneration + 1n },
+      { ...acquiredMenuToken(accepted), screen: accepted.screen + 1n },
+      { ...acquiredMenuToken(accepted), revision: accepted.revision - 1n },
+    ]) {
+      const errors = worker.of("menu-error").length;
+      await worker.send({ kind: "menu-fields", ...token, fields: acquiredMenuFields([]) });
+      assert.equal(worker.of("menu-error").length, errors + 1);
+      assert.deepEqual(worker.of("menu-state").at(-1), accepted);
+    }
+    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(accepted), fields: acquiredMenuFields([acquiredSource(1, "keyboard")]) });
+    const refreshed = worker.of("menu-state").at(-1);
+    assert.deepEqual(structuredClone(refreshed.roster.assignments), [[7, 1n]]);
+    assert.equal(refreshed.screen, accepted.screen);
+    assert.ok(refreshed.revision > accepted.revision);
+  } finally { await worker.send({ kind: "dispose" }); }
+});
+
+test("actual Worker keeps roster and fields when genuine owner admission or pending operation refuses inventory refresh", async () => {
+  let fault = null;
+  const { worker } = await acquiredPlayersWorker({ menuAdmissionFault(method, owner, args) {
+    if (fault === "domain" && method === "navigate_with_fields" && args[2] === owner.route) {
+      throw new Error("injected WASM admission refusal");
+    }
+    if (fault === "pending" && method === "set_fields") throw new Error("injected pending owner refusal");
+  } });
+  try {
+    await worker.send({ kind: "menu-roster-assign", ...acquiredMenuToken(worker.of("menu-state").at(-1)), player: 7, source: 1n });
+    const accepted = worker.of("menu-state").at(-1);
+    const publications = worker.renderPort.posts.filter(post => post.kind === "menu").length;
+    for (const kind of ["domain", "pending"]) {
+      fault = kind;
+      const errors = worker.of("menu-error").length;
+      await worker.send({ kind: "menu-fields", ...acquiredMenuToken(accepted), fields: acquiredMenuFields([]) });
+      assert.equal(worker.of("menu-error").length, errors + 1);
+      assert.deepEqual(worker.of("menu-state").at(-1), accepted);
+      assert.equal(worker.renderPort.posts.filter(post => post.kind === "menu").length, publications);
+    }
+    fault = null;
+    const read = deferred();
+    await worker.send({ kind: "import", id: 1, files: [selectedFile("pending/chart.bms", "#BPM 120", () => read.promise)] });
+    const errors = worker.of("menu-error").length;
+    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(accepted), fields: acquiredMenuFields([]) });
+    assert.equal(worker.of("menu-error").length, errors + 1);
+    assert.deepEqual(worker.of("menu-state").at(-1), accepted);
+    read.resolve(new TextEncoder().encode("#BPM 120").buffer);
+    await flushJobs();
+    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(accepted), fields: acquiredMenuFields([]) });
+    const released = worker.of("menu-state").at(-1);
+    assert.deepEqual(Array.from(released.roster.assignments), []);
+    assert.deepEqual(Array.from(released.roster.players), [7, 11]);
+    assert.equal(released.roster.nextPlayerId, 12);
+  } finally { await worker.send({ kind: "dispose" }); }
+});
+
+test("actual Worker non-assignment Devices field updates cannot retire canonical source ownership", async () => {
+  const { worker } = await acquiredPlayersWorker();
+  try {
+    await worker.send({ kind: "menu-roster-assign", ...acquiredMenuToken(worker.of("menu-state").at(-1)), player: 7, source: 1n });
+    const players = worker.of("menu-state").at(-1);
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(players), actionId: 1n, control: 31n });
+    const settings = worker.of("menu-state").at(-1);
+    assert.equal(settings.route, 2);
+    await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(settings), route: 6,
+      fields: acquiredMenuFields([acquiredSource(1, "keyboard")]) });
+    const devices = worker.of("menu-state").at(-1);
+    assert.equal(devices.route, 6);
+    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(devices), fields: acquiredMenuFields([]) });
+    const refreshed = worker.of("menu-state").at(-1);
+    assert.equal(refreshed.route, 6);
+    assert.equal(refreshed.screen, devices.screen);
+    assert.deepEqual(structuredClone(refreshed.roster), structuredClone(players.roster),
+      "only Players and assignment-picker refreshes retire canonical assignments");
+    assert.equal(worker.of("menu-error").length, 0);
+  } finally { await worker.send({ kind: "dispose" }); }
+});
 
 test("game Worker uses actual menu owner for Settings Practice Back and keeps retained parent draft", async () => {
   const worker = await readyWorker({ actualMenu: true });

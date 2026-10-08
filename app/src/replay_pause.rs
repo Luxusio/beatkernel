@@ -59,10 +59,80 @@ impl ReplayPause {
         self.native = self.native.with_playback_end_frame(end)?;
         Ok(self)
     }
+    /// Binds physical target time without changing recorded source-song coordinates.
+    pub fn with_target_basis(
+        mut self,
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
+    ) -> Result<Self, PauseError> {
+        self.native = self.native.with_target_basis(epoch, basis)?;
+        Ok(self)
+    }
+    pub fn target_basis(&self) -> Option<beatkernel::audio::TargetFrameBasis> {
+        self.native.target_basis()
+    }
+    pub fn request_target(
+        &mut self,
+        paused: bool,
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
+        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        pair: ClockPair,
+    ) -> Result<bool, PauseError> {
+        if self.native.epoch() != epoch
+            || self.native.target_basis() != Some(basis)
+            || facts.origin != Some(self.origin)
+            || facts.source_rate != self.rate
+            || pair.source.timestamp
+                < basis
+                    .point_at_stream_frame(0)
+                    .map_err(|_| PauseError("replay target creation overflow"))?
+                    .timestamp
+        {
+            return Err(PauseError("replay target pause identity differs"));
+        }
+        let mut next = self.clone();
+        let accepted = next.native.request_in_epoch(epoch, paused, pair)?;
+        *self = next;
+        Ok(accepted)
+    }
+    /// Mapped source adoption and original native crossing acknowledge replay controls.
+    pub fn observe_target(
+        &mut self,
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
+        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        source: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> Result<Option<ReplayPauseBoundary>, PauseError> {
+        let mut next = self.clone();
+        let boundary = next
+            .native
+            .observe_target(epoch, basis, facts, source, pair)?;
+        let mapped = boundary
+            .map(|boundary| -> Result<ReplayPauseBoundary, PauseError> {
+                Ok(ReplayPauseBoundary {
+                    paused: boundary.paused,
+                    host: boundary.host,
+                    song: next.boundary_song(boundary.playback_frame)?,
+                })
+            })
+            .transpose()?;
+        if mapped.is_some_and(|boundary| !boundary.paused) {
+            next.minimum_presentation = Some(next.native.resumed_presentation_point()?);
+        }
+        *self = next;
+        Ok(mapped)
+    }
     pub fn phase(&self) -> PausePhase {
         self.native.phase()
     }
     pub fn request(&mut self, paused: bool, reference: ClockPair) -> Result<bool, PauseError> {
+        if self.target_basis().is_some() {
+            return Err(PauseError(
+                "target replay pause requires typed observations",
+            ));
+        }
         self.native.request(paused, reference)
     }
     pub fn request_interval(
@@ -70,6 +140,11 @@ impl ReplayPause {
         paused: bool,
         reference: PauseIntervalObservation,
     ) -> Result<bool, PauseError> {
+        if self.target_basis().is_some() {
+            return Err(PauseError(
+                "target replay pause requires typed observations",
+            ));
+        }
         self.native.request_interval(paused, reference)
     }
     fn boundary_song(&self, playback_frame: u64) -> Result<Timestamp, PauseError> {
@@ -85,6 +160,11 @@ impl ReplayPause {
         observation: Option<PauseIntervalObservation>,
         now: ClockPoint,
     ) -> Result<Option<ReplayPauseBoundaryWindow>, PauseError> {
+        if self.target_basis().is_some() {
+            return Err(PauseError(
+                "target replay pause requires typed observations",
+            ));
+        }
         let mut native = self.native.clone();
         let boundary = native.observe_interval(observation, now)?;
         let mapped = boundary
@@ -117,6 +197,11 @@ impl ReplayPause {
         report: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<Option<ReplayPauseBoundary>, PauseError> {
+        if self.target_basis().is_some() {
+            return Err(PauseError(
+                "target replay pause requires typed observations",
+            ));
+        }
         let mut native = self.native.clone();
         let boundary = native.observe(report, pair)?;
         let mapped = boundary
@@ -198,8 +283,8 @@ mod fixtures {
     #[test]
     fn actual_straddling_mixer_end_freezes_replay_song_only_after_native_crossing() {
         use beatkernel::audio::{
-            AudioCommand, AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample,
-            SampleBank, SampleId, VoiceId, command_queue,
+            command_queue, AudioCommand, AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits,
+            PcmSample, SampleBank, SampleId, VoiceId,
         };
         let format = AudioFormat::new(1000, 1).unwrap();
         let limits = AudioLimits::new(4, 2, 4, 16, 4).unwrap();
@@ -351,11 +436,9 @@ mod fixtures {
         )
         .unwrap();
         pause.request(true, pair(0)).unwrap();
-        assert!(
-            pause
-                .observe(Some(report(1, 1, 1, true)), pair(2_000_000))
-                .is_err()
-        );
+        assert!(pause
+            .observe(Some(report(1, 1, 1, true)), pair(2_000_000))
+            .is_err());
         assert_eq!(pause.phase(), PausePhase::Pausing);
         assert_eq!(pause.last_render_report(), None);
         assert_eq!(pause.presentation_song(point(1, 2_000_000)).unwrap(), None);
@@ -370,35 +453,29 @@ mod fixtures {
         .unwrap();
         assert!(running.presentation_song(point(1, -9)).is_err());
         assert!(running.presentation_song(point(1, -11)).is_err());
-        assert!(
-            ReplayPause::new(
-                point(1, 0),
-                ClockDomainId(2),
-                0,
-                Timestamp::ZERO,
-                Duration::ZERO
-            )
-            .is_err()
-        );
-        assert!(
-            ReplayPause::new(
-                point(1, 0),
-                ClockDomainId(2),
-                1000,
-                Timestamp::ZERO,
-                Duration::from_nanos(-1)
-            )
-            .is_err()
-        );
-        assert!(
-            ReplayPause::new(
-                point(1, 0),
-                ClockDomainId(2),
-                1000,
-                Timestamp::from_nanos(i64::MIN),
-                Duration::from_nanos(1)
-            )
-            .is_err()
-        );
+        assert!(ReplayPause::new(
+            point(1, 0),
+            ClockDomainId(2),
+            0,
+            Timestamp::ZERO,
+            Duration::ZERO
+        )
+        .is_err());
+        assert!(ReplayPause::new(
+            point(1, 0),
+            ClockDomainId(2),
+            1000,
+            Timestamp::ZERO,
+            Duration::from_nanos(-1)
+        )
+        .is_err());
+        assert!(ReplayPause::new(
+            point(1, 0),
+            ClockDomainId(2),
+            1000,
+            Timestamp::from_nanos(i64::MIN),
+            Duration::from_nanos(1)
+        )
+        .is_err());
     }
 }

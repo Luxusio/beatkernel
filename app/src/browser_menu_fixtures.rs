@@ -9,6 +9,166 @@ fn token(menu: &BrowserMenu) -> MenuToken {
     menu.snapshot().token
 }
 
+fn paged_browser_local_fields(members: usize, sources: usize) -> Vec<String> {
+    let mut fields = vec!["1".into(), "1".into(), members.to_string()];
+    for index in 0..members {
+        fields.push((index + 1).to_string());
+        fields.push(String::new());
+    }
+    fields.push(sources.to_string());
+    for index in 0..sources {
+        fields.extend([
+            (index + 1).to_string(),
+            "hid".into(),
+            format!("ACQUIRED SOURCE {}", index + 1),
+            format!("Original acquired source {}", index + 1),
+            "1".into(),
+        ]);
+    }
+    fields
+}
+
+#[test]
+fn actual_players_roster_shrink_normalizes_published_selection_and_first_visible_row() {
+    use crate::browser_menu::BrowserMenuPresentation;
+    let mut menu = BrowserMenu::new(107).unwrap();
+    menu.navigate_with_fields(
+        token(&menu),
+        ScreenRoute::Settings,
+        vec!["accepted settings".into()],
+    )
+    .unwrap();
+    menu.navigate_with_fields(
+        token(&menu),
+        ScreenRoute::Players,
+        paged_browser_local_fields(21, 0),
+    )
+    .unwrap();
+    menu.select(token(&menu), 20).unwrap();
+    let old = menu.snapshot();
+    let mut presentation = BrowserMenuPresentation::new(old.clone()).unwrap();
+    render_menu(&mut presentation);
+    assert_eq!(presentation.hit((30.0, 125.0), [960, 720]), 20020);
+    menu.navigate_with_fields(
+        old.token,
+        ScreenRoute::Players,
+        paged_browser_local_fields(10, 0),
+    )
+    .unwrap();
+    let admitted = menu.snapshot();
+    assert_eq!(admitted.token.screen, old.token.screen);
+    assert_eq!(admitted.selected, 9);
+    assert!(admitted.token.revision > old.token.revision);
+    assert!(menu.select(admitted.token, 10).is_err());
+    assert_eq!(menu.snapshot(), admitted);
+    presentation.apply(admitted.clone()).unwrap();
+    let scene = render_menu(&mut presentation);
+    assert_eq!(presentation.hit((30.0, 125.0), [960, 720]), 20000);
+    assert_eq!(presentation.hit((30.0, 476.0), [960, 720]), 20009);
+    menu_label(&scene, "10 PLAYERS  ROWS 1-10 OF 10");
+    assert_eq!(
+        menu_packet(&render_menu(&mut presentation)),
+        menu_packet(&scene)
+    );
+    assert!(menu
+        .navigate_with_fields(
+            old.token,
+            ScreenRoute::Players,
+            paged_browser_local_fields(1, 0)
+        )
+        .is_err());
+    assert_eq!(menu.snapshot(), admitted);
+    assert!(menu
+        .navigate_with_fields(
+            admitted.token,
+            ScreenRoute::Players,
+            paged_browser_local_fields(0, 0)
+        )
+        .is_err());
+    assert_eq!(
+        menu.snapshot(),
+        admitted,
+        "empty Players roster cannot publish an invalid selection"
+    );
+    let mut malformed = paged_browser_local_fields(10, 1);
+    *malformed.last_mut().unwrap() = "2".into();
+    assert!(menu.set_fields(admitted.token, malformed.clone()).is_err());
+    assert_eq!(menu.snapshot(), admitted);
+    assert!(menu
+        .navigate_with_fields(admitted.token, ScreenRoute::Players, malformed)
+        .is_err());
+    assert_eq!(menu.snapshot(), admitted);
+    assert_eq!(
+        menu_packet(&render_menu(&mut presentation)),
+        menu_packet(&scene)
+    );
+}
+
+#[test]
+fn actual_device_inventory_shrink_and_empty_inventory_normalize_selection_before_compose() {
+    use crate::browser_menu::BrowserMenuPresentation;
+    let mut menu = BrowserMenu::new(109).unwrap();
+    menu.navigate_with_fields(
+        token(&menu),
+        ScreenRoute::Settings,
+        vec!["accepted settings".into()],
+    )
+    .unwrap();
+    let route = ScreenRoute::Devices { players: false };
+    menu.navigate_with_fields(token(&menu), route, paged_browser_local_fields(2, 20))
+        .unwrap();
+    menu.select(token(&menu), 15).unwrap();
+    let old = menu.snapshot();
+    let mut presentation = BrowserMenuPresentation::new(old.clone()).unwrap();
+    render_menu(&mut presentation);
+    assert_eq!(presentation.hit((30.0, 125.0), [960, 720]), 10010);
+    menu.set_fields(old.token, paged_browser_local_fields(2, 5))
+        .unwrap();
+    let admitted = menu.snapshot();
+    assert_eq!(admitted.token.screen, old.token.screen);
+    assert_eq!(admitted.selected, 4);
+    assert!(menu.select(admitted.token, 5).is_err());
+    assert_eq!(menu.snapshot(), admitted);
+    presentation.apply(admitted.clone()).unwrap();
+    let scene = render_menu(&mut presentation);
+    assert_eq!(presentation.hit((30.0, 125.0), [960, 720]), 10000);
+    assert_eq!(presentation.hit((30.0, 281.0), [960, 720]), 10004);
+    assert_eq!(
+        menu_packet(&render_menu(&mut presentation)),
+        menu_packet(&scene)
+    );
+    assert!(menu
+        .set_fields(old.token, paged_browser_local_fields(2, 0))
+        .is_err());
+    assert_eq!(menu.snapshot(), admitted);
+    let mut malformed = paged_browser_local_fields(2, 5);
+    malformed[9] = "foreign source kind".into();
+    assert!(menu.set_fields(admitted.token, malformed.clone()).is_err());
+    assert_eq!(menu.snapshot(), admitted);
+    assert!(menu
+        .navigate_with_fields(admitted.token, route, malformed)
+        .is_err());
+    assert_eq!(menu.snapshot(), admitted);
+    menu.navigate_with_fields(admitted.token, route, paged_browser_local_fields(2, 0))
+        .unwrap();
+    let empty = menu.snapshot();
+    assert_eq!(empty.selected, 0);
+    assert_eq!(empty.token.screen, admitted.token.screen);
+    presentation.apply(empty.clone()).unwrap();
+    let empty_scene = render_menu(&mut presentation);
+    assert_eq!(presentation.hit((30.0, 125.0), [960, 720]), 0);
+    assert_eq!(
+        menu_packet(&render_menu(&mut presentation)),
+        menu_packet(&empty_scene)
+    );
+    let mut invalid = paged_browser_local_fields(2, 1);
+    invalid.pop();
+    assert!(menu
+        .navigate_with_fields(empty.token, route, invalid)
+        .is_err());
+    assert_eq!(menu.snapshot(), empty);
+}
+
 fn requested_menu_motion(offset: f32) -> crate::ui::motion::ComponentMotion {
     crate::ui::motion::ComponentMotion::new(
         crate::scene::UiTransform::default(),
@@ -591,11 +751,8 @@ fn unchanged_draft_is_revision_stable_and_nested_device_back_keeps_players_ident
     let mut menu = BrowserMenu::new(19).unwrap();
     menu.navigate(token(&menu), ScreenRoute::Settings).unwrap();
     menu.navigate(token(&menu), ScreenRoute::Players).unwrap();
-    menu.set_fields(
-        token(&menu),
-        vec!["2".into(), "keyboard A".into(), "keyboard B".into()],
-    )
-    .unwrap();
+    menu.set_fields(token(&menu), acquired_browser_member_fields())
+        .unwrap();
     let players = menu.snapshot();
     menu.set_fields(token(&menu), players.fields.clone())
         .unwrap();

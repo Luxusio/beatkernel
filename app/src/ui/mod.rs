@@ -23,6 +23,6 @@ pub mod selection;
 pub mod settings;
 pub mod text_input;
 
-pub mod live_audio;
 #[cfg(test)]
 mod browser_local_projection_fixtures;
+pub mod live_audio;

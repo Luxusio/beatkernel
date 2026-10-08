@@ -158,24 +158,28 @@ impl BrowserMenu {
     ) -> Result<(), String> {
         self.admit(token)?;
         validate_fields(&values)?;
-        match route {
-            ScreenRoute::Selection => {}
-            ScreenRoute::Settings if values.len() <= crate::settings::MAX_FIELDS => {}
-            ScreenRoute::Practice if values.len() == 2 => {}
-            ScreenRoute::Display if values.len() == 4 => {}
-            ScreenRoute::Records if values.len() <= 256 => {}
+        let selection_count = match route {
+            ScreenRoute::Selection => values.len(),
+            ScreenRoute::Settings if values.len() <= crate::settings::MAX_FIELDS => values.len(),
+            ScreenRoute::Practice if values.len() == 2 => values.len(),
+            ScreenRoute::Display if values.len() == 4 => values.len(),
+            ScreenRoute::Records if values.len() <= 256 => values.len(),
             ScreenRoute::Players | ScreenRoute::Devices { .. } => {
-                decode_local_fields(&values, route == ScreenRoute::Players)?;
+                menu_selection_count(route, &values)?
             }
             _ => return Err("invalid or unsupported destination menu fields".into()),
-        }
+        };
         let mut next = self.navigator.clone();
         let transition = next.navigate(route, self.pending, true)?;
         let screen = next
             .active_id()
             .ok_or("destination menu instance unavailable")?;
         let existing = self.drafts.iter().find(|draft| draft.0 == screen);
-        if transition.is_none() && existing.is_some_and(|draft| draft.1 == values) {
+        if transition.is_none()
+            && existing.is_some_and(|draft| {
+                draft.1 == values && draft.2 == draft.2.min(selection_count.saturating_sub(1))
+            })
+        {
             return Ok(());
         }
         if existing.is_none() {
@@ -186,7 +190,7 @@ impl BrowserMenu {
         // Everything fallible is staged. Move the admitted values into the destination.
         self.drafts.retain(|draft| next.retains(draft.0));
         if let Some(draft) = self.drafts.iter_mut().find(|draft| draft.0 == screen) {
-            draft.2 = draft.2.min(values.len().saturating_sub(1));
+            draft.2 = draft.2.min(selection_count.saturating_sub(1));
             draft.1 = values;
         } else {
             self.drafts.push((screen, values, 0));
@@ -206,12 +210,27 @@ impl BrowserMenu {
         }
         let draft = self
             .drafts
-            .iter_mut()
+            .iter()
             .find(|draft| draft.0 == token.screen)
             .ok_or("menu draft unavailable")?;
-        if draft.1 != values {
+        // Raw navigation can temporarily own an empty value model. Its unchanged
+        // no-op setter remains a pending-operation preflight for the Worker;
+        // publishing any changed local roster/catalog requires domain validation.
+        let selection_count = if values.is_empty() && draft.1 == values {
+            0
+        } else {
+            menu_selection_count(self.navigator.route(), &values)?
+        };
+        let selected = draft.2.min(selection_count.saturating_sub(1));
+        let changed = draft.1 != values || draft.2 != selected;
+        if changed {
+            let draft = self
+                .drafts
+                .iter_mut()
+                .find(|draft| draft.0 == token.screen)
+                .expect("preflighted menu draft");
             draft.1 = values;
-            draft.2 = draft.2.min(draft.1.len().saturating_sub(1));
+            draft.2 = selected;
             self.revision += 1;
         }
         Ok(())
@@ -223,12 +242,17 @@ impl BrowserMenu {
         }
         let draft = self
             .drafts
-            .iter_mut()
+            .iter()
             .find(|draft| draft.0 == token.screen)
             .ok_or("menu draft unavailable")?;
-        if index >= draft.1.len() {
+        if index >= menu_selection_count(self.navigator.route(), &draft.1)? {
             return Err("menu selection exceeds fields".into());
         }
+        let draft = self
+            .drafts
+            .iter_mut()
+            .find(|draft| draft.0 == token.screen)
+            .expect("preflighted menu draft");
         if draft.2 != index {
             draft.2 = index;
             self.revision += 1;
@@ -1180,10 +1204,11 @@ impl BrowserMenuPresentation {
                     sources: &sources,
                     can_assign,
                 };
+                let selected = model.selected.min(players.len() - 1);
                 view.update_browser(crate::ui::players::BrowserPlayersFrame {
                     model: &projection,
-                    selected: model.selected.min(players.len() - 1),
-                    first: model.selected / 10 * 10,
+                    selected,
+                    first: selected / 10 * 10,
                     pending: model.pending,
                     error,
                     message: None,
@@ -1195,17 +1220,14 @@ impl BrowserMenuPresentation {
             MenuView::Devices(view) => {
                 let (_, sources, can_assign, can_refresh) =
                     decode_local_fields(&model.fields, false)?;
+                let selected = (!sources.is_empty()).then(|| model.selected.min(sources.len() - 1));
                 view.update_browser(crate::ui::devices::BrowserDevicesFrame {
                     sources: &sources,
                     can_assign,
                     can_refresh,
                     player: None,
-                    selected: (model.selected < sources.len()).then_some(model.selected),
-                    first: if sources.is_empty() {
-                        0
-                    } else {
-                        model.selected / 10 * 10
-                    },
+                    selected,
+                    first: selected.map_or(0, |selected| selected / 10 * 10),
                     pending: model.pending,
                     error,
                     hovered: None,
@@ -1516,6 +1538,13 @@ impl BrowserMenuPresentation {
             })
         })
         .unwrap_or(0)
+    }
+}
+fn menu_selection_count(route: ScreenRoute, fields: &[String]) -> Result<usize, String> {
+    match route {
+        ScreenRoute::Players => Ok(decode_local_fields(fields, true)?.0.len()),
+        ScreenRoute::Devices { .. } => Ok(decode_local_fields(fields, false)?.1.len()),
+        _ => Ok(fields.len()),
     }
 }
 fn decode_local_fields(

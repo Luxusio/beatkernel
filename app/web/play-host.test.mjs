@@ -774,8 +774,11 @@ test("Window menu editor and Back bridge preserve exact owner token without audi
   h.get("menu-editor").value = "604800.000000001"; h.get("menu-editor").emit("input");
   assert.deepEqual(game.last("menu-edit"), { kind: "menu-edit", menuGeneration: 77n,
     screen: 3n, revision: 5n, index: 0, value: "604800.000000001" });
-  h.click("menu-back"); await flush(); const back = game.last("menu-action");
-  assert.equal(back.menuGeneration, 77n); assert.equal(back.screen, 3n); assert.equal(back.revision, 5n);
+  h.click("menu-back"); await flush();
+  assert.equal(game.messages("menu-action").length, 0, "Back waits for the pending edit transaction");
+  await h.receive({ ...state, revision: 6n, fields: ["604800.000000001", "2.000000002"] });
+  const back = game.last("menu-action");
+  assert.equal(back.menuGeneration, 77n); assert.equal(back.screen, 3n); assert.equal(back.revision, 6n);
   assert.equal(back.control, 72n); assert.equal(typeof back.actionId, "bigint"); assert.ok(back.actionId > 0n);
   assert.equal(game.messages("play-start").length, 0); assert.equal(h.opens.length, 0);
   await h.receive({ ...state, revision: 4n, fields: ["stale overwritten field"] });
@@ -843,6 +846,262 @@ test("menu IME bridge commits text once and ignores composition and retired owne
   editor.value = "obsolete"; editor.emit("input", { isComposing: false });
   assert.equal(game.messages("menu-edit").length, count);
   await h.close();
+});
+
+test("compositionend alone commits the final editor value and Enter waits for its correlated state", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+      route: 3, fields: ["0", "2"], selected: 1 };
+    await h.receive(state);
+    const editor = h.get("menu-editor");
+    editor.emit("compositionstart"); editor.value = "7";
+    editor.emit("input", { isComposing: true }); editor.emit("input", { isComposing: false });
+    editor.emit("keydown", { code: "Enter", isComposing: true });
+    assert.equal(game.messages("menu-edit").length, 0, "composition ownership also suppresses an intermediate input whose flag is false");
+    assert.equal(game.messages("menu-action").length, 0);
+    editor.value = "73"; editor.emit("compositionend");
+    assert.deepEqual(game.last("menu-edit"), { kind: "menu-edit", menuGeneration: 77n,
+      screen: 3n, revision: 5n, index: 1, value: "73" });
+    editor.emit("keydown", { code: "Enter", isComposing: false });
+    assert.equal(game.messages("menu-action").length, 0, "Apply cannot overtake the final edit");
+    await h.receive({ ...state, revision: 4n, fields: ["0", "73"] });
+    await h.receive({ ...state, fields: ["0", "2"] });
+    assert.equal(game.messages("menu-action").length, 0, "stale or uncommitted state cannot release Apply");
+    await h.receive({ ...state, revision: 6n, fields: ["0", "73"] });
+    const action = game.last("menu-action");
+    assert.equal(game.messages("menu-action").length, 1);
+    assert.equal(action.menuGeneration, 77n); assert.equal(action.screen, 3n);
+    assert.equal(action.revision, 6n); assert.equal(action.control, 71n);
+    assert.equal(game.messages("play-start").length, 0); assert.equal(h.opens.length, 0);
+  } finally { await h.close(); }
+});
+
+test("multiple composition commits coalesce to the latest value before a deferred Apply", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+      route: 3, fields: ["0", "2"], selected: 0 };
+    await h.receive(state); const editor = h.get("menu-editor");
+    for (const value of ["73", "74", "75"]) {
+      editor.emit("compositionstart"); editor.value = value;
+      editor.emit("input", { isComposing: true }); editor.emit("compositionend");
+    }
+    assert.equal(game.messages("menu-edit").length, 1);
+    assert.equal(game.last("menu-edit").value, "73");
+    editor.emit("input", { isComposing: false });
+    assert.equal(game.messages("menu-edit").length, 1, "a trailing final input joins the same pending commit");
+    editor.emit("keydown", { code: "Enter", isComposing: false });
+    await h.receive({ ...state, revision: 6n, fields: ["73", "2"] });
+    assert.deepEqual(game.last("menu-edit"), { kind: "menu-edit", menuGeneration: 77n,
+      screen: 3n, revision: 6n, index: 0, value: "75" });
+    assert.equal(game.messages("menu-edit").length, 2, "the intermediate committed value is coalesced");
+    assert.equal(game.messages("menu-action").length, 0);
+    assert.equal(editor.value, "75", "an earlier edit reply cannot replace the most recent composition");
+    await h.receive({ ...state, revision: 7n, fields: ["75", "2"] });
+    assert.equal(game.messages("menu-action").length, 1);
+    assert.equal(game.last("menu-action").revision, 7n); assert.equal(game.last("menu-action").control, 71n);
+    await h.receive({ ...state, revision: 7n, fields: ["75", "2"] });
+    assert.equal(game.messages("menu-action").length, 1);
+  } finally { await h.close(); }
+});
+
+test("Escape cancels an active composition and a late compositionend cannot commit its discarded text", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+      route: 3, fields: ["0", "2"], selected: 0 };
+    await h.receive(state); const editor = h.get("menu-editor");
+    editor.emit("compositionstart"); editor.value = "discarded text";
+    editor.emit("input", { isComposing: true });
+    editor.emit("keydown", { code: "Escape", isComposing: false });
+    assert.equal(game.messages("menu-edit").length, 0);
+    assert.equal(game.last("menu-action").control, 72n);
+    assert.equal(game.last("menu-action").screen, 3n); assert.equal(game.last("menu-action").revision, 5n);
+    editor.emit("compositionend");
+    assert.equal(game.messages("menu-edit").length, 0, "cancelled composition cannot commit even before navigation replies");
+    await h.receive({ ...state, screen: 4n, revision: 6n, route: 2, fields: ["destination"] });
+    editor.value = "discarded text"; editor.emit("compositionend");
+    assert.equal(game.messages("menu-edit").length, 0);
+    assert.equal(game.messages("menu-action").length, 1);
+  } finally { await h.close(); }
+});
+
+for (const change of ["screen", "selected field", "cancel", "owner"]) test(`composition ${change} change fences a stale end and deferred Apply`, async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+      route: 3, fields: ["0", "2"], selected: 0 };
+    await h.receive(state); const editor = h.get("menu-editor");
+    editor.value = "73"; editor.emit("input", { isComposing: false });
+    editor.emit("keydown", { code: "Enter", isComposing: false });
+    editor.emit("compositionstart"); editor.value = "obsolete composition";
+    if (change === "owner") {
+      h.window.emit("pagehide"); await flush();
+      h.window.emit("pageshow", { persisted: true }); await flush();
+      await h.receive({ kind: "ready" });
+    } else if (change === "cancel") h.click("menu-back");
+    const destination = { ...state, revision: 6n, screen: change === "selected field" ? 3n : 4n,
+      selected: change === "selected field" ? 1 : 0, fields: ["destination", "retained"] };
+    await h.receive(destination);
+    const target = h.workers.at(-1), edits = target.messages("menu-edit").length;
+    const actions = target.messages("menu-action").length;
+    editor.value = "obsolete composition"; editor.emit("compositionend");
+    assert.equal(target.messages("menu-edit").length, edits, "old composition cannot edit the destination field");
+    assert.equal(target.messages("menu-action").length, actions);
+    await h.receive({ ...state, revision: 5n, fields: ["73", "2"] }, game);
+    assert.equal(target.messages("menu-edit").length, edits);
+    assert.equal(target.messages("menu-action").length, actions, "old edit reply cannot Apply the destination");
+  } finally { await h.close(); }
+});
+
+test("canonical Players count ACK refreshes discovery controls and removal restores automatic one-player guidance", async () => {
+  const h = await harness({ touchSupported: true });
+  try {
+    await h.preview(); const game = h.workers[0]; h.click("menu-open");
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+      route: 5, fields: ["0", "1", "1", "1", "", "0"], selected: 0,
+      roster: { players: [1], nextPlayerId: 2, assignments: [] } };
+    await h.receive(state);
+    assert.equal(h.get("local-discover").disabled, true);
+    h.get("local-count").value = "2"; h.get("local-count").emit("change");
+    assert.deepEqual(game.last("menu-roster-count"), { kind: "menu-roster-count", menuGeneration: 77n,
+      screen: 3n, revision: 5n, count: 2 });
+    assert.equal(h.get("local-discover").disabled, true, "the count request cannot change the canonical roster before ACK");
+    const two = { ...state, revision: 6n, fields: ["0", "1", "2", "1", "", "2", "", "0"],
+      roster: { players: [1, 2], nextPlayerId: 3, assignments: [] } };
+    await h.receive(two);
+    assert.equal(h.get("local-count").value, "2"); assert.equal(h.get("local-discover").disabled, false);
+    assert.match(h.get("local-status").textContent, /discover.*sources/i);
+    assert.ok(h.get("local-source-1")); assert.ok(h.get("local-source-2"));
+    assert.equal(h.get("local-source-1").disabled, true, "assignment still needs acquired sources");
+    h.click("local-discover"); await flush();
+    assert.match(h.get("local-status").textContent, /acquired source/);
+    assert.equal(h.get("local-source-1").disabled, true, "source assignment waits for canonical inventory admission");
+    const inventory = game.last("menu-fields");
+    assert.equal(inventory.fields[0], "1"); assert.equal(inventory.fields[1], "1");
+    assert.equal(inventory.fields[7], "2"); assert.equal(inventory.fields[8], "1");
+    assert.equal(inventory.fields[9], "keyboard");
+    await h.receive({ ...two, revision: 7n, fields: inventory.fields });
+    assert.equal(h.get("local-source-1").disabled, false);
+    const acquiredStatus = h.get("local-status").textContent;
+    const assignedFields = [...inventory.fields]; assignedFields[4] = "1";
+    await h.receive({ ...two, revision: 8n, fields: assignedFields, roster: { ...two.roster, assignments: [[1, 1n]] } });
+    assert.equal(h.get("local-source-1").value, "1");
+    assert.equal(h.get("local-source-1").disabled, false);
+    assert.equal(h.get("local-status").textContent, acquiredStatus, "assignment ACK retains acquired-inventory guidance");
+    h.get("local-count").value = "1"; h.get("local-count").emit("change");
+    await h.receive({ ...state, revision: 9n, roster: { players: [1], nextPlayerId: 3, assignments: [] } });
+    assert.equal(h.get("local-count").value, "1"); assert.equal(h.get("local-discover").disabled, true);
+    assert.equal(h.get("local-source-1"), undefined); assert.equal(h.get("local-source-2"), undefined);
+    assert.match(h.get("local-status").textContent, /one player.*automatically/i);
+    await h.receive(two);
+    assert.equal(h.get("local-count").value, "1"); assert.equal(h.get("local-discover").disabled, true);
+  } finally { await h.close(); }
+});
+
+test("canonical Players refresh preserves busy controls and old Worker ownership fencing", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const oldGame = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+      route: 5, fields: ["0", "1", "1", "1", "", "0"], selected: 0,
+      roster: { players: [1], nextPlayerId: 2, assignments: [] } };
+    await h.receive(state); h.click("settings-save");
+    assert.ok(oldGame.last("settings-profile-save"));
+    const two = { ...state, revision: 6n,
+      roster: { players: [1, 2], nextPlayerId: 3, assignments: [] } };
+    await h.receive(two);
+    for (const id of ["local-count", "local-discover", "local-source-1", "local-source-2"]) {
+      assert.equal(h.get(id).disabled, true, `${id} stays disabled while the settings operation owns the UI`);
+    }
+    h.get("local-discover").emit("click"); await flush();
+    assert.doesNotMatch(h.get("local-status").textContent, /acquired source/);
+    h.window.emit("pagehide"); await flush(); h.window.emit("pageshow", { persisted: true }); await flush();
+    await h.receive({ kind: "ready" });
+    await h.receive({ ...state, revision: 7n, roster: { players: [1], nextPlayerId: 3, assignments: [] } });
+    const before = h.get("local-status").textContent;
+    await h.receive({ ...two, revision: 8n }, oldGame);
+    assert.equal(h.get("local-count").value, "1"); assert.equal(h.get("local-discover").disabled, true);
+    assert.equal(h.get("local-status").textContent, before);
+  } finally { await h.close(); }
+});
+
+test("released inventory and rediscovery serialize behind exact capability and source-table ACKs", async () => {
+  const h = await harness({ touchSupported: true });
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+      route: 5, fields: ["0", "1", "2", "1", "", "2", "", "0"], selected: 0,
+      roster: { players: [1, 2], nextPlayerId: 3, assignments: [] } };
+    await h.receive(state); h.click("local-discover"); await flush();
+    const first = game.last("menu-fields");
+    assert.equal(first.revision, 5n); assert.equal(first.fields[0], "1");
+    assert.equal(first.fields[8], "1"); assert.equal(first.fields[9], "keyboard");
+    assert.equal(h.get("local-source-1").disabled, true);
+    localAssign(h, 1, 1n);
+    assert.equal(game.messages("menu-roster-assign").length, 0, "even direct events cannot assign an unacknowledged inventory");
+    await h.receive({ ...state, revision: 6n, fields: first.fields });
+    assert.equal(h.get("local-source-1").disabled, false);
+    h.click("local-release"); await flush();
+    const empty = game.last("menu-fields");
+    assert.equal(empty.revision, 6n); assert.deepEqual(empty.fields, state.fields);
+    assert.equal(h.get("local-source-1").disabled, true);
+    const publications = game.messages("menu-fields").length;
+    h.click("local-discover"); await flush();
+    assert.equal(game.messages("menu-fields").length, publications, "rediscovery coalesces behind the outstanding release transaction");
+    assert.equal(h.get("local-source-1").disabled, true);
+    const wrongCapability = [...empty.fields]; wrongCapability[1] = "0";
+    await h.receive({ ...state, revision: 7n, fields: wrongCapability });
+    assert.equal(game.messages("menu-fields").length, publications);
+    assert.equal(h.get("local-source-1").disabled, true, "a mismatched capability is not release admission");
+    await h.receive({ ...state, revision: 8n, fields: empty.fields });
+    const latest = game.last("menu-fields");
+    assert.equal(game.messages("menu-fields").length, publications + 1);
+    assert.equal(latest.revision, 8n); assert.deepEqual(latest.fields, first.fields);
+    assert.equal(h.get("local-source-1").disabled, true, "the new inventory has its own ACK gate");
+    const wrongTable = [...latest.fields]; wrongTable[10] = "unrelated source label";
+    await h.receive({ ...state, revision: 9n, fields: wrongTable });
+    assert.equal(h.get("local-source-1").disabled, true, "matching capabilities alone cannot admit a different source table");
+    await h.receive({ ...state, revision: 10n, fields: latest.fields });
+    assert.equal(h.get("local-source-1").disabled, false);
+    localAssign(h, 1, 1n);
+    assert.deepEqual(game.last("menu-roster-assign"), { kind: "menu-roster-assign", menuGeneration: 77n,
+      screen: 3n, revision: 10n, player: 1, source: 1n });
+  } finally { await h.close(); }
+});
+
+test("navigation cancels an old inventory transaction and publishes acquired sources for the current assignment screen", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+      route: 5, fields: ["0", "1", "2", "1", "", "2", "", "0"], selected: 0,
+      roster: { players: [1, 2], nextPlayerId: 3, assignments: [] } };
+    await h.receive(state); h.click("local-discover"); await flush();
+    const old = game.last("menu-fields");
+    await h.receive({ ...state, screen: 4n, revision: 6n, route: 2, fields: ["retained settings"] });
+    const publications = game.messages("menu-fields").length;
+    await h.receive({ ...state, revision: 5n, fields: old.fields });
+    assert.equal(game.messages("menu-fields").length, publications, "old state cannot republish an inventory onto Settings");
+    await h.receive({ ...state, screen: 9n, revision: 7n, route: 9 });
+    const current = game.last("menu-fields");
+    assert.equal(game.messages("menu-fields").length, publications + 1);
+    assert.equal(current.screen, 9n); assert.equal(current.revision, 7n);
+    assert.deepEqual(current.fields, old.fields, "the new screen receives the actual retained acquired inventory");
+    assert.equal(h.get("local-source-1").disabled, true);
+    await h.receive({ ...state, screen: 3n, revision: 6n, fields: old.fields });
+    assert.equal(h.get("local-source-1").disabled, true);
+    await h.receive({ ...state, screen: 9n, revision: 8n, route: 9, fields: current.fields });
+    assert.equal(h.get("local-source-1").disabled, false);
+    localAssign(h, 1, 1n);
+    assert.equal(game.last("menu-roster-assign").screen, 9n);
+    assert.equal(game.last("menu-roster-assign").revision, 8n);
+  } finally { await h.close(); }
 });
 
 test("two owners transfer only renderer canvas and CPU readiness does not wait for GPU readiness", async () => {

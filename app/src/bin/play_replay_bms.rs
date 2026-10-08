@@ -1,12 +1,13 @@
 //! Checked recorded BMS sounds on the explicit host output backend; no input.
 use beatkernel::{
-    audio::{AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, RenderReport, command_queue},
+    audio::{command_queue, AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, RenderReport},
     input::CodecLimits,
     replay::codec::ReplayCodecLimits,
     time::{ClockDomainId, ClockPair, ClockPoint, Duration, Timestamp},
 };
+#[cfg(test)]
+use beatkernel_bms_runtime::replay_audio::completed_render_cursor;
 use beatkernel_bms_runtime::{
-    ChannelPolicy,
     bgm::{BgmConfig, BgmFeeder},
     completion::ReplayCompletion,
     load_prepared_for_section_replay,
@@ -17,9 +18,8 @@ use beatkernel_bms_runtime::{
     replay_pause::ReplayPause,
     replay_playback::read_replay,
     replay_visual::ReplayVisual,
+    ChannelPolicy,
 };
-#[cfg(test)]
-use beatkernel_bms_runtime::replay_audio::completed_render_cursor;
 use beatkernel_platform::audio::{DeviceFormat, SampleEncoding, SharedPeriodPolicy};
 use std::{
     collections::HashSet,
@@ -92,6 +92,7 @@ struct Options {
     seconds: Option<u64>,
     channel_policy: ChannelPolicy,
     format: AudioFormat,
+    output_rate: Option<u32>,
     buffer: Option<u32>,
     #[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
     period: Option<u32>,
@@ -130,6 +131,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
     let (mut chart, mut replay, mut device, mut seconds, mut rate, mut channels) =
         (None, None, None, None, None, None);
     let (mut buffer, mut period) = (None, None);
+    let mut output_rate = None;
     let mut exclusive = false;
     let mut shared = SharedPeriodPolicy::EnginePeriod;
     let mut mode_set = false;
@@ -240,6 +242,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
                 };
             }
             "--rate" => rate = Some(value.parse::<u32>()?),
+            "--output-rate" => output_rate = Some(positive_u32(value)?),
             "--channels" => channels = Some(value.parse::<u16>()?),
             "--buffer-frames" => buffer = Some(positive_u32(value)?),
             "--period-frames" => period = Some(positive_u32(value)?),
@@ -284,6 +287,9 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
     }
     if backend != host && !(host == Backend::Windows && backend == Backend::Asio) {
         return Err("requested backend is incompatible with host".into());
+    }
+    if output_rate.is_some() && backend != Backend::Linux {
+        return Err("--output-rate applies only to Linux ALSA".into());
     }
     if backend != Backend::Asio
         && (output_channels.is_some() || seen.iter().any(|flag| flag.starts_with("--asio-")))
@@ -377,7 +383,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
         return Err("ASIO output channel count must match --channels".into());
     }
     DeviceFormat::new(
-        format.sample_rate(),
+        output_rate.unwrap_or(format.sample_rate()),
         format.channels(),
         SampleEncoding::Float32,
         None,
@@ -430,6 +436,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
         seconds,
         channel_policy,
         format,
+        output_rate,
         buffer,
         period,
         exclusive,
@@ -535,7 +542,77 @@ fn update_replay_pause(
     Ok(update)
 }
 
+/// A single target-owner observation; its auxiliary members share one generation.
+#[derive(Clone, Copy, Debug)]
+struct TargetReplayObservation {
+    epoch: u64,
+    basis: beatkernel::audio::TargetFrameBasis,
+    telemetry: Option<beatkernel_bms_runtime::gameplay::output::ports::TargetOutputTelemetry>,
+    pair: Option<ClockPair>,
+}
+
+/// Target controls stage source/native facts before either held or producer effects.
+fn update_target_replay_pause<O: NativeOutput + ?Sized>(
+    pause: &mut ReplayPause,
+    available: &mut bool,
+    observation: TargetReplayObservation,
+    desired: bool,
+    output: &mut O,
+    mut request_audio: impl FnMut(bool),
+) -> Result<ReplayPauseUpdate> {
+    let (Some(tuple), Some(pair)) = (observation.telemetry, observation.pair) else {
+        return Ok(ReplayPauseUpdate::default());
+    };
+    let mut candidate = pause.clone();
+    let accepted = candidate.request_target(
+        desired,
+        observation.epoch,
+        observation.basis,
+        tuple.facts,
+        pair,
+    )?;
+    let mut update = ReplayPauseUpdate {
+        became_available: !*available,
+        requested: accepted.then_some(candidate.phase() == PausePhase::Pausing),
+        boundary: candidate
+            .observe_target(
+                observation.epoch,
+                observation.basis,
+                tuple.facts,
+                tuple.source,
+                pair,
+            )?
+            .map(|boundary| ReplayControlBoundary {
+                paused: boundary.paused,
+                song: boundary.song,
+                interval: None,
+            }),
+    };
+    if update.requested == Some(false) {
+        output.set_target_held(false)?;
+    }
+    if update.boundary.is_some_and(|boundary| boundary.paused) {
+        output.set_target_held(true)?;
+    }
+    *pause = candidate;
+    *available = true;
+    if let Some(paused) = update.requested.take() {
+        request_audio(paused);
+        update.requested = Some(paused);
+    }
+    Ok(update)
+}
+
 trait NativeOutput {
+    fn target_identity(&self) -> Option<(u64, beatkernel::audio::TargetFrameBasis)> {
+        None
+    }
+    fn target_observation(&mut self) -> Result<Option<TargetReplayObservation>> {
+        Ok(None)
+    }
+    fn set_target_held(&mut self, _: bool) -> Result<()> {
+        Ok(())
+    }
     fn start(&mut self) -> Result<()>;
     fn stop(&mut self) -> Result<()>;
     fn poll(&mut self) -> Result<Option<RenderReport>>;
@@ -769,14 +846,38 @@ mod native {
 #[cfg(target_os = "linux")]
 mod native {
     use super::*;
-    use beatkernel_platform::linux::{AlsaRequest, AlsaStatus, AlsaStream};
-    struct Stream(AlsaStream);
+    use beatkernel::audio::{ChannelMatrix, ResampleQuality, StoppedMixerSource};
+    use beatkernel_bms_runtime::{
+        gameplay::output::ports::OutputReplacementBackend,
+        native_alsa_output_ui::ConvertedAlsaOutputOwner,
+        native_alsa_replacement::{
+            ConvertedAlsaReplacementBackend, ConvertedAlsaReplacementRequest,
+        },
+    };
+    use beatkernel_platform::{
+        audio::ConvertedNativeOutputState,
+        linux::{AlsaRequest, AlsaStatus},
+    };
+    pub(super) struct Stream {
+        owner: ConvertedAlsaOutputOwner,
+        source_rate: u32,
+        telemetry: Option<beatkernel_bms_runtime::gameplay::output::ports::TargetOutputTelemetry>,
+        recovered: Option<ConvertedNativeOutputState>,
+    }
     impl Stream {
+        pub(super) fn take_recovered(&mut self) -> Option<ConvertedNativeOutputState> {
+            self.recovered.take()
+        }
         fn check(&self, final_check: bool) -> Result<()> {
-            let snapshot = self.0.snapshot();
+            let snapshot = self
+                .owner
+                .current()
+                .ok_or("replay target owner missing")?
+                .stream()
+                .snapshot();
             match snapshot.status {
                 AlsaStatus::Running => {}
-                AlsaStatus::Ready if !final_check => return Ok(()), // asynchronous start flag
+                AlsaStatus::Ready if !final_check => return Ok(()),
                 AlsaStatus::Stopped if final_check => {}
                 status => return Err(format!("ALSA unexpected/terminal status: {status:?}").into()),
             }
@@ -787,50 +888,146 @@ mod native {
         }
     }
     impl NativeOutput for Stream {
+        fn target_identity(&self) -> Option<(u64, beatkernel::audio::TargetFrameBasis)> {
+            self.owner
+                .current()
+                .map(|output| (output.epoch(), output.stream().frame_basis()))
+        }
+        fn target_observation(&mut self) -> Result<Option<TargetReplayObservation>> {
+            self.check(false)?;
+            let output = self.owner.current().ok_or("replay target owner missing")?;
+            let epoch = output.epoch();
+            let basis = output.stream().frame_basis();
+            let pair = match output.stream().timing_snapshot() {
+                Some(timing) => {
+                    beatkernel_platform::linux::alsa_presentation_pair_with_target_basis(
+                        timing, basis,
+                    )?
+                }
+                None => None,
+            };
+            let telemetry = output
+                .stream()
+                .output_telemetry()
+                .map(|(source, converted, facts)| {
+                    beatkernel_bms_runtime::gameplay::output::ports::TargetOutputTelemetry {
+                        source,
+                        converted,
+                        facts,
+                    }
+                });
+            if let Some(tuple) = telemetry {
+                if tuple.facts.origin != Some(basis.origin())
+                    || tuple.facts.source_rate != self.source_rate
+                    || tuple.converted.is_some_and(|report| {
+                        report.source_rate != self.source_rate
+                            || report.target_rate != basis.sample_rate()
+                    })
+                {
+                    return Err(
+                        "replay auxiliary facts differ from immutable source/target identity"
+                            .into(),
+                    );
+                }
+                self.telemetry = Some(tuple);
+            }
+            Ok(Some(TargetReplayObservation {
+                epoch,
+                basis,
+                telemetry,
+                pair,
+            }))
+        }
+        fn set_target_held(&mut self, held: bool) -> Result<()> {
+            Ok(self.owner.set_target_held(held)?)
+        }
         fn start(&mut self) -> Result<()> {
-            Ok(self.0.start()?)
+            Ok(self
+                .owner
+                .current_mut()
+                .ok_or("replay target owner missing")?
+                .stream_mut()
+                .start()?)
         }
         fn stop(&mut self) -> Result<()> {
-            Ok(self.0.stop()?)
+            self.owner.stop()?;
+            if self.recovered.is_none() {
+                self.recovered = self
+                    .owner
+                    .current_mut()
+                    .ok_or("replay target owner missing")?
+                    .take_stopped_mixer()?;
+            }
+            if self.recovered.is_none() {
+                return Err(
+                    "replay target retirement did not recover complete converted owner".into(),
+                );
+            }
+            Ok(())
         }
         fn poll(&mut self) -> Result<Option<RenderReport>> {
             self.check(false)?;
-            Ok(self.0.last_render_report())
+            Ok(self.telemetry.and_then(|tuple| tuple.source))
         }
         fn presented(&mut self) -> Result<Option<ClockPoint>> {
-            Ok(self.presentation_pair()?.map(|pair| pair.source))
-        }
-        fn presentation_pair(&mut self) -> Result<Option<ClockPair>> {
-            self.check(false)?;
-            let Some(timing) = self.0.timing_snapshot() else {
-                return Ok(None);
-            };
-            Ok(
-                beatkernel_platform::linux::alsa_presentation_pair_with_basis(
-                    timing,
-                    self.0.frame_basis(),
-                )?,
-            )
+            Ok(self
+                .target_observation()?
+                .and_then(|observation| observation.pair)
+                .map(|pair| pair.source))
         }
         fn last_render(&mut self) -> Option<RenderReport> {
-            self.0.last_render_report()
+            self.telemetry.and_then(|tuple| tuple.source)
         }
         fn final_check(&mut self) -> Result<()> {
             self.check(true)
         }
         fn print_native(&mut self) {
-            println!(
-                "ALSA applied={:?}; independent native counters={:?}; retained core report does not prove native writes/acoustic output",
-                self.0.configuration(),
-                self.0.snapshot()
-            );
+            if let Some(output) = self.owner.current() {
+                println!(
+                    "ALSA target applied={:?}; independent native counters={:?}; recovered complete converter={}; source report does not prove native/acoustic output",
+                    output.stream().configuration(), output.stream().snapshot(), self.recovered.is_some()
+                );
+            }
         }
+    }
+    /// Cold factory shared by the actual replay consumer and its native fixtures.
+    pub(super) fn open_target_output(request: AlsaRequest, mixer: Mixer) -> Result<Stream> {
+        let source_rate = mixer.config().format().sample_rate();
+        let matrix = ChannelMatrix::default_mix(
+            mixer.config().format().channels(),
+            request.format.channels(),
+        )?;
+        let state = ConvertedNativeOutputState::new(
+            mixer,
+            request.format,
+            matrix,
+            ResampleQuality::Linear,
+            request.period_frames as usize,
+        )
+        .map_err(|failure| failure.into_parts().0)?;
+        let mut backend = ConvertedAlsaReplacementBackend;
+        let output = backend
+            .open(
+                ConvertedAlsaReplacementRequest {
+                    native: request,
+                    matrix: None,
+                },
+                state,
+                0,
+            )
+            .map_err(|failure| failure.into_parts().0)?;
+        Ok(Stream {
+            owner: ConvertedAlsaOutputOwner::new(backend, output),
+            source_rate,
+            telemetry: None,
+            recovered: None,
+        })
     }
     pub(super) fn open(options: &Options, mixer: Mixer) -> Result<Box<dyn NativeOutput>> {
         let request = AlsaRequest {
             device: options.device.clone(),
             format: DeviceFormat::new(
-                options.format.sample_rate(),
+                options.output_rate.unwrap_or(options.format.sample_rate()),
                 options.format.channels(),
                 SampleEncoding::Float32,
                 None,
@@ -840,12 +1037,17 @@ mod native {
             allow_size_rounding: false,
             monotonic_domain: HOST,
         };
-        let stream = AlsaStream::open(request, mixer)?;
+        let stream = open_target_output(request, mixer)?;
         println!(
-            "ALSA requested/applied exact float32 output={:?}",
-            stream.configuration()
+            "ALSA requested/applied exact target float32 output={:?}",
+            stream
+                .owner
+                .current()
+                .ok_or("replay target owner missing")?
+                .stream()
+                .configuration()
         );
-        Ok(Box::new(Stream(stream)))
+        Ok(Box::new(stream))
     }
 }
 
@@ -1070,9 +1272,17 @@ fn run(options: Options) -> Result<()> {
             return Err(error);
         }
     };
+    let target_identity = stream.target_identity();
     let outcome = (|| -> Result<()> {
         if player::cancelled() {
             return Ok(());
+        }
+        if let Some((epoch, basis)) = target_identity {
+            pause = pause.with_target_basis(epoch, basis)?;
+            completion = completion.with_target_basis(epoch, basis, HOST)?;
+            finite_completion = finite_completion
+                .map(|completion| completion.with_target_basis(epoch, basis, HOST))
+                .transpose()?;
         }
         stream.start()?;
         let deadline = options
@@ -1093,31 +1303,78 @@ fn run(options: Options) -> Result<()> {
             if player::cancelled() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 break;
             }
+            let target = stream.target_observation()?;
+            if target.map(|observation| (observation.epoch, observation.basis)) != target_identity {
+                return Err("replay output changed its immutable target identity".into());
+            }
             let rendered = stream.poll()?;
             let cursor = rendered
                 .as_ref()
                 .map(|report| playback_render_cursor_for_feeder(report, &feeder))
                 .transpose()?;
             player::retry_pause_publication();
-            let presentation = stream.presentation()?;
+            let presentation = match target {
+                Some(observation) => NativePresentation {
+                    presented: observation.pair.map(|pair| pair.source),
+                    pause: None,
+                },
+                None => stream.presentation()?,
+            };
             let presented = presentation.presented;
-            if let Some(completion) = &mut finite_completion {
+            if let Some(observation) = target {
+                if let Some(completion) = &mut finite_completion {
+                    completion.observe_target(
+                        false,
+                        &feeder,
+                        observation.epoch,
+                        observation.basis,
+                        observation.telemetry,
+                        observation.pair,
+                    )?;
+                } else {
+                    completion.observe_target(
+                        false,
+                        &feeder,
+                        observation.epoch,
+                        observation.basis,
+                        observation.telemetry,
+                        observation.pair,
+                    )?;
+                }
+            } else if let Some(completion) = &mut finite_completion {
                 completion.observe(false, &feeder, rendered, presented)?;
+            }
+            if finite_completion.is_some() {
                 if let (Some(report), Some(cursor)) = (rendered, cursor) {
                     if report.playback_end_physical_frame.is_some() {
                         feeder.retire_completed(cursor)?;
-                        completion.observe(false, &feeder, None, presented)?;
+                        if target.is_none() {
+                            finite_completion
+                                .as_mut()
+                                .expect("finite replay checked")
+                                .observe(false, &feeder, None, presented)?;
+                        }
                     }
                 }
             }
-            let update = update_replay_pause(
-                &mut pause,
-                &mut pause_available,
-                presentation.pause,
-                rendered,
-                player::pause_requested(),
-                |paused| producer.request_pause(paused),
-            )?;
+            let update = match target {
+                Some(observation) => update_target_replay_pause(
+                    &mut pause,
+                    &mut pause_available,
+                    observation,
+                    player::pause_requested(),
+                    stream.as_mut(),
+                    |paused| producer.request_pause(paused),
+                )?,
+                None => update_replay_pause(
+                    &mut pause,
+                    &mut pause_available,
+                    presentation.pause,
+                    rendered,
+                    player::pause_requested(),
+                    |paused| producer.request_pause(paused),
+                )?,
+            };
             if update.became_available {
                 player::publish_pause(player::PauseState::Running);
             }
@@ -1164,7 +1421,7 @@ fn run(options: Options) -> Result<()> {
                     }
                 }
                 if let Some(point) = presented {
-                    let song = if pause_available {
+                    let song = if pause_available || target_identity.is_some() {
                         pause.presentation_song(point)?
                     } else {
                         Some(presentation_song(point, visual.start(), options.preroll)?)
@@ -1183,12 +1440,44 @@ fn run(options: Options) -> Result<()> {
                 }
             }
             if deadline.is_none() {
-                let finished = if let Some(completion) = &mut finite_completion {
-                    completion.observe(visual.finished(), &feeder, None, presented)?
-                } else if pause.phase() == PausePhase::Running {
-                    completion.observe(visual.finished(), feeder.report(), rendered, presented)?
-                } else {
-                    false
+                let finished = match target {
+                    Some(observation) => {
+                        if let Some(completion) = &mut finite_completion {
+                            completion.observe_target(
+                                visual.finished(),
+                                &feeder,
+                                observation.epoch,
+                                observation.basis,
+                                None,
+                                observation.pair,
+                            )?
+                        } else if pause.phase() == PausePhase::Running {
+                            completion.observe_target(
+                                visual.finished(),
+                                &feeder,
+                                observation.epoch,
+                                observation.basis,
+                                None,
+                                observation.pair,
+                            )?
+                        } else {
+                            false
+                        }
+                    }
+                    None => {
+                        if let Some(completion) = &mut finite_completion {
+                            completion.observe(visual.finished(), &feeder, None, presented)?
+                        } else if pause.phase() == PausePhase::Running {
+                            completion.observe(
+                                visual.finished(),
+                                feeder.report(),
+                                rendered,
+                                presented,
+                            )?
+                        } else {
+                            false
+                        }
+                    }
                 };
                 if finished {
                     break;
@@ -1239,10 +1528,14 @@ fn main() -> Result<()> {
     run_args(&args)
 }
 
+#[cfg(test)]
+#[path = "play_replay_bms/target_fixtures.rs"]
+mod target_fixtures;
+
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!(
-            "play_replay_bms --chart PATH --replay PATH --device ID --rate HZ --channels N [--seconds N --channel-policy exact|mono-stereo --backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels and --asio-system-clock multimedia plus --asio-timer-error-ns, --asio-drift-error-ns, --asio-latency-error-ns assessments; optional --asio-anchor-age-ns defaults1000000000. Rejects mode/shared-policy/period; buffer defaults driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 output rate/channels; no endpoint/mode fallback. Channel policy defaults exact; mono-stereo explicitly duplicates mono assets into stereo.\nLinux requires explicit buffer/period; macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nOmit seconds to finish the actual recorded prefix and drain admitted PCM through native presentation. Seconds is an optional wall cutoff after Start including preroll and can truncate the prefix/tail. Presentation missing/degraded stays unavailable; cancellation remains available. ASIO queues actual rendered-block presentation observations until fresh QPC reaches their assessed upper host interval, then advances visual/natural drain. Prepared frames/raw sample position do not establish audible progress. ASIO replay pause uses original assessed intervals and exact frozen playback frames; physical accuracy unmeasured. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence."
+            "play_replay_bms --chart PATH --replay PATH --device ID --rate HZ --channels N [--output-rate HZ --seconds N --channel-policy exact|mono-stereo --backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels and --asio-system-clock multimedia plus --asio-timer-error-ns, --asio-drift-error-ns, --asio-latency-error-ns assessments; optional --asio-anchor-age-ns defaults1000000000. Rejects mode/shared-policy/period; buffer defaults driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 output rate/channels; no endpoint/mode fallback. Channel policy defaults exact; mono-stereo explicitly duplicates mono assets into stereo.\nLinux requires explicit buffer/period; --output-rate selects the ALSA target rate while --rate remains the immutable source PCM rate. The target rate defaults to the source rate; other backends reject --output-rate. macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nOmit seconds to finish the actual recorded prefix and drain admitted PCM through native presentation. Seconds is an optional wall cutoff after Start including preroll and can truncate the prefix/tail. Presentation missing/degraded stays unavailable; cancellation remains available. ASIO queues actual rendered-block presentation observations until fresh QPC reaches their assessed upper host interval, then advances visual/natural drain. Prepared frames/raw sample position do not establish audible progress. ASIO replay pause uses original assessed intervals and exact frozen playback frames; physical accuracy unmeasured. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence."
         );
         return Ok(());
     }
@@ -1348,57 +1641,45 @@ mod fixtures {
                 .shared,
             SharedPeriodPolicy::DeviceDefault
         );
-        assert!(
-            parse(
-                &args(&["--mode", "exclusive", "--shared-policy", "engine-period"]),
-                Backend::Windows
-            )
-            .is_err()
-        );
+        assert!(parse(
+            &args(&["--mode", "exclusive", "--shared-policy", "engine-period"]),
+            Backend::Windows
+        )
+        .is_err());
         assert!(parse(&args(&[]), Backend::Linux).is_err());
-        assert!(
-            parse(
-                &args(&["--buffer-frames", "256", "--period-frames", "64"]),
-                Backend::Linux
-            )
-            .is_ok()
-        );
-        assert!(
-            parse(
-                &args(&["--buffer-frames", "64", "--period-frames", "64"]),
-                Backend::Linux
-            )
-            .is_err()
-        );
-        assert!(
-            parse(
-                &args(&[
-                    "--buffer-frames",
-                    "256",
-                    "--period-frames",
-                    "64",
-                    "--mode",
-                    "shared"
-                ]),
-                Backend::Linux
-            )
-            .is_err()
-        );
-        assert!(
-            parse(
-                &args(&["--buffer-frames", "256", "--shared-policy", "legacy"]),
-                Backend::Macos
-            )
-            .is_err()
-        );
+        assert!(parse(
+            &args(&["--buffer-frames", "256", "--period-frames", "64"]),
+            Backend::Linux
+        )
+        .is_ok());
+        assert!(parse(
+            &args(&["--buffer-frames", "64", "--period-frames", "64"]),
+            Backend::Linux
+        )
+        .is_err());
+        assert!(parse(
+            &args(&[
+                "--buffer-frames",
+                "256",
+                "--period-frames",
+                "64",
+                "--mode",
+                "shared"
+            ]),
+            Backend::Linux
+        )
+        .is_err());
+        assert!(parse(
+            &args(&["--buffer-frames", "256", "--shared-policy", "legacy"]),
+            Backend::Macos
+        )
+        .is_err());
         assert!(parse(&args(&["--buffer-frames", "256"]), Backend::Macos).is_ok());
-        assert!(
-            parse(
-                &args(&["--buffer-frames", "256", "--period-frames", "64"]),
-                Backend::Macos
-            )
-            .is_err()
-        );
+        assert!(parse(
+            &args(&["--buffer-frames", "256", "--period-frames", "64"]),
+            Backend::Macos
+        )
+        .is_err());
         assert!(parse(&args(&[]), Backend::Unsupported).is_err());
     }
     #[test]
@@ -1492,18 +1773,16 @@ mod fixtures {
             Some(2)
         );
         assert!(parse(&args(&["--channel-policy", "automatic"]), Backend::Windows).is_err());
-        assert!(
-            parse(
-                &args(&[
-                    "--channel-policy",
-                    "exact",
-                    "--channel-policy",
-                    "mono-stereo"
-                ]),
-                Backend::Windows
-            )
-            .is_err()
-        );
+        assert!(parse(
+            &args(&[
+                "--channel-policy",
+                "exact",
+                "--channel-policy",
+                "mono-stereo"
+            ]),
+            Backend::Windows
+        )
+        .is_err());
         let seconds = i64::MAX as u64 / 1_000_000_000;
         let mut bounded = args(&[]);
         let index = bounded
@@ -1591,17 +1870,15 @@ mod fixtures {
                 .as_nanos(),
             6_000_000_000
         );
-        assert!(
-            presentation_song(
-                ClockPoint {
-                    domain: ClockDomainId(0),
-                    timestamp: Timestamp::ZERO
-                },
-                start,
-                preroll
-            )
-            .is_err()
-        );
+        assert!(presentation_song(
+            ClockPoint {
+                domain: ClockDomainId(0),
+                timestamp: Timestamp::ZERO
+            },
+            start,
+            preroll
+        )
+        .is_err());
         assert!(presentation_song(point(-1), start, preroll).is_err());
         assert!(
             presentation_song(point(i64::MAX), Timestamp::from_nanos(1), Duration::ZERO).is_err()
@@ -1622,10 +1899,10 @@ mod asio_native {
             AsioBufferRequest, AsioPresentationError, MultimediaClockAnchor, MultimediaClockError,
         },
         windows::asio::{
-            AsioEnumerationLimits, AsioRegistryView,
             control::AsioControl,
             enumerate_asio_drivers,
             stream::{AsioStream, AsioStreamPhase, AsioStreamSnapshot},
+            AsioEnumerationLimits, AsioRegistryView,
         },
     };
     use std::{io, ptr};
@@ -1633,8 +1910,8 @@ mod asio_native {
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE,
-            PeekMessageW, RegisterClassW, TranslateMessage, UnregisterClassW, WM_CLOSE, WM_QUIT,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
+            RegisterClassW, TranslateMessage, UnregisterClassW, MSG, PM_REMOVE, WM_CLOSE, WM_QUIT,
             WNDCLASSW,
         },
     };

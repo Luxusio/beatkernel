@@ -314,6 +314,8 @@ mod native_converted_end_fixtures;
 #[cfg(all(test, target_os = "linux"))]
 mod native_converted_gameplay_fixtures;
 #[cfg(all(test, target_os = "linux"))]
+mod replay_target_fixtures;
+#[cfg(all(test, target_os = "linux"))]
 mod native_converted_pause_fixtures;
 /// Omitted solo option defaults, independent of native discovery.
 pub mod native_defaults;

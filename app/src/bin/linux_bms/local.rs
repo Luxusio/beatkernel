@@ -55,8 +55,7 @@ use beatkernel_platform::{
 use beatkernel_bms_runtime::native_start::{start_target_committed, NativeStartConfig};
 
 use beatkernel_bms_runtime::{
-    gameplay_output_owner::GameplayOutputOwner,
-    native_alsa_replacement::AlsaReplacementBackend,
+    gameplay_output_owner::GameplayOutputOwner, native_alsa_replacement::AlsaReplacementBackend,
 };
 type OwnedOutput = GameplayOutputOwner<
     beatkernel_bms_runtime::gameplay::output::adapters::remix::RemixedOutputBackend<

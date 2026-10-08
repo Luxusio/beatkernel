@@ -494,6 +494,32 @@ function commitMenuRoster(change) {
   if ([5, 6, 9].includes(menuOwner.route)) menuOwner.set_fields(menuOwner.screen, menuOwner.revision, menuRosterFields(menuOwner.fields(), candidate));
   menuRoster = candidate;
 }
+function commitAcquiredMenuFields(fields) {
+  const admitted = menuFields(fields);
+  if (!menuRoster || ![5, 9].includes(menuOwner.route)) {
+    menuOwner.set_fields(menuOwner.screen, menuOwner.revision, menuRosterFields(admitted));
+    return;
+  }
+  const count = Number(admitted[2]), at = 3 + count * 2;
+  const sources = Number(admitted[at]);
+  if (!Number.isInteger(count) || count < 0 || count > 64 || !Number.isInteger(sources)
+    || sources < 0 || sources > 1024 || admitted.length !== at + 1 + sources * 5) {
+    throw new Error("Invalid acquired browser source inventory.");
+  }
+  const inventory = new Set(Array.from({ length: sources }, (_, index) => admitted[at + 1 + index * 5]));
+  const candidate = new LocalRoster(); candidate.importState(menuRoster.exportState());
+  for (const player of candidate.players) {
+    const source = candidate.selected(player);
+    if (source !== null && !inventory.has(source.toString())) candidate.assign(player, null);
+  }
+  const values = menuRosterFields(admitted, candidate);
+  // Preserve set_fields' pending-operation refusal without changing a value or
+  // revision. Same-route admission then performs the existing domain validation
+  // before either the field model or canonical roster is published.
+  menuOwner.set_fields(menuOwner.screen, menuOwner.revision, menuOwner.fields());
+  menuOwner.navigate_with_fields(menuOwner.screen, menuOwner.revision, menuOwner.route, values);
+  menuRoster = candidate;
+}
 function menuFields(fields) {
   if (!Array.isArray(fields) || fields.length > 8192) throw new Error("Menu field count exceeds limit.");
   let total = 48;
@@ -537,7 +563,7 @@ function handleMenu(request) {
         const admitted = menuRosterFields(fields, menuRoster, request.route);
         menuOwner.navigate_with_fields(request.screen, request.revision, request.route, admitted);
       } else menuOwner.navigate(request.screen, request.revision, request.route);
-    } else if (request.kind === "menu-fields") menuOwner.set_fields(request.screen, request.revision, menuRosterFields(menuFields(request.fields)));
+    } else if (request.kind === "menu-fields") commitAcquiredMenuFields(request.fields);
     else if (request.kind === "menu-roster-count") {
       commitMenuRoster(roster => roster.setCount(request.count));
     } else if (request.kind === "menu-roster-assign") {
