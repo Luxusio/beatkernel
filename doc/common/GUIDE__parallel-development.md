@@ -33,3 +33,39 @@ rewrite master history or push unless explicitly authorized.
 Group a working feature with its relevant tests and documentation into a
 meaningful commit. Avoid commits for every small progress step; keep each
 commit reviewable and the code buildable.
+
+## Parent-Goal parallelism
+
+On 2026-10-08 the user requested parallel development across all remaining
+requirements, extending earlier within-feature pairing. Survey actual source
+and current evidence, assign literal disjoint ownership, and dispatch ready
+independent domains up to real host capacity. Do not serialize UI, media,
+networking and quality work behind audio or another blocked requirement.
+Keep the full requirement/readiness ledger; source presence is not completion.
+
+Freeze shared interfaces before dependent consumers and reserve common exports,
+desktop integration and native cohort/bridge files to the coordinator. One
+focused root-checkout task hosts independent AC lanes without competing
+same-checkout tasks. Preserve the current no-worktree/no-push scope. The
+configured eight-lane ceiling requires fresh source/test-pair and quality-role
+reservations under the host limit. Capacity refusal requires accounting for
+what started, then waiting or explicitly scoped reuse rather than blind retries.
+
+Verify the ownership/dependency table, actual actor inventory, per-layer tests,
+combined independent review and applicable GUI/runtime QA. Physical proof and
+genuine unresolved product choices remain explicit while other ready code,
+research and evidence preparation proceed concurrently.
+
+Native X11 motion development verification uses the ignored binary fixture
+`native_x11_window_presents_explicit_control_motion_with_stable_geometry` with
+`BEATKERNEL_TEST_NATIVE_UI_WINDOW=1`, `DISPLAY=:99` and, for the software tier,
+`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`. Keep one Cargo job and
+the existing bounded compiler environment. This is development evidence, not QA.
+If `libxkbcommon-x11` cannot load, check its actual dependencies before rerunning.
+On the current Ubuntu environment, official archive packages
+`libxkbcommon-x11-0_1.6.0-1build1_amd64.deb` and
+`libxcb-xkb1_1.15-1ubuntu2_amd64.deb` were extracted with `dpkg-deb -x` into
+ignored `target/toolchain/native-ui-runtime`; prepend its
+`usr/lib/x86_64-linux-gnu` directory to that test process's `LD_LIBRARY_PATH`.
+No system package installation, service or Docker change is needed. Other hosts
+must use compatible runtime packages rather than assuming these versions apply.

@@ -5,6 +5,8 @@ type: library
 languages: [rust]
 audience: public
 maintenance_default: false
+develop:
+  fanout_cap: 8
 build_command: cargo build --workspace --locked
 test_command: cargo test --workspace --locked
 verify_commands:

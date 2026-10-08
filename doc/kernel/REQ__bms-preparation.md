@@ -128,6 +128,19 @@ Exact remains available through AssetPathPolicy and the new full composition ent
 
 ## Ogg/Vorbis assets
 
+The parallel completion scope extends the initial single-stream milestone to
+sequential complete same-format Vorbis links. Reset serial/sequence/granule and
+packet-window state at each BOS, require its EOS before the next link, trim each
+link independently and enforce checked cumulative PCM/encoded limits. A mixed
+rate/channel chain, overlap/multiplexing, incomplete boundary or malformed later
+link refuses the entire asset. Original source format/path/identity stays intact.
+This supersedes single-stream-only refusal for this bounded chain case; other
+Ogg codecs, mixed-format chains and exhaustive conformance are not implied.
+
+Each chain link has a unique serial within the physical bitstream, as required
+by [RFC 3533 section 4](https://www.rfc-editor.org/rfc/rfc3533.html#section-4).
+Reused link serials refuse rather than introducing an implicit permissive mode.
+
 Default preparation shall identify Ogg by OggS content and decode a complete single Vorbis logical stream through app-only pinned Rust lewton. Source sample rate and channel count remain unchanged; interleaved finite f32 enters the same channel expansion and PCM bank limits. Input is bounded to 64 MiB; cumulative decoded bytes are capped before owned output growth, including a preflight from the final EOS granule. Pages require exact framing, version/flags, one serial, consecutive sequence numbers, BOS/EOS and packet continuation consistency, CRC and nondecreasing defined granules. Missing end pages, corruption, trailing data, chained/multiplexed streams and other Ogg codecs reject instead of partial success. Final decoded frame count must equal the final granule for supported zero-origin streams. Application packet decoding shall trim the final audio packet against actual cumulative frames and the EOS granule, including when all audio packets share a single EOS page. Completed-page granules shall agree with cumulative decoded frames; a page granule is not applied prematurely to intermediate packets on that page. It shall not rely on the library high-level reader having observed an earlier audio page. Ordinary codec errors reject. Codec panics that unwind shall become preparation errors without changing global panic hooks; panic-abort builds and allocation/process aborts cannot be recovered by this boundary. Decoder scratch/setup/comment storage is separate from the caller PCM cap; this is not a CPU or total-memory sandbox. The identification packet must be the sole fixed 30-byte BOS packet under the Vorbis mapping, with supported source format checked before setup allocations.
 
 Compatible lookup includes OGG and MP3 case variants with the policy below: the literal path wins; supported original family comes first, then remaining WAV, FLAC, OGG, MP3 families. Extensionless references use that order. At most 36 unique ASCII extension-case combinations are considered. Exact custom-codec lookup and original chart/replay identity remain unchanged. Original synthetic Vorbis/Ogg fixtures, limits/container errors and actual default preparation/offline PCM composition are authored and compiled for later execution. Other Ogg codecs, chaining/multiplexing, nonzero-origin support and exhaustive codec/native acceptance remain future work.

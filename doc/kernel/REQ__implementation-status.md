@@ -19,32 +19,30 @@ verification deferral on 2026-10-06; historical deferral text below is supersede
 Neither the old inventory nor the current survey establishes full-player,
 native hardware or measured performance acceptance.
 
-## Parallel implementation evidence on 2026-10-08
+## Parallel implementation evidence on 2026-10-09
 
-These are development checks on the current uncommitted worktree, not final
-independent review or QA. Formal code/security review and CLI/browser/desktop
-QA remain required before the parallel task closes. Totals below belong to
-their individual commands; they must not be added into an overall TODO ratio.
+These are bounded development checks, not full-player acceptance. The current
+security review passed; the code review's missing native Desktop component
+motion has been implemented and tested, and stale document statements were
+corrected. The fresh full code review passed. Independent
+review and CLI/browser/desktop QA remain required before task close.
 
-The latest combined app library development run (`desktop,webtransport`) passed
-2011 tests, with 0 failures and 3 ignored. This includes all migrated screens,
-pure/frozen record-preview fixtures and the converted startup correction. The
-parallel pack has 24 planned criteria and 17 development milestones verified;
-this is neither 17 completed full-player requirements nor a 71% full-player
-completion claim. Actual converted launcher/replacement integration, Worker
-menu integration, real transports, component motion, the full scope audit and
-ordered independent review/QA remain open.
+The latest combined app library run (`desktop,webtransport`) passed 2099 tests,
+with 0 failures and 4 ignored. Linux binary tests passed 34/0/3, platform library
+131/0/1, and the browser Node suite 692/0. Each total belongs to its own command;
+they must not be added into a TODO ratio. The pack retains 24 criteria and 17
+development milestones; the canonical WBS remains the completion-count ledger.
 
 | Requirement slice | Actual evidence | Remaining integration or proof |
 | --- | --- | --- |
-| Typed persistent UI layout and retained geometry | `MountedLayout` and retained paint/hit clipping, with Selection/Settings/Records included in the executed app library run: 1953 passed, 0 failed, 2 ignored | Actual browser menu navigation and combined GUI QA; per-component motion |
-| Practice declarations and partial geometry updates | Focused `ui::practice` run: 9 passed, 0 failed; includes six new behavioral fixtures | Combined GUI QA; physical gapless loop/restart proof is separate |
-| Players, Devices and Results declarations | Independent behavior fixtures passed in the 2011-test app library run; existing browser/native APIs preserved | Combined GUI QA pending |
-| Exact mixed-rate target duration and converted output boundaries | Core resume check: 23 passed; platform check: 126 passed, 0 failed, 1 ignored | Actual native converted solo/local/replay and output replacement consumers, other backend integration and hardware presentation |
-| Chained same-format Vorbis preparation | Actual decoder/preparation fixtures included in the executed 1953-test app library run | Mixed-format chaining remains rejected; no new automatic format policy |
-| Selected-policy network admission | Pure policy/identity fixtures included in the executed app library run; cohort and Linux entrypoint routing is now being connected | Execute new routing tests and actual QUIC/WebTransport exchanges; foreign launcher routing remains unfinished |
-| Worker menu ownership and portable record preview | Pure setup preview and read-only frozen preview fixtures passed in the 2011-test app library run | Rebuild actual WASM, execute all menu/record paths and browser QA |
-| Real transport acceptance | Real QUIC and HTTP/3 room fixtures authored with explicit owned TLS relay requirements | Execute them with ephemeral credentials and bounded server cleanup; successful transport is not acoustic synchronization |
+| Retained layout and declarative screens | All migrated screen fixtures included in app 2099; stable mounted geometry and partial updates | Full native/browser route interactions and independent GUI QA |
+| Mixed-rate target output | App 2099, platform 131; Linux solo/local and network committed-start consumers compile and Linux tests pass | Clock-capable full play, socket-to-driver synchronization, replay/other backend and interval integration |
+| Converted output settings and ownership | Actual typed owner/request/reply/recovery fixtures; Linux consumers connected | Actual endpoint changes and hardware presentation/latency |
+| Chained same-format Vorbis | Decoder/preparation/Mixer-tail fixtures executed | Mixed-format chaining remains explicitly rejected |
+| Selected-policy network admission | Policy/identity/launcher admission fixtures; WBS E8 actual selected cohort production-owner/header routing | Selected peer exchanges and cross-platform physical playback |
+| Browser Worker menus and record preview | App fixtures, Node 692; rebuilt WASM and export smoke | All-route editor/permission/record interaction and independent browser QA |
+| Component motion | Browser SwiftShader 51 submitted frames (E18); native binary 281 tests (E24), actual X11/llvmpipe Vulkan 22 animation frames and shifted hits/cache/disposal (E25); full code review PASS | Hardware performance and independent UI QA |
+| Real transport acceptance | QUIC 5 actual loopback cases (E12), native HTTP/3 room 4 cases with owned relay cleanup (E14) | Browser trusted WebTransport interoperability, socket-to-driver and acoustic synchronization |
 
 The full requirement scope remains in the parallel requirements document and
 the original plan acceptance map. Historical timing presets, empty-POOR and

@@ -1,5 +1,21 @@
 # Authoring retained screens with static layout
 
+The parallel completion foundation adds persistent `MountedLayout` to these
+initial static primitives. Mount the typed declaration once; stable preorder
+`NodeId` and `LayoutUpdate` address existing size/origin/gap/clip properties.
+`Node::fill` consumes remaining parent axes. Explicit updates/resize stage
+checked dependent geometry and clips before publishing, preserve identity and
+leave rejected changes atomic. Zero extent suspends; repeated unchanged extent
+reuses packets. Bind painting and hits to the same geometry through retained
+layout dependencies. Do not rebuild a virtual declaration on each frame.
+
+Display demonstrates the new API while retaining exact default 960x720 output.
+Other screen migrations must preserve native/browser capability projections,
+original control IDs, current keyboard/editor/lifecycle behavior and packet
+reuse. The older static-only ceiling below describes the initial milestone;
+text measurement/automatic wrapping and component animation remain separate
+requirements until their actual implementations and interaction evidence exist.
+
 `app/src/ui/layout.rs` supplies typed `Node` declarations:
 `leaf` identifies a component, `row` and `column` arrange children with a gap,
 and `layer` positions sections with `.at(x, y)`. Each node declares its size.

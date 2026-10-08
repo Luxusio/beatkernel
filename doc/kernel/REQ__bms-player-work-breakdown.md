@@ -62,6 +62,17 @@ python3 tools/wbs_status.py --ready
 | E12 | `quic-ca-loopback-development.log`: 후속 real QUIC loopback 5 PASS / 실패0 / ignored0 | 별도 유효 unrelated CA 거절 추가; TLS 검증을 우회하지 않고 두 worker join |
 | E13 | `controller-menu-fixed-app-development.log`: app lib 2027 PASS / 실패0 / ignored3; `browser-atomic-focused-development.log`: Node 집중214 PASS / 실패0 | mixed-rate rebind/cold end 준비·typed whole-owner lifecycle·genuine BKRP·atomic navigation; actual native launcher/GUI/browser audio 전체 완료 아님 |
 | E14 | `webtransport-native-development.log`: owned HTTP/3 relay의 native room 4 PASS / 실패0 / ignored0, relay Ctrl+C exit0/join 확인 | 실제 roster/start/progress/final/drain·취소·identity/Origin/unrelated-CA; browser 상호운용/음향 동기화는 별도 |
+| E15 | `inherited-target-owner-app-fixed-development.log`: app lib 2065 PASS / 실패0 / ignored4; `inherited-ui-wasm-development.log`: browser WASM check PASS | typed target controller/actual owner·pending retirement hold·공유 mapped pause·원본 source 시간·이동 후 드러나는 UI geometry/hit; 실제 launcher/GPU/browser QA 완료 아님 |
+| E16 | `target-held-pump-bounded-app-development.log`: app lib 2072 PASS / 실패0 / ignored4; 선행 bounded 집중 shared-pump 4 PASS | 실제 공개 audio solo/cohort pump + real converted state + controlled 원본 target IO 관측으로 held/ACK/resume·교체 대기·실패 원자성 검증; 실제 launcher/driver/독립 QA는 별도 |
+| E17 | `browser-component-motion-app-final-development.log`: app lib 2077 PASS / 실패0 / ignored4; `browser-all-component-motion-development.log`: Node 692 PASS / 실패0; production browser WASM build/bindgen/export smoke PASS | 실제 Selection/Display 메뉴 소유자·제출 pose/input·Back/zero/dispose·프레임/retry 분리의 pure/worker boundary; native motion/실제 GPU·browser QA는 별도 |
+| E18 | `browser-software-motion-evidence.json`, `menu-motion-before.png`, `menu-motion-after.png`: actual regenerated WASM + renderer Worker + OffscreenCanvas + isolated SwiftShader Chromium | Selection SETTINGS가 x750→550 이동, 51 제출 프레임/오류0, 이전 좌표 거절/이동 좌표 control5 수락; 정상 dispose·브라우저 exit·서버 종료. 소프트웨어 기능 증거이며 hardware/native/full-flow/독립 QA는 별도 |
+| E19 | `converted-ui-app-development.log`: app lib 2084 PASS / 실패0 / ignored4 | 실제 typed target owner 요청/응답·backpressure·cold refusal·전체 회수 및 ALSA target rate/sizes/matrix/applied metadata; 실제 Linux launcher/physical playback은 별도 |
+| E20 | Linux solo consumer: lib 2086 PASS / 실패0 / ignored4; Linux bin 34 PASS / 실패0 / ignored2; all-bin check PASS; actual null functional 1 PASS | 실제 non-network solo converted 연결과 held 제출/회수/원본 BGM PCM; null은 PREPARED/played-frame 없음으로 원본 시계 admission 없음. clock-capable finite crossing/evdev/물리 전체 플레이는 별도 |
+| E21 | `coherent-target-app-development.log`: lib 2093 PASS / 실패0 / ignored4, Linux bin 34 PASS / 실패0 / ignored2; `coherent-target-platform-development.log`: platform 131 PASS / 실패0 / ignored1 | 보조 telemetry 부재 시 원본 clock 보존·동일 generation cache·교체 유예·첫 native pair를 유지한 지연 end priming 검증; 물리 clock/전체 모드/독립 QA는 별도 |
+| E22 | `linux-target-local-check-development.log`: Linux bin check PASS; `linux-target-local-bin-development.log`: 34 PASS / 실패0 / ignored3; `linux-target-local-null-development.log`: actual null local wrapper 1 PASS | offline local의 실제 converted owner 연결·held 제출·typed 관측/거절·전체 source 회수·원본 BGM cue; 실제 evdev/cohort 전체 플레이/native clock/network target startup는 별도 |
+| E23 | `target-committed-app-development.log`: app lib 2099 PASS / 실패0 / ignored4; `target-committed-linux-check-development.log`: Linux bin check PASS | source/target 공통 시작 루프·실제 변환 상태 기반 시작 6건·solo/local 네트워크 target 소비자 연결; socket→driver/물리 동기화·target interval 지원·독립 QA는 별도 |
+| E24 | `native-component-motion-check-development.log`: app binary check PASS; `native-component-motion-focused-development.log`: 8 PASS; `native-component-motion-bin-development.log`: 281 PASS / 실패0 / ignored3 | 실제 Desktop typed 명령·retained 노드·제출 pose 입력·캐시·Back/zero/clip/dispose 개발 fixture; 실제 native 창/GPU·하드웨어 성능·재리뷰/QA는 별도 |
+| E25 | `native-component-motion-x11-development.log`: actual X11 window + llvmpipe Vulkan/Fifo 1 PASS | 실제 Desktop draw로 22 animation frame 제출·control5 -200px·이전/이동 입력 좌표·geometry identity/revision 유지·창/owner 종료; 하드웨어 성능·물리 입력·독립 QA는 별도. 종료 뒤 blank screenshot은 증거에서 제외 |
  
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
@@ -193,13 +204,13 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-07.01** 고정 rate 출력 retirement/recovery에서 whole-owner와 immutable source grid를 보존한다. — 상태=D(검증완료); 선행=-; 근거=E5.
 - [x] **BK-WBS-07.02** source/target 분리된 native presentation/start/pause/resume/end 기초 helper를 검증한다. — 상태=D(검증완료); 선행=-; 근거=E1; 실제 launcher 완료는 아래 별도.
 - [x] **BK-WBS-07.03** target pause/end rebind에서 source-frame floor와 정확한 target-time floor를 분리한다. — 상태=D(검증완료); 선행=-; 근거=E13 actual mixed-rate/retained-tail/planned basis/frozen source/native ACK/cold finite-end helper 회귀; controller publication은 07.08 별도.
-- [ ] **BK-WBS-07.04** 기존 출력 lifecycle/controller를 typed target basis로 확장하고 두 번째 runtime을 만들지 않는다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=정적 DI, legacy default와 오류/회수 의미 보존.
-- [ ] **BK-WBS-07.05** ConvertedAlsaStream을 실제 solo 시작·입력 AudioAuthority·BGM 공급에 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=실제 start gate와 원본 native target 관측.
+- [x] **BK-WBS-07.04** 기존 출력 lifecycle/controller를 typed target basis로 확장하고 두 번째 runtime을 만들지 않는다. — 상태=D(검증완료); 선행=-; 근거=E15; static generic port·기존 legacy default 회귀·실제 converted owner 및 실패/회수/hold 보존; launcher 연결은 아래 별도.
+- [ ] **BK-WBS-07.05** ConvertedAlsaStream을 실제 solo 시작·입력 AudioAuthority·BGM 공급에 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E20 solo, E21 telemetry, E22 local, E23 network target startup 연결·pure 검증; clock-capable endpoint 전체 플레이 및 socket→driver 시작 검증 필요.
 - [ ] **BK-WBS-07.06** 같은 converted 출력 owner를 실제 local cohort 경로에 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=member ID/clock/capture/section 보존.
 - [ ] **BK-WBS-07.07** 실제 recorded playback을 target rate와 source recording grid가 분리된 경로에 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=replay PCM·finite end·drain 검사.
 - [ ] **BK-WBS-07.08** paused output 교체의 open/start/poll/prime/commit을 입력 merger와 원자적으로 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=2개 실제 native progressing 관측; stale publish 상태 보존.
-- [ ] **BK-WBS-07.09** rate/buffer/channel/encoding 변경을 실제 설정 요청·capability·applied 결과까지 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=pending PCM 해석 불일치는 보존하며 거절.
-- [ ] **BK-WBS-07.10** startup/pause/resume/finite end ACK가 lookahead/held-release가 아니라 native crossing을 기다린다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=실제 owner→worker→native 관측 E2E.
+- [ ] **BK-WBS-07.09** rate/buffer/channel/encoding 변경을 실제 설정 요청·capability·applied 결과까지 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E19 target rate/buffer/period/matrix UI bridge 검증; 실제 launcher/encoding 제어·pending PCM 해석 보존은 계속 필요.
+- [ ] **BK-WBS-07.10** startup/pause/resume/finite end ACK가 lookahead/held-release가 아니라 native crossing을 기다린다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E16 공개 audio pump의 pause/resume/held 순서 검증; 실제 launcher owner→worker→native 관측 E2E 및 finite end는 계속 필요.
 - [ ] **BK-WBS-07.11** WASAPI↔ASIO 등 cross-backend 교체의 현재 소스 범위와 missing seam을 audit한다. — 상태=U(현황감사필요); 선행=-; 필요 근거/다음=native source/phase/history/latency/cleanup 교차 검사.
 - [ ] **BK-WBS-07.12** unknown/stale/wrong-domain 관측·취소·실패·재시도가 owner를 유실하지 않는다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=모든 실제 launcher/replacement 회귀.
 - [ ] **BK-WBS-07.13** 모든 OS solo/local launchers가 실제 선택 class/gauge 정책 검증을 통해 network를 준비한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E1/E8 일부; 현재 Windows/macOS parser·foreign typing 재검사.
@@ -265,8 +276,8 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-10.13** screen/fragment/back-stack의 suspend/resume/dispose와 취소를 명시적으로 관리한다. — 상태=D(검증완료); 선행=-; 근거=E0,E1; native/browser 전체 flow는 아래 추가.
 - [x] **BK-WBS-10.14** 노트 visible-range/index/cache가 전체 chart의 매-frame 순회를 피한다. — 상태=D(검증완료); 선행=-; 근거=E0,E1.
 - [ ] **BK-WBS-10.15** 비정상 dense 노트/큰 chart/장시간 projection에서 capacity와 정확한 표시 정책을 검증한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=GPU cache/explicit limit·성능 및 누락 검사.
-- [ ] **BK-WBS-10.16** 개별 component fractional transform/opacity/easing을 paint/hit/clip에 공통 적용한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=현재 whole-scene motion 기반만 존재.
-- [ ] **BK-WBS-10.17** component animation scheduler의 frame budget·취소·suspend/resume/dispose를 구현한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=actual native/browser 비영점 움직임과 unchanged packet 검사.
+- [ ] **BK-WBS-10.16** 개별 component fractional transform/opacity/easing을 paint/hit/clip에 공통 적용한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E17/E18 browser Selection/Display, E24 native Selection/Display 소유자, E25 실제 native software Vulkan 이동/역 hit; 나머지 화면 연동·하드웨어 및 독립 QA 필요.
+- [ ] **BK-WBS-10.17** component animation scheduler의 frame budget·취소·suspend/resume/dispose를 구현한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E17 64-slot/수명/cache·worker scheduling, E18 browser 51프레임/dispose, E24 native 수명 fixture, E25 native 22프레임/cache/dispose; 실제 성능/frame budget 및 독립 QA 필요.
 - [ ] **BK-WBS-10.18** font fallback/Unicode/IME/clipboard/selection이 실제 native/browser 입력 방법에서 동작한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=순수 editor fixture + 실제 API/글꼴.
 - [ ] **BK-WBS-10.19** 0-size/resize/DPI/focus loss/renderer loss/close가 owner cleanup과 input geometry를 보존한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=실제 winit/GPU/browser lifecycle.
 - [ ] **BK-WBS-10.20** Selection→설정→로딩→플레이→pause/output→기록/결과→Back/재시작 전 흐름을 GUI로 검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=실제 shader/클릭/키/수명·독립 GUI QA.

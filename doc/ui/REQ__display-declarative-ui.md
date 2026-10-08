@@ -22,3 +22,19 @@ Verification includes pure layout bounds/error tests, existing Display packet
 reuse/focus/pending/disposal tests and actual desktop interaction/screenshots.
 The shared authoring primitives must compile for the browser target. This first
 migration does not establish responsive layout or completion of other screens.
+
+## Next retained dynamic-layout requirement
+
+The parent-Goal parallel implementation extends this initial static milestone.
+Keep mounted node identity and bounded hierarchy/dependencies after resolution;
+explicit extent, child-size, parent allocation and sibling changes reflow only
+affected geometry. Paint and hit admission use identical published bounds/clips.
+Invalid geometry leaves the previous published state unchanged; zero extent
+suspends output. Unchanged frames reuse packets without rebuilding declarations.
+The original 960x720 layout remains the compatible default, rather than the only
+accepted extent. Preserve current depth/node bounds unless explicitly revised.
+
+Display must exercise actual reflow and shared input geometry. Independent
+Selection/Settings/Records/Practice/Players/Devices/Results authoring then adopts
+the frozen API; Display-only completion does not complete all-screen migration.
+No Virtual DOM, scene transfer or orphan animation lifecycle is introduced.
