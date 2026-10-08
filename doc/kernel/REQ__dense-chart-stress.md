@@ -78,3 +78,27 @@ Reproduce with `cargo test -p beatkernel --locked --test dense_chart_stress`,
 `cargo build --release -p beatkernel --example dense_chart_stress --locked`,
 then the built example with default options or `--help`. Exact executed QA
 results and evidence paths are recorded after independent verification.
+
+## Verified implementation
+
+Frozen source `891eb85` passed independent DEEP code, security and documentation
+review followed by CLI QA. Evidence is in
+`target/wf/qa-cli-dense-chart-01a11dd7/REPORT.md` and `cli-results.json`.
+Full core tests:426 passed, zero failures, including9 independent dense tests.
+All-target core Clippy, scoped formatting and the release example build passed.
+
+QA executed38 release CLI cases: help, default, minimum, partial rows,64 lanes,
+100000 notes, maximum check count, repeated20h/week timestamp origins and28
+invalid inputs. All invalid inputs exited1 without success stdout; successful
+summaries matched independent count, target, overlap and probe formulas.
+Repeated command facts matched excluding informational timing fields. All
+compiler/workload processes reached terminal status; no timeout was claimed
+as proof. Cargo used one job,240s cap and8GiB address-space limit; workloads
+ran sequentially with90s cap and8GiB address-space limit.
+
+Default20000 notes/8 lanes/16 checks produced40000 records,25000 results,
+3 checkpoints and maximum24 visible objects. The100000-note/64-lane/4-check
+case produced200000 records,125024 results,3 checkpoints and maximum128
+visible objects for its scheduled windows. This is not a worst-case capacity
+or performance guarantee. The earlier runtime v1 source remains byte-identical
+to base `9ff3ca1`. Whole13.05/13.08 and full-player acceptance remain open.
