@@ -41,7 +41,7 @@ use beatkernel_bms_runtime::{
     native_cohort::{NativeAudioCohortSession, run_cohort_audio_with_policies_and_results},
     native_gameplay::{
         InputBatch, NativeGameplayConfig, AudioGameplayConfig, NativeGameplayDevice,
-        NativeGameplayResult, retain_input,
+        NativeGameplayResult, NativeCollectedInput,
     },
 };
 use beatkernel_platform::{
@@ -49,20 +49,19 @@ use beatkernel_platform::{
         DeviceFormat, SampleEncoding,
         presentation::discipline::{DisciplineConfig, PresentationDiscipline},
     },
-    linux::{AlsaRequest, AlsaStream, EvdevDevice, EvdevItem, MonotonicClock},
+    linux::{AlsaRequest, AlsaStream, MonotonicClock},
 };
 
 use beatkernel_bms_runtime::native_start::{
     NativeStartConfig, NativeStartDevice, NativeStartObservation, NativeStartResult,
     start_committed,
 };
-use std::collections::VecDeque;
 struct CohortStartupDevice<'a> {
     stream: &'a mut AlsaStream,
-    inputs: &'a mut [EvdevDevice],
+    inputs: &'a mut beatkernel_bms_runtime::native_input::NativeInputCollector,
     clock: &'a MonotonicClock,
     before_origin: &'a mut u64,
-    retained: &'a mut VecDeque<beatkernel::input::PhysicalInputEvent>,
+    retained: &'a mut NativeCollectedInput,
     observed: bool,
 }
 impl NativeStartDevice for CohortStartupDevice<'_> {
@@ -71,20 +70,7 @@ impl NativeStartDevice for CohortStartupDevice<'_> {
         Ok(self.stream.start()?)
     }
     fn service_input(&mut self, retain: bool) -> NativeStartResult<bool> {
-        for input in &mut *self.inputs {
-            if !startup_input(
-                input,
-                self.before_origin,
-                if retain {
-                    Some(&mut *self.retained)
-                } else {
-                    None
-                },
-            )? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        startup_input(self.inputs, self.before_origin, self.retained, retain)
     }
     fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<()>>> {
         let pair = observe(self.stream, !self.observed)?;
@@ -117,10 +103,9 @@ type OwnedOutput = GameplayOutputOwner<
 struct CohortDevice<'a> {
     output: &'a mut OwnedOutput,
     output_ui: &'a mut beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi,
-    inputs: &'a mut [EvdevDevice],
+    inputs: &'a mut beatkernel_bms_runtime::native_input::NativeInputCollector,
     clock: &'a MonotonicClock,
-    backlogged: &'a mut [bool],
-    retained: &'a mut VecDeque<beatkernel::input::PhysicalInputEvent>,
+    retained: &'a mut NativeCollectedInput,
     startup_end: Option<&'a mut NativeEnd>,
     startup_primed: bool,
 }
@@ -195,44 +180,7 @@ impl NativeGameplayDevice for CohortDevice<'_> {
         &mut self,
         events: &mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
     ) -> NativeGameplayResult<InputBatch> {
-        if self.inputs.len() != self.backlogged.len() || self.inputs.is_empty() {
-            return Err("invalid local evdev ownership".into());
-        }
-        for _ in 0..256 {
-            let Some(event) = self.retained.pop_front() else {
-                break;
-            };
-            retain_input(events, event)?;
-        }
-        if !self.retained.is_empty() {
-            return Ok(InputBatch {
-                backlog: true,
-                closed: false,
-            });
-        }
-        self.backlogged.fill(true);
-        for _ in 0..256 {
-            if self.backlogged.iter().all(|pending| !pending) {
-                break;
-            }
-            for (index, input) in self.inputs.iter_mut().enumerate() {
-                if !self.backlogged[index] {
-                    continue;
-                }
-                match input.read_next()? {
-                    EvdevItem::WouldBlock => self.backlogged[index] = false,
-                    EvdevItem::Ignored => {}
-                    EvdevItem::Event(event) => retain_input(events, event)?,
-                    EvdevItem::Dropped | EvdevItem::Resync(_) => {
-                        return Err("local evdev loss/resync; restart whole cohort".into());
-                    }
-                }
-            }
-        }
-        Ok(InputBatch {
-            backlog: self.backlogged.iter().any(|pending| *pending),
-            closed: false,
-        })
+        self.retained.acquire(self.inputs, events, 256)
     }
     fn observe_end(
         &mut self,
@@ -259,12 +207,7 @@ impl NativeGameplayDevice for CohortDevice<'_> {
 impl beatkernel_bms_runtime::native_audio_startup::NativeAudioSeedPort for CohortDevice<'_> {
     fn service_input(&mut self) -> NativeGameplayResult<bool> {
         let mut ignored = 0;
-        for input in &mut *self.inputs {
-            if !startup_input(input, &mut ignored, Some(&mut *self.retained))? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        startup_input(self.inputs, &mut ignored, self.retained, true)
     }
     fn observe_audio(
         &mut self,
@@ -425,17 +368,6 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         },
     )?;
     let mut bgm = BgmSession(bgm);
-    // Every evdev owner precedes the stream. Native output therefore stops and
-    // joins before input handles disappear on both normal and exceptional exits.
-    let mut inputs = Vec::with_capacity(count);
-    let mut native_numbers = HashSet::new();
-    for (index, path) in options.local_inputs.iter().enumerate() {
-        let input = EvdevDevice::open(path, DeviceId(u64::try_from(index + 1)?), HOST)?;
-        if !native_numbers.insert(input.native_device_number()?) {
-            return Err("local input paths alias the same physical character device".into());
-        }
-        inputs.push(input);
-    }
     let stream = AlsaStream::open(
         AlsaRequest {
             device: options.alsa.clone(),
@@ -462,6 +394,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         &output,
         competition_options.network.is_none(),
     )?;
+    let (mut inputs, _descriptors, input_counters) = super::collected_input::open(options.local_inputs.clone())?;
     println!(
         "local players={count}; shared requested/applied ALSA={:?}; exact input devices={:?}; one asset bank/BGM/output; independent judges/captures/scores",
         output
@@ -472,7 +405,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         options.local_inputs
     );
     let mut before_origin = 0u64;
-    let mut startup_inputs = VecDeque::new();
+    let mut startup_inputs = NativeCollectedInput::new()?;
     let outcome = (|| -> Result<Option<Vec<(beatkernel_bms_runtime::local_players::PlayerId,beatkernel_bms_runtime::play_result::CompletedPlayResult)>>> {
         let (network_origin, playback_origin) = if let Some(network) = network.as_mut() {
             let started = start_committed(
@@ -520,8 +453,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             epoch, basis, HOST, ClockPoint { domain: LOGICAL, timestamp: Timestamp::ZERO }, audio_config,
         )?;
         let seeded = {
-            let mut backlogged = vec![true; count];
-            let mut device = CohortDevice { output:&mut output, output_ui:&mut output_ui, inputs:&mut inputs, clock:&clock, backlogged:&mut backlogged, retained:&mut startup_inputs,
+            let mut device = CohortDevice { output:&mut output, output_ui:&mut output_ui, inputs:&mut inputs, clock:&clock, retained:&mut startup_inputs,
                 startup_end: if network_origin.is_none() { native_end.as_mut() } else { None }, startup_primed:false };
             beatkernel_bms_runtime::native_audio_startup::prime_native_audio(&mut device, &mut presentation, &mut bgm, &mut producer, startup_timeout)?
         };
@@ -542,13 +474,11 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             hazard_sounds,
         )?;
         let pump = {
-            let mut backlogged = vec![true; count];
             let mut device = CohortDevice {
                 output: &mut output,
                 output_ui: &mut output_ui,
                 inputs: &mut inputs,
                 clock: &clock,
-                backlogged: &mut backlogged,
                 retained: &mut startup_inputs,
                 startup_end: None,
                 startup_primed: false,
@@ -602,7 +532,9 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     let timing = output
         .current()
         .and_then(|output| output.stream().timing_snapshot());
+    inputs.cancel();
     let stop = output.stop();
+    let input_stop = inputs.stop_and_join();
     println!(
         "shared final ALSA={:?}; timing={timing:?}; last observed mixer={:?}; pre-origin ignored={before_origin}; physical delivery unverified",
         output.current().map(|output| output.stream().snapshot()),
@@ -611,18 +543,13 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             .and_then(|output| output.stream().last_render_report())
             .or(output.render_report())
     );
-    for (index, input) in inputs.iter().enumerate() {
-        println!(
-            "player{} final evdev counters={:?}",
-            options.local_players[index].0,
-            input.counters()
-        );
-    }
+    println!("final local evdev counters={:?}", input_counters.try_recv().ok());
     if let Err(error) = &stop {
         eprintln!("local ALSA stop/join error: {error}");
     }
     drop(inputs);
     let mut failures = Vec::new();
+    if let Err(error) = input_stop { failures.push(format!("input cleanup: {error}")); }
     if let Err(error) = stop {
         failures.push(format!("output cleanup: {error}"));
     }

@@ -480,6 +480,9 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
 #[cfg(target_os = "linux")]
 #[path = "linux_bms/local.rs"]
 mod local_native;
+#[cfg(target_os = "linux")]
+#[path = "linux_bms/input.rs"]
+mod collected_input;
 
 #[cfg(target_os = "linux")]
 mod native {
@@ -511,7 +514,7 @@ mod native {
             presentation::discipline::{DisciplineConfig, PresentationDiscipline},
         },
         linux::{
-            AlsaRequest, AlsaStatus, AlsaStream, EvdevDevice, EvdevItem, MonotonicClock,
+            AlsaRequest, AlsaStatus, AlsaStream, MonotonicClock,
             alsa_presentation_pair_with_basis,
         },
     };
@@ -547,10 +550,10 @@ mod native {
     };
     struct StartupDevice<'a> {
         stream: &'a mut AlsaStream,
-        input: &'a mut EvdevDevice,
+        input: &'a mut beatkernel_bms_runtime::native_input::NativeInputCollector,
         clock: &'a MonotonicClock,
         before_origin: &'a mut u64,
-        retained: &'a mut VecDeque<PhysicalInputEvent>,
+        retained: &'a mut NativeCollectedInput,
         observed: bool,
     }
     impl NativeStartDevice for StartupDevice<'_> {
@@ -562,11 +565,8 @@ mod native {
             startup_input(
                 self.input,
                 self.before_origin,
-                if retain {
-                    Some(&mut *self.retained)
-                } else {
-                    None
-                },
+                self.retained,
+                retain,
             )
         }
         fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<()>>> {
@@ -589,7 +589,7 @@ mod native {
     }
     use beatkernel_bms_runtime::native_gameplay::{
         InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
-        NativeAudioGameplaySession, AudioGameplayConfig, GameplaySession, retain_input,
+        NativeAudioGameplaySession, AudioGameplayConfig, GameplaySession, NativeCollectedInput,
         run_gameplay_audio_with_policy_and_result_and_score,
     };
     use beatkernel_bms_runtime::{
@@ -604,9 +604,9 @@ mod native {
     struct GameplayDevice<'a> {
         output: &'a mut OwnedOutput,
         output_ui: &'a mut beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi,
-        input: &'a mut EvdevDevice,
+        input: &'a mut beatkernel_bms_runtime::native_input::NativeInputCollector,
         clock: &'a MonotonicClock,
-        retained: &'a mut VecDeque<PhysicalInputEvent>,
+        retained: &'a mut NativeCollectedInput,
         startup_end: Option<&'a mut beatkernel_bms_runtime::native_end::NativeEnd>,
         startup_primed: bool,
     }
@@ -685,30 +685,7 @@ mod native {
             &mut self,
             events: &mut VecDeque<PhysicalInputEvent>,
         ) -> NativeGameplayResult<InputBatch> {
-            for _ in 0..256 {
-                let next = if let Some(event) = self.retained.pop_front() {
-                    EvdevItem::Event(event)
-                } else {
-                    self.input.read_next()?
-                };
-                match next {
-                    EvdevItem::WouldBlock => {
-                        return Ok(InputBatch {
-                            backlog: false,
-                            closed: false,
-                        });
-                    }
-                    EvdevItem::Ignored => {}
-                    EvdevItem::Event(event) => retain_input(events, event)?,
-                    EvdevItem::Dropped | EvdevItem::Resync(_) => {
-                        return Err("evdev loss/resync; cleanup and restart required".into());
-                    }
-                }
-            }
-            Ok(InputBatch {
-                backlog: true,
-                closed: false,
-            })
+            self.retained.acquire(self.input, events, 256)
         }
         fn observe_end(
             &mut self,
@@ -731,36 +708,14 @@ mod native {
             Err("ALSA uses logical mixer scheduling".into())
         }
     }
-    // The owner drains bounded batches; the audio callback never waits on input.
     pub(super) fn startup_input(
-        input: &mut EvdevDevice,
+        input: &mut beatkernel_bms_runtime::native_input::NativeInputCollector,
         before_origin: &mut u64,
-        retained: Option<&mut VecDeque<PhysicalInputEvent>>,
+        retained: &mut NativeCollectedInput,
+        retain: bool,
     ) -> Result<bool> {
-        if player::cancelled() {
-            return Ok(false);
-        }
-        let mut retained = retained;
-        for _ in 0..256 {
-            match input.read_next()? {
-                EvdevItem::WouldBlock => break,
-                EvdevItem::Ignored => {}
-                EvdevItem::Event(event) => {
-                    if let Some(events) = retained.as_deref_mut() {
-                        if events.len() == MAX_START_INPUT_EVENTS {
-                            return Err("startup input capacity exceeded; restart required".into());
-                        }
-                        events.push_back(event);
-                    } else {
-                        *before_origin = before_origin.saturating_add(1);
-                    }
-                }
-                EvdevItem::Dropped | EvdevItem::Resync(_) => {
-                    return Err("evdev loss during startup; restart required".into());
-                }
-            }
-        }
-        Ok(true)
+        if player::cancelled() { return Ok(false); }
+        retained.service_start(input, retain, before_origin, 256)
     }
     /// Declared finite association permission and availability for the negotiated grid.
     pub(super) fn audio_timing_config(
@@ -796,7 +751,7 @@ mod native {
     impl beatkernel_bms_runtime::native_audio_startup::NativeAudioSeedPort for GameplayDevice<'_> {
         fn service_input(&mut self) -> NativeGameplayResult<bool> {
             let mut ignored = 0;
-            startup_input(self.input, &mut ignored, Some(self.retained))
+            startup_input(self.input, &mut ignored, self.retained, true)
         }
         fn observe_audio(
             &mut self,
@@ -965,9 +920,6 @@ mod native {
             },
         )?;
         let mut bgm = BgmSession(bgm);
-        // Open evdev first: stream RAII/drop and explicit stop join output before
-        // this handle can disappear on setup, startup, or gameplay failure.
-        let mut input = EvdevDevice::open(&options.evdev, DEVICE, HOST)?;
         let request = AlsaRequest {
             device: options.alsa,
             format: DeviceFormat::new(
@@ -992,6 +944,9 @@ mod native {
             &output,
             competition_options.network.is_none(),
         )?;
+        // Heavy asset/output preparation precedes acquisition so setup cannot
+        // fill the bounded transport with idle completion markers.
+        let (mut input, descriptors, input_counters) = super::collected_input::open(vec![options.evdev.clone()])?;
         println!(
             "requested/applied ALSA={:?}; evdev={:?}; exact source={:?}; bindings={:?}; windows={}/{}ns offset={}ns preroll={}ns advance_lag={}ns voices={} channel_policy={} queue/pending={} live_slack={SLACK}",
             output
@@ -999,7 +954,7 @@ mod native {
                 .ok_or("initial ALSA output missing")?
                 .stream()
                 .configuration(),
-            input.descriptor(),
+            descriptors[0],
             DEVICE,
             options.bindings,
             options.early,
@@ -1016,7 +971,7 @@ mod native {
             capacity
         );
         let mut before_origin = 0u64;
-        let mut startup_inputs = VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
+        let mut startup_inputs = NativeCollectedInput::new()?;
         let mut score = beatkernel_bms_runtime::competition::ScoreSummary::default();
         let outcome =
             (|| -> Result<Option<beatkernel_bms_runtime::play_result::CompletedPlayResult>> {
@@ -1205,17 +1160,18 @@ mod native {
                     )
                 };
                 println!(
-                    "runtime processing={:?} counters={:?}; pre-origin ignored={before_origin}; evdev={:?}",
+                    "runtime processing={:?} counters={:?}; pre-origin ignored={before_origin}; evdev collector active",
                     runtime.telemetry().processing(),
                     runtime.telemetry().counters(),
-                    input.counters()
                 );
                 pump_outcome
             })();
         let timing = output
             .current()
             .and_then(|output| output.stream().timing_snapshot());
-        let stop = output.stop(); // joins and tears down native handles before evdev drop
+        input.cancel();
+        let stop = output.stop();
+        let input_stop = input.stop_and_join();
         match output
             .current()
             .and_then(|output| output.stream().last_render_report())
@@ -1229,19 +1185,18 @@ mod native {
             ),
         }
         println!(
-            "final independent ALSA counters={:?}; last separately coherent timing={timing:?}; evdev={:?}; pre-origin ignored={before_origin}; physical latency=unmeasured",
+            "final independent ALSA counters={:?}; last separately coherent timing={timing:?}; pre-origin ignored={before_origin}; physical latency=unmeasured",
             output.current().map(|output| output.stream().snapshot()),
-            input.counters()
         );
         if let Err(error) = &stop {
             eprintln!("ALSA stop/join error: {error}");
         }
-        // Final input counters were read above; close evdev before file I/O.
+        println!("final evdev counters={:?}", input_counters.try_recv().ok());
         drop(input);
         finish_solo_with_result_and_score(
             outcome,
             stop.map_err(Into::into),
-            Ok(()),
+            input_stop.map_err(Into::into),
             competition.as_mut(),
             capture,
             gauge.profile(),
