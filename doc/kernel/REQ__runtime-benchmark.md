@@ -103,16 +103,18 @@ comparison remain WBS13.08 and broader performance acceptance obligations.
 
 ## Verified software baseline
 
-Independent CLI QA at `6c62108` rebuilt the release example, passed example
-Clippy and 23 report tests, and validated all six default cases three times.
+Independent CLI QA at `24663f3` rebuilt the release example, passed example
+Clippy and 24 report tests, and validated all six default cases three times.
 Every run emitted 4785 operations; measured frames were 52000,208000,832000 for
 buffers32,128,512, with retained Runtime samples4096 and Mixer samples2000.
 The benchmark artifact was854240bytes and reported debug_assertions=false.
 This artifact size describes the benchmark executable, not the BMS player.
 Actual help/refusal/stdout paths, existing-file and dangling-symlink preservation,
 timeout joining, and post-reap descendant cleanup passed.
+The actual temporary-repository regression and public report execution also
+preserved repository index bytes/mtime and left no index lock.
 
-Evidence is retained locally in `target/wf/qa-cli-runtime-report-01a11d72-1`.
+Evidence is retained locally in `target/wf/qa-cli-runtime-report-01a11d72-2`.
 Linux was actually executed. Darwin/unknown-resource/fallback tests do not
 establish execution on those hosts. There is no performance threshold,
 optimization/comparison, full-player, GPU or physical timing PASS in this result.
