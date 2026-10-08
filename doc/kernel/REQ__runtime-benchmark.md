@@ -70,6 +70,8 @@ logical CPUs/Python, available Git revision/tracked-dirty state, and artifact
 SHA256/byte size. Recheck artifact identity after the full matrix; mutation
 refuses publication. Timing/resource observations can vary between repetitions;
 deterministic counters, frames and checksum must agree within each case.
+Git status collection disables optional locks and must not refresh or rewrite
+the repository index. Unavailable/timed-out Git observations remain unavailable.
 
 Parent-observed child wall time and Rust measured-loop elapsed are distinct.
 On supported POSIX hosts, one `wait4` owner captures original per-child CPU
@@ -98,3 +100,19 @@ Independent parser/process/publication tests and an actual release-binary
 six-case matrix are required. Debug smoke cannot replace release evidence.
 Dense charts, UI stall, multiple players, GPU, long soak and competitor workload
 comparison remain WBS13.08 and broader performance acceptance obligations.
+
+## Verified software baseline
+
+Independent CLI QA at `6c62108` rebuilt the release example, passed example
+Clippy and 23 report tests, and validated all six default cases three times.
+Every run emitted 4785 operations; measured frames were 52000,208000,832000 for
+buffers32,128,512, with retained Runtime samples4096 and Mixer samples2000.
+The benchmark artifact was854240bytes and reported debug_assertions=false.
+This artifact size describes the benchmark executable, not the BMS player.
+Actual help/refusal/stdout paths, existing-file and dangling-symlink preservation,
+timeout joining, and post-reap descendant cleanup passed.
+
+Evidence is retained locally in `target/wf/qa-cli-runtime-report-01a11d72-1`.
+Linux was actually executed. Darwin/unknown-resource/fallback tests do not
+establish execution on those hosts. There is no performance threshold,
+optimization/comparison, full-player, GPU or physical timing PASS in this result.

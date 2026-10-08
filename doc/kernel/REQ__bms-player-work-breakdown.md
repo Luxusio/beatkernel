@@ -78,6 +78,7 @@ python3 tools/wbs_status.py --ready
 | E28 | `selected-quic-actual-development.log`: actual selected cohort 2 PASS; `selected-webtransport-actual-development.log`: actual selected room 2 PASS | 실제 admitted class/gauge/member identity의 peer start/progress/finals/drain·policy mismatch 거절·owner/relay 종료; full native room/음향 동기화·재리뷰/QA는 별도 |
 | E29 | `browser-pagination-app-development.log`: lib 2107 PASS / 실패0 / ignored4; current WASM/bindgen PASS; `browser-pagination-all-node-development.log`: Node 707 PASS / 실패0 | 실제 row 수 기준 Players/Devices selection/page 정규화·21→10/20→5→empty shrink·cached compose·거절 회귀; 실제 브라우저 재검증·독립 재리뷰/QA는 별도 |
 | E30 | `24b2569`의 독립 rank-metadata QA: `target/wf/qa-cli-bms-rank-01a11d56-1`; 전체 adapter 97 PASS / 실패0 / ignored0, 새 public rank fixture10, API docs PASS, code/security/docs review PASS | 실제 RANK/DEFEXRANK exact metadata·명시 precedence·조건/중복/원본 line·fabricated map·원래 판정 identity 검증. 기존 raw Clippy5와 lib/parser 포맷 차이는 실제 b097e42 baseline에서 재현; raw lint/format PASS 아님. timing preset/dynamic EXRANK/app profile 적용/전체 제품 완료는 별도 |
+| E31 | `6c62108`의 독립 runtime report QA: `target/wf/qa-cli-runtime-report-01a11d72-1`; release example build/Clippy PASS, Python23 PASS, 실제6조합×3회18run report와 CLI 거절/보존/timeout/descendant 종료 PASS | 고정 software Runtime/queue/Mixer의 원본 per-child CPU/RSS·loop 측정·artifact와 unavailable 구분. 854240bytes는 benchmark 크기이며 player 크기 아님. Linux 실제실행, 다른 OS adapter는 테스트 근거; dense/UI stall/다인/GPU/soak/비교 및 전체 제품 성능은 별도 |
  
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
@@ -337,7 +338,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [ ] **BK-WBS-13.05** 대규모 노트·64-member·오랜 플레이·반복 seek/rebind의 soak/stress를 실행한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=실제 CPU/memory/queue/owner leak·20h/1week 가상 시간.
 - [ ] **BK-WBS-13.06** 전체 RT callback과 판정 hot path alloc/lock/I/O/error 경로를 계측한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=일반/오류/포화·모든 backend; scoped 테스트만 확대하지 않음.
 - [ ] **BK-WBS-13.07** p50/p95/p99/max·drop/xrun·scheduler jitter 계측을 재현 workload에 연결한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=계측 위치/provenance/용량·관측 불가 표시.
-- [ ] **BK-WBS-13.08** 성능 기준 workload·CPU/RAM/GPU/배포 artifact/실행 절차를 고정한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=REQ__runtime-benchmark의 fixed software matrix·검증 report 구현/QA; 대형 chart·dense notes·UI stall·다인·GPU·장시간 비교는 계속 필요.
+- [ ] **BK-WBS-13.08** 성능 기준 workload·CPU/RAM/GPU/배포 artifact/실행 절차를 고정한다. — 상태=W(구현·연동중); 선행=-; 근거/다음=E31 fixed software matrix/report 검증 완료; 대형 chart·dense notes·UI stall·다인·GPU·장시간 비교는 계속 필요.
 - [ ] **BK-WBS-13.09** 입력 1kHz 이상에서 device→collector→runtime 손실/순서/jitter를 측정한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=실제 source/device.
 - [ ] **BK-WBS-13.10** buffer 크기별 native audio underrun/latency·교체 후 지연을 측정한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=실제 WASAPI/ASIO/ALSA/CoreAudio.
 - [ ] **BK-WBS-13.11** 입력→소리·구간 재시작의 end-to-end 음향 latency/drift를 측정한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=물리 loopback/측정장비와 raw data.

@@ -283,7 +283,7 @@ def _git_metadata():
                                   timeout=2, check=True).stdout.decode("ascii").strip()
         if not re.fullmatch(r"[0-9a-f]{40,64}", revision):
             return None
-        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+        dirty = subprocess.run(["git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=no"],
                                cwd=root, capture_output=True, timeout=2, check=True).stdout
         return {"revision": revision, "tracked_dirty": bool(dirty)}
     except (OSError, subprocess.SubprocessError, UnicodeError):

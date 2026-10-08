@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -411,6 +413,46 @@ class CollectorAndPublicationTests(unittest.TestCase):
                 benchmark.publish_report(self.collect(), target)
         self.assertEqual(target.read_bytes(), b"concurrent owner")
         self.assertEqual(sorted(p.name for p in target.parent.iterdir()), ["prebuilt", "raced.json"])
+
+
+class GitMetadataTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("git"), "Git unavailable")
+    def test_clean_metadata_does_not_refresh_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            tools = repository / "tools"
+            tools.mkdir()
+            tracked = repository / "tracked.txt"
+            tracked.write_text("unchanged fixture content\n")
+            environment = dict(os.environ)
+            # Keep the fixture independent of any surrounding repository or
+            # personal configuration; all Git mutations belong to this tempdir.
+            for key in tuple(environment):
+                if key.startswith("GIT_"):
+                    del environment[key]
+            environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+            def git(*args):
+                return subprocess.run([shutil.which("git"), *args], cwd=repository,
+                    env=environment, check=True, capture_output=True, text=True,
+                    timeout=5).stdout.strip()
+            git("init", "--quiet")
+            git("add", "tracked.txt")
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@invalid",
+                "commit", "--quiet", "--no-gpg-sign", "-m", "fixture")
+            revision = git("rev-parse", "HEAD")
+            index = repository / ".git" / "index"
+            original_bytes = index.read_bytes()
+            original_mtime = index.stat().st_mtime_ns
+            original_stat = tracked.stat()
+            os.utime(tracked, ns=(original_stat.st_atime_ns,
+                                 original_stat.st_mtime_ns + 1_000_000_000))
+            with mock.patch.object(benchmark, "__file__", str(tools / "runtime_benchmark.py")), mock.patch.dict(os.environ, environment, clear=True):
+                metadata = benchmark._git_metadata()
+            self.assertEqual(metadata["revision"], revision)
+            self.assertIs(metadata["tracked_dirty"], False)
+            self.assertEqual(index.read_bytes(), original_bytes)
+            self.assertEqual(index.stat().st_mtime_ns, original_mtime)
+            self.assertFalse((repository / ".git" / "index.lock").exists())
 
 
 class CliTests(unittest.TestCase):
