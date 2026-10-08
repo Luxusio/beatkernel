@@ -1,6 +1,6 @@
 # Native software output continuity
 
-Status: implementation candidates present; combined review and QA pending.
+Status: implementation, independent review and fresh required QA passed.
 
 The existing recovery carriers now transfer a complete statically typed output
 owner. Ordinary Mixer constructors retain their original inference behavior;
@@ -36,7 +36,7 @@ Independent review found one invalid-domain refusal regression: freshness was
 checked before noncommitting native validation. Validation now runs first;
 valid earlier-tail evidence still waits before any commit or anchor collection.
 The unchanged invalid-domain refusal fixture and new full-owner early/fresh
-publication fixtures pass. Final independent review and required QA remain open.
+publication fixtures pass.
 
 The first independent QA passed all functional checks: 3,072 workspace
 unit/integration tests and 20 doc-tests, both production WASM libraries,
@@ -44,8 +44,17 @@ Windows/Darwin Rust typing, an independent public owner driver and an actual
 ALSA null-plugin diagnostic. Null-plugin execution is not physical presentation
 proof. QA also identified four newly introduced formatting drifts and a
 non-Linux unused test-helper reexport. Those four files were formatted and the
-helper export now matches its Linux test consumers; final review and QA are
-being refreshed after this bounded correction.
+helper export now matches its Linux test consumers. Final independent review
+and refreshed QA at `4e536cd` passed after this bounded correction.
+
+Final evidence: target/wf/native-output-continuity/qa-cli-2/. Fresh workspace
+passed 3,072 unit/integration tests and 20 doc-tests, zero failures and six
+ignored. Both production WASM libraries and Windows/Darwin all-target Rust
+checks passed. Four corrected files passed targeted formatting, and the foreign
+helper warning is absent. The independent public owner driver and actual ALSA
+null-plugin diagnostic passed again. Focused tests and the diagnostic are
+reported separately rather than added to the workspace count. Existing warnings
+and repository-wide health gaps remain; this is not full player completion.
 
 Broad repository formatting and strict clippy remain non-green. QA compared
 task-base source and formatting, distinguishing old drift from the four new

@@ -1,6 +1,7 @@
 # Native output software continuity
 
-Status: implementation in progress; independent review and QA pending.
+Status: same-rate ALSA/application software continuity implemented; independent
+code/security/documentation review and fresh required CLI QA passed.
 
 An output owner retains its unique Mixer, prepared converter, generated target
 PCM and positively admitted prefix together. Stop/recovery/reopen must transfer
