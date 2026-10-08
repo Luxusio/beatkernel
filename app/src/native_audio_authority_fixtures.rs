@@ -12,14 +12,13 @@ use crate::{
     local_runtime::{MemberConfig, PlayerReport, RuntimeGroup, SoloRuntime},
     native_audio_presentation::{NativeAudioPresentation, NativeAudioSnapshot},
     native_cohort::{
-        AudioCohortSession, GameplayPlayerState, run_cohort_audio_with_results_and_ports,
+        run_cohort_audio_with_results_and_ports, AudioCohortSession, GameplayPlayerState,
     },
     native_end::{EndBoundary, NativeEnd},
     native_gameplay::{
-        AudioGameplayConfig, AudioGameplaySession, GameplaySession, InputBatch,
-        NativeGameplayConfig, NativeGameplayResult,
         run_gameplay_audio_with_policy_and_result_and_score_and_ports,
-        run_gameplay_audio_with_result_and_ports,
+        run_gameplay_audio_with_result_and_ports, AudioGameplayConfig, AudioGameplaySession,
+        GameplaySession, InputBatch, NativeGameplayConfig, NativeGameplayResult,
     },
     native_gameplay_host::{
         NativeGameplayDiagnostic, NativeGameplayHost, NoopGameplayHost, PauseState,
@@ -32,20 +31,20 @@ use crate::{
 };
 use beatkernel::{
     audio::{
-        AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample, RenderReport,
-        SampleBank, SampleId, VoiceId, command_queue, command_queue_with_start_gate,
+        command_queue, command_queue_with_start_gate, AudioFormat, AudioLimits, Mixer, MixerConfig,
+        PcmLimits, PcmSample, RenderReport, SampleBank, SampleId, VoiceId,
     },
     input::{
         Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId, DeviceSelector,
         EventMeta, GameControlId, PhysicalControlId, PhysicalInputEvent,
     },
     judge::{JudgeEngine, JudgeGrade, JudgeOutcome, JudgeStage, JudgeWindow},
-    replay::{ReplayHeader, ReplayOperation, codec::ReplayCodecLimits},
+    replay::{codec::ReplayCodecLimits, ReplayHeader, ReplayOperation},
     runtime::{RuntimeProcessingClock, RuntimeReport, SoundBinding},
     telemetry::InputDeliveryTelemetry,
     time::{
-        ClockDomainId, ClockMappingQuality, ClockPair, ClockPoint, Duration, ExtrapolationPolicy,
-        Timestamp, presentation::PresentationEstimator,
+        presentation::PresentationEstimator, ClockDomainId, ClockMappingQuality, ClockPair,
+        ClockPoint, Duration, ExtrapolationPolicy, Timestamp,
     },
     transport::{Rate, Transport},
 };
@@ -181,6 +180,9 @@ struct Device {
     first_input_at: i64,
     stop_after: Option<usize>,
     extra_normal_input: bool,
+    // Scripted native drain evidence, independent of the output/receipt clock.
+    collector_cuts: Option<Vec<Option<ClockPoint>>>,
+    collector_closed_step: Option<usize>,
     pcm: Vec<f32>,
     observed_pairs: Vec<ClockPair>,
 }
@@ -367,8 +369,14 @@ impl GameplayDevice for Device {
             }
         }
         Ok(InputBatch {
+            completed_through: self.collector_cuts.as_ref().map_or_else(
+                || Some(self.now()),
+                |cuts| cuts.get(self.step - 1).copied().flatten(),
+            ),
             backlog: self.step == 2 || (self.backlog_three && self.step == 3),
-            closed: false,
+            closed: self
+                .collector_closed_step
+                .is_some_and(|step| self.step >= step),
         })
     }
     fn observe_end(
@@ -530,6 +538,8 @@ fn device(
             first_input_at: 10_000_000,
             stop_after: None,
             extra_normal_input: false,
+            collector_cuts: None,
+            collector_closed_step: None,
             pcm: vec![],
             observed_pairs: vec![],
         },
@@ -711,8 +721,8 @@ impl Solo {
 }
 
 #[test]
-fn actual_audio_pump_joins_backlog_maps_original_input_and_selected_score_without_host_rate_correction()
- {
+fn actual_audio_pump_joins_backlog_maps_original_input_and_selected_score_without_host_rate_correction(
+) {
     let mut f = Solo::new(Mode::Normal, false, true);
     let initial = f.runtime.transport_mut().anchor();
     let (result, score) = f.run(true);
@@ -788,12 +798,11 @@ fn startup_missing_single_anchor_and_stationary_output_do_not_follow_generated_c
         Some(logical(20_000_000))
     );
     assert!(f.device.mixer.frame_cursor() > 20);
-    assert!(
-        f.host
-            .reports
-            .iter()
-            .all(|r| r.song_time <= Timestamp::from_nanos(20_000_000))
-    );
+    assert!(f
+        .host
+        .reports
+        .iter()
+        .all(|r| r.song_time <= Timestamp::from_nanos(20_000_000)));
 }
 
 #[test]
@@ -850,16 +859,12 @@ fn genuine_point_and_asio_pause_resume_keep_correlation_and_use_raw_logical_cont
         assert_eq!(f.pause.epoch(), 0);
         let anchors = f.runtime.transport_mut().anchors().to_vec();
         assert!(anchors.iter().all(|a| a.host_time < host(0).timestamp));
-        assert!(
-            anchors
-                .iter()
-                .any(|a| a.host_time == logical(50_000_000).timestamp && a.rate == Rate::ZERO)
-        );
-        assert!(
-            anchors
-                .iter()
-                .any(|a| a.host_time == logical(100_000_000).timestamp && a.rate == Rate::NORMAL)
-        );
+        assert!(anchors
+            .iter()
+            .any(|a| a.host_time == logical(50_000_000).timestamp && a.rate == Rate::ZERO));
+        assert!(anchors
+            .iter()
+            .any(|a| a.host_time == logical(100_000_000).timestamp && a.rate == Rate::NORMAL));
         let post = f
             .host
             .reports
@@ -871,11 +876,10 @@ fn genuine_point_and_asio_pause_resume_keep_correlation_and_use_raw_logical_cont
             })
             .unwrap();
         assert_eq!(post.song_time, Timestamp::from_nanos(80_000_000));
-        assert!(
-            post.judge_events
-                .iter()
-                .any(|e| matches!(e.outcome, JudgeOutcome::Hit { .. }))
-        );
+        assert!(post
+            .judge_events
+            .iter()
+            .any(|e| matches!(e.outcome, JudgeOutcome::Hit { .. })));
         assert_eq!(f.presentation.authority().epoch().id, 0);
         assert!(
             f.presentation
@@ -1024,16 +1028,14 @@ fn actual_local_reported_audio_failure_commits_processed_member_prefix_once() {
         delivery: &mut delivery,
         pre_origin_inputs: &mut pre,
     };
-    assert!(
-        run_cohort_audio_with_results_and_ports(
-            &mut device,
-            session,
-            audio_config(false, false),
-            &mut Control::default(),
-            &mut host_port
-        )
-        .is_err()
-    );
+    assert!(run_cohort_audio_with_results_and_ports(
+        &mut device,
+        session,
+        audio_config(false, false),
+        &mut Control::default(),
+        &mut host_port
+    )
+    .is_err());
     assert_eq!(states[0].score.hits, 3);
     assert_eq!(states[1].score.hits, 0);
     assert_eq!(
@@ -1289,6 +1291,144 @@ fn host_normalized_cohort_is_refused_from_real_group_identity_before_device_effe
 }
 
 #[test]
+fn unavailable_collector_cut_keeps_audio_observation_but_withholds_solo_prefix_and_judgment() {
+    for cut in [None, Some(host(0)), Some(host(-1))] {
+        let mut f = Solo::new(Mode::Normal, false, true);
+        f.device.collector_cuts = Some(vec![cut; 100]);
+        let (result, score) = f.run(true);
+        assert!(result.unwrap().is_none());
+        assert_eq!(score.hits, 0);
+        assert_eq!(score.misses, 0);
+        assert!(f.host.reports.iter().all(|r| r.input.is_none()));
+        assert_eq!(f.presentation.authority().acquired_prefix(), None);
+        assert_eq!(f.presentation.authority().committed_input_host(), None);
+        assert!(f.presentation.latest_record().is_some());
+        assert!(f.device.observed_pairs.len() > 2);
+        assert_eq!(f.delivery.observed_events(), 2);
+        assert_eq!(f.merger.pending(), 2);
+        assert!(f.capture.as_ref().unwrap().records().is_empty());
+    }
+}
+
+#[test]
+fn cohort_empty_transfer_does_not_turn_receipt_into_all_source_completion() {
+    let mut f = Cohort::new(ClockDomainId(3));
+    f.device.collector_cuts = Some(vec![None; 100]);
+    assert!(f.run().unwrap().is_none());
+    assert_eq!(f.p.authority().acquired_prefix(), None);
+    assert!(f.p.latest_record().is_some());
+    assert_eq!(f.delivery.observed_events(), 4);
+    assert_eq!(f.merger.pending(), 4);
+    for state in &f.states {
+        assert_eq!(state.score.hits, 0);
+        assert_eq!(state.score.misses, 0);
+        assert!(state.capture.as_ref().unwrap().records().is_empty());
+    }
+}
+
+#[test]
+fn delayed_collector_cut_admits_original_input_with_original_receipt_telemetry() {
+    let mut baseline = Solo::new(Mode::Normal, false, true);
+    assert!(baseline.run(true).0.unwrap().is_none());
+    let mut f = Solo::new(Mode::Normal, false, true);
+    f.device.collector_cuts = Some(vec![
+        None,
+        None,
+        None,
+        None,
+        Some(host(25_000_000)),
+        Some(host(30_000_000)),
+        Some(host(35_000_000)),
+    ]);
+    let (result, score) = f.run(true);
+    assert!(result.unwrap().is_none());
+    assert_eq!(score.hits, 1);
+    assert_eq!(f.delivery.observed_events(), 2);
+    assert_eq!(f.merger.pending(), 0);
+    let physical: Vec<_> = f
+        .host
+        .reports
+        .iter()
+        .filter_map(|r| r.input.as_ref())
+        .collect();
+    assert_eq!(physical.len(), 2);
+    assert!(physical
+        .iter()
+        .all(|e| e.meta().original_clock_point == Some(host(10_000_000))));
+    assert_eq!(
+        f.presentation.authority().committed_input_host(),
+        Some(host(10_000_000))
+    );
+    assert!(f.device.observed_pairs.len() >= 5);
+    assert_eq!(f.device.observed_pairs, baseline.device.observed_pairs);
+    assert_eq!(
+        f.device.report.unwrap().start_frame,
+        baseline.device.report.unwrap().start_frame
+    );
+    assert_eq!(
+        f.device.report.unwrap().frames,
+        baseline.device.report.unwrap().frames
+    );
+}
+
+#[test]
+fn audio_collector_cut_invalid_domain_future_and_regression_refuse_before_prefix() {
+    for cuts in [
+        vec![Some(raw(0))],
+        vec![Some(host(5_000_001))],
+        vec![Some(host(0)), Some(host(-1))],
+    ] {
+        let mut f = Solo::new(Mode::Normal, false, true);
+        f.device.collector_cuts = Some(cuts);
+        let (result, score) = f.run(true);
+        assert!(result.is_err());
+        assert_eq!(score.hits, 0);
+        assert_eq!(score.misses, 0);
+        assert_eq!(f.presentation.authority().acquired_prefix(), None);
+        assert_eq!(f.presentation.authority().committed_input_host(), None);
+        assert!(f.capture.as_ref().unwrap().records().is_empty());
+    }
+}
+
+#[test]
+fn audio_finite_end_requires_collector_cut_even_after_real_output_end() {
+    let mut f = Solo::new(Mode::Normal, true, true);
+    f.device.collector_cuts = Some(vec![None; 100]);
+    f.device.collector_closed_step = Some(15);
+    let (result, score) = f.run(true);
+    assert!(result.unwrap().is_none());
+    assert_eq!(f.device.step, 15);
+    assert!(f
+        .device
+        .report
+        .unwrap()
+        .playback_end_physical_frame
+        .is_some());
+    assert!(f.host.completed.is_empty());
+    assert!(f.completion.is_none());
+    assert_eq!(score.hits, 0);
+    assert_eq!(score.misses, 0);
+    assert_eq!(f.presentation.authority().acquired_prefix(), None);
+}
+
+#[test]
+fn audio_pause_ack_and_resume_do_not_invent_missing_collector_frontier() {
+    for mode in [Mode::PausePoint, Mode::PauseAsio] {
+        let mut f = Solo::new(mode, false, true);
+        f.device.collector_cuts = Some(vec![None; 100]);
+        let (result, score) = f.run(true);
+        assert!(result.unwrap().is_none());
+        assert_eq!(score.hits, 0);
+        assert_eq!(score.misses, 0);
+        assert!(!f.host.pause.contains(&PauseState::Paused));
+        assert_eq!(f.presentation.authority().acquired_prefix(), None);
+        assert_eq!(f.presentation.authority().committed_input_host(), None);
+        assert!(f.device.observed_pairs.len() > 4);
+        assert_eq!(f.runtime.transport_mut().anchors().len(), 1);
+    }
+}
+
+#[test]
 fn native_future_asio_association_keeps_older_covered_authority_without_advancing_to_future() {
     let mut f = Solo::new(Mode::FutureAsio, false, false);
     assert!(f.run(false).0.unwrap().is_none());
@@ -1305,12 +1445,11 @@ fn native_future_asio_association_keeps_older_covered_authority_without_advancin
         f.runtime.judge().effective_song_time(),
         Some(Timestamp::from_nanos(30_000_000))
     );
-    assert!(
-        f.host
-            .reports
-            .iter()
-            .all(|r| r.song_time <= Timestamp::from_nanos(30_000_000))
-    );
+    assert!(f
+        .host
+        .reports
+        .iter()
+        .all(|r| r.song_time <= Timestamp::from_nanos(30_000_000)));
     assert_eq!(
         f.host
             .reports
@@ -1458,17 +1597,15 @@ fn actual_selected_frame_preroll_keeps_requested_section_and_original_grade_iden
     assert_eq!(&setup.profile, f.selected.judge());
     assert_eq!(setup.judgments.as_ref(), f.selected.judgments());
     assert_eq!(file.header.normalized_clock, ClockDomainId(3));
-    assert!(
-        file.records
-            .iter()
-            .any(|r| r.song_time == Timestamp::from_nanos(15_000_000))
-    );
-    assert!(
-        file.records
-            .iter()
-            .any(|r| r.song_time == Timestamp::from_nanos(20_000_000)
-                && matches!(r.operation, ReplayOperation::Input(_)))
-    );
+    assert!(file
+        .records
+        .iter()
+        .any(|r| r.song_time == Timestamp::from_nanos(15_000_000)));
+    assert!(file
+        .records
+        .iter()
+        .any(|r| r.song_time == Timestamp::from_nanos(20_000_000)
+            && matches!(r.operation, ReplayOperation::Input(_))));
 }
 
 #[test]

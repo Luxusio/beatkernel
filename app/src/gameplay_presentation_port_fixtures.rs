@@ -238,6 +238,7 @@ impl GameplayDevice for MemoryDevice {
                 }
             }
             return Ok(InputBatch {
+                completed_through: Some(self.host_now()?),
                 backlog: self.step == 5,
                 closed: self.close && self.step >= 7,
             });
@@ -255,6 +256,7 @@ impl GameplayDevice for MemoryDevice {
             }
         }
         Ok(InputBatch {
+            completed_through: Some(self.host_now()?),
             backlog: self.step == 2,
             closed: self.close && self.step >= 4,
         })

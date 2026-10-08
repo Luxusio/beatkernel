@@ -128,6 +128,7 @@ impl NativeGameplayDevice for ScriptDevice<'_> {
             _ => {}
         }
         Ok(InputBatch {
+            completed_through: Some(self.inner.host_now()?),
             backlog: self.inner.step == 5,
             closed: self.inner.step >= 7,
         })

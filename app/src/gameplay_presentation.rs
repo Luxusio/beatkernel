@@ -2,14 +2,14 @@
 use crate::{
     live_pause::LivePauseObservation,
     native_end::{EndBoundary, NativeEnd},
-    native_gameplay::{InputBatch, NativeGameplayResult, NativeGameplayConfig},
+    native_gameplay::{InputBatch, NativeGameplayConfig, NativeGameplayResult},
 };
 use beatkernel::{
     audio::RenderReport,
     input::PhysicalInputEvent,
     time::{
-        ClockDomainId, ClockMappingQuality, ClockPair, ClockPoint, Timestamp,
         presentation::{DisciplineConfig, DisciplineUpdate, PresentationEstimator},
+        ClockDomainId, ClockMappingQuality, ClockPair, ClockPoint, Timestamp,
     },
     transport::Transport,
 };
@@ -317,6 +317,8 @@ pub trait GameplayDevice {
     }
     fn render_report(&mut self) -> NativeGameplayResult<Option<RenderReport>>;
     fn host_now(&self) -> NativeGameplayResult<ClockPoint>;
+    /// Append covered original events before exposing the proven acquisition cut.
+    /// An absent cut cannot be inferred from host_now or an empty transfer queue.
     fn acquire(
         &mut self,
         events: &mut VecDeque<PhysicalInputEvent>,

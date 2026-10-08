@@ -1,33 +1,43 @@
 //! Shared local-cohort gameplay policy over original native input and evidence.
+#[cfg(test)]
+use crate::native_gameplay::NativeGameplayDevice;
+pub use crate::native_gameplay_bridge::{
+    finite_cohort_done, member_progress, run_cohort, run_cohort_audio_with_policies_and_results,
+    run_cohort_audio_with_results, run_cohort_with_control, run_cohort_with_policies_and_results,
+    run_cohort_with_results, NativeAudioCohortSession, NativeCohortSession, PlayerState,
+};
+#[cfg(test)]
+use crate::native_group_competition::NativeGroupCompetition;
 use crate::{
     bgm::{BgmFeedReport, BgmFeeder},
     competition::ScoreSummary,
     completion::SongCompletion,
     gameplay_competition::{GroupCompetitionPort, SoloCompetitionPort},
-    gameplay_presentation::{PumpTiming, LegacyTiming, AudioTiming},
+    gameplay_presentation::{AudioTiming, LegacyTiming, PumpTiming},
     gauge::{BmsGauge, GaugeProfile},
     live_pause::{
-        LivePauseBoundary, AudioLivePauseBoundary, prepare_live_transport,
-        prepare_live_audio_transport, update_live_pause, update_live_audio_pause,
-        validate_pre_pause_input,
+        prepare_live_audio_transport, prepare_live_transport, update_live_audio_pause,
+        update_live_pause, validate_pre_pause_input, AudioLivePauseBoundary, LivePauseBoundary,
     },
     local_input::InputMerger,
     local_players::PlayerId,
     local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup},
+    multiplayer::Progress,
+    multiplayer_group::{validate_members, MemberProgress},
+    native_audio::{finite_terminal_output_ready, validate_stop_evidence, NativeStopBarrier},
     native_end::NativeEnd,
-    native_audio::{NativeStopBarrier, finite_terminal_output_ready, validate_stop_evidence},
+    native_gameplay::{
+        AudioGameplayConfig, NativeGameplayConfig, NativeGameplayResult, MAX_PENDING_INPUT_EVENTS,
+    },
     native_gameplay_host::{NativeGameplayDiagnostic, NativeGameplayHost, PauseState},
     native_pump_control::{NativePumpControl, NativePumpDeadline},
     offline::OwnedStopEvidence,
-    multiplayer_group::{MemberProgress, validate_members},
-    multiplayer::Progress,
-    native_gameplay::{
-        MAX_PENDING_INPUT_EVENTS, NativeGameplayConfig, NativeGameplayResult, AudioGameplayConfig,
-    },
+    play_result::{CompletedLocalPublicationError, CompletedPlayResult},
     playback_pause::{NativePause, PauseKeyboard, PausePhase},
-    play_result::{CompletedPlayResult, CompletedLocalPublicationError},
     replay_capture::LiveReplayCapture,
 };
+#[cfg(test)]
+use beatkernel::time::presentation::DisciplineConfig;
 use beatkernel::{
     audio::RenderReport,
     input::PhysicalInputEvent,
@@ -35,25 +45,13 @@ use beatkernel::{
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
 };
 #[cfg(test)]
-use beatkernel::time::presentation::DisciplineConfig;
-#[cfg(test)]
 use beatkernel_platform::audio::presentation::discipline::PresentationDiscipline;
-#[cfg(test)]
-use crate::native_gameplay::NativeGameplayDevice;
 use std::{
     collections::VecDeque,
     fmt,
     path::{Path, PathBuf},
     time::Duration as WallDuration,
 };
-pub use crate::native_gameplay_bridge::{
-    NativeCohortSession, PlayerState, finite_cohort_done, member_progress, run_cohort,
-    run_cohort_with_control, run_cohort_with_results, run_cohort_with_policies_and_results,
-    NativeAudioCohortSession, run_cohort_audio_with_results,
-    run_cohort_audio_with_policies_and_results,
-};
-#[cfg(test)]
-use crate::native_group_competition::NativeGroupCompetition;
 
 /// Borrowed cohort state with explicit per-member and shared competition ports.
 pub struct CohortSession<'a, S, G, P> {
@@ -767,6 +765,7 @@ fn run_cohort_timed<
         }
     }
     let mut acquired = VecDeque::new();
+    let mut completed_through = None;
     if custom_policy {
         if session.group.poisoned()
             || !session
@@ -1019,6 +1018,12 @@ fn run_cohort_timed<
             now,
             config.origin,
         )?;
+        let cut = crate::native_gameplay::completed_cut(
+            batch.completed_through,
+            now,
+            config.origin,
+            &mut completed_through,
+        )?;
         let frozen_pause = paused_boundary
             .filter(|_| {
                 pause_committed && session.pause.phase() == PausePhase::Paused && !end_rendered
@@ -1052,7 +1057,11 @@ fn run_cohort_timed<
             session.merger.admit(event, now)?;
         }
         if T::AUDIO {
-            if let Some(prefix) = session.merger.watermark(now, lag, batch.backlog)? {
+            if let Some(prefix) = cut
+                .map(|cut| session.merger.watermark(cut, lag, batch.backlog))
+                .transpose()?
+                .flatten()
+            {
                 session
                     .discipline
                     .audio_mut()
@@ -1100,10 +1109,14 @@ fn run_cohort_timed<
                 continue;
             }
         } else {
+            let Some(cut) = cut else {
+                control.wait(WallDuration::from_millis(1))?;
+                continue;
+            };
             if session.pause.phase() == PausePhase::Paused && !end_rendered {
                 let boundary = paused_boundary.ok_or("cohort paused boundary unavailable")?;
                 let at = boundary.at;
-                if !pause_committed && lag_reaches(now, at, lag)? {
+                if !pause_committed && lag_reaches(cut, at, lag)? {
                     while let Some(event) = session.merger.pop_ready(at)? {
                         if point(&event).timestamp >= at.timestamp {
                             keyboard.observe_paused(event)?;
@@ -1138,10 +1151,10 @@ fn run_cohort_timed<
                 }
                 if pause_committed {
                     if !pause_lag_reached {
-                        pause_lag_reached = lag_reaches(now, at, lag)?;
+                        pause_lag_reached = lag_reaches(cut, at, lag)?;
                     }
                     if pause_lag_reached {
-                        if let Some(frontier) = session.merger.watermark(now, lag, false)? {
+                        if let Some(frontier) = session.merger.watermark(cut, lag, false)? {
                             while let Some(event) = session.merger.pop_ready(frontier)? {
                                 keyboard.observe_paused(event)?;
                             }
@@ -1167,12 +1180,12 @@ fn run_cohort_timed<
                 continue;
             }
             if let Some(at) = resume_boundary {
-                if !lag_reaches(now, at, lag)? {
+                if !lag_reaches(cut, at, lag)? {
                     control.wait(WallDuration::from_millis(1))?;
                     continue;
                 }
             }
-            let frontier = session.merger.watermark(now, lag, false)?;
+            let frontier = session.merger.watermark(cut, lag, false)?;
             if resume_boundary
                 .is_some_and(|at| frontier.is_none_or(|frontier| frontier.timestamp < at.timestamp))
             {
@@ -1258,7 +1271,13 @@ fn run_cohort_timed<
         } else {
             true
         };
+        let acquired_ready = cut.zip(committed).is_some_and(|(cut, committed)| {
+            !batch.backlog
+                && i128::from(cut.timestamp.as_nanos()) - i128::from(lag)
+                    >= i128::from(committed.timestamp.as_nanos())
+        });
         if stops_rendered
+            && acquired_ready
             && finite_cohort_done_with_terminal(
                 config.end_song.map(|end| end.as_nanos()),
                 end_boundary.map(|boundary| boundary.host),
@@ -1274,6 +1293,7 @@ fn run_cohort_timed<
             return complete_cohort(&mut session, config, host_port);
         }
         if config.end_song.is_none()
+            && acquired_ready
             && session.pause.phase() == PausePhase::Running
             && resume_boundary.is_none()
             && session.merger.pending() == 0
@@ -1352,7 +1372,7 @@ mod fixtures {
             EventMeta, GameControlId, PhysicalControlId,
         },
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
-        replay::{ReplayOperation, codec::ReplayCodecLimits},
+        replay::{codec::ReplayCodecLimits, ReplayOperation},
         runtime::SoundBinding,
         time::Duration,
         transport::{Rate, Transport},
@@ -1410,7 +1430,7 @@ mod fixtures {
             &mut self,
             events: &mut VecDeque<PhysicalInputEvent>,
         ) -> NativeGameplayResult<crate::native_gameplay::InputBatch> {
-            use crate::native_gameplay::{InputBatch, retain_input};
+            use crate::native_gameplay::{retain_input, InputBatch};
             if self.pause_flow {
                 match self.step {
                     1 => {
@@ -1438,6 +1458,7 @@ mod fixtures {
                 }
             }
             Ok(InputBatch {
+                completed_through: Some(host(self.step as i64 * 10_000_000)),
                 backlog: if self.pause_flow {
                     self.step == 5
                 } else {
@@ -1745,13 +1766,11 @@ mod fixtures {
         fixture.run(true).unwrap();
         assert_eq!(fixture.device.step, 3);
         assert_eq!(fixture.delivery.observed_events(), 2);
-        assert!(
-            fixture
-                .states
-                .iter()
-                .all(|state| state.last_song == Timestamp::from_nanos(10_000_000)
-                    && state.score.hits == 0)
-        );
+        assert!(fixture
+            .states
+            .iter()
+            .all(|state| state.last_song == Timestamp::from_nanos(10_000_000)
+                && state.score.hits == 0));
         assert_eq!(fixture.merger.pending(), 0);
     }
     #[test]

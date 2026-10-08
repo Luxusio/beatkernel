@@ -88,6 +88,7 @@ impl NativeGameplayDevice for CohortIntervalDevice<'_> {
             _ => {}
         }
         Ok(InputBatch {
+            completed_through: Some(self.inner.host_now()?),
             backlog: self.inner.step == 6,
             closed: self.inner.step >= 8,
         })

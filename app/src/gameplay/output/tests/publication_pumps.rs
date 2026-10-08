@@ -80,6 +80,7 @@ impl GameplayDevice for Device {
             }
         }
         Ok(InputBatch {
+            completed_through: Some(self.host_now()?),
             backlog: false,
             closed: self.step >= 10,
         })

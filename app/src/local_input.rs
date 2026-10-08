@@ -463,7 +463,9 @@ impl InputMerger {
     ///
     /// Lag is 0..=1s. Domain/origin/lag/arithmetic errors remain errors during backlog.
     /// Increasing lag after a commit may regress the frontier and is rejected.
-    /// The caller must refresh now after gathering every source's native batch.
+    /// `now` must be a completed-drain observation justified by every source,
+    /// exposed only after its covered events were admitted. A later consumer
+    /// receipt time or an empty transfer queue cannot establish that observation.
     pub fn watermark(
         &self,
         now: ClockPoint,

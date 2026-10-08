@@ -360,6 +360,7 @@ pub trait NativeStartDevice {
     type Evidence: Copy;
     fn start(&mut self) -> NativeStartResult<()>;
     /// Service acquisition/cancellation; retain original selected input after arming.
+    /// Native collector compositions keep the same input buffer/owner through gameplay.
     fn service_input(&mut self, retain: bool) -> NativeStartResult<bool>;
     fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<Self::Evidence>>>;
     fn render_report(&mut self) -> NativeStartResult<Option<beatkernel::audio::RenderReport>>;

@@ -3,24 +3,29 @@ use crate::{
     bgm::{BgmFeedReport, BgmFeeder},
     completion::SongCompletion,
     gameplay_competition::SoloCompetitionPort,
-    gameplay_presentation::{PumpTiming, LegacyTiming, AudioTiming},
-    local_input::InputMerger,
-    native_audio_presentation::NativeAudioPresentation,
+    gameplay_presentation::{AudioTiming, LegacyTiming, PumpTiming},
     gauge::{BmsGauge, GaugeError, GaugeProfile},
     live_pause::{
-        LivePauseBoundary, AudioLivePauseBoundary, prepare_live_transport, update_live_pause,
-        update_live_audio_pause, prepare_live_audio_transport, validate_pre_pause_input,
+        prepare_live_audio_transport, prepare_live_transport, update_live_audio_pause,
+        update_live_pause, validate_pre_pause_input, AudioLivePauseBoundary, LivePauseBoundary,
     },
+    local_input::InputMerger,
     local_runtime::SoloRuntime,
+    native_audio::{finite_terminal_output_ready, validate_stop_evidence, NativeStopBarrier},
+    native_audio_presentation::NativeAudioPresentation,
     native_end::{EndBoundary, NativeEnd},
-    native_audio::{NativeStopBarrier, finite_terminal_output_ready, validate_stop_evidence},
     native_gameplay_host::{NativeGameplayDiagnostic, NativeGameplayHost, PauseState},
     native_pump_control::{NativePumpControl, NativePumpDeadline},
     offline::OwnedStopEvidence,
-    playback_pause::{NativePause, PauseKeyboard, PausePhase},
     play_result::{CompletedPlayResult, CompletedSoloPublicationError},
+    playback_pause::{NativePause, PauseKeyboard, PausePhase},
     replay_capture::{CaptureError, LiveReplayCapture},
 };
+#[cfg(test)]
+use beatkernel::time::presentation::DisciplineConfig;
+use beatkernel::time::presentation::DisciplineUpdate;
+#[cfg(test)]
+use beatkernel::time::ClockPair;
 use beatkernel::{
     audio::RenderReport,
     input::PhysicalInputEvent,
@@ -28,21 +33,20 @@ use beatkernel::{
     telemetry::InputDeliveryTelemetry,
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
 };
-use beatkernel::time::presentation::DisciplineUpdate;
-#[cfg(test)]
-use beatkernel::time::presentation::DisciplineConfig;
-#[cfg(test)]
-use beatkernel::time::ClockPair;
 #[cfg(test)]
 use beatkernel_platform::audio::presentation::discipline::PresentationDiscipline;
 use std::{collections::VecDeque, error::Error, fmt, time::Duration as WallDuration};
 
 pub use crate::native_gameplay_bridge::{
-    NativeGameplayDevice, NativeGameplaySession, run_gameplay, run_gameplay_with_control,
-    run_gameplay_with_result, run_gameplay_with_result_and_score,
-    run_gameplay_with_policy_and_result_and_score, NativeAudioGameplaySession,
-    run_gameplay_audio_with_result, run_gameplay_audio_with_policy_and_result_and_score,
+    run_gameplay, run_gameplay_audio_with_policy_and_result_and_score,
+    run_gameplay_audio_with_result, run_gameplay_with_control,
+    run_gameplay_with_policy_and_result_and_score, run_gameplay_with_result,
+    run_gameplay_with_result_and_score, NativeAudioGameplaySession, NativeGameplayDevice,
+    NativeGameplaySession,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use crate::native_gameplay_bridge::NativeCollectedInput;
 
 pub type NativeGameplayResult<T> = Result<T, Box<dyn std::error::Error>>;
 pub const MAX_PENDING_INPUT_EVENTS: usize = 65_536;
@@ -61,6 +65,8 @@ pub fn retain_input(
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InputBatch {
+    /// Original native drain evidence, published after all covered input.
+    pub completed_through: Option<ClockPoint>,
     pub backlog: bool,
     pub closed: bool,
 }
@@ -171,6 +177,26 @@ fn chronology(at: ClockPoint, last: ClockPoint) -> NativeGameplayResult<()> {
     }
     Ok(())
 }
+/// Validate raw acquisition evidence independently of receipt and gameplay origin.
+pub(crate) fn completed_cut(
+    cut: Option<ClockPoint>,
+    receipt: ClockPoint,
+    origin: ClockPoint,
+    previous: &mut Option<ClockPoint>,
+) -> NativeGameplayResult<Option<ClockPoint>> {
+    if let Some(cut) = cut {
+        if cut.domain != origin.domain
+            || cut.domain != receipt.domain
+            || cut.timestamp > receipt.timestamp
+            || previous.is_some_and(|last| cut.timestamp < last.timestamp)
+        {
+            return Err("native completed input cut has invalid domain/future/regression".into());
+        }
+        *previous = Some(cut);
+    }
+    Ok(previous.filter(|cut| cut.timestamp >= origin.timestamp))
+}
+
 fn watermark(
     origin: ClockPoint,
     last: ClockPoint,
@@ -598,6 +624,7 @@ fn run_gameplay_timed<
         pending.try_reserve_exact(4096)?;
     }
     let mut last_acquired = config.origin;
+    let mut completed_through = None;
     let mut last_operation = config.origin;
     let mut last_song = config.song_origin;
     let mut last_progress = None;
@@ -762,6 +789,12 @@ fn run_gameplay_timed<
             received,
             frozen_pause,
         )?;
+        let cut = completed_cut(
+            batch.completed_through,
+            received,
+            config.origin,
+            &mut completed_through,
+        )?;
         // Validate each newly acquired timestamp once, even while ACKs are pending.
         let mut index = old_len;
         while index < pending.len() {
@@ -796,8 +829,12 @@ fn run_gameplay_timed<
                 input_merger.register_source(event.meta().source)?;
                 input_merger.admit(event, received)?;
             }
-            if let Some(prefix) =
-                input_merger.watermark(received, config.advance_lag.as_nanos(), batch.backlog)?
+            if let Some(prefix) = cut
+                .map(|cut| {
+                    input_merger.watermark(cut, config.advance_lag.as_nanos(), batch.backlog)
+                })
+                .transpose()?
+                .flatten()
             {
                 session
                     .discipline
@@ -855,7 +892,7 @@ fn run_gameplay_timed<
                 {
                     keyboard.observe_paused(pending.pop_front().unwrap())?;
                 }
-                if batch.backlog || received.timestamp < at.timestamp {
+                if batch.backlog || cut.is_none_or(|cut| cut.timestamp < at.timestamp) {
                     control.wait(WallDuration::from_millis(1))?;
                     continue;
                 }
@@ -904,7 +941,7 @@ fn run_gameplay_timed<
             if !batch.backlog {
                 if let Some(boundary) = paused_boundary.filter(|_| !pause_committed) {
                     let at = boundary.at;
-                    if received.timestamp >= at.timestamp {
+                    if cut.is_some_and(|cut| cut.timestamp >= at.timestamp) {
                         chronology(at, last_operation)?;
                         let audio_at = schedule(device, &session, config)?;
                         let report = session.runtime.advance_to(at, &ExplicitDomains, audio_at)?;
@@ -966,13 +1003,19 @@ fn run_gameplay_timed<
                     quality: session.discipline.quality(),
                 });
             }
-            if let Some(at) = watermark(
-                config.origin,
-                last_operation,
-                now,
-                config.advance_lag,
-                batch.backlog,
-            )? {
+            if let Some(at) = cut
+                .map(|cut| {
+                    watermark(
+                        config.origin,
+                        last_operation,
+                        cut,
+                        config.advance_lag,
+                        batch.backlog,
+                    )
+                })
+                .transpose()?
+                .flatten()
+            {
                 let audio_at = schedule(device, &session, config)?;
                 let report = session.runtime.advance_to(at, &ExplicitDomains, audio_at)?;
                 last_song = report.song_time;
@@ -996,7 +1039,13 @@ fn run_gameplay_timed<
         } else {
             true
         };
+        let acquired_ready = cut.is_some_and(|cut| {
+            !batch.backlog
+                && i128::from(cut.timestamp.as_nanos()) - i128::from(config.advance_lag.as_nanos())
+                    >= i128::from(last_operation.timestamp.as_nanos())
+        });
         if stops_rendered
+            && acquired_ready
             && finite_done_with_terminal(
                 config,
                 end_boundary,
@@ -1013,6 +1062,7 @@ fn run_gameplay_timed<
             return complete_gameplay(&mut session, config, host_port);
         }
         if config.end_song.is_none()
+            && acquired_ready
             && !batch.backlog
             && pending.is_empty()
             && merger.as_ref().is_none_or(|value| value.pending() == 0)
@@ -1076,6 +1126,7 @@ mod fixtures {
         include!("native_policy_admission_fixtures.rs");
     }
     include!("native_gameplay_interval_fixtures.rs");
+    include!("native_input_gameplay_fixtures.rs");
     use super::*;
     use beatkernel::{
         audio::*,
@@ -1084,7 +1135,7 @@ mod fixtures {
             EventMeta, GameControlId, PhysicalControlId,
         },
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
-        replay::{ReplayOperation, codec::ReplayCodecLimits},
+        replay::{codec::ReplayCodecLimits, ReplayOperation},
         runtime::SoundBinding,
         transport::Rate,
         transport::Transport,
@@ -1150,6 +1201,7 @@ mod fixtures {
                     _ => {}
                 }
                 Ok(InputBatch {
+                    completed_through: Some(point(1, self.step as i64 * 10_000_000)),
                     backlog: self.step == 5,
                     closed: self.step >= 7,
                 })
@@ -1165,6 +1217,7 @@ mod fixtures {
                     )?;
                 }
                 Ok(InputBatch {
+                    completed_through: Some(point(1, self.step as i64 * 10_000_000)),
                     backlog: self.backlog && self.step == 2,
                     closed: self.step >= 4,
                 })
@@ -1395,12 +1448,10 @@ mod fixtures {
             );
             assert_eq!(fixture.delivery.observed_events(), 1);
             assert_eq!(fixture.device.fallback > 0, !logical);
-            assert!(
-                capture
-                    .records()
-                    .iter()
-                    .any(|record| matches!(record.operation, ReplayOperation::Input(_)))
-            );
+            assert!(capture
+                .records()
+                .iter()
+                .any(|record| matches!(record.operation, ReplayOperation::Input(_))));
             let file = beatkernel::replay::codec::ReplayFile::new(
                 capture.header().clone(),
                 capture.records().to_vec(),
@@ -1504,17 +1555,15 @@ mod fixtures {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            watermark(
-                point(1, 30),
-                point(1, 30),
-                point(1, 20),
-                Duration::ZERO,
-                false
-            )
-            .unwrap()
-            .is_none()
-        );
+        assert!(watermark(
+            point(1, 30),
+            point(1, 30),
+            point(1, 20),
+            Duration::ZERO,
+            false
+        )
+        .unwrap()
+        .is_none());
         assert!(watermark(point(1, 0), point(1, 0), point(2, 0), Duration::ZERO, false).is_err());
     }
     #[test]

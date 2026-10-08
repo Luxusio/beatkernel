@@ -5,32 +5,32 @@ use crate::{
     gameplay_competition::{GroupCompetitionPort, SoloCompetitionPort},
     gameplay_presentation::{GameplayDevice, GameplayPresentationPort},
     live_pause::LivePauseObservation,
-    native_end::{EndBoundary, NativeEnd},
+    local_players::PlayerId,
     local_runtime::PlayerReport,
     multiplayer_group::MemberProgress,
     native_cohort::{
-        CohortSession, GameplayPlayerState, finite_cohort_done_for_states,
-        member_progress_for_states, run_cohort_with_ports, run_cohort_with_results_and_ports,
+        finite_cohort_done_for_states, member_progress_for_states, run_cohort_with_ports,
+        run_cohort_with_results_and_ports, CohortSession, GameplayPlayerState,
     },
+    native_end::{EndBoundary, NativeEnd},
     native_gameplay::{
-        GameplaySession, InputBatch, NativeGameplayConfig, NativeGameplayResult,
-        run_gameplay_with_ports, run_gameplay_with_result_and_ports,
+        run_gameplay_with_ports, run_gameplay_with_result_and_ports, GameplaySession, InputBatch,
+        NativeGameplayConfig, NativeGameplayResult,
     },
     native_gameplay_host::{NativeGameplayDiagnostic, NativeGameplayHost, PauseState},
     native_group_competition::NativeGroupCompetition,
     native_pump_control::NativePumpControl,
     native_pump_system::SystemControl,
-    player,
-    local_players::PlayerId,
     play_result::CompletedPlayResult,
+    player,
 };
 use beatkernel::{
     audio::RenderReport,
     input::PhysicalInputEvent,
     runtime::RuntimeReport,
     time::{
-        ClockDomainId, ClockMappingQuality, ClockPair, ClockPoint, Timestamp,
         presentation::{DisciplineConfig, DisciplineUpdate},
+        ClockDomainId, ClockMappingQuality, ClockPair, ClockPoint, Timestamp,
     },
     transport::Transport,
 };
@@ -91,6 +91,8 @@ pub trait NativeGameplayDevice {
     }
     fn render_report(&mut self) -> NativeGameplayResult<Option<RenderReport>>;
     fn host_now(&self) -> NativeGameplayResult<ClockPoint>;
+    /// Append original input before returning its optional native completed cut.
+    /// Receipt time and transfer queue emptiness do not establish completion.
     fn acquire(
         &mut self,
         events: &mut VecDeque<PhysicalInputEvent>,
@@ -638,4 +640,67 @@ pub fn run_cohort_audio_with_policies_and_results<D: NativeGameplayDevice>(
         &mut PlayerGameplayHost,
         policies,
     )
+}
+
+/// Input composition shared by native startup and gameplay output owners.
+/// The same buffer and collector must survive the phase handoff.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct NativeCollectedInput {
+    retained: VecDeque<PhysicalInputEvent>,
+    completed_through: Option<ClockPoint>,
+}
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeCollectedInput {
+    pub fn new() -> NativeGameplayResult<Self> {
+        let mut retained = VecDeque::new();
+        retained.try_reserve_exact(crate::native_start::MAX_START_INPUT_EVENTS + 1)?;
+        Ok(Self {
+            retained,
+            completed_through: None,
+        })
+    }
+    pub fn service_start(
+        &mut self,
+        collector: &mut crate::native_input::NativeInputCollector,
+        retain: bool,
+        pre_origin: &mut u64,
+        max_items: usize,
+    ) -> NativeGameplayResult<bool> {
+        // Discarded setup input is counted exactly as in the synchronous owners.
+        // Retained input and its FIFO cut stay together until gameplay acquisition.
+        let room = crate::native_start::MAX_START_INPUT_EVENTS.saturating_sub(self.retained.len());
+        let batch = collector.drain(&mut self.retained, max_items.min(room + 1))?;
+        if let Some(cut) = batch.completed_through {
+            self.completed_through = Some(cut);
+        }
+        if !retain {
+            *pre_origin = pre_origin.saturating_add(self.retained.len() as u64);
+            self.retained.clear();
+        } else if self.retained.len() > crate::native_start::MAX_START_INPUT_EVENTS {
+            return Err("startup input capacity exceeded; restart required".into());
+        }
+        Ok(!batch.closed)
+    }
+    pub fn acquire(
+        &mut self,
+        collector: &mut crate::native_input::NativeInputCollector,
+        events: &mut VecDeque<PhysicalInputEvent>,
+        max_items: usize,
+    ) -> NativeGameplayResult<InputBatch> {
+        let limit = crate::native_gameplay::MAX_PENDING_INPUT_EVENTS;
+        if events.len().saturating_add(self.retained.len()) > limit {
+            return Err("native pending input capacity exceeded; restart required".into());
+        }
+        events.try_reserve(self.retained.len())?;
+        events.append(&mut self.retained);
+        let allowance = max_items.min(limit - events.len());
+        let batch = collector.drain(events, allowance)?;
+        let cut = batch.completed_through.or(self.completed_through.take());
+        self.completed_through = None;
+        Ok(InputBatch {
+            backlog: batch.backlog,
+            closed: batch.closed,
+            completed_through: cut,
+        })
+    }
 }

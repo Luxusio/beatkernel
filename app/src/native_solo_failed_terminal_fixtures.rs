@@ -56,6 +56,7 @@ impl NativeGameplayDevice for Pump<'_> {
             retain_input(events, input(20_000_000, 1, ButtonState::Down))?;
         }
         Ok(InputBatch {
+            completed_through: Some(self.device.host_now()?),
             backlog: false,
             closed: false,
         })

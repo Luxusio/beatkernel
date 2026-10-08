@@ -48,6 +48,7 @@ impl NativeGameplayDevice for Pump<'_> {
             }
         }
         Ok(InputBatch {
+            completed_through: Some(self.device.host_now()?),
             backlog: false,
             closed: false,
         })
