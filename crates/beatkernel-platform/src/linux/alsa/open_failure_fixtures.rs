@@ -1,8 +1,8 @@
 //! Deferred real launch/join policy with memory workers, never NativePcm.
 use super::*;
 use beatkernel::audio::{
-    AudioCommand, AudioFormat, AudioLimits, CommandProducer, MixerConfig, PcmLimits, PcmSample,
-    SampleBank, SampleId, VoiceId, command_queue,
+    command_queue, AudioCommand, AudioFormat, AudioLimits, CommandProducer, MixerConfig, PcmLimits,
+    PcmSample, SampleBank, SampleId, VoiceId,
 };
 fn rig() -> (CommandProducer, Mixer) {
     let format = AudioFormat::new(4, 1).unwrap();
@@ -79,8 +79,8 @@ fn recovered_pcm(mut mixer: Mixer, producer: &mut CommandProducer, physical: u64
 }
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
-fn actual_open_preflight_returns_advanced_original_mixer_before_native_acquisition_and_legacy_error_stays_compatible()
- {
+fn actual_open_preflight_returns_advanced_original_mixer_before_native_acquisition_and_legacy_error_stays_compatible(
+) {
     for case in 0..6 {
         let (mut producer, mixer) = rig();
         let before = mixer.output_frame_basis();
@@ -147,10 +147,14 @@ fn actual_launch_helper_keeps_control_owned_mixer_and_original_spawn_error_witho
     };
     let entered = Arc::new(AtomicBool::new(false));
     let entered_work = entered.clone();
-    let failure = match launch_worker(spawner, NativeOutputState::from_mixer(mixer), move |mixer| {
-        entered_work.store(true, Ordering::Release);
-        (Ok(()), mixer)
-    }) {
+    let failure = match launch_worker(
+        spawner,
+        NativeOutputState::from_mixer(mixer),
+        move |mixer| {
+            entered_work.store(true, Ordering::Release);
+            (Ok(()), mixer)
+        },
+    ) {
         Err(failure) => failure,
         Ok(_) => panic!("injected spawner must refuse"),
     };
@@ -173,17 +177,21 @@ fn actual_launch_helper_keeps_control_owned_mixer_and_original_spawn_error_witho
     recovered_pcm(mixer.unwrap().into_mixer().ok().unwrap(), &mut producer, 5);
 }
 #[test]
-fn actual_normal_worker_join_returns_unique_mixer_and_original_setup_error_even_if_worker_also_reports_failure()
- {
+fn actual_normal_worker_join_returns_unique_mixer_and_original_setup_error_even_if_worker_also_reports_failure(
+) {
     let (mut producer, mixer) = rig();
-    let worker = launch_worker(NativeWorkerSpawner, NativeOutputState::from_mixer(mixer), |owner| {
-        let mut mixer = owner.into_mixer().ok().unwrap();
-        mixer.render(&mut [0.; 1]).unwrap();
-        (
-            Err(LinuxError::InvalidConfiguration("secondary worker result")),
-            NativeOutputState::from_mixer(mixer),
-        )
-    });
+    let worker = launch_worker(
+        NativeWorkerSpawner,
+        NativeOutputState::from_mixer(mixer),
+        |owner| {
+            let mut mixer = owner.into_mixer().ok().unwrap();
+            mixer.render(&mut [0.; 1]).unwrap();
+            (
+                Err(LinuxError::InvalidConfiguration("secondary worker result")),
+                NativeOutputState::from_mixer(mixer),
+            )
+        },
+    );
     let worker = match worker {
         Ok(worker) => worker,
         Err(_) => panic!("memory worker launch required"),
@@ -204,10 +212,14 @@ fn actual_normal_worker_join_returns_unique_mixer_and_original_setup_error_even_
 fn dropped_startup_sender_then_normal_join_recovers_original_mixer_without_claiming_native_ready() {
     let (mut producer, mixer) = rig();
     let (sender, receiver) = mpsc::sync_channel::<Result<AlsaAppliedConfig, LinuxError>>(1);
-    let worker = match launch_worker(NativeWorkerSpawner, NativeOutputState::from_mixer(mixer), move |mixer| {
-        drop(sender);
-        (Ok(()), mixer)
-    }) {
+    let worker = match launch_worker(
+        NativeWorkerSpawner,
+        NativeOutputState::from_mixer(mixer),
+        move |mixer| {
+            drop(sender);
+            (Ok(()), mixer)
+        },
+    ) {
         Ok(worker) => worker,
         Err(_) => panic!("memory worker launch required"),
     };
@@ -220,10 +232,14 @@ fn dropped_startup_sender_then_normal_join_recovers_original_mixer_without_claim
 #[test]
 fn panicked_worker_join_preserves_original_startup_error_and_explicit_unavailable_recovery() {
     let (_, mixer) = rig();
-    let worker = match launch_worker(NativeWorkerSpawner, NativeOutputState::from_mixer(mixer), |mixer| {
-        let _original = mixer;
-        panic!("controlled memory startup panic")
-    }) {
+    let worker = match launch_worker(
+        NativeWorkerSpawner,
+        NativeOutputState::from_mixer(mixer),
+        |mixer| {
+            let _original = mixer;
+            panic!("controlled memory startup panic")
+        },
+    ) {
         Ok(worker) => worker,
         Err(_) => panic!("memory worker launch required"),
     };
@@ -253,13 +269,23 @@ fn full_owner_spawn_and_setup_refusals_preserve_pending_pcm_and_queue() {
         let report = owner.pending_report();
         let failure = if setup_failure {
             let worker = launch_worker(NativeWorkerSpawner, owner, |owner| {
-                (Err(LinuxError::InvalidConfiguration("secondary worker")), owner)
-            }).unwrap_or_else(|_| panic!("memory worker launch"));
+                (
+                    Err(LinuxError::InvalidConfiguration("secondary worker")),
+                    owner,
+                )
+            })
+            .unwrap_or_else(|_| panic!("memory worker launch"));
             join_open_failure(worker, LinuxError::InvalidConfiguration("primary setup"))
         } else {
-            launch_worker(RefusingSpawner {
-                error: std::io::Error::new(std::io::ErrorKind::WouldBlock, "spawn refusal"),
-            }, owner, |_owner| panic!("refused worker must not enter")).err().unwrap()
+            launch_worker(
+                RefusingSpawner {
+                    error: std::io::Error::new(std::io::ErrorKind::WouldBlock, "spawn refusal"),
+                },
+                owner,
+                |_owner| panic!("refused worker must not enter"),
+            )
+            .err()
+            .unwrap()
         };
         let (_, recovered) = failure.into_parts();
         let owner = recovered.unwrap();
@@ -267,8 +293,10 @@ fn full_owner_spawn_and_setup_refusals_preserve_pending_pcm_and_queue() {
         assert_eq!(owner.pending_report(), report);
         assert_eq!(owner.pending_samples(), &[0.0; 3]);
         assert_eq!(owner.admitted_frames(), 1);
-        let mut owner = match owner.into_mixer() { Err(owner) => owner,
-            Ok(_) => panic!("bare extraction would discard pending output") };
+        let mut owner = match owner.into_mixer() {
+            Err(owner) => owner,
+            Ok(_) => panic!("bare extraction would discard pending output"),
+        };
         owner.admit(3).unwrap();
         let mixer = owner.into_mixer().ok().unwrap();
         recovered_pcm(mixer, &mut producer, 9);

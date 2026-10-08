@@ -38,6 +38,20 @@ valid earlier-tail evidence still waits before any commit or anchor collection.
 The unchanged invalid-domain refusal fixture and new full-owner early/fresh
 publication fixtures pass. Final independent review and required QA remain open.
 
+The first independent QA passed all functional checks: 3,072 workspace
+unit/integration tests and 20 doc-tests, both production WASM libraries,
+Windows/Darwin Rust typing, an independent public owner driver and an actual
+ALSA null-plugin diagnostic. Null-plugin execution is not physical presentation
+proof. QA also identified four newly introduced formatting drifts and a
+non-Linux unused test-helper reexport. Those four files were formatted and the
+helper export now matches its Linux test consumers; final review and QA are
+being refreshed after this bounded correction.
+
+Broad repository formatting and strict clippy remain non-green. QA compared
+task-base source and formatting, distinguishing old drift from the four new
+format issues. The four reported clippy source files are unchanged from the
+task base. These broader health limits are not an all-green release claim.
+
 ## Known ceiling
 
 Known ceiling: native hardware and acoustic continuity remain unverified —
