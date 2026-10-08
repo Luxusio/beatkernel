@@ -44,6 +44,12 @@ and stale/malformed refusal remain verified. The current Rust WASM and bindings
 also rebuild successfully; actual browser regression and fresh review/QA are
 still required.
 
+Settings Apply validates the thirteen scalar menu fields using the same bounded
+timing/output/capacity/section rules as full settings profiles. Applying scalars
+preserves the currently selected keyboard bindings. Full profile import/export
+continues to require its kind/version/exact schema and all eighteen keyboard
+lanes; a menu draft must neither fabricate a binding map nor weaken that check.
+
 Browser menu navigation and business drafts belong to the gameplay owner. The
 render Worker instantiates local shared retained views/navigator lifecycle and
 owns Scene/GPU; no Rc, runtime, PCM bank or Scene crosses Workers. Bounded

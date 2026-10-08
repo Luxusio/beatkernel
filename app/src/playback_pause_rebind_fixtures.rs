@@ -556,12 +556,12 @@ fn immutable_start_end_and_reached_endpoint_refuse_while_compatible_finite_repla
 #[test]
 fn converted_pending_held_suffix_rebind_preserves_exact_basis_and_floors_fractional_gap_once_on_real_resume(
 ) {
-    use crate::native_converted_gameplay_fixtures::{native, rig as converted_rig};
+    use crate::native_converted_test_support::{controlled_pair, rig as converted_rig};
     use beatkernel::audio::TargetTime;
     let (mut producer, mut output) = converted_rig(24_000, 48_000, None, None, 0);
     let initial = output.target_frame_basis();
     let relation = |basis: beatkernel::audio::TargetFrameBasis, frame| {
-        native(
+        controlled_pair(
             basis,
             frame,
             1_000_000_000
@@ -571,7 +571,6 @@ fn converted_pending_held_suffix_rebind_preserves_exact_basis_and_floors_fractio
                     .timestamp
                     .as_nanos(),
         )
-        .1
     };
     let mut pause = NativePause::new(point(2, 0), ClockDomainId(1), 24_000)
         .unwrap()
@@ -669,11 +668,11 @@ fn converted_pending_held_suffix_rebind_preserves_exact_basis_and_floors_fractio
 
 #[test]
 fn converted_audible_pending_tail_refuses_pause_rebind_even_with_paused_source_report() {
-    use crate::native_converted_gameplay_fixtures::{native, rig as converted_rig};
+    use crate::native_converted_test_support::{controlled_pair, rig as converted_rig};
     let (mut producer, mut output) = converted_rig(24_000, 48_000, None, None, 0);
     let basis = output.target_frame_basis();
     let relation = |frame| {
-        native(
+        controlled_pair(
             basis,
             frame,
             1_000_000_000
@@ -683,7 +682,6 @@ fn converted_audible_pending_tail_refuses_pause_rebind_even_with_paused_source_r
                     .timestamp
                     .as_nanos(),
         )
-        .1
     };
     let mut pause = NativePause::new(point(2, 0), ClockDomainId(1), 24_000)
         .unwrap()
@@ -726,12 +724,12 @@ fn converted_audible_pending_tail_refuses_pause_rebind_even_with_paused_source_r
 #[test]
 fn mixed_target_rate_rebind_defers_retained_tail_and_uses_exact_generated_frontier_through_repeated_epochs(
 ) {
-    use crate::native_converted_gameplay_fixtures::{native, rig as converted_rig};
+    use crate::native_converted_test_support::{controlled_pair, rig as converted_rig};
     use beatkernel::audio::{ChannelMatrix, TargetFrameBasis, TargetTime};
     use beatkernel_platform::audio::{DeviceFormat, SampleEncoding};
     let (mut producer, mut output) = converted_rig(44_100, 48_000, None, None, 0);
     let relation = |basis: TargetFrameBasis, frame| {
-        native(
+        controlled_pair(
             basis,
             frame,
             1_000_000_000
@@ -741,7 +739,6 @@ fn mixed_target_rate_rebind_defers_retained_tail_and_uses_exact_generated_fronti
                     .timestamp
                     .as_nanos(),
         )
-        .1
     };
     let original = output.target_frame_basis();
     let mut pause = NativePause::new(point(2, 0), ClockDomainId(1), 44_100)

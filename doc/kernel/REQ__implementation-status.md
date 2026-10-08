@@ -29,7 +29,24 @@ are now remediated. The latest full code review found a retained pagination
 defect; its source fix and app library verification are complete. Fresh full
 code and security re-reviews passed the pagination remediation. Two mechanical
 import/module formatting corrections followed; no runtime behavior changed. Fresh
-CLI/browser/desktop QA remains required before task close.
+CLI/browser/desktop QA remains required before task close. The second independent
+QA cycle on revision `585dc17` returned browser/CLI FAIL: Settings Apply passed
+an empty binding list to full-profile validation, and portable replacement/pause
+tests imported a Linux-only helper. Desktop QA remained BLOCKED_ENV without a
+clock-capable native endpoint and input devices.
+
+The current uncommitted remediation validates the 13 Settings scalar fields
+without replacing the actual 18 keyboard bindings, while retaining full-profile
+binding validation. Pure replacement/pause fixtures now use shared controlled
+clock pairs; Linux ALSA mapping tests still exercise their original native helper.
+Development checks passed the app library (2107/0/4) and the three focused browser
+test files (185/0). These results do not replace fresh independent review or QA.
+The subsequent Windows all-targets check timed out (`exit=124`); the macOS check
+was terminated (`exit=143`) when build activity was stopped after the reported
+Docker/WSL incident. Neither foreign-platform run establishes a type-check PASS.
+No Docker daemon/configuration mutation was performed. Container OOM counters
+were zero at inspection and Docker responded, while the kernel log contained a
+WSL init/distribution termination; the causal link to verification is unproven.
 
 The latest app library run (`desktop,webtransport`) passed 2107 tests / failed 0 /
 ignored 4; replay binary 26/0/1, with its null functional case separately passing.

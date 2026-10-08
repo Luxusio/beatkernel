@@ -14,7 +14,14 @@ checks. Earlier independent QA passed fresh package
 tests and observed real software GPU motion, but found browser composition/roster
 defects and incomplete replay/selected-peer coverage. These software gaps are
 remediated with development regressions; fresh reviews and independent QA
-remain required.
+remain required. A second QA cycle found Settings Apply incorrectly using
+full-profile validation with no bindings and portable tests depending on a
+Linux-only helper. The pending fixes preserve all keyboard bindings during
+scalar Apply and share controlled clock pairs across portable tests; development
+checks passed 185 focused browser tests and 2107 app library tests. Windows
+verification timed out and macOS verification was stopped after the reported
+Docker/WSL incident, so neither is claimed as passing. Fresh independent review
+and QA of these fixes remain outstanding.
 Successful physical native play, other backend/OS execution, hardware performance
 and full release acceptance remain outstanding. Current evidence and the full
 unchanged Goal scope are tracked in

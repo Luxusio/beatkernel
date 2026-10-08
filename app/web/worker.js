@@ -13,7 +13,7 @@ import { AudioSampleClient } from "./audio-sample-client.mjs";
 import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, gamepadSetupFromProfile, GamepadAdapter } from "./gamepad-profile.mjs";
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
 import { LocalRoster } from "./local-play-host.mjs";
-import { encodeBrowserSettings, decodeBrowserSettings } from "./settings-profile.mjs";
+import { encodeBrowserSettings, decodeBrowserSettings, snapshotBrowserSettingsScalars } from "./settings-profile.mjs";
 import { snapshotPointerSetup } from "./pointer-profile.mjs";
 const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserHistoricalRecord } = runtime;
 let ready = null;
@@ -660,11 +660,11 @@ function handleMenu(request) {
         if (route === 2 && control === 10n) {
           const fields = menuOwner.fields();
           if (fields.length !== 13) throw new Error("Browser settings draft has an invalid field count.");
-          encodeBrowserSettings({ kind: "beatkernel-browser-settings", version: 1,
+          snapshotBrowserSettingsScalars({
             timing: { earlyMs: fields[0], lateMs: fields[1], offsetMs: fields[2] },
             output: { latency: fields[3], latencyMs: fields[4], rate: fields[5] },
             capacities: { queueCapacity: fields[6], maxVoices: fields[7], pendingCapacity: fields[8], maxFrames: fields[9], maxCommandsPerRender: fields[10] },
-            section: { startSeconds: fields[11], endSeconds: fields[12] }, bindings: [] });
+            section: { startSeconds: fields[11], endSeconds: fields[12] } });
         }
         if (route === 7 && control === 40n) {
           const fields = menuOwner.fields();

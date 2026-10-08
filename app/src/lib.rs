@@ -313,6 +313,8 @@ pub mod native_competition_network;
 mod native_converted_end_fixtures;
 #[cfg(all(test, target_os = "linux"))]
 mod native_converted_gameplay_fixtures;
+#[cfg(test)]
+mod native_converted_test_support;
 #[cfg(all(test, target_os = "linux"))]
 mod replay_target_fixtures;
 #[cfg(all(test, target_os = "linux"))]

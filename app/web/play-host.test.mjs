@@ -878,6 +878,38 @@ test("compositionend alone commits the final editor value and Enter waits for it
   } finally { await h.close(); }
 });
 
+test("correlated Settings Apply changes all thirteen scalar controls and preserves every keyboard binding", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    const lanes = [...Array.from({ length: 9 }, (_, index) => 0x11 + index),
+      ...Array.from({ length: 9 }, (_, index) => 0x21 + index)];
+    const bindingValues = () => lanes.map(lane => [lane, h.get(`binding-${lane.toString(16)}`).value]);
+    h.get("binding-11").value = "KeyA"; h.get("binding-12").value = "";
+    const bindings = bindingValues(); assert.equal(bindings.length, 18);
+    const ids = ["judge-early", "judge-late", "judge-offset", "output-latency", "output-latency-ms", "output-rate",
+      "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "live-start", "live-end"];
+    const fields = ["73", "12.345678", "-0.000001", "balanced", "10.000001", "044100",
+      "65536", "4096", "4096", "4096", "65536", "1.000000001", "2.000000002"];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 2, fields, selected: 0 };
+    await h.receive(state);
+    const oldScalars = ids.map(id => h.get(id).value);
+    const effect = { ...state, kind: "menu-effect", effect: 1n, control: 10n };
+    for (const wrong of [{ menuGeneration: 78n }, { screen: 4n }, { revision: 5n }]) {
+      await h.receive({ ...effect, ...wrong });
+      assert.deepEqual(ids.map(id => h.get(id).value), oldScalars);
+      assert.deepEqual(bindingValues(), bindings);
+    }
+    await h.receive(effect);
+    assert.deepEqual(ids.map(id => h.get(id).value), fields);
+    assert.equal(h.get("judge-early").value, "73");
+    assert.deepEqual(bindingValues(), bindings, "scalar Apply has no binding ownership");
+    assert.equal(game.messages("settings-profile-save").length, 0);
+    assert.equal(game.messages("play-start").length, 0); assert.equal(h.opens.length, 0);
+  } finally { await h.close(); }
+});
+
 test("multiple composition commits coalesce to the latest value before a deferred Apply", async () => {
   const h = await harness();
   try {

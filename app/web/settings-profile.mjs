@@ -19,12 +19,11 @@ function strings(value, limits) {
   return Object.freeze(result);
 }
 
-// Shared bounded DTO validation; only the Worker calls the file/JSON helpers.
-export function snapshotBrowserSettings(value) {
-  object(value, ["kind", "version", "timing", "output", "capacities", "section", "bindings"]);
-  const { kind, version, timing: timingValue, output: outputValue, capacities: capacityValue,
-    section: sectionValue, bindings: bindingValue } = value;
-  if (kind !== "beatkernel-browser-settings" || version !== 1) throw new Error("Choose a version 1 BeatKernel browser settings file.");
+// The retained Settings menu owns these thirteen scalar strings. Keyboard
+// bindings remain with the actual Window input owner and full profile codec.
+export function snapshotBrowserSettingsScalars(value) {
+  object(value, ["timing", "output", "capacities", "section"]);
+  const { timing: timingValue, output: outputValue, capacities: capacityValue, section: sectionValue } = value;
   const timing = strings(timingValue, { earlyMs: 21, lateMs: 21, offsetMs: 21 });
   const output = strings(outputValue, { latency: 16, latencyMs: 21, rate: 10 });
   const capacities = strings(capacityValue, { queueCapacity: 5, maxVoices: 5, pendingCapacity: 5, maxFrames: 5, maxCommandsPerRender: 5 });
@@ -35,6 +34,17 @@ export function snapshotBrowserSettings(value) {
   audioOutputFromFields("custom", output.latencyMs, output.rate);
   audioLimitsFromFields(capacities);
   sectionFromSeconds(section.startSeconds, section.endSeconds);
+  return Object.freeze({ timing, output, capacities, section });
+}
+
+// Shared bounded DTO validation; only the Worker calls the file/JSON helpers.
+export function snapshotBrowserSettings(value) {
+  object(value, ["kind", "version", "timing", "output", "capacities", "section", "bindings"]);
+  const { kind, version, timing: timingValue, output: outputValue, capacities: capacityValue,
+    section: sectionValue, bindings: bindingValue } = value;
+  if (kind !== "beatkernel-browser-settings" || version !== 1) throw new Error("Choose a version 1 BeatKernel browser settings file.");
+  const { timing, output, capacities, section } = snapshotBrowserSettingsScalars({
+    timing: timingValue, output: outputValue, capacities: capacityValue, section: sectionValue });
   if (!Array.isArray(bindingValue) || bindingValue.length !== LANES.length) throw new Error("Settings require all eighteen keyboard lanes.");
   const rows = [];
   for (let index = 0; index < LANES.length; index++) {

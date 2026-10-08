@@ -1,5 +1,12 @@
 # Exact native target time and converted boundaries
 
+Pure target ownership and pause/rebind tests are portable across supported Rust
+targets. Shared converter rigs and controlled original association values may
+be constructed without platform-specific drivers, with that evidence tier
+explicit. Linux-specific ALSA timestamp/snapshot tests retain their actual
+association checks. A missing native fixture on another platform must not be
+hidden by skipping the otherwise portable business tests.
+
 Replay conversion must preserve the existing saved timeline, source commands,
 section and preroll. `play_replay_bms --rate` remains the PCM preparation rate;
 Linux-only `--output-rate` selects the native target rate and defaults to source.

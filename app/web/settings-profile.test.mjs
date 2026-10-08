@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { File } from "node:buffer";
 import test from "node:test";
-import { snapshotBrowserSettings, encodeBrowserSettings, decodeBrowserSettings } from "./settings-profile.mjs";
+import { snapshotBrowserSettings, snapshotBrowserSettingsScalars, encodeBrowserSettings, decodeBrowserSettings } from "./settings-profile.mjs";
 
 globalThis.File ??= File;
 const FileType = globalThis.File;
@@ -19,6 +19,50 @@ function settings() {
 }
 const bytes = value => new TextEncoder().encode(JSON.stringify(value));
 const file = data => new FileType([data], "portable.json", { type: "application/json" });
+const scalarDraft = value => ({ timing: value.timing, output: value.output, capacities: value.capacities, section: value.section });
+
+test("scalar menu snapshots preserve all thirteen fields independently without weakening complete file bindings", () => {
+  const original = scalarDraft(settings()), before = structuredClone(original);
+  const snapshot = snapshotBrowserSettingsScalars(original);
+  assert.deepEqual(snapshot, before);
+  for (const value of [snapshot, ...Object.values(snapshot)]) assert.ok(Object.isFrozen(value));
+  original.timing.earlyMs = "73";
+  assert.equal(snapshot.timing.earlyMs, before.timing.earlyMs);
+  for (const invalid of [null, [], { ...before, bindings: [] }, { ...before, kind: "beatkernel-browser-settings" },
+    { timing: before.timing, output: before.output, capacities: before.capacities },
+    { ...before, timing: { ...before.timing, earlyNs: "1" } }]) assert.throws(() => snapshotBrowserSettingsScalars(invalid));
+  const full = settings(); full.bindings = [];
+  assert.deepEqual(snapshotBrowserSettingsScalars(scalarDraft(full)), before);
+  assert.throws(() => snapshotBrowserSettings(full), /eighteen/);
+  assert.throws(() => encodeBrowserSettings(full), /eighteen/);
+});
+
+test("scalar validation retains timing endpoints capacity bounds output categories and inactive Custom policy", () => {
+  const edge = scalarDraft(settings());
+  edge.timing = { earlyMs: "9223372036854.775807", lateMs: "0", offsetMs: "-9223372036854.775808" };
+  edge.output = { latency: "playback", latencyMs: "60000.000000", rate: "4294967295" };
+  edge.section = { startSeconds: "9223372034.854775806", endSeconds: "9223372034.854775807" };
+  assert.deepEqual(snapshotBrowserSettingsScalars(edge), edge);
+  const minimum = scalarDraft(settings());
+  minimum.timing = { earlyMs: "0", lateMs: "0", offsetMs: "0" };
+  minimum.output = { latency: "interactive", latencyMs: "0", rate: "" };
+  minimum.section = { startSeconds: "0", endSeconds: "" };
+  for (const name of Object.keys(minimum.capacities)) minimum.capacities[name] = "1";
+  assert.deepEqual(snapshotBrowserSettingsScalars(minimum), minimum);
+  for (const mutate of [
+    value => { value.timing.earlyMs = "9223372036854.775808"; },
+    value => { value.timing.offsetMs = "-9223372036854.775809"; },
+    value => { value.section.endSeconds = "9223372034.854775808"; },
+    ...Object.keys(minimum.capacities).map(name => value => { value.capacities[name] = "0"; }),
+    ...["interactive", "balanced", "playback"].flatMap(latency => [
+      value => { value.output.latency = latency; value.output.latencyMs = "invalid"; },
+      value => { value.output.latency = latency; value.output.latencyMs = "60000.000001"; },
+    ]),
+  ]) {
+    const invalid = structuredClone(edge); mutate(invalid);
+    assert.throws(() => snapshotBrowserSettingsScalars(invalid));
+  }
+});
 
 test("full settings snapshots keep exact decimal text, canonical eighteen rows and independent frozen ownership", async () => {
   const original = settings();
@@ -54,6 +98,7 @@ test("exact schema and complete binding ownership reject foreign, partial, dupli
     value => { value.output.deviceId = "device"; }, value => { value.timing.extra = "0"; },
     value => { delete value.capacities.maxFrames; }, value => { value.section.endNs = "1"; },
     value => { value.bindings.pop(); }, value => { value.bindings.push([17, "KeyB"]); },
+    value => { value.bindings = []; },
     value => { value.bindings[17] = [17, "KeyB"]; }, value => { value.bindings[0] = [0, "KeyA"]; },
     value => { value.bindings[1][1] = "KeyA"; }, value => { value.bindings[0][1] = "Escape"; },
     value => { value.bindings[0] = [17, "KeyA", 19]; }, value => { value.bindings[0][0] = "17"; },
@@ -89,6 +134,7 @@ test("original timing, output, capacity and section limits retain precision with
   ];
   for (const change of changes) {
     const malformed = settings(); change(malformed);
+    assert.throws(() => snapshotBrowserSettingsScalars(scalarDraft(malformed)));
     assert.throws(() => snapshotBrowserSettings(malformed));
     await assert.rejects(decodeBrowserSettings(file(bytes(malformed))));
   }

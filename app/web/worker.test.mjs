@@ -453,6 +453,73 @@ async function readyWorker(options) {
 }
 
 const acquiredMenuToken = state => ({ menuGeneration: state.menuGeneration, screen: state.screen, revision: state.revision });
+const settingsMenuDraft = () => ["73", "12.345678", "-0.000001", "balanced", "10.000001", "044100",
+  "65536", "4096", "4096", "4096", "65536", "1.000000001", "2.000000002"];
+
+test("actual Worker and WASM Settings Apply validates thirteen scalars and emits the exact correlated effect", async () => {
+  const worker = await readyWorker({ actualMenu: true });
+  try {
+    await worker.send({ kind: "menu-open", fields: ["song/chart.bms"] });
+    await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(worker.of("menu-state").at(-1)),
+      route: 2, fields: settingsMenuDraft() });
+    const accepted = worker.of("menu-state").at(-1);
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(accepted), actionId: 1n, control: 10n });
+    const applied = worker.of("menu-state").at(-1), effect = worker.of("menu-effect").at(-1);
+    assert.equal(worker.of("menu-effect").length, 1);
+    assert.equal(effect.effect, 1n); assert.equal(effect.control, 10n); assert.equal(effect.route, 2);
+    assert.deepEqual(acquiredMenuToken(effect), acquiredMenuToken(applied));
+    assert.deepEqual(Array.from(effect.fields), settingsMenuDraft());
+    assert.equal(effect.fields.length, 13); assert.equal(effect.fields[0], "73");
+    assert.equal(worker.of("menu-error").length, 0);
+    assert.equal(worker.games.length, 0); assert.equal(worker.preparedOwners.length, 0);
+    assert.equal(worker.of("settings-profile-saved").length, 0, "Apply does not become a full-profile file save");
+  } finally { await worker.send({ kind: "dispose" }); }
+});
+
+test("actual Worker Settings scalar refusal preserves the accepted draft and action ID for correction", async () => {
+  const worker = await readyWorker({ actualMenu: true });
+  try {
+    await worker.send({ kind: "menu-open", fields: ["song/chart.bms"] });
+    await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(worker.of("menu-state").at(-1)),
+      route: 2, fields: settingsMenuDraft() });
+    for (const [index, value] of [[0, "-1"], [4, "invalid inactive custom draft"], [6, "65537"], [12, "0"]]) {
+      await worker.send({ kind: "menu-edit", ...acquiredMenuToken(worker.of("menu-state").at(-1)), index, value });
+      const invalid = worker.of("menu-state").at(-1), errors = worker.of("menu-error").length;
+      await worker.send({ kind: "menu-action", ...acquiredMenuToken(invalid), actionId: 1n, control: 10n });
+      assert.equal(worker.of("menu-effect").length, 0);
+      assert.equal(worker.of("menu-error").length, errors + 1);
+      assert.deepEqual(worker.of("menu-state").at(-1), invalid, "scalar refusal changes no token or draft");
+      await worker.send({ kind: "menu-edit", ...acquiredMenuToken(invalid), index, value: settingsMenuDraft()[index] });
+    }
+    const corrected = worker.of("menu-state").at(-1);
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(corrected), actionId: 1n, control: 10n });
+    assert.equal(worker.of("menu-effect").length, 1, "refused Apply never consumes the semantic action ID");
+    assert.deepEqual(Array.from(worker.of("menu-effect")[0].fields), settingsMenuDraft());
+  } finally { await worker.send({ kind: "dispose" }); }
+});
+
+test("actual Worker Settings pending and stale tokens cannot produce Apply effects", async () => {
+  const worker = await readyWorker({ actualMenu: true });
+  try {
+    await worker.send({ kind: "menu-open", fields: ["song/chart.bms"] });
+    await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(worker.of("menu-state").at(-1)), route: 2, fields: [] });
+    const pending = worker.of("menu-state").at(-1);
+    assert.deepEqual(Array.from(pending.fields), [], "the Settings draft is still pending its field acquisition");
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(pending), actionId: 1n, control: 10n });
+    assert.equal(worker.of("menu-effect").length, 0);
+    assert.deepEqual(worker.of("menu-state").at(-1), pending);
+    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(pending), fields: settingsMenuDraft() });
+    const accepted = worker.of("menu-state").at(-1);
+    for (const wrong of [{ menuGeneration: accepted.menuGeneration + 1n }, { screen: accepted.screen + 1n },
+      { revision: pending.revision }]) {
+      await worker.send({ kind: "menu-action", ...acquiredMenuToken(accepted), ...wrong, actionId: 2n, control: 10n });
+      assert.equal(worker.of("menu-effect").length, 0);
+      assert.deepEqual(worker.of("menu-state").at(-1), accepted);
+    }
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(accepted), actionId: 2n, control: 10n });
+    assert.equal(worker.of("menu-effect").length, 1);
+  } finally { await worker.send({ kind: "dispose" }); }
+});
 const acquiredSource = (id, kind = "hid") => [String(id), kind, `Acquired ${id}`, `Original source ${id}`, "1"];
 function acquiredMenuFields(sources, members = [[999, "42"]]) {
   return ["1", "1", String(members.length), ...members.flatMap(([id, source]) => [String(id), source]),

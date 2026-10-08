@@ -10,7 +10,7 @@ use crate::{
     local_input::InputMerger,
     local_runtime::SoloRuntime,
     native_audio_startup::new_target_audio_presentation,
-    native_converted_gameplay_fixtures::{native, point, rig as converted_rig},
+    native_converted_test_support::{controlled_pair, point, rig as converted_rig},
     native_gameplay::NativeGameplayConfig,
 };
 use beatkernel::{
@@ -299,7 +299,7 @@ impl OriginalTargetNativeOutputBackend<ConvertedNativeOutputState> for Effects {
 }
 type Controller = OutputReplacement<Effects, ConvertedNativeOutputState, TargetFrameBasis>;
 fn relation(basis: TargetFrameBasis, frame: u64) -> ClockPair {
-    native(
+    controlled_pair(
         basis,
         frame,
         1_000_000_000
@@ -309,7 +309,6 @@ fn relation(basis: TargetFrameBasis, frame: u64) -> ClockPair {
                 .timestamp
                 .as_nanos(),
     )
-    .1
 }
 fn snap(epoch: u64, basis: TargetFrameBasis, frame: u64) -> TargetNativeAudioSnapshot {
     TargetNativeAudioSnapshot {
