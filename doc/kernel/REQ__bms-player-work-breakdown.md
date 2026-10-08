@@ -77,6 +77,7 @@ python3 tools/wbs_status.py --ready
 | E27 | `browser-ime-roster-focused-development.log`: Node 175 PASS / 실패0 | 실제 main/Worker+WASM 경로의 composition/ACK·canonical roster·inventory 퇴역/재탐색·거절 회귀; 수정 후 trusted browser 재검증과 독립 QA는 별도 |
 | E28 | `selected-quic-actual-development.log`: actual selected cohort 2 PASS; `selected-webtransport-actual-development.log`: actual selected room 2 PASS | 실제 admitted class/gauge/member identity의 peer start/progress/finals/drain·policy mismatch 거절·owner/relay 종료; full native room/음향 동기화·재리뷰/QA는 별도 |
 | E29 | `browser-pagination-app-development.log`: lib 2107 PASS / 실패0 / ignored4; current WASM/bindgen PASS; `browser-pagination-all-node-development.log`: Node 707 PASS / 실패0 | 실제 row 수 기준 Players/Devices selection/page 정규화·21→10/20→5→empty shrink·cached compose·거절 회귀; 실제 브라우저 재검증·독립 재리뷰/QA는 별도 |
+| E30 | `24b2569`의 독립 rank-metadata QA: `target/wf/qa-cli-bms-rank-01a11d56-1`; 전체 adapter 97 PASS / 실패0 / ignored0, 새 public rank fixture10, API docs PASS, code/security/docs review PASS | 실제 RANK/DEFEXRANK exact metadata·명시 precedence·조건/중복/원본 line·fabricated map·원래 판정 identity 검증. 기존 raw Clippy5와 lib/parser 포맷 차이는 실제 b097e42 baseline에서 재현; raw lint/format PASS 아님. timing preset/dynamic EXRANK/app profile 적용/전체 제품 완료는 별도 |
  
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
@@ -229,7 +230,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-08.03** LNOBJ/LNTYPE·mine의 원래 stage/source/gauge 의미를 fixture로 검증한다. — 상태=D(검증완료); 선행=-; 근거=E0,E1.
 - [x] **BK-WBS-08.04** 선택 gauge·명시 class mapping·EX 계산이 opaque grade를 추정하지 않는다. — 상태=D(검증완료); 선행=-; 근거=E1.
 - [x] **BK-WBS-08.05** 연습 구간이 원래 TOTAL/note-count gauge context를 보존한다. — 상태=D(검증완료); 선행=-; 근거=E1.
-- [ ] **BK-WBS-08.06** RANK/DEFEXRANK metadata를 typed validation·명시 precedence로 처리한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=REQ__bms-judge-rank의 exact metadata·호출자 선택 precedence 계약 구현과 독립 parser/API 검증; timing preset은08.07에 유지.
+- [x] **BK-WBS-08.06** RANK/DEFEXRANK metadata를 typed validation·명시 precedence로 처리한다. — 상태=D(검증완료); 선행=-; 근거=E30, [typed metadata 계약](REQ__bms-judge-rank.md); timing preset은08.07에 유지.
 - [ ] **BK-WBS-08.07** key/scratch/LN-end별 versioned timing preset을 기존 ClassifiedWindow에 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=검증된 opt-in dialect·경계 ±1ns; 새 기본값 추정 금지.
 - [ ] **BK-WBS-08.08** 기본 timing dialect와 역사적 LR2/nanasi 호환 범위를 확정한다. — 상태=P(정책선택대기); 선행=-; 필요 근거/다음=원문 spec만으로 millisecond 표를 추정하지 않음.
 - [ ] **BK-WBS-08.09** 동적 EXRANK/A0 의미와 필요한 timed policy를 primary source로 확인한다. — 상태=U(현황감사필요); 선행=-; 필요 근거/다음=서로 다른 engine 동작을 동일 표준으로 합치지 않음.
