@@ -48,6 +48,13 @@ completion evidence, not just an empty callback buffer. An unavailable proof
 withholds advancement. Existing lag, deterministic InputMerger admission,
 pause/resume/finite completion and output authority remain strict.
 
+macOS runloop timeout alone is not proof that HID ports are empty. A checked
+queue path must distinguish actual native underrun from dequeue/conversion
+errors and publish a cut only after every selected queue reports empty.
+Existing callback APIs remain compatible. Detectable application/transport
+overflow remains fatal; underlying kernel/driver loss is not completely
+observable and no universal physical loss-detection guarantee is claimed.
+
 Verification must exercise actual spawned-thread construction/destruction,
 acquisition during a gated consumer stall, exact event equality, partial FIFO
 delivery and withheld cuts, invalid/stale domains, all-source completion,

@@ -4,10 +4,11 @@ use super::native::{
 };
 use super::*;
 #[cfg(test)]
-use beatkernel::input::PhysicalControlId;
+use beatkernel::input::{DeviceId, PhysicalControlId};
+#[cfg(test)]
+use beatkernel_bms_runtime::local_players::PlayerId;
 use beatkernel::{
     audio::PcmLimits,
-    input::DeviceId,
     time::Duration,
     transport::{Rate, Transport},
 };
@@ -21,7 +22,7 @@ use beatkernel_bms_runtime::native_cohort_setup::{
     prepare_audio_cohort_with_policy, CohortPreparation, PreparedCohort,
 };
 use beatkernel_bms_runtime::native_start::{
-    start_committed, NativeStartConfig, MAX_START_INPUT_EVENTS,
+    start_committed, NativeStartConfig,
 };
 #[cfg(test)]
 use beatkernel_bms_runtime::{
@@ -31,7 +32,6 @@ use beatkernel_bms_runtime::{
 };
 use beatkernel_bms_runtime::{
     competition_live::CompetitionOptions,
-    local_players::PlayerId,
     native_chart::{prepare_chart, NativeChartConfig},
     native_end::NativeEnd,
     playback_pause::NativePause,
@@ -45,35 +45,33 @@ use beatkernel_bms_runtime::{
 use beatkernel_bms_runtime::{
     native_cohort::{run_cohort_audio_with_policies_and_results, NativeAudioCohortSession},
     native_gameplay::{
-        retain_input, InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
+        InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
     },
 };
+#[cfg(test)]
+use beatkernel_platform::macos::input::HidCounters;
 use beatkernel_platform::{
     audio::presentation::discipline::{DisciplineConfig, PresentationDiscipline},
     macos::{
         audio::{CoreAudioRequest, CoreAudioStream},
         clock::MachClock,
-        input::{HidCounters, HidInput, HidSample},
     },
 };
-use std::time::{Duration as WallDuration, Instant};
+
 
 struct CohortDevice<'a> {
     output: &'a mut NativeCoreAudioOutputOwner,
     output_ui: &'a mut NativeCoreAudioOutputUi,
-    input: &'a mut HidInput,
+    input: &'a mut super::collected_input::Collector,
     clock: &'a MachClock,
-    selected: &'a [DeviceId],
-    assignments: &'a [(PlayerId, u64)],
-    retained: &'a mut std::collections::VecDeque<HidSample>,
+    retained: &'a mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
 }
 impl NativeGameplayDevice for CohortDevice<'_> {
     fn observe_audio(
         &mut self,
         presentation: &mut beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
     ) -> NativeGameplayResult<()> {
-        self.input.poll(WallDuration::from_millis(1))?;
-        check_group(self.input, self.assignments, self.selected)?;
+        self.input.status()?;
         Ok(self.output.observe_native(presentation)?)
     }
     fn audio_pause_observation(
@@ -102,8 +100,7 @@ impl NativeGameplayDevice for CohortDevice<'_> {
         self.output_ui.service_audio(self.output, context, now)
     }
     fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
-        self.input.poll(WallDuration::from_millis(1))?;
-        check_group(self.input, self.assignments, self.selected)?;
+        self.input.status()?;
         self.output.observe(discipline)?;
         Ok(())
     }
@@ -144,22 +141,8 @@ impl NativeGameplayDevice for CohortDevice<'_> {
         &mut self,
         events: &mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
     ) -> NativeGameplayResult<InputBatch> {
-        for _ in 0..256 {
-            let sample = self.retained.pop_front().or_else(|| self.input.pop());
-            let Some(sample) = sample else {
-                return Ok(InputBatch {
-                    backlog: false,
-                    closed: false,
-                });
-            };
-            if self.selected.contains(&sample.event.meta().source) {
-                retain_input(events, sample.event)?;
-            }
-        }
-        Ok(InputBatch {
-            backlog: true,
-            closed: false,
-        })
+        self.input.activate();
+        self.retained.acquire(&mut self.input.worker, events, 256)
     }
     fn observe_end(
         &mut self,
@@ -183,6 +166,7 @@ impl NativeGameplayDevice for CohortDevice<'_> {
 
 /// Missing attachments may arrive during bounded preparation; ambiguity,
 /// incapable attachments and identity aliases are terminal setup errors.
+#[cfg(test)]
 fn registry_error(
     error: beatkernel_bms_runtime::local_input::attachments::AttachmentError,
 ) -> Box<dyn std::error::Error> {
@@ -199,6 +183,7 @@ fn registry_error(
     }
     .into()
 }
+#[cfg(test)]
 fn resolve_registries(
     requested: &[(PlayerId, u64)],
     attached: &[(Option<u64>, DeviceId, bool)],
@@ -206,6 +191,7 @@ fn resolve_registries(
     beatkernel_bms_runtime::local_input::attachments::resolve(requested, attached)
         .map_err(registry_error)
 }
+#[cfg(test)]
 fn check_counters(counters: HidCounters) -> Result<()> {
     if counters.queue_full != 0
         || counters.unsupported != 0
@@ -218,44 +204,6 @@ fn check_counters(counters: HidCounters) -> Result<()> {
         return Err(format!("IOHID acquisition loss; restart whole cohort: {counters:?}").into());
     }
     Ok(())
-}
-fn current_ids(input: &HidInput, requested: &[(PlayerId, u64)]) -> Result<Option<Vec<DeviceId>>> {
-    check_counters(input.counters())?;
-    let attached: Vec<_> = input
-        .devices()
-        .iter()
-        .map(|device| {
-            (
-                device.registry_entry,
-                device.descriptor.runtime_id,
-                device.descriptor.capabilities.button,
-            )
-        })
-        .collect();
-    resolve_registries(requested, &attached)
-}
-fn select_group(input: &mut HidInput, requested: &[(PlayerId, u64)]) -> Result<Vec<DeviceId>> {
-    let deadline = Instant::now() + WallDuration::from_secs(2);
-    loop {
-        if let Some(ids) = current_ids(input, requested)? {
-            return Ok(ids);
-        }
-        if Instant::now() >= deadline {
-            return Err("local IORegistry assignments unavailable within two seconds".into());
-        }
-        input.poll(WallDuration::from_millis(1))?;
-    }
-}
-fn check_group(
-    input: &HidInput,
-    requested: &[(PlayerId, u64)],
-    selected: &[DeviceId],
-) -> Result<()> {
-    check_counters(input.counters())?;
-    beatkernel_bms_runtime::local_input::attachments::verify(requested, selected, |key| {
-        input.registry_candidates(key)
-    })
-    .map_err(registry_error)
 }
 /// Every seed poll validates the full roster, never just one selected member.
 pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> Result<()> {
@@ -327,17 +275,8 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         return Ok(());
     }
     // Input precedes output, retaining owner-thread close order on early exits.
-    let mut input = HidInput::open(clock, DeviceId(1), 65536)?;
-    let selected = match select_group(&mut input, &options.local_players) {
-        Ok(selected) => selected,
-        Err(error) => {
-            let mut failures = vec![format!("local IORegistry selection: {error}")];
-            if let Err(close) = input.close() {
-                failures.push(format!("IOHID close after selection failure: {close}"));
-            }
-            return Err(failures.join("; ").into());
-        }
-    };
+    let (mut input, devices) = super::collected_input::open(clock, options.local_players.iter().map(|(_, registry)| *registry).collect(), 65536)?;
+    let selected: Vec<_> = devices.iter().map(|d| d.descriptor.runtime_id).collect();
     let assignments: Vec<_> = options
         .local_players
         .iter()
@@ -431,24 +370,21 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     );
     let mut output = owner(stream, clock, HOST);
     let mut before_origin = 0u64;
-    let mut other_devices = 0u64;
-    let mut retained = std::collections::VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
+    let mut retained = beatkernel_bms_runtime::native_gameplay::NativeCollectedInput::new()?;
     let outcome = (|| -> Result<Option<Vec<(beatkernel_bms_runtime::local_players::PlayerId,beatkernel_bms_runtime::play_result::CompletedPlayResult)>>> {
         let mut output_ui = NativeCoreAudioOutputUi::new(&output, !network_start)?;
-        check_group(&input, &options.local_players, &selected)?;
+        input.status()?;
         let (network_origin, playback_origin) = if let Some(network) = network.as_mut()
         {
             let started = {
-                let check_selection =
-                    |input: &HidInput| check_group(input, &options.local_players, &selected);
                 let mut device = super::native::StartupDevice {
                     audio: output.current_mut().ok_or("initial CoreAudio output unavailable")?.stream_mut(),
                     input: &mut input,
                     clock: &clock,
-                    selected: &selected,
-                    check_selection: &check_selection,
+
+
                     pre_origin: &mut before_origin,
-                    other_devices: &mut other_devices,
+
                     retained: &mut retained,
                 };
                 start_committed(
@@ -486,11 +422,10 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             ClockPoint { domain: LOGICAL, timestamp: Timestamp::ZERO }, authority_config,
         )?;
         let seeded = {
-            let check_selection = |input: &HidInput| check_group(input, &options.local_players, &selected);
             let mut seed = AudioSeedDevice {
-                output: &mut output, input: &mut input, clock: &clock, selected: &selected,
-                check_selection: &check_selection, pre_origin: &mut before_origin,
-                other_devices: &mut other_devices, retained: &mut retained,
+                output: &mut output, input: &mut input, clock: &clock,
+                 pre_origin: &mut before_origin,
+                 retained: &mut retained,
                 end: if network_start { None } else { native_end.as_mut() }, end_primed: false,
             };
             beatkernel_bms_runtime::native_audio_startup::prime_native_audio(
@@ -521,8 +456,8 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 output_ui: &mut output_ui,
                 input: &mut input,
                 clock: &clock,
-                selected: &selected,
-                assignments: &options.local_players,
+
+
                 retained: &mut retained,
             };
             let selected_policies: Vec<_> = assignments
@@ -578,9 +513,9 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     let stop = output.stop();
     let close = input.close();
     println!(
-        "shared final CoreAudio={:?}; HID counters={:?}; pre-origin ignored={before_origin}; other-device startup inputs={other_devices}; physical delivery unverified",
+        "shared final CoreAudio={:?}; input collector status={:?}; pre-origin ignored={before_origin}; physical delivery unverified",
         output.current().map(|out| out.stream().snapshot()),
-        input.counters()
+        input.worker.status()
     );
     if let Err(error) = &stop {
         eprintln!("CoreAudio stop error: {error}");

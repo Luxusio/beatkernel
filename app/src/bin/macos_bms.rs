@@ -10,6 +10,9 @@ use std::{
     error::Error,
     path::PathBuf,
 };
+#[cfg(any(target_os = "macos", test))]
+#[path = "macos_bms/input.rs"]
+mod collected_input;
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct Options {
@@ -556,7 +559,7 @@ mod native {
     use super::*;
     use beatkernel::{
         audio::PcmLimits,
-        input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
+        input::{Binding, BindingMap, DeviceSelector, GameControlId, PhysicalControlId},
         time::{ClockDomainId, Duration},
         transport::{Rate, Transport},
     };
@@ -578,13 +581,12 @@ mod native {
         macos::{
             audio::{CoreAudioRequest, CoreAudioStream},
             clock::MachClock,
-            input::{HidDevice, HidInput, HidSample},
             presentation::coreaudio_presentation_pair,
         },
     };
     use std::{
         collections::VecDeque,
-        time::{Duration as WallDuration, Instant},
+        time::Duration as WallDuration,
     };
     pub(super) const M_NATIVE: ClockDomainId = ClockDomainId(1);
     pub(super) const HOST: ClockDomainId = ClockDomainId(2);
@@ -595,49 +597,6 @@ mod native {
         ClockPoint {
             domain: OUTPUT,
             timestamp: Timestamp::ZERO,
-        }
-    }
-    fn check_hid(input: &HidInput, selected: DeviceId, registry: u64) -> Result<()> {
-        let counters = input.counters();
-        if counters.queue_full != 0
-            || counters.unsupported != 0
-            || counters.reports_timestamp_failed != 0
-        {
-            return Err(format!(
-                "IOHID queue/unsupported/timestamp loss; explicit restart required: {counters:?}"
-            )
-            .into());
-        }
-        if !input.has_registry_attachment(registry, selected) {
-            return Err(
-                "selected IORegistry attachment disconnected/reconnected; no automatic retarget"
-                    .into(),
-            );
-        }
-        Ok(())
-    }
-    fn select(input: &mut HidInput, registry: u64) -> Result<HidDevice> {
-        let deadline = Instant::now() + WallDuration::from_secs(2);
-        loop {
-            let devices = input.devices();
-            let mut matches = devices
-                .into_iter()
-                .filter(|d| d.registry_entry == Some(registry));
-            if let Some(device) = matches.next() {
-                if matches.next().is_some() {
-                    return Err("ambiguous selected IORegistry identity".into());
-                }
-                if !device.descriptor.capabilities.button {
-                    return Err("selected IORegistry device does not advertise buttons; choose a keyboard-capable entry".into());
-                }
-                return Ok(device);
-            }
-            if Instant::now() >= deadline {
-                return Err(
-                    "explicit keyboard IORegistry identity unavailable within two seconds".into(),
-                );
-            }
-            input.poll(WallDuration::from_millis(1))?;
         }
     }
     pub(super) fn observe(audio: &CoreAudioStream, clock: &MachClock) -> Result<Option<ClockPair>> {
@@ -657,17 +616,14 @@ mod native {
     }
     use beatkernel_bms_runtime::native_start::{
         start_committed, NativeStartConfig, NativeStartDevice, NativeStartObservation,
-        NativeStartResult, MAX_START_INPUT_EVENTS,
+        NativeStartResult,
     };
     pub(super) struct StartupDevice<'a> {
         pub(super) audio: &'a mut CoreAudioStream,
-        pub(super) input: &'a mut HidInput,
+        pub(super) input: &'a mut super::collected_input::Collector,
         pub(super) clock: &'a MachClock,
-        pub(super) selected: &'a [DeviceId],
-        pub(super) check_selection: &'a dyn Fn(&HidInput) -> Result<()>,
         pub(super) pre_origin: &'a mut u64,
-        pub(super) other_devices: &'a mut u64,
-        pub(super) retained: &'a mut VecDeque<HidSample>,
+        pub(super) retained: &'a mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
     }
     impl NativeStartDevice for StartupDevice<'_> {
         type Evidence = ();
@@ -677,15 +633,9 @@ mod native {
         fn service_input(&mut self, retain: bool) -> NativeStartResult<bool> {
             startup_input(
                 self.input,
-                self.selected,
-                self.check_selection,
                 self.pre_origin,
-                self.other_devices,
-                if retain {
-                    Some(&mut *self.retained)
-                } else {
-                    None
-                },
+                &mut *self.retained,
+                retain,
             )
         }
         fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<()>>> {
@@ -707,7 +657,7 @@ mod native {
         }
     }
     use beatkernel_bms_runtime::native_gameplay::{
-        retain_input, run_gameplay_audio_with_policy_and_result_and_score, InputBatch,
+        run_gameplay_audio_with_policy_and_result_and_score, InputBatch,
         NativeAudioGameplaySession, NativeGameplayConfig, NativeGameplayDevice,
         NativeGameplayResult,
     };
@@ -715,20 +665,16 @@ mod native {
     struct GameplayDevice<'a> {
         output: &'a mut OwnedOutput,
         output_ui: &'a mut beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::NativeCoreAudioOutputUi,
-        input: &'a mut HidInput,
+        input: &'a mut super::collected_input::Collector,
         clock: &'a MachClock,
-        selected: DeviceId,
-        registry: u64,
-        other_devices: &'a mut u64,
-        retained: &'a mut VecDeque<HidSample>,
+        retained: &'a mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
     }
     impl NativeGameplayDevice for GameplayDevice<'_> {
         fn observe_audio(
             &mut self,
             presentation: &mut beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
         ) -> NativeGameplayResult<()> {
-            self.input.poll(WallDuration::from_millis(1))?;
-            check_hid(self.input, self.selected, self.registry)?;
+            self.input.status()?;
             Ok(self.output.observe_native(presentation)?)
         }
         fn audio_pause_observation(
@@ -758,8 +704,7 @@ mod native {
             self.output_ui.service_audio(self.output, context, now)
         }
         fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
-            self.input.poll(WallDuration::from_millis(1))?;
-            check_hid(self.input, self.selected, self.registry)?;
+            self.input.status()?;
             self.output.observe(discipline)?;
             Ok(())
         }
@@ -801,28 +746,8 @@ mod native {
             &mut self,
             events: &mut VecDeque<beatkernel::input::PhysicalInputEvent>,
         ) -> NativeGameplayResult<InputBatch> {
-            for _ in 0..256 {
-                let sample = if let Some(sample) = self.retained.pop_front() {
-                    Some(sample)
-                } else {
-                    self.input.pop()
-                };
-                let Some(sample) = sample else {
-                    return Ok(InputBatch {
-                        backlog: false,
-                        closed: false,
-                    });
-                };
-                if sample.event.meta().source != self.selected {
-                    *self.other_devices = self.other_devices.saturating_add(1);
-                } else {
-                    retain_input(events, sample.event)?;
-                }
-            }
-            Ok(InputBatch {
-                backlog: true,
-                closed: false,
-            })
+            self.input.activate();
+            self.retained.acquire(&mut self.input.worker, events, 256)
         }
         fn observe_end(
             &mut self,
@@ -845,50 +770,22 @@ mod native {
             Err("CoreAudio uses logical mixer scheduling".into())
         }
     }
-    fn retain_startup_sample(events: &mut VecDeque<HidSample>, sample: HidSample) -> Result<()> {
-        if events.len() == MAX_START_INPUT_EVENTS {
-            return Err("startup HID input capacity exceeded; restart required".into());
-        }
-        events.push_back(sample);
-        Ok(())
-    }
     pub(super) fn startup_input(
-        input: &mut HidInput,
-        selected: &[DeviceId],
-        check_selection: &dyn Fn(&HidInput) -> Result<()>,
+        input: &mut super::collected_input::Collector,
         pre_origin: &mut u64,
-        other_devices: &mut u64,
-        retained: Option<&mut VecDeque<HidSample>>,
+        retained: &mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
+        retain: bool,
     ) -> Result<bool> {
-        if player::cancelled() {
-            return Ok(false);
-        }
-        input.poll(WallDuration::from_millis(1))?;
-        check_selection(input)?;
-        let mut retained = retained;
-        for _ in 0..256 {
-            let Some(sample) = input.pop() else {
-                break;
-            };
-            if !selected.contains(&sample.event.meta().source) {
-                *other_devices = other_devices.saturating_add(1);
-            } else if let Some(events) = retained.as_deref_mut() {
-                retain_startup_sample(events, sample)?;
-            } else {
-                *pre_origin = pre_origin.saturating_add(1);
-            }
-        }
-        Ok(true)
+        if player::cancelled() { return Ok(false); }
+        input.activate();
+        retained.service_start(&mut input.worker, retain, pre_origin, 256)
     }
     pub(super) struct AudioSeedDevice<'a> {
         pub(super) output: &'a mut OwnedOutput,
-        pub(super) input: &'a mut HidInput,
+        pub(super) input: &'a mut super::collected_input::Collector,
         pub(super) clock: &'a MachClock,
-        pub(super) selected: &'a [DeviceId],
-        pub(super) check_selection: &'a dyn Fn(&HidInput) -> Result<()>,
         pub(super) pre_origin: &'a mut u64,
-        pub(super) other_devices: &'a mut u64,
-        pub(super) retained: &'a mut VecDeque<HidSample>,
+        pub(super) retained: &'a mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
         pub(super) end: Option<&'a mut NativeEnd>,
         pub(super) end_primed: bool,
     }
@@ -896,11 +793,9 @@ mod native {
         fn service_input(&mut self) -> NativeGameplayResult<bool> {
             startup_input(
                 self.input,
-                self.selected,
-                self.check_selection,
                 self.pre_origin,
-                self.other_devices,
-                Some(&mut *self.retained),
+                &mut *self.retained,
+                true,
             )
         }
         fn observe_audio(
@@ -973,74 +868,6 @@ mod native {
                 ..Default::default()
             },
         ))
-    }
-    #[cfg(test)]
-    mod startup_fixtures {
-        use super::*;
-        use beatkernel::input::{
-            BackendId, ButtonEvent, ButtonState, EventMeta, NativeEventMeta, PhysicalInputEvent,
-        };
-        fn sample(sequence: u64) -> HidSample {
-            let native = ClockPoint {
-                domain: M_NATIVE,
-                timestamp: Timestamp::from_nanos(77),
-            };
-            let normalized = ClockPoint {
-                domain: HOST,
-                timestamp: Timestamp::from_nanos(99),
-            };
-            let mut meta = EventMeta::new(DeviceId(1), normalized, sequence);
-            meta.native = Some(NativeEventMeta {
-                backend: BackendId(7),
-                code: Some(4),
-                timestamp: Some(native),
-            });
-            HidSample {
-                event: PhysicalInputEvent::Button(ButtonEvent {
-                    meta,
-                    control: PhysicalControlId::keyboard(4),
-                    state: ButtonState::Down,
-                }),
-                mach_ticks: 77,
-                integer_value: 1,
-                element_cookie: 4,
-            }
-        }
-        #[test]
-        fn startup_retains_actual_hid_provenance_in_order_and_rejects_capacity_atomically() {
-            let mut events = VecDeque::with_capacity(4096);
-            let original = sample(1);
-            retain_startup_sample(&mut events, original.clone()).unwrap();
-            assert_eq!(events.front(), Some(&original));
-            for sequence in 2..=4096 {
-                retain_startup_sample(&mut events, sample(sequence)).unwrap();
-            }
-            let first = events.front().cloned();
-            let last = events.back().cloned();
-            assert!(retain_startup_sample(&mut events, sample(4097)).is_err());
-            assert_eq!(events.len(), 4096);
-            assert_eq!(events.front(), first.as_ref());
-            assert_eq!(events.back(), last.as_ref());
-            for sequence in 1..=4096 {
-                let retained = events.pop_front().unwrap();
-                assert_eq!(retained.event.meta().sequence, sequence);
-                assert_eq!(retained.mach_ticks, 77);
-                assert_eq!(retained.integer_value, 1);
-                assert_eq!(retained.element_cookie, 4);
-                assert_eq!(retained.event.meta().timestamp, Timestamp::from_nanos(99));
-                assert_eq!(
-                    retained
-                        .event
-                        .meta()
-                        .native
-                        .unwrap()
-                        .timestamp
-                        .unwrap()
-                        .domain,
-                    M_NATIVE
-                );
-            }
-        }
     }
     pub(super) fn run(
         options: Options,
@@ -1143,16 +970,8 @@ mod native {
             },
         )?;
         let mut bgm = BgmSession(bgm);
-        let mut input = HidInput::open(clock, DeviceId(1), 1024)?;
-        let selected = match select(&mut input, options.keyboard_registry) {
-            Ok(device) => device,
-            Err(error) => {
-                if let Err(close) = input.close() {
-                    eprintln!("IOHID close error after selection failure: {close}");
-                }
-                return Err(error);
-            }
-        };
+        let (mut input, mut selected_devices) = super::collected_input::open(clock, vec![options.keyboard_registry], 1024)?;
+        let selected = selected_devices.remove(0);
         let selected_id = selected.descriptor.runtime_id;
         let bindings =
             BindingMap::from_bindings(options.bindings.iter().map(|(&channel, &key)| Binding {
@@ -1196,10 +1015,9 @@ mod native {
         };
         let mut output = owner(audio, clock, HOST);
         let mut output_ui = NativeCoreAudioOutputUi::new(&output, !network_start)?;
-        let mut other_devices = 0u64;
         let mut pre_origin = 0u64;
         let mut capture = None;
-        let mut startup_inputs = VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
+        let mut startup_inputs = beatkernel_bms_runtime::native_gameplay::NativeCollectedInput::new()?;
         let mut score = beatkernel_bms_runtime::competition::ScoreSummary::default();
         let outcome =
             (|| -> Result<Option<beatkernel_bms_runtime::play_result::CompletedPlayResult>> {
@@ -1217,15 +1035,12 @@ mod native {
                         options.replay_max_records,
                     )?,
                 )?;
-                check_hid(&input, selected_id, options.keyboard_registry)?;
+                input.status()?;
                 let (network_origin, playback_origin) = if network_start {
                     let competition = competition
                         .as_mut()
                         .ok_or("network startup owner missing")?;
                     let started = {
-                        let check_selection = |input: &HidInput| {
-                            check_hid(input, selected_id, options.keyboard_registry)
-                        };
                         let mut device = StartupDevice {
                             audio: output
                                 .current_mut()
@@ -1233,10 +1048,7 @@ mod native {
                                 .stream_mut(),
                             input: &mut input,
                             clock: &clock,
-                            selected: std::slice::from_ref(&selected_id),
-                            check_selection: &check_selection,
                             pre_origin: &mut pre_origin,
-                            other_devices: &mut other_devices,
                             retained: &mut startup_inputs,
                         };
                         start_committed(
@@ -1290,16 +1102,11 @@ mod native {
                         authority_config,
                     )?;
                 let seeded = {
-                    let check_selection =
-                        |input: &HidInput| check_hid(input, selected_id, options.keyboard_registry);
                     let mut seed = AudioSeedDevice {
                         output: &mut output,
                         input: &mut input,
                         clock: &clock,
-                        selected: std::slice::from_ref(&selected_id),
-                        check_selection: &check_selection,
                         pre_origin: &mut pre_origin,
-                        other_devices: &mut other_devices,
                         retained: &mut startup_inputs,
                         end: if network_start {
                             None
@@ -1358,9 +1165,6 @@ mod native {
                         output_ui: &mut output_ui,
                         input: &mut input,
                         clock: &clock,
-                        selected: selected_id,
-                        registry: options.keyboard_registry,
-                        other_devices: &mut other_devices,
                         retained: &mut startup_inputs,
                     };
                     run_gameplay_audio_with_policy_and_result_and_score(
@@ -1401,7 +1205,7 @@ mod native {
                     )
                 };
                 println!(
-                    "runtime processing={:?} counters={:?}; other-device ignored={other_devices}; pre-origin ignored={pre_origin}",
+                    "runtime processing={:?} counters={:?}; pre-origin ignored={pre_origin}",
                     runtime.telemetry().processing(),
                     runtime.telemetry().counters()
                 );
@@ -1410,9 +1214,9 @@ mod native {
         let stop = output.stop();
         let close = input.close();
         println!(
-            "final CoreAudio native snapshot={:?}; HID counters={:?}; other-device ignored={other_devices}; pre-origin ignored={pre_origin}; physical latency unmeasured",
+            "final CoreAudio native snapshot={:?}; input collector status={:?}; pre-origin ignored={pre_origin}; physical latency unmeasured",
             output.current().map(|out| out.stream().snapshot()),
-            input.counters()
+            input.worker.status()
         );
         match output
             .current()

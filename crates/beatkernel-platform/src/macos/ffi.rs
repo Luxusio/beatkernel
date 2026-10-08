@@ -253,3 +253,113 @@ pub(super) fn cf_string(value: Ref) -> Option<String> {
     let end = bytes.iter().position(|byte| *byte == 0)?;
     String::from_utf8(bytes[..end].to_vec()).ok()
 }
+
+// Public IOHIDDevicePlugIn.h v1.5 queue interface. These are COM pointer-to-
+// vtable interfaces; UUID selection fixes the complete layout, not slot guesses.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct UuidBytes(pub [u8; 16]);
+#[repr(C)]
+pub(super) struct UnknownInterface {
+    pub reserved: *mut c_void,
+    pub query: unsafe extern "C" fn(*mut c_void, UuidBytes, *mut *mut c_void) -> i32,
+    pub add_ref: unsafe extern "C" fn(*mut c_void) -> u32,
+    pub release: unsafe extern "C" fn(*mut c_void) -> u32,
+}
+#[repr(C)]
+pub(super) struct PluginInterface {
+    pub unknown: UnknownInterface,
+    pub version: u16,
+    pub revision: u16,
+    pub probe: unsafe extern "C" fn(*mut c_void, Ref, u32, *mut i32) -> i32,
+    pub start: unsafe extern "C" fn(*mut c_void, Ref, u32) -> i32,
+    pub stop: unsafe extern "C" fn(*mut c_void) -> i32,
+}
+pub(super) type HidReportCallback =
+    unsafe extern "C" fn(*mut c_void, i32, *mut c_void, u32, u32, *mut u8, isize);
+#[repr(C)]
+pub(super) struct DeviceInterface {
+    pub unknown: UnknownInterface,
+    pub open: unsafe extern "C" fn(*mut c_void, u32) -> i32,
+    pub close: unsafe extern "C" fn(*mut c_void, u32) -> i32,
+    pub get_property: unsafe extern "C" fn(*mut c_void, Ref, *mut Ref) -> i32,
+    pub set_property: unsafe extern "C" fn(*mut c_void, Ref, Ref) -> i32,
+    pub get_async_source: unsafe extern "C" fn(*mut c_void, *mut Ref) -> i32,
+    pub copy_elements: unsafe extern "C" fn(*mut c_void, Ref, *mut Ref, u32) -> i32,
+    pub set_value: unsafe extern "C" fn(
+        *mut c_void,
+        Ref,
+        Ref,
+        u32,
+        Option<HidCallback>,
+        *mut c_void,
+        u32,
+    ) -> i32,
+    pub get_value: unsafe extern "C" fn(
+        *mut c_void,
+        Ref,
+        *mut Ref,
+        u32,
+        Option<HidCallback>,
+        *mut c_void,
+        u32,
+    ) -> i32,
+    pub set_report_callback: unsafe extern "C" fn(
+        *mut c_void,
+        *mut u8,
+        isize,
+        Option<HidReportCallback>,
+        *mut c_void,
+        u32,
+    ) -> i32,
+    pub set_report: unsafe extern "C" fn(
+        *mut c_void,
+        u32,
+        u32,
+        *const u8,
+        isize,
+        u32,
+        Option<HidReportCallback>,
+        *mut c_void,
+        u32,
+    ) -> i32,
+    pub get_report: unsafe extern "C" fn(
+        *mut c_void,
+        u32,
+        u32,
+        *mut u8,
+        *mut isize,
+        u32,
+        Option<HidReportCallback>,
+        *mut c_void,
+        u32,
+    ) -> i32,
+}
+#[repr(C)]
+pub(super) struct QueueInterface {
+    pub unknown: UnknownInterface,
+    pub get_async_source: unsafe extern "C" fn(*mut c_void, *mut Ref) -> i32,
+    pub set_depth: unsafe extern "C" fn(*mut c_void, u32, u32) -> i32,
+    pub get_depth: unsafe extern "C" fn(*mut c_void, *mut u32) -> i32,
+    pub add_element: unsafe extern "C" fn(*mut c_void, Ref, u32) -> i32,
+    pub remove_element: unsafe extern "C" fn(*mut c_void, Ref, u32) -> i32,
+    pub contains_element: unsafe extern "C" fn(*mut c_void, Ref, *mut u8, u32) -> i32,
+    pub start: unsafe extern "C" fn(*mut c_void, u32) -> i32,
+    pub stop: unsafe extern "C" fn(*mut c_void, u32) -> i32,
+    pub set_callback: unsafe extern "C" fn(*mut c_void, Option<HidCallback>, *mut c_void) -> i32,
+    pub copy_next_value: unsafe extern "C" fn(*mut c_void, *mut Ref, u32, u32) -> i32,
+}
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    pub fn CFUUIDCreateFromUUIDBytes(allocator: Ref, bytes: UuidBytes) -> Ref;
+}
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    pub fn IOCreatePlugInInterfaceForService(
+        service: u32,
+        plugin_type: Ref,
+        interface_type: Ref,
+        interface: *mut *mut *mut PluginInterface,
+        score: *mut i32,
+    ) -> i32;
+}

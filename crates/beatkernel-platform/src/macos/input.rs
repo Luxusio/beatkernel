@@ -390,6 +390,12 @@ impl State {
             .insert(device as usize, DeviceRecord { info, sequence: 0 });
     }
     fn value(&mut self, value: ffi::Ref) {
+        let element = unsafe { ffi::IOHIDValueGetElement(value) };
+        if element.is_null() { self.error = Some(HidError::InvalidMetadata); return; }
+        let device = unsafe { ffi::IOHIDElementGetDevice(element) };
+        self.value_for_device(value, device);
+    }
+    fn value_for_device(&mut self, value: ffi::Ref, device: ffi::Ref) {
         // SAFETY: IOKit supplied a live IOHIDValueRef for this callback duration.
         let (element, ticks, length) = unsafe {
             (
@@ -403,9 +409,8 @@ impl State {
             return;
         }
         // SAFETY: element borrowed from live IOHIDValue; all queries are synchronous.
-        let (device, page, usage, kind, cookie, integer, relative) = unsafe {
+        let (page, usage, kind, cookie, integer, relative) = unsafe {
             (
-                ffi::IOHIDElementGetDevice(element),
                 ffi::IOHIDElementGetUsagePage(element),
                 ffi::IOHIDElementGetUsage(element),
                 ffi::IOHIDElementGetType(element),
@@ -428,6 +433,7 @@ impl State {
             self.error = Some(HidError::TimestampOverflow);
             return;
         };
+        if device.is_null() { self.error = Some(HidError::InvalidMetadata); return; }
         self.register(device);
         let Some(record) = self.devices.get_mut(&(device as usize)) else {
             return;
@@ -502,6 +508,7 @@ impl State {
             self.error = Some(HidError::InvalidReport);
             return;
         }
+        if device.is_null() { self.error = Some(HidError::InvalidMetadata); return; }
         self.register(device);
         let Some(record) = self.devices.get_mut(&(device as usize)) else {
             return;
@@ -559,6 +566,237 @@ impl State {
     }
 }
 
+/// Actual CFRunLoopRunInMode completion, distinct from callback queue emptiness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HidPollCompletion {
+    /// The requested mode has no remaining sources or timers.
+    Finished,
+    /// The native runloop was explicitly stopped.
+    Stopped,
+    /// The requested duration elapsed; this is not a native queue drain proof.
+    TimedOut,
+    /// One source was handled; further native work may remain.
+    HandledSource,
+}
+fn poll_completion(code: i32) -> Result<HidPollCompletion, HidError> {
+    // Apple CFRunLoop.h defines these four return reasons.
+    match code {
+        1 => Ok(HidPollCompletion::Finished),
+        2 => Ok(HidPollCompletion::Stopped),
+        3 => Ok(HidPollCompletion::TimedOut),
+        4 => Ok(HidPollCompletion::HandledSource),
+        _ => Err(HidError::Native(code)),
+    }
+}
+
+// Checked public queue interface: IOHIDDevicePlugIn.h (HIDFamily v1.5).
+// https://github.com/apple-oss-distributions/IOKitUser/blob/main/hid.subproj/IOHIDDevicePlugIn.h
+const QUEUE_UNDERRUN: i32 = 0xe000_02e7u32 as i32;
+fn decode_queue_result(status: i32, present: bool) -> Result<bool, HidError> {
+    match (status, present) {
+        (0, true) => Ok(true),
+        (QUEUE_UNDERRUN, false) => Ok(false),
+        (0, false) | (QUEUE_UNDERRUN, true) => Err(HidError::InvalidMetadata),
+        _ => { check(status)?; Err(HidError::InvalidMetadata) }
+    }
+}
+/// Cold checked-queue initialization failure with first cleanup failure retained.
+/// Legacy callback APIs continue returning the Copy HidError type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueuedInputError {
+    /// Original queue initialization error.
+    pub primary: HidError,
+    /// First failure while closing every partially acquired native lease.
+    pub cleanup: Option<HidError>,
+}
+impl From<HidError> for QueuedInputError {
+    fn from(primary: HidError) -> Self { Self { primary, cleanup: None } }
+}
+impl std::fmt::Display for QueuedInputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.primary)?;
+        if let Some(cleanup) = self.cleanup { write!(f, "; IOHID queue cleanup: {cleanup}")?; }
+        Ok(())
+    }
+}
+impl std::error::Error for QueuedInputError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(&self.primary) }
+}
+struct QueueSweep {
+    drained: Vec<bool>,
+    cursor: usize,
+    remaining: usize,
+    before: Option<beatkernel::time::ClockPoint>,
+}
+impl QueueSweep {
+    fn new(count: usize) -> Result<Self, HidError> {
+        if count == 0 || count > 64 { return Err(HidError::Capacity); }
+        let mut drained = Vec::new();
+        drained.try_reserve_exact(count).map_err(|_| HidError::Capacity)?;
+        drained.resize(count, false);
+        Ok(Self { drained, cursor: 0, remaining: count, before: None })
+    }
+    fn begin(&mut self, before: beatkernel::time::ClockPoint) {
+        if self.before.is_none() {
+            self.drained.fill(false);
+            self.cursor = 0;
+            self.remaining = self.drained.len();
+            self.before = Some(before);
+        }
+    }
+    fn index(&mut self) -> usize {
+        let index = self.cursor;
+        self.cursor = (self.cursor + 1) % self.drained.len();
+        index
+    }
+    fn empty(&mut self, index: usize) -> Option<beatkernel::time::ClockPoint> {
+        if !self.drained[index] { self.drained[index] = true; self.remaining -= 1; }
+        if self.remaining == 0 { self.before.take() } else { None }
+    }
+}
+trait QueueLease {
+    fn stop(&mut self) -> Result<(), HidError>;
+    fn close_device(&mut self) -> Result<(), HidError>;
+    fn release(&mut self);
+}
+#[derive(Default)]
+struct QueueCleanup {
+    started: bool,
+    opened: bool,
+    retained: Option<HidError>,
+    released: bool,
+}
+impl QueueCleanup {
+    fn close(&mut self, lease: &mut impl QueueLease) -> Result<(), HidError> {
+        if let Some(error) = self.retained { return Err(error); }
+        if self.released { return Ok(()); }
+        let mut failure = None;
+        if self.started {
+            match lease.stop() { Ok(()) => self.started = false, Err(error) => failure = Some(error) }
+        }
+        if self.opened {
+            match lease.close_device() { Ok(()) => self.opened = false, Err(error) => { failure.get_or_insert(error); } }
+        }
+        if let Some(error) = failure { self.retained = Some(error); return Err(error); }
+        lease.release();
+        self.released = true;
+        Ok(())
+    }
+}
+struct NativeLease {
+    plugin: *mut *mut ffi::PluginInterface,
+    device: *mut *mut ffi::DeviceInterface,
+    queue: *mut *mut ffi::QueueInterface,
+}
+impl QueueLease for NativeLease {
+    fn stop(&mut self) -> Result<(), HidError> {
+        check(unsafe { ((**self.queue).stop)(self.queue.cast(), 0) })
+    }
+    fn close_device(&mut self) -> Result<(), HidError> {
+        check(unsafe { ((**self.device).close)(self.device.cast(), 0) })
+    }
+    fn release(&mut self) {
+        // SAFETY: each successful QueryInterface/Create owns one COM reference;
+        // no queue callbacks were scheduled, and checked stop/close completed.
+        unsafe {
+            if !self.queue.is_null() && !(*self.queue).is_null() { ((**self.queue).unknown.release)(self.queue.cast()); }
+            if !self.device.is_null() && !(*self.device).is_null() { ((**self.device).unknown.release)(self.device.cast()); }
+            if !self.plugin.is_null() && !(*self.plugin).is_null() { ((**self.plugin).unknown.release)(self.plugin.cast()); }
+        }
+    }
+}
+struct NativeQueue {
+    id: DeviceId,
+    device: ffi::Ref,
+    owned_device: ffi::OwnedRef,
+    plugin: *mut *mut ffi::PluginInterface,
+    native_device: *mut *mut ffi::DeviceInterface,
+    queue: *mut *mut ffi::QueueInterface,
+    cleanup: QueueCleanup,
+}
+impl NativeQueue {
+    fn open(device: ffi::Ref, id: DeviceId, depth: usize) -> Result<Self, QueuedInputError> {
+        let mut owner = Self {
+            id, device, owned_device: ffi::OwnedRef(unsafe { ffi::CFRetain(device) }),
+            plugin: std::ptr::null_mut(), native_device: std::ptr::null_mut(), queue: std::ptr::null_mut(),
+            cleanup: QueueCleanup::default(),
+        };
+        let result = (|| -> Result<(), HidError> {
+            // These UUIDs select complete public layouts, not private objects.
+            let device_type = ffi::OwnedRef(unsafe { ffi::CFUUIDCreateFromUUIDBytes(std::ptr::null(), ffi::UuidBytes([0x7d,0xde,0xec,0xa8,0xa7,0xb4,0x11,0xda,0x8a,0x0e,0x00,0x14,0x51,0x97,0x58,0xef])) });
+            let plugin_type = ffi::OwnedRef(unsafe { ffi::CFUUIDCreateFromUUIDBytes(std::ptr::null(), ffi::UuidBytes([0xc2,0x44,0xe8,0x58,0x10,0x9c,0x11,0xd4,0x91,0xd4,0x00,0x50,0xe4,0xc6,0x42,0x6f])) });
+            if device_type.0.is_null() || plugin_type.0.is_null() { return Err(HidError::Capacity); }
+            let mut score = 0;
+            // SAFETY: exact live selected service; writable public COM output.
+            check(unsafe { ffi::IOCreatePlugInInterfaceForService(ffi::IOHIDDeviceGetService(device), device_type.0, plugin_type.0, &mut owner.plugin, &mut score) })?;
+            if owner.plugin.is_null() || unsafe { (*owner.plugin).is_null() } { return Err(HidError::InvalidMetadata); }
+            let mut native = std::ptr::null_mut();
+            let status = unsafe { ((**owner.plugin).unknown.query)(owner.plugin.cast(), ffi::UuidBytes([0x47,0x4b,0xdc,0x8e,0x9f,0x4a,0x11,0xda,0xb3,0x66,0x00,0x0d,0x93,0x6d,0x06,0xd2]), &mut native) };
+            owner.native_device = native.cast();
+            check(status)?;
+            if owner.native_device.is_null() || unsafe { (*owner.native_device).is_null() } { return Err(HidError::InvalidMetadata); }
+            check(unsafe { ((**owner.native_device).open)(owner.native_device.cast(), 0) })?;
+            owner.cleanup.opened = true;
+            let mut queue = std::ptr::null_mut();
+            let status = unsafe { ((**owner.plugin).unknown.query)(owner.plugin.cast(), ffi::UuidBytes([0x2e,0xc7,0x8b,0xdb,0x9f,0x4e,0x11,0xda,0xb6,0x5c,0x00,0x0d,0x93,0x6d,0x06,0xd2]), &mut queue) };
+            owner.queue = queue.cast();
+            check(status)?;
+            if owner.queue.is_null() || unsafe { (*owner.queue).is_null() } { return Err(HidError::InvalidMetadata); }
+            check(unsafe { ((**owner.queue).set_depth)(owner.queue.cast(), u32::try_from(depth).map_err(|_| HidError::Capacity)?, 0) })?;
+            let mut elements = std::ptr::null();
+            let status = unsafe { ((**owner.native_device).copy_elements)(owner.native_device.cast(), std::ptr::null(), &mut elements, 0) };
+            let elements = ffi::OwnedRef(elements);
+            check(status)?;
+            if elements.0.is_null() { return Err(HidError::InvalidMetadata); }
+            let count = unsafe { ffi::CFArrayGetCount(elements.0) };
+            if !(0..=65536).contains(&count) { return Err(HidError::Capacity); }
+            let mut added = 0usize;
+            for index in 0..count {
+                let element = unsafe { ffi::CFArrayGetValueAtIndex(elements.0, index) };
+                if element.is_null() { return Err(HidError::InvalidMetadata); }
+                let kind = unsafe { ffi::IOHIDElementGetType(element) };
+                let page = unsafe { ffi::IOHIDElementGetUsagePage(element) };
+                if matches!(kind, 1..=4) && (kind != 4 || page == u32::from(KEYBOARD_USAGE_PAGE) || page == 9) {
+                    check(unsafe { ((**owner.queue).add_element)(owner.queue.cast(), element, 0) })?;
+                    added += 1;
+                }
+            }
+            if added == 0 { return Err(HidError::InvalidMetadata); }
+            // A failed start may have partially activated native delivery; stop
+            // is still attempted during initialization cleanup.
+            owner.cleanup.started = true;
+            check(unsafe { ((**owner.queue).start)(owner.queue.cast(), 0) })?;
+            Ok(())
+        })();
+        if let Err(primary) = result {
+            return Err(QueuedInputError { primary, cleanup: owner.close().err() });
+        }
+        Ok(owner)
+    }
+    fn next(&mut self) -> Result<Option<ffi::OwnedRef>, HidError> {
+        let mut value = std::ptr::null();
+        // SAFETY: checked UUID queue, worker-local owner, nonblocking timeout0.
+        let status = unsafe { ((**self.queue).copy_next_value)(self.queue.cast(), &mut value, 0, 0) };
+        let value = ffi::OwnedRef(value);
+        if decode_queue_result(status, !value.0.is_null())? { Ok(Some(value)) } else { Ok(None) }
+    }
+    fn close(&mut self) -> Result<(), HidError> {
+        let mut lease = NativeLease { plugin: self.plugin, device: self.native_device, queue: self.queue };
+        self.cleanup.close(&mut lease)?;
+        self.queue = std::ptr::null_mut(); self.native_device = std::ptr::null_mut(); self.plugin = std::ptr::null_mut();
+        Ok(())
+    }
+
+}
+impl Drop for NativeQueue {
+    fn drop(&mut self) {
+        let _ = self.close();
+        if self.cleanup.retained.is_some() {
+            std::mem::forget(std::mem::replace(&mut self.owned_device, ffi::OwnedRef(std::ptr::null())));
+        }
+    }
+}
+
 /// Native manager pinned to its creating runloop/thread, intentionally !Send/!Sync.
 /// All callbacks run only while this owner polls that runloop. Input callback
 /// allocations are off the audio path; bounded value/report queues report overflow.
@@ -569,6 +807,9 @@ pub struct HidInput {
     owner_thread: PhantomData<Rc<()>>,
     closed: bool,
     report_registration: Option<ffi::RegisterTimestampedReport>,
+    queued: bool,
+    queues: Vec<NativeQueue>,
+    sweep: Option<QueueSweep>,
 }
 impl HidInput {
     /// Opens all HID devices without seizure on the current thread's runloop.
@@ -606,6 +847,14 @@ impl HidInput {
         first_device: DeviceId,
         options: HidInputOptions,
     ) -> Result<Self, HidError> {
+        Self::open_mode(clock, first_device, options, false)
+    }
+    /// Opens an owner-thread manager for explicit checked synchronous queues.
+    /// No scalar callback is registered; configure the pinned selection before polling.
+    pub fn open_queued(clock: MachClock, first_device: DeviceId, queue_capacity: usize) -> Result<Self, HidError> {
+        Self::open_mode(clock, first_device, HidInputOptions::Values { queue_capacity }, true)
+    }
+    fn open_mode(clock: MachClock, first_device: DeviceId, options: HidInputOptions, queued: bool) -> Result<Self, HidError> {
         let (queue_capacity, report_byte_cap) = match options {
             HidInputOptions::Values { queue_capacity } => (queue_capacity, None),
             HidInputOptions::Reports {
@@ -667,6 +916,9 @@ impl HidInput {
             owner_thread: PhantomData,
             closed: false,
             report_registration,
+            queued,
+            queues: Vec::new(),
+            sweep: None,
         };
         let context = (&mut *input.state as *mut State).cast();
         // SAFETY: boxed context has stable address, remains owned until unschedule,
@@ -681,7 +933,7 @@ impl HidInput {
             ffi::IOHIDManagerRegisterDeviceRemovalCallback(input.manager.0, Some(removed), context);
             if let Some(register) = input.report_registration {
                 register(input.manager.0, Some(report), context);
-            } else {
+            } else if !queued {
                 ffi::IOHIDManagerRegisterInputValueCallback(input.manager.0, Some(value), context);
             }
             ffi::IOHIDManagerScheduleWithRunLoop(
@@ -710,15 +962,81 @@ impl HidInput {
         }
         Ok(input)
     }
+    /// Installs one checked native queue for every exact admitted runtime identity.
+    /// Only a fresh queued manager may configure the roster; no callback migration.
+    pub fn select_queued_devices(&mut self, selected: &[DeviceId]) -> Result<(), QueuedInputError> {
+        if self.closed { return Err(HidError::Closed.into()); }
+        if !self.queued || !self.queues.is_empty() || selected.is_empty() || selected.len() > 64 { return Err(HidError::Capacity.into()); }
+        // Validate/allocate the complete pinned roster before acquiring native leases.
+        let mut devices = Vec::new();
+        devices.try_reserve_exact(selected.len()).map_err(|_| HidError::Capacity)?;
+        for (index, &id) in selected.iter().enumerate() {
+            if selected[..index].contains(&id) { return Err(HidError::InvalidMetadata.into()); }
+            let (&device, _) = self.state.devices.iter().find(|(_, record)| record.info.descriptor.runtime_id == id).ok_or(HidError::InvalidMetadata)?;
+            devices.push((device as ffi::Ref, id));
+        }
+        let sweep = QueueSweep::new(selected.len())?;
+        let mut queues = Vec::new();
+        queues.try_reserve_exact(selected.len()).map_err(|_| HidError::Capacity)?;
+        for (device, id) in devices {
+            match NativeQueue::open(device, id, self.state.capacity.min(1024)) {
+                Ok(queue) => queues.push(queue),
+                Err(mut error) => {
+                    for queue in &mut queues {
+                        if let Err(cleanup) = queue.close() { error.cleanup.get_or_insert(cleanup); }
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        self.sweep = Some(sweep);
+        self.queues = queues;
+        Ok(())
+    }
+    /// Bounded fair checked queue sweep. Cut describes the observation BEFORE
+    /// this sweep, and appears only after every selected queue returned Underrun.
+    /// Kernel/driver losses not exposed by the native API remain unmeasured.
+    pub fn poll_queued(&mut self, quantum: usize) -> Result<Option<beatkernel::time::ClockPoint>, HidError> {
+        if self.closed { return Err(HidError::Closed); }
+        if !self.queued || self.queues.is_empty() || quantum == 0 || quantum > 65536 { return Err(HidError::Capacity); }
+        let sweep = self.sweep.as_mut().ok_or(HidError::InvalidMetadata)?;
+        if sweep.before.is_none() {
+            let before = self.state.clock.sample().map_err(|_| HidError::TimestampOverflow)?.normalized;
+            sweep.begin(before);
+        }
+        for _ in 0..quantum {
+            let index = sweep.index();
+            if sweep.drained[index] { continue; }
+            let queue = &mut self.queues[index];
+            if self.state.devices.get(&(queue.device as usize)).is_none_or(|record| record.info.descriptor.runtime_id != queue.id) { return Err(HidError::Closed); }
+            match queue.next()? {
+                Some(value) => {
+                    self.state.value_for_device(value.0, queue.device);
+                    if let Some(error) = self.state.error.take() { return Err(error); }
+                }
+                None => { if let Some(cut) = sweep.empty(index) { return Ok(Some(cut)); } }
+            }
+        }
+        Ok(None)
+    }
     /// Pumps at most the requested duration or one runloop source on owner thread.
     /// Other sources registered in this default runloop mode may also run.
     pub fn poll(&mut self, timeout: Duration) -> Result<(), HidError> {
+        self.poll_completion(timeout).map(|_| ())
+    }
+    /// Returns the native runloop reason, which alone does not prove native queues empty.
+    pub fn poll_completion(&mut self, timeout: Duration) -> Result<HidPollCompletion, HidError> {
         if self.closed {
             return Err(HidError::Closed);
         }
         // SAFETY: owner-thread runloop with callbacks pointing at this stable box.
-        unsafe { ffi::CFRunLoopRunInMode(ffi::kCFRunLoopDefaultMode, timeout.as_secs_f64(), 1) };
-        self.state.error.take().map_or(Ok(()), Err)
+        let reason = unsafe {
+            ffi::CFRunLoopRunInMode(ffi::kCFRunLoopDefaultMode, timeout.as_secs_f64(), 1)
+        };
+        if let Some(error) = self.state.error.take() {
+            return Err(error);
+        }
+        poll_completion(reason)
     }
     /// Copies active devices; removal retires IDs and reconnect allocates new IDs.
     pub fn devices(&self) -> Vec<HidDevice> {
@@ -773,6 +1091,10 @@ impl HidInput {
         if self.closed {
             return Ok(());
         }
+        let mut queue_error = None;
+        for queue in &mut self.queues {
+            if let Err(error) = queue.close() { queue_error.get_or_insert(error); }
+        }
         // SAFETY: owner thread only. Unschedule/unregister before close and before
         // state destruction so no later runloop callback can reference its box.
         unsafe {
@@ -803,7 +1125,8 @@ impl HidInput {
         }
         self.closed = true;
         // SAFETY: manager remains owned; callbacks no longer retain our context.
-        check(unsafe { ffi::IOHIDManagerClose(self.manager.0, 0) })
+        let manager_close = check(unsafe { ffi::IOHIDManagerClose(self.manager.0, 0) });
+        queue_error.map_or(manager_close, Err)
     }
 }
 impl Drop for HidInput {
@@ -962,3 +1285,7 @@ mod discovery_fixtures {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "input_fixtures.rs"]
+mod input_fixtures;
