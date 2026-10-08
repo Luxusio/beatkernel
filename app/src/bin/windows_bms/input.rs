@@ -14,11 +14,11 @@ pub(super) fn finish_raw_input<T, E>(
 
 #[cfg(target_os = "windows")]
 mod native {
-    use super::finish_raw_input;
-    use crate::{
+    use super::super::{
         native::{AcquisitionWindow, HOST},
         Result,
     };
+    use super::finish_raw_input;
     use beatkernel::input::DeviceId;
     use beatkernel_bms_runtime::{
         local_players::PlayerId,
@@ -86,14 +86,17 @@ mod native {
                             })
                             .collect();
                         let selected = match selection {
-                            Selection::Solo(path) => {
-                                crate::selected_keyboard(path.as_deref(), attached.iter().copied())?
-                                    .map(|(id, handle)| (DeviceId(id), handle))
-                                    .into_iter()
-                                    .collect()
-                            }
+                            Selection::Solo(path) => super::super::selected_keyboard(
+                                path.as_deref(),
+                                attached.iter().copied(),
+                            )?
+                            .map(|(id, handle)| (DeviceId(id), handle))
+                            .into_iter()
+                            .collect(),
                             Selection::Local(requested) => {
-                                crate::local_native::resolve_keyboards(&requested, &attached)?
+                                super::super::local_native::resolve_keyboards(
+                                    &requested, &attached,
+                                )?
                             }
                         };
                         metadata_tx
