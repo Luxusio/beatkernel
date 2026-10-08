@@ -525,6 +525,16 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 "metadata header",
                 options.duplicates,
             )?;
+        } else if command == "DEFEXRANK" {
+            BmsDefExRank::parse_at(value, line)?;
+            define(
+                &mut metadata,
+                command,
+                value.to_owned(),
+                line,
+                "DEFEXRANK",
+                options.duplicates,
+            )?;
         } else if command == "VOLWAV" {
             parse_wav_gain(value, line)?;
             define(
