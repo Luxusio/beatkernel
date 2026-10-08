@@ -158,6 +158,456 @@ fn assert_close(actual: &[f32], expected: &[f64], tolerance: f64) {
     }
 }
 
+// This oracle sums absolute rational time in u128; it does not use the
+// converter's recurrence, phase accessor or target-dependent phase helpers.
+#[derive(Clone, Copy)]
+struct ExactTime {
+    numerator: u128,
+    denominator: u128,
+}
+impl ExactTime {
+    fn zero() -> Self {
+        Self {
+            numerator: 0,
+            denominator: 1,
+        }
+    }
+    fn add_frames(&mut self, frames: usize, source: u32, target: u32) {
+        self.numerator = self.numerator * u128::from(target)
+            + frames as u128 * u128::from(source) * self.denominator;
+        self.denominator *= u128::from(target);
+        let mut a = self.numerator;
+        let mut b = self.denominator;
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        self.numerator /= a;
+        self.denominator /= a;
+    }
+    fn check(self, converter: &FormatConverter) {
+        let actual = converter.source_position();
+        assert_eq!(u128::from(actual.frame), self.numerator / self.denominator);
+        assert_eq!(
+            u128::from(actual.numerator) * self.denominator,
+            (self.numerator % self.denominator) * u128::from(actual.denominator)
+        );
+        assert!(actual.denominator > 0 && actual.numerator < actual.denominator);
+    }
+    fn linear(self, signal: &Signal, channel: usize) -> f64 {
+        let whole = (self.numerator / self.denominator) as i64;
+        let fraction = (self.numerator % self.denominator) as f64 / self.denominator as f64;
+        signal.at(whole, channel) * (1.0 - fraction) + signal.at(whole + 1, channel) * fraction
+    }
+}
+
+fn continuous(quality: ResampleQuality, rate: u32, capacity: usize) -> FormatConverter {
+    FormatConverter::new_continuous(
+        format(44_100, 2),
+        format(rate, 2),
+        ChannelMatrix::default_mix(2, 2).unwrap(),
+        quality,
+        capacity,
+    )
+    .unwrap()
+}
+
+#[test]
+fn retarget_piecewise_absolute_rational_and_pcm_oracle() {
+    let mut converter = continuous(ResampleQuality::Linear, 48_000, 64);
+    let mut signal = Signal::new(2, ramp);
+    let mut time = ExactTime::zero();
+    for (rate, frames) in [(48_000, 17), (44_100, 19), (32_000, 23), (48_000, 31)] {
+        let before = (
+            converter.source_position(),
+            converter.source_frame_cursor(),
+            converter.output_frame_cursor(),
+        );
+        converter
+            .retarget(
+                format(rate, 2),
+                ChannelMatrix::default_mix(2, 2).unwrap(),
+                64,
+            )
+            .unwrap();
+        assert_eq!(
+            before,
+            (
+                converter.source_position(),
+                converter.source_frame_cursor(),
+                converter.output_frame_cursor()
+            )
+        );
+        let mut expected = Vec::new();
+        for _ in 0..frames {
+            for channel in 0..2 {
+                expected.push(time.linear(&signal, channel));
+            }
+            time.add_frames(1, 44_100, rate);
+        }
+        let output = render_partitioned(&mut converter, &mut signal, frames, &[1, 7, 3]);
+        assert_close(&output, &expected, 1e-6);
+        time.check(&converter);
+        assert_eq!(converter.source_frame_cursor(), signal.next);
+        assert!(signal.largest_block <= converter.max_source_frames());
+    }
+    assert_eq!(converter.output_frame_cursor(), 90);
+}
+
+#[test]
+fn retarget_same_boundary_partitioning_preserves_linear_and_sinc_history() {
+    for quality in [
+        ResampleQuality::Linear,
+        ResampleQuality::WindowedSinc { half_taps: 16 },
+    ] {
+        let run = |partitions: &[usize]| {
+            let mut converter = continuous(quality, 48_000, 128);
+            let mut signal = Signal::new(2, tone);
+            let mut output = Vec::new();
+            let mut time = ExactTime::zero();
+            for (rate, frames) in [(48_000, 97), (44_100, 113), (32_000, 127), (48_000, 119)] {
+                converter
+                    .retarget(
+                        format(rate, 2),
+                        ChannelMatrix::default_mix(2, 2).unwrap(),
+                        128,
+                    )
+                    .unwrap();
+                let block = render_partitioned(&mut converter, &mut signal, frames, partitions);
+                if matches!(quality, ResampleQuality::WindowedSinc { .. }) {
+                    for (index, sample) in block.iter().enumerate() {
+                        let x = time.numerator as f64 / time.denominator as f64;
+                        if x > 40.0 {
+                            let expected =
+                                0.5 * (2.0 * PI * 997.0 * x / 44_100.0 + (index % 2) as f64).sin();
+                            assert!(
+                                (f64::from(*sample) - expected).abs() < 0.004,
+                                "rate {rate}, source {x}, sample {sample}, expected {expected}"
+                            );
+                        }
+                        if index % 2 == 1 {
+                            time.add_frames(1, 44_100, rate);
+                        }
+                    }
+                } else {
+                    time.add_frames(frames, 44_100, rate);
+                }
+                time.check(&converter);
+                output.extend(block);
+            }
+            (
+                output,
+                converter.source_position(),
+                converter.source_frame_cursor(),
+            )
+        };
+        assert_eq!(run(&[128]), run(&[1, 31, 7, 53]));
+    }
+}
+
+#[test]
+fn retarget_capacity_refusal_and_channel_matrix_changes_are_atomic() {
+    let mut changed = continuous(ResampleQuality::Linear, 48_000, 64);
+    let mut baseline = continuous(ResampleQuality::Linear, 48_000, 64);
+    let mut a = Signal::new(2, ramp);
+    let mut b = Signal::new(2, ramp);
+    assert_eq!(
+        render_partitioned(&mut changed, &mut a, 17, &[17]),
+        render_partitioned(&mut baseline, &mut b, 17, &[17])
+    );
+    let before = (
+        changed.source_position(),
+        changed.source_frame_cursor(),
+        changed.output_frame_cursor(),
+        changed.target_format(),
+    );
+    for capacity in [0, AudioLimits::MAX_RENDER_FRAMES + 1] {
+        assert!(changed
+            .retarget(
+                format(32_000, 2),
+                ChannelMatrix::default_mix(2, 2).unwrap(),
+                capacity
+            )
+            .is_err());
+        assert_eq!(
+            before,
+            (
+                changed.source_position(),
+                changed.source_frame_cursor(),
+                changed.output_frame_cursor(),
+                changed.target_format()
+            )
+        );
+    }
+    assert!(changed
+        .retarget(
+            format(32_000, 1),
+            ChannelMatrix::default_mix(2, 2).unwrap(),
+            64
+        )
+        .is_err());
+    assert_eq!(
+        render_partitioned(&mut changed, &mut a, 41, &[13, 1]),
+        render_partitioned(&mut baseline, &mut b, 41, &[13, 1])
+    );
+    for capacity in [128, 16, 64] {
+        changed
+            .retarget(
+                format(48_000, 2),
+                ChannelMatrix::default_mix(2, 2).unwrap(),
+                capacity,
+            )
+            .unwrap();
+        baseline
+            .retarget(
+                format(48_000, 2),
+                ChannelMatrix::default_mix(2, 2).unwrap(),
+                64,
+            )
+            .unwrap();
+        assert_eq!(
+            render_partitioned(&mut changed, &mut a, 31, &[7, 1]),
+            render_partitioned(&mut baseline, &mut b, 31, &[7, 1])
+        );
+    }
+    let position = changed.source_position();
+    let time = ExactTime {
+        numerator: u128::from(position.frame) * u128::from(position.denominator)
+            + u128::from(position.numerator),
+        denominator: u128::from(position.denominator),
+    };
+    changed
+        .retarget(
+            format(32_000, 1),
+            ChannelMatrix::new(2, 1, &[0.25, 0.75]).unwrap(),
+            64,
+        )
+        .unwrap();
+    let output = render_partitioned(&mut changed, &mut a, 1, &[1]);
+    assert_close(
+        &output,
+        &[time.linear(&a, 0) * 0.25 + time.linear(&a, 1) * 0.75],
+        1e-6,
+    );
+    assert_eq!(changed.source_format(), format(44_100, 2));
+}
+
+#[test]
+fn retarget_source_refusal_and_zero_extent_preserve_converter_position() {
+    let mut converter = continuous(ResampleQuality::Linear, 48_000, 64);
+    let mut signal = Signal::new(2, ramp);
+    render_partitioned(&mut converter, &mut signal, 17, &[17]);
+    converter
+        .retarget(
+            format(32_000, 2),
+            ChannelMatrix::default_mix(2, 2).unwrap(),
+            64,
+        )
+        .unwrap();
+    let before = (
+        converter.source_position(),
+        converter.source_frame_cursor(),
+        converter.output_frame_cursor(),
+    );
+    let mut failed_calls = 0;
+    assert_eq!(
+        converter.render(&mut [0.0; 64], |_| {
+            failed_calls += 1;
+            Err::<(), _>(AudioError::InvalidBuffer)
+        }),
+        Err(AudioError::InvalidBuffer)
+    );
+    assert_eq!(failed_calls, 1); // The source's own effects are not rolled back.
+    assert_eq!(
+        before,
+        (
+            converter.source_position(),
+            converter.source_frame_cursor(),
+            converter.output_frame_cursor()
+        )
+    );
+    converter
+        .render(&mut [], |block| {
+            assert!(block.is_empty());
+            Ok::<_, AudioError>(())
+        })
+        .unwrap();
+    assert_eq!(
+        before,
+        (
+            converter.source_position(),
+            converter.source_frame_cursor(),
+            converter.output_frame_cursor()
+        )
+    );
+    let mut time = ExactTime {
+        numerator: u128::from(before.0.frame) * u128::from(before.0.denominator)
+            + u128::from(before.0.numerator),
+        denominator: u128::from(before.0.denominator),
+    };
+    let mut expected = Vec::new();
+    for _ in 0..32 {
+        for channel in 0..2 {
+            expected.push(time.linear(&signal, channel));
+        }
+        time.add_frames(1, 44_100, 32_000);
+    }
+    let output = render_partitioned(&mut converter, &mut signal, 32, &[32]);
+    assert_close(&output, &expected, 1e-6);
+    time.check(&converter);
+}
+
+#[test]
+fn retarget_large_coprime_rates_refuse_exact_denominator_overflow() {
+    let source = format(1, 1);
+    let rates = [4_294_967_291, 4_294_967_279, 4_294_967_231];
+    let mut converter = FormatConverter::new_continuous(
+        source,
+        format(rates[0], 1),
+        ChannelMatrix::default_mix(1, 1).unwrap(),
+        ResampleQuality::Linear,
+        1,
+    )
+    .unwrap();
+    let mut signal = Signal::new(1, ramp);
+    let mut oracle = ExactTime::zero();
+    for rate in &rates[..2] {
+        converter
+            .retarget(
+                format(*rate, 1),
+                ChannelMatrix::default_mix(1, 1).unwrap(),
+                1,
+            )
+            .unwrap();
+        render_partitioned(&mut converter, &mut signal, 1, &[1]);
+        oracle.add_frames(1, 1, *rate);
+        oracle.check(&converter);
+    }
+    let before = (
+        converter.source_position(),
+        converter.source_frame_cursor(),
+        converter.output_frame_cursor(),
+    );
+    assert!(converter
+        .retarget(
+            format(rates[2], 1),
+            ChannelMatrix::default_mix(1, 1).unwrap(),
+            1
+        )
+        .is_err());
+    assert_eq!(
+        before,
+        (
+            converter.source_position(),
+            converter.source_frame_cursor(),
+            converter.output_frame_cursor()
+        )
+    );
+    let mut output = [0.0];
+    converter
+        .render(&mut output, |block| signal.fill(block))
+        .unwrap();
+    assert_close(&output, &[oracle.linear(&signal, 0)], 1e-6);
+    oracle.add_frames(1, 1, rates[1]);
+    oracle.check(&converter);
+    let frontier = converter.source_frame_cursor();
+    assert!(converter
+        .retarget(format(1, 1), ChannelMatrix::default_mix(1, 1).unwrap(), 1)
+        .is_ok());
+    assert_eq!(converter.source_frame_cursor(), frontier);
+    // The opposite extreme is refused cold rather than attempting a huge pull.
+    let mut huge = FormatConverter::new_continuous(
+        format(u32::MAX, 1),
+        format(u32::MAX, 1),
+        ChannelMatrix::default_mix(1, 1).unwrap(),
+        ResampleQuality::Linear,
+        1,
+    )
+    .unwrap();
+    assert!(huge
+        .retarget(format(1, 1), ChannelMatrix::default_mix(1, 1).unwrap(), 1)
+        .is_err());
+    assert_eq!(huge.output_frame_cursor(), 0);
+}
+
+#[test]
+fn retargeted_callbacks_do_not_allocate_reallocate_or_deallocate() {
+    for quality in [
+        ResampleQuality::Linear,
+        ResampleQuality::WindowedSinc { half_taps: 16 },
+    ] {
+        let mut converter = continuous(quality, 48_000, 64);
+        let mut signal = Signal::new(2, tone);
+        let mut output = [0.0; 128];
+        converter
+            .render(&mut output[..34], |block| signal.fill(block))
+            .unwrap();
+        for rate in [44_100, 32_000, 48_000] {
+            converter
+                .retarget(
+                    format(rate, 2),
+                    ChannelMatrix::default_mix(2, 2).unwrap(),
+                    64,
+                )
+                .unwrap();
+            let (_, counts) = track(|| {
+                for frames in [0, 1, 64, 7, 31] {
+                    converter
+                        .render(&mut output[..frames * 2], |block| signal.fill(block))
+                        .unwrap();
+                }
+            });
+            assert_eq!(counts, [0, 0, 0]);
+        }
+    }
+}
+
+#[test]
+fn continuous_initial_equal_rate_retains_sinc_history_for_later_conversion() {
+    let mut converter = continuous(ResampleQuality::WindowedSinc { half_taps: 16 }, 44_100, 64);
+    let mut signal = Signal::new(2, tone);
+    let equal = render_partitioned(&mut converter, &mut signal, 53, &[19, 1]);
+    let expected: Vec<_> = (0..53)
+        .flat_map(|frame| (0..2).map(move |channel| f64::from(tone(frame, channel))))
+        .collect();
+    assert_close(&equal, &expected, 0.0);
+    converter
+        .retarget(
+            format(48_000, 2),
+            ChannelMatrix::default_mix(2, 2).unwrap(),
+            64,
+        )
+        .unwrap();
+    let converted = render_partitioned(&mut converter, &mut signal, 31, &[1, 7]);
+    for (index, value) in converted.iter().enumerate() {
+        let position = 53.0 + (index / 2) as f64 * 44_100.0 / 48_000.0;
+        let expected = 0.5 * (2.0 * PI * 997.0 * position / 44_100.0 + (index % 2) as f64).sin();
+        assert!((f64::from(*value) - expected).abs() < 0.004);
+    }
+}
+
+#[test]
+fn legacy_fixed_rate_converter_refuses_retarget_without_losing_pcm() {
+    let mut converter = FormatConverter::new(
+        format(44_100, 2),
+        format(48_000, 2),
+        ChannelMatrix::default_mix(2, 2).unwrap(),
+        ResampleQuality::Linear,
+        64,
+    )
+    .unwrap();
+    assert_eq!(
+        converter.retarget(
+            format(44_100, 2),
+            ChannelMatrix::default_mix(2, 2).unwrap(),
+            64
+        ),
+        Err(AudioError::InvalidCapacity)
+    );
+    let mut signal = Signal::new(2, ramp);
+    let output = render_partitioned(&mut converter, &mut signal, 31, &[13, 1]);
+    assert_close(&output, &linear_oracle(&signal, 44_100, 48_000, 31), 1e-6);
+}
+
 #[test]
 fn kernel_width_is_not_actual_pulled_source_progress() {
     for (source_rate, target_rate, pulled) in [(48_000, 8_000, 6), (24_000, 48_000, 2)] {
@@ -229,11 +679,9 @@ fn default_channel_matrices_are_layout_agnostic_and_validated() {
         ChannelMatrix::new(1, 1, &[f32::NAN]),
         Err(AudioError::NonFiniteSample)
     );
-    assert!(
-        !ChannelMatrix::new(2, 2, &[1.0, 0.0, 0.0, 0.5])
-            .unwrap()
-            .is_identity()
-    );
+    assert!(!ChannelMatrix::new(2, 2, &[1.0, 0.0, 0.0, 0.5])
+        .unwrap()
+        .is_identity());
 }
 
 #[test]

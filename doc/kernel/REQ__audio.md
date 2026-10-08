@@ -7,6 +7,10 @@ native playback has passed verification. Native device control belongs to
 
 ## Loading and ownership
 
+Cold converter/mixer continuity follows [the converted output contract](REQ__converted-output-continuity.md).
+Source and target grids remain distinct; its implementation is a prerequisite
+for later native unequal-rate enablement, not evidence of that feature.
+
 - Decode assets before starting output. RIFF WAVE PCM16/24/32 and IEEE float32
   become owned finite interleaved samples with explicit rate and channel count.
   Extensible WAVE accepts known PCM/float subformats only, with consistent

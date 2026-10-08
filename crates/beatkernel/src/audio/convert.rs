@@ -130,6 +130,25 @@ impl ResampleQuality {
     }
 }
 
+/// Exact absolute position of the next output sample on the immutable source grid.
+/// `numerator / denominator` is a reduced proper fraction after `frame`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourcePosition {
+    /// Whole source frames before the next output sampling position.
+    pub frame: u64,
+    /// Reduced fractional numerator in a reported source position.
+    pub numerator: u64,
+    /// Positive denominator of the reported reduced fraction.
+    pub denominator: u64,
+}
+
+#[derive(Debug)]
+struct ContinuousPosition {
+    frame: u64,
+    // Absolute first nonnegative source frame retained in window.
+    window_start: u64,
+}
+
 /// Preallocated callback-safe conversion from a source render format, normally
 /// a [`super::Mixer`], to a different device rate and/or channel count.
 ///
@@ -137,7 +156,9 @@ impl ResampleQuality {
 /// the source's own report, pause and endpoint evidence pass through unchanged
 /// on the source frame grid. Output frame `k` samples source position
 /// `k * source_rate / target_rate` using an exact reduced rational phase, so any
-/// partition of the same output frames yields identical samples. Frames before
+/// partition of the same output frames yields identical samples. Continuity-capable
+/// construction also preserves exact absolute position across target changes.
+/// Frames before
 /// source frame zero read as silence. Converted results are clamped once to
 /// [-1, 1]; a matching-format pass-through only replaces non-finite samples.
 /// Device sample encoding (integer widths or float) stays a native concern.
@@ -169,7 +190,8 @@ pub struct FormatConverter {
     matrix: ChannelMatrix,
     identity_mix: bool,
     quality: ResampleQuality,
-    // Zero when rates match; otherwise taps on each side of the phase.
+    // Legacy converters bypass the kernel at equal rates. Continuous converters
+    // retain this half-width at every rate to preserve history for later changes.
     half_taps: usize,
     step: u64,
     denominator: u64,
@@ -183,6 +205,7 @@ pub struct FormatConverter {
     output_cursor: u64,
     source_cursor: u64,
     sanitized_samples: u64,
+    continuous: Option<ContinuousPosition>,
 }
 
 impl FormatConverter {
@@ -246,7 +269,185 @@ impl FormatConverter {
             output_cursor: 0,
             source_cursor: 0,
             sanitized_samples: 0,
+            continuous: None,
         })
+    }
+
+    /// Cold construction retaining the history needed for later target changes.
+    /// Unlike [`new`](Self::new), this keeps kernel history even at equal rates.
+    /// Source format and source callback ownership must remain unchanged.
+    pub fn new_continuous(
+        source: AudioFormat,
+        target: AudioFormat,
+        matrix: ChannelMatrix,
+        quality: ResampleQuality,
+        max_output_frames: usize,
+    ) -> Result<Self, AudioError> {
+        let max_source_frames =
+            Self::required_source_frames_continuous(source, target, quality, max_output_frames)?;
+        let half_taps = quality.half_taps()?;
+        let storage_frames = max_source_frames
+            .checked_add(2 * half_taps)
+            .ok_or(AudioError::Overflow)?;
+        let samples = storage_frames
+            .checked_mul(usize::from(source.channels()))
+            .ok_or(AudioError::Overflow)?;
+        let mut window = Vec::new();
+        window
+            .try_reserve_exact(samples)
+            .map_err(|_| AudioError::AllocationFailed)?;
+        window.resize(samples, 0.0);
+        let kernel = match quality {
+            ResampleQuality::WindowedSinc { .. } => sinc_table(
+                half_taps,
+                (f64::from(target.sample_rate()) / f64::from(source.sample_rate())).min(1.0),
+            )?,
+            ResampleQuality::Linear => Vec::new(),
+        };
+        let mut converter = Self::new(source, target, matrix, quality, max_output_frames)?;
+        converter.continuous = Some(ContinuousPosition {
+            frame: 0,
+            window_start: 0,
+        });
+        converter.window_frames = 0;
+        converter.window = window;
+        converter.kernel = kernel;
+        converter.half_taps = half_taps;
+        converter.max_source_frames = max_source_frames;
+        Ok(converter)
+    }
+
+    /// Continuity-capable setup checked against the source mixer's render limit.
+    pub fn for_mixer_continuous(
+        config: MixerConfig,
+        target: AudioFormat,
+        matrix: ChannelMatrix,
+        quality: ResampleQuality,
+        max_output_frames: usize,
+    ) -> Result<Self, AudioError> {
+        let converter =
+            Self::new_continuous(config.format(), target, matrix, quality, max_output_frames)?;
+        if converter.max_source_frames > config.limits().max_render_frames() {
+            return Err(AudioError::RenderCapacity);
+        }
+        Ok(converter)
+    }
+
+    /// Worst contiguous source pull for a continuity-capable callback. Retained
+    /// history storage is additional and is prepared internally on the cold path.
+    pub fn required_source_frames_continuous(
+        source: AudioFormat,
+        target: AudioFormat,
+        quality: ResampleQuality,
+        max_output_frames: usize,
+    ) -> Result<usize, AudioError> {
+        let half = quality.half_taps()? as u64;
+        if max_output_frames == 0 || max_output_frames > AudioLimits::MAX_RENDER_FRAMES {
+            return Err(AudioError::InvalidCapacity);
+        }
+        let frames = max_output_frames as u64;
+        let step = u64::from(source.sample_rate());
+        let denominator = u64::from(target.sample_rate());
+        let required = ((frames - 1) * step)
+            .div_ceil(denominator)
+            .checked_add(2 * half)
+            .ok_or(AudioError::Overflow)?
+            .max((frames * step).div_ceil(denominator));
+        if required > AudioLimits::MAX_RENDER_FRAMES as u64 {
+            return Err(AudioError::RenderCapacity);
+        }
+        Ok(required as usize)
+    }
+
+    /// Prepare a new target on the cold path, preserving source position,
+    /// pulled frontier, history, pending PCM and counters. A legacy converter
+    /// constructed with `new` refuses this operation with `InvalidCapacity`.
+    /// Every fallible preparation finishes before any state is changed.
+    pub fn retarget(
+        &mut self,
+        target: AudioFormat,
+        matrix: ChannelMatrix,
+        max_output_frames: usize,
+    ) -> Result<(), AudioError> {
+        if self.continuous.is_none() {
+            return Err(AudioError::InvalidCapacity);
+        }
+        if matrix.source != self.source.channels() || matrix.target != target.channels() {
+            return Err(AudioError::ChannelMismatch);
+        }
+        let max_source_frames = Self::required_source_frames_continuous(
+            self.source,
+            target,
+            self.quality,
+            max_output_frames,
+        )?;
+        let position = self.source_position();
+        let divisor = gcd(self.source.sample_rate(), target.sample_rate());
+        let rate_denominator = u64::from(target.sample_rate() / divisor);
+        let denominator = (position.denominator / gcd64(position.denominator, rate_denominator))
+            .checked_mul(rate_denominator)
+            .ok_or(AudioError::Overflow)?;
+        let fraction = position
+            .numerator
+            .checked_mul(denominator / position.denominator)
+            .ok_or(AudioError::Overflow)?;
+        let step = u64::from(self.source.sample_rate() / divisor)
+            .checked_mul(denominator / rate_denominator)
+            .ok_or(AudioError::Overflow)?;
+        let half_taps = self.quality.half_taps()?;
+        // Existing unread PCM may exceed a newly smaller callback. Keep all of
+        // it, plus enough space for the largest new pull without dropping history.
+        let storage_frames = self
+            .window_frames
+            .checked_add(max_source_frames)
+            .and_then(|n| n.checked_add(2 * half_taps))
+            .ok_or(AudioError::Overflow)?;
+        let samples = storage_frames
+            .checked_mul(usize::from(self.source.channels()))
+            .ok_or(AudioError::Overflow)?;
+        let mut window = Vec::new();
+        window
+            .try_reserve_exact(samples)
+            .map_err(|_| AudioError::AllocationFailed)?;
+        window.resize(samples, 0.0);
+        let retained_samples = self.window_frames * usize::from(self.source.channels());
+        window[..retained_samples].copy_from_slice(&self.window[..retained_samples]);
+        let kernel = match self.quality {
+            ResampleQuality::WindowedSinc { .. } => sinc_table(
+                half_taps,
+                (f64::from(target.sample_rate()) / f64::from(self.source.sample_rate())).min(1.0),
+            )?,
+            ResampleQuality::Linear => Vec::new(),
+        };
+        self.target = target;
+        self.identity_mix = matrix.is_identity();
+        self.matrix = matrix;
+        self.half_taps = half_taps;
+        self.denominator = denominator;
+        self.fraction = fraction;
+        self.step = step;
+        self.window = window;
+        self.kernel = kernel;
+        self.max_output_frames = max_output_frames;
+        self.max_source_frames = max_source_frames;
+        Ok(())
+    }
+
+    /// Exact next source sample position, distinct from the pulled frontier.
+    pub fn source_position(&self) -> SourcePosition {
+        let frame = match &self.continuous {
+            Some(position) => position.frame,
+            None => {
+                ((u128::from(self.output_cursor) * u128::from(self.source.sample_rate()))
+                    / u128::from(self.target.sample_rate())) as u64
+            }
+        };
+        let divisor = gcd64(self.fraction, self.denominator);
+        SourcePosition {
+            frame,
+            numerator: self.fraction / divisor,
+            denominator: self.denominator / divisor,
+        }
     }
 
     /// Like [`new`](Self::new) with the mixer's format, also requiring that its
@@ -305,7 +506,8 @@ impl FormatConverter {
     pub const fn target_format(&self) -> AudioFormat {
         self.target
     }
-    /// Configured kernel, inactive while rates match.
+    /// Configured kernel. Continuous converters use it for inherited fractional
+    /// positions even while rates match.
     pub const fn quality(&self) -> ResampleQuality {
         self.quality
     }
@@ -321,7 +523,8 @@ impl FormatConverter {
     pub const fn max_source_frames(&self) -> usize {
         self.max_source_frames
     }
-    /// Kernel half-width in source frames, zero when rates match. This is not
+    /// Kernel half-width in source frames, zero for legacy equal-rate paths.
+    /// Continuity-capable paths retain history even at equal rates. This is not
     /// the current pulled-frame lead or a measured native presentation delay.
     /// Native mapping must also use original frame basis and output evidence.
     pub const fn source_lookahead_frames(&self) -> usize {
@@ -365,6 +568,9 @@ impl FormatConverter {
         let frames = output.len() / target_channels;
         if frames > self.max_output_frames {
             return Err(AudioError::RenderCapacity.into());
+        }
+        if self.continuous.is_some() {
+            return self.render_continuous(output, source);
         }
         if self.half_taps == 0 {
             self.validate_frames(frames, frames).map_err(E::from)?;
@@ -453,6 +659,130 @@ impl FormatConverter {
             .copy_within(advance * source_channels..needed * source_channels, 0);
         self.window_frames = needed - advance;
         self.fraction = (self.fraction + frames as u64 * self.step) % self.denominator;
+        self.commit_frames(frames, pulled);
+        Ok(report)
+    }
+
+    fn render_continuous<R, E>(
+        &mut self,
+        output: &mut [f32],
+        source: impl FnOnce(&mut [f32]) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<AudioError>,
+    {
+        let source_channels = usize::from(self.source.channels());
+        let target_channels = usize::from(self.target.channels());
+        let frames = output.len() / target_channels;
+        if frames == 0 {
+            return source(&mut []);
+        }
+        let position = self.continuous.as_ref().unwrap();
+        let start = position.window_start;
+        let first = position.frame;
+        // u128 intermediates cover every u64 fraction, step and callback bound;
+        // narrowing and all cursor checks precede the source call.
+        let next_rational = u128::from(self.fraction) + frames as u128 * u128::from(self.step);
+        let advance = u64::try_from(next_rational / u128::from(self.denominator))
+            .map_err(|_| E::from(AudioError::Overflow))?;
+        let next = first
+            .checked_add(advance)
+            .ok_or_else(|| E::from(AudioError::Overflow))?;
+        let last_rational =
+            u128::from(self.fraction) + (frames - 1) as u128 * u128::from(self.step);
+        let last_advance = u64::try_from(last_rational / u128::from(self.denominator))
+            .map_err(|_| E::from(AudioError::Overflow))?;
+        let last = first
+            .checked_add(last_advance)
+            .ok_or_else(|| E::from(AudioError::Overflow))?;
+        let needed_frontier = last
+            .checked_add(self.half_taps as u64)
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| E::from(AudioError::Overflow))?
+            .max(next)
+            .max(self.source_cursor);
+        let pulled = usize::try_from(needed_frontier - self.source_cursor)
+            .map_err(|_| E::from(AudioError::Overflow))?;
+        let needed = self
+            .window_frames
+            .checked_add(pulled)
+            .ok_or_else(|| E::from(AudioError::Overflow))?;
+        if pulled > self.max_source_frames || needed > self.window.len() / source_channels {
+            return Err(AudioError::RenderCapacity.into());
+        }
+        self.validate_frames(frames, pulled).map_err(E::from)?;
+        let range = self.window_frames * source_channels..needed * source_channels;
+        let report = source(&mut self.window[range.clone()])?;
+        let sanitized = sanitize(&mut self.window[range]);
+        self.count_sanitized(sanitized);
+        let taps = 2 * self.half_taps;
+        for (index, frame) in output.chunks_exact_mut(target_channels).enumerate() {
+            let rational = u128::from(self.fraction) + index as u128 * u128::from(self.step);
+            let whole = first + (rational / u128::from(self.denominator)) as u64;
+            let remainder = (rational % u128::from(self.denominator)) as u64;
+            let phase = remainder as f64 / self.denominator as f64;
+            let mut mixed = [0.0f64; MAX_CHANNELS];
+            if self.source.sample_rate() == self.target.sample_rate() && remainder == 0 {
+                let offset = (whole - start) as usize * source_channels;
+                for (channel, sample) in self.window[offset..offset + source_channels]
+                    .iter()
+                    .enumerate()
+                {
+                    mixed[channel] = f64::from(*sample);
+                }
+            } else {
+                let mut weights = [0.0f64; 2 * ResampleQuality::MAX_HALF_TAPS as usize];
+                let weights = &mut weights[..taps];
+                if self.kernel.is_empty() {
+                    weights[0] = 1.0 - phase;
+                    weights[1] = phase;
+                } else {
+                    let mut total = 0.0;
+                    for (tap, weight) in weights.iter_mut().enumerate() {
+                        let distance = (tap as f64 - (self.half_taps - 1) as f64 - phase).abs();
+                        *weight = kernel_at(&self.kernel, self.half_taps, distance);
+                        total += *weight;
+                    }
+                    if total != 0.0 {
+                        weights.iter_mut().for_each(|weight| *weight /= total);
+                    }
+                }
+                for (tap, weight) in weights.iter().enumerate() {
+                    let absolute = i128::from(whole) + tap as i128 - (self.half_taps - 1) as i128;
+                    if absolute < 0 {
+                        continue;
+                    }
+                    let offset = (absolute as u64 - start) as usize * source_channels;
+                    for (channel, sample) in self.window[offset..offset + source_channels]
+                        .iter()
+                        .enumerate()
+                    {
+                        mixed[channel] += f64::from(*sample) * weight;
+                    }
+                }
+            }
+            if self.identity_mix
+                && self.source.sample_rate() == self.target.sample_rate()
+                && remainder == 0
+            {
+                for (destination, value) in frame.iter_mut().zip(&mixed) {
+                    *destination = *value as f32;
+                }
+            } else {
+                self.mix_into(&mixed[..source_channels], frame);
+            }
+        }
+        let keep_start = next
+            .saturating_sub((self.half_taps - 1) as u64)
+            .min(needed_frontier);
+        let discard = (keep_start - start) as usize;
+        self.window
+            .copy_within(discard * source_channels..needed * source_channels, 0);
+        self.window_frames = needed - discard;
+        self.fraction = (next_rational % u128::from(self.denominator)) as u64;
+        let position = self.continuous.as_mut().unwrap();
+        position.frame = next;
+        position.window_start = keep_start;
         self.commit_frames(frames, pulled);
         Ok(report)
     }
@@ -591,6 +921,13 @@ fn kernel_at(table: &[f32], half_taps: usize, distance: f64) -> f64 {
 }
 
 fn gcd(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left
+}
+
+fn gcd64(mut left: u64, mut right: u64) -> u64 {
     while right != 0 {
         (left, right) = (right, left % right);
     }

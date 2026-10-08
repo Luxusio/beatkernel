@@ -47,7 +47,7 @@ mod model;
 mod pcm;
 mod queue;
 
-pub use convert::{ChannelMatrix, FormatConverter, ResampleQuality};
+pub use convert::{ChannelMatrix, FormatConverter, ResampleQuality, SourcePosition};
 pub use frame_basis::{OutputFrameBasis, OutputFrameBasisError};
 pub use handoff::{MixerOpenFailure, OutputOpenFailure, StoppedMixerSource};
 pub use mixer::Mixer;
