@@ -1,16 +1,57 @@
 # Implementation inventory and outstanding acceptance
 
+The canonical full product TODO/count ledger is the
+[BMS player WBS](REQ__bms-player-work-breakdown.md). Run
+`python3 tools/wbs_status.py` for leaf counts and per-domain status; the
+historical feature survey and a child task's milestones use different scopes.
+
 ## Current authority and historical boundary
 
-The current feature-level source/verification survey is
-[BMS player progress](REQ__bms-player-progress.md), inspected at revision
-`5ddc850` on 2026-10-07. The sections below are historical source observations
+The feature-level survey at revision `5ddc850` on 2026-10-07 in
+[BMS player progress](REQ__bms-player-progress.md) is a historical baseline.
+The ongoing [parallel requirements](REQ__parallel-player-requirements.md)
+work adds the evidence table below without declaring full-player acceptance.
+The sections after that table are historical source observations
 from 2026-10-01 and subsequent dated continuations, not a current completion
 ledger. In particular, old WAV-only, unavailable-backend or deferred-execution
 statements must not override current source and fresh evidence. The user lifted
 verification deferral on 2026-10-06; historical deferral text below is superseded.
 Neither the old inventory nor the current survey establishes full-player,
 native hardware or measured performance acceptance.
+
+## Parallel implementation evidence on 2026-10-08
+
+These are development checks on the current uncommitted worktree, not final
+independent review or QA. Formal code/security review and CLI/browser/desktop
+QA remain required before the parallel task closes. Totals below belong to
+their individual commands; they must not be added into an overall TODO ratio.
+
+The latest combined app library development run (`desktop,webtransport`) passed
+2011 tests, with 0 failures and 3 ignored. This includes all migrated screens,
+pure/frozen record-preview fixtures and the converted startup correction. The
+parallel pack has 24 planned criteria and 17 development milestones verified;
+this is neither 17 completed full-player requirements nor a 71% full-player
+completion claim. Actual converted launcher/replacement integration, Worker
+menu integration, real transports, component motion, the full scope audit and
+ordered independent review/QA remain open.
+
+| Requirement slice | Actual evidence | Remaining integration or proof |
+| --- | --- | --- |
+| Typed persistent UI layout and retained geometry | `MountedLayout` and retained paint/hit clipping, with Selection/Settings/Records included in the executed app library run: 1953 passed, 0 failed, 2 ignored | Actual browser menu navigation and combined GUI QA; per-component motion |
+| Practice declarations and partial geometry updates | Focused `ui::practice` run: 9 passed, 0 failed; includes six new behavioral fixtures | Combined GUI QA; physical gapless loop/restart proof is separate |
+| Players, Devices and Results declarations | Independent behavior fixtures passed in the 2011-test app library run; existing browser/native APIs preserved | Combined GUI QA pending |
+| Exact mixed-rate target duration and converted output boundaries | Core resume check: 23 passed; platform check: 126 passed, 0 failed, 1 ignored | Actual native converted solo/local/replay and output replacement consumers, other backend integration and hardware presentation |
+| Chained same-format Vorbis preparation | Actual decoder/preparation fixtures included in the executed 1953-test app library run | Mixed-format chaining remains rejected; no new automatic format policy |
+| Selected-policy network admission | Pure policy/identity fixtures included in the executed app library run; cohort and Linux entrypoint routing is now being connected | Execute new routing tests and actual QUIC/WebTransport exchanges; foreign launcher routing remains unfinished |
+| Worker menu ownership and portable record preview | Pure setup preview and read-only frozen preview fixtures passed in the 2011-test app library run | Rebuild actual WASM, execute all menu/record paths and browser QA |
+| Real transport acceptance | Real QUIC and HTTP/3 room fixtures authored with explicit owned TLS relay requirements | Execute them with ephemeral credentials and bounded server cleanup; successful transport is not acoustic synchronization |
+
+The full requirement scope remains in the parallel requirements document and
+the original plan acceptance map. Historical timing presets, empty-POOR and
+EXBMP/video policies, cross-backend continuity, DDD/port coverage, RT/fuzz/stress,
+performance comparisons, OS/device matrix, licensing/release and final docs
+remain open wherever direct acceptance evidence is absent. Conditional C ABI/C#
+SDK activation still requires a concrete host requirement.
 
 ## Historical source inventory
 

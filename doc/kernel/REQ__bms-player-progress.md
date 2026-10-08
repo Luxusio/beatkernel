@@ -1,5 +1,18 @@
 # BMS player 구현/검증 현황 — 2026-10-07
 
+현재 전체 TODO/진행률은 [전체 WBS](REQ__bms-player-work-breakdown.md)를 사용한다.
+`python3 tools/wbs_status.py`가 말단 작업의 완료·검증 대기·구현 중·장비/정책 대기를
+집계한다. 아래 60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
+
+2026-10-08 재개 주의: 아래는 이전 revision의 기능 인벤토리이며 현재
+완료율/TODO 집계가 아니다. 전용 native input collector는 새 구현과
+독립 검증을 마쳤다(REQ__native-input-collector.md, closed task). 실제
+same-rate ALSA/app pending PCM 소유권도 REQ__native-output-continuity.md의
+새 검증을 마쳤다. 별도 browser renderer Worker·live class/EX·mines·records
+경로 역시 최신 source/evidence를 우선한다. 전체 행의 재조사·독립 사실
+검토는 TASK__parallel-player-requirements의 범위 ledger에서 진행한다.
+아래 과거 상태나 수를 근거로 이 기능들을 중복 구현하지 않는다.
+
 조사 상태: 독립 사실/범위 리뷰 대기. 이전 슬롯 제한은 재시작 후 해제됐지만
 이 인벤토리 자체의 독립 리뷰는 아직 완료되지 않았다. 아래 숫자는 source 조사 집계이며,
 독립 검토된 기능 완료 개수로 인용하면 안 된다.
