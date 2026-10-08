@@ -1,5 +1,41 @@
 # Exact native target time and converted boundaries
 
+Replay conversion must preserve the existing saved timeline, source commands,
+section and preroll. `play_replay_bms --rate` remains the PCM preparation rate;
+Linux-only `--output-rate` selects the native target rate and defaults to source.
+Unsupported platforms refuse that override before effects. One existing replay
+loop consumes typed target identity, coherent source/converted boundary facts
+and original native associations. Pause holds native output only after mapped
+ACK and releases hold before producer resume. Finite completion requires the
+original source endpoint, exhausted feeder and completed visual plus mapped end
+and native crossing. Natural drain maps the real idle source frontier through
+actual converted generation, retains that target barrier across silence/held
+output and waits original native crossing. Source pull/submitted frames cannot
+prove replay presentation completion. Refusals preserve complete ownership and
+admitted pause/completion state. Null output tests remain functional evidence;
+clock-capable and other backend proof remain mandatory.
+
+Replay target library development verification passes six focused fixtures
+(`replay-target-library-focused-development.log`). They drive actual converted
+state and source commands through pause/held/resume, finite mapped completion,
+idle lookahead/held silence and skipped telemetry recovery with atomic identity
+refusal. An unmapped idle barrier missed between telemetry reads may be replaced
+by a later real idle source frontier; completion can be delayed conservatively,
+but song and cue time do not shift. Once mapped, the target barrier is retained.
+These library fixtures do not complete the replay binary consumer or physical
+native presentation proof.
+
+The Linux replay binary consumer now uses the complete converted output owner
+with direct coherent telemetry and original target associations. It has no
+unused AudioAuthority/input-merger history or alternate playback clock. Combined
+development checks pass library 2105 / fail 0 / ignored 4 and replay binary
+26 / fail 0 / ignored 1 (`replay-target-app-consumer-development.log`). The actual
+null factory test separately passes (`replay-target-null-development.log`),
+covering held source freeze, complete stopped converter recovery and original
+future cue execution. This remains submission/recovery evidence, not native
+played-frame timing. Other OS/backend conversion and clock-capable replay play
+remain outstanding; fresh independent review/QA is still required.
+
 Status: exact target-time and converted-state development checks passed; native
 startup/pause/resume/end helpers and their integration fixtures are being
 verified. Actual launcher/replacement integration and hardware acceptance remain
@@ -134,8 +170,9 @@ effect failure. Four ALSA settings fixtures validate target rate/sizes/matrix,
 applied metadata and absence of a rate editor in legacy capabilities. The shared
 cold service is statically generic over the original owner and frame basis.
 Linux solo/local startup and settings consumers are now connected, including
-network committed target start. Replay/other backend integration and actual
-endpoint verification remain required; bridge fixtures do not prove playback.
+network committed target start. Linux replay conversion is connected (E26);
+other OS/backend conversion and clock-capable replay/endpoint acceptance remain
+required. Bridge fixtures do not prove physical playback.
 
 Linux non-network solo must consume the real converted stream, target owner,
 target startup prime, source reports and source PCM configuration through the

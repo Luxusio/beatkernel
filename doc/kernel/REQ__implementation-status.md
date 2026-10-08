@@ -21,28 +21,38 @@ native hardware or measured performance acceptance.
 
 ## Parallel implementation evidence on 2026-10-09
 
-These are bounded development checks, not full-player acceptance. The current
-security review passed; the code review's missing native Desktop component
-motion has been implemented and tested, and stale document statements were
-corrected. The fresh full code review passed. Independent
-review and CLI/browser/desktop QA remain required before task close.
+These are bounded development checks, not full-player acceptance. The previous
+full code/security PASS applies to reviewed revision 5b3af39. Its subsequent
+independent QA found browser composition/roster defects and incomplete replay
+and selected-peer coverage. Those implementations and development regressions
+are now remediated. The latest full code review found a retained pagination
+defect; its source fix and app library verification are complete. Fresh full
+code and security re-reviews passed the pagination remediation. Two mechanical
+import/module formatting corrections followed; no runtime behavior changed. Fresh
+CLI/browser/desktop QA remains required before task close.
 
-The latest combined app library run (`desktop,webtransport`) passed 2099 tests,
-with 0 failures and 4 ignored. Linux binary tests passed 34/0/3, platform library
-131/0/1, and the browser Node suite 692/0. Each total belongs to its own command;
-they must not be added into a TODO ratio. The pack retains 24 criteria and 17
-development milestones; the canonical WBS remains the completion-count ledger.
+The latest app library run (`desktop,webtransport`) passed 2107 tests / failed 0 /
+ignored 4; replay binary 26/0/1, with its null functional case separately passing.
+The full browser Node suite passed 707/0 (E29). Earlier bounded Linux 34/0/3,
+platform 131/0/1 and native binary 281/0/4 evidence remains command-specific.
+Totals must not be added into a TODO ratio. The pack retains all 24 criteria and
+17 recorded development milestones; the canonical WBS remains the count ledger.
+
+The current full format check remains failing. Of eight task-changed paths it
+reported, six also fail formatting when their base revision is checked; the
+other two have been corrected and pass scoped checks. The wider pre-existing
+format backlog remains a separate release obligation, not a QA PASS.
 
 | Requirement slice | Actual evidence | Remaining integration or proof |
 | --- | --- | --- |
-| Retained layout and declarative screens | All migrated screen fixtures included in app 2099; stable mounted geometry and partial updates | Full native/browser route interactions and independent GUI QA |
-| Mixed-rate target output | App 2099, platform 131; Linux solo/local and network committed-start consumers compile and Linux tests pass | Clock-capable full play, socket-to-driver synchronization, replay/other backend and interval integration |
+| Retained layout and declarative screens | Migrated screen and pagination fixtures included in app 2107; actual prior browser/native navigation | Fresh all-route interaction and independent GUI QA after remediation |
+| Mixed-rate target output and replay | E26 app 2105/replay 26/null 1; Linux solo/local/network/replay consumers connected | Clock-capable full play, socket-to-driver synchronization, other OS/backend and interval conversion |
 | Converted output settings and ownership | Actual typed owner/request/reply/recovery fixtures; Linux consumers connected | Actual endpoint changes and hardware presentation/latency |
-| Chained same-format Vorbis | Decoder/preparation/Mixer-tail fixtures executed | Mixed-format chaining remains explicitly rejected |
-| Selected-policy network admission | Policy/identity/launcher admission fixtures; WBS E8 actual selected cohort production-owner/header routing | Selected peer exchanges and cross-platform physical playback |
-| Browser Worker menus and record preview | App fixtures, Node 692; rebuilt WASM and export smoke | All-route editor/permission/record interaction and independent browser QA |
-| Component motion | Browser SwiftShader 51 submitted frames (E18); native binary 281 tests (E24), actual X11/llvmpipe Vulkan 22 animation frames and shifted hits/cache/disposal (E25); full code review PASS | Hardware performance and independent UI QA |
-| Real transport acceptance | QUIC 5 actual loopback cases (E12), native HTTP/3 room 4 cases with owned relay cleanup (E14) | Browser trusted WebTransport interoperability, socket-to-driver and acoustic synchronization |
+| Chained same-format Vorbis | Decoder/preparation/Mixer-tail fixtures and prior shipped-command checks executed | Mixed-format chaining remains explicitly rejected |
+| Selected-policy network admission | E8 production owner/header routing; E28 actual selected QUIC 2 and native WebTransport 2 | Browser selected interoperability, full native room completion and physical playback |
+| Browser Worker menus and record preview | App fixtures, Node 707; IME/inventory regression 175, prior genuine Records/Results UI proof | Fresh trusted composition/acquisition/navigation QA after fixes |
+| Component motion | E18 browser 51 frames; E24 native binary tests; E25 actual X11/llvmpipe 22 frames and shifted hits/cache/disposal | Hardware performance and fresh full review/independent UI QA |
+| Real transport acceptance | E12 QUIC 5, E14 native HTTP/3 4; actual browser generic room and E28 selected peers | Corrected browser runner rerun, selected browser/full native room, socket-to-driver and acoustic proof |
 
 The full requirement scope remains in the parallel requirements document and
 the original plan acceptance map. Historical timing presets, empty-POOR and

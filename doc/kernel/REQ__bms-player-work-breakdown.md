@@ -73,6 +73,10 @@ python3 tools/wbs_status.py --ready
 | E23 | `target-committed-app-development.log`: app lib 2099 PASS / 실패0 / ignored4; `target-committed-linux-check-development.log`: Linux bin check PASS | source/target 공통 시작 루프·실제 변환 상태 기반 시작 6건·solo/local 네트워크 target 소비자 연결; socket→driver/물리 동기화·target interval 지원·독립 QA는 별도 |
 | E24 | `native-component-motion-check-development.log`: app binary check PASS; `native-component-motion-focused-development.log`: 8 PASS; `native-component-motion-bin-development.log`: 281 PASS / 실패0 / ignored3 | 실제 Desktop typed 명령·retained 노드·제출 pose 입력·캐시·Back/zero/clip/dispose 개발 fixture; 실제 native 창/GPU·하드웨어 성능·재리뷰/QA는 별도 |
 | E25 | `native-component-motion-x11-development.log`: actual X11 window + llvmpipe Vulkan/Fifo 1 PASS | 실제 Desktop draw로 22 animation frame 제출·control5 -200px·이전/이동 입력 좌표·geometry identity/revision 유지·창/owner 종료; 하드웨어 성능·물리 입력·독립 QA는 별도. 종료 뒤 blank screenshot은 증거에서 제외 |
+| E26 | `replay-target-app-consumer-development.log`: lib 2105 PASS / 실패0 / ignored4, replay bin 26 PASS / 실패0 / ignored1; `replay-target-null-development.log`: actual null 1 PASS | source/target 분리·typed replay pause/finite/idle drain·96 관측·실제 변환 상태 회수/원본 cue; clock-capable 전체 replay·다른 backend/OS·재리뷰/QA는 별도 |
+| E27 | `browser-ime-roster-focused-development.log`: Node 175 PASS / 실패0 | 실제 main/Worker+WASM 경로의 composition/ACK·canonical roster·inventory 퇴역/재탐색·거절 회귀; 수정 후 trusted browser 재검증과 독립 QA는 별도 |
+| E28 | `selected-quic-actual-development.log`: actual selected cohort 2 PASS; `selected-webtransport-actual-development.log`: actual selected room 2 PASS | 실제 admitted class/gauge/member identity의 peer start/progress/finals/drain·policy mismatch 거절·owner/relay 종료; full native room/음향 동기화·재리뷰/QA는 별도 |
+| E29 | `browser-pagination-app-development.log`: lib 2107 PASS / 실패0 / ignored4; current WASM/bindgen PASS; `browser-pagination-all-node-development.log`: Node 707 PASS / 실패0 | 실제 row 수 기준 Players/Devices selection/page 정규화·21→10/20→5→empty shrink·cached compose·거절 회귀; 실제 브라우저 재검증·독립 재리뷰/QA는 별도 |
  
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
@@ -206,8 +210,8 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-07.03** target pause/end rebind에서 source-frame floor와 정확한 target-time floor를 분리한다. — 상태=D(검증완료); 선행=-; 근거=E13 actual mixed-rate/retained-tail/planned basis/frozen source/native ACK/cold finite-end helper 회귀; controller publication은 07.08 별도.
 - [x] **BK-WBS-07.04** 기존 출력 lifecycle/controller를 typed target basis로 확장하고 두 번째 runtime을 만들지 않는다. — 상태=D(검증완료); 선행=-; 근거=E15; static generic port·기존 legacy default 회귀·실제 converted owner 및 실패/회수/hold 보존; launcher 연결은 아래 별도.
 - [ ] **BK-WBS-07.05** ConvertedAlsaStream을 실제 solo 시작·입력 AudioAuthority·BGM 공급에 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E20 solo, E21 telemetry, E22 local, E23 network target startup 연결·pure 검증; clock-capable endpoint 전체 플레이 및 socket→driver 시작 검증 필요.
-- [ ] **BK-WBS-07.06** 같은 converted 출력 owner를 실제 local cohort 경로에 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=member ID/clock/capture/section 보존.
-- [ ] **BK-WBS-07.07** 실제 recorded playback을 target rate와 source recording grid가 분리된 경로에 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=replay PCM·finite end·drain 검사.
+- [ ] **BK-WBS-07.06** 같은 converted 출력 owner를 실제 local cohort 경로에 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E22/E23 actual local consumer·null/공유 pump 검증; clock-capable 전체 cohort·member ID/clock/capture/section E2E 및 독립 QA 필요.
+- [ ] **BK-WBS-07.07** 실제 recorded playback을 target rate와 source recording grid가 분리된 경로에 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E26 실제 consumer 연결·pause/finite/idle drain·null 회수/원본 cue 검증; clock-capable 전체 replay와 다른 backend/OS·독립 QA 필요.
 - [ ] **BK-WBS-07.08** paused output 교체의 open/start/poll/prime/commit을 입력 merger와 원자적으로 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=2개 실제 native progressing 관측; stale publish 상태 보존.
 - [ ] **BK-WBS-07.09** rate/buffer/channel/encoding 변경을 실제 설정 요청·capability·applied 결과까지 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E19 target rate/buffer/period/matrix UI bridge 검증; 실제 launcher/encoding 제어·pending PCM 해석 보존은 계속 필요.
 - [ ] **BK-WBS-07.10** startup/pause/resume/finite end ACK가 lookahead/held-release가 아니라 native crossing을 기다린다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E16 공개 audio pump의 pause/resume/held 순서 검증; 실제 launcher owner→worker→native 관측 E2E 및 finite end는 계속 필요.

@@ -11,6 +11,39 @@ and have development fixtures. Existing gameplay/render Worker separation is
 reused. All-route interaction, editor/permission flows and independent browser QA
 remain pending.
 
+Composition commits must publish the final editor value through the existing
+correlated Worker edit transaction before Enter can apply a field. Intermediate
+composition updates must not submit incomplete values, and navigation/disposal
+must not apply a stale composition to another screen or field.
+
+An admitted Players roster update must refresh the Window acquisition controls
+and status from the same canonical roster. Growing from one to multiple players
+must enable discovery when setup is otherwise idle; removal, stale updates and
+busy play retain the original ownership/capability gates. Supported assignment
+must remain reachable through the ordinary Players flow.
+
+Menu snapshots omit assignments belonging to an inactive or retired acquisition
+inventory. Such stale sources cannot authorize play. Successful cleanup retires
+absent source assignments atomically in the Worker while preserving player IDs
+and still-owned sources. Rediscovery publishes the current acquired inventory
+before assignment or start can proceed; one bounded pending/latest publication
+orders release and rediscovery across matching source-table/capability ACKs.
+Stale owner, screen or generation replies cannot revive retired assignments.
+
+When a Players roster or acquired Devices inventory shrinks, retained selection
+and page start are normalized against the actual player/source row count before
+publishing the new menu model. Serialized metadata field count is not a row count.
+Empty and nonempty shrink retain a valid visible page and cannot fail rendering
+after an otherwise admitted roster/inventory update.
+
+Pagination remediation development verification passes the combined app library
+2107 tests / fail 0 / ignored 4 (`browser-pagination-app-development.log`),
+including actual owner/presentation regressions for Players 21→10 and Devices
+20→5→empty while a later page is selected. Domain metadata, cached composition
+and stale/malformed refusal remain verified. The current Rust WASM and bindings
+also rebuild successfully; actual browser regression and fresh review/QA are
+still required.
+
 Browser menu navigation and business drafts belong to the gameplay owner. The
 render Worker instantiates local shared retained views/navigator lifecycle and
 owns Scene/GPU; no Rc, runtime, PCM bank or Scene crosses Workers. Bounded
