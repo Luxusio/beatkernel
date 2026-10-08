@@ -28,14 +28,14 @@ and selected-peer coverage. Those implementations and development regressions
 are now remediated. The latest full code review found a retained pagination
 defect; its source fix and app library verification are complete. Fresh full
 code and security re-reviews passed the pagination remediation. Two mechanical
-import/module formatting corrections followed; no runtime behavior changed. Fresh
-CLI/browser/desktop QA remains required before task close. The second independent
+import/module formatting corrections followed; no runtime behavior changed.
+CLI/browser/desktop QA was still outstanding at that point. The second independent
 QA cycle on revision `585dc17` returned browser/CLI FAIL: Settings Apply passed
 an empty binding list to full-profile validation, and portable replacement/pause
 tests imported a Linux-only helper. Desktop QA remained BLOCKED_ENV without a
 clock-capable native endpoint and input devices.
 
-The current uncommitted remediation validates the 13 Settings scalar fields
+The remediation committed as `d276d2d` validates the 13 Settings scalar fields
 without replacing the actual 18 keyboard bindings, while retaining full-profile
 binding validation. Pure replacement/pause fixtures now use shared controlled
 clock pairs; Linux ALSA mapping tests still exercise their original native helper.
@@ -48,9 +48,29 @@ No Docker daemon/configuration mutation was performed. Container OOM counters
 were zero at inspection and Docker responded, while the kernel log contained a
 WSL init/distribution termination; the causal link to verification is unproven.
 
+Fresh code, security and documentation reviews passed the remediation. Browser
+QA cycle 3 passed actual trusted interactions, all 13 scalar updates with all 18
+bindings preserved, atomic invalid-value refusal, acquisition/retirement,
+pagination, AudioWorklet Results and IndexedDB records, 51-frame GPU motion and
+the original six WebTransport checks. CLI QA cycle 3 completed on `d276d2d`:
+Windows and macOS workspace/all-targets typing both exited 0; full app debug
+passed 2622/0/26, core/platform/BMS debug 745/0/1, full Node 713/0, workspace docs
+and both WASM builds exited 0. These fresh foreign checks supersede the earlier
+timeout/termination for type evidence only, not OS execution or linking.
+QUIC 7, native WebTransport 6 and cold admission 1 passed. Full Node was rerun
+without a compiler-oriented address-space cap after the cap caused V8/WASM
+reservation errors; tests were unchanged. CLI's overall verdict remains
+BLOCKED_ENV for absent physical input/native presentation-clock and foreign OS
+execution. Both release checks timed out during compilation; global clippy's
+four pre-existing errors and formatting differences in 403 files remain open.
+Evidence: `target/wf/qa-browser-parallel-player-01a119a6-3/transcript.md` and
+`target/wf/qa-cli-parallel-player-01a119a6-3/transcript.md`. All owned verification
+processes were joined. No task, whole-player or release completion is claimed.
+
 The latest app library run (`desktop,webtransport`) passed 2107 tests / failed 0 /
 ignored 4; replay binary 26/0/1, with its null functional case separately passing.
-The full browser Node suite passed 707/0 (E29). Earlier bounded Linux 34/0/3,
+The earlier full browser Node suite passed 707/0 (E29), superseded by 713/0 above.
+Earlier bounded Linux 34/0/3,
 platform 131/0/1 and native binary 281/0/4 evidence remains command-specific.
 Totals must not be added into a TODO ratio. The pack retains all 24 criteria and
 17 recorded development milestones; the canonical WBS remains the count ledger.
@@ -62,14 +82,14 @@ format backlog remains a separate release obligation, not a QA PASS.
 
 | Requirement slice | Actual evidence | Remaining integration or proof |
 | --- | --- | --- |
-| Retained layout and declarative screens | Migrated screen and pagination fixtures included in app 2107; actual prior browser/native navigation | Fresh all-route interaction and independent GUI QA after remediation |
+| Retained layout and declarative screens | App library 2107; QA3 actual browser routes, resize and pagination | Full native play/input lifecycle and hardware matrix |
 | Mixed-rate target output and replay | E26 app 2105/replay 26/null 1; Linux solo/local/network/replay consumers connected | Clock-capable full play, socket-to-driver synchronization, other OS/backend and interval conversion |
 | Converted output settings and ownership | Actual typed owner/request/reply/recovery fixtures; Linux consumers connected | Actual endpoint changes and hardware presentation/latency |
 | Chained same-format Vorbis | Decoder/preparation/Mixer-tail fixtures and prior shipped-command checks executed | Mixed-format chaining remains explicitly rejected |
 | Selected-policy network admission | E8 production owner/header routing; E28 actual selected QUIC 2 and native WebTransport 2 | Browser selected interoperability, full native room completion and physical playback |
-| Browser Worker menus and record preview | App fixtures, Node 707; IME/inventory regression 175, prior genuine Records/Results UI proof | Fresh trusted composition/acquisition/navigation QA after fixes |
-| Component motion | E18 browser 51 frames; E24 native binary tests; E25 actual X11/llvmpipe 22 frames and shifted hits/cache/disposal | Hardware performance and fresh full review/independent UI QA |
-| Real transport acceptance | E12 QUIC 5, E14 native HTTP/3 4; actual browser generic room and E28 selected peers | Corrected browser runner rerun, selected browser/full native room, socket-to-driver and acoustic proof |
+| Browser Worker menus and record preview | Node 713; QA3 trusted IME/scalar Apply, acquisition/retirement, genuine Results and IndexedDB preview | Wider physical input/permission/browser matrix, failure/stall proof |
+| Component motion | E24 native binary tests; E25 X11/llvmpipe 22 frames; fresh full reviews and QA3 actual browser GPU 51 frames | Wider native/hardware performance, remaining screen integration and frame budgets |
+| Real transport acceptance | QA3 QUIC 7, native WebTransport 6, cold admission 1 and original browser runner 6; E28 selected peers | Selected browser/full native room, socket-to-driver and acoustic proof |
 
 The full requirement scope remains in the parallel requirements document and
 the original plan acceptance map. Historical timing presets, empty-POOR and
