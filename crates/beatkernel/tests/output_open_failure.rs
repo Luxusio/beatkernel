@@ -92,8 +92,8 @@ fn pcm(mut mixer: Mixer, producer: &mut CommandProducer) {
     assert_eq!(samples, [0.75, 1., 0., 0., 0.25, 0.5]);
 }
 #[test]
-fn repeated_refusals_keep_same_pending_owner_and_original_error_then_retirement_moves_original_pcm_once()
- {
+fn repeated_refusals_keep_same_pending_owner_and_original_error_then_retirement_moves_original_pcm_once(
+) {
     let (mut producer, mixer) = rig();
     let basis = mixer.output_frame_basis();
     let (owner, drops, unretired) = owner(Some(mixer));
@@ -150,8 +150,8 @@ fn repeated_refusals_keep_same_pending_owner_and_original_error_then_retirement_
     pcm(mixer.unwrap(), &mut producer);
 }
 #[test]
-fn into_parts_transfers_unretired_owner_and_latest_cleanup_without_premature_drop_or_mixer_publication()
- {
+fn into_parts_transfers_unretired_owner_and_latest_cleanup_without_premature_drop_or_mixer_publication(
+) {
     let (mut producer, mixer) = rig();
     let (owner, drops, unretired) = owner(Some(mixer));
     let owner_id = owner.id.as_ref() as *const u64;
@@ -208,11 +208,9 @@ fn successful_retirement_without_recoverable_mixer_drops_owner_only_after_proof_
 {
     let (owner, drops, unretired) = owner(None);
     let mut failure = OutputOpenFailure::pending(Opaque(Box::new(11)), owner);
-    assert!(
-        failure
-            .retry_retirement(|_| Err(Opaque(Box::new(12))))
-            .is_err()
-    );
+    assert!(failure
+        .retry_retirement(|_| Err(Opaque(Box::new(12))))
+        .is_err());
     assert_eq!(drops.get(), 0);
     match failure.retry_retirement(|pending| {
         pending.retired = true;
@@ -230,4 +228,88 @@ fn successful_retirement_without_recoverable_mixer_drops_owner_only_after_proof_
         Ok(false) => {}
         _ => panic!("no pending owner expected"),
     }
+}
+
+#[test]
+fn complete_recovered_owner_keeps_pending_pcm_and_offset_through_cleanup_refusal() {
+    struct Complete {
+        mixer: Mixer,
+        converter: FormatConverter,
+        pending: Box<[f32]>,
+        admitted: usize,
+    }
+    struct Pending {
+        complete: Option<Complete>,
+        retired: bool,
+    }
+    let (mut producer, mixer) = rig();
+    let converter = FormatConverter::for_mixer(
+        mixer.config(),
+        AudioFormat::new(4, 2).unwrap(),
+        ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap(),
+        ResampleQuality::Linear,
+        8,
+    )
+    .unwrap();
+    let pending = vec![0.75, -0.375, 1., -0.5].into_boxed_slice();
+    let pcm_pointer = pending.as_ptr();
+    let original = Opaque(Box::new(37));
+    let error_pointer = original.0.as_ref() as *const u64;
+    let mut failure: OutputOpenFailure<Opaque, Pending, Complete> =
+        OutputOpenFailure::pending_state(
+            original,
+            Pending {
+                complete: Some(Complete {
+                    mixer,
+                    converter,
+                    pending,
+                    admitted: 1,
+                }),
+                retired: false,
+            },
+        );
+    assert!(failure
+        .retry_retirement(|owner| {
+            assert!(!owner.retired);
+            assert_eq!(
+                owner.complete.as_ref().unwrap().pending.as_ptr(),
+                pcm_pointer
+            );
+            Err(Opaque(Box::new(41)))
+        })
+        .is_err());
+    assert!(failure.mixer().is_none());
+    assert_eq!(failure.cleanup_error().unwrap().0.as_ref(), &41);
+    assert_eq!(failure.error().0.as_ref() as *const u64, error_pointer);
+    assert!(matches!(
+        failure.retry_retirement(|owner| {
+            owner.retired = true;
+            Ok(owner.complete.take())
+        }),
+        Ok(true)
+    ));
+    assert!(failure.pending_owner().is_none());
+    assert!(failure.cleanup_error().is_none());
+    assert!(matches!(
+        failure.retry_retirement(|_| panic!("complete state must move once")),
+        Ok(false)
+    ));
+    let (error, complete, pending, cleanup) = failure.into_parts();
+    assert_eq!(error.0.as_ref() as *const u64, error_pointer);
+    assert!(pending.is_none());
+    assert!(cleanup.is_none());
+    let mut complete = complete.unwrap();
+    assert_eq!(complete.pending.as_ptr(), pcm_pointer);
+    assert_eq!(&complete.pending[complete.admitted * 2..], [1., -0.5]);
+    assert_eq!(complete.converter.output_frame_cursor(), 0);
+    producer.request_pause(false);
+    let mut output = [0.; 12];
+    complete
+        .converter
+        .render(&mut output, |source| complete.mixer.render(source))
+        .unwrap();
+    assert_eq!(
+        output,
+        [0.75, -0.375, 1., -0.5, 0., 0., 0., 0., 0.25, -0.125, 0.5, -0.25]
+    );
 }

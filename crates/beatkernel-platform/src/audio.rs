@@ -43,12 +43,14 @@ mod convert;
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 pub(crate) mod mixer_launch;
 mod negotiation;
+mod output_state;
 pub mod presentation;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", test))]
 pub(crate) mod telemetry;
 
 pub use convert::encode_pcm;
 pub use negotiation::{resolve_period, validate_buffer_size, ResolvedPeriod};
+pub use output_state::NativeOutputState;
 
 /// Native audio API selected by the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

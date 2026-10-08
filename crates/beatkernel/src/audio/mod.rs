@@ -51,7 +51,7 @@ mod queue;
 pub use convert::{ChannelMatrix, FormatConverter, ResampleQuality, SourcePosition};
 pub use converted_mixer::{ConvertedMixer, ConvertedOutputState, ConvertedRenderReport};
 pub use frame_basis::{OutputFrameBasis, OutputFrameBasisError};
-pub use handoff::{MixerOpenFailure, OutputOpenFailure, StoppedMixerSource};
+pub use handoff::{MixerOpenFailure, OutputOpenFailure, SoftwareOutputState, StoppedMixerSource};
 pub use mixer::Mixer;
 pub use model::{
     AudioCommand, AudioCounters, AudioError, AudioFormat, AudioLimits, MixerConfig, PcmLimits,

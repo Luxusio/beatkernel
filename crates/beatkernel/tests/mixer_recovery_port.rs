@@ -224,3 +224,62 @@ fn generic_take_refuses_before_retirement_without_changing_mixer_and_moves_only_
     recovered.render(&mut pcm).unwrap();
     assert_eq!(recovered.counters().commands_consumed, 2);
 }
+
+#[test]
+fn static_recovery_port_transfers_complete_converter_owner_only_after_retirement() {
+    struct CompletePort {
+        owner: Option<ConvertedMixer>,
+        retired: bool,
+    }
+    impl StoppedMixerSource<ConvertedMixer> for CompletePort {
+        type Error = Refusal;
+        fn take_stopped_mixer(&mut self) -> Result<Option<ConvertedMixer>, Refusal> {
+            if !self.retired {
+                return Err(Refusal::NotRetired);
+            }
+            Ok(self.owner.take())
+        }
+    }
+    fn take_complete<P: StoppedMixerSource<ConvertedMixer>>(
+        port: &mut P,
+    ) -> Result<Option<ConvertedMixer>, P::Error> {
+        port.take_stopped_mixer()
+    }
+    let (mut producer, mixer) = rig(4, 4, None);
+    producer.try_push(play(1, 2, 0, 0.5)).unwrap();
+    let owner = ConvertedMixer::new(
+        mixer,
+        AudioFormat::new(8, 1).unwrap(),
+        ChannelMatrix::default_mix(1, 1).unwrap(),
+        ResampleQuality::Linear,
+        4,
+    );
+    let mut owner = match owner {
+        Ok(owner) => owner,
+        Err(_) => panic!("valid owner preparation"),
+    };
+    let mut pcm = [0.; 3];
+    owner.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.5, 0.375, 0.25]);
+    let position = owner.converter().source_position();
+    let counters = owner.mixer().counters();
+    let mut port = CompletePort {
+        owner: Some(owner),
+        retired: false,
+    };
+    assert!(matches!(take_complete(&mut port), Err(Refusal::NotRetired)));
+    assert_eq!(
+        port.owner.as_ref().unwrap().converter().source_position(),
+        position
+    );
+    assert_eq!(port.owner.as_ref().unwrap().mixer().counters(), counters);
+    port.retired = true;
+    let mut recovered = match take_complete(&mut port) {
+        Ok(Some(o)) => o,
+        _ => panic!("complete retired owner"),
+    };
+    assert!(matches!(take_complete(&mut port), Ok(None)));
+    recovered.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.125, 0., -0.125]);
+    assert_eq!(recovered.mixer().counters().commands_consumed, 1);
+}

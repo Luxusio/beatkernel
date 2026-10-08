@@ -45,8 +45,8 @@ fn play(voice: u64, at: i64, gain: f32) -> AudioCommand {
     }
 }
 #[test]
-fn failure_borrows_then_moves_original_opaque_error_and_advanced_paused_mixer_without_losing_future_commands()
- {
+fn failure_borrows_then_moves_original_opaque_error_and_advanced_paused_mixer_without_losing_future_commands(
+) {
     let (mut producer, mut mixer) = rig();
     let (mut reference_producer, mut reference) = rig();
     for p in [&mut producer, &mut reference_producer] {
@@ -112,4 +112,49 @@ fn unavailable_recovery_retains_only_original_error_without_substituting_empty_m
     let (error, mixer) = failure.into_parts();
     assert_eq!(error.0.as_ref() as *const u64, pointer);
     assert!(mixer.is_none());
+}
+
+#[test]
+fn generic_open_failure_moves_whole_converter_owner_without_losing_cached_source_or_queue() {
+    let (mut producer, mixer) = rig();
+    producer.try_push(play(1, -1_000_000_000, 0.5)).unwrap();
+    let target = AudioFormat::new(8, 2).unwrap();
+    let owner = ConvertedMixer::new(
+        mixer,
+        target,
+        ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap(),
+        ResampleQuality::Linear,
+        4,
+    );
+    let mut owner = match owner {
+        Ok(o) => o,
+        Err(_) => panic!("continuous owner setup"),
+    };
+    let mut initial = [0.; 6];
+    owner.render(&mut initial).unwrap();
+    assert_eq!(initial, [0., 0., 0.1875, -0.09375, 0.375, -0.1875]);
+    let position = owner.converter().source_position();
+    let pulled = owner.mixer().frame_cursor();
+    let error = Opaque(Box::new(29));
+    let pointer = error.0.as_ref() as *const u64;
+    let failure: MixerOpenFailure<Opaque, ConvertedMixer> =
+        MixerOpenFailure::new_state(error, Some(owner));
+    assert_eq!(failure.error().0.as_ref() as *const u64, pointer);
+    assert_eq!(
+        failure.mixer().unwrap().converter().source_position(),
+        position
+    );
+    assert_eq!(failure.mixer().unwrap().mixer().frame_cursor(), pulled);
+    let (error, owner) = failure.into_parts();
+    assert_eq!(error.0.as_ref() as *const u64, pointer);
+    let mut owner = owner.unwrap();
+    producer.try_push(play(2, 2_000_000_000, 0.25)).unwrap();
+    let mut next = [0.; 6];
+    let report = owner.render(&mut next).unwrap();
+    // Mixer source frames are [0, 3/8, 3/4, 1]: the fourth frame's
+    // sample/gain sum 9/8 saturates before the output converter interpolates.
+    // Next output source positions 3/2, 2, 5/2 therefore yield 9/16, 3/4, 7/8.
+    assert_eq!(next, [0.5625, -0.28125, 0.75, -0.375, 0.875, -0.4375]);
+    assert_eq!(owner.mixer().counters().commands_consumed, 2);
+    assert_eq!(report.source.unwrap().pending_commands, 1);
 }

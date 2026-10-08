@@ -5,8 +5,8 @@ use beatkernel::{
     time::{ClockDomainId, Timestamp},
 };
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, Ordering},
+    Arc,
 };
 struct MemorySpawner;
 impl<T: Send + 'static> WorkerSpawner<T> for MemorySpawner {
@@ -129,8 +129,8 @@ fn shared_spawn_refusal_retains_original_io_payload_and_control_owned_mixer_befo
     assert_pcm(mixer.unwrap(), &mut producer, 5);
 }
 #[test]
-fn shared_tuple_worker_join_retains_original_opaque_backend_error_even_after_secondary_worker_failure()
- {
+fn shared_tuple_worker_join_retains_original_opaque_backend_error_even_after_secondary_worker_failure(
+) {
     let (mut producer, mixer) = rig();
     let worker = match launch_worker(MemorySpawner, mixer, |mut mixer| {
         mixer.render(&mut [0.; 1]).unwrap();
@@ -199,4 +199,82 @@ fn shared_panicked_worker_join_returns_original_error_and_explicitly_unavailable
     assert_eq!(failure.error().0.as_ref() as *const u64, pointer);
     let (_, mixer) = failure.into_parts();
     assert!(mixer.is_none());
+}
+
+#[test]
+fn shared_launch_refusal_returns_complete_pending_state_without_flattening_or_work_entry() {
+    use crate::audio::{DeviceFormat, NativeOutputState, SampleEncoding};
+    let (mut producer, mixer) = rig();
+    producer.request_pause(false);
+    let format = DeviceFormat::new(4, 1, SampleEncoding::Float32, None).unwrap();
+    let mut state = match NativeOutputState::new(mixer, format, None, 8) {
+        Ok(state) => state,
+        Err(_) => panic!("valid software owner"),
+    };
+    state.render_pending(2).unwrap();
+    state.admit(1).unwrap();
+    let entered = Arc::new(AtomicBool::new(false));
+    let worker_entered = entered.clone();
+    let result = launch_worker(
+        RefusingSpawner(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+        state,
+        move |state| {
+            worker_entered.store(true, Ordering::Release);
+            Some(state)
+        },
+    );
+    let failure = match result {
+        Err(f) => f,
+        Ok(_) => panic!("injected spawn refusal"),
+    };
+    assert!(!entered.load(Ordering::Acquire));
+    assert_eq!(failure.mixer().unwrap().pending_samples(), [1.]);
+    assert_eq!(
+        failure
+            .mixer()
+            .unwrap()
+            .output_frame_basis()
+            .start_physical_frame(),
+        6
+    );
+    assert_eq!(failure.mixer().unwrap().mixer().frame_cursor(), 7);
+    let (_, state) = failure.into_parts();
+    let mut state = state.unwrap();
+    state.admit(1).unwrap();
+    state.render_pending(4).unwrap();
+    assert_eq!(state.pending_samples(), [0., 0., 0.25, 0.5]);
+    assert_eq!(state.mixer().counters().commands_consumed, 2);
+}
+
+#[test]
+fn shared_join_moves_whole_worker_tail_and_preserves_original_error_after_later_refusal() {
+    use crate::audio::{DeviceFormat, NativeOutputState, SampleEncoding};
+    let (mut producer, mixer) = rig();
+    producer.request_pause(false);
+    let format = DeviceFormat::new(4, 1, SampleEncoding::Float32, None).unwrap();
+    let state = match NativeOutputState::new(mixer, format, None, 8) {
+        Ok(state) => state,
+        Err(_) => panic!("valid software owner"),
+    };
+    let worker = match launch_worker(MemorySpawner, state, |mut state| {
+        state.render_pending(2).unwrap();
+        state.admit(1).unwrap();
+        (Err::<(), _>(BackendError(Box::new(73))), state)
+    }) {
+        Ok(worker) => worker,
+        Err(_) => panic!("memory worker spawn"),
+    };
+    let original = BackendError(Box::new(79));
+    let pointer = original.0.as_ref() as *const u64;
+    let failure = join_open_failure(worker, original, |(_, state)| Some(state));
+    assert_eq!(failure.error().0.as_ref() as *const u64, pointer);
+    let (_, state) = failure.into_parts();
+    let mut state = state.unwrap();
+    assert_eq!(state.pending_samples(), [1.]);
+    assert_eq!(state.admitted_frames(), 1);
+    assert_eq!(state.output_frame_basis().start_physical_frame(), 6);
+    assert_eq!(state.mixer().frame_cursor(), 7);
+    state.admit(1).unwrap();
+    state.render_pending(4).unwrap();
+    assert_eq!(state.pending_samples(), [0., 0., 0.25, 0.5]);
 }
