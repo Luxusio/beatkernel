@@ -309,6 +309,10 @@ pub mod native_end;
 pub mod native_finish;
 /// Shared native solo gameplay sequencing behind device operations.
 pub mod native_gameplay;
+/// Dedicated native acquisition and ordered completed-drain evidence.
+pub mod native_input;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_input_fixtures;
 mod native_gameplay_bridge;
 /// Explicit command, publication and diagnostic port for native gameplay policy.
 pub mod native_gameplay_host;
