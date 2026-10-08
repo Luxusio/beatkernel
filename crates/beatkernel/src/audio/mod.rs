@@ -40,6 +40,7 @@
 //! ```
 
 mod convert;
+mod converted_mixer;
 mod frame_basis;
 mod handoff;
 mod mixer;
@@ -48,6 +49,7 @@ mod pcm;
 mod queue;
 
 pub use convert::{ChannelMatrix, FormatConverter, ResampleQuality, SourcePosition};
+pub use converted_mixer::{ConvertedMixer, ConvertedOutputState, ConvertedRenderReport};
 pub use frame_basis::{OutputFrameBasis, OutputFrameBasisError};
 pub use handoff::{MixerOpenFailure, OutputOpenFailure, StoppedMixerSource};
 pub use mixer::Mixer;

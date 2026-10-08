@@ -7,6 +7,10 @@ portable owner must retain the Mixer, converter, exact next rational source
 position, past kernel history and pulled-but-unconsumed PCM together across
 cold target-rate/channel/buffer changes. Recovering only the Mixer cursor does
 not recover samples already pulled into the converter.
+Constructing a new converted owner at an existing Mixer cursor establishes a
+new conversion-stream boundary; unavailable earlier samples use initial
+padding. It cannot reconstruct a previous bare-Mixer native stream. Future
+native migration must carry the complete owner from its stream beginning.
 
 Retarget prepares every fallible validation, allocation, capacity and coefficient
 change before commit. Refusal preserves the original owner, voices, queue,
