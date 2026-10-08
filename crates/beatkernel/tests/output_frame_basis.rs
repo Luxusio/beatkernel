@@ -190,7 +190,7 @@ fn target_basis_maps_only_admitted_prefix_using_exact_piecewise_start() {
     }
     let next =
         TargetFrameBasis::new(origin, basis.time_at_stream_frame(2).unwrap(), 48_000).unwrap();
-    let ticks = start_ticks + 2 * (DEN / 32_000) + 1 * (DEN / 48_000);
+    let ticks = start_ticks + 2 * (DEN / 32_000) + (DEN / 48_000);
     assert_eq!(
         next.point_at_stream_frame(1).unwrap(),
         point(-444_333_222 + (ticks * 1_000_000_000 / DEN) as i64)

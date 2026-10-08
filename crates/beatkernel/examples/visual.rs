@@ -55,9 +55,8 @@ impl CustomProjection for Scene3D {
         let next = (index + 1).min(self.points.len() - 1);
         let weight = coordinate - index as f64;
         let mut values = [0.0; 16];
-        for axis in 0..3 {
-            values[axis] =
-                self.points[index][axis] * (1.0 - weight) + self.points[next][axis] * weight;
+        for (axis, value) in values.iter_mut().take(3).enumerate() {
+            *value = self.points[index][axis] * (1.0 - weight) + self.points[next][axis] * weight;
         }
         values[6] = 1.0; // xyz position + xyzw identity target orientation.
         if self.path {

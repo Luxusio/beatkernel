@@ -197,8 +197,7 @@ impl AffineClockMapper {
         Self::build(
             first,
             Some(second),
-            numerator,
-            denominator,
+            (numerator, denominator),
             validity,
             extrapolation,
             uncertainty,
@@ -221,8 +220,7 @@ impl AffineClockMapper {
         Self::build(
             anchor,
             None,
-            1,
-            1,
+            (1, 1),
             validity,
             ExtrapolationPolicy::Forbid,
             None,
@@ -232,13 +230,13 @@ impl AffineClockMapper {
     fn build(
         first: ClockPair,
         second: Option<ClockPair>,
-        numerator: i128,
-        denominator: i128,
+        rate: (i128, i128),
         validity: ClockInterval,
         extrapolation: ExtrapolationPolicy,
         uncertainty: Option<CalibrationUncertainty>,
         quality: ClockMappingQuality,
     ) -> Result<Self, CalibrationError> {
+        let (numerator, denominator) = rate;
         let start = affine(
             validity.start,
             first.source.timestamp,

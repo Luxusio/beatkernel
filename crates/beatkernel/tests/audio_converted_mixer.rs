@@ -649,6 +649,10 @@ fn construction_allocation_refusal_returns_the_original_mixer_for_equivalent_ret
         let mut control_raw = [0.0; 2];
         let mut output = [0.0; 64];
         let mut control_output = [0.0; 64];
+        #[allow(
+            clippy::result_large_err,
+            reason = "Recover the original Mixer inline so the allocation-refusal oracle needs no boxing or extra allocation"
+        )]
         let (attempt, fired) = refusing(failure_index, || {
             ConvertedMixer::new(mixer, target, matrix, quality, 32)
         });

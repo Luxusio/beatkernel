@@ -330,11 +330,10 @@ impl ActiveInteraction for Composite {
                         && (!self.same_device || held.source == source.source)
                 })
             })
+            && context.policy.grade(delta, context.profile).is_some()
         {
-            if context.policy.grade(delta, context.profile).is_some() {
-                self.state = InteractionState::Completed;
-                return success(context, delta);
-            }
+            self.state = InteractionState::Completed;
+            return success(context, delta);
         }
         InteractionOutput::default()
     }

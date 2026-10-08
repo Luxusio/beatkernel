@@ -159,6 +159,10 @@ pub struct ConvertedMixer {
 impl ConvertedMixer {
     /// Creates a conversion stream checked against this actual mixer's limits.
     /// Refusal returns the original mixer, without rendering or consuming commands.
+    #[allow(
+        clippy::result_large_err,
+        reason = "Return the original Mixer inline for recovery without additional error-path allocation"
+    )]
     pub fn new(
         mixer: Mixer,
         target: AudioFormat,

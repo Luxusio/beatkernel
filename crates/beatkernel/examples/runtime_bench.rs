@@ -49,7 +49,7 @@ fn parse(args: &[String]) -> Result<Options, Box<dyn Error>> {
     if !args.len().is_multiple_of(2) {
         return Err("each option requires one integer value; use --help".into());
     }
-    for pair in args.chunks_exact(2) {
+    for pair in args.as_chunks::<2>().0 {
         let value = pair[1]
             .parse::<usize>()
             .map_err(|_| format!("{} requires an unsigned integer", pair[0]))?;
@@ -291,7 +291,7 @@ impl Workload {
             block.sequence,
             ButtonState::Down,
         )?;
-        if block.sequence % 16 == 0 {
+        if block.sequence.is_multiple_of(16) {
             emit(
                 block.control as u64,
                 block.control as u16 + 3,
@@ -305,7 +305,7 @@ impl Workload {
             block.sequence + 2,
             ButtonState::Up,
         )?;
-        if block.sequence % 28 == 0 {
+        if block.sequence.is_multiple_of(28) {
             emit(9, 6, block.sequence + 3, ButtonState::Down)?;
         }
         let started = Instant::now();

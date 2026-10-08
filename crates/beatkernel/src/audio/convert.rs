@@ -827,59 +827,6 @@ impl FormatConverter {
     }
 }
 
-#[cfg(test)]
-mod cursor_fixtures {
-    use super::*;
-
-    #[test]
-    fn cursor_overflow_refuses_source_before_mutating_output_or_conversion_state() {
-        for (target_rate, channels) in [(48_000, 1), (48_000, 2), (44_100, 1)] {
-            for source_overflow in [false, true] {
-                let source = AudioFormat::new(48_000, 1).unwrap();
-                let target = AudioFormat::new(target_rate, channels).unwrap();
-                let mut converter = FormatConverter::new(
-                    source,
-                    target,
-                    ChannelMatrix::default_mix(1, channels).unwrap(),
-                    ResampleQuality::Linear,
-                    4,
-                )
-                .unwrap();
-                if source_overflow {
-                    converter.source_cursor = u64::MAX;
-                } else {
-                    converter.output_cursor = u64::MAX;
-                }
-                let before = (
-                    converter.output_cursor,
-                    converter.source_cursor,
-                    converter.fraction,
-                    converter.window_frames,
-                    converter.window.clone(),
-                );
-                let mut output = vec![0.75; usize::from(channels)];
-                assert_eq!(
-                    converter.render(&mut output, |_| -> Result<(), AudioError> {
-                        panic!("source must not run on cursor overflow")
-                    }),
-                    Err(AudioError::Overflow)
-                );
-                assert_eq!(
-                    (
-                        converter.output_cursor,
-                        converter.source_cursor,
-                        converter.fraction,
-                        converter.window_frames,
-                        converter.window.clone()
-                    ),
-                    before
-                );
-                assert!(output.iter().all(|value| *value == 0.75));
-            }
-        }
-    }
-}
-
 // Replaces non-finite samples with silence so they cannot reach the device.
 fn sanitize(values: &mut [f32]) -> u64 {
     let mut count = 0;
@@ -932,4 +879,57 @@ fn gcd64(mut left: u64, mut right: u64) -> u64 {
         (left, right) = (right, left % right);
     }
     left
+}
+
+#[cfg(test)]
+mod cursor_fixtures {
+    use super::*;
+
+    #[test]
+    fn cursor_overflow_refuses_source_before_mutating_output_or_conversion_state() {
+        for (target_rate, channels) in [(48_000, 1), (48_000, 2), (44_100, 1)] {
+            for source_overflow in [false, true] {
+                let source = AudioFormat::new(48_000, 1).unwrap();
+                let target = AudioFormat::new(target_rate, channels).unwrap();
+                let mut converter = FormatConverter::new(
+                    source,
+                    target,
+                    ChannelMatrix::default_mix(1, channels).unwrap(),
+                    ResampleQuality::Linear,
+                    4,
+                )
+                .unwrap();
+                if source_overflow {
+                    converter.source_cursor = u64::MAX;
+                } else {
+                    converter.output_cursor = u64::MAX;
+                }
+                let before = (
+                    converter.output_cursor,
+                    converter.source_cursor,
+                    converter.fraction,
+                    converter.window_frames,
+                    converter.window.clone(),
+                );
+                let mut output = vec![0.75; usize::from(channels)];
+                assert_eq!(
+                    converter.render(&mut output, |_| -> Result<(), AudioError> {
+                        panic!("source must not run on cursor overflow")
+                    }),
+                    Err(AudioError::Overflow)
+                );
+                assert_eq!(
+                    (
+                        converter.output_cursor,
+                        converter.source_cursor,
+                        converter.fraction,
+                        converter.window_frames,
+                        converter.window.clone()
+                    ),
+                    before
+                );
+                assert!(output.iter().all(|value| *value == 0.75));
+            }
+        }
+    }
 }

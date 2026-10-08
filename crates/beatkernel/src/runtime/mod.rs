@@ -345,9 +345,7 @@ impl Runtime {
         &mut self,
         requested_at: Timestamp,
     ) -> Option<RuntimeSoundStopReport> {
-        if self.gameplay_fence.is_none() {
-            return None;
-        }
+        self.gameplay_fence.as_ref()?;
         let producer = &mut self.producer;
         let counters = self.telemetry.counters_mut();
         self.gameplay_sound_stop.attempt(requested_at, |command| {
