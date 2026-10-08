@@ -18,8 +18,11 @@ use crate::{
 };
 
 use super::{
-    hazard::HazardState, Candidate, CandidateResolver, ClosestCandidate, HazardError, HazardEvent,
-    HazardTimeline, JudgeError, JudgeEvent, JudgePolicy, JudgeProfile, Rule, WindowJudgePolicy,
+    hazard::HazardState,
+    input_report::{InputSink, LegacyInput, ObservedInput},
+    Candidate, CandidateResolver, ClosestCandidate, HazardError, HazardEvent, HazardTimeline,
+    InputFreshness, JudgeError, JudgeEvent, JudgeInputReport, JudgePolicy, JudgeProfile, Rule,
+    WindowJudgePolicy,
 };
 
 /// Single-owner forward judge with indexed starts and ordered deadlines.
@@ -258,6 +261,24 @@ impl JudgeEngine {
         event: &GameInputEvent,
         mapped_song_time: Timestamp,
     ) -> Result<Vec<JudgeEvent>, JudgeError> {
+        self.push_input_transition::<LegacyInput>(event, mapped_song_time)
+    }
+
+    /// Processes the same input transition, returning its authoritative facts.
+    /// Rejected operations return no report and preserve engine-owned state.
+    pub fn push_input_report(
+        &mut self,
+        event: &GameInputEvent,
+        mapped_song_time: Timestamp,
+    ) -> Result<JudgeInputReport, JudgeError> {
+        self.push_input_transition::<ObservedInput>(event, mapped_song_time)
+    }
+
+    fn push_input_transition<S: InputSink>(
+        &mut self,
+        event: &GameInputEvent,
+        mapped_song_time: Timestamp,
+    ) -> Result<S::Output, JudgeError> {
         let time = self.checked_time(mapped_song_time)?;
         let button = match &event.physical {
             PhysicalInputEvent::Button(button) => Some((
@@ -305,6 +326,21 @@ impl JudgeEngine {
             }
             None => None,
         };
+        let mut sink = S::default();
+        if S::OBSERVED {
+            let freshness = match (button, contact) {
+                (Some((_, ButtonState::Repeat)), _) => InputFreshness::ExplicitRepeat,
+                (Some((_, ButtonState::Down)), _) | (_, Some((_, TouchPhase::Down))) => {
+                    if fresh {
+                        InputFreshness::FreshPress
+                    } else {
+                        InputFreshness::HeldDown
+                    }
+                }
+                _ => InputFreshness::Other,
+            };
+            sink.admitted(freshness, candidates.len(), selected);
+        }
 
         // No library-owned fallible work remains after this point.
         if let Some(hazards) = &mut self.hazards {
@@ -313,6 +349,9 @@ impl JudgeEngine {
         }
         let mut output = Vec::new();
         self.expire(time, &mut output);
+        if S::OBSERVED {
+            sink.passive_results(output.len());
+        }
         if let Some((owner, state)) = button {
             match state {
                 ButtonState::Down => {
@@ -352,7 +391,15 @@ impl JudgeEngine {
             }
         }
         if let Some(hazards) = &mut self.hazards {
+            let previous_count = if S::OBSERVED {
+                hazards.events().len()
+            } else {
+                0
+            };
             hazards.consume(time, true, Some(*event.physical.meta()));
+            if S::OBSERVED {
+                sink.input_hazards(hazards.events().len() - previous_count);
+            }
         }
         let mut dispatch: BTreeSet<(ObjectId, usize)> = self
             .active_controls
@@ -374,6 +421,9 @@ impl JudgeEngine {
                 profile: &self.profile,
                 policy: self.policy.as_ref(),
             };
+            if S::OBSERVED {
+                sink.dispatched();
+            }
             let results = self.interactions[index].on_input(event, &context);
             self.stamp(
                 index,
@@ -385,7 +435,7 @@ impl JudgeEngine {
             self.refresh(index, None);
         }
         self.effective_time = Some(time);
-        Ok(output)
+        Ok(sink.finish(output))
     }
 
     /// Advances at unoffset mapped song time, expiring strictly older deadlines.

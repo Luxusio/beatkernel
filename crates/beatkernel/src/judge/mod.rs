@@ -2,12 +2,14 @@
 
 mod engine;
 mod hazard;
+mod input_report;
 mod policy;
 mod profile;
 pub(crate) mod snapshot;
 
 pub use engine::{JudgeEngine, JudgeSnapshot, SnapshotError};
 pub use hazard::{HazardError, HazardEvent, HazardId, HazardMarker, HazardOutcome, HazardTimeline};
+pub use input_report::{InputDisposition, InputFreshness, JudgeInputReport};
 pub use policy::{
     Candidate, CandidateResolver, ClosestCandidate, EarliestCandidate, JudgePolicy,
     WindowJudgePolicy,

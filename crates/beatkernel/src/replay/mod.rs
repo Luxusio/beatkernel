@@ -8,7 +8,10 @@ pub mod codec;
 use crate::judge::snapshot::{hash, Encoder};
 use crate::{
     input::GameInputEvent,
-    judge::{JudgeEngine, JudgeError, JudgeEvent, JudgeSnapshot, SnapshotError},
+    judge::{
+        InputDisposition, JudgeEngine, JudgeError, JudgeEvent, JudgeInputReport, JudgeSnapshot,
+        SnapshotError,
+    },
     runtime::RuntimeReport,
     time::{ClockDomainId, Timestamp},
 };
@@ -262,6 +265,32 @@ impl ReplaySession {
         }
         Ok(session)
     }
+    /// Loads a recording and streams facts for each accepted input.
+    ///
+    /// The observer runs after results, record and cursor commit. Advances and
+    /// rejected records do not invoke it. Earlier callbacks remain visible if a
+    /// later record fails; an observer panic does not roll back the commitment.
+    pub fn from_records_observed(
+        header: ReplayHeader,
+        engine: JudgeEngine,
+        records: impl IntoIterator<Item = ReplayRecord>,
+        mut observer: impl FnMut(&ReplayRecord, InputDisposition),
+    ) -> Result<Self, ReplayError> {
+        let mut session = Self::new(header, engine)?;
+        for record in records {
+            match record.operation {
+                ReplayOperation::Input(event) => {
+                    let report =
+                        session.append_input_report(event, record.song_time, record.ordinal)?;
+                    observer(&session.records[session.cursor - 1], report.disposition);
+                }
+                ReplayOperation::Advance => {
+                    session.append_record(record)?;
+                }
+            }
+        }
+        Ok(session)
+    }
     /// Immutable application replay metadata.
     pub const fn header(&self) -> &ReplayHeader {
         &self.header
@@ -300,6 +329,15 @@ impl ReplaySession {
             operation: ReplayOperation::Input(event),
         })
     }
+    /// Records unchanged normalized input and returns its judge transition facts.
+    pub fn push_input_report(
+        &mut self,
+        event: GameInputEvent,
+        song_time: Timestamp,
+    ) -> Result<JudgeInputReport, ReplayError> {
+        let ordinal = u64::try_from(self.records.len()).map_err(|_| ReplayError::Overflow)?;
+        self.append_input_report(event, song_time, ordinal)
+    }
     /// Records exact explicit advance times, including equal-time operations.
     pub fn advance_to(&mut self, song_time: Timestamp) -> Result<Vec<JudgeEvent>, ReplayError> {
         let ordinal = u64::try_from(self.records.len()).map_err(|_| ReplayError::Overflow)?;
@@ -310,29 +348,63 @@ impl ReplaySession {
         })
     }
     fn append_record(&mut self, record: ReplayRecord) -> Result<Vec<JudgeEvent>, ReplayError> {
+        let input = match &record.operation {
+            ReplayOperation::Input(event) => Some(event),
+            ReplayOperation::Advance => None,
+        };
+        self.preflight_record(record.ordinal, record.song_time, input)?;
+        let output = apply(&mut self.engine, &record)?;
+        self.commit_record(record, &output);
+        Ok(output)
+    }
+    fn append_input_report(
+        &mut self,
+        event: GameInputEvent,
+        song_time: Timestamp,
+        ordinal: u64,
+    ) -> Result<JudgeInputReport, ReplayError> {
+        self.preflight_record(ordinal, song_time, Some(&event))?;
+        let report = self.engine.push_input_report(&event, song_time)?;
+        self.commit_record(
+            ReplayRecord {
+                ordinal,
+                song_time,
+                operation: ReplayOperation::Input(event),
+            },
+            &report.events,
+        );
+        Ok(report)
+    }
+    fn preflight_record(
+        &self,
+        ordinal: u64,
+        song_time: Timestamp,
+        input: Option<&GameInputEvent>,
+    ) -> Result<(), ReplayError> {
         if self.cursor != self.records.len() || self.boundary_time.is_some() {
             return Err(ReplayError::FutureExists);
         }
-        if u64::try_from(self.records.len()).ok() != Some(record.ordinal) {
+        if u64::try_from(self.records.len()).ok() != Some(ordinal) {
             return Err(ReplayError::InvalidOrdinal);
         }
         if self
             .records
             .last()
-            .is_some_and(|previous| record.song_time < previous.song_time)
+            .is_some_and(|previous| song_time < previous.song_time)
         {
             return Err(ReplayError::NonMonotonicSongTime);
         }
-        if let ReplayOperation::Input(event) = &record.operation {
+        if let Some(event) = input {
             if event.physical.meta().clock_domain != self.header.normalized_clock {
                 return Err(ReplayError::ClockDomainMismatch);
             }
         }
-        let output = apply(&mut self.engine, &record)?;
-        self.results.extend_from_slice(&output);
+        Ok(())
+    }
+    fn commit_record(&mut self, record: ReplayRecord, output: &[JudgeEvent]) {
+        self.results.extend_from_slice(output);
         self.records.push(record);
         self.cursor += 1;
-        Ok(output)
     }
     /// Captures real state and complete result prefix at the current cursor.
     pub fn checkpoint(&mut self) -> Result<(), ReplayError> {

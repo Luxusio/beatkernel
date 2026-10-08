@@ -235,7 +235,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [ ] **BK-WBS-08.07** key/scratch/LN-end별 versioned timing preset을 기존 ClassifiedWindow에 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=검증된 opt-in dialect·경계 ±1ns; 새 기본값 추정 금지.
 - [ ] **BK-WBS-08.08** 기본 timing dialect와 역사적 LR2/nanasi 호환 범위를 확정한다. — 상태=P(정책선택대기); 선행=-; 필요 근거/다음=원문 spec만으로 millisecond 표를 추정하지 않음.
 - [ ] **BK-WBS-08.09** 동적 EXRANK/A0 의미와 필요한 timed policy를 primary source로 확인한다. — 상태=U(현황감사필요); 선행=-; 필요 근거/다음=서로 다른 engine 동작을 동일 표준으로 합치지 않음.
-- [ ] **BK-WBS-08.10** fresh unmatched/repeat/refused 입력을 구별하는 authoritative empty-POOR disposition을 만든다. — 상태=N(미구현); 선행=-; 필요 근거/다음=빈 JudgeEvent Vec나 가짜 ObjectId로 penalty를 만들지 않음.
+- [ ] **BK-WBS-08.10** fresh unmatched/repeat/refused 입력을 구별하는 authoritative empty-POOR disposition을 만든다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=REQ__input-disposition의 실제 judge/runtime/replay facts와 prefix·state/hash 검증; penalty/dialect 선택은08.11에 유지.
 - [ ] **BK-WBS-08.11** empty-POOR의 후보/반복/게이지/combo/capture 의미를 선택 dialect에 고정한다. — 상태=P(정책선택대기); 선행=-; 필요 근거/다음=preroll 정책과 구별; replay/network identity에 포함.
 - [x] **BK-WBS-08.12** WAV/FLAC/Vorbis/MP3가 실제 bounded preparation과 Mixer 출력까지 연결된다. — 상태=D(검증완료); 선행=-; 근거=E1; 포맷별 declared trim/limits.
 - [x] **BK-WBS-08.13** same-format Ogg chaining의 BOS/EOS/serial/독립 trim/aggregate limit를 검증한다. — 상태=D(검증완료); 선행=-; 근거=E1; malformed·mixed format 전체 거절.

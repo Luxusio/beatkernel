@@ -12,10 +12,13 @@ use crate::{
     audio::{AudioCommand, CommandProducer, CommandPushError, QueuePushError, SampleId, VoiceId},
     chart::ObjectId,
     input::{
-        BindingMap, DeviceId, GameInputEvent, PhysicalInputEvent, Position2, TouchRegion,
-        TouchRoute, TouchRouter, TouchRoutingError,
+        BindingMap, DeviceId, EventMeta, GameControlId, GameInputEvent, PhysicalInputEvent,
+        Position2, TouchRegion, TouchRoute, TouchRouter, TouchRoutingError,
     },
-    judge::{HazardEvent, JudgeEngine, JudgeError, JudgeEvent, JudgeOutcome, JudgeStage},
+    judge::{
+        HazardEvent, InputDisposition, JudgeEngine, JudgeError, JudgeEvent, JudgeOutcome,
+        JudgeStage,
+    },
     telemetry::{RuntimeCounters, RuntimeTelemetry},
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
     transport::{Transport, TransportError},
@@ -133,6 +136,100 @@ pub struct RuntimeReport {
     pub audio_commands: Vec<AudioCommand>,
     /// Exact failed commands and reasons, with no implicit retry.
     pub audio_failures: Vec<CommandPushError>,
+}
+
+/// Original failure for the first bound input refused by the judge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefusedJudgeInput {
+    /// Logical destination of the refused bound input.
+    pub game_control: GameControlId,
+    /// Normalized input metadata, retaining original acquisition provenance.
+    pub input: EventMeta,
+    /// The actual error returned by the judge for this input.
+    pub error: JudgeError,
+}
+
+/// Runtime output with transient evidence for the accepted bound-input prefix.
+#[derive(Clone, Debug)]
+pub struct RuntimeInputReport {
+    /// Original runtime results, including partial failure and audio evidence.
+    pub report: RuntimeReport,
+    /// One disposition per successful bound input, in binding order.
+    pub dispositions: Vec<InputDisposition>,
+    /// First refused bound input; endpoint advancement errors do not set this.
+    pub refused: Option<RefusedJudgeInput>,
+}
+
+// Static modes retain the legacy return type without an observation vector or
+// constructing a rich judge/runtime report just to discard it.
+trait RuntimeInputMode: Default {
+    type Output;
+
+    fn push_input(
+        &mut self,
+        judge: &mut JudgeEngine,
+        input: &GameInputEvent,
+        song_time: Timestamp,
+    ) -> Result<Vec<JudgeEvent>, JudgeError>;
+    fn refused(&mut self, _: &GameInputEvent, _: JudgeError) {}
+    fn finish(self, report: RuntimeReport) -> Self::Output;
+}
+
+#[derive(Default)]
+struct LegacyRuntimeInput;
+
+impl RuntimeInputMode for LegacyRuntimeInput {
+    type Output = RuntimeReport;
+
+    fn push_input(
+        &mut self,
+        judge: &mut JudgeEngine,
+        input: &GameInputEvent,
+        song_time: Timestamp,
+    ) -> Result<Vec<JudgeEvent>, JudgeError> {
+        judge.push_input(input, song_time)
+    }
+
+    fn finish(self, report: RuntimeReport) -> Self::Output {
+        report
+    }
+}
+
+#[derive(Default)]
+struct ObservedRuntimeInput {
+    dispositions: Vec<InputDisposition>,
+    refused: Option<RefusedJudgeInput>,
+}
+
+impl RuntimeInputMode for ObservedRuntimeInput {
+    type Output = RuntimeInputReport;
+
+    fn push_input(
+        &mut self,
+        judge: &mut JudgeEngine,
+        input: &GameInputEvent,
+        song_time: Timestamp,
+    ) -> Result<Vec<JudgeEvent>, JudgeError> {
+        let report = judge.push_input_report(input, song_time)?;
+        self.dispositions.push(report.disposition);
+        Ok(report.events)
+    }
+
+    fn refused(&mut self, input: &GameInputEvent, error: JudgeError) {
+        self.refused = Some(RefusedJudgeInput {
+            game_control: input.game_control,
+            input: *input.physical.meta(),
+            error,
+        });
+    }
+
+    fn finish(self, report: RuntimeReport) -> Self::Output {
+        RuntimeInputReport {
+            report,
+            dispositions: self.dispositions,
+            refused: self.refused,
+        }
+    }
 }
 
 /// Software profiling only; never an input, song or output clock.
@@ -398,7 +495,7 @@ impl Runtime {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, RuntimeError> {
-        self.process_input_with_position(input, None, mapper, audio_at)
+        self.process_input_with_position::<LegacyRuntimeInput>(input, None, mapper, audio_at)
     }
 
     /// Processes genuine physical input with a separate touch hit-test position.
@@ -412,18 +509,53 @@ impl Runtime {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, RuntimeError> {
-        self.process_input_with_position(input, Some(position), mapper, audio_at)
+        self.process_input_with_position::<LegacyRuntimeInput>(
+            input,
+            Some(position),
+            mapper,
+            audio_at,
+        )
     }
 
-    fn process_input_with_position(
+    /// Processes input while retaining judge facts aligned with accepted bound inputs.
+    /// A later judge or queue failure preserves the accepted prefix. Normalization
+    /// and preflight failures retain the same operation error as `process_input`.
+    pub fn process_input_report(
+        &mut self,
+        input: PhysicalInputEvent,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<RuntimeInputReport, RuntimeError> {
+        self.process_input_with_position::<ObservedRuntimeInput>(input, None, mapper, audio_at)
+    }
+
+    /// Processes positioned input with the same routing and provenance as
+    /// `process_input_at`, returning facts only for successfully judged bindings.
+    pub fn process_input_at_report(
+        &mut self,
+        input: PhysicalInputEvent,
+        position: Position2,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<RuntimeInputReport, RuntimeError> {
+        self.process_input_with_position::<ObservedRuntimeInput>(
+            input,
+            Some(position),
+            mapper,
+            audio_at,
+        )
+    }
+
+    fn process_input_with_position<M: RuntimeInputMode>(
         &mut self,
         mut input: PhysicalInputEvent,
         position: Option<Position2>,
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
-    ) -> Result<RuntimeReport, RuntimeError> {
+    ) -> Result<M::Output, RuntimeError> {
         let started = self.processing_clock.start();
         let result = (|| {
+            let mut mode = M::default();
             let incoming = ClockPoint {
                 domain: input.meta().clock_domain,
                 timestamp: input.meta().timestamp,
@@ -452,7 +584,7 @@ impl Runtime {
                 let counters = self.telemetry.counters_mut();
                 counters.inputs = counters.inputs.saturating_add(1);
                 report.input = Some(input);
-                return Ok(report);
+                return Ok(mode.finish(report));
             }
             let routed = if report.song_end_reached {
                 TouchRoute::Unconfigured
@@ -493,7 +625,7 @@ impl Runtime {
                 };
                 for bound in single.into_iter().chain(fallback.into_iter().flatten()) {
                     let fresh = self.input_sounds.is_some() && self.judge.is_fresh_press(&bound);
-                    match self.judge.push_input(&bound, report.song_time) {
+                    match mode.push_input(&mut self.judge, &bound, report.song_time) {
                         Ok(events) => {
                             report
                                 .hazard_events
@@ -513,6 +645,7 @@ impl Runtime {
                             report.judge_events.extend(events);
                         }
                         Err(error) => {
+                            mode.refused(&bound, error);
                             report.judge_error = Some(error);
                             break;
                         }
@@ -525,7 +658,7 @@ impl Runtime {
                 report.input = Some(input);
             }
             self.publish(&mut report, &input_commands);
-            Ok(report)
+            Ok(mode.finish(report))
         })();
         self.observe(started, result.as_ref().is_err());
         result
