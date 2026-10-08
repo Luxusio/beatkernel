@@ -337,7 +337,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [ ] **BK-WBS-13.05** 대규모 노트·64-member·오랜 플레이·반복 seek/rebind의 soak/stress를 실행한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=실제 CPU/memory/queue/owner leak·20h/1week 가상 시간.
 - [ ] **BK-WBS-13.06** 전체 RT callback과 판정 hot path alloc/lock/I/O/error 경로를 계측한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=일반/오류/포화·모든 backend; scoped 테스트만 확대하지 않음.
 - [ ] **BK-WBS-13.07** p50/p95/p99/max·drop/xrun·scheduler jitter 계측을 재현 workload에 연결한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=계측 위치/provenance/용량·관측 불가 표시.
-- [ ] **BK-WBS-13.08** 성능 기준 workload·CPU/RAM/GPU/배포 artifact/실행 절차를 고정한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=대형 chart·dense notes·UI stall·다인·여러 buffer.
+- [ ] **BK-WBS-13.08** 성능 기준 workload·CPU/RAM/GPU/배포 artifact/실행 절차를 고정한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=REQ__runtime-benchmark의 fixed software matrix·검증 report 구현/QA; 대형 chart·dense notes·UI stall·다인·GPU·장시간 비교는 계속 필요.
 - [ ] **BK-WBS-13.09** 입력 1kHz 이상에서 device→collector→runtime 손실/순서/jitter를 측정한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=실제 source/device.
 - [ ] **BK-WBS-13.10** buffer 크기별 native audio underrun/latency·교체 후 지연을 측정한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=실제 WASAPI/ASIO/ALSA/CoreAudio.
 - [ ] **BK-WBS-13.11** 입력→소리·구간 재시작의 end-to-end 음향 latency/drift를 측정한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=물리 loopback/측정장비와 raw data.

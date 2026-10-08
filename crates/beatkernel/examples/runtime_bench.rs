@@ -402,6 +402,10 @@ fn run(options: Options) -> Result<(), Box<dyn Error>> {
     let elapsed_ns = elapsed.as_nanos();
     let runtime = runtime_delta(workload.runtime.telemetry().counters(), baseline_runtime);
     let audio = audio_delta(workload.mixer.counters(), baseline_audio);
+    println!(
+        "benchmark_schema=1 workload_id=beatkernel-runtime-cpu-v1 debug_assertions={}",
+        cfg!(debug_assertions)
+    );
     println!("software-only CPU workload; settings={options:?}; elapsed_ns={elapsed_ns}");
     println!(
         "measured_blocks={} software_operations={} rendered_frames={} pcm_checksum={}",
