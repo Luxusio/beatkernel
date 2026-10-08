@@ -543,3 +543,432 @@ fn pending_accept_and_pending_connect_cancel_and_join_without_application_succes
         .expect("joined pending owners retain idempotent cleanup");
     assert!(stopped_again.elapsed() < Duration::from_secs(2));
 }
+
+// These cases cross the actual selected native cohort admission/metadata bridge.
+// Progress is a self-reported network prefix; no native completed-play flag is set.
+mod selected_policy_peers {
+    use super::*;
+    use beatkernel::{
+        audio::{AudioFormat, PcmLimits, SampleBank},
+        input::DeviceId,
+        judge::{JudgeGrade, JudgeWindow},
+        time::{Duration as SongDuration, Timestamp},
+    };
+    use beatkernel_bms::{BmsGaugeKind, BmsJudgment};
+    use beatkernel_bms_runtime::{
+        competition_live::{CompetitionOptions, NetworkRole},
+        competition_presentation::{NetworkSnapshot, NetworkStatus},
+        gameplay_competition::GroupCompetitionPort,
+        local_players::PlayerId,
+        multiplayer_group::MemberProgress,
+        native_cohort_setup::{
+            prepare_audio_cohort_with_policy, CohortPreparation, PreparedCohort,
+        },
+        native_group_competition::NativeGroupCompetition,
+        native_start::NativeStartAgreement,
+        play_policy::{ClassifiedWindow, ResolvedPlayPolicy},
+        replay_playback::decode_section_setup,
+        PreparedBms,
+    };
+    use std::{collections::BTreeMap, sync::Barrier};
+
+    #[derive(Clone, Copy)]
+    struct Selected {
+        gauge: BmsGaugeKind,
+        class: BmsJudgment,
+        offset: i64,
+        start: i64,
+        end: i64,
+        seed: u64,
+    }
+    impl Default for Selected {
+        fn default() -> Self {
+            Self {
+                gauge: BmsGaugeKind::Hard,
+                class: BmsJudgment::Great,
+                offset: -3,
+                start: 1,
+                end: 5_000_000_000,
+                seed: 71,
+            }
+        }
+    }
+    fn cohort(
+        role: NetworkRole,
+        credentials: QuicCredentials,
+        first: u32,
+        selected: Selected,
+        preroll: i64,
+    ) -> PreparedCohort {
+        let source = beatkernel_bms::parse_seeded(
+            "#BPM 60\n#TOTAL 320\n#WAV01 note.wav\n#00111:0101\n",
+            Default::default(),
+            selected.seed,
+        )
+        .unwrap();
+        let policy = ResolvedPlayPolicy::bms(
+            &source,
+            selected.gauge,
+            &[ClassifiedWindow {
+                judgment: selected.class,
+                window: JudgeWindow {
+                    grade: JudgeGrade(7),
+                    early: SongDuration::from_nanos(7),
+                    late: SongDuration::from_nanos(9),
+                },
+            }],
+            selected.offset,
+        )
+        .unwrap();
+        let prepared = PreparedBms {
+            compiled: source.compile().unwrap(),
+            source,
+            bank: SampleBank::new(
+                AudioFormat::new(1000, 1).unwrap(),
+                PcmLimits::new(64, 256, 4).unwrap(),
+            )
+            .unwrap(),
+            sounds: vec![],
+            bgm_commands: vec![],
+        };
+        let bindings = BTreeMap::from([(0x11, 7)]);
+        let assignments = [
+            (PlayerId(first), DeviceId(31)),
+            (PlayerId(first + 1), DeviceId(u64::MAX)),
+        ];
+        let options = CompetitionOptions {
+            network: Some(role),
+            quic: credentials,
+            setup_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let cohort = prepare_audio_cohort_with_policy(
+            &prepared,
+            &assignments,
+            &options,
+            &CohortPreparation {
+                host: ClockDomainId(99),
+                output: ClockDomainId(2),
+                early: 7,
+                late: 9,
+                offset: selected.offset,
+                preroll,
+                start: Timestamp::from_nanos(selected.start),
+                end: Some(Timestamp::from_nanos(selected.end)),
+                chart_seed: selected.seed,
+                bindings: &bindings,
+                record_replay: None,
+                replay_max_bytes: 0,
+                replay_max_records: 0,
+            },
+            ClockDomainId(17),
+            &policy,
+        )
+        .unwrap();
+        let network = cohort.network.as_ref().unwrap();
+        let port: &dyn GroupCompetitionPort = network;
+        assert!(!port.policy_agnostic());
+        assert!(port.expected_policy_header(PlayerId(0)).is_none());
+        for (member, state) in cohort.configs.iter().zip(&cohort.states) {
+            assert!(state.capture.is_none());
+            assert_eq!(state.gauge.profile(), policy.gauge());
+            assert!(member.judge.effective_song_time().is_none());
+            let header = port.expected_policy_header(member.player).unwrap();
+            assert!(std::ptr::eq(
+                header,
+                network.native_policy_header(member.player).unwrap()
+            ));
+            let expected = beatkernel_bms_runtime::native_judge::prepare_policy_header(
+                &prepared.source,
+                &member.judge,
+                &policy,
+                ClockDomainId(17),
+                Timestamp::from_nanos(selected.start),
+                selected.seed,
+                Some(Timestamp::from_nanos(selected.end)),
+            )
+            .unwrap();
+            assert_eq!(header, &expected);
+            let setup = decode_section_setup(&header.options).unwrap();
+            assert_eq!(setup.judgments.as_ref(), policy.judgments());
+            assert_eq!(setup.gauge, *policy.gauge());
+            assert_eq!(setup.start, Timestamp::from_nanos(selected.start));
+            assert_eq!(setup.end, Some(Timestamp::from_nanos(selected.end)));
+            assert_eq!(setup.chart_seed, selected.seed);
+        }
+        cohort
+    }
+
+    struct SelectedPeers {
+        host: NativeGroupCompetition,
+        join: NativeGroupCompetition,
+        // Retain the real prepared judges/gauges to prove remote progress never judges them.
+        cohorts: [PreparedCohort; 2],
+        finished: bool,
+    }
+    impl SelectedPeers {
+        fn connect(selected: Selected) -> Self {
+            let credentials = Credentials::from_environment();
+            let address = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .unwrap()
+                .local_addr()
+                .unwrap();
+            let mut host = cohort(
+                NetworkRole::Host(address),
+                credentials.host,
+                11,
+                Selected::default(),
+                HOST_PREROLL,
+            );
+            let mut join = cohort(
+                NetworkRole::Join(address),
+                credentials.join,
+                21,
+                selected,
+                JOIN_PREROLL,
+            );
+            Self {
+                host: host.network.take().unwrap(),
+                join: join.network.take().unwrap(),
+                cohorts: [host, join],
+                finished: false,
+            }
+        }
+        fn commit(&mut self) -> Result<(), String> {
+            // Host Ready is enqueued before the service enters Join's real gate.
+            // Each existing production QUIC worker independently drives the handshake.
+            let mut join_committed = false;
+            let mut join_checked = false;
+            let mut join_error = None;
+            let host_result = self.host.await_commit(&mut || {
+                if !join_checked {
+                    join_checked = true;
+                    match self.join.await_commit(&mut || Ok(true)) {
+                        Ok(true) => join_committed = true,
+                        Ok(false) => return Ok(false),
+                        Err(error) => join_error = Some(error.to_string()),
+                    }
+                }
+                Ok(true)
+            });
+            match host_result {
+                Err(error) => Err(format!("host={error}; join={join_error:?}")),
+                Ok(true) if join_committed => Ok(()),
+                Ok(_) => Err(join_error.unwrap_or_else(|| "actual startup cancelled".into())),
+            }
+        }
+        fn finish(
+            &mut self,
+            host: &[MemberProgress],
+            join: &[MemberProgress],
+        ) -> [Result<(), String>; 2] {
+            let barrier = Barrier::new(2);
+            let result = thread::scope(|scope| {
+                let joining = &mut self.join;
+                let barrier = &barrier;
+                let worker = scope.spawn(move || {
+                    barrier.wait();
+                    joining.finish(join).map_err(|error| error.to_string())
+                });
+                barrier.wait();
+                let host = self.host.finish(host).map_err(|error| error.to_string());
+                [
+                    host,
+                    worker.join().expect("selected join finalization panicked"),
+                ]
+            });
+            self.finished = true;
+            result
+        }
+        fn pristine(&self) {
+            for cohort in &self.cohorts {
+                for (member, state) in cohort.configs.iter().zip(&cohort.states) {
+                    assert!(member.judge.effective_song_time().is_none());
+                    assert_eq!(
+                        state.gauge.snapshot(),
+                        beatkernel_bms_runtime::gauge::BmsGauge::new(
+                            state.gauge.profile().try_copy().unwrap()
+                        )
+                        .snapshot()
+                    );
+                    assert!(state.capture.is_none());
+                }
+            }
+        }
+    }
+    impl Drop for SelectedPeers {
+        fn drop(&mut self) {
+            if !self.finished {
+                // Refused setup has no local prefix. Even a failing-progress unwind
+                // must attempt both existing cleanup owners; no completion is asserted.
+                let _ = self.finish(&[], &[]);
+            }
+        }
+    }
+    fn members(first: u32, tick: u64) -> Vec<MemberProgress> {
+        (0..2)
+            .map(|slot| MemberProgress {
+                player: PlayerId(first + slot),
+                progress: Progress {
+                    song_ns: tick as i64 * 1_000_000_000,
+                    hits: tick * 4 + u64::from(slot),
+                    misses: tick,
+                    combo: tick,
+                    max_combo: tick * 2,
+                },
+            })
+            .collect()
+    }
+    fn exact(rows: &[(PlayerId, NetworkSnapshot)], local: u32, remote: &[MemberProgress]) -> bool {
+        rows.len() == 2
+            && rows
+                .iter()
+                .zip(remote)
+                .enumerate()
+                .all(|(slot, ((player, snapshot), member))| {
+                    *player == PlayerId(local + slot as u32)
+                        && snapshot.progress == Some(member.progress)
+                })
+    }
+
+    #[test]
+    #[ignore = "requires ephemeral valid QUIC PKI and real UDP peers; selected native policy bridge"]
+    fn actual_selected_cohort_peers_commit_exchange_ordered_prefixes_ack_finals_and_join() {
+        let mut peers = SelectedPeers::connect(Selected::default());
+        peers
+            .commit()
+            .expect("matching admitted selected cohorts must commit");
+        for (owner, preroll) in [(&peers.host, HOST_PREROLL), (&peers.join, JOIN_PREROLL)] {
+            let schedule = owner.committed_schedule().unwrap();
+            assert!(schedule.target_ns > 0);
+            assert_eq!(schedule.song_target_ns - schedule.target_ns, preroll);
+            assert!(!owner.is_failed());
+            assert!(
+                !owner.native_completed(),
+                "transport receipt is not native completion"
+            );
+        }
+        for tick in 1..=2 {
+            let host = members(11, tick);
+            let join = members(21, tick);
+            let deadline = Instant::now() + DEADLINE;
+            loop {
+                peers.host.observe(&host).unwrap();
+                peers.join.observe(&join).unwrap();
+                assert!(!peers.host.is_failed() && !peers.join.is_failed());
+                if exact(&peers.host.archive_snapshots().unwrap(), 11, &join)
+                    && exact(&peers.join.archive_snapshots().unwrap(), 21, &host)
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "selected peer prefix {tick} did not cross actual QUIC"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            peers.pristine();
+        }
+        let host_final = members(11, 3);
+        let join_final = members(21, 3);
+        let began = Instant::now();
+        for result in peers.finish(&host_final, &join_final) {
+            result.expect("selected final delivery/ACK and actual worker joins must succeed");
+        }
+        assert!(began.elapsed() < DEADLINE);
+        let host = peers.host.archive_snapshots().unwrap();
+        let join = peers.join.archive_snapshots().unwrap();
+        assert!(exact(&host, 11, &join_final));
+        assert!(exact(&join, 21, &host_final));
+        assert!(host
+            .iter()
+            .chain(&join)
+            .all(|(_, snapshot)| snapshot.status == NetworkStatus::Stopped));
+        peers.pristine();
+    }
+
+    #[test]
+    #[ignore = "requires ephemeral valid QUIC PKI and real UDP peers; admitted policy mismatches"]
+    fn actual_selected_cohort_peers_refuse_class_gauge_profile_section_and_seed_before_start() {
+        let selected = Selected::default();
+        // Great and PGreat have the same Hard gauge effects and judge windows;
+        // their genuine class mapping alone must still refuse the peer.
+        let mut cases = vec![
+            Selected {
+                class: BmsJudgment::PGreat,
+                ..selected
+            },
+            Selected {
+                gauge: BmsGaugeKind::Hazard,
+                ..selected
+            },
+            Selected {
+                offset: selected.offset + 1,
+                ..selected
+            },
+            Selected {
+                start: selected.start + 1,
+                ..selected
+            },
+            Selected {
+                end: selected.end - 1,
+                ..selected
+            },
+            Selected {
+                seed: selected.seed + 1,
+                ..selected
+            },
+        ];
+        for (index, foreign) in cases.drain(..).enumerate() {
+            let mut peers = SelectedPeers::connect(foreign);
+            if index == 0 {
+                assert_eq!(
+                    peers.cohorts[0].configs[0].judge.profile(),
+                    peers.cohorts[1].configs[0].judge.profile()
+                );
+                assert_eq!(
+                    peers.cohorts[0].states[0].gauge.profile(),
+                    peers.cohorts[1].states[0].gauge.profile()
+                );
+                assert_ne!(
+                    peers
+                        .host
+                        .native_policy_header(PlayerId(11))
+                        .unwrap()
+                        .options,
+                    peers
+                        .join
+                        .native_policy_header(PlayerId(21))
+                        .unwrap()
+                        .options
+                );
+            }
+            let error = peers
+                .commit()
+                .expect_err("different admitted meanings must not commit");
+            assert!(
+                error.contains("IncompatibleSetup"),
+                "case {index} must fail explicit identity admission: {error}"
+            );
+            assert!(peers.host.committed_schedule().is_err());
+            assert!(peers.join.committed_schedule().is_err());
+            assert!(peers
+                .host
+                .archive_snapshots()
+                .unwrap()
+                .iter()
+                .all(|(_, snapshot)| snapshot.progress.is_none()));
+            assert!(peers
+                .join
+                .archive_snapshots()
+                .unwrap()
+                .iter()
+                .all(|(_, snapshot)| snapshot.progress.is_none()));
+            assert!(!peers.host.native_completed() && !peers.join.native_completed());
+            peers.pristine();
+            let began = Instant::now();
+            let _ = peers.finish(&[], &[]); // The original disconnect is retained; both owners still join.
+            assert!(began.elapsed() < DEADLINE);
+        }
+    }
+}

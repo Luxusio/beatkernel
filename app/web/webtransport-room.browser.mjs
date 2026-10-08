@@ -178,11 +178,16 @@ try {
     const refusal = await rejection.evaluate(async address => {
       const { WebTransportChannel } = await import("/app/web/multiplayer-transport.mjs");
       let channel;
-      try { channel = await WebTransportChannel.open(address, { setupTimeoutMs: 5000, ioTimeoutMs: 5000 }); return false; }
-      catch (error) { return error.operation === "open" && error.code === "transport"; }
+      try {
+        channel = await WebTransportChannel.open(address, { setupTimeoutMs: 5000, ioTimeoutMs: 5000 });
+        return { opened: true };
+      }
+      catch (error) { return { opened: false, operation: error.operation, code: error.code }; }
       finally { if (channel) await channel.close(); }
     }, transportURL);
-    assert(refusal, `${label} acquired an HTTP/3 stream or failed outside actual transport admission`);
+    assert.equal(refusal.opened, false, `${label} acquired an HTTP/3 stream`);
+    assert.equal(refusal.code, "transport", `${label} failed outside actual transport admission`);
+    assert(["open", "remote"].includes(refusal.operation), `${label} failed outside opening-handshake/remote transport refusal`);
     await rejection.close();
   }
   await refused(forbiddenURL, `${relayURL}_${process.pid}_forbidden`, "Forbidden browser Origin");
