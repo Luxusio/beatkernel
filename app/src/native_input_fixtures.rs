@@ -162,6 +162,85 @@ impl NativeInputSource for ScriptSource {
     }
 }
 
+struct DropPanicSource {
+    inner: ScriptSource,
+    close_panic: bool,
+}
+
+impl NativeInputSource for DropPanicSource {
+    fn service(
+        &mut self,
+        sink: &mut InputPublisher<'_>,
+        quantum: usize,
+    ) -> Result<SourceDrain, String> {
+        self.inner.service(sink, quantum)
+    }
+
+    fn close(&mut self) -> Result<(), String> {
+        let result = self.inner.close();
+        if self.close_panic {
+            panic!("scripted close panic");
+        }
+        result
+    }
+}
+
+impl Drop for DropPanicSource {
+    fn drop(&mut self) {
+        panic!("scripted source destructor panic");
+    }
+}
+
+#[test]
+fn destructor_panic_preserves_first_cleanup_failure_and_original_source_failure() {
+    // close error + drop panic; close panic + drop panic; healthy close + drop
+    // panic; native error + close error + drop panic. Each source is constructed
+    // on its actual acquisition worker, and all cleanup attempts finish before
+    // the terminal outcome is inspected.
+    for case in 0..4 {
+        let (actions_tx, actions) = mpsc::channel();
+        let (observations, observed) = mpsc::channel();
+        let mut collector = NativeInputCollector::spawn(config(), move || {
+            Ok(DropPanicSource {
+                inner: ScriptSource {
+                    witness: OwnerWitness::new(observations),
+                    actions,
+                    close_error: case == 0 || case == 3,
+                },
+                close_panic: case == 1,
+            })
+        })
+        .unwrap();
+        collector.wait_ready().unwrap();
+        let owner = match receive(&observed) {
+            OwnerObservation::Constructed(id) => id,
+            other => panic!("{other:?}"),
+        };
+        assert_ne!(owner, thread::current().id());
+        actions_tx
+            .send(if case == 3 { Action::Fail } else { Action::End })
+            .unwrap();
+        collector.wake();
+        assert!(matches!(receive(&observed), OwnerObservation::Closed(id) if id == owner));
+        assert!(matches!(receive(&observed), OwnerObservation::Dropped(id) if id == owner));
+        let expected = match case {
+            0 => CollectorError::Close("close failed".into()),
+            1 => CollectorError::Close("source close panicked".into()),
+            2 => CollectorError::Close("source drop panicked".into()),
+            _ => CollectorError::FailedClose {
+                primary: Box::new(CollectorError::Source("native loss".into())),
+                close: "close failed".into(),
+            },
+        };
+        assert_eq!(
+            collector.stop_and_join(),
+            Err(expected.clone()),
+            "case {case}"
+        );
+        assert_eq!(collector.status(), Err(expected), "case {case}");
+    }
+}
+
 fn config() -> CollectorConfig {
     CollectorConfig {
         domain: ClockDomainId(10),

@@ -379,7 +379,7 @@ mod threaded {
             Ok(result) => result,
             Err(_) => Err("source close panicked".into()),
         };
-        let close = if dropped.is_err() {
+        let close = if dropped.is_err() && close.is_ok() {
             Err("source drop panicked".into())
         } else {
             close
