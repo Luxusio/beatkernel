@@ -1,6 +1,7 @@
 # Exact converted output continuity
 
-Status: selected prerequisite contract; implementation/acceptance pending.
+Status: source implementation and development checks passed; independent
+review and final QA pending.
 
 The original Mixer source format and source identity remain immutable. One
 portable owner must retain the Mixer, converter, exact next rational source

@@ -12,8 +12,27 @@ use beatkernel::{
 thread_local! {
     static TRACK: Cell<bool> = const { Cell::new(false) };
     static COUNTS: Cell<[usize; 3]> = const { Cell::new([0; 3]) };
+    // Per-thread and one-shot: unrelated concurrently running tests are unaffected.
+    static FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
+    static FAILURE_TRIGGERED: Cell<bool> = const { Cell::new(false) };
 }
 struct Allocator;
+fn allocation_refused() -> bool {
+    FAIL_AFTER
+        .try_with(|remaining| match remaining.get() {
+            Some(0) => {
+                remaining.set(None);
+                let _ = FAILURE_TRIGGERED.try_with(|triggered| triggered.set(true));
+                true
+            }
+            Some(count) => {
+                remaining.set(Some(count - 1));
+                false
+            }
+            None => false,
+        })
+        .unwrap_or(false)
+}
 fn count(kind: usize) {
     let _ = TRACK.try_with(|track| {
         if track.get() {
@@ -30,16 +49,25 @@ fn count(kind: usize) {
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         count(0);
+        if allocation_refused() {
+            return std::ptr::null_mut();
+        }
         // SAFETY: GlobalAlloc caller supplies a valid layout.
         unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         count(0);
+        if allocation_refused() {
+            return std::ptr::null_mut();
+        }
         // SAFETY: GlobalAlloc caller supplies a valid layout.
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         count(1);
+        if allocation_refused() {
+            return std::ptr::null_mut();
+        }
         // SAFETY: GlobalAlloc caller supplies a live allocation, its layout and
         // a valid nonzero replacement size.
         unsafe { System.realloc(pointer, layout, size) }
@@ -52,6 +80,21 @@ unsafe impl GlobalAlloc for Allocator {
 }
 #[global_allocator]
 static ALLOCATOR: Allocator = Allocator;
+
+fn refuse_allocation<T>(successful_allocations: usize, operation: impl FnOnce() -> T) -> (T, bool) {
+    struct Disarm;
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            FAIL_AFTER.with(|remaining| remaining.set(None));
+        }
+    }
+    FAILURE_TRIGGERED.with(|triggered| triggered.set(false));
+    FAIL_AFTER.with(|remaining| remaining.set(Some(successful_allocations)));
+    let guard = Disarm;
+    let result = operation();
+    drop(guard); // Assertions and error formatting always run with injection disabled.
+    (result, FAILURE_TRIGGERED.with(Cell::get))
+}
 
 fn track<T>(operation: impl FnOnce() -> T) -> (T, [usize; 3]) {
     COUNTS.with(|counts| counts.set([0; 3]));
@@ -606,6 +649,100 @@ fn legacy_fixed_rate_converter_refuses_retarget_without_losing_pcm() {
     let mut signal = Signal::new(2, ramp);
     let output = render_partitioned(&mut converter, &mut signal, 31, &[13, 1]);
     assert_close(&output, &linear_oracle(&signal, 44_100, 48_000, 31), 1e-6);
+}
+
+#[test]
+fn cold_retarget_allocation_refusal_preserves_complete_state_pcm_and_retry() {
+    // Retarget allocates its new source window first, then the sinc table.
+    // Index 1 therefore fails after retained PCM has been copied into the new
+    // window, exercising refusal late in preparation before atomic commit.
+    for (quality, allocation_index) in [
+        (ResampleQuality::Linear, 0),
+        (ResampleQuality::WindowedSinc { half_taps: 16 }, 0),
+        (ResampleQuality::WindowedSinc { half_taps: 16 }, 1),
+    ] {
+        let mut changed = continuous(quality, 48_000, 64);
+        let mut control = continuous(quality, 48_000, 64);
+        let dirty_signal = |frame: u64, channel: usize| {
+            if frame == 2 && channel == 0 {
+                f32::NAN
+            } else {
+                tone(frame, channel)
+            }
+        };
+        let mut a = Signal::new(2, dirty_signal);
+        let mut b = Signal::new(2, dirty_signal);
+        assert_eq!(
+            render_partitioned(&mut changed, &mut a, 17, &[17]),
+            render_partitioned(&mut control, &mut b, 17, &[17])
+        );
+        assert!(changed.source_position().numerator > 0);
+        assert!(changed.sanitized_samples() > 0);
+        let before = (
+            changed.source_position(),
+            changed.source_frame_cursor(),
+            changed.output_frame_cursor(),
+            changed.sanitized_samples(),
+            changed.source_format(),
+            changed.target_format(),
+            changed.quality(),
+            changed.max_output_frames(),
+            changed.max_source_frames(),
+            changed.source_lookahead_frames(),
+        );
+        let old_matrix = changed.matrix().coefficients().to_vec();
+        let target = format(32_000, 1);
+        // Matrix allocation occurs before injection, leaving exactly the
+        // converter window and optional kernel allocations under observation.
+        let rejected_matrix = ChannelMatrix::new(2, 1, &[0.25, 0.75]).unwrap();
+        let retry_matrix = ChannelMatrix::new(2, 1, &[0.25, 0.75]).unwrap();
+        let control_matrix = ChannelMatrix::new(2, 1, &[0.25, 0.75]).unwrap();
+        let source_before = a.next;
+        let (result, triggered) = refuse_allocation(allocation_index, || {
+            changed.retarget(target, rejected_matrix, 128)
+        });
+        assert!(
+            triggered,
+            "cold allocation index {allocation_index} was not reached"
+        );
+        assert_eq!(result, Err(AudioError::AllocationFailed));
+        assert_eq!(
+            before,
+            (
+                changed.source_position(),
+                changed.source_frame_cursor(),
+                changed.output_frame_cursor(),
+                changed.sanitized_samples(),
+                changed.source_format(),
+                changed.target_format(),
+                changed.quality(),
+                changed.max_output_frames(),
+                changed.max_source_frames(),
+                changed.source_lookahead_frames(),
+            )
+        );
+        assert_eq!(changed.matrix().source_channels(), 2);
+        assert_eq!(changed.matrix().target_channels(), 2);
+        assert_eq!(changed.matrix().coefficients(), old_matrix);
+        assert_eq!(a.next, source_before);
+        // Compare audible continuation before retry, including the old pending
+        // PCM and past sinc history, rather than only checking scalar getters.
+        assert_eq!(
+            render_partitioned(&mut changed, &mut a, 37, &[7, 1, 13]),
+            render_partitioned(&mut control, &mut b, 37, &[7, 1, 13])
+        );
+        changed.retarget(target, retry_matrix, 128).unwrap();
+        control.retarget(target, control_matrix, 128).unwrap();
+        assert_eq!(
+            render_partitioned(&mut changed, &mut a, 91, &[1, 31, 9]),
+            render_partitioned(&mut control, &mut b, 91, &[1, 31, 9])
+        );
+        assert_eq!(changed.source_position(), control.source_position());
+        assert_eq!(changed.source_frame_cursor(), control.source_frame_cursor());
+        assert_eq!(changed.output_frame_cursor(), control.output_frame_cursor());
+        assert_eq!(changed.sanitized_samples(), control.sanitized_samples());
+        assert_eq!(a.next, b.next);
+    }
 }
 
 #[test]

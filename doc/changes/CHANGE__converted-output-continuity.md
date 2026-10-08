@@ -32,6 +32,14 @@ zero allocation/reallocation/deallocation on active and held paths. Test setup
 PCM budgets and common-oracle denominator were corrected without relaxing
 PCM/position/allocation assertions.
 
+Review remediation adds actual thread-local one-shot allocation refusal:
+converter window/kernel preparation, every constructor allocation path and
+owner retarget preparation. The tests confirm AllocationFailed, unchanged
+state/PCM, preserved original Mixer voices/queue, and equivalent successful
+retry; injection is disabled before assertions and isolated from other threads.
+Updated focused checks pass 22 converter and 14 owner tests. Production code
+is unchanged by this test-only correction.
+
 Evidence: `target/wf/converted-output-continuity/converter-development-second.log`
 and `owner-development-third.log`. Unequal native rate enablement, full-owner
 retirement/recovery, target-grid evidence, pause/end/publication migration and

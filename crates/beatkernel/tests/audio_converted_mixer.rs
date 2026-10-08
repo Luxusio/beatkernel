@@ -11,8 +11,40 @@ use beatkernel::{
 thread_local! {
     static TRACK: Cell<bool> = const { Cell::new(false) };
     static COUNTS: Cell<[usize; 3]> = const { Cell::new([0; 3]) };
+    static FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
+    static FAILURE_TRIGGERED: Cell<bool> = const { Cell::new(false) };
 }
 struct Allocator;
+fn fail_allocation() -> bool {
+    FAIL_AFTER
+        .try_with(|remaining| match remaining.get() {
+            None => false,
+            Some(0) => {
+                remaining.set(None); // One shot: error cleanup remains usable.
+                let _ = FAILURE_TRIGGERED.try_with(|fired| fired.set(true));
+                true
+            }
+            Some(count) => {
+                remaining.set(Some(count - 1));
+                false
+            }
+        })
+        .unwrap_or(false)
+}
+fn refusing<T>(after: usize, operation: impl FnOnce() -> T) -> (T, bool) {
+    struct Disarm;
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            FAIL_AFTER.with(|remaining| remaining.set(None));
+        }
+    }
+    FAILURE_TRIGGERED.with(|fired| fired.set(false));
+    FAIL_AFTER.with(|remaining| remaining.set(Some(after)));
+    let guard = Disarm;
+    let result = operation();
+    drop(guard); // Disarm before assertions, formatting or error inspection.
+    (result, FAILURE_TRIGGERED.with(Cell::get))
+}
 fn count(kind: usize) {
     let _ = TRACK.try_with(|track| {
         if track.get() {
@@ -24,19 +56,30 @@ fn count(kind: usize) {
         }
     });
 }
-// SAFETY: Every operation forwards the original valid arguments to System;
-// the thread-local accounting uses scalar cells and allocates no memory.
+// SAFETY: Operations forward their original valid arguments to System or
+// return null for an injected allocation refusal, as GlobalAlloc permits.
+// Refused realloc leaves the original allocation intact. Scalar thread-local
+// accounting allocates no memory; deallocation always reaches System.
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         count(0);
+        if fail_allocation() {
+            return std::ptr::null_mut();
+        }
         unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         count(0);
+        if fail_allocation() {
+            return std::ptr::null_mut();
+        }
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         count(1);
+        if fail_allocation() {
+            return std::ptr::null_mut();
+        }
         unsafe { System.realloc(ptr, layout, size) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -148,7 +191,11 @@ fn actual_mixer_piecewise_rate_changes_follow_independent_absolute_pcm_positions
         (32_000, 1, 11),
         (48_000, 2, 13),
     ] {
-        assert_eq!(DEN % u128::from(rate), 0, "oracle rate must divide denominator exactly");
+        assert_eq!(
+            DEN % u128::from(rate),
+            0,
+            "oracle rate must divide denominator exactly"
+        );
         retarget(&mut converted, rate, channels, 32);
         for size in [3, count - 3] {
             let mut output = vec![99.0; size * usize::from(channels)];
@@ -565,4 +612,189 @@ fn allocator_calibration_observes_all_three_operations() {
         drop(data);
     });
     assert!(counts.iter().all(|count| *count > 0));
+}
+
+#[test]
+fn construction_allocation_refusal_returns_the_original_mixer_for_equivalent_retry() {
+    // new_continuous prepares its retained window/table and then invokes the
+    // legacy initializer, which prepares another window/table before replacement.
+    // Unequal-rate linear has two allocations; sinc has all four. Exercise each
+    // refusal, including failures in the later initializer, with original ownership.
+    for (quality, failure_index) in [
+        (ResampleQuality::Linear, 0),
+        (ResampleQuality::Linear, 1),
+        (ResampleQuality::WindowedSinc { half_taps: 8 }, 0),
+        (ResampleQuality::WindowedSinc { half_taps: 8 }, 1),
+        (ResampleQuality::WindowedSinc { half_taps: 8 }, 2),
+        (ResampleQuality::WindowedSinc { half_taps: 8 }, 3),
+    ] {
+        let (mut producer, mut mixer) = rig(44_100, 256, None);
+        let (mut control_producer, mut control_mixer) = rig(44_100, 256, None);
+        play(&mut producer, 1, 0);
+        play(&mut control_producer, 1, 0);
+        let mut prefix = [0.0; 3];
+        let mut control_prefix = [0.0; 3];
+        assert_eq!(
+            mixer.render(&mut prefix).unwrap(),
+            control_mixer.render(&mut control_prefix).unwrap()
+        );
+        assert_eq!(prefix, control_prefix);
+        play(&mut producer, 2, 1_000_000_000);
+        play(&mut control_producer, 2, 1_000_000_000);
+        let target = format(48_000, 2);
+        let matrix = ChannelMatrix::default_mix(1, 2).unwrap();
+        let mut raw = [0.0; 2];
+        let mut control_raw = [0.0; 2];
+        let mut output = [0.0; 64];
+        let mut control_output = [0.0; 64];
+        let (attempt, fired) = refusing(failure_index, || {
+            ConvertedMixer::new(mixer, target, matrix, quality, 32)
+        });
+        assert!(
+            fired,
+            "constructor allocation {failure_index} was not exercised"
+        );
+        let failure = match attempt {
+            Err(failure) => failure,
+            Ok(_) => panic!("injected allocation failure was accepted"),
+        };
+        assert_eq!(failure.error(), &AudioError::AllocationFailed);
+        let (error, original) = failure.into_parts();
+        assert_eq!(error, AudioError::AllocationFailed);
+        let mut mixer = original.expect("failed construction must return the original mixer");
+        assert_eq!(mixer.frame_cursor(), control_mixer.frame_cursor());
+        assert_eq!(mixer.counters(), control_mixer.counters());
+        assert_eq!(
+            mixer.render(&mut raw).unwrap(),
+            control_mixer.render(&mut control_raw).unwrap()
+        );
+        assert_eq!(raw, control_raw);
+        assert_eq!(raw, [value(3), value(4)]);
+        assert_eq!(
+            mixer.counters().commands_consumed,
+            2,
+            "queued command survives refused ownership transfer"
+        );
+        let mut retry = owner(mixer, target, quality, 32);
+        let mut control = owner(control_mixer, target, quality, 32);
+        assert_eq!(
+            render(&mut retry, &mut output),
+            render(&mut control, &mut control_output)
+        );
+        assert_eq!(output, control_output);
+        assert_eq!(retry.mixer().counters().commands_consumed, 2);
+    }
+}
+
+#[test]
+fn retarget_allocation_refusal_preserves_owner_pcm_commands_and_successful_retry() {
+    // retarget prepares its replacement window and then its replacement sinc
+    // table before publishing any target configuration or rational phase.
+    for failure_index in [0, 1] {
+        let build = || {
+            let (mut producer, mixer) = rig(44_100, 256, None);
+            play(&mut producer, 1, 0);
+            (
+                producer,
+                owner(
+                    mixer,
+                    format(48_000, 1),
+                    ResampleQuality::WindowedSinc { half_taps: 8 },
+                    32,
+                ),
+            )
+        };
+        let (mut producer, mut converted) = build();
+        let (mut control_producer, mut control) = build();
+        let mut prefix = [0.0; 7];
+        let mut control_prefix = [0.0; 7];
+        assert_eq!(
+            render(&mut converted, &mut prefix),
+            render(&mut control, &mut control_prefix)
+        );
+        assert_eq!(prefix, control_prefix);
+        play(&mut producer, 2, 1_000_000_000);
+        play(&mut control_producer, 2, 1_000_000_000);
+        let position = converted.source_position();
+        let frontier = converted.pulled_source_frame_cursor();
+        let target_cursor = converted.target_frame_cursor();
+        let counters = converted.mixer().counters();
+        let source_format = converted.converter().source_format();
+        let old_target = converted.converter().target_format();
+        let target = format(32_000, 2);
+        let matrix = ChannelMatrix::default_mix(1, 2).unwrap();
+        let mut unchanged = [0.0; 16];
+        let mut control_unchanged = [0.0; 16];
+        let mut output = [0.0; 64];
+        let mut control_output = [0.0; 64];
+        let (attempt, fired) = refusing(failure_index, || converted.retarget(target, matrix, 32));
+        assert!(
+            fired,
+            "retarget allocation {failure_index} was not exercised"
+        );
+        assert_eq!(attempt, Err(AudioError::AllocationFailed));
+        assert_eq!(converted.source_position(), position);
+        assert_eq!(converted.pulled_source_frame_cursor(), frontier);
+        assert_eq!(converted.target_frame_cursor(), target_cursor);
+        assert_eq!(converted.mixer().counters(), counters);
+        assert_eq!(converted.converter().source_format(), source_format);
+        assert_eq!(converted.converter().target_format(), old_target);
+        assert_eq!(
+            render(&mut converted, &mut unchanged),
+            render(&mut control, &mut control_unchanged)
+        );
+        assert_eq!(unchanged, control_unchanged);
+        assert_eq!(converted.mixer().counters().commands_consumed, 2);
+        retarget(&mut converted, 32_000, 2, 32);
+        retarget(&mut control, 32_000, 2, 32);
+        assert_eq!(
+            render(&mut converted, &mut output),
+            render(&mut control, &mut control_output)
+        );
+        assert_eq!(output, control_output);
+        assert_eq!(
+            converted.mixer().counters().commands_consumed,
+            2,
+            "retry must not consume a command twice"
+        );
+    }
+}
+
+#[test]
+fn allocation_failure_injection_is_one_shot_and_thread_local() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let begin = Arc::new(AtomicBool::new(false));
+    let end = Arc::new(AtomicBool::new(false));
+    let child_begin = Arc::clone(&begin);
+    let child_end = Arc::clone(&end);
+    let child = std::thread::spawn(move || {
+        while !child_begin.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        let mut unrelated = Vec::<u8>::new();
+        let result = unrelated.try_reserve_exact(1024);
+        child_end.store(true, Ordering::Release);
+        result
+    });
+    let mut first = Vec::<u8>::new();
+    let mut second = Vec::<u8>::new();
+    let ((refused, successful), fired) = refusing(0, || {
+        begin.store(true, Ordering::Release);
+        while !end.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        let refused = first.try_reserve_exact(1024);
+        let successful = second.try_reserve_exact(1024);
+        (refused, successful)
+    });
+    assert!(fired);
+    assert!(refused.is_err());
+    assert!(successful.is_ok());
+    assert!(
+        child.join().unwrap().is_ok(),
+        "another thread must not inherit injected failure"
+    );
 }
