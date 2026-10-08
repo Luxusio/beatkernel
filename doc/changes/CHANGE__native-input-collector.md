@@ -1,7 +1,7 @@
 # Dedicated native acquisition and ordered drain evidence
 
-Status: all three source integrations passed available development checks;
-independent code review and final QA remain in progress.
+Status: independent code/security/document review and final CLI QA passed on
+`e15da1f`; native hardware acceptance remains unproved.
 
 The shared collector constructs, services, closes and drops its native source
 on one worker. Original canonical events and completed-drain observations share
@@ -46,3 +46,13 @@ Underlying kernel/driver losses are not completely observable.
 Physical-device behavior, supported-host Windows/macOS execution, acoustic
 latency, universal scheduler reliability and full-player completion remain
 unproven. Portable facade tests and foreign target typing are distinct evidence.
+
+Final independent QA: workspace unit/integration 3014 passed, zero failed,
+six existing ignored; 20 doc-tests passed, for 3034 total passes. App library
+1882, main 275, Linux 33, Windows host-portable 46 and macOS host-portable 28
+passed. Windows and Darwin application/platform all-target Rust checks and
+both browser/browser-audio WASM checks passed. The Windows main composition
+initially failed because the input module assumed a crate-root namespace;
+parent-relative paths now work in both standalone and embedded compositions.
+Evidence: `target/wf/native-input-collector/qa-cli-2/`. Foreign C stubs and the
+absence of native devices/OSes retain the execution limits above.

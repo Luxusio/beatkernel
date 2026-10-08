@@ -1,7 +1,7 @@
 # Dedicated native acquisition and completed input evidence
 
-Status: source integration implemented; final independent review/QA and native
-hardware acceptance remain pending.
+Status: source integration and independent local review/QA passed; native
+hardware acceptance remains unproved.
 
 One native input collector must acquire independently of UI, output processing
 and gameplay across existing Linux evdev, Windows Raw Input and macOS IOHID
