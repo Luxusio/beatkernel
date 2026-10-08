@@ -79,6 +79,7 @@ python3 tools/wbs_status.py --ready
 | E29 | `browser-pagination-app-development.log`: lib 2107 PASS / 실패0 / ignored4; current WASM/bindgen PASS; `browser-pagination-all-node-development.log`: Node 707 PASS / 실패0 | 실제 row 수 기준 Players/Devices selection/page 정규화·21→10/20→5→empty shrink·cached compose·거절 회귀; 실제 브라우저 재검증·독립 재리뷰/QA는 별도 |
 | E30 | `24b2569`의 독립 rank-metadata QA: `target/wf/qa-cli-bms-rank-01a11d56-1`; 전체 adapter 97 PASS / 실패0 / ignored0, 새 public rank fixture10, API docs PASS, code/security/docs review PASS | 실제 RANK/DEFEXRANK exact metadata·명시 precedence·조건/중복/원본 line·fabricated map·원래 판정 identity 검증. 기존 raw Clippy5와 lib/parser 포맷 차이는 실제 b097e42 baseline에서 재현; raw lint/format PASS 아님. timing preset/dynamic EXRANK/app profile 적용/전체 제품 완료는 별도 |
 | E31 | `24663f3`의 독립 runtime report QA: `target/wf/qa-cli-runtime-report-01a11d72-2`; release example build/Clippy PASS, Python24 PASS, 실제6조합×3회18run report와 CLI 거절/보존/timeout/descendant 종료 및 Git index 읽기 전용 검사 PASS | 고정 software Runtime/queue/Mixer의 원본 per-child CPU/RSS·loop 측정·artifact와 unavailable 구분. 854240bytes는 benchmark 크기이며 player 크기 아님. Linux 실제실행, 다른 OS adapter는 테스트 근거; dense/UI stall/다인/GPU/soak/비교 및 전체 제품 성능은 별도 |
+| E32 | `d0b062c`의 독립 input-disposition QA: `target/wf/qa-cli-input-disposition-01a11db1`; 전체 core417 PASS / 실패0 / ignored0(새 judge12/runtime8/replay6 및 doctest16 포함), core all-target Clippy PASS, desktop/webtransport app lib check PASS, DEEP code/security/docs PASS | 실제 판정 facts·정규화 거절·성공 prefix·replay 기록 후 callback·legacy hash/codec parity. 동일 v1 benchmark18회에서 연산/프레임/PCM checksum/counter 일치; 시간은 관측이며 성능 우위/zero-overhead 보증 아님. 최초 full-test compile240초 timeout 후 동일 전체 명령 cache continuation PASS. app 경고20·물리 검증·08.11 정책은 별도 |
  
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
@@ -235,7 +236,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [ ] **BK-WBS-08.07** key/scratch/LN-end별 versioned timing preset을 기존 ClassifiedWindow에 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=검증된 opt-in dialect·경계 ±1ns; 새 기본값 추정 금지.
 - [ ] **BK-WBS-08.08** 기본 timing dialect와 역사적 LR2/nanasi 호환 범위를 확정한다. — 상태=P(정책선택대기); 선행=-; 필요 근거/다음=원문 spec만으로 millisecond 표를 추정하지 않음.
 - [ ] **BK-WBS-08.09** 동적 EXRANK/A0 의미와 필요한 timed policy를 primary source로 확인한다. — 상태=U(현황감사필요); 선행=-; 필요 근거/다음=서로 다른 engine 동작을 동일 표준으로 합치지 않음.
-- [ ] **BK-WBS-08.10** fresh unmatched/repeat/refused 입력을 구별하는 authoritative empty-POOR disposition을 만든다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=REQ__input-disposition의 실제 judge/runtime/replay facts와 prefix·state/hash 검증; penalty/dialect 선택은08.11에 유지.
+- [x] **BK-WBS-08.10** fresh unmatched/repeat/refused 입력을 구별하는 authoritative empty-POOR disposition을 만든다. — 상태=D(검증완료); 선행=-; 근거=E32,REQ__input-disposition; penalty/dialect 선택은08.11에 유지.
 - [ ] **BK-WBS-08.11** empty-POOR의 후보/반복/게이지/combo/capture 의미를 선택 dialect에 고정한다. — 상태=P(정책선택대기); 선행=-; 필요 근거/다음=preroll 정책과 구별; replay/network identity에 포함.
 - [x] **BK-WBS-08.12** WAV/FLAC/Vorbis/MP3가 실제 bounded preparation과 Mixer 출력까지 연결된다. — 상태=D(검증완료); 선행=-; 근거=E1; 포맷별 declared trim/limits.
 - [x] **BK-WBS-08.13** same-format Ogg chaining의 BOS/EOS/serial/독립 trim/aggregate limit를 검증한다. — 상태=D(검증완료); 선행=-; 근거=E1; malformed·mixed format 전체 거절.

@@ -83,3 +83,23 @@ WBS08.10 covers these facts. WBS08.11 still requires an explicit BMS dialect for
 candidate/repeat/gauge/combo/capture meaning, including replay/network identity.
 This generic evidence does not choose historical BMS behavior or complete the
 full-player, physical device or performance objective.
+
+## Verified implementation
+
+Frozen source `d0b062c` passed independent DEEP code, security and documentation
+review, followed by CLI QA. Evidence is in
+`target/wf/qa-cli-input-disposition-01a11db1/`: full core suite 417 passed,
+zero failures/ignored, including judge12/runtime8/replay6 new tests and16
+doctests. All-target core Clippy and scoped formatting passed. Desktop and
+WebTransport app library compilation passed with20 warnings in unchanged app
+code. The first full-suite compilation reached240s; the same full command
+completed using its warmed cache. The timeout itself supplies no test proof.
+
+The unchanged v1 release workload ran six cases with three repetitions. All18
+paired observations match the earlier baseline's options, counts, exact PCM
+checksum and runtime/mixer counters. `comparison.txt` records timing observations
+without thresholds or performance rankings. The854712-byte executable is the
+benchmark, not the player. After-matrix optional Git metadata was unavailable;
+QA independently checked frozen HEAD before and after execution. Physical,
+native and GPU measurements remain unavailable. No universal zero-overhead
+claim follows from this test or the private static legacy specialization.
