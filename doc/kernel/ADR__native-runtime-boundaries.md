@@ -5,7 +5,8 @@ The source adapter owns native construction, draining and cleanup on one input
 thread; shared bounded transport carries original events and ordered genuine
 drain cuts. Shared startup/gameplay owners retain admission and domain policy.
 They must not infer an acquired prefix from an empty transport queue or their
-own later host clock. This migration is pending; output observation and the
+own later host clock. This migration is implemented in source; final independent
+QA and native hardware acceptance remain pending. Output observation and the
 main UI loop retain their existing owners.
 
 The user requires native capabilities to be abstracted as far as their actual semantics allow. Gameplay, replay/judgment, multiplayer protocol, screen lifecycle and playback scheduling policy belong in shared runtime code. Operating-system modules provide device ownership/operations, normalized clocks, native acquisition and required cleanup. An OS entry point must not contain an independent multiplayer implementation or repeat the playback-start state machine. Native evidence and limitations remain explicit; abstraction must preserve clock domains, native reading quality, bounded intervals, provenance, callback constraints and failure semantics. Unsupported capabilities are reported rather than replaced with invented observations. No additional crates are required merely to establish these boundaries.

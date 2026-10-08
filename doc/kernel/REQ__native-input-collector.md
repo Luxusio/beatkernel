@@ -1,6 +1,7 @@
 # Dedicated native acquisition and completed input evidence
 
-Status: selected contract; implementation and platform acceptance pending.
+Status: source integration implemented; final independent review/QA and native
+hardware acceptance remain pending.
 
 One native input collector must acquire independently of UI, output processing
 and gameplay across existing Linux evdev, Windows Raw Input and macOS IOHID
@@ -23,6 +24,9 @@ events cannot be silently overwritten or discarded as successful admission.
 Cancellation and fatal status remain observable even when data transport is
 full. Startup failure, gameplay failure and ordinary completion must close
 on the source owner and join the worker before another session can start.
+Preserve the acquisition failure as primary with cleanup context. An earlier
+close error or close panic takes precedence over a later destructor panic;
+destructor failure becomes the cleanup cause only when close succeeded.
 
 Collector completed-drain observations are separate from gameplay receipt
 time. A completion marker follows every event it covers in the same bounded
@@ -43,8 +47,9 @@ or a claim that all acquisition operations allocate nothing.
 
 Every selected source must justify a conservative common cut with original
 domain and chronology. Linux uses actual nonblocking drain observations;
-Windows uses the acquisition-owner message drain; macOS requires actual runloop
-completion evidence, not just an empty callback buffer. An unavailable proof
+Windows uses the acquisition-owner message drain; macOS requires every selected
+checked native queue to report empty. Runloop timeout and an empty callback
+buffer alone are insufficient. An unavailable proof
 withholds advancement. Existing lag, deterministic InputMerger admission,
 pause/resume/finite completion and output authority remain strict.
 

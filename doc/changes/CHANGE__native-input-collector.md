@@ -24,7 +24,10 @@ runs exactly once before decode or publication errors propagate. Selection
 metadata crosses only a bounded cold channel. Thread-local UI attachment is
 sampled by the caller; the worker does not read another thread's attachment.
 
-Development evidence: 13 collector tests; full app library 1881 passed, zero
+Development evidence: initially 13 collector tests; after the cleanup precedence
+remediation, 14 pass, including four close/destructor failure combinations.
+The earlier close failure survives later destructor panic, while an acquisition
+error remains primary with that cleanup cause. Full app library 1881 passed, zero
 failed, two existing ignored; Linux binary 33 passed; Windows host-portable
 binary 46 passed. Windows Rust-target typing passed through the inspected
 `target/toolchain/xcheck.sh`, which uses C stubs and does not link or execute

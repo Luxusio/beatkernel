@@ -113,9 +113,9 @@ general engine UI API. Promote proven reusable abstractions after concrete use.
 The main thread owns the desktop window, navigation and lane rendering. A game
 thread owns Runtime/JudgeEngine. Dedicated native acquisition ownership is
 specified in [the collector contract](REQ__native-input-collector.md); its
-implementation is pending and must preserve genuine acquired-prefix evidence.
-Audio remains on its
-native output worker/callback and selected multiplayer on its socket worker.
+source implementation preserves genuine acquired-prefix evidence; final
+independent QA and native hardware acceptance remain pending. Audio remains on
+its native output worker/callback and selected multiplayer on its socket worker.
 The game publishes latest snapshots without waiting for a UI-held lock. Snapshot
 publication never runs on audio callbacks. Native input keeps its clock and
 provenance; UI key events navigate menus and never timestamp gameplay.
