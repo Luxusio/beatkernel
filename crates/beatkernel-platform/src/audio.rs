@@ -51,6 +51,8 @@ pub(crate) mod telemetry;
 pub use convert::encode_pcm;
 pub use negotiation::{resolve_period, validate_buffer_size, ResolvedPeriod};
 pub use output_state::NativeOutputState;
+#[cfg(test)]
+pub(crate) use output_state::output_state_fixtures::count_heap_calls;
 
 /// Native audio API selected by the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

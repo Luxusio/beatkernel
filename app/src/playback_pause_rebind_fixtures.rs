@@ -112,12 +112,104 @@ fn rig(
 fn standard() -> Rig {
     rig(3, 0, 1, 2, 2, None, None)
 }
+
+#[test]
+fn full_owner_authorizes_only_exact_pending_basis_without_lowering_pause_frontier() {
+    use beatkernel_platform::audio::{DeviceFormat, NativeOutputState, SampleEncoding};
+    let r = standard();
+    let mut state = match NativeOutputState::new(
+        r.mixer,
+        DeviceFormat::new(3, 1, SampleEncoding::Float32, None).unwrap(),
+        None,
+        4,
+    ) {
+        Ok(state) => state,
+        Err(_) => panic!("valid direct state"),
+    };
+    let tail = state.render_pending(4).unwrap();
+    assert_eq!((tail.start_frame, tail.frames), (5, 4));
+    state.admit(1).unwrap();
+    assert_eq!(state.pending_samples(), &[0.0; 3]);
+    let basis = state.output_frame_basis();
+    assert_eq!(basis.start_physical_frame(), 6);
+    let mut candidate = r.pause.clone();
+    candidate.rebind_output_state(1, &state).unwrap();
+    assert_eq!(candidate.min_physical_frame, 9);
+    assert_eq!(candidate.frozen, 2);
+    assert!(!candidate.replacement_observation_ready(Some(tail), pair(9, 3)));
+    assert!(!candidate.replacement_observation_ready(None, pair(9, 3)));
+    state.admit(3).unwrap();
+    let fresh = state.render_pending(1).unwrap();
+    assert!(!candidate.replacement_observation_ready(Some(fresh), pair(8, 3)));
+    assert!(candidate.replacement_observation_ready(Some(fresh), pair(10, 3)));
+    for invalid in [
+        RenderReport { frames: 0, ..fresh },
+        RenderReport {
+            paused: false,
+            ..fresh
+        },
+        RenderReport {
+            playback_frames: 1,
+            ..fresh
+        },
+        RenderReport {
+            playback_start_frame: 3,
+            ..fresh
+        },
+    ] {
+        assert!(!candidate.replacement_observation_ready(Some(invalid), pair(10, 3)));
+    }
+    candidate
+        .observe_in_epoch(1, Some(fresh), pair(10, 3))
+        .unwrap();
+    r.pause
+        .validate_replacement(&candidate, basis, pair(10, 3))
+        .unwrap();
+    for frame in [5, 7, 8, 9] {
+        let unauthorized = OutputFrameBasis::new(basis.origin(), 3, frame).unwrap();
+        assert!(r
+            .pause
+            .validate_replacement(&candidate, unauthorized, pair(10, 3))
+            .is_err());
+    }
+}
+
+#[test]
+fn active_pending_tail_refuses_held_rebind_without_rewriting_frozen_identity() {
+    use beatkernel_platform::audio::{DeviceFormat, NativeOutputState, SampleEncoding};
+    let mut r = standard();
+    r.producer.request_pause(false);
+    let mut state = match NativeOutputState::new(
+        r.mixer,
+        DeviceFormat::new(3, 1, SampleEncoding::Float32, None).unwrap(),
+        None,
+        2,
+    ) {
+        Ok(state) => state,
+        Err(_) => panic!("valid direct state"),
+    };
+    let active = state.render_pending(2).unwrap();
+    assert!(!active.paused);
+    assert_eq!(state.pending_samples(), &[0.375, 0.5]);
+    r.producer.request_pause(true);
+    let mut candidate = r.pause.clone();
+    let before = format!("{candidate:?}");
+    assert!(candidate.rebind_output_state(1, &state).is_err());
+    unchanged(&candidate, &before);
+    assert_eq!(state.pending_samples(), &[0.375, 0.5]);
+    state.admit(2).unwrap();
+    state.render_pending(1).unwrap();
+    // The output state now contains genuine silence, but playback moved while
+    // active: it cannot rewrite the already acknowledged frozen identity.
+    assert!(candidate.rebind_output_state(1, &state).is_err());
+    unchanged(&candidate, &before);
+}
 fn unchanged(pause: &NativePause, before: &str) {
     assert_eq!(format!("{pause:?}"), before);
 }
 #[test]
-fn acknowledged_pause_rebind_preserves_frozen_gap_and_original_pcm_then_commits_cumulative_gap_only_on_genuine_resume()
- {
+fn acknowledged_pause_rebind_preserves_frozen_gap_and_original_pcm_then_commits_cumulative_gap_only_on_genuine_resume(
+) {
     let mut r = standard();
     assert_eq!(r.pause.epoch(), 0);
     assert_eq!(
@@ -189,8 +281,8 @@ fn acknowledged_pause_rebind_preserves_frozen_gap_and_original_pcm_then_commits_
     );
 }
 #[test]
-fn three_real_one_frame_replacements_floor_cumulative_gap_once_instead_of_summing_rounded_pause_durations()
- {
+fn three_real_one_frame_replacements_floor_cumulative_gap_once_instead_of_summing_rounded_pause_durations(
+) {
     let mut r = rig(3, 0, 1, 2, 0, None, None);
     for epoch in 1..=3 {
         let old_gap = r.pause.gap;
@@ -231,8 +323,8 @@ fn three_real_one_frame_replacements_floor_cumulative_gap_once_instead_of_summin
     assert_ne!(3 * ns(1, 3), ns(3, 3));
 }
 #[test]
-fn repeated_paused_replacement_reaches_max_epoch_without_wrap_and_all_stale_tagged_operations_are_atomic()
- {
+fn repeated_paused_replacement_reaches_max_epoch_without_wrap_and_all_stale_tagged_operations_are_atomic(
+) {
     let mut r = standard();
     for epoch in [1, 7, u64::MAX] {
         r.pause.rebind_output(epoch, &r.mixer).unwrap();
@@ -244,21 +336,19 @@ fn repeated_paused_replacement_reaches_max_epoch_without_wrap_and_all_stale_tagg
         source: point(99, i64::MIN),
         target: point(99, i64::MIN),
     };
-    assert!(
-        r.pause
-            .request_in_epoch(0, false, invalid)
-            .unwrap_err()
-            .0
-            .contains("epoch")
-    );
+    assert!(r
+        .pause
+        .request_in_epoch(0, false, invalid)
+        .unwrap_err()
+        .0
+        .contains("epoch"));
     unchanged(&r.pause, &before);
-    assert!(
-        r.pause
-            .observe_in_epoch(0, Some(r.old_report), invalid)
-            .unwrap_err()
-            .0
-            .contains("epoch")
-    );
+    assert!(r
+        .pause
+        .observe_in_epoch(0, Some(r.old_report), invalid)
+        .unwrap_err()
+        .0
+        .contains("epoch"));
     unchanged(&r.pause, &before);
     let interval = PauseIntervalObservation {
         output_origin: point(99, 0),
@@ -270,21 +360,19 @@ fn repeated_paused_replacement_reaches_max_epoch_without_wrap_and_all_stale_tagg
             after: point(99, 1),
         },
     };
-    assert!(
-        r.pause
-            .request_interval_in_epoch(0, false, interval)
-            .unwrap_err()
-            .0
-            .contains("epoch")
-    );
+    assert!(r
+        .pause
+        .request_interval_in_epoch(0, false, interval)
+        .unwrap_err()
+        .0
+        .contains("epoch"));
     unchanged(&r.pause, &before);
-    assert!(
-        r.pause
-            .observe_interval_in_epoch(0, Some(interval), point(99, i64::MIN))
-            .unwrap_err()
-            .0
-            .contains("epoch")
-    );
+    assert!(r
+        .pause
+        .observe_interval_in_epoch(0, Some(interval), point(99, i64::MIN))
+        .unwrap_err()
+        .0
+        .contains("epoch"));
     unchanged(&r.pause, &before);
     for epoch in [0, 7, u64::MAX] {
         assert!(r.pause.rebind_output(epoch, &r.mixer).is_err());
@@ -292,8 +380,8 @@ fn repeated_paused_replacement_reaches_max_epoch_without_wrap_and_all_stale_tagg
     }
 }
 #[test]
-fn replacement_switches_point_interval_point_and_preserves_actual_arrival_not_uncertainty_upper_endpoint()
- {
+fn replacement_switches_point_interval_point_and_preserves_actual_arrival_not_uncertainty_upper_endpoint(
+) {
     let mut r = standard();
     r.pause.rebind_output(1, &r.mixer).unwrap();
     let report = r.mixer.render(&mut [0.; 1]).unwrap();
@@ -330,8 +418,8 @@ fn replacement_switches_point_interval_point_and_preserves_actual_arrival_not_un
     assert_eq!((r.pause.gap, r.pause.frozen), (0, 2));
 }
 #[test]
-fn captured_physical_and_greatest_host_floors_refuse_old_reports_and_relations_before_mutating_fresh_kind()
- {
+fn captured_physical_and_greatest_host_floors_refuse_old_reports_and_relations_before_mutating_fresh_kind(
+) {
     let mut r = standard();
     r.pause.rebind_output(1, &r.mixer).unwrap();
     let before = format!("{:?}", r.pause);
@@ -343,11 +431,10 @@ fn captured_physical_and_greatest_host_floors_refuse_old_reports_and_relations_b
     };
     assert!(r.pause.observe_in_epoch(1, None, bad_host).is_err());
     unchanged(&r.pause, &before);
-    assert!(
-        r.pause
-            .observe_in_epoch(1, Some(r.old_report), pair(5, 3))
-            .is_err()
-    );
+    assert!(r
+        .pause
+        .observe_in_epoch(1, Some(r.old_report), pair(5, 3))
+        .is_err());
     unchanged(&r.pause, &before);
     let older = rig(3, 0, 1, 2, 0, None, None);
     assert!(r.pause.rebind_output(2, &older.mixer).is_err());
@@ -359,13 +446,11 @@ fn captured_physical_and_greatest_host_floors_refuse_old_reports_and_relations_b
     report.frames = 1;
     malformed.last_report = Some(report);
     let fault = format!("{malformed:?}");
-    assert!(
-        malformed
-            .rebind_output(2, &r.mixer)
-            .unwrap_err()
-            .0
-            .contains("overflow")
-    );
+    assert!(malformed
+        .rebind_output(2, &r.mixer)
+        .unwrap_err()
+        .0
+        .contains("overflow"));
     unchanged(&malformed, &fault);
     assert!(!r.pause.request_in_epoch(1, true, pair(5, 3)).unwrap());
 }
@@ -403,8 +488,8 @@ fn phase_grid_frozen_cursor_and_unpaused_model_refusals_preserve_complete_acknow
     unchanged(&r.pause, &state);
 }
 #[test]
-fn immutable_start_end_and_reached_endpoint_refuse_while_compatible_finite_replacement_keeps_start_gap()
- {
+fn immutable_start_end_and_reached_endpoint_refuse_while_compatible_finite_replacement_keeps_start_gap(
+) {
     let mut r = rig(3, 0, 1, 2, 1, Some(8), Some(4));
     let before = format!("{:?}", r.pause);
     for candidate in [
@@ -447,13 +532,12 @@ fn immutable_start_end_and_reached_endpoint_refuse_while_compatible_finite_repla
         assert!(unresolved.is_paused());
         assert_eq!(unresolved.start_gate_frame(), Some(target));
         assert_eq!(unresolved.applied_start_frame(), None);
-        assert!(
-            r.pause
-                .rebind_output(2, &unresolved)
-                .unwrap_err()
-                .0
-                .contains("startup")
-        );
+        assert!(r
+            .pause
+            .rebind_output(2, &unresolved)
+            .unwrap_err()
+            .0
+            .contains("startup"));
         unchanged(&r.pause, &rebound);
     }
     assert!(r.pause.clone().with_start_frame(5).is_err());

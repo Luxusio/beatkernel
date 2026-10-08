@@ -1,9 +1,10 @@
 //! Actual ALSA lifecycle adapter for the portable paused-output replacement policy.
 use crate::gameplay::output::ports::OutputReplacementBackend;
-use beatkernel::audio::{Mixer, OutputFrameBasis, OutputOpenFailure, RenderReport, StoppedMixerSource};
+use beatkernel::audio::{OutputFrameBasis, OutputOpenFailure, RenderReport, StoppedMixerSource};
 use beatkernel_platform::{
     audio::presentation::discipline::{DisciplineError, PresentationDiscipline},
-    linux::{AlsaRequest, AlsaStatus, AlsaStream, LinuxError, alsa_presentation_pair_with_basis},
+    audio::NativeOutputState,
+    linux::{alsa_presentation_pair_with_basis, AlsaRequest, AlsaStatus, AlsaStream, LinuxError},
 };
 
 #[derive(Debug)]
@@ -59,17 +60,17 @@ impl AlsaReplacementOutput {
         self.matrix.as_ref()
     }
 }
-impl StoppedMixerSource for AlsaReplacementOutput {
+impl StoppedMixerSource<NativeOutputState> for AlsaReplacementOutput {
     type Error = AlsaReplacementError;
-    fn take_stopped_mixer(&mut self) -> Result<Option<Mixer>, Self::Error> {
+    fn take_stopped_mixer(&mut self) -> Result<Option<NativeOutputState>, Self::Error> {
         self.stream
-            .take_stopped_mixer()
+            .take_stopped_output()
             .map_err(AlsaReplacementError::Linux)
     }
 }
 #[derive(Default)]
 pub struct AlsaReplacementBackend;
-impl OutputReplacementBackend for AlsaReplacementBackend {
+impl OutputReplacementBackend<NativeOutputState> for AlsaReplacementBackend {
     type Presentation = PresentationDiscipline;
     type Output = AlsaReplacementOutput;
     type Request = AlsaRequest;
@@ -77,10 +78,10 @@ impl OutputReplacementBackend for AlsaReplacementBackend {
     fn open(
         &mut self,
         request: AlsaRequest,
-        mixer: Mixer,
+        mixer: NativeOutputState,
         epoch: u64,
-    ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output>> {
-        AlsaStream::open_recoverable(request, mixer)
+    ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output, NativeOutputState>> {
+        AlsaStream::open_state_recoverable(request, mixer)
             .map(|stream| AlsaReplacementOutput {
                 stream,
                 epoch,
@@ -88,7 +89,7 @@ impl OutputReplacementBackend for AlsaReplacementBackend {
             })
             .map_err(|failure| {
                 let (error, mixer) = failure.into_parts();
-                OutputOpenFailure::recovered(AlsaReplacementError::Linux(error), mixer)
+                OutputOpenFailure::recovered_state(AlsaReplacementError::Linux(error), mixer)
             })
     }
     fn retire(&mut self, output: &mut Self::Output) -> Result<(), Self::Error> {
@@ -118,20 +119,42 @@ impl OutputReplacementBackend for AlsaReplacementBackend {
         }
         Ok(())
     }
+    fn observe_replacement(
+        &mut self,
+        output: &mut Self::Output,
+        presentation: &mut Self::Presentation,
+        pause: &crate::playback_pause::NativePause,
+    ) -> Result<(), Self::Error> {
+        if presentation.epoch() != output.epoch {
+            return Err(AlsaReplacementError::EpochMismatch);
+        }
+        if let Some(pair) = self.original_pair(output)? {
+            if pause.replacement_observation_ready(output.stream.last_render_report(), pair) {
+                presentation
+                    .observe_clock_pair_in_epoch(output.epoch, pair)
+                    .map_err(AlsaReplacementError::Discipline)?;
+            }
+        }
+        Ok(())
+    }
     fn render_report(&self, output: &Self::Output) -> Result<Option<RenderReport>, Self::Error> {
         Ok(output.stream.last_render_report())
     }
 }
 
-impl crate::gameplay::output::ports::OutputChannelRemixBackend for AlsaReplacementBackend {
+impl crate::gameplay::output::ports::OutputChannelRemixBackend<NativeOutputState>
+    for AlsaReplacementBackend
+{
     fn open_remixed(
         &mut self,
         request: AlsaRequest,
-        mixer: Mixer,
+        mixer: NativeOutputState,
         epoch: u64,
         matrix: beatkernel::audio::ChannelMatrix,
-    ) -> Result<AlsaReplacementOutput, OutputOpenFailure<AlsaReplacementError, AlsaReplacementOutput>>
-    {
+    ) -> Result<
+        AlsaReplacementOutput,
+        OutputOpenFailure<AlsaReplacementError, AlsaReplacementOutput, NativeOutputState>,
+    > {
         let native_matrix = match beatkernel::audio::ChannelMatrix::new(
             matrix.source_channels(),
             matrix.target_channels(),
@@ -139,13 +162,13 @@ impl crate::gameplay::output::ports::OutputChannelRemixBackend for AlsaReplaceme
         ) {
             Ok(copy) => copy,
             Err(error) => {
-                return Err(OutputOpenFailure::recovered(
+                return Err(OutputOpenFailure::recovered_state(
                     AlsaReplacementError::Linux(LinuxError::Mixer(error)),
                     Some(mixer),
                 ));
             }
         };
-        AlsaStream::open_remixed_recoverable(request, mixer, native_matrix)
+        AlsaStream::open_state_remixed_recoverable(request, mixer, native_matrix)
             .map(|stream| AlsaReplacementOutput {
                 stream,
                 epoch,
@@ -153,7 +176,7 @@ impl crate::gameplay::output::ports::OutputChannelRemixBackend for AlsaReplaceme
             })
             .map_err(|failure| {
                 let (error, mixer) = failure.into_parts();
-                OutputOpenFailure::recovered(AlsaReplacementError::Linux(error), mixer)
+                OutputOpenFailure::recovered_state(AlsaReplacementError::Linux(error), mixer)
             })
     }
 }
@@ -176,7 +199,9 @@ impl AlsaReplacementBackend {
     }
 }
 
-impl crate::gameplay::output::ports::OriginalNativeOutputBackend for AlsaReplacementBackend {
+impl crate::gameplay::output::ports::OriginalNativeOutputBackend<NativeOutputState>
+    for AlsaReplacementBackend
+{
     fn observe_native(
         &mut self,
         output: &mut Self::Output,

@@ -557,3 +557,12 @@ remains pending. CoreAudio follows
 pending owner when callback retirement refuses. WASAPI follows
 [WASAPI recoverable open](REQ__wasapi-recoverable-open.md), sharing the cold
 launch/join ownership seam with ALSA. Native resource acceptance remains pending.
+
+Recovering only the Mixer must not discard prepared conversion state or generated
+target PCM awaiting admission. The additive whole-state carriers and actual ALSA
+replacement candidate follow [native software continuity](REQ__native-output-continuity.md).
+The next native basis is the first unsubmitted frame, separate from the advanced
+Mixer frontier. Earlier tail observations and stored reports do not authorize
+fresh pause/end publication. Destructive legacy extraction refuses while keeping
+the complete state available; device-admitted but unheard output remains a
+separate physical continuity problem.

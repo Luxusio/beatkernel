@@ -59,6 +59,7 @@ struct PendingBoundary {
 pub struct NativePause {
     epoch: u64,
     min_physical_frame: u64,
+    rebound_basis: Option<beatkernel::audio::OutputFrameBasis>,
     min_host: Option<ClockPoint>,
     origin: ClockPoint,
     host: ClockDomainId,
@@ -96,6 +97,7 @@ impl NativePause {
         Ok(Self {
             epoch: 0,
             min_physical_frame: 0,
+            rebound_basis: None,
             min_host: None,
             origin: output_origin,
             host: host_domain,
@@ -152,7 +154,10 @@ impl NativePause {
             || candidate.boundary.is_some()
             || basis.origin() != self.origin
             || basis.sample_rate() != self.rate
-            || candidate.min_physical_frame != basis.start_physical_frame()
+            || candidate.rebound_basis.map_or(
+                candidate.min_physical_frame != basis.start_physical_frame(),
+                |authorized| authorized != basis,
+            )
         {
             return Err(PauseError(
                 "replacement changed acknowledged pause identity",
@@ -273,6 +278,7 @@ impl NativePause {
         }
         self.epoch = epoch;
         self.min_physical_frame = physical;
+        self.rebound_basis = None;
         self.min_host = min_host;
         self.reference = None;
         self.last_pair = None;
@@ -285,6 +291,43 @@ impl NativePause {
         self.interval_window = None;
         self.setup_locked = true;
         Ok(())
+    }
+    /// Authorize a complete owner's exact basis without lowering the pause frontier.
+    pub fn rebind_output_state(
+        &mut self,
+        epoch: u64,
+        state: &impl beatkernel::audio::SoftwareOutputState,
+    ) -> Result<(), PauseError> {
+        let basis = state.output_frame_basis();
+        let mixer = state.mixer();
+        if !state.paused_tail_admissible()
+            || basis.origin() != self.origin
+            || basis.sample_rate() != self.rate
+            || basis.start_physical_frame() > mixer.frame_cursor()
+        {
+            return Err(PauseError(
+                "output state has no compatible paused-zero basis",
+            ));
+        }
+        self.rebind_output(epoch, mixer)?;
+        self.rebound_basis = Some(basis);
+        Ok(())
+    }
+    /// Early replay evidence cannot become a new output acknowledgement.
+    pub fn replacement_observation_ready(
+        &self,
+        report: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> bool {
+        report.is_some_and(|report| {
+            report.frames > 0
+                && report.paused
+                && report.playback_frames == 0
+                && report.playback_start_frame == self.frozen
+                && report.start_frame >= self.min_physical_frame
+        }) && self.point(self.min_physical_frame).is_ok_and(|floor| {
+            pair.source.domain == floor.domain && pair.source.timestamp >= floor.timestamp
+        })
     }
     pub fn request_in_epoch(
         &mut self,

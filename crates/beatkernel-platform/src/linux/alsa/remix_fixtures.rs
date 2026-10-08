@@ -1,5 +1,6 @@
 //! Actual core/native render paths with explicit same-rate channel conversion.
 use super::*;
+use beatkernel::audio::FormatConverter;
 use beatkernel::audio::{
     AudioCommand, AudioFormat, AudioLimits, CommandProducer, MixerConfig, PcmLimits, PcmSample,
     ResampleQuality, SampleBank, SampleId, StoppedMixerSource, VoiceId,
@@ -221,8 +222,9 @@ fn actual_null_plugin_remixes_and_retires_with_original_mixer() {
         std::thread::yield_now();
     }
     stream.stop().unwrap();
-    let original = stream.take_stopped_mixer().unwrap().unwrap();
-    assert_eq!(original.config().format().channels(), 1);
-    assert_eq!(original.playback_frame_cursor(), 3);
+    assert!(stream.take_stopped_mixer().is_err());
+    let original = stream.take_stopped_output().unwrap().unwrap();
+    assert_eq!(original.mixer().config().format().channels(), 1);
+    assert_eq!(original.mixer().playback_frame_cursor(), 3);
     assert_eq!(original.output_frame_basis().origin(), basis.origin());
 }

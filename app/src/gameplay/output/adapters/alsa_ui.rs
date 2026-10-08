@@ -46,7 +46,10 @@ pub fn request_for_args(current: &AlsaRequest, args: &[String]) -> Result<AlsaRe
     Ok(request)
 }
 
-pub type NativeAlsaOutputOwner = GameplayOutputOwner<RemixedOutputBackend<AlsaReplacementBackend>>;
+pub type NativeAlsaOutputOwner = GameplayOutputOwner<
+    RemixedOutputBackend<AlsaReplacementBackend>,
+    beatkernel_platform::audio::NativeOutputState,
+>;
 pub fn remixed_request_for_args(
     current: &AlsaRequest,
     current_matrix: Option<&ChannelMatrix>,
@@ -258,10 +261,6 @@ mod fixtures {
         use crate::gameplay::output::ports::OutputReplacementBackend;
         use crate::gameplay_output_owner::fixtures::initial;
         use beatkernel::audio::StoppedMixerSource;
-        let (mut memory, mut producer, _trace) = initial(vec![]);
-        producer.request_pause(true);
-        let mut mixer = memory.mixer.take().unwrap();
-        mixer.render(&mut [0.; 1]).unwrap();
         let mut native = current();
         native.format = DeviceFormat::new(1000, 1, SampleEncoding::Float32, None).unwrap();
         native.period_frames = 2;
@@ -271,6 +270,12 @@ mod fixtures {
         for (epoch, expected_channels, expected_text) in
             [(0, 1, "exact"), (1, 2, "1;0.5"), (2, 1, "exact")]
         {
+            let (mut memory, mut producer, _trace) = initial(vec![]);
+            producer.request_pause(true);
+            let mut mixer = memory.mixer.take().unwrap();
+            mixer.render(&mut [0.; 1]).unwrap();
+            let mixer = beatkernel_platform::audio::NativeOutputState::from_mixer(mixer);
+            let same_request = request.clone();
             let mut output = backend
                 .open(request, mixer, epoch)
                 .unwrap_or_else(|f| panic!("{}", f.error()));
@@ -317,9 +322,40 @@ mod fixtures {
                 .is_err());
             }
             backend.retire(&mut output).unwrap();
-            mixer = output.take_stopped_mixer().unwrap().unwrap();
-            assert_eq!(mixer.config().format().channels(), 1);
-            assert!(mixer.is_paused());
+            let mut mixer = output.take_stopped_mixer().unwrap().unwrap();
+            assert_eq!(mixer.mixer().config().format().channels(), 1);
+            assert!(mixer.mixer().is_paused());
+            if mixer.pending_frames() == 0 {
+                mixer.render_pending(1).unwrap();
+            }
+            let basis = mixer.output_frame_basis();
+            let tail = mixer.pending_samples().to_vec();
+            let incompatible = if expected_channels == 1 {
+                "1;0.5"
+            } else {
+                "exact"
+            };
+            let incompatible = remixed_request_for_args(
+                &same_request.native,
+                same_request.matrix.as_ref(),
+                &args("--output-matrix", incompatible),
+            )
+            .unwrap();
+            let refusal = match backend.open(incompatible, mixer, epoch + 10) {
+                Ok(_) => panic!("incompatible retained PCM must refuse"),
+                Err(refusal) => refusal,
+            };
+            let (_, recovered, pending, _) = refusal.into_parts();
+            assert!(pending.is_none());
+            let recovered = recovered.unwrap();
+            assert_eq!(recovered.output_frame_basis(), basis);
+            assert_eq!(recovered.pending_samples(), tail);
+            let mut retried = backend
+                .open(same_request, recovered, epoch + 20)
+                .unwrap_or_else(|f| panic!("{}", f.error()));
+            backend.start(&mut retried).unwrap();
+            backend.retire(&mut retried).unwrap();
+            assert!(retried.take_stopped_mixer().unwrap().is_some());
         }
     }
 }

@@ -600,6 +600,7 @@ mod native {
         beatkernel_bms_runtime::gameplay::output::adapters::remix::RemixedOutputBackend<
             AlsaReplacementBackend,
         >,
+        beatkernel_platform::audio::NativeOutputState,
     >;
     struct GameplayDevice<'a> {
         output: &'a mut OwnedOutput,

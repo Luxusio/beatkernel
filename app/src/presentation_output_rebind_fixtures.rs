@@ -62,9 +62,40 @@ fn paused() -> (CommandProducer, Mixer, NativePause) {
     mixer.render(&mut [0.; 2]).unwrap();
     (producer, mixer, pause)
 }
+
 #[test]
-fn actual_core_staging_preserves_old_owners_and_mixer_but_new_epoch_has_no_samples_and_requires_warmup()
- {
+fn complete_owner_timing_uses_first_unsent_frame_and_preserves_source_frontier() {
+    use beatkernel_platform::audio::{DeviceFormat, NativeOutputState, SampleEncoding};
+    let (_producer, mixer, pause) = paused();
+    let mut state = match NativeOutputState::new(
+        mixer,
+        DeviceFormat::new(3, 1, SampleEncoding::Float32, None).unwrap(),
+        None,
+        4,
+    ) {
+        Ok(state) => state,
+        Err(_) => panic!("valid direct owner"),
+    };
+    state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    let current =
+        PresentationEstimator::new(config(), point(1, 0), ClockDomainId(2), Timestamp::ZERO)
+            .unwrap();
+    let before = format!("{pause:?}");
+    let staged =
+        prepare_output_timing_rebind_state(&current, &pause, 1, &state, Timestamp::ZERO).unwrap();
+    assert_eq!(staged.basis.start_physical_frame(), 6);
+    assert_eq!(state.mixer().frame_cursor(), 9);
+    assert_eq!(staged.playback_origin, point(1, 2_000_000_000));
+    assert_eq!(state.pending_samples(), &[0.0; 3]);
+    assert_eq!(staged.presentation.latest_pair(), None);
+    assert_eq!(staged.pause.last_render_report(), None);
+    assert_eq!(format!("{pause:?}"), before);
+    assert_eq!(current.epoch(), 0);
+}
+#[test]
+fn actual_core_staging_preserves_old_owners_and_mixer_but_new_epoch_has_no_samples_and_requires_warmup(
+) {
     for epoch in [7, u64::MAX] {
         let (_producer, mixer, pause) = paused();
         let old_pause = format!("{pause:?}");
@@ -96,12 +127,10 @@ fn actual_core_staging_preserves_old_owners_and_mixer_but_new_epoch_has_no_sampl
         assert_eq!(current.epoch(), 0);
         assert_eq!(mixer.counters(), counters);
         assert_eq!(mixer.output_frame_basis(), basis);
-        assert!(
-            prepared
-                .presentation
-                .observe_clock_pair_in_epoch(0, pair(5))
-                .is_err()
-        );
+        assert!(prepared
+            .presentation
+            .observe_clock_pair_in_epoch(0, pair(5))
+            .is_err());
         assert_eq!(prepared.presentation.latest_pair(), None);
         prepared
             .presentation
@@ -141,12 +170,10 @@ fn actual_native_bridge_uses_same_basis_config_and_epoch_staging_without_backend
     assert_eq!(staged.presentation.config(), config());
     assert_eq!(staged.presentation.latest_pair(), None);
     assert_eq!(staged.playback_origin, point(1, 1_666_666_666));
-    assert!(
-        staged
-            .presentation
-            .observe_clock_pair_in_epoch(0, pair(5))
-            .is_err()
-    );
+    assert!(staged
+        .presentation
+        .observe_clock_pair_in_epoch(0, pair(5))
+        .is_err());
     assert_eq!(staged.presentation.latest_pair(), None);
     assert_eq!(current.latest_pair(), original);
 }
@@ -257,8 +284,8 @@ impl GameplayPresentationPort for Spy {
     }
 }
 #[test]
-fn pending_resume_epoch_mismatch_legacy_and_invalid_phase_refuse_before_constructing_or_publishing_candidates()
- {
+fn pending_resume_epoch_mismatch_legacy_and_invalid_phase_refuse_before_constructing_or_publishing_candidates(
+) {
     use std::sync::atomic::Ordering::SeqCst;
     let (mut producer, mixer, pause) = paused();
     let before = format!("{pause:?}");
@@ -284,17 +311,15 @@ fn pending_resume_epoch_mismatch_legacy_and_invalid_phase_refuse_before_construc
         assert_eq!(CONSTRUCTIONS.load(SeqCst), 0);
     }
     current.epoch = None;
-    assert!(
-        current
-            .restart_for_output(
-                10,
-                point(1, 0),
-                point(1, 0),
-                ClockDomainId(2),
-                Timestamp::ZERO
-            )
-            .is_err()
-    );
+    assert!(current
+        .restart_for_output(
+            10,
+            point(1, 0),
+            point(1, 0),
+            ClockDomainId(2),
+            Timestamp::ZERO
+        )
+        .is_err());
     assert_eq!(CONSTRUCTIONS.load(SeqCst), 0);
     let mut last_pause = pause.clone();
     last_pause.rebind_output(u64::MAX, &mixer).unwrap();
@@ -305,17 +330,15 @@ fn pending_resume_epoch_mismatch_legacy_and_invalid_phase_refuse_before_construc
     );
     assert_eq!(CONSTRUCTIONS.load(SeqCst), 0);
     current.epoch = Some(0);
-    assert!(
-        current
-            .restart_for_output(
-                0,
-                point(1, 0),
-                point(1, 0),
-                ClockDomainId(2),
-                Timestamp::ZERO
-            )
-            .is_err()
-    );
+    assert!(current
+        .restart_for_output(
+            0,
+            point(1, 0),
+            point(1, 0),
+            ClockDomainId(2),
+            Timestamp::ZERO
+        )
+        .is_err());
     assert_eq!(CONSTRUCTIONS.load(SeqCst), 0);
     let running = NativePause::new(point(1, 0), ClockDomainId(2), 3).unwrap();
     assert!(prepare_output_timing_rebind(&current, &running, 1, &mixer, Timestamp::ZERO).is_err());

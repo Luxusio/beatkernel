@@ -6,7 +6,7 @@ use crate::{
     gameplay::output::ports::{OriginalNativeOutputBackend, OutputReplacementBackend},
     gameplay_presentation::{GameplayAudioOutputContext, GameplayOutputContext},
 };
-use beatkernel::time::ClockPoint;
+use beatkernel::{audio::SoftwareOutputState, time::ClockPoint};
 use std::io;
 pub struct GameplayOutputUi<U: OutputUiPort> {
     ui: U,
@@ -40,9 +40,9 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
             Err(error) => Err(error),
         }
     }
-    pub fn service<B: OutputReplacementBackend>(
+    pub fn service<B: OutputReplacementBackend<O>, O: SoftwareOutputState>(
         &mut self,
-        owner: &mut GameplayOutputOwner<B>,
+        owner: &mut GameplayOutputOwner<B, O>,
         context: GameplayOutputContext<'_, B::Presentation>,
         now: ClockPoint,
         map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
@@ -56,9 +56,9 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
         })
     }
     /// Join the same correlated UI request to original-evidence audio publication.
-    pub fn service_audio<B: OriginalNativeOutputBackend>(
+    pub fn service_audio<B: OriginalNativeOutputBackend<O>, O: SoftwareOutputState>(
         &mut self,
-        owner: &mut GameplayOutputOwner<B>,
+        owner: &mut GameplayOutputOwner<B, O>,
         context: GameplayAudioOutputContext<'_>,
         now: ClockPoint,
         map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
@@ -71,12 +71,12 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
             owner.publish_paused_audio(context, now)
         })
     }
-    fn service_with<B: OutputReplacementBackend>(
+    fn service_with<B: OutputReplacementBackend<O>, O: SoftwareOutputState>(
         &mut self,
-        owner: &mut GameplayOutputOwner<B>,
+        owner: &mut GameplayOutputOwner<B, O>,
         map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
         applied: &mut impl FnMut(&B::Output) -> Result<OutputCapability, String>,
-        publish: impl FnOnce(&mut GameplayOutputOwner<B>) -> Result<bool, Box<dyn std::error::Error>>,
+        publish: impl FnOnce(&mut GameplayOutputOwner<B, O>) -> Result<bool, Box<dyn std::error::Error>>,
     ) -> Result<bool, Box<dyn std::error::Error>>
     where
         B::Error: std::error::Error + 'static,

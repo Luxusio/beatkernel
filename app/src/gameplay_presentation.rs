@@ -118,6 +118,17 @@ pub fn prepare_output_timing_rebind<P: GameplayPresentationPort>(
     mixer: &beatkernel::audio::Mixer,
     original_song: Timestamp,
 ) -> NativeGameplayResult<PreparedOutputTiming<P>> {
+    prepare_output_timing_rebind_state(current, pause, epoch, mixer, original_song)
+}
+/// Prepare timing from the complete owner's exact first unsubmitted frame.
+pub fn prepare_output_timing_rebind_state<P: GameplayPresentationPort>(
+    current: &P,
+    pause: &crate::playback_pause::NativePause,
+    epoch: u64,
+    state: &impl beatkernel::audio::SoftwareOutputState,
+    original_song: Timestamp,
+) -> NativeGameplayResult<PreparedOutputTiming<P>> {
+    let mixer = state.mixer();
     let current_epoch = current
         .epoch()
         .ok_or("output presentation epoch is unsupported")?;
@@ -130,7 +141,7 @@ pub fn prepare_output_timing_rebind<P: GameplayPresentationPort>(
     if !mixer.pause_requested() {
         return Err("output timing preparation requires a held producer pause request".into());
     }
-    let basis = mixer.output_frame_basis();
+    let basis = state.output_frame_basis();
     if let Some(pair) = current.latest_pair() {
         if pair.source.domain != basis.origin().domain || pair.target.domain != pause.host_domain()
         {
@@ -138,7 +149,7 @@ pub fn prepare_output_timing_rebind<P: GameplayPresentationPort>(
         }
     }
     let mut candidate_pause = pause.clone();
-    candidate_pause.rebind_output(epoch, mixer)?;
+    candidate_pause.rebind_output_state(epoch, state)?;
     let playback_origin = basis.point_at_stream_frame(0)?;
     let song_origin =
         candidate_pause.song_origin_for_presentation(original_song, playback_origin)?;

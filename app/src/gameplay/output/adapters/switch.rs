@@ -4,13 +4,15 @@
 //! opening side; every other lifecycle call follows the side that owns the output,
 //! so the recovered Mixer moves between backends through the unchanged controller.
 use crate::{
+    gameplay::output::ports::OutputReplacementBackend,
     live_pause::LivePauseObservation,
     native_end::{EndBoundary, NativeEnd},
     native_gameplay::NativeGameplayResult,
-    gameplay::output::ports::OutputReplacementBackend,
 };
 use beatkernel::{
-    audio::{Mixer, OutputFrameBasis, OutputOpenFailure, RenderReport, StoppedMixerSource},
+    audio::{
+        OutputFrameBasis, OutputOpenFailure, RenderReport, SoftwareOutputState, StoppedMixerSource,
+    },
     time::{ClockPair, ClockPoint},
 };
 
@@ -70,9 +72,11 @@ where
         }
     }
 }
-impl<A: StoppedMixerSource, B: StoppedMixerSource> StoppedMixerSource for Switched<A, B> {
+impl<A: StoppedMixerSource<O>, B: StoppedMixerSource<O>, O> StoppedMixerSource<O>
+    for Switched<A, B>
+{
     type Error = Switched<A::Error, B::Error>;
-    fn take_stopped_mixer(&mut self) -> Result<Option<Mixer>, Self::Error> {
+    fn take_stopped_mixer(&mut self) -> Result<Option<O>, Self::Error> {
         match self {
             Self::First(output) => output.take_stopped_mixer().map_err(Switched::First),
             Self::Second(output) => output.take_stopped_mixer().map_err(Switched::Second),
@@ -107,17 +111,17 @@ impl<A, B> OutputBackendSwitch<A, B> {
 }
 
 /// Retags a side failure without dropping its mixer, pending owner or cleanup.
-fn switched_failure<E, S, F, T>(
-    failure: OutputOpenFailure<E, S>,
+fn switched_failure<E, S, F, T, O>(
+    failure: OutputOpenFailure<E, S, O>,
     error: impl Fn(E) -> F,
     owner: impl FnOnce(S) -> T,
-) -> OutputOpenFailure<F, T> {
+) -> OutputOpenFailure<F, T, O> {
     let (original, mixer, pending, cleanup) = failure.into_parts();
     // OutputOpenFailure constructors never retain both a pending owner and a mixer.
     debug_assert!(mixer.is_none() || pending.is_none());
     let failure = match pending {
-        Some(pending) => OutputOpenFailure::pending(error(original), owner(pending)),
-        None => OutputOpenFailure::recovered(error(original), mixer),
+        Some(pending) => OutputOpenFailure::pending_state(error(original), owner(pending)),
+        None => OutputOpenFailure::recovered_state(error(original), mixer),
     };
     match cleanup {
         Some(cleanup) => failure.with_cleanup_error(error(cleanup)),
@@ -125,10 +129,10 @@ fn switched_failure<E, S, F, T>(
     }
 }
 
-impl<A, B> OutputReplacementBackend for OutputBackendSwitch<A, B>
+impl<A, B, O: SoftwareOutputState> OutputReplacementBackend<O> for OutputBackendSwitch<A, B>
 where
-    A: OutputReplacementBackend,
-    B: OutputReplacementBackend<Presentation = A::Presentation>,
+    A: OutputReplacementBackend<O>,
+    B: OutputReplacementBackend<O, Presentation = A::Presentation>,
 {
     type Presentation = A::Presentation;
     type Output = Switched<A::Output, B::Output>;
@@ -137,9 +141,9 @@ where
     fn open(
         &mut self,
         request: Self::Request,
-        mixer: Mixer,
+        mixer: O,
         epoch: u64,
-    ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output>> {
+    ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output, O>> {
         match request {
             Switched::First(request) => self
                 .first
@@ -194,6 +198,23 @@ where
         }
     }
     /// Forward overrides so interval backends keep their original end evidence.
+    fn observe_replacement(
+        &mut self,
+        output: &mut Self::Output,
+        presentation: &mut Self::Presentation,
+        pause: &crate::playback_pause::NativePause,
+    ) -> Result<(), Self::Error> {
+        match output {
+            Switched::First(output) => self
+                .first
+                .observe_replacement(output, presentation, pause)
+                .map_err(Switched::First),
+            Switched::Second(output) => self
+                .second
+                .observe_replacement(output, presentation, pause)
+                .map_err(Switched::Second),
+        }
+    }
     fn observe_end(
         &self,
         output: &Self::Output,
@@ -234,10 +255,14 @@ where
 #[path = "switch_fixtures.rs"]
 mod fixtures;
 
-impl<A, B> crate::gameplay::output::ports::OriginalNativeOutputBackend for OutputBackendSwitch<A, B>
+impl<A, B, O: SoftwareOutputState> crate::gameplay::output::ports::OriginalNativeOutputBackend<O>
+    for OutputBackendSwitch<A, B>
 where
-    A: crate::gameplay::output::ports::OriginalNativeOutputBackend,
-    B: crate::gameplay::output::ports::OriginalNativeOutputBackend<Presentation = A::Presentation>,
+    A: crate::gameplay::output::ports::OriginalNativeOutputBackend<O>,
+    B: crate::gameplay::output::ports::OriginalNativeOutputBackend<
+        O,
+        Presentation = A::Presentation,
+    >,
 {
     fn observe_native(
         &mut self,

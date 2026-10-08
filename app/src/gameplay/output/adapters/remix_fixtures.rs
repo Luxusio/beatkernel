@@ -1,7 +1,7 @@
 //! Real owner/controller traces; fake native dispatch does not prove DSP/device clocks.
 use super::*;
 use crate::{
-    gameplay_output_owner::{GameplayOutputOwner, fixtures::*},
+    gameplay_output_owner::{fixtures::*, GameplayOutputOwner},
     gameplay_presentation::{GameplayOutputContext, GameplayPauseControl},
     local_runtime::SoloRuntime,
     playback_pause::NativePause,
@@ -202,23 +202,21 @@ fn matrix() -> ChannelMatrix {
 #[test]
 fn typed_channel_requests_use_real_owner_epochs_and_forward_original_overrides() {
     let mut f = Fixture::new(None);
-    assert!(
-        f.owner
-            .queue(
-                RemixedOutputRequest::remixed(request(1, 1), matrix()),
-                100_000_000,
-            )
-            .is_ok()
-    );
+    assert!(f
+        .owner
+        .queue(
+            RemixedOutputRequest::remixed(request(1, 1), matrix()),
+            100_000_000,
+        )
+        .is_ok());
     f.ready();
     assert_eq!(f.presentation.epoch(), 1);
     assert_eq!(f.pause.epoch(), 1);
     assert_eq!(&*f.matrices.borrow(), &[vec![1., 0.5]]);
-    assert!(
-        f.owner
-            .queue(RemixedOutputRequest::strict(request(2, 1)), 100_000_000)
-            .is_ok()
-    );
+    assert!(f
+        .owner
+        .queue(RemixedOutputRequest::strict(request(2, 1)), 100_000_000)
+        .is_ok());
     f.ready();
     assert_eq!(f.presentation.epoch(), 2);
     assert!(f.marks.borrow().contains(&"strict"));
@@ -272,14 +270,13 @@ fn channel_open_failure_keeps_original_error_and_mixer_for_explicit_retry() {
     let ptr = fault.pointer();
     let mut requested = request(1, 0);
     requested.open_error = Some(fault);
-    assert!(
-        f.owner
-            .queue(
-                RemixedOutputRequest::remixed(requested, matrix()),
-                100_000_000,
-            )
-            .is_ok()
-    );
+    assert!(f
+        .owner
+        .queue(
+            RemixedOutputRequest::remixed(requested, matrix()),
+            100_000_000,
+        )
+        .is_ok());
     let error = f
         .publish()
         .unwrap_err()
@@ -289,11 +286,10 @@ fn channel_open_failure_keeps_original_error_and_mixer_for_explicit_retry() {
         matches!(&error.cause, ReplacementCause::Backend { error, .. } if error.pointer() == ptr)
     );
     assert_eq!(f.owner.state(), ReplacementState::RecoveredMixer);
-    assert!(
-        f.owner
-            .queue(RemixedOutputRequest::strict(request(2, 0)), 100_000_000)
-            .is_ok()
-    );
+    assert!(f
+        .owner
+        .queue(RemixedOutputRequest::strict(request(2, 0)), 100_000_000)
+        .is_ok());
     f.ready();
     assert_eq!(f.presentation.epoch(), 2);
 }
@@ -305,14 +301,13 @@ fn channel_pending_failure_retains_cleanup_owner_and_error_identity() {
     let ptr = original.pointer();
     let cleanup_ptr = cleanup.pointer();
     let mut f = Fixture::new(Some((original, cleanup)));
-    assert!(
-        f.owner
-            .queue(
-                RemixedOutputRequest::remixed(request(1, 0), matrix()),
-                100_000_000,
-            )
-            .is_ok()
-    );
+    assert!(f
+        .owner
+        .queue(
+            RemixedOutputRequest::remixed(request(1, 0), matrix()),
+            100_000_000,
+        )
+        .is_ok());
     let error = f
         .publish()
         .unwrap_err()
@@ -353,11 +348,11 @@ fn original_interval_pause_evidence_is_not_replaced_by_point_fallback() {
 #[ignore = "explicit ALSA null native diagnostic; no acoustic/device clock proof"]
 fn actual_alsa_adapter_routes_matrix_and_recovers_original_source() {
     use crate::gameplay::output::adapters::alsa::AlsaReplacementBackend;
+    use beatkernel::audio::StoppedMixerSource;
     use beatkernel_platform::{
         audio::{DeviceFormat, SampleEncoding},
         linux::AlsaRequest,
     };
-    use beatkernel::audio::StoppedMixerSource;
     let (mut output, _producer, _trace) = initial(vec![]);
     let mixer = output.mixer.take().unwrap();
     let before = mixer.output_frame_basis();
@@ -371,7 +366,11 @@ fn actual_alsa_adapter_routes_matrix_and_recovers_original_source() {
     };
     let mut backend = RemixedOutputBackend::new(AlsaReplacementBackend);
     let mut native = backend
-        .open(RemixedOutputRequest::remixed(request, matrix()), mixer, 9)
+        .open(
+            RemixedOutputRequest::remixed(request, matrix()),
+            beatkernel_platform::audio::NativeOutputState::from_mixer(mixer),
+            9,
+        )
         .unwrap_or_else(|f| panic!("{}", f.error()));
     assert_eq!(backend.epoch(&native), 9);
     assert_eq!(backend.basis(&native), before);
@@ -384,6 +383,6 @@ fn actual_alsa_adapter_routes_matrix_and_recovers_original_source() {
     assert!(backend.render_report(&native).unwrap().is_some());
     backend.retire(&mut native).unwrap();
     let original = native.take_stopped_mixer().unwrap().unwrap();
-    assert_eq!(original.config().format().channels(), 1);
+    assert_eq!(original.mixer().config().format().channels(), 1);
     assert_eq!(original.output_frame_basis().origin(), before.origin());
 }

@@ -99,6 +99,7 @@ type OwnedOutput = GameplayOutputOwner<
     beatkernel_bms_runtime::gameplay::output::adapters::remix::RemixedOutputBackend<
         AlsaReplacementBackend,
     >,
+beatkernel_platform::audio::NativeOutputState,
 >;
 struct CohortDevice<'a> {
     output: &'a mut OwnedOutput,

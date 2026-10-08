@@ -11,7 +11,7 @@ use crate::{
     native_end::{EndBoundary, NativeEnd},
 };
 use beatkernel::{
-    audio::{Mixer, OutputFrameBasis, RenderReport},
+    audio::{Mixer, OutputFrameBasis, RenderReport, SoftwareOutputState},
     time::{ClockPair, ClockPoint},
 };
 use beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence;
@@ -20,16 +20,16 @@ enum RejectedReady<P: GameplayPresentationPort, O> {
     Legacy(ReadyOutput<P, O>),
     Audio(ReadyAudioOutput<O>),
 }
-pub struct GameplayOutputOwner<B: OutputReplacementBackend> {
+pub struct GameplayOutputOwner<B: OutputReplacementBackend<O>, O: SoftwareOutputState = Mixer> {
     current: Option<B::Output>,
     basis: OutputFrameBasis,
-    controller: OutputReplacement<B>,
+    controller: OutputReplacement<B, O>,
     pending: Option<(B::Request, u64)>,
     rejected: Option<RejectedReady<B::Presentation, B::Output>>,
     report: Option<RenderReport>,
     pause_evidence: Option<LivePauseObservation>,
 }
-impl<B: OutputReplacementBackend> GameplayOutputOwner<B> {
+impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> GameplayOutputOwner<B, O> {
     pub fn new(backend: B, output: B::Output) -> Self {
         let basis = backend.basis(&output);
         Self {
@@ -183,7 +183,7 @@ impl<B: OutputReplacementBackend> GameplayOutputOwner<B> {
         }
         Ok(())
     }
-    pub fn take_recovered_mixer(&mut self) -> Option<Mixer> {
+    pub fn take_recovered_mixer(&mut self) -> Option<O> {
         self.controller.take_recovered_mixer()
     }
     pub fn retry_retirement(&mut self) -> Result<bool, ReplacementFailure<B::Error>> {
@@ -215,7 +215,7 @@ impl<B: OutputReplacementBackend> GameplayOutputOwner<B> {
         cancellation.map(|_| ()).and(retirement)
     }
 }
-impl<B: OriginalNativeOutputBackend> GameplayOutputOwner<B> {
+impl<B: OriginalNativeOutputBackend<O>, O: SoftwareOutputState> GameplayOutputOwner<B, O> {
     fn audio_identity(
         &self,
         presentation: &NativeAudioPresentation,
@@ -359,7 +359,7 @@ impl<B: OriginalNativeOutputBackend> GameplayOutputOwner<B> {
         }
     }
 }
-impl<B: OriginalNativeOutputBackend> GameplayOutputOwner<B>
+impl<B: OriginalNativeOutputBackend<O>, O: SoftwareOutputState> GameplayOutputOwner<B, O>
 where
     B::Error: std::error::Error + 'static,
 {
@@ -432,7 +432,7 @@ where
     }
 }
 
-impl<B: OutputReplacementBackend> GameplayOutputOwner<B>
+impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> GameplayOutputOwner<B, O>
 where
     B::Error: std::error::Error + 'static,
 {

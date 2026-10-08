@@ -114,23 +114,10 @@ impl NativeOutputState {
         matrix: Option<ChannelMatrix>,
         max_frames: usize,
     ) -> Result<(), AudioError> {
+        self.validate_reconfigure(format, matrix.as_ref(), max_frames)?;
         let config = self.mixer.config();
-        if max_frames == 0 {
-            return Err(AudioError::InvalidCapacity);
-        }
-        if max_frames > config.limits().max_render_frames() {
-            return Err(AudioError::RenderCapacity);
-        }
-        match matrix.as_ref() {
-            Some(matrix) => channel_remix::validate(config.format(), format.pcm(), matrix)?,
-            None if config.format() != format.pcm() => return Err(AudioError::InvalidFormat),
-            None => {}
-        }
         let same = self.format == Some(format)
             && self.remix.as_ref().map(FormatConverter::matrix) == matrix.as_ref();
-        if self.pending_frames() != 0 && !same {
-            return Err(AudioError::InvalidFormat);
-        }
         // Equal-rate legacy remix uses no source lookahead. Preparing to the
         // immutable Mixer bound allows later period changes to retain this owner.
         let replacement = if same {
@@ -175,6 +162,33 @@ impl NativeOutputState {
         }
         self.format = Some(format);
         self.max_frames = max_frames;
+        Ok(())
+    }
+    /// Checks a cold request without allocating or changing retained state.
+    /// Native acquisition can refuse after this check without committing it.
+    pub fn validate_reconfigure(
+        &self,
+        format: DeviceFormat,
+        matrix: Option<&ChannelMatrix>,
+        max_frames: usize,
+    ) -> Result<(), AudioError> {
+        let config = self.mixer.config();
+        if max_frames == 0 {
+            return Err(AudioError::InvalidCapacity);
+        }
+        if max_frames > config.limits().max_render_frames() {
+            return Err(AudioError::RenderCapacity);
+        }
+        match matrix {
+            Some(matrix) => channel_remix::validate(config.format(), format.pcm(), matrix)?,
+            None if config.format() != format.pcm() => return Err(AudioError::InvalidFormat),
+            None => {}
+        }
+        let same = self.format == Some(format)
+            && self.remix.as_ref().map(FormatConverter::matrix) == matrix;
+        if self.pending_frames() != 0 && !same {
+            return Err(AudioError::InvalidFormat);
+        }
         Ok(())
     }
     /// Renders exactly one new block into prepared storage. Pending output must

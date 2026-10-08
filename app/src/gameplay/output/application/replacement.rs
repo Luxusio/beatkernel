@@ -2,7 +2,7 @@
 use crate::{
     audio_authority::AudioAuthorityEpoch,
     gameplay_presentation::{
-        prepare_output_timing_rebind, GameplayPresentationPort, PreparedOutputTiming,
+        prepare_output_timing_rebind_state, GameplayPresentationPort, PreparedOutputTiming,
     },
     live_pause::LivePauseObservation,
     local_input::InputMerger,
@@ -13,7 +13,9 @@ use crate::{
     playback_pause::{NativePause, PausePhase},
 };
 use beatkernel::{
-    audio::{Mixer, OutputFrameBasis, PauseHold, PauseHoldError, StoppedMixerSource},
+    audio::{
+        Mixer, OutputFrameBasis, PauseHold, PauseHoldError, SoftwareOutputState, StoppedMixerSource,
+    },
     time::{ClockPoint, Timestamp},
 };
 
@@ -140,7 +142,7 @@ impl<P: GameplayPresentationPort> WaitingTiming<P> {
         }
     }
 }
-struct Waiting<B: OutputReplacementBackend> {
+struct Waiting<B: OutputReplacementBackend<O>, O: SoftwareOutputState = Mixer> {
     output: B::Output,
     timing: WaitingTiming<B::Presentation>,
     hold: PauseHold,
@@ -148,20 +150,20 @@ struct Waiting<B: OutputReplacementBackend> {
     first_poll: Option<ClockPoint>,
     last_poll: Option<ClockPoint>,
 }
-enum Slot<B: OutputReplacementBackend> {
+enum Slot<B: OutputReplacementBackend<O>, O: SoftwareOutputState = Mixer> {
     Detached,
     Attached(B::Output),
-    Recovered(Mixer),
+    Recovered(O),
     Pending(B::Output),
-    Waiting(Waiting<B>),
+    Waiting(Waiting<B, O>),
     Unavailable,
 }
-pub struct OutputReplacement<B: OutputReplacementBackend> {
+pub struct OutputReplacement<B: OutputReplacementBackend<O>, O: SoftwareOutputState = Mixer> {
     backend: B,
-    slot: Slot<B>,
+    slot: Slot<B, O>,
     last_issued: u64,
 }
-impl<B: OutputReplacementBackend> OutputReplacement<B> {
+impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B, O> {
     pub fn new(backend: B) -> Self {
         Self {
             backend,
@@ -231,7 +233,7 @@ impl<B: OutputReplacementBackend> OutputReplacement<B> {
         self.slot = Slot::Attached(output);
         Ok(())
     }
-    pub fn take_recovered_mixer(&mut self) -> Option<Mixer> {
+    pub fn take_recovered_mixer(&mut self) -> Option<O> {
         let slot = std::mem::replace(&mut self.slot, Slot::Detached);
         match slot {
             Slot::Recovered(mixer) => Some(mixer),
@@ -276,7 +278,7 @@ impl<B: OutputReplacementBackend> OutputReplacement<B> {
             ReplacementFailure::policy("output replacement requires presentation epochs")
         })?;
         self.begin_with(request, epoch, pause, wait_ns, acquire, |next, mixer| {
-            prepare_output_timing_rebind(current, pause, next, mixer, original_song)
+            prepare_output_timing_rebind_state(current, pause, next, mixer, original_song)
                 .map(WaitingTiming::Legacy)
         })
     }
@@ -289,7 +291,7 @@ impl<B: OutputReplacementBackend> OutputReplacement<B> {
         acquire: impl FnOnce() -> Result<PauseHold, PauseHoldError>,
         prepare: impl FnOnce(
             u64,
-            &Mixer,
+            &O,
         )
             -> Result<WaitingTiming<B::Presentation>, Box<dyn std::error::Error>>,
     ) -> Result<(), ReplacementFailure<B::Error>> {
@@ -371,6 +373,12 @@ impl<B: OutputReplacementBackend> OutputReplacement<B> {
             }
             _ => unreachable!("preflight admitted only attached or recovered ownership"),
         };
+        if !mixer.paused_tail_admissible() {
+            self.slot = Slot::Recovered(mixer);
+            return Err(ReplacementFailure::policy(
+                "held output replacement requires a proven paused-zero retained tail",
+            ));
+        }
         let timing = match prepare(next_epoch, &mixer) {
             Ok(timing) => timing,
             Err(error) => {
@@ -474,7 +482,7 @@ impl<B: OutputReplacementBackend> OutputReplacement<B> {
                 ));
             }
             self.backend
-                .observe(&mut waiting.output, &mut timing.presentation)
+                .observe_replacement(&mut waiting.output, &mut timing.presentation, &timing.pause)
                 .map_err(|error| ReplacementFailure::backend(ReplacementPhase::Observe, error))?;
             if timing.presentation.epoch() != Some(timing.pause.epoch()) {
                 return Err(ReplacementFailure::policy(
@@ -501,6 +509,12 @@ impl<B: OutputReplacementBackend> OutputReplacement<B> {
                 ));
             }
             if report.frames == 0 {
+                return Ok(false);
+            }
+            if !timing
+                .pause
+                .replacement_observation_ready(Some(report), pair)
+            {
                 return Ok(false);
             }
             let evidence = self
@@ -601,7 +615,7 @@ impl<B: OutputReplacementBackend> OutputReplacement<B> {
         }
     }
 }
-impl<B: OriginalNativeOutputBackend> OutputReplacement<B> {
+impl<B: OriginalNativeOutputBackend<O>, O: SoftwareOutputState> OutputReplacement<B, O> {
     pub fn begin_audio(
         &mut self,
         request: B::Request,
@@ -619,13 +633,13 @@ impl<B: OriginalNativeOutputBackend> OutputReplacement<B> {
         }
         let epoch = current.authority().epoch();
         self.begin_with(request, epoch.id, pause, wait_ns, acquire, |id, mixer| {
-            if !mixer.pause_requested() {
+            if !mixer.mixer().pause_requested() {
                 return Err("audio replacement requires a held producer pause".into());
             }
             let basis = mixer.output_frame_basis();
             let playback_origin = basis.point_at_stream_frame(0)?;
             let mut candidate_pause = pause.clone();
-            candidate_pause.rebind_output(id, mixer)?;
+            candidate_pause.rebind_output_state(id, mixer)?;
             candidate_pause.song_origin_for_presentation(original_song, playback_origin)?;
             let next = AudioAuthorityEpoch {
                 id,
@@ -756,8 +770,6 @@ impl<B: OriginalNativeOutputBackend> OutputReplacement<B> {
                             "candidate snapshot epoch or basis differs",
                         ));
                     }
-                    let prepared = prepare_native_snapshot(&timing.validator, snapshot)
-                        .map_err(ReplacementFailure::timing)?;
                     let observed_report = match snapshot.evidence {
                         OriginalNativePresentationEvidence::Asio { observation, .. } => {
                             Some(observation.render)
@@ -772,7 +784,18 @@ impl<B: OriginalNativeOutputBackend> OutputReplacement<B> {
                             "replacement output rendered without held pause",
                         ));
                     }
+                    // Preparation validates domains without committing evidence.
+                    // Only valid early tail observations may wait for freshness.
+                    let prepared = prepare_native_snapshot(&timing.validator, snapshot)
+                        .map_err(ReplacementFailure::timing)?;
                     let pair = prepared.correlation_pair();
+                    if pair.is_none_or(|pair| {
+                        !timing
+                            .pause
+                            .replacement_observation_ready(observed_report, pair)
+                    }) {
+                        return Ok(None);
+                    }
                     if collect {
                         timing
                             .validator
@@ -1106,3 +1129,7 @@ pub(crate) fn publish_ready_audio_output_held<O>(
     *context.end = end;
     Ok(hold)
 }
+
+#[cfg(test)]
+#[path = "output_continuity_fixtures.rs"]
+mod output_continuity_fixtures;

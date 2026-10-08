@@ -1,23 +1,26 @@
 //! Static effect contracts for gameplay output.
+use super::domain::control::{OutputCapability, OutputReply, OutputRequest};
 use crate::{gameplay_presentation::GameplayPresentationPort, live_pause::LivePauseObservation};
-use super::domain::control::{OutputCapability, OutputRequest, OutputReply};
 use beatkernel::{
-    audio::{Mixer, OutputFrameBasis, OutputOpenFailure, RenderReport, StoppedMixerSource},
+    audio::{
+        Mixer, OutputFrameBasis, OutputOpenFailure, RenderReport, SoftwareOutputState,
+        StoppedMixerSource,
+    },
     time::{ClockPair, ClockPoint},
 };
 use std::io;
 
-pub trait OutputReplacementBackend {
+pub trait OutputReplacementBackend<O: SoftwareOutputState = Mixer> {
     type Presentation: GameplayPresentationPort;
-    type Output: StoppedMixerSource<Error = Self::Error>;
+    type Output: StoppedMixerSource<O, Error = Self::Error>;
     type Request;
     type Error;
     fn open(
         &mut self,
         request: Self::Request,
-        mixer: Mixer,
+        mixer: O,
         epoch: u64,
-    ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output>>;
+    ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output, O>>;
     fn retire(&mut self, output: &mut Self::Output) -> Result<(), Self::Error>;
     fn start(&mut self, output: &mut Self::Output) -> Result<(), Self::Error>;
     fn epoch(&self, output: &Self::Output) -> u64;
@@ -27,6 +30,15 @@ pub trait OutputReplacementBackend {
         output: &mut Self::Output,
         presentation: &mut Self::Presentation,
     ) -> Result<(), Self::Error>;
+    /// Adapter may defer native pairs preceding the retained-tail pause frontier.
+    fn observe_replacement(
+        &mut self,
+        output: &mut Self::Output,
+        presentation: &mut Self::Presentation,
+        _: &crate::playback_pause::NativePause,
+    ) -> Result<(), Self::Error> {
+        self.observe(output, presentation)
+    }
     /// Interval backends override this with their original accepted end evidence.
     fn observe_end(
         &self,
@@ -49,7 +61,9 @@ pub trait OutputReplacementBackend {
 }
 
 /// Original native evidence without invoking the optional legacy estimator.
-pub trait OriginalNativeOutputBackend: OutputReplacementBackend {
+pub trait OriginalNativeOutputBackend<O: SoftwareOutputState = Mixer>:
+    OutputReplacementBackend<O>
+{
     fn observe_native(
         &mut self,
         output: &mut Self::Output,
@@ -57,14 +71,16 @@ pub trait OriginalNativeOutputBackend: OutputReplacementBackend {
 }
 
 /// Explicit same-rate channel conversion; no default can silently ignore a matrix.
-pub trait OutputChannelRemixBackend: OutputReplacementBackend {
+pub trait OutputChannelRemixBackend<O: SoftwareOutputState = Mixer>:
+    OutputReplacementBackend<O>
+{
     fn open_remixed(
         &mut self,
         request: Self::Request,
-        mixer: Mixer,
+        mixer: O,
         epoch: u64,
         matrix: beatkernel::audio::ChannelMatrix,
-    ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output>>;
+    ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output, O>>;
 }
 
 pub trait OutputUiPort {

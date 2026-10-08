@@ -51,3 +51,9 @@ failure ports must later carry the complete owner; ALSA, WASAPI, CoreAudio and
 ASIO need actual target-grid evidence, pause/end/publication integration and
 supported-host validation. Hardware gaps, acoustic latency and performance
 claims require measured evidence. BK019 and the full player Goal remain open.
+
+The separate [native software continuity](REQ__native-output-continuity.md)
+integration carries ALSA's existing equal-rate Mixer/converter and positively
+unsubmitted target PCM through its actual worker and application replacement.
+Its implementation candidate does not install this continuous converter in
+native unequal-rate output or prove admitted/presented acoustic continuity.

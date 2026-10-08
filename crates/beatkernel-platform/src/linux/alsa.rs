@@ -9,20 +9,19 @@ pub use timing::{AlsaNativeTimestamp, AlsaTimingSnapshot};
 
 use super::{LinuxError, MonotonicClock};
 use crate::audio::{
-    AudioStreamSnapshot, AudioStreamStatus, DeviceFormat, SampleEncoding, StreamCounters,
-    encode_pcm, telemetry::Telemetry,
+    encode_pcm, telemetry::Telemetry, AudioStreamSnapshot, AudioStreamStatus, DeviceFormat,
+    NativeOutputState, SampleEncoding, StreamCounters,
 };
 use beatkernel::{
-    audio::{AudioError, ChannelMatrix, FormatConverter, Mixer, MixerOpenFailure, RenderReport},
+    audio::{AudioError, ChannelMatrix, Mixer, MixerOpenFailure, RenderReport},
     time::{ClockDomainId, ClockPoint, Timestamp},
 };
 use std::{
-    ffi::{CString, c_char, c_int, c_long, c_uint, c_ulong, c_void},
+    ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void, CString},
     io, ptr,
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, AtomicU64, Ordering},
-        mpsc,
+        atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, AtomicU8, Ordering},
+        mpsc, Arc,
     },
     thread::{self, JoinHandle},
 };
@@ -401,7 +400,7 @@ impl Shared {
     }
 }
 
-type WorkerExit = (Result<(), LinuxError>, Mixer);
+type WorkerExit = (Result<(), LinuxError>, NativeOutputState);
 use crate::audio::mixer_launch::WorkerSpawner;
 struct NativeWorkerSpawner;
 impl WorkerSpawner<WorkerExit> for NativeWorkerSpawner {
@@ -416,23 +415,30 @@ impl WorkerSpawner<WorkerExit> for NativeWorkerSpawner {
 }
 fn launch_worker<S, F>(
     spawner: S,
-    mixer: Mixer,
+    mixer: NativeOutputState,
     work: F,
-) -> Result<JoinHandle<WorkerExit>, MixerOpenFailure<LinuxError>>
+) -> Result<JoinHandle<WorkerExit>, MixerOpenFailure<LinuxError, NativeOutputState>>
 where
     S: WorkerSpawner<WorkerExit>,
-    F: FnOnce(Mixer) -> WorkerExit + Send + 'static,
+    F: FnOnce(NativeOutputState) -> WorkerExit + Send + 'static,
 {
     crate::audio::mixer_launch::launch_worker(spawner, mixer, work).map_err(|failure| {
         let (error, mixer) = failure.into_parts();
-        MixerOpenFailure::new(error.into(), mixer)
+        MixerOpenFailure::new_state(error.into(), mixer)
     })
 }
 fn join_open_failure(
     worker: JoinHandle<WorkerExit>,
     original: LinuxError,
-) -> MixerOpenFailure<LinuxError> {
+) -> MixerOpenFailure<LinuxError, NativeOutputState> {
     crate::audio::mixer_launch::join_open_failure(worker, original, |(_, mixer)| Some(mixer))
+}
+
+fn legacy_open_failure(
+    failure: MixerOpenFailure<LinuxError, NativeOutputState>,
+) -> MixerOpenFailure<LinuxError> {
+    let (error, state) = failure.into_parts();
+    MixerOpenFailure::new(error, state.and_then(|state| state.into_mixer().ok()))
 }
 
 /// Owns the worker lifecycle; worker exclusively owns ALSA handles and Mixer.
@@ -441,7 +447,7 @@ pub struct AlsaStream {
     basis: beatkernel::audio::OutputFrameBasis,
     shared: Arc<Shared>,
     worker: Option<JoinHandle<WorkerExit>>,
-    recovered_mixer: Option<Mixer>,
+    recovered_output: Option<NativeOutputState>,
     retired: bool,
 }
 impl AlsaStream {
@@ -456,24 +462,41 @@ impl AlsaStream {
         request: AlsaRequest,
         mixer: Mixer,
     ) -> Result<Self, MixerOpenFailure<LinuxError>> {
-        Self::open_impl(request, mixer, None)
+        Self::open_state_recoverable(request, NativeOutputState::from_mixer(mixer))
+            .map_err(legacy_open_failure)
     }
     /// Opens with an explicit channel matrix at the mixer's unchanged rate.
-    /// The converter has no rate history; original frame/pause/end evidence and
-    /// stopped-mixer recovery retain their meaning. Rate mismatches reject.
+    /// Rate mismatches reject. Recover stopped remix streams through
+    /// `take_stopped_output` to preserve their prepared converter.
     pub fn open_remixed_recoverable(
         request: AlsaRequest,
         mixer: Mixer,
         matrix: ChannelMatrix,
     ) -> Result<Self, MixerOpenFailure<LinuxError>> {
-        Self::open_impl(request, mixer, Some(matrix))
+        Self::open_state_remixed_recoverable(request, NativeOutputState::from_mixer(mixer), matrix)
+            .map_err(legacy_open_failure)
+    }
+    /// Reopens complete software state, retaining positively unsubmitted PCM.
+    pub fn open_state_recoverable(
+        request: AlsaRequest,
+        state: NativeOutputState,
+    ) -> Result<Self, MixerOpenFailure<LinuxError, NativeOutputState>> {
+        Self::open_impl(request, state, None)
+    }
+    /// Reopens complete state with an explicit unchanged-rate channel matrix.
+    pub fn open_state_remixed_recoverable(
+        request: AlsaRequest,
+        state: NativeOutputState,
+        matrix: ChannelMatrix,
+    ) -> Result<Self, MixerOpenFailure<LinuxError, NativeOutputState>> {
+        Self::open_impl(request, state, Some(matrix))
     }
     fn open_impl(
         request: AlsaRequest,
-        mixer: Mixer,
+        state: NativeOutputState,
         matrix: Option<ChannelMatrix>,
-    ) -> Result<Self, MixerOpenFailure<LinuxError>> {
-        let basis = mixer.output_frame_basis();
+    ) -> Result<Self, MixerOpenFailure<LinuxError, NativeOutputState>> {
+        let basis = state.output_frame_basis();
         let validation = (|| -> Result<(), LinuxError> {
             super::sys::supported_abi()?;
             if request.device.is_empty()
@@ -486,7 +509,7 @@ impl AlsaStream {
                     "explicit device, unspecified channel mask, and 0 < period < buffer required",
                 ));
             }
-            let source = mixer.config().format();
+            let source = state.mixer().config().format();
             let target = request.format.pcm();
             if let Some(matrix) = &matrix {
                 crate::audio::channel_remix::validate(source, target, matrix).map_err(|_| {
@@ -502,14 +525,28 @@ impl AlsaStream {
             Ok(())
         })();
         if let Err(error) = validation {
-            return Err(MixerOpenFailure::new(error, Some(mixer)));
+            return Err(MixerOpenFailure::new_state(error, Some(state)));
+        }
+        // Validate a retained interpretation before native acquisition. Bare
+        // legacy Mixers remain bare until native setup succeeds, so failed open
+        // can still return the original Mixer without discarding a converter.
+        if state.format().is_some() {
+            let frames = (request.period_frames as usize)
+                .min(state.mixer().config().limits().max_render_frames());
+            if let Err(error) = state.validate_reconfigure(request.format, matrix.as_ref(), frames)
+            {
+                return Err(MixerOpenFailure::new_state(
+                    LinuxError::Mixer(error),
+                    Some(state),
+                ));
+            }
         }
         let shared = Arc::new(Shared::new());
         let worker_shared = Arc::clone(&shared);
         let (sender, receiver) = mpsc::sync_channel(1);
-        let worker = launch_worker(NativeWorkerSpawner, mixer, move |mut mixer| {
+        let worker = launch_worker(NativeWorkerSpawner, state, move |mut state| {
             let opened = NativePcm::open(&request).and_then(|(pcm, buffer, period)| {
-                if period as usize > mixer.config().limits().max_render_frames() {
+                if period as usize > state.mixer().config().limits().max_render_frames() {
                     return Err(LinuxError::InvalidConfiguration(
                         "applied period exceeds preallocated mixer render limit",
                     ));
@@ -520,40 +557,31 @@ impl AlsaStream {
                 let bytes = samples
                     .checked_mul(usize::from(request.format.encoding().bytes_per_sample()))
                     .ok_or(LinuxError::Overflow)?;
-                let render = vec![0.0; samples];
                 let conversion = vec![0u8; bytes];
-                let remix = matrix
-                    .map(|matrix| {
-                        crate::audio::channel_remix::prepare(
-                            mixer.config(),
-                            request.format.pcm(),
-                            matrix,
-                            period as usize,
-                        )
-                        .map_err(LinuxError::Mixer)
-                    })
-                    .transpose()?;
+                state
+                    .reconfigure(request.format, matrix, period as usize)
+                    .map_err(LinuxError::Mixer)?;
                 let configuration = AlsaAppliedConfig {
                     format: request.format,
                     buffer_frames: buffer,
                     period_frames: period,
                     sizing_adjusted: period != request.period_frames
                         || buffer != request.buffer_frames,
-                    output_domain: mixer.config().domain(),
-                    output_origin: mixer.config().origin(),
+                    output_domain: state.mixer().config().domain(),
+                    output_origin: state.mixer().config().origin(),
                     requested: request.clone(),
                 };
-                Ok((pcm, configuration, render, conversion, remix))
+                Ok((pcm, configuration, conversion))
             });
-            let (mut pcm, configuration, mut render, mut conversion, mut remix) = match opened {
+            let (mut pcm, configuration, mut conversion) = match opened {
                 Ok(opened) => opened,
                 Err(error) => {
                     let _ = sender.send(Err(error));
-                    return (Ok(()), mixer);
+                    return (Ok(()), state);
                 }
             };
             if sender.send(Ok(configuration.clone())).is_err() {
-                return (Ok(()), mixer);
+                return (Ok(()), state);
             }
             drop(sender);
             while !worker_shared.start.load(Ordering::Acquire)
@@ -562,19 +590,19 @@ impl AlsaStream {
                 thread::park();
             }
             if worker_shared.stop.load(Ordering::Acquire) {
-                return (Ok(()), mixer);
+                return (Ok(()), state);
             }
             worker_shared.status.store(1, Ordering::Release);
             // Worker-local unwind/return guard clears timing even on panic.
             let _timing_guard = TimingInvalidation(&worker_shared.timing);
             let result = run_worker(
                 &mut pcm,
-                &mut mixer,
+                &mut state,
                 &configuration,
-                &mut render,
                 &mut conversion,
-                &mut remix,
                 &worker_shared,
+                &MonotonicClock::new(configuration.requested.monotonic_domain),
+                &mut NativeEncoder,
             );
             match &result {
                 Ok(()) => worker_shared.status.store(2, Ordering::Release),
@@ -594,7 +622,7 @@ impl AlsaStream {
                     worker_shared.status.store(3, Ordering::Release);
                 }
             }
-            (result, mixer)
+            (result, state)
         })?;
         match receiver.recv() {
             Ok(Ok(configuration)) => Ok(Self {
@@ -602,7 +630,7 @@ impl AlsaStream {
                 basis,
                 shared,
                 worker: Some(worker),
-                recovered_mixer: None,
+                recovered_output: None,
                 retired: false,
             }),
             Ok(Err(error)) => Err(join_open_failure(worker, error)),
@@ -610,7 +638,7 @@ impl AlsaStream {
         }
     }
 
-    /// Original mixer grid captured before this stream renders or submits frames.
+    /// First unsent frame captured before this stream renders or submits frames.
     pub const fn frame_basis(&self) -> beatkernel::audio::OutputFrameBasis {
         self.basis
     }
@@ -640,7 +668,7 @@ impl AlsaStream {
         worker.thread().unpark();
         match worker.join() {
             Ok((result, mixer)) => {
-                self.recovered_mixer = Some(mixer);
+                self.recovered_output = Some(mixer);
                 self.retired = true;
                 self.shared.timing.invalidate();
                 if result.is_ok() {
@@ -654,6 +682,13 @@ impl AlsaStream {
                 Err(LinuxError::WorkerPanicked)
             }
         }
+    }
+    /// Moves complete software ownership once after proven worker retirement.
+    pub fn take_stopped_output(&mut self) -> Result<Option<NativeOutputState>, LinuxError> {
+        if !self.retired || self.worker.is_some() {
+            return Err(LinuxError::InvalidLifecycle);
+        }
+        Ok(self.recovered_output.take())
     }
     /// Last successful core mixer report, retained after stop or native failure.
     /// It proves core rendering, not native submission or acoustic presentation.
@@ -738,36 +773,97 @@ fn increment(counter: &AtomicU64, amount: u64) {
     let old = counter.load(Ordering::Relaxed);
     counter.store(old.saturating_add(amount), Ordering::Relaxed);
 }
-fn run_worker(
-    pcm: &mut NativePcm,
-    mixer: &mut Mixer,
+trait WorkerClock {
+    fn now(&self) -> Result<ClockPoint, LinuxError>;
+}
+impl WorkerClock for MonotonicClock {
+    fn now(&self) -> Result<ClockPoint, LinuxError> {
+        MonotonicClock::now(*self)
+    }
+}
+trait PcmEncoder {
+    fn encode(
+        &mut self,
+        format: DeviceFormat,
+        samples: &[f32],
+        bytes: &mut [u8],
+    ) -> Result<(), LinuxError>;
+}
+struct NativeEncoder;
+impl PcmEncoder for NativeEncoder {
+    fn encode(
+        &mut self,
+        format: DeviceFormat,
+        samples: &[f32],
+        bytes: &mut [u8],
+    ) -> Result<(), LinuxError> {
+        encode_pcm(format, samples, bytes).map_err(LinuxError::Conversion)
+    }
+}
+trait PcmOperations {
+    fn write(&mut self, bytes: &[u8], frames: usize) -> Result<Option<usize>, LinuxError>;
+    fn wait(&mut self) -> Result<bool, LinuxError>;
+    fn timing<C: WorkerClock>(
+        &mut self,
+        clock: &C,
+        submitted: u64,
+    ) -> Result<Option<AlsaTimingSnapshot>, LinuxError>;
+    fn drop_stream(&mut self) -> Result<(), LinuxError>;
+}
+impl PcmOperations for NativePcm {
+    fn write(&mut self, bytes: &[u8], frames: usize) -> Result<Option<usize>, LinuxError> {
+        NativePcm::write(self, bytes, frames)
+    }
+    fn wait(&mut self) -> Result<bool, LinuxError> {
+        NativePcm::wait(self)
+    }
+    fn timing<C: WorkerClock>(
+        &mut self,
+        clock: &C,
+        submitted: u64,
+    ) -> Result<Option<AlsaTimingSnapshot>, LinuxError> {
+        NativePcm::timing(self, clock, submitted)
+    }
+    fn drop_stream(&mut self) -> Result<(), LinuxError> {
+        NativePcm::drop_stream(self)
+    }
+}
+
+// Production and fixtures share this statically dispatched admission loop.
+fn run_worker<P: PcmOperations, C: WorkerClock, E: PcmEncoder>(
+    pcm: &mut P,
+    state: &mut NativeOutputState,
     config: &AlsaAppliedConfig,
-    render: &mut [f32],
     conversion: &mut [u8],
-    remix: &mut Option<FormatConverter>,
     shared: &Shared,
+    clock: &C,
+    encoder: &mut E,
 ) -> Result<(), LinuxError> {
-    let clock = MonotonicClock::new(config.requested.monotonic_domain);
-    let mut pending_offset = config.period_frames as usize;
     let mut render_version = 0u64;
     let align = usize::from(config.format.block_align());
+    let channels = usize::from(config.format.channels());
     while !shared.stop.load(Ordering::Acquire) {
-        if pending_offset == config.period_frames as usize {
+        if state.pending_frames() == 0 {
             let render_start = clock.now()?;
-            let report = render_device_and_publish(
-                mixer,
-                remix,
-                render,
-                &shared.render_telemetry,
+            let report = state
+                .render_pending(config.period_frames as usize)
+                .map_err(LinuxError::Mixer)?;
+            // Fresh rendering alone publishes new-stream callback evidence.
+            shared.render_telemetry.publish(
+                AudioStreamSnapshot {
+                    telemetry_available: true,
+                    status: AudioStreamStatus::Running,
+                    counters: StreamCounters::default(),
+                    clock: None,
+                    render: Some(report),
+                },
                 &mut render_version,
-            )
-            .map_err(LinuxError::Mixer)?;
+            );
             shared.cadence.record(
                 render_start.timestamp,
                 report.start_frame,
                 report.frames as u64,
             );
-            encode_pcm(config.format, render, conversion).map_err(LinuxError::Conversion)?;
             let rendered = shared
                 .rendered
                 .load(Ordering::Relaxed)
@@ -775,18 +871,27 @@ fn run_worker(
                 .ok_or(LinuxError::Overflow)?;
             shared.rendered.store(rendered, Ordering::Relaxed);
             increment(&shared.renders, 1);
-            pending_offset = 0;
         }
-        match pcm.write(
-            &conversion[pending_offset * align..],
-            config.period_frames as usize - pending_offset,
-        )? {
-            Some(frames) if frames > 0 => {
-                pending_offset += frames;
+        let frames = state.pending_frames().min(config.period_frames as usize);
+        let bytes = &mut conversion[..frames * align];
+        encoder.encode(
+            config.format,
+            &state.pending_samples()[..frames * channels],
+            bytes,
+        )?;
+        match pcm.write(bytes, frames)? {
+            Some(written) if written > 0 => {
+                if written > frames {
+                    return Err(LinuxError::InvalidConfiguration(
+                        "ALSA returned more written frames than submitted",
+                    ));
+                }
+                // Positive native admission is irrevocable even if telemetry fails.
+                state.admit(written).map_err(LinuxError::Mixer)?;
                 let submitted = shared
                     .submitted
                     .load(Ordering::Relaxed)
-                    .checked_add(frames as u64)
+                    .checked_add(written as u64)
                     .ok_or(LinuxError::Overflow)?;
                 shared.submitted.store(submitted, Ordering::Relaxed);
             }
@@ -797,7 +902,7 @@ fn run_worker(
             }
         }
         shared.timing.invalidate();
-        if let Some(timing) = pcm.timing(&clock, shared.submitted.load(Ordering::Relaxed))? {
+        if let Some(timing) = pcm.timing(clock, shared.submitted.load(Ordering::Relaxed))? {
             shared.timing.publish(timing);
         }
         let point = clock.now()?;
@@ -809,10 +914,11 @@ fn run_worker(
     pcm.drop_stream()
 }
 
-// Publishes only successful core rendering, before conversion/native admission.
+// Pure rendering fixtures also exercise the same-rate channel helper.
+#[cfg(test)]
 fn render_device_and_publish(
     mixer: &mut Mixer,
-    remix: &mut Option<FormatConverter>,
+    remix: &mut Option<beatkernel::audio::FormatConverter>,
     output: &mut [f32],
     telemetry: &Telemetry,
     version: &mut u64,
@@ -1146,9 +1252,9 @@ impl NativePcm {
         check("snd_pcm_wait", result)?;
         Ok(true)
     }
-    fn timing(
+    fn timing<C: WorkerClock>(
         &mut self,
-        clock: &MonotonicClock,
+        clock: &C,
         submitted: u64,
     ) -> Result<Option<AlsaTimingSnapshot>, LinuxError> {
         let started = clock.now()?;
@@ -1362,8 +1468,8 @@ mod tests {
     #[test]
     fn real_mixer_reports_expose_execution_rejections_and_survive_stop() {
         use beatkernel::audio::{
-            AudioCommand, AudioFormat, AudioLimits, MixerConfig, PcmLimits, PcmSample, SampleBank,
-            SampleId, VoiceId, command_queue,
+            command_queue, AudioCommand, AudioFormat, AudioLimits, MixerConfig, PcmLimits,
+            PcmSample, SampleBank, SampleId, VoiceId,
         };
         let requested = request();
         let shared = Arc::new(Shared::new());
@@ -1388,7 +1494,7 @@ mod tests {
             .unwrap(),
             shared: Arc::clone(&shared),
             worker: None, // Pure facade fixture: no native thread/PCM/device.
-            recovered_mixer: None,
+            recovered_output: None,
             retired: false,
         };
         assert_eq!(stream.last_render_report(), None);
@@ -1458,15 +1564,13 @@ mod tests {
         assert!(second.producer_disconnected);
         assert_eq!(stream.last_render_report(), Some(second));
         let published_version = version;
-        assert!(
-            render_and_publish(
-                &mut mixer,
-                &mut [0.0; 18],
-                &shared.render_telemetry,
-                &mut version
-            )
-            .is_err()
-        );
+        assert!(render_and_publish(
+            &mut mixer,
+            &mut [0.0; 18],
+            &shared.render_telemetry,
+            &mut version
+        )
+        .is_err());
         assert_eq!(version, published_version);
         assert_eq!(stream.last_render_report(), Some(second));
         // The internal carrier exposes no clock or synthetic native counters.
@@ -1488,7 +1592,16 @@ impl beatkernel::audio::StoppedMixerSource for AlsaStream {
         if !self.retired || self.worker.is_some() {
             return Err(LinuxError::InvalidLifecycle);
         }
-        Ok(self.recovered_mixer.take())
+        let Some(state) = self.recovered_output.take() else {
+            return Ok(None);
+        };
+        match state.into_mixer() {
+            Ok(mixer) => Ok(Some(mixer)),
+            Err(state) => {
+                self.recovered_output = Some(state);
+                Err(LinuxError::InvalidLifecycle)
+            }
+        }
     }
 }
 #[cfg(test)]
@@ -1506,3 +1619,7 @@ mod open_failure_fixtures;
 #[cfg(test)]
 #[path = "alsa/remix_fixtures.rs"]
 mod remix_fixtures;
+
+#[cfg(test)]
+#[path = "alsa/continuity_fixtures.rs"]
+mod continuity_fixtures;

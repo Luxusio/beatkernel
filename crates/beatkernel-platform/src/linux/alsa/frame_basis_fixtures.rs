@@ -68,14 +68,14 @@ fn advanced_paused_mixer_basis_is_captured_before_worker_and_survives_join_and_t
             },
             &mut version,
         );
-        (Ok(()), mixer)
+        (Ok(()), NativeOutputState::from_mixer(mixer))
     });
     let mut stream = AlsaStream {
         configuration,
         basis,
         shared,
         worker: Some(worker),
-        recovered_mixer: None,
+        recovered_output: None,
         retired: false,
     };
     assert_eq!(stream.frame_basis(), basis);

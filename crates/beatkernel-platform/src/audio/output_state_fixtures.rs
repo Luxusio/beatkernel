@@ -183,6 +183,28 @@ pub(crate) fn count_heap_calls<R>(work: impl FnOnce() -> R) -> (R, usize) {
     (result, HEAP_CALLS.get())
 }
 
+#[test]
+fn native_acquisition_preflight_does_not_commit_a_new_render_capacity() {
+    let (_, mixer) = rig();
+    let mut state = prepared(mixer, target(1), None, 4);
+    state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    let report = state.pending_report();
+    let basis = state.output_frame_basis();
+    let pcm = state.pending_samples().to_vec();
+    let (result, calls) = count_heap_calls(|| state.validate_reconfigure(target(1), None, 16));
+    assert_eq!(result, Ok(()));
+    assert_eq!(calls, 0);
+    assert_eq!(state.max_frames(), 4);
+    assert_eq!(state.pending_report(), report);
+    assert_eq!(state.output_frame_basis(), basis);
+    assert_eq!(state.pending_samples(), pcm);
+    assert_eq!(state.admitted_frames(), 1);
+    state.reconfigure(target(1), None, 16).unwrap();
+    assert_eq!(state.max_frames(), 16);
+    assert_eq!(state.pending_samples(), pcm);
+}
+
 fn rig() -> (CommandProducer, Mixer) {
     let format = AudioFormat::new(8, 1).unwrap();
     let limits = PcmLimits::new(128, 512, 1).unwrap();

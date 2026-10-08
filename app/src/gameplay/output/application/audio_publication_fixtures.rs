@@ -32,6 +32,102 @@ use std::{
 };
 
 const LOGICAL_ORIGIN: i64 = 5_000_000_000;
+
+#[test]
+fn complete_native_owner_defers_tail_then_publishes_only_two_fresh_original_anchors() {
+    let (ready, mut current, mut pause, mut merger, _producer, now) =
+        super::output_continuity_fixtures::full_owner_native_ready();
+    let mut runtime = Rig::new().runtime;
+    let mut config = memory::config(false);
+    config.sample_rate = 3;
+    config.origin = ClockPoint {
+        domain: ClockDomainId(2),
+        timestamp: Timestamp::ZERO,
+    };
+    config.playback_origin = ClockPoint {
+        domain: ClockDomainId(1),
+        timestamp: Timestamp::ZERO,
+    };
+    config.stream_origin = config.playback_origin;
+    let mut end = None;
+    let mut output = None;
+    let context = GameplayAudioOutputContext {
+        control: GameplayPauseControl::solo(&mut runtime),
+        presentation: &mut current,
+        pause: &mut pause,
+        merger: &mut merger,
+        config: &mut config,
+        end: &mut end,
+    };
+    assert!(publish_ready_audio_output(ready, &mut output, context, now).is_ok());
+    assert_eq!(current.authority().epoch().id, 1);
+    assert_eq!(pause.epoch(), 1);
+    assert_eq!(
+        config.playback_origin.timestamp,
+        Timestamp::from_nanos(1_333_333_333)
+    );
+    let state = output.unwrap().state.unwrap();
+    assert_eq!(state.pending_samples(), &[0.0]);
+    assert_eq!(state.mixer().playback_frame_cursor(), 2);
+}
+
+#[test]
+fn complete_native_publication_refusal_retains_exact_owner_and_exclusive_hold_for_retry() {
+    let (ready, mut current, mut pause, mut merger, mut producer, now) =
+        super::output_continuity_fixtures::full_owner_native_ready();
+    let mut runtime = Rig::new().runtime;
+    let mut config = memory::config(false);
+    config.sample_rate = 4; // Intentional incompatible target-grid refusal.
+    let mut end = None;
+    let mut output = None;
+    let context = GameplayAudioOutputContext {
+        control: GameplayPauseControl::solo(&mut runtime),
+        presentation: &mut current,
+        pause: &mut pause,
+        merger: &mut merger,
+        config: &mut config,
+        end: &mut end,
+    };
+    let failure = match publish_ready_audio_output(ready, &mut output, context, now) {
+        Err(failure) => failure,
+        Ok(()) => panic!("wrong grid must refuse"),
+    };
+    assert!(output.is_none());
+    assert_eq!(current.authority().epoch().id, 0);
+    assert_eq!(pause.epoch(), 0);
+    assert!(producer.hold_pause().is_err());
+    assert_eq!(
+        failure
+            .ready
+            .output
+            .state
+            .as_ref()
+            .unwrap()
+            .pending_samples(),
+        &[0.0]
+    );
+    config.sample_rate = 3;
+    config.origin = ClockPoint {
+        domain: ClockDomainId(2),
+        timestamp: Timestamp::ZERO,
+    };
+    config.playback_origin = ClockPoint {
+        domain: ClockDomainId(1),
+        timestamp: Timestamp::ZERO,
+    };
+    config.stream_origin = config.playback_origin;
+    let context = GameplayAudioOutputContext {
+        control: GameplayPauseControl::solo(&mut runtime),
+        presentation: &mut current,
+        pause: &mut pause,
+        merger: &mut merger,
+        config: &mut config,
+        end: &mut end,
+    };
+    assert!(publish_ready_audio_output(failure.ready, &mut output, context, now).is_ok());
+    assert!(producer.hold_pause().is_ok());
+    assert_eq!(current.authority().epoch().id, 1);
+}
 fn point(domain: u32, nanos: i64) -> ClockPoint {
     ClockPoint {
         domain: ClockDomainId(domain),

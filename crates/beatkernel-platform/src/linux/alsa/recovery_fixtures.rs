@@ -95,7 +95,7 @@ fn worker(error: bool) -> (AlsaStream, CommandProducer, mpsc::Sender<()>) {
         } else {
             Ok(())
         };
-        (result, mixer)
+        (result, NativeOutputState::from_mixer(mixer))
     });
     (
         AlsaStream {
@@ -103,7 +103,7 @@ fn worker(error: bool) -> (AlsaStream, CommandProducer, mpsc::Sender<()>) {
             basis,
             shared,
             worker: Some(handle),
-            recovered_mixer: None,
+            recovered_output: None,
             retired: false,
         },
         producer,
@@ -176,7 +176,7 @@ fn ordinary_joined_worker_error_returns_original_diagnostic_and_retains_rendered
 fn worker_panic_never_claims_retirement_or_recovers_destroyed_worker_state() {
     let (_, mixer) = rig();
     let basis = mixer.output_frame_basis();
-    let handle: JoinHandle<(Result<(), LinuxError>, Mixer)> = thread::spawn(move || {
+    let handle: JoinHandle<WorkerExit> = thread::spawn(move || {
         let _owned = mixer;
         panic!("controlled memory worker panic")
     });
@@ -185,7 +185,7 @@ fn worker_panic_never_claims_retirement_or_recovers_destroyed_worker_state() {
         basis,
         shared: Arc::new(Shared::new()),
         worker: Some(handle),
-        recovered_mixer: None,
+        recovered_output: None,
         retired: false,
     };
     assert!(matches!(stream.stop(), Err(LinuxError::WorkerPanicked)));
@@ -199,5 +199,5 @@ fn worker_panic_never_claims_retirement_or_recovers_destroyed_worker_state() {
         stream.take_stopped_mixer(),
         Err(LinuxError::InvalidLifecycle)
     ));
-    assert!(stream.recovered_mixer.is_none());
+    assert!(stream.recovered_output.is_none());
 }

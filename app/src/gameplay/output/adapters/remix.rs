@@ -9,7 +9,7 @@ use crate::{
     native_gameplay::NativeGameplayResult,
 };
 use beatkernel::{
-    audio::{Mixer, OutputFrameBasis, OutputOpenFailure, RenderReport},
+    audio::{OutputFrameBasis, OutputOpenFailure, RenderReport, SoftwareOutputState},
     time::{ClockPair, ClockPoint},
 };
 
@@ -21,7 +21,9 @@ impl<B> RemixedOutputBackend<B> {
         Self { inner }
     }
 }
-impl<B: OutputChannelRemixBackend> OutputReplacementBackend for RemixedOutputBackend<B> {
+impl<B: OutputChannelRemixBackend<O>, O: SoftwareOutputState> OutputReplacementBackend<O>
+    for RemixedOutputBackend<B>
+{
     type Presentation = B::Presentation;
     type Output = B::Output;
     type Request = RemixedOutputRequest<B::Request>;
@@ -29,9 +31,9 @@ impl<B: OutputChannelRemixBackend> OutputReplacementBackend for RemixedOutputBac
     fn open(
         &mut self,
         request: Self::Request,
-        mixer: Mixer,
+        mixer: O,
         epoch: u64,
-    ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output>> {
+    ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output, O>> {
         match request.matrix {
             Some(matrix) => self
                 .inner
@@ -57,6 +59,14 @@ impl<B: OutputChannelRemixBackend> OutputReplacementBackend for RemixedOutputBac
         presentation: &mut Self::Presentation,
     ) -> Result<(), Self::Error> {
         self.inner.observe(output, presentation)
+    }
+    fn observe_replacement(
+        &mut self,
+        output: &mut Self::Output,
+        presentation: &mut Self::Presentation,
+        pause: &crate::playback_pause::NativePause,
+    ) -> Result<(), Self::Error> {
+        self.inner.observe_replacement(output, presentation, pause)
     }
     fn observe_end(
         &self,
@@ -84,9 +94,11 @@ impl<B: OutputChannelRemixBackend> OutputReplacementBackend for RemixedOutputBac
 #[path = "remix_fixtures.rs"]
 mod remix_fixtures;
 
-impl<B> crate::gameplay::output::ports::OriginalNativeOutputBackend for RemixedOutputBackend<B>
+impl<B, O: SoftwareOutputState> crate::gameplay::output::ports::OriginalNativeOutputBackend<O>
+    for RemixedOutputBackend<B>
 where
-    B: OutputChannelRemixBackend + crate::gameplay::output::ports::OriginalNativeOutputBackend,
+    B: OutputChannelRemixBackend<O>
+        + crate::gameplay::output::ports::OriginalNativeOutputBackend<O>,
 {
     fn observe_native(
         &mut self,
