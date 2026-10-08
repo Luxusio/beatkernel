@@ -41,7 +41,9 @@ Updated focused checks pass 22 converter and 14 owner tests. Production code
 is unchanged by this test-only correction.
 
 Evidence: `target/wf/converted-output-continuity/converter-development-second.log`
-and `owner-development-third.log`. Unequal native rate enablement, full-owner
+and `owner-development-third.log`; allocation-refusal remediation evidence is
+`target/wf/converted-output-continuity/allocation-refusal-final-development.log`.
+Unequal native rate enablement, full-owner
 retirement/recovery, target-grid evidence, pause/end/publication migration and
 supported-host/physical measurements remain mandatory later Goal work. BK019
 and the full player are not complete merely because this component exists.
