@@ -1,6 +1,6 @@
 # Portable converted output continuity
 
-Status: development checks passed; independent review and final QA pending.
+Status: independent code/security/documentation review and required CLI QA passed.
 
 The additive continuity-enabled converter preserves exact rational source
 position, retained past samples and unread lookahead through cold target-rate,
@@ -43,6 +43,21 @@ is unchanged by this test-only correction.
 Evidence: `target/wf/converted-output-continuity/converter-development-second.log`
 and `owner-development-third.log`; allocation-refusal remediation evidence is
 `target/wf/converted-output-continuity/allocation-refusal-final-development.log`.
+Final QA at `c06135f` passed 3,037 workspace unit/integration tests and 20
+doc-tests (zero failures; six ignored). The focused 49 passing tests are a
+subset, not an additional total. A standalone public API PCM/position oracle
+also passed. Production browser and browser-audio WASM library checks passed;
+Windows/Darwin all-target Rust checks passed with C stubs, without linking or
+native execution. Evidence is in
+`target/wf/converted-output-continuity/qa-cli-1/evidence-summary.json`.
+
+An additional browser WASM all-target check failed on 16 preexisting app
+fixture cfg/import errors. The affected app definitions are unchanged from
+`aa037e0`; this remaining Goal defect does not imply production WASM library
+failure, and WASM test targets are not claimed to pass. Allocation-refusal
+coverage is captured in committed integration tests. The standalone driver
+linker setup is task-local evidence; its recipe is not promoted to a runbook.
+
 Unequal native rate enablement, full-owner
 retirement/recovery, target-grid evidence, pause/end/publication migration and
 supported-host/physical measurements remain mandatory later Goal work. BK019

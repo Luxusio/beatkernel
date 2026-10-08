@@ -1,7 +1,7 @@
 # Exact converted output continuity
 
-Status: source implementation and development checks passed; independent
-review and final QA pending.
+Status: source implementation, independent code/security/documentation review
+and required CLI QA passed. Native integration and physical proof remain open.
 
 The original Mixer source format and source identity remain immutable. One
 portable owner must retain the Mixer, converter, exact next rational source
