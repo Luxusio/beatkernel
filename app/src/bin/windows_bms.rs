@@ -1,4 +1,7 @@
-//! Real BMS/WAV assets, physical keyboard acquisition and explicit WASAPI/ASIO output.
+#[cfg(any(target_os = "windows", test))]
+#[path = "windows_bms/input.rs"]
+mod collected_input;
+// Real BMS/WAV assets, physical keyboard acquisition and explicit WASAPI/ASIO output.
 #[cfg(test)]
 use beatkernel::audio::AudioCommand;
 #[cfg(test)]
@@ -756,7 +759,7 @@ mod native {
         windows::{
             audio::WasapiStream,
             clock::QpcClock,
-            input::{RawInputRegistration, RawInputUsage, WindowsInput},
+            input::{RawInputRegistration, RawInputUsage},
         },
     };
     use std::{
@@ -767,9 +770,8 @@ mod native {
         Foundation::{HINSTANCE, HWND},
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GIDC_ARRIVAL,
-            GIDC_REMOVAL, MSG, PM_REMOVE, PeekMessageW, RegisterClassW, TranslateMessage,
-            UnregisterClassW, WM_CLOSE, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_QUIT, WNDCLASSW,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW,
+            UnregisterClassW, WM_CLOSE, WNDCLASSW,
             WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         },
     };
@@ -803,14 +805,11 @@ mod native {
     }
 
     impl Window {
-        fn new() -> Result<Self> {
-            Self::with_visibility(!beatkernel_bms_runtime::player::attached(), "Input")
-        }
         #[cfg(feature = "asio-sdk")]
         pub(super) fn hidden() -> Result<Self> {
             Self::with_visibility(false, "AsioSysref")
         }
-        fn with_visibility(visible: bool, role: &str) -> Result<Self> {
+        pub(super) fn with_visibility(visible: bool, role: &str) -> Result<Self> {
             let class: Vec<u16> = format!("BeatKernelBms{}{}", std::process::id(), role)
                 .encode_utf16()
                 .chain(Some(0))
@@ -1023,15 +1022,14 @@ mod native {
         }
         Err("no accurate progressing presentation seed within two seconds".into())
     }
-    // Own registration and its target together. Created before stream, so early
-    // returns drop/join audio before this guard unregisters and destroys Window.
+    // Registration and target remain together on the acquisition owner thread.
     pub(super) struct AcquisitionWindow {
         pub(super) registration: RawInputRegistration,
         window: Option<Window>,
     }
     impl AcquisitionWindow {
-        pub(super) fn new() -> Result<Self> {
-            let window = Window::new()?;
+        pub(super) fn new(visible: bool) -> Result<Self> {
+            let window = Window::with_visibility(visible, "Input")?;
             let registration =
                 RawInputRegistration::register(window.hwnd as usize, &[RawInputUsage::KEYBOARD])?;
             Ok(Self {
@@ -1054,7 +1052,7 @@ mod native {
         }
     }
     use beatkernel_bms_runtime::native_gameplay::{
-        retain_input, run_gameplay_audio_with_policy_and_result_and_score,
+        run_gameplay_audio_with_policy_and_result_and_score,
         AudioGameplayConfig, InputBatch, NativeAudioGameplaySession,
         NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
     };
@@ -1064,18 +1062,15 @@ mod native {
     };
     use beatkernel_bms_runtime::native_start::{
         start_committed, NativeStartConfig, NativeStartDevice, NativeStartObservation,
-        NativeStartResult, MAX_START_INPUT_EVENTS,
+        NativeStartResult,
     };
     use beatkernel_platform::audio::presentation::validation::NativePresentationValidator;
     pub(super) struct GameplayDevice<'a> {
         pub(super) output: &'a mut super::owned_output::WindowsOutputOwner,
         pub(super) output_ui: &'a mut super::owned_output::WindowsOutputUi,
-        pub(super) input: &'a mut WindowsInput,
-        pub(super) acquisition: &'a AcquisitionWindow,
+        pub(super) collector: &'a mut beatkernel_bms_runtime::native_input::NativeInputCollector,
         pub(super) clock: &'a QpcClock,
-        pub(super) selected: &'a [(beatkernel::input::DeviceId, usize)],
-        pub(super) retained:
-            &'a mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
+        pub(super) collected: &'a mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
     }
     impl NativeGameplayDevice for GameplayDevice<'_> {
         fn observe_audio(
@@ -1154,27 +1149,7 @@ mod native {
             &mut self,
             events: &mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
         ) -> NativeGameplayResult<InputBatch> {
-            let mut count = 0;
-            while count < 256 {
-                let Some(event) = self.retained.pop_front() else {
-                    break;
-                };
-                retain_input(events, event)?;
-                count += 1;
-            }
-            if count == 256 {
-                return Ok(InputBatch {
-                    backlog: true,
-                    closed: false,
-                });
-            }
-            read_messages(
-                self.input,
-                self.acquisition,
-                self.selected,
-                256 - count,
-                |event| retain_input(events, event),
-            )
+            self.collected.acquire(self.collector, events, 256)
         }
         fn observe_end(
             &mut self,
@@ -1197,35 +1172,25 @@ mod native {
     }
     pub(super) struct StartupDevice<'a> {
         pub(super) stream: &'a mut super::live_output::Output,
-        pub(super) input: &'a mut WindowsInput,
-        pub(super) acquisition: &'a AcquisitionWindow,
+        pub(super) collector: &'a mut beatkernel_bms_runtime::native_input::NativeInputCollector,
         pub(super) clock: &'a QpcClock,
-        pub(super) selected: &'a [(beatkernel::input::DeviceId, usize)],
         pub(super) pre_origin: &'a mut u64,
-        pub(super) retained:
-            &'a mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
+        pub(super) collected: &'a mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
         pub(super) physical: NativePresentationValidator,
     }
     struct AudioSeedDevice<'a> {
         output: &'a mut super::owned_output::WindowsOutputOwner,
-        input: &'a mut WindowsInput,
-        acquisition: &'a AcquisitionWindow,
+        collector: &'a mut beatkernel_bms_runtime::native_input::NativeInputCollector,
         clock: &'a QpcClock,
-        selected: &'a [(beatkernel::input::DeviceId, usize)],
         pre_origin: &'a mut u64,
-        retained: &'a mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
+        collected: &'a mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
         end: &'a mut Option<beatkernel_bms_runtime::native_end::NativeEnd>,
         seed_end: bool,
     }
     impl NativeAudioSeedPort for AudioSeedDevice<'_> {
         fn service_input(&mut self) -> NativeGameplayResult<bool> {
-            startup_messages(
-                self.input,
-                self.acquisition,
-                self.selected,
-                self.pre_origin,
-                Some(self.retained),
-            )
+            if player::cancelled() { self.collector.cancel(); return Ok(false); }
+            self.collected.service_start(self.collector, true, self.pre_origin, 256)
         }
         fn observe_audio(
             &mut self,
@@ -1261,12 +1226,10 @@ mod native {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn prime_output(
         output: &mut super::owned_output::WindowsOutputOwner,
-        input: &mut WindowsInput,
-        acquisition: &AcquisitionWindow,
+        collector: &mut beatkernel_bms_runtime::native_input::NativeInputCollector,
         clock: &QpcClock,
-        selected: &[(beatkernel::input::DeviceId, usize)],
         pre_origin: &mut u64,
-        retained: &mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
+        collected: &mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
         bgm: &mut BgmSession,
         producer: &mut beatkernel::audio::CommandProducer,
         end: &mut Option<beatkernel_bms_runtime::native_end::NativeEnd>,
@@ -1294,12 +1257,10 @@ mod native {
         )?;
         let mut port = AudioSeedDevice {
             output,
-            input,
-            acquisition,
+            collector,
             clock,
-            selected,
             pre_origin,
-            retained,
+            collected,
             end,
             seed_end,
         };
@@ -1315,17 +1276,8 @@ mod native {
             self.stream.start()
         }
         fn service_input(&mut self, retain: bool) -> NativeStartResult<bool> {
-            startup_messages(
-                self.input,
-                self.acquisition,
-                self.selected,
-                self.pre_origin,
-                if retain {
-                    Some(&mut *self.retained)
-                } else {
-                    None
-                },
-            )
+            if player::cancelled() { self.collector.cancel(); return Ok(false); }
+            self.collected.service_start(self.collector, retain, self.pre_origin, 256)
         }
         fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<Self::Evidence>>> {
             self.stream.startup_native_observation(&mut self.physical)
@@ -1346,108 +1298,6 @@ mod native {
         fn host_now(&self) -> NativeStartResult<ClockPoint> {
             Ok(self.clock.sample()?.normalized)
         }
-    }
-    fn startup_messages(
-        input: &mut WindowsInput,
-        acquisition: &AcquisitionWindow,
-        selected: &[(beatkernel::input::DeviceId, usize)],
-        pre_origin: &mut u64,
-        mut retained: Option<
-            &mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
-        >,
-    ) -> Result<bool> {
-        let batch = read_messages(input, acquisition, selected, 256, |event| {
-            if let Some(events) = retained.as_deref_mut() {
-                if events.len() >= MAX_START_INPUT_EVENTS {
-                    return Err("startup Raw Input buffer exhausted; restart required".into());
-                }
-                events.push_back(event);
-            } else {
-                *pre_origin = pre_origin.saturating_add(1);
-            }
-            Ok(())
-        })?;
-        Ok(!batch.closed)
-    }
-    fn read_messages(
-        input: &mut WindowsInput,
-        acquisition: &AcquisitionWindow,
-        selected: &[(beatkernel::input::DeviceId, usize)],
-        limit: usize,
-        mut admit: impl FnMut(beatkernel::input::PhysicalInputEvent) -> Result<()>,
-    ) -> Result<InputBatch> {
-        if player::cancelled() {
-            return Ok(InputBatch {
-                backlog: false,
-                closed: true,
-            });
-        }
-        // SAFETY: initialized native message storage, owned by this game thread.
-        let mut message: MSG = unsafe { std::mem::zeroed() };
-        for _ in 0..limit {
-            // SAFETY: live writable output on the message owner.
-            if unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } == 0 {
-                return Ok(InputBatch {
-                    backlog: false,
-                    closed: false,
-                });
-            }
-            if message.message == WM_QUIT || message.message == WM_CLOSE {
-                return Ok(InputBatch {
-                    backlog: false,
-                    closed: true,
-                });
-            }
-            if message.hwnd == acquisition.hwnd() && message.message == WM_INPUT {
-                let acquired = input.read_raw_input(message.lParam as usize, Some(message.time));
-                if message.wParam & 0xff == 0 {
-                    // SAFETY: foreground Raw Input cleanup occurs once, even on decode failure.
-                    unsafe {
-                        DefWindowProcW(
-                            message.hwnd,
-                            message.message,
-                            message.wParam,
-                            message.lParam,
-                        );
-                    }
-                }
-                for event in acquired?.input.events {
-                    if !selected.is_empty()
-                        && !selected.iter().any(|(id, _)| event.meta().source == *id)
-                    {
-                        continue;
-                    }
-                    admit(event)?;
-                }
-                continue;
-            }
-            if message.hwnd == acquisition.hwnd() && message.message == WM_INPUT_DEVICE_CHANGE {
-                match message.wParam as u32 {
-                    GIDC_ARRIVAL => {
-                        input.attach_device(message.lParam as usize)?;
-                    }
-                    GIDC_REMOVAL => {
-                        if selected
-                            .iter()
-                            .any(|(_, handle)| *handle == message.lParam as usize)
-                        {
-                            return Err("selected keyboard detached during acquisition".into());
-                        }
-                        input.remove_device(message.lParam as usize);
-                    }
-                    _ => {}
-                }
-            }
-            // SAFETY: real message and stateless owning-window procedure.
-            unsafe {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-        }
-        Ok(InputBatch {
-            backlog: true,
-            closed: false,
-        })
     }
     pub(super) fn run(
         options: Options,
@@ -1523,22 +1373,10 @@ mod native {
                 warning.line, warning.message
             );
         }
-        let mut acquisition = AcquisitionWindow::new()?;
-        let mut input = WindowsInput::new(clock);
-        let devices = input.enumerate_devices()?;
-        let selected = selected_keyboard(
-            options.keyboard_path.as_deref(),
-            devices
-                .iter()
-                .filter(|d| d.kind == beatkernel_platform::raw_input::RawDeviceKind::Keyboard)
-                .map(|d| {
-                    (
-                        d.interface_path.as_str(),
-                        d.descriptor.runtime_id.0,
-                        d.handle,
-                    )
-                }),
+        let (mut input_owner, selected_metadata) = super::collected_input::CollectorOwner::open(
+            clock, super::collected_input::Selection::Solo(options.keyboard_path.clone()),
         )?;
+        let selected = selected_metadata.first().map(|(id, handle)| (id.0, *handle));
         let keyboard_selector = selected.map_or(DeviceSelector::Any, |(id, _)| {
             DeviceSelector::Exact(beatkernel::input::DeviceId(id))
         });
@@ -1630,9 +1468,7 @@ mod native {
         }
         let mut capture = None;
         let mut pre_origin_inputs = 0u64;
-        let mut startup_inputs = std::collections::VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
-        let startup_selection =
-            selected.map(|(id, handle)| (beatkernel::input::DeviceId(id), handle));
+        let mut collected = beatkernel_bms_runtime::native_gameplay::NativeCollectedInput::new()?;
         let mut score = beatkernel_bms_runtime::competition::ScoreSummary::default();
         let outcome =
             (|| -> Result<Option<beatkernel_bms_runtime::play_result::CompletedPlayResult>> {
@@ -1652,6 +1488,7 @@ mod native {
                 )?;
                 let start_basis = super::owned_output::basis(&output)?;
                 let creation_epoch = output.last_issued_epoch();
+                input_owner.activate();
                 let committed_start = if network_start {
                     let competition = competition
                         .as_mut()
@@ -1659,12 +1496,10 @@ mod native {
                     let started = {
                         let mut device = StartupDevice {
                             stream: super::owned_output::stream(&mut output)?,
-                            input: &mut input,
-                            acquisition: &acquisition,
+                            collector: &mut input_owner.collector,
                             clock: &clock,
-                            selected: startup_selection.as_slice(),
                             pre_origin: &mut pre_origin_inputs,
-                            retained: &mut startup_inputs,
+                            collected: &mut collected,
                             physical: NativePresentationValidator::new(
                                 creation_epoch,
                                 start_basis.point_at_stream_frame(0)?,
@@ -1702,13 +1537,8 @@ mod native {
                 } else {
                     if let Some(competition) = competition.as_mut() {
                         if !competition.await_network_ready(|| {
-                            startup_messages(
-                                &mut input,
-                                &acquisition,
-                                startup_selection.as_slice(),
-                                &mut pre_origin_inputs,
-                                None,
-                            )
+                            if player::cancelled() { input_owner.collector.cancel(); return Ok(false); }
+                            collected.service_start(&mut input_owner.collector, false, &mut pre_origin_inputs, 256)
                         })? {
                             return Ok(None);
                         }
@@ -1718,12 +1548,10 @@ mod native {
                 };
                 let Some((mut presentation, seed, before)) = prime_output(
                     &mut output,
-                    &mut input,
-                    &acquisition,
+                    &mut input_owner.collector,
                     &clock,
-                    startup_selection.as_slice(),
                     &mut pre_origin_inputs,
-                    &mut startup_inputs,
+                    &mut collected,
                     &mut bgm,
                     &mut producer,
                     &mut native_end,
@@ -1771,16 +1599,12 @@ mod native {
                     runtime.set_song_end(Timestamp::from_nanos(end))?;
                 }
                 let pump = {
-                    let gameplay_selection =
-                        selected.map(|(id, handle)| (beatkernel::input::DeviceId(id), handle));
                     let mut device = GameplayDevice {
                         output: &mut output,
                         output_ui: &mut output_ui,
-                        input: &mut input,
-                        acquisition: &acquisition,
+                        collector: &mut input_owner.collector,
                         clock: &clock,
-                        selected: gameplay_selection.as_slice(),
-                        retained: &mut startup_inputs,
+                        collected: &mut collected,
                     };
                     run_gameplay_audio_with_policy_and_result_and_score(
                         &mut device,
@@ -1830,7 +1654,7 @@ mod native {
             })();
         // Both cleanups run before propagating any start/calibration/pump error.
         let stop = output.stop(); // closes/drains the selected native backend
-        let close = acquisition.registration.close();
+        let close = input_owner.stop_and_join();
         println!(
             "pre-output-origin physical inputs ignored without retimestamping={pre_origin_inputs}; physical latency remains unmeasured"
         );

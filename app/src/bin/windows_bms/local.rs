@@ -1,5 +1,5 @@
 //! Actual Windows local cohort: one Raw Input pump and one shared native output.
-use super::native::{AcquisitionWindow, HOST, LOGICAL, OUTPUT};
+use super::native::{HOST, LOGICAL, OUTPUT};
 use super::*;
 #[cfg(test)]
 use beatkernel::input::PhysicalControlId;
@@ -16,7 +16,7 @@ use beatkernel_bms_runtime::native_cohort_setup::{
     prepare_audio_cohort_with_policy, CohortPreparation, PreparedCohort,
 };
 use beatkernel_bms_runtime::native_start::{
-    MAX_START_INPUT_EVENTS, NativeStartConfig, start_committed,
+    NativeStartConfig, start_committed,
 };
 use beatkernel_bms_runtime::{
     ChannelPolicy,
@@ -42,12 +42,11 @@ use beatkernel_bms_runtime::{
 };
 use beatkernel_platform::{
     audio::presentation::{discipline::DisciplineConfig, validation::NativePresentationValidator},
-    raw_input::RawDeviceKind,
-    windows::{clock::QpcClock, input::WindowsInput},
+    windows::clock::QpcClock,
 };
 
 /// Exact fresh attachment identities, without publishing native interface paths.
-fn resolve_keyboards(
+pub(super) fn resolve_keyboards(
     requested: &[(PlayerId, String)],
     attached: &[(&str, u64, usize)],
 ) -> Result<Vec<(DeviceId, usize)>> {
@@ -88,22 +87,6 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
         4096, HOST,
     )?);
-    // Declared before output setup so exceptional exits close output owners first.
-    let mut acquisition = AcquisitionWindow::new()?;
-    let mut input = WindowsInput::new(clock);
-    let devices = input.enumerate_devices()?;
-    let attached: Vec<_> = devices
-        .iter()
-        .filter(|device| device.kind == RawDeviceKind::Keyboard)
-        .map(|device| {
-            (
-                device.interface_path.as_str(),
-                device.descriptor.runtime_id.0,
-                device.handle,
-            )
-        })
-        .collect();
-    let selected = resolve_keyboards(&options.local_players, &attached)?;
     let setup = super::live_output::Setup::new(&options, clock)?;
     let pcm = setup.format();
     let output_origin = ClockPoint {
@@ -168,6 +151,9 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     if beatkernel_bms_runtime::player::cancelled() {
         return Ok(());
     }
+    let (mut input_owner, selected) = super::collected_input::CollectorOwner::open(
+        clock, super::collected_input::Selection::Local(options.local_players.clone()),
+    )?;
     let assignments: Vec<_> = options
         .local_players
         .iter()
@@ -227,7 +213,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         Err(error) => {
             drop(setup);
             let mut failures = vec![format!("local audio preparation: {error}")];
-            if let Err(close) = acquisition.registration.close() {
+            if let Err(close) = input_owner.stop_and_join() {
                 failures.push(format!("input cleanup: {close}"));
             }
             finish_cohort_network(network.as_mut(), &states, &mut failures);
@@ -239,7 +225,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         Ok(stream) => stream,
         Err(error) => {
             let mut failures = vec![format!("native output open: {error}")];
-            if let Err(close) = acquisition.registration.close() {
+            if let Err(close) = input_owner.stop_and_join() {
                 failures.push(format!("input cleanup: {close}"));
             }
             finish_cohort_network(network.as_mut(), &states, &mut failures);
@@ -253,22 +239,21 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         super::owned_output::stream(&mut output)?.description()
     );
     let mut before_origin = 0u64;
-    let mut retained = std::collections::VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
+    let mut collected = beatkernel_bms_runtime::native_gameplay::NativeCollectedInput::new()?;
     let outcome = (|| -> Result<Option<Vec<(beatkernel_bms_runtime::local_players::PlayerId,beatkernel_bms_runtime::play_result::CompletedPlayResult)>>> {
         let start_basis = super::owned_output::basis(&output)?;
         let creation_epoch = output.last_issued_epoch();
+        input_owner.activate();
         let committed_start = if let Some(network) =
             network.as_mut()
         {
             let started = {
                 let mut device = super::native::StartupDevice {
                     stream: super::owned_output::stream(&mut output)?,
-                    input: &mut input,
-                    acquisition: &acquisition,
+                    collector: &mut input_owner.collector,
                     clock: &clock,
-                    selected: &selected,
                     pre_origin: &mut before_origin,
-                    retained: &mut retained,
+                    collected: &mut collected,
                     physical: NativePresentationValidator::new(creation_epoch, start_basis.point_at_stream_frame(0)?, HOST),
                 };
                 start_committed(
@@ -300,8 +285,8 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             super::owned_output::stream(&mut output)?.start()?;
             None
         };
-        let Some((mut presentation, seed, before)) = super::native::prime_output(&mut output, &mut input, &acquisition,
-            &clock, &selected, &mut before_origin, &mut retained, &mut bgm, &mut producer, &mut native_end, committed_start.is_none())? else { return Ok(None); };
+        let Some((mut presentation, seed, before)) = super::native::prime_output(&mut output, &mut input_owner.collector,
+            &clock, &mut before_origin, &mut collected, &mut bgm, &mut producer, &mut native_end, committed_start.is_none())? else { return Ok(None); };
         let playback_origin = committed_start.map_or(output_origin, |(_, playback)| playback);
         let host_origin = match committed_start { Some((host, _)) => host, None => seed.host_for_output(playback_origin, before)? };
         let logical_origin = presentation.logical_output(playback_origin)?;
@@ -323,11 +308,9 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             let mut device = super::native::GameplayDevice {
                 output: &mut output,
                 output_ui: &mut output_ui,
-                input: &mut input,
-                acquisition: &acquisition,
+                collector: &mut input_owner.collector,
                 clock: &clock,
-                selected: &selected,
-                retained: &mut retained,
+                collected: &mut collected,
             };
             let selected_policies: Vec<_> = assignments
                 .iter()
@@ -381,7 +364,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     // Stop/join every output callback before unregistering physical acquisition,
     // finishing ghosts, and attempting every independent replay save.
     let stop = output.stop();
-    let close = acquisition.registration.close();
+    let close = input_owner.stop_and_join();
     println!(
         "shared final output={:?}; pre-origin ignored={before_origin}; physical delivery unverified",
         output.current_mut().map(|out| out.native.description())
