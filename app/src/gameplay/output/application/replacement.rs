@@ -56,14 +56,14 @@ pub struct ReplacementFailure<E> {
     pub recovery: Option<E>,
 }
 impl<E> ReplacementFailure<E> {
-    fn policy(message: &'static str) -> Self {
+    pub(super) fn policy(message: &'static str) -> Self {
         Self {
             cause: ReplacementCause::Policy(message),
             cleanup: None,
             recovery: None,
         }
     }
-    fn timing(error: Box<dyn std::error::Error>) -> Self {
+    pub(super) fn timing(error: Box<dyn std::error::Error>) -> Self {
         Self {
             cause: ReplacementCause::Timing(error),
             cleanup: None,
@@ -130,19 +130,23 @@ struct AudioWaitingTiming {
     snapshots: [Option<NativeAudioSnapshot>; 2],
     pairs: [Option<beatkernel::time::ClockPair>; 2],
 }
+#[path = "target_replacement.rs"]
+pub mod target;
 enum WaitingTiming<P: GameplayPresentationPort> {
     Legacy(PreparedOutputTiming<P>),
     Audio(AudioWaitingTiming),
+    Target(target::TargetWaitingTiming),
 }
 impl<P: GameplayPresentationPort> WaitingTiming<P> {
-    fn basis(&self) -> OutputFrameBasis {
+    fn basis(&self) -> Result<OutputFrameBasis, &'static str> {
         match self {
-            Self::Legacy(value) => value.basis,
-            Self::Audio(value) => value.basis,
+            Self::Legacy(value) => Ok(value.basis),
+            Self::Audio(value) => Ok(value.basis),
+            Self::Target(_) => Err("target timing has no fixed source-grid basis"),
         }
     }
 }
-struct Waiting<B: OutputReplacementBackend<O>, O: SoftwareOutputState = Mixer> {
+struct Waiting<B: OutputReplacementBackend<O, Basis>, O = Mixer, Basis = OutputFrameBasis> {
     output: B::Output,
     timing: WaitingTiming<B::Presentation>,
     hold: PauseHold,
@@ -150,25 +154,31 @@ struct Waiting<B: OutputReplacementBackend<O>, O: SoftwareOutputState = Mixer> {
     first_poll: Option<ClockPoint>,
     last_poll: Option<ClockPoint>,
 }
-enum Slot<B: OutputReplacementBackend<O>, O: SoftwareOutputState = Mixer> {
+enum Slot<B: OutputReplacementBackend<O, Basis>, O = Mixer, Basis = OutputFrameBasis> {
     Detached,
     Attached(B::Output),
     Recovered(O),
     Pending(B::Output),
-    Waiting(Waiting<B, O>),
+    Waiting(Waiting<B, O, Basis>),
     Unavailable,
 }
-pub struct OutputReplacement<B: OutputReplacementBackend<O>, O: SoftwareOutputState = Mixer> {
+pub struct OutputReplacement<
+    B: OutputReplacementBackend<O, Basis>,
+    O = Mixer,
+    Basis = OutputFrameBasis,
+> {
     backend: B,
-    slot: Slot<B, O>,
+    slot: Slot<B, O, Basis>,
     last_issued: u64,
+    retirement_hold: Option<PauseHold>,
 }
-impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B, O> {
+impl<B: OutputReplacementBackend<O, Basis>, O, Basis> OutputReplacement<B, O, Basis> {
     pub fn new(backend: B) -> Self {
         Self {
             backend,
             slot: Slot::Detached,
             last_issued: 0,
+            retirement_hold: None,
         }
     }
     pub fn state(&self) -> ReplacementState {
@@ -211,6 +221,9 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
         output: B::Output,
     ) -> Result<(), ReplacementFailure<B::Error>> {
         let (cleanup, recovery) = self.cleanup_output(output);
+        if self.state() != ReplacementState::PendingRetirement {
+            self.retirement_hold = None;
+        }
         match (cleanup, recovery) {
             (Some(error), recovery) => {
                 let mut failure = ReplacementFailure::backend(ReplacementPhase::Retire, error);
@@ -223,6 +236,20 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
             )),
             (None, None) => Ok(()),
         }
+    }
+    pub(super) fn retain_retirement_hold(&mut self, hold: PauseHold) {
+        if self.state() == ReplacementState::PendingRetirement {
+            self.retirement_hold = Some(hold);
+        }
+    }
+    pub(super) fn retire_owned_output_held(
+        &mut self,
+        output: B::Output,
+        hold: PauseHold,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        let result = self.retire_owned_output(output);
+        self.retain_retirement_hold(hold);
+        result
     }
     /// Rejected ownership is returned untouched, never implicitly dropped.
     pub fn attach(&mut self, output: B::Output) -> Result<(), B::Output> {
@@ -260,29 +287,9 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
             }
         }
     }
-    pub fn begin(
-        &mut self,
-        request: B::Request,
-        current: &B::Presentation,
-        pause: &NativePause,
-        original_song: Timestamp,
-        wait_ns: u64,
-        acquire: impl FnOnce() -> Result<PauseHold, PauseHoldError>,
-    ) -> Result<(), ReplacementFailure<B::Error>> {
-        if pause.phase() != PausePhase::Paused {
-            return Err(ReplacementFailure::policy(
-                "output replacement requires acknowledged pause",
-            ));
-        }
-        let epoch = current.epoch().ok_or_else(|| {
-            ReplacementFailure::policy("output replacement requires presentation epochs")
-        })?;
-        self.begin_with(request, epoch, pause, wait_ns, acquire, |next, mixer| {
-            prepare_output_timing_rebind_state(current, pause, next, mixer, original_song)
-                .map(WaitingTiming::Legacy)
-        })
-    }
-    fn begin_with(
+}
+impl<B: OutputReplacementBackend<O, Basis>, O, Basis: PartialEq> OutputReplacement<B, O, Basis> {
+    fn begin_lifecycle_with(
         &mut self,
         request: B::Request,
         epoch: u64,
@@ -290,10 +297,14 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
         wait_ns: u64,
         acquire: impl FnOnce() -> Result<PauseHold, PauseHoldError>,
         prepare: impl FnOnce(
+            &B,
+            &B::Request,
             u64,
             &O,
-        )
-            -> Result<WaitingTiming<B::Presentation>, Box<dyn std::error::Error>>,
+        ) -> Result<
+            (WaitingTiming<B::Presentation>, Basis),
+            ReplacementFailure<B::Error>,
+        >,
     ) -> Result<(), ReplacementFailure<B::Error>> {
         if pause.phase() != PausePhase::Paused {
             return Err(ReplacementFailure::policy(
@@ -357,6 +368,7 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
                     }
                     (Err(error), Err(recovery)) => {
                         self.slot = Slot::Pending(output);
+                        self.retain_retirement_hold(hold);
                         let mut failure =
                             ReplacementFailure::backend(ReplacementPhase::Retire, error);
                         failure.recovery = Some(recovery);
@@ -364,6 +376,7 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
                     }
                     (Ok(()), Err(error)) => {
                         self.slot = Slot::Pending(output);
+                        self.retain_retirement_hold(hold);
                         return Err(ReplacementFailure::backend(
                             ReplacementPhase::Recover,
                             error,
@@ -373,17 +386,11 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
             }
             _ => unreachable!("preflight admitted only attached or recovered ownership"),
         };
-        if !mixer.paused_tail_admissible() {
-            self.slot = Slot::Recovered(mixer);
-            return Err(ReplacementFailure::policy(
-                "held output replacement requires a proven paused-zero retained tail",
-            ));
-        }
-        let timing = match prepare(next_epoch, &mixer) {
+        let (timing, basis) = match prepare(&self.backend, &request, next_epoch, &mixer) {
             Ok(timing) => timing,
             Err(error) => {
                 self.slot = Slot::Recovered(mixer);
-                return Err(ReplacementFailure::timing(error));
+                return Err(error);
             }
         };
         // Consume creation identity before every real attempt, including refusal.
@@ -397,6 +404,7 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
                     (None, Some(mixer)) => Slot::Recovered(mixer),
                     (None, None) => Slot::Unavailable,
                 };
+                self.retain_retirement_hold(hold);
                 return Err(ReplacementFailure {
                     cause: ReplacementCause::Backend {
                         phase: ReplacementPhase::Open,
@@ -407,18 +415,22 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
                 });
             }
         };
-        if self.backend.epoch(&output) != next_epoch
-            || self.backend.basis(&output) != timing.basis()
-        {
+        if self.backend.epoch(&output) != next_epoch || self.backend.basis(&output) != basis {
             let (cleanup, recovery) = self.cleanup_output(output);
+            self.retain_retirement_hold(hold);
             return Err(ReplacementFailure {
                 cause: ReplacementCause::Policy("opened output epoch or frame basis differs"),
                 cleanup,
                 recovery,
             });
         }
-        if let Err(error) = self.backend.start(&mut output) {
+        if let Err(error) = self
+            .backend
+            .prepare_replacement_start(&mut output)
+            .and_then(|_| self.backend.start(&mut output))
+        {
             let (cleanup, recovery) = self.cleanup_output(output);
+            self.retain_retirement_hold(hold);
             return Err(ReplacementFailure {
                 cause: ReplacementCause::Backend {
                     phase: ReplacementPhase::Start,
@@ -437,6 +449,61 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
             last_poll: None,
         });
         Ok(())
+    }
+}
+impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B, O> {
+    pub fn begin(
+        &mut self,
+        request: B::Request,
+        current: &B::Presentation,
+        pause: &NativePause,
+        original_song: Timestamp,
+        wait_ns: u64,
+        acquire: impl FnOnce() -> Result<PauseHold, PauseHoldError>,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        if pause.phase() != PausePhase::Paused {
+            return Err(ReplacementFailure::policy(
+                "output replacement requires acknowledged pause",
+            ));
+        }
+        let epoch = current.epoch().ok_or_else(|| {
+            ReplacementFailure::policy("output replacement requires presentation epochs")
+        })?;
+        self.begin_with(request, epoch, pause, wait_ns, acquire, |next, mixer| {
+            prepare_output_timing_rebind_state(current, pause, next, mixer, original_song)
+                .map(WaitingTiming::Legacy)
+        })
+    }
+    fn begin_with(
+        &mut self,
+        request: B::Request,
+        epoch: u64,
+        pause: &NativePause,
+        wait_ns: u64,
+        acquire: impl FnOnce() -> Result<PauseHold, PauseHoldError>,
+        prepare: impl FnOnce(
+            u64,
+            &O,
+        )
+            -> Result<WaitingTiming<B::Presentation>, Box<dyn std::error::Error>>,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        self.begin_lifecycle_with(
+            request,
+            epoch,
+            pause,
+            wait_ns,
+            acquire,
+            |_, _, next, owner| {
+                if !owner.paused_tail_admissible() {
+                    return Err(ReplacementFailure::policy(
+                        "held output replacement requires a proven paused-zero retained tail",
+                    ));
+                }
+                let timing = prepare(next, owner).map_err(ReplacementFailure::timing)?;
+                let basis = timing.basis().map_err(ReplacementFailure::policy)?;
+                Ok((timing, basis))
+            },
+        )
     }
     pub fn poll(
         &mut self,
@@ -523,6 +590,11 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
                 .map_err(|error| ReplacementFailure::backend(ReplacementPhase::Observe, error))?;
             let epoch = timing.pause.epoch();
             match evidence {
+                LivePauseObservation::Target { .. } => {
+                    return Err(ReplacementFailure::policy(
+                        "source-grid replacement cannot consume target pause evidence",
+                    ));
+                }
                 LivePauseObservation::Point(pair) => {
                     timing
                         .pause
@@ -568,12 +640,15 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
             }
             Err(mut failure) => {
                 let (cleanup, recovery) = self.cleanup_output(waiting.output);
+                self.retain_retirement_hold(waiting.hold);
                 failure.cleanup = cleanup;
                 failure.recovery = recovery;
                 Err(failure)
             }
         }
     }
+}
+impl<B: OutputReplacementBackend<O, Basis>, O, Basis> OutputReplacement<B, O, Basis> {
     pub fn cancel(&mut self) -> Result<bool, ReplacementFailure<B::Error>> {
         let slot = std::mem::replace(&mut self.slot, Slot::Detached);
         let Slot::Waiting(waiting) = slot else {
@@ -581,6 +656,7 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
             return Ok(false);
         };
         let (cleanup, recovery) = self.cleanup_output(waiting.output);
+        self.retain_retirement_hold(waiting.hold);
         match (cleanup, recovery) {
             (Some(error), recovery) => {
                 let mut failure = ReplacementFailure::backend(ReplacementPhase::Retire, error);
@@ -601,6 +677,9 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
             return Ok(false);
         };
         let (cleanup, recovery) = self.cleanup_output(output);
+        if self.state() != ReplacementState::PendingRetirement {
+            self.retirement_hold = None;
+        }
         match (cleanup, recovery) {
             (Some(error), recovery) => {
                 let mut failure = ReplacementFailure::backend(ReplacementPhase::Retire, error);
@@ -946,6 +1025,7 @@ impl<B: OriginalNativeOutputBackend<O>, O: SoftwareOutputState> OutputReplacemen
             Err(mut failure) => {
                 let (cleanup, recovery) = self.cleanup_output(waiting.output);
                 failure.cleanup = cleanup;
+                self.retain_retirement_hold(waiting.hold);
                 failure.recovery = recovery;
                 Err(failure)
             }
@@ -955,6 +1035,10 @@ impl<B: OriginalNativeOutputBackend<O>, O: SoftwareOutputState> OutputReplacemen
 #[cfg(test)]
 #[path = "replacement_fixtures.rs"]
 mod fixtures;
+
+#[cfg(test)]
+#[path = "target_lifecycle_fixtures.rs"]
+mod target_lifecycle_fixtures;
 
 #[cfg(test)]
 #[path = "audio_publication_fixtures.rs"]

@@ -1,18 +1,18 @@
 //! Bounded historical records, distinct from live completion evidence.
 use crate::{
     gauge::{
-        GaugeProfile, GaugeSnapshot, GaugeFailure, GradeDelta, GaugeDynamics, MAX_GAUGE_UNITS,
-        MAX_GAUGE_GRADES,
+        GaugeDynamics, GaugeFailure, GaugeProfile, GaugeSnapshot, GradeDelta, MAX_GAUGE_GRADES,
+        MAX_GAUGE_UNITS,
     },
     local_players::PlayerId,
-    play_result::{CompletedPlayResult, PlayResultScope, PlayResultOutcome},
+    play_result::{CompletedPlayResult, PlayResultOutcome, PlayResultScope},
 };
 use beatkernel::{
     input::CodecLimits,
     judge::JudgeGrade,
     replay::{
+        codec::{decode_replay, encode_replay, ReplayCodecLimits, ReplayFile},
         ReplayHeader,
-        codec::{ReplayFile, ReplayCodecLimits, encode_replay, decode_replay},
     },
     time::Timestamp,
 };
@@ -1094,3 +1094,55 @@ mod archived_score_fixtures;
 #[cfg(test)]
 #[path = "archived_comparison_fixtures.rs"]
 mod archived_comparison_fixtures;
+
+pub(crate) fn validate_visual_comparison(
+    snapshot: &crate::competition_presentation::CompetitionSnapshot,
+) -> Result<(), String> {
+    use crate::competition_presentation::NetworkStatus;
+    if snapshot.ghosts.len() > 8 {
+        return Err("visual comparison ghost capacity exceeded".into());
+    }
+    for ghost in &snapshot.ghosts {
+        if ghost.label.is_empty()
+            || ghost.label.len() > 256
+            || ghost.label.chars().count() > 64
+            || ghost.label.chars().any(char::is_control)
+            || ghost.combo > ghost.max_combo
+            || ghost.max_combo > ghost.hits
+            || ghost.hits.checked_add(ghost.misses).is_none()
+        {
+            return Err("invalid visual comparison".into());
+        }
+    }
+    if let Some(network) = &snapshot.network {
+        if let Some(progress) = network.progress {
+            if network.status == NetworkStatus::Waiting {
+                return Err("waiting peer has progress".into());
+            }
+            crate::multiplayer_protocol::validate_progress(None, progress)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+pub(crate) fn validate_frozen_result(
+    result: &crate::result_archive::ArchivedResult,
+) -> Result<(), String> {
+    if result.gauge.level_units > crate::gauge::MAX_GAUGE_UNITS
+        || match result.outcome {
+            PlayResultOutcome::Failed(reason) => result.gauge.failure != Some(reason),
+            _ => result.gauge.failure.is_some(),
+        }
+    {
+        return Err("invalid frozen display result gauge or outcome".into());
+    }
+    if let PlayResultScope::PracticeSection { start, end } = result.scope {
+        if start < beatkernel::time::Timestamp::ZERO
+            || end.is_some_and(|end| end <= start)
+            || (start == beatkernel::time::Timestamp::ZERO && end.is_none())
+        {
+            return Err("invalid frozen display result scope".into());
+        }
+    }
+    Ok(())
+}

@@ -9,36 +9,34 @@ use beatkernel::{
     time::{ClockPoint, Timestamp},
     transport::Rate,
 };
-use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
+use beatkernel_bms_runtime::native_audio::{prepare_audio, NativeAudioConfig, PreparedNativeAudio};
 use beatkernel_bms_runtime::native_cohort_setup::{
     activate_audio_cohort_with_sounds, admit_cohort as admit_mode, finish_cohort,
     finish_cohort_network, finish_cohort_with_results_and_network,
     prepare_audio_cohort_with_policy, CohortPreparation, PreparedCohort,
 };
-use beatkernel_bms_runtime::native_start::{
-    NativeStartConfig, start_committed,
-};
-use beatkernel_bms_runtime::{
-    ChannelPolicy,
-    competition_live::CompetitionOptions,
-    local_players::PlayerId,
-    native_chart::{NativeChartConfig, prepare_chart},
-    playback_pause::NativePause,
-};
+use beatkernel_bms_runtime::native_start::{start_committed, NativeStartConfig};
 #[cfg(test)]
 use beatkernel_bms_runtime::{
     competition::ScoreSummary,
     local_input::InputMerger,
-    native_cohort::{PlayerState, replay_path},
+    native_cohort::{replay_path, PlayerState},
 };
 use beatkernel_bms_runtime::{
-    native_cohort::{NativeAudioCohortSession, run_cohort_audio_with_policies_and_results},
-    native_gameplay::{AudioGameplayConfig, NativeGameplayConfig},
+    competition_live::CompetitionOptions,
+    local_players::PlayerId,
+    native_chart::{prepare_chart, NativeChartConfig},
+    playback_pause::NativePause,
+    ChannelPolicy,
 };
 #[cfg(test)]
 use beatkernel_bms_runtime::{
     native_cohort::{finite_cohort_done, lag_reaches},
     playback_pause::{PauseKeyboard, PausePhase},
+};
+use beatkernel_bms_runtime::{
+    native_cohort::{run_cohort_audio_with_policies_and_results, NativeAudioCohortSession},
+    native_gameplay::{AudioGameplayConfig, NativeGameplayConfig},
 };
 use beatkernel_platform::{
     audio::presentation::{discipline::DisciplineConfig, validation::NativePresentationValidator},
@@ -69,10 +67,6 @@ pub(super) fn resolve_keyboards(
 }
 
 pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> Result<()> {
-    beatkernel_bms_runtime::native_judge::validate_policy_competition(
-        options.gauge,
-        &competition_options,
-    )?;
     admit_mode(
         options.local_players.len(),
         competition_options.network.is_some(),
@@ -152,7 +146,8 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         return Ok(());
     }
     let (mut input_owner, selected) = super::collected_input::CollectorOwner::open(
-        clock, super::collected_input::Selection::Local(options.local_players.clone()),
+        clock,
+        super::collected_input::Selection::Local(options.local_players.clone()),
     )?;
     let assignments: Vec<_> = options
         .local_players
@@ -545,11 +540,9 @@ mod fixtures {
         // Future post-end acquisition is retained by the bounded merger until
         // owner cleanup; it neither blocks this prefix nor invents gameplay.
         assert_eq!(merger.pending(), 1);
-        assert!(
-            merger
-                .admit(button(1, ButtonState::Up, 17, 2), host(30))
-                .is_err()
-        );
+        assert!(merger
+            .admit(button(1, ButtonState::Up, 17, 2), host(30))
+            .is_err());
     }
     #[test]
     fn pending_raw_receipts_preserve_merge_order_and_pause_key_provenance() {
@@ -608,12 +601,10 @@ mod fixtures {
             producer_disconnected: false,
             counters: AudioCounters::default(),
         };
-        assert!(
-            pause
-                .observe(Some(render), pair(500_000))
-                .unwrap()
-                .is_none()
-        );
+        assert!(pause
+            .observe(Some(render), pair(500_000))
+            .unwrap()
+            .is_none());
         let boundary = pause.observe(None, pair(1_000_000)).unwrap().unwrap();
         assert_eq!(boundary.host, host(1_000_100));
         let exact = merger.pop_ready(boundary.host).unwrap().unwrap();
@@ -632,20 +623,15 @@ mod fixtures {
             Some(host(2_000_100))
         );
         assert_eq!(releases[0].meta().native, released.meta().native);
-        assert!(
-            !keys
-                .accept(&button(9, ButtonState::Repeat, 4_000_101, 2))
-                .unwrap()
-        );
-        assert!(
-            !keys
-                .accept(&button(9, ButtonState::Up, 4_000_102, 3))
-                .unwrap()
-        );
-        assert!(
-            keys.accept(&button(9, ButtonState::Down, 5_000_100, 4))
-                .unwrap()
-        );
+        assert!(!keys
+            .accept(&button(9, ButtonState::Repeat, 4_000_101, 2))
+            .unwrap());
+        assert!(!keys
+            .accept(&button(9, ButtonState::Up, 4_000_102, 3))
+            .unwrap());
+        assert!(keys
+            .accept(&button(9, ButtonState::Down, 5_000_100, 4))
+            .unwrap());
     }
     #[test]
     fn immediate_pause_and_short_resume_wait_for_lag_without_masking_merger_regression() {
@@ -660,32 +646,26 @@ mod fixtures {
                 .unwrap(),
             Some(host(10_000_000))
         );
-        assert!(
-            merger
-                .watermark(host(11_000_000), 2_000_000, false)
-                .is_err()
-        );
+        assert!(merger
+            .watermark(host(11_000_000), 2_000_000, false)
+            .is_err());
         assert!(!lag_reaches(host(12_000_000), host(11_000_000), 2_000_000).unwrap());
         assert!(lag_reaches(host(13_000_000), host(11_000_000), 2_000_000).unwrap());
-        assert!(
-            merger
-                .watermark(host(13_000_000), 2_000_000, true)
-                .unwrap()
-                .is_none()
-        );
+        assert!(merger
+            .watermark(host(13_000_000), 2_000_000, true)
+            .unwrap()
+            .is_none());
         assert!(!lag_reaches(host(i64::MIN), host(i64::MIN), 1).unwrap());
         assert!(lag_reaches(host(10), host(10), -1).is_err());
-        assert!(
-            lag_reaches(
-                host(10),
-                ClockPoint {
-                    domain: OUTPUT,
-                    timestamp: Timestamp::from_nanos(10)
-                },
-                0
-            )
-            .is_err()
-        );
+        assert!(lag_reaches(
+            host(10),
+            ClockPoint {
+                domain: OUTPUT,
+                timestamp: Timestamp::from_nanos(10)
+            },
+            0
+        )
+        .is_err());
     }
     #[test]
     fn exact_four_keyboard_resolution_preserves_native_ids_and_rejects_aliases() {

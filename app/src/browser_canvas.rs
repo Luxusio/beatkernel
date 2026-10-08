@@ -13,7 +13,7 @@ use crate::{
     playfield_layout::LOGICAL_EXTENT,
     poor_background::PoorBackgroundPolicy,
     scene::Scene,
-    ui::{atoms, molecules, organisms, interaction::Bounds},
+    ui::{atoms, interaction::Bounds, molecules, organisms},
 };
 
 pub(crate) struct BrowserCanvas {
@@ -22,11 +22,70 @@ pub(crate) struct BrowserCanvas {
     renderer: Renderer,
     scene: Scene,
     backgrounds: BgaTextureCache,
-    visual_recent: [Vec<beatkernel::judge::JudgeEvent>; crate::browser_render_state::MAX_RENDER_VISIBLE],
+    visual_recent:
+        [Vec<beatkernel::judge::JudgeEvent>; crate::browser_render_state::MAX_RENDER_VISIBLE],
     extent: [u32; 2],
+    menu_token: Option<crate::browser_menu::MenuToken>,
 }
 
 impl BrowserCanvas {
+    pub(crate) fn invalidate_menu(&mut self) {
+        self.menu_token = None;
+    }
+    pub(crate) fn extent(&self) -> [u32; 2] {
+        self.extent
+    }
+    pub(crate) fn present_menu(
+        &mut self,
+        menu: &mut crate::browser_menu::BrowserMenuPresentation,
+    ) -> Result<(), String> {
+        let now = menu.motion_time();
+        self.present_menu_at(menu, now).map(|_| ())
+    }
+    pub(crate) fn present_menu_at(
+        &mut self,
+        menu: &mut crate::browser_menu::BrowserMenuPresentation,
+        now: std::time::Duration,
+    ) -> Result<bool, String> {
+        menu.validate_motion_time(now)?;
+        self.prepare_surface()?;
+        if self.extent.contains(&0) {
+            menu.tick_motion(now, self.extent, &mut self.scene)?;
+            return Ok(false);
+        }
+        self.backgrounds
+            .sync_presentations(None, &[], &mut self.renderer)?;
+        if self.menu_token != Some(menu.model.token) {
+            menu.compose(&mut self.scene)?;
+            self.menu_token = Some(menu.model.token);
+        }
+        menu.tick_motion(now, self.extent, &mut self.scene)?;
+        let before = self.renderer.presentation_count();
+        self.renderer.render(&self.scene)?;
+        let presented = self.renderer.presentation_count() != before;
+        if presented {
+            menu.publish_presented(&self.scene, self.extent)?;
+        }
+        Ok(presented)
+    }
+    pub(crate) fn request_menu_motion(
+        &mut self,
+        menu: &mut crate::browser_menu::BrowserMenuPresentation,
+        token: crate::browser_menu::MenuToken,
+        control: crate::ui::interaction::ControlId,
+        motion: crate::ui::motion::ComponentMotion,
+        now: std::time::Duration,
+    ) -> Result<(), String> {
+        menu.validate_motion_request(token, now)?;
+        if self.extent.contains(&0) {
+            return Err("menu motion request while backing extent is zero".into());
+        }
+        if self.menu_token != Some(menu.model.token) {
+            menu.compose(&mut self.scene)?;
+            self.menu_token = Some(menu.model.token);
+        }
+        menu.request_motion(token, control, motion, now, &mut self.scene)
+    }
     pub(crate) async fn create(canvas: OffscreenCanvas) -> Result<Self, String> {
         let extent = [canvas.width(), canvas.height()];
         let instance = graphics::instance(BackendChoice::Auto)?;
@@ -43,8 +102,11 @@ impl BrowserCanvas {
             renderer,
             scene: Scene::new(LOGICAL_EXTENT[0], LOGICAL_EXTENT[1]),
             backgrounds: BgaTextureCache::default(),
-            visual_recent: std::array::from_fn(|_| Vec::with_capacity(crate::browser_render_state::MAX_RENDER_RECENT)),
+            visual_recent: std::array::from_fn(|_| {
+                Vec::with_capacity(crate::browser_render_state::MAX_RENDER_RECENT)
+            }),
             extent,
+            menu_token: None,
         })
     }
 
@@ -181,6 +243,7 @@ impl BrowserCanvas {
             &mut self.renderer,
         )?;
         self.scene.clear();
+        self.menu_token = None;
         organisms::local_player_views_with_reserved_comparison_space(
             &mut self.scene,
             &views[..count],
@@ -255,6 +318,7 @@ impl BrowserCanvas {
             .as_ref()
             .ok_or("historical record display unavailable")?;
         self.scene.clear();
+        self.menu_token = None;
         presentation.compose(&mut self.scene)?;
         self.renderer.render(&self.scene)
     }
@@ -278,6 +342,7 @@ impl BrowserCanvas {
             .view()
             .ok_or("completed Results display unavailable")?;
         self.scene.clear();
+        self.menu_token = None;
         crate::ui::atoms::text(
             &mut self.scene,
             24,
@@ -315,6 +380,7 @@ impl BrowserCanvas {
         self.backgrounds
             .sync_presentations(None, &[], &mut self.renderer)?;
         self.scene.clear();
+        self.menu_token = None;
         organisms::room_presentation_footer(&mut self.scene, page)?;
         self.renderer.render(&self.scene)
     }
@@ -353,6 +419,7 @@ impl BrowserCanvas {
         )?;
         // Clearing geometry retains Scene's visible-note and GPU instance cache.
         self.scene.clear();
+        self.menu_token = None;
         organisms::playfield_with_background(
             &mut self.scene,
             chart,
@@ -389,7 +456,11 @@ impl BrowserCanvas {
         self.renderer.render(&self.scene)
     }
 
-    pub(crate) fn present_visual(&mut self, state: &crate::browser_render_state::BrowserRenderState, local: bool) -> Result<(), String> {
+    pub(crate) fn present_visual(
+        &mut self,
+        state: &crate::browser_render_state::BrowserRenderState,
+        local: bool,
+    ) -> Result<(), String> {
         let chart = state.chart();
         let roster = state.roster();
         let first = state.page() as usize * 4;
@@ -398,67 +469,167 @@ impl BrowserCanvas {
         for (slot, player) in visible.iter().enumerate() {
             let member = state.member(*player).ok_or("visual member missing")?;
             let scalars = member.scalars.as_ref().ok_or("visual frame unavailable")?;
-            presentations[slot] = PoorBackgroundPolicy::default().select(chart, Timestamp::from_nanos(scalars.song_ns), Some(&member.progress))?;
+            presentations[slot] = PoorBackgroundPolicy::default().select(
+                chart,
+                Timestamp::from_nanos(scalars.song_ns),
+                Some(&member.progress),
+            )?;
         }
         self.prepare_surface()?;
-        let frames = self.backgrounds.sync_presentations(Some(state.images()), &presentations[..visible.len()], &mut self.renderer)?;
+        let frames = self.backgrounds.sync_presentations(
+            Some(state.images()),
+            &presentations[..visible.len()],
+            &mut self.renderer,
+        )?;
         self.scene.clear();
+        self.menu_token = None;
         if !local {
             let member = &state.members()[0];
             let scalar = member.scalars.as_ref().ok_or("visual frame unavailable")?;
             let recent = &mut self.visual_recent[0];
             recent.clear();
             recent.extend(scalar.recent.iter().map(|event| event.event()));
-            organisms::playfield_with_background(&mut self.scene, chart, Timestamp::from_nanos(scalar.song_ns), state.lookahead_ns(), recent, scalar.pressed, Some(&member.progress), frames[0])?;
+            organisms::playfield_with_background(
+                &mut self.scene,
+                chart,
+                Timestamp::from_nanos(scalar.song_ns),
+                state.lookahead_ns(),
+                recent,
+                scalar.pressed,
+                Some(&member.progress),
+                frames[0],
+            )?;
             if let Some(score) = scalar.score {
                 if let Some(snapshot) = &scalar.competition {
-                    organisms::competition_scoreboard_visual(&mut self.scene, score, snapshot, None)?;
-                } else { organisms::scoreboard_visual(&mut self.scene, score, recent, None); }
+                    organisms::competition_scoreboard_visual(
+                        &mut self.scene,
+                        score,
+                        snapshot,
+                        None,
+                    )?;
+                } else {
+                    organisms::scoreboard_visual(&mut self.scene, score, recent, None);
+                }
                 if scalar.saved_failed {
                     atoms::text(&mut self.scene, 750, 650, "SAVED COMPARISONS", 1, 0xff8e8e);
                     atoms::text(&mut self.scene, 750, 660, "UNAVAILABLE", 1, 0xff8e8e);
                 }
             }
             if let Some(gauge) = scalar.gauge {
-                molecules::gauge_hud_visual(&mut self.scene, gauge, Bounds { x: 750, y: 110, width: 186, height: 18 })?;
+                molecules::gauge_hud_visual(
+                    &mut self.scene,
+                    gauge,
+                    Bounds {
+                        x: 750,
+                        y: 110,
+                        width: 186,
+                        height: 18,
+                    },
+                )?;
             }
         } else {
-            organisms::visual_local_render_state(&mut self.scene, state, &frames, &mut self.visual_recent)?;
+            organisms::visual_local_render_state(
+                &mut self.scene,
+                state,
+                &frames,
+                &mut self.visual_recent,
+            )?;
             for (slot, player) in visible.iter().enumerate() {
-                let scalar = state.member(*player).and_then(|member| member.scalars.as_ref()).ok_or("visual frame unavailable")?;
-                let [x, y, _, _] = crate::playfield_layout::local_panel_bounds(visible.len(), slot)?;
-                if scalar.saved_failed && scalar.saved_comparison_height > 0 { atoms::text(&mut self.scene, (x + 10) as usize, (y + 72) as usize, "SAVED COMPARISONS UNAVAILABLE", 1, 0xff8e8e); }
-                if scalar.peer_admitted && scalar.peer_failed { atoms::text(&mut self.scene, (x + 10) as usize, (y + 72 + i64::from(scalar.saved_comparison_height)) as usize, "PEER DISPLAY UNAVAILABLE", 1, 0xff8e8e); }
+                let scalar = state
+                    .member(*player)
+                    .and_then(|member| member.scalars.as_ref())
+                    .ok_or("visual frame unavailable")?;
+                let [x, y, _, _] =
+                    crate::playfield_layout::local_panel_bounds(visible.len(), slot)?;
+                if scalar.saved_failed && scalar.saved_comparison_height > 0 {
+                    atoms::text(
+                        &mut self.scene,
+                        (x + 10) as usize,
+                        (y + 72) as usize,
+                        "SAVED COMPARISONS UNAVAILABLE",
+                        1,
+                        0xff8e8e,
+                    );
+                }
+                if scalar.peer_admitted && scalar.peer_failed {
+                    atoms::text(
+                        &mut self.scene,
+                        (x + 10) as usize,
+                        (y + 72 + i64::from(scalar.saved_comparison_height)) as usize,
+                        "PEER DISPLAY UNAVAILABLE",
+                        1,
+                        0xff8e8e,
+                    );
+                }
             }
         }
-        if let Some(room) = state.room() { organisms::room_presentation_footer(&mut self.scene, room)?; }
-        else if state.room_disabled() { atoms::text(&mut self.scene, 12, 646, "ROOM SCORES UNAVAILABLE", 1, 0xff8e8e); }
+        if let Some(room) = state.room() {
+            organisms::room_presentation_footer(&mut self.scene, room)?;
+        } else if state.room_disabled() {
+            atoms::text(
+                &mut self.scene,
+                12,
+                646,
+                "ROOM SCORES UNAVAILABLE",
+                1,
+                0xff8e8e,
+            );
+        }
         self.renderer.render(&self.scene)
     }
 
     fn prepare_surface(&mut self) -> Result<(), String> {
         if self.renderer.needs_surface_recreation() {
-            let surface = self.instance.create_surface(wgpu::SurfaceTarget::OffscreenCanvas(self.canvas.clone())).map_err(|error| format!("recreate browser canvas surface: {error}"))?;
+            let surface = self
+                .instance
+                .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(self.canvas.clone()))
+                .map_err(|error| format!("recreate browser canvas surface: {error}"))?;
             self.renderer.replace_surface(surface)?;
         }
         Ok(())
     }
 
-    pub(crate) fn present_frozen_history(&mut self, history: &crate::historical_record_presentation::HistoricalRecordPresentation) -> Result<(), String> {
+    pub(crate) fn present_frozen_history(
+        &mut self,
+        history: &crate::historical_record_presentation::HistoricalRecordPresentation,
+    ) -> Result<(), String> {
         self.prepare_surface()?;
-        self.backgrounds.sync_presentations(None, &[], &mut self.renderer)?;
+        self.backgrounds
+            .sync_presentations(None, &[], &mut self.renderer)?;
         self.scene.clear();
+        self.menu_token = None;
         history.compose(&mut self.scene)?;
         self.renderer.render(&self.scene)
     }
 
-    pub(crate) fn present_frozen_results(&mut self, results: &crate::ui::results::FrozenResultsView, page: usize, comparisons: bool, room: Option<&crate::room_presentation::RoomPresentation>) -> Result<(), String> {
+    pub(crate) fn present_frozen_results(
+        &mut self,
+        results: &crate::ui::results::FrozenResultsView,
+        page: usize,
+        comparisons: bool,
+        room: Option<&crate::room_presentation::RoomPresentation>,
+    ) -> Result<(), String> {
         self.prepare_surface()?;
-        self.backgrounds.sync_presentations(None, &[], &mut self.renderer)?;
+        self.backgrounds
+            .sync_presentations(None, &[], &mut self.renderer)?;
         self.scene.clear();
-        atoms::text(&mut self.scene, 24, 65, if results.has_comparisons() { "COMPLETED RESULTS - C COMPARISONS" } else { "COMPLETED RESULTS" }, 2, 0x9bb1cf);
+        self.menu_token = None;
+        atoms::text(
+            &mut self.scene,
+            24,
+            65,
+            if results.has_comparisons() {
+                "COMPLETED RESULTS - C COMPARISONS"
+            } else {
+                "COMPLETED RESULTS"
+            },
+            2,
+            0x9bb1cf,
+        );
         results.compose_mode(&mut self.scene, page, comparisons)?;
-        if let Some(room) = room { organisms::room_presentation_footer(&mut self.scene, room)?; }
+        if let Some(room) = room {
+            organisms::room_presentation_footer(&mut self.scene, room)?;
+        }
         self.renderer.render(&self.scene)
     }
 

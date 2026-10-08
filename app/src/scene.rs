@@ -1,8 +1,10 @@
 //! Bounded, ordered geometry shared by native and browser renderers.
 
 pub const MAX_RECTANGLES: usize = 65_536;
-use crate::playfield_gpu::{MAX_PLAYFIELDS, PlayfieldCache, PlayfieldFrame};
+use crate::playfield_gpu::{PlayfieldCache, PlayfieldFrame, MAX_PLAYFIELDS};
 use crate::texture::TextureId;
+use crate::{screen_lifecycle::ScreenInstanceId, ui::layout::NodeId};
+use std::ops::Range;
 use std::sync::Arc;
 
 /// Immutable per-call clipping rectangle with checked exclusive endpoints.
@@ -35,6 +37,163 @@ pub(crate) struct DrawBatch {
     pub first: u32,
     pub count: u32,
     pub playfield: Option<usize>,
+    pub component: u32,
+}
+
+pub const MAX_UI_COMPONENTS: usize = 64;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiTransform {
+    offset: [f32; 2],
+    scale: [f32; 2],
+    opacity: f32,
+}
+impl Default for UiTransform {
+    fn default() -> Self {
+        Self {
+            offset: [0.0; 2],
+            scale: [1.0; 2],
+            opacity: 1.0,
+        }
+    }
+}
+impl UiTransform {
+    pub fn new(offset: [f32; 2], scale: [f32; 2], opacity: f32) -> Result<Self, String> {
+        if offset
+            .iter()
+            .any(|v| !v.is_finite() || v.abs() > (1 << 24) as f32)
+            || scale
+                .iter()
+                .any(|v| !v.is_finite() || !(1.0 / 16.0..=16.0).contains(v))
+            || !opacity.is_finite()
+            || !(0.0..=1.0).contains(&opacity)
+        {
+            return Err("invalid bounded UI component transform".into());
+        }
+        Ok(Self {
+            offset,
+            scale,
+            opacity,
+        })
+    }
+    pub const fn offset(self) -> [f32; 2] {
+        self.offset
+    }
+    pub const fn scale(self) -> [f32; 2] {
+        self.scale
+    }
+    pub const fn opacity(self) -> f32 {
+        self.opacity
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UiComponentKey {
+    pub screen: ScreenInstanceId,
+    pub node: NodeId,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UiComponentId {
+    slot: usize,
+    key: UiComponentKey,
+    epoch: u64,
+}
+impl UiComponentId {
+    pub const fn key(self) -> UiComponentKey {
+        self.key
+    }
+}
+#[derive(Clone)]
+struct ComponentBinding {
+    key: UiComponentKey,
+    transform: UiTransform,
+    source: Option<ClipRect>,
+    parent: Option<ClipRect>,
+    pivot: [i64; 2],
+    live: bool,
+    epoch: u64,
+}
+
+/// Input pose committed by the presentation owner only after a painted frame.
+#[derive(Clone)]
+pub struct UiPresentedPose {
+    width: u32,
+    height: u32,
+    translation: UiTranslation,
+    components: [Option<ComponentBinding>; MAX_UI_COMPONENTS],
+}
+impl UiPresentedPose {
+    pub fn project(&self, key: Option<UiComponentKey>, point: (f64, f64)) -> Option<(f64, f64)> {
+        if let Some(binding) = key.and_then(|key| {
+            self.components
+                .iter()
+                .flatten()
+                .find(|b| b.live && b.key == key)
+        }) {
+            return project_component(self.width, self.height, self.translation, binding, point);
+        }
+        let inside = |(x, y): (f64, f64)| {
+            x.is_finite()
+                && y.is_finite()
+                && x >= 0.0
+                && y >= 0.0
+                && x < f64::from(self.width)
+                && y < f64::from(self.height)
+        };
+        if !inside(point) {
+            return None;
+        }
+        let local = (
+            point.0 - f64::from(self.translation.x),
+            point.1 - f64::from(self.translation.y),
+        );
+        inside(local).then_some(local)
+    }
+}
+fn project_component(
+    width: u32,
+    height: u32,
+    translation: UiTranslation,
+    binding: &ComponentBinding,
+    point: (f64, f64),
+) -> Option<(f64, f64)> {
+    if !point.0.is_finite()
+        || !point.1.is_finite()
+        || point.0 < 0.0
+        || point.1 < 0.0
+        || point.0 >= f64::from(width)
+        || point.1 >= f64::from(height)
+    {
+        return None;
+    }
+    if binding.transform.opacity == 0.0 {
+        return None;
+    }
+    let point = (
+        point.0 - f64::from(translation.x),
+        point.1 - f64::from(translation.y),
+    );
+    let inside = |p: (f64, f64), clip: [i64; 4]| {
+        p.0.is_finite()
+            && p.1.is_finite()
+            && p.0 >= clip[0] as f64
+            && p.0 < clip[2] as f64
+            && p.1 >= clip[1] as f64
+            && p.1 < clip[3] as f64
+    };
+    if !inside(point, [0, 0, i64::from(width), i64::from(height)])
+        || !inside(point, binding.parent?.endpoints)
+    {
+        return None;
+    }
+    let t = binding.transform;
+    let source = binding.source?.endpoints;
+    let pivot = binding.pivot;
+    let inverse = (
+        (point.0 - pivot[0] as f64 - f64::from(t.offset[0])) / f64::from(t.scale[0])
+            + pivot[0] as f64,
+        (point.1 - pivot[1] as f64 - f64::from(t.offset[1])) / f64::from(t.scale[1])
+            + pivot[1] as f64,
+    );
+    inside(inverse, source).then_some(inverse)
 }
 
 #[repr(C)]
@@ -53,6 +212,11 @@ pub struct GeometrySnapshot {
     height: u32,
     rectangles: Arc<[Rectangle]>,
     batches: Arc<[DrawBatch]>,
+}
+impl GeometrySnapshot {
+    pub(crate) fn rectangle_count(&self) -> usize {
+        self.rectangles.len()
+    }
 }
 
 /// Integer translation of the ordinary UI surface, separate from timed notes.
@@ -94,6 +258,10 @@ pub struct Scene {
     geometry_identity: Arc<()>,
     geometry_epoch: u64,
     ui_translation: UiTranslation,
+    components: [Option<ComponentBinding>; MAX_UI_COMPONENTS],
+    component_owner: Option<ScreenInstanceId>,
+    next_component_epoch: u64,
+    source_geometry: bool,
 }
 
 impl Scene {
@@ -124,10 +292,19 @@ impl Scene {
             geometry_identity: Arc::new(()),
             geometry_epoch: 0,
             ui_translation: UiTranslation::default(),
+            components: std::array::from_fn(|_| None),
+            component_owner: None,
+            next_component_epoch: 1,
+            source_geometry: false,
         }
     }
 
     pub fn clear(&mut self) {
+        self.source_geometry = false;
+        self.component_owner = None;
+        for component in self.components.iter_mut().flatten() {
+            component.live = false;
+        }
         self.ui_translation = UiTranslation::default();
         self.geometry_changed();
         self.rectangles.clear();
@@ -149,7 +326,7 @@ impl Scene {
         }
     }
 
-    pub(crate) fn geometry_stamp(&self) -> (&Arc<()>, u64) {
+    pub fn geometry_stamp(&self) -> (&Arc<()>, u64) {
         (&self.geometry_identity, self.geometry_epoch)
     }
 
@@ -160,6 +337,305 @@ impl Scene {
     /// Changes presentation only: retained geometry and its upload identity stay intact.
     pub fn set_ui_translation(&mut self, translation: UiTranslation) {
         self.ui_translation = translation;
+    }
+
+    pub fn component_id(&self, key: UiComponentKey) -> Option<UiComponentId> {
+        self.components
+            .iter()
+            .position(|v| v.as_ref().is_some_and(|v| v.key == key))
+            .map(|slot| UiComponentId {
+                slot,
+                key,
+                epoch: self.components[slot].as_ref().unwrap().epoch,
+            })
+    }
+    pub fn component_transform(&self, id: UiComponentId) -> Option<UiTransform> {
+        self.components
+            .get(id.slot)?
+            .as_ref()
+            .filter(|v| v.key == id.key && v.epoch == id.epoch)
+            .map(|v| v.transform)
+    }
+    pub fn bind_component(
+        &mut self,
+        key: UiComponentKey,
+        ranges: &[Range<u32>],
+        source_clip: ClipRect,
+        parent_clip: Option<ClipRect>,
+    ) -> Result<UiComponentId, String> {
+        self.bind_component_clipped(
+            key,
+            ranges,
+            [source_clip.endpoints[0], source_clip.endpoints[1]],
+            Some(source_clip),
+            parent_clip,
+        )
+    }
+    /// Explicit node-bounds pivot preserves scaling when the node's local clip
+    /// begins inside its allocation. Empty source/ancestor clips remain hidden.
+    pub fn bind_component_clipped(
+        &mut self,
+        key: UiComponentKey,
+        ranges: &[Range<u32>],
+        pivot: [i64; 2],
+        source_clip: Option<ClipRect>,
+        parent_clip: Option<ClipRect>,
+    ) -> Result<UiComponentId, String> {
+        self.status()?;
+        if key.screen.0 == 0
+            || key.node.0 >= 1024
+            || ranges.len() > 1024
+            || ranges
+                .iter()
+                .any(|r| r.start > r.end || r.end as usize > self.rectangles.len())
+            || ranges.windows(2).any(|pair| pair[0].end > pair[1].start)
+        {
+            return Err("invalid bounded UI component binding".into());
+        }
+        let slot = self
+            .component_id(key)
+            .map(|id| id.slot)
+            .or_else(|| self.components.iter().position(Option::is_none))
+            .ok_or("UI component capacity exhausted")?;
+        let component = (slot + 1) as u32;
+        let epoch = self.components[slot]
+            .as_ref()
+            .map_or(self.next_component_epoch, |v| v.epoch);
+        let next_epoch = if self.components[slot].is_none() {
+            self.next_component_epoch
+                .checked_add(1)
+                .ok_or("UI component identity exhausted")?
+        } else {
+            self.next_component_epoch
+        };
+        for batch in &self.batches {
+            for range in ranges {
+                if batch.playfield.is_some() && range.start < batch.first && batch.first < range.end
+                {
+                    return Err("UI component cannot contain an indexed note layer".into());
+                }
+                if batch.playfield.is_none()
+                    && batch.first < range.end
+                    && range.start < batch.first + batch.count
+                    && batch.component != 0
+                    && batch.component != component
+                {
+                    return Err("UI component ranges overlap another component".into());
+                }
+            }
+        }
+        let mut batches = Vec::new();
+        batches
+            .try_reserve_exact(self.batches.len() + ranges.len() * 2)
+            .map_err(|_| "UI component batch allocation failed")?;
+        for batch in &self.batches {
+            if batch.playfield.is_some() {
+                batches.push(batch.clone());
+                continue;
+            }
+            let end = batch.first + batch.count;
+            let mut first = batch.first;
+            while first < end {
+                let covered = ranges.iter().find(|r| r.start <= first && first < r.end);
+                let last = covered
+                    .map_or_else(
+                        || {
+                            ranges
+                                .iter()
+                                .filter(|r| r.start > first)
+                                .map(|r| r.start)
+                                .min()
+                                .unwrap_or(end)
+                        },
+                        |r| r.end,
+                    )
+                    .min(end);
+                let mut next = batch.clone();
+                next.first = first;
+                next.count = last - first;
+                if covered.is_some() {
+                    next.component = component;
+                }
+                batches.push(next);
+                first = last;
+            }
+        }
+        let transform = self.components[slot]
+            .as_ref()
+            .map_or(UiTransform::default(), |v| v.transform);
+        self.components[slot] = Some(ComponentBinding {
+            key,
+            transform,
+            source: source_clip,
+            parent: parent_clip,
+            pivot,
+            live: true,
+            epoch,
+        });
+        self.next_component_epoch = next_epoch;
+        self.batches = batches;
+        Ok(UiComponentId { slot, key, epoch })
+    }
+    pub fn set_component_transforms(
+        &mut self,
+        updates: &[(UiComponentId, UiTransform)],
+    ) -> Result<bool, String> {
+        self.status()?;
+        if updates.len() > MAX_UI_COMPONENTS
+            || updates.iter().enumerate().any(|(i, (id, _))| {
+                self.component_transform(*id).is_none()
+                    || updates[..i].iter().any(|(other, _)| other == id)
+            })
+        {
+            return Err("invalid or stale UI component update batch".into());
+        }
+        let changed = updates
+            .iter()
+            .any(|(id, value)| self.component_transform(*id) != Some(*value));
+        for (id, value) in updates {
+            self.components[id.slot].as_mut().unwrap().transform = *value;
+        }
+        Ok(changed)
+    }
+    pub fn project_component_point(
+        &self,
+        id: UiComponentId,
+        point: (f64, f64),
+    ) -> Option<(f64, f64)> {
+        let binding = self
+            .components
+            .get(id.slot)?
+            .as_ref()
+            .filter(|v| v.key == id.key && v.epoch == id.epoch && v.live)?;
+        project_component(self.width, self.height, self.ui_translation, binding, point)
+    }
+    /// Only bounded paint/input metadata is copied; geometry and note caches stay local.
+    pub fn presented_pose(&self) -> UiPresentedPose {
+        UiPresentedPose {
+            width: self.width,
+            height: self.height,
+            translation: self.ui_translation,
+            components: self.components.clone(),
+        }
+    }
+    pub fn dispose_components(&mut self, screen: ScreenInstanceId) -> usize {
+        let mut removed = 0;
+        for (slot, value) in self.components.iter_mut().enumerate() {
+            if value.as_ref().is_some_and(|v| v.key.screen == screen) {
+                *value = None;
+                removed += 1;
+                for batch in &mut self.batches {
+                    if batch.component == (slot + 1) as u32 {
+                        batch.component = 0;
+                    }
+                }
+            }
+        }
+        if self.component_owner == Some(screen) {
+            self.component_owner = None;
+        }
+        removed
+    }
+    pub(crate) fn component_gpu_uniform(&self, slot: usize) -> [f32; 16] {
+        let Some(binding) = slot
+            .checked_sub(1)
+            .and_then(|slot| self.components.get(slot))
+            .and_then(Option::as_ref)
+        else {
+            return [
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                self.width as f32,
+                self.height as f32,
+                0.0,
+                0.0,
+                self.width as f32,
+                self.height as f32,
+            ];
+        };
+        let t = binding.transform;
+        let parent = binding.parent.map_or([0; 4], |clip| clip.endpoints);
+        let source = binding.source.map_or([0; 4], |clip| clip.endpoints);
+        [
+            t.offset[0],
+            t.offset[1],
+            t.scale[0],
+            t.scale[1],
+            binding.pivot[0] as f32,
+            binding.pivot[1] as f32,
+            t.opacity,
+            0.0,
+            parent[0] as f32,
+            parent[1] as f32,
+            parent[2] as f32,
+            parent[3] as f32,
+            source[0] as f32,
+            source[1] as f32,
+            source[2] as f32,
+            source[3] as f32,
+        ]
+    }
+    pub(crate) fn component_uniform_live(&self, slot: usize) -> bool {
+        slot == 0
+            || self
+                .components
+                .get(slot - 1)
+                .and_then(Option::as_ref)
+                .is_some_and(|v| v.live)
+    }
+    pub(crate) fn component_owner(&self) -> Option<ScreenInstanceId> {
+        self.component_owner
+    }
+    pub(crate) fn component_live(&self, key: UiComponentKey) -> Option<UiComponentId> {
+        let id = self.component_id(key)?;
+        self.components[id.slot].as_ref()?.live.then_some(id)
+    }
+    pub(crate) fn component_candidate(&self) -> Self {
+        let mut next = Self::with_capacity(self.width, self.height, self.rectangles.len());
+        next.components = self.components.clone();
+        next.next_component_epoch = self.next_component_epoch;
+        for value in next.components.iter_mut().flatten() {
+            value.live = false;
+        }
+        next
+    }
+    pub fn retain_component_keys(&mut self, screen: ScreenInstanceId, nodes: &[NodeId]) {
+        for component in &mut self.components {
+            if component
+                .as_ref()
+                .is_some_and(|b| b.key.screen != screen || !nodes.contains(&b.key.node))
+            {
+                *component = None;
+            }
+        }
+    }
+    /// Cold component source capture defers viewport cropping until the GPU
+    /// applies the node transform and fixed ancestor clip. Ordinary scenes keep
+    /// their existing CPU clipping behavior.
+    pub(crate) fn component_source(width: u32, height: u32, capacity: usize) -> Self {
+        let mut scene = Self::with_capacity(width, height, capacity);
+        scene.source_geometry = true;
+        scene
+    }
+    pub(crate) fn publish_component_scene(&mut self, next: Self, owner: ScreenInstanceId) {
+        self.rectangles = next.rectangles;
+        self.batches = next.batches;
+        self.components = next.components;
+        self.next_component_epoch = next.next_component_epoch;
+        self.ui_translation = next.ui_translation;
+        self.playfields.clear();
+        self.error = next.error;
+        self.overflow = next.overflow;
+        self.component_owner = Some(owner);
+        self.geometry_changed();
     }
 
     /// Inverse presentation projection for ordinary retained UI hit bounds.
@@ -189,6 +665,9 @@ impl Scene {
         if self.ui_translation != UiTranslation::default() {
             return Err("translated UI surface cannot become a static geometry packet".into());
         }
+        if self.batches.iter().any(|batch| batch.component != 0) {
+            return Err("animated components cannot become static geometry packets".into());
+        }
         if !self.playfields.is_empty() {
             return Err("timed playfields cannot become static UI geometry".into());
         }
@@ -213,11 +692,9 @@ impl Scene {
         let offset = self.rectangles.len() as u32;
         self.rectangles.extend_from_slice(&geometry.rectangles);
         for source in geometry.batches.iter() {
-            if let Some(last) = self
-                .batches
-                .last_mut()
-                .filter(|last| last.playfield.is_none() && last.texture == source.texture)
-            {
+            if let Some(last) = self.batches.last_mut().filter(|last| {
+                last.playfield.is_none() && last.component == 0 && last.texture == source.texture
+            }) {
                 last.count += source.count;
             } else {
                 self.batches.push(DrawBatch {
@@ -225,6 +702,7 @@ impl Scene {
                     first: source.first + offset,
                     count: source.count,
                     playfield: None,
+                    component: 0,
                 });
             }
         }
@@ -305,9 +783,10 @@ impl Scene {
         self.playfields.push(frame);
         self.batches.push(DrawBatch {
             texture: TextureId::WHITE,
-            first: 0,
+            first: self.rectangles.len() as u32,
             count: 0,
             playfield: Some(slot),
+            component: 0,
         });
         Ok(())
     }
@@ -368,6 +847,9 @@ impl Scene {
     }
 
     pub(crate) fn clip_bounds(&self, clip: ClipRect) -> Option<[i64; 4]> {
+        if self.source_geometry {
+            return Some(clip.endpoints);
+        }
         let [left, top, right, bottom] = clip.endpoints;
         let endpoints = [
             left.max(0),
@@ -400,7 +882,11 @@ impl Scene {
             bounds,
             uv,
             color,
-            [0, 0, i64::from(self.width), i64::from(self.height)],
+            if self.source_geometry {
+                [i64::MIN, i64::MIN, i64::MAX, i64::MAX]
+            } else {
+                [0, 0, i64::from(self.width), i64::from(self.height)]
+            },
         );
     }
 
@@ -444,11 +930,9 @@ impl Scene {
         }
         self.geometry_changed();
         let first = self.rectangles.len() as u32;
-        if let Some(batch) = self
-            .batches
-            .last_mut()
-            .filter(|batch| batch.playfield.is_none() && batch.texture == texture)
-        {
+        if let Some(batch) = self.batches.last_mut().filter(|batch| {
+            batch.playfield.is_none() && batch.component == 0 && batch.texture == texture
+        }) {
             batch.count += 1;
         } else {
             self.batches.push(DrawBatch {
@@ -456,6 +940,7 @@ impl Scene {
                 first,
                 count: 1,
                 playfield: None,
+                component: 0,
             });
         }
         let horizontal = (i128::from(left) - i128::from(x)) as f64 / width as f64;
@@ -516,6 +1001,10 @@ impl Scene {
 }
 
 #[cfg(test)]
+#[path = "component_motion_scene_fixtures.rs"]
+mod component_motion_fixtures;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -551,18 +1040,16 @@ mod tests {
                 clip,
             )
             .unwrap();
-        assert!(
-            scene
-                .sprite_clipped_alpha(
-                    TextureId::FONT,
-                    [0, 0, 100, 100],
-                    [f32::NAN, 0.0, 1.0, 1.0],
-                    0,
-                    0,
-                    clip
-                )
-                .is_err()
-        );
+        assert!(scene
+            .sprite_clipped_alpha(
+                TextureId::FONT,
+                [0, 0, 100, 100],
+                [f32::NAN, 0.0, 1.0, 1.0],
+                0,
+                0,
+                clip
+            )
+            .is_err());
         assert_eq!(scene.geometry_epoch, epoch);
         assert_eq!(scene.rectangles().len(), 1);
         scene
@@ -682,11 +1169,9 @@ mod tests {
             [0.0, 0.0, 0.0, 1.0],
             [0.5, 0.0, 0.75, 1.0],
         ] {
-            assert!(
-                scene
-                    .sprite_clipped(TextureId::FONT, [0, 0, 1, 1], uv, 0, clip)
-                    .is_err()
-            );
+            assert!(scene
+                .sprite_clipped(TextureId::FONT, [0, 0, 1, 1], uv, 0, clip)
+                .is_err());
             assert_eq!(scene.geometry_epoch, epoch);
             assert_eq!(scene.rectangles.len(), 1);
             assert_eq!(scene.batches.len(), 1);
@@ -716,12 +1201,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(scene.rectangles()[1].bounds, [0.0, 0.0, 100.0, 100.0]);
-        assert!(
-            scene.rectangles()[1]
-                .uv
-                .iter()
-                .all(|value| value.is_finite() && *value >= 0.0)
-        );
+        assert!(scene.rectangles()[1]
+            .uv
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0));
     }
 
     #[test]
@@ -788,17 +1271,15 @@ mod tests {
         }
         assert_eq!(scene.rectangles().len(), MAX_RECTANGLES);
         assert!(scene.status().is_err());
-        assert!(
-            scene
-                .sprite_clipped(
-                    TextureId::FONT,
-                    [0, 0, 1, 1],
-                    [0.0, 0.0, 1.0, 1.0],
-                    0,
-                    ClipRect::new([0, 0, 1, 1]).unwrap()
-                )
-                .is_err()
-        );
+        assert!(scene
+            .sprite_clipped(
+                TextureId::FONT,
+                [0, 0, 1, 1],
+                [0.0, 0.0, 1.0, 1.0],
+                0,
+                ClipRect::new([0, 0, 1, 1]).unwrap()
+            )
+            .is_err());
         assert_eq!(scene.rectangles().len(), MAX_RECTANGLES);
         scene.clear();
         assert!(scene.status().is_ok());
@@ -846,11 +1327,9 @@ mod tests {
                 (TextureId::FONT, 2, 2)
             ]
         );
-        assert!(
-            scene
-                .sprite(TextureId::FONT, [0, 0, 1, 1], [f32::NAN, 0.0, 1.0, 1.0], 0)
-                .is_err()
-        );
+        assert!(scene
+            .sprite(TextureId::FONT, [0, 0, 1, 1], [f32::NAN, 0.0, 1.0, 1.0], 0)
+            .is_err());
         assert_eq!(scene.rectangles().len(), 4);
         scene
             .sprite(TextureId::FONT, [0, 0, 1, 1], [0.2, 0.2, 0.8, 0.8], 0)
@@ -1019,16 +1498,14 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert!(
-            scene
-                .playfield(
-                    &chart,
-                    beatkernel::time::Timestamp::ZERO,
-                    1_000_000_000,
-                    bounds
-                )
-                .is_err()
-        );
+        assert!(scene
+            .playfield(
+                &chart,
+                beatkernel::time::Timestamp::ZERO,
+                1_000_000_000,
+                bounds
+            )
+            .is_err());
         assert_eq!(scene.playfields().len(), MAX_PLAYFIELDS);
         assert_eq!(scene.visible_note_indices.as_ptr(), scratch);
         assert_eq!(scene.visible_note_indices.capacity(), capacity);
@@ -1036,7 +1513,7 @@ mod tests {
 
     #[test]
     fn one_lazy_scratch_serves_growing_membership_four_slots_seek_and_rejection() {
-        use crate::player_chart::{MAX_VISIBLE_NOTES, PlayerChart};
+        use crate::player_chart::{PlayerChart, MAX_VISIBLE_NOTES};
         use beatkernel::time::Timestamp;
         use std::sync::Arc;
         let model = |text: &str| {
@@ -1129,22 +1606,18 @@ mod tests {
         let batches = scene.batches.len();
         let mut malformed = chart.clone();
         malformed.notes[0].lane_index = usize::MAX;
-        assert!(
-            scene
-                .playfield(&malformed, Timestamp::ZERO, 750_000_000, bounds)
-                .is_err()
-        );
+        assert!(scene
+            .playfield(&malformed, Timestamp::ZERO, 750_000_000, bounds)
+            .is_err());
         assert_eq!(scene.playfields.len(), admitted);
         assert_eq!(scene.batches.len(), batches);
         let dense = model(&format!(
             "#BPM 60\n#WAV01 head.wav\n#00011:{}",
             "01".repeat(MAX_VISIBLE_NOTES + 1)
         ));
-        assert!(
-            scene
-                .playfield(&dense, Timestamp::ZERO, i64::MAX, bounds)
-                .is_err()
-        );
+        assert!(scene
+            .playfield(&dense, Timestamp::ZERO, i64::MAX, bounds)
+            .is_err());
         assert!(scene.visible_note_indices.is_empty());
         assert_eq!(scene.playfields.len(), admitted);
         assert_eq!(scene.batches.len(), batches);

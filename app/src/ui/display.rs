@@ -2,8 +2,8 @@
 use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
+    layout::{LayoutChange, LayoutUpdate, MountedLayout, Node, NodeId, TextStyle},
     molecules::{button, text_field_with_font},
-    layout::{Node, TextStyle, resolve},
     retained::RetainedNodes,
     text_input::LineEditor,
 };
@@ -195,7 +195,29 @@ const SCREEN: N =
             .at(BUTTONS[0].1.x, BUTTONS[0].1.y),
             N::leaf([936, 7], Component::Error).at(24, 690),
         ],
-    );
+    )
+    .clipped();
+fn reflow_display(
+    layout: &mut MountedLayout<Component>,
+    anchors: &[(NodeId, [i64; 2])],
+    extent: [u32; 2],
+) -> Result<bool, String> {
+    if extent.contains(&0) {
+        return layout.resize(extent);
+    }
+    let mut updates = vec![LayoutUpdate {
+        id: NodeId(1),
+        change: LayoutChange::Size(extent.map(i64::from)),
+    }];
+    updates.extend(anchors.iter().map(|&(id, origin)| LayoutUpdate {
+        id,
+        change: LayoutChange::Origin([
+            origin[0] * i64::from(extent[0]) / 960,
+            origin[1] * i64::from(extent[1]) / 720,
+        ]),
+    }));
+    layout.update_on_extent(extent, &updates)
+}
 fn paint_text(scene: &mut Scene, bounds: Bounds, value: &str, style: TextStyle) {
     text(
         scene,
@@ -226,11 +248,25 @@ pub struct DisplayView {
     hovered: RwSignal<Option<ControlId>>,
     armed: RwSignal<Option<ControlId>>,
     nodes: RetainedNodes,
+    layout: MountedLayout<Component>,
+    anchors: Vec<(NodeId, [i64; 2])>,
 }
 impl DisplayView {
     pub fn new(id: ScreenInstanceId, width: u32, height: u32) -> Result<Self, String> {
         let nodes = RetainedNodes::new(width, height)?;
-        let layout = resolve(SCREEN)?;
+        let mut layout = MountedLayout::mount(SCREEN)?;
+        let anchors: Vec<_> = layout
+            .children(NodeId(0))
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|&id| id != NodeId(1))
+            .map(|id| {
+                let bounds = layout.geometry(id).unwrap().bounds;
+                (id, [bounds.x, bounds.y])
+            })
+            .collect();
+        reflow_display(&mut layout, &anchors, [width, height])?;
         let editors = [
             LineEditor::new("auto", 32)?,
             LineEditor::new("fifo", 32)?,
@@ -249,8 +285,12 @@ impl DisplayView {
             hovered: scope.create_rw_signal(None),
             armed: scope.create_rw_signal(None),
             nodes,
+            layout,
+            anchors,
         };
-        let header: Vec<_> = layout
+        let header: Vec<_> = view
+            .layout
+            .leaves()
             .iter()
             .copied()
             .filter(|leaf| {
@@ -260,36 +300,43 @@ impl DisplayView {
                 )
             })
             .collect();
-        view.nodes.static_node(move |scene, _| {
-            for leaf in header {
+        let header_ids: Vec<_> = header.iter().map(|leaf| leaf.id).collect();
+        view.nodes.static_layout_node(
+            &view.layout,
+            &header_ids,
+            move |id, geometry, scene, _| {
+                let leaf = header.iter().find(|leaf| leaf.id == id).unwrap();
+                let bounds = geometry.bounds;
                 match leaf.component {
                     Component::Background(color) => rect(
                         scene,
-                        leaf.bounds.x,
-                        leaf.bounds.y,
-                        leaf.bounds.width,
-                        leaf.bounds.height,
+                        bounds.x,
+                        bounds.y,
+                        bounds.width,
+                        bounds.height,
                         color,
                     ),
-                    Component::Header(value, style) => paint_text(scene, leaf.bounds, value, style),
+                    Component::Header(value, style) => paint_text(scene, bounds, value, style),
                     _ => unreachable!(),
                 }
-            }
-        });
+            },
+        )?;
         for index in 0..4 {
-            let label = layout
+            let label = view
+                .layout
+                .leaves()
                 .iter()
                 .find_map(|leaf| match leaf.component {
-                    Component::FieldLabel(field, value) if field == index => {
-                        Some((leaf.bounds, value))
-                    }
+                    Component::FieldLabel(field, value) if field == index => Some((leaf.id, value)),
                     _ => None,
                 })
                 .ok_or("Display field label missing")?;
-            let (bounds, id) = layout
+            let (editor_id, control) = view
+                .layout
+                .leaves()
                 .iter()
                 .find_map(|leaf| match leaf.component {
-                    Component::Editor(field, id) if field == index => Some((leaf.bounds, id)),
+                    Component::Editor(field, id) if field == index => Some((leaf.id, id)),
                     _ => None,
                 })
                 .ok_or("Display editor missing")?;
@@ -300,41 +347,49 @@ impl DisplayView {
             let focus = scope.create_memo(move |_| selected.get() == index);
             let memo = scope
                 .create_memo(move |_| (editor.get(), focus.get(), pending.get(), input_font.get()));
-            view.nodes.bind(
+            view.nodes.bind_layout(
                 scope,
                 memo,
-                move |(editor, focused, pending, font), scene, hits| {
-                    paint_text(scene, label.0, label.1, LABEL);
-                    text_field_with_font(
-                        scene,
-                        &editor,
-                        bounds,
-                        focused && !pending,
-                        font.as_ref(),
-                    );
-                    if !pending {
-                        hits.push((id, bounds));
+                &view.layout,
+                &[label.0, editor_id],
+                move |(editor, focused, pending, font), id, geometry, scene, hits| {
+                    if id == label.0 {
+                        paint_text(scene, geometry.bounds, label.1, LABEL);
+                    } else {
+                        text_field_with_font(
+                            scene,
+                            &editor,
+                            geometry.bounds,
+                            focused && !pending,
+                            font.as_ref(),
+                        );
+                        if !pending {
+                            hits.push((control, geometry.bounds));
+                        }
                     }
                 },
-            );
+            )?;
         }
-        let hints: Vec<_> = layout
+        let hints: Vec<_> = view
+            .layout
+            .leaves()
             .iter()
             .copied()
             .filter(|leaf| matches!(leaf.component, Component::Hint(_)))
             .collect();
-        view.nodes.static_node(move |scene, _| {
-            for leaf in hints {
-                if let Component::Hint(value) = leaf.component {
-                    paint_text(scene, leaf.bounds, value, HELP);
+        let hint_ids: Vec<_> = hints.iter().map(|leaf| leaf.id).collect();
+        view.nodes
+            .static_layout_node(&view.layout, &hint_ids, move |id, geometry, scene, _| {
+                if let Component::Hint(value) =
+                    hints.iter().find(|leaf| leaf.id == id).unwrap().component
+                {
+                    paint_text(scene, geometry.bounds, value, HELP);
                 }
-            }
-        });
-        for leaf in &layout {
-            let Component::Action(id, label) = leaf.component else {
+            })?;
+        for leaf in view.layout.leaves() {
+            let Component::Action(control, label) = leaf.component else {
                 continue;
             };
-            let bounds = leaf.bounds;
             let hovered = view.hovered;
             let armed = view.armed;
             let pending = view.pending;
@@ -342,34 +397,87 @@ impl DisplayView {
                 if pending.get() {
                     (false, false, true)
                 } else {
-                    (hovered.get() == Some(id), armed.get() == Some(id), false)
+                    (
+                        hovered.get() == Some(control),
+                        armed.get() == Some(control),
+                        false,
+                    )
                 }
             });
-            view.nodes.bind(
+            view.nodes.bind_layout(
                 scope,
                 memo,
-                move |(hovered, armed, pending), scene, hits| {
-                    button(scene, bounds, label, hovered, armed);
+                &view.layout,
+                &[leaf.id],
+                move |(hovered, armed, pending), _, geometry, scene, hits| {
+                    button(scene, geometry.bounds, label, hovered, armed);
                     if !pending {
-                        hits.push((id, bounds));
+                        hits.push((control, geometry.bounds));
                     }
                 },
-            );
+            )?;
         }
-        let error_bounds = layout
+        let error_id = view
+            .layout
+            .leaves()
             .iter()
             .find(|leaf| matches!(leaf.component, Component::Error))
             .ok_or("Display error region missing")?
-            .bounds;
+            .id;
         let error = view.error;
         let memo = scope.create_memo(move |_| error.get());
-        view.nodes.bind(scope, memo, move |error, scene, _| {
-            if let Some(error) = error {
-                paint_text(scene, error_bounds, &error, ERROR);
-            }
-        });
+        view.nodes.bind_layout(
+            scope,
+            memo,
+            &view.layout,
+            &[error_id],
+            move |error, _, geometry, scene, _| {
+                if let Some(error) = error {
+                    paint_text(scene, geometry.bounds, &error, ERROR);
+                }
+            },
+        )?;
         view.nodes.validate()?;
         Ok(view)
+    }
+    /// Direct extent updates retain the mounted tree and draft/editor lifetime.
+    /// Each section keeps its declared allocation and follows its proportional
+    /// anchor; overflow is clipped identically for painting and pointer admission.
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, String> {
+        if self.layout.extent() == [width, height] {
+            return Ok(false);
+        }
+        let mut candidate = self.layout.clone();
+        if !reflow_display(&mut candidate, &self.anchors, [width, height])? {
+            return Ok(false);
+        }
+        self.nodes.relayout(&candidate)?;
+        self.layout = candidate;
+        Ok(true)
+    }
+    pub fn hit(&self, point: (f64, f64)) -> Option<ControlId> {
+        self.nodes.hit(point)
+    }
+    /// Resolve a mounted node only from this view's actual published control geometry.
+    pub fn node_for_control(&self, control: ControlId) -> Result<Option<NodeId>, String> {
+        self.nodes.node_for_control(control)
+    }
+    pub fn compose_components(
+        &self,
+        scene: &mut Scene,
+        hits: &mut Vec<(ControlId, Bounds)>,
+        screen: ScreenInstanceId,
+        animated: &[NodeId],
+    ) -> Result<(), String> {
+        self.nodes.compose_components(scene, hits, screen, animated)
+    }
+    pub fn hit_components(
+        &self,
+        scene: &Scene,
+        screen: ScreenInstanceId,
+        point: (f64, f64),
+    ) -> Option<ControlId> {
+        self.nodes.hit_components(scene, screen, point)
     }
     pub const fn id(&self) -> ScreenInstanceId {
         self.id
@@ -662,6 +770,6 @@ mod fixtures {
         assert!(weak.strong_count() > 1);
         drop(view);
         assert!(weak.upgrade().is_none());
-        assert!(DisplayView::new(ScreenInstanceId(3), 800, 600).is_err());
+        assert!(DisplayView::new(ScreenInstanceId(3), 800, 600).is_ok());
     }
 }

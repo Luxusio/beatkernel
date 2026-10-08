@@ -3,7 +3,7 @@ use crate::{
     competition::ScoreSummary,
     competition_live::{load_chart_with_seed, replay_limits},
     replay_playback::{decode_section_setup, read_replay, reconstruct_section, RecordedSetup},
-    settings::{MAX_VALUE_BYTES, NativeSettings},
+    settings::{NativeSettings, MAX_VALUE_BYTES},
 };
 use beatkernel::{
     judge::{JudgeGrade, JudgeProfile, JudgeWindow},
@@ -114,9 +114,18 @@ impl RecordPreview {
         settings: &NativeSettings,
         file: ReplayFile,
     ) -> Result<Self, String> {
+        decode_section_setup(&file.header.options).map_err(|error| error.to_string())?;
+        let expected = draft_section(settings, source)?;
+        Self::from_prefix_with_setup(path, source, &expected, file)
+    }
+    fn from_prefix_with_setup(
+        path: &Path,
+        source: &beatkernel_bms::BmsChart,
+        expected: &crate::replay_playback::RecordedSetup,
+        file: ReplayFile,
+    ) -> Result<Self, String> {
         let setup =
             decode_section_setup(&file.header.options).map_err(|error| error.to_string())?;
-        let expected = draft_section(settings, source)?;
         if setup.chart_seed != expected.chart_seed {
             return Err("saved record chart seed differs from the current draft".into());
         }
@@ -169,8 +178,22 @@ impl RecordPreview {
         archive: Option<&crate::result_archive::ResultArchive>,
         player: Option<crate::local_players::PlayerId>,
     ) -> Result<Self, String> {
+        decode_section_setup(&file.header.options).map_err(|error| error.to_string())?;
+        let expected = draft_section(settings, source)?;
+        Self::from_file_with_setup(path, source, &expected, file, archive, player)
+    }
+    /// Pure admitted-policy preview for browser or native acquisition adapters.
+    /// Reconstructs the original accepted prefix and separately associates stored data.
+    pub fn from_file_with_setup(
+        path: &Path,
+        source: &beatkernel_bms::BmsChart,
+        expected: &crate::replay_playback::RecordedSetup,
+        file: ReplayFile,
+        archive: Option<&crate::result_archive::ResultArchive>,
+        player: Option<crate::local_players::PlayerId>,
+    ) -> Result<Self, String> {
         let association = archive.map(|archive| prepare_association(archive, &file.header, player));
-        let mut preview = Self::from_file(path, source, settings, file)?;
+        let mut preview = Self::from_prefix_with_setup(path, source, expected, file)?;
         match association {
             Some(Ok((historical, score, comparison, bms_score))) => {
                 preview.historical = Some(historical);
@@ -390,7 +413,7 @@ mod fixtures {
         replay::{ReplayOperation, ReplayRecord},
         time::ClockDomainId,
     };
-    use beatkernel_bms::{ParseOptions, parse};
+    use beatkernel_bms::{parse, ParseOptions};
     fn settings(args: &[&str]) -> NativeSettings {
         NativeSettings::from_args(
             &args.iter().map(|text| (*text).into()).collect::<Vec<_>>(),
@@ -439,25 +462,21 @@ mod fixtures {
             RecordPreview::from_file(Path::new("record.bkr"), &source(), &draft, file.clone())
                 .is_ok()
         );
-        assert!(
-            RecordPreview::from_file(
-                Path::new("record.bkr"),
-                &source(),
-                &settings(&[]),
-                file.clone()
-            )
-            .unwrap_err()
-            .contains("chart seed")
-        );
-        assert!(
-            RecordPreview::from_file(
-                Path::new("record.bkr"),
-                &source(),
-                &settings(&["--chart-seed", "18446744073709551615"]),
-                file
-            )
-            .is_err()
-        );
+        assert!(RecordPreview::from_file(
+            Path::new("record.bkr"),
+            &source(),
+            &settings(&[]),
+            file.clone()
+        )
+        .unwrap_err()
+        .contains("chart seed"));
+        assert!(RecordPreview::from_file(
+            Path::new("record.bkr"),
+            &source(),
+            &settings(&["--chart-seed", "18446744073709551615"]),
+            file
+        )
+        .is_err());
     }
     #[test]
     fn bounded_catalog_is_sorted_marks_overflow_and_rejects_unusable_paths() {
@@ -552,15 +571,13 @@ mod fixtures {
             vec!["--late-ns", "1"],
             vec!["--input-offset-ns", "1"],
         ] {
-            assert!(
-                RecordPreview::from_file(
-                    Path::new("record.bkr"),
-                    &source(),
-                    &settings(&args),
-                    file.clone()
-                )
-                .is_err()
-            );
+            assert!(RecordPreview::from_file(
+                Path::new("record.bkr"),
+                &source(),
+                &settings(&args),
+                file.clone()
+            )
+            .is_err());
         }
         let changed = parse(
             "#BPM 121\n#WAV01 head.wav\n#00011:01\n#00112:01\n",
@@ -616,3 +633,7 @@ mod record_stored_score_fixtures;
 #[cfg(test)]
 #[path = "record_comparison_association_fixtures.rs"]
 mod record_comparison_association_fixtures;
+
+#[cfg(test)]
+#[path = "record_catalog_setup_fixtures.rs"]
+mod record_catalog_setup_fixtures;

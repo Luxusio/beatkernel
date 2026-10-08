@@ -2,23 +2,23 @@
 //! Remote prefixes are display data and never enter any local judge.
 
 use crate::{
-    competition_live::{CompetitionOptions, replay_limits},
+    competition_live::{replay_limits, CompetitionOptions},
+    competition_presentation::{self, CompetitionPresentationHost, NetworkStatus},
+    competition_presentation_bridge::NativeCompetitionPresentation,
     competition_progress,
+    competition_progress_cadence::{self, CadenceError, CompetitionProgressClock, ProgressCadence},
+    competition_progress_clock_bridge::NativeProgressClock,
+    competition_start_gate::{self, CompetitionSetupControl, CompetitionStartPort},
     competition_terminal::{self, DeliveryIntent},
     competition_terminal_bridge::NativeTerminalPort,
-    competition_progress_cadence::{self, CompetitionProgressClock, ProgressCadence, CadenceError},
-    competition_progress_clock_bridge::NativeProgressClock,
     input_sounds::InputSoundIdentity,
     local_players::PlayerId,
     local_runtime::MemberConfig,
-    multiplayer::{MultiplayerError, MultiplayerOptions, competition_identity_for_section},
-    multiplayer_group::{GroupPrefix, MemberProgress, validate_members, validate_roster},
+    multiplayer::{competition_identity_for_section, MultiplayerError, MultiplayerOptions},
+    multiplayer_group::{validate_members, validate_roster, GroupPrefix, MemberProgress},
     native_competition_network::NativeCompetitionNetwork,
-    native_start::{NativeStartAgreement, NativeStartResult, SessionHostBracket},
-    competition_presentation::{self, CompetitionPresentationHost, NetworkStatus},
-    competition_presentation_bridge::NativeCompetitionPresentation,
-    competition_start_gate::{self, CompetitionSetupControl, CompetitionStartPort},
     native_pump_system::SystemControl,
+    native_start::{NativeStartAgreement, NativeStartResult, SessionHostBracket},
     replay_capture::LiveReplayCapture,
 };
 use beatkernel::time::{ClockDomainId, ClockPoint, Timestamp};
@@ -31,6 +31,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub struct NativeGroupCompetition {
     network: NativeCompetitionNetwork,
     players: Vec<PlayerId>,
+    policy_headers: Vec<(PlayerId, beatkernel::replay::ReplayHeader)>,
     local: Option<Vec<MemberProgress>>,
     progress_cadence: ProgressCadence,
     progress_clock: NativeProgressClock,
@@ -54,12 +55,79 @@ impl NativeGroupCompetition {
         preroll: i64,
     ) -> Result<Option<Self>> {
         let players = member_roster(members, start, end, preroll)?;
-        let Some(role) = &options.network else {
+        let Some(_) = &options.network else {
             return Ok(None);
         };
         let identity = canonical_identity(
             options, source, members, domain, start, chart_seed, end, preroll,
         )?;
+        let limits = replay_limits()?;
+        let input_sounds = InputSoundIdentity::from_source(source)?;
+        let mut headers = Vec::new();
+        headers.try_reserve_exact(members.len())?;
+        for member in members {
+            let header = LiveReplayCapture::new_with_input_sounds(
+                &member.judge,
+                domain,
+                limits,
+                start,
+                chart_seed,
+                end,
+                BmsInputMode::ButtonOnly,
+                input_sounds,
+            )?
+            .header()
+            .clone();
+            headers.push((member.player, header));
+        }
+        Self::from_identity(options, players, identity, headers, preroll).map(Some)
+    }
+
+    /// Admission of actual selected meanings precedes endpoint/credential acquisition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_policies(
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        members: &[MemberConfig],
+        policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+        domain: ClockDomainId,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+        preroll: i64,
+    ) -> Result<Option<Self>> {
+        let players = member_roster(members, start, end, preroll)?;
+        let (identity, headers) = selected_setup(
+            options, source, members, policies, domain, start, chart_seed, end, preroll,
+        )?;
+        if options.network.is_none() {
+            return Ok(None);
+        }
+        Self::from_identity(options, players, identity, headers, preroll).map(Some)
+    }
+
+    /// Read checked evidence only for the original admitted member ID.
+    pub fn native_policy_header(
+        &self,
+        player: PlayerId,
+    ) -> Option<&beatkernel::replay::ReplayHeader> {
+        self.policy_headers
+            .iter()
+            .find(|(id, _)| *id == player)
+            .map(|(_, header)| header)
+    }
+
+    fn from_identity(
+        options: &CompetitionOptions,
+        players: Vec<PlayerId>,
+        identity: Vec<u8>,
+        policy_headers: Vec<(PlayerId, beatkernel::replay::ReplayHeader)>,
+        preroll: i64,
+    ) -> Result<Self> {
+        let role = options
+            .network
+            .as_ref()
+            .ok_or("group network role missing")?;
         let settings = MultiplayerOptions {
             quic: options.quic.clone(),
             setup_timeout: options.setup_timeout,
@@ -74,6 +142,7 @@ impl NativeGroupCompetition {
         let mut owner = Self {
             network,
             players,
+            policy_headers,
             local: None,
             progress_cadence: ProgressCadence::new(),
             progress_clock: NativeProgressClock::new(),
@@ -84,7 +153,7 @@ impl NativeGroupCompetition {
             finished: false,
         };
         owner.publish_presentation(true)?;
-        Ok(Some(owner))
+        Ok(owner)
     }
 
     pub fn is_failed(&self) -> bool {
@@ -455,6 +524,80 @@ pub(crate) fn canonical_identity(
         }
     }
     identity.ok_or_else(|| "native group has no identity".into())
+}
+
+/// Selected setup identity with the unchanged optional finite outer envelope.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn canonical_identity_with_policies(
+    options: &CompetitionOptions,
+    source: &BmsChart,
+    members: &[MemberConfig],
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    domain: ClockDomainId,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    preroll: i64,
+) -> Result<Vec<u8>> {
+    selected_setup(
+        options, source, members, policies, domain, start, chart_seed, end, preroll,
+    )
+    .map(|(identity, _)| identity)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn selected_setup(
+    options: &CompetitionOptions,
+    source: &BmsChart,
+    members: &[MemberConfig],
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    domain: ClockDomainId,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    preroll: i64,
+) -> Result<(Vec<u8>, Vec<(PlayerId, beatkernel::replay::ReplayHeader)>)> {
+    let players = member_roster(members, start, end, preroll)?;
+    if !players
+        .iter()
+        .copied()
+        .eq(policies.iter().map(|(player, _)| *player))
+    {
+        return Err("selected group policies differ from the original ordered roster".into());
+    }
+    options.start_policy.validate()?;
+    let mut headers = Vec::new();
+    headers.try_reserve_exact(players.len())?;
+    let mut identity = None;
+    for (member, (_, policy)) in members.iter().zip(policies) {
+        let header = crate::native_judge::prepare_policy_header(
+            source,
+            &member.judge,
+            policy,
+            domain,
+            start,
+            chart_seed,
+            end,
+        )?;
+        let current = crate::native_judge::prepare_policy_competition_identity(
+            source,
+            &member.judge,
+            policy,
+            domain,
+            start,
+            chart_seed,
+            end,
+        )?;
+        if identity
+            .as_ref()
+            .is_some_and(|expected| *expected != current)
+        {
+            return Err("selected group members have different competition policies".into());
+        }
+        identity = Some(current);
+        headers.push((member.player, header));
+    }
+    Ok((identity.ok_or("selected group has no identity")?, headers))
 }
 
 fn copy_members(members: &[MemberProgress]) -> Result<Vec<MemberProgress>> {

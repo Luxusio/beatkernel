@@ -45,6 +45,10 @@ pub trait NativeGameplayDevice {
     fn output_replacement_pending(&self) -> bool {
         false
     }
+    /// Converted owners switch native held output at acknowledged target boundaries.
+    fn set_audio_held(&mut self, _: bool) -> NativeGameplayResult<()> {
+        Ok(())
+    }
     /// Compatibility hook for committed paused replacement; existing owners opt out.
     fn publish_paused_output(
         &mut self,
@@ -194,6 +198,9 @@ impl<D: NativeGameplayDevice> GameplayDevice for D {
     ) -> NativeGameplayResult<LivePauseObservation> {
         NativeGameplayDevice::audio_pause_observation(self, presentation, now)
     }
+    fn set_audio_held(&mut self, held: bool) -> NativeGameplayResult<()> {
+        NativeGameplayDevice::set_audio_held(self, held)
+    }
     fn observe_audio_end(
         &mut self,
         end: &mut NativeEnd,
@@ -271,6 +278,12 @@ impl SoloCompetitionPort for LiveCompetition {
 }
 
 impl GroupCompetitionPort for NativeGroupCompetition {
+    fn expected_policy_header(
+        &self,
+        player: crate::local_players::PlayerId,
+    ) -> Option<&beatkernel::replay::ReplayHeader> {
+        self.native_policy_header(player)
+    }
     fn observe(&mut self, members: &[MemberProgress]) -> NativeGameplayResult<()> {
         NativeGroupCompetition::observe(self, members)
     }

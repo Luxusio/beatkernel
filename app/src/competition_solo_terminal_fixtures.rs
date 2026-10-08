@@ -1,9 +1,9 @@
 use super::*;
-use crate::competition_terminal::{
-    CompetitionTerminalPort, DeliveryIntent, DeliveryStatus, TerminalGuard, finalize_terminal,
-    solo_delivery_intent,
-};
 use crate::competition_presentation::{CompetitionSnapshot, GhostSnapshot, NetworkSnapshot};
+use crate::competition_terminal::{
+    finalize_terminal, solo_delivery_intent, CompetitionTerminalPort, DeliveryIntent,
+    DeliveryStatus, TerminalGuard,
+};
 use std::{cell::Cell, collections::VecDeque, sync::Arc};
 
 struct Opaque(Arc<u8>);
@@ -205,6 +205,7 @@ fn offline() -> (LiveCompetition, JudgeEngine) {
         .header;
     (
         LiveCompetition {
+            admitted_policy_header: None,
             player: PlayerId(u32::MAX),
             competition: Competition::new(header, 0).unwrap(),
             network: None,
@@ -365,16 +366,14 @@ fn actual_late_report_and_start_requests_refuse_before_judge_host_control_or_ser
     assert_eq!(owner.last_display, None);
     assert_eq!(owner.last_publish, None);
     for release in [false, true] {
-        assert!(
-            owner
-                .await_network_start_with_ports(
-                    || panic!("claimed owner must not service acquisition"),
-                    release,
-                    &mut NoControl,
-                    &mut host
-                )
-                .is_err()
-        );
+        assert!(owner
+            .await_network_start_with_ports(
+                || panic!("claimed owner must not service acquisition"),
+                release,
+                &mut NoControl,
+                &mut host
+            )
+            .is_err());
     }
     assert_eq!(host.saved.len(), 1);
     assert_eq!(host.reads, 2);

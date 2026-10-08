@@ -362,6 +362,7 @@ fn retarget_refusals_preserve_exact_state_pcm_and_retry() {
     let pos = failed.source_position();
     let pulled = failed.pulled_source_frame_cursor();
     let target = failed.target_frame_cursor();
+    let duration = failed.target_time();
     assert_eq!(
         failed.retarget(
             format(32_000, 2),
@@ -389,6 +390,7 @@ fn retarget_refusals_preserve_exact_state_pcm_and_retry() {
     assert_eq!(failed.source_position(), pos);
     assert_eq!(failed.pulled_source_frame_cursor(), pulled);
     assert_eq!(failed.target_frame_cursor(), target);
+    assert_eq!(failed.target_time(), duration);
     retarget(&mut failed, 44_100, 1, 32);
     retarget(&mut reference, 44_100, 1, 32);
     let mut a = [0.0; 32];
@@ -718,6 +720,7 @@ fn retarget_allocation_refusal_preserves_owner_pcm_commands_and_successful_retry
         let position = converted.source_position();
         let frontier = converted.pulled_source_frame_cursor();
         let target_cursor = converted.target_frame_cursor();
+        let duration = converted.target_time();
         let counters = converted.mixer().counters();
         let source_format = converted.converter().source_format();
         let old_target = converted.converter().target_format();
@@ -736,6 +739,7 @@ fn retarget_allocation_refusal_preserves_owner_pcm_commands_and_successful_retry
         assert_eq!(converted.source_position(), position);
         assert_eq!(converted.pulled_source_frame_cursor(), frontier);
         assert_eq!(converted.target_frame_cursor(), target_cursor);
+        assert_eq!(converted.target_time(), duration);
         assert_eq!(converted.mixer().counters(), counters);
         assert_eq!(converted.converter().source_format(), source_format);
         assert_eq!(converted.converter().target_format(), old_target);
@@ -797,4 +801,128 @@ fn allocation_failure_injection_is_one_shot_and_thread_local() {
         child.join().unwrap().is_ok(),
         "another thread must not inherit injected failure"
     );
+}
+
+#[test]
+fn nonzero_source_origin_piecewise_active_and_held_duration_is_exact_and_allocation_free() {
+    const DEN: u128 = 14_112_000;
+    let (mut producer, mut mixer) = rig(44_100, 256, None);
+    play(&mut producer, 1, 0);
+    mixer.render(&mut [0.0; 5]).unwrap();
+    let mut converted = owner(mixer, format(48_000, 1), ResampleQuality::Linear, 32);
+    let mut duration_ticks = 5 * (DEN / 44_100);
+    let mut position_ticks = 5 * DEN;
+    let mut generated = 0_u64;
+    for (rate, count, hold) in [
+        (48_000, 3, false),
+        (32_000, 5, true),
+        (44_100, 7, false),
+        (48_000, 11, true),
+    ] {
+        retarget(&mut converted, rate, 1, 32);
+        let start = converted.target_time();
+        let basis = converted.target_frame_basis();
+        assert_eq!(basis.start_time(), start);
+        assert_eq!(basis.sample_rate(), rate);
+        let mut output = [99.0; 32];
+        let report = if hold {
+            held(&mut converted, &mut output[..count])
+        } else {
+            render(&mut converted, &mut output[..count])
+        };
+        duration_ticks += count as u128 * (DEN / u128::from(rate));
+        generated += count as u64;
+        if hold {
+            assert_eq!(&output[..count], &vec![0.0; count]);
+            assert_eq!(report.source, None);
+        } else {
+            position_ticks += count as u128 * 44_100 * (DEN / u128::from(rate));
+        }
+        let duration = converted.target_time();
+        assert_eq!(
+            u128::from(duration.seconds()) * DEN * u128::from(duration.denominator())
+                + u128::from(duration.numerator()) * DEN,
+            duration_ticks * u128::from(duration.denominator())
+        );
+        let position = converted.source_position();
+        assert_eq!(
+            u128::from(position.frame) * DEN
+                + u128::from(position.numerator) * (DEN / u128::from(position.denominator)),
+            position_ticks
+        );
+        assert_eq!(report.target_start_time, start);
+        assert_eq!(report.target_end_time, duration);
+        assert_eq!(report.target_rate, rate);
+        assert_eq!(report.target_frame_cursor, generated);
+        assert_eq!(basis.time_at_stream_frame(count as u64).unwrap(), duration);
+        assert_eq!(
+            basis.time_at_stream_frame(1).unwrap(),
+            start.checked_add_frames(1, rate).unwrap()
+        );
+    }
+}
+
+#[test]
+fn cold_duration_denominator_refusal_preserves_owner_queue_and_equivalent_retry() {
+    let build = || {
+        let (mut producer, mixer) = rig(44_100, 256, None);
+        play(&mut producer, 1, 0);
+        (
+            producer,
+            owner(mixer, format(1_000_003, 1), ResampleQuality::Linear, 8),
+        )
+    };
+    let (_producer, mut failed) = build();
+    let (_control_producer, mut control) = build();
+    for rate in [1_000_003, 1_000_033, 1_000_037] {
+        retarget(&mut failed, rate, 1, 8);
+        retarget(&mut control, rate, 1, 8);
+        assert_eq!(
+            held(&mut failed, &mut [99.0; 1]),
+            held(&mut control, &mut [99.0; 1])
+        );
+    }
+    let before = (
+        failed.target_time(),
+        failed.target_frame_cursor(),
+        failed.source_position(),
+        failed.pulled_source_frame_cursor(),
+        failed.mixer().counters(),
+        failed.converter().target_format(),
+    );
+    assert_eq!(
+        failed.retarget(
+            format(1_000_039, 1),
+            ChannelMatrix::default_mix(1, 1).unwrap(),
+            8
+        ),
+        Err(AudioError::Overflow)
+    );
+    assert_eq!(
+        (
+            failed.target_time(),
+            failed.target_frame_cursor(),
+            failed.source_position(),
+            failed.pulled_source_frame_cursor(),
+            failed.mixer().counters(),
+            failed.converter().target_format()
+        ),
+        before
+    );
+    let mut actual = [99.0; 4];
+    let mut expected = [99.0; 4];
+    assert_eq!(
+        render(&mut failed, &mut actual),
+        render(&mut control, &mut expected)
+    );
+    assert_eq!(actual, expected);
+    assert_eq!(failed.mixer().counters().commands_consumed, 1);
+    // A representable retry retains the accepted voice and exact buffered PCM.
+    retarget(&mut failed, 1_000_033, 1, 8);
+    retarget(&mut control, 1_000_033, 1, 8);
+    assert_eq!(
+        render(&mut failed, &mut actual),
+        render(&mut control, &mut expected)
+    );
+    assert_eq!(actual, expected);
 }

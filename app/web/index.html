@@ -13,6 +13,11 @@
     <header><p class="eyebrow">BEATKERNEL</p><h1>BMS player</h1>
       <p>Choose a song folder, preview its chart, or play with the keyboard.</p>
     </header>
+    <nav class="menu-bridge" aria-label="Game menu">
+      <button id="menu-open" type="button">Open game menu</button>
+      <button id="menu-back" type="button">Back</button>
+      <label>Menu field <input id="menu-editor" type="text" maxlength="4096" hidden autocomplete="off"></label>
+    </nav>
     <section aria-label="Song library" class="controls">
       <div class="files">
         <label>Song folder <input id="folder" type="file" webkitdirectory multiple disabled></label>

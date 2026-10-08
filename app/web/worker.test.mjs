@@ -5,9 +5,26 @@ import { File as NodeFile } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { ROOM_SESSION_METHODS } from "./room-owner.mjs";
-import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
+import { preflightMenuPacket } from "./render-protocol.mjs";
+import { createContext, SourceTextModule, SyntheticModule, runInContext } from "node:vm";
 
 const FileType = globalThis.File ?? NodeFile;
+let actualMenuBinding;
+function realMenuOwner() {
+  return actualMenuBinding ??= (async () => {
+    const url = new URL("./pkg/beatkernel_bms_runtime.js", import.meta.url);
+    const context = createContext({ WebAssembly, TextEncoder, TextDecoder, Uint8Array,
+      ArrayBuffer, DataView, URL, Request, Response, console });
+    const module = new SourceTextModule(await readFile(url, "utf8"), { context,
+      identifier: url.href, initializeImportMeta(meta) { meta.url = url.href; } });
+    await module.link(specifier => { throw new Error(`unexpected menu binding import ${specifier}`); });
+    await module.evaluate();
+    context.testWasmModule = new WebAssembly.Module(await readFile(new URL("./pkg/beatkernel_bms_runtime_bg.wasm", import.meta.url)));
+    module.namespace.initSync(runInContext("({ module: testWasmModule })", context));
+    assert.equal(typeof module.namespace.BrowserMenuOwner, "function");
+    return module.namespace.BrowserMenuOwner;
+  })();
+}
 
 function deferred() {
   let resolve;
@@ -87,6 +104,13 @@ async function workerHarness(options = {}) {
       const message=structuredClone(request,{transfer}); this.posts.push(message);
       Promise.resolve().then(()=>{
         if(this.blocked)return;
+        if (message.kind === "menu") {
+          const header = preflightMenuPacket(message.packet);
+          this.emit({ kind: "menu-ack", operationId: message.operationId,
+            generation: message.generation, content: message.content,
+            menuGeneration: header.generation, screen: header.screen, revision: header.revision });
+          return;
+        }
         const view=views[0];
         if(message.kind==="packet") {
           const h=new DataView(message.packet.buffer),kind=h.getUint16(6,true),sequence=h.getBigUint64(24,true);
@@ -322,13 +346,17 @@ async function workerHarness(options = {}) {
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
   });
-  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserGame", "BrowserReplay"], function () {
+  const MenuOwner = options.actualMenu ? await realMenuOwner() : class {
+    constructor() { assert.fail("menu business fixtures must opt into the actual generated WASM owner"); }
+  };
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserGame", "BrowserReplay", "BrowserMenuOwner"], function () {
     this.setExport("default", async () => {
       if (options.initError) throw new Error(options.initError);
     });
     this.setExport("BrowserLibrary", BrowserLibrary);
     this.setExport("BrowserGame", BrowserGame);
     this.setExport("BrowserReplay", BrowserGame);
+    this.setExport("BrowserMenuOwner", MenuOwner);
   }, { context });
   const network = new SyntheticModule(["BrowserMultiplayerOwner"], function () {
     this.setExport("BrowserMultiplayerOwner", class {
@@ -348,6 +376,7 @@ async function workerHarness(options = {}) {
   const opponentHelpers = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
   const physicalHelpers = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
   const localHelpers = new SourceTextModule(await readFile(new URL("./local-play-model.mjs", import.meta.url), "utf8"), { context });
+  const localHostHelpers = new SourceTextModule(await readFile(new URL("./local-play-host.mjs", import.meta.url), "utf8"), { context });
   const hidProfileHelpers = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
   const gamepadProfileHelpers = new SourceTextModule(await readFile(new URL("./gamepad-profile.mjs", import.meta.url), "utf8"), { context });
   const pointerProfileHelpers = new SourceTextModule(await readFile(new URL("./pointer-profile.mjs", import.meta.url), "utf8"), { context });
@@ -368,6 +397,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./saved-opponents.mjs") return opponentHelpers;
     if (specifier === "./physical-input.mjs") return physicalHelpers;
     if (specifier === "./local-play-model.mjs") return localHelpers;
+    if (specifier === "./local-play-host.mjs") return localHostHelpers;
     if (specifier === "./hid-profile.mjs") return hidProfileHelpers;
     if (specifier === "./gamepad-profile.mjs") return gamepadProfileHelpers;
     if (specifier === "./pointer-profile.mjs") return pointerProfileHelpers;
@@ -405,6 +435,122 @@ async function readyWorker(options) {
   assert.equal(worker.of("fatal").length, 0);
   return worker;
 }
+
+test("game Worker uses actual menu owner for Settings Practice Back and keeps retained parent draft", async () => {
+  const worker = await readyWorker({ actualMenu: true });
+  await worker.send({ kind: "menu-open", fields: ["Songs/曲/chart.bms"] });
+  const selection = worker.of("menu-state").at(-1); assert.equal(selection.route, 1);
+  const token = state => ({ menuGeneration: state.menuGeneration, screen: state.screen, revision: state.revision });
+  await worker.send({ kind: "menu-navigate", ...token(selection), route: 2, fields: ["accepted settings draft"] });
+  const settings = worker.of("menu-state").at(-1); assert.equal(settings.route, 2);
+  await worker.send({ kind: "menu-navigate", ...token(settings), route: 3, fields: ["1.000000001", "2.000000002"] });
+  const practice = worker.of("menu-state").at(-1); assert.equal(practice.route, 3);
+  await worker.send({ kind: "menu-edit", ...token(practice), index: 0, value: "12.345678901" });
+  const edited = worker.of("menu-state").at(-1);
+  await worker.send({ kind: "menu-action", ...token(edited), actionId: 1n, control: 72n });
+  const returned = worker.of("menu-state").at(-1);
+  assert.equal(returned.route, 2); assert.equal(returned.screen, settings.screen);
+  assert.deepEqual(returned.fields, settings.fields, "Back must discard child edits without business Apply");
+  assert.equal(worker.games.length, 0); assert.equal(worker.preparedOwners.length, 0);
+  assert.ok(worker.renderPort.posts.some(message => message.kind === "menu"), "models cross direct renderer channel");
+  await worker.send({ kind: "dispose" });
+});
+
+test("stale menu actions cannot prepare a game or mutate a newer retained screen", async () => {
+  const worker = await readyWorker({ actualMenu: true });
+  await worker.send({ kind: "menu-open", fields: ["Songs/曲/chart.bms"] });
+  const old = worker.of("menu-state").at(-1);
+  await worker.send({ kind: "menu-navigate", menuGeneration: old.menuGeneration,
+    screen: old.screen, revision: old.revision, route: 2, fields: [] });
+  const current = worker.of("menu-state").at(-1);
+  for (const request of [
+    { kind: "menu-action", actionId: 1n, control: 1n },
+    { kind: "menu-edit", index: 0, value: "forged" },
+    { kind: "menu-navigate", route: 8, fields: [] },
+  ]) await worker.send({ ...request, menuGeneration: old.menuGeneration, screen: old.screen, revision: old.revision });
+  assert.deepEqual(worker.of("menu-state").at(-1), current);
+  assert.equal(worker.games.length, 0); assert.equal(worker.preparedOwners.length, 0);
+  await worker.send({ kind: "dispose" });
+});
+
+test("actual Worker malformed navigation preserves accepted token draft and next valid action before retry", async () => {
+  const worker = await readyWorker({ actualMenu: true });
+  const reference = await readyWorker({ actualMenu: true });
+  const token = state => ({ menuGeneration: state.menuGeneration, screen: state.screen, revision: state.revision });
+  try {
+    for (const value of [worker, reference]) {
+      await value.send({ kind: "menu-open", fields: ["Songs/曲/chart.bms"] });
+      await value.send({ kind: "menu-navigate", ...token(value.of("menu-state").at(-1)), route: 2, fields: ["accepted settings draft"] });
+    }
+    const accepted = worker.of("menu-state").at(-1);
+    const publications = worker.renderPort.posts.filter(message => message.kind === "menu").length;
+    for (const [route, fields] of [
+      [5, []], [6, ["1", "1", "65", "0"]], [3, ["0"]],
+      [7, ["auto", "fifo", "960"]], [4, Array(257).fill("record")],
+      [9, ["1", "1", "1", "1", "", "1", "1", "forged-kind", "source", "detail", "1"]],
+    ]) {
+      const failures = worker.of("menu-error").length;
+      await worker.send({ kind: "menu-navigate", ...token(accepted), route, fields });
+      assert.equal(worker.of("menu-error").length, failures + 1);
+      assert.deepEqual(worker.of("menu-state").at(-1), accepted);
+      assert.equal(worker.renderPort.posts.filter(message => message.kind === "menu").length, publications);
+      assert.equal(worker.games.length, 0); assert.equal(worker.preparedOwners.length, 0);
+    }
+    for (const value of [worker, reference]) {
+      await value.send({ kind: "menu-action", ...token(value.of("menu-state").at(-1)), actionId: 1n, control: 74n });
+    }
+    const practice = worker.of("menu-state").at(-1);
+    assert.equal(practice.route, 3);
+    assert.deepEqual(structuredClone(practice), structuredClone(reference.of("menu-state").at(-1)), "refused navigation consumes no next screen identity or revision");
+    for (const value of [worker, reference]) {
+      await value.send({ kind: "menu-action", ...token(value.of("menu-state").at(-1)), actionId: 2n, control: 72n });
+    }
+    const restored = worker.of("menu-state").at(-1);
+    assert.equal(restored.screen, accepted.screen); assert.deepEqual(restored.fields, accepted.fields);
+    await worker.send({ kind: "menu-navigate", ...token(restored), route: 3, fields: ["1.000000001", "2.000000002"] });
+    const retried = worker.of("menu-state").at(-1);
+    assert.equal(retried.route, 3); assert.deepEqual(Array.from(retried.fields), ["1.000000001", "2.000000002"]);
+    await worker.send({ kind: "menu-action", ...token(retried), actionId: 3n, control: 72n });
+    const back = worker.of("menu-state").at(-1);
+    await worker.send({ kind: "menu-navigate", ...token(back), route: 3 });
+    assert.equal(worker.of("menu-state").at(-1).route, 3, "fields-absent legacy navigation keeps its original intent");
+  } finally {
+    await worker.send({ kind: "dispose" }); await reference.send({ kind: "dispose" });
+  }
+});
+
+test("actual Worker routes all supported shared menu capabilities without inventing Results or native ownership", async () => {
+  const worker = await readyWorker({ actualMenu: true });
+  const roster = { players: [7, 4294967295], nextPlayerId: 4294967296, assignments: [] };
+  const rosterFields = ["1", "1", "2", "7", "", "4294967295", "", "1",
+    "1", "keyboard", "Browser keyboard", "Original acquired keyboard source", "1"];
+  await worker.send({ kind: "menu-open", fields: ["Songs/曲/chart.bms"], roster });
+  const token = state => ({ menuGeneration: state.menuGeneration, screen: state.screen, revision: state.revision });
+  const selection = worker.of("menu-state").at(-1);
+  await worker.send({ kind: "menu-navigate", ...token(selection), route: 2, fields: [] });
+  let actionId = 1n;
+  for (const [route, back] of [[3, 72n], [4, 55n], [5, 31n], [6, 21n], [7, 41n]]) {
+    const parent = worker.of("menu-state").at(-1);
+    await worker.send({ kind: "menu-navigate", ...token(parent), route,
+      fields: [5, 6].includes(route) ? rosterFields : route === 3 ? ["0", ""] : route === 7 ? ["auto", "fifo", "960", "720"] : [] });
+    const child = worker.of("menu-state").at(-1); assert.equal(child.route, route);
+    if ([5, 6].includes(route)) assert.deepEqual(structuredClone(child.roster), roster, "capability projections retain actual original player IDs");
+    await worker.send({ kind: "menu-action", ...token(child), actionId: actionId++, control: back });
+    const returned = worker.of("menu-state").at(-1);
+    assert.equal(returned.route, 2); assert.equal(returned.screen, parent.screen);
+  }
+  const settings = worker.of("menu-state").at(-1);
+  await worker.send({ kind: "menu-navigate", ...token(settings), route: 5, fields: rosterFields });
+  const players = worker.of("menu-state").at(-1);
+  await worker.send({ kind: "menu-action", ...token(players), actionId: actionId++, control: 34n });
+  const devices = worker.of("menu-state").at(-1); assert.equal(devices.route, 9);
+  await worker.send({ kind: "menu-action", ...token(devices), actionId: actionId++, control: 21n });
+  const restored = worker.of("menu-state").at(-1); assert.equal(restored.screen, players.screen);
+  await worker.send({ kind: "menu-navigate", ...token(restored), route: 8, fields: [] });
+  assert.deepEqual(worker.of("menu-state").at(-1), restored);
+  assert.equal(worker.games.length, 0); assert.equal(worker.preparedOwners.length, 0);
+  await worker.send({ kind: "dispose" });
+});
 
 function opponentFile(name, values = [66, 75, 82, 1], read) {
   const bytes = Uint8Array.from(values);

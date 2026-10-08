@@ -3,10 +3,16 @@ use crate::gameplay::output::ports::OutputUiPort;
 use crate::{
     gameplay::output::application::owner::GameplayOutputOwner,
     gameplay::output::domain::control::{OutputCapability, OutputReply, OutputRequest},
-    gameplay::output::ports::{OriginalNativeOutputBackend, OutputReplacementBackend},
+    gameplay::output::ports::{
+        OriginalNativeOutputBackend, OriginalTargetNativeOutputBackend, OutputReplacementBackend,
+    },
     gameplay_presentation::{GameplayAudioOutputContext, GameplayOutputContext},
 };
-use beatkernel::{audio::SoftwareOutputState, time::ClockPoint};
+use beatkernel::{
+    audio::{SoftwareOutputState, TargetFrameBasis},
+    time::ClockPoint,
+};
+use beatkernel_platform::audio::ConvertedNativeOutputState;
 use std::io;
 pub struct GameplayOutputUi<U: OutputUiPort> {
     ui: U,
@@ -71,12 +77,30 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
             owner.publish_paused_audio(context, now)
         })
     }
-    fn service_with<B: OutputReplacementBackend<O>, O: SoftwareOutputState>(
+    /// Keep target publication on the original converted owner and physical basis.
+    pub fn service_target_audio<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>>(
         &mut self,
-        owner: &mut GameplayOutputOwner<B, O>,
+        owner: &mut GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis>,
+        context: GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
         map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
         applied: &mut impl FnMut(&B::Output) -> Result<OutputCapability, String>,
-        publish: impl FnOnce(&mut GameplayOutputOwner<B, O>) -> Result<bool, Box<dyn std::error::Error>>,
+    ) -> Result<bool, Box<dyn std::error::Error>>
+    where
+        B::Error: std::error::Error + 'static,
+    {
+        self.service_with(owner, map, applied, |owner| {
+            owner.publish_paused_target_audio(context, now)
+        })
+    }
+    fn service_with<B: OutputReplacementBackend<O, Basis>, O, Basis>(
+        &mut self,
+        owner: &mut GameplayOutputOwner<B, O, Basis>,
+        map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
+        applied: &mut impl FnMut(&B::Output) -> Result<OutputCapability, String>,
+        publish: impl FnOnce(
+            &mut GameplayOutputOwner<B, O, Basis>,
+        ) -> Result<bool, Box<dyn std::error::Error>>,
     ) -> Result<bool, Box<dyn std::error::Error>>
     where
         B::Error: std::error::Error + 'static,

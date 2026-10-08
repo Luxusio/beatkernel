@@ -7,16 +7,17 @@
 
 use beatkernel::{
     input::CodecLimits,
-    replay::{REPLAY_VERSION, ReplayHeader, codec::ReplayCodecLimits},
+    replay::{codec::ReplayCodecLimits, ReplayHeader, REPLAY_VERSION},
     time::ClockDomainId,
 };
 use beatkernel_bms_runtime::{
     multiplayer::{
-        Multiplayer, MultiplayerError, MultiplayerEvent, MultiplayerOptions, Progress,
-        competition_identity,
+        competition_identity, Multiplayer, MultiplayerError, MultiplayerEvent, MultiplayerOptions,
+        Progress,
     },
     multiplayer_quic::QuicCredentials,
 };
+use std::fs;
 use std::{
     env,
     net::{Ipv4Addr, SocketAddr, UdpSocket},
@@ -325,11 +326,9 @@ fn compatible_peers_commit_start_exchange_exact_progress_and_acknowledge_both_fi
                 .count(),
             1
         );
-        assert!(
-            events[..ack]
-                .iter()
-                .all(|event| !matches!(event, MultiplayerEvent::Disconnected(_)))
-        );
+        assert!(events[..ack]
+            .iter()
+            .all(|event| !matches!(event, MultiplayerEvent::Disconnected(_))));
     }
     // stop joins workers; its result is not evidence of transport-drain success.
     peers.stop().expect("QUIC worker join failed");
@@ -379,6 +378,65 @@ fn certificate_name_mismatch_fails_tls_before_connected_or_ready() {
 }
 
 #[test]
+#[ignore = "external unrelated development CA and real socket execution required"]
+fn unrelated_root_ca_fails_tls_before_connected_ready_or_start_and_joins_both_workers() {
+    let mut credentials = Credentials::from_environment();
+    let wrong_ca = PathBuf::from(
+        env::var_os("BEATKERNEL_TEST_QUIC_WRONG_CA")
+            .expect("unrelated-root integration requires BEATKERNEL_TEST_QUIC_WRONG_CA"),
+    );
+    let wrong_bytes = fs::read(&wrong_ca)
+        .expect("unrelated root must be an actual readable development certificate");
+    assert!(!wrong_bytes.is_empty());
+    assert_ne!(
+        wrong_bytes,
+        fs::read(credentials.join.ca.as_ref().unwrap()).unwrap(),
+        "wrong-root test must not reuse the accepted CA bytes",
+    );
+    // Keep the correctly authorized server name and certificate. Change only
+    // the genuine client's trusted root, separating CA rejection from name and
+    // canonical application-identity rejection.
+    credentials.join.ca = Some(wrong_ca);
+    let mut peers = Peers::connect(credentials, 41, 41);
+    peers.ready();
+    peers.poll_until(
+        Instant::now() + DEADLINE,
+        "unrelated-root TLS rejection",
+        |peers| terminal(&peers.host_events).is_some() && terminal(&peers.join_events).is_some(),
+    );
+    match terminal(&peers.join_events).unwrap() {
+        MultiplayerError::Io(message) => {
+            let message = message.to_ascii_lowercase();
+            assert!(
+                message.contains("certificate")
+                    && (message.contains("unknownissuer")
+                        || message.contains("unknown issuer")
+                        || message.contains("unknown ca")),
+                "expected certificate trust-root rejection, got {message}"
+            );
+        }
+        error => panic!("expected unrelated-root TLS error, got {error:?}"),
+    }
+    for events in [&peers.host_events, &peers.join_events] {
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event, MultiplayerEvent::Disconnected(_))),
+            "untrusted root exposed application events: {events:?}"
+        );
+    }
+    assert!(!peers.host.is_connected() && !peers.join.is_connected());
+    assert!(!peers.host.is_ready() && !peers.join.is_ready());
+    assert!(peers.host.start_schedule().is_none() && peers.join.start_schedule().is_none());
+    assert!(peers.host.remote_progress().is_none() && peers.join.remote_progress().is_none());
+    let stopped_at = Instant::now();
+    peers
+        .stop()
+        .expect("both QUIC workers must join after unrelated-root refusal");
+    assert!(stopped_at.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
 #[ignore = "external test certificates and socket execution are deferred"]
 fn incompatible_canonical_identity_never_reaches_ready_or_scheduled_start() {
     let credentials = Credentials::from_environment();
@@ -412,4 +470,76 @@ fn incompatible_canonical_identity_never_reaches_ready_or_scheduled_start() {
     peers
         .stop()
         .expect("QUIC worker join failed after incompatible setup");
+}
+
+#[test]
+#[ignore = "external test certificates and socket execution are deferred"]
+fn pending_accept_and_pending_connect_cancel_and_join_without_application_success() {
+    let credentials = Credentials::from_environment();
+    let host_address = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    // An owned UDP sink holds the destination open without supplying any QUIC
+    // response. Receipt proves the production join reached its real handshake;
+    // the lone host remains in accept with no peer and no successful session.
+    let sink = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    sink.set_nonblocking(true).unwrap();
+    let host = Multiplayer::host(
+        host_address,
+        identity(41),
+        options(credentials.host, HOST_PREROLL),
+    )
+    .expect("real pending QUIC host setup failed");
+    let join = Multiplayer::join(
+        sink.local_addr().unwrap(),
+        identity(41),
+        options(credentials.join, JOIN_PREROLL),
+    )
+    .expect("real pending QUIC join setup failed");
+    let mut peers = Peers {
+        host,
+        join,
+        host_events: Vec::new(),
+        join_events: Vec::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut packet = [0u8; 2048];
+    loop {
+        peers.host_events.extend(peers.host.poll());
+        peers.join_events.extend(peers.join.poll());
+        assert!(peers.host_events.is_empty() && peers.join_events.is_empty());
+        match sink.recv_from(&mut packet) {
+            Ok((received, _)) => {
+                assert!(
+                    received >= 1200,
+                    "QUIC Initial must reach the real UDP sink"
+                );
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("real UDP sink failed: {error}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "production join never sent its QUIC Initial"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(!peers.host.is_connected() && !peers.join.is_connected());
+    assert!(!peers.host.is_ready() && !peers.join.is_ready());
+    assert!(peers.host.start_schedule().is_none() && peers.join.start_schedule().is_none());
+    let stopped_at = Instant::now();
+    peers
+        .stop()
+        .expect("cancelled pending QUIC workers must join");
+    assert!(stopped_at.elapsed() < Duration::from_secs(2));
+    assert!(!peers.host.is_connected() && !peers.join.is_connected());
+    assert!(!peers.host.is_ready() && !peers.join.is_ready());
+    assert!(peers.host.remote_progress().is_none() && peers.join.remote_progress().is_none());
+    let stopped_again = Instant::now();
+    peers
+        .stop()
+        .expect("joined pending owners retain idempotent cleanup");
+    assert!(stopped_again.elapsed() < Duration::from_secs(2));
 }

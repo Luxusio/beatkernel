@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { MessageChannel } from "node:worker_threads";
+import { preflightMenuPacket } from "./render-protocol.mjs";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 
 const turn = () => new Promise(resolve => setImmediate(resolve));
@@ -22,7 +23,7 @@ async function rendererHarness(options = {}) {
   const host = [], messages = [], calls = [], views = [], timers = new Map();
   const { port1, port2 } = new MessageChannel();
   port1.on("message", message => messages.push(message));
-  let timerId = 0, receive;
+  let timerId = 0, receive, now = 100;
   const self = { postMessage: message => host.push(message),
     addEventListener(name, handler) { if (name === "message") receive = handler; }, close() { calls.push(["worker-close"]); } };
   class BrowserView {
@@ -75,15 +76,51 @@ async function rendererHarness(options = {}) {
       this.model = { ...this.model, page: this.appliedPage, comparisons };
     }
     set_visual_room_page(page) { calls.push(["room-page", page]); }
+    import_menu_packet(bytes) {
+      if (options.menuImportError) throw new Error(options.menuImportError);
+      const identity = preflightMenuPacket(bytes);
+      calls.push(["menu-import", identity]); this.menuIdentity = identity;
+      return identity.revision;
+    }
+    draw_menu() { calls.push(["menu-draw", this.menuIdentity]); if (options.menuDrawError) throw new Error(options.menuDrawError); }
+    request_menu_motion(screen, revision, control, transforms, duration, easing, at) {
+      calls.push(["menu-motion", screen, revision, control, [...transforms], duration, easing, at]);
+      if (options.motionError) throw new Error(options.motionError);
+      this.motion = { start: at, duration, suspended: null };
+    }
+    draw_menu_at(at) {
+      this.draw_menu(); calls.push(["menu-time", at]);
+      const frame = options.menuFrames?.shift();
+      this.surfaceRetry = frame?.needsRedraw ?? options.needsRedraw ?? false;
+      if (this.motion && this.motion.suspended === null && at >= this.motion.start + this.motion.duration) this.motion = null;
+      return frame?.presented ?? options.menuPresented ?? !this.surfaceRetry;
+    }
+    menu_motion_active() { return this.motion !== null && this.motion !== undefined && this.motion.suspended === null; }
+    suspend_menu_motion(at) { calls.push(["motion-suspend", at]); if (this.motion && this.motion.suspended === null) this.motion.suspended = at; }
+    resume_menu_motion(at) {
+      calls.push(["motion-resume", at]);
+      if (this.motion?.suspended !== null && this.motion?.suspended !== undefined) {
+        this.motion.start += at - this.motion.suspended; this.motion.suspended = null;
+      }
+    }
+    dispose_menu_motion() { calls.push(["motion-dispose"]); this.motion = null; }
+    menu_hit(x, y) { calls.push(["menu-hit", x, y]); return options.menuControl ?? 5n; }
+    set_menu_opponents(count, own, other) { calls.push(["menu-opponents", count, own, other]); }
+    menu_page() { return this.appliedPage; }
+    menu_details() { return false; }
     visual_page() { calls.push(["visual-page", this.appliedPage]); return this.appliedPage; }
     resize(width, height) { calls.push(["resize", width, height]); }
     draw_visual() { calls.push(["draw", this.model?.kind, this.appliedPage, this.model?.comparisons]); if (options.drawError) throw new Error(options.drawError); }
-    needs_redraw() { return options.needsRedraw ?? false; }
+    needs_redraw() { return this.surfaceRetry ?? options.needsRedraw ?? false; }
     retire_visual() { this.retired++; this.model = null; calls.push(["retire"]); }
     free() { this.frees++; assert.equal(this.frees, 1); calls.push(["free"]); }
   }
-  const context = createContext({ self, console, Uint8Array, ArrayBuffer, DataView, BigInt, TextEncoder, Error,
-    performance: { now: () => 100 },
+  if (options.animationFrame !== false) {
+    self.requestAnimationFrame = callback => { const id = ++timerId; timers.set(id, callback); return id; };
+    self.cancelAnimationFrame = id => { timers.delete(id); };
+  }
+  const context = createContext({ self, console, Uint8Array, Float32Array, ArrayBuffer, DataView, BigInt, TextEncoder, Error,
+    performance: { now: () => now },
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
     requestAnimationFrame(callback) { const id = ++timerId; timers.set(id, callback); return id; },
@@ -113,7 +150,11 @@ async function rendererHarness(options = {}) {
     async init() { await sendHost({ kind: "init", canvas: { width: 640, height: 480 }, port: port2,
       maxPacketBytes: 4096, maxDiagnosticBytes: 1024 }); },
     async send(data) { port1.postMessage(data); await settle(); },
-    async draw() { const scheduled = [...timers.values()]; timers.clear(); for (const callback of scheduled) callback(100); await settle(); },
+    setNow(at) { assert.ok(Number.isFinite(at) && at >= now); now = at; },
+    async draw(at = now + 16) {
+      assert.ok(Number.isFinite(at) && at >= now); now = at;
+      const scheduled = [...timers.values()]; timers.clear(); for (const callback of scheduled) callback(now); await settle();
+    },
     async close() { await sendHost({ kind: "dispose" }); port1.close(); port2.close(); },
   };
   return h;
@@ -123,6 +164,254 @@ const request = (operationId, kind = 1, sequence = 0n, mode = "live", generation
   packet: packet(kind, sequence, generation, content, body ?? (kind === 1 ? [mode === "preview" ? 0 : 1] : [0])), mode,
 });
 const ofKind = (h, kind) => h.messages.filter(message => message.kind === kind);
+
+function menuRequest(operationId = 1n, fields = {}) {
+  const bytes = new Uint8Array(48); bytes.set([66,75,77,78]); const view = new DataView(bytes.buffer);
+  view.setBigUint64(4, 77n, true); view.setBigUint64(12, 3n, true); view.setBigUint64(20, 5n, true);
+  view.setUint32(28, 2, true);
+  return { kind: "menu", operationId, generation: 7n, content: 9n, packet: bytes, geometryVersion: 11n, ...fields };
+}
+
+function motionRequest(fields = {}) {
+  return { kind: "menu-motion", operationId: 2n, generation: 7n, content: 9n,
+    menuGeneration: 77n, screen: 3n, revision: 5n, geometryVersion: 12n,
+    control: 74n, transforms: new Float32Array([0, 0, 1, 1, 1, 20, 10, 1.25, 0.75, 0.5]),
+    durationMs: 1000, easing: 2, ...fields };
+}
+
+test("menu motion uses the frozen binding and keeps presenting beyond the surface retry budget", async () => {
+  const h = await rendererHarness();
+  try {
+    await h.init(); await h.send(menuRequest()); await h.draw(116);
+    h.setNow(120);
+    const motion = motionRequest(); await h.send(motion);
+    assert.deepEqual(h.calls.filter(call => call[0] === "menu-motion"), [
+      ["menu-motion", 3n, 5n, 74n, [...motion.transforms], 1000, 2, 120],
+    ]);
+    assert.equal(ofKind(h, "geometry-ack").filter(message => message.geometryVersion === 12n).length, 0);
+    for (const at of [136, 152, 168, 184, 200, 216]) {
+      await h.draw(at); assert.equal(h.timers.size, 1, "successful motion frame schedules its successor");
+    }
+    assert.equal(ofKind(h, "render-wait").length, 0);
+    assert.deepEqual(h.calls.filter(call => call[0] === "menu-time").map(call => call[1]),
+      [116, 136, 152, 168, 184, 200, 216]);
+    assert.equal(ofKind(h, "geometry-ack").filter(message => message.geometryVersion === 12n).length, 1);
+    await h.draw(1120); assert.equal(h.timers.size, 0, "completed motion stops scheduling");
+  } finally { await h.close(); }
+});
+
+test("unpresented menu frames never ACK geometry while a presented suboptimal frame resets retries", async () => {
+  const h = await rendererHarness({ menuFrames: [
+    { presented: false, needsRedraw: true }, { presented: false, needsRedraw: true },
+    { presented: false, needsRedraw: true }, { presented: true, needsRedraw: true },
+    { presented: false, needsRedraw: true }, { presented: false, needsRedraw: true },
+    { presented: false, needsRedraw: true }, { presented: true, needsRedraw: false },
+  ] });
+  try {
+    await h.init(); await h.send(menuRequest()); await h.send(motionRequest());
+    for (let i = 0; i < 3; i++) { await h.draw(); assert.equal(ofKind(h, "geometry-ack").length, 0); }
+    await h.draw();
+    assert.equal(ofKind(h, "geometry-ack").length, 1, "actual suboptimal presentation is geometry evidence");
+    assert.equal(ofKind(h, "geometry-ack")[0].geometryVersion, 12n);
+    assert.equal(ofKind(h, "drawn").length, 1);
+    for (let i = 0; i < 3; i++) { await h.draw(); assert.equal(h.timers.size, 1); }
+    await h.draw(); assert.equal(ofKind(h, "drawn").length, 2);
+    assert.equal(ofKind(h, "render-wait").length, 0, "successful presentation resets consecutive misses");
+  } finally { await h.close(); }
+});
+
+test("active menu motion cannot bypass the bounded unpresented surface retry cap", async () => {
+  const h = await rendererHarness({ menuPresented: false, needsRedraw: true });
+  try {
+    await h.init(); await h.send(menuRequest()); await h.send(motionRequest());
+    for (let i = 0; i < 4; i++) await h.draw();
+    assert.equal(h.calls.filter(call => call[0] === "menu-draw").length, 4);
+    assert.equal(h.timers.size, 0);
+    assert.equal(ofKind(h, "geometry-ack").length, 0); assert.equal(ofKind(h, "drawn").length, 0);
+    assert.ok(ofKind(h, "render-wait").length > 0);
+    h.options.menuPresented = true; h.options.needsRedraw = false;
+    await h.send({ kind: "resize", operationId: 3n, generation: 7n, content: 9n,
+      geometryVersion: 13n, width: 800, height: 600 });
+    await h.draw();
+    assert.equal(ofKind(h, "geometry-ack").at(-1).geometryVersion, 13n);
+    assert.equal(h.timers.size, 1, "external recovery resumes the still active motion");
+  } finally { await h.close(); }
+});
+
+test("stale menu motion identities and operations never reach the motion binding", async () => {
+  const h = await rendererHarness();
+  try {
+    await h.init(); await h.send(menuRequest()); await h.draw();
+    for (const stale of [{ generation: 6n }, { generation: 8n }, { content: 10n },
+      { menuGeneration: 78n }, { screen: 4n }, { revision: 4n }, { revision: 6n }, { operationId: 1n }]) {
+      await h.send(motionRequest(stale));
+    }
+    assert.equal(h.calls.filter(call => call[0] === "menu-motion").length, 0);
+    assert.equal(ofKind(h, "render-error").length, 0);
+    await h.send(motionRequest());
+    assert.equal(h.calls.filter(call => call[0] === "menu-motion").length, 1);
+    await h.send(motionRequest({ geometryVersion: 13n }));
+    assert.equal(h.calls.filter(call => call[0] === "menu-motion").length, 1, "duplicate operation cannot restart motion");
+  } finally { await h.close(); }
+});
+
+for (const [name, fields] of [
+  ["negative duration", { durationMs: -1 }], ["nonfinite duration", { durationMs: Infinity }],
+  ["NaN duration", { durationMs: NaN }], ["fractional easing", { easing: 1.5 }],
+  ["unknown easing", { easing: 4 }], ["zero control", { control: 0n }],
+  ["numeric control", { control: 74 }], ["short transforms", { transforms: new Float32Array(9) }],
+  ["array transforms", { transforms: Array(10).fill(1) }],
+  ["nonfinite transforms", { transforms: new Float32Array([0, 0, 1, 1, 1, Infinity, 0, 1, 1, 1]) }],
+  ["NaN transforms", { transforms: new Float32Array([0, 0, 1, 1, 1, 0, 0, 1, NaN, 1]) }],
+  ["old geometry version", { geometryVersion: 11n }],
+]) test(`menu motion refuses ${name} before native admission or geometry publication`, async () => {
+  const h = await rendererHarness();
+  try {
+    await h.init(); await h.send(menuRequest()); await h.draw();
+    await h.send(motionRequest(fields));
+    assert.equal(h.calls.filter(call => call[0] === "menu-motion").length, 0);
+    assert.ok(ofKind(h, "render-error").some(message => message.operationId === 2n));
+    assert.equal(ofKind(h, "control-ack").filter(message => message.operationId === 2n).length, 0);
+    assert.equal(ofKind(h, "geometry-ack").filter(message => message.geometryVersion === 12n).length, 0);
+  } finally { await h.close(); }
+});
+
+test("native motion range refusal cannot publish a control or geometry ACK", async () => {
+  const h = await rendererHarness({ motionError: "invalid motion scale range" });
+  try {
+    await h.init(); await h.send(menuRequest()); await h.draw();
+    await h.send(motionRequest({ transforms: new Float32Array([0, 0, 1, 1, 1, 0, 0, -1, 1, 1]) }));
+    assert.equal(h.calls.filter(call => call[0] === "menu-motion").length, 1);
+    assert.equal(h.views[0].motion, undefined);
+    assert.ok(ofKind(h, "render-error").some(message => /scale range/.test(message.message)));
+    assert.equal(ofKind(h, "control-ack").filter(message => message.operationId === 2n).length, 0);
+    assert.equal(ofKind(h, "geometry-ack").filter(message => message.geometryVersion === 12n).length, 0);
+  } finally { await h.close(); }
+});
+
+for (const animationFrame of [true, false]) test(`menu motion ${animationFrame ? "RAF" : "timer fallback"} suspends at zero extent and resumes without elapsed hidden time`, async () => {
+  const h = await rendererHarness({ animationFrame });
+  try {
+    await h.init(); await h.send(menuRequest()); await h.send(motionRequest({ durationMs: 100 }));
+    await h.draw(116); assert.equal(h.timers.size, 1);
+    h.setNow(120);
+    await h.send({ kind: "resize", operationId: 3n, generation: 7n, content: 9n,
+      geometryVersion: 13n, width: 0, height: 480 });
+    assert.equal(h.timers.size, 0); assert.deepEqual(h.calls.filter(call => call[0] === "motion-suspend"), [["motion-suspend", 120]]);
+    const drawCount = h.calls.filter(call => call[0] === "menu-draw").length;
+    await h.draw(1000); assert.equal(h.calls.filter(call => call[0] === "menu-draw").length, drawCount);
+    assert.equal(ofKind(h, "geometry-ack").filter(message => message.geometryVersion === 13n).length, 0);
+    await h.send({ kind: "resize", operationId: 4n, generation: 7n, content: 9n,
+      geometryVersion: 14n, width: 800, height: 600 });
+    assert.deepEqual(h.calls.filter(call => call[0] === "motion-resume").at(-1), ["motion-resume", 1000]);
+    await h.draw(1016); assert.equal(h.timers.size, 1, "hidden interval does not complete the resumed motion");
+    assert.equal(ofKind(h, "geometry-ack").at(-1).geometryVersion, 14n);
+    await h.draw(1080); assert.equal(h.timers.size, 0);
+  } finally { await h.close(); }
+});
+
+for (const action of ["retire", "dispose"]) test(`${action} cancels scheduled motion and fences a captured old callback`, async () => {
+  const h = await rendererHarness({ animationFrame: false });
+  try {
+    await h.init(); await h.send(menuRequest()); await h.send(motionRequest());
+    const callbacks = [...h.timers.values()]; assert.equal(callbacks.length, 1);
+    if (action === "retire") await h.send({ kind: "retire", operationId: 3n, generation: 7n, content: 9n });
+    else await h.sendHost({ kind: "dispose" });
+    assert.equal(h.timers.size, 0); assert.equal(h.views[0].motion, null);
+    assert.ok(h.calls.some(call => call[0] === "motion-dispose"));
+    const drawCount = h.calls.filter(call => call[0] === "menu-draw").length;
+    for (const callback of callbacks) callback(200);
+    await settle();
+    assert.equal(h.calls.filter(call => call[0] === "menu-draw").length, drawCount);
+    assert.equal(ofKind(h, "geometry-ack").length, 0);
+    if (action === "retire") {
+      await h.send(motionRequest({ operationId: 4n, geometryVersion: 13n }));
+      assert.equal(h.calls.filter(call => call[0] === "menu-motion").length, 1);
+    }
+  } finally { await h.close(); }
+});
+
+test("renderer imports menu into local shared view before exact ACK and publishes separate submitted identity", async () => {
+  const h = await rendererHarness();
+  try {
+    await h.init(); await h.send(menuRequest());
+    const acknowledgements = ofKind(h, "menu-ack"); assert.equal(acknowledgements.length, 1);
+    assert.deepEqual(acknowledgements[0], { kind: "menu-ack", operationId: 1n, generation: 7n, content: 9n,
+      menuGeneration: 77n, screen: 3n, revision: 5n });
+    assert.equal(ofKind(h, "geometry-ack").length, 0);
+    assert.deepEqual(h.calls.filter(call => call[0] === "menu-opponents"), [["menu-opponents", 0, 0, 0]]);
+    assert.equal(h.calls.filter(call => call[0] === "import").length, 0, "menu view never reconstructs a game or visual chart");
+    await h.draw(); assert.equal(h.calls.filter(call => call[0] === "menu-draw").length, 1);
+    const geometry = ofKind(h, "geometry-ack").at(-1);
+    assert.equal(geometry.menuGeneration, 77n); assert.equal(geometry.screen, 3n); assert.equal(geometry.revision, 5n);
+    assert.equal(geometry.geometryVersion, 11n); assert.equal(geometry.width, 640); assert.equal(geometry.height, 480);
+  } finally { await h.close(); }
+});
+
+test("failed menu import preserves local view and never ACKs partial navigation", async () => {
+  const h = await rendererHarness();
+  try {
+    await h.init(); await h.send(menuRequest()); await h.draw();
+    const before = h.views[0].menuIdentity; h.options.menuImportError = "invalid last editor field";
+    const changed = menuRequest(2n, { geometryVersion: 12n });
+    new DataView(changed.packet.buffer).setBigUint64(20, 6n, true);
+    await h.send(changed);
+    assert.equal(h.views[0].menuIdentity, before);
+    assert.equal(ofKind(h, "menu-ack").filter(message => message.operationId === 2n).length, 0);
+    assert.ok(ofKind(h, "render-error").some(message => /invalid last editor field/.test(message.message)));
+    assert.equal(ofKind(h, "geometry-ack").filter(message => message.geometryVersion === 12n).length, 0);
+  } finally { await h.close(); }
+});
+
+test("zero extent and retired owner never establish submitted menu geometry", async () => {
+  const h = await rendererHarness();
+  try {
+    await h.init(); await h.send(menuRequest());
+    await h.send({ kind: "resize", operationId: 2n, generation: 7n, content: 9n,
+      width: 0, height: 0, geometryVersion: 12n }); await h.draw();
+    assert.equal(ofKind(h, "geometry-ack").length, 0);
+    await h.send({ kind: "retire", generation: 7n, content: 9n });
+    await h.send(menuRequest(3n, { geometryVersion: 13n })); await h.draw();
+    assert.equal(ofKind(h, "menu-ack").filter(message => message.operationId === 3n).length, 0);
+    assert.equal(ofKind(h, "geometry-ack").length, 0);
+  } finally { await h.close(); }
+});
+
+test("old menu revision cannot replace the submitted screen or repaint a retired draft", async () => {
+  const h = await rendererHarness();
+  try {
+    await h.init(); await h.send(menuRequest()); await h.draw();
+    const before = h.views[0].menuIdentity;
+    const stale = menuRequest(2n, { geometryVersion: 12n });
+    new DataView(stale.packet.buffer).setBigUint64(20, 4n, true);
+    await h.send(stale); await h.draw();
+    assert.equal(h.views[0].menuIdentity, before);
+    assert.equal(ofKind(h, "menu-ack").filter(message => message.operationId === 2n).length, 0);
+    assert.equal(ofKind(h, "geometry-ack").filter(message => message.geometryVersion === 12n).length, 0);
+  } finally { await h.close(); }
+});
+
+test("menu semantic actions require actual submitted screen geometry and retain original action identity", async () => {
+  const h = await rendererHarness({ menuControl: 74n });
+  try {
+    await h.init(); await h.send(menuRequest());
+    const input = { kind: "menu-input", generation: 7n, content: 9n,
+      menuGeneration: 77n, screen: 3n, revision: 5n, actionId: (1n << 53n) + 7n,
+      x: 100.125, y: 200.5, geometryVersion: 11n };
+    await h.send(input); assert.equal(ofKind(h, "menu-action").length, 0, "state ACK alone does not admit a hit");
+    await h.draw();
+    for (const wrong of [{ generation: 8n }, { content: 10n }, { menuGeneration: 78n },
+      { screen: 4n }, { revision: 4n }, { geometryVersion: 10n }, { x: NaN }, { y: Infinity }]) {
+      await h.send({ ...input, ...wrong }); assert.equal(ofKind(h, "menu-action").length, 0);
+    }
+    assert.equal(h.calls.filter(call => call[0] === "menu-hit").length, 0);
+    await h.send(input);
+    assert.deepEqual(ofKind(h, "menu-action"), [{ kind: "menu-action", generation: 7n, content: 9n,
+      menuGeneration: 77n, screen: 3n, revision: 5n, actionId: input.actionId, control: 74n }]);
+    assert.deepEqual(h.calls.filter(call => call[0] === "menu-hit"), [["menu-hit", 100.125, 200.5]]);
+    await h.send(input); assert.equal(ofKind(h, "menu-action").length, 1, "duplicate acquisition never repeats a semantic action");
+  } finally { await h.close(); }
+});
 
 for (const { mode, roster } of [
   { mode: "live", roster: 2 }, { mode: "replay", roster: 2 },

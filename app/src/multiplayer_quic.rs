@@ -4,30 +4,30 @@ use crate::multiplayer_start::StartRole;
 
 pub use crate::multiplayer_credentials::QuicCredentials;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use native::{QuicEndpoint, QuicStream};
-#[cfg(all(not(target_arch = "wasm32"), test))]
-pub(crate) use native::{client_config, server_config};
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "webtransport")))]
 pub(crate) use native::client_tls;
+#[cfg(all(not(target_arch = "wasm32"), test))]
+pub(crate) use native::{client_config, server_config};
 #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
-pub(crate) use native::{NativeCredentialReader, credential_error, wait};
+pub(crate) use native::{credential_error, wait, NativeCredentialReader};
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::{QuicEndpoint, QuicStream};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::{QuicCredentials, StartRole};
     use crate::multiplayer_credentials::{
-        self, CredentialReadPort, CredentialLoadError, LoadedCredentials, CREDENTIAL_BYTE_LIMIT,
-        invalid, validate_name,
+        self, invalid, validate_name, CredentialLoadError, CredentialReadPort, LoadedCredentials,
+        CREDENTIAL_BYTE_LIMIT,
     };
     use quinn::{
-        ClientConfig, Connection, Endpoint, EndpointConfig, RecvStream, SendStream, ServerConfig,
-        TransportConfig, VarInt,
         crypto::rustls::{QuicClientConfig, QuicServerConfig},
         rustls::{
             self,
-            pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject},
+            pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName},
         },
+        ClientConfig, Connection, Endpoint, EndpointConfig, RecvStream, SendStream, ServerConfig,
+        TransportConfig, VarInt,
     };
     use std::{
         fmt,
@@ -37,8 +37,8 @@ mod native {
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
         path::Path,
         sync::{
-            Arc,
             atomic::{AtomicBool, Ordering},
+            Arc,
         },
         time::{Duration, Instant},
     };
@@ -327,15 +327,16 @@ mod native {
                     name,
                 } => (None, Some((config, address, name))),
             };
-            let mut endpoint = {
-                let _entered = runtime.enter();
-                Endpoint::new(
-                    EndpointConfig::default(),
-                    server,
-                    self.socket,
-                    Arc::new(quinn::TokioRuntime),
-                )?
-            };
+            // Quinn creates timers and spawns connection drivers eagerly in
+            // connect/Incoming::accept, before wait() polls their futures.
+            // Keep this worker's runtime entered through setup and cleanup.
+            let entered = runtime.enter();
+            let mut endpoint = Endpoint::new(
+                EndpointConfig::default(),
+                server,
+                self.socket,
+                Arc::new(quinn::TokioRuntime),
+            )?;
             let connected: io::Result<_> = (|| {
                 if let Some((config, address, name)) = client {
                     endpoint.set_default_client_config(config);
@@ -360,17 +361,24 @@ mod native {
                 }
             })();
             match connected {
-                Ok((connection, send, recv)) => Ok(QuicStream {
-                    send,
-                    recv,
-                    connection,
-                    endpoint,
-                    finished: false,
-                    finish_error: None,
-                    runtime,
-                }),
+                Ok((connection, send, recv)) => {
+                    // Release the borrow before moving the same runtime into
+                    // the established stream owner.
+                    drop(entered);
+                    Ok(QuicStream {
+                        send,
+                        recv,
+                        connection,
+                        endpoint,
+                        finished: false,
+                        finish_error: None,
+                        runtime,
+                    })
+                }
                 Err(error) => {
                     endpoint.close(VarInt::from_u32(1), b"setup failed");
+                    drop(endpoint);
+                    drop(entered);
                     Err(error)
                 }
             }

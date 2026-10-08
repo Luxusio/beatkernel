@@ -79,7 +79,7 @@ impl Drop for HeapReset {
         TRACK_HEAP.set(false);
     }
 }
-fn fail_allocation<T>(index: usize, work: impl FnOnce() -> T) -> T {
+pub(crate) fn fail_allocation<T>(index: usize, work: impl FnOnce() -> T) -> T {
     FAIL_AFTER.set(Some(index));
     let reset = HeapReset;
     let result = work();

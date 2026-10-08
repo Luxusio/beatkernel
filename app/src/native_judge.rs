@@ -1,7 +1,7 @@
 //! Stage-separated native judge, completion and optional capture policy.
 use crate::{
-    PreparedBms, completion::SongCompletion, input_sounds::InputSoundIdentity,
-    native_gameplay::NativeGameplayResult, replay_capture::LiveReplayCapture,
+    completion::SongCompletion, input_sounds::InputSoundIdentity,
+    native_gameplay::NativeGameplayResult, replay_capture::LiveReplayCapture, PreparedBms,
 };
 use beatkernel::{
     chart::CompiledChart,
@@ -41,7 +41,7 @@ impl NativeJudgeConfig {
         context: &crate::play_policy::OriginalGaugeContext,
         selection: crate::play_policy::GaugeSelection,
     ) -> NativeGameplayResult<crate::play_policy::ResolvedPlayPolicy> {
-        use crate::play_policy::{GaugeSelection, ResolvedPlayPolicy, ClassifiedWindow};
+        use crate::play_policy::{ClassifiedWindow, GaugeSelection, ResolvedPlayPolicy};
         match selection {
             GaugeSelection::BeatKernel => {
                 ResolvedPlayPolicy::builtin(self.early, self.late, self.offset).map_err(|error| {
@@ -123,6 +123,57 @@ pub fn validate_policy_competition(
     }
     Ok(())
 }
+/// Build checked selected meanings before optional recording or network acquisition.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_policy_header(
+    source: &BmsChart,
+    judge: &JudgeEngine,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    domain: ClockDomainId,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+) -> NativeGameplayResult<beatkernel::replay::ReplayHeader> {
+    if judge.effective_song_time().is_some() || judge.profile() != policy.judge() {
+        return Err("selected competition requires a pristine matching judge".into());
+    }
+    let limits = crate::competition_live::replay_limits()?;
+    let header = crate::replay_capture::setup_play_policy_header(
+        judge,
+        domain,
+        limits,
+        start,
+        chart_seed,
+        end,
+        BmsInputMode::ButtonOnly,
+        InputSoundIdentity::from_source(source)?,
+        policy,
+    )?;
+    let file = beatkernel::replay::codec::ReplayFile::new(header, Vec::new());
+    crate::replay_playback::validate_section_setup(source, &file, limits)?;
+    Ok(file.header)
+}
+
+/// Network endpoint agreement around unchanged canonical selected setup meanings.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_policy_competition_identity(
+    source: &BmsChart,
+    judge: &JudgeEngine,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    domain: ClockDomainId,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+) -> NativeGameplayResult<Vec<u8>> {
+    let header = prepare_policy_header(source, judge, policy, domain, start, chart_seed, None)?;
+    Ok(crate::multiplayer::competition_identity_for_section(
+        &header,
+        env!("CARGO_PKG_VERSION"),
+        crate::competition_live::replay_limits()?,
+        end,
+    )?)
+}
+
 /// Disabled recording does not validate otherwise unused recording settings.
 pub fn capture_limits(
     enabled: bool,

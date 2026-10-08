@@ -47,9 +47,12 @@ mod mixer;
 mod model;
 mod pcm;
 mod queue;
+mod target_time;
 
 pub use convert::{ChannelMatrix, FormatConverter, ResampleQuality, SourcePosition};
-pub use converted_mixer::{ConvertedMixer, ConvertedOutputState, ConvertedRenderReport};
+pub use converted_mixer::{
+    ConvertedMixer, ConvertedOutputState, ConvertedRenderReport, TargetBoundary,
+};
 pub use frame_basis::{OutputFrameBasis, OutputFrameBasisError};
 pub use handoff::{MixerOpenFailure, OutputOpenFailure, SoftwareOutputState, StoppedMixerSource};
 pub use mixer::Mixer;
@@ -57,9 +60,10 @@ pub use model::{
     AudioCommand, AudioCounters, AudioError, AudioFormat, AudioLimits, MixerConfig, PcmLimits,
     RenderReport, SampleId, VoiceId,
 };
+pub use target_time::{TargetFrameBasis, TargetTime};
 
 pub use pcm::{PcmSample, SampleBank, WavError};
 pub use queue::{
-    PauseHold, PauseHoldError, CommandConsumer, CommandProducer, CommandPushError, QueueCounters,
-    QueuePopError, QueuePushError, command_queue, command_queue_with_start_gate,
+    command_queue, command_queue_with_start_gate, CommandConsumer, CommandProducer,
+    CommandPushError, PauseHold, PauseHoldError, QueueCounters, QueuePopError, QueuePushError,
 };

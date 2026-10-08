@@ -1,6 +1,9 @@
 //! ALSA-only output conversion on the native play thread, before retirement.
 use crate::{
-    gameplay::output::adapters::alsa::{AlsaReplacementBackend, AlsaReplacementOutput},
+    gameplay::output::adapters::alsa::{
+        AlsaReplacementBackend, AlsaReplacementOutput, ConvertedAlsaReplacementBackend,
+        ConvertedAlsaReplacementOutput, ConvertedAlsaReplacementRequest,
+    },
     gameplay::output::adapters::player::PlayerOutputUi,
     gameplay::output::application::owner::GameplayOutputOwner,
     gameplay::output::application::requests::GameplayOutputUi,
@@ -13,14 +16,19 @@ use crate::{
     settings::{NativeSettings, SettingsHost},
 };
 use beatkernel::{
-    audio::{AudioLimits, ChannelMatrix},
+    audio::{AudioLimits, ChannelMatrix, TargetFrameBasis},
     time::ClockPoint,
 };
 use beatkernel_platform::{
-    audio::{presentation::discipline::PresentationDiscipline, DeviceFormat},
+    audio::{
+        presentation::discipline::PresentationDiscipline, ConvertedNativeOutputState, DeviceFormat,
+    },
     linux::{AlsaAppliedConfig, AlsaRequest},
 };
 pub fn request_for_args(current: &AlsaRequest, args: &[String]) -> Result<AlsaRequest, String> {
+    if args.chunks_exact(2).any(|pair| pair[0] == "--rate") {
+        return Err("this ALSA output does not support target-rate replacement".into());
+    }
     let draft = NativeSettings::output_only(args, SettingsHost::Linux)?;
     let mut request = current.clone();
     for field in draft.fields() {
@@ -46,6 +54,67 @@ pub fn request_for_args(current: &AlsaRequest, args: &[String]) -> Result<AlsaRe
     Ok(request)
 }
 
+pub type ConvertedAlsaOutputOwner = GameplayOutputOwner<
+    ConvertedAlsaReplacementBackend,
+    ConvertedNativeOutputState,
+    TargetFrameBasis,
+>;
+
+/// Source channels come from the retained converter matrix, never native targets.
+pub fn converted_request_for_args(
+    current: &AlsaRequest,
+    current_matrix: &ChannelMatrix,
+    args: &[String],
+) -> Result<ConvertedAlsaReplacementRequest, String> {
+    if current_matrix.target_channels() != current.format.channels() {
+        return Err("current channel matrix dimensions differ from native output".into());
+    }
+    let draft = NativeSettings::output_only(args, SettingsHost::Linux)?;
+    let native_args: Vec<String> = draft
+        .fields()
+        .iter()
+        .filter(|field| {
+            !matches!(field.flag, "--rate" | "--output-matrix") && !field.value.is_empty()
+        })
+        .flat_map(|field| [field.flag.to_owned(), field.value.clone()])
+        .collect();
+    let mut native = request_for_args(current, &native_args)?;
+    let value = |flag| {
+        draft
+            .fields()
+            .iter()
+            .find(|field| field.flag == flag)
+            .map_or("", |field| field.value.as_str())
+    };
+    let rate = if value("--rate").is_empty() {
+        current.format.sample_rate()
+    } else {
+        parse_frames(value("--rate"))?
+    };
+    let (channels, matrix) = select_matrix(
+        current_matrix.source_channels(),
+        Some(current_matrix),
+        value("--output-matrix"),
+    )?;
+    let matrix = match matrix {
+        Some(matrix) => matrix,
+        None => ChannelMatrix::default_mix(current_matrix.source_channels(), channels)
+            .map_err(|error| error.to_string())?,
+    };
+    native.format = DeviceFormat::new(
+        rate,
+        channels,
+        current.format.encoding(),
+        current.format.channel_mask(),
+    )
+    .map_err(|error| error.to_string())?;
+    // Pending PCM compatibility remains the complete owner's cold admission check.
+    Ok(ConvertedAlsaReplacementRequest {
+        native,
+        matrix: Some(matrix),
+    })
+}
+
 pub type NativeAlsaOutputOwner = GameplayOutputOwner<
     RemixedOutputBackend<AlsaReplacementBackend>,
     beatkernel_platform::audio::NativeOutputState,
@@ -55,6 +124,9 @@ pub fn remixed_request_for_args(
     current_matrix: Option<&ChannelMatrix>,
     args: &[String],
 ) -> Result<RemixedOutputRequest<AlsaRequest>, String> {
+    if args.chunks_exact(2).any(|pair| pair[0] == "--rate") {
+        return Err("this ALSA output does not support target-rate replacement".into());
+    }
     let draft = NativeSettings::output_only(args, SettingsHost::Linux)?;
     let native_args: Vec<String> = draft
         .fields()
@@ -128,6 +200,83 @@ pub fn capability_for_output(output: &AlsaReplacementOutput) -> Result<OutputCap
     cap.validate()?;
     Ok(cap)
 }
+
+pub fn converted_capability(
+    applied: &AlsaAppliedConfig,
+    matrix: &ChannelMatrix,
+) -> Result<OutputCapability, String> {
+    let mut cap = capability(applied)?;
+    if matrix.target_channels() != applied.format.channels() {
+        return Err("applied channel matrix dimensions differ from native output".into());
+    }
+    cap.current_args.extend([
+        "--rate".into(),
+        applied.format.sample_rate().to_string(),
+        "--output-matrix".into(),
+        matrix_text(matrix)?,
+    ]);
+    cap.validate()?;
+    Ok(cap)
+}
+pub fn capability_for_converted_output(
+    output: &ConvertedAlsaReplacementOutput,
+) -> Result<OutputCapability, String> {
+    converted_capability(output.stream().configuration(), output.channel_matrix())
+}
+
+pub struct ConvertedAlsaOutputUi {
+    bridge: GameplayOutputUi<PlayerOutputUi>,
+}
+impl ConvertedAlsaOutputUi {
+    pub fn new(
+        owner: &ConvertedAlsaOutputOwner,
+        enabled: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut bridge = GameplayOutputUi::new(PlayerOutputUi);
+        let cap = if enabled {
+            owner
+                .current()
+                .map(capability_for_converted_output)
+                .transpose()?
+        } else {
+            None
+        };
+        bridge.advertise(cap)?;
+        Ok(Self { bridge })
+    }
+    pub fn pending(&self) -> bool {
+        self.bridge.pending()
+    }
+    fn map_request(
+        request: &OutputRequest,
+        output: &ConvertedAlsaReplacementOutput,
+    ) -> Result<ConvertedAlsaReplacementRequest, String> {
+        let applied = output.stream().configuration();
+        let mut current = applied.requested.clone();
+        current.format = applied.format;
+        current.buffer_frames = applied.buffer_frames;
+        current.period_frames = applied.period_frames;
+        converted_request_for_args(&current, output.channel_matrix(), &request.args)
+    }
+    pub fn service_audio(
+        &mut self,
+        owner: &mut ConvertedAlsaOutputOwner,
+        context: GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        self.bridge.service_target_audio(
+            owner,
+            context,
+            now,
+            &mut Self::map_request,
+            &mut capability_for_converted_output,
+        )
+    }
+}
+
+#[cfg(test)]
+#[path = "alsa_target_ui_fixtures.rs"]
+mod target_ui_fixtures;
 pub struct NativeAlsaOutputUi {
     bridge: GameplayOutputUi<PlayerOutputUi>,
 }

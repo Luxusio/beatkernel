@@ -41,12 +41,49 @@ export function validateRenderLimits(maxPacketBytes, maxDiagnosticBytes) {
   if (!boundedU32(maxPacketBytes) || maxPacketBytes < HEADER_BYTES || !boundedU32(maxDiagnosticBytes)) throw new Error("Invalid trusted render limits.");
 }
 
+export function preflightMenuPacket(packet) {
+  if (Object.getPrototypeOf(packet) !== Uint8Array.prototype) throw new Error("Invalid menu packet.");
+  const buffer = backing.call(packet), length = byteLength.call(packet), offset = byteOffset.call(packet);
+  if (resizable?.call(buffer) === true || arrayLength.call(buffer) > 4 * 1024 * 1024 || length < 48 || length > 4 * 1024 * 1024) throw new Error("Menu packet exceeds its fixed byte limit.");
+  const bytes = new Uint8Array(buffer, offset, length), view = new DataView(buffer, offset, length);
+  const generation = view.getBigUint64(4, true), screen = view.getBigUint64(12, true), revision = view.getBigUint64(20, true);
+  const route = view.getUint32(28, true), selected = view.getUint32(32, true), count = view.getUint32(36, true);
+  if (bytes[0] !== 66 || bytes[1] !== 75 || bytes[2] !== 77 || bytes[3] !== 78 || !unsignedIdentity(generation)
+    || !unsignedIdentity(screen) || !unsignedIdentity(revision) || route < 1 || route > 10 || count > 8192
+    || (count === 0 ? selected !== 0 : selected >= count) || bytes[40] > 1 || bytes[41] !== 0 || bytes[42] !== 0 || bytes[43] !== 0) throw new Error("Invalid menu envelope.");
+  return Object.freeze({ generation, screen, revision, route, selected, pending: bytes[40] === 1 });
+}
+function preflightRecordPreview(packet, menu) {
+  if (Object.getPrototypeOf(packet) !== Uint8Array.prototype) throw new Error("Invalid record preview packet.");
+  const buffer = backing.call(packet), length = byteLength.call(packet), offset = byteOffset.call(packet);
+  if (resizable?.call(buffer) === true || arrayLength.call(buffer) > 4 * 1024 * 1024 || length < 28 || length > 4 * 1024 * 1024) throw new Error("Record preview exceeds its fixed byte limit.");
+  const bytes = new Uint8Array(buffer, offset, length), view = new DataView(buffer, offset, length);
+  if (bytes[0] !== 66 || bytes[1] !== 75 || bytes[2] !== 82 || bytes[3] !== 80
+    || view.getBigUint64(4, true) !== menu.generation || view.getBigUint64(12, true) !== menu.screen
+    || view.getBigUint64(20, true) !== menu.revision || menu.route !== 4) throw new Error("Foreign record preview token.");
+}
+export function preflightMenuPayload(packet, recordPreview) {
+  const header = preflightMenuPacket(packet);
+  if (recordPreview !== undefined && recordPreview !== null) {
+    preflightRecordPreview(recordPreview, header);
+    const first = backing.call(packet), second = backing.call(recordPreview);
+    if (first === second || arrayLength.call(first) + arrayLength.call(second) > 4 * 1024 * 1024) throw new Error("Combined menu preview exceeds its independent bounded stores.");
+  }
+  return header;
+}
+export function menuOpponentProjection(input) {
+  const { count, own, other } = input ?? { count: 0, own: 0, other: 0 };
+  if (![count, own, other].every(boundedU32) || count > 8 || own + other > count) throw new Error("Invalid menu opponent projection.");
+  return Object.freeze({ count, own, other });
+}
+
 export class RenderClient {
   #port; #generation; #content; #limit; #diagnostics; #timeout; #onError; #onGeometry;
   #pending = null; #dirty = null; #operationId = 0n; #state = "ready"; #failure = null;
   #lastSequence = 0n; #registered = false; #mode = null;
   #geometryRequested = 0n; #geometryAcknowledged = 0n;
   #retiring = false;
+  #menu = null;
 
   constructor(options = {}) {
     const { port, generation, content, maxPacketBytes, maxDiagnosticBytes, timeoutMs, onError, onGeometry } = options;
@@ -65,6 +102,22 @@ export class RenderClient {
   get pending() { return this.#pending !== null; }
   get state() { return this.#state; }
   get failure() { return this.#failure; }
+  async menu(packet, options = {}) {
+    this.#available();
+    const { onAck, geometryVersion, recordPreview } = options;
+    const opponents = menuOpponentProjection(options.opponents);
+    const header = preflightMenuPayload(packet, recordPreview);
+    const transfers = [backing.call(packet)];
+    if (recordPreview !== undefined && recordPreview !== null) {
+      transfers.push(backing.call(recordPreview));
+    }
+    if (this.#menu && (header.generation !== this.#menu.generation || header.revision <= this.#menu.revision)) throw new Error("Stale menu snapshot.");
+    if (geometryVersion !== undefined) {
+      if (!unsignedIdentity(geometryVersion) || geometryVersion <= this.#geometryRequested) throw new Error("Menu geometry version must increase.");
+      this.#geometryRequested = geometryVersion;
+    }
+    return this.#request("menu", { packet, geometryVersion, recordPreview, opponents }, { menuHeader: header, onAck }, transfers);
+  }
   #available() {
     if (this.#failure) throw this.#failure;
     if (this.#state !== "ready") throw new Error("Render client is closed.");
@@ -100,12 +153,13 @@ export class RenderClient {
   }
   async control(operation, fields = {}) {
     this.#available();
-    const { width, height, page, comparisons, geometryVersion } = fields;
+    const { width, height, page, comparisons, details, geometryVersion } = fields;
     let snapshot;
     if (operation === "retire") snapshot = {};
     else if (operation === "resize" && boundedU32(width) && boundedU32(height) && unsignedIdentity(geometryVersion)) snapshot = { width, height, geometryVersion };
     else if (operation === "page" && boundedU32(page) && typeof comparisons === "boolean" && unsignedIdentity(geometryVersion)) snapshot = { page, comparisons, geometryVersion };
     else if (operation === "room-page" && boundedU32(page) && unsignedIdentity(geometryVersion)) snapshot = { page, geometryVersion };
+    else if (operation === "menu-details" && boundedU32(page) && typeof details === "boolean" && unsignedIdentity(geometryVersion)) snapshot = { page, details, geometryVersion };
     else throw new Error("Invalid render control.");
     this.#available();
     if (operation !== "retire") {
@@ -144,14 +198,18 @@ export class RenderClient {
   }
   #message(input) {
     if (this.#state !== "ready" || !input || typeof input !== "object") return;
-    const { kind, generation, content, operationId, sequence, packetKind, operation, geometryVersion, page, width, height, message } = input;
+    const { kind, generation, content, operationId, sequence, packetKind, operation, geometryVersion, page, width, height, message,
+      menuGeneration, screen, revision, details } = input;
     if (kind === "ready") return;
     if (generation !== this.#generation || content !== this.#content) return;
     if (kind === "geometry-ack") {
       if (this.#retiring || !unsignedIdentity(geometryVersion) || geometryVersion !== this.#geometryRequested || geometryVersion <= this.#geometryAcknowledged
         || !boundedU32(page) || !boundedU32(width) || !boundedU32(height) || width === 0 || height === 0) return;
+      if (this.#menu && (menuGeneration !== this.#menu.generation || screen !== this.#menu.screen || revision !== this.#menu.revision)) return;
+      if (this.#menu && details !== undefined && typeof details !== "boolean") return;
       this.#geometryAcknowledged = geometryVersion;
-      try { this.#onGeometry?.(Object.freeze({ generation, content, geometryVersion, page, width, height })); } catch (error) { this.#fail(error); }
+      try { this.#onGeometry?.(Object.freeze({ generation, content, geometryVersion, page, width, height,
+        ...(this.#menu ? { menuGeneration, screen, revision, ...(details === undefined ? {} : { details }) } : {}) })); } catch (error) { this.#fail(error); }
       return;
     }
     if (kind === "render-wait") return;
@@ -162,6 +220,16 @@ export class RenderClient {
       return;
     }
     if (!pending || operationId !== pending.operationId) return;
+    if (pending.menuHeader) {
+      const header = pending.menuHeader;
+      if (kind !== "menu-ack" || menuGeneration !== header.generation || screen !== header.screen || revision !== header.revision) return;
+      try { if (pending.onAck?.(header) === false) throw new Error("Menu producer refused its exact acknowledgement."); }
+      catch (error) { this.#fail(error); return; }
+      if (this.#state !== "ready" || this.#pending !== pending) return;
+      clearTimeout(pending.timer); this.#menu = header; this.#pending = null;
+      pending.resolve(Object.freeze({ kind, operationId, generation, content, menuGeneration, screen, revision }));
+      return;
+    }
     if (pending.operation === "packet" ? kind !== "state-ack" || sequence !== pending.header.sequence || packetKind !== pending.header.kind
       : kind !== "control-ack" || operation !== pending.operation || geometryVersion !== pending.geometryVersion) {
       return;

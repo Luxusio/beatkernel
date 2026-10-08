@@ -8,15 +8,19 @@ mod presentation;
 #[allow(unsafe_code)]
 mod sys;
 
+pub use alsa::ConvertedAlsaStream;
 pub use alsa::{
-    AlsaAppliedConfig, AlsaCadenceError, AlsaDevice, AlsaNativeTimestamp, AlsaRenderCadence,
-    AlsaRequest, AlsaSnapshot, AlsaStatus, AlsaStream, AlsaTimingSnapshot, alsa_output_devices,
+    alsa_output_devices, AlsaAppliedConfig, AlsaCadenceError, AlsaDevice, AlsaNativeTimestamp,
+    AlsaRenderCadence, AlsaRequest, AlsaSnapshot, AlsaStatus, AlsaStream, AlsaTimingSnapshot,
 };
 pub use input::{
-    EvdevDevice, EvdevItem, EvdevKeyboardDevice, EvdevSnapshot, HidrawDevice, LinuxInputCounters,
-    evdev_keyboard_devices,
+    evdev_keyboard_devices, EvdevDevice, EvdevItem, EvdevKeyboardDevice, EvdevSnapshot,
+    HidrawDevice, LinuxInputCounters,
 };
-pub use presentation::{alsa_presentation_pair, alsa_presentation_pair_with_basis};
+pub use presentation::{
+    alsa_presentation_pair, alsa_presentation_pair_with_basis,
+    alsa_presentation_pair_with_target_basis,
+};
 pub use sys::{LinuxError, MonotonicClock};
 
 /// The native target represented by this module.

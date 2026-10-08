@@ -95,6 +95,29 @@ pub fn new_audio_presentation(
     )
 }
 
+/// Constructs target-duration owners without inventing a source-rate stream basis.
+pub fn new_target_audio_presentation(
+    epoch: u64,
+    basis: beatkernel::audio::TargetFrameBasis,
+    host: ClockDomainId,
+    logical_origin: ClockPoint,
+    config: AudioAuthorityConfig,
+) -> NativeGameplayResult<NativeAudioPresentation> {
+    let stream_origin = basis.point_at_stream_frame(0)?;
+    NativeAudioPresentation::new(
+        AudioAuthority::new(
+            config,
+            AudioAuthorityEpoch {
+                id: epoch,
+                stream_origin,
+                logical_origin,
+                host_domain: host,
+            },
+        )?,
+        NativePresentationValidator::new(epoch, stream_origin, host),
+    )
+}
+
 /// Primes a started stream without processing Runtime, closing input or fitting a rate.
 pub fn prime_native_audio<P: NativeAudioSeedPort>(
     port: &mut P,
@@ -168,4 +191,17 @@ pub fn prime_native_audio<P: NativeAudioSeedPort>(
         }
         port.wait(std::time::Duration::from_millis(1))?;
     }
+}
+
+/// Target adapters use the same bounded input/BGM/original-association startup loop.
+/// NativeAudioSeedPort::observe_audio must call admit_target with the creation basis;
+/// render_report remains actual source evidence for BGM feeding, not target ACK.
+pub fn prime_target_native_audio<P: NativeAudioSeedPort>(
+    port: &mut P,
+    presentation: &mut NativeAudioPresentation,
+    bgm: &mut BgmFeeder,
+    producer: &mut CommandProducer,
+    timeout: Duration,
+) -> NativeGameplayResult<Option<SeededNativeAudio>> {
+    prime_native_audio(port, presentation, bgm, producer, timeout)
 }

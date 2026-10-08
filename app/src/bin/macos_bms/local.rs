@@ -5,8 +5,6 @@ use super::native::{
 use super::*;
 #[cfg(test)]
 use beatkernel::input::{DeviceId, PhysicalControlId};
-#[cfg(test)]
-use beatkernel_bms_runtime::local_players::PlayerId;
 use beatkernel::{
     audio::PcmLimits,
     time::Duration,
@@ -15,15 +13,15 @@ use beatkernel::{
 use beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::{
     owner, NativeCoreAudioOutputOwner, NativeCoreAudioOutputUi,
 };
+#[cfg(test)]
+use beatkernel_bms_runtime::local_players::PlayerId;
 use beatkernel_bms_runtime::native_audio::{prepare_audio, NativeAudioConfig, PreparedNativeAudio};
 use beatkernel_bms_runtime::native_cohort_setup::{
     activate_audio_cohort_with_sounds, admit_cohort as admit_mode, finish_cohort,
     finish_cohort_network, finish_cohort_with_results_and_network,
     prepare_audio_cohort_with_policy, CohortPreparation, PreparedCohort,
 };
-use beatkernel_bms_runtime::native_start::{
-    start_committed, NativeStartConfig,
-};
+use beatkernel_bms_runtime::native_start::{start_committed, NativeStartConfig};
 #[cfg(test)]
 use beatkernel_bms_runtime::{
     competition::ScoreSummary,
@@ -57,7 +55,6 @@ use beatkernel_platform::{
         clock::MachClock,
     },
 };
-
 
 struct CohortDevice<'a> {
     output: &'a mut NativeCoreAudioOutputOwner,
@@ -207,10 +204,6 @@ fn check_counters(counters: HidCounters) -> Result<()> {
 }
 /// Every seed poll validates the full roster, never just one selected member.
 pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> Result<()> {
-    beatkernel_bms_runtime::native_judge::validate_policy_competition(
-        options.gauge,
-        &competition_options,
-    )?;
     admit_mode(
         options.local_players.len(),
         competition_options.network.is_some(),
@@ -275,7 +268,15 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         return Ok(());
     }
     // Input precedes output, retaining owner-thread close order on early exits.
-    let (mut input, devices) = super::collected_input::open(clock, options.local_players.iter().map(|(_, registry)| *registry).collect(), 65536)?;
+    let (mut input, devices) = super::collected_input::open(
+        clock,
+        options
+            .local_players
+            .iter()
+            .map(|(_, registry)| *registry)
+            .collect(),
+        65536,
+    )?;
     let selected: Vec<_> = devices.iter().map(|d| d.descriptor.runtime_id).collect();
     let assignments: Vec<_> = options
         .local_players
@@ -661,8 +662,8 @@ mod fixtures {
         }
     }
     #[test]
-    fn finite_global_prefix_reconciles_release_before_exclusive_terminal_and_commits_only_after_pop()
-     {
+    fn finite_global_prefix_reconciles_release_before_exclusive_terminal_and_commits_only_after_pop(
+    ) {
         let requested = [
             (PlayerId(7), 900),
             (PlayerId(u32::MAX), 901),
@@ -756,14 +757,12 @@ mod fixtures {
             false
         ));
         assert_eq!(merger.pending(), 1); // Future post-end input survives until owner cleanup.
-        assert!(
-            merger
-                .admit(
-                    paused_button(DeviceId(44), 4, ButtonState::Up, 27, 2),
-                    host(40)
-                )
-                .is_err()
-        );
+        assert!(merger
+            .admit(
+                paused_button(DeviceId(44), 4, ButtonState::Up, 27, 2),
+                host(40)
+            )
+            .is_err());
     }
     #[test]
     fn four_fresh_registry_devices_keep_independent_paused_levels_and_native_release_provenance() {
@@ -783,11 +782,9 @@ mod fixtures {
         let mut keyboard = PauseKeyboard::new();
         let mut merger = InputMerger::new(HOST, host(0), ids.clone(), 16).unwrap();
         for &device in &ids {
-            assert!(
-                keyboard
-                    .accept(&paused_button(device, 4, ButtonState::Down, 1, 1))
-                    .unwrap()
-            );
+            assert!(keyboard
+                .accept(&paused_button(device, 4, ButtonState::Down, 1, 1))
+                .unwrap());
         }
         merger.commit(host(10)).unwrap();
         let release = paused_button(DeviceId(11), 4, ButtonState::Up, 19, 2);
@@ -823,16 +820,12 @@ mod fixtures {
         assert_eq!(admitted[0].meta().original_clock_point, Some(host(19)));
         assert_eq!(admitted[0].meta().timestamp, host(20).timestamp);
         assert_eq!(admitted[2].meta().timestamp, host(21).timestamp);
-        assert!(
-            !keyboard
-                .accept(&paused_button(DeviceId(44), 5, ButtonState::Repeat, 31, 3))
-                .unwrap()
-        );
-        assert!(
-            keyboard
-                .accept(&paused_button(DeviceId(22), 4, ButtonState::Repeat, 31, 2))
-                .unwrap()
-        );
+        assert!(!keyboard
+            .accept(&paused_button(DeviceId(44), 5, ButtonState::Repeat, 31, 3))
+            .unwrap());
+        assert!(keyboard
+            .accept(&paused_button(DeviceId(22), 4, ButtonState::Repeat, 31, 2))
+            .unwrap());
         merger.commit(frontier).unwrap();
     }
     #[test]
@@ -850,23 +843,19 @@ mod fixtures {
         );
         assert!(!lag_reaches(host(12_000_000), host(11_000_000), 2_000_000).unwrap());
         assert!(lag_reaches(host(13_000_000), host(11_000_000), 2_000_000).unwrap());
-        assert!(
-            merger
-                .watermark(host(11_000_000), 2_000_000, false)
-                .is_err()
-        );
+        assert!(merger
+            .watermark(host(11_000_000), 2_000_000, false)
+            .is_err());
         assert!(!lag_reaches(host(i64::MIN), host(i64::MIN), 1).unwrap());
-        assert!(
-            lag_reaches(
-                host(0),
-                ClockPoint {
-                    domain: OUTPUT,
-                    timestamp: Timestamp::ZERO
-                },
-                0
-            )
-            .is_err()
-        );
+        assert!(lag_reaches(
+            host(0),
+            ClockPoint {
+                domain: OUTPUT,
+                timestamp: Timestamp::ZERO
+            },
+            0
+        )
+        .is_err());
         assert!(lag_reaches(host(0), host(0), 1_000_000_001).is_err());
     }
     #[test]
@@ -906,13 +895,11 @@ mod fixtures {
     }
     #[test]
     fn loss_counters_fence_cohort_but_unassigned_removal_is_not_itself_loss() {
-        assert!(
-            check_counters(HidCounters {
-                removed: 1,
-                ..Default::default()
-            })
-            .is_ok()
-        );
+        assert!(check_counters(HidCounters {
+            removed: 1,
+            ..Default::default()
+        })
+        .is_ok());
         for counters in [
             HidCounters {
                 queue_full: 1,

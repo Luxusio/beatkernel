@@ -18,6 +18,13 @@ pub trait SoloCompetitionPort {
 
 /// Observes the validated ordered prefixes of the actual local members.
 pub trait GroupCompetitionPort {
+    /// Exact original-ID member policy; an enabled owner cannot omit this evidence.
+    fn expected_policy_header(
+        &self,
+        _: crate::local_players::PlayerId,
+    ) -> Option<&beatkernel::replay::ReplayHeader> {
+        None
+    }
     fn policy_agnostic(&self) -> bool {
         false
     }

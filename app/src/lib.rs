@@ -17,11 +17,6 @@ pub mod bga;
 pub mod bgm;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser;
-/// Portable committed visual snapshots and atomic receiver state.
-#[cfg(feature = "graphics")]
-pub mod browser_render_state;
-#[cfg(all(feature = "graphics", test))]
-mod browser_render_state_fixtures;
 /// Numeric bindings for the separate AudioWorklet WASM owner.
 #[cfg(all(target_arch = "wasm32", feature = "browser-audio"))]
 pub mod browser_audio;
@@ -50,9 +45,19 @@ pub mod browser_local_game;
 mod browser_local_input_fixtures;
 #[cfg(test)]
 mod browser_local_saved_fixtures;
+/// Portable retained menu navigation and bounded Worker messages.
+#[cfg(feature = "graphics")]
+pub mod browser_menu;
+#[cfg(all(feature = "graphics", test))]
+mod browser_menu_fixtures;
 /// Browser bindings for the common multiplayer session and bounded framing.
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_multiplayer;
+/// Portable committed visual snapshots and atomic receiver state.
+#[cfg(feature = "graphics")]
+pub mod browser_render_state;
+#[cfg(all(feature = "graphics", test))]
+mod browser_render_state_fixtures;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_replay;
 /// Worker bindings for the common bounded room-admission client.
@@ -70,6 +75,8 @@ pub mod chart_text;
 pub mod competition;
 /// Application competition options and native runtime observation.
 pub mod competition_live;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod competition_policy_network_fixtures;
 /// Pure competition display projection and publication contracts.
 pub mod competition_presentation;
 mod competition_presentation_bridge;
@@ -281,14 +288,14 @@ mod multiplayer_webtransport_client_fixtures;
 mod multiplayer_webtransport_fixtures;
 /// Common queue, rolling BGM and mixer construction/replenishment.
 pub mod native_audio;
-/// Bounded original audio-observation startup for all native launchers.
-pub mod native_audio_startup;
-#[cfg(test)]
-mod native_audio_startup_fixtures;
 /// Original native evidence coupled to the shared audio-authoritative gameplay boundary.
 pub mod native_audio_presentation;
 #[cfg(test)]
 mod native_audio_presentation_fixtures;
+/// Bounded original audio-observation startup for all native launchers.
+pub mod native_audio_startup;
+#[cfg(test)]
+mod native_audio_startup_fixtures;
 /// Owned native background scanning and CPU catalog preparation.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_catalog;
@@ -302,6 +309,12 @@ pub mod native_cohort;
 pub mod native_cohort_setup;
 /// One application routing boundary for bilateral and multi-host room competition.
 pub mod native_competition_network;
+#[cfg(all(test, target_os = "linux"))]
+mod native_converted_end_fixtures;
+#[cfg(all(test, target_os = "linux"))]
+mod native_converted_gameplay_fixtures;
+#[cfg(all(test, target_os = "linux"))]
+mod native_converted_pause_fixtures;
 /// Omitted solo option defaults, independent of native discovery.
 pub mod native_defaults;
 pub mod native_end;
@@ -309,10 +322,6 @@ pub mod native_end;
 pub mod native_finish;
 /// Shared native solo gameplay sequencing behind device operations.
 pub mod native_gameplay;
-/// Dedicated native acquisition and ordered completed-drain evidence.
-pub mod native_input;
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod native_input_fixtures;
 mod native_gameplay_bridge;
 /// Explicit command, publication and diagnostic port for native gameplay policy.
 pub mod native_gameplay_host;
@@ -322,6 +331,10 @@ mod native_gauge_fixtures;
 mod native_gauge_selection_fixtures;
 /// One shared network/start owner over actual native local-member prefixes.
 pub mod native_group_competition;
+/// Dedicated native acquisition and ordered completed-drain evidence.
+pub mod native_input;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_input_fixtures;
 #[cfg(test)]
 mod native_invisible_audio_fixtures;
 #[cfg(test)]
@@ -339,6 +352,8 @@ mod native_mine_fixtures;
 #[cfg(test)]
 mod native_mine_presentation_fixtures;
 mod native_policy_admission;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_policy_network_fixtures;
 #[cfg(test)]
 mod native_policy_preparation_fixtures;
 /// Injectable diagnostic deadlines and waiting for shared native pumps.
@@ -493,18 +508,22 @@ pub mod viewport;
 mod viewport_fixtures;
 #[cfg(test)]
 mod viewport_touch_fixtures;
+#[cfg(test)]
+mod vorbis_chain_fixtures;
+#[cfg(test)]
+mod vorbis_chain_preparation_fixtures;
 /// Complete single-stream Ogg/Vorbis assets decoded during preparation.
 pub mod vorbis_decode;
 #[cfg(test)]
 mod vorbis_fixture;
 
-use beatkernel::replay::codec::{ReplayCodecLimits, ReplayFile, encode_replay};
+use beatkernel::replay::codec::{encode_replay, ReplayCodecLimits, ReplayFile};
 use beatkernel::{
     audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, VoiceId},
     judge::JudgeStage,
     runtime::SoundBinding,
 };
-use beatkernel_bms::{BmsChart, CompiledBms, ParseOptions, parse_seeded};
+use beatkernel_bms::{parse_seeded, BmsChart, CompiledBms, ParseOptions};
 use std::{collections::BTreeMap, error::Error, path::Path};
 
 /// Default original PCM sample capacity for the complete two-digit base62 namespace.

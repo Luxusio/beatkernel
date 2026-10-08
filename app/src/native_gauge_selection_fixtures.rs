@@ -1,6 +1,6 @@
 use crate::{
-    play_policy::{OriginalGaugeContext, GaugeSelection},
     native_judge::NativeJudgeConfig,
+    play_policy::{GaugeSelection, OriginalGaugeContext},
 };
 use beatkernel::{
     audio::{AudioFormat, PcmLimits, SampleBank},
@@ -61,31 +61,27 @@ fn practice_keeps_original_total_and_stage_count_for_every_selected_gauge() {
 #[test]
 fn custom_ghosts_are_admitted_network_refuses_and_settings_roundtrip_all_hosts() {
     use crate::{
-        competition_live::CompetitionOptions,
         competition::OpponentKind,
+        competition_live::CompetitionOptions,
         settings::{NativeSettings, SettingsHost},
     };
     let mut options = CompetitionOptions::default();
     options
         .ghosts
         .push((OpponentKind::Other, std::path::PathBuf::from("missing.bkr")));
-    assert!(
-        crate::native_judge::validate_policy_competition(
-            GaugeSelection::Bms(beatkernel_bms::BmsGaugeKind::Hard),
-            &options
-        )
-        .is_ok()
-    );
+    assert!(crate::native_judge::validate_policy_competition(
+        GaugeSelection::Bms(beatkernel_bms::BmsGaugeKind::Hard),
+        &options
+    )
+    .is_ok());
     crate::native_judge::validate_policy_competition(GaugeSelection::BeatKernel, &options).unwrap();
     let (network, _) =
         CompetitionOptions::extract(&["--mp-host".into(), "127.0.0.1:34567".into()]).unwrap();
-    assert!(
-        crate::native_judge::validate_policy_competition(
-            GaugeSelection::Bms(beatkernel_bms::BmsGaugeKind::Hard),
-            &network
-        )
-        .is_err()
-    );
+    assert!(crate::native_judge::validate_policy_competition(
+        GaugeSelection::Bms(beatkernel_bms::BmsGaugeKind::Hard),
+        &network
+    )
+    .is_err());
     for host in [
         SettingsHost::Linux,
         SettingsHost::Windows,
@@ -102,20 +98,18 @@ fn custom_ghosts_are_admitted_network_refuses_and_settings_roundtrip_all_hosts()
                 .value,
             "hard"
         );
-        assert!(
-            settings
-                .native_args()
-                .windows(2)
-                .any(|pair| pair == ["--gauge", "hard"])
-        );
+        assert!(settings
+            .native_args()
+            .windows(2)
+            .any(|pair| pair == ["--gauge", "hard"]));
     }
 }
 
 #[test]
 fn selected_cohort_constructor_preserves_policy_and_capture_for_each_original_player() {
     use crate::{
-        native_cohort_setup::{CohortPreparation, prepare_cohort_with_policy},
         local_players::PlayerId,
+        native_cohort_setup::{prepare_cohort_with_policy, CohortPreparation},
     };
     use beatkernel::input::DeviceId;
     let source = beatkernel_bms::parse(

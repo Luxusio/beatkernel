@@ -282,6 +282,10 @@ pub trait GameplayDevice {
     fn output_replacement_pending(&self) -> bool {
         false
     }
+    /// Converted owners switch native held output at acknowledged target boundaries.
+    fn set_audio_held(&mut self, _: bool) -> NativeGameplayResult<()> {
+        Ok(())
+    }
     /// Called only during a committed nonterminal pause; default adapters have no replacement.
     fn publish_paused_output(
         &mut self,

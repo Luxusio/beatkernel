@@ -4,7 +4,7 @@ use crate::{
     local_input::InputMerger,
     native_gameplay::NativeGameplayResult,
 };
-use beatkernel::audio::OutputFrameBasis;
+use beatkernel::audio::{OutputFrameBasis, TargetFrameBasis};
 use beatkernel::time::ClockPoint;
 use beatkernel_platform::audio::presentation::validation::{
     NativeObservationAdmission, NativePresentationRecord, NativePresentationValidator,
@@ -22,12 +22,50 @@ pub struct NativeAudioSnapshot {
     pub evidence: OriginalNativePresentationEvidence,
 }
 
+/// Original native association on an exact target-duration creation basis.
+/// SuppliedPair adapters must retain and validate their original native metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetNativeAudioSnapshot {
+    pub epoch: u64,
+    pub basis: TargetFrameBasis,
+    pub evidence: OriginalNativePresentationEvidence,
+}
+/// Cold candidate for a target-rate output epoch, using the same audio authority.
+#[derive(Clone, Debug)]
+pub struct PreparedTargetNativeAudioEpoch {
+    previous_epoch: AudioAuthorityEpoch,
+    previous_record: Option<NativePresentationRecord>,
+    previous_basis: Option<OutputFrameBasis>,
+    previous_target_basis: Option<TargetFrameBasis>,
+    validator: NativePresentationValidator,
+    basis: TargetFrameBasis,
+    snapshots: [TargetNativeAudioSnapshot; 2],
+    correlation: PreparedPrimedCorrelation,
+}
+impl PreparedTargetNativeAudioEpoch {
+    pub fn basis(&self) -> TargetFrameBasis {
+        self.basis
+    }
+    pub fn snapshots(&self) -> [TargetNativeAudioSnapshot; 2] {
+        self.snapshots
+    }
+    pub fn epoch(&self) -> u64 {
+        self.validator.epoch()
+    }
+    pub fn latest_record(&self) -> NativePresentationRecord {
+        self.validator
+            .latest_record()
+            .expect("two actual observations staged")
+    }
+}
+
 /// Opaque original-evidence candidate bound to the current live owners.
 #[derive(Clone, Debug)]
 pub struct PreparedNativeAudioEpoch {
     previous_epoch: AudioAuthorityEpoch,
     previous_record: Option<NativePresentationRecord>,
     previous_basis: Option<OutputFrameBasis>,
+    previous_target_basis: Option<TargetFrameBasis>,
     validator: NativePresentationValidator,
     basis: OutputFrameBasis,
     snapshots: [NativeAudioSnapshot; 2],
@@ -56,6 +94,7 @@ pub struct NativeAudioPresentation {
     authority: AudioAuthority,
     validator: NativePresentationValidator,
     basis: Option<OutputFrameBasis>,
+    target_basis: Option<TargetFrameBasis>,
 }
 impl NativeAudioPresentation {
     /// Construct matching cold owners without stitching independently admitted histories.
@@ -76,6 +115,7 @@ impl NativeAudioPresentation {
             authority,
             validator,
             basis: None,
+            target_basis: None,
         };
         owner.validate_identity()?;
         Ok(owner)
@@ -88,6 +128,9 @@ impl NativeAudioPresentation {
         snapshot: NativeAudioSnapshot,
     ) -> NativeGameplayResult<NativeObservationAdmission> {
         self.validate_identity()?;
+        if self.target_basis.is_some() {
+            return Err("legacy snapshot cannot replace target creation basis".into());
+        }
         if snapshot.epoch != self.authority.epoch().id {
             return Err("native audio snapshot belongs to another output epoch".into());
         }
@@ -150,6 +193,7 @@ impl NativeAudioPresentation {
             previous_epoch: self.authority.epoch(),
             previous_record: self.validator.latest_record(),
             previous_basis: self.basis,
+            previous_target_basis: self.target_basis,
             validator,
             basis,
             snapshots,
@@ -167,6 +211,7 @@ impl NativeAudioPresentation {
         if prepared.previous_epoch != self.authority.epoch()
             || prepared.previous_record != self.validator.latest_record()
             || prepared.previous_basis != self.basis
+            || prepared.previous_target_basis != self.target_basis
         {
             return Err("replacement native owner changed after preparation".into());
         }
@@ -186,6 +231,116 @@ impl NativeAudioPresentation {
             .commit_primed_correlation(prepared.correlation, now, merger)?;
         self.validator = prepared.validator;
         self.basis = Some(prepared.basis);
+        self.target_basis = None;
+        Ok(())
+    }
+
+    /// Admits an original target-grid association without substituting source frames.
+    pub fn admit_target(
+        &mut self,
+        snapshot: TargetNativeAudioSnapshot,
+    ) -> NativeGameplayResult<NativeObservationAdmission> {
+        self.validate_identity()?;
+        if self.basis.is_some()
+            || snapshot.epoch != self.authority.epoch().id
+            || self
+                .target_basis
+                .is_some_and(|basis| basis != snapshot.basis)
+        {
+            return Err("target snapshot differs from immutable creation epoch/basis".into());
+        }
+        let prepared = prepare_target_native_snapshot(&self.validator, snapshot)?;
+        if let Some(pair) = prepared.correlation_pair() {
+            self.authority.observe(snapshot.epoch, pair)?;
+        }
+        let admission = self.validator.commit(prepared)?;
+        if admission == NativeObservationAdmission::Progress {
+            self.target_basis = Some(snapshot.basis);
+        }
+        Ok(admission)
+    }
+    pub const fn target_basis(&self) -> Option<TargetFrameBasis> {
+        self.target_basis
+    }
+    /// Prepares two genuine progressing target observations and the same input authority.
+    pub fn prepare_target_output_epoch(
+        &self,
+        next: AudioAuthorityEpoch,
+        basis: TargetFrameBasis,
+        snapshots: [TargetNativeAudioSnapshot; 2],
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<PreparedTargetNativeAudioEpoch> {
+        self.validate_identity()?;
+        if basis.point_at_stream_frame(0)? != next.stream_origin {
+            return Err("target epoch origin differs from physical creation basis".into());
+        }
+        let staged = self.authority.prepare_epoch(next, merger)?;
+        let mut validator =
+            NativePresentationValidator::new(next.id, next.stream_origin, next.host_domain);
+        let mut pairs = [None; 2];
+        for (index, snapshot) in snapshots.into_iter().enumerate() {
+            if snapshot.epoch != next.id || snapshot.basis != basis {
+                return Err("target replacement snapshot creation identity differs".into());
+            }
+            let prepared = prepare_target_native_snapshot(&validator, snapshot)?;
+            pairs[index] = Some(
+                prepared
+                    .correlation_pair()
+                    .ok_or("target replacement requires progressing original observations")?,
+            );
+            validator.commit(prepared)?;
+        }
+        let correlation = self.authority.prepare_primed_epoch(
+            staged,
+            [
+                pairs[0].expect("first pair"),
+                pairs[1].expect("second pair"),
+            ],
+            now,
+            merger,
+        )?;
+        Ok(PreparedTargetNativeAudioEpoch {
+            previous_epoch: self.authority.epoch(),
+            previous_record: self.validator.latest_record(),
+            previous_basis: self.basis,
+            previous_target_basis: self.target_basis,
+            validator,
+            basis,
+            snapshots,
+            correlation,
+        })
+    }
+    pub fn validate_target_output_epoch(
+        &self,
+        prepared: &PreparedTargetNativeAudioEpoch,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<()> {
+        self.validate_identity()?;
+        if prepared.previous_epoch != self.authority.epoch()
+            || prepared.previous_record != self.validator.latest_record()
+            || prepared.previous_basis != self.basis
+            || prepared.previous_target_basis != self.target_basis
+        {
+            return Err("target output changed after cold preparation".into());
+        }
+        self.authority
+            .validate_primed_correlation(&prepared.correlation, now, merger)?;
+        Ok(())
+    }
+    pub fn commit_target_output_epoch(
+        &mut self,
+        prepared: PreparedTargetNativeAudioEpoch,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<()> {
+        self.validate_target_output_epoch(&prepared, now, merger)?;
+        self.authority
+            .commit_primed_correlation(prepared.correlation, now, merger)?;
+        self.validator = prepared.validator;
+        self.basis = None;
+        self.target_basis = Some(prepared.basis);
         Ok(())
     }
 
@@ -262,4 +417,24 @@ pub(crate) fn prepare_native_snapshot(
             validator.prepare_asio(snapshot.epoch, observation, basis)?
         }
     })
+}
+
+pub(crate) fn prepare_target_native_snapshot(
+    validator: &NativePresentationValidator,
+    snapshot: TargetNativeAudioSnapshot,
+) -> NativeGameplayResult<PreparedNativePresentation> {
+    if snapshot.epoch != validator.epoch()
+        || snapshot.basis.point_at_stream_frame(0)? != validator.output_origin()
+    {
+        return Err("target snapshot creation epoch or exact basis differs".into());
+    }
+    match snapshot.evidence {
+        OriginalNativePresentationEvidence::SuppliedPair(pair) => {
+            Ok(validator.prepare_pair(snapshot.epoch, pair)?)
+        }
+        _ => Err(
+            "target native backend must supply its validated target-grid original association"
+                .into(),
+        ),
+    }
 }

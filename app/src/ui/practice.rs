@@ -2,6 +2,7 @@
 use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
+    layout::{LayoutChange, LayoutUpdate, MountedLayout, Node, NodeId, TextStyle},
     molecules::{button, text_field_with_font},
     retained::RetainedNodes,
     text_input::LineEditor,
@@ -10,6 +11,165 @@ use crate::{
     font_text::FontText, practice::PracticeStart, scene::Scene, screen_lifecycle::ScreenInstanceId,
 };
 use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate};
+
+const TITLE: TextStyle = TextStyle {
+    scale: 3,
+    color: 0xf0f4ff,
+};
+const SUBTITLE: TextStyle = TextStyle {
+    scale: 2,
+    color: 0xf0f4ff,
+};
+const LABEL: TextStyle = TextStyle {
+    scale: 1,
+    color: 0x9bb1cf,
+};
+const FORMAT: TextStyle = TextStyle {
+    scale: 2,
+    color: 0x9bb1cf,
+};
+const PREVIEW: TextStyle = TextStyle {
+    scale: 2,
+    color: 0xd8b36b,
+};
+const ERROR: TextStyle = TextStyle {
+    scale: 1,
+    color: 0xffaaaa,
+};
+#[derive(Clone, Copy)]
+enum Component {
+    Background(u32),
+    Text(&'static str, TextStyle),
+    StartEditor(ControlId),
+    StartPreview(TextStyle),
+    EndEditor(ControlId),
+    EndPreview(TextStyle),
+    Action(ControlId, &'static str),
+    Error(TextStyle),
+}
+type N = Node<'static, Component>;
+// Static hints retain their original painter order; each editor/preview pair
+// shares a column so a direct editor allocation moves its dependent preview.
+const SCREEN: N = N::layer(
+    [960, 720],
+    &[
+        N::leaf([960, 720], Component::Background(0x10151e)).at(0, 0),
+        N::column(
+            [936, 59],
+            24,
+            &[
+                N::leaf([936, 21], Component::Text("BEATKERNEL BMS PLAYER", TITLE)),
+                N::leaf([936, 14], Component::Text("PRACTICE SECTION", SUBTITLE)),
+            ],
+        )
+        .at(24, 20),
+        N::leaf([936, 7], Component::Text("START", LABEL)).at(24, 134),
+        N::leaf(
+            [936, 7],
+            Component::Text("END (OPTIONAL; EMPTY PLAYS THROUGH SONG END)", LABEL),
+        )
+        .at(24, 260),
+        N::leaf(
+            [936, 14],
+            Component::Text("SECONDS / M:SS / H:MM:SS  FRACTION UP TO 9 DIGITS", FORMAT),
+        )
+        .at(24, 105),
+        N::column(
+            [936, 73],
+            15,
+            &[
+                N::leaf(
+                    [936, 7],
+                    Component::Text(
+                        "DONE UPDATES SETTINGS DRAFT; APPLY CHANGES THE NEXT SESSION",
+                        LABEL,
+                    ),
+                ),
+                N::leaf(
+                    [936, 7],
+                    Component::Text(
+                        "F5 RETRIES THE PINNED SESSION; BACK DISCARDS THESE EDITS",
+                        LABEL,
+                    ),
+                ),
+                N::leaf(
+                    [936, 7],
+                    Component::Text(
+                        "FULL SONG RESETS START AND END; THROUGH END CLEARS ONLY END",
+                        LABEL,
+                    ),
+                ),
+                N::leaf(
+                    [936, 7],
+                    Component::Text("TAB SWITCHES START / END; END MUST BE AFTER START", LABEL),
+                ),
+            ],
+        )
+        .at(24, 450),
+        N::column(
+            [906, 94],
+            40,
+            &[
+                N::leaf([906, 40], Component::StartEditor(ControlId(70))),
+                N::leaf([906, 14], Component::StartPreview(PREVIEW)),
+            ],
+        )
+        .at(24, 150),
+        N::column(
+            [906, 69],
+            15,
+            &[
+                N::leaf([906, 40], Component::EndEditor(ControlId(75))),
+                N::leaf([906, 14], Component::EndPreview(PREVIEW)),
+            ],
+        )
+        .at(24, 280),
+        N::row(
+            [768, 34],
+            16,
+            &[
+                N::leaf([180, 34], Component::Action(ControlId(71), "DONE")),
+                N::leaf([180, 34], Component::Action(ControlId(72), "BACK")),
+                N::leaf([180, 34], Component::Action(ControlId(73), "FULL SONG")),
+                N::leaf([180, 34], Component::Action(ControlId(76), "THROUGH END")),
+            ],
+        )
+        .at(24, 380),
+        N::leaf([936, 7], Component::Error(ERROR)).at(24, 560),
+    ],
+)
+.clipped();
+fn paint_text(scene: &mut Scene, bounds: Bounds, label: &str, style: TextStyle) {
+    text(
+        scene,
+        bounds.x as usize,
+        bounds.y as usize,
+        label,
+        style.scale,
+        style.color,
+    );
+}
+fn reflow_practice(
+    layout: &mut MountedLayout<Component>,
+    anchors: &[(NodeId, [i64; 2])],
+    extent: [u32; 2],
+) -> Result<bool, String> {
+    if extent.contains(&0) {
+        return layout.resize(extent);
+    }
+    let mut updates = vec![LayoutUpdate {
+        id: NodeId(1),
+        change: LayoutChange::Size(extent.map(i64::from)),
+    }];
+    updates.extend(anchors.iter().map(|&(id, origin)| LayoutUpdate {
+        id,
+        change: LayoutChange::Origin([
+            origin[0] * i64::from(extent[0]) / 960,
+            origin[1] * i64::from(extent[1]) / 720,
+        ]),
+    }));
+    layout.update_on_extent(extent, &updates)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PracticeFrame {
@@ -21,7 +181,7 @@ pub struct PracticeFrame {
     pub armed: Option<ControlId>,
 }
 
-/// Fixed main-thread node tree retained for its Navigator instance.
+/// Mounted retained hierarchy owned by its native or browser Navigator instance.
 /// Done updates the parent draft; Apply and pinned F5 remain coordinator-owned.
 pub struct PracticeView {
     id: ScreenInstanceId,
@@ -34,14 +194,27 @@ pub struct PracticeView {
     hovered: RwSignal<Option<ControlId>>,
     armed: RwSignal<Option<ControlId>>,
     nodes: RetainedNodes,
+    layout: MountedLayout<Component>,
+    anchors: Vec<(NodeId, [i64; 2])>,
+    editor_height: u32,
 }
 impl PracticeView {
     pub fn new(id: ScreenInstanceId, width: u32, height: u32) -> Result<Self, String> {
-        if (width, height) != (960, 720) {
-            return Err("Practice requires the 960x720 logical viewport".into());
-        }
         let editor = LineEditor::new("0:00", 64)?;
         let end_editor = LineEditor::new("", 64)?;
+        let mut layout = MountedLayout::mount(SCREEN)?;
+        let anchors = layout
+            .children(NodeId(0))
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|&id| id != NodeId(1))
+            .map(|id| {
+                let bounds = layout.geometry(id).unwrap().bounds;
+                (id, [bounds.x, bounds.y])
+            })
+            .collect::<Vec<_>>();
+        reflow_practice(&mut layout, &anchors, [width, height])?;
         let nodes = RetainedNodes::new(width, height)?;
         let scope = Scope::new();
         let mut view = Self {
@@ -55,127 +228,193 @@ impl PracticeView {
             hovered: scope.create_rw_signal(None),
             armed: scope.create_rw_signal(None),
             nodes,
+            layout,
+            anchors,
+            editor_height: 40,
         };
-        view.nodes.static_node(|scene, _| {
-            rect(scene, 0, 0, 960, 720, 0x10151e);
-            text(scene, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
-            text(scene, 24, 65, "PRACTICE SECTION", 2, 0xf0f4ff);
-            text(scene, 24, 134, "START", 1, 0x9bb1cf);
-            text(
-                scene,
-                24,
-                260,
-                "END (OPTIONAL; EMPTY PLAYS THROUGH SONG END)",
-                1,
-                0x9bb1cf,
-            );
-            text(
-                scene,
-                24,
-                105,
-                "SECONDS / M:SS / H:MM:SS  FRACTION UP TO 9 DIGITS",
-                2,
-                0x9bb1cf,
-            );
-            text(
-                scene,
-                24,
-                450,
-                "DONE UPDATES SETTINGS DRAFT; APPLY CHANGES THE NEXT SESSION",
-                1,
-                0x9bb1cf,
-            );
-            text(
-                scene,
-                24,
-                472,
-                "F5 RETRIES THE PINNED SESSION; BACK DISCARDS THESE EDITS",
-                1,
-                0x9bb1cf,
-            );
-            text(
-                scene,
-                24,
-                494,
-                "FULL SONG RESETS START AND END; THROUGH END CLEARS ONLY END",
-                1,
-                0x9bb1cf,
-            );
-            text(
-                scene,
-                24,
-                516,
-                "TAB SWITCHES START / END; END MUST BE AFTER START",
-                1,
-                0x9bb1cf,
-            );
-        });
-        let editor = view.editor;
-        let end_focused = view.end_focused;
-        let input_font = view.input_font;
-        let memo = scope.create_memo(move |_| (editor.get(), end_focused.get(), input_font.get()));
-        view.nodes
-            .bind(scope, memo, |(editor, end_focused, font), scene, hits| {
-                let bounds = Bounds {
-                    x: 24,
-                    y: 150,
-                    width: 906,
-                    height: 40,
-                };
-                text_field_with_font(scene, &editor, bounds, !end_focused, font.as_ref());
-                hits.push((ControlId(70), bounds));
-                let preview = PracticeStart::parse(editor.value())
-                    .map(|start| format!("EXACT START: {} NS", start.nanoseconds()))
-                    .unwrap_or_else(|_| "INVALID START".into());
-                text(scene, 24, 230, &preview, 2, 0xd8b36b);
-            });
-        let editor = view.end_editor;
-        let memo = scope.create_memo(move |_| (editor.get(), end_focused.get(), input_font.get()));
-        view.nodes
-            .bind(scope, memo, |(editor, end_focused, font), scene, hits| {
-                let bounds = Bounds {
-                    x: 24,
-                    y: 280,
-                    width: 906,
-                    height: 40,
-                };
-                text_field_with_font(scene, &editor, bounds, end_focused, font.as_ref());
-                hits.push((ControlId(75), bounds));
-                let preview = if editor.value().is_empty() {
-                    "THROUGH SONG END".into()
-                } else {
-                    PracticeStart::parse(editor.value())
-                        .map(|end| format!("EXACT END: {} NS", end.nanoseconds()))
-                        .unwrap_or_else(|_| "INVALID END".into())
-                };
-                text(scene, 24, 335, &preview, 2, 0xd8b36b);
-            });
-        for (id, x, label) in [
-            (71, 24, "DONE"),
-            (72, 220, "BACK"),
-            (73, 416, "FULL SONG"),
-            (76, 612, "THROUGH END"),
-        ] {
-            view.button_node(
-                ControlId(id),
-                Bounds {
-                    x,
-                    y: 380,
-                    width: 180,
-                    height: 34,
+        let leaves = view.layout.leaves().to_vec();
+        let static_leaves: Vec<_> = leaves
+            .iter()
+            .copied()
+            .filter(|leaf| {
+                matches!(
+                    leaf.component,
+                    Component::Background(_) | Component::Text(..)
+                )
+            })
+            .collect();
+        let static_ids: Vec<_> = static_leaves.iter().map(|leaf| leaf.id).collect();
+        view.nodes.static_layout_node(
+            &view.layout,
+            &static_ids,
+            move |id, geometry, scene, _| match static_leaves
+                .iter()
+                .find(|leaf| leaf.id == id)
+                .unwrap()
+                .component
+            {
+                Component::Background(color) => {
+                    let b = geometry.bounds;
+                    rect(scene, b.x, b.y, b.width, b.height, color);
+                }
+                Component::Text(label, style) => paint_text(scene, geometry.bounds, label, style),
+                _ => unreachable!(),
+            },
+        )?;
+        for end in [false, true] {
+            let pair: Vec<_> = leaves
+                .iter()
+                .copied()
+                .filter(|leaf| {
+                    if end {
+                        matches!(
+                            leaf.component,
+                            Component::EndEditor(_) | Component::EndPreview(_)
+                        )
+                    } else {
+                        matches!(
+                            leaf.component,
+                            Component::StartEditor(_) | Component::StartPreview(_)
+                        )
+                    }
+                })
+                .collect();
+            let pair_ids: Vec<_> = pair.iter().map(|leaf| leaf.id).collect();
+            let editor = if end { view.end_editor } else { view.editor };
+            let end_focused = view.end_focused;
+            let input_font = view.input_font;
+            let memo =
+                scope.create_memo(move |_| (editor.get(), end_focused.get(), input_font.get()));
+            view.nodes.bind_layout(
+                scope,
+                memo,
+                &view.layout,
+                &pair_ids,
+                move |(editor, end_focused, font), id, geometry, scene, hits| match pair
+                    .iter()
+                    .find(|leaf| leaf.id == id)
+                    .unwrap()
+                    .component
+                {
+                    Component::StartEditor(control) | Component::EndEditor(control) => {
+                        text_field_with_font(
+                            scene,
+                            &editor,
+                            geometry.bounds,
+                            end == end_focused,
+                            font.as_ref(),
+                        );
+                        hits.push((control, geometry.bounds));
+                    }
+                    Component::StartPreview(style) | Component::EndPreview(style) => {
+                        let preview = if end && editor.value().is_empty() {
+                            "THROUGH SONG END".into()
+                        } else {
+                            PracticeStart::parse(editor.value())
+                                .map(|time| {
+                                    format!(
+                                        "EXACT {}: {} NS",
+                                        if end { "END" } else { "START" },
+                                        time.nanoseconds()
+                                    )
+                                })
+                                .unwrap_or_else(|_| {
+                                    format!("INVALID {}", if end { "END" } else { "START" })
+                                })
+                        };
+                        paint_text(scene, geometry.bounds, &preview, style);
+                    }
+                    _ => unreachable!(),
                 },
-                label,
-            );
+            )?;
         }
+        for leaf in &leaves {
+            let Component::Action(control, label) = leaf.component else {
+                continue;
+            };
+            view.button_node(leaf.id, control, label)?;
+        }
+        let error_leaf = leaves
+            .iter()
+            .find(|leaf| matches!(leaf.component, Component::Error(_)))
+            .unwrap();
+        let Component::Error(error_style) = error_leaf.component else {
+            unreachable!()
+        };
         let error = view.error;
         let memo = scope.create_memo(move |_| error.get());
-        view.nodes.bind(scope, memo, |error, scene, _| {
-            if let Some(error) = error {
-                text(scene, 24, 560, &error, 1, 0xffaaaa);
-            }
-        });
+        view.nodes.bind_layout(
+            scope,
+            memo,
+            &view.layout,
+            &[error_leaf.id],
+            move |error, _, geometry, scene, _| {
+                if let Some(error) = error {
+                    paint_text(scene, geometry.bounds, &error, error_style);
+                }
+            },
+        )?;
         view.nodes.validate()?;
         Ok(view)
+    }
+    /// Reflows section anchors and inherited clips without replacing editors,
+    /// reactive scopes or the caller-owned practice draft.
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, String> {
+        if self.layout.extent() == [width, height] {
+            return Ok(false);
+        }
+        let mut candidate = self.layout.clone();
+        reflow_practice(&mut candidate, &self.anchors, [width, height])?;
+        self.nodes.relayout(&candidate)?;
+        self.layout = candidate;
+        Ok(true)
+    }
+    /// Direct allocation changes move each exact-time preview through its
+    /// existing column dependency, keeping the action and hint packets intact.
+    pub fn set_editor_height(&mut self, height: u32) -> Result<bool, String> {
+        if height == 0 {
+            return Err("Practice editor height must be positive".into());
+        }
+        if self.editor_height == height {
+            return Ok(false);
+        }
+        let mut updates = Vec::new();
+        for leaf in self.layout.leaves() {
+            let gap = match leaf.component {
+                Component::StartEditor(_) => 40,
+                Component::EndEditor(_) => 15,
+                _ => continue,
+            };
+            let column = self
+                .layout
+                .children(NodeId(0))
+                .unwrap()
+                .iter()
+                .copied()
+                .find(|&id| {
+                    self.layout
+                        .children(id)
+                        .is_some_and(|children| children.first() == Some(&leaf.id))
+                })
+                .ok_or("Practice editor column missing")?;
+            updates.push(LayoutUpdate {
+                id: column,
+                change: LayoutChange::Size([906, i64::from(height) + gap + 14]),
+            });
+            updates.push(LayoutUpdate {
+                id: leaf.id,
+                change: LayoutChange::Size([906, i64::from(height)]),
+            });
+        }
+        let mut candidate = self.layout.clone();
+        candidate.update(&updates)?;
+        self.nodes.relayout(&candidate)?;
+        self.layout = candidate;
+        self.editor_height = height;
+        Ok(true)
+    }
+    pub fn hit(&self, point: (f64, f64)) -> Option<ControlId> {
+        self.nodes.hit(point)
     }
     pub const fn id(&self) -> ScreenInstanceId {
         self.id
@@ -217,17 +456,27 @@ impl PracticeView {
     ) -> Result<(), String> {
         self.nodes.compose(scene, hits)
     }
-    fn button_node(&mut self, id: ControlId, bounds: Bounds, label: &'static str) {
+    fn button_node(
+        &mut self,
+        node: NodeId,
+        id: ControlId,
+        label: &'static str,
+    ) -> Result<(), String> {
         let hovered = self.hovered;
         let armed = self.armed;
         let memo = self
             .scope
             .create_memo(move |_| (hovered.get() == Some(id), armed.get() == Some(id)));
-        self.nodes
-            .bind(self.scope, memo, move |(hovered, armed), scene, hits| {
-                button(scene, bounds, label, hovered, armed);
-                hits.push((id, bounds));
-            });
+        self.nodes.bind_layout(
+            self.scope,
+            memo,
+            &self.layout,
+            &[node],
+            move |(hovered, armed), _, geometry, scene, hits| {
+                button(scene, geometry.bounds, label, hovered, armed);
+                hits.push((id, geometry.bounds));
+            },
+        )
     }
 }
 impl Drop for PracticeView {
@@ -235,6 +484,10 @@ impl Drop for PracticeView {
         self.scope.dispose();
     }
 }
+#[cfg(test)]
+#[path = "practice_declarative_fixtures.rs"]
+mod practice_declarative_fixtures;
+
 #[cfg(test)]
 mod fixtures {
     use super::*;
@@ -373,6 +626,6 @@ mod fixtures {
         assert!(weak.strong_count() >= 2);
         drop(view);
         assert!(weak.upgrade().is_none());
-        assert!(PracticeView::new(ScreenInstanceId(9), 800, 600).is_err());
+        assert!(PracticeView::new(ScreenInstanceId(9), 800, 600).is_ok());
     }
 }

@@ -43,15 +43,18 @@ use beatkernel_bms_runtime::ui::{
     catalog_search::CatalogSearch,
     clipboard::{ClipboardAction, ClipboardEdit},
     devices::{DevicesFrame, DevicesView},
-    display::{BUTTONS as DISPLAY_BUTTONS, DisplayFrame, DisplayView},
-    interaction::{Bounds, ControlId, Gesture, WheelSteps, logical_point},
-    molecules, organisms,
+    display::{DisplayFrame, DisplayView, BUTTONS as DISPLAY_BUTTONS},
+    interaction::{logical_point, Bounds, ControlId, Gesture, WheelSteps},
+    layout::NodeId,
+    molecules,
+    motion::{ComponentMotion, MotionScheduler},
+    organisms,
     players::{PlayersFrame, PlayersView},
     practice::{PracticeFrame, PracticeView},
     records::{RecordsFrame, RecordsView},
-    results::{ResultsView, ResultDetails},
-    selection::{ROW_HEIGHT, SelectionFrame, SelectionItem, SelectionView, VISIBLE_ROWS},
-    settings::{BUTTONS as SETTINGS_BUTTONS, SettingsFrame, SettingsView},
+    results::{ResultDetails, ResultsView},
+    selection::{SelectionFrame, SelectionItem, SelectionView, ROW_HEIGHT, VISIBLE_ROWS},
+    settings::{SettingsFrame, SettingsView, BUTTONS as SETTINGS_BUTTONS},
     text_input::LineEditor,
 };
 use beatkernel_bms_runtime::{
@@ -65,11 +68,11 @@ use beatkernel_bms_runtime::{
     native_catalog::{CatalogControl, NativeCatalog},
     panel_scope::{PanelScope, TaskPermit},
     player, player_chart,
-    room_presentation::RoomUiAction,
     practice::PracticeStart,
     practice_loop::PracticeLoop,
     presentation_settings::PresentationSettings,
     record_catalog::{RecordCatalog, RecordPreview},
+    room_presentation::RoomUiAction,
     screen_lifecycle::{ScreenInstanceId, ScreenKind, ScreenNavigator, ScreenPhase, ScreenRoute},
     session_launch::SessionLaunch,
     settings::{NativeSettings, SettingsHost},
@@ -77,7 +80,7 @@ use beatkernel_bms_runtime::{
 };
 use beatkernel_bms_runtime::{
     graphics::{self, BackendChoice, Presentation, Renderer},
-    scene::Scene,
+    scene::{Scene, UiComponentKey, UiPresentedPose, UiTransform, MAX_UI_COMPONENTS},
 };
 use std::{
     error::Error,
@@ -91,7 +94,7 @@ use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, KeyCode, ModifiersState, PhysicalKey},
     window::{Window, WindowId},
 };
@@ -730,7 +733,11 @@ impl Game {
         if !succeeded {
             self.loop_enabled = false;
         }
-        if succeeded { prepared } else { None }
+        if succeeded {
+            prepared
+        } else {
+            None
+        }
     }
 }
 fn spawn_game(
@@ -778,6 +785,19 @@ impl Drop for Game {
     }
 }
 
+/// Trusted host commands carry explicit presentation intent. Each request
+/// uses a dedicated one-shot bounded reply receiver; replies never block the UI.
+pub(super) enum DesktopUiCommand {
+    RequestMotion {
+        screen: ScreenInstanceId,
+        control: ControlId,
+        motion: ComponentMotion,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    InspectScreen {
+        reply: std::sync::mpsc::SyncSender<Option<ScreenInstanceId>>,
+    },
+}
 pub(super) fn run(
     args: &[String],
     native: Native,
@@ -785,6 +805,28 @@ pub(super) fn run(
     query_devices: QueryDevices,
     replay: Native,
     validate_replay: Native,
+) -> Result<(), Box<dyn Error>> {
+    run_with_ui_commands(
+        args,
+        native,
+        validate,
+        query_devices,
+        replay,
+        validate_replay,
+        |_| {},
+    )
+}
+
+/// Native embedding hosts can post bounded typed presentation requests after
+/// inspecting the actual mounted screen. The ordinary launcher registers none.
+pub(super) fn run_with_ui_commands(
+    args: &[String],
+    native: Native,
+    validate: Native,
+    query_devices: QueryDevices,
+    replay: Native,
+    validate_replay: Native,
+    register: impl FnOnce(EventLoopProxy<DesktopUiCommand>),
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
@@ -797,7 +839,8 @@ pub(super) fn run(
     let selection_items: Arc<[SelectionItem]> = Arc::from([]);
     let catalog_search = CatalogSearch::new(&selection_items)?;
     let search_editor = LineEditor::new("", 256)?;
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::<DesktopUiCommand>::with_user_event().build()?;
+    register(event_loop.create_proxy());
     let active_backend = options.backend;
     let mut app = Desktop {
         options,
@@ -844,6 +887,7 @@ pub(super) fn run(
         selection_diagnostics: Arc::from([]),
         selection_view: None,
         painted_reactive: None,
+        ui_motion: NativeUiMotionState::default(),
         window: None,
         renderer: None,
         renderer_startup: None,
@@ -1360,6 +1404,98 @@ struct RendererStartup {
     job: NativeCatalog<PreparedRenderer>,
     retired: bool,
 }
+struct NativeMotionOwner {
+    screen: ScreenInstanceId,
+    scheduler: MotionScheduler,
+    nodes: Vec<(NodeId, UiTransform)>,
+    suspended: bool,
+}
+#[derive(Clone, Copy)]
+struct NativeMotionHit {
+    control: ControlId,
+    bounds: Bounds,
+    key: Option<UiComponentKey>,
+}
+struct NativeUiMotionState {
+    origin: Instant,
+    time: Duration,
+    owners: Vec<NativeMotionOwner>,
+    pending_hits: Vec<NativeMotionHit>,
+    presented_hits: Vec<NativeMotionHit>,
+    presented_pose: Option<UiPresentedPose>,
+    presented_screen: Option<ScreenInstanceId>,
+    presented_extent: [u32; 2],
+    disposed: bool,
+}
+impl Default for NativeUiMotionState {
+    fn default() -> Self {
+        Self {
+            origin: Instant::now(),
+            time: Duration::ZERO,
+            owners: Vec::new(),
+            pending_hits: Vec::new(),
+            presented_hits: Vec::new(),
+            presented_pose: None,
+            presented_screen: None,
+            presented_extent: [0; 2],
+            disposed: false,
+        }
+    }
+}
+impl NativeUiMotionState {
+    fn validate_time(&self, now: Duration) -> Result<(), String> {
+        if self.disposed || now < self.time {
+            return Err("disposed native UI motion or regressed presentation time".into());
+        }
+        for owner in &self.owners {
+            owner.scheduler.validate_time(now)?;
+        }
+        Ok(())
+    }
+    fn suspend(&mut self, now: Duration) -> Result<(), String> {
+        self.validate_time(now)?;
+        for owner in &mut self.owners {
+            owner.scheduler.suspend(now)?;
+            owner.suspended = true;
+        }
+        self.time = now;
+        Ok(())
+    }
+    fn remove(&mut self, screen: ScreenInstanceId, scene: &mut Scene) {
+        for owner in &mut self.owners {
+            if owner.screen == screen {
+                owner.scheduler.dispose();
+            }
+        }
+        self.owners.retain(|owner| !owner.scheduler.disposed());
+        scene.dispose_components(screen);
+    }
+    fn synchronize(&mut self, navigator: &ScreenNavigator, scene: &mut Scene) {
+        for owner in &mut self.owners {
+            if !navigator.retains(owner.screen) {
+                owner.scheduler.dispose();
+                scene.dispose_components(owner.screen);
+            } else if navigator.active_id() != Some(owner.screen) {
+                // Freeze the last sampled pose. Returning composition restores it
+                // before rebinding, and caller time excludes the suspended span.
+                if !owner.suspended {
+                    owner
+                        .scheduler
+                        .suspend(self.time)
+                        .expect("admitted native motion time");
+                    owner.suspended = true;
+                }
+                scene.dispose_components(owner.screen);
+            }
+        }
+        self.owners.retain(|owner| !owner.scheduler.disposed());
+        if navigator.route() == ScreenRoute::Closing {
+            self.disposed = true;
+            self.presented_pose = None;
+            self.presented_hits.clear();
+        }
+    }
+}
 struct Desktop {
     options: Options,
     active_backend: BackendChoice,
@@ -1405,6 +1541,7 @@ struct Desktop {
     selection_diagnostics: Arc<[String]>,
     selection_view: Option<SelectionView>,
     painted_reactive: Option<ScreenInstanceId>,
+    ui_motion: NativeUiMotionState,
     // On unexpected Desktop drop, join the transferred surface owner before
     // releasing this UI-owned window reference.
     renderer_startup: Option<RendererStartup>,
@@ -1425,6 +1562,329 @@ struct Desktop {
     hits: Vec<(ControlId, Bounds)>,
 }
 impl Desktop {
+    fn handle_ui_command(&mut self, command: DesktopUiCommand) {
+        match command {
+            DesktopUiCommand::InspectScreen { reply } => {
+                let screen = match self.navigator.route() {
+                    ScreenRoute::Selection => self.selection_view.as_ref().map(SelectionView::id),
+                    ScreenRoute::Display => self.display_view.as_ref().map(DisplayView::id),
+                    _ => None,
+                }
+                .filter(|screen| self.navigator.accepts(*screen));
+                if reply.try_send(screen).is_err() {
+                    self.failure =
+                        Some("native UI screen reply unavailable; no motion requested".into());
+                }
+            }
+            DesktopUiCommand::RequestMotion {
+                screen,
+                control,
+                motion,
+                reply,
+            } => {
+                let now = self.ui_motion.origin.elapsed();
+                let result = self.request_control_motion(screen, control, motion, now);
+                let admitted = result.is_ok();
+                if reply.try_send(result).is_err() {
+                    self.failure = Some(if admitted {
+                        "native UI motion admitted but reply unavailable; do not retry without inspecting owner state"
+                    } else { "native UI motion refused and reply unavailable" }.into());
+                }
+                if admitted {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+            }
+        }
+    }
+    fn control_motion_nodes(&self, screen: ScreenInstanceId) -> Vec<NodeId> {
+        self.ui_motion
+            .owners
+            .iter()
+            .find(|owner| owner.screen == screen)
+            .map(|owner| owner.nodes.iter().map(|(node, _)| *node).collect())
+            .unwrap_or_default()
+    }
+    fn control_node(&self, control: ControlId) -> Result<NodeId, String> {
+        let node = match self.navigator.route() {
+            ScreenRoute::Selection => self
+                .selection_view
+                .as_ref()
+                .ok_or("Selection view unavailable")?
+                .node_for_control(control)?,
+            ScreenRoute::Display => self
+                .display_view
+                .as_ref()
+                .ok_or("Display view unavailable")?
+                .node_for_control(control)?,
+            _ => return Err("native component motion requires Selection or Display".into()),
+        };
+        node.ok_or_else(|| "native motion control is not displayed".into())
+    }
+    fn restore_control_motion(&mut self, screen: ScreenInstanceId) -> Result<(), String> {
+        if let Some(owner) = self
+            .ui_motion
+            .owners
+            .iter_mut()
+            .find(|owner| owner.screen == screen)
+        {
+            let mut scheduler = owner.scheduler.clone();
+            scheduler.rebind(&self.scene)?;
+            let mut updates = [None; MAX_UI_COMPONENTS];
+            for (i, (node, pose)) in owner.nodes.iter().enumerate() {
+                let id = self
+                    .scene
+                    .component_id(UiComponentKey {
+                        screen,
+                        node: *node,
+                    })
+                    .ok_or("native motion binding unavailable")?;
+                updates[i] = Some((id, *pose));
+            }
+            // Every pose is checked before changing scene uniforms or owner IDs.
+            for update in updates.iter().flatten() {
+                if self.scene.component_transform(update.0).is_none() {
+                    return Err("native motion pose unavailable".into());
+                }
+            }
+            for update in updates.iter().flatten() {
+                self.scene
+                    .set_component_transforms(std::slice::from_ref(update))?;
+            }
+            owner.scheduler = scheduler;
+        }
+        Ok(())
+    }
+    fn stage_control_hits(&mut self, screen: ScreenInstanceId) -> Result<(), String> {
+        self.ui_motion.pending_hits.clear();
+        self.ui_motion
+            .pending_hits
+            .try_reserve(self.hits.len())
+            .map_err(|_| "native motion hit staging allocation failed")?;
+        self.ui_motion
+            .presented_hits
+            .try_reserve(
+                self.hits
+                    .len()
+                    .saturating_sub(self.ui_motion.presented_hits.len()),
+            )
+            .map_err(|_| "native motion presented hit allocation failed")?;
+        for &(control, bounds) in &self.hits {
+            let node = self.control_node(control)?;
+            self.ui_motion.pending_hits.push(NativeMotionHit {
+                control,
+                bounds,
+                key: Some(UiComponentKey { screen, node }),
+            });
+        }
+        Ok(())
+    }
+    /// Cold typed native host request. The caller chooses the complete motion;
+    /// its time belongs solely to monotonic presentation, never the song clock.
+    fn request_control_motion(
+        &mut self,
+        screen: ScreenInstanceId,
+        control: ControlId,
+        motion: ComponentMotion,
+        now: Duration,
+    ) -> Result<(), String> {
+        self.ui_motion.validate_time(now)?;
+        if !self.ui_ready()
+            || !self.navigator.accepts(screen)
+            || self.profile_io.is_some()
+            || self.catalog.is_some()
+            || !self.hits.iter().any(|(id, _)| *id == control)
+        {
+            return Err("stale, suspended or undisplayed native motion control".into());
+        }
+        if self.window.as_ref().is_some_and(|window| {
+            let size = window.inner_size();
+            size.width == 0 || size.height == 0
+        }) {
+            return Err("native motion request while backing extent is zero".into());
+        }
+        let node = self.control_node(control)?;
+        let existing = self
+            .ui_motion
+            .owners
+            .iter()
+            .position(|owner| owner.screen == screen);
+        if existing.is_some_and(|i| self.ui_motion.owners[i].suspended) {
+            return Err("native motion owner suspended; present before requesting".into());
+        }
+        if existing.is_some_and(|i| {
+            self.ui_motion.owners[i].nodes.len() == MAX_UI_COMPONENTS
+                && !self.ui_motion.owners[i]
+                    .nodes
+                    .iter()
+                    .any(|(old, _)| *old == node)
+        }) {
+            return Err("native motion component capacity exhausted".into());
+        }
+        let index = if let Some(index) = existing {
+            index
+        } else {
+            self.ui_motion
+                .owners
+                .try_reserve(1)
+                .map_err(|_| "native motion owner allocation failed")?;
+            self.ui_motion.owners.push(NativeMotionOwner {
+                screen,
+                scheduler: MotionScheduler::new(screen, MAX_UI_COMPONENTS)?,
+                nodes: Vec::new(),
+                suspended: false,
+            });
+            self.ui_motion.owners.len() - 1
+        };
+        let added = !self.ui_motion.owners[index]
+            .nodes
+            .iter()
+            .any(|(old, _)| *old == node);
+        if added {
+            self.ui_motion.owners[index]
+                .nodes
+                .try_reserve(1)
+                .map_err(|_| "native motion node allocation failed")?;
+            self.ui_motion.owners[index]
+                .nodes
+                .push((node, UiTransform::default()));
+            let nodes = self.control_motion_nodes(screen);
+            let composed = match self.navigator.route() {
+                ScreenRoute::Selection => self
+                    .selection_view
+                    .as_ref()
+                    .ok_or("Selection view unavailable")?
+                    .compose_components(&mut self.scene, &mut self.hits, screen, &nodes),
+                ScreenRoute::Display => self
+                    .display_view
+                    .as_ref()
+                    .ok_or("Display view unavailable")?
+                    .compose_components(&mut self.scene, &mut self.hits, screen, &nodes),
+                _ => unreachable!("control node preflight restricts route"),
+            };
+            if let Err(error) = composed {
+                self.ui_motion.owners[index].nodes.pop();
+                return Err(error);
+            }
+            self.restore_control_motion(screen)?;
+            self.stage_control_hits(screen)?;
+        }
+        let key = UiComponentKey { screen, node };
+        let id = self
+            .scene
+            .component_id(key)
+            .ok_or("native motion binding unavailable")?;
+        let mut scheduler = self.ui_motion.owners[index].scheduler.clone();
+        scheduler.rebind(&self.scene)?;
+        scheduler.schedule(key, id, motion, now)?;
+        self.ui_motion.owners[index].scheduler = scheduler;
+        self.tick_control_motion(now, [WIDTH as u32, HEIGHT as u32])?;
+        Ok(())
+    }
+    fn tick_control_motion(&mut self, now: Duration, extent: [u32; 2]) -> Result<bool, String> {
+        self.ui_motion.validate_time(now)?;
+        if self.is_suspended() || self.occluded || extent.contains(&0) {
+            self.ui_motion.suspend(self.ui_motion.time)?;
+            self.ui_motion.time = now;
+            return Ok(false);
+        }
+        let mut changed = false;
+        if let Some(owner) = self
+            .ui_motion
+            .owners
+            .iter_mut()
+            .find(|owner| Some(owner.screen) == self.navigator.active_id())
+        {
+            for (node, _) in &owner.nodes {
+                let id = self
+                    .scene
+                    .component_id(UiComponentKey {
+                        screen: owner.screen,
+                        node: *node,
+                    })
+                    .ok_or("native motion pose unavailable")?;
+                if self.scene.component_transform(id).is_none() {
+                    return Err("native motion pose unavailable".into());
+                }
+            }
+            let mut scheduler = owner.scheduler.clone();
+            scheduler.rebind(&self.scene)?;
+            if owner.suspended {
+                scheduler.resume(now)?;
+            }
+            changed = scheduler.tick(owner.screen, now, &mut self.scene)?;
+            owner.scheduler = scheduler;
+            owner.suspended = false;
+            for (node, pose) in &mut owner.nodes {
+                *pose = self
+                    .scene
+                    .component_id(UiComponentKey {
+                        screen: owner.screen,
+                        node: *node,
+                    })
+                    .and_then(|id| self.scene.component_transform(id))
+                    .expect("preflighted native motion pose");
+            }
+        }
+        self.ui_motion.time = now;
+        Ok(changed)
+    }
+    fn publish_control_pose(&mut self, extent: [u32; 2]) -> Result<(), String> {
+        if extent.contains(&0) {
+            return Err("zero extent cannot publish native input pose".into());
+        }
+        self.scene.status()?;
+        if !matches!(
+            self.navigator.route(),
+            ScreenRoute::Selection | ScreenRoute::Display
+        ) {
+            self.ui_motion.presented_screen = None;
+            self.ui_motion.presented_pose = None;
+            return Ok(());
+        }
+        self.ui_motion.presented_hits.clear();
+        self.ui_motion
+            .presented_hits
+            .extend_from_slice(&self.ui_motion.pending_hits);
+        self.ui_motion.presented_pose = Some(self.scene.presented_pose());
+        self.ui_motion.presented_screen = self.navigator.active_id();
+        self.ui_motion.presented_extent = extent;
+        Ok(())
+    }
+    fn control_motion_active(&self) -> bool {
+        !self.ui_motion.disposed
+            && !self.occluded
+            && !self.is_suspended()
+            && self.ui_motion.owners.iter().any(|owner| {
+                Some(owner.screen) == self.navigator.active_id()
+                    && !owner.suspended
+                    && owner.scheduler.active_count() > 0
+            })
+    }
+    fn hit_motion(&self, point: (f64, f64), extent: [u32; 2]) -> Option<ControlId> {
+        if extent.contains(&0) || self.ui_motion.presented_screen != self.navigator.active_id() {
+            return None;
+        }
+        let pose = self.ui_motion.presented_pose.as_ref()?;
+        let point = logical_point(
+            point,
+            (
+                self.ui_motion.presented_extent[0],
+                self.ui_motion.presented_extent[1],
+            ),
+            (WIDTH as u32, HEIGHT as u32),
+        )?;
+        self.hit_motion_logical(pose, point)
+    }
+    fn hit_motion_logical(&self, pose: &UiPresentedPose, point: (f64, f64)) -> Option<ControlId> {
+        self.ui_motion.presented_hits.iter().rev().find_map(|hit| {
+            pose.project(hit.key, point)
+                .filter(|local| hit.bounds.contains(*local))
+                .map(|_| hit.control)
+        })
+    }
+
     fn startup_busy(&self) -> bool {
         self.startup.as_ref().is_some_and(|startup| {
             !startup.is_finished()
@@ -1513,6 +1973,9 @@ impl Desktop {
         self.selection_items = items;
         self.catalog_search = search;
         self.selection_diagnostics = Arc::from([]);
+        if let Some(view) = &self.selection_view {
+            self.ui_motion.remove(view.id(), &mut self.scene);
+        }
         self.selection_view = None;
         self.invalidate_hits();
         Ok(())
@@ -1621,6 +2084,11 @@ impl Desktop {
     }
     fn bind_title_font(&mut self, font: Option<FontText>) {
         self.font_text = font;
+        if let Some(view) = &self.selection_view {
+            // Renderer/font replacement changes the cold packet allocation,
+            // while the retained screen's pose and elapsed track survive.
+            self.scene.dispose_components(view.id());
+        }
         self.selection_view = None;
         self.invalidate_hits();
     }
@@ -1973,6 +2441,7 @@ impl Desktop {
     fn commit_route(&mut self, next: ScreenNavigator) {
         self.catalog_wheel.reset();
         self.navigator = next;
+        self.ui_motion.synchronize(&self.navigator, &mut self.scene);
         self.set_search_focus(false);
         self.gesture.cancel();
         self.invalidate_hits();
@@ -2032,6 +2501,9 @@ impl Desktop {
             .as_ref()
             .is_some_and(|view| !self.navigator.retains(view.id()))
         {
+            if let Some(view) = &self.selection_view {
+                self.ui_motion.remove(view.id(), &mut self.scene);
+            }
             self.selection_view = None;
         }
         self.painted_reactive = None;
@@ -3340,6 +3812,16 @@ impl Desktop {
         {
             return None;
         }
+        if self
+            .ui_motion
+            .owners
+            .iter()
+            .any(|owner| Some(owner.screen) == self.navigator.active_id())
+        {
+            let window = self.window.as_ref()?;
+            let size = window.inner_size();
+            return self.hit_motion(self.pointer?, [size.width, size.height]);
+        }
         let point = self.point()?;
         self.hits
             .iter()
@@ -4205,6 +4687,22 @@ impl Desktop {
         }
     }
     fn over_catalog(&self, point: Option<(f64, f64)>) -> bool {
+        if self.navigator.route() == ScreenRoute::Selection
+            && self
+                .ui_motion
+                .owners
+                .iter()
+                .any(|owner| Some(owner.screen) == self.navigator.active_id())
+        {
+            return self.ui_motion.presented_screen == self.navigator.active_id()
+                && self
+                    .ui_motion
+                    .presented_pose
+                    .as_ref()
+                    .zip(point)
+                    .and_then(|(pose, point)| self.hit_motion_logical(pose, point))
+                    .is_some_and(|id| id.0 >= 100);
+        }
         self.navigator.route() == ScreenRoute::Selection
             && self.selection_view.as_ref().is_some_and(|view| {
                 Some(view.id()) == self.navigator.active_id()
@@ -4843,16 +5341,18 @@ impl Desktop {
             && !self.renderer_startup_busy()
     }
     fn reactive_scene_idle(&self) -> bool {
-        matches!(
-            self.navigator.route(),
-            ScreenRoute::Selection
-                | ScreenRoute::Practice
-                | ScreenRoute::Settings
-                | ScreenRoute::Display
-                | ScreenRoute::Records
-                | ScreenRoute::Players
-                | ScreenRoute::Devices { .. }
-        ) && self.navigator.phase() == ScreenPhase::Active
+        !self.control_motion_active()
+            && matches!(
+                self.navigator.route(),
+                ScreenRoute::Selection
+                    | ScreenRoute::Practice
+                    | ScreenRoute::Settings
+                    | ScreenRoute::Display
+                    | ScreenRoute::Records
+                    | ScreenRoute::Players
+                    | ScreenRoute::Devices { .. }
+            )
+            && self.navigator.phase() == ScreenPhase::Active
             && !self.occluded
             && self.profile_io.is_none()
             && self
@@ -4863,6 +5363,9 @@ impl Desktop {
     fn draw_selection(&mut self) -> Result<(), String> {
         if self.catalog.is_some() {
             let library = self.options.library.is_some();
+            if let Some(view) = &self.selection_view {
+                self.ui_motion.remove(view.id(), &mut self.scene);
+            }
             self.selection_view = None;
             self.painted_reactive = None;
             self.scene.clear();
@@ -4981,7 +5484,14 @@ impl Desktop {
         view.update(frame);
         view.set_input_font(self.input_font.clone());
         if view.dirty() || self.painted_reactive != Some(id) {
-            view.compose(&mut self.scene, &mut self.hits)?;
+            let nodes = self.control_motion_nodes(id);
+            if nodes.is_empty() {
+                view.compose(&mut self.scene, &mut self.hits)?;
+            } else {
+                view.compose_components(&mut self.scene, &mut self.hits, id, &nodes)?;
+            }
+            self.restore_control_motion(id)?;
+            self.stage_control_hits(id)?;
             self.painted_reactive = Some(id);
         }
         self.render_scene()
@@ -5063,18 +5573,7 @@ impl Desktop {
             self.painted_reactive = None;
         }
         let pending = self.profile_io.is_some();
-        let point = self.point();
-        let hovered = if pending {
-            None
-        } else {
-            point.and_then(|point| {
-                DISPLAY_BUTTONS
-                    .iter()
-                    .rev()
-                    .find(|(_, bounds, _)| bounds.contains(point))
-                    .map(|(id, _, _)| *id)
-            })
-        };
+        let hovered = if pending { None } else { self.hit() };
         let armed = if pending {
             None
         } else {
@@ -5107,7 +5606,14 @@ impl Desktop {
         })?;
         view.set_input_font(self.input_font.clone());
         if view.dirty() || self.painted_reactive != Some(id) {
-            view.compose(&mut self.scene, &mut self.hits)?;
+            let nodes = self.control_motion_nodes(id);
+            if nodes.is_empty() {
+                view.compose(&mut self.scene, &mut self.hits)?;
+            } else {
+                view.compose_components(&mut self.scene, &mut self.hits, id, &nodes)?;
+            }
+            self.restore_control_motion(id)?;
+            self.stage_control_hits(id)?;
             self.painted_reactive = Some(id);
         }
         self.render_scene()
@@ -5597,8 +6103,18 @@ impl Desktop {
     }
     fn render_scene(&mut self) -> Result<(), String> {
         let mut presented = false;
+        if self.renderer.is_some() {
+            let extent = self.window.as_ref().map_or([0, 0], |window| {
+                let size = window.inner_size();
+                [size.width, size.height]
+            });
+            let now = self.ui_motion.origin.elapsed();
+            self.tick_control_motion(now, extent)?;
+        }
         if let Some(renderer) = &mut self.renderer {
+            let before = renderer.presentation_count();
             renderer.render(&self.scene)?;
+            presented = renderer.presentation_count() != before;
             if renderer.needs_surface_recreation() {
                 let instance = self.instance.as_ref().ok_or("missing GPU instance")?;
                 let window = self
@@ -5610,9 +6126,13 @@ impl Desktop {
                     .map_err(|error| error.to_string())?;
                 renderer.replace_surface(surface)?;
             }
-            presented = !renderer.needs_redraw();
         }
         if presented {
+            let extent = self.window.as_ref().map_or([0, 0], |window| {
+                let size = window.inner_size();
+                [size.width, size.height]
+            });
+            self.publish_control_pose(extent)?;
             self.publish_ime_cursor_area();
         } else {
             self.ime.cursor_area = None;
@@ -5772,7 +6292,10 @@ impl Desktop {
             .sync_presentations(snapshot.images.as_ref(), &states[..count], renderer)
     }
 }
-impl ApplicationHandler for Desktop {
+impl ApplicationHandler<DesktopUiCommand> for Desktop {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: DesktopUiCommand) {
+        self.handle_ui_command(event);
+    }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.closing() {
             return;
@@ -5820,6 +6343,10 @@ impl ApplicationHandler for Desktop {
         }
     }
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        if !self.ui_motion.disposed {
+            let _ = self.ui_motion.suspend(self.ui_motion.time);
+        }
+        self.painted_reactive = None;
         self.retire_renderer_startup();
         self.catalog_wheel.reset();
         self.navigator.suspend();
@@ -5862,10 +6389,18 @@ impl ApplicationHandler for Desktop {
                 self.catalog_wheel.reset();
                 self.occluded = occluded;
                 if occluded {
+                    if !self.ui_motion.disposed {
+                        let _ = self.ui_motion.suspend(self.ui_motion.time);
+                    }
                     self.gesture.cancel();
                 }
             }
             WindowEvent::Resized(size) => {
+                if size.width == 0 || size.height == 0 {
+                    if !self.ui_motion.disposed {
+                        let _ = self.ui_motion.suspend(self.ui_motion.time);
+                    }
+                }
                 self.catalog_wheel.reset();
                 self.painted_reactive = None;
                 self.gesture.cancel();
@@ -6533,6 +7068,454 @@ fn draw_game_with_background(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use beatkernel_bms_runtime::ui::motion::Easing;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires BEATKERNEL_TEST_NATIVE_UI_WINDOW=1 and an actual X11 display/GPU surface"]
+    #[allow(deprecated)]
+    fn native_x11_window_presents_explicit_control_motion_with_stable_geometry() {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        assert_eq!(
+            std::env::var("BEATKERNEL_TEST_NATIVE_UI_WINDOW").as_deref(),
+            Ok("1")
+        );
+        let event_loop = EventLoop::<DesktopUiCommand>::with_user_event()
+            .with_x11()
+            .with_any_thread(true)
+            .build()
+            .unwrap();
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("BeatKernel actual native component motion fixture")
+                        .with_inner_size(LogicalSize::new(960.0, 720.0)),
+                )
+                .unwrap(),
+        );
+        let mut app = lifecycle_fixture();
+        let instance = graphics::instance(app.active_backend).unwrap();
+        let surface = instance.create_surface(window.clone()).unwrap();
+        let mut renderer =
+            pollster::block_on(Renderer::new(surface, &instance, app.options.presentation))
+                .unwrap();
+        let size = window.inner_size();
+        renderer.resize(size.width, size.height).unwrap();
+        let description = renderer.description();
+        app.window = Some(window.clone());
+        app.renderer = Some(renderer);
+        app.instance = Some(instance);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.renderer.as_ref().unwrap().presentation_count() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "initial native frame was not presented"
+            );
+            app.draw().unwrap();
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        let extent = [size.width, size.height];
+        let physical = |x: f64, y: f64| {
+            (
+                x * f64::from(size.width) / 960.0,
+                y * f64::from(size.height) / 720.0,
+            )
+        };
+        assert_eq!(
+            app.hit_motion(physical(920.0, 35.0), extent),
+            Some(ControlId(5))
+        );
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        app.handle_ui_command(DesktopUiCommand::InspectScreen { reply });
+        let screen = received.recv().unwrap().unwrap();
+        let destination = UiTransform::new([-200.0, 0.0], [1.0, 1.0], 1.0).unwrap();
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        app.handle_ui_command(DesktopUiCommand::RequestMotion {
+            screen,
+            control: ControlId(5),
+            motion: ComponentMotion::new(
+                UiTransform::default(),
+                destination,
+                Duration::from_millis(400),
+                Easing::Linear,
+            ),
+            reply,
+        });
+        received.recv().unwrap().unwrap();
+        let key = UiComponentKey {
+            screen,
+            node: app.control_node(ControlId(5)).unwrap(),
+        };
+        let geometry_identity = Arc::clone(app.scene.geometry_stamp().0);
+        let geometry_epoch = app.scene.geometry_stamp().1;
+        let first_frame = app.renderer.as_ref().unwrap().presentation_count();
+        let mut presented_samples = 0;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "native component motion did not complete"
+            );
+            let before = app.renderer.as_ref().unwrap().presentation_count();
+            app.draw().unwrap();
+            let after = app.renderer.as_ref().unwrap().presentation_count();
+            if after > before {
+                presented_samples += 1;
+                assert_eq!(app.ui_motion.presented_screen, Some(screen));
+            }
+            assert!(Arc::ptr_eq(
+                &geometry_identity,
+                app.scene.geometry_stamp().0
+            ));
+            assert_eq!(app.scene.geometry_stamp().1, geometry_epoch);
+            if !app.control_motion_active() && after > before {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        let last_frame = app.renderer.as_ref().unwrap().presentation_count();
+        assert!(
+            presented_samples >= 2,
+            "requires multiple real successful surface presentations"
+        );
+        assert!(last_frame >= first_frame + 2);
+        assert_eq!(
+            app.scene
+                .component_transform(app.scene.component_id(key).unwrap()),
+            Some(destination)
+        );
+        assert_eq!(
+            app.hit_motion(physical(560.0, 35.0), extent),
+            Some(ControlId(5))
+        );
+        assert_eq!(app.hit_motion(physical(920.0, 35.0), extent), None);
+        eprintln!("actual native UI motion: {description}; extent={extent:?}; presented_frames={presented_samples}; counters={first_frame}..{last_frame}; final_offset={:?}; stable_geometry_epoch={geometry_epoch}", destination.offset());
+        if let Ok(hold) = std::env::var("BEATKERNEL_TEST_NATIVE_UI_HOLD_MS") {
+            let millis = hold.parse::<u64>().unwrap().min(5000);
+            std::thread::sleep(Duration::from_millis(millis));
+        }
+        app.request_close();
+        assert!(app.ui_motion.disposed);
+        assert!(app.ui_motion.owners.is_empty());
+        assert!(app.scene.component_id(key).is_none());
+        drop(app);
+        drop(window);
+        drop(event_loop);
+    }
+
+    fn native_control_motion(offset: f32) -> ComponentMotion {
+        ComponentMotion::new(
+            UiTransform::default(),
+            UiTransform::new([offset, 0.0], [1.0, 1.0], 1.0).unwrap(),
+            Duration::from_nanos(100),
+            Easing::Linear,
+        )
+    }
+
+    #[test]
+    fn native_selection_motion_input_keeps_last_accepted_pose_until_publication() {
+        let mut app = lifecycle_fixture();
+        app.draw().unwrap();
+        let screen = app.navigator.active_id().unwrap();
+        let node = app.control_node(ControlId(5)).unwrap();
+        app.publish_control_pose([960, 720]).unwrap();
+        assert_eq!(
+            app.hit_motion((920.0, 35.0), [960, 720]),
+            Some(ControlId(5))
+        );
+        app.request_control_motion(
+            screen,
+            ControlId(5),
+            native_control_motion(-200.0),
+            Duration::ZERO,
+        )
+        .unwrap();
+        let key = UiComponentKey { screen, node };
+        let id = app.scene.component_id(key).unwrap();
+        let geometry_identity = Arc::clone(app.scene.geometry_stamp().0);
+        let geometry_epoch = app.scene.geometry_stamp().1;
+        assert!(app.control_motion_active());
+        app.tick_control_motion(Duration::from_nanos(25), [960, 720])
+            .unwrap();
+        app.publish_control_pose([960, 720]).unwrap();
+        assert_eq!(
+            app.scene.component_transform(id).unwrap().offset(),
+            [-50.0, 0.0]
+        );
+        assert_eq!(
+            app.hit_motion((710.0, 35.0), [960, 720]),
+            Some(ControlId(5))
+        );
+        app.tick_control_motion(Duration::from_nanos(50), [960, 720])
+            .unwrap();
+        assert_eq!(
+            app.scene.component_transform(id).unwrap().offset(),
+            [-100.0, 0.0]
+        );
+        assert!(!app.selection_view.as_ref().unwrap().dirty());
+        assert!(Arc::ptr_eq(
+            &geometry_identity,
+            app.scene.geometry_stamp().0
+        ));
+        assert_eq!(app.scene.geometry_stamp().1, geometry_epoch);
+        // Rendererless fixtures explicitly exercise the actual publication
+        // hook; they do not claim GPU pixels or successful surface rendering.
+        assert_eq!(app.hit_motion((660.0, 35.0), [960, 720]), None);
+        assert_eq!(
+            app.hit_motion((870.0, 35.0), [960, 720]),
+            Some(ControlId(5))
+        );
+        assert!(app.publish_control_pose([0, 720]).is_err());
+        assert_eq!(app.hit_motion((660.0, 35.0), [960, 720]), None);
+        app.publish_control_pose([960, 720]).unwrap();
+        assert_eq!(
+            app.hit_motion((660.0, 35.0), [960, 720]),
+            Some(ControlId(5))
+        );
+        assert_eq!(app.hit_motion((870.0, 35.0), [960, 720]), None);
+        app.tick_control_motion(Duration::from_nanos(100), [960, 720])
+            .unwrap();
+        assert!(!app.control_motion_active());
+        assert_eq!(
+            app.scene.component_transform(id).unwrap().offset(),
+            [-200.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn native_motion_request_owner_control_and_time_refusals_preserve_admitted_pose() {
+        let mut app = lifecycle_fixture();
+        app.draw().unwrap();
+        let screen = app.navigator.active_id().unwrap();
+        let key = UiComponentKey {
+            screen,
+            node: app.control_node(ControlId(5)).unwrap(),
+        };
+        app.request_control_motion(
+            screen,
+            ControlId(5),
+            native_control_motion(-200.0),
+            Duration::ZERO,
+        )
+        .unwrap();
+        app.tick_control_motion(Duration::from_nanos(25), [960, 720])
+            .unwrap();
+        app.publish_control_pose([960, 720]).unwrap();
+        let id = app.scene.component_id(key).unwrap();
+        let pose = app.scene.component_transform(id);
+        let geometry_identity = Arc::clone(app.scene.geometry_stamp().0);
+        let geometry_epoch = app.scene.geometry_stamp().1;
+        let hits: Vec<_> = app
+            .hits
+            .iter()
+            .map(|(id, b)| (*id, [b.x, b.y, b.width, b.height]))
+            .collect();
+        for (owner, control, time) in [
+            (ScreenInstanceId(u64::MAX), ControlId(5), 25),
+            (screen, ControlId(u64::MAX), 25),
+            (screen, ControlId(5), 24),
+        ] {
+            assert!(app
+                .request_control_motion(
+                    owner,
+                    control,
+                    native_control_motion(80.0),
+                    Duration::from_nanos(time)
+                )
+                .is_err());
+        }
+        assert!(app
+            .tick_control_motion(Duration::from_nanos(24), [960, 720])
+            .is_err());
+        assert_eq!(app.ui_motion.time, Duration::from_nanos(25));
+        assert_eq!(app.scene.component_transform(id), pose);
+        assert!(Arc::ptr_eq(
+            &geometry_identity,
+            app.scene.geometry_stamp().0
+        ));
+        assert_eq!(app.scene.geometry_stamp().1, geometry_epoch);
+        assert_eq!(
+            app.hits
+                .iter()
+                .map(|(id, b)| (*id, [b.x, b.y, b.width, b.height]))
+                .collect::<Vec<_>>(),
+            hits
+        );
+        assert_eq!(
+            app.hit_motion((710.0, 35.0), [960, 720]),
+            Some(ControlId(5))
+        );
+        assert_eq!(app.ui_motion.owners[0].scheduler.active_count(), 1);
+        app.tick_control_motion(Duration::from_nanos(50), [960, 720])
+            .unwrap();
+        assert_eq!(
+            app.scene.component_transform(id).unwrap().offset(),
+            [-100.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn native_retained_parent_resumes_after_back_and_zero_extent_without_losing_elapsed_time() {
+        let mut app = lifecycle_fixture();
+        app.draw().unwrap();
+        let screen = app.navigator.active_id().unwrap();
+        let key = UiComponentKey {
+            screen,
+            node: app.control_node(ControlId(5)).unwrap(),
+        };
+        app.request_control_motion(
+            screen,
+            ControlId(5),
+            native_control_motion(-200.0),
+            Duration::ZERO,
+        )
+        .unwrap();
+        app.tick_control_motion(Duration::from_nanos(25), [960, 720])
+            .unwrap();
+        let original = app.scene.component_id(key).unwrap();
+        let quarter = app.scene.component_transform(original);
+        app.open_settings();
+        app.draw().unwrap();
+        assert!(app.scene.component_id(key).is_none());
+        assert!(!app.control_motion_active());
+        app.tick_control_motion(Duration::from_nanos(1000), [960, 720])
+            .unwrap();
+        app.back();
+        app.draw().unwrap();
+        let rebound = app.scene.component_id(key).unwrap();
+        assert_ne!(rebound, original);
+        app.tick_control_motion(Duration::from_nanos(1000), [960, 720])
+            .unwrap();
+        assert_eq!(app.scene.component_transform(rebound), quarter);
+        app.tick_control_motion(Duration::from_nanos(1025), [960, 720])
+            .unwrap();
+        assert_eq!(
+            app.scene.component_transform(rebound).unwrap().offset(),
+            [-100.0, 0.0]
+        );
+        assert!(!app
+            .tick_control_motion(Duration::from_nanos(1025), [0, 720])
+            .unwrap());
+        assert!(!app
+            .tick_control_motion(Duration::from_nanos(5000), [0, 0])
+            .unwrap());
+        assert!(!app.control_motion_active());
+        app.tick_control_motion(Duration::from_nanos(5000), [960, 720])
+            .unwrap();
+        assert_eq!(
+            app.scene.component_transform(rebound).unwrap().offset(),
+            [-100.0, 0.0]
+        );
+        app.tick_control_motion(Duration::from_nanos(5025), [960, 720])
+            .unwrap();
+        assert_eq!(
+            app.scene.component_transform(rebound).unwrap().offset(),
+            [-150.0, 0.0]
+        );
+        app.request_close();
+        assert!(app.ui_motion.disposed);
+        assert!(!app.control_motion_active());
+        assert!(app.ui_motion.owners.is_empty());
+        assert!(app.scene.component_id(key).is_none());
+        assert!(app
+            .tick_control_motion(Duration::from_nanos(5050), [960, 720])
+            .is_err());
+    }
+
+    #[test]
+    fn native_display_motion_respects_fixed_parent_clip_and_removed_child_disposal() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        app.open_display();
+        app.draw().unwrap();
+        let screen = app.navigator.active_id().unwrap();
+        let key = UiComponentKey {
+            screen,
+            node: app.control_node(ControlId(41)).unwrap(),
+        };
+        app.request_control_motion(
+            screen,
+            ControlId(41),
+            native_control_motion(100.0),
+            Duration::ZERO,
+        )
+        .unwrap();
+        app.tick_control_motion(Duration::from_nanos(25), [960, 720])
+            .unwrap();
+        app.publish_control_pose([960, 720]).unwrap();
+        assert_eq!(
+            app.scene
+                .component_transform(app.scene.component_id(key).unwrap())
+                .unwrap()
+                .offset(),
+            [25.0, 0.0]
+        );
+        assert_eq!(
+            app.hit_motion((350.0, 635.0), [960, 720]),
+            Some(ControlId(41))
+        );
+        assert_eq!(app.hit_motion((395.0, 635.0), [960, 720]), None);
+        app.back();
+        app.draw().unwrap();
+        assert!(app.scene.component_id(key).is_none());
+        assert!(app
+            .ui_motion
+            .owners
+            .iter()
+            .all(|owner| owner.screen != screen));
+        assert!(app
+            .request_control_motion(
+                screen,
+                ControlId(41),
+                native_control_motion(100.0),
+                Duration::from_nanos(25)
+            )
+            .is_err());
+        app.open_display();
+        app.draw().unwrap();
+        assert_ne!(app.navigator.active_id(), Some(screen));
+        assert!(!app.control_motion_active());
+        app.request_close();
+        assert!(app.display_view.is_none());
+    }
+
+    #[test]
+    fn native_typed_ui_command_inspects_actual_owner_and_acknowledges_requested_motion() {
+        let mut app = lifecycle_fixture();
+        app.draw().unwrap();
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        app.handle_ui_command(DesktopUiCommand::InspectScreen { reply });
+        let screen = received.recv().unwrap().unwrap();
+        assert_eq!(Some(screen), app.navigator.active_id());
+        let destination = UiTransform::new([-40.0, 0.0], [1.0, 1.0], 1.0).unwrap();
+        let motion = ComponentMotion::new(
+            UiTransform::default(),
+            destination,
+            Duration::ZERO,
+            Easing::Linear,
+        );
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        app.handle_ui_command(DesktopUiCommand::RequestMotion {
+            screen,
+            control: ControlId(5),
+            motion,
+            reply,
+        });
+        received.recv().unwrap().unwrap();
+        let key = UiComponentKey {
+            screen,
+            node: app.control_node(ControlId(5)).unwrap(),
+        };
+        assert_eq!(
+            app.scene
+                .component_transform(app.scene.component_id(key).unwrap()),
+            Some(destination)
+        );
+        app.open_settings();
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        app.handle_ui_command(DesktopUiCommand::InspectScreen { reply });
+        assert_eq!(received.recv().unwrap(), None);
+    }
     #[test]
     fn desktop_game_composes_background_and_rejects_invalid_sprite_frame() {
         use beatkernel::time::Timestamp;
@@ -6632,13 +7615,11 @@ mod tests {
         for member in &mut snapshot.players {
             member.song_time = Some(Timestamp::from_nanos(500_000_000));
         }
-        assert!(
-            background_presentations(&snapshot, 0)
-                .unwrap()
-                .0
-                .iter()
-                .all(|p| p.poor_overlay.is_none())
-        );
+        assert!(background_presentations(&snapshot, 0)
+            .unwrap()
+            .0
+            .iter()
+            .all(|p| p.poor_overlay.is_none()));
         snapshot.players.clear();
         snapshot.chart = overlay.chart;
         snapshot.song_time = overlay.song_time;
@@ -6894,12 +7875,11 @@ mod tests {
         app.edit_search(None, Some("가"));
         assert_eq!(app.search_editor.value(), "A가");
         assert!(Arc::ptr_eq(&before, app.title_font.as_ref().unwrap()));
-        assert!(
-            app.input_font_error
-                .as_ref()
-                .unwrap()
-                .contains("USING BITMAP")
-        );
+        assert!(app
+            .input_font_error
+            .as_ref()
+            .unwrap()
+            .contains("USING BITMAP"));
         assert!(app.input_font.is_none());
         app.draw_selection().unwrap();
         select_all_input(&mut app);
@@ -7251,6 +8231,7 @@ mod tests {
             selection_diagnostics: Arc::from([]),
             selection_view: None,
             painted_reactive: None,
+            ui_motion: NativeUiMotionState::default(),
             window: None,
             renderer: None,
             renderer_startup: None,
@@ -7327,11 +8308,10 @@ mod tests {
             app.draw_settings_view().unwrap();
             assert!(app.ime.preview.is_none());
             let profile = &app.settings.as_ref().unwrap().profile;
-            assert!(
-                app.ime_editor(ImeField::Profile, profile)
-                    .composition()
-                    .is_none()
-            );
+            assert!(app
+                .ime_editor(ImeField::Profile, profile)
+                .composition()
+                .is_none());
             assert_eq!(profile.value(), "");
             assert_eq!(app.settings.as_ref().unwrap().values.native_args(), args);
             app.ime_event(Ime::Enabled);
@@ -7590,13 +8570,11 @@ mod tests {
                 1.0
             );
         }
-        assert!(
-            catalog_scroll_lines(
-                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 1.0)),
-                (0, 0)
-            )
-            .is_nan()
-        );
+        assert!(catalog_scroll_lines(
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 1.0)),
+            (0, 0)
+        )
+        .is_nan());
     }
     #[test]
     fn filtered_selection_preserves_catalog_identity_and_empty_results_cannot_play_or_open_records()
@@ -7659,12 +8637,11 @@ mod tests {
         app.set_search_focus(true);
         app.activate(ControlId(1));
         assert!(!app.search_focused);
-        assert!(
-            app.failure
-                .as_deref()
-                .unwrap()
-                .contains("START BUTTON REACHED PREFLIGHT")
-        );
+        assert!(app
+            .failure
+            .as_deref()
+            .unwrap()
+            .contains("START BUTTON REACHED PREFLIGHT"));
         assert!(app.game.is_none());
     }
 
@@ -7878,13 +8855,11 @@ mod tests {
         let settings = app.settings.as_ref().unwrap();
         assert_eq!(settings.values.fields()[index].value, "604800000000001");
         assert_eq!(settings.editor.value(), "604800000000001");
-        assert!(
-            settings
-                .message
-                .as_deref()
-                .unwrap()
-                .contains("APPLY IS SEPARATE")
-        );
+        assert!(settings
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("APPLY IS SEPARATE"));
         assert_eq!(
             settings
                 .values
@@ -8148,24 +9123,20 @@ mod tests {
         let permit = scope.task_permit();
         drop(scope);
         let called = Cell::new(false);
-        assert!(
-            scoped_metadata(permit, || {
-                called.set(true);
-                Ok(ProfileResult::Saved)
-            })
-            .is_err()
-        );
+        assert!(scoped_metadata(permit, || {
+            called.set(true);
+            Ok(ProfileResult::Saved)
+        })
+        .is_err());
         assert!(!called.get());
         let scope = PanelScope::new(ScreenInstanceId(100), ());
         let permit = scope.task_permit();
-        assert!(
-            scoped_metadata(permit, || {
-                called.set(true);
-                drop(scope); // Cancellation after work starts suppresses its result.
-                Ok(ProfileResult::Saved)
-            })
-            .is_err()
-        );
+        assert!(scoped_metadata(permit, || {
+            called.set(true);
+            drop(scope); // Cancellation after work starts suppresses its result.
+            Ok(ProfileResult::Saved)
+        })
+        .is_err());
         assert!(called.get());
 
         let mut app = lifecycle_fixture();
@@ -8174,10 +9145,9 @@ mod tests {
             .unwrap();
         app.commit_route(next);
         app.game = Some(retry_fixture()); // No thread/device in this fixture.
-        assert!(
-            app.prepare_route(ScreenRoute::Results { replay: false })
-                .is_err()
-        );
+        assert!(app
+            .prepare_route(ScreenRoute::Results { replay: false })
+            .is_err());
         assert!(app.prepare_route(ScreenRoute::Selection).is_err());
         app.navigator.suspend();
         app.game.as_mut().unwrap().owner_finished(true);
@@ -8257,13 +9227,12 @@ mod tests {
         game.replay = true;
         game.launch = launch;
         game.prepared_retry = Some(retry);
-        assert!(
-            game.owner_finished(true)
-                .unwrap()
-                .args()
-                .chunks_exact(2)
-                .any(|p| p == ["--replay", "old.bkr"])
-        );
+        assert!(game
+            .owner_finished(true)
+            .unwrap()
+            .args()
+            .chunks_exact(2)
+            .any(|p| p == ["--replay", "old.bkr"]));
         assert!(game.replay);
     }
     fn retry_fixture() -> Game {
@@ -8444,19 +9413,15 @@ mod tests {
         assert!(next.loop_due());
         let launch = next.launch.retry_loop(next.practice_loop.unwrap()).unwrap();
         assert_eq!(launch.attempt(), 2);
-        assert!(
-            launch
-                .args()
-                .chunks_exact(2)
-                .any(|p| p == ["--record-replay", "run.retry2.bkr"])
-        );
+        assert!(launch
+            .args()
+            .chunks_exact(2)
+            .any(|p| p == ["--record-replay", "run.retry2.bkr"]));
         let pinned = launch.retry().unwrap();
-        assert!(
-            !pinned
-                .args()
-                .iter()
-                .any(|arg| arg == "--start-ns" || arg == "--end-ns")
-        );
+        assert!(!pinned
+            .args()
+            .iter()
+            .any(|arg| arg == "--start-ns" || arg == "--end-ns"));
     }
     #[test]
     fn rejected_loop_toggle_during_pause_transition_never_cancels_or_prepares_retry() {
@@ -8499,15 +9464,13 @@ mod tests {
         app.request_retry();
         let game = app.game.as_ref().unwrap();
         assert!(!game.loop_enabled);
-        assert!(
-            !game
-                .prepared_retry
-                .as_ref()
-                .unwrap()
-                .args()
-                .iter()
-                .any(|a| a == "--start-ns")
-        );
+        assert!(!game
+            .prepared_retry
+            .as_ref()
+            .unwrap()
+            .args()
+            .iter()
+            .any(|a| a == "--start-ns"));
         app.cancel();
         assert!(app.game.as_ref().unwrap().prepared_retry.is_none());
         let mut game = loop_fixture();
@@ -8764,10 +9727,9 @@ mod tests {
         assert!(hits.iter().any(|(id, _)| *id == ControlId(52)));
         assert!(hits.iter().any(|(id, _)| *id == ControlId(53)));
         assert!(hits.iter().any(|(id, _)| *id == ControlId(59)));
-        assert!(
-            hits.iter()
-                .all(|(id, _)| matches!(id.0,50..=59|50000..=50255))
-        );
+        assert!(hits
+            .iter()
+            .all(|(id, _)| matches!(id.0,50..=59|50000..=50255)));
         scene.clear();
         hits.clear();
         draw_records(
@@ -8782,8 +9744,8 @@ mod tests {
         assert!(hits.is_empty());
     }
     #[test]
-    fn selective_record_removal_refreshes_parent_editor_and_preserves_duplicates_and_accepted_state()
-     {
+    fn selective_record_removal_refreshes_parent_editor_and_preserves_duplicates_and_accepted_state(
+    ) {
         let mut app = lifecycle_fixture();
         app.open_settings();
         app.open_records();
@@ -8898,10 +9860,9 @@ mod tests {
         );
         assert_eq!(hits.len(), 6);
         assert!(hits.iter().any(|(id, _)| *id == ControlId(40)));
-        assert!(
-            hits.iter()
-                .all(|(id, _)| matches!(id.0, 40 | 41 | 40000..=40003))
-        );
+        assert!(hits
+            .iter()
+            .all(|(id, _)| matches!(id.0, 40 | 41 | 40000..=40003)));
         hits.clear();
         scene.clear();
         draw_display(
@@ -8938,17 +9899,15 @@ mod tests {
         assert_eq!(merged.fps, 60);
         assert_eq!(merged.lookahead_ms, 3500);
         assert_eq!(merged.presentation, Presentation::Mailbox);
-        assert!(
-            Options::parse(&[
-                "--chart".into(),
-                "song.bms".into(),
-                "--ui-fps".into(),
-                "120".into(),
-                "--ui-fps".into(),
-                "60".into()
-            ])
-            .is_err()
-        );
+        assert!(Options::parse(&[
+            "--chart".into(),
+            "song.bms".into(),
+            "--ui-fps".into(),
+            "120".into(),
+            "--ui-fps".into(),
+            "60".into()
+        ])
+        .is_err());
     }
     #[test]
     fn comparison_toggle_is_available_only_for_groups_with_retained_comparisons() {
@@ -9206,24 +10165,20 @@ mod tests {
                 Options::parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err()
             );
         }
-        assert!(
-            Options::parse(&[
-                "--library".into(),
-                "charts".into(),
-                "--chart".into(),
-                "song.bms".into()
-            ])
-            .is_err()
-        );
+        assert!(Options::parse(&[
+            "--library".into(),
+            "charts".into(),
+            "--chart".into(),
+            "song.bms".into()
+        ])
+        .is_err());
     }
     #[test]
     fn native_title_keeps_unicode_but_removes_control_characters_and_bounds_size() {
         assert!(window_title("곡\0제목", "아티스트").contains("곡제목"));
-        assert!(
-            !window_title("bad\nname", "\0")
-                .chars()
-                .any(char::is_control)
-        );
+        assert!(!window_title("bad\nname", "\0")
+            .chars()
+            .any(char::is_control));
         assert_eq!(window_title(&"A".repeat(1024), "").chars().count(), 256);
     }
     mod live_output {

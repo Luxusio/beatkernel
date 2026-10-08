@@ -24,9 +24,12 @@ pub struct EndBoundary {
 
 /// One fresh finite session. Host interpolation has Unknown physical accuracy.
 /// An actual lower clock bracket must be observed before presentation crosses.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeEnd {
     origin: ClockPoint,
+    target_basis: Option<(u64, beatkernel::audio::TargetFrameBasis)>,
+    target_endpoint: Option<beatkernel::audio::TargetBoundary>,
+    target_generation_floor: Option<beatkernel::audio::TargetTime>,
     host: ClockDomainId,
     rate: u32,
     end: u64,
@@ -53,6 +56,9 @@ impl NativeEnd {
         }
         let result = Self {
             origin,
+            target_basis: None,
+            target_endpoint: None,
+            target_generation_floor: None,
             host,
             rate,
             end,
@@ -68,12 +74,297 @@ impl NativeEnd {
         result.point(end)?;
         Ok(result)
     }
-    /// Preserve an original startup observation without discarding early completion.
-    pub fn prime(
+    /// Binds a cold finite source session to an exact native target-duration basis.
+    pub fn with_target_basis(
+        mut self,
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
+    ) -> Result<Self, EndError> {
+        if self.target_basis.is_some()
+            || self.last_pair.is_some()
+            || self.last_report.is_some()
+            || basis.origin() != self.origin
+        {
+            return Err(EndError(
+                "target end requires a cold session with its immutable origin",
+            ));
+        }
+        self.target_basis = Some((epoch, basis));
+        Ok(self)
+    }
+    /// Keeps source endpoint evidence separate from generated target and actual native crossing.
+    pub fn observe_target(
         &mut self,
-        report: Option<RenderReport>,
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
+        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        source: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> Result<Option<EndBoundary>, EndError> {
+        let mut next = self.clone();
+        if next.target_basis != Some((epoch, basis))
+            || facts.origin != Some(next.origin)
+            || facts.source_rate != next.rate
+        {
+            return Err(EndError(
+                "target end creation epoch, basis or original source identity differs",
+            ));
+        }
+        if pair.source.timestamp
+            < basis
+                .point_at_stream_frame(0)
+                .map_err(|_| EndError("target creation time overflow"))?
+                .timestamp
+        {
+            return Err(EndError("target end pair precedes native stream creation"));
+        }
+        next.check_pair(pair)?;
+        if let Some(source) = source.filter(|source| source.frames != 0) {
+            next.physical = next.check_report(source)?;
+            next.last_report = Some(source);
+        }
+        if let Some(mapped) = facts.end {
+            if next.physical != Some(mapped.source_frame)
+                || next.target_endpoint.is_some_and(|old| old != mapped)
+            {
+                return Err(EndError(
+                    "mapped target endpoint differs from actual immutable source endpoint",
+                ));
+            }
+            next.target_endpoint = Some(mapped);
+        }
+        next.lower.get_or_insert(pair);
+        if let Some(boundary) = next.deferred_boundary.take() {
+            next.last_pair = Some(pair);
+            *self = next;
+            return Ok(Some(boundary));
+        }
+        let boundary = if let Some(mapped) = next.target_endpoint {
+            let output = mapped
+                .target_time
+                .point(next.origin)
+                .map_err(|_| EndError("target endpoint overflow"))?;
+            if next.emitted {
+                None
+            } else if pair.source.timestamp < output.timestamp {
+                next.lower = Some(pair);
+                None
+            } else {
+                let lower = next
+                    .lower
+                    .ok_or(EndError("target end lacks original native lower bracket"))?;
+                if lower.source.timestamp > output.timestamp {
+                    return Err(EndError("target end precedes actual native lower bracket"));
+                }
+                let host = if pair.source == output {
+                    pair.target
+                } else {
+                    crate::native_start::presented_output(output, lower, pair).map_err(|_| {
+                        EndError("target end requires progressing original native brackets")
+                    })?
+                };
+                next.emitted = true;
+                Some(EndBoundary {
+                    host,
+                    output,
+                    physical_frame: mapped.source_frame,
+                    playback_frame: next.end,
+                })
+            }
+        } else {
+            None
+        };
+        next.last_pair = Some(pair);
+        *self = next;
+        Ok(boundary)
+    }
+    /// Prepares a new finite target relation before the software owner enters its worker.
+    /// This authorizes no native association or endpoint acknowledgement.
+    pub fn prepare_restart_for_target_output(
+        &self,
+        epoch: u64,
+        state: &beatkernel_platform::audio::ConvertedNativeOutputState,
+        basis: beatkernel::audio::TargetFrameBasis,
+    ) -> Result<Self, EndError> {
+        let (old_epoch, _) = self
+            .target_basis
+            .ok_or(EndError("finite target restart requires target session"))?;
+        let actual = state.target_frame_basis();
+        let mixer = state.mixer();
+        if epoch <= old_epoch
+            || self.emitted
+            || self.deferred_boundary.is_some()
+            || basis.origin() != actual.origin()
+            || basis.start_time() != actual.start_time()
+            || basis.origin() != self.origin
+            || mixer.config().format().sample_rate() != self.rate
+            || mixer.config().playback_end_frame() != Some(self.end)
+            || !mixer.is_paused()
+            || (mixer.playback_frame_cursor() >= self.end && state.pending_frames() == 0)
+            || (state.pending_frames() != 0
+                && (basis != actual
+                    || (mixer.playback_frame_cursor() < self.end && !state.pending_is_held())))
+        {
+            return Err(EndError(
+                "finite target restart changed immutable source or retained interpretation",
+            ));
+        }
+        match mixer.start_gate_frame() {
+            None if self.start_frame == 0 => {}
+            Some(Some(frame))
+                if frame == self.start_frame
+                    && (mixer.applied_start_frame() == Some(frame) || self.end == 0) => {}
+            _ => {
+                return Err(EndError(
+                    "finite target restart changed actual startup identity",
+                ))
+            }
+        }
+        let first = basis
+            .point_at_stream_frame(0)
+            .map_err(|_| EndError("target restart time overflow"))?;
+        if self
+            .last_pair
+            .is_some_and(|pair| first.timestamp < pair.source.timestamp)
+        {
+            return Err(EndError(
+                "target restart regressed original native progress",
+            ));
+        }
+        if let Some(end) = self.target_endpoint.or(state.boundaries().end) {
+            if end
+                .target_time
+                .point(self.origin)
+                .map_err(|_| EndError("target end time overflow"))?
+                .timestamp
+                < first.timestamp
+            {
+                return Err(EndError("target restart begins after finite endpoint"));
+            }
+        }
+        let mut next = self.restart_relation();
+        next.target_basis = Some((epoch, basis));
+        next.target_generation_floor = Some(state.converter_owner().target_time());
+        if let Some(source) = state.last_real_source_report() {
+            next.physical = next.check_report(source)?;
+            next.last_report = Some(source);
+        }
+        if let Some(end) = state.boundaries().end {
+            if next.physical != Some(end.source_frame)
+                || next.target_endpoint.is_some_and(|old| old != end)
+            {
+                return Err(EndError(
+                    "target restart changed actual mapped finite endpoint",
+                ));
+            }
+            next.target_endpoint = Some(end);
+        }
+        Ok(next)
+    }
+    /// Compatible convenience wrapper when a genuine new native pair is already available.
+    pub fn restart_for_target_output(
+        &self,
+        epoch: u64,
+        state: &beatkernel_platform::audio::ConvertedNativeOutputState,
+        pair: ClockPair,
+    ) -> Result<Self, EndError> {
+        let basis = state.target_frame_basis();
+        let mut next = self.prepare_restart_for_target_output(epoch, state, basis)?;
+        next.observe_target(
+            epoch,
+            basis,
+            state.boundaries(),
+            state.last_real_source_report(),
+            pair,
+        )?;
+        Ok(next)
+    }
+    /// Defers retained old held output before fresh replacement publication.
+    pub fn target_replacement_observation_ready(
+        &self,
+        report: Option<beatkernel::audio::ConvertedRenderReport>,
+        pair: ClockPair,
+    ) -> Result<bool, EndError> {
+        let (_, basis) = self
+            .target_basis
+            .ok_or(EndError("finite replacement lacks target basis"))?;
+        self.check_pair(pair)?;
+        let Some(report) = report else {
+            return Ok(false);
+        };
+        if report.target_frames == 0 {
+            return Ok(false);
+        }
+        if report.target_rate != basis.sample_rate()
+            || report.source_rate != self.rate
+            || report.state != beatkernel::audio::ConvertedOutputState::Held
+            || report.source.is_some()
+        {
+            return Err(EndError(
+                "finite replacement requires genuine target-held generation",
+            ));
+        }
+        let floor = self
+            .target_generation_floor
+            .ok_or(EndError("finite replacement lacks generation frontier"))?;
+        let later = |time: beatkernel::audio::TargetTime| {
+            time.seconds() > floor.seconds()
+                || (time.seconds() == floor.seconds()
+                    && u128::from(time.numerator()) * u128::from(floor.denominator())
+                        >= u128::from(floor.numerator()) * u128::from(time.denominator()))
+        };
+        if !later(report.target_start_time) {
+            return Ok(false);
+        }
+        let first = floor
+            .point(self.origin)
+            .map_err(|_| EndError("finite generation frontier overflow"))?;
+        Ok(pair.source.timestamp >= first.timestamp)
+    }
+    /// Preserve an original startup observation without discarding early completion.
+    pub fn prime_target_clock(
+        &mut self,
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
         pair: ClockPair,
     ) -> Result<(), EndError> {
+        if self.target_basis != Some((epoch, basis))
+            || self.emitted
+            || self.deferred_boundary.is_some()
+            || pair.source.timestamp
+                < basis
+                    .point_at_stream_frame(0)
+                    .map_err(|_| EndError("target creation time overflow"))?
+                    .timestamp
+        {
+            return Err(EndError(
+                "invalid or completed target startup clock relation",
+            ));
+        }
+        self.check_pair(pair)?;
+        self.lower.get_or_insert(pair);
+        self.last_pair = Some(pair);
+        Ok(())
+    }
+    /// Preserve an original startup observation without discarding early completion.
+    pub fn prime_target(
+        &mut self,
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
+        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        source: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> Result<(), EndError> {
+        if self.emitted || self.deferred_boundary.is_some() {
+            return Err(EndError("finite startup boundary is already committed"));
+        }
+        let mut next = self.clone();
+        next.deferred_boundary = next.observe_target(epoch, basis, facts, source, pair)?;
+        *self = next;
+        Ok(())
+    }
+    /// Preserve an original startup observation without discarding early completion.
+    pub fn prime(&mut self, report: Option<RenderReport>, pair: ClockPair) -> Result<(), EndError> {
         if self.emitted || self.deferred_boundary.is_some() {
             return Err(EndError("finite startup boundary is already committed"));
         }
@@ -446,8 +737,8 @@ impl NativeEnd {
 mod fixtures {
     use super::*;
     use beatkernel::audio::{
-        AudioCommand, AudioCounters, AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits,
-        PcmSample, SampleBank, SampleId, VoiceId, command_queue,
+        command_queue, AudioCommand, AudioCounters, AudioFormat, AudioLimits, Mixer, MixerConfig,
+        PcmLimits, PcmSample, SampleBank, SampleId, VoiceId,
     };
     fn output(ns: i64) -> ClockPoint {
         ClockPoint {
@@ -570,13 +861,11 @@ mod fixtures {
     #[test]
     fn startup_end_setup_shape_and_regression_rejections_are_atomic() {
         let fresh = || NativeEnd::new(output(0), ClockDomainId(1), 1000, 3).unwrap();
-        assert!(
-            fresh()
-                .with_start_frame(0)
-                .unwrap()
-                .with_start_frame(0)
-                .is_err()
-        );
+        assert!(fresh()
+            .with_start_frame(0)
+            .unwrap()
+            .with_start_frame(0)
+            .is_err());
         assert!(fresh().with_start_frame(u64::MAX).is_err());
         let mut observed = fresh();
         observed.observe(None, pair(0)).unwrap();
@@ -605,7 +894,9 @@ mod fixtures {
         latency_frames: u32,
         error_ns: u64,
     ) -> beatkernel_platform::audio::asio::AsioPresentationObservation {
-        use beatkernel_platform::audio::asio::{AsioPresentationObservation, MultimediaHostInterval};
+        use beatkernel_platform::audio::asio::{
+            AsioPresentationObservation, MultimediaHostInterval,
+        };
         AsioPresentationObservation::from_render(
             render,
             1000,
@@ -738,17 +1029,15 @@ mod fixtures {
         assert_eq!(crossing.output, output(6_000_000));
         let mut generic = end.clone();
         let before = generic.clone();
-        assert!(
-            generic
-                .observe(
-                    Some(silent),
-                    ClockPair {
-                        source: crossing.output,
-                        target: crossing.host.after,
-                    }
-                )
-                .is_err()
-        );
+        assert!(generic
+            .observe(
+                Some(silent),
+                ClockPair {
+                    source: crossing.output,
+                    target: crossing.host.after,
+                }
+            )
+            .is_err());
         evidence_unchanged(&generic, &before);
         let boundary = end.observe_asio(crossing).unwrap().unwrap();
         assert_eq!(boundary.host, crossing.host.after);
@@ -857,11 +1146,10 @@ mod fixtures {
         let mut wrong = pair(5_000_000);
         wrong.source.domain = ClockDomainId(99);
         assert!(end.observe(Some(latest), wrong).is_err());
-        assert!(
-            end.observe(Some(latest), pair(4_000_000))
-                .unwrap()
-                .is_some()
-        );
+        assert!(end
+            .observe(Some(latest), pair(4_000_000))
+            .unwrap()
+            .is_some());
     }
     #[test]
     fn extreme_host_interpolation_overflow_preserves_the_actual_lower_bracket() {

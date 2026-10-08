@@ -1,26 +1,26 @@
 //! Common local-player construction and recording finalization outside native callbacks.
 pub use crate::native_finish::save_capture;
 use crate::{
-    PreparedBms,
     competition::ScoreSummary,
     competition_live::{CompetitionOptions, LiveCompetition},
     local_input::InputMerger,
-    local_players::{MAX_LOCAL_PLAYERS, PlayerId, ResolvedInputPlan},
+    local_players::{PlayerId, ResolvedInputPlan, MAX_LOCAL_PLAYERS},
     local_preparation::{
-        PreparedLocalMembers, prepare_local_members, prepare_local_input_sounds,
-        prepare_local_mine_sounds,
+        prepare_local_input_sounds, prepare_local_members, prepare_local_mine_sounds,
+        PreparedLocalMembers,
     },
     local_runtime::{MemberConfig, RuntimeGroup},
-    native_cohort::{PlayerState, member_progress, replay_path},
-    native_group_competition::NativeGroupCompetition,
+    native_cohort::{member_progress, replay_path, PlayerState},
     native_gameplay::NativeGameplayResult,
-    native_judge::{NativeJudgeConfig, capture_limits, prepare_section_capture_for_source},
+    native_group_competition::NativeGroupCompetition,
+    native_judge::{capture_limits, prepare_section_capture_for_source, NativeJudgeConfig},
     replay_capture::LiveReplayCapture,
+    PreparedBms,
 };
 use beatkernel::{
     audio::{CommandProducer, VoiceId},
     input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
-    runtime::{input_sound::InputSoundTimeline, hazard_sound::HazardSoundTimeline},
+    runtime::{hazard_sound::HazardSoundTimeline, input_sound::InputSoundTimeline},
     time::{ClockDomainId, ClockPoint, Timestamp},
     transport::Transport,
 };
@@ -82,7 +82,6 @@ pub fn prepare_cohort_with_policy(
     config: &CohortPreparation<'_>,
     policy: &crate::play_policy::ResolvedPlayPolicy,
 ) -> NativeGameplayResult<PreparedCohort> {
-    crate::native_judge::validate_policy_competition(policy.selection(), competition)?;
     if policy.judge().max_early().as_nanos() != config.early
         || policy.judge().max_late().as_nanos() != config.late
         || policy.judge().input_offset().as_nanos() != config.offset
@@ -107,7 +106,6 @@ pub fn prepare_audio_cohort_with_policy(
     logical_domain: ClockDomainId,
     policy: &crate::play_policy::ResolvedPlayPolicy,
 ) -> NativeGameplayResult<PreparedCohort> {
-    crate::native_judge::validate_policy_competition(policy.selection(), competition)?;
     if policy.judge().max_early().as_nanos() != config.early
         || policy.judge().max_late().as_nanos() != config.late
         || policy.judge().input_offset().as_nanos() != config.offset
@@ -287,16 +285,34 @@ fn prepare_cohort_inner(
         };
     }
     let network = if competition.network.is_some() {
-        NativeGroupCompetition::prepare(
-            competition,
-            &prepared.source,
-            &configs,
-            logical_domain,
-            config.start,
-            config.chart_seed,
-            config.end,
-            config.preroll,
-        )?
+        match policy {
+            Some(policy) => {
+                let mut policies = Vec::new();
+                policies.try_reserve_exact(configs.len())?;
+                policies.extend(configs.iter().map(|member| (member.player, policy)));
+                NativeGroupCompetition::prepare_with_policies(
+                    competition,
+                    &prepared.source,
+                    &configs,
+                    &policies,
+                    logical_domain,
+                    config.start,
+                    config.chart_seed,
+                    config.end,
+                    config.preroll,
+                )?
+            }
+            None => NativeGroupCompetition::prepare(
+                competition,
+                &prepared.source,
+                &configs,
+                logical_domain,
+                config.start,
+                config.chart_seed,
+                config.end,
+                config.preroll,
+            )?,
+        }
     } else {
         None
     };
@@ -799,22 +815,18 @@ mod fixtures {
             {
                 assert_eq!(member.player, *player);
                 assert_eq!(member.device, Some(*device));
-                assert!(
-                    member
-                        .bindings
-                        .bindings()
-                        .iter()
-                        .all(|binding| binding.device == DeviceSelector::Exact(*device))
-                );
+                assert!(member
+                    .bindings
+                    .bindings()
+                    .iter()
+                    .all(|binding| binding.device == DeviceSelector::Exact(*device)));
                 assert!(state.completion.is_some());
                 assert!(state.competition.is_none());
                 assert_eq!(state.last_song, Timestamp::ZERO);
-                assert!(
-                    member
-                        .sounds
-                        .iter()
-                        .all(|sound| sound.voice.0 > 99 && voices.insert(sound.voice.0))
-                );
+                assert!(member
+                    .sounds
+                    .iter()
+                    .all(|sound| sound.voice.0 > 99 && voices.insert(sound.voice.0)));
                 let (_, start, seed) = crate::replay_playback::decode_chart_setup(
                     &state.capture.as_ref().unwrap().header().options,
                 )
@@ -932,18 +944,16 @@ mod fixtures {
         .unwrap();
         assert!(error.to_string().contains("anchor"));
         let no_bindings = BTreeMap::new();
-        assert!(
-            prepare_cohort(
-                &prepared,
-                &assignments,
-                &CompetitionOptions::default(),
-                &config(&no_bindings)
-            )
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("missing --bind")
-        );
+        assert!(prepare_cohort(
+            &prepared,
+            &assignments,
+            &CompetitionOptions::default(),
+            &config(&no_bindings)
+        )
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("missing --bind"));
         assert!(admit_cohort(2, true).is_ok());
         assert!(admit_cohort(1, false).is_err());
         assert!(admit_cohort(65, false).is_err());
@@ -977,22 +987,18 @@ mod fixtures {
             [(PlayerId(7), DeviceId(91)), (PlayerId(9), DeviceId(91))],
             [(PlayerId(0), DeviceId(91)), (PlayerId(9), DeviceId(19))],
         ] {
-            assert!(
-                prepare_cohort(&prepared, &invalid, &competition, &cfg)
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("assignments")
-            );
-        }
-        cfg.end = Some(Timestamp::from_nanos(9));
-        assert!(
-            prepare_cohort(&prepared, &assignments, &competition, &cfg)
+            assert!(prepare_cohort(&prepared, &invalid, &competition, &cfg)
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("section")
-        );
+                .contains("assignments"));
+        }
+        cfg.end = Some(Timestamp::from_nanos(9));
+        assert!(prepare_cohort(&prepared, &assignments, &competition, &cfg)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("section"));
         cfg.end = None;
         cfg.early = -1;
         assert!(prepare_cohort(&prepared, &assignments, &competition, &cfg).is_err());
@@ -1003,13 +1009,11 @@ mod fixtures {
             at: Timestamp::ZERO,
             gain: 1.0,
         };
-        assert!(
-            prepare_cohort(&prepared, &assignments, &competition, &cfg)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("namespace")
-        );
+        assert!(prepare_cohort(&prepared, &assignments, &competition, &cfg)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("namespace"));
     }
     fn states(ids: &[u32]) -> Vec<PlayerState> {
         ids.iter()
@@ -1094,18 +1098,16 @@ mod fixtures {
                 && error.contains("duplicate save destination")
         );
         let mut calls = 0;
-        assert!(
-            finish_cohort(
-                states(&[1, 1, 2]),
-                vec![(PlayerId(1), None)],
-                Vec::new(),
-                |_, _, _| {
-                    calls += 1;
-                    Ok(())
-                }
-            )
-            .is_err()
-        );
+        assert!(finish_cohort(
+            states(&[1, 1, 2]),
+            vec![(PlayerId(1), None)],
+            Vec::new(),
+            |_, _, _| {
+                calls += 1;
+                Ok(())
+            }
+        )
+        .is_err());
         assert_eq!(calls, 0);
         assert!(
             finish_cohort(Vec::new(), Vec::new(), Vec::new(), |_, _, _| panic!(

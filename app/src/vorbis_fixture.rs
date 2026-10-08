@@ -173,6 +173,17 @@ pub fn continued_comment(channels: u8, final_frames: u64) -> Vec<u8> {
     }
     bytes
 }
+/// Give an original authored stream its own logical-link serial and source rate.
+/// Packet contents and final trim remain the independent fixture definition.
+pub fn link(mut bytes: Vec<u8>, serial: u32, rate: u32) -> Vec<u8> {
+    assert!(rate > 0);
+    bytes[40..44].copy_from_slice(&rate.to_le_bytes());
+    for (offset, _) in pages(&bytes) {
+        bytes[offset + 14..offset + 18].copy_from_slice(&serial.to_le_bytes());
+        reseal_page(&mut bytes, offset);
+    }
+    bytes
+}
 /// Page offset/lengths of this original helper's valid fixture stream.
 pub fn pages(bytes: &[u8]) -> Vec<(usize, usize)> {
     let mut offset = 0;

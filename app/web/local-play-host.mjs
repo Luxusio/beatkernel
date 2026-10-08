@@ -8,6 +8,35 @@ export class LocalRoster {
   #next = 2;
   #sources = new Map();
   get players() { return Object.freeze([...this.#players]); }
+  exportState() {
+    return Object.freeze({ players: this.players, nextPlayerId: this.#next,
+      assignments: Object.freeze([...this.#sources].map(pair => Object.freeze([...pair]))) });
+  }
+  importState(state) {
+    const { players: inputPlayers, nextPlayerId, assignments: inputAssignments } = state ?? {};
+    if (!Array.isArray(inputPlayers) || !Array.isArray(inputAssignments)) throw new Error("Invalid retained local roster state.");
+    const playerCount = inputPlayers.length, assignmentCount = inputAssignments.length;
+    if (playerCount < 1 || playerCount > 64 || assignmentCount > playerCount) throw new Error("Invalid retained local roster state.");
+    // Snapshot bounded indexed values before validation or publication.
+    const players = [], assignments = [];
+    for (let index = 0; index < playerCount; index++) players.push(inputPlayers[index]);
+    for (let index = 0; index < assignmentCount; index++) {
+      const pair = inputAssignments[index];
+      if (!Array.isArray(pair) || pair.length !== 2) throw new Error("Invalid retained local source assignment.");
+      assignments.push([pair[0], pair[1]]);
+    }
+    if (players.some(player => !Number.isInteger(player) || player < 1 || player > 0xffffffff
+      || !this.#players.includes(player) && player < this.#next)
+      || new Set(players).size !== players.length || !Number.isInteger(nextPlayerId) || nextPlayerId < this.#next
+      || nextPlayerId > 0x100000000 || players.some(player => player >= nextPlayerId)) throw new Error("Invalid retained local roster state.");
+    const sources = new Map(), assigned = new Set();
+    for (const pair of assignments) {
+      if (!Array.isArray(pair) || pair.length !== 2 || !players.includes(pair[0]) || sources.has(pair[0])
+        || !sourceId(pair[1]) || assigned.has(pair[1])) throw new Error("Invalid retained local source assignment.");
+      sources.set(pair[0], pair[1]); assigned.add(pair[1]);
+    }
+    this.#players = [...players]; this.#next = nextPlayerId; this.#sources = sources;
+  }
   setCount(count) {
     if (!Number.isInteger(count) || count < 1 || count > 64) throw new Error("Choose one to 64 local players.");
     const added = Math.max(0, count - this.#players.length);

@@ -1333,6 +1333,7 @@ async function workerHarness(options = {}) {
   const audioFailure = new SourceTextModule(await readFile(new URL("./audio-failure.mjs", import.meta.url), "utf8"), { context });
   const sampleClient = new SourceTextModule(await readFile(new URL("./audio-sample-client.mjs", import.meta.url), "utf8"), { context });
   const localHelper = new SourceTextModule(await readFile(new URL("./local-play-model.mjs", import.meta.url), "utf8"), { context });
+  const localHostHelper = new SourceTextModule(await readFile(new URL("./local-play-host.mjs", import.meta.url), "utf8"), { context });
   const roomOwner = new SourceTextModule(await readFile(new URL("./room-owner.mjs", import.meta.url), "utf8"), { context });
   const roomTransport = new SyntheticModule(["WebTransportChannel"], function () {
     this.setExport("WebTransportChannel", RoomChannel);
@@ -1356,6 +1357,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./audio-failure.mjs") return audioFailure;
     if (specifier === "./audio-sample-client.mjs") return sampleClient;
     if (specifier === "./local-play-model.mjs") return localHelper;
+    if (specifier === "./local-play-host.mjs") return localHostHelper;
     if (specifier === "./room-owner.mjs") return roomOwner;
     if (specifier === "./multiplayer-transport.mjs") return roomTransport;
     throw new Error(`Unexpected import: ${specifier}`);

@@ -8,15 +8,162 @@ use crate::{
     native_cohort::member_progress,
 };
 use beatkernel::{
-    audio::{AudioCommand, SampleId, command_queue},
+    audio::{command_queue, AudioCommand, SampleId},
     input::{ButtonEvent, ButtonState, EventMeta, PhysicalInputEvent},
     judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeStage, JudgeWindow},
-    replay::codec::{ReplayFile, encode_replay},
+    replay::codec::{encode_replay, ReplayFile},
     runtime::{RuntimeProcessingClock, SoundBinding},
     time::{ClockMapper, ClockMappingQuality, Duration},
     transport::Rate,
 };
-use beatkernel_bms::{ParseOptions, parse_seeded};
+use beatkernel_bms::{parse_seeded, ParseOptions};
+
+#[test]
+#[ignore = "real QUIC host requires existing BEATKERNEL_TEST_QUIC_CERT/KEY development TLS environment"]
+fn actual_selected_cohort_owner_forwards_checked_per_member_headers_and_joins_its_quic_worker() {
+    use crate::{
+        competition_live::NetworkRole,
+        gameplay_competition::GroupCompetitionPort,
+        play_policy::{ClassifiedWindow, ResolvedPlayPolicy},
+        replay_playback::decode_section_setup,
+        PreparedBms,
+    };
+    use beatkernel::audio::{AudioFormat, PcmLimits, SampleBank};
+    use std::{
+        net::{Ipv4Addr, UdpSocket},
+        time::{Duration as WallDuration, Instant},
+    };
+
+    let source = beatkernel_bms::parse(
+        "#BPM 60\n#TOTAL 320\n#WAV01 note.wav\n#00111:0101\n",
+        Default::default(),
+    )
+    .unwrap();
+    let selected = ResolvedPlayPolicy::bms(
+        &source,
+        beatkernel_bms::BmsGaugeKind::Hard,
+        &[ClassifiedWindow {
+            judgment: beatkernel_bms::BmsJudgment::Great,
+            window: JudgeWindow {
+                grade: JudgeGrade(7),
+                early: Duration::from_nanos(7),
+                late: Duration::from_nanos(9),
+            },
+        }],
+        -3,
+    )
+    .unwrap();
+    let prepared = PreparedBms {
+        compiled: source.compile().unwrap(),
+        source,
+        bank: SampleBank::new(
+            AudioFormat::new(1000, 1).unwrap(),
+            PcmLimits::new(64, 256, 4).unwrap(),
+        )
+        .unwrap(),
+        sounds: vec![],
+        bgm_commands: vec![],
+    };
+    let bindings = BTreeMap::from([(0x11, 7)]);
+    let assignments = [
+        (PlayerId(u32::MAX), DeviceId(u64::MAX)),
+        (PlayerId(7), DeviceId(31)),
+    ];
+    for audio in [false, true] {
+        // Release the probe before the genuine production endpoint bind. A
+        // collision remains an explicit test failure, never a fake endpoint.
+        let address = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut options = CompetitionOptions::default();
+        options.network = Some(NetworkRole::Host(address));
+        options.setup_timeout = WallDuration::from_secs(2);
+        options.quic.cert = Some(
+            std::env::var_os("BEATKERNEL_TEST_QUIC_CERT")
+                .expect("real owner fixture requires TLS cert")
+                .into(),
+        );
+        options.quic.key = Some(
+            std::env::var_os("BEATKERNEL_TEST_QUIC_KEY")
+                .expect("real owner fixture requires TLS key")
+                .into(),
+        );
+        let config = CohortPreparation {
+            host: ClockDomainId(99),
+            output: ClockDomainId(2),
+            early: 7,
+            late: 9,
+            offset: -3,
+            preroll: 0,
+            start: Timestamp::from_nanos(1),
+            end: Some(Timestamp::from_nanos(5_000_000_000)),
+            chart_seed: u64::MAX - 17,
+            bindings: &bindings,
+            record_replay: None,
+            replay_max_bytes: 0,
+            replay_max_records: 0,
+        };
+        let mut cohort = if audio {
+            prepare_audio_cohort_with_policy(
+                &prepared,
+                &assignments,
+                &options,
+                &config,
+                ClockDomainId(17),
+                &selected,
+            )
+        } else {
+            prepare_cohort_with_policy(&prepared, &assignments, &options, &config, &selected)
+        }
+        .unwrap();
+        let network = cohort
+            .network
+            .as_mut()
+            .expect("selected path must own a genuine native network");
+        let port: &dyn GroupCompetitionPort = network;
+        assert!(!port.policy_agnostic());
+        assert!(port.expected_policy_header(PlayerId(0)).is_none());
+        assert!(port.expected_policy_header(PlayerId(91)).is_none());
+        for (index, (player, _)) in assignments.iter().enumerate() {
+            assert!(
+                cohort.states[index].capture.is_none(),
+                "disabled capture still requires network setup evidence"
+            );
+            let actual = port
+                .expected_policy_header(*player)
+                .expect("original member header must cross actual trait implementation");
+            assert!(std::ptr::eq(
+                actual,
+                network.native_policy_header(*player).unwrap()
+            ));
+            let expected = crate::native_judge::prepare_policy_header(
+                &prepared.source,
+                &cohort.configs[index].judge,
+                &selected,
+                if audio {
+                    ClockDomainId(17)
+                } else {
+                    config.host
+                },
+                config.start,
+                config.chart_seed,
+                config.end,
+            )
+            .unwrap();
+            assert_eq!(actual, &expected);
+            let setup = decode_section_setup(&actual.options).unwrap();
+            assert_eq!(setup.judgments.as_ref(), selected.judgments());
+            assert_eq!(setup.gauge, *selected.gauge());
+            assert_eq!(setup.start, config.start);
+            assert_eq!(setup.end, config.end);
+            assert_eq!(setup.chart_seed, config.chart_seed);
+        }
+        let started = Instant::now();
+        network.finish(&[]).unwrap(); // Genuine uncommitted owner cancellation joins its worker.
+        assert!(started.elapsed() < WallDuration::from_secs(5));
+    }
+}
 
 fn states(count: usize) -> Vec<PlayerState> {
     (0..count)

@@ -27,6 +27,37 @@ pub fn alsa_presentation_pair_with_basis(
     snapshot: AlsaTimingSnapshot,
     basis: beatkernel::audio::OutputFrameBasis,
 ) -> Result<Option<ClockPair>, LinuxError> {
+    let Some((played, native)) = validated_native_pair(snapshot)? else {
+        return Ok(None);
+    };
+    let output = basis
+        .point_at_stream_frame(played)
+        .map_err(|_| LinuxError::Overflow)?;
+    Ok(Some(ClockPair {
+        source: output,
+        target: native,
+    }))
+}
+
+/// Maps actual native target frames from an exact piecewise-rate physical start.
+pub fn alsa_presentation_pair_with_target_basis(
+    snapshot: AlsaTimingSnapshot,
+    basis: beatkernel::audio::TargetFrameBasis,
+) -> Result<Option<ClockPair>, LinuxError> {
+    let Some((played, native)) = validated_native_pair(snapshot)? else {
+        return Ok(None);
+    };
+    let output = basis
+        .point_at_stream_frame(played)
+        .map_err(|_| LinuxError::Overflow)?;
+    Ok(Some(ClockPair {
+        source: output,
+        target: native,
+    }))
+}
+fn validated_native_pair(
+    snapshot: AlsaTimingSnapshot,
+) -> Result<Option<(u64, ClockPoint)>, LinuxError> {
     let (Some(played), Some(native)) =
         (snapshot.estimated_played_frames, snapshot.native_timestamp)
     else {
@@ -73,13 +104,7 @@ pub fn alsa_presentation_pair_with_basis(
             "ALSA played estimate contradicts submitted-minus-delay",
         ));
     }
-    let output = basis
-        .point_at_stream_frame(played)
-        .map_err(|_| LinuxError::Overflow)?;
-    Ok(Some(ClockPair {
-        source: output,
-        target: native,
-    }))
+    Ok(Some((played, native)))
 }
 
 #[cfg(test)]

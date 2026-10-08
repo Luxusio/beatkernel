@@ -12,6 +12,13 @@ use beatkernel::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LivePauseObservation {
     Point(ClockPair),
+    Target {
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
+        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        source: Option<RenderReport>,
+        pair: ClockPair,
+    },
     Interval {
         observation: Option<PauseIntervalObservation>,
         now: ClockPoint,
@@ -124,6 +131,31 @@ fn update_live_pause_inner(
     }
     let mut requested = None;
     let (boundary, observed) = match evidence {
+        LivePauseObservation::Target {
+            epoch,
+            basis,
+            facts,
+            source,
+            pair,
+        } => {
+            if facts.source_rate != sample_rate || pause.target_basis() != Some(basis) {
+                return Err(PauseError("target live pause source rate or basis differs"));
+            }
+            if let Some(desired) = desired {
+                if pause.request_in_epoch(epoch, desired, pair)? {
+                    requested = Some(desired);
+                }
+            }
+            let boundary = pause
+                .observe_target(epoch, basis, facts, source, pair)?
+                .map(|boundary| {
+                    HostStartWindow::new(boundary.host, boundary.host)
+                        .map(|window| (boundary.paused, window, boundary.playback_frame))
+                        .map_err(|_| PauseError("target live pause boundary is invalid"))
+                })
+                .transpose()?;
+            (boundary, true)
+        }
         LivePauseObservation::Point(pair) => {
             if let Some(desired) = desired {
                 if pause.request(desired, pair)? {

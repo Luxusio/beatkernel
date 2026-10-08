@@ -40,6 +40,7 @@ pub mod asio;
 pub mod cadence;
 pub(crate) mod channel_remix;
 mod convert;
+mod converted_output_state;
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 pub(crate) mod mixer_launch;
 mod negotiation;
@@ -49,9 +50,10 @@ pub mod presentation;
 pub(crate) mod telemetry;
 
 pub use convert::encode_pcm;
+pub use converted_output_state::{ConvertedBoundaryFacts, ConvertedNativeOutputState};
 pub use negotiation::{resolve_period, validate_buffer_size, ResolvedPeriod};
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) use output_state::output_state_fixtures::count_heap_calls;
+#[cfg(test)]
+pub(crate) use output_state::output_state_fixtures::{count_heap_calls, fail_allocation};
 pub use output_state::NativeOutputState;
 
 /// Native audio API selected by the caller.

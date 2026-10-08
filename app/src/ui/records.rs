@@ -2,22 +2,23 @@
 use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
+    layout::{LayoutGeometry, LayoutUpdate, MountedLayout, Node, NodeId},
     molecules::{button, text_field_value, text_field_with_font},
     retained::RetainedNodes,
     text_input::LineEditor,
 };
 use crate::{
     font_text::FontText,
-    record_model::{RecordCatalog, RecordPreview},
+    record_model::{FrozenRecordPreview, RecordCatalog, RecordPreview},
     scene::Scene,
     screen_lifecycle::ScreenInstanceId,
 };
 use beatkernel::time::Timestamp;
+use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
 use std::{
     cell::{Cell, RefCell},
     sync::Arc,
 };
-use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
 
 const DIRECTORY: Bounds = Bounds {
     x: 160,
@@ -180,8 +181,136 @@ pub const DETAIL_BUTTONS: [(ControlId, Bounds, &str); 3] = [
         "NEXT",
     ),
 ];
-fn grade_pages(frame: &RecordsFrame<'_>) -> usize {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Component {
+    Background,
+    Title,
+    Subtitle,
+    DirectoryLabel,
+    Directory,
+    Help,
+    Row(usize),
+    Summary,
+    Preview,
+    Opponents,
+    SelectedOpponents,
+    Button(usize),
+    Message,
+    Error,
+    DetailBody,
+    DetailButton(usize),
+}
+type N = Node<'static, Component>;
+/// One mounted hierarchy; state updates address its existing rows and actions.
+const SCREEN: N = N::layer(
+    [960, 720],
+    &[
+        N::leaf([960, 720], Component::Background)
+            .fill([true, true])
+            .at(0, 0),
+        N::column(
+            [936, 59],
+            24,
+            &[
+                N::leaf([936, 21], Component::Title),
+                N::leaf([936, 14], Component::Subtitle),
+            ],
+        )
+        .at(24, 20),
+        N::layer(
+            [906, 34],
+            &[
+                N::leaf([136, 7], Component::DirectoryLabel).at(0, 12),
+                N::leaf([770, 34], Component::Directory).at(136, 0),
+            ],
+        )
+        .at(24, 108),
+        N::leaf([906, 7], Component::Help).at(24, 151),
+        N::column(
+            [906, 298],
+            2,
+            &[
+                N::leaf([906, 28], Component::Row(0)),
+                N::leaf([906, 28], Component::Row(1)),
+                N::leaf([906, 28], Component::Row(2)),
+                N::leaf([906, 28], Component::Row(3)),
+                N::leaf([906, 28], Component::Row(4)),
+                N::leaf([906, 28], Component::Row(5)),
+                N::leaf([906, 28], Component::Row(6)),
+                N::leaf([906, 28], Component::Row(7)),
+                N::leaf([906, 28], Component::Row(8)),
+                N::leaf([906, 28], Component::Row(9)),
+            ],
+        )
+        .clipped()
+        .at(24, 170),
+        N::leaf([906, 309], Component::Summary).at(24, 170),
+        N::leaf([906, 92], Component::Preview).at(24, 482),
+        N::leaf([280, 7], Component::SelectedOpponents).at(24, 576),
+        N::leaf([280, 7], Component::Opponents).at(24, 592),
+        N::leaf([906, 7], Component::Message).at(24, 665),
+        N::leaf([906, 30], Component::Error).at(24, 682),
+        N::leaf([150, 30], Component::Button(0)).at(620, 475),
+        N::leaf([150, 30], Component::Button(1)).at(780, 475),
+        N::row(
+            [906, 34],
+            10,
+            &[
+                N::leaf([130, 34], Component::Button(2)),
+                N::leaf([130, 34], Component::Button(3)),
+                N::leaf([130, 34], Component::Button(4)),
+                N::leaf([140, 34], Component::Button(5)),
+                N::layer(
+                    [150, 34],
+                    &[N::leaf([140, 34], Component::Button(6)).at(0, 0)],
+                ),
+                N::leaf([176, 34], Component::Button(7)),
+            ],
+        )
+        .at(24, 620),
+        N::leaf([176, 34], Component::Button(8)).at(754, 575),
+        N::leaf([140, 34], Component::Button(9)).at(430, 575),
+        N::leaf([164, 34], Component::Button(10)).at(580, 575),
+        N::leaf([110, 34], Component::Button(11)).at(304, 575),
+        N::leaf([960, 720], Component::DetailBody)
+            .fill([true, true])
+            .at(0, 0),
+        N::leaf([176, 34], Component::DetailButton(0)).at(754, 620),
+        N::leaf([140, 34], Component::DetailButton(1)).at(430, 575),
+        N::leaf([164, 34], Component::DetailButton(2)).at(580, 575),
+    ],
+)
+.clipped();
+/// Retained painters report conversion refusal so staged layout publication stays atomic.
+fn paint_text(
+    scene: &mut Scene,
+    bounds: Bounds,
+    offset: [i64; 2],
+    value: &str,
+    scale: usize,
+    color: u32,
+) {
+    let origin = bounds
+        .x
+        .checked_add(offset[0])
+        .zip(bounds.y.checked_add(offset[1]));
+    let origin = origin.and_then(|(x, y)| usize::try_from(x).ok().zip(usize::try_from(y).ok()));
+    match origin {
+        Some((x, y)) => text(scene, x, y, value, scale, color),
+        None => scene.reject("Records text origin exceeds the supported coordinate range".into()),
+    }
+}
+fn node_id(layout: &MountedLayout<Component>, component: Component) -> NodeId {
+    layout
+        .leaves()
+        .iter()
+        .find(|leaf| leaf.component == component)
+        .expect("mounted Records component")
+        .id
+}
+fn grade_pages<P: RecordInfo>(frame: &RecordsFrame<'_, P>) -> usize {
     frame.preview.map_or(1, |preview| {
+        let preview = preview.project();
         crate::historical_record_presentation::historical_page_count(
             preview.historical_score.as_deref(),
             preview.historical_comparison.as_deref(),
@@ -196,14 +325,14 @@ fn detail_available(id: ControlId, page: usize, pages: usize) -> bool {
         _ => false,
     }
 }
-pub struct RecordsFrame<'a> {
+pub struct RecordsFrame<'a, P = RecordPreview> {
     pub directory: &'a LineEditor,
     pub directory_focused: bool,
     pub catalog: Option<&'a RecordCatalog>,
     pub selected: Option<usize>,
     pub first: usize,
     /// The coordinator supplies only the current compatible selected preview.
-    pub preview: Option<&'a RecordPreview>,
+    pub preview: Option<&'a P>,
     pub pending: bool,
     pub details: bool,
     pub grade_page: usize,
@@ -215,6 +344,7 @@ pub struct RecordsFrame<'a> {
     pub hovered: Option<ControlId>,
     pub armed: Option<ControlId>,
 }
+pub type VisualRecordsFrame<'a> = RecordsFrame<'a, FrozenRecordPreview>;
 fn bounds(slot: usize) -> Bounds {
     Bounds {
         x: 24,
@@ -223,7 +353,7 @@ fn bounds(slot: usize) -> Bounds {
         height: 28,
     }
 }
-fn available(frame: &RecordsFrame<'_>, id: ControlId) -> bool {
+fn available<P: RecordInfo>(frame: &RecordsFrame<'_, P>, id: ControlId) -> bool {
     if frame.pending {
         return false;
     }
@@ -239,7 +369,7 @@ fn available(frame: &RecordsFrame<'_>, id: ControlId) -> bool {
         59 => frame.preview.is_some(),
         66 => frame
             .preview
-            .is_some_and(|preview| preview.historical.is_some()),
+            .is_some_and(|preview| preview.project().historical.is_some()),
         60 => frame.selected_opponents[0] > 0,
         61 => frame.selected_opponents[1] > 0,
         50 | 54 | 55 => true,
@@ -249,6 +379,21 @@ fn available(frame: &RecordsFrame<'_>, id: ControlId) -> bool {
 /// Hit admission from current borrowed state, independent of the desktop hit cache.
 /// Reverse painter order matches composed geometry. Invalid or pending frames admit none.
 pub fn hit(frame: &RecordsFrame<'_>, point: Option<(f64, f64)>) -> Option<ControlId> {
+    hit_projected(frame, point)
+}
+pub fn hit_visual(frame: &VisualRecordsFrame<'_>, point: Option<(f64, f64)>) -> Option<ControlId> {
+    if frame
+        .preview
+        .is_some_and(|preview| preview.validate().is_err())
+    {
+        return None;
+    }
+    hit_projected(frame, point)
+}
+fn hit_projected<P: RecordInfo>(
+    frame: &RecordsFrame<'_, P>,
+    point: Option<(f64, f64)>,
+) -> Option<ControlId> {
     let point = point?;
     if frame.pending || validate_frame(frame).is_err() {
         return None;
@@ -272,7 +417,7 @@ pub fn hit(frame: &RecordsFrame<'_>, point: Option<(f64, f64)>) -> Option<Contro
     }
     DIRECTORY.contains(point).then_some(ControlId(58))
 }
-fn validate_frame(frame: &RecordsFrame<'_>) -> Result<(), String> {
+fn validate_frame<P: RecordInfo>(frame: &RecordsFrame<'_, P>) -> Result<(), String> {
     if (!frame.details && frame.grade_page != 0)
         || (frame.details && frame.grade_page >= grade_pages(frame))
     {
@@ -282,7 +427,7 @@ fn validate_frame(frame: &RecordsFrame<'_>) -> Result<(), String> {
         && (frame.pending
             || frame
                 .preview
-                .is_none_or(|preview| preview.historical.is_none()))
+                .is_none_or(|preview| preview.project().historical.is_none()))
     {
         return Err("Records details require idle associated historical metadata".into());
     }
@@ -303,9 +448,10 @@ fn validate_frame(frame: &RecordsFrame<'_>) -> Result<(), String> {
         return Err("Records frame exceeds catalog or index bounds".into());
     }
     if let Some(preview) = frame.preview {
+        let preview = preview.project();
         if let Some(classes) = preview.bms_score {
             classes
-                .validate_for(preview.score.hits, preview.score.misses)
+                .validate_for(preview.hits, preview.misses)
                 .map_err(|error| error.to_string())?;
         }
         if let Some(classes) = preview.historical_bms_score {
@@ -321,7 +467,7 @@ fn validate_frame(frame: &RecordsFrame<'_>) -> Result<(), String> {
         let selected = frame
             .selected
             .and_then(|index| frame.catalog?.entries.get(index));
-        if selected != Some(&preview.path) {
+        if selected != Some(preview.path) {
             return Err("Records preview does not match the selected path".into());
         }
     }
@@ -347,10 +493,77 @@ struct Preview {
     misses: u64,
     combo: u64,
     max_combo: u64,
-    timing: crate::timing::TimingSummary,
+    timing: crate::timing::TimingRecord,
 }
-impl From<&RecordPreview> for Preview {
-    fn from(value: &RecordPreview) -> Self {
+struct RecordProjection<'a> {
+    path: &'a std::path::PathBuf,
+    bms_score: Option<crate::judgment_policy::BmsScoreSummary>,
+    historical_bms_score: Option<crate::judgment_policy::BmsScoreSummary>,
+    records: usize,
+    recorded_until: Option<Timestamp>,
+    start: Timestamp,
+    end: Option<Timestamp>,
+    historical: Option<crate::record_model::HistoricalRecordValue>,
+    historical_score: &'a Option<Arc<crate::result_archive::ArchivedScore>>,
+    historical_comparison:
+        &'a Option<Arc<Option<crate::competition_presentation::CompetitionSnapshot>>>,
+    archive_error: &'a Option<String>,
+    hits: u64,
+    misses: u64,
+    combo: u64,
+    max_combo: u64,
+    timing: crate::timing::TimingRecord,
+}
+trait RecordInfo {
+    fn project(&self) -> RecordProjection<'_>;
+}
+impl RecordInfo for RecordPreview {
+    fn project(&self) -> RecordProjection<'_> {
+        RecordProjection {
+            path: &self.path,
+            bms_score: self.bms_score,
+            historical_bms_score: self.historical_bms_score,
+            records: self.records,
+            recorded_until: self.recorded_until,
+            start: self.start,
+            end: self.end,
+            historical: self.historical,
+            historical_score: &self.historical_score,
+            historical_comparison: &self.historical_comparison,
+            archive_error: &self.archive_error,
+            hits: self.score.hits,
+            misses: self.score.misses,
+            combo: self.score.combo,
+            max_combo: self.score.max_combo,
+            timing: self.score.timing.record(),
+        }
+    }
+}
+impl RecordInfo for FrozenRecordPreview {
+    fn project(&self) -> RecordProjection<'_> {
+        RecordProjection {
+            path: &self.path,
+            bms_score: self.bms_score,
+            historical_bms_score: self.historical_bms_score,
+            records: self.records,
+            recorded_until: self.recorded_until,
+            start: self.start,
+            end: self.end,
+            historical: self.historical,
+            historical_score: &self.historical_score,
+            historical_comparison: &self.historical_comparison,
+            archive_error: &self.archive_error,
+            hits: self.score.hits,
+            misses: self.score.misses,
+            combo: self.score.combo,
+            max_combo: self.score.max_combo,
+            timing: self.score.timing,
+        }
+    }
+}
+impl<P: RecordInfo> From<&P> for Preview {
+    fn from(value: &P) -> Self {
+        let value = value.project();
         Self {
             bms_score: value.bms_score,
             records: value.records,
@@ -359,11 +572,11 @@ impl From<&RecordPreview> for Preview {
             historical: value.historical,
             archive_failed: value.archive_error.is_some(),
             until: value.recorded_until,
-            hits: value.score.hits,
-            misses: value.score.misses,
-            combo: value.score.combo,
-            max_combo: value.score.max_combo,
-            timing: value.score.timing,
+            hits: value.hits,
+            misses: value.misses,
+            combo: value.combo,
+            max_combo: value.max_combo,
+            timing: value.timing,
         }
     }
 }
@@ -374,34 +587,119 @@ struct DetailCache {
     score: Option<Arc<crate::result_archive::ArchivedScore>>,
     comparison: Option<Arc<Option<crate::competition_presentation::CompetitionSnapshot>>>,
     presentation: crate::historical_record_presentation::HistoricalRecordPresentation,
-    geometry: crate::scene::GeometrySnapshot,
+    geometry: Option<crate::scene::GeometrySnapshot>,
     grade_page: usize,
     grade_geometry: crate::scene::GeometrySnapshot,
 }
 fn detail_geometry(
+    layout: &MountedLayout<Component>,
     presentation: &crate::historical_record_presentation::HistoricalRecordPresentation,
     grade_geometry: &crate::scene::GeometrySnapshot,
     page: usize,
     hovered: Option<ControlId>,
     armed: Option<ControlId>,
-) -> Result<crate::scene::GeometrySnapshot, String> {
-    let mut scene = Scene::with_capacity(960, 720, 1024);
-    rect(&mut scene, 0, 0, 960, 720, 0x10151e);
-    presentation.compose_body_for_page(page, &mut scene)?;
-    scene.append_geometry(grade_geometry)?;
-    for (id, bounds, label) in DETAIL_BUTTONS {
+) -> Result<Option<crate::scene::GeometrySnapshot>, String> {
+    let extent = layout.extent();
+    if layout.suspended() {
+        return Ok(None);
+    }
+    let mut scene = Scene::with_capacity(extent[0], extent[1], 1024);
+    let background = layout
+        .geometry(node_id(layout, Component::Background))
+        .unwrap();
+    let mut background_scene = Scene::with_capacity(extent[0], extent[1], 1);
+    rect(
+        &mut background_scene,
+        background.bounds.x,
+        background.bounds.y,
+        background.bounds.width,
+        background.bounds.height,
+        0x10151e,
+    );
+    append_clipped(&mut scene, &background_scene, background, [0, 0])?;
+    let body = layout
+        .geometry(node_id(layout, Component::DetailBody))
+        .unwrap();
+    let mut original = Scene::with_capacity(960, 720, 1024);
+    presentation.compose_body_for_page(page, &mut original)?;
+    original.append_geometry(grade_geometry)?;
+    append_clipped(&mut scene, &original, body, [body.bounds.x, body.bounds.y])?;
+    for (index, (id, _, label)) in DETAIL_BUTTONS.into_iter().enumerate() {
         if detail_available(id, page, presentation.grade_page_count()) {
+            let geometry = layout
+                .geometry(node_id(layout, Component::DetailButton(index)))
+                .unwrap();
+            let mut part = Scene::with_capacity(extent[0], extent[1], 64);
             button(
-                &mut scene,
-                bounds,
+                &mut part,
+                geometry.bounds,
                 label,
                 hovered == Some(id),
                 armed == Some(id),
             );
+            append_clipped(&mut scene, &part, geometry, [0, 0])?;
         }
     }
-    scene.geometry_snapshot()
+    scene.geometry_snapshot().map(Some)
 }
+/// Cached historical geometry is projected through the same mounted clip as its actions.
+fn append_clipped(
+    scene: &mut Scene,
+    source: &Scene,
+    geometry: LayoutGeometry,
+    offset: [i64; 2],
+) -> Result<(), String> {
+    if geometry.clip.width == 0 || geometry.clip.height == 0 {
+        return Ok(());
+    }
+    source.status()?;
+    let clip = crate::scene::ClipRect::new([
+        geometry.clip.x,
+        geometry.clip.y,
+        geometry.clip.width,
+        geometry.clip.height,
+    ])?;
+    for batch in source.batches() {
+        for rectangle in
+            &source.rectangles()[batch.first as usize..(batch.first + batch.count) as usize]
+        {
+            let color = rectangle
+                .color
+                .map(|channel| (channel * 255.0).round() as u8);
+            let mut bounds = rectangle.bounds.map(|n| n as i64);
+            bounds[0] = bounds[0]
+                .checked_add(offset[0])
+                .ok_or("Records detail x overflow")?;
+            bounds[1] = bounds[1]
+                .checked_add(offset[1])
+                .ok_or("Records detail y overflow")?;
+            scene.sprite_clipped_alpha(
+                batch.texture,
+                bounds,
+                rectangle.uv,
+                (u32::from(color[0]) << 16) | (u32::from(color[1]) << 8) | u32::from(color[2]),
+                color[3],
+                clip,
+            )?;
+        }
+    }
+    Ok(())
+}
+fn clipped_bounds(geometry: LayoutGeometry) -> Option<Bounds> {
+    let bounds = geometry.bounds;
+    let clip = geometry.clip;
+    let x = bounds.x.max(clip.x);
+    let y = bounds.y.max(clip.y);
+    let width = (bounds.x + bounds.width).min(clip.x + clip.width) - x;
+    let height = (bounds.y + bounds.height).min(clip.y + clip.height) - y;
+    (width > 0 && height > 0).then_some(Bounds {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
 pub struct RecordsView {
     details: Cell<bool>,
     detail_dirty: Cell<bool>,
@@ -425,9 +723,12 @@ pub struct RecordsView {
     hovered: RwSignal<Option<ControlId>>,
     armed: RwSignal<Option<ControlId>>,
     nodes: RetainedNodes,
+    layout: RefCell<MountedLayout<Component>>,
 }
 impl RecordsView {
     pub fn new(id: ScreenInstanceId, width: u32, height: u32) -> Result<Self, String> {
+        let mut layout = MountedLayout::mount(SCREEN)?;
+        layout.resize([width, height])?;
         let nodes = RetainedNodes::new(width, height)?;
         let directory = LineEditor::new("", 4096)?;
         let scope = Scope::new();
@@ -454,12 +755,36 @@ impl RecordsView {
             hovered: scope.create_rw_signal(None),
             armed: scope.create_rw_signal(None),
             nodes,
+            layout: RefCell::new(layout),
         };
-        view.nodes.static_node(|scene, _| {
-            rect(scene, 0, 0, 960, 720, 0x10151e);
-            text(scene, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
-            text(scene, 24, 65, "RECORDS - RECORDED PREFIX", 2, 0x9bb1cf);
-        });
+        let layout = view.layout.borrow().clone();
+        let header_ids = [Component::Background, Component::Title, Component::Subtitle]
+            .map(|component| node_id(&layout, component));
+        view.nodes
+            .static_layout_node(&layout, &header_ids, move |id, geometry, scene, _| {
+                let bounds = geometry.bounds;
+                if id == header_ids[0] {
+                    rect(
+                        scene,
+                        bounds.x,
+                        bounds.y,
+                        bounds.width,
+                        bounds.height,
+                        0x10151e,
+                    );
+                } else if id == header_ids[1] {
+                    paint_text(scene, bounds, [0, 0], "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
+                } else {
+                    paint_text(
+                        scene,
+                        bounds,
+                        [0, 0],
+                        "RECORDS - RECORDED PREFIX",
+                        2,
+                        0x9bb1cf,
+                    );
+                }
+            })?;
         let directory = view.directory;
         let focused = view.directory_focused;
         let pending = view.pending;
@@ -472,90 +797,123 @@ impl RecordsView {
                 input_font.get(),
             )
         });
-        view.nodes.bind(
+        let directory_ids = [
+            node_id(&layout, Component::DirectoryLabel),
+            node_id(&layout, Component::Directory),
+        ];
+        view.nodes.bind_layout(
             scope,
             memo,
-            |(directory, focused, pending, font), scene, hits| {
-                text(scene, 24, 120, "DIRECTORY", 1, 0xf0f4ff);
-                text_field_with_font(
-                    scene,
-                    &directory,
-                    DIRECTORY,
-                    focused && !pending,
-                    font.as_ref(),
-                );
-                if !pending {
-                    hits.push((ControlId(58), DIRECTORY));
+            &layout,
+            &directory_ids,
+            move |(directory, focused, pending, font), id, geometry, scene, hits| {
+                if id == directory_ids[0] {
+                    paint_text(scene, geometry.bounds, [0, 0], "DIRECTORY", 1, 0xf0f4ff);
+                } else {
+                    text_field_with_font(
+                        scene,
+                        &directory,
+                        geometry.bounds,
+                        focused && !pending,
+                        font.as_ref(),
+                    );
+                    if !pending {
+                        hits.push((ControlId(58), geometry.bounds));
+                    }
                 }
             },
-        );
-        view.nodes.static_node(|scene, _| {
-            text(
-                scene,
-                24,
-                151,
-                "TAB DIRECTORY/LIST   ENTER SCAN/PREVIEW   PGUP/PGDN PAGE",
-                1,
-                0x9bb1cf,
-            )
-        });
+        )?;
+        view.nodes.static_layout_node(
+            &layout,
+            &[node_id(&layout, Component::Help)],
+            |_, geometry, scene, _| {
+                paint_text(
+                    scene,
+                    geometry.bounds,
+                    [0, 0],
+                    "TAB DIRECTORY/LIST   ENTER SCAN/PREVIEW   PGUP/PGDN PAGE",
+                    1,
+                    0x9bb1cf,
+                )
+            },
+        )?;
         for (slot, row) in view.rows.iter().copied().enumerate() {
             let memo = scope.create_memo(move |_| row.get());
-            view.nodes.bind(scope, memo, move |row, scene, hits| {
-                if let Some(row) = row {
-                    let bounds = bounds(slot);
-                    rect(
-                        scene,
-                        bounds.x,
-                        bounds.y,
-                        bounds.width,
-                        bounds.height,
-                        if row.selected { 0x29475e } else { 0x1d2734 },
-                    );
-                    text_field_value(
-                        scene,
-                        &row.label,
-                        Bounds {
-                            height: 30,
-                            ..bounds
-                        },
-                    );
-                    if row.selected {
-                        rect(scene, bounds.x, bounds.y, 4, bounds.height, 0x74e5c5);
+            view.nodes.bind_layout(
+                scope,
+                memo,
+                &layout,
+                &[node_id(&layout, Component::Row(slot))],
+                move |row, _, geometry, scene, hits| {
+                    if let Some(row) = row {
+                        let bounds = geometry.bounds;
+                        rect(
+                            scene,
+                            bounds.x,
+                            bounds.y,
+                            bounds.width,
+                            bounds.height,
+                            if row.selected { 0x29475e } else { 0x1d2734 },
+                        );
+                        text_field_value(
+                            scene,
+                            &row.label,
+                            Bounds {
+                                height: 30,
+                                ..bounds
+                            },
+                        );
+                        if row.selected {
+                            rect(scene, bounds.x, bounds.y, 4, bounds.height, 0x74e5c5);
+                        }
+                        if !row.pending {
+                            hits.push((ControlId(50000 + row.index as u64), bounds));
+                        }
                     }
-                    if !row.pending {
-                        hits.push((ControlId(50000 + row.index as u64), bounds));
-                    }
-                }
-            });
+                },
+            )?;
         }
         let summary = view.summary;
         let memo = scope.create_memo(move |_| summary.get());
-        view.nodes.bind(scope, memo, |summary, scene, _| {
-            if let Some((count, truncated)) = summary {
-                if count == 0 {
-                    text(scene, 24, 180, "NO DIRECT .BKR RECORDS", 1, 0x9bb1cf);
+        view.nodes.bind_layout(
+            scope,
+            memo,
+            &layout,
+            &[node_id(&layout, Component::Summary)],
+            |summary, _, geometry, scene, _| {
+                let bounds = geometry.bounds;
+                if let Some((count, truncated)) = summary {
+                    if count == 0 {
+                        paint_text(
+                            scene,
+                            bounds,
+                            [0, 10],
+                            "NO DIRECT .BKR RECORDS",
+                            1,
+                            0x9bb1cf,
+                        );
+                    }
+                    paint_text(
+                        scene,
+                        bounds,
+                        [0, 302],
+                        &format!(
+                            "{} RECORDS{}",
+                            count,
+                            if truncated {
+                                " - DIRECTORY LIMIT REACHED"
+                            } else {
+                                ""
+                            }
+                        ),
+                        1,
+                        0xd8b36b,
+                    );
                 }
-                text(
-                    scene,
-                    24,
-                    472,
-                    &format!(
-                        "{} RECORDS{}",
-                        count,
-                        if truncated {
-                            " - DIRECTORY LIMIT REACHED"
-                        } else {
-                            ""
-                        }
-                    ),
-                    1,
-                    0xd8b36b,
-                );
-            }
-        });
+            },
+        )?;
         for index in 0..2 {
-            view.button_node(index);
+            view.button_node(index, &layout)?;
         }
         let preview = view.preview;
         let pending = view.pending;
@@ -566,42 +924,47 @@ impl RecordsView {
                 (false, preview.get())
             }
         });
-        view.nodes
-            .bind(scope, memo, |(pending, preview), scene, _| {
+        view.nodes.bind_layout(
+            scope,
+            memo,
+            &layout,
+            &[node_id(&layout, Component::Preview)],
+            |(pending, preview), _, geometry, scene, _| {
+                let bounds = geometry.bounds;
                 if pending {
-                    text(scene, 24, 520, "LOADING RECORDS", 2, 0xd8b36b);
+                    paint_text(scene, bounds, [0, 38], "LOADING RECORDS", 2, 0xd8b36b);
                 } else if let Some(preview) = preview {
                     if let Some(classes) = preview.bms_score {
                         for (y, label) in [
-                            (482, format!("PREFIX EX {}", classes.ex_score)),
+                            (0, format!("PREFIX EX {}", classes.ex_score)),
                             (
-                                492,
+                                10,
                                 format!("PGREAT {} GREAT {}", classes.pgreat, classes.great),
                             ),
                             (
-                                502,
+                                20,
                                 format!(
                                     "GOOD {} BAD {} POOR {}",
                                     classes.good, classes.bad, classes.poor
                                 ),
                             ),
                         ] {
-                            text(scene, 24, y, &label, 1, 0xd8b36b);
+                            paint_text(scene, bounds, [0, y], &label, 1, 0xd8b36b);
                         }
                     } else {
-                        text(
+                        paint_text(
                             scene,
-                            24,
-                            482,
+                            bounds,
+                            [0, 0],
                             "PREFIX CLASS SCORE UNAVAILABLE",
                             1,
                             0x9bb1cf,
                         );
                     }
-                    text(
+                    paint_text(
                         scene,
-                        24,
-                        514,
+                        bounds,
+                        [0, 32],
                         &format!(
                             "OPERATIONS {}   START {:.3} S",
                             preview.records,
@@ -610,10 +973,10 @@ impl RecordsView {
                         1,
                         0xb6cce6,
                     );
-                    text(
+                    paint_text(
                         scene,
-                        24,
-                        524,
+                        bounds,
+                        [0, 42],
                         &format!(
                             "UNTIL {}",
                             preview.until.map_or("UNKNOWN".into(), |at| format!(
@@ -624,45 +987,45 @@ impl RecordsView {
                         1,
                         0xb6cce6,
                     );
-                    text(
+                    paint_text(
                         scene,
-                        24,
-                        534,
+                        bounds,
+                        [0, 52],
                         &format!("HITS {} MISSES {}", preview.hits, preview.misses),
                         1,
                         0x9bb1cf,
                     );
-                    text(
+                    paint_text(
                         scene,
-                        24,
-                        544,
+                        bounds,
+                        [0, 62],
                         &format!("COMBO {} MAX {}", preview.combo, preview.max_combo),
                         1,
                         0x9bb1cf,
                     );
-                    let (bias, absolute) = crate::timing_display::summary(&preview.timing);
-                    text(scene, 24, 554, &bias, 1, 0x9bb1cf);
-                    text(scene, 24, 564, &absolute, 1, 0x9bb1cf);
+                    let (bias, absolute) = crate::timing_display::record(&preview.timing);
+                    paint_text(scene, bounds, [0, 72], &bias, 1, 0x9bb1cf);
+                    paint_text(scene, bounds, [0, 82], &absolute, 1, 0x9bb1cf);
                     let end = preview.end.map_or_else(
                         || "END UNLIMITED".into(),
                         |end| format!("END {} NS", end.as_nanos()),
                     );
-                    text(scene, 560, 514, &end, 1, 0xb6cce6);
+                    paint_text(scene, bounds, [536, 32], &end, 1, 0xb6cce6);
                     if let Some((player, result)) = preview.historical {
-                        use crate::play_result::{PlayResultScope, PlayResultOutcome};
                         use crate::gauge::GaugeFailure;
-                        text(
+                        use crate::play_result::{PlayResultOutcome, PlayResultScope};
+                        paint_text(
                             scene,
-                            560,
-                            524,
+                            bounds,
+                            [536, 42],
                             &format!("HISTORICAL PLAYER {}", player.0),
                             1,
                             0xd8b36b,
                         );
-                        text(
+                        paint_text(
                             scene,
-                            560,
-                            534,
+                            bounds,
+                            [536, 52],
                             match result.scope {
                                 PlayResultScope::FullSong => "STORED SCOPE FULL SONG",
                                 PlayResultScope::PracticeSection { .. } => {
@@ -672,10 +1035,10 @@ impl RecordsView {
                             1,
                             0xd8b36b,
                         );
-                        text(
+                        paint_text(
                             scene,
-                            560,
-                            544,
+                            bounds,
+                            [536, 62],
                             match result.outcome {
                                 PlayResultOutcome::Cleared => "STORED OUTCOME CLEARED",
                                 PlayResultOutcome::BelowClearThreshold => {
@@ -691,22 +1054,22 @@ impl RecordsView {
                             1,
                             0xd8b36b,
                         );
-                        text(
+                        paint_text(
                             scene,
-                            560,
-                            554,
+                            bounds,
+                            [536, 72],
                             &format!("STORED GAUGE {} UNITS", result.gauge.level_units),
                             1,
                             0xd8b36b,
                         );
                         if preview.archive_failed {
-                            text(scene, 560, 564, "ARCHIVE DIAGNOSTIC", 1, 0xf07878);
+                            paint_text(scene, bounds, [536, 82], "ARCHIVE DIAGNOSTIC", 1, 0xf07878);
                         }
                     } else {
-                        text(
+                        paint_text(
                             scene,
-                            560,
-                            524,
+                            bounds,
+                            [536, 42],
                             if preview.archive_failed {
                                 "HISTORICAL ARCHIVE UNAVAILABLE"
                             } else {
@@ -721,68 +1084,170 @@ impl RecordsView {
                         );
                     }
                 } else {
-                    text(
+                    paint_text(
                         scene,
-                        24,
-                        520,
+                        bounds,
+                        [0, 38],
                         "PREVIEW A COMPATIBLE RECORD BEFORE WATCH / ADD",
                         1,
                         0x9bb1cf,
                     );
                 }
-            });
+            },
+        )?;
         let opponents = view.opponents;
         let memo = scope.create_memo(move |_| opponents.get());
-        view.nodes.bind(scope, memo, |opponents, scene, _| {
-            text(
-                scene,
-                24,
-                592,
-                &format!("SAVED GHOSTS {opponents}/8 - DRAFT ONLY"),
-                1,
-                0x9bb1cf,
-            )
-        });
+        view.nodes.bind_layout(
+            scope,
+            memo,
+            &layout,
+            &[node_id(&layout, Component::Opponents)],
+            |opponents, _, geometry, scene, _| {
+                let bounds = geometry.bounds;
+                paint_text(
+                    scene,
+                    bounds,
+                    [0, 0],
+                    &format!("SAVED GHOSTS {opponents}/8 - DRAFT ONLY"),
+                    1,
+                    0x9bb1cf,
+                )
+            },
+        )?;
         let selected_opponents = view.selected_opponents;
         let memo = scope.create_memo(move |_| selected_opponents.get());
-        view.nodes.bind(scope, memo, |counts, scene, _| {
-            text(
-                scene,
-                24,
-                576,
-                &format!("SELECTED OWN {} / OTHER {}", counts[0], counts[1]),
-                1,
-                0x9bb1cf,
-            );
-        });
+        view.nodes.bind_layout(
+            scope,
+            memo,
+            &layout,
+            &[node_id(&layout, Component::SelectedOpponents)],
+            |counts, _, geometry, scene, _| {
+                let bounds = geometry.bounds;
+                paint_text(
+                    scene,
+                    bounds,
+                    [0, 0],
+                    &format!("SELECTED OWN {} / OTHER {}", counts[0], counts[1]),
+                    1,
+                    0x9bb1cf,
+                );
+            },
+        )?;
         for index in 2..BUTTONS.len() {
-            view.button_node(index);
+            view.button_node(index, &layout)?;
         }
         let message = view.message;
         let memo = scope.create_memo(move |_| message.get());
-        view.nodes.bind(scope, memo, |message, scene, _| {
-            if let Some(message) = message {
-                text(scene, 24, 665, &message, 1, 0x74e5c5);
-            }
-        });
+        view.nodes.bind_layout(
+            scope,
+            memo,
+            &layout,
+            &[node_id(&layout, Component::Message)],
+            |message, _, geometry, scene, _| {
+                let bounds = geometry.bounds;
+                if let Some(message) = message {
+                    paint_text(scene, bounds, [0, 0], &message, 1, 0x74e5c5);
+                }
+            },
+        )?;
         let error = view.error;
         let memo = scope.create_memo(move |_| error.get());
-        view.nodes.bind(scope, memo, |error, scene, _| {
-            if let Some(error) = error {
-                text_field_value(
-                    scene,
-                    &error,
-                    Bounds {
-                        x: 24,
-                        y: 682,
-                        width: 906,
-                        height: 30,
-                    },
-                );
-            }
-        });
+        view.nodes.bind_layout(
+            scope,
+            memo,
+            &layout,
+            &[node_id(&layout, Component::Error)],
+            |error, _, geometry, scene, _| {
+                let bounds = geometry.bounds;
+                if let Some(error) = error {
+                    text_field_value(scene, &error, bounds);
+                }
+            },
+        )?;
         view.nodes.validate()?;
+        drop(layout);
         Ok(view)
+    }
+    /// Resize the existing logical surface; fixed record coordinates crop rather than remount.
+    pub fn resize(&self, width: u32, height: u32) -> Result<bool, String> {
+        let mut candidate = self.layout.borrow().clone();
+        if !candidate.resize([width, height])? {
+            return Ok(false);
+        }
+        self.publish_layout(candidate)
+    }
+    /// Direct child size/position/clip changes retain row and editor identities.
+    pub fn update_layout(&self, updates: &[LayoutUpdate]) -> Result<bool, String> {
+        let mut candidate = self.layout.borrow().clone();
+        if !candidate.update(updates)? {
+            return Ok(false);
+        }
+        self.publish_layout(candidate)
+    }
+    fn publish_layout(&self, candidate: MountedLayout<Component>) -> Result<bool, String> {
+        let detail_changed = self.layout.borrow().extent() != candidate.extent()
+            || [
+                Component::Background,
+                Component::DetailBody,
+                Component::DetailButton(0),
+                Component::DetailButton(1),
+                Component::DetailButton(2),
+            ]
+            .iter()
+            .any(|&component| {
+                candidate
+                    .changed_nodes()
+                    .contains(&node_id(&candidate, component))
+            });
+        let staged = if detail_changed {
+            self.detail_cache
+                .borrow()
+                .as_ref()
+                .map(|cache| {
+                    detail_geometry(
+                        &candidate,
+                        &cache.presentation,
+                        &cache.grade_geometry,
+                        cache.grade_page,
+                        self.detail_hovered.get(),
+                        self.detail_armed.get(),
+                    )
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        self.nodes.relayout(&candidate)?;
+        *self.layout.borrow_mut() = candidate;
+        if let Some(geometry) = staged {
+            self.detail_cache.borrow_mut().as_mut().unwrap().geometry = geometry;
+        }
+        if self.details.get() && detail_changed {
+            self.detail_dirty.set(true);
+        }
+        Ok(true)
+    }
+    /// Paint and hits use the same currently published geometry in both modes.
+    pub fn hit(&self, point: (f64, f64)) -> Option<ControlId> {
+        let layout = self.layout.borrow();
+        if layout.suspended() {
+            return None;
+        }
+        if !self.details.get() {
+            return self.nodes.hit(point);
+        }
+        let cache = self.detail_cache.borrow();
+        let cache = cache.as_ref()?;
+        DETAIL_BUTTONS
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, (id, _, _))| {
+                let geometry = layout.geometry(node_id(&layout, Component::DetailButton(index)))?;
+                (detail_available(*id, cache.grade_page, cache.presentation.grade_page_count())
+                    && clipped_bounds(geometry).is_some_and(|bounds| bounds.contains(point)))
+                .then_some(*id)
+            })
     }
     pub const fn id(&self) -> ScreenInstanceId {
         self.id
@@ -793,11 +1258,20 @@ impl RecordsView {
         }
     }
     pub fn update(&self, frame: RecordsFrame<'_>) -> Result<(), String> {
+        self.update_projected(frame)
+    }
+    pub fn update_visual(&self, frame: VisualRecordsFrame<'_>) -> Result<(), String> {
+        if let Some(preview) = frame.preview {
+            preview.validate()?;
+        }
+        self.update_projected(frame)
+    }
+    fn update_projected<P: RecordInfo>(&self, frame: RecordsFrame<'_, P>) -> Result<(), String> {
         validate_frame(&frame)?;
         let mut staged = None;
         let mut staged_geometry = None;
         if frame.details {
-            let preview = frame.preview.expect("validated detail preview");
+            let preview = frame.preview.expect("validated detail preview").project();
             let value = preview.historical.expect("validated historical value");
             let same = self.detail_cache.borrow().as_ref().is_some_and(|cache| {
                 cache.value == value
@@ -817,6 +1291,7 @@ impl RecordsView {
                 let presentation = crate::historical_record_presentation::HistoricalRecordPresentation::from_record_with_class_score(value, preview.historical_score.as_deref(), preview.historical_comparison.as_deref(), preview.historical_bms_score)?;
                 let grade_geometry = presentation.prepare_grade_page(frame.grade_page)?;
                 let geometry = detail_geometry(
+                    &self.layout.borrow(),
                     &presentation,
                     &grade_geometry,
                     frame.grade_page,
@@ -826,8 +1301,8 @@ impl RecordsView {
                 staged = Some(DetailCache {
                     bms_score: preview.historical_bms_score,
                     value,
-                    score: preview.historical_score.clone(),
-                    comparison: preview.historical_comparison.clone(),
+                    score: (*preview.historical_score).clone(),
+                    comparison: (*preview.historical_comparison).clone(),
                     presentation,
                     geometry,
                     grade_page: frame.grade_page,
@@ -850,6 +1325,7 @@ impl RecordsView {
                     cache.presentation.prepare_grade_page(frame.grade_page)?
                 };
                 let geometry = detail_geometry(
+                    &self.layout.borrow(),
                     &cache.presentation,
                     &grade_geometry,
                     frame.grade_page,
@@ -974,15 +1450,32 @@ impl RecordsView {
         scene: &mut Scene,
         hits: &mut Vec<(ControlId, Bounds)>,
     ) -> Result<(), String> {
+        if self.layout.borrow().suspended() {
+            scene.clear();
+            hits.clear();
+            self.detail_dirty.set(false);
+            return Ok(());
+        }
         if self.details.get() {
             let cache = self.detail_cache.borrow();
             let cache = cache.as_ref().ok_or("Records details cache unavailable")?;
+            let geometry = cache
+                .geometry
+                .as_ref()
+                .ok_or("Records details geometry unavailable")?;
             scene.clear();
             hits.clear();
-            scene.append_geometry(&cache.geometry)?;
-            for (id, bounds, _) in DETAIL_BUTTONS {
+            scene.append_geometry(geometry)?;
+            let layout = self.layout.borrow();
+            for (index, (id, _, _)) in DETAIL_BUTTONS.into_iter().enumerate() {
                 if detail_available(id, cache.grade_page, cache.presentation.grade_page_count()) {
-                    hits.push((id, bounds));
+                    if let Some(bounds) = clipped_bounds(
+                        layout
+                            .geometry(node_id(&layout, Component::DetailButton(index)))
+                            .unwrap(),
+                    ) {
+                        hits.push((id, bounds));
+                    }
                 }
             }
         } else {
@@ -991,8 +1484,12 @@ impl RecordsView {
         self.detail_dirty.set(false);
         Ok(())
     }
-    fn button_node(&mut self, index: usize) {
-        let (id, bounds, label) = BUTTONS[index];
+    fn button_node(
+        &mut self,
+        index: usize,
+        layout: &MountedLayout<Component>,
+    ) -> Result<(), String> {
+        let (id, _, label) = BUTTONS[index];
         let gate = self.gates[index];
         let hovered = self.hovered;
         let armed = self.armed;
@@ -1003,10 +1500,13 @@ impl RecordsView {
                 (false, false, false)
             }
         });
-        self.nodes.bind(
+        self.nodes.bind_layout(
             self.scope,
             memo,
-            move |(available, hovered, armed), scene, hits| {
+            layout,
+            &[node_id(layout, Component::Button(index))],
+            move |(available, hovered, armed), _, geometry, scene, hits| {
+                let bounds = geometry.bounds;
                 if index < 2 && !available {
                     return;
                 }
@@ -1015,7 +1515,8 @@ impl RecordsView {
                     hits.push((id, bounds));
                 }
             },
-        );
+        )?;
+        Ok(())
     }
 }
 impl Drop for RecordsView {
@@ -1023,6 +1524,10 @@ impl Drop for RecordsView {
         self.scope.dispose();
     }
 }
+
+#[cfg(test)]
+#[path = "records_visual_fixtures.rs"]
+mod visual_fixtures;
 
 #[cfg(test)]
 mod fixtures {
@@ -1343,7 +1848,7 @@ mod fixtures {
         let weak = view.nodes.weak_dirty();
         drop(view);
         assert!(weak.upgrade().is_none());
-        assert!(RecordsView::new(ScreenInstanceId(8), 800, 600).is_err());
+        assert!(RecordsView::new(ScreenInstanceId(8), 800, 600).is_ok());
     }
     #[test]
     fn excessive_opponent_draft_still_displays_count_and_allows_clear_and_back() {
@@ -1363,12 +1868,10 @@ mod fixtures {
         assert!(hits.iter().any(|(id, _)| *id == ControlId(55)));
         // This node displays the actual draft count, including9/8, so invalid
         // repeated settings remain editable rather than disabling the screen.
-        assert!(
-            scene
-                .rectangles()
-                .iter()
-                .any(|rect| rect.bounds[1] == 592.0)
-        );
+        assert!(scene
+            .rectangles()
+            .iter()
+            .any(|rect| rect.bounds[1] == 592.0));
     }
 }
 
@@ -1387,3 +1890,7 @@ mod records_grade_page_fixtures;
 #[cfg(test)]
 #[path = "records_comparison_page_fixtures.rs"]
 mod records_comparison_page_fixtures;
+
+#[cfg(test)]
+#[path = "records_declarative_fixtures.rs"]
+mod records_declarative_fixtures;

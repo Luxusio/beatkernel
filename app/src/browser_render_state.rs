@@ -1,7 +1,7 @@
 //! Bounded committed display state. This owner never judges, advances time or proves completion.
 use crate::{
     competition::ScoreSummary,
-    competition_presentation::{CompetitionSnapshot, NetworkStatus},
+    competition_presentation::CompetitionSnapshot,
     gauge::{BmsGauge, GaugeSnapshot, MAX_GAUGE_UNITS},
     image_assets::{ImageAssetLimits, ImageAssets, ImageAssetsTransfer},
     local_players::PlayerId,
@@ -217,32 +217,9 @@ impl RenderMemberScalars {
     }
 }
 pub(crate) fn validate_comparison(snapshot: &CompetitionSnapshot) -> Result<(), String> {
-    if snapshot.ghosts.len() > 8 {
-        return Err("visual comparison ghost capacity exceeded".into());
-    }
-    for ghost in &snapshot.ghosts {
-        if ghost.label.is_empty()
-            || ghost.label.len() > 256
-            || ghost.label.chars().count() > 64
-            || ghost.label.chars().any(char::is_control)
-            || ghost.combo > ghost.max_combo
-            || ghost.max_combo > ghost.hits
-            || ghost.hits.checked_add(ghost.misses).is_none()
-        {
-            return Err("invalid visual comparison".into());
-        }
-    }
-    if let Some(network) = &snapshot.network {
-        if let Some(progress) = network.progress {
-            if network.status == NetworkStatus::Waiting {
-                return Err("waiting peer has progress".into());
-            }
-            crate::multiplayer_protocol::validate_progress(None, progress)
-                .map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(())
+    crate::result_archive::validate_visual_comparison(snapshot)
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderProgressPage {
     pub index: u32,

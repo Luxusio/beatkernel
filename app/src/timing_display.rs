@@ -47,12 +47,19 @@ pub fn judge_label(event: &JudgeEvent) -> (String, u32) {
 }
 /// Full accepted-stage bias and mean absolute error, with explicit empty state.
 pub fn summary(timing: &crate::timing::TimingSummary) -> (String, String) {
+    record(&timing.record())
+}
+/// Read-only timing labels shared by native and transferred menu values.
+pub fn record(timing: &crate::timing::TimingRecord) -> (String, String) {
+    let mean = (timing.count != 0)
+        .then(|| i64::try_from(timing.sum / i128::from(timing.count)).ok())
+        .flatten();
+    let absolute = (timing.count != 0)
+        .then(|| u64::try_from(timing.absolute_sum / u128::from(timing.count)).ok())
+        .flatten();
     (
-        format!("BIAS {}", timing.mean_ns().map_or("--".into(), signed_ms)),
-        format!(
-            "MEAN ABS {}",
-            timing.mean_absolute_ns().map_or("--".into(), unsigned_ms)
-        ),
+        format!("BIAS {}", mean.map_or("--".into(), signed_ms)),
+        format!("MEAN ABS {}", absolute.map_or("--".into(), unsigned_ms)),
     )
 }
 

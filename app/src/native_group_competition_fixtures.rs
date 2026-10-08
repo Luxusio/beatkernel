@@ -6,7 +6,7 @@ use crate::{
     local_runtime::{InputResult, RuntimeGroup},
     multiplayer::Progress,
     player::{self, GhostSnapshot, NetworkSnapshot, NetworkStatus},
-    replay_capture::{LiveReplayCapture, setup_header},
+    replay_capture::{setup_header, LiveReplayCapture},
     section_start::source_at,
 };
 use beatkernel::{
@@ -16,15 +16,194 @@ use beatkernel::{
         GameControlId, PhysicalControlId, PhysicalInputEvent,
     },
     judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
-    replay::codec::{ReplayFile, encode_replay},
+    replay::codec::{encode_replay, ReplayFile},
     runtime::RuntimeProcessingClock,
     time::{ClockMapper, ClockMappingQuality, ClockPoint, Duration},
     transport::{Rate, Transport},
 };
-use beatkernel_bms::{ParseOptions, parse_seeded};
+use beatkernel_bms::{parse_seeded, ParseOptions};
 
 const DOMAIN: ClockDomainId = ClockDomainId(17);
 const PREROLL: i64 = 100_000_000;
+
+fn selected_policy(
+    source: &BmsChart,
+    kind: beatkernel_bms::BmsGaugeKind,
+    class: beatkernel_bms::BmsJudgment,
+    offset: i64,
+) -> crate::play_policy::ResolvedPlayPolicy {
+    crate::play_policy::ResolvedPlayPolicy::bms(
+        source,
+        kind,
+        &[crate::play_policy::ClassifiedWindow {
+            judgment: class,
+            window: JudgeWindow {
+                grade: JudgeGrade(1),
+                early: Duration::ZERO,
+                late: Duration::ZERO,
+            },
+        }],
+        offset,
+    )
+    .unwrap()
+}
+
+#[test]
+fn selected_group_identity_retains_actual_classes_gauge_section_seed_and_default_bytes() {
+    let source = source();
+    let options = CompetitionOptions::default();
+    let start = Timestamp::from_nanos(1_000_000_000);
+    let end = Some(Timestamp::from_nanos(2_500_000_000));
+    let members = configs(&source, &[PlayerId(7), PlayerId(u32::MAX)], start, 7);
+    let builtin = crate::play_policy::ResolvedPlayPolicy::builtin(0, 0, 7).unwrap();
+    let defaults = [(PlayerId(7), &builtin), (PlayerId(u32::MAX), &builtin)];
+    assert_eq!(
+        canonical_identity_with_policies(
+            &options, &source, &members, &defaults, DOMAIN, start, 71, end, PREROLL
+        )
+        .unwrap(),
+        canonical_identity(&options, &source, &members, DOMAIN, start, 71, end, PREROLL).unwrap()
+    );
+    for kind in beatkernel_bms::BmsGaugeKind::ALL {
+        let selected = selected_policy(&source, kind, beatkernel_bms::BmsJudgment::Great, 7);
+        let policies = [(PlayerId(7), &selected), (PlayerId(u32::MAX), &selected)];
+        let actual = canonical_identity_with_policies(
+            &options, &source, &members, &policies, DOMAIN, start, 71, end, PREROLL,
+        )
+        .unwrap();
+        let limits = replay_limits().unwrap();
+        let header = crate::replay_capture::setup_play_policy_header(
+            &members[0].judge,
+            DOMAIN,
+            limits,
+            start,
+            71,
+            None,
+            beatkernel_bms::BmsInputMode::ButtonOnly,
+            crate::input_sounds::InputSoundIdentity::from_source(&source).unwrap(),
+            &selected,
+        )
+        .unwrap();
+        let expected = crate::multiplayer::competition_identity_for_section(
+            &header,
+            env!("CARGO_PKG_VERSION"),
+            limits,
+            end,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        for (seed, endpoint) in [
+            (72, end),
+            (71, None),
+            (71, Some(Timestamp::from_nanos(2_500_000_001))),
+        ] {
+            assert_ne!(
+                canonical_identity_with_policies(
+                    &options, &source, &members, &policies, DOMAIN, start, seed, endpoint, PREROLL
+                )
+                .unwrap(),
+                actual
+            );
+        }
+        assert!(members
+            .iter()
+            .all(|member| member.judge.effective_song_time().is_none()));
+    }
+}
+
+#[test]
+fn selected_group_refuses_missing_reordered_and_mismatched_member_policy_before_endpoint_acquisition(
+) {
+    let source = source();
+    let start = Timestamp::ZERO;
+    let members = configs(&source, &[PlayerId(7), PlayerId(u32::MAX)], start, 0);
+    let selected = selected_policy(
+        &source,
+        beatkernel_bms::BmsGaugeKind::Hard,
+        beatkernel_bms::BmsJudgment::Great,
+        0,
+    );
+    let other_class = selected_policy(
+        &source,
+        beatkernel_bms::BmsGaugeKind::Hard,
+        beatkernel_bms::BmsJudgment::PGreat,
+        0,
+    );
+    assert_eq!(selected.gauge(), other_class.gauge());
+    let other_gauge = selected_policy(
+        &source,
+        beatkernel_bms::BmsGaugeKind::Hazard,
+        beatkernel_bms::BmsJudgment::Great,
+        0,
+    );
+    let other_profile = selected_policy(
+        &source,
+        beatkernel_bms::BmsGaugeKind::Hard,
+        beatkernel_bms::BmsJudgment::Great,
+        1,
+    );
+    let (options, _) =
+        CompetitionOptions::extract(&["--mp-host".into(), "127.0.0.1:34567".into()]).unwrap();
+    let cases = [
+        vec![],
+        vec![(PlayerId(7), &selected)],
+        vec![(PlayerId(u32::MAX), &selected), (PlayerId(7), &selected)],
+        vec![(PlayerId(7), &selected), (PlayerId(7), &selected)],
+        vec![(PlayerId(7), &selected), (PlayerId(99), &selected)],
+        vec![(PlayerId(7), &selected), (PlayerId(u32::MAX), &other_class)],
+        vec![(PlayerId(7), &selected), (PlayerId(u32::MAX), &other_gauge)],
+        vec![
+            (PlayerId(7), &selected),
+            (PlayerId(u32::MAX), &other_profile),
+        ],
+    ];
+    let pristine = members
+        .iter()
+        .map(|m| m.judge.stable_hash().unwrap())
+        .collect::<Vec<_>>();
+    let disabled = CompetitionOptions::default();
+    let matching = [(PlayerId(7), &selected), (PlayerId(u32::MAX), &selected)];
+    assert!(NativeGroupCompetition::prepare_with_policies(
+        &disabled, &source, &members, &matching, DOMAIN, start, 71, None, PREROLL
+    )
+    .unwrap()
+    .is_none());
+    for policies in cases {
+        assert!(NativeGroupCompetition::prepare_with_policies(
+            &disabled, &source, &members, &policies, DOMAIN, start, 71, None, PREROLL
+        )
+        .is_err());
+        assert!(canonical_identity_with_policies(
+            &options, &source, &members, &policies, DOMAIN, start, 71, None, PREROLL
+        )
+        .is_err());
+        let failure = match NativeGroupCompetition::prepare_with_policies(
+            &options, &source, &members, &policies, DOMAIN, start, 71, None, PREROLL,
+        ) {
+            Err(error) => error,
+            Ok(_) => {
+                panic!("invalid policy evidence must refuse before opening a network endpoint")
+            }
+        };
+        // A transport feature or absent TLS files must not hide a cold policy
+        // failure: the canonical preflight error is the same as preparation.
+        let expected = canonical_identity_with_policies(
+            &options, &source, &members, &policies, DOMAIN, start, 71, None, PREROLL,
+        )
+        .unwrap_err();
+        assert_eq!(failure.to_string(), expected.to_string());
+        assert_eq!(
+            members
+                .iter()
+                .map(|m| m.judge.stable_hash().unwrap())
+                .collect::<Vec<_>>(),
+            pristine
+        );
+        assert!(members
+            .iter()
+            .all(|m| m.judge.effective_song_time().is_none()));
+    }
+}
 
 fn source() -> BmsChart {
     parse_seeded(
@@ -156,11 +335,9 @@ fn actual_member_judges_share_one_canonical_identity_independent_of_roster_and_i
                 .collect::<Vec<_>>(),
             hashes
         );
-        assert!(
-            members
-                .iter()
-                .all(|member| member.judge.effective_song_time().is_none())
-        );
+        assert!(members
+            .iter()
+            .all(|member| member.judge.effective_song_time().is_none()));
     }
     assert_ne!(
         canonical_identity(&options, &source, &first, DOMAIN, start, 0, end, PREROLL).unwrap(),
@@ -206,19 +383,17 @@ fn identity_preflight_rejects_later_member_mismatch_started_judges_and_invalid_g
     let pristine = members[0].judge.stable_hash().unwrap();
     let mut differently_calibrated = configs(&source, &[players[2]], Timestamp::ZERO, 1);
     members[2] = differently_calibrated.pop().unwrap();
-    assert!(
-        canonical_identity(
-            &options,
-            &source,
-            &members,
-            DOMAIN,
-            Timestamp::ZERO,
-            0,
-            None,
-            PREROLL
-        )
-        .is_err()
-    );
+    assert!(canonical_identity(
+        &options,
+        &source,
+        &members,
+        DOMAIN,
+        Timestamp::ZERO,
+        0,
+        None,
+        PREROLL
+    )
+    .is_err());
     assert_eq!(members[0].judge.stable_hash().unwrap(), pristine);
     members[2] = configs(&source, &[players[2]], Timestamp::ZERO, 0)
         .pop()
@@ -227,19 +402,17 @@ fn identity_preflight_rejects_later_member_mismatch_started_judges_and_invalid_g
         .judge
         .advance_to(Timestamp::from_nanos(1))
         .unwrap();
-    assert!(
-        canonical_identity(
-            &options,
-            &source,
-            &members,
-            DOMAIN,
-            Timestamp::ZERO,
-            0,
-            None,
-            PREROLL
-        )
-        .is_err()
-    );
+    assert!(canonical_identity(
+        &options,
+        &source,
+        &members,
+        DOMAIN,
+        Timestamp::ZERO,
+        0,
+        None,
+        PREROLL
+    )
+    .is_err());
     assert_eq!(members[0].judge.stable_hash().unwrap(), pristine);
 
     let members = configs(&source, &players, Timestamp::ZERO, 0);
@@ -249,19 +422,17 @@ fn identity_preflight_rejects_later_member_mismatch_started_judges_and_invalid_g
         0,
     )
     .unwrap();
-    assert!(
-        canonical_identity(
-            &options,
-            &different_source,
-            &members,
-            DOMAIN,
-            Timestamp::ZERO,
-            0,
-            None,
-            PREROLL
-        )
-        .is_err()
-    );
+    assert!(canonical_identity(
+        &options,
+        &different_source,
+        &members,
+        DOMAIN,
+        Timestamp::ZERO,
+        0,
+        None,
+        PREROLL
+    )
+    .is_err());
     for (start, end, preroll) in [
         (-1, None, PREROLL),
         (0, Some(0), PREROLL),
@@ -269,19 +440,17 @@ fn identity_preflight_rejects_later_member_mismatch_started_judges_and_invalid_g
         (0, None, -1),
         (0, None, 10_000_000_001),
     ] {
-        assert!(
-            canonical_identity(
-                &options,
-                &source,
-                &members,
-                DOMAIN,
-                Timestamp::from_nanos(start),
-                0,
-                end.map(Timestamp::from_nanos),
-                preroll
-            )
-            .is_err()
-        );
+        assert!(canonical_identity(
+            &options,
+            &source,
+            &members,
+            DOMAIN,
+            Timestamp::from_nanos(start),
+            0,
+            end.map(Timestamp::from_nanos),
+            preroll
+        )
+        .is_err());
     }
     for players in [
         vec![],
@@ -290,33 +459,29 @@ fn identity_preflight_rejects_later_member_mismatch_started_judges_and_invalid_g
         (1..=65).map(PlayerId).collect(),
     ] {
         let invalid = configs(&source, &players, Timestamp::ZERO, 0);
-        assert!(
-            canonical_identity(
-                &options,
-                &source,
-                &invalid,
-                DOMAIN,
-                Timestamp::ZERO,
-                0,
-                None,
-                PREROLL
-            )
-            .is_err()
-        );
-    }
-    assert!(
-        canonical_identity(
+        assert!(canonical_identity(
             &options,
             &source,
-            &members,
+            &invalid,
             DOMAIN,
             Timestamp::ZERO,
             0,
             None,
-            10_000_000_000
+            PREROLL
         )
-        .is_ok()
-    );
+        .is_err());
+    }
+    assert!(canonical_identity(
+        &options,
+        &source,
+        &members,
+        DOMAIN,
+        Timestamp::ZERO,
+        0,
+        None,
+        10_000_000_000
+    )
+    .is_ok());
 }
 
 #[test]

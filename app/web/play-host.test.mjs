@@ -212,7 +212,8 @@ async function harness(faults = {}) {
     replaceChildren(...children) { this.children = []; this.value = ""; this.append(...children); }
     replaceWith(fresh) { elements.set(this.id, fresh); }
     setAttribute(name, value) { this[name] = value; }
-    getBoundingClientRect() { layoutReads++; return { ...viewport }; }
+    getBoundingClientRect() { layoutReads++; return { left: 0, top: 0, ...viewport }; }
+    get options() { return this.tagName === "select" ? this.children.filter(child => child.tagName === "option") : undefined; }
     setPointerCapture(id) {
       if (faults.captureFailure) throw faults.captureFailure;
       this.capturedPointers.add(id);
@@ -279,7 +280,8 @@ async function harness(faults = {}) {
     "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status",
     "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear",
     "local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay",
-    "historical-grade-prev", "historical-grade-next", "historical-grade-page"]) {
+    "historical-grade-prev", "historical-grade-next", "historical-grade-page",
+    "menu-open", "menu-editor", "menu-back"]) {
     elements.set(id, new Element(["chart", "records", "local-page", "captured-replay", "multiplayer-mode"].includes(id) ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -760,6 +762,88 @@ async function pagedTouchSession() {
   h.setNow(1300);
   return { h, session, worker: h.workers[0], surface: h.get("canvas") };
 }
+
+test("Window menu editor and Back bridge preserve exact owner token without audio or gameplay effects", async () => {
+  const h = await harness(); await h.preview(); const game = h.workers[0];
+  h.click("menu-open"); await flush();
+  assert.deepEqual(structuredClone(game.last("menu-open")), { kind: "menu-open", fields: ["chart.bms"],
+    roster: { players: [1], nextPlayerId: 2, assignments: [] }, opponents: [] });
+  const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+    route: 3, fields: ["1.000000001", "2.000000002"], selected: 0 };
+  await h.receive(state);
+  h.get("menu-editor").value = "604800.000000001"; h.get("menu-editor").emit("input");
+  assert.deepEqual(game.last("menu-edit"), { kind: "menu-edit", menuGeneration: 77n,
+    screen: 3n, revision: 5n, index: 0, value: "604800.000000001" });
+  h.click("menu-back"); await flush(); const back = game.last("menu-action");
+  assert.equal(back.menuGeneration, 77n); assert.equal(back.screen, 3n); assert.equal(back.revision, 5n);
+  assert.equal(back.control, 72n); assert.equal(typeof back.actionId, "bigint"); assert.ok(back.actionId > 0n);
+  assert.equal(game.messages("play-start").length, 0); assert.equal(h.opens.length, 0);
+  await h.receive({ ...state, revision: 4n, fields: ["stale overwritten field"] });
+  assert.equal(h.get("menu-editor").value, "604800.000000001", "old state cannot replace a committed editor acquisition");
+  await h.close();
+});
+
+test("menu editing during active gameplay cannot turn keyboard acquisition into UI business actions", async () => {
+  const h = await harness({ gamepads: [nativeGamepad()] }); await h.preview();
+  const session = await h.launch(), game = h.workers[0]; h.setNow(1301);
+  await h.receive({ kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+    route: 3, fields: ["0", ""], selected: 0 });
+  const edits = game.messages("menu-edit").length, actions = game.messages("menu-action").length;
+  h.get("menu-editor").value = "different song offset"; h.get("menu-editor").emit("input");
+  h.click("menu-open"); h.click("menu-back");
+  const reads = h.gamepadReads;
+  dispatchKeyboard(h, "keydown", observedKeyboard({ timeStamp: 1300.125 }).event);
+  assert.equal(h.gamepadReads, reads);
+  assert.equal(game.messages("menu-edit").length, edits); assert.equal(game.messages("menu-action").length, actions);
+  const key = game.last("play-step").events.find(event => event.key === 2);
+  assert.equal(key.hostNs, 1300125000n); assert.equal(key.down, true);
+  h.click("stop"); await flush(); await h.receive(finalScore(session.id)); await h.close();
+});
+
+test("Window menu clicks use only submitted menu geometry and preserve original resize acquisition", async () => {
+  const h = await harness(); await h.preview(); const game = h.workers[0];
+  h.click("menu-open"); await flush();
+  const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+    route: 2, fields: ["retained setting"], selected: 0 };
+  await h.receive(state); const surface = h.get("canvas");
+  surface.emit("click", { clientX: 120.25, clientY: 180.5 });
+  assert.equal(game.messages("menu-input").length, 0, "model update alone cannot establish a visible hit target");
+  const evidence = { kind: "render-geometry", mode: "menu", generation: 7n, content: 9n,
+    geometryVersion: 3n, page: 0, width: 960, height: 720,
+    menuGeneration: 77n, screen: 3n, revision: 5n };
+  await h.receive({ ...evidence, revision: 4n });
+  surface.emit("click", { clientX: 120.25, clientY: 180.5 });
+  assert.equal(game.messages("menu-input").length, 0);
+  await h.receive(evidence);
+  h.resize(480, 360); const reads = h.gamepadReads;
+  for (const [clientX, clientY] of [[NaN, 180.5], [120.25, Infinity], [undefined, 180.5], [120.25, undefined]]) {
+    surface.emit("click", { clientX, clientY });
+    assert.equal(game.messages("menu-input").length, 0, "malformed acquired coordinates cannot enter menu semantics");
+  }
+  surface.emit("click", { clientX: 120.25, clientY: 180.5 });
+  const input = game.last("menu-input"); assert.ok(input);
+  assert.equal(input.menuGeneration, 77n); assert.equal(input.screen, 3n); assert.equal(input.revision, 5n);
+  assert.equal(input.geometryVersion, 3n); assert.equal(input.x, 240.5); assert.equal(input.y, 361);
+  assert.equal(h.gamepadReads, reads); assert.equal(h.opens.length, 0);
+  assert.equal(game.messages("play-step").length, 0);
+  await h.close();
+});
+
+test("menu IME bridge commits text once and ignores composition and retired owner input", async () => {
+  const h = await harness(); await h.preview(); const game = h.workers[0]; h.click("menu-open"); await flush();
+  await h.receive({ kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+    route: 3, fields: [""], selected: 0 });
+  const editor = h.get("menu-editor");
+  editor.emit("compositionstart"); editor.value = "きょ"; editor.emit("input", { isComposing: true });
+  assert.equal(game.messages("menu-edit").length, 0);
+  editor.value = "曲🎵"; editor.emit("compositionend"); editor.emit("input", { isComposing: false });
+  assert.equal(game.messages("menu-edit").length, 1);
+  assert.equal(game.last("menu-edit").value, "曲🎵");
+  h.window.emit("pagehide"); await flush(); const count = game.messages("menu-edit").length;
+  editor.value = "obsolete"; editor.emit("input", { isComposing: false });
+  assert.equal(game.messages("menu-edit").length, count);
+  await h.close();
+});
 
 test("two owners transfer only renderer canvas and CPU readiness does not wait for GPU readiness", async () => {
   const h = await harness({ holdRendererReady: true });

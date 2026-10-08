@@ -666,17 +666,9 @@ fn main() -> Result<()> {
 /// Validate settings through the same parsers as play, without opening any resources.
 #[allow(dead_code)] // Standalone native binaries have no settings screen.
 pub(crate) fn validate_args(args: &[String]) -> Result<()> {
-    let (competition, native) =
+    let (_competition, native) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
-    let options = parse(&native)?;
-    validate_finite_modes(&options, &competition)
-}
-
-fn validate_finite_modes(
-    options: &Options,
-    competition: &beatkernel_bms_runtime::competition_live::CompetitionOptions,
-) -> Result<()> {
-    beatkernel_bms_runtime::native_judge::validate_policy_competition(options.gauge, competition)?;
+    parse(&native)?;
     Ok(())
 }
 
@@ -706,12 +698,11 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
             "Local play: repeat --local-player ID:EXACT_INTERFACE_PATH for 2..64 distinct keyboards, without --keyboard-path. Stable positive u32 IDs are preserved in GUI scores and .p<ID>.bkr replay files. --advance-lag-ns 0..1000000000 (default 2000000) controls the common input frontier. Network local groups share one connection and start agreement; saved ghosts remain per-player. Native commands compose the graphical player's actual runtime."
         );
         println!(
-            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --start-ns N --end-ns N --preroll-ns N\nGauge timing: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Saved ghosts must match the chosen policy. Nondefault multiplayer remains unavailable.\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Optional --end-ns unsigned strictly after start completes a native-presented, input-drained finite prefix for solo or local WASAPI/SDK-enabled ASIO; ASIO waits for the actual crossing block upper presentation interval. Solo and local group network peers must agree on the same finite section endpoint. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
+            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --start-ns N --end-ns N --preroll-ns N\nGauge timing: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Saved ghosts must match the chosen policy. Multiplayer peers must match the chosen gauge and judgment policy.\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Optional --end-ns unsigned strictly after start completes a native-presented, input-drained finite prefix for solo or local WASAPI/SDK-enabled ASIO; ASIO waits for the actual crossing block upper presentation interval. Solo and local group network peers must agree on the same finite section endpoint. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
         );
         return Ok(());
     }
     let options = parse(&args)?;
-    validate_finite_modes(&options, &competition_options)?;
     #[cfg(target_os = "windows")]
     {
         native::run(options, competition_options)
@@ -734,13 +725,13 @@ mod native {
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
     use beatkernel_bms_runtime::native_audio::{
-        NativeAudioConfig, PreparedNativeAudio, prepare_audio, prepare_input_sounds,
-        prepare_mine_sounds,
+        prepare_audio, prepare_input_sounds, prepare_mine_sounds, NativeAudioConfig,
+        PreparedNativeAudio,
     };
     use beatkernel_bms_runtime::{
+        native_chart::{prepare_chart, NativeChartConfig},
+        native_judge::{capture_limits, prepare_section_capture_for_policy, NativeJudgeConfig},
         ChannelPolicy,
-        native_chart::{NativeChartConfig, prepare_chart},
-        native_judge::{NativeJudgeConfig, capture_limits, prepare_section_capture_for_policy},
     };
     use beatkernel_bms_runtime::{
         playback_pause::NativePause,
@@ -748,13 +739,13 @@ mod native {
     };
     use beatkernel_platform::{
         audio::{
-            AudioOutputStream, AudioStreamStatus,
             presentation::{
-                PresentationError, WasapiPresentationClock,
                 discipline::{
                     DisciplineConfig, DisciplineError, ObservationAdmission, PresentationDiscipline,
                 },
+                PresentationError, WasapiPresentationClock,
             },
+            AudioOutputStream, AudioStreamStatus,
         },
         windows::{
             audio::WasapiStream,
@@ -770,9 +761,8 @@ mod native {
         Foundation::{HINSTANCE, HWND},
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW,
-            UnregisterClassW, WM_CLOSE, WNDCLASSW,
-            WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, UnregisterClassW,
+            WM_CLOSE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         },
     };
     pub(super) const HOST: ClockDomainId = ClockDomainId(1);
@@ -1051,14 +1041,14 @@ mod native {
             }
         }
     }
-    use beatkernel_bms_runtime::native_gameplay::{
-        run_gameplay_audio_with_policy_and_result_and_score,
-        AudioGameplayConfig, InputBatch, NativeAudioGameplaySession,
-        NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
-    };
     use beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation;
     use beatkernel_bms_runtime::native_audio_startup::{
         new_audio_presentation, prime_native_audio, NativeAudioSeedPort, SeededNativeAudio,
+    };
+    use beatkernel_bms_runtime::native_gameplay::{
+        run_gameplay_audio_with_policy_and_result_and_score, AudioGameplayConfig, InputBatch,
+        NativeAudioGameplaySession, NativeGameplayConfig, NativeGameplayDevice,
+        NativeGameplayResult,
     };
     use beatkernel_bms_runtime::native_start::{
         start_committed, NativeStartConfig, NativeStartDevice, NativeStartObservation,
@@ -1189,8 +1179,12 @@ mod native {
     }
     impl NativeAudioSeedPort for AudioSeedDevice<'_> {
         fn service_input(&mut self) -> NativeGameplayResult<bool> {
-            if player::cancelled() { self.collector.cancel(); return Ok(false); }
-            self.collected.service_start(self.collector, true, self.pre_origin, 256)
+            if player::cancelled() {
+                self.collector.cancel();
+                return Ok(false);
+            }
+            self.collected
+                .service_start(self.collector, true, self.pre_origin, 256)
         }
         fn observe_audio(
             &mut self,
@@ -1276,8 +1270,12 @@ mod native {
             self.stream.start()
         }
         fn service_input(&mut self, retain: bool) -> NativeStartResult<bool> {
-            if player::cancelled() { self.collector.cancel(); return Ok(false); }
-            self.collected.service_start(self.collector, retain, self.pre_origin, 256)
+            if player::cancelled() {
+                self.collector.cancel();
+                return Ok(false);
+            }
+            self.collected
+                .service_start(self.collector, retain, self.pre_origin, 256)
         }
         fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<Self::Evidence>>> {
             self.stream.startup_native_observation(&mut self.physical)
@@ -1374,9 +1372,12 @@ mod native {
             );
         }
         let (mut input_owner, selected_metadata) = super::collected_input::CollectorOwner::open(
-            clock, super::collected_input::Selection::Solo(options.keyboard_path.clone()),
+            clock,
+            super::collected_input::Selection::Solo(options.keyboard_path.clone()),
         )?;
-        let selected = selected_metadata.first().map(|(id, handle)| (id.0, *handle));
+        let selected = selected_metadata
+            .first()
+            .map(|(id, handle)| (id.0, *handle));
         let keyboard_selector = selected.map_or(DeviceSelector::Any, |(id, _)| {
             DeviceSelector::Exact(beatkernel::input::DeviceId(id))
         });
@@ -1537,8 +1538,16 @@ mod native {
                 } else {
                     if let Some(competition) = competition.as_mut() {
                         if !competition.await_network_ready(|| {
-                            if player::cancelled() { input_owner.collector.cancel(); return Ok(false); }
-                            collected.service_start(&mut input_owner.collector, false, &mut pre_origin_inputs, 256)
+                            if player::cancelled() {
+                                input_owner.collector.cancel();
+                                return Ok(false);
+                            }
+                            collected.service_start(
+                                &mut input_owner.collector,
+                                false,
+                                &mut pre_origin_inputs,
+                                256,
+                            )
                         })? {
                             return Ok(None);
                         }
@@ -1753,16 +1762,48 @@ mod preroll_fixtures {
         assert!(validate_args(&network).is_ok());
         local.extend(["--mp-host".into(), "127.0.0.1:39001".into()]);
         assert!(validate_args(&local).is_ok());
-        let mut asio = parse(&base).unwrap();
-        asio.backend = Backend::Asio;
-        asio.end_ns = Some(2);
-        assert!(validate_finite_modes(&asio, &Default::default()).is_ok());
+        let asio_args = [
+            "--chart",
+            "unopened.bms",
+            "--device",
+            "{12345678-9abc-def0-1234-56789abcdef0}",
+            "--bind",
+            "11:04",
+            "--backend",
+            "asio",
+            "--asio-view",
+            "native",
+            "--output-channels",
+            "0,1",
+            "--asio-system-clock",
+            "multimedia",
+            "--asio-timer-error-ns",
+            "0",
+            "--asio-drift-error-ns",
+            "0",
+            "--asio-latency-error-ns",
+            "0",
+            "--preroll-ns",
+            "0",
+            "--end-ns",
+            "2",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        assert!(validate_args(&asio_args).is_ok());
+        let asio = parse(&asio_args).unwrap();
+        assert!(matches!(asio.backend, Backend::Asio));
+        for rate in [44100, 48000, 96000] {
+            assert_eq!(asio.playback_end(rate).unwrap(), Some(1));
+        }
+        assert!(asio.playback_end(0).is_err());
     }
 
     #[test]
     fn finite_completion_waits_for_native_presentation_message_drain_and_resume() {
         use beatkernel::{
-            audio::{AudioFormat, Mixer, MixerConfig, PcmLimits, SampleBank, command_queue},
+            audio::{command_queue, AudioFormat, Mixer, MixerConfig, PcmLimits, SampleBank},
             time::{ClockDomainId, ClockPair, ClockPoint},
         };
         use beatkernel_bms_runtime::{native_end::NativeEnd, playback_pause::NativePause};
@@ -1819,11 +1860,10 @@ mod preroll_fixtures {
             .unwrap()
             .unwrap();
         assert_eq!(resumed.host, host(4_000_100));
-        assert!(
-            end.observe(Some(latest), pair(4_000_000))
-                .unwrap()
-                .is_none()
-        );
+        assert!(end
+            .observe(Some(latest), pair(4_000_000))
+            .unwrap()
+            .is_none());
         let song = Timestamp::from_nanos(2_000_000);
         assert!(!finite_session_done(
             Some(2_000_000),
@@ -1944,7 +1984,7 @@ mod preroll_fixtures {
                         options
                             .local_players
                             .iter()
-                            .map(|player| player.0.0)
+                            .map(|player| player.0 .0)
                             .collect::<Vec<_>>(),
                         vec![3, u32::MAX]
                     );
@@ -2013,7 +2053,7 @@ mod preroll_fixtures {
         }
         let options = parse(&configured).unwrap();
         assert_eq!(options.local_players.len(), 4);
-        assert_eq!(options.local_players[3].0.0, u32::MAX);
+        assert_eq!(options.local_players[3].0 .0, u32::MAX);
         assert_eq!(options.local_players[0].1, "path:3");
         assert_eq!(options.advance_lag, 2_000_000);
         for value in ["0", "1000000000"] {
@@ -2204,18 +2244,16 @@ mod preroll_fixtures {
             }
         );
         assert_eq!(shift_bgm(command, 0).unwrap(), command);
-        assert!(
-            shift_bgm(
-                AudioCommand::Play {
-                    at: Timestamp::from_nanos(i64::MAX),
-                    voice: VoiceId(1),
-                    sample: SampleId(1),
-                    gain: 1.0
-                },
-                1
-            )
-            .is_err()
-        );
+        assert!(shift_bgm(
+            AudioCommand::Play {
+                at: Timestamp::from_nanos(i64::MAX),
+                voice: VoiceId(1),
+                sample: SampleId(1),
+                gain: 1.0
+            },
+            1
+        )
+        .is_err());
         assert_eq!(
             calibration_extent(3600, 10_000_000_000).unwrap(),
             3_613_000_000_000
@@ -2261,7 +2299,7 @@ mod preroll_fixtures {
     }
 
     #[test]
-    fn nondefault_gauge_competition_is_rejected_without_opening_resources() {
+    fn selected_gauge_competition_syntax_is_admitted_before_checked_policy_preparation() {
         for (flag, value) in [
             ("--ghost-self", "unopened.bkr"),
             ("--ghost-other", "unopened.bkr"),
@@ -2271,11 +2309,7 @@ mod preroll_fixtures {
             supplied.extend([flag.into(), value.into()]);
             assert!(validate_args(&supplied).is_ok());
             supplied.extend(["--gauge".into(), "hard".into()]);
-            if flag.starts_with("--ghost") {
-                assert!(validate_args(&supplied).is_ok());
-            } else {
-                assert!(validate_args(&supplied).is_err());
-            }
+            assert!(validate_args(&supplied).is_ok());
         }
     }
 }

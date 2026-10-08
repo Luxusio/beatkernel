@@ -155,3 +155,71 @@ fn actual_paused_mixer_captures_physical_cursor_without_mutating_queue_or_playba
         before
     );
 }
+
+#[test]
+fn target_basis_maps_only_admitted_prefix_using_exact_piecewise_start() {
+    const DEN: u128 = 14_112_000;
+    let origin = point(-444_333_222);
+    let start = TargetTime::from_frames(17, 44_100)
+        .unwrap()
+        .checked_add_frames(7, 48_000)
+        .unwrap();
+    let basis = TargetFrameBasis::new(origin, start, 32_000).unwrap();
+    assert_eq!(
+        (basis.origin(), basis.start_time(), basis.sample_rate()),
+        (origin, start, 32_000)
+    );
+    let start_ticks = 17 * (DEN / 44_100) + 7 * (DEN / 48_000);
+    // An eight-frame generated block can admit only two. Its next stream must
+    // start at that two-frame prefix, never at the source lookahead or block end.
+    for prefix in [0, 1, 2, 8] {
+        let ticks = start_ticks + u128::from(prefix) * (DEN / 32_000);
+        let expected = -444_333_222 + (ticks * 1_000_000_000 / DEN) as i64;
+        assert_eq!(
+            basis.point_at_stream_frame(prefix).unwrap(),
+            point(expected)
+        );
+        assert_eq!(
+            basis
+                .time_at_stream_frame(prefix)
+                .unwrap()
+                .point(origin)
+                .unwrap(),
+            point(expected)
+        );
+    }
+    let next =
+        TargetFrameBasis::new(origin, basis.time_at_stream_frame(2).unwrap(), 48_000).unwrap();
+    let ticks = start_ticks + 2 * (DEN / 32_000) + 1 * (DEN / 48_000);
+    assert_eq!(
+        next.point_at_stream_frame(1).unwrap(),
+        point(-444_333_222 + (ticks * 1_000_000_000 / DEN) as i64)
+    );
+}
+
+#[test]
+fn target_basis_native_counter_adds_fractions_before_floor_and_keeps_original_domain() {
+    let start = TargetTime::new(0, 2, 3).unwrap();
+    let basis = TargetFrameBasis::new(point(-5), start, 48_000).unwrap();
+    assert_eq!(
+        basis.point_at_native_counter(1, 3).unwrap(),
+        point(999_999_995)
+    );
+    for frequency in [3_u64, 1_000, 10_000_000] {
+        for ticks in [0_u64, 1, 911] {
+            let numerator = 2_u128 * u128::from(frequency) + 3 * u128::from(ticks);
+            let denominator = 3_u128 * u128::from(frequency);
+            assert_eq!(
+                basis.point_at_native_counter(ticks, frequency).unwrap(),
+                point(-5 + (numerator * 1_000_000_000 / denominator) as i64)
+            );
+        }
+    }
+    assert!(basis.point_at_native_counter(1, 0).is_err());
+    assert_eq!(basis.start_time(), start);
+    assert!(TargetFrameBasis::new(point(0), start, 0).is_err());
+    let zero = TargetTime::new(0, 0, 1).unwrap();
+    let overflow = TargetFrameBasis::new(point(i64::MAX), zero, 48_000).unwrap();
+    assert!(overflow.point_at_stream_frame(1).is_err());
+    assert_eq!(overflow.start_time(), zero);
+}

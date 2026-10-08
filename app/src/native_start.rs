@@ -389,8 +389,8 @@ pub struct NativeStartConfig {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct NativeStarted<E> {
-    pub plan: OutputStartPlan,
+pub struct NativeStarted<E, P = OutputStartPlan> {
+    pub plan: P,
     pub observation: NativeStartObservation<E>,
     /// Retained arrival uncertainty; readiness waits for its upper endpoint.
     pub host_window: HostStartWindow,
@@ -487,15 +487,353 @@ pub(crate) fn native_calibration_timeout(
         .ok_or("native calibration timeout overflow")?
         .max(2_000_000_000);
     Ok(std::time::Duration::from_nanos(
-        u64::try_from(budget)
-            .map_err(|_| "native calibration timeout exceeds nanoseconds")?,
+        u64::try_from(budget).map_err(|_| "native calibration timeout exceeds nanoseconds")?,
     ))
 }
 
-/// Calibrate a silent device, arm one committed frame, and await actual presentation.
-/// Cancellation returns None; the caller always owns native stop/input cleanup.
-/// Point interpolation and assessed interval bounds do not prove physical sync.
+/// Converted committed startup keeps immutable creation identity and one coherent auxiliary tuple.
+pub trait NativeTargetStartDevice: NativeStartDevice {
+    fn target_identity(&self) -> NativeStartResult<(u64, beatkernel::audio::TargetFrameBasis)>;
+    fn target_output_telemetry(
+        &mut self,
+    ) -> NativeStartResult<Option<crate::gameplay::output::ports::TargetOutputTelemetry>>;
+}
+pub type TargetNativeStarted<E> = NativeStarted<E, TargetOutputStartPlan>;
+
+trait CommittedStartPolicy<D: NativeStartDevice> {
+    type Plan: Copy;
+    fn calibration_rate(&self, config: NativeStartConfig) -> u32;
+    fn project(
+        &self,
+        device: &mut D,
+        window: HostStartWindow,
+        first: NativeStartTiming,
+        latest: NativeStartTiming,
+        buffer: u32,
+        config: NativeStartConfig,
+    ) -> NativeStartResult<Option<Self::Plan>>;
+    fn source_frame(&self, plan: Self::Plan) -> u64;
+    fn output(&self, plan: Self::Plan) -> NativeStartResult<ClockPoint>;
+    fn stage(
+        &self,
+        device: &mut D,
+        plan: Self::Plan,
+        latest: &NativeStartObservation<D::Evidence>,
+        pause: &crate::playback_pause::NativePause,
+        end: &Option<crate::native_end::NativeEnd>,
+    ) -> NativeStartResult<(
+        crate::playback_pause::NativePause,
+        Option<crate::native_end::NativeEnd>,
+    )>;
+    fn confirmed(
+        &self,
+        device: &mut D,
+        plan: Self::Plan,
+        report: Option<beatkernel::audio::RenderReport>,
+        applied: Option<u64>,
+        config: NativeStartConfig,
+    ) -> NativeStartResult<bool>;
+}
+struct SourceStartPolicy;
+impl<D: NativeStartDevice> CommittedStartPolicy<D> for SourceStartPolicy {
+    type Plan = OutputStartPlan;
+    fn calibration_rate(&self, config: NativeStartConfig) -> u32 {
+        config.sample_rate
+    }
+    fn project(
+        &self,
+        device: &mut D,
+        window: HostStartWindow,
+        first: NativeStartTiming,
+        latest: NativeStartTiming,
+        buffer: u32,
+        config: NativeStartConfig,
+    ) -> NativeStartResult<Option<Self::Plan>> {
+        let report = device
+            .render_report()?
+            .ok_or("calibration render frontier missing")?;
+        let frames = u64::try_from(report.frames).map_err(|_| StartProjectionError::Overflow)?;
+        let rendered_end = report
+            .start_frame
+            .checked_add(frames)
+            .ok_or(StartProjectionError::Overflow)?;
+        let plan = match (first, latest) {
+            (NativeStartTiming::Point(first), NativeStartTiming::Point(latest)) => {
+                OutputStartPlan::from_pairs(
+                    window,
+                    first,
+                    latest,
+                    config.output_origin,
+                    config.sample_rate,
+                    rendered_end,
+                    u64::from(buffer),
+                    config.max_rate_error_ppm,
+                )?
+            }
+            (NativeStartTiming::Interval(first), NativeStartTiming::Interval(latest)) => {
+                interval::project(
+                    window,
+                    first,
+                    latest,
+                    config.output_origin,
+                    config.sample_rate,
+                    rendered_end,
+                    u64::from(buffer),
+                    config.max_rate_error_ppm,
+                )?
+            }
+            _ => return Err("native startup timing source changed".into()),
+        };
+        Ok(Some(plan))
+    }
+    fn source_frame(&self, plan: Self::Plan) -> u64 {
+        plan.selected_frame()
+    }
+    fn output(&self, plan: Self::Plan) -> NativeStartResult<ClockPoint> {
+        Ok(plan.selected_output())
+    }
+    fn stage(
+        &self,
+        device: &mut D,
+        plan: Self::Plan,
+        latest: &NativeStartObservation<D::Evidence>,
+        pause: &crate::playback_pause::NativePause,
+        end: &Option<crate::native_end::NativeEnd>,
+    ) -> NativeStartResult<(
+        crate::playback_pause::NativePause,
+        Option<crate::native_end::NativeEnd>,
+    )> {
+        let pause = pause.clone().with_start_frame(plan.selected_frame())?;
+        let end = end
+            .clone()
+            .map(|observer| -> NativeStartResult<_> {
+                let mut observer = observer.with_start_frame(plan.selected_frame())?;
+                device.seed_end(&mut observer, latest)?;
+                Ok(observer)
+            })
+            .transpose()?;
+        Ok((pause, end))
+    }
+    fn confirmed(
+        &self,
+        _: &mut D,
+        plan: Self::Plan,
+        report: Option<beatkernel::audio::RenderReport>,
+        applied: Option<u64>,
+        config: NativeStartConfig,
+    ) -> NativeStartResult<bool> {
+        if applied.is_some_and(|frame| frame != plan.selected_frame()) {
+            return Err("native applied frame differs from committed frame".into());
+        }
+        Ok(applied.is_some()
+            || (config.playback_end_frame == Some(0)
+                && report.is_some_and(|report| {
+                    report.playback_end_physical_frame == Some(plan.selected_frame())
+                })))
+    }
+}
+struct TargetStartPolicy {
+    epoch: u64,
+    basis: beatkernel::audio::TargetFrameBasis,
+}
+impl TargetStartPolicy {
+    fn telemetry<D: NativeTargetStartDevice>(
+        &self,
+        device: &mut D,
+        config: NativeStartConfig,
+    ) -> NativeStartResult<Option<crate::gameplay::output::ports::TargetOutputTelemetry>> {
+        if device.target_identity()? != (self.epoch, self.basis)
+            || self.basis.origin() != config.output_origin
+        {
+            return Err("target startup creation identity changed".into());
+        }
+        let Some(tuple) = device.target_output_telemetry()? else {
+            return Ok(None);
+        };
+        if tuple.facts.origin != Some(self.basis.origin())
+            || tuple.facts.source_rate != config.sample_rate
+        {
+            return Err("target startup source identity differs".into());
+        }
+        if let Some(report) = tuple.converted {
+            if report.source_rate != config.sample_rate
+                || report.target_rate != self.basis.sample_rate()
+                || report.state != beatkernel::audio::ConvertedOutputState::Active
+                || report.target_end_time.seconds() < self.basis.start_time().seconds()
+                || (report.target_end_time.seconds() == self.basis.start_time().seconds()
+                    && u128::from(report.target_end_time.numerator())
+                        * u128::from(self.basis.start_time().denominator())
+                        < u128::from(self.basis.start_time().numerator())
+                            * u128::from(report.target_end_time.denominator()))
+                || report
+                    .target_start_time
+                    .checked_add_frames(report.target_frames as u64, report.target_rate)?
+                    != report.target_end_time
+            {
+                return Err("target startup conversion interpretation differs".into());
+            }
+        }
+        Ok(Some(tuple))
+    }
+}
+impl<D: NativeTargetStartDevice> CommittedStartPolicy<D> for TargetStartPolicy {
+    type Plan = TargetOutputStartPlan;
+    fn calibration_rate(&self, _: NativeStartConfig) -> u32 {
+        self.basis.sample_rate()
+    }
+    fn project(
+        &self,
+        device: &mut D,
+        window: HostStartWindow,
+        first: NativeStartTiming,
+        latest: NativeStartTiming,
+        buffer: u32,
+        config: NativeStartConfig,
+    ) -> NativeStartResult<Option<Self::Plan>> {
+        let first = first.point()?;
+        let latest = latest.point()?;
+        let Some(tuple) = self.telemetry(device, config)? else {
+            return Ok(None);
+        };
+        let Some(report) = tuple.converted else {
+            return Ok(None);
+        };
+        let snapshot = TargetStartSnapshot {
+            basis: self.basis,
+            generated_time: report.target_end_time,
+            source_position: report.source_position,
+            pulled_source_frame: report.pulled_source_frame_cursor,
+            source_rate: report.source_rate,
+        };
+        Ok(Some(TargetOutputStartPlan::from_snapshot(
+            window,
+            first,
+            latest,
+            snapshot,
+            u64::from(buffer),
+            config.max_rate_error_ppm,
+        )?))
+    }
+    fn source_frame(&self, plan: Self::Plan) -> u64 {
+        plan.selected_source_frame()
+    }
+    fn output(&self, plan: Self::Plan) -> NativeStartResult<ClockPoint> {
+        Ok(plan.selected_output()?)
+    }
+    fn stage(
+        &self,
+        device: &mut D,
+        plan: Self::Plan,
+        latest: &NativeStartObservation<D::Evidence>,
+        pause: &crate::playback_pause::NativePause,
+        end: &Option<crate::native_end::NativeEnd>,
+    ) -> NativeStartResult<(
+        crate::playback_pause::NativePause,
+        Option<crate::native_end::NativeEnd>,
+    )> {
+        if device.target_identity()? != (self.epoch, self.basis) {
+            return Err("target startup creation identity changed".into());
+        }
+        let pair = latest.timing.point()?;
+        let pause = pause
+            .clone()
+            .with_start_frame(plan.selected_source_frame())?
+            .with_target_basis(self.epoch, self.basis)?;
+        let end = end
+            .clone()
+            .map(|observer| -> NativeStartResult<_> {
+                let mut observer = observer
+                    .with_start_frame(plan.selected_source_frame())?
+                    .with_target_basis(self.epoch, self.basis)?;
+                observer.prime_target_clock(self.epoch, self.basis, pair)?;
+                Ok(observer)
+            })
+            .transpose()?;
+        Ok((pause, end))
+    }
+    fn confirmed(
+        &self,
+        device: &mut D,
+        plan: Self::Plan,
+        _: Option<beatkernel::audio::RenderReport>,
+        applied: Option<u64>,
+        config: NativeStartConfig,
+    ) -> NativeStartResult<bool> {
+        if applied.is_some_and(|frame| frame != plan.selected_source_frame()) {
+            return Err("native applied source frame differs from committed frame".into());
+        }
+        let Some(tuple) = self.telemetry(device, config)? else {
+            return Ok(false);
+        };
+        if tuple.facts.startup.is_none() {
+            return Ok(false);
+        }
+        plan.validate_startup(tuple.facts)?;
+        let empty = config.playback_end_frame == Some(0)
+            && tuple.source.is_some_and(|source| {
+                source.playback_end_physical_frame == Some(plan.selected_source_frame())
+            });
+        Ok(applied.is_some() || empty)
+    }
+}
+
+/// Calibrate a silent device, arm one committed source frame, and await native presentation.
+/// Cancellation keeps native stop/input cleanup with the caller; clock evidence is not physical sync proof.
 pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
+    device: &mut D,
+    agreement: &mut A,
+    producer: &mut beatkernel::audio::CommandProducer,
+    pause: &mut crate::playback_pause::NativePause,
+    end: &mut Option<crate::native_end::NativeEnd>,
+    config: NativeStartConfig,
+    feed: impl FnMut(
+        Option<beatkernel::audio::RenderReport>,
+        &mut beatkernel::audio::CommandProducer,
+    ) -> NativeStartResult<()>,
+) -> NativeStartResult<Option<NativeStarted<D::Evidence>>> {
+    start_committed_with(
+        device,
+        agreement,
+        producer,
+        pause,
+        end,
+        config,
+        feed,
+        SourceStartPolicy,
+    )
+}
+/// Arms the source gate and confirms its actual mapped target onset before native readiness.
+/// Pause/end must be cold source observers; target identity is staged before queue admission.
+pub fn start_target_committed<D: NativeTargetStartDevice, A: NativeStartAgreement>(
+    device: &mut D,
+    agreement: &mut A,
+    producer: &mut beatkernel::audio::CommandProducer,
+    pause: &mut crate::playback_pause::NativePause,
+    end: &mut Option<crate::native_end::NativeEnd>,
+    config: NativeStartConfig,
+    feed: impl FnMut(
+        Option<beatkernel::audio::RenderReport>,
+        &mut beatkernel::audio::CommandProducer,
+    ) -> NativeStartResult<()>,
+) -> NativeStartResult<Option<TargetNativeStarted<D::Evidence>>> {
+    let (epoch, basis) = device.target_identity()?;
+    start_committed_with(
+        device,
+        agreement,
+        producer,
+        pause,
+        end,
+        config,
+        feed,
+        TargetStartPolicy { epoch, basis },
+    )
+}
+
+fn start_committed_with<
+    D: NativeStartDevice,
+    A: NativeStartAgreement,
+    P: CommittedStartPolicy<D>,
+>(
     device: &mut D,
     agreement: &mut A,
     producer: &mut beatkernel::audio::CommandProducer,
@@ -506,7 +844,8 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
         Option<beatkernel::audio::RenderReport>,
         &mut beatkernel::audio::CommandProducer,
     ) -> NativeStartResult<()>,
-) -> NativeStartResult<Option<NativeStarted<D::Evidence>>> {
+    policy: P,
+) -> NativeStartResult<Option<NativeStarted<D::Evidence, P::Plan>>> {
     use std::time::{Duration, Instant};
     if config.sample_rate == 0
         || config.sample_rate > 1_000_000_000
@@ -520,7 +859,10 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
         return Err("native startup buffer is empty".into());
     }
     let calibration_deadline = Instant::now()
-        .checked_add(native_calibration_timeout(buffer, config.sample_rate)?)
+        .checked_add(native_calibration_timeout(
+            buffer,
+            policy.calibration_rate(config),
+        )?)
         .ok_or("native calibration deadline overflow")?;
     device.start()?;
     let mut previous = None;
@@ -577,55 +919,42 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
         agreement.clock_now_ns()?,
         config.max_clock_age_ns,
     )?;
-    let report = device
-        .render_report()?
-        .ok_or("calibration render frontier missing")?;
-    let frames = u64::try_from(report.frames).map_err(|_| StartProjectionError::Overflow)?;
-    let rendered_end = report
-        .start_frame
-        .checked_add(frames)
-        .ok_or(StartProjectionError::Overflow)?;
-    let plan = match (first, latest.timing) {
-        (NativeStartTiming::Point(first), NativeStartTiming::Point(latest)) => {
-            OutputStartPlan::from_pairs(
-                window,
-                first,
-                latest,
-                config.output_origin,
-                config.sample_rate,
-                rendered_end,
-                u64::from(buffer),
-                config.max_rate_error_ppm,
-            )?
+    let projection_deadline = Instant::now()
+        .checked_add(config.setup_timeout)
+        .ok_or("native projection deadline overflow")?;
+    let plan = loop {
+        if let Some(plan) = policy.project(device, window, first, latest.timing, buffer, config)? {
+            break plan;
         }
-        (NativeStartTiming::Interval(first), NativeStartTiming::Interval(latest)) => {
-            interval::project(
-                window,
-                first,
-                latest,
-                config.output_origin,
-                config.sample_rate,
-                rendered_end,
-                u64::from(buffer),
-                config.max_rate_error_ppm,
-            )?
+        if Instant::now() >= projection_deadline {
+            return Err("native target projection telemetry timed out".into());
         }
-        _ => return Err("native startup timing source changed".into()),
+        if !device.service_input(false)? {
+            return Ok(None);
+        }
+        if let Some(observation) = startup_observation(device, config.output_origin, &mut previous)?
+        {
+            latest = observation;
+        }
+        feed(device.render_report()?, producer)?;
+        let host = device.host_now()?;
+        if host.domain != last_host.domain {
+            return Err(StartProjectionError::Domains.into());
+        }
+        if host.timestamp < last_host.timestamp {
+            return Err(StartProjectionError::Chronology.into());
+        }
+        last_host = host;
+        std::thread::sleep(Duration::from_millis(1));
     };
     // Reject observer setup failures before changing either the queue or live observers.
-    let next_pause = pause.clone().with_start_frame(plan.selected_frame())?;
-    let next_end = end
-        .clone()
-        .map(|observer| -> NativeStartResult<_> {
-            let mut observer = observer.with_start_frame(plan.selected_frame())?;
-            device.seed_end(&mut observer, &latest)?;
-            Ok(observer)
-        })
-        .transpose()?;
+    let (next_pause, next_end) = policy.stage(device, plan, &latest, pause, end)?;
+    let selected_source = policy.source_frame(plan);
+    let selected_output = policy.output(plan)?;
     let crossing_deadline = Instant::now()
         .checked_add(config.setup_timeout)
         .ok_or("native presentation deadline overflow")?;
-    producer.schedule_start_at(plan.selected_frame())?;
+    producer.schedule_start_at(selected_source)?;
     *pause = next_pause;
     *end = next_end;
     let mut lower = latest.timing;
@@ -641,21 +970,13 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
         let report = device.render_report()?;
         feed(report, producer)?;
         if let Some(observation) = observation.filter(|_| pending.is_none()) {
-            if observation.timing.bounds().output.timestamp < plan.selected_output().timestamp {
+            if observation.timing.bounds().output.timestamp < selected_output.timestamp {
                 lower = observation.timing;
             } else {
-                let applied = producer.applied_start_frame();
-                if applied.is_some_and(|frame| frame != plan.selected_frame()) {
-                    return Err("native applied frame differs from committed frame".into());
-                }
-                let empty_end = config.playback_end_frame == Some(0)
-                    && report.is_some_and(|report| {
-                        report.playback_end_physical_frame == Some(plan.selected_frame())
-                    });
-                if applied.is_some() || empty_end {
+                if policy.confirmed(device, plan, report, producer.applied_start_frame(), config)? {
                     let host_window = match (lower, observation.timing) {
                         (NativeStartTiming::Point(lower), NativeStartTiming::Point(upper)) => {
-                            let host = presented_output(plan.selected_output(), lower, upper)?;
+                            let host = presented_output(selected_output, lower, upper)?;
                             HostStartWindow {
                                 earliest: host,
                                 latest: host,
@@ -665,7 +986,7 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
                             NativeStartTiming::Interval(lower),
                             NativeStartTiming::Interval(upper),
                         ) => interval::crossing(
-                            plan.selected_output(),
+                            selected_output,
                             lower,
                             upper,
                             config.max_rate_error_ppm,
@@ -1046,19 +1367,17 @@ mod fixtures {
                 cancel: !after_gate,
                 target: 1_000_000_000,
             };
-            assert!(
-                start_committed(
-                    &mut device,
-                    &mut agreement,
-                    &mut producer,
-                    &mut pause,
-                    &mut end,
-                    config(None),
-                    |_, _| Ok(()),
-                )
-                .unwrap()
-                .is_none()
-            );
+            assert!(start_committed(
+                &mut device,
+                &mut agreement,
+                &mut producer,
+                &mut pause,
+                &mut end,
+                config(None),
+                |_, _| Ok(()),
+            )
+            .unwrap()
+            .is_none());
             assert_eq!(device.inner.starts, 1);
             assert_eq!(device.inner.stages.last(), Some(&after_gate));
             assert_eq!(producer.applied_start_frame(), None);
@@ -1128,19 +1447,17 @@ mod fixtures {
                 cancel: !after_gate,
                 target: 1_000_000_000,
             };
-            assert!(
-                start_committed(
-                    &mut device,
-                    &mut agreement,
-                    &mut producer,
-                    &mut pause,
-                    &mut end,
-                    config(None),
-                    |_, _| Ok(())
-                )
-                .unwrap()
-                .is_none()
-            );
+            assert!(start_committed(
+                &mut device,
+                &mut agreement,
+                &mut producer,
+                &mut pause,
+                &mut end,
+                config(None),
+                |_, _| Ok(())
+            )
+            .unwrap()
+            .is_none());
             assert_eq!(device.starts, 1);
             assert_eq!(producer.applied_start_frame(), None);
             assert_eq!(device.stages.last(), Some(&after_gate));
@@ -1161,18 +1478,16 @@ mod fixtures {
                 cancel: false,
                 target: 1_000_000_000,
             };
-            assert!(
-                start_committed(
-                    &mut device,
-                    &mut agreement,
-                    &mut producer,
-                    &mut pause,
-                    &mut end,
-                    config(None),
-                    |_, _| Ok(())
-                )
-                .is_err()
-            );
+            assert!(start_committed(
+                &mut device,
+                &mut agreement,
+                &mut producer,
+                &mut pause,
+                &mut end,
+                config(None),
+                |_, _| Ok(())
+            )
+            .is_err());
             assert_eq!(producer.applied_start_frame(), None);
             assert!(pause.clone().with_start_frame(10).is_ok());
             assert_eq!(device.starts, usize::from(invalid_clock));
@@ -1183,18 +1498,16 @@ mod fixtures {
             cancel: false,
             target: 1_000_000_000,
         };
-        assert!(
-            start_committed(
-                &mut device,
-                &mut agreement,
-                &mut producer,
-                &mut pause,
-                &mut end,
-                config(None),
-                |_, _| Ok(())
-            )
-            .is_err()
-        );
+        assert!(start_committed(
+            &mut device,
+            &mut agreement,
+            &mut producer,
+            &mut pause,
+            &mut end,
+            config(None),
+            |_, _| Ok(())
+        )
+        .is_err());
         assert!(pause.with_start_frame(10).is_ok());
         assert!(!device.stages.contains(&true));
     }
@@ -1206,18 +1519,16 @@ mod fixtures {
             cancel: false,
             target: 1_000_000_000,
         };
-        assert!(
-            start_committed(
-                &mut device,
-                &mut agreement,
-                &mut producer,
-                &mut pause,
-                &mut end,
-                config(Some(2)),
-                |_, _| Ok(())
-            )
-            .is_err()
-        );
+        assert!(start_committed(
+            &mut device,
+            &mut agreement,
+            &mut producer,
+            &mut pause,
+            &mut end,
+            config(Some(2)),
+            |_, _| Ok(())
+        )
+        .is_err());
         assert!(pause.with_start_frame(42).is_ok());
         assert!(producer.schedule_start_at(1_000).is_ok());
         assert!(!device.stages.contains(&true));
@@ -1519,5 +1830,220 @@ mod fixtures {
             let plan = OutputStartPlan::from_pair(window, pair, point(2, 0), 1_000, 0, 0).unwrap();
             assert_eq!(plan.selected_frame(), span as u64 / 1_000_000 + 1);
         }
+    }
+}
+
+/// Exact conversion state at a generated frontier and its original native creation basis.
+/// Source pull is the immutable arming safety frontier, never a playback timestamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetStartSnapshot {
+    pub basis: beatkernel::audio::TargetFrameBasis,
+    pub generated_time: beatkernel::audio::TargetTime,
+    pub source_position: beatkernel::audio::SourcePosition,
+    pub pulled_source_frame: u64,
+    pub source_rate: u32,
+}
+impl TargetStartSnapshot {
+    pub fn from_owner(owner: &beatkernel_platform::audio::ConvertedNativeOutputState) -> Self {
+        Self {
+            basis: owner.target_frame_basis(),
+            generated_time: owner.converter_owner().target_time(),
+            source_position: owner.converter_owner().source_position(),
+            pulled_source_frame: owner.converter_owner().pulled_source_frame_cursor(),
+            source_rate: owner.mixer().config().format().sample_rate(),
+        }
+    }
+}
+/// Source gate selected from original native clock associations and exact target time.
+/// The predicted output must still be confirmed by the actual mapped startup fact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetOutputStartPlan {
+    source_frame: u64,
+    source_rate: u32,
+    target_time: beatkernel::audio::TargetTime,
+    basis: beatkernel::audio::TargetFrameBasis,
+}
+impl TargetOutputStartPlan {
+    pub fn from_owner(
+        window: HostStartWindow,
+        first: ClockPair,
+        second: ClockPair,
+        owner: &beatkernel_platform::audio::ConvertedNativeOutputState,
+        target_buffer_frames: u64,
+        maximum_rate_error_ppm: u32,
+    ) -> Result<Self, StartProjectionError> {
+        Self::from_snapshot(
+            window,
+            first,
+            second,
+            TargetStartSnapshot::from_owner(owner),
+            target_buffer_frames,
+            maximum_rate_error_ppm,
+        )
+    }
+    pub fn from_snapshot(
+        window: HostStartWindow,
+        first: ClockPair,
+        second: ClockPair,
+        snapshot: TargetStartSnapshot,
+        target_buffer_frames: u64,
+        maximum_rate_error_ppm: u32,
+    ) -> Result<Self, StartProjectionError> {
+        if first.source.domain != snapshot.basis.origin().domain
+            || first.source.domain != second.source.domain
+            || first.target.domain != second.target.domain
+            || second.target.domain != window.earliest().domain
+        {
+            return Err(StartProjectionError::Domains);
+        }
+        let source_span = i128::from(second.source.timestamp.as_nanos())
+            - i128::from(first.source.timestamp.as_nanos());
+        let host_span = i128::from(second.target.timestamp.as_nanos())
+            - i128::from(first.target.timestamp.as_nanos());
+        if source_span <= 0 || host_span <= 0 {
+            return Err(StartProjectionError::Chronology);
+        }
+        if maximum_rate_error_ppm >= 1_000_000
+            || (source_span - host_span).abs() * 1_000_000
+                > host_span * i128::from(maximum_rate_error_ppm)
+        {
+            return Err(StartProjectionError::Slope);
+        }
+        let position = snapshot.source_position;
+        if snapshot.source_rate == 0
+            || target_buffer_frames == 0
+            || position.denominator == 0
+            || position.numerator >= position.denominator
+            || snapshot.pulled_source_frame < position.frame
+        {
+            return Err(StartProjectionError::InvalidRate);
+        }
+        let target_rate = u128::from(snapshot.basis.sample_rate());
+        let project = |host: ClockPoint| -> Result<u64, StartProjectionError> {
+            let physical_ns = (i128::from(second.source.timestamp.as_nanos())
+                - i128::from(snapshot.basis.origin().timestamp.as_nanos()))
+            .checked_mul(host_span)
+            .and_then(|value| {
+                (i128::from(host.timestamp.as_nanos())
+                    - i128::from(second.target.timestamp.as_nanos()))
+                .checked_mul(source_span)
+                .and_then(|offset| value.checked_add(offset))
+            })
+            .ok_or(StartProjectionError::Overflow)?;
+            let duration = snapshot.generated_time;
+            let start = i128::from(duration.seconds())
+                .checked_mul(i128::from(duration.denominator()))
+                .and_then(|value| value.checked_add(i128::from(duration.numerator())))
+                .and_then(|value| value.checked_mul(1_000_000_000))
+                .and_then(|value| value.checked_mul(host_span))
+                .ok_or(StartProjectionError::Overflow)?;
+            let delta = physical_ns
+                .checked_mul(i128::from(duration.denominator()))
+                .and_then(|value| value.checked_sub(start))
+                .ok_or(StartProjectionError::Overflow)?;
+            if delta < 0 {
+                return Err(StartProjectionError::TooClose);
+            }
+            let denominator = (host_span as u128)
+                .checked_mul(u128::from(duration.denominator()))
+                .and_then(|value| value.checked_mul(1_000_000_000))
+                .ok_or(StartProjectionError::Overflow)?;
+            // Quantize the source gate once. Rounding to a target frame first
+            // can unnecessarily skip a source frame that already maps to the
+            // same admissible first target sample.
+            let scaled = (delta as u128)
+                .checked_mul(u128::from(snapshot.source_rate))
+                .ok_or(StartProjectionError::Overflow)?;
+            let mut a = denominator;
+            let mut b = u128::from(position.denominator);
+            while b != 0 {
+                let remainder = a % b;
+                a = b;
+                b = remainder;
+            }
+            let common = (denominator / a)
+                .checked_mul(u128::from(position.denominator))
+                .ok_or(StartProjectionError::Overflow)?;
+            let fraction = (scaled % denominator)
+                .checked_mul(common / denominator)
+                .and_then(|value| {
+                    u128::from(position.numerator)
+                        .checked_mul(common / u128::from(position.denominator))
+                        .and_then(|phase| value.checked_add(phase))
+                })
+                .ok_or(StartProjectionError::Overflow)?;
+            let advance = (scaled / denominator)
+                .checked_add(fraction / common)
+                .and_then(|value| value.checked_add(u128::from(fraction % common != 0)))
+                .ok_or(StartProjectionError::Overflow)?;
+            position
+                .frame
+                .checked_add(u64::try_from(advance).map_err(|_| StartProjectionError::Overflow)?)
+                .ok_or(StartProjectionError::Overflow)
+        };
+        let earliest = project(window.earliest())?;
+        let source_buffer = u128::from(target_buffer_frames) * u128::from(snapshot.source_rate);
+        let source_buffer =
+            source_buffer / target_rate + u128::from(source_buffer % target_rate != 0);
+        let minimum = snapshot
+            .pulled_source_frame
+            .checked_add(u64::try_from(source_buffer).map_err(|_| StartProjectionError::Overflow)?)
+            .ok_or(StartProjectionError::Overflow)?;
+        if earliest < minimum {
+            return Err(StartProjectionError::TooClose);
+        }
+        let source_frame = project(window.latest())?;
+        let distance = u128::from(source_frame - position.frame) * u128::from(position.denominator)
+            - u128::from(position.numerator);
+        let numerator = distance
+            .checked_mul(target_rate)
+            .ok_or(StartProjectionError::Overflow)?;
+        let denominator = u128::from(position.denominator) * u128::from(snapshot.source_rate);
+        let target_frames = numerator / denominator + u128::from(numerator % denominator != 0);
+        let target_time = snapshot
+            .generated_time
+            .checked_add_frames(
+                u64::try_from(target_frames).map_err(|_| StartProjectionError::Overflow)?,
+                snapshot.basis.sample_rate(),
+            )
+            .map_err(|_| StartProjectionError::Overflow)?;
+        target_time
+            .point(snapshot.basis.origin())
+            .map_err(|_| StartProjectionError::Overflow)?;
+        Ok(Self {
+            source_frame,
+            source_rate: snapshot.source_rate,
+            target_time,
+            basis: snapshot.basis,
+        })
+    }
+    pub const fn selected_source_frame(self) -> u64 {
+        self.source_frame
+    }
+    pub fn selected_output(self) -> Result<ClockPoint, StartProjectionError> {
+        self.target_time
+            .point(self.basis.origin())
+            .map_err(|_| StartProjectionError::Overflow)
+    }
+    pub const fn target_basis(self) -> beatkernel::audio::TargetFrameBasis {
+        self.basis
+    }
+    /// Actual gate adoption must agree with the source identity and generated target boundary.
+    pub fn validate_startup(
+        self,
+        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+    ) -> Result<ClockPoint, StartProjectionError> {
+        let boundary = facts.startup.ok_or(StartProjectionError::TooClose)?;
+        if facts.origin != Some(self.basis.origin())
+            || facts.source_rate != self.source_rate
+            || boundary.source_frame != self.source_frame
+            || boundary.target_time != self.target_time
+        {
+            return Err(StartProjectionError::Chronology);
+        }
+        boundary
+            .target_time
+            .point(self.basis.origin())
+            .map_err(|_| StartProjectionError::Overflow)
     }
 }

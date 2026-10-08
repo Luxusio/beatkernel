@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use crate::playfield_gpu::{MAX_NOTE_INSTANCES, MAX_PLAYFIELDS, NoteInstance};
-use crate::scene::{MAX_RECTANGLES, Rectangle, Scene};
-use crate::texture::{MAX_TEXTURE_BYTES, MAX_TEXTURES, RgbaImage, TextureId};
+use crate::playfield_gpu::{NoteInstance, MAX_NOTE_INSTANCES, MAX_PLAYFIELDS};
+use crate::scene::{Rectangle, Scene, MAX_RECTANGLES};
+use crate::texture::{RgbaImage, TextureId, MAX_TEXTURES, MAX_TEXTURE_BYTES};
 
 pub use crate::presentation_settings::{BackendChoice, Presentation};
 
@@ -69,7 +69,12 @@ pub struct Renderer {
     instances: wgpu::Buffer,
     uploaded_geometry: Option<(Arc<()>, u64)>,
     redraw_pending: bool,
+    presentation_count: u64,
     viewport: wgpu::Buffer,
+    components: wgpu::Buffer,
+    component_bind_group: wgpu::BindGroup,
+    component_stride: u32,
+    component_uniforms: [Option<[f32; 16]>; crate::scene::MAX_UI_COMPONENTS + 1],
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     textures: BTreeMap<TextureId, TextureResource>,
@@ -225,9 +230,22 @@ impl Renderer {
                 },
             ],
         });
+        let component_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("BeatKernel retained component transforms"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(64),
+                },
+                count: None,
+            }],
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("BeatKernel texture pipeline layout"),
-            bind_group_layouts: &[&texture_layout],
+            bind_group_layouts: &[&texture_layout, &component_layout],
             push_constant_ranges: &[],
         });
         let attributes = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4];
@@ -354,6 +372,26 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let alignment = device.limits().min_uniform_buffer_offset_alignment;
+        let component_stride = 64u32.div_ceil(alignment) * alignment;
+        let components = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("BeatKernel bounded component uniforms"),
+            size: u64::from(component_stride) * (crate::scene::MAX_UI_COMPONENTS as u64 + 1),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let component_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("BeatKernel component presentation"),
+            layout: &component_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &components,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(64),
+                }),
+            }],
+        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("BeatKernel nearest sprite sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -376,7 +414,12 @@ impl Renderer {
             instances,
             uploaded_geometry: None,
             redraw_pending: true,
+            presentation_count: 0,
             viewport,
+            components,
+            component_bind_group,
+            component_stride,
+            component_uniforms: [None; crate::scene::MAX_UI_COMPONENTS + 1],
             texture_layout,
             sampler,
             textures: BTreeMap::new(),
@@ -583,6 +626,9 @@ impl Renderer {
 
     /// A transient acquisition failure still needs a later draw. Event-driven
     /// hosts must retry at their normal cadence until a frame is presented.
+    pub fn presentation_count(&self) -> u64 {
+        self.presentation_count
+    }
     pub fn needs_redraw(&self) -> bool {
         self.redraw_pending
     }
@@ -613,6 +659,10 @@ impl Renderer {
     /// Logical geometry fits the shared centered viewport. Upload only
     /// instance data once, then draw contiguous texture batches in painter order.
     pub fn render(&mut self, scene: &Scene) -> Result<(), String> {
+        let next_presentation = self
+            .presentation_count
+            .checked_add(1)
+            .ok_or("renderer presentation counter exhausted")?;
         self.check_failure()?;
         scene.status()?;
         for batch in scene.batches() {
@@ -659,6 +709,23 @@ impl Renderer {
             ]),
         );
         let rectangles = scene.rectangles();
+        // Component ticks alter only this bounded uniform storage. Ordinary
+        // instances and indexed note layers retain their existing upload keys.
+        for slot in 0..=crate::scene::MAX_UI_COMPONENTS {
+            if !scene.component_uniform_live(slot) {
+                continue;
+            }
+            let uniform = scene.component_gpu_uniform(slot);
+            if self.component_uniforms[slot] == Some(uniform) {
+                continue;
+            }
+            self.queue.write_buffer(
+                &self.components,
+                slot as u64 * u64::from(self.component_stride),
+                bytemuck::cast_slice(&uniform),
+            );
+            self.component_uniforms[slot] = Some(uniform);
+        }
         let (identity, epoch) = scene.geometry_stamp();
         if !self
             .uploaded_geometry
@@ -742,12 +809,18 @@ impl Renderer {
                     pass.set_pipeline(&self.pipeline);
                     pass.set_vertex_buffer(0, self.instances.slice(..));
                     pass.set_bind_group(0, &texture.bind_group, &[]);
+                    pass.set_bind_group(
+                        1,
+                        &self.component_bind_group,
+                        &[batch.component * self.component_stride],
+                    );
                     pass.draw(0..6, batch.first..batch.first + batch.count);
                 }
             }
         }
         self.queue.submit([encoder.finish()]);
         frame.present();
+        self.presentation_count = next_presentation;
         self.redraw_pending = false;
         if suboptimal {
             self.surface.configure(&self.device, &self.config);

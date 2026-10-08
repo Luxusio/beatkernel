@@ -55,9 +55,19 @@ struct PendingBoundary {
     playback: u64,
     gap: u64,
 }
+#[derive(Clone, Copy, Debug)]
+struct TargetPauseState {
+    basis: beatkernel::audio::TargetFrameBasis,
+    paused_at: Option<beatkernel::audio::TargetTime>,
+    total_gap: beatkernel::audio::TargetTime,
+    transition: Option<ClockPoint>,
+    startup: Option<beatkernel::audio::TargetTime>,
+    generation_floor: Option<beatkernel::audio::TargetTime>,
+}
 #[derive(Clone, Debug)]
 pub struct NativePause {
     epoch: u64,
+    target: Option<TargetPauseState>,
     min_physical_frame: u64,
     rebound_basis: Option<beatkernel::audio::OutputFrameBasis>,
     min_host: Option<ClockPoint>,
@@ -96,6 +106,7 @@ impl NativePause {
         }
         Ok(Self {
             epoch: 0,
+            target: None,
             min_physical_frame: 0,
             rebound_basis: None,
             min_host: None,
@@ -125,8 +136,339 @@ impl NativePause {
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }
+    /// Binds a cold pause owner to exact physical target time on its source grid.
+    pub fn with_target_basis(
+        mut self,
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
+    ) -> Result<Self, PauseError> {
+        if self.setup_locked
+            || self.last_pair.is_some()
+            || self.target.is_some()
+            || basis.origin() != self.origin
+        {
+            return Err(PauseError(
+                "target pause requires a cold owner and its immutable origin",
+            ));
+        }
+        self.epoch = epoch;
+        self.target = Some(TargetPauseState {
+            basis,
+            paused_at: None,
+            total_gap: beatkernel::audio::TargetTime::from_frames(0, 1)
+                .map_err(|_| PauseError("zero target duration"))?,
+            transition: None,
+            startup: None,
+            generation_floor: None,
+        });
+        Ok(self)
+    }
+    pub fn target_basis(&self) -> Option<beatkernel::audio::TargetFrameBasis> {
+        self.target.map(|target| target.basis)
+    }
+    /// Observes source adoption separately from mapped target consumption and native progress.
+    /// Invalid/stale facts commit nothing; a held report alone cannot create adoption.
+    pub fn observe_target(
+        &mut self,
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
+        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        source: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> Result<Option<PauseBoundary>, PauseError> {
+        let mut next = self.clone();
+        let boundary = next.observe_target_inner(epoch, basis, facts, source, pair)?;
+        *self = next;
+        Ok(boundary)
+    }
+    fn observe_target_inner(
+        &mut self,
+        epoch: u64,
+        basis: beatkernel::audio::TargetFrameBasis,
+        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        source: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> Result<Option<PauseBoundary>, PauseError> {
+        let target = self
+            .target
+            .ok_or(PauseError("pause has no target creation basis"))?;
+        if epoch != self.epoch
+            || basis != target.basis
+            || facts.origin != Some(self.origin)
+            || facts.source_rate != self.rate
+        {
+            return Err(PauseError(
+                "target pause epoch, basis or original source identity differs",
+            ));
+        }
+        self.bind(EvidenceKind::Point)?;
+        self.check_pair(pair)?;
+        if let Some(startup) = facts.startup {
+            self.target.as_mut().expect("target bound").startup = Some(startup.target_time);
+        }
+        if let Some(source) = source.filter(|source| source.frames != 0) {
+            let (_, playback, _) = self.check_report(source)?;
+            if self.phase == PausePhase::Paused && (playback != self.frozen || !source.paused) {
+                return Err(PauseError("target pause changed frozen source playback"));
+            }
+            self.end_marker = source.playback_end_physical_frame.or(self.end_marker);
+            self.last_report = Some(source);
+        }
+        let paused = self.phase == PausePhase::Pausing;
+        let mapped = match self.phase {
+            PausePhase::Pausing => facts.pause,
+            PausePhase::Resuming => facts.resume,
+            _ => None,
+        };
+        let Some(mapped) = mapped else {
+            self.last_pair = Some(pair);
+            return Ok(None);
+        };
+        let actual = self.last_report.ok_or(PauseError(
+            "mapped target transition lacks actual source adoption",
+        ))?;
+        let (_, playback, gap) = self.check_report(actual)?;
+        if paused {
+            if !actual.paused
+                || mapped.source_frame > actual.start_frame + actual.playback_frames as u64
+            {
+                return Err(PauseError(
+                    "mapped pause contradicts actual nonempty source adoption",
+                ));
+            }
+        } else if actual.paused
+            || actual.playback_start_frame < self.frozen
+            || mapped.source_frame > actual.start_frame
+            || self.end_marker.is_some()
+        {
+            return Err(PauseError(
+                "mapped resume contradicts frozen source adoption or reached end",
+            ));
+        }
+        let output = mapped
+            .target_time
+            .point(self.origin)
+            .map_err(|_| PauseError("target transition timestamp overflow"))?;
+        let lower = self.last_pair.or(self.reference).ok_or(PauseError(
+            "target transition lacks original native lower bracket",
+        ))?;
+        if pair.source.timestamp < output.timestamp {
+            self.last_pair = Some(pair);
+            return Ok(None);
+        }
+        if lower.source.timestamp > output.timestamp {
+            return Err(PauseError(
+                "target transition precedes actual native lower bracket",
+            ));
+        }
+        let host = if pair.source == output {
+            pair.target
+        } else {
+            crate::native_start::presented_output(output, lower, pair).map_err(|_| {
+                PauseError("target pause requires original progressing native brackets")
+            })?
+        };
+        let target = self.target.as_mut().expect("target bound");
+        if paused {
+            target.paused_at = Some(mapped.target_time);
+            self.frozen = playback;
+            self.phase = PausePhase::Paused;
+        } else {
+            let began = target
+                .paused_at
+                .ok_or(PauseError("resume lacks acknowledged target pause time"))?;
+            target.total_gap = combine_target_time(
+                target.total_gap,
+                target_duration_between(began, mapped.target_time)?,
+                false,
+            )?;
+            self.gap = gap;
+            self.phase = PausePhase::Running;
+        }
+        target.transition = Some(output);
+        self.last_pair = Some(pair);
+        self.reference = None;
+        self.boundary = None;
+        Ok(Some(PauseBoundary {
+            paused,
+            host,
+            playback_frame: self.frozen,
+        }))
+    }
+    /// Rebinds an acknowledged pause using the unchanged target interpretation.
+    pub fn rebind_target_output(
+        &mut self,
+        epoch: u64,
+        state: &beatkernel_platform::audio::ConvertedNativeOutputState,
+    ) -> Result<(), PauseError> {
+        self.rebind_target_output_with_basis(epoch, state, state.target_frame_basis())
+    }
+    /// Cold authorization of a planned target rate with the complete original owner.
+    /// Source identity/frozen playback and target physical floors remain separate.
+    pub fn rebind_target_output_with_basis(
+        &mut self,
+        epoch: u64,
+        state: &beatkernel_platform::audio::ConvertedNativeOutputState,
+        basis: beatkernel::audio::TargetFrameBasis,
+    ) -> Result<(), PauseError> {
+        let old = self
+            .target
+            .ok_or(PauseError("target rebind requires target pause"))?;
+        let actual = state.target_frame_basis();
+        let mixer = state.mixer();
+        let config = mixer.config();
+        if epoch <= self.epoch
+            || self.phase != PausePhase::Paused
+            || !mixer.is_paused()
+            || !mixer.pause_requested()
+            || mixer.playback_frame_cursor() != self.frozen
+            || config.domain() != self.origin.domain
+            || config.origin() != self.origin.timestamp
+            || config.format().sample_rate() != self.rate
+            || config.playback_end_frame() != self.playback_end
+            || basis.origin() != actual.origin()
+            || basis.start_time() != actual.start_time()
+            || basis.origin() != self.origin
+            || self.end_marker.is_some()
+            || self.playback_end.is_some_and(|end| self.frozen >= end)
+            || (state.pending_frames() != 0 && (!state.pending_is_held() || basis != actual))
+        {
+            return Err(PauseError(
+                "target rebind changed acknowledged source state or retained interpretation",
+            ));
+        }
+        match mixer.start_gate_frame() {
+            None if self.start_frame == 0 => {}
+            Some(Some(frame))
+                if frame == self.start_frame && mixer.applied_start_frame() == Some(frame) => {}
+            _ => return Err(PauseError("target rebind changed actual startup adoption")),
+        }
+        if self
+            .last_report
+            .is_some_and(|report| mixer.frame_cursor() < report.start_frame + report.frames as u64)
+        {
+            return Err(PauseError(
+                "target rebind regressed actual source pull frontier",
+            ));
+        }
+        let point = basis
+            .point_at_stream_frame(0)
+            .map_err(|_| PauseError("planned target basis overflow"))?;
+        if self
+            .last_pair
+            .is_some_and(|pair| point.timestamp < pair.source.timestamp)
+        {
+            return Err(PauseError(
+                "target rebind precedes original native progress",
+            ));
+        }
+        let generation = state.converter_owner().target_time();
+        target_duration_between(basis.start_time(), generation)?;
+        let mut next = self.clone();
+        next.epoch = epoch;
+        next.min_host = self.last_pair.map(|pair| pair.target).or(self.min_host);
+        next.last_pair = None;
+        next.reference = None;
+        next.boundary = None;
+        next.last_transition_physical = None;
+        next.evidence_kind = None;
+        next.interval_reference = None;
+        next.last_interval = None;
+        next.interval_window = None;
+        next.target = Some(TargetPauseState {
+            basis,
+            transition: None,
+            generation_floor: Some(generation),
+            ..old
+        });
+        *self = next;
+        Ok(())
+    }
+    /// Earlier replay of retained held PCM is not fresh replacement publication.
+    pub fn target_replacement_observation_ready(
+        &self,
+        report: Option<beatkernel::audio::ConvertedRenderReport>,
+        pair: ClockPair,
+    ) -> Result<bool, PauseError> {
+        let target = self
+            .target
+            .ok_or(PauseError("replacement lacks target basis"))?;
+        self.check_pair(pair)?;
+        let Some(report) = report else {
+            return Ok(false);
+        };
+        if report.target_frames == 0 {
+            return Ok(false);
+        }
+        if report.target_rate != target.basis.sample_rate()
+            || report.source_rate != self.rate
+            || report.state != beatkernel::audio::ConvertedOutputState::Held
+            || report.source.is_some()
+        {
+            return Err(PauseError(
+                "replacement requires genuine fresh target-held rendering",
+            ));
+        }
+        let Some(floor) = target.generation_floor else {
+            return Err(PauseError("replacement lacks cold generation frontier"));
+        };
+        let start = report.target_start_time;
+        if start.seconds() < floor.seconds()
+            || (start.seconds() == floor.seconds()
+                && u128::from(start.numerator()) * u128::from(floor.denominator())
+                    < u128::from(floor.numerator()) * u128::from(start.denominator()))
+        {
+            return Ok(false);
+        }
+        let point = floor
+            .point(self.origin)
+            .map_err(|_| PauseError("target generation floor overflow"))?;
+        Ok(pair.source.timestamp >= point.timestamp)
+    }
+    /// Validates a fresh target publication without changing either pause owner.
+    pub fn validate_target_replacement(
+        &self,
+        candidate: &Self,
+        basis: beatkernel::audio::TargetFrameBasis,
+        report: beatkernel::audio::ConvertedRenderReport,
+        pair: ClockPair,
+    ) -> Result<(), PauseError> {
+        let old = self
+            .target
+            .ok_or(PauseError("original pause lacks target identity"))?;
+        let new = candidate
+            .target
+            .ok_or(PauseError("candidate pause lacks target identity"))?;
+        if self.phase != PausePhase::Paused
+            || candidate.phase != PausePhase::Paused
+            || candidate.epoch <= self.epoch
+            || new.basis != basis
+            || self.origin != candidate.origin
+            || self.rate != candidate.rate
+            || self.host != candidate.host
+            || self.frozen != candidate.frozen
+            || self.gap != candidate.gap
+            || old.total_gap != new.total_gap
+            || old.paused_at != new.paused_at
+            || self.start_frame != candidate.start_frame
+            || self.playback_end != candidate.playback_end
+            || self.end_marker.is_some()
+            || candidate.end_marker.is_some()
+            || candidate.last_pair != Some(pair)
+            || !candidate.target_replacement_observation_ready(Some(report), pair)?
+        {
+            return Err(PauseError(
+                "target replacement changed acknowledged pause or lacks fresh native facts",
+            ));
+        }
+        self.check_pair(pair)?;
+        Ok(())
+    }
     /// Actual physical frame of the last committed transition on this output epoch.
     pub(crate) fn last_transition_output(&self) -> Result<Option<ClockPoint>, PauseError> {
+        if let Some(target) = self.target {
+            return Ok(target.transition);
+        }
         self.last_transition_physical
             .map(|frame| self.point(frame))
             .transpose()
@@ -425,7 +767,17 @@ impl NativePause {
     fn check_pair(&self, pair: ClockPair) -> Result<(), PauseError> {
         if pair.source.domain != self.origin.domain
             || pair.target.domain != self.host
-            || pair.source.timestamp < self.point(self.min_physical_frame)?.timestamp
+            || pair.source.timestamp
+                < match self.target {
+                    Some(target) => {
+                        target
+                            .basis
+                            .point_at_stream_frame(0)
+                            .map_err(|_| PauseError("target basis overflow"))?
+                            .timestamp
+                    }
+                    None => self.point(self.min_physical_frame)?.timestamp,
+                }
             || self
                 .min_host
                 .is_some_and(|host| pair.target.timestamp < host.timestamp)
@@ -767,6 +1119,11 @@ impl NativePause {
         self.point(playback)
     }
     pub(crate) fn resumed_presentation_point(&self) -> Result<ClockPoint, PauseError> {
+        if let Some(target) = self.target {
+            return target
+                .transition
+                .ok_or(PauseError("target resume lacks actual crossing"));
+        }
         self.point(
             self.frozen
                 .checked_add(self.gap)
@@ -784,6 +1141,25 @@ impl NativePause {
         original: Timestamp,
         playback_origin: ClockPoint,
     ) -> Result<Timestamp, PauseError> {
+        if let Some(target) = self.target {
+            let startup = target
+                .startup
+                .ok_or(PauseError("target song origin lacks mapped startup"))?
+                .point(self.origin)
+                .map_err(|_| PauseError("target startup overflow"))?;
+            if playback_origin.domain != self.origin.domain
+                || playback_origin.timestamp < startup.timestamp
+            {
+                return Err(PauseError("target playback origin precedes mapped startup"));
+            }
+            let paused = self.song_origin_after_pause(original)?;
+            let value = i128::from(paused.as_nanos())
+                + i128::from(playback_origin.timestamp.as_nanos())
+                - i128::from(startup.timestamp.as_nanos());
+            return Ok(Timestamp::from_nanos(
+                i64::try_from(value).map_err(|_| PauseError("target playback origin overflow"))?,
+            ));
+        }
         let startup = self.point(self.start_frame)?;
         if playback_origin.domain != self.origin.domain
             || playback_origin.timestamp < startup.timestamp
@@ -808,6 +1184,22 @@ impl NativePause {
     }
     /// Applies the cumulative gap once, avoiding per-pause rounding drift.
     pub fn song_origin_after_pause(&self, original: Timestamp) -> Result<Timestamp, PauseError> {
+        if let Some(target) = self.target {
+            let zero = ClockPoint {
+                domain: self.origin.domain,
+                timestamp: Timestamp::ZERO,
+            };
+            let gap = target
+                .total_gap
+                .point(zero)
+                .map_err(|_| PauseError("target pause duration overflow"))?
+                .timestamp
+                .as_nanos();
+            let value = i128::from(original.as_nanos()) - i128::from(gap);
+            return Ok(Timestamp::from_nanos(
+                i64::try_from(value).map_err(|_| PauseError("target song origin overflow"))?,
+            ));
+        }
         let manual_gap = self
             .gap
             .checked_sub(self.start_frame)
@@ -1196,11 +1588,9 @@ mod fixtures {
         assert_eq!(pause.phase(), PausePhase::Paused);
         let mut rewound_prefix = report(15, 0, 4, true);
         rewound_prefix.playback_frames = 4;
-        assert!(
-            pause
-                .observe(Some(rewound_prefix), pair(16_000_000))
-                .is_err()
-        );
+        assert!(pause
+            .observe(Some(rewound_prefix), pair(16_000_000))
+            .is_err());
         assert_eq!(pause.last_render_report(), before.last_render_report());
         let mut overlong = partial;
         overlong.playback_frames = 11;
@@ -1281,11 +1671,9 @@ mod fixtures {
             -1_000_000_000
         );
         let before = pause.clone();
-        assert!(
-            pause
-                .observe(Some(report(9, 6, 1, true)), reference)
-                .is_err()
-        );
+        assert!(pause
+            .observe(Some(report(9, 6, 1, true)), reference)
+            .is_err());
         assert_eq!(pause.phase(), before.phase());
         assert_eq!(pause.last_report, before.last_report);
         assert_eq!(pause.gap, before.gap);
@@ -1295,29 +1683,23 @@ mod fixtures {
         };
         assert!(pause.request(true, wrong).is_err());
         assert_eq!(pause.phase(), PausePhase::Running);
-        assert!(
-            pause
-                .scheduling_point(report(u64::MAX, u64::MAX, 1, false))
-                .is_err()
-        );
+        assert!(pause
+            .scheduling_point(report(u64::MAX, u64::MAX, 1, false))
+            .is_err());
         assert!(NativePause::new(point(1, 0), ClockDomainId(1), 3).is_err());
         assert!(NativePause::new(point(1, 0), ClockDomainId(2), 1_000_000_001).is_err());
         let mut bracket = NativePause::new(point(1, 0), ClockDomainId(2), 1000).unwrap();
         bracket.request(true, pair(20_000_000)).unwrap();
-        assert!(
-            bracket
-                .observe(Some(report(12, 10, 4, true)), pair(21_000_000))
-                .is_err()
-        );
+        assert!(bracket
+            .observe(Some(report(12, 10, 4, true)), pair(21_000_000))
+            .is_err());
         assert_eq!(bracket.phase(), PausePhase::Pausing);
         assert!(bracket.last_report.is_none());
         let mut stagnant = NativePause::new(point(1, 0), ClockDomainId(2), 1000).unwrap();
         stagnant.request(true, pair(0)).unwrap();
-        assert!(
-            stagnant
-                .observe(Some(report(0, 0, 1, true)), pair(0))
-                .is_err()
-        );
+        assert!(stagnant
+            .observe(Some(report(0, 0, 1, true)), pair(0))
+            .is_err());
     }
     fn finite_mixer(end: u64) -> (beatkernel::audio::CommandProducer, beatkernel::audio::Mixer) {
         mixer_queue(end, false)
@@ -1442,13 +1824,11 @@ mod fixtures {
         }
         let fresh = || NativePause::new(point(1, 0), ClockDomainId(2), 1000).unwrap();
         assert!(fresh().with_start_frame(u64::MAX).is_err());
-        assert!(
-            fresh()
-                .with_start_frame(0)
-                .unwrap()
-                .with_start_frame(0)
-                .is_err()
-        );
+        assert!(fresh()
+            .with_start_frame(0)
+            .unwrap()
+            .with_start_frame(0)
+            .is_err());
         let mut observed = fresh();
         observed.observe(None, pair(0)).unwrap();
         assert!(observed.with_start_frame(4).is_err());
@@ -1594,13 +1974,11 @@ mod fixtures {
         let fresh = || NativePause::new(point(1, 0), ClockDomainId(2), 1000).unwrap();
         assert!(fresh().with_playback_end_frame(u64::MAX).is_err());
         assert!(fresh().with_playback_end_frame(0).is_ok());
-        assert!(
-            fresh()
-                .with_playback_end_frame(3)
-                .unwrap()
-                .with_playback_end_frame(3)
-                .is_err()
-        );
+        assert!(fresh()
+            .with_playback_end_frame(3)
+            .unwrap()
+            .with_playback_end_frame(3)
+            .is_err());
         let mut requested = fresh();
         assert!(!requested.request(false, pair(0)).unwrap());
         assert!(requested.with_playback_end_frame(3).is_err());
@@ -1608,11 +1986,9 @@ mod fixtures {
         observed.observe(None, pair(0)).unwrap();
         assert!(observed.with_playback_end_frame(3).is_err());
         let mut wrong_endpoint = fresh().with_playback_end_frame(4).unwrap();
-        assert!(
-            wrong_endpoint
-                .observe(Some(terminal), pair(4_000_000))
-                .is_err()
-        );
+        assert!(wrong_endpoint
+            .observe(Some(terminal), pair(4_000_000))
+            .is_err());
         assert!(wrong_endpoint.last_render_report().is_none());
         let mut finite = fresh().with_playback_end_frame(3).unwrap();
         finite.observe(Some(terminal), pair(4_000_000)).unwrap();
@@ -1682,20 +2058,16 @@ mod fixtures {
         assert_eq!(reconciled[1].meta().timestamp, Timestamp::from_nanos(10));
         assert_eq!(reconciled[1].meta().native, released.meta().native);
         assert_eq!(reconciled[1].meta().original_clock_point, Some(point(2, 4)));
-        assert!(
-            !keys
-                .accept(&button(3, 6, ButtonState::Repeat, 11, 6))
-                .unwrap()
-        );
+        assert!(!keys
+            .accept(&button(3, 6, ButtonState::Repeat, 11, 6))
+            .unwrap());
         assert!(!keys.accept(&button(3, 6, ButtonState::Up, 12, 7)).unwrap());
-        assert!(
-            keys.accept(&button(3, 6, ButtonState::Down, 13, 8))
-                .unwrap()
-        );
-        assert!(
-            keys.accept(&button(4, 7, ButtonState::Repeat, 14, 9))
-                .unwrap()
-        );
+        assert!(keys
+            .accept(&button(3, 6, ButtonState::Down, 13, 8))
+            .unwrap());
+        assert!(keys
+            .accept(&button(4, 7, ButtonState::Repeat, 14, 9))
+            .unwrap());
         assert!(keys.resume(point(2, 15)).unwrap().is_empty());
     }
     #[test]
@@ -1737,3 +2109,52 @@ mod playback_pause_rebind_fixtures;
 #[cfg(test)]
 #[path = "playback_presentation_origin_fixtures.rs"]
 mod playback_presentation_origin_fixtures;
+
+fn target_duration_between(
+    start: beatkernel::audio::TargetTime,
+    end: beatkernel::audio::TargetTime,
+) -> Result<beatkernel::audio::TargetTime, PauseError> {
+    combine_target_time(end, start, true)
+}
+fn combine_target_time(
+    a: beatkernel::audio::TargetTime,
+    b: beatkernel::audio::TargetTime,
+    subtract: bool,
+) -> Result<beatkernel::audio::TargetTime, PauseError> {
+    let mut x = a.denominator();
+    let mut y = b.denominator();
+    while y != 0 {
+        let remainder = x % y;
+        x = y;
+        y = remainder;
+    }
+    let denominator = (a.denominator() / x)
+        .checked_mul(b.denominator())
+        .ok_or(PauseError("target duration denominator overflow"))?;
+    let aa = i128::from(a.seconds())
+        .checked_mul(i128::from(denominator))
+        .and_then(|value| {
+            value.checked_add(i128::from(a.numerator()) * i128::from(denominator / a.denominator()))
+        })
+        .ok_or(PauseError("target duration overflow"))?;
+    let bb = i128::from(b.seconds())
+        .checked_mul(i128::from(denominator))
+        .and_then(|value| {
+            value.checked_add(i128::from(b.numerator()) * i128::from(denominator / b.denominator()))
+        })
+        .ok_or(PauseError("target duration overflow"))?;
+    let total = if subtract {
+        aa.checked_sub(bb)
+    } else {
+        aa.checked_add(bb)
+    }
+    .filter(|total| *total >= 0)
+    .ok_or(PauseError("target duration regressed or overflowed"))?;
+    beatkernel::audio::TargetTime::new(
+        u64::try_from(total / i128::from(denominator))
+            .map_err(|_| PauseError("target seconds overflow"))?,
+        (total % i128::from(denominator)) as u64,
+        denominator,
+    )
+    .map_err(|_| PauseError("invalid target duration"))
+}

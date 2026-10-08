@@ -1,9 +1,131 @@
 //! Pure local roster drafts; metadata discovery and native attachment are external.
 use crate::{
     device_catalog::{DeviceCatalog, DeviceRequest},
-    local_players::{InputPlan, LocalPlayer, LocalPlayers, MAX_LOCAL_PLAYERS, PlayerId},
+    local_players::{InputPlan, LocalPlayer, LocalPlayers, PlayerId, MAX_LOCAL_PLAYERS},
     settings::{NativeSettings, SettingsHost},
 };
+
+/// Browser input descriptors are presentation metadata, never native device paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserInputKind {
+    Keyboard,
+    Touch,
+    Hid,
+    Gamepad,
+    Pointer,
+}
+impl BrowserInputKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Keyboard => "KEYBOARD",
+            Self::Touch => "TOUCH",
+            Self::Hid => "HID",
+            Self::Gamepad => "GAMEPAD",
+            Self::Pointer => "POINTER",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug)]
+pub struct BrowserInputSource<'a> {
+    pub id: &'a str,
+    pub kind: BrowserInputKind,
+    pub label: &'a str,
+    pub detail: &'a str,
+    pub selectable: bool,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct BrowserPlayerMember<'a> {
+    pub id: PlayerId,
+    pub source: Option<&'a str>,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct BrowserLocalProjection<'a> {
+    pub players: &'a [BrowserPlayerMember<'a>],
+    pub sources: &'a [BrowserInputSource<'a>],
+    pub can_assign: bool,
+}
+pub fn validate_browser_sources(sources: &[BrowserInputSource<'_>]) -> Result<(), String> {
+    use crate::device_catalog::{MAX_CATALOG_BYTES, MAX_DEVICES, MAX_DEVICE_TEXT_BYTES};
+    if sources.len() > MAX_DEVICES {
+        return Err("browser input catalog exceeds device limit".into());
+    }
+    let mut total = 0usize;
+    for (index, source) in sources.iter().enumerate() {
+        if source.id.is_empty() || sources[..index].iter().any(|other| other.id == source.id) {
+            return Err("browser source identity is empty or duplicated".into());
+        }
+        for value in [source.id, source.label, source.detail] {
+            if value.len() > MAX_DEVICE_TEXT_BYTES
+                || value
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+            {
+                return Err("browser source text exceeds metadata limits".into());
+            }
+            total = total
+                .checked_add(value.len())
+                .ok_or("browser metadata byte overflow")?;
+            if total > MAX_CATALOG_BYTES {
+                return Err("browser input catalog exceeds byte limit".into());
+            }
+        }
+    }
+    Ok(())
+}
+impl BrowserLocalProjection<'_> {
+    /// Semantic assignment admission for the business owner; no native attachment.
+    pub fn admit_assignment(&self, player: PlayerId, source: &str) -> Result<(), String> {
+        self.validate()?;
+        if !self.can_assign || self.players.len() == 1 {
+            return Err("browser source assignment is unavailable or automatic solo".into());
+        }
+        if !self.players.iter().any(|member| member.id == player) {
+            return Err("browser assignment references an unknown player".into());
+        }
+        if !self
+            .sources
+            .iter()
+            .any(|choice| choice.id == source && choice.selectable)
+        {
+            return Err("browser assignment source is unavailable".into());
+        }
+        if self
+            .players
+            .iter()
+            .any(|member| member.id != player && member.source == Some(source))
+        {
+            return Err("browser assignment source already belongs to another player".into());
+        }
+        Ok(())
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        validate_browser_sources(self.sources)?;
+        if !(1..=MAX_LOCAL_PLAYERS).contains(&self.players.len()) {
+            return Err("browser roster exceeds player limit".into());
+        }
+        for (index, player) in self.players.iter().enumerate() {
+            if player.id.0 == 0
+                || self.players[..index]
+                    .iter()
+                    .any(|other| other.id == player.id)
+            {
+                return Err("browser player identity is zero or duplicated".into());
+            }
+            if let Some(source) = player.source {
+                if !self.sources.iter().any(|choice| choice.id == source) {
+                    return Err("browser player references an unknown source".into());
+                }
+                if self.players[..index]
+                    .iter()
+                    .any(|other| other.source == Some(source))
+                {
+                    return Err("browser players share an assigned source".into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// A bounded stable-ID roster used by graphical setup and settings profiles.
 #[derive(Clone, Debug)]

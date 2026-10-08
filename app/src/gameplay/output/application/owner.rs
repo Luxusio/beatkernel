@@ -1,5 +1,8 @@
 //! One static output owner shared by gameplay adapters; input and clocks stay external.
-use crate::gameplay::output::ports::{OriginalNativeOutputBackend, OutputReplacementBackend};
+use super::replacement::target::{publish_ready_target_audio_output_held, ReadyTargetAudioOutput};
+use crate::gameplay::output::ports::{
+    OriginalNativeOutputBackend, OriginalTargetNativeOutputBackend, OutputReplacementBackend,
+};
 use crate::native_audio_presentation::NativeAudioPresentation;
 use crate::{
     gameplay::output::application::replacement::{
@@ -10,26 +13,35 @@ use crate::{
     live_pause::LivePauseObservation,
     native_end::{EndBoundary, NativeEnd},
 };
+use beatkernel::audio::{ConvertedRenderReport, TargetFrameBasis};
 use beatkernel::{
     audio::{Mixer, OutputFrameBasis, RenderReport, SoftwareOutputState},
     time::{ClockPair, ClockPoint},
 };
 use beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence;
+use beatkernel_platform::audio::{ConvertedBoundaryFacts, ConvertedNativeOutputState};
 
 enum RejectedReady<P: GameplayPresentationPort, O> {
     Legacy(ReadyOutput<P, O>),
     Audio(ReadyAudioOutput<O>),
+    Target(ReadyTargetAudioOutput<O>),
 }
-pub struct GameplayOutputOwner<B: OutputReplacementBackend<O>, O: SoftwareOutputState = Mixer> {
+pub struct GameplayOutputOwner<
+    B: OutputReplacementBackend<O, Basis>,
+    O = Mixer,
+    Basis = OutputFrameBasis,
+> {
     current: Option<B::Output>,
-    basis: OutputFrameBasis,
-    controller: OutputReplacement<B, O>,
+    basis: Basis,
+    controller: OutputReplacement<B, O, Basis>,
     pending: Option<(B::Request, u64)>,
     rejected: Option<RejectedReady<B::Presentation, B::Output>>,
     report: Option<RenderReport>,
     pause_evidence: Option<LivePauseObservation>,
+    converted: Option<ConvertedRenderReport>,
+    target_facts: Option<ConvertedBoundaryFacts>,
 }
-impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> GameplayOutputOwner<B, O> {
+impl<B: OutputReplacementBackend<O, Basis>, O, Basis> GameplayOutputOwner<B, O, Basis> {
     pub fn new(backend: B, output: B::Output) -> Self {
         let basis = backend.basis(&output);
         Self {
@@ -40,6 +52,8 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> GameplayOutputOwner
             rejected: None,
             report: None,
             pause_evidence: None,
+            converted: None,
+            target_facts: None,
         }
     }
     pub fn current(&self) -> Option<&B::Output> {
@@ -60,6 +74,12 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> GameplayOutputOwner
             _ => None,
         }
     }
+    pub fn rejected_target_audio_ready(&self) -> Option<&ReadyTargetAudioOutput<B::Output>> {
+        match self.rejected.as_ref() {
+            Some(RejectedReady::Target(ready)) => Some(ready),
+            _ => None,
+        }
+    }
     pub fn state(&self) -> ReplacementState {
         if self.current.is_some() {
             ReplacementState::Attached
@@ -77,15 +97,26 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> GameplayOutputOwner
             .max(self.controller.last_issued_epoch())
     }
     pub fn output_clock_suspended(&self) -> bool {
-        self.current.is_none() && self.controller.state() == ReplacementState::Waiting
+        self.current.is_none()
+            && matches!(
+                self.controller.state(),
+                ReplacementState::Waiting | ReplacementState::PendingRetirement
+            )
     }
     pub fn replacement_pending(&self) -> bool {
-        self.rejected.is_some() || self.controller.state() == ReplacementState::Waiting
+        self.rejected.is_some()
+            || matches!(
+                self.controller.state(),
+                ReplacementState::Waiting | ReplacementState::PendingRetirement
+            )
     }
     pub fn has_work(&self) -> bool {
         self.pending.is_some()
             || self.rejected.is_some()
-            || self.controller.state() == ReplacementState::Waiting
+            || matches!(
+                self.controller.state(),
+                ReplacementState::Waiting | ReplacementState::PendingRetirement
+            )
     }
     pub fn queue(&mut self, request: B::Request, wait_ns: u64) -> Result<(), (B::Request, u64)> {
         if wait_ns == 0
@@ -106,6 +137,8 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> GameplayOutputOwner
             recovery: None,
         }
     }
+}
+impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> GameplayOutputOwner<B, O> {
     pub fn observe(
         &mut self,
         presentation: &mut B::Presentation,
@@ -183,6 +216,8 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> GameplayOutputOwner
         }
         Ok(())
     }
+}
+impl<B: OutputReplacementBackend<O, Basis>, O, Basis> GameplayOutputOwner<B, O, Basis> {
     pub fn take_recovered_mixer(&mut self) -> Option<O> {
         self.controller.take_recovered_mixer()
     }
@@ -195,9 +230,9 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> GameplayOutputOwner
             let (output, hold) = match ready {
                 RejectedReady::Legacy(ReadyOutput { output, hold, .. }) => (output, hold),
                 RejectedReady::Audio(ReadyAudioOutput { output, hold, .. }) => (output, hold),
+                RejectedReady::Target(ready) => (ready.output, ready.hold),
             };
-            let result = self.controller.retire_owned_output(output);
-            drop(hold);
+            let result = self.controller.retire_owned_output_held(output, hold);
             return result.map(|_| true);
         }
         self.controller.stop_owned()
@@ -523,6 +558,243 @@ where
         }
     }
 }
+impl<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>>
+    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis>
+{
+    fn target_identity(
+        &self,
+        presentation: &NativeAudioPresentation,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        let Some(output) = self.current.as_ref() else {
+            return Ok(());
+        };
+        let epoch = presentation.authority().epoch();
+        if epoch.id != self.controller.backend().epoch(output)
+            || self.controller.backend().basis(output) != self.basis
+            || presentation.basis().is_some()
+            || presentation
+                .target_basis()
+                .is_some_and(|basis| basis != self.basis)
+            || self
+                .basis
+                .point_at_stream_frame(0)
+                .map_err(|error| ReplacementFailure::timing(Box::new(error)))?
+                != epoch.stream_origin
+        {
+            return Err(ReplacementFailure::policy(
+                "published target creation epoch or exact physical basis differs",
+            ));
+        }
+        Ok(())
+    }
+    /// Collects every fallible IO result before admitting authority or changing caches.
+    pub fn observe_target_native(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        self.target_identity(presentation)?;
+        let Some(output) = self.current.as_mut() else {
+            return Ok(());
+        };
+        let snapshot = self
+            .controller
+            .backend_mut()
+            .observe_native_target(output)
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
+        let telemetry = self
+            .controller
+            .backend()
+            .output_telemetry(output)
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
+        if let Some(telemetry) = telemetry {
+            let facts = telemetry.facts;
+            if facts.origin != Some(self.basis.origin())
+                || facts.source_rate == 0
+                || self.target_facts.is_some_and(|old| {
+                    old.origin != facts.origin || old.source_rate != facts.source_rate
+                })
+                || telemetry.converted.is_some_and(|report| {
+                    report.target_rate != self.basis.sample_rate()
+                        || report.source_rate != facts.source_rate
+                })
+            {
+                return Err(ReplacementFailure::policy(
+                    "target observation changed immutable source or target interpretation",
+                ));
+            }
+        }
+        if let Some(snapshot) = snapshot {
+            if snapshot.epoch != self.controller.backend().epoch(output)
+                || snapshot.basis != self.basis
+            {
+                return Err(ReplacementFailure::policy(
+                    "original target snapshot differs from published creation identity",
+                ));
+            }
+            presentation
+                .admit_target(snapshot)
+                .map_err(ReplacementFailure::timing)?;
+        }
+        if let Some(telemetry) = telemetry {
+            self.report = telemetry.source.filter(|report| report.frames != 0);
+            self.converted = telemetry.converted;
+            self.target_facts = Some(telemetry.facts);
+        }
+        Ok(())
+    }
+    /// Source scheduling evidence, never generated target frame counts.
+    pub fn render_report(&self) -> Option<RenderReport> {
+        self.report
+    }
+    pub fn converted_report(&self) -> Option<ConvertedRenderReport> {
+        self.converted
+    }
+    pub fn target_boundary_facts(&self) -> Option<ConvertedBoundaryFacts> {
+        self.target_facts
+    }
+    /// Returns genuine target/native facts to the shared target-aware pause handler.
+    /// Waiting output reuses only the previously committed pause observation.
+    pub fn audio_pause_observation_target(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        now: ClockPoint,
+    ) -> Result<LivePauseObservation, ReplacementFailure<B::Error>> {
+        self.target_identity(presentation)?;
+        if now.domain != presentation.authority().epoch().host_domain {
+            return Err(ReplacementFailure::policy(
+                "target pause observation HOST domain differs",
+            ));
+        }
+        if self.current.is_none() {
+            return self.pause_evidence.ok_or_else(|| {
+                ReplacementFailure::policy("waiting target output has no committed pause evidence")
+            });
+        }
+        let record = presentation.latest_record().ok_or_else(|| {
+            ReplacementFailure::policy("target pause has no accepted original native evidence")
+        })?;
+        let facts = self.target_facts.ok_or_else(|| {
+            ReplacementFailure::policy("target pause source association is unavailable")
+        })?;
+        let evidence = LivePauseObservation::Target {
+            epoch: presentation.authority().epoch().id,
+            basis: self.basis,
+            source: self.report,
+            facts,
+            pair: record.pair(),
+        };
+        self.pause_evidence = Some(evidence);
+        Ok(evidence)
+    }
+    /// Native held mode is separate from producer pause adoption and native acknowledgement.
+    pub fn set_target_held(&mut self, held: bool) -> Result<(), ReplacementFailure<B::Error>> {
+        let output = self.current.as_mut().ok_or_else(|| {
+            ReplacementFailure::policy("target held mode requires a published output")
+        })?;
+        if self.controller.backend().basis(output) != self.basis {
+            return Err(ReplacementFailure::policy(
+                "target held output changed creation basis",
+            ));
+        }
+        self.controller
+            .backend_mut()
+            .set_held(output, held)
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))
+    }
+}
+impl<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>>
+    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis>
+where
+    B::Error: std::error::Error + 'static,
+{
+    pub fn observe_target_audio_end(
+        &mut self,
+        end: &mut NativeEnd,
+        presentation: &NativeAudioPresentation,
+    ) -> crate::native_gameplay::NativeGameplayResult<Option<EndBoundary>> {
+        self.target_identity(presentation)?;
+        if self.current.is_none() {
+            return Ok(None);
+        }
+        let Some(record) = presentation.latest_record() else {
+            return Ok(None);
+        };
+        let Some(facts) = self.target_facts else {
+            return Ok(None);
+        };
+        Ok(end.observe_target(
+            presentation.authority().epoch().id,
+            self.basis,
+            facts,
+            self.report,
+            record.pair(),
+        )?)
+    }
+    /// Publishes the ready target owner through the same lifecycle and authority transaction.
+    pub fn publish_paused_target_audio(
+        &mut self,
+        mut context: crate::gameplay_presentation::GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.rejected.is_some() {
+            return Err(
+                "ready target publication was refused; explicit cancellation required".into(),
+            );
+        }
+        if context.merger.pending() != 0 {
+            return Ok(false);
+        }
+        self.target_identity(context.presentation)?;
+        if let Some((request, wait_ns)) = self.pending.take() {
+            if let Some(output) = self.current.take() {
+                if let Err(output) = self.controller.attach(output) {
+                    self.current = Some(output);
+                    self.pending = Some((request, wait_ns));
+                    return Err("replacement controller already owns an output".into());
+                }
+            }
+            self.controller.begin_target_audio(
+                request,
+                context.presentation,
+                context.pause,
+                context.end.as_ref(),
+                context.merger,
+                context.config.song_origin,
+                wait_ns,
+                || context.control.hold_audio_pause(),
+            )?;
+        }
+        if self.controller.state() != ReplacementState::Waiting {
+            return Ok(false);
+        }
+        let Some(ready) =
+            self.controller
+                .poll_target_audio(now, context.presentation, context.merger)?
+        else {
+            return Ok(false);
+        };
+        let basis = ready.basis;
+        let report = ready.source_report;
+        let converted = ready.converted_report;
+        let facts = ready.facts;
+        match publish_ready_target_audio_output_held(ready, &mut self.current, context, now) {
+            Ok(hold) => {
+                self.basis = basis;
+                self.report = report;
+                self.converted = Some(converted);
+                self.target_facts = Some(facts);
+                self.pause_evidence = None;
+                drop(hold);
+                Ok(true)
+            }
+            Err(failure) => {
+                self.rejected = Some(RejectedReady::Target(failure.ready));
+                Err(failure.error)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "owner_fixtures.rs"]
 pub(crate) mod fixtures;

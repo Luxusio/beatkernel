@@ -673,9 +673,19 @@ fn run_gameplay_timed<
                 reference,
                 pause_now.unwrap_or(reference.target),
             )?;
+            let target_pause = matches!(
+                evidence,
+                crate::live_pause::LivePauseObservation::Target { .. }
+            );
+            if target_pause && !T::AUDIO {
+                return Err("target pause requires original audio presentation".into());
+            }
+            let mut staged_pause = target_pause.then(|| session.pause.clone());
+            let pause = staged_pause.as_mut().unwrap_or(&mut *session.pause);
+            let mut staged_audio_boundary = None;
             let update = if T::AUDIO {
                 let update = update_live_audio_pause(
-                    session.pause,
+                    pause,
                     evidence,
                     rendered,
                     desired,
@@ -683,7 +693,7 @@ fn run_gameplay_timed<
                     config.sample_rate,
                 )?;
                 if let Some(boundary) = update.boundary {
-                    audio_boundary = Some(boundary);
+                    staged_audio_boundary = Some(boundary);
                 }
                 crate::live_pause::LivePauseUpdate {
                     requested: update.requested,
@@ -692,7 +702,7 @@ fn run_gameplay_timed<
                 }
             } else {
                 update_live_pause(
-                    session.pause,
+                    pause,
                     evidence,
                     rendered,
                     desired,
@@ -700,6 +710,19 @@ fn run_gameplay_timed<
                     config.sample_rate,
                 )?
             };
+            if target_pause {
+                if update.requested == Some(false) {
+                    device.set_audio_held(false)?;
+                } else if update.boundary.is_some_and(|boundary| boundary.paused) {
+                    device.set_audio_held(true)?;
+                }
+            }
+            if let Some(pause) = staged_pause {
+                *session.pause = pause;
+            }
+            if let Some(boundary) = staged_audio_boundary {
+                audio_boundary = Some(boundary);
+            }
             if update.observed && config.pause_supported && !pause_announced {
                 pause_announced = true;
                 host_port.publish_pause(PauseState::Running);
@@ -734,15 +757,17 @@ fn run_gameplay_timed<
                         pause_committed = false;
                     }
                 } else {
-                    let transport = prepare_live_transport(
-                        session.runtime.transport_mut(),
-                        boundary,
-                        last_song,
-                    )?;
-                    session
-                        .discipline
-                        .resume(device, config, session.pause, reference)?;
-                    *session.runtime.transport_mut() = transport;
+                    if !T::AUDIO {
+                        let transport = prepare_live_transport(
+                            session.runtime.transport_mut(),
+                            boundary,
+                            last_song,
+                        )?;
+                        session
+                            .discipline
+                            .resume(device, config, session.pause, reference)?;
+                        *session.runtime.transport_mut() = transport;
+                    }
                     resume_boundary = Some(boundary.at);
                     paused_boundary = None;
                     pause_committed = false;

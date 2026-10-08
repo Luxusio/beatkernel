@@ -2,6 +2,7 @@
 use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
+    layout::{LayoutChange, LayoutUpdate, MountedLayout, Node, NodeId, TextStyle},
     molecules::{button, text_field_value_with_font, text_field_with_font},
     retained::RetainedNodes,
     text_input::LineEditor,
@@ -10,7 +11,7 @@ use crate::{
     font_text::FontText,
     scene::Scene,
     screen_lifecycle::ScreenInstanceId,
-    settings::{MAX_FIELDS, SettingsField},
+    settings::{SettingsField, MAX_FIELDS},
 };
 use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
 use std::rc::Rc;
@@ -119,6 +120,166 @@ pub const BUTTONS: [(ControlId, Bounds, &'static str); 10] = [
     ),
 ];
 
+const TITLE: TextStyle = TextStyle {
+    scale: 3,
+    color: 0xf0f4ff,
+};
+const LABEL: TextStyle = TextStyle {
+    scale: 1,
+    color: 0xf0f4ff,
+};
+const HELP: TextStyle = TextStyle {
+    scale: 1,
+    color: 0x9bb1cf,
+};
+const NOTICE: TextStyle = TextStyle {
+    scale: 1,
+    color: 0xd8b36b,
+};
+const MESSAGE: TextStyle = TextStyle {
+    scale: 1,
+    color: 0x74e5c5,
+};
+const ERROR: TextStyle = TextStyle {
+    scale: 1,
+    color: 0xff8e8e,
+};
+
+#[derive(Clone, Copy)]
+enum Component {
+    Background(u32),
+    Header(&'static str, TextStyle),
+    Action(ControlId, &'static str),
+    Paging,
+    FieldLabel(usize),
+    Editor(usize),
+    Hint,
+    ProfileLabel,
+    ProfileEditor,
+    Status,
+    Error,
+}
+type N = Node<'static, Component>;
+const fn action(index: usize) -> N {
+    N::leaf(
+        [BUTTONS[index].1.width, BUTTONS[index].1.height],
+        Component::Action(BUTTONS[index].0, BUTTONS[index].2),
+    )
+}
+macro_rules! field_row {
+    ($slot:expr) => {
+        N::row(
+            [906, 32],
+            24,
+            &[
+                N::layer(
+                    [232, 32],
+                    &[N::leaf([232, 7], Component::FieldLabel($slot)).at(0, 10)],
+                ),
+                N::leaf([650, 32], Component::Editor($slot)),
+            ],
+        )
+    };
+}
+// Mounted once. The native/browser owners continue to supply actual drafts and
+// navigation capabilities; this declaration owns only view structure and style.
+const SCREEN: N = N::layer(
+    [960, 720],
+    &[
+        N::leaf([960, 720], Component::Background(0x10151e)).at(0, 0),
+        N::column(
+            [936, 52],
+            24,
+            &[
+                N::leaf([936, 21], Component::Header("BEATKERNEL BMS PLAYER", TITLE)),
+                N::leaf(
+                    [936, 7],
+                    Component::Header("F4 RECORDS / F6 PRACTICE", HELP),
+                ),
+            ],
+        )
+        .at(24, 20),
+        N::row(
+            [669, 34],
+            11,
+            &[action(0), action(1), action(2), action(3), action(4)],
+        )
+        .at(265, 60),
+        N::leaf([906, 7], Component::Paging).at(24, 102),
+        N::column(
+            [906, 383],
+            7,
+            &[
+                field_row!(0),
+                field_row!(1),
+                field_row!(2),
+                field_row!(3),
+                field_row!(4),
+                field_row!(5),
+                field_row!(6),
+                field_row!(7),
+                field_row!(8),
+                field_row!(9),
+            ],
+        )
+        .at(24, 120),
+        N::leaf([906, 7], Component::Hint).at(24, 525),
+        N::row(
+            [906, 34],
+            24,
+            &[
+                N::layer(
+                    [112, 34],
+                    &[N::leaf([112, 7], Component::ProfileLabel).at(0, 12)],
+                ),
+                N::leaf([770, 34], Component::ProfileEditor),
+            ],
+        )
+        .at(24, 558),
+        N::row(
+            [922, 34],
+            18,
+            &[action(5), action(6), action(7), action(8), action(9)],
+        )
+        .at(24, 620),
+        N::leaf([912, 7], Component::Status).at(24, 665),
+        N::leaf([912, 7], Component::Error).at(24, 690),
+    ],
+)
+.clipped();
+
+fn paint_text(scene: &mut Scene, bounds: Bounds, value: &str, style: TextStyle) {
+    text(
+        scene,
+        bounds.x as usize,
+        bounds.y as usize,
+        value,
+        style.scale,
+        style.color,
+    );
+}
+fn reflow_settings(
+    layout: &mut MountedLayout<Component>,
+    anchors: &[(NodeId, [i64; 2])],
+    extent: [u32; 2],
+) -> Result<bool, String> {
+    if extent.contains(&0) {
+        return layout.resize(extent);
+    }
+    let mut updates = vec![LayoutUpdate {
+        id: NodeId(1),
+        change: LayoutChange::Size(extent.map(i64::from)),
+    }];
+    updates.extend(anchors.iter().map(|&(id, origin)| LayoutUpdate {
+        id,
+        change: LayoutChange::Origin([
+            origin[0] * i64::from(extent[0]) / 960,
+            origin[1] * i64::from(extent[1]) / 720,
+        ]),
+    }));
+    layout.update_on_extent(extent, &updates)
+}
+
 pub struct SettingsFrame<'a> {
     pub fields: &'a [SettingsField],
     pub selected: usize,
@@ -158,14 +319,26 @@ pub struct SettingsView {
     hovered: RwSignal<Option<ControlId>>,
     armed: RwSignal<Option<ControlId>>,
     nodes: RetainedNodes,
+    layout: MountedLayout<Component>,
+    anchors: Vec<(NodeId, [i64; 2])>,
 }
 impl SettingsView {
     pub fn new(id: ScreenInstanceId, width: u32, height: u32) -> Result<Self, String> {
-        if (width, height) != (960, 720) {
-            return Err("Settings requires the 960x720 logical viewport".into());
-        }
         let empty = LineEditor::new("", 4096)?;
         let nodes = RetainedNodes::new(width, height)?;
+        let mut layout = MountedLayout::mount(SCREEN)?;
+        let anchors = layout
+            .children(NodeId(0))
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|&id| id != NodeId(1))
+            .map(|id| {
+                let bounds = layout.geometry(id).unwrap().bounds;
+                (id, [bounds.x, bounds.y])
+            })
+            .collect::<Vec<_>>();
+        reflow_settings(&mut layout, &anchors, [width, height])?;
         let scope = Scope::new();
         let mut view = Self {
             id,
@@ -186,36 +359,90 @@ impl SettingsView {
             hovered: scope.create_rw_signal(None),
             armed: scope.create_rw_signal(None),
             nodes,
+            layout,
+            anchors,
         };
-        view.nodes.static_node(|scene, _| {
-            rect(scene, 0, 0, 960, 720, 0x10151e);
-            text(scene, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
-            text(scene, 24, 65, "F4 RECORDS / F6 PRACTICE", 1, 0x9bb1cf);
-        });
-        for (id, bounds, label) in BUTTONS.iter().take(5).copied() {
-            view.button_node(id, bounds, label);
+        let header = view
+            .layout
+            .leaves()
+            .iter()
+            .copied()
+            .filter(|leaf| {
+                matches!(
+                    leaf.component,
+                    Component::Background(_) | Component::Header(..)
+                )
+            })
+            .collect::<Vec<_>>();
+        let header_ids = header.iter().map(|leaf| leaf.id).collect::<Vec<_>>();
+        view.nodes.static_layout_node(
+            &view.layout,
+            &header_ids,
+            move |id, geometry, scene, _| match header
+                .iter()
+                .find(|leaf| leaf.id == id)
+                .unwrap()
+                .component
+            {
+                Component::Background(color) => {
+                    let b = geometry.bounds;
+                    rect(scene, b.x, b.y, b.width, b.height, color);
+                }
+                Component::Header(value, style) => paint_text(scene, geometry.bounds, value, style),
+                _ => unreachable!(),
+            },
+        )?;
+        for (id, _, _) in BUTTONS.iter().take(5).copied() {
+            view.button_node(id)?;
         }
+        let paging = view
+            .layout
+            .leaves()
+            .iter()
+            .find(|leaf| matches!(leaf.component, Component::Paging))
+            .unwrap()
+            .id;
         let count = view.count;
         let selected = view.selected;
         let memo = scope.create_memo(move |_| (selected.get() / 10 * 10, count.get()));
-        view.nodes.bind(scope, memo, |(first, count), scene, _| {
-            if count > 0 {
-                text(
-                    scene,
-                    24,
-                    102,
-                    &format!(
-                        "FIELDS {}-{} OF {}   UP/DOWN OR TAB SELECT",
-                        first + 1,
-                        (first + 10).min(count),
-                        count
-                    ),
-                    1,
-                    0xd8b36b,
-                );
-            }
-        });
+        view.nodes.bind_layout(
+            scope,
+            memo,
+            &view.layout,
+            &[paging],
+            |(first, count), _, geometry, scene, _| {
+                if count > 0 {
+                    paint_text(
+                        scene,
+                        geometry.bounds,
+                        &format!(
+                            "FIELDS {}-{} OF {}   UP/DOWN OR TAB SELECT",
+                            first + 1,
+                            (first + 10).min(count),
+                            count
+                        ),
+                        NOTICE,
+                    );
+                }
+            },
+        )?;
         for slot in 0..10 {
+            let label_id = view
+                .layout
+                .leaves()
+                .iter()
+                .find(
+                    |leaf| matches!(leaf.component, Component::FieldLabel(index) if index == slot),
+                )
+                .unwrap()
+                .id;
+            let editor_id = view
+                .layout
+                .leaves()
+                .iter()
+                .find(|leaf| matches!(leaf.component, Component::Editor(index) if index == slot))
+                .unwrap()
+                .id;
             let fields = Rc::clone(&view.fields);
             let selected = view.selected;
             let editor = view.editor;
@@ -246,17 +473,18 @@ impl SettingsView {
                     input_font.get(),
                 )
             });
-            view.nodes
-                .bind(scope, memo, move |(row, font), scene, hits| {
+            view.nodes.bind_layout(
+                scope,
+                memo,
+                &view.layout,
+                &[label_id, editor_id],
+                move |(row, font), id, geometry, scene, hits| {
                     if let Some(row) = row {
-                        let y = 120 + slot as i64 * 39;
-                        text(scene, 24, (y + 10) as usize, row.field.label, 1, 0xf0f4ff);
-                        let bounds = Bounds {
-                            x: 280,
-                            y,
-                            width: 650,
-                            height: 32,
-                        };
+                        if id == label_id {
+                            paint_text(scene, geometry.bounds, row.field.label, LABEL);
+                            return;
+                        }
+                        let bounds = geometry.bounds;
                         if let Some(editor) = row.editor {
                             text_field_with_font(
                                 scene,
@@ -277,7 +505,8 @@ impl SettingsView {
                             hits.push((ControlId(1000 + row.index as u64), bounds));
                         }
                     }
-                });
+                },
+            )?;
         }
         let selected = view.selected;
         let fields = Rc::clone(&view.fields);
@@ -286,11 +515,24 @@ impl SettingsView {
                 .get(selected.get())
                 .and_then(|signal| signal.with(|field| field.as_ref().map(|field| field.hint)))
         });
-        view.nodes.bind(scope, memo, |hint, scene, _| {
-            if let Some(hint) = hint {
-                text(scene, 24, 525, hint, 1, 0x9bb1cf);
-            }
-        });
+        let hint_id = view
+            .layout
+            .leaves()
+            .iter()
+            .find(|leaf| matches!(leaf.component, Component::Hint))
+            .unwrap()
+            .id;
+        view.nodes.bind_layout(
+            scope,
+            memo,
+            &view.layout,
+            &[hint_id],
+            |hint, _, geometry, scene, _| {
+                if let Some(hint) = hint {
+                    paint_text(scene, geometry.bounds, hint, HELP);
+                }
+            },
+        )?;
         let profile = view.profile;
         let focused = view.profile_focused;
         let pending = view.pending;
@@ -303,25 +545,39 @@ impl SettingsView {
                 input_font.get(),
             )
         });
-        view.nodes.bind(
+        let profile_label = view
+            .layout
+            .leaves()
+            .iter()
+            .find(|leaf| matches!(leaf.component, Component::ProfileLabel))
+            .unwrap()
+            .id;
+        let profile_editor = view
+            .layout
+            .leaves()
+            .iter()
+            .find(|leaf| matches!(leaf.component, Component::ProfileEditor))
+            .unwrap()
+            .id;
+        view.nodes.bind_layout(
             scope,
             memo,
-            |(profile, focused, pending, font), scene, hits| {
-                let bounds = Bounds {
-                    x: 160,
-                    y: 558,
-                    width: 770,
-                    height: 34,
-                };
-                text(scene, 24, 570, "PROFILE PATH", 1, 0xf0f4ff);
+            &view.layout,
+            &[profile_label, profile_editor],
+            move |(profile, focused, pending, font), id, geometry, scene, hits| {
+                if id == profile_label {
+                    paint_text(scene, geometry.bounds, "PROFILE PATH", LABEL);
+                    return;
+                }
+                let bounds = geometry.bounds;
                 text_field_with_font(scene, &profile, bounds, focused, font.as_ref());
                 if !pending {
                     hits.push((ControlId(15), bounds));
                 }
             },
-        );
-        for (id, bounds, label) in BUTTONS.iter().skip(5).copied() {
-            view.button_node(id, bounds, label);
+        )?;
+        for (id, _, _) in BUTTONS.iter().skip(5).copied() {
+            view.button_node(id)?;
         }
         let pending = view.pending;
         let message = view.message;
@@ -332,23 +588,66 @@ impl SettingsView {
                 (false, message.get())
             }
         });
-        view.nodes
-            .bind(scope, memo, |(pending, message), scene, _| {
+        let status_id = view
+            .layout
+            .leaves()
+            .iter()
+            .find(|leaf| matches!(leaf.component, Component::Status))
+            .unwrap()
+            .id;
+        view.nodes.bind_layout(
+            scope,
+            memo,
+            &view.layout,
+            &[status_id],
+            |(pending, message), _, geometry, scene, _| {
                 if pending {
-                    text(scene, 24, 665, "LOADING DEVICES", 1, 0xd8b36b);
+                    paint_text(scene, geometry.bounds, "LOADING DEVICES", NOTICE);
                 } else if let Some(message) = message {
-                    text(scene, 24, 665, &message, 1, 0x74e5c5);
+                    paint_text(scene, geometry.bounds, &message, MESSAGE);
                 }
-            });
+            },
+        )?;
         let error = view.error;
         let memo = scope.create_memo(move |_| error.get());
-        view.nodes.bind(scope, memo, |error, scene, _| {
-            if let Some(error) = error {
-                text(scene, 24, 690, &error, 1, 0xff8e8e);
-            }
-        });
+        let error_id = view
+            .layout
+            .leaves()
+            .iter()
+            .find(|leaf| matches!(leaf.component, Component::Error))
+            .unwrap()
+            .id;
+        view.nodes.bind_layout(
+            scope,
+            memo,
+            &view.layout,
+            &[error_id],
+            |error, _, geometry, scene, _| {
+                if let Some(error) = error {
+                    paint_text(scene, geometry.bounds, &error, ERROR);
+                }
+            },
+        )?;
         view.nodes.validate()?;
         Ok(view)
+    }
+    /// Direct extent updates retain mounted identities, drafts and editor focus.
+    /// Section allocations follow their declared anchors; overflow shares one
+    /// clip for paint and pointer admission, including zero-extent suspension.
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, String> {
+        if self.layout.extent() == [width, height] {
+            return Ok(false);
+        }
+        let mut candidate = self.layout.clone();
+        if !reflow_settings(&mut candidate, &self.anchors, [width, height])? {
+            return Ok(false);
+        }
+        self.nodes.relayout(&candidate)?;
+        self.layout = candidate;
+        Ok(true)
+    }
+    pub fn hit(&self, point: (f64, f64)) -> Option<ControlId> {
+        self.nodes.hit(point)
     }
     pub const fn id(&self) -> ScreenInstanceId {
         self.id
@@ -421,7 +720,16 @@ impl SettingsView {
     ) -> Result<(), String> {
         self.nodes.compose(scene, hits)
     }
-    fn button_node(&mut self, id: ControlId, bounds: Bounds, label: &'static str) {
+    fn button_node(&mut self, id: ControlId) -> Result<(), String> {
+        let (node_id, label) = self
+            .layout
+            .leaves()
+            .iter()
+            .find_map(|leaf| match leaf.component {
+                Component::Action(control, label) if control == id => Some((leaf.id, label)),
+                _ => None,
+            })
+            .unwrap();
         let hovered = self.hovered;
         let armed = self.armed;
         let pending = self.pending;
@@ -432,16 +740,19 @@ impl SettingsView {
                 (hovered.get() == Some(id), armed.get() == Some(id), false)
             }
         });
-        self.nodes.bind(
+        self.nodes.bind_layout(
             self.scope,
             memo,
-            move |(hovered, armed, pending), scene, hits| {
+            &self.layout,
+            &[node_id],
+            move |(hovered, armed, pending), _, geometry, scene, hits| {
+                let bounds = geometry.bounds;
                 button(scene, bounds, label, hovered, armed);
                 if !pending {
                     hits.push((id, bounds));
                 }
             },
-        );
+        )
     }
 }
 impl Drop for SettingsView {
@@ -449,6 +760,9 @@ impl Drop for SettingsView {
         self.scope.dispose();
     }
 }
+#[cfg(test)]
+#[path = "settings_declarative_fixtures.rs"]
+mod declarative_fixtures;
 #[cfg(test)]
 mod fixtures {
     use super::*;
@@ -743,6 +1057,6 @@ mod fixtures {
         assert!(weak.strong_count() >= 2);
         drop(view);
         assert!(weak.upgrade().is_none());
-        assert!(SettingsView::new(ScreenInstanceId(9), 800, 600).is_err());
+        assert!(SettingsView::new(ScreenInstanceId(9), 800, 600).is_ok());
     }
 }

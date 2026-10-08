@@ -5,13 +5,14 @@ import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot } from
 import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { BrowserRoomOwner, ROOM_SESSION_METHODS } from "./room-owner.mjs";
-import { validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
+import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
 import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, encodeRawHidEvent, encodePointerEvent, encodePointerButtonEvent } from "./physical-input.mjs";
 import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
 import { AudioCommandClient } from "./audio-command-client.mjs";
 import { AudioSampleClient } from "./audio-sample-client.mjs";
 import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, gamepadSetupFromProfile, GamepadAdapter } from "./gamepad-profile.mjs";
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
+import { LocalRoster } from "./local-play-host.mjs";
 import { encodeBrowserSettings, decodeBrowserSettings } from "./settings-profile.mjs";
 import { snapshotPointerSetup } from "./pointer-profile.mjs";
 const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserHistoricalRecord } = runtime;
@@ -45,6 +46,14 @@ let roomFinalization = null;
 let roomResults = null;
 let completedResults = null;
 let historicalRecord = null;
+let menuOwner = null;
+let menuGeneration = 0n;
+let menuVisible = false;
+let lastMenuAction = 0n;
+let menuRoster = null;
+let menuAssignPlayer = null;
+let menuOpponents = null;
+let menuRecordFile = null;
 let historicalEpoch = {};
 let lastHistoricalId = 0;
 let roomResultsEpoch = {};
@@ -310,6 +319,7 @@ function captureDelivered() {
 }
 function visualSelection() {
   if (play?.game) return { owner: play, source: play.game, mode: play.mode === "replay" ? "replay" : play.localPlan ? "local" : "live" };
+  if (menuVisible && menuOwner) return { owner: menuOwner, source: menuOwner, mode: "menu" };
   if (completedResults?.shown && completedResults.binding && !completedResults.failed) return { owner: completedResults, source: completedResults.binding, mode: "results", room: roomResults?.binding && !roomResults.failed ? roomResults.binding : null };
   if (roomResults?.binding && !roomResults.failed) return { owner: roomResults, source: roomResults.binding, mode: "room" };
   if (historicalRecord?.binding) return { owner: historicalRecord, source: historicalRecord.binding, mode: "history" };
@@ -344,6 +354,8 @@ function scopedRenderPort(context) {
           report(evidence.kind, { selectedId, generation: context.generation, content: context.content,
             ...(play === context.owner ? { playId: play.id } : {}) });
         }
+        if (currentVisual(context) && context.mode === "menu" && evidence?.kind === "menu-action"
+          && evidence.generation === context.generation && evidence.content === context.content) handleMenu(evidence);
         listener(event);
       };
     },
@@ -383,15 +395,20 @@ function publishVisual() {
         visual = context;
         context.client = new RenderClient({ port: scopedRenderPort(context), ...renderLimits, generation: context.generation, content: context.content,
           onError: error => visualFailure(context, error),
-          onGeometry: evidence => { if (currentVisual(context)) report("render-geometry", { ...evidence, mode: context.mode, selectedId, ...(play === context.owner ? { playId: play.id } : {}) }); } });
-        const bytes = ["preview", "live", "local", "replay"].includes(context.mode)
+          onGeometry: evidence => { if (currentVisual(context)) { context.geometry = evidence; report("render-geometry", { ...evidence, mode: context.mode, selectedId, ...(play === context.owner ? { playId: play.id } : {}) }); } } });
+        const bytes = context.mode === "menu" ? context.source.snapshot() : ["preview", "live", "local", "replay"].includes(context.mode)
           ? context.source.visual_registration(context.generation, context.content, renderLimits.maxPacketBytes, renderLimits.maxDiagnosticBytes)
           : context.source.visual_snapshot(context.generation, context.content, renderLimits.maxPacketBytes, renderLimits.maxDiagnosticBytes);
         // A new content owner needs its own geometry submission evidence even
         // when the renderer keeps the same surface. Preserve an unsent resize's
         // reserved version; its control supplies the new owner's evidence.
         const registrationGeometry = surface && surfaceSentVersion >= surface.geometryVersion ? nextGeometry() : undefined;
-        await context.client.packet(bytes, { mode: context.mode,
+        if (context.mode === "menu") {
+          const revision = context.source.revision;
+          await context.client.menu(bytes, { recordPreview: context.source.record_snapshot(), opponents: menuOpponentState(),
+            ...(registrationGeometry === undefined ? {} : { geometryVersion: registrationGeometry }) });
+          context.menuRevision = revision;
+        } else await context.client.packet(bytes, { mode: context.mode,
           ...(registrationGeometry === undefined ? {} : { geometryVersion: registrationGeometry }) });
         if (!currentVisual(context)) { pump.dirty = true; continue; }
         if (context.room) {
@@ -419,6 +436,12 @@ function publishVisual() {
         if (!currentVisual(context)) { pump.dirty = true; break; }
       }
       if (!currentVisual(context)) continue;
+      if (context.mode === "menu" && context.source.revision > context.menuRevision) {
+        const revision = context.source.revision;
+        await context.client.menu(context.source.snapshot(), { geometryVersion: nextGeometry(), recordPreview: context.source.record_snapshot(), opponents: menuOpponentState() });
+        context.menuRevision = revision;
+        if (currentVisual(context) && context.source.revision > revision) pump.dirty = true;
+      }
       if (context.controls.length && (context.frameGeometry === undefined
         || context.controls[0].fields.geometryVersion < context.frameGeometry)) continue;
       if (["preview", "live", "local", "replay"].includes(context.mode)) {
@@ -443,6 +466,196 @@ function publishVisual() {
     else if (!failed && !disposed) pump.dirty = true;
   })
     .finally(() => { if (visualPump === pump) { visualPump = null; if (pump.dirty) publishVisual(); } });
+}
+function reportMenu() {
+  if (!menuOwner || !menuVisible) return;
+  report("menu-state", { menuGeneration, screen: menuOwner.screen, revision: menuOwner.revision,
+    route: menuOwner.route, selected: menuOwner.selected, fields: menuOwner.fields(),
+    ...(menuRoster ? { roster: menuRoster.exportState() } : {}), ...(menuOpponents ? { opponents: menuOpponents.snapshot() } : {}) });
+}
+function menuOpponentState() {
+  if (!menuOwner || menuOwner.route !== 4) return { count: menuOpponents?.size ?? 0, own: 0, other: 0 };
+  const key = `record:${menuOwner.selected_value()}`;
+  const selected = menuOpponents?.snapshot().filter(entry => entry.sourceKey === key) ?? [];
+  return { count: menuOpponents?.size ?? 0, own: selected.filter(entry => entry.own).length, other: selected.filter(entry => !entry.own).length };
+}
+function menuRosterFields(fields, roster = menuRoster, route = menuOwner.route) {
+  if (!roster || ![5, 6, 9].includes(route)) return fields;
+  const oldCount = Number(fields[2]);
+  if (!Number.isInteger(oldCount) || oldCount < 0 || oldCount > 64 || fields.length < 4 + oldCount * 2) throw new Error("Invalid browser roster metadata.");
+  const sourceTable = fields.slice(3 + oldCount * 2);
+  const values = [fields[0], fields[1], String(roster.players.length)];
+  for (const player of roster.players) values.push(String(player), roster.selected(player)?.toString() ?? "");
+  return [...values, ...sourceTable];
+}
+function commitMenuRoster(change) {
+  const candidate = new LocalRoster(); candidate.importState(menuRoster.exportState());
+  change(candidate);
+  if ([5, 6, 9].includes(menuOwner.route)) menuOwner.set_fields(menuOwner.screen, menuOwner.revision, menuRosterFields(menuOwner.fields(), candidate));
+  menuRoster = candidate;
+}
+function menuFields(fields) {
+  if (!Array.isArray(fields) || fields.length > 8192) throw new Error("Menu field count exceeds limit.");
+  let total = 48;
+  const encoder = new TextEncoder();
+  for (const value of fields) {
+    if (typeof value !== "string" || value.length > 4096) throw new Error("Invalid menu field.");
+    const length = encoder.encode(value).length;
+    if (length > 4096 || /[\u0000-\u001f\u007f-\u009f]/.test(value)) throw new Error("Menu field exceeds text limit.");
+    total += 4 + length;
+    if (total > 4 * 1024 * 1024) throw new Error("Menu exceeds byte limit.");
+  }
+  return fields;
+}
+function handleMenu(request) {
+  try {
+    if (!cpuReady || failed || disposed || play || settingsOperation || importing) throw new Error("Menus require the initialized idle gameplay owner.");
+    if (request.kind === "menu-open") {
+      if (menuGeneration === U64_MAX) throw new Error("Menu generation exhausted.");
+      const next = new runtime.BrowserMenuOwner(++menuGeneration);
+      const roster = new LocalRoster();
+      const opponents = new SavedOpponentSelection();
+      try {
+        for (const entry of validateSelections(request.opponents ?? [])) opponents.add(entry);
+        if (request.roster) roster.importState(request.roster);
+        next.set_fields(next.screen, next.revision, menuFields(request.fields ?? []));
+      }
+      catch (error) { next.free(); throw error; }
+      if (menuOwner) { menuOwner.dispose(); menuOwner.free(); }
+      menuOwner = next; menuRoster = roster; menuOpponents = opponents; menuRecordFile = null;
+      menuVisible = true; lastMenuAction = 0n; reportMenu(); publishVisual(); return;
+    }
+    if (!menuVisible || !menuOwner || request.menuGeneration !== menuGeneration || request.screen !== menuOwner.screen || request.revision !== menuOwner.revision) throw new Error("Stale menu owner or action.");
+    if (request.kind === "menu-input") {
+      if (!visual || visual.mode !== "menu" || !currentVisual(visual)) return;
+      renderPort.postMessage({ ...request, generation: visual.generation, content: visual.content }); return;
+    }
+    if (request.kind === "menu-navigate") {
+      if (!Number.isInteger(request.route) || ![1, 2, 3, 4, 5, 6, 7, 9].includes(request.route)) throw new Error("Menu navigation has no gameplay completion authority.");
+      const fields = request.fields ? menuFields(request.fields) : null;
+      if (fields) {
+        const admitted = menuRosterFields(fields, menuRoster, request.route);
+        menuOwner.navigate_with_fields(request.screen, request.revision, request.route, admitted);
+      } else menuOwner.navigate(request.screen, request.revision, request.route);
+    } else if (request.kind === "menu-fields") menuOwner.set_fields(request.screen, request.revision, menuRosterFields(menuFields(request.fields)));
+    else if (request.kind === "menu-roster-count") {
+      commitMenuRoster(roster => roster.setCount(request.count));
+    } else if (request.kind === "menu-roster-assign") {
+      const fields = menuOwner.fields(), count = Number(fields[2]), at = 3 + count * 2;
+      const sources = Number(fields[at]);
+      if (!Number.isInteger(sources) || sources < 0 || sources > 1024 || fields.length !== at + 1 + sources * 5) throw new Error("Invalid acquired browser source inventory.");
+      if (request.source !== null && (fields[0] !== "1" || menuRoster.players.length === 1)) throw new Error("Browser assignment is unavailable or automatic solo.");
+      if (request.source !== null && !Array.from({ length: sources }, (_, index) => fields[at + 1 + index * 5]).includes(request.source?.toString())) throw new Error("Source is not in the acquired browser inventory.");
+      commitMenuRoster(roster => roster.assign(request.player, request.source));
+    } else if (request.kind === "menu-record-preview") {
+      if (menuOwner.route !== 4 || !library || typeof request.chartPath !== "string" || typeof request.key !== "string"
+        || !(request.replay instanceof Uint8Array) || request.replay.byteLength > 64 * 1024 * 1024
+        || request.archive != null && !(request.archive instanceof Uint8Array)) throw new Error("Invalid actual record preview request.");
+      menuOwner.preview_record(request.screen, request.revision, library, request.chartPath, request.key,
+        request.replay, request.archive, request.player);
+      menuRecordFile = new File([request.replay], `${request.key}.bkr`, { type: "application/octet-stream" });
+    }
+    else if (request.kind.startsWith("menu-opponent-")) {
+      const candidate = new SavedOpponentSelection(); for (const entry of menuOpponents.snapshot()) candidate.add(entry);
+      if (request.kind === "menu-opponent-add") candidate.add(request.entry);
+      else if (request.kind === "menu-opponent-remove") { if (!candidate.remove(request.sourceKey)) throw new Error("Saved opponent is unavailable."); }
+      else if (request.kind === "menu-opponent-clear") candidate.clear();
+      else if (request.kind === "menu-opponent-target") {
+        if (request.player !== null && !menuRoster.players.includes(request.player)) throw new Error("Choose a current local player.");
+        candidate.setPlayer(request.sourceKey, request.player);
+      } else throw new Error("Unknown saved opponent request.");
+      menuOwner.touch(menuOwner.screen, menuOwner.revision); menuOpponents = candidate;
+    }
+    else if (request.kind === "menu-edit") {
+      if (![2, 3, 7].includes(menuOwner.route)) throw new Error("This menu does not support text editing.");
+      menuOwner.edit(request.screen, request.revision, request.index, request.value);
+    } else if (request.kind === "menu-action") {
+      if (!unsignedIdentity(request.actionId) || request.actionId <= lastMenuAction || !unsignedIdentity(request.control)) throw new Error("Invalid menu action identity.");
+      const route = menuOwner.route;
+      const control = request.control;
+      const index = route === 2 && control >= 1000n ? control - 1000n : route === 7 && control >= 40000n ? control - 40000n
+        : route === 3 && control === 70n ? 0n : route === 3 && control === 75n ? 1n
+        : route === 4 && control >= 50000n ? control - 50000n : route === 5 && control >= 20000n ? control - 20000n
+        : [6, 9].includes(route) && control >= 10000n ? control - 10000n : null;
+      if (index !== null) {
+        if (index > 0xffffffffn) throw new Error("Menu field index exceeds u32.");
+        menuOwner.select(request.screen, request.revision, Number(index));
+        if ([2, 3, 7].includes(route)) report("menu-focus", { menuGeneration, screen: menuOwner.screen, revision: menuOwner.revision, index: Number(index), value: menuOwner.fields()[Number(index)] });
+      } else {
+        if (route === 4 && [52n, 53n, 54n, 60n, 61n].includes(control)) {
+          const key = `record:${menuOwner.fields()[menuOwner.selected]}`;
+          const candidate = new SavedOpponentSelection();
+          for (const entry of menuOpponents.snapshot()) candidate.add(entry);
+          if (control === 54n) candidate.clear();
+          else if ([60n, 61n].includes(control)) {
+            const selected = candidate.snapshot().find(entry => entry.sourceKey === key && entry.own === (control === 60n));
+            if (!selected || !candidate.remove(key)) throw new Error("Selected saved opponent is unavailable.");
+          } else {
+            if (!menuRecordFile || !menuOwner.record_snapshot()) throw new Error("Preview this actual recorded prefix before adding it.");
+            candidate.add({ file: menuRecordFile, sourceKey: key, own: control === 52n, label: opponentLabel(menuRecordFile.name) });
+          }
+          menuOwner.touch(menuOwner.screen, menuOwner.revision); menuOpponents = candidate;
+          lastMenuAction = request.actionId; reportMenu(); publishVisual(); return;
+        }
+        if (route === 4 && [66n, 67n, 68n].includes(control)) {
+          const geometry = visual?.geometry;
+          if (!geometry || geometry.menuGeneration !== menuGeneration || geometry.screen !== menuOwner.screen || geometry.revision !== menuOwner.revision) throw new Error("Wait for submitted record geometry.");
+          const details = control === 66n ? geometry.details !== true : true;
+          const page = !details ? 0 : control === 67n ? Math.max(0, geometry.page - 1) : control === 68n ? geometry.page + 1 : 0;
+          queueVisualControl("menu-details", { details, page, geometryVersion: nextGeometry() });
+          lastMenuAction = request.actionId; return;
+        }
+        if (route === 5 && control === 34n) menuAssignPlayer = menuRoster.players[menuOwner.selected];
+        if (route === 9 && control === 20n) {
+          const fields = menuOwner.fields(), offset = 4 + Number(fields[2]) * 2 + menuOwner.selected * 5;
+          if (fields[0] !== "1" || fields[offset + 4] !== "1") throw new Error("Browser source assignment is unavailable.");
+          const metadata = fields;
+          commitMenuRoster(roster => roster.assign(menuAssignPlayer, BigInt(fields[offset])));
+          menuOwner.back(menuOwner.screen, menuOwner.revision);
+          menuOwner.set_fields(menuOwner.screen, menuOwner.revision, menuRosterFields(metadata));
+          lastMenuAction = request.actionId; reportMenu(); publishVisual(); return;
+        }
+        if (route === 4 && [56n, 57n].includes(control) || route === 5 && [36n, 37n].includes(control)
+          || [6, 9].includes(route) && [23n, 24n].includes(control)) {
+          const fields = menuOwner.fields();
+          const count = route === 4 ? fields.length : route === 5 ? menuRoster.players.length : Number(fields[3 + Number(fields[2]) * 2]);
+          const direction = [56n, 36n, 23n].includes(control) ? -1 : 1;
+          const index = Math.max(0, Math.min(count - 1, menuOwner.selected + direction * 10));
+          menuOwner.select(menuOwner.screen, menuOwner.revision, index);
+          lastMenuAction = request.actionId; reportMenu(); publishVisual(); return;
+        }
+        if (route === 5 && [32n, 33n, 35n].includes(control)) {
+          commitMenuRoster(roster => {
+            if (control === 35n) roster.assign(roster.players[menuOwner.selected], null);
+            else roster.setCount(roster.players.length + (control === 33n ? 1 : -1));
+          });
+          lastMenuAction = request.actionId; reportMenu(); publishVisual(); return;
+        }
+        if (route === 2 && control === 10n) {
+          const fields = menuOwner.fields();
+          if (fields.length !== 13) throw new Error("Browser settings draft has an invalid field count.");
+          encodeBrowserSettings({ kind: "beatkernel-browser-settings", version: 1,
+            timing: { earlyMs: fields[0], lateMs: fields[1], offsetMs: fields[2] },
+            output: { latency: fields[3], latencyMs: fields[4], rate: fields[5] },
+            capacities: { queueCapacity: fields[6], maxVoices: fields[7], pendingCapacity: fields[8], maxFrames: fields[9], maxCommandsPerRender: fields[10] },
+            section: { startSeconds: fields[11], endSeconds: fields[12] }, bindings: [] });
+        }
+        if (route === 7 && control === 40n) {
+          const fields = menuOwner.fields();
+          if (fields.length !== 4 || fields[0] !== "auto" || fields[1] !== "fifo"
+            || fields.slice(2).some(value => !/^[0-9]{1,5}$/.test(value) || Number(value) < 1 || Number(value) > 16384)) throw new Error("Browser Display supports auto/fifo and one to 16384 CSS pixels.");
+        }
+        const effect = menuOwner.action(request.screen, request.revision, request.actionId, control);
+        reportMenu();
+        if (effect !== 0n) report("menu-effect", { menuGeneration, screen: menuOwner.screen, revision: menuOwner.revision,
+          route, effect, control, selected: menuOwner.selected, fields: menuOwner.fields() });
+      }
+      lastMenuAction = request.actionId;
+    } else throw new Error("Unknown menu request.");
+    reportMenu();
+    if (menuOwner.fields().length || menuOwner.route === 1 || request.kind === "menu-fields") publishVisual();
+  } catch (error) { report("menu-error", { message: message(error), menuGeneration: request.menuGeneration,
+    screen: request.screen, revision: request.revision }); }
 }
 function queueVisualControl(operation, fields) {
   const context = visual;
@@ -2832,6 +3045,8 @@ self.addEventListener("message", event => {
     if (play || roomFinalization || capturesPending) { report("dispose-error", { message: "Join gameplay capture and room cleanup before disposing the Worker." }); return; }
     if (disposed) return;
     disposed = true;
+    if (menuOwner) { menuOwner.dispose(); menuOwner.free(); menuOwner = null; }
+    menuVisible = false;
     fenceVisual();
     visual?.client.close();
     visual = null;
@@ -2870,6 +3085,7 @@ self.addEventListener("message", event => {
     return;
   }
   if (request.kind === "historical-record-page") { pageHistoricalRecord(request); return; }
+  if (request.kind.startsWith("menu-")) { handleMenu(request); return; }
   if (request.kind === "historical-record-clear") { clearHistoricalRecord(request); return; }
   if (request.kind === "historical-record-present") { void presentHistoricalRecord(request); return; }
   if (request.kind === "settings-profile-save" || request.kind === "settings-profile-load") {
@@ -2892,7 +3108,10 @@ self.addEventListener("message", event => {
     }
     return;
   }
-  if (request.kind.startsWith("play-")) { handlePlay(request); return; }
+  if (request.kind.startsWith("play-")) {
+    if (request.kind === "play-start" && menuVisible) { menuVisible = false; menuOwner?.suspend(); }
+    handlePlay(request); return;
+  }
   if (request.kind === "import" || request.kind === "accept-library") {
     if (play) report("import-error", { id: request.id, message: "Stop gameplay before changing the selected library." });
     else if (request.kind === "import") { discardRoomResults(); queueImport(request); }

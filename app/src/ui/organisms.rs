@@ -8,7 +8,7 @@ use crate::{
     competition::{OpponentKind, ScoreSummary},
     player::{CompetitionSnapshot, LocalPlayerSnapshot, NetworkStatus},
     player_chart::PlayerChart,
-    playfield_layout::{DEFAULT_BOUNDS, partition_lane},
+    playfield_layout::{partition_lane, DEFAULT_BOUNDS},
     scene::Scene,
 };
 use beatkernel::{
@@ -607,11 +607,21 @@ pub struct VisualLocalPlayerView<'a> {
 }
 impl<'a> From<LocalPlayerView<'a>> for VisualLocalPlayerView<'a> {
     fn from(view: LocalPlayerView<'a>) -> Self {
-        Self { player: view.player, chart: view.chart, song_time: view.song_time,
+        Self {
+            player: view.player,
+            chart: view.chart,
+            song_time: view.song_time,
             score: crate::browser_render_state::RenderScore::from_summary(view.score),
-            bms_score: view.bms_score, gauge: view.gauge.map(crate::browser_render_state::RenderGauge::from_gauge),
-            last_judge: view.last_judge, recent_results: view.recent_results,
-            pressed_lanes: view.pressed_lanes, note_progress: view.note_progress, competition: view.competition }
+            bms_score: view.bms_score,
+            gauge: view
+                .gauge
+                .map(crate::browser_render_state::RenderGauge::from_gauge),
+            last_judge: view.last_judge,
+            recent_results: view.recent_results,
+            pressed_lanes: view.pressed_lanes,
+            note_progress: view.note_progress,
+            competition: view.competition,
+        }
     }
 }
 
@@ -688,9 +698,20 @@ fn local_player_views_with_background_impl(
     reserved: Option<&[i64]>,
 ) -> Result<(), String> {
     page_range(players.len(), page)?;
-    let mut views = [VisualLocalPlayerView::from(players[0]); crate::local_players::MAX_LOCAL_PLAYERS];
-    for (destination, player) in views.iter_mut().zip(players) { *destination = (*player).into(); }
-    visual_local_player_views(scene, &views[..players.len()], lookahead, page, show, frames, reserved)
+    let mut views =
+        [VisualLocalPlayerView::from(players[0]); crate::local_players::MAX_LOCAL_PLAYERS];
+    for (destination, player) in views.iter_mut().zip(players) {
+        *destination = (*player).into();
+    }
+    visual_local_player_views(
+        scene,
+        &views[..players.len()],
+        lookahead,
+        page,
+        show,
+        frames,
+        reserved,
+    )
 }
 
 /// Borrows the full roster while converting only the current page's feedback.
@@ -707,24 +728,37 @@ pub(crate) fn visual_local_render_state(
     for (slot, events) in recent.iter_mut().enumerate() {
         events.clear();
         if slot < visible.len() {
-            let scalars = members[visible.start + slot].scalars.as_ref().ok_or("visual frame unavailable")?;
+            let scalars = members[visible.start + slot]
+                .scalars
+                .as_ref()
+                .ok_or("visual frame unavailable")?;
             events.extend(scalars.recent.iter().map(|event| event.event()));
         }
     }
     let zero = crate::browser_render_state::RenderScore {
-        hits: 0, misses: 0, combo: 0, max_combo: 0,
+        hits: 0,
+        misses: 0,
+        combo: 0,
+        max_combo: 0,
         timing: crate::timing::TimingRecord::default(),
     };
     let member_view = |index: usize| {
         let member = &members[index];
         let scalar = member.scalars.as_ref();
-        let events = if visible.contains(&index) { recent[index - visible.start].as_slice() } else { &[] };
+        let events = if visible.contains(&index) {
+            recent[index - visible.start].as_slice()
+        } else {
+            &[]
+        };
         VisualLocalPlayerView {
-            player: roster[index], chart: Some(state.chart()),
+            player: roster[index],
+            chart: Some(state.chart()),
             song_time: scalar.map(|scalar| Timestamp::from_nanos(scalar.song_ns)),
-            score: scalar.and_then(|scalar| scalar.score).unwrap_or(zero), bms_score: None,
+            score: scalar.and_then(|scalar| scalar.score).unwrap_or(zero),
+            bms_score: None,
             gauge: scalar.and_then(|scalar| scalar.gauge),
-            last_judge: events.last(), recent_results: events,
+            last_judge: events.last(),
+            recent_results: events,
             pressed_lanes: scalar.map_or(0, |scalar| scalar.pressed),
             note_progress: Some(&member.progress),
             competition: scalar.and_then(|scalar| scalar.competition.as_ref()),
@@ -738,7 +772,15 @@ pub(crate) fn visual_local_render_state(
             i64::from(scalar.saved_comparison_height) + if scalar.peer_admitted { 28 } else { 0 }
         });
     }
-    visual_local_player_views(scene, &views[..roster.len()], state.lookahead_ns(), page, true, frames, Some(&reserved[..roster.len()]))
+    visual_local_player_views(
+        scene,
+        &views[..roster.len()],
+        state.lookahead_ns(),
+        page,
+        true,
+        frames,
+        Some(&reserved[..roster.len()]),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -983,10 +1025,7 @@ fn bms_score_hud(
 }
 
 fn visual_timing_summary(timing: crate::timing::TimingRecord) -> (String, String) {
-    let mean = (timing.count != 0).then(|| i64::try_from(timing.sum / i128::from(timing.count)).ok()).flatten();
-    let absolute = (timing.count != 0).then(|| u64::try_from(timing.absolute_sum / u128::from(timing.count)).ok()).flatten();
-    (format!("BIAS {}", mean.map_or("--".into(), crate::timing_display::signed_ms)),
-     format!("MEAN ABS {}", absolute.map_or("--".into(), crate::timing_display::unsigned_ms)))
+    crate::timing_display::record(&timing)
 }
 
 pub fn scoreboard(pixels: &mut Scene, score: &ScoreSummary, recent_results: &[JudgeEvent]) {
@@ -999,7 +1038,12 @@ pub fn scoreboard_with_bms_score(
     recent_results: &[JudgeEvent],
     bms_score: Option<&crate::judgment_policy::BmsScoreSummary>,
 ) {
-    scoreboard_visual(pixels, crate::browser_render_state::RenderScore::from_summary(score), recent_results, bms_score);
+    scoreboard_visual(
+        pixels,
+        crate::browser_render_state::RenderScore::from_summary(score),
+        recent_results,
+        bms_score,
+    );
 }
 
 pub fn scoreboard_visual(
@@ -1079,7 +1123,12 @@ pub fn competition_scoreboard_with_bms_score(
     snapshot: &CompetitionSnapshot,
     bms_score: Option<&crate::judgment_policy::BmsScoreSummary>,
 ) -> Result<(), String> {
-    competition_scoreboard_visual(scene, crate::browser_render_state::RenderScore::from_summary(score), snapshot, bms_score)
+    competition_scoreboard_visual(
+        scene,
+        crate::browser_render_state::RenderScore::from_summary(score),
+        snapshot,
+        bms_score,
+    )
 }
 
 pub fn competition_scoreboard_visual(
@@ -1273,13 +1322,11 @@ mod tests {
                     ]
             })
             .unwrap();
-        assert!(
-            scene.batches()[note_batch + 1..]
-                .iter()
-                .any(|batch| batch.playfield.is_none()
-                    && (batch.first as usize) <= strip_index
-                    && strip_index < (batch.first + batch.count) as usize)
-        );
+        assert!(scene.batches()[note_batch + 1..]
+            .iter()
+            .any(|batch| batch.playfield.is_none()
+                && (batch.first as usize) <= strip_index
+                && strip_index < (batch.first + batch.count) as usize));
         scene.clear();
         playfield_with_feedback(
             &mut scene,
@@ -1306,20 +1353,16 @@ mod tests {
             &[event],
         )
         .unwrap();
-        assert!(
-            !scene
-                .rectangles()
-                .iter()
-                .any(|rect| rect.bounds[1] == (LINE - 6) as f32 && rect.bounds[3] == 6.0)
-        );
+        assert!(!scene
+            .rectangles()
+            .iter()
+            .any(|rect| rect.bounds[1] == (LINE - 6) as f32 && rect.bounds[3] == 6.0));
         scene.clear();
         playfield(&mut scene, &chart, Timestamp::ZERO, 1_000_000_000).unwrap();
-        assert!(
-            !scene
-                .rectangles()
-                .iter()
-                .any(|rect| rect.bounds[1] == (LINE - 6) as f32 && rect.bounds[3] == 6.0)
-        );
+        assert!(!scene
+            .rectangles()
+            .iter()
+            .any(|rect| rect.bounds[1] == (LINE - 6) as f32 && rect.bounds[3] == 6.0));
     }
 
     #[test]
@@ -1331,16 +1374,14 @@ mod tests {
         scene.rect(0, 0, 1, 1, 0);
         let rectangles = scene.rectangles().len();
         let batches = scene.batches().len();
-        assert!(
-            playfield_with_feedback(
-                &mut scene,
-                &chart,
-                Timestamp::ZERO,
-                1_000_000_000,
-                &vec![hit; 129]
-            )
-            .is_err()
-        );
+        assert!(playfield_with_feedback(
+            &mut scene,
+            &chart,
+            Timestamp::ZERO,
+            1_000_000_000,
+            &vec![hit; 129]
+        )
+        .is_err());
         assert_eq!(scene.rectangles().len(), rectangles);
         assert_eq!(scene.batches().len(), batches);
         assert!(scene.playfields().is_empty());
@@ -1351,10 +1392,14 @@ mod tests {
             .find(|note| note.object == hit.object)
             .unwrap()
             .lane_index = usize::MAX;
-        assert!(
-            playfield_with_feedback(&mut scene, &invalid, Timestamp::ZERO, 1_000_000_000, &[hit])
-                .is_err()
-        );
+        assert!(playfield_with_feedback(
+            &mut scene,
+            &invalid,
+            Timestamp::ZERO,
+            1_000_000_000,
+            &[hit]
+        )
+        .is_err());
         assert_eq!(scene.rectangles().len(), rectangles);
         assert_eq!(scene.batches().len(), batches);
         let players: Vec<_> = [(3, hit), (u32::MAX, miss)]
@@ -1439,26 +1484,22 @@ mod tests {
         }
         assert_eq!(scene.rectangles().last().unwrap().color, rgba(0xffffff));
         scene.clear();
-        assert!(
-            playfield_with_state(
-                &mut scene,
-                &chart,
-                Timestamp::ZERO,
-                1_000_000_000,
-                &[],
-                1 << 18
-            )
-            .is_err()
-        );
+        assert!(playfield_with_state(
+            &mut scene,
+            &chart,
+            Timestamp::ZERO,
+            1_000_000_000,
+            &[],
+            1 << 18
+        )
+        .is_err());
         assert!(scene.rectangles().is_empty());
         assert!(scene.playfields().is_empty());
         playfield(&mut scene, &chart, Timestamp::ZERO, 1_000_000_000).unwrap();
-        assert!(
-            scene
-                .rectangles()
-                .iter()
-                .all(|rect| rect.color != rgba(0x416ca0))
-        );
+        assert!(scene
+            .rectangles()
+            .iter()
+            .all(|rect| rect.color != rgba(0x416ca0)));
         let chart = std::sync::Arc::new(chart);
         let players: Vec<_> = [(3, 1 << 5), (u32::MAX, 1 << 9)]
             .into_iter()
@@ -1603,18 +1644,16 @@ mod tests {
         assert_eq!(scene.playfields()[0].instances.len(), 4); // Fresh/reconstructed old prefix.
         let foreign = std::sync::Arc::new((*chart).clone());
         scene.clear();
-        assert!(
-            playfield_with_progress(
-                &mut scene,
-                &foreign,
-                Timestamp::ZERO,
-                1_000_000_000,
-                &[],
-                0,
-                Some(&progress)
-            )
-            .is_err()
-        );
+        assert!(playfield_with_progress(
+            &mut scene,
+            &foreign,
+            Timestamp::ZERO,
+            1_000_000_000,
+            &[],
+            0,
+            Some(&progress)
+        )
+        .is_err());
         assert!(scene.rectangles().is_empty());
         assert!(scene.playfields().is_empty());
         let mut players: Vec<_> = [(3, progress.clone()), (u32::MAX, pending)]
@@ -1775,10 +1814,15 @@ mod tests {
         let mut invalid = frames;
         invalid[3].base.as_mut().unwrap().width = 0;
         scene.clear();
-        assert!(
-            local_players_with_background(&mut scene, &players, 1_000_000_000, 15, false, &invalid)
-                .is_err()
-        );
+        assert!(local_players_with_background(
+            &mut scene,
+            &players,
+            1_000_000_000,
+            15,
+            false,
+            &invalid
+        )
+        .is_err());
         assert!(scene.rectangles().is_empty());
     }
 
@@ -1812,12 +1856,10 @@ mod tests {
                 height: 21
             }
         )));
-        assert!(
-            scene
-                .rectangles()
-                .iter()
-                .any(|rect| rect.color == rgba(0x87bfff))
-        );
+        assert!(scene
+            .rectangles()
+            .iter()
+            .any(|rect| rect.color == rgba(0x87bfff)));
         scene.clear();
         competition_scoreboard(
             &mut scene,
@@ -1860,37 +1902,31 @@ mod tests {
                 && instance.geometry[2] == 336.0
                 && instance.geometry[3] == 204.0
         }));
-        assert!(
-            scene
-                .rectangles()
-                .iter()
-                .all(|rectangle| inside(&rectangle.bounds, bounds))
-        );
+        assert!(scene
+            .rectangles()
+            .iter()
+            .all(|rectangle| inside(&rectangle.bounds, bounds)));
         for now in [Timestamp::MIN, Timestamp::MAX] {
             scene.clear();
             playfield_in(&mut scene, &chart, now, 1, bounds).unwrap();
             assert!(scene.playfields()[0].instances.is_empty());
-            assert!(
-                scene
-                    .rectangles()
-                    .iter()
-                    .all(|rectangle| inside(&rectangle.bounds, bounds))
-            );
+            assert!(scene
+                .rectangles()
+                .iter()
+                .all(|rectangle| inside(&rectangle.bounds, bounds)));
         }
         assert!(playfield_in(&mut scene, &chart, Timestamp::ZERO, 0, bounds).is_err());
-        assert!(
-            playfield_in(
-                &mut scene,
-                &chart,
-                Timestamp::ZERO,
-                1,
-                Bounds {
-                    x: i64::MAX,
-                    ..bounds
-                }
-            )
-            .is_err()
-        );
+        assert!(playfield_in(
+            &mut scene,
+            &chart,
+            Timestamp::ZERO,
+            1,
+            Bounds {
+                x: i64::MAX,
+                ..bounds
+            }
+        )
+        .is_err());
     }
     #[test]
     fn local_panels_contain_actual_geometry_and_paging_covers_the_whole_roster() {
@@ -1999,12 +2035,10 @@ mod tests {
                 ] {
                     scene.clear();
                     competition_summary(&mut scene, &snapshot, bounds).unwrap();
-                    assert!(
-                        scene
-                            .rectangles()
-                            .iter()
-                            .all(|rectangle| inside(&rectangle.bounds, bounds))
-                    );
+                    assert!(scene
+                        .rectangles()
+                        .iter()
+                        .all(|rectangle| inside(&rectangle.bounds, bounds)));
                     assert!(!scene.rectangles().is_empty());
                 }
             }
@@ -2023,19 +2057,17 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            competition_summary(
-                &mut scene,
-                &snapshot,
-                Bounds {
-                    x: 750,
-                    y: 280,
-                    width: 186,
-                    height: 195
-                }
-            )
-            .is_err()
-        );
+        assert!(competition_summary(
+            &mut scene,
+            &snapshot,
+            Bounds {
+                x: 750,
+                y: 280,
+                width: 186,
+                height: 195
+            }
+        )
+        .is_err());
         snapshot.ghosts.push(snapshot.ghosts[0].clone());
         assert!(competition_height(&snapshot, 430).is_err());
     }
@@ -2061,24 +2093,20 @@ mod tests {
         let mut scene = Scene::new(960, 720);
         local_players(&mut scene, &players, 1_000_000_000, 0).unwrap();
         // Stored opponents do not shrink the ordinary gameplay lane background.
-        assert!(
-            scene
-                .rectangles()
-                .iter()
-                .any(|rectangle| rectangle.bounds[0] == 34.0
-                    && rectangle.bounds[1] == 176.0
-                    && rectangle.bounds[3] == 180.0)
-        );
+        assert!(scene
+            .rectangles()
+            .iter()
+            .any(|rectangle| rectangle.bounds[0] == 34.0
+                && rectangle.bounds[1] == 176.0
+                && rectangle.bounds[3] == 180.0));
         scene.clear();
         local_players_with_competition(&mut scene, &players, 1_000_000_000, 0, true).unwrap();
-        assert!(
-            scene
-                .rectangles()
-                .iter()
-                .any(|rectangle| rectangle.bounds[0] == 34.0
-                    && rectangle.bounds[1] == 316.0
-                    && rectangle.bounds[3] == 40.0)
-        );
+        assert!(scene
+            .rectangles()
+            .iter()
+            .any(|rectangle| rectangle.bounds[0] == 34.0
+                && rectangle.bounds[1] == 316.0
+                && rectangle.bounds[3] == 40.0));
         let panels: Vec<_> = (0..4).map(|index| panel_bounds(index, 4)).collect();
         assert!(scene.rectangles().iter().all(|rectangle| {
             panels

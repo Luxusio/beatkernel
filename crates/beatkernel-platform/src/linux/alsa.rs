@@ -2,8 +2,11 @@
 #![allow(unsafe_code)]
 
 use crate::audio::cadence;
+mod converted;
+mod converted_telemetry;
 mod timing;
 pub use cadence::{RenderCadence as AlsaRenderCadence, RenderCadenceError as AlsaCadenceError};
+pub use converted::ConvertedAlsaStream;
 use timing::TimingShared;
 pub use timing::{AlsaNativeTimestamp, AlsaTimingSnapshot};
 
@@ -728,32 +731,34 @@ impl AlsaStream {
     }
     /// Reads fixed atomic observations outside the writer.
     pub fn snapshot(&self) -> AlsaSnapshot {
-        let status = match self.shared.status.load(Ordering::Acquire) {
-            0 => AlsaStatus::Ready,
-            1 => AlsaStatus::Running,
-            2 => AlsaStatus::Stopped,
-            3 => AlsaStatus::Failed {
-                code: self.shared.errno.load(Ordering::Relaxed),
-            },
-            _ => AlsaStatus::WorkerPanicked,
-        };
-        AlsaSnapshot {
-            status,
-            submitted_frames: self.shared.submitted.load(Ordering::Relaxed),
-            rendered_frames: self.shared.rendered.load(Ordering::Relaxed),
-            renders: self.shared.renders.load(Ordering::Relaxed),
-            xruns: self.shared.xruns.load(Ordering::Relaxed),
-            suspends: self.shared.suspends.load(Ordering::Relaxed),
-            failures: self.shared.failures.load(Ordering::Relaxed),
-            observed_at: self
-                .shared
-                .observed_valid
-                .load(Ordering::Acquire)
-                .then(|| ClockPoint {
-                    domain: self.configuration.requested.monotonic_domain,
-                    timestamp: Timestamp::from_nanos(self.shared.observed.load(Ordering::Relaxed)),
-                }),
-        }
+        shared_snapshot(&self.shared, self.configuration.requested.monotonic_domain)
+    }
+}
+fn shared_snapshot(shared: &Shared, domain: ClockDomainId) -> AlsaSnapshot {
+    let status = match shared.status.load(Ordering::Acquire) {
+        0 => AlsaStatus::Ready,
+        1 => AlsaStatus::Running,
+        2 => AlsaStatus::Stopped,
+        3 => AlsaStatus::Failed {
+            code: shared.errno.load(Ordering::Relaxed),
+        },
+        _ => AlsaStatus::WorkerPanicked,
+    };
+    AlsaSnapshot {
+        status,
+        submitted_frames: shared.submitted.load(Ordering::Relaxed),
+        rendered_frames: shared.rendered.load(Ordering::Relaxed),
+        renders: shared.renders.load(Ordering::Relaxed),
+        xruns: shared.xruns.load(Ordering::Relaxed),
+        suspends: shared.suspends.load(Ordering::Relaxed),
+        failures: shared.failures.load(Ordering::Relaxed),
+        observed_at: shared
+            .observed_valid
+            .load(Ordering::Acquire)
+            .then(|| ClockPoint {
+                domain,
+                timestamp: Timestamp::from_nanos(shared.observed.load(Ordering::Relaxed)),
+            }),
     }
 }
 impl Drop for AlsaStream {
@@ -829,7 +834,44 @@ impl PcmOperations for NativePcm {
     }
 }
 
-// Production and fixtures share this statically dispatched admission loop.
+trait PumpReport: Copy {
+    fn target_extent(self) -> (u64, usize);
+}
+impl PumpReport for RenderReport {
+    fn target_extent(self) -> (u64, usize) {
+        (self.start_frame, self.frames)
+    }
+}
+impl PumpReport for beatkernel::audio::ConvertedRenderReport {
+    fn target_extent(self) -> (u64, usize) {
+        (
+            self.target_frame_cursor - self.target_frames as u64,
+            self.target_frames,
+        )
+    }
+}
+trait PumpOutput {
+    type Report: PumpReport;
+    fn render_pending(&mut self, frames: usize) -> Result<Self::Report, AudioError>;
+    fn pending_frames(&self) -> usize;
+    fn pending_samples(&self) -> &[f32];
+    fn admit(&mut self, frames: usize) -> Result<(), AudioError>;
+}
+impl PumpOutput for NativeOutputState {
+    type Report = RenderReport;
+    fn render_pending(&mut self, frames: usize) -> Result<RenderReport, AudioError> {
+        NativeOutputState::render_pending(self, frames)
+    }
+    fn pending_frames(&self) -> usize {
+        NativeOutputState::pending_frames(self)
+    }
+    fn pending_samples(&self) -> &[f32] {
+        NativeOutputState::pending_samples(self)
+    }
+    fn admit(&mut self, frames: usize) -> Result<(), AudioError> {
+        NativeOutputState::admit(self, frames)
+    }
+}
 fn run_worker<P: PcmOperations, C: WorkerClock, E: PcmEncoder>(
     pcm: &mut P,
     state: &mut NativeOutputState,
@@ -839,7 +881,44 @@ fn run_worker<P: PcmOperations, C: WorkerClock, E: PcmEncoder>(
     clock: &C,
     encoder: &mut E,
 ) -> Result<(), LinuxError> {
-    let mut render_version = 0u64;
+    let mut version = 0;
+    run_output_worker(
+        pcm,
+        state,
+        config,
+        conversion,
+        shared,
+        clock,
+        encoder,
+        |report, _, shared| {
+            shared.render_telemetry.publish(
+                AudioStreamSnapshot {
+                    telemetry_available: true,
+                    status: AudioStreamStatus::Running,
+                    counters: StreamCounters::default(),
+                    clock: None,
+                    render: Some(report),
+                },
+                &mut version,
+            )
+        },
+    )
+}
+
+// Production and fixtures share this statically dispatched admission loop.
+fn run_output_worker<P: PcmOperations, C: WorkerClock, E: PcmEncoder, S: PumpOutput, F>(
+    pcm: &mut P,
+    state: &mut S,
+    config: &AlsaAppliedConfig,
+    conversion: &mut [u8],
+    shared: &Shared,
+    clock: &C,
+    encoder: &mut E,
+    mut publish: F,
+) -> Result<(), LinuxError>
+where
+    F: FnMut(S::Report, &S, &Shared),
+{
     let align = usize::from(config.format.block_align());
     let channels = usize::from(config.format.channels());
     while !shared.stop.load(Ordering::Acquire) {
@@ -849,25 +928,15 @@ fn run_worker<P: PcmOperations, C: WorkerClock, E: PcmEncoder>(
                 .render_pending(config.period_frames as usize)
                 .map_err(LinuxError::Mixer)?;
             // Fresh rendering alone publishes new-stream callback evidence.
-            shared.render_telemetry.publish(
-                AudioStreamSnapshot {
-                    telemetry_available: true,
-                    status: AudioStreamStatus::Running,
-                    counters: StreamCounters::default(),
-                    clock: None,
-                    render: Some(report),
-                },
-                &mut render_version,
-            );
-            shared.cadence.record(
-                render_start.timestamp,
-                report.start_frame,
-                report.frames as u64,
-            );
+            publish(report, state, shared);
+            let (start_frame, frames) = report.target_extent();
+            shared
+                .cadence
+                .record(render_start.timestamp, start_frame, frames as u64);
             let rendered = shared
                 .rendered
                 .load(Ordering::Relaxed)
-                .checked_add(u64::try_from(report.frames).map_err(|_| LinuxError::Overflow)?)
+                .checked_add(u64::try_from(frames).map_err(|_| LinuxError::Overflow)?)
                 .ok_or(LinuxError::Overflow)?;
             shared.rendered.store(rendered, Ordering::Relaxed);
             increment(&shared.renders, 1);
@@ -1623,3 +1692,7 @@ mod remix_fixtures;
 #[cfg(test)]
 #[path = "alsa/continuity_fixtures.rs"]
 mod continuity_fixtures;
+
+#[cfg(test)]
+#[path = "alsa/converted_fixtures.rs"]
+mod converted_fixtures;

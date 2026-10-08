@@ -1,15 +1,145 @@
 //! Retained final results from explicit immutable completion evidence.
-use super::atoms::{text, text_clipped};
+use super::{
+    atoms::text_clipped,
+    layout::{LayoutUpdate, MountedLayout, Node},
+};
 use crate::{
-    gauge::{GaugeFailure, GAUGE_UNITS_PER_PERCENT},
-    competition::{ScoreSummary, OpponentKind},
+    competition::{OpponentKind, ScoreSummary},
     competition_presentation::{CompetitionSnapshot, NetworkStatus},
+    gauge::{GaugeFailure, GAUGE_UNITS_PER_PERCENT},
     local_players::PlayerId,
     play_result::{CompletedPlayResult, PlayResultOutcome, PlayResultScope},
-    scene::{GeometrySnapshot, Scene, ClipRect},
+    scene::{ClipRect, GeometrySnapshot, Scene},
 };
 
 pub const PLAYERS_PER_PAGE: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Component {
+    Scope,
+    Card(usize),
+    Footer,
+}
+type N = Node<'static, Component>;
+// Shared by genuine completed Results and their immutable visual reconstruction.
+// No actions live here: the existing presentation owner supplies page/mode intent.
+const SCREEN: N = N::layer(
+    [960, 720],
+    &[
+        N::leaf([912, 7], Component::Scope).at(24, 100),
+        N::column(
+            [912, 430],
+            10,
+            &[
+                N::leaf([912, 100], Component::Card(0)),
+                N::leaf([912, 100], Component::Card(1)),
+                N::leaf([912, 100], Component::Card(2)),
+                N::leaf([912, 100], Component::Card(3)),
+            ],
+        )
+        .clipped()
+        .at(24, 140),
+        N::leaf([912, 7], Component::Footer).at(24, 600),
+    ],
+)
+.clipped();
+const LABEL_COLOR: u32 = 0xf0f4ff;
+const DETAIL_COLOR: u32 = 0x9bb1cf;
+
+struct ResultLine {
+    label: String,
+    y: usize,
+    scale: usize,
+    color: u32,
+}
+struct PageContent {
+    scope: String,
+    cards: Vec<Vec<ResultLine>>,
+    footer: String,
+}
+
+fn page_geometry(
+    layout: &MountedLayout<Component>,
+    content: &PageContent,
+) -> Result<GeometrySnapshot, String> {
+    let [width, height] = layout.extent();
+    let mut scene = Scene::with_capacity(width, height, 1024);
+    for leaf in layout.leaves() {
+        let geometry = leaf.geometry;
+        if geometry.clip.width == 0 || geometry.clip.height == 0 {
+            continue;
+        }
+        let clip = ClipRect::new([
+            geometry.clip.x,
+            geometry.clip.y,
+            geometry.clip.width,
+            geometry.clip.height,
+        ])?;
+        let x = geometry.bounds.x as usize;
+        let y = geometry.bounds.y as usize;
+        match leaf.component {
+            Component::Scope => {
+                text_clipped(&mut scene, x, y, &content.scope, 1, DETAIL_COLOR, clip)?
+            }
+            Component::Card(index) => {
+                if let Some(card) = content.cards.get(index) {
+                    for line in card {
+                        text_clipped(
+                            &mut scene,
+                            x,
+                            y + line.y,
+                            &line.label,
+                            line.scale,
+                            line.color,
+                            clip,
+                        )?;
+                    }
+                }
+            }
+            Component::Footer => {
+                text_clipped(&mut scene, x, y, &content.footer, 1, DETAIL_COLOR, clip)?
+            }
+        }
+    }
+    scene.geometry_snapshot()
+}
+
+fn stage_pages(
+    layout: &MountedLayout<Component>,
+    contents: &[PageContent],
+) -> Result<Vec<GeometrySnapshot>, String> {
+    let mut pages = Vec::new();
+    pages
+        .try_reserve_exact(contents.len())
+        .map_err(|error| error.to_string())?;
+    for content in contents {
+        pages.push(page_geometry(layout, content)?);
+    }
+    Ok(pages)
+}
+
+fn publish_layout(
+    layout: &mut MountedLayout<Component>,
+    candidate: MountedLayout<Component>,
+    pages: &mut [GeometrySnapshot],
+    contents: &[PageContent],
+    comparisons: &mut [GeometrySnapshot],
+    comparison_contents: &[PageContent],
+) -> Result<bool, String> {
+    if !candidate.suspended() {
+        // Stage both modes before replacing any packet or publishing geometry.
+        let staged = stage_pages(&candidate, contents)?;
+        let comparison_staged = stage_pages(&candidate, comparison_contents)?;
+        for (old, next) in pages.iter_mut().zip(staged) {
+            *old = next;
+        }
+        for (old, next) in comparisons.iter_mut().zip(comparison_staged) {
+            *old = next;
+        }
+    }
+    *layout = candidate;
+    Ok(true)
+}
 
 pub struct ResultRow {
     pub player: PlayerId,
@@ -31,13 +161,17 @@ pub struct FrozenResultDetails {
     pub competition: Option<CompetitionSnapshot>,
 }
 
-/// All labels and page packets are staged once before a view is accepted.
+/// Labels freeze before admission. Page packets reuse them only on explicit
+/// mounted geometry edits; ordinary composition borrows the existing caches.
 pub struct ResultsView {
     rows: Vec<ResultRow>,
     scope_label: String,
     pages: Vec<GeometrySnapshot>,
     details: Vec<FrozenResultDetails>,
     comparison_pages: Vec<GeometrySnapshot>,
+    layout: MountedLayout<Component>,
+    page_contents: Vec<PageContent>,
+    comparison_contents: Vec<PageContent>,
 }
 impl ResultsView {
     pub fn new(
@@ -82,15 +216,36 @@ impl ResultsView {
                 .find(|(id, _)| id == player)
                 .ok_or("completed Results omitted a registered player")?
                 .1;
-            let archived = crate::result_archive::ArchivedResult { scope: result.scope(), outcome: result.outcome(), gauge: result.gauge() };
+            let archived = crate::result_archive::ArchivedResult {
+                scope: result.scope(),
+                outcome: result.outcome(),
+                gauge: result.gauge(),
+            };
             let (identity_label, outcome_label, gauge_label) = result_labels(*player, archived);
-            rows.push(ResultRow { player: *player, result, identity_label, outcome_label, gauge_label });
+            rows.push(ResultRow {
+                player: *player,
+                result,
+                identity_label,
+                outcome_label,
+                gauge_label,
+            });
         }
+        let layout = MountedLayout::mount(SCREEN)?;
         let mut pages = Vec::new();
+        let mut page_contents = Vec::new();
         if simple {
-            let display_rows: Vec<_> = rows.iter().map(|row| FrozenResultRow { player: row.player,
-                result: crate::result_archive::ArchivedResult { scope: row.result.scope(), outcome: row.result.outcome(), gauge: row.result.gauge() } }).collect();
-            pages = simple_result_pages(&scope_label, &display_rows)?;
+            let display_rows: Vec<_> = rows
+                .iter()
+                .map(|row| FrozenResultRow {
+                    player: row.player,
+                    result: crate::result_archive::ArchivedResult {
+                        scope: row.result.scope(),
+                        outcome: row.result.outcome(),
+                        gauge: row.result.gauge(),
+                    },
+                })
+                .collect();
+            (pages, page_contents) = simple_result_pages(&layout, &scope_label, &display_rows)?;
         }
         Ok(Self {
             rows,
@@ -98,6 +253,9 @@ impl ResultsView {
             pages,
             details: Vec::new(),
             comparison_pages: Vec::new(),
+            layout,
+            page_contents,
+            comparison_contents: Vec::new(),
         })
     }
     /// Freeze all supplied score and comparison prefixes before creating retained packets.
@@ -140,29 +298,68 @@ impl ResultsView {
                 .iter()
                 .find(|detail| detail.player == row.player)
                 .ok_or("Results details omitted a registered player")?;
-            append_result_cards(&row.identity_label, &row.outcome_label, &row.gauge_label,
-                detail.score.hits, detail.score.misses, detail.score.combo, detail.score.max_combo,
+            append_result_cards(
+                &row.identity_label,
+                &row.outcome_label,
+                &row.gauge_label,
+                detail.score.hits,
+                detail.score.misses,
+                detail.score.combo,
+                detail.score.max_combo,
                 crate::timing_display::summary(&detail.score.timing),
-                detail.score.grades.iter().map(|(grade, count)| format!("GRADE G{grade} COUNT {count}")).collect(),
-                detail.competition, &mut detail_cards, &mut comparison_cards);
+                detail
+                    .score
+                    .grades
+                    .iter()
+                    .map(|(grade, count)| format!("GRADE G{grade} COUNT {count}"))
+                    .collect(),
+                detail.competition,
+                &mut detail_cards,
+                &mut comparison_cards,
+            );
             view.details.push(FrozenResultDetails {
                 player: row.player,
                 score: detail.score.clone(),
                 competition: detail.competition.cloned(),
             });
         }
-        view.pages = card_pages(&view.scope_label, &detail_cards, "DETAILS")?;
-        view.comparison_pages = card_pages(&view.scope_label, &comparison_cards, "COMPARISONS")?;
+        (view.pages, view.page_contents) =
+            card_pages(&view.layout, &view.scope_label, &detail_cards, "DETAILS")?;
+        (view.comparison_pages, view.comparison_contents) = card_pages(
+            &view.layout,
+            &view.scope_label,
+            &comparison_cards,
+            "COMPARISONS",
+        )?;
         Ok(view)
     }
     pub fn export_visual(&self) -> Result<FrozenResultsModel, String> {
         let model = FrozenResultsModel {
             roster: self.rows.iter().map(|row| row.player).collect(),
-            rows: self.rows.iter().map(|row| FrozenResultRow { player: row.player,
-                result: crate::result_archive::ArchivedResult { scope: row.result.scope(), outcome: row.result.outcome(), gauge: row.result.gauge() } }).collect(),
-            details: self.details.iter().map(|detail| Ok(FrozenScoreDetails { player: detail.player,
-                score: crate::result_archive::ArchivedScore::from_summary(&detail.score).map_err(|error| error.to_string())?,
-                competition: detail.competition.clone() })).collect::<Result<_, String>>()?,
+            rows: self
+                .rows
+                .iter()
+                .map(|row| FrozenResultRow {
+                    player: row.player,
+                    result: crate::result_archive::ArchivedResult {
+                        scope: row.result.scope(),
+                        outcome: row.result.outcome(),
+                        gauge: row.result.gauge(),
+                    },
+                })
+                .collect(),
+            details: self
+                .details
+                .iter()
+                .map(|detail| {
+                    Ok(FrozenScoreDetails {
+                        player: detail.player,
+                        score: crate::result_archive::ArchivedScore::from_summary(&detail.score)
+                            .map_err(|error| error.to_string())?,
+                        competition: detail.competition.clone(),
+                    })
+                })
+                .collect::<Result<_, String>>()?,
         };
         model.validate()?;
         Ok(model)
@@ -187,11 +384,14 @@ impl ResultsView {
         comparisons: bool,
     ) -> Result<(), String> {
         if comparisons && self.has_comparisons() {
-            scene.append_geometry(
-                self.comparison_pages
-                    .get(page)
-                    .ok_or("Results comparison page is out of range")?,
-            )
+            let packet = self
+                .comparison_pages
+                .get(page)
+                .ok_or("Results comparison page is out of range")?;
+            if self.layout.suspended() {
+                return Ok(());
+            }
+            scene.append_geometry(packet)
         } else {
             self.compose(scene, page)
         }
@@ -211,7 +411,36 @@ impl ResultsView {
             .pages
             .get(page)
             .ok_or("completed Results page is out of range")?;
+        if self.layout.suspended() {
+            return Ok(());
+        }
         scene.append_geometry(packet)
+    }
+    /// Resize existing page allocations without changing frozen result evidence.
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, String> {
+        let mut candidate = self.layout.clone();
+        if !candidate.resize([width, height])? {
+            return Ok(false);
+        }
+        self.publish_layout(candidate)
+    }
+    /// Explicit child flow/clip edits address the mounted hierarchy directly.
+    pub fn update_layout(&mut self, updates: &[LayoutUpdate]) -> Result<bool, String> {
+        let mut candidate = self.layout.clone();
+        if !candidate.update(updates)? {
+            return Ok(false);
+        }
+        self.publish_layout(candidate)
+    }
+    fn publish_layout(&mut self, candidate: MountedLayout<Component>) -> Result<bool, String> {
+        publish_layout(
+            &mut self.layout,
+            candidate,
+            &mut self.pages,
+            &self.page_contents,
+            &mut self.comparison_pages,
+            &self.comparison_contents,
+        )
     }
 }
 
@@ -220,47 +449,40 @@ fn counters(hits: u64, misses: u64, combo: u64, max_combo: u64) -> String {
 }
 
 fn card_pages(
+    layout: &MountedLayout<Component>,
     scope: &str,
     cards: &[Vec<String>],
     mode: &str,
-) -> Result<Vec<GeometrySnapshot>, String> {
-    let mut pages = Vec::new();
-    pages
+) -> Result<(Vec<GeometrySnapshot>, Vec<PageContent>), String> {
+    let mut contents = Vec::new();
+    contents
         .try_reserve_exact(cards.len().div_ceil(PLAYERS_PER_PAGE))
         .map_err(|error| error.to_string())?;
     for (page, visible) in cards.chunks(PLAYERS_PER_PAGE).enumerate() {
-        let mut scene = Scene::with_capacity(960, 720, 1024);
-        text(&mut scene, 24, 100, scope, 1, 0x9bb1cf);
-        for (index, card) in visible.iter().enumerate() {
-            let y = 140 + index * 110;
-            let clip = ClipRect::new([24, y as i64, 912, 100])?;
-            for (line, label) in card.iter().enumerate() {
-                text_clipped(
-                    &mut scene,
-                    24,
-                    y + line * 10,
-                    label,
-                    1,
-                    if line == 0 { 0xf0f4ff } else { 0x9bb1cf },
-                    clip,
-                )?;
-            }
-        }
-        text(
-            &mut scene,
-            24,
-            600,
-            &format!(
+        contents.push(PageContent {
+            scope: scope.to_owned(),
+            cards: visible
+                .iter()
+                .map(|card| {
+                    card.iter()
+                        .enumerate()
+                        .map(|(line, label)| ResultLine {
+                            label: label.clone(),
+                            y: line * 10,
+                            scale: 1,
+                            color: if line == 0 { LABEL_COLOR } else { DETAIL_COLOR },
+                        })
+                        .collect()
+                })
+                .collect(),
+            footer: format!(
                 "LOCAL {mode} PAGE {}/{} - PGUP/PGDN",
                 page + 1,
                 cards.len().div_ceil(PLAYERS_PER_PAGE)
             ),
-            1,
-            0x9bb1cf,
-        );
-        pages.push(scene.geometry_snapshot()?);
+        });
     }
-    Ok(pages)
+    Ok((stage_pages(layout, &contents)?, contents))
 }
 
 #[cfg(test)]
@@ -270,6 +492,10 @@ mod detail_fixtures;
 #[cfg(test)]
 #[path = "results_fixtures.rs"]
 mod fixtures;
+
+#[cfg(test)]
+#[path = "results_declarative_fixtures.rs"]
+mod declarative_fixtures;
 
 fn append_result_cards(
     identity_label: &String,
@@ -403,24 +629,9 @@ pub struct FrozenResultsModel {
 pub(crate) fn validate_frozen_result(
     result: &crate::result_archive::ArchivedResult,
 ) -> Result<(), String> {
-    if result.gauge.level_units > crate::gauge::MAX_GAUGE_UNITS
-        || match result.outcome {
-            PlayResultOutcome::Failed(reason) => result.gauge.failure != Some(reason),
-            _ => result.gauge.failure.is_some(),
-        }
-    {
-        return Err("invalid frozen display result gauge or outcome".into());
-    }
-    if let PlayResultScope::PracticeSection { start, end } = result.scope {
-        if start < beatkernel::time::Timestamp::ZERO
-            || end.is_some_and(|end| end <= start)
-            || (start == beatkernel::time::Timestamp::ZERO && end.is_none())
-        {
-            return Err("invalid frozen display result scope".into());
-        }
-    }
-    Ok(())
+    crate::result_archive::validate_frozen_result(result)
 }
+
 impl FrozenResultsModel {
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=64).contains(&self.roster.len())
@@ -477,15 +688,19 @@ pub struct FrozenResultsView {
     model: FrozenResultsModel,
     pages: Vec<GeometrySnapshot>,
     comparison_pages: Vec<GeometrySnapshot>,
+    layout: MountedLayout<Component>,
+    page_contents: Vec<PageContent>,
+    comparison_contents: Vec<PageContent>,
 }
 impl FrozenResultsView {
     pub fn from_model(model: FrozenResultsModel) -> Result<Self, String> {
         model.validate()?;
         let scope = result_scope_label(model.rows[0].result.scope);
+        let layout = MountedLayout::mount(SCREEN)?;
         let mut detail_cards = Vec::new();
         let mut comparison_cards = Vec::new();
-        let pages = if model.details.is_empty() {
-            simple_result_pages(&scope, &model.rows)?
+        let (pages, page_contents) = if model.details.is_empty() {
+            simple_result_pages(&layout, &scope, &model.rows)?
         } else {
             for (row, detail) in model.rows.iter().zip(&model.details) {
                 let (identity, outcome, gauge) = result_labels(row.player, row.result);
@@ -529,13 +744,17 @@ impl FrozenResultsView {
                     &mut comparison_cards,
                 );
             }
-            card_pages(&scope, &detail_cards, "DETAILS")?
+            card_pages(&layout, &scope, &detail_cards, "DETAILS")?
         };
-        let comparison_pages = card_pages(&scope, &comparison_cards, "COMPARISONS")?;
+        let (comparison_pages, comparison_contents) =
+            card_pages(&layout, &scope, &comparison_cards, "COMPARISONS")?;
         Ok(Self {
             model,
             pages,
             comparison_pages,
+            layout,
+            page_contents,
+            comparison_contents,
         })
     }
     pub fn model(&self) -> &FrozenResultsModel {
@@ -562,46 +781,86 @@ impl FrozenResultsView {
         } else {
             &self.pages
         };
-        scene.append_geometry(pages.get(page).ok_or("frozen Results page out of range")?)
+        let packet = pages.get(page).ok_or("frozen Results page out of range")?;
+        if self.layout.suspended() {
+            return Ok(());
+        }
+        scene.append_geometry(packet)
+    }
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<bool, String> {
+        let mut candidate = self.layout.clone();
+        if !candidate.resize([width, height])? {
+            return Ok(false);
+        }
+        self.publish_layout(candidate)
+    }
+    pub fn update_layout(&mut self, updates: &[LayoutUpdate]) -> Result<bool, String> {
+        let mut candidate = self.layout.clone();
+        if !candidate.update(updates)? {
+            return Ok(false);
+        }
+        self.publish_layout(candidate)
+    }
+    fn publish_layout(&mut self, candidate: MountedLayout<Component>) -> Result<bool, String> {
+        publish_layout(
+            &mut self.layout,
+            candidate,
+            &mut self.pages,
+            &self.page_contents,
+            &mut self.comparison_pages,
+            &self.comparison_contents,
+        )
     }
 }
 
 fn simple_result_pages(
+    layout: &MountedLayout<Component>,
     scope: &str,
     rows: &[FrozenResultRow],
-) -> Result<Vec<GeometrySnapshot>, String> {
-    let mut pages = Vec::new();
-    pages
+) -> Result<(Vec<GeometrySnapshot>, Vec<PageContent>), String> {
+    let mut contents = Vec::new();
+    contents
         .try_reserve_exact(rows.len().div_ceil(PLAYERS_PER_PAGE))
         .map_err(|error| error.to_string())?;
     for (page, visible) in rows.chunks(PLAYERS_PER_PAGE).enumerate() {
-        let mut scene = Scene::with_capacity(960, 720, 512);
-        text(&mut scene, 24, 100, scope, 1, 0x9bb1cf);
-        for (index, row) in visible.iter().enumerate() {
+        let mut cards = Vec::new();
+        for row in visible {
             let (identity, outcome, gauge) = result_labels(row.player, row.result);
             let color = match row.result.outcome {
                 PlayResultOutcome::Cleared => 0x74e5c5,
                 PlayResultOutcome::BelowClearThreshold => 0xd8b36b,
                 PlayResultOutcome::Failed(_) => 0xff8e8e,
             };
-            let y = 140 + index * 110;
-            text(&mut scene, 24, y, &identity, 2, 0xf0f4ff);
-            text(&mut scene, 24, y + 28, &outcome, 2, color);
-            text(&mut scene, 24, y + 55, &gauge, 2, 0x9bb1cf);
+            cards.push(vec![
+                ResultLine {
+                    label: identity,
+                    y: 0,
+                    scale: 2,
+                    color: LABEL_COLOR,
+                },
+                ResultLine {
+                    label: outcome,
+                    y: 28,
+                    scale: 2,
+                    color,
+                },
+                ResultLine {
+                    label: gauge,
+                    y: 55,
+                    scale: 2,
+                    color: DETAIL_COLOR,
+                },
+            ]);
         }
-        text(
-            &mut scene,
-            24,
-            600,
-            &format!(
+        contents.push(PageContent {
+            scope: scope.to_owned(),
+            cards,
+            footer: format!(
                 "LOCAL RESULTS PAGE {}/{} - PGUP/PGDN",
                 page + 1,
                 rows.len().div_ceil(PLAYERS_PER_PAGE)
             ),
-            1,
-            0x9bb1cf,
-        );
-        pages.push(scene.geometry_snapshot()?);
+        });
     }
-    Ok(pages)
+    Ok((stage_pages(layout, &contents)?, contents))
 }

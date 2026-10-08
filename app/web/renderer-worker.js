@@ -1,5 +1,5 @@
 import init, { BrowserView } from "./pkg/beatkernel_bms_runtime.js";
-import { preflightPacket, nativePacketView, validateRenderLimits, unsignedIdentity, boundedU32 } from "./render-protocol.mjs";
+import { preflightPacket, preflightMenuPayload, menuOpponentProjection, nativePacketView, validateRenderLimits, unsignedIdentity, boundedU32 } from "./render-protocol.mjs";
 
 let view = null;
 let port = null;
@@ -27,7 +27,7 @@ function stopDraw() {
 }
 function release(binding) {
   if (!binding) return;
-  try { binding.retire_visual(); } finally { binding.free(); }
+  try { binding.dispose_menu_motion(); binding.retire_visual(); } finally { binding.free(); }
 }
 function diagnostic(error) {
   const text = error instanceof Error ? error.message : String(error);
@@ -61,22 +61,34 @@ function scheduleDraw(reset = true) {
     redraw = null;
     if (disposed || failed || epoch !== ownerEpoch || current !== identity) return;
     try {
-      view.draw_visual();
-      if (view.needs_redraw()) {
-        if (++retries <= 3) scheduleDraw(false);
-        else wait(identity);
+      let presented;
+      if (identity.mode === "menu") {
+        presented = view.draw_menu_at(performance.now());
+        if (typeof presented !== "boolean") throw new Error("Invalid menu presentation result.");
       } else {
+        view.draw_visual();
+        presented = !view.needs_redraw();
+      }
+      if (presented) {
+        retries = 0;
         send({ kind: "drawn", generation: identity.generation, content: identity.content, sequence: identity.sequence });
         if (geometryVersion > submittedGeometry) {
-          const page = view.visual_page();
+          const page = identity.mode === "menu" ? view.menu_page() : view.visual_page();
           const [width, height] = extent;
           if (!boundedU32(page)) throw new Error("Invalid applied visual page.");
           submittedGeometry = geometryVersion;
           const evidence = { kind: "geometry-ack", generation: identity.generation, content: identity.content, geometryVersion,
-            page, width, height };
+            page, width, height, ...(identity.menu ? { menuGeneration: identity.menu.generation,
+              screen: identity.menu.screen, revision: identity.menu.revision, details: view.menu_details() } : {}) };
           send(evidence);
           self.postMessage(evidence);
         }
+        if (view.needs_redraw() || (identity.mode === "menu" && view.menu_motion_active())) scheduleDraw(false);
+      } else if (view.needs_redraw()) {
+        if (++retries <= 3) scheduleDraw(false);
+        else wait(identity);
+      } else {
+        wait(identity);
       }
     } catch (error) { fail(error, null, identity); }
   };
@@ -85,6 +97,41 @@ function scheduleDraw(reset = true) {
     catch (error) { if (error?.name !== "NotSupportedError") { fail(error); return; } }
   }
   redraw = { animation: false, id: setTimeout(draw, 16) };
+}
+function menu(message) {
+  const header = preflightMenuPayload(message.packet, message.recordPreview);
+  const opponents = menuOpponentProjection(message.opponents);
+  const { generation, content, operationId, geometryVersion: version } = message;
+  if (!unsignedIdentity(generation) || !unsignedIdentity(content) || !unsignedIdentity(operationId)) throw new Error("Invalid menu render identity.");
+  const replacing = !current || current.generation !== generation || current.content !== content;
+  if (replacing ? generation <= generationFloor : current.mode !== "menu" || operationId <= current.operationId
+    || header.generation !== current.menu.generation || header.revision <= current.menu.revision) return;
+  if (version !== undefined && (!unsignedIdentity(version) || version <= geometryVersion)) throw new Error("Menu geometry version must increase.");
+  const applied = view.import_menu_packet(nativePacketView(message.packet), message.recordPreview == null ? undefined : nativePacketView(message.recordPreview));
+  if (applied !== header.revision) throw new Error("Menu importer returned a different applied revision.");
+  view.set_menu_opponents(opponents.count, opponents.own, opponents.other);
+  if (replacing) {
+    stopDraw(); submittedGeometry = 0n; generationFloor = generation;
+    current = { generation, content, mode: "menu", drawable: true, sequence: header.revision, operationId, menu: header, lastAction: 0n };
+  } else { current.menu = header; current.sequence = header.revision; current.operationId = operationId; }
+  if (version !== undefined) geometryVersion = version;
+  send({ kind: "menu-ack", operationId, generation, content, menuGeneration: header.generation, screen: header.screen, revision: header.revision });
+  scheduleDraw();
+}
+function menuInput(message) {
+  if (!current || current.mode !== "menu" || current.generation !== message.generation || current.content !== message.content
+    || message.menuGeneration !== current.menu.generation || message.screen !== current.menu.screen || message.revision !== current.menu.revision
+    || message.geometryVersion !== submittedGeometry || geometryVersion !== submittedGeometry
+    || !unsignedIdentity(message.actionId) || message.actionId <= current.lastAction || !Number.isFinite(message.x) || !Number.isFinite(message.y)
+    || extent.includes(0)) return;
+  current.lastAction = message.actionId;
+  const control = view.menu_hit(message.x, message.y);
+  if (control === 0n) return;
+  if ((message.downX !== undefined || message.downY !== undefined)
+    && (!Number.isFinite(message.downX) || !Number.isFinite(message.downY) || view.menu_hit(message.downX, message.downY) !== control)) return;
+  if (!unsignedIdentity(control)) throw new Error("Invalid menu hit control.");
+  send({ kind: "menu-action", generation: current.generation, content: current.content,
+    menuGeneration: current.menu.generation, screen: current.menu.screen, revision: current.menu.revision, actionId: message.actionId, control });
 }
 function packet(message) {
   const { packet: input, operationId, mode } = message;
@@ -130,23 +177,38 @@ function packet(message) {
   scheduleDraw();
 }
 function control(message) {
-  const { kind, generation, content, operationId, width, height, page, comparisons, geometryVersion: version } = message;
+  const { kind, generation, content, operationId, width, height, page, comparisons, details, geometryVersion: version } = message;
   if (!current || generation !== current.generation || content !== current.content) return;
   if (!unsignedIdentity(operationId)) throw new Error("Invalid render control identity.");
   if (operationId <= current.operationId) return;
   if (kind === "retire") {
     stopDraw();
+    view.dispose_menu_motion();
     view.retire_visual();
     generationFloor = generationFloor > generation ? generationFloor : generation;
     current = null;
     send({ kind: "control-ack", operation: kind, operationId, generation, content });
     return;
   }
+  if (kind === "menu-motion" && (current.mode !== "menu" || message.menuGeneration !== current.menu.generation
+    || message.screen !== current.menu.screen || message.revision !== current.menu.revision)) return;
   if (!unsignedIdentity(version) || version <= geometryVersion) throw new Error("Geometry version must increase.");
   if (kind === "resize") {
     if (!boundedU32(width) || !boundedU32(height)) throw new Error("Invalid surface extent.");
     view.resize(width, height);
     extent = [width, height];
+    if (current.mode === "menu") {
+      if (extent.includes(0)) view.suspend_menu_motion(performance.now());
+      else view.resume_menu_motion(performance.now());
+    }
+  } else if (kind === "menu-motion") {
+    const values = message.transforms;
+    if (!unsignedIdentity(message.control) || !ArrayBuffer.isView(values)
+      || Object.prototype.toString.call(values) !== "[object Float32Array]" || values.length !== 10
+      || !values.every(Number.isFinite) || !Number.isFinite(message.durationMs) || message.durationMs < 0
+      || !Number.isInteger(message.easing) || message.easing < 0 || message.easing > 3) throw new Error("Invalid menu motion.");
+    view.request_menu_motion(message.screen, message.revision, message.control,
+      values, message.durationMs, message.easing, performance.now());
   } else if (kind === "page") {
     if (!boundedU32(page) || typeof comparisons !== "boolean") throw new Error("Invalid visual page.");
     view.set_visual_page(page, comparisons);
@@ -154,6 +216,9 @@ function control(message) {
   } else if (kind === "room-page") {
     if (!boundedU32(page)) throw new Error("Invalid room page.");
     view.set_visual_room_page(page);
+  } else if (kind === "menu-details") {
+    if (current.mode !== "menu" || typeof details !== "boolean" || !boundedU32(page)) throw new Error("Invalid menu details page.");
+    view.set_menu_record_details(details, page);
   } else throw new Error("Unknown render control.");
   geometryVersion = version;
   current.operationId = operationId;
@@ -169,10 +234,15 @@ function receive(event) {
   try {
     message = { kind: input.kind, packet: input.packet, operationId: input.operationId, generation: input.generation,
       content: input.content, mode: input.mode, width: input.width, height: input.height, page: input.page,
-      comparisons: input.comparisons, geometryVersion: input.geometryVersion };
+      comparisons: input.comparisons, geometryVersion: input.geometryVersion, menuGeneration: input.menuGeneration,
+      screen: input.screen, revision: input.revision, actionId: input.actionId, x: input.x, y: input.y,
+      downX: input.downX, downY: input.downY, recordPreview: input.recordPreview, details: input.details, opponents: input.opponents,
+      control: input.control, transforms: input.transforms, durationMs: input.durationMs, easing: input.easing };
     if (unsignedIdentity(message.generation) && message.generation < generationFloor) return;
     if (!current && unsignedIdentity(message.generation) && message.generation <= generationFloor) return;
-    if (message.kind === "packet") packet(message);
+    if (message.kind === "menu") menu(message);
+    else if (message.kind === "menu-input") menuInput(message);
+    else if (message.kind === "packet") packet(message);
     else control(message);
   } catch (error) {
     const identity = unsignedIdentity(message?.generation) && unsignedIdentity(message?.content) ? message : current;

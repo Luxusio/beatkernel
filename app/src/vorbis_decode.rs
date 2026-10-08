@@ -1,13 +1,14 @@
-//! Complete single-stream native Ogg/Vorbis preparation outside callbacks.
+//! Complete sequential same-format Ogg/Vorbis preparation outside callbacks.
 use crate::AssetDecoder;
 use beatkernel::audio::{AudioFormat, PcmLimits, PcmSample};
 use lewton::{
-    audio::{PreviousWindowRight, read_audio_packet_generic},
+    audio::{read_audio_packet_generic, PreviousWindowRight},
     inside_ogg::read_headers,
     samples::InterleavedSamples,
 };
 use ogg::PacketReader;
 use std::{
+    collections::HashSet,
     error::Error,
     io::{self, Cursor},
     path::Path,
@@ -45,11 +46,8 @@ const fn crc_table() -> [u32; 256] {
 }
 const CRC: [u32; 256] = crc_table();
 
-fn validate_pages(bytes: &[u8]) -> io::Result<u64> {
-    if bytes.is_empty() || bytes.len() > 64 * 1024 * 1024 {
-        return Err(invalid("Ogg input is empty or exceeds64MiB"));
-    }
-    let mut offset = 0usize;
+fn validate_link(bytes: &[u8], start: usize) -> io::Result<(usize, u64)> {
+    let mut offset = start;
     let mut sequence = 0u32;
     let mut serial = None;
     let mut unfinished = false;
@@ -62,7 +60,7 @@ fn validate_pages(bytes: &[u8]) -> io::Result<u64> {
         if &header[..4] != b"OggS"
             || header[4] != 0
             || flags & !7 != 0
-            || (flags & 2 != 0) != (offset == 0)
+            || (flags & 2 != 0) != (offset == start)
             || (flags & 1 != 0) != unfinished
         {
             return Err(invalid("invalid Ogg framing, flags or packet continuation"));
@@ -70,7 +68,7 @@ fn validate_pages(bytes: &[u8]) -> io::Result<u64> {
         let page_serial = u32::from_le_bytes(header[14..18].try_into().unwrap());
         let page_sequence = u32::from_le_bytes(header[18..22].try_into().unwrap());
         if serial.is_some_and(|old| old != page_serial) || page_sequence != sequence {
-            return Err(invalid("multiplexed, chained or nonconsecutive Ogg pages"));
+            return Err(invalid("multiplexed or nonconsecutive Ogg pages"));
         }
         serial = Some(page_serial);
         sequence = sequence
@@ -113,16 +111,31 @@ fn validate_pages(bytes: &[u8]) -> io::Result<u64> {
             return Err(invalid("Ogg unfinished page must have undefined granule"));
         }
         if flags & 4 != 0 {
-            if unfinished || !completed || current == u64::MAX || end != bytes.len() {
-                return Err(invalid(
-                    "Ogg EOS is incomplete or has trailing/chained data",
-                ));
+            if unfinished || !completed || current == u64::MAX {
+                return Err(invalid("Ogg EOS is incomplete"));
             }
-            return Ok(current);
+            return Ok((end, current));
         }
         offset = end;
     }
     Err(invalid("Ogg stream has no final EOS page"))
+}
+
+#[cfg(test)]
+fn validate_pages(bytes: &[u8]) -> io::Result<u64> {
+    if bytes.is_empty() || bytes.len() > 64 * 1024 * 1024 {
+        return Err(invalid("Ogg input is empty or exceeds64MiB"));
+    }
+    let mut offset = 0;
+    let mut frames = 0u64;
+    while offset < bytes.len() {
+        let (end, count) = validate_link(bytes, offset)?;
+        frames = frames
+            .checked_add(count)
+            .ok_or_else(|| invalid("Ogg cumulative frame extent overflow"))?;
+        offset = end;
+    }
+    Ok(frames)
 }
 
 fn identification(bytes: &[u8]) -> Result<AudioFormat, Box<dyn Error>> {
@@ -158,8 +171,36 @@ impl AssetDecoder for VorbisDecoder {
         encoded: &[u8],
         limits: PcmLimits,
     ) -> Result<PcmSample, Box<dyn Error>> {
-        let final_frames = validate_pages(encoded)?;
-        let format = identification(encoded)?;
+        if encoded.is_empty() || encoded.len() > 64 * 1024 * 1024 {
+            return Err(invalid("Ogg input is empty or exceeds64MiB").into());
+        }
+        // Validate every complete link and its source format before owning PCM.
+        let mut offset = 0;
+        let mut source_format = None;
+        let mut final_frames = 0u64;
+        let mut serials = HashSet::new();
+        while offset < encoded.len() {
+            let (end, frames) = validate_link(encoded, offset)?;
+            let serial = u32::from_le_bytes(encoded[offset + 14..offset + 18].try_into().unwrap());
+            if serials.contains(&serial) {
+                return Err(invalid("Ogg chain reuses a logical stream serial").into());
+            }
+            serials
+                .try_reserve(1)
+                .map_err(|_| io::Error::other("Ogg link serial allocation failed"))?;
+            serials.insert(serial);
+            let format = identification(&encoded[offset..end])?;
+            if source_format.is_some_and(|original| original != format) {
+                return Err(invalid("Vorbis chain changes source rate or channels").into());
+            }
+            source_format = Some(format);
+            final_frames = final_frames
+                .checked_add(frames)
+                .ok_or_else(|| invalid("Ogg cumulative frame extent overflow"))?;
+            offset = end;
+        }
+        drop(serials);
+        let format = source_format.ok_or_else(|| invalid("Ogg stream has no link"))?;
         let channels = usize::from(format.channels());
         let max_samples = limits.max_asset_bytes() / std::mem::size_of::<f32>();
         let expected = final_frames
@@ -167,8 +208,23 @@ impl AssetDecoder for VorbisDecoder {
             .and_then(|count| usize::try_from(count).ok())
             .filter(|&count| count <= max_samples)
             .ok_or_else(|| invalid("Ogg final granule exceeds PCM asset limit"))?;
-        std::panic::catch_unwind(|| decode_packets(encoded, format, expected, limits))
-            .map_err(|_| invalid("Vorbis codec panicked on malformed stream"))?
+        std::panic::catch_unwind(|| {
+            let mut samples = Vec::new();
+            samples
+                .try_reserve_exact(expected)
+                .map_err(|_| io::Error::other("Vorbis PCM allocation failed"))?;
+            let mut offset = 0;
+            while offset < encoded.len() {
+                let (end, frames) = validate_link(encoded, offset)?;
+                let link_samples = usize::try_from(frames)?
+                    .checked_mul(channels)
+                    .ok_or_else(|| invalid("Ogg link sample extent overflow"))?;
+                decode_packets(&encoded[offset..end], format, link_samples, &mut samples)?;
+                offset = end;
+            }
+            Ok(PcmSample::new(format, samples, limits)?)
+        })
+        .map_err(|_| invalid("Vorbis codec panicked on malformed stream"))?
     }
 }
 
@@ -176,10 +232,9 @@ fn decode_packets(
     encoded: &[u8],
     format: AudioFormat,
     expected: usize,
-    limits: PcmLimits,
-) -> Result<PcmSample, Box<dyn Error>> {
+    samples: &mut Vec<f32>,
+) -> Result<(), Box<dyn Error>> {
     let channels = usize::from(format.channels());
-    let max_samples = limits.max_asset_bytes() / std::mem::size_of::<f32>();
     let mut reader = PacketReader::new(Cursor::new(encoded));
     let ((ident, comments, setup), serial) = read_headers(&mut reader)?;
     if ident.audio_sample_rate != format.sample_rate()
@@ -188,10 +243,7 @@ fn decode_packets(
         return Err(invalid("Vorbis source format changed after identification").into());
     }
     drop(comments);
-    let mut samples = Vec::new();
-    samples
-        .try_reserve_exact(expected)
-        .map_err(|_| io::Error::other("Vorbis PCM allocation failed"))?;
+    let start = samples.len();
     let mut previous = PreviousWindowRight::new();
     let mut ended = false;
     while let Some(actual) = reader.read_packet()? {
@@ -215,7 +267,7 @@ fn decode_packets(
         }
         if actual.last_in_stream() {
             let remaining = expected
-                .checked_sub(samples.len())
+                .checked_sub(samples.len() - start)
                 .filter(|&count| count <= packet.samples.len())
                 .ok_or_else(|| invalid("Vorbis final packet cannot reach EOS granule"))?;
             packet.samples.truncate(remaining);
@@ -223,8 +275,9 @@ fn decode_packets(
         }
         let extent = samples
             .len()
-            .checked_add(packet.samples.len())
-            .filter(|&count| count <= expected && count <= max_samples)
+            .checked_sub(start)
+            .and_then(|count| count.checked_add(packet.samples.len()))
+            .filter(|&count| count <= expected)
             .ok_or_else(|| invalid("Vorbis decoded PCM exceeds granule or asset limit"))?;
         if actual.last_in_page() && actual.absgp_page() != (extent / channels) as u64 {
             return Err(
@@ -233,10 +286,10 @@ fn decode_packets(
         }
         samples.extend_from_slice(&packet.samples);
     }
-    if !ended || samples.len() != expected {
+    if !ended || samples.len() - start != expected {
         return Err(invalid("Vorbis decoded frames differ from final EOS granule").into());
     }
-    Ok(PcmSample::new(format, samples, limits)?)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -267,11 +320,10 @@ mod fixtures {
                 );
                 assert_eq!(pcm.frames(), frames as usize);
                 assert_eq!(pcm.samples().len(), frames as usize * usize::from(channels));
-                assert!(
-                    pcm.samples()
-                        .iter()
-                        .all(|&value| value == 0.0 && value.is_finite())
-                );
+                assert!(pcm
+                    .samples()
+                    .iter()
+                    .all(|&value| value == 0.0 && value.is_finite()));
             }
         }
     }
@@ -345,12 +397,10 @@ mod fixtures {
         let prime = offsets[3].0;
         prime_nonzero[prime + 6..prime + 14].copy_from_slice(&7u64.to_le_bytes());
         reseal_page(&mut prime_nonzero, prime);
-        assert!(
-            decode(&prime_nonzero, 384)
-                .unwrap_err()
-                .to_string()
-                .contains("zero-origin")
-        );
+        assert!(decode(&prime_nonzero, 384)
+            .unwrap_err()
+            .to_string()
+            .contains("zero-origin"));
     }
     #[test]
     fn crc_truncation_missing_eos_chains_multiplex_sequence_flags_and_granules_reject() {

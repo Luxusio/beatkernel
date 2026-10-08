@@ -1,25 +1,25 @@
 //! Shared native application flags and observation outside the audio callback.
 use crate::{
     competition::{Competition, OpponentKind},
-    competition_progress,
-    competition_opponent_loading::{self, OpponentLoadError, OpponentRequest},
     competition_opponent_loader_bridge::NativeOpponentReplayPort,
+    competition_opponent_loading::{self, OpponentLoadError, OpponentRequest},
+    competition_presentation::{
+        self, CompetitionPresentationHost, NetworkStatus, SoloNetworkPresentation,
+    },
+    competition_presentation_bridge::NativeCompetitionPresentation,
+    competition_progress,
+    competition_start_gate::{self, CompetitionSetupControl},
     competition_terminal::{self, DeliveryStatus, TerminalGuard},
     competition_terminal_bridge::NativeTerminalPort,
     input_sounds::InputSoundIdentity,
     local_players::PlayerId,
     multiplayer::{
-        MultiplayerEvent, MultiplayerNotice, MultiplayerOptions, Progress,
-        competition_identity_for_section,
+        competition_identity_for_section, MultiplayerEvent, MultiplayerNotice, MultiplayerOptions,
+        Progress,
     },
     multiplayer_group::{GroupPrefix, MemberProgress},
     multiplayer_quic::QuicCredentials,
     native_competition_network::NativeCompetitionNetwork,
-    competition_presentation::{
-        self, CompetitionPresentationHost, SoloNetworkPresentation, NetworkStatus,
-    },
-    competition_presentation_bridge::NativeCompetitionPresentation,
-    competition_start_gate::{self, CompetitionSetupControl},
     native_pump_system::SystemControl,
     replay_capture::LiveReplayCapture,
 };
@@ -30,7 +30,7 @@ use beatkernel::{
     runtime::RuntimeReport,
     time::{ClockDomainId, Timestamp},
 };
-use beatkernel_bms::{BmsChart, BmsInputMode, ParseOptions, parse_seeded};
+use beatkernel_bms::{parse_seeded, BmsChart, BmsInputMode, ParseOptions};
 use std::{
     fs::File,
     net::SocketAddr,
@@ -345,6 +345,7 @@ pub fn load_chart_with_seed(path: &Path, seed: u64) -> Result<BmsChart> {
 pub struct LiveCompetition {
     player: PlayerId,
     competition: Competition,
+    admitted_policy_header: Option<beatkernel::replay::ReplayHeader>,
     network: Option<NativeCompetitionNetwork>,
     last_publish: Option<i64>,
     last_display: Option<i64>,
@@ -356,7 +357,9 @@ pub struct LiveCompetition {
 }
 impl LiveCompetition {
     pub(crate) fn native_policy_header(&self) -> &beatkernel::replay::ReplayHeader {
-        self.competition.expected_header()
+        self.admitted_policy_header
+            .as_ref()
+            .unwrap_or_else(|| self.competition.expected_header())
     }
     /// Load ghosts before starting audio; spawn networking only when selected.
     pub fn prepare(
@@ -504,9 +507,16 @@ impl LiveCompetition {
             return Err("policy-aware competition requires a pristine matching judge".into());
         }
         if policy.selection() == crate::play_policy::GaugeSelection::BeatKernel {
-            return Self::prepare_native_section_at_with_chart_seed(
+            let header = crate::native_judge::prepare_policy_header(
+                source, judge, policy, domain, start, chart_seed, end,
+            )?;
+            let mut prepared = Self::prepare_native_section_at_with_chart_seed(
                 options, source, judge, domain, start, chart_seed, end, preroll_ns,
-            );
+            )?;
+            if let Some(owner) = prepared.as_mut() {
+                owner.admitted_policy_header = Some(header);
+            }
+            return Ok(prepared);
         }
         if preroll_ns < 0 {
             return Err("native competition preroll cannot be negative".into());
@@ -541,11 +551,17 @@ impl LiveCompetition {
             return Err("policy-aware competition requires a pristine matching judge".into());
         }
         if policy.selection() == crate::play_policy::GaugeSelection::BeatKernel {
-            return Self::prepare_member_section(
+            let header = crate::native_judge::prepare_policy_header(
+                source, judge, policy, domain, start, chart_seed, end,
+            )?;
+            let mut prepared = Self::prepare_member_section(
                 player, options, source, judge, domain, start, chart_seed, end,
-            );
+            )?;
+            if let Some(owner) = prepared.as_mut() {
+                owner.admitted_policy_header = Some(header);
+            }
+            return Ok(prepared);
         }
-        crate::native_judge::validate_policy_competition(policy.selection(), options)?;
 
         Self::prepare_member_section_inner(
             player,
@@ -599,17 +615,9 @@ impl LiveCompetition {
         }
         let limits = replay_limits()?;
         let input_sounds = InputSoundIdentity::from_source(source)?;
-        let capture = match policy {
-            Some(policy) => LiveReplayCapture::new_with_policy(
-                judge,
-                domain,
-                limits,
-                start,
-                chart_seed,
-                end,
-                BmsInputMode::ButtonOnly,
-                input_sounds,
-                policy,
+        let header = match policy {
+            Some(policy) => crate::native_judge::prepare_policy_header(
+                source, judge, policy, domain, start, chart_seed, end,
             )?,
             None => LiveReplayCapture::new_with_input_sounds(
                 judge,
@@ -620,16 +628,32 @@ impl LiveCompetition {
                 None,
                 BmsInputMode::ButtonOnly,
                 input_sounds,
+            )?
+            .header()
+            .clone(),
+        };
+        // Captures/ghosts keep the actual endpoint; network agreement keeps its
+        // established finite outer envelope around an endpoint-free setup.
+        let network_end = if options.network.is_some() { end } else { None };
+        let identity = match policy {
+            Some(policy) if options.network.is_some() => {
+                crate::native_judge::prepare_policy_competition_identity(
+                    source,
+                    judge,
+                    policy,
+                    domain,
+                    start,
+                    chart_seed,
+                    network_end,
+                )?
+            }
+            _ => competition_identity_for_section(
+                &header,
+                env!("CARGO_PKG_VERSION"),
+                limits,
+                network_end,
             )?,
         };
-        let header = capture.header().clone();
-        let network_end = if options.network.is_some() { end } else { None };
-        let identity = competition_identity_for_section(
-            &header,
-            env!("CARGO_PKG_VERSION"),
-            limits,
-            network_end,
-        )?;
         let mut competition = Competition::new(header.clone(), 8)?;
         options.load_opponents(source, &mut competition, limits)?;
         let settings = MultiplayerOptions {
@@ -666,6 +690,7 @@ impl LiveCompetition {
         let mut prepared = Self {
             player,
             competition,
+            admitted_policy_header: None,
             network,
             last_publish: None,
             last_display: None,
@@ -1183,6 +1208,7 @@ mod fixtures {
         let mut owner = LiveCompetition {
             player: PlayerId(1),
             competition: Competition::new(header, 0).unwrap(),
+            admitted_policy_header: None,
             network: None,
             last_publish: Some(0),
             last_display: None,

@@ -1,7 +1,7 @@
 //! Real mixer, transport and runtime fixtures for the shared live pause policy.
 use super::*;
 use crate::{
-    native_start::{HostStartWindow, interval::StartInterval},
+    native_start::{interval::StartInterval, HostStartWindow},
     playback_pause::{
         NativePause, PauseError, PauseIntervalObservation, PauseKeyboard, PausePhase,
     },
@@ -9,8 +9,8 @@ use crate::{
 };
 use beatkernel::{
     audio::{
-        AudioCommand, AudioFormat, AudioLimits, CommandProducer, Mixer, MixerConfig, PcmLimits,
-        PcmSample, RenderReport, SampleBank, SampleId, VoiceId, command_queue,
+        command_queue, AudioCommand, AudioFormat, AudioLimits, CommandProducer, Mixer, MixerConfig,
+        PcmLimits, PcmSample, RenderReport, SampleBank, SampleId, VoiceId,
     },
     input::{
         BackendId, Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId,
@@ -18,13 +18,427 @@ use beatkernel::{
         PhysicalInputEvent,
     },
     judge::{JudgeEngine, JudgeGrade, JudgeOutcome, JudgeProfile, JudgeWindow},
-    replay::{ReplayOperation, codec::ReplayCodecLimits},
+    replay::{codec::ReplayCodecLimits, ReplayOperation},
     runtime::Runtime,
     time::{
         ClockDomainId, ClockMapper, ClockMappingQuality, ClockPair, ClockPoint, Duration, Timestamp,
     },
     transport::{Rate, Transport},
 };
+
+#[cfg(target_os = "linux")]
+mod converted_target {
+    use super::*;
+    use crate::native_converted_gameplay_fixtures::{native, rig};
+    use beatkernel::audio::{TargetFrameBasis, TargetTime};
+    use beatkernel_platform::audio::ConvertedNativeOutputState;
+
+    const SONG: Timestamp = Timestamp::from_nanos(9_000_000_000);
+    fn evidence(
+        output: &ConvertedNativeOutputState,
+        basis: TargetFrameBasis,
+        frame: u64,
+    ) -> LivePauseObservation {
+        LivePauseObservation::Target {
+            epoch: 7,
+            basis,
+            facts: output.boundaries(),
+            source: output.last_real_source_report(),
+            pair: native(
+                basis,
+                frame,
+                1_000_000_000 + (u128::from(frame) * 1_000_000_000 / 48_000) as i64,
+            )
+            .1,
+        }
+    }
+    fn initial_pause() -> (
+        CommandProducer,
+        ConvertedNativeOutputState,
+        NativePause,
+        TargetFrameBasis,
+    ) {
+        let (mut producer, mut output) = rig(24_000, 48_000, None, None, 0);
+        let basis = output.target_frame_basis();
+        let mut pause = NativePause::new(point(2, 0), ClockDomainId(1), 24_000)
+            .unwrap()
+            .with_target_basis(7, basis)
+            .unwrap();
+        output.render_pending(1).unwrap();
+        output.admit(1).unwrap();
+        update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 0),
+            None,
+            None,
+            SONG,
+            24_000,
+        )
+        .unwrap();
+        let request = update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 1),
+            None,
+            Some(true),
+            SONG,
+            24_000,
+        )
+        .unwrap();
+        assert_eq!(request.requested, Some(true));
+        assert!(request.boundary.is_none());
+        producer.request_pause(true);
+        let paused = output.render_pending(8).unwrap();
+        assert!(paused.source.unwrap().paused);
+        assert!(output.pending_samples()[0] > 0.0);
+        assert_eq!(
+            output.boundaries().pause.unwrap().target_time,
+            TargetTime::from_frames(4, 48_000).unwrap()
+        );
+        (producer, output, pause, basis)
+    }
+
+    #[test]
+    fn shared_target_pause_and_held_resume_wait_for_mapped_native_crossing_keep_source_song_grid() {
+        let (mut producer, mut output, mut pause, basis) = initial_pause();
+        let waiting = update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 3),
+            None,
+            None,
+            SONG,
+            24_000,
+        )
+        .unwrap();
+        assert!(waiting.observed);
+        assert!(waiting.boundary.is_none());
+        assert_eq!(pause.phase(), PausePhase::Pausing);
+        let ack = update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 4),
+            None,
+            None,
+            SONG,
+            24_000,
+        )
+        .unwrap();
+        let boundary = ack.boundary.unwrap();
+        assert!(boundary.original.paused);
+        assert_eq!(boundary.epoch, 7);
+        assert_eq!(boundary.original.playback_frame, 2);
+        assert_eq!(boundary.original.song, Timestamp::from_nanos(9_000_083_333));
+        assert_eq!(boundary.raw_output, basis.point_at_stream_frame(4).unwrap());
+        assert_eq!(
+            boundary.original.at,
+            native(basis, 4, 1_000_083_333).1.target
+        );
+        assert_eq!(pause.phase(), PausePhase::Paused);
+        output.admit(8).unwrap();
+        let request = update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 9),
+            None,
+            Some(false),
+            SONG,
+            24_000,
+        )
+        .unwrap();
+        assert_eq!(request.requested, Some(false));
+        assert!(request.boundary.is_none());
+        producer.request_pause(false);
+        let phase = output.converter_owner().source_position();
+        output.render_held_pending(4).unwrap();
+        assert_eq!(output.converter_owner().source_position(), phase);
+        assert!(output.mixer().is_paused());
+        let waiting = update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 13),
+            None,
+            None,
+            SONG,
+            24_000,
+        )
+        .unwrap();
+        assert!(waiting.boundary.is_none());
+        assert_eq!(pause.phase(), PausePhase::Resuming);
+        output.admit(4).unwrap();
+        let mut adopted_before_consumption = false;
+        for _ in 0..8 {
+            let report = output.render_pending(1).unwrap();
+            output.admit(1).unwrap();
+            if report.resume_source_frame.is_some() && output.boundaries().resume.is_none() {
+                adopted_before_consumption = true;
+                let waiting = update_live_audio_pause(
+                    &mut pause,
+                    evidence(&output, basis, 13),
+                    None,
+                    None,
+                    SONG,
+                    24_000,
+                )
+                .unwrap();
+                assert!(waiting.boundary.is_none());
+            }
+            if output.boundaries().resume.is_some() {
+                break;
+            }
+        }
+        assert!(adopted_before_consumption);
+        assert_eq!(
+            output.boundaries().resume.unwrap().target_time,
+            TargetTime::from_frames(16, 48_000).unwrap()
+        );
+        assert!(update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 15),
+            None,
+            None,
+            SONG,
+            24_000
+        )
+        .unwrap()
+        .boundary
+        .is_none());
+        let resumed = update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 16),
+            None,
+            None,
+            SONG,
+            24_000,
+        )
+        .unwrap()
+        .boundary
+        .unwrap();
+        assert!(!resumed.original.paused);
+        assert_eq!(resumed.original.playback_frame, 2);
+        assert_eq!(resumed.original.song, boundary.original.song);
+        assert_eq!(resumed.raw_output, basis.point_at_stream_frame(16).unwrap());
+        assert_ne!(resumed.raw_output, boundary.raw_output);
+        assert_ne!(
+            resumed.original.song,
+            Timestamp::from_nanos(SONG.as_nanos() + resumed.raw_output.timestamp.as_nanos())
+        );
+        assert_eq!(
+            resumed.raw_output.timestamp.as_nanos() - boundary.raw_output.timestamp.as_nanos(),
+            250_000
+        );
+        assert_eq!(resumed.epoch, 7);
+        assert_eq!(pause.phase(), PausePhase::Running);
+    }
+
+    #[test]
+    fn shared_target_fractional_source_grid_uses_original_native_brackets_and_retained_boundary() {
+        let (mut producer, mut output) = rig(44_100, 48_000, None, None, 0);
+        let basis = output.target_frame_basis();
+        let mut pause = NativePause::new(point(2, 0), ClockDomainId(1), 44_100)
+            .unwrap()
+            .with_target_basis(7, basis)
+            .unwrap();
+        output.render_pending(1).unwrap();
+        output.admit(1).unwrap();
+        update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 0),
+            None,
+            None,
+            SONG,
+            44_100,
+        )
+        .unwrap();
+        let requested = update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 1),
+            None,
+            Some(true),
+            SONG,
+            44_100,
+        )
+        .unwrap();
+        assert_eq!(requested.requested, Some(true));
+        producer.request_pause(true);
+        let adopted = output.render_pending(8).unwrap();
+        assert!(adopted.source.unwrap().paused);
+        assert!(output.pending_samples()[0] > 0.0);
+        let mapped = output.boundaries().pause.unwrap();
+        assert_eq!(mapped.source_frame, 2);
+        // ceil(2 * 48000 / 44100) = 3: source adoption and target onset
+        // have different durations even before adding any held output.
+        assert_eq!(
+            mapped.target_time,
+            TargetTime::from_frames(3, 48_000).unwrap()
+        );
+        output.admit(8).unwrap();
+        let retained_source = output.last_real_source_report();
+        let held = output.render_held_pending(4).unwrap();
+        assert!(held.source.is_none());
+        assert_eq!(output.last_real_source_report(), retained_source);
+        assert_eq!(output.boundaries().pause, Some(mapped));
+        output.admit(4).unwrap();
+        let waiting = update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 2),
+            None,
+            None,
+            SONG,
+            44_100,
+        )
+        .unwrap();
+        assert!(waiting.observed && waiting.boundary.is_none());
+        assert_eq!(pause.phase(), PausePhase::Pausing);
+        // The upper native observation skips the boundary. Its original lower
+        // and upper brackets must map the retained target frame, rather than
+        // ACK at the latest callback or held-output frontier.
+        let ack = update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 4),
+            None,
+            None,
+            SONG,
+            44_100,
+        )
+        .unwrap()
+        .boundary
+        .unwrap();
+        assert_eq!(ack.original.playback_frame, 2);
+        assert_eq!(ack.original.song, Timestamp::from_nanos(9_000_045_351));
+        assert_eq!(ack.raw_output, basis.point_at_stream_frame(3).unwrap());
+        assert_eq!(ack.original.at, point(1, 1_000_062_500));
+        assert_eq!(ack.original.window.earliest(), ack.original.at);
+        assert_eq!(ack.original.window.latest(), ack.original.at);
+        assert_ne!(
+            ack.original.song.as_nanos() - SONG.as_nanos(),
+            ack.raw_output.timestamp.as_nanos()
+        );
+        assert_eq!(pause.phase(), PausePhase::Paused);
+    }
+
+    #[test]
+    fn shared_target_refusal_after_staged_request_preserves_running_state_and_original_source() {
+        let (_producer, mut output) = rig(44_100, 48_000, None, None, 0);
+        let basis = output.target_frame_basis();
+        output.render_pending(8).unwrap();
+        output.admit(8).unwrap();
+        let mut pause = NativePause::new(point(2, 0), ClockDomainId(1), 44_100)
+            .unwrap()
+            .with_target_basis(7, basis)
+            .unwrap();
+        update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 0),
+            None,
+            None,
+            SONG,
+            44_100,
+        )
+        .unwrap();
+        let before = format!("{pause:?}");
+        // Genuine converter facts from a different original source origin fail
+        // after the valid epoch/domain request has already been staged.
+        let (_other_producer, mut other) = rig(44_100, 48_000, None, None, 1);
+        other.render_pending(8).unwrap();
+        let invalid = LivePauseObservation::Target {
+            epoch: 7,
+            basis,
+            facts: other.boundaries(),
+            source: other.last_real_source_report(),
+            pair: native(basis, 1, 1_000_020_833).1,
+        };
+        assert!(
+            update_live_audio_pause(&mut pause, invalid, None, Some(true), SONG, 44_100,).is_err()
+        );
+        assert_eq!(format!("{pause:?}"), before);
+        assert_eq!(pause.phase(), PausePhase::Running);
+        let requested = update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 1),
+            None,
+            Some(true),
+            SONG,
+            44_100,
+        )
+        .unwrap();
+        assert_eq!(requested.requested, Some(true));
+        assert!(requested.boundary.is_none());
+        assert_eq!(pause.phase(), PausePhase::Pausing);
+        assert_eq!(pause.last_render_report(), output.last_real_source_report());
+    }
+
+    #[test]
+    fn shared_target_identity_domain_basis_and_source_rate_refusals_are_atomic_before_valid_ack() {
+        let (_producer, output, mut pause, basis) = initial_pause();
+        update_live_audio_pause(
+            &mut pause,
+            evidence(&output, basis, 3),
+            None,
+            None,
+            SONG,
+            24_000,
+        )
+        .unwrap();
+        let original = format!("{pause:?}");
+        let correct = evidence(&output, basis, 4);
+        let mut wrong = Vec::new();
+        for case in 0..6 {
+            let LivePauseObservation::Target {
+                mut epoch,
+                mut basis,
+                mut facts,
+                source,
+                mut pair,
+            } = correct
+            else {
+                unreachable!()
+            };
+            match case {
+                0 => epoch = 8,
+                1 => {
+                    basis =
+                        TargetFrameBasis::new(basis.origin(), basis.start_time(), 32_000).unwrap()
+                }
+                2 => pair.source.domain = ClockDomainId(99),
+                3 => pair.target.domain = ClockDomainId(99),
+                4 => facts.source_rate = 48_000,
+                _ => facts.origin = Some(point(2, 1)),
+            }
+            wrong.push(LivePauseObservation::Target {
+                epoch,
+                basis,
+                facts,
+                source,
+                pair,
+            });
+        }
+        for invalid in wrong {
+            assert!(
+                update_live_audio_pause(&mut pause, invalid, None, Some(false), SONG, 24_000)
+                    .is_err()
+            );
+            assert_eq!(format!("{pause:?}"), original);
+        }
+        for rate in [0, 48_000] {
+            assert!(update_live_audio_pause(&mut pause, correct, None, None, SONG, rate).is_err());
+            assert_eq!(format!("{pause:?}"), original);
+        }
+        assert!(update_live_audio_pause(
+            &mut pause,
+            correct,
+            None,
+            None,
+            Timestamp::from_nanos(i64::MAX),
+            24_000
+        )
+        .is_err());
+        assert_eq!(format!("{pause:?}"), original);
+        let ack = update_live_audio_pause(&mut pause, correct, None, None, SONG, 24_000)
+            .unwrap()
+            .boundary
+            .unwrap();
+        assert_eq!(ack.original.playback_frame, 2);
+        assert_eq!(ack.original.song, Timestamp::from_nanos(9_000_083_333));
+        assert_eq!(ack.raw_output, basis.point_at_stream_frame(4).unwrap());
+        assert_eq!(pause.phase(), PausePhase::Paused);
+    }
+}
 
 fn point(domain: u32, ns: i64) -> ClockPoint {
     ClockPoint {
@@ -319,17 +733,15 @@ fn live_update_validates_before_publishing_request_state_and_checked_song() {
     let first = observed(mixer.render(&mut [0.0; 1]).unwrap(), 44_100, 100, 120);
     let mut pause = NativePause::new(point(11, 0), ClockDomainId(22), 44_100).unwrap();
     for rate in [0, 1_000_000_001] {
-        assert!(
-            update_live_pause(
-                &mut pause,
-                interval(Some(first), 120),
-                Some(first.render),
-                Some(true),
-                Timestamp::ZERO,
-                rate
-            )
-            .is_err()
-        );
+        assert!(update_live_pause(
+            &mut pause,
+            interval(Some(first), 120),
+            Some(first.render),
+            Some(true),
+            Timestamp::ZERO,
+            rate
+        )
+        .is_err());
         assert_eq!(pause.phase(), PausePhase::Running);
         assert_eq!(pause.last_render_report(), None);
     }
@@ -337,17 +749,15 @@ fn live_update_validates_before_publishing_request_state_and_checked_song() {
         observation: Some(first),
         now: point(99, 120),
     };
-    assert!(
-        update_live_pause(
-            &mut pause,
-            wrong_now,
-            Some(first.render),
-            Some(true),
-            Timestamp::ZERO,
-            44_100
-        )
-        .is_err()
-    );
+    assert!(update_live_pause(
+        &mut pause,
+        wrong_now,
+        Some(first.render),
+        Some(true),
+        Timestamp::ZERO,
+        44_100
+    )
+    .is_err());
     assert_eq!(pause.phase(), PausePhase::Running);
     assert_eq!(pause.last_render_report(), None);
     let update = update_live_pause(
@@ -362,17 +772,15 @@ fn live_update_validates_before_publishing_request_state_and_checked_song() {
     producer.request_pause(update.requested.unwrap());
     let frozen = observed(mixer.render(&mut [0.0; 1]).unwrap(), 44_100, 200, 240);
     let before = pause.last_render_report();
-    assert!(
-        update_live_pause(
-            &mut pause,
-            interval(Some(frozen), 240),
-            None,
-            None,
-            Timestamp::from_nanos(i64::MAX - 22_674),
-            44_100
-        )
-        .is_err()
-    );
+    assert!(update_live_pause(
+        &mut pause,
+        interval(Some(frozen), 240),
+        None,
+        None,
+        Timestamp::from_nanos(i64::MAX - 22_674),
+        44_100
+    )
+    .is_err());
     assert_eq!(pause.phase(), PausePhase::Pausing);
     assert_eq!(pause.last_render_report(), before);
     let waiting = update_live_pause(
@@ -485,17 +893,15 @@ fn transport_preparation_rejects_chronology_state_and_frozen_song_mismatches_ato
     let resume = boundary(false, 7_000_000, 7_200_000, 4_000_000, 4);
     assert!(prepare_live_transport(&pristine, resume, pause.song).is_err());
     assert!(prepare_live_transport(&frozen, resume, Timestamp::from_nanos(3_999_999)).is_err());
-    assert!(
-        prepare_live_transport(
-            &frozen,
-            LivePauseBoundary {
-                song: Timestamp::from_nanos(4_000_001),
-                ..resume
-            },
-            Timestamp::from_nanos(4_000_001)
-        )
-        .is_err()
-    );
+    assert!(prepare_live_transport(
+        &frozen,
+        LivePauseBoundary {
+            song: Timestamp::from_nanos(4_000_001),
+            ..resume
+        },
+        Timestamp::from_nanos(4_000_001)
+    )
+    .is_err());
     assert_eq!(frozen, before);
     let wrong_cutoff = LivePauseBoundary {
         at: point(22, 4_200_000),
@@ -665,16 +1071,12 @@ fn actual_runtime_capture_preserves_committed_prefix_and_source_owned_resume_rel
         .unwrap();
     assert_eq!(report.song_time, paused.song);
     capture.record_report(&report).unwrap();
-    assert!(
-        !keyboard
-            .accept(&input(2, 7_200_000, 2, ButtonState::Repeat))
-            .unwrap()
-    );
-    assert!(
-        !keyboard
-            .accept(&input(2, 7_200_000, 3, ButtonState::Up))
-            .unwrap()
-    );
+    assert!(!keyboard
+        .accept(&input(2, 7_200_000, 2, ButtonState::Repeat))
+        .unwrap());
+    assert!(!keyboard
+        .accept(&input(2, 7_200_000, 3, ButtonState::Up))
+        .unwrap());
     let down = input(1, 7_200_000, 3, ButtonState::Down);
     assert!(keyboard.accept(&down).unwrap());
     let report = runtime

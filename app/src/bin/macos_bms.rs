@@ -520,7 +520,6 @@ pub(crate) fn validate_args(args: &[String]) -> Result<()> {
     let (competition, native) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     let options = parse(&native)?;
-    beatkernel_bms_runtime::native_judge::validate_policy_competition(options.gauge, &competition)?;
     finite_mode(&options, competition.network.is_some())?;
     Ok(())
 }
@@ -533,15 +532,11 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
             "Graphical player is bms-player; this is a native developer composition. Local mode: replace --keyboard-registry with repeated --local-player ID:REGISTRY (2..64 distinct keyboards). Network local groups share one connection and start agreement.\n"
         );
         println!(
-            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nGauge timing: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Saved ghosts must match the chosen policy. Nondefault multiplayer remains unavailable.\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned and strictly after start; solo or local cohort CoreAudio completes a finite prefix only after native presentation and input drain, without forcing remaining notes. Network peers must agree on the same finite section endpoint. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
+            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nGauge timing: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Saved ghosts must match the chosen policy. Multiplayer peers must match the chosen gauge and judgment policy.\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned and strictly after start; solo or local cohort CoreAudio completes a finite prefix only after native presentation and input drain, without forcing remaining notes. Network peers must agree on the same finite section endpoint. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
     let options = parse(&args)?;
-    beatkernel_bms_runtime::native_judge::validate_policy_competition(
-        options.gauge,
-        &competition_options,
-    )?;
     finite_mode(&options, competition_options.network.is_some())?;
     #[cfg(target_os = "macos")]
     {
@@ -584,10 +579,7 @@ mod native {
             presentation::coreaudio_presentation_pair,
         },
     };
-    use std::{
-        collections::VecDeque,
-        time::Duration as WallDuration,
-    };
+    use std::{collections::VecDeque, time::Duration as WallDuration};
     pub(super) const M_NATIVE: ClockDomainId = ClockDomainId(1);
     pub(super) const HOST: ClockDomainId = ClockDomainId(2);
     pub(super) const OUTPUT: ClockDomainId = ClockDomainId(3);
@@ -631,12 +623,7 @@ mod native {
             Ok(self.audio.start()?)
         }
         fn service_input(&mut self, retain: bool) -> NativeStartResult<bool> {
-            startup_input(
-                self.input,
-                self.pre_origin,
-                &mut *self.retained,
-                retain,
-            )
+            startup_input(self.input, self.pre_origin, &mut *self.retained, retain)
         }
         fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<()>>> {
             Ok(
@@ -776,7 +763,9 @@ mod native {
         retained: &mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
         retain: bool,
     ) -> Result<bool> {
-        if player::cancelled() { return Ok(false); }
+        if player::cancelled() {
+            return Ok(false);
+        }
         input.activate();
         retained.service_start(&mut input.worker, retain, pre_origin, 256)
     }
@@ -791,12 +780,7 @@ mod native {
     }
     impl beatkernel_bms_runtime::native_audio_startup::NativeAudioSeedPort for AudioSeedDevice<'_> {
         fn service_input(&mut self) -> NativeGameplayResult<bool> {
-            startup_input(
-                self.input,
-                self.pre_origin,
-                &mut *self.retained,
-                true,
-            )
+            startup_input(self.input, self.pre_origin, &mut *self.retained, true)
         }
         fn observe_audio(
             &mut self,
@@ -970,7 +954,8 @@ mod native {
             },
         )?;
         let mut bgm = BgmSession(bgm);
-        let (mut input, mut selected_devices) = super::collected_input::open(clock, vec![options.keyboard_registry], 1024)?;
+        let (mut input, mut selected_devices) =
+            super::collected_input::open(clock, vec![options.keyboard_registry], 1024)?;
         let selected = selected_devices.remove(0);
         let selected_id = selected.descriptor.runtime_id;
         let bindings =
@@ -1017,7 +1002,8 @@ mod native {
         let mut output_ui = NativeCoreAudioOutputUi::new(&output, !network_start)?;
         let mut pre_origin = 0u64;
         let mut capture = None;
-        let mut startup_inputs = beatkernel_bms_runtime::native_gameplay::NativeCollectedInput::new()?;
+        let mut startup_inputs =
+            beatkernel_bms_runtime::native_gameplay::NativeCollectedInput::new()?;
         let mut score = beatkernel_bms_runtime::competition::ScoreSummary::default();
         let outcome =
             (|| -> Result<Option<beatkernel_bms_runtime::play_result::CompletedPlayResult>> {
@@ -1538,7 +1524,7 @@ mod fixtures {
                         options
                             .local_players
                             .iter()
-                            .map(|player| player.0.0)
+                            .map(|player| player.0 .0)
                             .collect::<Vec<_>>(),
                         vec![3, u32::MAX]
                     );
@@ -1720,7 +1706,7 @@ mod fixtures {
         let parsed = parse(&group).unwrap();
         assert_eq!(parsed.keyboard_registry, 0);
         assert_eq!(parsed.local_players.len(), 4);
-        assert_eq!(parsed.local_players[3].0.0, u32::MAX);
+        assert_eq!(parsed.local_players[3].0 .0, u32::MAX);
         assert_eq!(parsed.local_players[3].1, u64::MAX);
         assert!(validate_args(&group).is_ok());
         let mut network = group.clone();
@@ -1828,18 +1814,16 @@ mod fixtures {
                 gain: 0.5
             }
         );
-        assert!(
-            shift_bgm(
-                AudioCommand::Play {
-                    voice: VoiceId(1),
-                    sample: SampleId(1),
-                    at: Timestamp::from_nanos(i64::MAX),
-                    gain: 1.0
-                },
-                1
-            )
-            .is_err()
-        );
+        assert!(shift_bgm(
+            AudioCommand::Play {
+                voice: VoiceId(1),
+                sample: SampleId(1),
+                at: Timestamp::from_nanos(i64::MAX),
+                gain: 1.0
+            },
+            1
+        )
+        .is_err());
     }
     #[test]
     fn future_output_origin_defers_deadlines_without_clamping_native_pair() {
@@ -1869,16 +1853,14 @@ mod fixtures {
             Some(point(1000))
         );
         assert!(estimated_origin(pair, point(0)).is_err());
-        assert!(
-            estimated_origin(
-                ClockPair {
-                    source: point(i64::MAX),
-                    target: point(i64::MIN)
-                },
-                point(0)
-            )
-            .is_err()
-        );
+        assert!(estimated_origin(
+            ClockPair {
+                source: point(i64::MAX),
+                target: point(i64::MIN)
+            },
+            point(0)
+        )
+        .is_err());
     }
     #[test]
     fn input_epoch_future_and_lag_backlog_guards_keep_original_time() {
@@ -1888,16 +1870,14 @@ mod fixtures {
         assert!(validate_input_chronology(point(100), point(100)).is_ok());
         assert!(validate_input_chronology(point(101), point(100)).is_ok());
         assert!(validate_input_chronology(point(99), point(100)).is_err());
-        assert!(
-            validate_input_chronology(
-                ClockPoint {
-                    domain: ClockDomainId(3),
-                    timestamp: Timestamp::from_nanos(100)
-                },
-                point(100)
-            )
-            .is_err()
-        );
+        assert!(validate_input_chronology(
+            ClockPoint {
+                domain: ClockDomainId(3),
+                timestamp: Timestamp::from_nanos(100)
+            },
+            point(100)
+        )
+        .is_err());
 
         assert_eq!(
             watermark(point(10), point(100), point(200), 50, false).unwrap(),
@@ -1941,17 +1921,15 @@ mod fixtures {
             pause_input_stage(point(20), None, Some(point(20))).unwrap(),
             PauseInputStage::AfterResume
         );
-        assert!(
-            pause_input_stage(
-                point(20),
-                None,
-                Some(ClockPoint {
-                    domain: ClockDomainId(99),
-                    timestamp: Timestamp::from_nanos(20)
-                })
-            )
-            .is_err()
-        );
+        assert!(pause_input_stage(
+            point(20),
+            None,
+            Some(ClockPoint {
+                domain: ClockDomainId(99),
+                timestamp: Timestamp::from_nanos(20)
+            })
+        )
+        .is_err());
         assert_eq!(
             watermark(point(0), point(10), point(30), 0, true).unwrap(),
             None
@@ -2039,7 +2017,7 @@ mod fixtures {
     }
 
     #[test]
-    fn nondefault_gauge_competition_is_rejected_without_opening_resources() {
+    fn selected_gauge_competition_syntax_is_admitted_before_checked_policy_preparation() {
         for (flag, value) in [
             ("--ghost-self", "unopened.bkr"),
             ("--ghost-other", "unopened.bkr"),
@@ -2049,11 +2027,7 @@ mod fixtures {
             supplied.extend([flag.into(), value.into()]);
             assert!(validate_args(&supplied).is_ok());
             supplied.extend(["--gauge".into(), "hard".into()]);
-            if flag.starts_with("--ghost") {
-                assert!(validate_args(&supplied).is_ok());
-            } else {
-                assert!(validate_args(&supplied).is_err());
-            }
+            assert!(validate_args(&supplied).is_ok());
         }
     }
 }

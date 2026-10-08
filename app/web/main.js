@@ -8,7 +8,7 @@ import { PointerInputOwner } from "./pointer-input.mjs";
 import { LocalRoster, validateLocalPrepared, localReplayReceipt } from "./local-play-host.mjs";
 import { snapshotHidDevices } from "./hid-profile.mjs";
 import { snapshotBrowserSettings } from "./settings-profile.mjs";
-import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
+import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
 import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
@@ -25,6 +25,13 @@ let worker = null;
 let renderer = null;
 let rendererReady = false;
 let submittedGeometry = null;
+let menuState = null;
+let menuGeometry = null;
+let menuPress = null;
+let menuActionId = 0n;
+let menuEditPending = null;
+let menuEditControl = null;
+const menuIdentity = value => typeof value === "bigint" && value > 0n && value <= 0xffffffffffffffffn;
 let shuttingDown = false;
 let shutdown = null;
 let closingOwner = null;
@@ -61,6 +68,145 @@ const settingsFields = Object.freeze([
   ["capacities", "maxCommandsPerRender", "audio-commands", 5],
   ["section", "startSeconds", "live-start", 20], ["section", "endSeconds", "live-end", 20],
 ].map(row => Object.freeze(row)));
+
+function menuToken() {
+  return menuState && menuState.owner === owner && menuState.worker === worker && !activePlay && !shuttingDown
+    ? { menuGeneration: menuState.menuGeneration, screen: menuState.screen, revision: menuState.revision } : null;
+}
+function sendMenuEdit(token, index, value) {
+  menuEditPending = { ...token, owner, worker, index, sent: value, latest: value };
+  worker.postMessage({ kind: "menu-edit", ...token, index, value });
+}
+function menuFieldsFor(route) {
+  if (route === 1) return Array.from(ui.chart.options ?? [], option => option.value).filter(Boolean);
+  if (route === 2) return settingsFields.map(([, , id]) => ui[id].value);
+  if (route === 3) return [ui["live-start"].value, ui["live-end"].value];
+  if (route === 4) return Array.from(ui.records.options ?? [], option => option.value).filter(Boolean);
+  if (route === 7) return ["auto", "fifo", "960", "720"];
+  if (route === 6) return ["0", "0", "0", "0"];
+  const inventory = localSetup?.phase === "ready" ? localSetup.inventory : [];
+  const members = localRoster.players;
+  const fields = [inventory.length ? "1" : "0", "1", String(members.length)];
+  for (const player of members) {
+    const source = localRoster.selected(player);
+    fields.push(String(player), inventory.some(row => row.source === source) ? source.toString() : "");
+  }
+  fields.push(String(inventory.length));
+  for (const row of inventory) {
+    const kind = row.source === 1n ? "keyboard" : row.source === 2n ? "touch"
+      : localSetup.hidDevices?.some(device => device.source === row.source) ? "hid"
+      : localSetup.gamepadDevices?.some(device => device.source === row.source) ? "gamepad" : "pointer";
+    fields.push(row.source.toString(), kind, row.label, "Acquired browser input source", "1");
+  }
+  return fields;
+}
+function receiveMenu(data) {
+  if (activePlay || shuttingDown || !worker) return;
+  if (data.kind === "menu-error") {
+    if (menuEditPending && data.menuGeneration === menuEditPending.menuGeneration
+      && data.screen === menuEditPending.screen && data.revision === menuEditPending.revision) {
+      menuEditPending = null; menuEditControl = null;
+    }
+    status(data.message, true); return;
+  }
+  if (data.kind === "menu-state") {
+    if (!menuIdentity(data.menuGeneration) || !menuIdentity(data.screen) || !menuIdentity(data.revision)
+      || !Number.isInteger(data.selected) || data.selected < 0 || data.selected > 0xffffffff
+      || !Number.isInteger(data.route) || ![1, 2, 3, 4, 5, 6, 7, 9].includes(data.route)
+      || !Array.isArray(data.fields) || data.fields.length > 8192 || data.fields.some(value => typeof value !== "string" || value.length > 4096)) return;
+    if (menuState?.owner === owner && (data.menuGeneration < menuState.menuGeneration
+      || data.menuGeneration === menuState.menuGeneration && data.revision < menuState.revision)) return;
+    if (recordsOperation?.menuTicket && (recordsOperation.menuTicket.menuGeneration !== data.menuGeneration
+      || recordsOperation.menuTicket.screen !== data.screen || recordsOperation.menuTicket.revision !== data.revision)) {
+      recordsOperation.controller.abort(); recordsOperation = null;
+      controls();
+    }
+    const unchangedToken = menuState?.owner === owner && menuState.menuGeneration === data.menuGeneration
+      && menuState.screen === data.screen && menuState.revision === data.revision;
+    if (data.roster) {
+      try {
+        const old = localRoster.exportState();
+        const changed = old.nextPlayerId !== data.roster.nextPlayerId || old.players.length !== data.roster.players?.length
+          || old.players.some((player, index) => player !== data.roster.players[index])
+          || old.assignments.length !== data.roster.assignments?.length
+          || old.assignments.some((pair, index) => pair[0] !== data.roster.assignments[index]?.[0] || pair[1] !== data.roster.assignments[index]?.[1]);
+        localRoster.importState(data.roster);
+        if (changed) { ui["local-count"].value = String(localRoster.players.length); showLocalRoster(); }
+      }
+      catch (error) { status(error.message, true); return; }
+    }
+    if (data.opponents) {
+      try {
+        const accepted = validateSelections(data.opponents);
+        const old = opponents.snapshot();
+        const changed = old.length !== accepted.length || old.some((entry, index) => entry.sourceKey !== accepted[index]?.sourceKey
+          || entry.own !== accepted[index]?.own || entry.player !== accepted[index]?.player || entry.file.size !== accepted[index]?.file.size);
+        if (changed) { opponents.clear(); for (const entry of accepted) opponents.add(entry); showOpponentSelection(); }
+      } catch (error) { status(error.message, true); return; }
+    }
+    menuState = Object.freeze({ ...data, fields: Object.freeze([...data.fields]), owner, worker });
+    if (!unchangedToken) menuGeometry = null;
+    const editor = byId("menu-editor");
+    editor.hidden = ![2, 3, 7].includes(data.route);
+    const pending = menuEditPending;
+    const sameEditor = pending && pending.owner === owner && pending.worker === worker && pending.menuGeneration === data.menuGeneration
+      && pending.screen === data.screen && pending.index === data.selected;
+    if (pending && !sameEditor) { menuEditPending = null; menuEditControl = null; }
+    if (!editor.hidden && !sameEditor && editor.value !== (data.fields[data.selected] ?? "")) editor.value = data.fields[data.selected] ?? "";
+    if (sameEditor && data.fields[pending.index] === pending.sent) {
+      menuEditPending = null;
+      if (pending.latest !== pending.sent) sendMenuEdit(menuToken(), pending.index, pending.latest);
+      else if (menuEditControl) {
+        const control = menuEditControl; menuEditControl = null;
+        if (menuActionId < 18446744073709551615n) worker.postMessage({ kind: "menu-action", ...menuToken(), actionId: ++menuActionId, control });
+      }
+    }
+    if (data.fields.length === 0 && data.route !== 1 && !unchangedToken) {
+      worker.postMessage({ kind: "menu-fields", ...menuToken(), fields: menuFieldsFor(data.route) });
+    }
+  } else if (data.kind === "menu-focus") {
+    const token = menuToken();
+    if (!token || token.menuGeneration !== data.menuGeneration || token.screen !== data.screen || data.revision < token.revision) return;
+    const editor = byId("menu-editor"); editor.hidden = false; editor.value = data.value; editor.focus();
+  } else if (data.kind === "menu-effect") {
+    const token = menuToken();
+    if (!token || token.menuGeneration !== data.menuGeneration || token.screen !== data.screen || token.revision !== data.revision) return;
+    if (data.effect === 4n) { ui.play.focus(); status("Press Play to authorize audio in the browser gesture."); }
+    else if (data.effect === 2n) { ui["settings-load"].focus(); status("Choose a settings file using the browser file picker."); }
+    else if (data.effect === 3n) ui["settings-save"].click();
+    else if (data.effect === 1n && data.route === 2) settingsFields.forEach(([, , id], index) => { ui[id].value = data.fields[index]; });
+    else if (data.effect === 1n && data.route === 7) {
+      ui.viewport.style.width = `${data.fields[2]}px`; ui.viewport.style.height = `${data.fields[3]}px`;
+    }
+    else if (data.effect === 1n && data.route === 3) {
+      ui["live-start"].value = data.fields[0]; ui["live-end"].value = data.fields[1];
+    } else if (data.effect >= 100n && data.effect < 100000n) { ui.chart.value = data.fields[Number(data.effect - 100n)]; prepare(); }
+    else if (data.effect >= 100000n) {
+      const control = Number(data.effect - 100000n);
+      if (control === 50) void recordAction("refresh", token);
+      else if (control === 51) { ui.records.value = data.fields[data.selected]; void recordAction("use", token); }
+      else if (control === 59) { ui["replay-play"].focus(); status("Press Play replay to authorize audio in the browser gesture."); }
+      else if (control === 54) ui["opponents-clear"].click();
+      else if (control === 22 || control === 34) void discoverLocalSources();
+    }
+  }
+}
+function menuClick(event, target) {
+  if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+  const token = menuToken(), geometry = menuGeometry;
+  if (!token || target !== canvas || !geometry || geometry.owner !== owner || geometry.worker !== worker
+    || geometry.menuGeneration !== token.menuGeneration || geometry.screen !== token.screen || geometry.revision !== token.revision) return;
+  const box = target.getBoundingClientRect();
+  if (box.width <= 0 || box.height <= 0) return;
+  if (menuActionId === 18446744073709551615n) return;
+  const press = menuPress; menuPress = null;
+  if (press?.cancelled) return;
+  if (press && (press.owner !== owner || press.worker !== worker || press.screen !== token.screen
+    || press.revision !== token.revision || press.menuGeneration !== token.menuGeneration || press.geometryVersion !== geometry.geometryVersion)) return;
+  worker.postMessage({ kind: "menu-input", ...token, actionId: ++menuActionId, geometryVersion: geometry.geometryVersion,
+    x: (event.clientX - box.left) * geometry.width / box.width, y: (event.clientY - box.top) * geometry.height / box.height,
+    ...(press ? { downX: press.x, downY: press.y } : {}) });
+}
 
 function settingsStatus(text, error = false) {
   ui["settings-status"].textContent = text;
@@ -320,6 +466,10 @@ function showLocalRoster() {
       try {
         const source = select.value === "" ? null : BigInt(select.value);
         if (source !== null && !localSetup.inventory.some(row => row.source === source)) throw new Error("Choose an acquired source.");
+        const token = menuToken();
+        if (token && [5, 6, 9].includes(menuState.route)) {
+          worker.postMessage({ kind: "menu-roster-assign", ...token, player, source }); return;
+        }
         localRoster.assign(player, source);
         const touch = localRoster.players.findIndex(id => localRoster.selected(id) === 2n);
         if (touch >= 0) ui["local-page"].value = String(Math.floor(touch / 4));
@@ -903,6 +1053,7 @@ function prepare() {
 }
 
 function received(data) {
+  if (data?.kind?.startsWith("menu-")) { receiveMenu(data); return; }
   if (data?.kind === "render-geometry") { receiveGeometry(data); return; }
   if (shuttingDown && !data?.kind?.startsWith("play-")) return;
   if (data?.kind === "historical-record-page-result") { receiveHistoricalGradePage(data); return; }
@@ -966,6 +1117,17 @@ function received(data) {
 }
 
 function receiveGeometry(data) {
+  if (data.mode === "menu") {
+    const token = menuToken();
+    if (!token || data.menuGeneration !== token.menuGeneration || data.screen !== token.screen || data.revision !== token.revision
+      || !menuIdentity(data.generation) || !menuIdentity(data.content) || !menuIdentity(data.geometryVersion)
+      || !Number.isInteger(data.page) || data.page < 0 || data.page > 0xffffffff
+      || (data.details === true ? menuState.route !== 4 : data.page !== 0)
+      || !Number.isInteger(data.width) || data.width < 1 || data.width > 0xffffffff
+      || !Number.isInteger(data.height) || data.height < 1 || data.height > 0xffffffff
+      || menuGeometry && data.geometryVersion <= menuGeometry.geometryVersion) return;
+    menuGeometry = Object.freeze({ ...data, owner, worker }); canvas.hidden = false; return;
+  }
   if (shuttingDown || typeof data.generation !== "bigint" || data.generation <= 0n || data.generation > 18446744073709551615n
     || typeof data.content !== "bigint" || data.content <= 0n || data.content > 18446744073709551615n
     || typeof data.geometryVersion !== "bigint" || data.geometryVersion <= 0n || data.geometryVersion > 18446744073709551615n
@@ -1023,10 +1185,26 @@ async function start() {
   canvas = fresh;
   cssExtent = [0, 0];
   submittedGeometry = null;
+  menuState = null; menuGeometry = null;
+  menuPress = null;
+  menuEditPending = null; menuEditControl = null;
   for (const [name, phase] of [["pointerdown", 0], ["pointermove", 1], ["pointerup", 2], ["pointercancel", 3]]) {
     fresh.addEventListener(name, event => touch(event, phase, fresh), { passive: false });
   }
   fresh.addEventListener("lostpointercapture", event => touch(event, 3, fresh, true), { passive: false });
+  fresh.addEventListener("click", event => menuClick(event, fresh));
+  fresh.addEventListener("pointerdown", event => {
+    const token = menuToken(), geometry = menuGeometry;
+    menuPress = null;
+    if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+    if (!token || !geometry || token.screen !== geometry.screen || token.revision !== geometry.revision
+      || token.menuGeneration !== geometry.menuGeneration) return;
+    const box = fresh.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) return;
+    menuPress = { ...token, owner, worker, geometryVersion: geometry.geometryVersion,
+      x: (event.clientX - box.left) * geometry.width / box.width, y: (event.clientY - box.top) * geometry.height / box.height };
+  });
+  fresh.addEventListener("pointercancel", () => { menuPress = { cancelled: true }; });
   fresh.addEventListener("contextmenu", event => {
     const session = activePlay;
     const current = () => session && activePlay === session && session.owner === owner
@@ -1143,6 +1321,33 @@ window.addEventListener("resize", resize);
 ui.play.addEventListener("click", () => { void play("live"); });
 ui["replay-play"].addEventListener("click", () => { void play("replay"); });
 ui["settings-save"].addEventListener("click", () => requestSettings("settings-profile-save"));
+byId("menu-open").addEventListener("click", () => {
+  if (!initialized || activePlay || shuttingDown || importing || preparing || !worker) return;
+  worker.postMessage({ kind: "menu-open", fields: menuFieldsFor(1), roster: localRoster.exportState(), opponents: opponents.snapshot() });
+});
+byId("menu-back").addEventListener("click", () => {
+  const token = menuToken();
+  const control = { 2: 11n, 3: 72n, 4: 55n, 5: 31n, 6: 21n, 7: 41n, 9: 21n }[menuState?.route];
+  if (!token || !control || menuActionId === 18446744073709551615n) return;
+  worker.postMessage({ kind: "menu-action", ...token, actionId: ++menuActionId, control });
+});
+byId("menu-editor").addEventListener("input", event => {
+  const token = menuToken();
+  if (!token || event.isComposing || ![2, 3, 7].includes(menuState.route)) return;
+  if (typeof event.target.value !== "string" || event.target.value.length > 4096) { status("Menu field exceeds its input limit.", true); return; }
+  if (menuEditPending) { menuEditPending.latest = event.target.value; return; }
+  sendMenuEdit(token, menuState.selected, event.target.value);
+});
+byId("menu-editor").addEventListener("keydown", event => {
+  const token = menuToken();
+  if (!token || event.isComposing || menuActionId === 18446744073709551615n) return;
+  const control = event.code === "Enter" ? ({ 2: 10n, 3: 71n, 7: 40n }[menuState.route])
+    : event.code === "Escape" ? ({ 2: 11n, 3: 72n, 7: 41n }[menuState.route]) : null;
+  if (!control) return;
+  event.preventDefault();
+  if (menuEditPending) { menuEditControl = control; return; }
+  worker.postMessage({ kind: "menu-action", ...token, actionId: ++menuActionId, control });
+});
 ui["settings-load"].addEventListener("change", event => {
   if (settingsOperation || !settingsIdle()) return;
   try {
@@ -1157,6 +1362,8 @@ ui["local-count"].addEventListener("change", () => {
   if (settingsOperation || activePlay) return;
   try {
     if (!/^[0-9]{1,2}$/.test(ui["local-count"].value)) throw new Error("Choose one to 64 local players.");
+    const token = menuToken();
+    if (token) { worker.postMessage({ kind: "menu-roster-count", ...token, count: Number(ui["local-count"].value) }); return; }
     localRoster.setCount(Number(ui["local-count"].value));
     localRoster.clearSources();
     void releaseLocalSources(localRoster.players.length === 1 ? "One player uses inputs automatically. No source selection is needed." : "Discover sources before assigning local players.");
@@ -1277,6 +1484,8 @@ ui["opponents-add"].addEventListener("click", () => {
 });
 ui["opponents-clear"].addEventListener("click", () => {
   if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  const token = menuToken();
+  if (token) { worker.postMessage({ kind: "menu-opponent-clear", ...token }); return; }
   opponents.clear();
   showOpponentSelection();
   clearOpponentResults("No saved opponents selected.");
@@ -2896,6 +3105,9 @@ function opponentChoice() {
   return { own: kind === "own", label: ui["opponents-label"].value };
 }
 function addOpponent(file, sourceKey, choice) {
+  const token = menuToken();
+  if (token) { worker.postMessage({ kind: "menu-opponent-add", ...token,
+    entry: { file, sourceKey, own: choice.own, label: choice.label || opponentLabel(file.name) } }); return; }
   opponents.add({ file, sourceKey, own: choice.own, label: choice.label || opponentLabel(file.name) });
   showOpponentSelection();
   opponentStatus(`${opponents.size} saved opponent(s) selected · ${opponents.byteLength} bytes. Compatibility is checked on Live Play.`);
@@ -2913,6 +3125,8 @@ function showOpponentSelection() {
     button.textContent = "Remove";
     button.addEventListener("click", () => {
       if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+      const token = menuToken();
+      if (token) { worker.postMessage({ kind: "menu-opponent-remove", ...token, sourceKey: entry.sourceKey }); return; }
       opponents.remove(entry.sourceKey);
       showOpponentSelection();
       clearOpponentResults(opponents.size ? `${opponents.size} saved opponent(s) selected.` : "No saved opponents selected.");
@@ -2931,6 +3145,8 @@ function showOpponentSelection() {
       try {
         const player = target.value === "" ? null : Number(target.value);
         if (player !== null && (localRoster.players.length === 1 || !localRoster.players.includes(player))) throw new Error("Choose a current local player.");
+        const token = menuToken();
+        if (token) { worker.postMessage({ kind: "menu-opponent-target", ...token, sourceKey: entry.sourceKey, player }); return; }
         opponents.setPlayer(entry.sourceKey, player);
         showOpponentSelection();
         controls();
@@ -3145,7 +3361,10 @@ function closeRecords() {
   previous?.close();
 }
 function recordCurrent(operation) {
-  return recordsOperation === operation && operation.owner === owner && !operation.controller.signal.aborted;
+  const token = operation.menuTicket ? menuToken() : null;
+  return recordsOperation === operation && operation.owner === owner && !operation.controller.signal.aborted
+    && (!operation.menuTicket || token && token.menuGeneration === operation.menuTicket.menuGeneration
+      && token.screen === operation.menuTicket.screen && token.revision === operation.menuTicket.revision);
 }
 async function openRecords(operation) {
   if (recordsStore && !recordsStore.closed) return recordsStore;
@@ -3167,13 +3386,13 @@ function showRecords(entries) {
   if (!entries.length) ui.records.append(new Option("No saved records", ""));
   else if (entries.some(record => String(record.id) === previous)) ui.records.value = previous;
 }
-async function recordAction(action) {
+async function recordAction(action, menuTicket = null) {
   if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   const captured = lastReplay;
   if (action === "save" && captured === null) return;
   const id = Number(ui.records.value);
   if ((action === "use" || action === "delete" || action === "opponent") && (!Number.isSafeInteger(id) || id < 1)) return;
-  const operation = { owner, controller: new AbortController() };
+  const operation = { owner, controller: new AbortController(), menuTicket };
   recordsOperation = operation;
   if (action === "use") clearHistoricalRecord();
   controls();
@@ -3195,6 +3414,16 @@ async function recordAction(action) {
         selectedReplayKey = `record:${id}`;
         ui["replay-file"].value = "";
         ui["replay-name"].textContent = `${file.name} · ${file.size} bytes · matching chart: ${loaded.metadata.chartPath}`;
+        if (menuTicket) {
+          const replay = loaded.bytes;
+          const archive = loaded.completedArchive ?? null;
+          const transfers = [replay.buffer];
+          if (archive && archive.buffer !== replay.buffer) transfers.push(archive.buffer);
+          worker.postMessage({ kind: "menu-record-preview", ...menuTicket, key: String(id), chartPath: loaded.metadata.chartPath,
+            replay, archive, player: loaded.archivePlayer ?? undefined }, transfers);
+          status("Inspecting the actual recorded prefix on the gameplay owner…");
+          return;
+        }
         const historical = await requestHistoricalRecord(operation, file, loaded.completedArchive, loaded.archivePlayer);
         if (!recordCurrent(operation)) return;
         status("Saved replay selected. Prepare its matching chart, then choose Play replay."

@@ -437,6 +437,7 @@ impl NativeSettings {
         let allowed: &[&str] = match host {
             SettingsHost::Linux => &[
                 "--alsa",
+                "--rate",
                 "--period-frames",
                 "--buffer-frames",
                 "--output-matrix",
@@ -495,6 +496,10 @@ impl NativeSettings {
                 "--period-frames" | "--period" => {
                     field.label = "PROCESSING PERIOD (FRAMES)";
                     field.hint = "Empty keeps the current period. It must be smaller than the hardware buffer.";
+                }
+                "--rate" => {
+                    field.label = "TARGET SAMPLE RATE (HZ)";
+                    field.hint = "Empty keeps the current native target rate. Source PCM rate and command timing stay fixed.";
                 }
                 _ => {}
             }

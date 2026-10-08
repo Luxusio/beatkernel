@@ -426,10 +426,9 @@ pub(crate) fn validate_args(args: &[String]) -> Result<()> {
 
 fn validate_finite_modes(
     options: &Options,
-    competition: &beatkernel_bms_runtime::competition_live::CompetitionOptions,
+    _competition: &beatkernel_bms_runtime::competition_live::CompetitionOptions,
 ) -> Result<()> {
     options.playback_end()?;
-    beatkernel_bms_runtime::native_judge::validate_policy_competition(options.gauge, competition)?;
     Ok(())
 }
 
@@ -456,7 +455,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
         println!(
-            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nGauge timing: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Saved ghosts must match the chosen policy. Nondefault multiplayer remains unavailable.\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and supports solo or local-cohort network peers with the same section endpoint; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; local groups use one shared QUIC/WebTransport connection and committed native start. Native float32 ALSA, no fallback. Physical timing Unknown."
+            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nGauge timing: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Saved ghosts must match the chosen policy. Multiplayer peers must match the chosen gauge and judgment policy.\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and supports solo or local-cohort network peers with the same section endpoint; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; local groups use one shared QUIC/WebTransport connection and committed native start. Native float32 ALSA, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
@@ -478,11 +477,11 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-#[path = "linux_bms/local.rs"]
-mod local_native;
-#[cfg(target_os = "linux")]
 #[path = "linux_bms/input.rs"]
 mod collected_input;
+#[cfg(target_os = "linux")]
+#[path = "linux_bms/local.rs"]
+mod local_native;
 
 #[cfg(target_os = "linux")]
 mod native {
@@ -498,24 +497,23 @@ mod native {
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
     use beatkernel_bms_runtime::native_audio::{
-        NativeAudioConfig, PreparedNativeAudio, prepare_audio, prepare_input_sounds,
-        prepare_mine_sounds,
+        prepare_audio, prepare_input_sounds, prepare_mine_sounds, NativeAudioConfig,
+        PreparedNativeAudio,
     };
     use beatkernel_bms_runtime::{
-        ChannelPolicy,
-        native_chart::{NativeChartConfig, prepare_chart},
-        native_judge::{NativeJudgeConfig, capture_limits, prepare_section_capture_for_policy},
+        native_chart::{prepare_chart, NativeChartConfig},
+        native_judge::{capture_limits, prepare_section_capture_for_policy, NativeJudgeConfig},
         playback_pause::NativePause,
         player::{self},
+        ChannelPolicy,
     };
     use beatkernel_platform::{
         audio::{
-            DeviceFormat, SampleEncoding,
             presentation::discipline::{DisciplineConfig, PresentationDiscipline},
+            DeviceFormat, SampleEncoding,
         },
         linux::{
-            AlsaRequest, AlsaStatus, AlsaStream, MonotonicClock,
-            alsa_presentation_pair_with_basis,
+            alsa_presentation_pair_with_basis, AlsaRequest, AlsaStatus, AlsaStream, MonotonicClock,
         },
     };
     use std::{collections::VecDeque, time::Duration as WallDuration};
@@ -545,8 +543,8 @@ mod native {
         )?)
     }
     use beatkernel_bms_runtime::native_start::{
-        MAX_START_INPUT_EVENTS, NativeStartConfig, NativeStartDevice, NativeStartObservation,
-        NativeStartResult, start_committed,
+        start_target_committed, NativeStartConfig, NativeStartDevice,
+        NativeStartObservation, NativeStartResult, NativeTargetStartDevice, MAX_START_INPUT_EVENTS,
     };
     struct StartupDevice<'a> {
         stream: &'a mut AlsaStream,
@@ -562,12 +560,7 @@ mod native {
             Ok(self.stream.start()?)
         }
         fn service_input(&mut self, retain: bool) -> NativeStartResult<bool> {
-            startup_input(
-                self.input,
-                self.before_origin,
-                self.retained,
-                retain,
-            )
+            startup_input(self.input, self.before_origin, self.retained, retain)
         }
         fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<()>>> {
             let pair = observe(self.stream, !self.observed)?;
@@ -588,13 +581,13 @@ mod native {
         }
     }
     use beatkernel_bms_runtime::native_gameplay::{
-        InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
-        NativeAudioGameplaySession, AudioGameplayConfig, GameplaySession, NativeCollectedInput,
-        run_gameplay_audio_with_policy_and_result_and_score,
+        run_gameplay_audio_with_policy_and_result_and_score, AudioGameplayConfig, GameplaySession,
+        InputBatch, NativeAudioGameplaySession, NativeCollectedInput, NativeGameplayConfig,
+        NativeGameplayDevice, NativeGameplayResult,
     };
     use beatkernel_bms_runtime::{
         gameplay_output_owner::GameplayOutputOwner,
-        native_alsa_replacement::{AlsaReplacementBackend, AlsaReplacementOutput},
+        native_alsa_replacement::AlsaReplacementBackend,
     };
     type OwnedOutput = GameplayOutputOwner<
         beatkernel_bms_runtime::gameplay::output::adapters::remix::RemixedOutputBackend<
@@ -602,9 +595,287 @@ mod native {
         >,
         beatkernel_platform::audio::NativeOutputState,
     >;
+    use beatkernel_bms_runtime::native_alsa_output_ui::{
+        ConvertedAlsaOutputOwner, ConvertedAlsaOutputUi,
+    };
+    use beatkernel_platform::linux::ConvertedAlsaStream;
+
+    pub(super) struct TargetStartupDevice<'a> {
+        pub stream: &'a mut ConvertedAlsaStream,
+        pub epoch: u64,
+        pub input: &'a mut beatkernel_bms_runtime::native_input::NativeInputCollector,
+        pub clock: &'a MonotonicClock,
+        pub before_origin: &'a mut u64,
+        pub retained: &'a mut NativeCollectedInput,
+    }
+    impl NativeStartDevice for TargetStartupDevice<'_> {
+        type Evidence = ();
+        fn start(&mut self) -> NativeStartResult<()> {
+            Ok(self.stream.start()?)
+        }
+        fn service_input(&mut self, retain: bool) -> NativeStartResult<bool> {
+            startup_input(self.input, self.before_origin, self.retained, retain)
+        }
+        fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<()>>> {
+            match self.stream.snapshot().status {
+                AlsaStatus::Ready => return Ok(None),
+                AlsaStatus::Running => {}
+                state => {
+                    return Err(format!("target ALSA terminal/unexpected state: {state:?}").into())
+                }
+            }
+            let Some(timing) = self.stream.timing_snapshot() else {
+                return Ok(None);
+            };
+            Ok(
+                beatkernel_platform::linux::alsa_presentation_pair_with_target_basis(
+                    timing,
+                    self.stream.frame_basis(),
+                )?
+                .map(|pair| NativeStartObservation {
+                    timing: pair.into(),
+                    evidence: (),
+                }),
+            )
+        }
+        fn render_report(&mut self) -> NativeStartResult<Option<beatkernel::audio::RenderReport>> {
+            Ok(self.stream.last_real_source_report())
+        }
+        fn buffer_frames(&self) -> NativeStartResult<u32> {
+            Ok(self.stream.configuration().buffer_frames)
+        }
+        fn host_now(&self) -> NativeStartResult<ClockPoint> {
+            Ok(self.clock.now()?)
+        }
+    }
+    impl NativeTargetStartDevice for TargetStartupDevice<'_> {
+        fn target_identity(&self) -> NativeStartResult<(u64, beatkernel::audio::TargetFrameBasis)> {
+            Ok((self.epoch, self.stream.frame_basis()))
+        }
+        fn target_output_telemetry(
+            &mut self,
+        ) -> NativeStartResult<
+            Option<beatkernel_bms_runtime::gameplay::output::ports::TargetOutputTelemetry>,
+        > {
+            Ok(self
+                .stream
+                .output_telemetry()
+                .map(|(source, converted, facts)| {
+                    beatkernel_bms_runtime::gameplay::output::ports::TargetOutputTelemetry {
+                        source,
+                        converted,
+                        facts,
+                    }
+                }))
+        }
+    }
+
+    /// Cold target preparation preserves the immutable source Mixer and command clock.
+    pub(super) fn open_target_output(
+        request: AlsaRequest,
+        mixer: beatkernel::audio::Mixer,
+    ) -> Result<ConvertedAlsaOutputOwner> {
+        use beatkernel_bms_runtime::gameplay::output::ports::OutputReplacementBackend;
+        use beatkernel_bms_runtime::native_alsa_replacement::{
+            ConvertedAlsaReplacementBackend, ConvertedAlsaReplacementRequest,
+        };
+        let matrix = beatkernel::audio::ChannelMatrix::default_mix(
+            mixer.config().format().channels(),
+            request.format.channels(),
+        )?;
+        let state = beatkernel_platform::audio::ConvertedNativeOutputState::new(
+            mixer,
+            request.format,
+            matrix,
+            beatkernel::audio::ResampleQuality::Linear,
+            request.period_frames as usize,
+        )
+        .map_err(|failure| failure.into_parts().0)?;
+        let mut backend = ConvertedAlsaReplacementBackend;
+        let output = backend
+            .open(
+                ConvertedAlsaReplacementRequest {
+                    native: request,
+                    matrix: None,
+                },
+                state,
+                0,
+            )
+            .map_err(|failure| failure.into_parts().0)?;
+        Ok(ConvertedAlsaOutputOwner::new(backend, output))
+    }
+    pub(super) fn observe_target_output(
+        output: &mut ConvertedAlsaOutputOwner,
+        presentation: &mut beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
+        end: Option<&mut beatkernel_bms_runtime::native_end::NativeEnd>,
+    ) -> Result<bool> {
+        output.observe_target_native(presentation)?;
+        if let (Some(end), Some(record)) = (end, presentation.latest_record()) {
+            let initial = output
+                .current()
+                .ok_or("startup target ALSA output missing")?;
+            let mut next = end.clone();
+            next.prime_target_clock(
+                initial.epoch(),
+                initial.stream().frame_basis(),
+                record.pair(),
+            )?;
+            if let Some(facts) = output.target_boundary_facts() {
+                next.prime_target(
+                    initial.epoch(),
+                    initial.stream().frame_basis(),
+                    facts,
+                    output.render_report(),
+                    record.pair(),
+                )?;
+                *end = next;
+                return Ok(true);
+            }
+            *end = next;
+            return Ok(false);
+        }
+        Ok(presentation.latest_record().is_some())
+    }
+    enum SoloOutput {
+        Legacy(
+            OwnedOutput,
+            beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi,
+        ),
+        Target(ConvertedAlsaOutputOwner, ConvertedAlsaOutputUi),
+    }
+    impl SoloOutput {
+        fn legacy_mut(&mut self) -> Result<&mut OwnedOutput> {
+            match self {
+                Self::Legacy(owner, _) => Ok(owner),
+                Self::Target(..) => {
+                    Err("committed startup requires the legacy source stream".into())
+                }
+            }
+        }
+        fn target(&self) -> bool {
+            matches!(self, Self::Target(..))
+        }
+        fn configuration(&self) -> Result<&beatkernel_platform::linux::AlsaAppliedConfig> {
+            match self {
+                Self::Legacy(owner, _) => Ok(owner
+                    .current()
+                    .ok_or("ALSA output missing")?
+                    .stream()
+                    .configuration()),
+                Self::Target(owner, _) => Ok(owner
+                    .current()
+                    .ok_or("target ALSA output missing")?
+                    .stream()
+                    .configuration()),
+            }
+        }
+        fn start(&mut self) -> Result<()> {
+            match self {
+                Self::Legacy(owner, _) => owner
+                    .current_mut()
+                    .ok_or("ALSA output missing")?
+                    .stream_mut()
+                    .start()?,
+                Self::Target(owner, _) => owner
+                    .current_mut()
+                    .ok_or("target ALSA output missing")?
+                    .stream_mut()
+                    .start()?,
+            };
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<()> {
+            match self {
+                Self::Legacy(owner, _) => owner.stop()?,
+                Self::Target(owner, _) => owner.stop()?,
+            };
+            Ok(())
+        }
+        fn render_report(&self) -> Option<beatkernel::audio::RenderReport> {
+            match self {
+                Self::Legacy(owner, _) => owner
+                    .current()
+                    .and_then(|o| o.stream().last_render_report())
+                    .or(owner.render_report()),
+                Self::Target(owner, _) => owner
+                    .current()
+                    .and_then(|o| o.stream().last_real_source_report())
+                    .or(owner.render_report()),
+            }
+        }
+        fn timing_snapshot(&self) -> Option<beatkernel_platform::linux::AlsaTimingSnapshot> {
+            match self {
+                Self::Legacy(owner, _) => {
+                    owner.current().and_then(|o| o.stream().timing_snapshot())
+                }
+                Self::Target(owner, _) => {
+                    owner.current().and_then(|o| o.stream().timing_snapshot())
+                }
+            }
+        }
+        fn snapshot(&self) -> Option<beatkernel_platform::linux::AlsaSnapshot> {
+            match self {
+                Self::Legacy(owner, _) => owner.current().map(|o| o.stream().snapshot()),
+                Self::Target(owner, _) => owner.current().map(|o| o.stream().snapshot()),
+            }
+        }
+        fn pending(&self) -> bool {
+            match self {
+                Self::Legacy(owner, ui) => owner.replacement_pending() || ui.pending(),
+                Self::Target(owner, ui) => owner.replacement_pending() || ui.pending(),
+            }
+        }
+        fn suspended(&self) -> bool {
+            match self {
+                Self::Legacy(owner, _) => owner.output_clock_suspended(),
+                Self::Target(owner, _) => owner.output_clock_suspended(),
+            }
+        }
+        fn observe_audio(
+            &mut self,
+            presentation: &mut beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
+        ) -> Result<()> {
+            match self {
+                Self::Legacy(owner, _) => owner.observe_native(presentation)?,
+                Self::Target(owner, _) => owner.observe_target_native(presentation)?,
+            };
+            Ok(())
+        }
+        fn audio_pause(
+            &mut self,
+            presentation: &beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
+            now: ClockPoint,
+        ) -> Result<beatkernel_bms_runtime::live_pause::LivePauseObservation> {
+            Ok(match self {
+                Self::Legacy(owner, _) => owner.audio_pause_observation(presentation, now)?,
+                Self::Target(owner, _) => {
+                    owner.audio_pause_observation_target(presentation, now)?
+                }
+            })
+        }
+        fn audio_end(
+            &mut self,
+            end: &mut beatkernel_bms_runtime::native_end::NativeEnd,
+            presentation: &beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
+        ) -> Result<Option<beatkernel_bms_runtime::native_end::EndBoundary>> {
+            match self {
+                Self::Legacy(owner, _) => owner.observe_audio_end(end, presentation),
+                Self::Target(owner, _) => owner.observe_target_audio_end(end, presentation),
+            }
+        }
+        fn service_audio(
+            &mut self,
+            context: beatkernel_bms_runtime::gameplay_presentation::GameplayAudioOutputContext<'_>,
+            now: ClockPoint,
+        ) -> Result<bool> {
+            match self {
+                Self::Legacy(owner, ui) => ui.service_audio(owner, context, now),
+                Self::Target(owner, ui) => ui.service_audio(owner, context, now),
+            }
+        }
+    }
     struct GameplayDevice<'a> {
-        output: &'a mut OwnedOutput,
-        output_ui: &'a mut beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi,
+        output: &'a mut SoloOutput,
         input: &'a mut beatkernel_bms_runtime::native_input::NativeInputCollector,
         clock: &'a MonotonicClock,
         retained: &'a mut NativeCollectedInput,
@@ -616,7 +887,7 @@ mod native {
             &mut self,
             presentation: &mut beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
         ) -> NativeGameplayResult<()> {
-            Ok(self.output.observe_native(presentation)?)
+            self.output.observe_audio(presentation)
         }
         fn audio_pause_observation(
             &mut self,
@@ -624,7 +895,7 @@ mod native {
             now: ClockPoint,
         ) -> NativeGameplayResult<beatkernel_bms_runtime::live_pause::LivePauseObservation>
         {
-            Ok(self.output.audio_pause_observation(presentation, now)?)
+            Ok(self.output.audio_pause(presentation, now)?)
         }
         fn observe_audio_end(
             &mut self,
@@ -632,27 +903,24 @@ mod native {
             presentation: &beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
             _: Option<beatkernel::audio::RenderReport>,
         ) -> NativeGameplayResult<Option<beatkernel_bms_runtime::native_end::EndBoundary>> {
-            self.output.observe_audio_end(end, presentation)
+            self.output.audio_end(end, presentation)
         }
         fn publish_paused_audio_output(
             &mut self,
             context: beatkernel_bms_runtime::gameplay_presentation::GameplayAudioOutputContext<'_>,
             now: ClockPoint,
         ) -> NativeGameplayResult<bool> {
-            if !self.output.has_work() && !self.output_ui.pending() {
-                return Ok(false);
-            }
-            self.output_ui.service_audio(self.output, context, now)
+            self.output.service_audio(context, now)
         }
 
         fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
-            Ok(self.output.observe(discipline)?)
+            Ok(self.output.legacy_mut()?.observe(discipline)?)
         }
         fn output_clock_suspended(&self) -> bool {
-            self.output.output_clock_suspended()
+            self.output.suspended()
         }
         fn output_replacement_pending(&self) -> bool {
-            self.output.replacement_pending() || self.output_ui.pending()
+            self.output.pending()
         }
         fn publish_paused_output(
             &mut self,
@@ -661,18 +929,22 @@ mod native {
                 PresentationDiscipline,
             >,
         ) -> NativeGameplayResult<bool> {
-            if !self.output.has_work() && !self.output_ui.pending() {
-                return Ok(false);
+            match self.output {
+                SoloOutput::Legacy(owner, ui) => ui.service(owner, context, self.clock.now()?),
+                SoloOutput::Target(..) => {
+                    Err("target output requires typed audio publication".into())
+                }
             }
-            self.output_ui
-                .service(self.output, context, self.clock.now()?)
         }
         fn pause_observation(
             &mut self,
             pair: ClockPair,
         ) -> NativeGameplayResult<beatkernel_bms_runtime::live_pause::LivePauseObservation>
         {
-            Ok(self.output.pause_observation(pair, pair.target)?)
+            Ok(self
+                .output
+                .legacy_mut()?
+                .pause_observation(pair, pair.target)?)
         }
         fn render_report(
             &mut self,
@@ -695,7 +967,7 @@ mod native {
             report: Option<beatkernel::audio::RenderReport>,
         ) -> NativeGameplayResult<Option<beatkernel_bms_runtime::native_end::EndBoundary>> {
             let _ = report;
-            self.output.observe_end(end, discipline)
+            self.output.legacy_mut()?.observe_end(end, discipline)
         }
         fn seed_resume(
             &mut self,
@@ -703,7 +975,13 @@ mod native {
             reference: ClockPair,
         ) -> NativeGameplayResult<()> {
             let _ = reference;
-            Ok(self.output.seed_resume(discipline)?)
+            Ok(self.output.legacy_mut()?.seed_resume(discipline)?)
+        }
+        fn set_audio_held(&mut self, held: bool) -> NativeGameplayResult<()> {
+            if let SoloOutput::Target(owner, _) = self.output {
+                owner.set_target_held(held)?;
+            }
+            Ok(())
         }
         fn fallback_schedule(&mut self, _: u32) -> NativeGameplayResult<ClockPoint> {
             Err("ALSA uses logical mixer scheduling".into())
@@ -715,7 +993,9 @@ mod native {
         retained: &mut NativeCollectedInput,
         retain: bool,
     ) -> Result<bool> {
-        if player::cancelled() { return Ok(false); }
+        if player::cancelled() {
+            return Ok(false);
+        }
         retained.service_start(input, retain, before_origin, 256)
     }
     /// Declared finite association permission and availability for the negotiated grid.
@@ -725,7 +1005,22 @@ mod native {
         beatkernel_bms_runtime::audio_authority::AudioAuthorityConfig,
         Duration,
     )> {
-        let applied = stream.configuration();
+        timing_config_for_applied(stream.configuration())
+    }
+    pub(super) fn target_audio_timing_config(
+        stream: &ConvertedAlsaStream,
+    ) -> Result<(
+        beatkernel_bms_runtime::audio_authority::AudioAuthorityConfig,
+        Duration,
+    )> {
+        timing_config_for_applied(stream.configuration())
+    }
+    fn timing_config_for_applied(
+        applied: &beatkernel_platform::linux::AlsaAppliedConfig,
+    ) -> Result<(
+        beatkernel_bms_runtime::audio_authority::AudioAuthorityConfig,
+        Duration,
+    )> {
         let rate = i128::from(applied.format.sample_rate());
         let buffer_ns = (i128::from(applied.buffer_frames) * 1_000_000_000 + rate - 1) / rate;
         let timeout = Duration::from_nanos(i64::try_from(buffer_ns * 4 + 2_000_000_000)?);
@@ -758,21 +1053,37 @@ mod native {
             &mut self,
             presentation: &mut beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
         ) -> NativeGameplayResult<()> {
-            self.output.observe_native(presentation)?;
-            if !self.startup_primed {
-                if let Some(record) = presentation.latest_record() {
-                    if let Some(end) = self.startup_end.as_deref_mut() {
-                        end.prime(
-                            startup_render(
-                                self.output
-                                    .current()
-                                    .ok_or("startup ALSA output missing")?
-                                    .stream(),
-                            )?,
-                            record.pair(),
-                        )?;
+            match self.output {
+                SoloOutput::Legacy(owner, _) => {
+                    owner.observe_native(presentation)?;
+                    if !self.startup_primed {
+                        if let Some(record) = presentation.latest_record() {
+                            if let Some(end) = self.startup_end.as_deref_mut() {
+                                end.prime(
+                                    startup_render(
+                                        owner
+                                            .current()
+                                            .ok_or("startup ALSA output missing")?
+                                            .stream(),
+                                    )?,
+                                    record.pair(),
+                                )?;
+                            }
+                            self.startup_primed = true;
+                        }
                     }
-                    self.startup_primed = true;
+                }
+                SoloOutput::Target(owner, _) => {
+                    let primed = observe_target_output(
+                        owner,
+                        presentation,
+                        if self.startup_primed {
+                            None
+                        } else {
+                            self.startup_end.as_deref_mut()
+                        },
+                    )?;
+                    self.startup_primed |= primed;
                 }
             }
             Ok(())
@@ -780,12 +1091,7 @@ mod native {
         fn render_report(
             &mut self,
         ) -> NativeGameplayResult<Option<beatkernel::audio::RenderReport>> {
-            startup_render(
-                self.output
-                    .current()
-                    .ok_or("startup ALSA output missing")?
-                    .stream(),
-            )
+            Ok(self.output.render_report())
         }
         fn host_now(&self) -> NativeGameplayResult<ClockPoint> {
             Ok(self.clock.now()?)
@@ -934,27 +1240,26 @@ mod native {
             allow_size_rounding: false,
             monotonic_domain: HOST,
         };
-        let stream = AlsaStream::open(request, mixer)?;
-        let mut output = OwnedOutput::new(
-            beatkernel_bms_runtime::gameplay::output::adapters::remix::RemixedOutputBackend::new(
-                AlsaReplacementBackend,
-            ),
-            AlsaReplacementOutput::from_stream(stream),
-        );
-        let mut output_ui = beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi::new(
-            &output,
-            competition_options.network.is_none(),
-        )?;
+        let owner = open_target_output(request, mixer)?;
+        let initial = owner
+            .current()
+            .ok_or("initial target ALSA output missing")?;
+        let basis = initial.stream().frame_basis();
+        if !network_start {
+            pause = pause.with_target_basis(initial.epoch(), basis)?;
+            native_end = native_end
+                .map(|end| end.with_target_basis(initial.epoch(), basis))
+                .transpose()?;
+        }
+        let ui = ConvertedAlsaOutputUi::new(&owner, !network_start)?;
+        let mut output = SoloOutput::Target(owner, ui);
         // Heavy asset/output preparation precedes acquisition so setup cannot
         // fill the bounded transport with idle completion markers.
-        let (mut input, descriptors, input_counters) = super::collected_input::open(vec![options.evdev.clone()])?;
+        let (mut input, descriptors, input_counters) =
+            super::collected_input::open(vec![options.evdev.clone()])?;
         println!(
             "requested/applied ALSA={:?}; evdev={:?}; exact source={:?}; bindings={:?}; windows={}/{}ns offset={}ns preroll={}ns advance_lag={}ns voices={} channel_policy={} queue/pending={} live_slack={SLACK}",
-            output
-                .current()
-                .ok_or("initial ALSA output missing")?
-                .stream()
-                .configuration(),
+            output.configuration()?,
             descriptors[0],
             DEVICE,
             options.bindings,
@@ -981,18 +1286,22 @@ mod native {
                         .as_mut()
                         .ok_or("network startup owner missing")?;
                     let started = {
-                        let mut device = StartupDevice {
-                            stream: output
-                                .current_mut()
-                                .ok_or("startup ALSA output missing")?
-                                .stream_mut(),
+                        let SoloOutput::Target(owner, _) = &mut output else {
+                            return Err("network startup requires target output".into());
+                        };
+                        let initial = owner
+                            .current_mut()
+                            .ok_or("startup target ALSA output missing")?;
+                        let epoch = initial.epoch();
+                        let mut device = TargetStartupDevice {
+                            stream: initial.stream_mut(),
+                            epoch,
                             input: &mut input,
                             clock: &clock,
                             before_origin: &mut before_origin,
                             retained: &mut startup_inputs,
-                            observed: false,
                         };
-                        start_committed(
+                        start_target_committed(
                             &mut device,
                             competition,
                             &mut producer,
@@ -1020,40 +1329,44 @@ mod native {
                         "native applied start={:?}; host={:?}; physical accuracy unmeasured",
                         started.plan, started.host_origin
                     );
-                    (Some(started.host_origin), started.plan.selected_output())
+                    (Some(started.host_origin), started.plan.selected_output()?)
                 } else {
-                    output
-                        .current_mut()
-                        .ok_or("startup ALSA output missing")?
-                        .stream_mut()
-                        .start()?;
+                    output.start()?;
                     (None, output_origin())
                 };
-                let stream = output
-                    .current()
-                    .ok_or("startup ALSA output missing")?
-                    .stream();
-                let basis = stream.frame_basis();
-                let (audio_config, startup_timeout) = audio_timing_config(stream)?;
-                let epoch = output
-                    .current()
-                    .ok_or("startup ALSA output missing")?
-                    .epoch();
-                let mut presentation =
-                    beatkernel_bms_runtime::native_audio_startup::new_audio_presentation(
-                        epoch,
-                        basis,
-                        HOST,
-                        ClockPoint {
-                            domain: LOGICAL,
-                            timestamp: Timestamp::ZERO,
-                        },
-                        audio_config,
-                    )?;
+                let (mut presentation, startup_timeout) = match &output {
+                    SoloOutput::Legacy(owner, _) => {
+                        let stream = owner
+                            .current()
+                            .ok_or("startup ALSA output missing")?
+                            .stream();
+                        let (config, timeout) = audio_timing_config(stream)?;
+                        (
+                            beatkernel_bms_runtime::native_audio_startup::new_audio_presentation(
+                                owner.current().unwrap().epoch(),
+                                stream.frame_basis(),
+                                HOST,
+                                ClockPoint {
+                                    domain: LOGICAL,
+                                    timestamp: Timestamp::ZERO,
+                                },
+                                config,
+                            )?,
+                            timeout,
+                        )
+                    }
+                    SoloOutput::Target(owner, _) => {
+                        let initial = owner
+                            .current()
+                            .ok_or("startup target ALSA output missing")?;
+                        let (config, timeout) = target_audio_timing_config(initial.stream())?;
+                        (beatkernel_bms_runtime::native_audio_startup::new_target_audio_presentation(initial.epoch(), initial.stream().frame_basis(), HOST, ClockPoint { domain: LOGICAL, timestamp: Timestamp::ZERO }, config)?, timeout)
+                    }
+                };
+                let target = output.target();
                 let seeded = {
                     let mut device = GameplayDevice {
                         output: &mut output,
-                        output_ui: &mut output_ui,
                         input: &mut input,
                         clock: &clock,
                         retained: &mut startup_inputs,
@@ -1064,13 +1377,23 @@ mod native {
                         },
                         startup_primed: false,
                     };
-                    beatkernel_bms_runtime::native_audio_startup::prime_native_audio(
-                        &mut device,
-                        &mut presentation,
-                        &mut bgm,
-                        &mut producer,
-                        startup_timeout,
-                    )?
+                    if target {
+                        beatkernel_bms_runtime::native_audio_startup::prime_target_native_audio(
+                            &mut device,
+                            &mut presentation,
+                            &mut bgm,
+                            &mut producer,
+                            startup_timeout,
+                        )?
+                    } else {
+                        beatkernel_bms_runtime::native_audio_startup::prime_native_audio(
+                            &mut device,
+                            &mut presentation,
+                            &mut bgm,
+                            &mut producer,
+                            startup_timeout,
+                        )?
+                    }
                 };
                 let Some(seeded) = seeded else {
                     return Ok(None);
@@ -1116,7 +1439,6 @@ mod native {
                 let pump_outcome = {
                     let mut device = GameplayDevice {
                         output: &mut output,
-                        output_ui: &mut output_ui,
                         input: &mut input,
                         clock: &clock,
                         retained: &mut startup_inputs,
@@ -1167,16 +1489,11 @@ mod native {
                 );
                 pump_outcome
             })();
-        let timing = output
-            .current()
-            .and_then(|output| output.stream().timing_snapshot());
+        let timing = output.timing_snapshot();
         input.cancel();
         let stop = output.stop();
         let input_stop = input.stop_and_join();
-        match output
-            .current()
-            .and_then(|output| output.stream().last_render_report())
-            .or(output.render_report())
+        match output.render_report()
         {
             Some(report) => println!(
                 "last observed Mixer render report={report:?}; execution counters distinct from queue admission/native writes; physical delivery unverified"
@@ -1187,7 +1504,7 @@ mod native {
         }
         println!(
             "final independent ALSA counters={:?}; last separately coherent timing={timing:?}; pre-origin ignored={before_origin}; physical latency=unmeasured",
-            output.current().map(|output| output.stream().snapshot()),
+            output.snapshot(),
         );
         if let Err(error) = &stop {
             eprintln!("ALSA stop/join error: {error}");
@@ -1281,8 +1598,8 @@ mod fixtures {
     fn finite_native_pause_resume_judging_capture_and_replay_share_the_retained_prefix() {
         use beatkernel::{
             audio::{
-                Mixer, MixerConfig, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId,
-                command_queue,
+                command_queue, Mixer, MixerConfig, PcmLimits, PcmSample, SampleBank, SampleId,
+                VoiceId,
             },
             chart::{
                 Beat, Bpm, InteractionId, ObjectId, ObjectMetadata, SourceChart, SourceObject,
@@ -1294,7 +1611,7 @@ mod fixtures {
             },
             interaction::InstantEvaluator,
             judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeStage, JudgeWindow, Rule},
-            replay::{ReplaySession, codec::ReplayCodecLimits},
+            replay::{codec::ReplayCodecLimits, ReplaySession},
             runtime::SoundBinding,
             time::{ClockMapper, ClockMappingQuality, Duration},
             transport::{Rate, Transport},
@@ -1433,11 +1750,10 @@ mod fixtures {
             .unwrap()
             .unwrap();
         runtime.transport_mut().pause(at.host.timestamp).unwrap();
-        assert!(
-            end.observe(Some(paused), pair(1_000_000))
-                .unwrap()
-                .is_none()
-        );
+        assert!(end
+            .observe(Some(paused), pair(1_000_000))
+            .unwrap()
+            .is_none());
         assert!(pause.request(false, pair(3_000_000)).unwrap());
         runtime.request_audio_pause(false);
         let mut pcm = [1.0; 4];
@@ -1454,11 +1770,10 @@ mod fixtures {
             .transport_mut()
             .resume(resumed.host.timestamp)
             .unwrap();
-        assert!(
-            end.observe(Some(latest), pair(4_000_000))
-                .unwrap()
-                .is_none()
-        );
+        assert!(end
+            .observe(Some(latest), pair(4_000_000))
+            .unwrap()
+            .is_none());
         let report = runtime
             .advance_to(point(5_000_100), &Identity, output(2_000_000))
             .unwrap();
@@ -1886,18 +2201,16 @@ mod fixtures {
         assert!(
             matches!(shift_bgm(command,3_000_000_000).unwrap(),AudioCommand::Play{at,..} if at.as_nanos()==3_000_000_012)
         );
-        assert!(
-            shift_bgm(
-                AudioCommand::Play {
-                    voice: VoiceId(1),
-                    sample: SampleId(1),
-                    at: Timestamp::from_nanos(i64::MAX),
-                    gain: 1.0
-                },
-                1
-            )
-            .is_err()
-        );
+        assert!(shift_bgm(
+            AudioCommand::Play {
+                voice: VoiceId(1),
+                sample: SampleId(1),
+                at: Timestamp::from_nanos(i64::MAX),
+                gain: 1.0
+            },
+            1
+        )
+        .is_err());
     }
     #[test]
     fn finite_lag_deadline_watermark_and_backlog_keep_original_event_floor() {
@@ -1932,19 +2245,17 @@ mod fixtures {
             watermark(point(0), point(i64::MAX), point(i64::MAX), 0, false).unwrap(),
             Some(point(i64::MAX))
         );
-        assert!(
-            watermark(
-                point(0),
-                point(0),
-                ClockPoint {
-                    domain: ClockDomainId(2),
-                    timestamp: Timestamp::ZERO
-                },
-                0,
-                false
-            )
-            .is_err()
-        );
+        assert!(watermark(
+            point(0),
+            point(0),
+            ClockPoint {
+                domain: ClockDomainId(2),
+                timestamp: Timestamp::ZERO
+            },
+            0,
+            false
+        )
+        .is_err());
     }
     #[test]
     fn estimated_origin_uses_supplied_pair_and_checks_domain_and_range() {
@@ -1959,29 +2270,25 @@ mod fixtures {
             estimated_origin(pair, point(0)).unwrap(),
             Timestamp::from_nanos(900)
         );
-        assert!(
-            estimated_origin(
-                pair,
-                ClockPoint {
-                    domain: ClockDomainId(3),
-                    timestamp: Timestamp::ZERO
+        assert!(estimated_origin(
+            pair,
+            ClockPoint {
+                domain: ClockDomainId(3),
+                timestamp: Timestamp::ZERO
+            }
+        )
+        .is_err());
+        assert!(estimated_origin(
+            ClockPair {
+                source: point(i64::MAX),
+                target: ClockPoint {
+                    domain: ClockDomainId(2),
+                    timestamp: Timestamp::from_nanos(i64::MIN)
                 }
-            )
-            .is_err()
-        );
-        assert!(
-            estimated_origin(
-                ClockPair {
-                    source: point(i64::MAX),
-                    target: ClockPoint {
-                        domain: ClockDomainId(2),
-                        timestamp: Timestamp::from_nanos(i64::MIN)
-                    }
-                },
-                point(0)
-            )
-            .is_err()
-        );
+            },
+            point(0)
+        )
+        .is_err());
     }
     #[test]
     fn gauge_selection_uses_exact_names_and_rejects_invalid_or_duplicate_values() {
@@ -2022,7 +2329,7 @@ mod fixtures {
     }
 
     #[test]
-    fn nondefault_gauge_competition_is_rejected_without_opening_resources() {
+    fn selected_gauge_competition_syntax_is_admitted_before_checked_policy_preparation() {
         for (flag, value) in [
             ("--ghost-self", "unopened.bkr"),
             ("--ghost-other", "unopened.bkr"),
@@ -2032,11 +2339,11 @@ mod fixtures {
             supplied.extend([flag.into(), value.into()]);
             assert!(validate_args(&supplied).is_ok());
             supplied.extend(["--gauge".into(), "hard".into()]);
-            if flag.starts_with("--ghost") {
-                assert!(validate_args(&supplied).is_ok());
-            } else {
-                assert!(validate_args(&supplied).is_err());
-            }
+            assert!(validate_args(&supplied).is_ok());
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "linux_bms/target_solo_fixtures.rs"]
+mod target_solo_fixtures;

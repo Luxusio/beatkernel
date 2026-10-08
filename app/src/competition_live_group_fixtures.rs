@@ -8,7 +8,7 @@ use beatkernel::{
         GameControlId, PhysicalControlId, PhysicalInputEvent,
     },
     judge::{JudgeGrade, JudgeProfile, JudgeWindow},
-    replay::codec::{ReplayFile, encode_replay},
+    replay::codec::{encode_replay, ReplayFile},
     runtime::Runtime,
     time::{ClockMapper, ClockMappingQuality, ClockPoint},
     transport::{Rate, Transport},
@@ -209,6 +209,7 @@ fn offline_terminal_progress_uses_actual_reports_and_remote_selection_cannot_cha
     let mut capture = LiveReplayCapture::new(&judge, domain, limits).unwrap();
     let local_player = PlayerId(u32::MAX - 5);
     let mut owner = LiveCompetition {
+        admitted_policy_header: None,
         player: local_player,
         competition: Competition::new(capture.header().clone(), 0).unwrap(),
         network: None,
@@ -221,16 +222,12 @@ fn offline_terminal_progress_uses_actual_reports_and_remote_selection_cannot_cha
         terminal: TerminalGuard::new(),
     };
     assert_eq!(owner.terminal_prefix(), None);
-    assert!(
-        owner
-            .await_network_ready(|| panic!("offline service must not run"))
-            .unwrap()
-    );
-    assert!(
-        owner
-            .await_network_commit(|| panic!("offline service must not run"))
-            .unwrap()
-    );
+    assert!(owner
+        .await_network_ready(|| panic!("offline service must not run"))
+        .unwrap());
+    assert!(owner
+        .await_network_commit(|| panic!("offline service must not run"))
+        .unwrap());
     assert_eq!(owner.committed_start_schedule(), None);
 
     let (producer, _consumer) = command_queue(1).unwrap();

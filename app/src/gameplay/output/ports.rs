@@ -10,7 +10,9 @@ use beatkernel::{
 };
 use std::io;
 
-pub trait OutputReplacementBackend<O: SoftwareOutputState = Mixer> {
+/// Lifecycle ownership does not imply a fixed source-grid timing capability.
+/// Converted backends use `TargetFrameBasis` and retain their complete owner.
+pub trait OutputReplacementBackend<O = Mixer, Basis = OutputFrameBasis> {
     type Presentation: GameplayPresentationPort;
     type Output: StoppedMixerSource<O, Error = Self::Error>;
     type Request;
@@ -23,8 +25,13 @@ pub trait OutputReplacementBackend<O: SoftwareOutputState = Mixer> {
     ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output, O>>;
     fn retire(&mut self, output: &mut Self::Output) -> Result<(), Self::Error>;
     fn start(&mut self, output: &mut Self::Output) -> Result<(), Self::Error>;
+    /// Cold setup immediately before a paused replacement starts. Initial
+    /// stream startup does not invoke this hook; source-grid backends need no setup.
+    fn prepare_replacement_start(&mut self, _: &mut Self::Output) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn epoch(&self, output: &Self::Output) -> u64;
-    fn basis(&self, output: &Self::Output) -> OutputFrameBasis;
+    fn basis(&self, output: &Self::Output) -> Basis;
     fn observe(
         &mut self,
         output: &mut Self::Output,
@@ -68,6 +75,61 @@ pub trait OriginalNativeOutputBackend<O: SoftwareOutputState = Mixer>:
         &mut self,
         output: &mut Self::Output,
     ) -> Result<Option<crate::native_audio_presentation::NativeAudioSnapshot>, Self::Error>;
+}
+
+/// Original observations for a target-time output, independent of source pull.
+/// Native lifecycle is shared; this port adds no alternative clock discipline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetOutputTelemetry {
+    pub source: Option<RenderReport>,
+    pub converted: Option<beatkernel::audio::ConvertedRenderReport>,
+    pub facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+}
+
+pub trait OriginalTargetNativeOutputBackend<O>:
+    OutputReplacementBackend<O, beatkernel::audio::TargetFrameBasis>
+{
+    /// Validate pending interpretation and plan the new immutable creation basis
+    /// before transferring the recovered owner to the native worker.
+    fn planned_target_basis(
+        &self,
+        request: &Self::Request,
+        owner: &O,
+    ) -> Result<beatkernel::audio::TargetFrameBasis, Self::Error>;
+    fn observe_native_target(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<crate::native_audio_presentation::TargetNativeAudioSnapshot>, Self::Error>;
+    fn converted_report(
+        &self,
+        output: &Self::Output,
+    ) -> Result<Option<beatkernel::audio::ConvertedRenderReport>, Self::Error>;
+    fn boundary_facts(
+        &self,
+        output: &Self::Output,
+    ) -> Result<beatkernel_platform::audio::ConvertedBoundaryFacts, Self::Error>;
+    /// The default is suitable only for serialized same-owner implementations.
+    /// Concurrent worker adapters must override with one coherent bounded read.
+    fn output_telemetry(
+        &self,
+        output: &Self::Output,
+    ) -> Result<Option<TargetOutputTelemetry>, Self::Error> {
+        let source = self.render_report(output)?;
+        let converted = self.converted_report(output)?;
+        let facts = self.boundary_facts(output)?;
+        Ok(
+            (facts != beatkernel_platform::audio::ConvertedBoundaryFacts::default()).then_some(
+                TargetOutputTelemetry {
+                    source,
+                    converted,
+                    facts,
+                },
+            ),
+        )
+    }
+    /// Paused replacements select held output before native `start`; ordinary
+    /// transitions still wait for actual source adoption and native crossing.
+    fn set_held(&mut self, output: &mut Self::Output, held: bool) -> Result<(), Self::Error>;
 }
 
 /// Explicit same-rate channel conversion; no default can silently ignore a matrix.

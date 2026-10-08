@@ -552,3 +552,392 @@ fn immutable_start_end_and_reached_endpoint_refuse_while_compatible_finite_repla
     assert!(initial.clone().with_start_frame(u64::MAX).is_err());
     assert!(initial.with_playback_end_frame(u64::MAX).is_err());
 }
+
+#[test]
+fn converted_pending_held_suffix_rebind_preserves_exact_basis_and_floors_fractional_gap_once_on_real_resume(
+) {
+    use crate::native_converted_gameplay_fixtures::{native, rig as converted_rig};
+    use beatkernel::audio::TargetTime;
+    let (mut producer, mut output) = converted_rig(24_000, 48_000, None, None, 0);
+    let initial = output.target_frame_basis();
+    let relation = |basis: beatkernel::audio::TargetFrameBasis, frame| {
+        native(
+            basis,
+            frame,
+            1_000_000_000
+                + basis
+                    .point_at_stream_frame(frame)
+                    .unwrap()
+                    .timestamp
+                    .as_nanos(),
+        )
+        .1
+    };
+    let mut pause = NativePause::new(point(2, 0), ClockDomainId(1), 24_000)
+        .unwrap()
+        .with_target_basis(7, initial)
+        .unwrap();
+    output.render_pending(1).unwrap();
+    output.admit(1).unwrap();
+    pause
+        .request_in_epoch(7, true, relation(initial, 1))
+        .unwrap();
+    producer.request_pause(true);
+    output.render_pending(8).unwrap();
+    pause
+        .observe_target(
+            7,
+            initial,
+            output.boundaries(),
+            output.last_real_source_report(),
+            relation(initial, 4),
+        )
+        .unwrap()
+        .unwrap();
+    output.admit(8).unwrap();
+    let physical = output.converter_owner().source_position();
+    let counters = output.mixer().counters();
+    output.render_held_pending(3).unwrap();
+    output.admit(1).unwrap();
+    let basis = output.target_frame_basis();
+    assert_eq!(
+        basis.start_time(),
+        TargetTime::from_frames(10, 48_000).unwrap()
+    );
+    assert_eq!(output.pending_samples(), [0.; 2]);
+    pause.rebind_target_output(8, &output).unwrap();
+    assert_eq!(pause.target_basis(), Some(basis));
+    assert_eq!(pause.epoch(), 8);
+    assert_eq!(pause.phase(), PausePhase::Paused);
+    assert_eq!(output.converter_owner().source_position(), physical);
+    assert_eq!(output.mixer().counters(), counters);
+    let before = format!("{pause:?}");
+    assert!(pause
+        .request_in_epoch(7, false, relation(basis, 0))
+        .is_err());
+    assert_eq!(format!("{pause:?}"), before);
+    assert!(pause.rebind_target_output(8, &output).is_err());
+    assert_eq!(format!("{pause:?}"), before);
+    assert!(pause
+        .request_in_epoch(8, false, relation(basis, 0))
+        .unwrap());
+    producer.request_pause(false);
+    output.admit(2).unwrap();
+    let mut mapped = false;
+    for _ in 0..8 {
+        output.render_pending(1).unwrap();
+        output.admit(1).unwrap();
+        if output.boundaries().resume.is_some() {
+            mapped = true;
+            break;
+        }
+    }
+    assert!(mapped);
+    assert_eq!(
+        output.boundaries().resume.unwrap().target_time,
+        TargetTime::from_frames(15, 48_000).unwrap()
+    );
+    assert_eq!(
+        pause
+            .observe_target(
+                8,
+                basis,
+                output.boundaries(),
+                output.last_real_source_report(),
+                relation(basis, 4)
+            )
+            .unwrap(),
+        None
+    );
+    let resumed = pause
+        .observe_target(
+            8,
+            basis,
+            output.boundaries(),
+            output.last_real_source_report(),
+            relation(basis, 5),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(!resumed.paused);
+    assert_eq!(resumed.playback_frame, 2);
+    assert_eq!(
+        pause.song_origin_after_pause(Timestamp::ZERO).unwrap(),
+        Timestamp::from_nanos(-229_166)
+    );
+}
+
+#[test]
+fn converted_audible_pending_tail_refuses_pause_rebind_even_with_paused_source_report() {
+    use crate::native_converted_gameplay_fixtures::{native, rig as converted_rig};
+    let (mut producer, mut output) = converted_rig(24_000, 48_000, None, None, 0);
+    let basis = output.target_frame_basis();
+    let relation = |frame| {
+        native(
+            basis,
+            frame,
+            1_000_000_000
+                + basis
+                    .point_at_stream_frame(frame)
+                    .unwrap()
+                    .timestamp
+                    .as_nanos(),
+        )
+        .1
+    };
+    let mut pause = NativePause::new(point(2, 0), ClockDomainId(1), 24_000)
+        .unwrap()
+        .with_target_basis(7, basis)
+        .unwrap();
+    output.render_pending(1).unwrap();
+    output.admit(1).unwrap();
+    pause.request_in_epoch(7, true, relation(1)).unwrap();
+    producer.request_pause(true);
+    let paused = output.render_pending(8).unwrap();
+    assert!(paused.source.unwrap().paused);
+    pause
+        .observe_target(
+            7,
+            basis,
+            output.boundaries(),
+            output.last_real_source_report(),
+            relation(4),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(output.pending_samples()[0] > 0.0);
+    let before = format!("{pause:?}");
+    let pcm = output.pending_samples().to_vec();
+    assert!(pause.rebind_target_output(8, &output).is_err());
+    assert_eq!(format!("{pause:?}"), before);
+    assert_eq!(output.pending_samples(), pcm);
+    output.admit(3).unwrap();
+    assert!(output.pending_samples().iter().all(|sample| *sample == 0.0));
+    assert!(!output.pending_is_held());
+    assert!(pause.rebind_target_output(8, &output).is_err());
+    assert_eq!(format!("{pause:?}"), before);
+    output.admit(5).unwrap();
+    output.render_held_pending(2).unwrap();
+    assert!(output.pending_is_held());
+    pause.rebind_target_output(8, &output).unwrap();
+    assert_eq!(pause.phase(), PausePhase::Paused);
+}
+
+#[test]
+fn mixed_target_rate_rebind_defers_retained_tail_and_uses_exact_generated_frontier_through_repeated_epochs(
+) {
+    use crate::native_converted_gameplay_fixtures::{native, rig as converted_rig};
+    use beatkernel::audio::{ChannelMatrix, TargetFrameBasis, TargetTime};
+    use beatkernel_platform::audio::{DeviceFormat, SampleEncoding};
+    let (mut producer, mut output) = converted_rig(44_100, 48_000, None, None, 0);
+    let relation = |basis: TargetFrameBasis, frame| {
+        native(
+            basis,
+            frame,
+            1_000_000_000
+                + basis
+                    .point_at_stream_frame(frame)
+                    .unwrap()
+                    .timestamp
+                    .as_nanos(),
+        )
+        .1
+    };
+    let original = output.target_frame_basis();
+    let mut pause = NativePause::new(point(2, 0), ClockDomainId(1), 44_100)
+        .unwrap()
+        .with_target_basis(7, original)
+        .unwrap();
+    let first = output.render_pending(8).unwrap();
+    // Linear output samples target indices 0..7 at i*147/160 source
+    // positions. The last is 6+69/160 and reads source frames 6 and 7:
+    // the pull frontier is 8, although the consumed position is 7+56/160.
+    let frozen_source = (7_u64 * 147 / 160) + 2;
+    assert_eq!(first.pulled_source_frame_cursor, frozen_source);
+    assert_eq!(first.source.unwrap().playback_frames, 8);
+    output.admit(8).unwrap();
+    pause
+        .request_in_epoch(7, true, relation(original, 8))
+        .unwrap();
+    producer.request_pause(true);
+    let source_pause = output.render_pending(8).unwrap();
+    assert_eq!(source_pause.source.unwrap().start_frame, frozen_source);
+    assert_eq!(
+        source_pause.source.unwrap().playback_start_frame,
+        frozen_source
+    );
+    // Actual source adoption at 8 maps to ceil(8*160/147)=9 target frames.
+    assert_eq!(
+        output.boundaries().pause.unwrap().target_time,
+        TargetTime::from_frames((frozen_source * 160).div_ceil(147), 48_000).unwrap()
+    );
+    let ack = pause
+        .observe_target(
+            7,
+            original,
+            output.boundaries(),
+            output.last_real_source_report(),
+            relation(original, 10),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(ack.playback_frame, frozen_source);
+    output.admit(8).unwrap();
+    let position = output.converter_owner().source_position();
+    let source_frontier = output.mixer().frame_cursor();
+    // After target index 15, the last linear taps are source 13 and 14.
+    assert_eq!(source_frontier, (15_u64 * 147 / 160) + 2);
+    output
+        .reconfigure(
+            DeviceFormat::new(32_000, 1, SampleEncoding::Float32, None).unwrap(),
+            ChannelMatrix::default_mix(1, 1).unwrap(),
+            128,
+        )
+        .unwrap();
+    let retained = output.render_held_pending(3).unwrap();
+    output.admit(1).unwrap();
+    let planned = output.target_frame_basis();
+    const DEN: u128 = 14_112_000;
+    let first_unsent = 16 * (DEN / 48_000) + DEN / 32_000;
+    let generated = 16 * (DEN / 48_000) + 3 * (DEN / 32_000);
+    assert_eq!(
+        planned
+            .point_at_stream_frame(0)
+            .unwrap()
+            .timestamp
+            .as_nanos(),
+        (first_unsent * 1_000_000_000 / DEN) as i64
+    );
+    assert_eq!(
+        output
+            .converter_owner()
+            .target_time()
+            .point(planned.origin())
+            .unwrap()
+            .timestamp
+            .as_nanos(),
+        (generated * 1_000_000_000 / DEN) as i64
+    );
+    assert_ne!(
+        planned
+            .point_at_stream_frame(0)
+            .unwrap()
+            .timestamp
+            .as_nanos(),
+        ns(source_frontier, 44_100)
+    );
+    pause
+        .rebind_target_output_with_basis(8, &output, planned)
+        .unwrap();
+    let frozen = format!("{pause:?}");
+    assert!(!pause
+        .target_replacement_observation_ready(Some(retained), relation(planned, 0))
+        .unwrap());
+    assert_eq!(format!("{pause:?}"), frozen);
+    assert!(!pause
+        .target_replacement_observation_ready(Some(retained), relation(planned, 2))
+        .unwrap());
+    assert_eq!(format!("{pause:?}"), frozen);
+    assert_eq!(output.converter_owner().source_position(), position);
+    assert_eq!(output.pending_samples(), [0.; 2]);
+    output.admit(2).unwrap();
+    let fresh = output.render_held_pending(2).unwrap();
+    assert!(pause
+        .target_replacement_observation_ready(Some(fresh), relation(planned, 2))
+        .unwrap());
+    let mut wrong = relation(planned, 2);
+    wrong.target.domain = ClockDomainId(99);
+    assert!(pause
+        .target_replacement_observation_ready(Some(fresh), wrong)
+        .is_err());
+    assert_eq!(format!("{pause:?}"), frozen);
+    assert_eq!(
+        pause
+            .observe_target(
+                8,
+                planned,
+                output.boundaries(),
+                output.last_real_source_report(),
+                relation(planned, 2)
+            )
+            .unwrap(),
+        None
+    );
+    // Validate the actual staged owner against the old acknowledged pause.
+    let mut old = NativePause::new(point(2, 0), ClockDomainId(1), 44_100)
+        .unwrap()
+        .with_target_basis(7, original)
+        .unwrap();
+    old.request_in_epoch(7, true, relation(original, 8))
+        .unwrap();
+    old.observe_target(
+        7,
+        original,
+        output.boundaries(),
+        output.last_real_source_report(),
+        relation(original, 10),
+    )
+    .unwrap()
+    .unwrap();
+    old.validate_target_replacement(&pause, planned, fresh, relation(planned, 2))
+        .unwrap();
+    output.admit(2).unwrap();
+    let next = TargetFrameBasis::new(
+        planned.origin(),
+        output.target_frame_basis().start_time(),
+        44_100,
+    )
+    .unwrap();
+    pause
+        .rebind_target_output_with_basis(9, &output, next)
+        .unwrap();
+    output
+        .reconfigure(
+            DeviceFormat::new(44_100, 1, SampleEncoding::Float32, None).unwrap(),
+            ChannelMatrix::default_mix(1, 1).unwrap(),
+            128,
+        )
+        .unwrap();
+    assert_eq!(output.target_frame_basis(), next);
+    let third = output.render_held_pending(1).unwrap();
+    assert!(pause
+        .target_replacement_observation_ready(Some(third), relation(next, 0))
+        .unwrap());
+    output.admit(1).unwrap();
+    let last = TargetFrameBasis::new(
+        next.origin(),
+        output.target_frame_basis().start_time(),
+        48_000,
+    )
+    .unwrap();
+    pause
+        .rebind_target_output_with_basis(10, &output, last)
+        .unwrap();
+    let before = format!("{pause:?}");
+    assert!(pause
+        .rebind_target_output_with_basis(9, &output, last)
+        .is_err());
+    assert_eq!(format!("{pause:?}"), before);
+    assert_eq!(pause.target_basis(), Some(last));
+    assert_eq!(pause.phase(), PausePhase::Paused);
+    assert_eq!(output.converter_owner().source_position(), position);
+    assert_eq!(output.mixer().playback_frame_cursor(), frozen_source);
+    assert_eq!(
+        pause.song_origin_after_pause(Timestamp::ZERO).unwrap(),
+        Timestamp::ZERO
+    );
+    let ticks = 16 * (DEN / 48_000) + 5 * (DEN / 32_000) + DEN / 44_100;
+    assert_eq!(
+        last.point_at_stream_frame(0).unwrap().timestamp.as_nanos(),
+        (ticks * 1_000_000_000 / DEN) as i64
+    );
+    assert_eq!(
+        last.start_time(),
+        TargetTime::from_frames(16, 48_000)
+            .unwrap()
+            .checked_add_frames(5, 32_000)
+            .unwrap()
+            .checked_add_frames(1, 44_100)
+            .unwrap()
+    );
+}
