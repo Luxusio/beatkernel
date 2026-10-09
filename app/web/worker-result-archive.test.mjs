@@ -354,6 +354,11 @@ async function workerHarness(options = {}) {
       start_ns: 0n,
       note_count: 23, sample_count: 2, image_count: 1,
       lanes: new Uint8Array(options.lanes ?? [0x11, 0x12]), moved: false, frees: 0,
+      video_registration() {
+        assert.equal(this.moved, false, "movie registration is exported before consuming Prepared");
+        assert.equal(this.frees, 0);
+        return { resources: [], images: [] };
+      },
       free() { assert.equal(this.moved, false); assert.equal(++this.frees, 1); },
     };
     installVisualProducer(prepared);

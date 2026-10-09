@@ -13,10 +13,24 @@ mod audio_assets;
 pub mod audio_authority;
 /// Prepared original-song image selections shared by live and replay presentation.
 pub mod bga;
+pub mod video;
+pub mod video_assets;
+#[cfg(all(test, feature = "graphics", not(target_arch = "wasm32")))]
+#[path = "video_render_fixtures.rs"]
+mod video_render_fixtures;
+#[cfg(all(test, feature = "graphics", not(target_arch = "wasm32")))]
+#[path = "video_native_scene_fixtures.rs"]
+mod video_native_scene_fixtures;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod video_native;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod video_native_bank;
 /// Rolling BGM admission on an explicitly configured output frame grid.
 pub mod bgm;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser;
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+pub(crate) mod browser_video;
 /// Numeric bindings for the separate AudioWorklet WASM owner.
 #[cfg(all(target_arch = "wasm32", feature = "browser-audio"))]
 pub mod browser_audio;

@@ -22,6 +22,8 @@ pub(crate) struct BrowserCanvas {
     renderer: Renderer,
     scene: Scene,
     backgrounds: BgaTextureCache,
+    pub(crate) video: crate::browser_video::BrowserVideo,
+    movies: crate::bga_render::MovieTextureCache,
     visual_recent:
         [Vec<beatkernel::judge::JudgeEvent>; crate::browser_render_state::MAX_RENDER_VISIBLE],
     extent: [u32; 2],
@@ -29,6 +31,10 @@ pub(crate) struct BrowserCanvas {
 }
 
 impl BrowserCanvas {
+    pub(crate) fn retire_video(&mut self) -> Result<(), String> {
+        self.video.retire();
+        self.movies.clear(&mut self.renderer)
+    }
     pub(crate) fn invalidate_menu(&mut self) {
         self.menu_token = None;
     }
@@ -53,6 +59,7 @@ impl BrowserCanvas {
             menu.tick_motion(now, self.extent, &mut self.scene)?;
             return Ok(false);
         }
+        self.movies.clear(&mut self.renderer)?;
         self.backgrounds
             .sync_presentations(None, &[], &mut self.renderer)?;
         if self.menu_token != Some(menu.model.token) {
@@ -102,6 +109,8 @@ impl BrowserCanvas {
             renderer,
             scene: Scene::new(LOGICAL_EXTENT[0], LOGICAL_EXTENT[1]),
             backgrounds: BgaTextureCache::default(),
+            video: crate::browser_video::BrowserVideo::default(),
+            movies: crate::bga_render::MovieTextureCache::default(),
             visual_recent: std::array::from_fn(|_| {
                 Vec::with_capacity(crate::browser_render_state::MAX_RENDER_RECENT)
             }),
@@ -311,6 +320,7 @@ impl BrowserCanvas {
                 .map_err(|error| format!("recreate browser canvas surface: {error}"))?;
             self.renderer.replace_surface(surface)?;
         }
+        self.movies.clear(&mut self.renderer)?;
         self.backgrounds
             .sync_presentations(None, &[], &mut self.renderer)?;
         let presentation = record
@@ -335,6 +345,7 @@ impl BrowserCanvas {
                 .map_err(|error| format!("recreate browser canvas surface: {error}"))?;
             self.renderer.replace_surface(surface)?;
         }
+        self.movies.clear(&mut self.renderer)?;
         self.backgrounds
             .sync_presentations(None, &[], &mut self.renderer)?;
         let view = results
@@ -377,6 +388,7 @@ impl BrowserCanvas {
                 .map_err(|error| format!("recreate browser canvas surface: {error}"))?;
             self.renderer.replace_surface(surface)?;
         }
+        self.movies.clear(&mut self.renderer)?;
         self.backgrounds
             .sync_presentations(None, &[], &mut self.renderer)?;
         self.scene.clear();
@@ -412,11 +424,12 @@ impl BrowserCanvas {
         let presentation = PoorBackgroundPolicy::default().select(chart, song, progress)?;
         // The common cache releases a previous asset bank and keeps current
         // image aliases, opacity and unavailable-image behavior intact.
-        let frames = self.backgrounds.sync_presentations(
+        let mut frames = self.backgrounds.sync_presentations(
             Some(images),
             &[presentation],
             &mut self.renderer,
         )?;
+        self.merge_movies(&mut frames, 1)?;
         // Clearing geometry retains Scene's visible-note and GPU instance cache.
         self.scene.clear();
         self.menu_token = None;
@@ -476,11 +489,12 @@ impl BrowserCanvas {
             )?;
         }
         self.prepare_surface()?;
-        let frames = self.backgrounds.sync_presentations(
+        let mut frames = self.backgrounds.sync_presentations(
             Some(state.images()),
             &presentations[..visible.len()],
             &mut self.renderer,
         )?;
+        self.merge_movies(&mut frames, visible.len())?;
         self.scene.clear();
         self.menu_token = None;
         if !local {
@@ -578,6 +592,35 @@ impl BrowserCanvas {
         self.renderer.render(&self.scene)
     }
 
+    fn merge_movies(
+        &mut self,
+        frames: &mut [crate::bga_render::BgaFrame; 4],
+        count: usize,
+    ) -> Result<(), String> {
+        let active = self.video.active();
+        let selected = self.video.selected();
+        let sprites = self.movies.sync(&selected, &mut self.renderer)?;
+        for (view, frame) in frames.iter_mut().enumerate().take(count) {
+            for channel in 0..4 {
+                let slot = view * 4 + channel;
+                if !active[slot] {
+                    continue;
+                }
+                let destination = match channel {
+                    0 => &mut frame.base,
+                    1 => &mut frame.layer,
+                    2 => &mut frame.layer2,
+                    _ => &mut frame.poor_overlay,
+                };
+                if destination.is_none() && sprites[slot].is_some() {
+                    frame.unavailable = frame.unavailable.saturating_sub(1);
+                }
+                *destination = sprites[slot];
+            }
+            frame.validate()?;
+        }
+        Ok(())
+    }
     fn prepare_surface(&mut self) -> Result<(), String> {
         if self.renderer.needs_surface_recreation() {
             let surface = self
@@ -594,6 +637,7 @@ impl BrowserCanvas {
         history: &crate::historical_record_presentation::HistoricalRecordPresentation,
     ) -> Result<(), String> {
         self.prepare_surface()?;
+        self.movies.clear(&mut self.renderer)?;
         self.backgrounds
             .sync_presentations(None, &[], &mut self.renderer)?;
         self.scene.clear();
@@ -610,6 +654,7 @@ impl BrowserCanvas {
         room: Option<&crate::room_presentation::RoomPresentation>,
     ) -> Result<(), String> {
         self.prepare_surface()?;
+        self.movies.clear(&mut self.renderer)?;
         self.backgrounds
             .sync_presentations(None, &[], &mut self.renderer)?;
         self.scene.clear();

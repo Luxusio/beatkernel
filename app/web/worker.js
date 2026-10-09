@@ -354,6 +354,8 @@ function scopedRenderPort(context) {
           report(evidence.kind, { selectedId, generation: context.generation, content: context.content,
             ...(play === context.owner ? { playId: play.id } : {}) });
         }
+        if (currentVisual(context) && evidence?.kind === "video-unavailable"
+          && evidence.generation === context.generation && evidence.content === context.content) report("video-unavailable", { selectedId, message: evidence.message, ...(play === context.owner ? { playId: play.id } : {}) });
         if (currentVisual(context) && context.mode === "menu" && evidence?.kind === "menu-action"
           && evidence.generation === context.generation && evidence.content === context.content) handleMenu(evidence);
         listener(event);
@@ -411,6 +413,11 @@ function publishVisual() {
         } else await context.client.packet(bytes, { mode: context.mode,
           ...(registrationGeometry === undefined ? {} : { geometryVersion: registrationGeometry }) });
         if (!currentVisual(context)) { pump.dirty = true; continue; }
+        if (["preview", "live", "local", "replay"].includes(context.mode)) {
+          const movies = context.mode === "preview" ? context.source.video_registration() : context.owner.movies;
+          if (movies && movies.images.length) renderPort.postMessage({ kind: "video-registration",
+            generation: context.generation, content: context.content, registration: movies });
+        }
         if (context.room) {
           await context.client.packet(context.room.visual_snapshot(context.generation, context.content, renderLimits.maxPacketBytes, renderLimits.maxDiagnosticBytes));
           if (!currentVisual(context)) { pump.dirty = true; continue; }
@@ -2173,6 +2180,7 @@ async function preparePlay(state, request) {
     if (state.mode === "live" && !state.physicalInput && requestedEnd !== undefined && typeof BrowserGame.new_section !== "function") {
       throw new Error("The gameplay binding does not provide finite section ownership.");
     }
+    state.movies = prepared.video_registration();
     const moved = prepared;
     prepared = null; // A consuming Rust constructor also owns the argument on Err.
     state.game = state.mode === "replay"

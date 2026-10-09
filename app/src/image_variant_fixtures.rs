@@ -521,10 +521,13 @@ fn literal_decode_failures_stay_blank_and_read_failures_or_exhausted_limits_neve
         bank.unavailable(ImageId(2)),
         Some(ImageUnavailable::InvalidData(_))
     ));
-    for id in [3, 4] {
+    for (id, reason) in [
+        (3, ImageUnavailable::Missing),
+        (4, ImageUnavailable::Unsupported),
+    ] {
         assert_eq!(
             bank.unavailable(ImageId(id)),
-            Some(&ImageUnavailable::Missing)
+            Some(&reason)
         );
     }
     assert_eq!(

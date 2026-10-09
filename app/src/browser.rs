@@ -464,11 +464,20 @@ impl BrowserLibrary {
             )
             .map_err(js_error)?,
         );
+        let movies = Arc::new(
+            crate::video_assets::VideoAssets::prepare_from_source(
+                &source,
+                &prepared.source,
+                crate::video_assets::VideoAssetLimits::default(),
+            )
+            .map_err(js_error)?,
+        );
         Ok(BrowserPrepared {
             prepared,
             visual_preview: None,
             chart,
             images,
+            movies,
             chart_seed: seed,
             start: Timestamp::ZERO,
             replay: None,
@@ -516,6 +525,7 @@ impl BrowserLibrary {
             visual_preview: None,
             chart,
             images: original.images,
+            movies: original.movies,
             chart_seed: seed,
             start,
             replay: None,
@@ -569,6 +579,7 @@ impl BrowserLibrary {
             visual_preview: None,
             chart,
             images: original.images,
+            movies: original.movies,
             chart_seed: seed,
             start,
             replay: Some(file),
@@ -583,6 +594,7 @@ pub struct BrowserPrepared {
     visual_preview: Option<(u64, u64, u64, u32, u32, bool)>,
     pub(crate) chart: PlayerChart,
     pub(crate) images: Arc<ImageAssets>,
+    movies: Arc<crate::video_assets::VideoAssets>,
     pub(crate) chart_seed: u64,
     pub(crate) start: Timestamp,
     pub(crate) replay: Option<ReplayFile>,
@@ -590,6 +602,10 @@ pub struct BrowserPrepared {
 
 #[wasm_bindgen]
 impl BrowserPrepared {
+    /// Transfer compressed movie resources once, before consuming preparation.
+    pub fn video_registration(&self) -> Result<JsValue, JsValue> {
+        crate::browser_video::registration(&self.movies)
+    }
     #[wasm_bindgen(getter)]
     pub fn start_ns(&self) -> i64 {
         self.start.as_nanos()
@@ -1151,6 +1167,7 @@ impl BrowserView {
                         .map_err(js_error)?;
                     VisualPresentation::Play { state, local }
                 };
+                self.retire_video()?;
                 self.visual = Some(replacement);
                 self.current = None;
             }
@@ -1319,7 +1336,129 @@ impl BrowserView {
         }
         .map_err(js_error)
     }
+    /// Movie descriptors are admitted separately from the unchanged visual wire.
+    pub fn register_video(
+        &mut self,
+        generation: u64,
+        content: u64,
+        images: js_sys::Array,
+    ) -> Result<(), JsValue> {
+        if self
+            .visual_identity
+            .is_none_or(|(g, c, _)| (g, c) != (generation, content))
+        {
+            return Err(js_error(
+                "movie registry does not match committed visual identity",
+            ));
+        }
+        self.canvas.video.register(content, &images)
+    }
+    pub fn video_demands(&mut self) -> Result<js_sys::Array, JsValue> {
+        use render::VisualPresentation;
+        let mut wanted = self.canvas.video.begin();
+        match self.visual.as_ref() {
+            Some(VisualPresentation::Preview { chart, song, .. }) => {
+                let presentation = crate::poor_background::PoorBackgroundPolicy::default()
+                    .select(chart, *song, None)
+                    .map_err(js_error)?;
+                self.canvas
+                    .video
+                    .prepare(0, chart, *song, None, presentation, &mut wanted)?;
+            }
+            Some(VisualPresentation::Play { state, .. }) => {
+                let first = state.page() as usize * 4;
+                for (slot, player) in state.roster()[first..(first + 4).min(state.roster().len())]
+                    .iter()
+                    .enumerate()
+                {
+                    let member = state
+                        .member(*player)
+                        .ok_or_else(|| js_error("movie member missing"))?;
+                    let Some(scalars) = member.scalars.as_ref() else {
+                        continue;
+                    };
+                    let now = Timestamp::from_nanos(scalars.song_ns);
+                    let presentation = crate::poor_background::PoorBackgroundPolicy::default()
+                        .select(state.chart(), now, Some(&member.progress))
+                        .map_err(js_error)?;
+                    self.canvas.video.prepare(
+                        slot,
+                        state.chart(),
+                        now,
+                        member.progress.last_miss(),
+                        presentation,
+                        &mut wanted,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+        self.canvas.video.demands(wanted)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_video_frame(
+        &mut self,
+        slot: u32,
+        generation: u64,
+        revision: u64,
+        pts_ns: i64,
+        width: u32,
+        height: u32,
+        rgba: js_sys::Uint8Array,
+    ) -> Result<bool, JsValue> {
+        self.canvas.video.admit(
+            slot as usize,
+            generation,
+            revision,
+            pts_ns,
+            width,
+            height,
+            &rgba,
+        )
+    }
+    /// Completion comes from the decoder after every required output was copied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_completed_video_frame(
+        &mut self,
+        slot: u32,
+        generation: u64,
+        revision: u64,
+        pts_ns: i64,
+        width: u32,
+        height: u32,
+        rgba: js_sys::Uint8Array,
+        completed_through_ns: i64,
+    ) -> Result<bool, JsValue> {
+        self.canvas.video.admit_with_completion(
+            slot as usize,
+            generation,
+            revision,
+            pts_ns,
+            width,
+            height,
+            &rgba,
+            Some(completed_through_ns),
+        )
+    }
+    pub fn video_watermark(
+        &mut self,
+        slot: u32,
+        generation: u64,
+        through_ns: i64,
+    ) -> Result<bool, JsValue> {
+        self.canvas
+            .video
+            .watermark(slot as usize, generation, through_ns)
+    }
+    pub fn video_end(&mut self, slot: u32, generation: u64, end_ns: i64) -> Result<bool, JsValue> {
+        self.canvas.video.end(slot as usize, generation, end_ns)
+    }
+    pub fn retire_video(&mut self) -> Result<(), JsValue> {
+        self.canvas.retire_video().map_err(js_error)
+    }
     pub fn retire_visual(&mut self) {
+        // Renderer disposal owns any texture remaining after a removal failure.
+        let _ = self.retire_video();
         self.visual = None;
         self.visual_identity = None;
         self.current = None;

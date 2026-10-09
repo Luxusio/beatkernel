@@ -173,6 +173,11 @@ async function workerHarness(options = {}) {
     const prepared = {
       title: `Prepared ${path}`, artist: "Fixture", duration_ns: 604800000000000n,
       note_count: 3, sample_count: 2, image_count: 1, lanes: [0x11], path, moved: false, frees: 0,
+      video_registration() {
+        assert.equal(this.moved, false, "movie registration is exported before consuming Prepared");
+        assert.equal(this.frees, 0);
+        return { resources: [], images: [] };
+      },
       free() { assert.equal(this.moved, false); assert.equal(++this.frees, 1); },
     };
     if (!options.omitPreparedStart) prepared.start_ns = Object.hasOwn(options, "preparedStart") ? options.preparedStart : start;

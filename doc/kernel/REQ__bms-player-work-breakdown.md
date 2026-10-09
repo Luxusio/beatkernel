@@ -1,6 +1,6 @@
 # BMS 플레이어 전체 작업 분해 구조(WBS)
 
-기준일: 2026-10-08. 목표: **범용 BeatKernel 기반의 고성능 cross-platform BMS 플레이어**.
+기준일: 2026-10-09. 목표: **범용 BeatKernel 기반의 고성능 cross-platform BMS 플레이어**.
 사용자가 요청한 전체 TODO/진행률의 기준 문서다. 현재 병렬 개발 묶음만으로
 전체 목표를 대체하지 않는다. [원래 명세](../../plan.md),
 [플레이어 요구사항](REQ__bms-player.md),
@@ -81,7 +81,8 @@ python3 tools/wbs_status.py --ready
 | E31 | `24663f3`의 독립 runtime report QA: `target/wf/qa-cli-runtime-report-01a11d72-2`; release example build/Clippy PASS, Python24 PASS, 실제6조합×3회18run report와 CLI 거절/보존/timeout/descendant 종료 및 Git index 읽기 전용 검사 PASS | 고정 software Runtime/queue/Mixer의 원본 per-child CPU/RSS·loop 측정·artifact와 unavailable 구분. 854240bytes는 benchmark 크기이며 player 크기 아님. Linux 실제실행, 다른 OS adapter는 테스트 근거; dense/UI stall/다인/GPU/soak/비교 및 전체 제품 성능은 별도 |
 | E32 | `d0b062c`의 독립 input-disposition QA: `target/wf/qa-cli-input-disposition-01a11db1`; 전체 core417 PASS / 실패0 / ignored0(새 judge12/runtime8/replay6 및 doctest16 포함), core all-target Clippy PASS, desktop/webtransport app lib check PASS, DEEP code/security/docs PASS | 실제 판정 facts·정규화 거절·성공 prefix·replay 기록 후 callback·legacy hash/codec parity. 동일 v1 benchmark18회에서 연산/프레임/PCM checksum/counter 일치; 시간은 관측이며 성능 우위/zero-overhead 보증 아님. 최초 full-test compile240초 timeout 후 동일 전체 명령 cache continuation PASS. app 경고20·물리 검증·08.11 정책은 별도 |
 | E33 | `891eb85`의 독립 dense-chart QA: `target/wf/qa-cli-dense-chart-01a11dd7/REPORT.md`, `cli-results.json`; 전체 core426 PASS / 실패0(새 dense9 포함), all-target Clippy/release build/DEEP code/security/docs PASS, 실제 release CLI38건(거절28건) PASS | actual judge/replay/projector의 원본2N 기록·golden head/tail/provenance·fresh prefix 복원·narrow tail·geometry/storage 검사. 기본2만 노트 및10만 노트/64레인 실제 실행; 반복20h/week origin facts 일치. origin은 장시간 실행이 아니며 레인은 member가 아님. GPU/물리/native/soak/rebind/다인 및 전체13.05/13.08 완료는 별도 |
- 
+| E34 | 영상 BGA 독립 DEEP code review와 qa-cli/qa-browser PASS: `target/wf/bms-video/qa-cli/`, `target/wf/bms-video/qa-browser/evidence.json`; app2124 PASS/실패0/ignored6, external51 PASS(실제 FFmpeg2 포함), Node750 PASS, native encoded-to-Scene/GPU2 PASS, 실제 Chromium23 checks PASS | VFR/B-frame/nonzero origin/preroll/backseek/EOF/반복 활성화·예산/ACK/종료·실제 native/browser GPU 및 preview/live/results/history/replay/local2/reload. Windows/macOS 실제 실행·물리 오디오 지연·모든 코덱/배포 선택은 별도. 재현 계약은 REQ__bms-video. |
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -244,7 +245,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [ ] **BK-WBS-08.14** 전 포맷의 잘린 파일·큰 metadata·late decode 실패·rate/channel 정책을 확장 검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=순수/실제 파일 corpus와 allocation/byte budget.
 - [ ] **BK-WBS-08.15** static BGA BMP/PNG/JPEG·layer/poor/opacity/crop/canvas·파일명 호환을 실제 화면에서 검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=기존 순수 fixture + 실제 native/browser rendering.
 - [ ] **BK-WBS-08.16** EXBMP RGB/color-key/근사 matching의 정확한 호환 규칙을 확정한다. — 상태=P(정책선택대기); 선행=-; 필요 근거/다음=원본 engine 문서/asset 사례·허용 오차.
-- [ ] **BK-WBS-08.17** video decode·timestamp/reorder/frame budget·off-thread 공급을 구현한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=audio master clock 기반; native/browser decoder port.
+- [x] **BK-WBS-08.17** video decode·timestamp/reorder/frame budget·off-thread 공급을 구현한다. — 상태=D(검증완료); 선행=-; 근거=E34,REQ__bms-video의 순수 계약과 실제 native/browser decode-to-Scene·GPU·플레이 경로; 지원 코덱/배포 선택은08.18에 유지.
 - [ ] **BK-WBS-08.18** video codec/backend/redistribution 라이선스와 지원 범위를 선택한다. — 상태=P(정책선택대기); 선행=-; 필요 근거/다음=MIT/non-ASIO 배포 조건과 실제 third-party 감사.
 
 ### 09. 기록·리플레이·연습·저장 경쟁
@@ -453,6 +454,11 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 상세 behavior/architecture/라이선스는 연결된 기존 REQ/GUIDE/ADR이 계속 소유한다.
 
 ## 변경 이력
+
+- 2026-10-09: 영상 BGA의 native/browser 실제 디코딩·GPU·플레이 경로와
+  독립 code review/QA를 확인하여 08.17을 D로 갱신했다. 완료84→85,
+  활성193 유지. 물리 오디오·다른 OS 및 08.18의 배포/코덱 선택은 완료로
+  확대하지 않는다.
 
 - 2026-10-08: 사용자 요청에 따라 15개 영역으로 전체 목표를 분해했다. 초기 활성
   말단190개, 조건부3개; source-only/physical proof를 구별하고 문서 작성 시 확인한

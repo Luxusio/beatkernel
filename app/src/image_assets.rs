@@ -426,6 +426,10 @@ impl ImageAssets {
                 bank.unavailable.insert(id, ImageUnavailable::Undefined);
                 continue;
             };
+            if crate::video_assets::is_movie_name(name) {
+                bank.unavailable.insert(id, ImageUnavailable::Unsupported);
+                continue;
+            }
             let path = match source.resolve(name, AssetPathPolicy::ImageVariants) {
                 Ok(path) => path,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {

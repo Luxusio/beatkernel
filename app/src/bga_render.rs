@@ -4,7 +4,7 @@ use crate::{
     image_assets::ImageAssets,
     poor_background::BgaPresentation,
     scene::{ClipRect, Scene},
-    texture::{MAX_TEXTURE_BYTES, RgbaImage, TextureId},
+    texture::{RgbaImage, TextureId, MAX_TEXTURE_BYTES},
     ui::interaction::Bounds,
 };
 use std::sync::Arc;
@@ -13,6 +13,9 @@ use std::sync::Arc;
 pub trait TextureOwner {
     fn upload(&mut self, image: &RgbaImage) -> Result<TextureId, String>;
     fn remove(&mut self, id: TextureId) -> Result<(), String>;
+    fn update(&mut self, _id: TextureId, _image: &RgbaImage) -> Result<(), String> {
+        Err("texture updates unsupported".into())
+    }
 }
 impl TextureOwner for crate::graphics::Renderer {
     fn upload(&mut self, image: &RgbaImage) -> Result<TextureId, String> {
@@ -20,6 +23,9 @@ impl TextureOwner for crate::graphics::Renderer {
     }
     fn remove(&mut self, id: TextureId) -> Result<(), String> {
         self.remove_texture(id)
+    }
+    fn update(&mut self, id: TextureId, image: &RgbaImage) -> Result<(), String> {
+        self.update_texture(id, image)
     }
 }
 /// One admitted immutable sprite reference.
@@ -251,6 +257,99 @@ fn upload(owner: &mut impl TextureOwner, image: &RgbaImage) -> Option<BgaSprite>
         width: image.width(),
         height: image.height(),
     })
+}
+/// Mutable movie textures are identified by decode session, never pixel Arc address.
+#[derive(Default)]
+pub struct MovieTextureCache {
+    entries: Vec<MovieEntry>,
+}
+struct MovieEntry {
+    session: crate::video::VideoSessionKey,
+    revision: Option<u64>,
+    sprite: Option<BgaSprite>,
+}
+impl MovieTextureCache {
+    pub fn clear(&mut self, owner: &mut impl TextureOwner) -> Result<(), String> {
+        while let Some(entry) = self.entries.last() {
+            if let Some(sprite) = entry.sprite {
+                owner.remove(sprite.texture)?;
+            }
+            self.entries.pop();
+        }
+        Ok(())
+    }
+    pub fn sync(
+        &mut self,
+        frames: &[Option<&crate::video::VideoFrame>],
+        owner: &mut impl TextureOwner,
+    ) -> Result<[Option<BgaSprite>; 16], String> {
+        if frames.len() > 16 {
+            return Err("movie cache admits at most sixteen channels".into());
+        }
+        let mut index = 0;
+        while index < self.entries.len() {
+            if frames
+                .iter()
+                .flatten()
+                .any(|frame| frame.session == self.entries[index].session)
+            {
+                index += 1;
+            } else {
+                if let Some(sprite) = self.entries[index].sprite {
+                    owner.remove(sprite.texture)?;
+                }
+                self.entries.remove(index);
+            }
+        }
+        let mut sprites = [None; 16];
+        for (slot, frame) in frames.iter().enumerate() {
+            let Some(frame) = frame else {
+                continue;
+            };
+            let index = match self
+                .entries
+                .iter()
+                .position(|entry| entry.session == frame.session)
+            {
+                Some(index) => index,
+                None => {
+                    self.entries
+                        .try_reserve(1)
+                        .map_err(|error| error.to_string())?;
+                    self.entries.push(MovieEntry {
+                        session: frame.session,
+                        revision: None,
+                        sprite: None,
+                    });
+                    self.entries.len() - 1
+                }
+            };
+            let entry = &mut self.entries[index];
+            if entry.sprite.is_some_and(|sprite| {
+                sprite.width != frame.image.width() || sprite.height != frame.image.height()
+            }) {
+                owner.remove(entry.sprite.unwrap().texture)?;
+                entry.sprite = None;
+                entry.revision = None;
+            }
+            if let Some(sprite) = entry.sprite {
+                if entry.revision != Some(frame.revision) {
+                    owner.update(sprite.texture, &frame.image)?;
+                    entry.revision = Some(frame.revision);
+                }
+            } else {
+                let texture = owner.upload(&frame.image)?;
+                entry.sprite = Some(BgaSprite {
+                    texture,
+                    width: frame.image.width(),
+                    height: frame.image.height(),
+                });
+                entry.revision = Some(frame.revision);
+            }
+            sprites[slot] = entry.sprite;
+        }
+        Ok(sprites)
+    }
 }
 /// Paints black then Base, Layer, Layer2 and Poor inside the above-judgement field.
 /// Sprites use centered integer aspect fit, straight alpha and dim tint.
@@ -521,11 +620,9 @@ mod fixtures {
             .sync(Some(&replacement), &[state(3, None)], &mut owner)
             .unwrap();
         assert_eq!(owner.attempts, 3);
-        assert!(
-            cache
-                .sync(Some(&replacement), &[BgaState::default(); 5], &mut owner)
-                .is_err()
-        );
+        assert!(cache
+            .sync(Some(&replacement), &[BgaState::default(); 5], &mut owner)
+            .is_err());
         assert_eq!(owner.live.len(), 1);
         cache.clear(&mut owner).unwrap();
         assert!(owner.live.is_empty());
@@ -625,11 +722,9 @@ mod fixtures {
             .sync_presentations(Some(&prepared.bank), &selections, &mut owner)
             .unwrap();
         assert_eq!((owner.live.len(), owner.attempts), (16, 16));
-        assert!(
-            frames
-                .iter()
-                .all(|f| f.layer2.is_some() && f.poor_overlay.is_some() && f.unavailable == 0)
-        );
+        assert!(frames
+            .iter()
+            .all(|f| f.layer2.is_some() && f.poor_overlay.is_some() && f.unavailable == 0));
         cache
             .sync_presentations(Some(&prepared.bank), &selections, &mut owner)
             .unwrap();
@@ -671,15 +766,13 @@ mod fixtures {
             .unwrap();
         assert_eq!((owner.live.len(), owner.attempts), (15, 16));
         let before = owner.actions.len();
-        assert!(
-            cache
-                .sync_presentations(
-                    Some(&prepared.bank),
-                    &[BgaPresentation::default(); 5],
-                    &mut owner
-                )
-                .is_err()
-        );
+        assert!(cache
+            .sync_presentations(
+                Some(&prepared.bank),
+                &[BgaPresentation::default(); 5],
+                &mut owner
+            )
+            .is_err());
         assert_eq!(owner.actions.len(), before);
         cache.clear(&mut owner).unwrap();
         assert!(owner.live.is_empty());
@@ -774,33 +867,29 @@ mod fixtures {
             }),
             ..frame
         };
-        assert!(
-            paint(
-                &mut scene,
-                invalid,
-                Bounds {
-                    x: 20,
-                    y: 30,
-                    width: 200,
-                    height: 200
-                }
-            )
-            .is_err()
-        );
+        assert!(paint(
+            &mut scene,
+            invalid,
+            Bounds {
+                x: 20,
+                y: 30,
+                width: 200,
+                height: 200
+            }
+        )
+        .is_err());
         assert_eq!(scene.rectangles().len(), before);
-        assert!(
-            paint(
-                &mut scene,
-                frame,
-                Bounds {
-                    x: i64::MAX,
-                    y: 0,
-                    width: 1,
-                    height: 1
-                }
-            )
-            .is_err()
-        );
+        assert!(paint(
+            &mut scene,
+            frame,
+            Bounds {
+                x: i64::MAX,
+                y: 0,
+                width: 1,
+                height: 1
+            }
+        )
+        .is_err());
         assert_eq!(scene.rectangles().len(), before);
     }
 }

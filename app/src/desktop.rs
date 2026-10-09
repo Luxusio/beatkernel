@@ -58,7 +58,7 @@ use beatkernel_bms_runtime::ui::{
     text_input::LineEditor,
 };
 use beatkernel_bms_runtime::{
-    bga_render::{BgaFrame, BgaTextureCache},
+    bga_render::{BgaFrame, BgaTextureCache, MovieTextureCache},
     competition::OpponentKind,
     device_catalog::{DeviceCatalog, DeviceRequest},
     font_atlas::{FontAtlas, MAX_FONT_CHAIN},
@@ -77,6 +77,7 @@ use beatkernel_bms_runtime::{
     session_launch::SessionLaunch,
     settings::{NativeSettings, SettingsHost},
     settings_profile::PlayerProfile,
+    video_native_bank::NativeVideoController,
 };
 use beatkernel_bms_runtime::{
     graphics::{self, BackendChoice, Presentation, Renderer},
@@ -892,6 +893,8 @@ pub(super) fn run_with_ui_commands(
         renderer: None,
         renderer_startup: None,
         bga_cache: BgaTextureCache::default(),
+        movie_cache: MovieTextureCache::default(),
+        movie_controller: NativeVideoController::default(),
         instance: None,
         scene: Scene::new(WIDTH as u32, HEIGHT as u32),
         game: None,
@@ -1548,6 +1551,8 @@ struct Desktop {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     bga_cache: BgaTextureCache,
+    movie_cache: MovieTextureCache,
+    movie_controller: NativeVideoController,
     instance: Option<wgpu::Instance>,
     scene: Scene,
     game: Option<Game>,
@@ -5828,6 +5833,10 @@ impl Desktop {
                 .as_ref()
                 .ok_or("session screen data unavailable")?;
             draw_game_with_background(pixels, game, self.options.lookahead, &backgrounds)?;
+            if let Some(reason) = self.movie_controller.unavailable.first() {
+                let reason: String = reason.chars().take(96).collect();
+                text(pixels, 24, 604, &reason, 1, 0xd8b36b);
+            }
             if live_audio_available {
                 text(pixels, 740, 26, "F2: AUDIO OUTPUT", 1, 0x74e5c5);
             }
@@ -6256,7 +6265,11 @@ impl Desktop {
     }
 
     fn release_backgrounds(&mut self) {
+        self.movie_controller.retire();
         if let Some(renderer) = &mut self.renderer {
+            if let Err(error) = self.movie_cache.clear(renderer) {
+                self.failure = Some(error);
+            }
             if let Err(error) = self.bga_cache.clear(renderer) {
                 self.failure = Some(error);
             }
@@ -6269,27 +6282,127 @@ impl Desktop {
     /// the native game owner. Exact member clocks determine visible selections.
     fn background_frames(&mut self, route: ScreenRoute) -> Result<[BgaFrame; 4], String> {
         let Some(renderer) = &mut self.renderer else {
+            self.movie_controller.retire();
+            self.movie_cache = MovieTextureCache::default();
             self.bga_cache = BgaTextureCache::default();
             return Ok([BgaFrame::default(); 4]);
         };
+        let snapshot = self
+            .game
+            .as_ref()
+            .filter(|game| !game.joined || game.replay)
+            .and_then(|game| game.snapshot.as_ref());
         if !matches!(
             route,
             ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
-        ) {
+        ) || snapshot.is_none()
+        {
+            self.movie_controller.retire();
+            self.movie_cache.clear(renderer)?;
             return self.bga_cache.sync(None, &[], renderer);
         }
-        let Some(game) = &self.game else {
-            return self.bga_cache.sync(None, &[], renderer);
-        };
-        if game.joined && !game.replay {
-            return self.bga_cache.sync(None, &[], renderer);
+        let snapshot = snapshot.unwrap();
+        let page = self.game.as_ref().unwrap().local_page;
+        let (states, count) = background_presentations(snapshot, page)?;
+        let mut frames = self.bga_cache.sync_presentations(
+            snapshot.images.as_ref(),
+            &states[..count],
+            renderer,
+        )?;
+        let mut demands = [None; 16];
+        if let Some(bank) = &snapshot.movies {
+            for view in 0..count {
+                let (chart, now, progress) = if snapshot.players.len() >= 2 {
+                    let member = &snapshot.players[page * 4 + view];
+                    (
+                        member.chart.as_ref(),
+                        member.song_time,
+                        member.note_progress.as_ref(),
+                    )
+                } else {
+                    (
+                        snapshot.chart.as_ref(),
+                        snapshot.song_time,
+                        snapshot.note_progress.as_ref(),
+                    )
+                };
+                let (Some(chart), Some(now)) = (chart, now) else {
+                    continue;
+                };
+                let activations = chart.bga_activations(now);
+                let last_miss = progress
+                    .and_then(beatkernel_bms_runtime::note_progress::NoteProgress::last_miss);
+                let poor_replaces = chart.poor_bga_mode == beatkernel_bms::PoorBgaMode::Replace
+                    && states[view].state.poor.is_some()
+                    && last_miss.is_some_and(|miss| {
+                        let age = i128::from(now.as_nanos()) - i128::from(miss.as_nanos());
+                        age >= 0 && age < 500_000_000
+                    });
+                for (channel, image) in [
+                    states[view].state.base,
+                    states[view].state.layer,
+                    states[view].state.layer2,
+                    states[view].poor_overlay,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let Some(image) = image.filter(|image| bank.assets.get(*image).is_some())
+                    else {
+                        continue;
+                    };
+                    let activation_index = match channel {
+                        0 if poor_replaces => 2,
+                        0 => 0,
+                        1 => 1,
+                        2 => 3,
+                        _ => 2,
+                    };
+                    let Some(activation) = activations[activation_index]
+                        .filter(|activation| activation.image == image)
+                    else {
+                        continue;
+                    };
+                    let Some(session) =
+                        beatkernel_bms_runtime::video::VideoSessionKey::from_activation(
+                            bank.content(),
+                            0,
+                            activation,
+                            last_miss,
+                        )
+                    else {
+                        continue;
+                    };
+                    demands[view * 4 + channel] = Some((session, session.target(now)?));
+                }
+            }
         }
-        let Some(snapshot) = &game.snapshot else {
-            return self.bga_cache.sync(None, &[], renderer);
-        };
-        let (states, count) = background_presentations(snapshot, game.local_page)?;
-        self.bga_cache
-            .sync_presentations(snapshot.images.as_ref(), &states[..count], renderer)
+        let movies = self
+            .movie_controller
+            .sync(snapshot.movies.as_ref(), &demands)?;
+        let movie_refs = movies.each_ref().map(Option::as_ref);
+        let sprites = self.movie_cache.sync(&movie_refs, renderer)?;
+        for view in 0..count {
+            for channel in 0..4 {
+                let slot = view * 4 + channel;
+                if demands[slot].is_none() {
+                    continue;
+                }
+                let frame = &mut frames[view];
+                let destination = match channel {
+                    0 => &mut frame.base,
+                    1 => &mut frame.layer,
+                    2 => &mut frame.layer2,
+                    _ => &mut frame.poor_overlay,
+                };
+                if destination.is_none() && sprites[slot].is_some() {
+                    frame.unavailable = frame.unavailable.saturating_sub(1);
+                }
+                *destination = sprites[slot];
+            }
+            frames[view].validate()?;
+        }
+        Ok(frames)
     }
 }
 impl ApplicationHandler<DesktopUiCommand> for Desktop {
@@ -6360,6 +6473,8 @@ impl ApplicationHandler<DesktopUiCommand> for Desktop {
         self.font_text = None;
         self.input_font = None;
         self.bga_cache = BgaTextureCache::default();
+        self.movie_controller.retire();
+        self.movie_cache = MovieTextureCache::default();
         self.instance = None;
     }
     fn window_event(&mut self, _event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -6375,6 +6490,8 @@ impl ApplicationHandler<DesktopUiCommand> for Desktop {
                 self.request_close();
                 self.renderer = None;
                 self.bga_cache = BgaTextureCache::default();
+                self.movie_controller.retire();
+                self.movie_cache = MovieTextureCache::default();
                 self.window = None;
             }
             WindowEvent::Focused(active) => {
@@ -8236,6 +8353,8 @@ mod tests {
             renderer: None,
             renderer_startup: None,
             bga_cache: BgaTextureCache::default(),
+            movie_cache: MovieTextureCache::default(),
+            movie_controller: NativeVideoController::default(),
             instance: None,
             scene: Scene::new(WIDTH as u32, HEIGHT as u32),
             game: None,

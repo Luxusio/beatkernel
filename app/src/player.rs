@@ -261,6 +261,9 @@ pub struct PlayerSnapshot {
     pub chart: Option<Arc<PlayerChart>>,
     /// One immutable CPU image bank shared by the registered local roster.
     pub images: Option<Arc<crate::image_assets::ImageAssets>>,
+    /// Prepared movie descriptors and nonblocking IO handle, shared without pixels.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub movies: Option<Arc<crate::video_native_bank::NativeVideoBank>>,
     pub song_time: Option<Timestamp>,
     pub score: ScoreSummary,
     pub bms_score: Option<BmsScoreSummary>,
@@ -292,6 +295,8 @@ impl Default for PlayerSnapshot {
             players: Vec::new(),
             chart: None,
             images: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            movies: None,
             song_time: None,
             score: ScoreSummary::default(),
             bms_score: None,
@@ -725,6 +730,16 @@ struct Session {
     pause_dirty: bool,
     room_dirty: bool,
 }
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Session belongs to the game worker, including unwind/thread exit.
+        // Snapshot Arc releases on the UI/render owner never wait for video IO.
+        if let Some(bank) = &self.snapshot.movies {
+            let _ = bank.join();
+        }
+    }
+}
 thread_local! { static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) }; }
 
 /// Native owner reads desired state without UI locks; cancellation wins.
@@ -802,9 +817,17 @@ pub fn with_publisher<T>(
                 .clone(),
         )
     });
-    let result = run();
+    let mut result = run();
     SESSION.with(|session| {
         if let Some(mut current) = session.borrow_mut().take() {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(bank) = &current.snapshot.movies {
+                if let Err(reason) = bank.join() {
+                    if result.is_ok() {
+                        result = Err(reason);
+                    }
+                }
+            }
             current
                 .publisher
                 .0
@@ -852,7 +875,7 @@ pub fn with_publisher<T>(
             // Gameplay and audio owners have already stopped. This final tiny
             // handoff can wait for take_latest, which releases before rendering.
             if let Ok(mut slot) = current.publisher.0.latest.lock() {
-                *slot = Some(current.snapshot);
+                *slot = Some(std::mem::take(&mut current.snapshot));
             }
         }
     });
@@ -1146,6 +1169,29 @@ fn register_chart(
         if let Some(policy) = &admitted_policy {
             members[0].gauge = BmsGauge::new(policy.try_copy()?);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(old) = &current.snapshot.movies {
+            old.join()?;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let movies = native_path
+            .map(|path| -> Result<_, Box<dyn std::error::Error>> {
+                let path = std::fs::canonicalize(path)?;
+                let root = path.parent().ok_or("native chart has no directory")?;
+                let assets = Arc::new(crate::video_assets::VideoAssets::prepare(
+                    root,
+                    source,
+                    Default::default(),
+                )?);
+                if assets.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(crate::video_native_bank::NativeVideoBank::prepare(
+                    assets,
+                )?))
+            })
+            .transpose()?
+            .flatten();
         if current.pressed.is_empty() {
             current.pressed = players.iter().map(|_| PressedState::default()).collect();
         }
@@ -1156,6 +1202,10 @@ fn register_chart(
         current.snapshot.players = members;
         current.snapshot.chart = Some(prepared);
         current.snapshot.images = images;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            current.snapshot.movies = movies;
+        }
         current.chart_published = true;
         current.observe_cancellation(false);
         current.publish_latest(true);

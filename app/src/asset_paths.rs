@@ -12,6 +12,7 @@ pub enum AssetPathPolicy {
     Exact,
     AudioVariants,
     ImageVariants,
+    VideoVariants,
 }
 
 pub(crate) fn relative_name(name: &str) -> io::Result<PathBuf> {
@@ -57,10 +58,16 @@ pub(crate) fn variants_for(relative: &Path, policy: AssetPathPolicy) -> Vec<Path
         AssetPathPolicy::Exact => Vec::new(),
         AssetPathPolicy::AudioVariants => variants(relative),
         AssetPathPolicy::ImageVariants => family_variants(relative, ["bmp", "png", "jpg", "jpeg"]),
+        AssetPathPolicy::VideoVariants => family_variants(
+            relative,
+            [
+                "mp4", "m4v", "mov", "webm", "mkv", "avi", "mpg", "mpeg", "wmv",
+            ],
+        ),
     }
 }
 
-fn family_variants(relative: &Path, families: [&str; 4]) -> Vec<PathBuf> {
+fn family_variants<const N: usize>(relative: &Path, families: [&str; N]) -> Vec<PathBuf> {
     let first = match relative
         .extension()
         .and_then(|extension| extension.to_str())
@@ -209,11 +216,9 @@ mod fixtures {
         assert_eq!(supported.len(), 35);
         assert_eq!(supported[0], Path::new("日本/音.flac"));
         assert_eq!(supported[15], Path::new("日本/音.wav"));
-        assert!(
-            !supported
-                .iter()
-                .any(|candidate| candidate == Path::new("日本/音.FlAc"))
-        );
+        assert!(!supported
+            .iter()
+            .any(|candidate| candidate == Path::new("日本/音.FlAc")));
         let ogg = variants(Path::new("日本/音.oGg"));
         assert_eq!(ogg.len(), 35);
         assert_eq!(ogg[0], Path::new("日本/音.ogg"));

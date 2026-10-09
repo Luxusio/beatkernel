@@ -45,6 +45,12 @@ handling, exact data preservation, resource bounds and reproducible crashes
 remain concrete correctness tests. Report those results in plain language.
 Keep progressing on implementation rather than pausing for hypothetical risks.
 
+The user reiterated this on 2026-10-09 while the continuous fuzz task was
+active. Defer that task's remaining campaigns/minimization/infrastructure work
+and prioritize unfinished player features. Existing committed tests remain;
+do not start more dedicated audit/fuzz infrastructure without a user request.
+Run ordinary regression checks needed for the feature being implemented.
+
 On 2026-10-08 the user requested parallel development across all remaining
 requirements, extending earlier within-feature pairing. Survey actual source
 and current evidence, assign literal disjoint ownership, and dispatch ready

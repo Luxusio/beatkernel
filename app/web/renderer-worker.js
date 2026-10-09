@@ -1,6 +1,9 @@
 import init, { BrowserView } from "./pkg/beatkernel_bms_runtime.js";
 import { preflightPacket, preflightMenuPayload, menuOpponentProjection, nativePacketView, validateRenderLimits, unsignedIdentity, boundedU32 } from "./render-protocol.mjs";
 
+import { VideoClient } from "./video-client.mjs";
+
+let movies = null;
 let view = null;
 let port = null;
 let loading = false;
@@ -41,6 +44,7 @@ function fail(error, operationId = null, identity = current) {
   if (failed || disposed) return;
   failed = true;
   stopDraw();
+  movies?.retire();
   const report = { kind: "render-error", generation: identity?.generation ?? 0n, content: identity?.content ?? 0n,
     operationId, mode: identity?.mode ?? "initializing", message: diagnostic(error) };
   try { send(report); } catch {}
@@ -67,6 +71,7 @@ function scheduleDraw(reset = true) {
         if (typeof presented !== "boolean") throw new Error("Invalid menu presentation result.");
       } else {
         view.draw_visual();
+        movies?.drain();
         presented = !view.needs_redraw();
       }
       if (presented) {
@@ -153,6 +158,7 @@ function packet(message) {
   const version = message.geometryVersion;
   if (version !== undefined && (!unsignedIdentity(version) || version <= geometryVersion)) throw new Error("Packet geometry version must increase.");
   // Pass a fresh native view: caller properties cannot change WASM admission.
+  if (cold && !combinedRoom) movies?.retire();
   const bytes = nativePacketView(input);
   const applied = header.kind === 1
     ? view.import_visual_registration(bytes, maxPacketBytes, maxDiagnosticBytes,
@@ -174,6 +180,7 @@ function packet(message) {
   if (version !== undefined) geometryVersion = version;
   send({ kind: "state-ack", operationId, generation: header.generation, content: header.content,
     sequence: header.sequence, packetKind: header.kind });
+  movies?.refresh();
   scheduleDraw();
 }
 function control(message) {
@@ -184,6 +191,7 @@ function control(message) {
   if (kind === "retire") {
     stopDraw();
     view.dispose_menu_motion();
+    movies?.retire();
     view.retire_visual();
     generationFloor = generationFloor > generation ? generationFloor : generation;
     current = null;
@@ -222,6 +230,8 @@ function control(message) {
   } else throw new Error("Unknown render control.");
   geometryVersion = version;
   current.operationId = operationId;
+  if (kind === "resize" && extent.includes(0)) movies?.suspend();
+  else { movies?.resume(); movies?.refresh(); }
   send({ kind: "control-ack", operation: kind, operationId, generation, content, geometryVersion: version });
   scheduleDraw();
 }
@@ -237,10 +247,20 @@ function receive(event) {
       comparisons: input.comparisons, geometryVersion: input.geometryVersion, menuGeneration: input.menuGeneration,
       screen: input.screen, revision: input.revision, actionId: input.actionId, x: input.x, y: input.y,
       downX: input.downX, downY: input.downY, recordPreview: input.recordPreview, details: input.details, opponents: input.opponents,
-      control: input.control, transforms: input.transforms, durationMs: input.durationMs, easing: input.easing };
+      control: input.control, transforms: input.transforms, durationMs: input.durationMs, easing: input.easing,
+      registration: input.registration };
     if (unsignedIdentity(message.generation) && message.generation < generationFloor) return;
     if (!current && unsignedIdentity(message.generation) && message.generation <= generationFloor) return;
-    if (message.kind === "menu") menu(message);
+    if (message.kind === "video-registration") {
+      if (!current || current.generation !== message.generation || current.content !== message.content
+        || !["preview", "live", "local", "replay"].includes(current.mode)) return;
+      if (!movies) movies = new VideoClient({ worker: new Worker(new URL("./video-decoder-worker.js", import.meta.url), { type: "module" }),
+        view, onFrame: () => scheduleDraw(), onUnavailable: reason => send({ kind: "video-unavailable",
+          generation: current?.generation ?? 0n, content: current?.content ?? 0n, message: diagnostic(reason) }) });
+      movies.register(message.generation, message.content, message.registration);
+      return;
+    }
+    if (message.kind === "menu") { movies?.retire(); menu(message); }
     else if (message.kind === "menu-input") menuInput(message);
     else if (message.kind === "packet") packet(message);
     else control(message);
@@ -255,6 +275,8 @@ function dispose() {
   ++epoch;
   clearTimeout(initTimer);
   stopDraw();
+  movies?.close();
+  movies = null;
   current = null;
   const owned = view;
   view = null;

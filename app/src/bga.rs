@@ -16,6 +16,16 @@ pub struct BgaState {
     pub poor: Option<ImageId>,
 }
 
+/// Exact marker identity used to restart a movie on the original song clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BgaActivation {
+    pub channel: BgaChannel,
+    pub image: ImageId,
+    pub activated_at: Timestamp,
+    /// Initial Poor is a selection without a timed marker.
+    pub ordinal: Option<u64>,
+}
+
 /// Immutable per-channel indexes prepared before play; queries allocate nothing.
 #[derive(Clone, Debug, Default)]
 pub struct BgaTimeline {
@@ -107,6 +117,42 @@ impl BgaTimeline {
         }
     }
 
+    /// Exact activations in Base, Layer, Poor, Layer2 order. Repeated image
+    /// references retain their distinct timestamps and acquisition ordinals.
+    pub fn activations_at(&self, now: Timestamp) -> [Option<BgaActivation>; 4] {
+        let kinds = [
+            BgaChannel::Base,
+            BgaChannel::Layer,
+            BgaChannel::Poor,
+            BgaChannel::Layer2,
+        ];
+        std::array::from_fn(|channel| {
+            let events = &self.channels[channel];
+            let end = events.partition_point(|event| event.at <= now);
+            end.checked_sub(1)
+                .map(|index| {
+                    let event = events[index];
+                    BgaActivation {
+                        channel: event.channel,
+                        image: event.image,
+                        activated_at: event.at,
+                        ordinal: Some(event.ordinal),
+                    }
+                })
+                .or_else(|| {
+                    (channel == 2)
+                        .then_some(self.initial_poor)
+                        .flatten()
+                        .map(|image| BgaActivation {
+                            channel: kinds[channel],
+                            image,
+                            activated_at: Timestamp::ZERO,
+                            ordinal: None,
+                        })
+                })
+        })
+    }
+
     /// Number of prepared visual markers, independent of resource definitions.
     pub fn len(&self) -> usize {
         self.channels.iter().map(Vec::len).sum()
@@ -175,26 +221,22 @@ mod tests {
     #[test]
     fn rejection_and_empty_pristine_state_do_not_require_resources() {
         assert!(BgaTimeline::new(vec![event(-1, 0, BgaChannel::Base, 1)], None).is_err());
-        assert!(
-            BgaTimeline::new(
-                vec![
-                    event(2, 0, BgaChannel::Base, 1),
-                    event(1, 1, BgaChannel::Layer, 1)
-                ],
-                None
-            )
-            .is_err()
-        );
-        assert!(
-            BgaTimeline::new(
-                vec![
-                    event(1, 0, BgaChannel::Base, 1),
-                    event(1, 0, BgaChannel::Layer, 1)
-                ],
-                None
-            )
-            .is_err()
-        );
+        assert!(BgaTimeline::new(
+            vec![
+                event(2, 0, BgaChannel::Base, 1),
+                event(1, 1, BgaChannel::Layer, 1)
+            ],
+            None
+        )
+        .is_err());
+        assert!(BgaTimeline::new(
+            vec![
+                event(1, 0, BgaChannel::Base, 1),
+                event(1, 0, BgaChannel::Layer, 1)
+            ],
+            None
+        )
+        .is_err());
         assert!(check_limit(MAX_SOURCE_ITEMS).is_ok());
         assert!(check_limit(MAX_SOURCE_ITEMS + 1).is_err());
         let empty = BgaTimeline::default();

@@ -389,6 +389,11 @@ impl PlayerChart {
         self.bga.state_at(now)
     }
 
+    /// Exact video activations on the same original-song visual timeline.
+    pub fn bga_activations(&self, now: Timestamp) -> [Option<crate::bga::BgaActivation>; 4] {
+        self.bga.activations_at(now)
+    }
+
     /// Per-channel opacity at the exact original song time, independent of images.
     pub fn bga_opacity(&self, now: Timestamp) -> crate::bga_opacity::BgaOpacity {
         self.opacity.state_at(now)
