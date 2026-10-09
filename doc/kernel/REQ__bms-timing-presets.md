@@ -53,3 +53,27 @@ grades, offset applied once, tail bounds beyond the routing envelope, ownership,
 and same-envelope snapshot mismatch/restore. These tests are not full task QA.
 Application ClassifiedWindow/completion, immutable recorded policy, replay and
 native/browser selectors remain required in this active task.
+
+The app resolver now retains numerical selection, header precedence and all
+four applied profiles beside the existing ClassifiedWindow/gauge policy.
+Policy-aware native pristine preparation uses staged rules; cold admission
+compares actual builtin stage configuration even without recording. Both
+selected-policy/legacy-judge and legacy-policy/staged-judge mismatches refuse.
+The core inspection port has no BMS classification or native IO.
+
+An optional outer timing setup codec preserves numerical/Hold versions,
+difficulty declaration, effective percentage and every classified extent.
+Decoding recomputes the selected table and compares all stored values; absent
+timing retains legacy bytes. Seven codec fixtures include real replay-file wire
+roundtrips, malformed/version/window rejection and exact header limits. The
+app timing-focused development run passed 42 tests after the reverse-identity
+review finding was fixed. The subsequent no-default-features app library
+regression passed 1,745 tests with zero failures and four ignored; this excludes
+desktop/browser feature execution. These codec helpers are not yet connected to every
+capture/replay consumer; that integration and actual selectors remain open.
+
+Before the subsequent cold inspection addition, the core/BMS regression run
+passed 541 tests including doctests, zero failures/ignored. Its first cold build
+hit the bounded 240-second timeout; the follow-up warm run exited successfully.
+This is development evidence, not independent final task QA or all-platform
+release acceptance.

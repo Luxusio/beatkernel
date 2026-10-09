@@ -73,12 +73,13 @@ impl NativeJudgeConfig {
         chart: CompiledChart,
         policy: &crate::play_policy::ResolvedPlayPolicy,
     ) -> NativeGameplayResult<JudgeEngine> {
-        Ok(crate::mine_plan::prepare_judge(
+        Ok(crate::mine_plan::prepare_judge_with_timing(
             source,
             chart,
             policy.judge().clone(),
             BmsInputMode::ButtonOnly,
             beatkernel_bms::ParseOptions::default().max_objects,
+            policy.timing().map(|timing| timing.profiles()),
         )?)
     }
     /// Constructs the actual source-aware pristine judge before native output
@@ -111,6 +112,16 @@ impl NativeJudgeConfig {
             self.preroll,
             self.output,
         )?))
+    }
+    /// Uses the actual immutable selected stage deadline and calibration.
+    pub fn completion_with_policy(
+        &self,
+        prepared: &PreparedBms,
+        policy: &crate::play_policy::ResolvedPlayPolicy,
+    ) -> NativeGameplayResult<Option<SongCompletion>> {
+        if self.end.is_some() { return Ok(None); }
+        Ok(Some(SongCompletion::prepare(prepared, policy.completion_late().as_nanos(),
+            policy.judge().input_offset().as_nanos(), self.preroll, self.output)?))
     }
 }
 /// Refuse unsupported identity preparation before native/ghost/network acquisition.

@@ -4,7 +4,50 @@ use beatkernel::{
     judge::{JudgeError, JudgeGrade, JudgeProfile, JudgeWindow},
     time::Duration,
 };
-use beatkernel_bms::{BmsChart, BmsGaugeError, BmsGaugeKind, BmsJudgment, ResolvedTotal};
+use beatkernel_bms::{
+    BmsChart, BmsGaugeError, BmsGaugeKind, BmsJudgeDifficulty, BmsJudgment, BmsRankPrecedence,
+    BmsTimingPreset, BmsTimingPresetError, BmsTimingProfiles, BmsTimingStage, ResolvedTotal,
+};
+
+/// Explicit numerical version and header precedence; neither has a default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimingPresetSelection {
+    pub preset: BmsTimingPreset,
+    pub precedence: BmsRankPrecedence,
+}
+
+/// Immutable selected numerical policy, retaining the caller's precedence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedTimingPolicy {
+    selection: TimingPresetSelection,
+    profiles: BmsTimingProfiles,
+}
+impl ResolvedTimingPolicy {
+    /// Recomputes a recorded numerical policy from its explicit typed declaration.
+    /// Codecs must additionally compare every stored effective window and version.
+    pub fn from_recorded(
+        selection: TimingPresetSelection,
+        difficulty: BmsJudgeDifficulty,
+    ) -> Result<Self, PolicyError> {
+        Ok(Self {
+            selection,
+            profiles: selection
+                .preset
+                .resolve(difficulty)
+                .map_err(PolicyError::Timing)?,
+        })
+    }
+    pub const fn selection(&self) -> TimingPresetSelection {
+        self.selection
+    }
+    pub fn profiles(&self) -> &BmsTimingProfiles {
+        &self.profiles
+    }
+    /// Recorded independently from the numerical-table version.
+    pub const fn interaction_semantics(&self) -> &'static str {
+        "beatkernel-hold/v1"
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GaugeSelection {
@@ -59,6 +102,8 @@ pub enum PolicyError {
     Judge(JudgeError),
     Gauge(GaugeError),
     Bms(BmsGaugeError),
+    Rank(beatkernel_bms::BmsError),
+    Timing(BmsTimingPresetError),
 }
 impl std::fmt::Display for PolicyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -73,6 +118,7 @@ pub struct ResolvedPlayPolicy {
     gauge: GaugeProfile,
     total: Option<ResolvedTotal>,
     judgments: Option<crate::judgment_policy::BmsJudgmentPolicy>,
+    timing: Option<ResolvedTimingPolicy>,
 }
 impl ResolvedPlayPolicy {
     pub fn builtin(early: i64, late: i64, offset: i64) -> Result<Self, PolicyError> {
@@ -92,6 +138,7 @@ impl ResolvedPlayPolicy {
             gauge: GaugeProfile::default(),
             total: None,
             judgments: None,
+            timing: None,
         })
     }
     /// Resolve from the original source; callers retain this policy when selecting practice heads.
@@ -168,7 +215,47 @@ impl ResolvedPlayPolicy {
             gauge,
             total: Some(total),
             judgments: Some(judgments),
+            timing: None,
         })
+    }
+    /// Resolves an opt-in preset from the original source before practice filtering.
+    /// Hit classes use the existing ClassifiedWindow path; the judge profile is
+    /// only the head routing envelope, not a replacement for staged rules.
+    pub fn bms_with_timing(
+        source: &BmsChart,
+        kind: BmsGaugeKind,
+        selection: TimingPresetSelection,
+        offset: i64,
+    ) -> Result<Self, PolicyError> {
+        let difficulty = source
+            .judge_rank_metadata()
+            .map_err(PolicyError::Rank)?
+            .resolve(selection.precedence)
+            .ok_or(PolicyError::Invalid(
+                "timing preset requires declared RANK or DEFEXRANK",
+            ))?;
+        let timing = ResolvedTimingPolicy::from_recorded(selection, difficulty)?;
+        let profiles = &timing.profiles;
+        let envelope = profiles
+            .head_envelope(Duration::from_nanos(offset))
+            .map_err(PolicyError::Judge)?;
+        let mut classified = [ClassifiedWindow {
+            judgment: BmsJudgment::PGreat,
+            window: envelope.windows()[0],
+        }; 4];
+        for ((entry, window), class) in classified
+            .iter_mut()
+            .zip(envelope.windows())
+            .zip(profiles.windows(BmsTimingStage::KeyHead))
+        {
+            *entry = ClassifiedWindow {
+                judgment: class.judgment,
+                window: *window,
+            };
+        }
+        let mut policy = Self::bms(source, kind, &classified, offset)?;
+        policy.timing = Some(timing);
+        Ok(policy)
     }
     pub const fn selection(&self) -> GaugeSelection {
         self.selection
@@ -185,7 +272,96 @@ impl ResolvedPlayPolicy {
     pub fn judgments(&self) -> Option<&crate::judgment_policy::BmsJudgmentPolicy> {
         self.judgments.as_ref()
     }
+    pub fn timing(&self) -> Option<&ResolvedTimingPolicy> {
+        self.timing.as_ref()
+    }
+    /// Checks actual immutable stage windows even when no recording is enabled.
+    /// Equal routing envelopes alone do not establish selected policy identity.
+    pub fn validate_timing(
+        &self,
+        judge: &beatkernel::judge::JudgeEngine,
+        mode: beatkernel_bms::BmsInputMode,
+    ) -> Result<(), PolicyError> {
+        let Some(timing) = &self.timing else {
+            if judge
+                .chart()
+                .objects()
+                .iter()
+                .any(|object| judge.builtin_timing(object.id).is_some())
+            {
+                return Err(PolicyError::Invalid(
+                    "staged rules require selected timing identity",
+                ));
+            }
+            return Ok(());
+        };
+        if judge.profile() != &self.judge {
+            return Err(PolicyError::Invalid(
+                "selected timing routing envelope differs",
+            ));
+        }
+        let profiles = [
+            BmsTimingStage::KeyHead,
+            BmsTimingStage::ScratchHead,
+            BmsTimingStage::KeyTail,
+            BmsTimingStage::ScratchTail,
+        ]
+        .map(|stage| timing.profiles.judge_profile(stage));
+        let [key_head, scratch_head, key_tail, scratch_tail] = profiles;
+        let (key_head, scratch_head, key_tail, scratch_tail) = (
+            key_head.map_err(PolicyError::Judge)?,
+            scratch_head.map_err(PolicyError::Judge)?,
+            key_tail.map_err(PolicyError::Judge)?,
+            scratch_tail.map_err(PolicyError::Judge)?,
+        );
+        for object in judge.chart().objects() {
+            let actual = judge.builtin_timing(object.id).ok_or(PolicyError::Invalid(
+                "selected timing requires staged builtin rules",
+            ))?;
+            // BMS logical controls preserve the visible source channel code.
+            if !matches!(actual.control.0, 0x11..=0x19 | 0x21..=0x29) {
+                return Err(PolicyError::Invalid(
+                    "selected timing has an unknown BMS lane",
+                ));
+            }
+            let (head, tail) = if actual.control.0 & 15 == 6 {
+                (&scratch_head, &scratch_tail)
+            } else {
+                (&key_head, &key_tail)
+            };
+            if actual.head != head
+                || actual.tail != object.time.end.map(|_| tail)
+                || actual.accepts_contact != (mode == beatkernel_bms::BmsInputMode::ButtonOrContact)
+                || actual.semantics != timing.interaction_semantics()
+            {
+                return Err(PolicyError::Invalid(
+                    "selected timing differs from actual stage rules",
+                ));
+            }
+        }
+        Ok(())
+    }
+    /// Maximum actual late stage extent, including long-note releases.
+    pub fn completion_late(&self) -> Duration {
+        self.timing
+            .as_ref()
+            .map_or(self.judge.max_late(), |timing| {
+                [
+                    BmsTimingStage::KeyHead,
+                    BmsTimingStage::ScratchHead,
+                    BmsTimingStage::KeyTail,
+                    BmsTimingStage::ScratchTail,
+                ]
+                .into_iter()
+                .flat_map(|stage| timing.profiles.windows(stage).iter())
+                .map(|entry| entry.window.late)
+                .max()
+                .expect("four nonempty profiles")
+            })
+    }
     /// Legacy judge/gauge extraction does not assign class semantics to consumers.
+    /// Stage windows are not carried by this legacy tuple; selected timing must
+    /// use policy-aware preparation rather than rebuilding rules from the tuple.
     pub fn into_parts(self) -> (JudgeProfile, GaugeProfile) {
         (self.judge, self.gauge)
     }
@@ -193,3 +369,6 @@ impl ResolvedPlayPolicy {
 #[cfg(test)]
 #[path = "play_policy_fixtures.rs"]
 mod fixtures;
+#[cfg(test)]
+#[path = "timing_policy_fixtures.rs"]
+mod timing_fixtures;

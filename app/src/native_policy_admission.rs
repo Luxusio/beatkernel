@@ -156,6 +156,7 @@ pub(crate) fn validate_selected_in_domain(
     if judge.profile() != policy.judge() || gauge.profile() != policy.gauge() {
         return Err("selected native policy differs from actual judge or gauge".into());
     }
+    policy.validate_timing(judge, beatkernel_bms::BmsInputMode::ButtonOnly)?;
     validate_capture_in_domain(
         judge,
         gauge.profile(),

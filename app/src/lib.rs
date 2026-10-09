@@ -444,6 +444,10 @@ pub mod replay_gauge_policy;
 mod replay_gauge_sound_stop_fixtures;
 /// Canonical optional recorded judgment-class identity.
 pub mod replay_judgment_policy;
+/// Canonical optional numerical timing and staged interaction identity.
+pub mod replay_timing_policy;
+#[cfg(test)]
+mod replay_timing_policy_fixtures;
 pub mod replay_pause;
 /// Checked durable replay reconstruction through the same builtin BMS judge.
 pub mod replay_playback;

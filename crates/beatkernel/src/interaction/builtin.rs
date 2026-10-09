@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::{
-    ActiveInteraction, BeginContext, InputOwner, InteractionContext, InteractionEvaluator,
-    InteractionOutput, InteractionResult, InteractionState, StartEligibility,
+    ActiveInteraction, BeginContext, BuiltinTimingConfiguration, InputOwner, InteractionContext,
+    InteractionEvaluator, InteractionOutput, InteractionResult, InteractionState, StartEligibility,
 };
 
 /// A point interaction completed by a fresh button press.
@@ -404,6 +404,17 @@ impl ButtonInteraction {
 }
 
 impl ActiveInteraction for ButtonInteraction {
+    fn builtin_timing(&self) -> Option<BuiltinTimingConfiguration<'_>> {
+        self.profiles
+            .as_ref()
+            .map(|profiles| BuiltinTimingConfiguration {
+                control: self.control,
+                head: &profiles.head,
+                tail: profiles.tail.as_ref(),
+                accepts_contact: self.accepts_contact,
+                semantics: "beatkernel-hold/v1",
+            })
+    }
     fn snapshot_clone(&self) -> Option<Box<dyn ActiveInteraction>> {
         Some(Box::new(self.clone()))
     }

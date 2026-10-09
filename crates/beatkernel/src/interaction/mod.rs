@@ -87,7 +87,7 @@ pub trait InteractionEvaluator: Send + Sync {
 
     /// Begins an object already accepted by [`Self::validate`].
     fn begin(&self, object: &TimedObject, context: &BeginContext<'_>)
-    -> Box<dyn ActiveInteraction>;
+        -> Box<dyn ActiveInteraction>;
 }
 
 /// Eligibility used to build separate builtin and custom pending indexes.
@@ -101,8 +101,28 @@ pub enum StartEligibility {
     ProfilePress,
 }
 
+/// Cold inspection of immutable builtin stage configuration, without snapshots.
+#[derive(Clone, Copy, Debug)]
+pub struct BuiltinTimingConfiguration<'a> {
+    /// Logical destination used by the actual interaction.
+    pub control: GameControlId,
+    /// Selected zero-offset start windows.
+    pub head: &'a JudgeProfile,
+    /// Selected zero-offset release windows, absent for instant objects.
+    pub tail: Option<&'a JudgeProfile>,
+    /// Whether individually owned touch contacts are admitted.
+    pub accepts_contact: bool,
+    /// Version of the builtin stage transition behavior.
+    pub semantics: &'static str,
+}
+
 /// Single-owner state transitions for one validated object.
 pub trait ActiveInteraction: Send {
+    /// Reports immutable staged builtin configuration for cold policy admission.
+    /// Custom or legacy implementations are unsupported by default.
+    fn builtin_timing(&self) -> Option<BuiltinTimingConfiguration<'_>> {
+        None
+    }
     /// Additional logical destinations observed by this interaction.
     ///
     /// These are immutable for the interaction lifetime and included in native

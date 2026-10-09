@@ -467,6 +467,17 @@ impl JudgeEngine {
             .map(|&index| self.interactions[index].state())
     }
 
+    /// Inspects immutable staged builtin windows during cold policy preparation.
+    /// Unknown objects and legacy/custom interactions report no configuration.
+    pub fn builtin_timing(
+        &self,
+        object: ObjectId,
+    ) -> Option<crate::interaction::BuiltinTimingConfiguration<'_>> {
+        self.identities
+            .get(&object)
+            .and_then(|&index| self.interactions[index].builtin_timing())
+    }
+
     /// Returns the last accepted operation's effective time, if any.
     pub const fn effective_song_time(&self) -> Option<Timestamp> {
         self.effective_time

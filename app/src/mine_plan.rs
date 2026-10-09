@@ -65,6 +65,18 @@ pub fn prepare_judge(
     mode: BmsInputMode,
     max_markers: usize,
 ) -> Result<JudgeEngine, String> {
+    prepare_judge_with_timing(source, chart, profile, mode, max_markers, None)
+}
+
+/// Preserves source mine configuration while preparing explicit staged windows.
+pub fn prepare_judge_with_timing(
+    source: &BmsChart,
+    chart: CompiledChart,
+    profile: JudgeProfile,
+    mode: BmsInputMode,
+    max_markers: usize,
+    timing: Option<&beatkernel_bms::BmsTimingProfiles>,
+) -> Result<JudgeEngine, String> {
     let plan = MinePlan::prepare(source, max_markers)?;
     let constructor = if mode == BmsInputMode::ButtonOrContact
         && (!source.invisible.is_empty() || !source.mines.is_empty())
@@ -73,8 +85,13 @@ pub fn prepare_judge(
     } else {
         JudgeEngine::new
     };
-    let mut judge = constructor(chart, source.rules_with_input_mode(mode), profile)
-        .map_err(|error| error.to_string())?;
+    let rules = match timing {
+        Some(timing) => source
+            .rules_with_timing_profiles(mode, timing)
+            .map_err(|error| error.to_string())?,
+        None => source.rules_with_input_mode(mode),
+    };
+    let mut judge = constructor(chart, rules, profile).map_err(|error| error.to_string())?;
     if let Some(timeline) = plan.timeline {
         judge
             .configure_hazards(timeline)
