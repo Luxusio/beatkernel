@@ -52,7 +52,8 @@ function fail(error, operationId = null, identity = current) {
   // Gameplay decides capture-preserving failed stop. This owner has no game.
 }
 function wait(identity) {
-  send({ kind: "render-wait", generation: identity.generation, content: identity.content, geometryVersion });
+  send({ kind: "render-wait", generation: identity.generation, content: identity.content, mode: identity.mode, geometryVersion,
+    ...(identity.menu ? { menuGeneration: identity.menu.generation, screen: identity.menu.screen, revision: identity.menu.revision } : {}) });
 }
 function scheduleDraw(reset = true) {
   if (disposed || failed || !view || !current || !current.drawable) return;
@@ -76,7 +77,8 @@ function scheduleDraw(reset = true) {
       }
       if (presented) {
         retries = 0;
-        send({ kind: "drawn", generation: identity.generation, content: identity.content, sequence: identity.sequence });
+        send({ kind: "drawn", generation: identity.generation, content: identity.content, mode: identity.mode, sequence: identity.sequence,
+          ...(identity.menu ? { menuGeneration: identity.menu.generation, screen: identity.menu.screen, revision: identity.menu.revision } : {}) });
         if (geometryVersion > submittedGeometry) {
           const page = identity.mode === "menu" ? view.menu_page() : view.visual_page();
           const [width, height] = extent;

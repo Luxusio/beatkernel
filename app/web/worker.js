@@ -350,8 +350,12 @@ function scopedRenderPort(context) {
       port.onmessage = listener === null ? null : event => {
         const evidence = event.data;
         if (currentVisual(context) && evidence?.generation === context.generation && evidence.content === context.content
-          && ["drawn", "render-wait"].includes(evidence.kind)) {
+          && ["drawn", "render-wait"].includes(evidence.kind)
+          && (context.mode !== "menu" || evidence.menuGeneration === menuGeneration
+            && evidence.screen === menuOwner.screen && evidence.revision === menuOwner.revision)) {
           report(evidence.kind, { selectedId, generation: context.generation, content: context.content,
+            mode: context.mode, ...(context.mode === "menu" ? { menuGeneration: evidence.menuGeneration,
+              screen: evidence.screen, revision: evidence.revision } : {}),
             ...(play === context.owner ? { playId: play.id } : {}) });
         }
         if (currentVisual(context) && evidence?.kind === "video-unavailable"

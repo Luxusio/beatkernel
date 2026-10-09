@@ -179,6 +179,27 @@ function motionRequest(fields = {}) {
     durationMs: 1000, easing: 2, ...fields };
 }
 
+test("menu drawn and waiting evidence retain the exact screen revision across navigation", async () => {
+  const h = await rendererHarness();
+  try {
+    await h.init(); await h.send(menuRequest()); await h.draw();
+    const first = ofKind(h, "drawn").at(-1);
+    assert.equal(first.mode, "menu");
+    assert.deepEqual([first.menuGeneration, first.screen, first.revision], [77n, 3n, 5n]);
+    await h.send({ kind: "resize", operationId: 2n, generation: 7n, content: 9n,
+      width: 0, height: 0, geometryVersion: 12n });
+    const waiting = ofKind(h, "render-wait").at(-1);
+    assert.deepEqual([waiting.mode, waiting.menuGeneration, waiting.screen, waiting.revision], ["menu", 77n, 3n, 5n]);
+    const next = menuRequest(3n, { geometryVersion: 13n });
+    const view = new DataView(next.packet.buffer);
+    view.setBigUint64(12, 4n, true); view.setBigUint64(20, 6n, true);
+    await h.send(next);
+    const latest = ofKind(h, "render-wait").at(-1);
+    assert.deepEqual([latest.menuGeneration, latest.screen, latest.revision], [77n, 4n, 6n]);
+    assert.deepEqual([waiting.menuGeneration, waiting.screen, waiting.revision], [77n, 3n, 5n], "queued evidence remains a snapshot");
+  } finally { await h.close(); }
+});
+
 test("menu motion uses the frozen binding and keeps presenting beyond the surface retry budget", async () => {
   const h = await rendererHarness();
   try {

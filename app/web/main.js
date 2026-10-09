@@ -1,6 +1,7 @@
 import { validateCompletedResults, validateCompletedArchive } from "./completed-results-model.mjs";
 import { snapshotFiles, nanoseconds, seconds, validateHistoricalGradeSnapshot, HistoricalGradePager } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
+import { PresentationStatus } from "./presentation-status.mjs";
 import { RecordsStore } from "./record-store.mjs";
 import { HidInputOwner } from "./hid-input.mjs";
 import { GamepadInputOwner } from "./gamepad-input.mjs";
@@ -195,6 +196,7 @@ function receiveMenu(data) {
       } catch (error) { status(error.message, true); return; }
     }
     menuState = Object.freeze({ ...data, fields: Object.freeze([...data.fields]), owner, worker });
+    if (!unchangedToken) presentationStatus.invalidate(true);
     const sourcesPending = menuSourcesPending;
     if (sourcesPending && !menuSourcesCurrent(sourcesPending)) menuSourcesPending = null;
     else if (sourcesPending && sameMenuSourceFields(data.fields, sourcesPending.sent)) {
@@ -764,9 +766,14 @@ function pointerSetupFor(session) {
   return Object.freeze({ devices: session.pointerDevices, bindingWords: Uint32Array.from(words) });
 }
 
-function status(text, error = false) {
+const presentationStatus = new PresentationStatus((text, error) => {
   ui.status.textContent = text;
   ui.status.dataset.error = String(error);
+}, ui.status.textContent, ui.status.dataset.error === "true");
+const presentationIdentity = { owner: 0, worker: null, selectedId: 0, playId: undefined, generation: 0n, content: 0n };
+
+function status(text, error = false) {
+  presentationStatus.message(text, error);
 }
 
 function hidCapable() {
@@ -1047,6 +1054,7 @@ function stop() {
   ++startRequest;
   if (shutdown) return shutdown;
   shuttingDown = true;
+  presentationStatus.invalidate();
   cancelMenuComposition(); menuEditPending = null; menuSourcesPending = null;
   initialized = false;
   closingOwner = owner++;
@@ -1160,7 +1168,7 @@ function prepare() {
   } catch (error) { preparing = false; controls(); status(error.message, true); }
 }
 
-function received(data) {
+function received(data, sourceWorker = worker, sourceOwner = owner) {
   if (data?.kind?.startsWith("menu-")) { receiveMenu(data); return; }
   if (data?.kind === "render-geometry") { receiveGeometry(data); return; }
   if (shuttingDown && !data?.kind?.startsWith("play-")) return;
@@ -1205,8 +1213,9 @@ function received(data) {
     ui.position.value = "0";
     controls();
     status("Chart prepared at 0 seconds. This preview does not play audio or judge input.");
-  } else if (data.kind === "drawn" && data.selectedId === selectedId && !preparing) canvas.hidden = false;
-  else if (data.kind === "selection-error" && data.id === selectId) {
+  } else if (data.kind === "drawn" || data.kind === "render-wait") {
+    receivePresentation(data, sourceWorker, sourceOwner);
+  } else if (data.kind === "selection-error" && data.id === selectId) {
     preparing = false;
     canvas.hidden = !hasPreview;
     controls();
@@ -1221,7 +1230,38 @@ function received(data) {
     controls();
     status(data.message, true);
   }
-  else if (data.kind === "render-wait" && data.selectedId === selectedId) status("The graphics surface is not ready. Resize the view or choose Show position to retry.", true);
+}
+
+function receivePresentation(data, sourceWorker, sourceOwner) {
+  if (!worker || sourceWorker !== worker || sourceOwner !== owner || shuttingDown || closingOwner !== null
+    || preparing || !Number.isSafeInteger(data.selectedId) || data.selectedId < 0
+    || data.selectedId !== selectedId
+    || !menuIdentity(data.generation) || !menuIdentity(data.content)) return;
+  const session = activePlay;
+  if (session ? data.playId !== session.id || session.owner !== owner || session.phase === "closing"
+    : data.playId !== undefined) return;
+  if (data.playId !== undefined && (!Number.isSafeInteger(data.playId) || data.playId <= 0)) return;
+  if (data.mode === "menu") {
+    const token = menuToken();
+    if (!token || data.menuGeneration !== token.menuGeneration || data.screen !== token.screen || data.revision !== token.revision) return;
+  } else if (data.menuGeneration !== undefined || data.screen !== undefined || data.revision !== undefined) return;
+  if (submittedGeometry && (data.generation < submittedGeometry.generation
+    || (data.generation === submittedGeometry.generation && data.content !== submittedGeometry.content))) return;
+  // Reuse this scalar carrier; the helper copies waits and retains no draw packet.
+  presentationIdentity.owner = owner;
+  presentationIdentity.worker = worker;
+  presentationIdentity.selectedId = data.selectedId;
+  presentationIdentity.playId = data.playId;
+  presentationIdentity.generation = data.generation;
+  presentationIdentity.content = data.content;
+  presentationIdentity.menuGeneration = data.menuGeneration;
+  presentationIdentity.screen = data.screen;
+  presentationIdentity.revision = data.revision;
+  if (data.kind === "drawn") {
+    if (canvas.hidden) canvas.hidden = false;
+    presentationStatus.drawn(presentationIdentity);
+  } else presentationStatus.wait(presentationIdentity,
+    "The graphics surface is not ready. Resize the view or choose Show position to retry.");
 }
 
 function receiveGeometry(data) {
@@ -1346,7 +1386,7 @@ async function start() {
         return;
       }
       if (worker === game && (generation === owner
-        || (shuttingDown && generation === closingOwner && event.data?.kind?.startsWith("play-")))) received(event.data);
+        || (shuttingDown && generation === closingOwner && event.data?.kind?.startsWith("play-")))) received(event.data, game, generation);
     });
     worker.addEventListener("error", event => {
       if (generation !== owner) return;

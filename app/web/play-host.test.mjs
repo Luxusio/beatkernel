@@ -581,7 +581,7 @@ async function harness(faults = {}) {
     this.setExport("RecordsStore", RecordsStore);
   }, { context });
   const modules = new Map();
-  for (const name of ["completed-results-model.mjs", "host_model.mjs", "play-model.mjs", "settings-profile.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "pointer-input.mjs", "local-play-host.mjs", "main.js"]) {
+  for (const name of ["presentation-status.mjs", "completed-results-model.mjs", "host_model.mjs", "play-model.mjs", "settings-profile.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "pointer-input.mjs", "local-play-host.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
     modules.set(name, new SourceTextModule(await readFile(url, "utf8"), {
       context, identifier: url.href, initializeImportMeta(meta) { meta.url = url.href; },
@@ -638,7 +638,7 @@ async function harness(faults = {}) {
     const selected = worker.last("select");
     await receive({ kind: "selected", id: selected.id, libraryId: imported.id, path: "chart.bms",
       title: "Accepted preview", artist: "Preview artist", notes: 6, samples: 1, images: 0, duration: "6000000000" });
-    await receive({ kind: "drawn", selectedId: selected.id });
+    await receive({ kind: "drawn", selectedId: selected.id, generation: 1n, content: 1n });
     if (!faults.holdGeometry) await geometry({ selectedId: selected.id });
     get("position").value = "12.345678901";
     get("seek-form").emit("submit");
@@ -7263,4 +7263,228 @@ test("main stored-record detail caption admits 1033 pages while matching changed
   await h.receive({ kind: "historical-record-page-result", id: malformed.id, rpcId: malformed.rpcId, gradePage: 2, gradePages: 1034, error: null });
   assert.equal(h.get("historical-grade-next").hidden, true); assert.equal(h.get("replay-name").textContent, replay);
   assert.equal(h.get("replay-play").disabled, false); assert.equal(h.opens.length, 0); await h.close();
+});
+
+// These exercise the actual Window module's status wiring. The controlled
+// Worker is deliberately not proof of a native GPU presentation.
+function presentationPacket(h, kind, fields = {}) {
+  return { kind, selectedId: h.workers.at(-1).last("select").id,
+    generation: 7n, content: 11n, ...fields };
+}
+function statusSnapshot(h) {
+  return { text: h.get("status").textContent, error: h.get("status").dataset.error };
+}
+test("presentation feedback: preview wait restores status only on matching drawn and idle packets do not write", async () => {
+  const h = await harness(); await h.preview(); const baseline = statusSnapshot(h);
+  const writes = watchPlayDisplay(h);
+  await h.receive(presentationPacket(h, "drawn"));
+  assert.equal(writes.length, 0);
+  await h.receive(presentationPacket(h, "render-wait"));
+  assert.match(h.get("status").textContent, /graphics surface.*not ready/i);
+  assert.equal(h.get("status").dataset.error, "true");
+  await h.receive(presentationPacket(h, "render-wait"));
+  assert.equal(writes.filter(write => write.id === "status").length, 1);
+  for (const fields of [{ generation: 6n }, { content: 12n }, { selectedId: 999 }, { playId: 1 }]) {
+    await h.receive(presentationPacket(h, "drawn", fields));
+    assert.match(h.get("status").textContent, /graphics surface.*not ready/i);
+  }
+  await h.receive(presentationPacket(h, "drawn")); assert.deepEqual(statusSnapshot(h), baseline);
+  assert.equal(h.get("canvas").hidden, false);
+  const count = writes.length; await h.receive(presentationPacket(h, "drawn")); assert.equal(writes.length, count);
+  await h.close();
+});
+test("presentation feedback: newer preview messages and late application errors survive presentation", async () => {
+  for (const error of [false, true]) {
+    const h = await harness(); await h.preview();
+    await h.receive(presentationPacket(h, "render-wait"));
+    h.get("position").value = "3.125"; h.get("seek-form").emit("submit");
+    const seek = h.workers[0].last("seek");
+    await h.receive(error ? { kind: "seek-error", id: seek.id, selectedId: seek.selectedId, message: "Seek operation failed" }
+      : { kind: "position", id: seek.id, selectedId: seek.selectedId, ns: "3125000000" });
+    const ordinary = statusSnapshot(h);
+    assert.equal(ordinary.error, String(error));
+    assert.match(ordinary.text, error ? /Seek operation failed/ : /Preview position: 3.125/);
+    await h.receive(presentationPacket(h, "drawn")); assert.deepEqual(statusSnapshot(h), ordinary);
+    await h.receive(presentationPacket(h, "render-wait", { generation: 8n }));
+    await h.receive(presentationPacket(h, "drawn", { generation: 8n }));
+    assert.deepEqual(statusSnapshot(h), ordinary, "a preceding error is restored with its error bit");
+    await h.close();
+  }
+});
+test("presentation feedback: live replay and local play restore their own ordinary feedback and retain controls", async () => {
+  for (const mode of ["live", "replay", "local"]) {
+    const h = await harness({ touchSupported: mode === "local" }); await h.preview();
+    if (mode === "replay") chooseRecording(h, [selectedRecording().file]);
+    if (mode === "local") {
+      await localCount(h, 2); h.click("local-discover"); await flush();
+      localAssign(h, 1, 1n); localAssign(h, 2, 2n);
+    }
+    const session = await h.launch(0, mode === "replay" ? "replay" : "live");
+    if (mode === "local") assert.equal(session.start.localPlanWords.length, 8);
+    const baseline = statusSnapshot(h);
+    await h.receive(presentationPacket(h, "render-wait", { playId: session.id }));
+    assert.match(h.get("status").textContent, /graphics surface.*not ready/i);
+    for (const fields of [{ playId: session.id + 1 }, { playId: undefined }, { generation: 6n }, { content: 2n }]) {
+      await h.receive(presentationPacket(h, "drawn", fields));
+      assert.match(h.get("status").textContent, /graphics surface.*not ready/i);
+    }
+    await h.receive(presentationPacket(h, "drawn", { playId: session.id }));
+    assert.deepEqual(statusSnapshot(h), baseline);
+    assert.equal(h.get("stop").disabled, false); assert.equal(h.get("play").disabled, true);
+    h.click("stop"); await flush();
+    await h.receive(mode === "local" ? localFinal(session.start) : finalScore(session.id));
+    await h.close();
+  }
+});
+test("presentation feedback: invalid or inactive play packets never create a wait overlay", async () => {
+  const h = await harness(); await h.preview(); const baseline = statusSnapshot(h);
+  for (const fields of [{ playId: 1 }, { selectedId: 0 }, { generation: undefined }, { generation: 0n },
+    { generation: 1 }, { content: undefined }, { content: 0n }, { content: "11" }]) {
+    await h.receive(presentationPacket(h, "render-wait", fields));
+    await h.receive(presentationPacket(h, "drawn", fields));
+    assert.deepEqual(statusSnapshot(h), baseline);
+  }
+  const session = await h.launch(); const playing = statusSnapshot(h);
+  for (const fields of [{ playId: session.id + 1 }, { playId: undefined }]) {
+    await h.receive(presentationPacket(h, "render-wait", fields)); assert.deepEqual(statusSnapshot(h), playing);
+  }
+  await h.close();
+});
+test("presentation feedback: preparing chart fences previous waits and presentations", async () => {
+  const h = await harness(); await h.preview(); const old = presentationPacket(h, "drawn");
+  await h.receive({ ...old, kind: "render-wait" });
+  h.get("prepare-form").emit("submit"); await flush(); const preparing = statusSnapshot(h);
+  assert.match(preparing.text, /Preparing chart/); assert.equal(h.get("canvas").hidden, true);
+  await h.receive(old); await h.receive({ ...old, kind: "render-wait" });
+  assert.deepEqual(statusSnapshot(h), preparing); assert.equal(h.get("canvas").hidden, true);
+  await h.close();
+});
+test("presentation feedback: stop and new play cannot revive old play status", async () => {
+  const h = await harness(); await h.preview(); const first = await h.launch();
+  const old = presentationPacket(h, "drawn", { playId: first.id });
+  await h.receive({ ...old, kind: "render-wait" });
+  h.click("stop"); await flush();
+  const closing = statusSnapshot(h);
+  await h.receive(old); await h.receive({ ...old, kind: "render-wait" }); assert.deepEqual(statusSnapshot(h), closing);
+  await h.receive(finalScore(first.id)); const completed = statusSnapshot(h);
+  await h.receive(old); await h.receive({ ...old, kind: "render-wait" }); assert.deepEqual(statusSnapshot(h), completed);
+  const second = await h.launch(); const playing = statusSnapshot(h);
+  await h.receive(old); await h.receive({ ...old, kind: "render-wait" }); assert.deepEqual(statusSnapshot(h), playing);
+  await h.receive(presentationPacket(h, "render-wait", { playId: second.id, generation: 9n }));
+  await h.receive(presentationPacket(h, "drawn", { playId: second.id, generation: 9n }));
+  assert.deepEqual(statusSnapshot(h), playing); await h.close();
+});
+test("presentation feedback: shutdown and replaced Worker cannot alter the replacement owner", async () => {
+  const h = await harness({ holdDispose: true }); await h.preview();
+  const oldWorker = h.workers[0], old = presentationPacket(h, "drawn");
+  await h.receive({ ...old, kind: "render-wait" });
+  h.window.emit("pagehide"); await flush(); const shuttingDown = statusSnapshot(h);
+  await h.receive(old, oldWorker); await h.receive({ ...old, kind: "render-wait" }, oldWorker);
+  assert.deepEqual(statusSnapshot(h), shuttingDown);
+  h.window.emit("pageshow", { persisted: true });
+  await h.receive({ kind: "disposed" }, oldWorker); await h.receive({ kind: "disposed" }, h.renderers[0]);
+  await flush(); h.faults.holdDispose = false; await h.preview();
+  const replacement = statusSnapshot(h), replacementCanvas = h.get("canvas");
+  await h.receive(old, oldWorker); await h.receive({ ...old, kind: "render-wait" }, oldWorker);
+  assert.deepEqual(statusSnapshot(h), replacement); assert.equal(h.get("canvas"), replacementCanvas);
+  await h.close();
+});
+test("presentation feedback: menu Back and history remain ordinary feedback owners", async () => {
+  const h = await harness(storedHistoricalFields()); await selectedHistoricalGrades(h);
+  const baseline = statusSnapshot(h);
+  await h.receive(presentationPacket(h, "render-wait"));
+  await h.receive(presentationPacket(h, "drawn")); assert.deepEqual(statusSnapshot(h), baseline);
+  h.click("menu-open"); await flush();
+  const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+    route: 3, fields: ["0", ""], selected: 0 };
+  await h.receive(state); h.click("menu-back"); await flush();
+  assert.equal(h.workers[0].last("menu-action").control, 72n);
+  const afterBack = statusSnapshot(h);
+  await h.receive(presentationPacket(h, "render-wait", { generation: 9n }));
+  await h.receive(presentationPacket(h, "drawn", { generation: 9n }));
+  assert.deepEqual(statusSnapshot(h), afterBack); assert.equal(h.opens.length, 0); await h.close();
+});
+test("presentation feedback: matching preroll presentation restores preparing text without claiming audio activation", async () => {
+  const h = await harness(); await h.preview(); const start = await h.begin();
+  assert.ok(start); const baseline = statusSnapshot(h); assert.match(baseline.text, /Preparing playable/);
+  await h.receive(presentationPacket(h, "render-wait", { playId: start.playId }));
+  assert.match(h.get("status").textContent, /graphics surface.*not ready/i);
+  await h.receive(presentationPacket(h, "drawn", { playId: start.playId }));
+  assert.deepEqual(statusSnapshot(h), baseline); assert.equal(h.audio.arms.length, 0);
+  assert.equal(h.workers[0].messages("play-activate").length, 0);
+  await h.close();
+});
+
+test("presentation feedback: accepted menu navigation cancels old waits and fences queued screen evidence", async () => {
+  const h = await harness(); await h.preview();
+  const baseline = statusSnapshot(h);
+  await h.receive(presentationPacket(h, "render-wait"));
+  assert.match(statusSnapshot(h).text, /graphics surface.*not ready/i);
+  h.click("menu-open"); await flush();
+  const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+    route: 3, fields: ["0", ""], selected: 0 };
+  await h.receive(state);
+  assert.deepEqual(statusSnapshot(h), baseline, "retired preview wait is not guidance for the menu");
+  const old = { mode: "menu", generation: 9n, content: 11n,
+    menuGeneration: 77n, screen: 3n, revision: 5n };
+  await h.receive(presentationPacket(h, "render-wait", old));
+  assert.match(statusSnapshot(h).text, /graphics surface.*not ready/i);
+  const current = { ...old, screen: 4n, revision: 6n };
+  await h.receive({ ...state, screen: 4n, revision: 6n });
+  assert.deepEqual(statusSnapshot(h), baseline);
+  for (const kind of ["render-wait", "drawn"]) {
+    await h.receive(presentationPacket(h, kind, old));
+    assert.deepEqual(statusSnapshot(h), baseline, "previous menu screen cannot publish feedback");
+  }
+  await h.receive(presentationPacket(h, "render-wait", current));
+  await h.receive(presentationPacket(h, "drawn", old));
+  assert.match(statusSnapshot(h).text, /graphics surface.*not ready/i);
+  await h.receive(presentationPacket(h, "drawn", current));
+  assert.deepEqual(statusSnapshot(h), baseline);
+  await h.close();
+});
+
+test("presentation feedback: first-run menu waiting and recovery require no selected chart", async () => {
+  const h = await harness();
+  await h.receive({ kind: "ready" });
+  await h.receive({ kind: "ready" }, h.renderers.at(-1));
+  const baseline = statusSnapshot(h);
+  assert.equal(h.workers[0].last("select"), undefined);
+  h.click("menu-open"); await flush();
+  assert.ok(h.workers[0].last("menu-open"), "initialized first-run owner admits menu navigation");
+  await h.receive({ kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+    route: 1, fields: [], selected: 0 });
+  const menu = { selectedId: 0, mode: "menu", generation: 7n, content: 11n,
+    menuGeneration: 77n, screen: 3n, revision: 5n };
+  await h.receive({ ...menu, kind: "render-wait", mode: "preview" });
+  assert.deepEqual(statusSnapshot(h), baseline);
+  await h.receive({ ...menu, kind: "render-wait" });
+  assert.match(statusSnapshot(h).text, /graphics surface.*not ready/i);
+  await h.receive({ ...menu, kind: "drawn" });
+  assert.deepEqual(statusSnapshot(h), baseline);
+  assert.equal(h.get("canvas").hidden, false);
+  assert.equal(h.opens.length, 0);
+  assert.equal(h.workers[0].last("select"), undefined);
+  await h.close();
+});
+
+test("presentation feedback: stored history can wait and recover before preparing a chart", async () => {
+  const h = await harness(storedHistoricalFields());
+  await h.receive({ kind: "ready" });
+  await h.receive({ kind: "ready" }, h.renderers.at(-1));
+  assert.equal(h.workers[0].last("select"), undefined);
+  h.click("records-refresh"); await flush(); h.click("records-use"); await flush();
+  const request = h.workers[0].last("historical-record-present");
+  assert.ok(request, "history presentation does not require a prepared preview");
+  await h.receive({ kind: "historical-record-result", id: request.id, available: true, error: null, gradePage: 0, gradePages: 1 });
+  const baseline = statusSnapshot(h);
+  const history = { selectedId: 0, mode: "history", generation: 7n, content: 11n };
+  await h.receive({ ...history, kind: "render-wait" });
+  assert.match(statusSnapshot(h).text, /graphics surface.*not ready/i);
+  await h.receive({ ...history, kind: "drawn" });
+  assert.deepEqual(statusSnapshot(h), baseline);
+  assert.equal(h.get("canvas").hidden, false);
+  assert.equal(h.workers[0].last("select"), undefined);
+  assert.equal(h.opens.length, 0);
+  await h.close();
 });
