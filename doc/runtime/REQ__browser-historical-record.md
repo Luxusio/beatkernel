@@ -30,6 +30,12 @@ selection, preview seek, imported replay selection, reset and fatal owner dispos
 invalidate and release historical presentation. It may render only while idle;
 it cannot replace an active gameplay or joined live Results screen.
 
+## Historical checkpoint — superseded as of 2026-10-10
+
+The following paragraphs describe the earlier compile-only increment. Their
+verification deferral is no longer active; current development checks and
+remaining independent QA are recorded in the later dated section.
+
 Independent deferred pure Rust and actual Worker-message fixtures cover original
 IDs, long extents, malformed later archive rows, legacy absence, idle admission,
 stale/cancelled reads and binding release. Tests, JS parsers, generated WASM,
@@ -100,6 +106,8 @@ green tests were not repeated for that focused correction.
 
 These are development handler fixtures, not actual browser GPU acceptance.
 Fresh full-sweep source review and independent CLI/browser QA remain required.
+
+## Historical compile-only evidence — superseded as of 2026-10-10
 
 Both paired writers returned terminal `Writes STOPPED` before formatting and
 compilation. Seven deferred groups were authored: three pure Rust byte/geometry
