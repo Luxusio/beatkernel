@@ -60,8 +60,15 @@ connected campaign tests. Evidence is
 `target/wf/player-network-ui-fault-schedules/app-all-final.log`. Both new fixture
 files pass Rust 2021 formatting and the complete change passes diff whitespace
 checks. The compile emits the existing browser-menu motion dead-code warning;
-the new unused import was removed before the final run. Independent review and
-subsequent QA remain separate close gates.
+the new unused import was removed before the final run. Independent deep code
+review, subsequent CLI QA and documentation review passed. QA reran the seven
+campaigns plus the existing `room_competition` (32), `competition_progress` (17)
+and `multiplayer_room_progress` (18) filtered tests, all with zero failures.
+Each used the first Cargo command above with its respective filter; logs are
+under `target/wf/player-network-ui-fault-schedules/qa-cli/`. These overlap the
+full app suite and are not additional product requirements. Strict global
+formatting/Clippy success is not claimed: inherited module-order/import and
+intentional reversed-range test debt remains outside this correction.
 
 The network campaign has three tests and uses actual Runtime object IDs101–103,
 10/20/30ms song targets and Device41 sequences901–903, with literal grade7 and
