@@ -22,6 +22,8 @@ Invalid target metadata is rejected before retirement. Native open/format failur
 uses existing recoverable/pending cleanup without implicit backend fallback.
 ASIO selection reuses the existing trusted installed-driver loading policy.
 
+## Known ceiling
+
 Portable tests and foreign Rust typing establish only their stated scope.
 Actual MSVC/ASIO SDK compilation, installed-driver playback, measured latency and
 physical cross-backend continuity remain required before hardware acceptance.
