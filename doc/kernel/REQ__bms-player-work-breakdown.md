@@ -235,7 +235,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-08.04** 선택 gauge·명시 class mapping·EX 계산이 opaque grade를 추정하지 않는다. — 상태=D(검증완료); 선행=-; 근거=E1.
 - [x] **BK-WBS-08.05** 연습 구간이 원래 TOTAL/note-count gauge context를 보존한다. — 상태=D(검증완료); 선행=-; 근거=E1.
 - [x] **BK-WBS-08.06** RANK/DEFEXRANK metadata를 typed validation·명시 precedence로 처리한다. — 상태=D(검증완료); 선행=-; 근거=E30, [typed metadata 계약](REQ__bms-judge-rank.md); timing preset은08.07에 유지.
-- [ ] **BK-WBS-08.07** key/scratch/LN-end별 versioned timing preset을 기존 ClassifiedWindow에 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=[고정 numerical preset·staged core 계약](REQ__bms-timing-presets.md), core11+adapter7 개발 테스트 PASS; ClassifiedWindow·completion·record identity·native/browser 선택 연결과 독립 전체 QA 남음. 새 기본값 추정 금지.
+- [ ] **BK-WBS-08.07** key/scratch/LN-end별 versioned timing preset을 기존 ClassifiedWindow에 연결한다. — 상태=W(구현·연동중); 선행=-; 근거/다음=[고정 numerical preset·staged core 계약](REQ__bms-timing-presets.md), `1d0c172`까지 ClassifiedWindow·completion·record identity·native/browser 선택 연결 구현, core11+adapter7 및 app timing63·native parser6 개발 테스트 PASS; 현재 WASM 실제 브라우저 흐름과 독립 최종 CLI/browser QA 진행 중. 새 기본값 추정 금지.
 - [ ] **BK-WBS-08.08** 기본 timing dialect와 역사적 LR2/nanasi 호환 범위를 확정한다. — 상태=P(정책선택대기); 선행=-; 필요 근거/다음=원문 spec만으로 millisecond 표를 추정하지 않음.
 - [ ] **BK-WBS-08.09** 동적 EXRANK/A0 의미와 필요한 timed policy를 primary source로 확인한다. — 상태=U(현황감사필요); 선행=-; 필요 근거/다음=서로 다른 engine 동작을 동일 표준으로 합치지 않음.
 - [x] **BK-WBS-08.10** fresh unmatched/repeat/refused 입력을 구별하는 authoritative empty-POOR disposition을 만든다. — 상태=D(검증완료); 선행=-; 근거=E32,REQ__input-disposition; penalty/dialect 선택은08.11에 유지.
