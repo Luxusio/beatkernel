@@ -1,0 +1,73 @@
+[package]
+name = "beatkernel-layer-fuzz"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[features]
+default = []
+fuzzing = ["dep:libfuzzer-sys"]
+harness-probe = []
+
+[dependencies]
+arbitrary = "=1.4.2"
+libfuzzer-sys = { version = "=0.4.13", optional = true }
+beatkernel = { path = "../crates/beatkernel" }
+beatkernel-bms = { path = "../adapters/beatkernel-bms" }
+beatkernel-bms-runtime = { path = "../app", default-features = false }
+
+[[bin]]
+name = "input_codec"
+path = "fuzz_targets/input_codec.rs"
+required-features = ["fuzzing"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replay_codec"
+path = "fuzz_targets/replay_codec.rs"
+required-features = ["fuzzing"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "room_codec"
+path = "fuzz_targets/room_codec.rs"
+required-features = ["fuzzing"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bms_parser"
+path = "fuzz_targets/bms_parser.rs"
+required-features = ["fuzzing"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chart_compiler"
+path = "fuzz_targets/chart_compiler.rs"
+required-features = ["fuzzing"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "controlled_failure"
+path = "probes/controlled_failure.rs"
+required-features = ["fuzzing", "harness-probe"]
+test = false
+doc = false
+bench = false

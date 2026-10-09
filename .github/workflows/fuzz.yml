@@ -1,0 +1,122 @@
+name: Layer fuzz campaigns
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+  pull_request:
+    paths:
+      - 'fuzz/**'
+      - 'crates/beatkernel/**'
+      - 'adapters/beatkernel-bms/**'
+      - 'app/**'
+      - '.github/workflows/fuzz.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: input_codec
+            max_len: 65536
+          - target: replay_codec
+            max_len: 65536
+          - target: room_codec
+            max_len: 131072
+          - target: bms_parser
+            max_len: 16384
+          - target: chart_compiler
+            max_len: 4096
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CC: gcc
+      CXX: g++
+      AR: ar
+      FUZZ_TARGET: ${{ matrix.target }}
+      FUZZ_MAX_LEN: ${{ matrix.max_len }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize retention and command metadata
+        shell: bash
+        run: |
+          mkdir -p fuzz/logs fuzz/artifacts/"$FUZZ_TARGET"
+          {
+            printf 'target=%s\ncommit=%s\n' "$FUZZ_TARGET" "$GITHUB_SHA"
+            printf 'nightly=nightly-2026-10-08\ncargo-fuzz=0.13.2\n'
+            printf 'features=fuzzing\nsanitizer=address\nmax_len=%s\nmax_total_time=60\ntimeout=2\nrss_limit_mb=1024\n' "$FUZZ_MAX_LEN"
+            printf 'CC=%s\nCXX=%s\nAR=%s\nCARGO_BUILD_JOBS=%s\nCARGO_INCREMENTAL=%s\n' "$CC" "$CXX" "$AR" "$CARGO_BUILD_JOBS" "$CARGO_INCREMENTAL"
+            printf 'build: cargo +nightly-2026-10-08 fuzz build %s --fuzz-dir fuzz --features fuzzing --sanitizer address\n' "$FUZZ_TARGET"
+            printf 'run: timeout --signal=TERM --kill-after=10s 90s cargo +nightly-2026-10-08 fuzz run %s --fuzz-dir fuzz --features fuzzing --sanitizer address fuzz/corpus/%s -- -max_total_time=60 -timeout=2 -rss_limit_mb=1024 -max_len=%s\n' "$FUZZ_TARGET" "$FUZZ_TARGET" "$FUZZ_MAX_LEN"
+          } > fuzz/logs/metadata.txt
+      - uses: dtolnay/rust-toolchain@nightly-2026-10-08
+        with:
+          components: rust-src
+      - uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: layer-fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            layer-fuzz-corpus-${{ matrix.target }}-
+      - name: Install pinned cargo-fuzz
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +nightly-2026-10-08 install cargo-fuzz --version 0.13.2 --locked 2>&1 | tee fuzz/logs/install.log
+      - name: Record actual tool versions and CLI
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            rustc +nightly-2026-10-08 -Vv
+            cargo +nightly-2026-10-08 -V
+            cargo +nightly-2026-10-08 fuzz --version
+            "$CC" --version
+            "$CXX" --version
+            cargo +nightly-2026-10-08 fuzz build --help
+            cargo +nightly-2026-10-08 fuzz run --help
+          } 2>&1 | tee fuzz/logs/tools.log
+      - name: Generate and admit source corpus
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +nightly-2026-10-08 run --manifest-path fuzz/Cargo.toml --no-default-features --locked --example seed_corpus -- fuzz/generated-seeds 2>&1 | tee fuzz/logs/seeds.log
+          mkdir -p "fuzz/corpus/$FUZZ_TARGET"
+          for seed in fuzz/generated-seeds/"$FUZZ_TARGET"/*; do
+            digest=$(sha256sum "$seed" | cut -d ' ' -f 1)
+            cp -n "$seed" "fuzz/corpus/$FUZZ_TARGET/source-$digest"
+          done
+      - name: Build with AddressSanitizer
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo +nightly-2026-10-08 fuzz build "$FUZZ_TARGET" --fuzz-dir fuzz --features fuzzing --sanitizer address 2>&1 | tee fuzz/logs/build.log
+      - name: Run bounded campaign
+        shell: bash
+        run: |
+          set -o pipefail
+          timeout --signal=TERM --kill-after=10s 90s cargo +nightly-2026-10-08 fuzz run "$FUZZ_TARGET" --fuzz-dir fuzz --features fuzzing --sanitizer address "fuzz/corpus/$FUZZ_TARGET" -- -max_total_time=60 -timeout=2 -rss_limit_mb=1024 "-max_len=$FUZZ_MAX_LEN" 2>&1 | tee fuzz/logs/campaign.log
+      - name: Save growing corpus cache even after a finding
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: layer-fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Preserve original findings, corpus and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer-fuzz-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            fuzz/logs/
+            fuzz/corpus/${{ matrix.target }}/
+            fuzz/artifacts/${{ matrix.target }}/
+            fuzz/generated-seeds/${{ matrix.target }}/
+            fuzz/Cargo.lock

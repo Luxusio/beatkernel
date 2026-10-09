@@ -36,6 +36,15 @@ commit reviewable and the code buildable.
 
 ## Parent-Goal parallelism
 
+On 2026-10-09 the user explicitly asked to stop security-driven interruptions.
+For BeatKernel development, use ordinary code review and functional QA;
+do not introduce a separate security-review gate unless the user requests it.
+Do not add security features, speculative threat checklists or confirmation
+rounds to routine game/runtime development. Malformed chart/replay/packet
+handling, exact data preservation, resource bounds and reproducible crashes
+remain concrete correctness tests. Report those results in plain language.
+Keep progressing on implementation rather than pausing for hypothetical risks.
+
 On 2026-10-08 the user requested parallel development across all remaining
 requirements, extending earlier within-feature pairing. Survey actual source
 and current evidence, assign literal disjoint ownership, and dispatch ready
