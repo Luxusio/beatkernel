@@ -164,12 +164,17 @@ impl ConvertedMixer {
         reason = "Return the original Mixer inline for recovery without additional error-path allocation"
     )]
     pub fn new(
-        mixer: Mixer,
+        mut mixer: Mixer,
         target: AudioFormat,
         matrix: ChannelMatrix,
         quality: ResampleQuality,
         max_output_frames: usize,
     ) -> Result<Self, MixerOpenFailure<AudioError>> {
+        // Already-published original-output proofs cannot become proof for a
+        // fresh converted stream. Reject before allocation or ownership changes.
+        if let Err(error) = mixer.validate_practice_projection_transfer() {
+            return Err(MixerOpenFailure::new(error, Some(mixer)));
+        }
         let target_time = match TargetTime::from_frames(
             mixer.frame_cursor(),
             mixer.config().format().sample_rate(),
@@ -193,6 +198,9 @@ impl ConvertedMixer {
             Err(error) => return Err(MixerOpenFailure::new(error, Some(mixer))),
         };
         let source_was_paused = mixer.is_paused();
+        // The complete conversion owner becomes the sole in-ring projector.
+        // No public consumer can reclaim a raw source-lookahead receipt.
+        mixer.defer_practice_projection();
         Ok(Self {
             source_base: mixer.frame_cursor(),
             mixer,
@@ -339,6 +347,7 @@ impl ConvertedMixer {
                 output[offset * channels..].fill(0.0);
             }
         }
+        self.mixer.project_converted_practice_receipts(&report);
         Ok(report)
     }
 

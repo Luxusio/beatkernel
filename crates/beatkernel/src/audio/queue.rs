@@ -1,8 +1,8 @@
 use super::{AudioCommand, AudioError, AudioLimits, SampleId, VoiceId};
 use crate::{time::Timestamp, transport::Rate};
 use std::sync::{
+    atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering},
     Arc,
-    atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering},
 };
 
 /// Producer-local saturating admission counters.
@@ -43,11 +43,16 @@ pub enum QueuePopError {
     Disconnected,
 }
 
+/// Explicit producer-owned pass identity. Zero is the legacy unscoped pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CommandScope(pub u64);
+
 /// Sole queue producer. It is intentionally not clonable.
 pub struct CommandProducer {
     shared: Arc<Shared>,
     cursor: usize,
     counters: QueueCounters,
+    scope: CommandScope,
 }
 
 /// Sole queue consumer. It is intentionally not clonable.
@@ -109,6 +114,7 @@ struct Slot {
     second: AtomicU64,
     signed: AtomicI64,
     gain: AtomicU32,
+    scope: AtomicU64,
 }
 
 impl Slot {
@@ -121,11 +127,13 @@ impl Slot {
             second: AtomicU64::new(0),
             signed: AtomicI64::new(0),
             gain: AtomicU32::new(0),
+            scope: AtomicU64::new(0),
         }
     }
 
     // Called only by the sole producer after Acquire-observing a free slot.
-    fn store(&self, command: AudioCommand) {
+    fn store(&self, command: AudioCommand, scope: CommandScope) {
+        self.scope.store(scope.0, Ordering::Relaxed);
         self.at.store(command.at().as_nanos(), Ordering::Relaxed);
         let tag = match command {
             AudioCommand::Play {
@@ -158,7 +166,8 @@ impl Slot {
     }
 
     // Called only by the sole consumer after Acquire-observing publication.
-    fn load(&self) -> AudioCommand {
+    fn load(&self) -> (AudioCommand, CommandScope) {
+        let scope = CommandScope(self.scope.load(Ordering::Relaxed));
         let at = Timestamp::from_nanos(self.at.load(Ordering::Relaxed));
         let command = match self.tag.load(Ordering::Relaxed) {
             0 => AudioCommand::Play {
@@ -186,7 +195,7 @@ impl Slot {
             _ => unreachable!("only scalar AudioCommand tags are published"),
         };
         self.ready.store(false, Ordering::Release);
-        command
+        (command, scope)
     }
 }
 
@@ -250,6 +259,7 @@ fn queue(
             shared: Arc::clone(&shared),
             cursor: 0,
             counters: QueueCounters::default(),
+            scope: CommandScope::default(),
         },
         CommandConsumer { shared, cursor: 0 },
     ))
@@ -308,6 +318,24 @@ impl CommandProducer {
     /// A concurrent consumer drop may occur after the connected observation;
     /// successful publication then belongs to that preceding connected state.
     pub fn try_push(&mut self, command: AudioCommand) -> Result<(), CommandPushError> {
+        self.try_push_scoped(self.scope, command)
+    }
+
+    /// Sets the explicit identity for subsequent ordinary admissions. It never
+    /// follows callback generations automatically; old owners retain old scopes.
+    pub fn set_scope(&mut self, scope: CommandScope) {
+        self.scope = scope;
+    }
+    /// Current producer-owned admission scope.
+    pub const fn scope(&self) -> CommandScope {
+        self.scope
+    }
+    /// Publishes a command with an explicit immutable pass identity.
+    pub fn try_push_scoped(
+        &mut self,
+        scope: CommandScope,
+        command: AudioCommand,
+    ) -> Result<(), CommandPushError> {
         let reason = if self.is_disconnected() {
             self.counters.disconnected = self.counters.disconnected.saturating_add(1);
             Some(QueuePushError::Disconnected)
@@ -320,7 +348,7 @@ impl CommandProducer {
         if let Some(reason) = reason {
             return Err(CommandPushError { command, reason });
         }
-        self.shared.slots[self.cursor].store(command);
+        self.shared.slots[self.cursor].store(command, scope);
         self.cursor = next_cursor(self.cursor, self.capacity());
         self.counters.accepted = self.counters.accepted.saturating_add(1);
         Ok(())
@@ -374,6 +402,9 @@ impl CommandConsumer {
     }
     /// Retrieves one command; published commands drain after producer drop.
     pub fn try_pop(&mut self) -> Result<AudioCommand, QueuePopError> {
+        self.try_pop_scoped().map(|(command, _)| command)
+    }
+    pub(crate) fn try_pop_scoped(&mut self) -> Result<(AudioCommand, CommandScope), QueuePopError> {
         let slot = &self.shared.slots[self.cursor];
         if !slot.ready.load(Ordering::Acquire) {
             if !self.is_disconnected() {

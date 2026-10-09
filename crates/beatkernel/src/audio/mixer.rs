@@ -22,6 +22,8 @@ pub struct Mixer {
     counters: AudioCounters,
     rate: Rate,
     song_position: Timestamp,
+    practice: Option<super::practice::Practice>,
+    practice_projection_deferred: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -29,6 +31,7 @@ struct Pending {
     target: i128,
     preroll: bool,
     command: AudioCommand,
+    scope: super::CommandScope,
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +111,49 @@ impl Head {
 }
 
 impl Mixer {
+    /// Installs original assets and bounded controls before the first render.
+    /// Finite legacy endpoints are deliberately incompatible with retained play.
+    pub fn install_practice(
+        &mut self,
+        program: super::PreparedPracticeProgram,
+        endpoint: super::PracticeAudioEndpoint,
+        region: super::PracticeRegion,
+    ) -> Result<(), super::PracticeError> {
+        if self.practice.is_some() {
+            return Err(super::PracticeError::AlreadyInstalled);
+        }
+        if self.frame_cursor != 0
+            || self.config.playback_end_frame().is_some()
+            || program.data.output_rate != self.config.format().sample_rate()
+            || program.data.channels != self.config.format().channels()
+            || program.data.limits.max_overlap > self.voices.len()
+        {
+            return Err(super::PracticeError::IncompatibleMixer);
+        }
+        // The program may have been prepared against another bank. Recheck all
+        // metadata before ownership changes; no asset identity can be substituted.
+        for cue in &program.data.cues {
+            let sample = self
+                .bank
+                .get(cue.cue.sample)
+                .ok_or(super::PracticeError::UnknownSample)?;
+            if sample.frames() != cue.frames || sample.format().sample_rate() != cue.source_rate {
+                return Err(super::PracticeError::IncompatibleMixer);
+            }
+        }
+        let practice = super::practice::Practice::new(program, endpoint, region)?;
+        self.practice = Some(practice);
+        Ok(())
+    }
+    /// Current explicit program generation, distinct from native output epochs.
+    pub fn practice_generation(&self) -> Option<u64> {
+        self.practice.as_ref().map(|p| p.cursor.generation)
+    }
+    /// Whether the nonrepeating retained region reached its end boundary.
+    pub fn practice_finished(&self) -> bool {
+        self.practice.as_ref().is_some_and(|p| !p.cursor.active)
+    }
+
     /// Actual immutable format, scheduling origin and capacities owned by this mixer.
     pub const fn configuration(&self) -> MixerConfig {
         self.config
@@ -154,6 +200,8 @@ impl Mixer {
             counters: AudioCounters::default(),
             rate: Rate::NORMAL,
             song_position: Timestamp::ZERO,
+            practice: None,
+            practice_projection_deferred: false,
         })
     }
 
@@ -197,6 +245,10 @@ impl Mixer {
             .frame_cursor
             .checked_add(extent)
             .ok_or(AudioError::Overflow)?;
+        if frames != 0 && self.practice.is_some() && !self.practice_projection_deferred {
+            super::TargetTime::from_frames(end, self.config.format().sample_rate())?
+                .point(self.output_frame_basis().origin())?;
+        }
         let start = self.frame_cursor;
         let playback_start = self.playback_frame_cursor;
         if frames == 0 {
@@ -249,6 +301,21 @@ impl Mixer {
         let physical_prefix_end = active_start
             .checked_add(active_extent)
             .ok_or(AudioError::Overflow)?;
+        let practice_controls = if !pause_requested && active_frames > 0 {
+            if let Some(practice) = &self.practice {
+                practice
+                    .preflight(playback_start, active_frames)
+                    .map_err(|error| match error {
+                        super::PracticeError::ReceiptFull => AudioError::PracticeReceiptFull,
+                        super::PracticeError::EventBudget => AudioError::PracticeEventBudget,
+                        _ => AudioError::PracticeControl,
+                    })?
+            } else {
+                0
+            }
+        } else {
+            0
+        };
         // All failure paths precede state, output, queue and evidence changes.
         if prefix_extent == extent {
             self.paused = true;
@@ -276,10 +343,17 @@ impl Mixer {
             .consumer
             .available_up_to(self.config.limits().max_commands_per_render());
         for _ in 0..budget {
-            let Ok(command) = self.consumer.try_pop() else {
+            let Ok((command, scope)) = self.consumer.try_pop_scoped() else {
                 break;
             };
             increment(&mut self.counters.commands_consumed);
+            if self
+                .practice
+                .as_ref()
+                .is_some_and(|p| scope.0 < p.cursor.generation)
+            {
+                continue;
+            }
             let Some(target) = self.target_frame(command.at()) else {
                 increment(&mut self.counters.invalid_times);
                 continue;
@@ -297,13 +371,23 @@ impl Mixer {
                     target,
                     preroll: command.at() < self.config.origin(),
                     command,
+                    scope,
                 },
             );
         }
 
-        for frame in
-            output[prefix_samples..prefix_samples + active_samples].chunks_exact_mut(channels)
+        let mut applied_practice_controls = 0;
+        for (frame_offset, frame) in output[prefix_samples..prefix_samples + active_samples]
+            .chunks_exact_mut(channels)
+            .enumerate()
         {
+            if self.practice.is_some() {
+                self.practice_frame(
+                    active_start + frame_offset as u64,
+                    practice_controls,
+                    &mut applied_practice_controls,
+                );
+            }
             while self
                 .pending
                 .first()
@@ -313,7 +397,13 @@ impl Mixer {
                 if pending.preroll || pending.target < i128::from(self.playback_frame_cursor) {
                     increment(&mut self.counters.late_commands);
                 }
-                self.apply(pending.command);
+                if self
+                    .practice
+                    .as_ref()
+                    .is_none_or(|p| p.cursor.active && pending.scope.0 == p.cursor.generation)
+                {
+                    self.apply(pending.command);
+                }
             }
             self.mix_frame(frame);
             self.playback_frame_cursor += 1;
@@ -332,7 +422,103 @@ impl Mixer {
         debug_assert_eq!(self.frame_cursor, end);
         debug_assert_eq!(self.playback_frame_cursor, playback_end);
         self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(extent);
+        if !self.practice_projection_deferred {
+            self.project_direct_practice_receipts(start, frames);
+        }
         Ok(self.report(start, playback_start, frames))
+    }
+
+    /// Cold preflight before creating a fresh conversion owner from this mixer.
+    /// Original-output receipts must drain before their output basis changes.
+    /// Refusal preserves all owners and receipts. This is not required for a
+    /// retained converter's retarget, which preserves the same projection owner.
+    /// Native composition can call this before retiring an existing endpoint.
+    pub fn validate_practice_projection_transfer(&self) -> Result<(), AudioError> {
+        if self
+            .practice
+            .as_ref()
+            .is_some_and(|p| p.endpoint.has_pending_receipts())
+        {
+            Err(AudioError::PracticeProjectionPending)
+        } else {
+            Ok(())
+        }
+    }
+    pub(crate) fn defer_practice_projection(&mut self) {
+        self.practice_projection_deferred = true;
+    }
+    fn project_direct_practice_receipts(&mut self, start: u64, frames: usize) {
+        let rate = self.config.format().sample_rate();
+        let origin = self.output_frame_basis().origin();
+        let Some(practice) = self.practice.as_mut() else {
+            return;
+        };
+        for _ in 0..practice.program.data.limits.receipt_capacity {
+            let Some(frame) = practice.endpoint.raw_boundary() else {
+                break;
+            };
+            if frame >= start + frames as u64 {
+                break;
+            }
+            let time =
+                super::TargetTime::from_frames(frame, rate).expect("validated direct output rate");
+            practice.endpoint.publish_projection(
+                super::TargetBoundary {
+                    source_frame: frame,
+                    target_frame_offset: frame.saturating_sub(start) as usize,
+                    target_time: time,
+                },
+                frame,
+                rate,
+                origin,
+            );
+        }
+    }
+    pub(crate) fn project_converted_practice_receipts(
+        &mut self,
+        report: &super::ConvertedRenderReport,
+    ) {
+        if report.state != super::ConvertedOutputState::Active || report.target_frames == 0 {
+            return;
+        }
+        let origin = self.output_frame_basis().origin();
+        let Some(practice) = self.practice.as_mut() else {
+            return;
+        };
+        for _ in 0..practice.program.data.limits.receipt_capacity {
+            let Some(frame) = practice.endpoint.raw_boundary() else {
+                break;
+            };
+            let boundary = if frame <= report.source_start_position.frame {
+                // A boundary deferred at the previous exclusive target end
+                // becomes proved by this first actual target sample. Held
+                // output never reaches here and therefore moves its real time.
+                super::TargetBoundary {
+                    source_frame: frame,
+                    target_frame_offset: 0,
+                    target_time: report.target_start_time,
+                }
+            } else {
+                let Some(boundary) = report
+                    .project_source_boundary(frame)
+                    .expect("validated source/target projection arithmetic")
+                else {
+                    break;
+                };
+                if boundary.target_frame_offset >= report.target_frames {
+                    break;
+                }
+                boundary
+            };
+            let target_frame = report.target_frame_cursor - report.target_frames as u64
+                + boundary.target_frame_offset as u64;
+            practice.endpoint.publish_projection(
+                boundary,
+                target_frame,
+                report.target_rate,
+                origin,
+            );
+        }
     }
 
     /// Immutable format, clock origin and capacity contract.
@@ -416,7 +602,133 @@ impl Mixer {
         }
     }
 
+    fn practice_frame(&mut self, physical: u64, control_snapshot: usize, consumed: &mut usize) {
+        use super::practice::{ceil, Practice};
+        use super::{PracticeBoundaryKind, PracticeReceipt};
+        let practice = self.practice.as_mut().expect("installed program");
+        loop {
+            let request = if *consumed < control_snapshot {
+                practice.endpoint.request(0)
+            } else {
+                None
+            };
+            let boundary = Practice::step(
+                &practice.program.data,
+                &mut practice.cursor,
+                self.playback_frame_cursor,
+                request,
+            )
+            .expect("scalar practice preflight");
+            let Some((id, kind)) = boundary else {
+                break;
+            };
+            {
+                if matches!(
+                    kind,
+                    PracticeBoundaryKind::Requested
+                        | PracticeBoundaryKind::LoopDisabled
+                        | PracticeBoundaryKind::ControlRejectedRevision
+                ) {
+                    practice.endpoint.consume();
+                    *consumed += 1;
+                }
+                let cursor = practice.cursor;
+                if !matches!(
+                    kind,
+                    PracticeBoundaryKind::LoopDisabled
+                        | PracticeBoundaryKind::ControlRejectedRevision
+                ) {
+                    self.voices.fill(None);
+                    self.pending
+                        .retain(|pending| pending.scope.0 >= cursor.generation);
+                    self.song_position = cursor.anchor;
+                    if cursor.active {
+                        let bank = &self.bank;
+                        let voices = &mut self.voices;
+                        practice.program.data.overlaps(cursor.anchor, |index| {
+                            let cue = practice.program.data.cues[index];
+                            let selected = ceil(
+                                (i128::from(cursor.anchor.as_nanos())
+                                    - i128::from(cue.cue.at.as_nanos()))
+                                    * i128::from(cue.source_rate),
+                                1_000_000_000,
+                            ) as usize;
+                            start_program_voice(
+                                voices,
+                                bank,
+                                cue,
+                                selected,
+                                practice.program.data.output_rate,
+                                practice.program.data.limits.max_overlap,
+                            );
+                        });
+                    }
+                }
+                let requested = if kind == PracticeBoundaryKind::Ended {
+                    cursor.region.end
+                } else if kind == PracticeBoundaryKind::LoopDisabled {
+                    cursor.anchor
+                } else if kind == PracticeBoundaryKind::ControlRejectedRevision {
+                    request
+                        .filter(|control| !control.disable)
+                        .map_or(cursor.anchor, |control| control.request.region.start)
+                } else {
+                    cursor.region.start
+                };
+                let applied = if kind == PracticeBoundaryKind::ControlRejectedRevision {
+                    cursor.anchor
+                } else {
+                    requested
+                };
+                practice.endpoint.receipt(
+                    PracticeReceipt {
+                        request_id: id,
+                        generation: cursor.generation,
+                        iteration: cursor.iteration,
+                        physical_frame: physical,
+                        playback_frame: self.playback_frame_cursor,
+                        requested_song_time: requested,
+                        applied_song_time: applied,
+                        correction_nanos: i64::try_from(
+                            i128::from(applied.as_nanos()) - i128::from(requested.as_nanos()),
+                        )
+                        .expect("preflight checked rejection correction"),
+                        kind,
+                    },
+                    cursor.revision,
+                );
+            }
+        }
+        while Practice::cue_due(
+            &practice.program.data,
+            &practice.cursor,
+            self.playback_frame_cursor,
+        ) {
+            let cue = practice.program.data.cues[practice.cursor.next_cue];
+            practice.cursor.next_cue += 1;
+            start_program_voice(
+                &mut self.voices,
+                &self.bank,
+                cue,
+                0,
+                practice.program.data.output_rate,
+                practice.program.data.limits.max_overlap,
+            );
+        }
+    }
+
     fn apply(&mut self, command: AudioCommand) {
+        if self.practice.is_some()
+            && matches!(
+                command,
+                AudioCommand::SetRate { .. } | AudioCommand::Seek { .. }
+            )
+        {
+            // Retained program owns its original-song mapping. Pause remains the
+            // independent queue pause; legacy Seek/rate semantics stay program-free.
+            increment(&mut self.counters.invalid_times);
+            return;
+        }
         match command {
             AudioCommand::Play {
                 voice,
@@ -428,6 +740,11 @@ impl Mixer {
                 if let Some(slot) = self
                     .voices
                     .iter_mut()
+                    .skip(
+                        self.practice
+                            .as_ref()
+                            .map_or(0, |p| p.program.data.limits.max_overlap),
+                    )
                     .find(|slot| slot.is_some_and(|active| active.id == voice))
                 {
                     *slot = None;
@@ -455,10 +772,17 @@ impl Mixer {
             increment(&mut self.counters.unknown_samples);
             return;
         };
+        let reserved = self
+            .practice
+            .as_ref()
+            .map_or(0, |p| p.program.data.limits.max_overlap);
         let existing = self
             .voices
             .iter()
-            .position(|slot| slot.is_some_and(|active| active.id == id));
+            .enumerate()
+            .skip(reserved)
+            .find(|(_, slot)| slot.is_some_and(|active| active.id == id))
+            .map(|(index, _)| index);
         // A valid empty asset replaces an existing voice with silence and needs
         // no free slot of its own. No storage ownership is released here.
         if sample.frames() == 0 {
@@ -482,7 +806,14 @@ impl Mixer {
             increment(&mut self.counters.invalid_rates);
             return;
         };
-        let Some(index) = existing.or_else(|| self.voices.iter().position(Option::is_none)) else {
+        let Some(index) = existing.or_else(|| {
+            self.voices
+                .iter()
+                .enumerate()
+                .skip(reserved)
+                .find(|(_, slot)| slot.is_none())
+                .map(|(index, _)| index)
+        }) else {
             increment(&mut self.counters.voice_full);
             return;
         };
@@ -564,6 +895,38 @@ impl Mixer {
     }
 }
 
+fn start_program_voice(
+    voices: &mut [Option<Voice>],
+    bank: &SampleBank,
+    cue: super::practice::Cue,
+    selected: usize,
+    output_rate: u32,
+    reserved: usize,
+) {
+    if selected >= cue.frames {
+        return;
+    }
+    let sample = bank
+        .get(cue.cue.sample)
+        .expect("cold validated original asset");
+    let index = voices[..reserved]
+        .iter()
+        .position(Option::is_none)
+        .expect("cold validated overlap capacity");
+    voices[index] = Some(Voice {
+        id: cue.cue.voice,
+        sample: cue.cue.sample,
+        gain: cue.cue.gain,
+        head: Head::new(
+            selected,
+            sample.format().sample_rate(),
+            output_rate,
+            Rate::NORMAL,
+        )
+        .expect("normal rational head"),
+    });
+}
+
 fn interpolated(sample: &PcmSample, head: Head, channel: usize) -> f64 {
     let channels = usize::from(sample.format().channels());
     let frame = head.whole as usize;
@@ -589,7 +952,7 @@ fn gcd(mut left: i128, mut right: i128) -> i128 {
 mod start_gate_race_fixtures {
     use super::*;
     use crate::{
-        audio::{AudioFormat, AudioLimits, PcmLimits, command_queue_with_start_gate},
+        audio::{command_queue_with_start_gate, AudioFormat, AudioLimits, PcmLimits},
         time::ClockDomainId,
     };
     #[test]
@@ -622,5 +985,102 @@ mod start_gate_race_fixtures {
         assert_eq!(producer.applied_start_frame(), None);
         assert_eq!(mixer.consumer.available(), 1);
         assert_eq!(mixer.render(&mut []).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod practice_snapshot_race_fixtures {
+    use super::*;
+    use crate::audio::{
+        command_queue, practice_queue, AudioFormat, AudioLimits, PcmLimits, PracticeBoundaryKind,
+        PracticeCue, PracticeLimits, PracticeRegion, PreparedPracticeProgram,
+    };
+    use crate::time::ClockDomainId;
+    #[test]
+    fn next_control_published_after_snapshot_survives_actual_autonomous_frame_steps() {
+        let format = AudioFormat::new(1000, 1).unwrap();
+        let pl = PcmLimits::new(128, 128, 1).unwrap();
+        let mut bank = SampleBank::new(format, pl).unwrap();
+        bank.insert(
+            SampleId(1),
+            PcmSample::new(format, vec![0.1, 0.2, 0.3, 0.4], pl).unwrap(),
+        )
+        .unwrap();
+        let program = PreparedPracticeProgram::new(
+            &bank,
+            vec![PracticeCue {
+                voice: VoiceId(1),
+                sample: SampleId(1),
+                at: Timestamp::ZERO,
+                gain: 1.0,
+            }],
+            PracticeLimits::new(1, 1, 64, 4, 16).unwrap(),
+        )
+        .unwrap();
+        let (mut controller, endpoint) = practice_queue(&program).unwrap();
+        let (_producer, consumer) = command_queue(4).unwrap();
+        let mut mixer = Mixer::new(
+            MixerConfig::new(
+                format,
+                ClockDomainId(1),
+                Timestamp::ZERO,
+                AudioLimits::new(4, 2, 4, 16, 4).unwrap(),
+            ),
+            bank,
+            consumer,
+        )
+        .unwrap();
+        mixer
+            .install_practice(
+                program,
+                endpoint,
+                PracticeRegion::new(Timestamp::ZERO, Timestamp::from_nanos(1_000_000), true)
+                    .unwrap(),
+            )
+            .unwrap();
+        // Deterministically reproduce producer publication immediately AFTER
+        // the real callback's bounded snapshot. Execute the same production
+        // per-frame methods with that frozen snapshot, without thread sleeps.
+        let snapshot = mixer.practice.as_ref().unwrap().preflight(0, 4).unwrap();
+        assert_eq!(snapshot, 0);
+        controller
+            .try_request_next(
+                1,
+                1,
+                PracticeRegion::new(
+                    Timestamp::from_nanos(2_000_000),
+                    Timestamp::from_nanos(4_000_000),
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut consumed = 0;
+        let mut old_pcm = [0.0; 4];
+        for (physical, frame) in old_pcm.iter_mut().enumerate() {
+            mixer.practice_frame(physical as u64, snapshot, &mut consumed);
+            mixer.mix_frame(std::slice::from_mut(frame));
+            mixer.playback_frame_cursor += 1;
+            mixer.frame_cursor += 1;
+        }
+        mixer.project_direct_practice_receipts(0, 4);
+        assert_eq!(old_pcm, [0.1; 4]);
+        assert_eq!(controller.generation(), 4);
+        let mut new_pcm = [0.0; 2];
+        mixer.render(&mut new_pcm).unwrap();
+        assert_eq!(new_pcm, [0.3, 0.4]);
+        for generation in 1..=4 {
+            assert_eq!(controller.try_pop_receipt().unwrap().generation, generation);
+        }
+        let applied = controller.try_pop_receipt().unwrap();
+        assert_eq!(
+            (
+                applied.request_id,
+                applied.generation,
+                applied.physical_frame,
+                applied.kind
+            ),
+            (1, 5, 4, PracticeBoundaryKind::Requested)
+        );
     }
 }

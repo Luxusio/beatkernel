@@ -309,6 +309,16 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Explicit pass identity for all future keysounds and audio commands.
+    /// A late old Runtime never adopts a callback generation implicitly.
+    pub fn set_audio_scope(&mut self, scope: crate::audio::CommandScope) {
+        self.producer.set_scope(scope);
+    }
+    /// Current producer-owned pass identity.
+    pub fn audio_scope(&self) -> crate::audio::CommandScope {
+        self.producer.scope()
+    }
+
     /// Configured normalized timeline and raw audio scheduling domains.
     /// Reading identity never processes input or changes transport/judge state.
     pub const fn clock_domains(&self) -> (ClockDomainId, ClockDomainId) {

@@ -46,6 +46,7 @@ mod handoff;
 mod mixer;
 mod model;
 mod pcm;
+mod practice;
 mod queue;
 mod target_time;
 
@@ -60,10 +61,16 @@ pub use model::{
     AudioCommand, AudioCounters, AudioError, AudioFormat, AudioLimits, MixerConfig, PcmLimits,
     RenderReport, SampleId, VoiceId,
 };
+pub use practice::{
+    practice_queue, PracticeAudioEndpoint, PracticeBoundaryKind, PracticeController, PracticeCue,
+    PracticeError, PracticeLimits, PracticeReceipt, PracticeRegion, PracticeRequest,
+    PracticeSourceSelection, PreparedPracticeProgram, ProjectedPracticeReceipt,
+};
 pub use target_time::{TargetFrameBasis, TargetTime};
 
 pub use pcm::{PcmSample, SampleBank, WavError};
 pub use queue::{
     command_queue, command_queue_with_start_gate, CommandConsumer, CommandProducer,
-    CommandPushError, PauseHold, PauseHoldError, QueueCounters, QueuePopError, QueuePushError,
+    CommandPushError, CommandScope, PauseHold, PauseHoldError, QueueCounters, QueuePopError,
+    QueuePushError,
 };

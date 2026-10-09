@@ -403,6 +403,14 @@ pub enum AudioError {
     StartGatePaused,
     /// Rate cannot be represented by the configured sample-head arithmetic.
     UnsupportedRate,
+    /// Retained program receipt capacity exhausted before any render mutation.
+    PracticeReceiptFull,
+    /// Retained program event budget exhausted before any render mutation.
+    PracticeEventBudget,
+    /// Retained program request is stale, late, invalid or overflows.
+    PracticeControl,
+    /// A fresh conversion owner cannot reinterpret pending original-output proofs.
+    PracticeProjectionPending,
 }
 
 impl fmt::Display for AudioError {
@@ -427,6 +435,12 @@ impl fmt::Display for AudioError {
             Self::StartGateDisconnected => "startup endpoint disconnected",
             Self::StartGateMissed => "initial physical start frame was missed",
             Self::StartGatePaused => "manual pause intersects initial start frame",
+            Self::PracticeReceiptFull => "practice receipt capacity exhausted",
+            Self::PracticeEventBudget => "practice event budget exhausted",
+            Self::PracticeControl => "practice control is stale, late or invalid",
+            Self::PracticeProjectionPending => {
+                "practice receipts must drain before transferring to a new conversion owner"
+            }
             Self::UnsupportedRate => "rate is not representable by this mixer",
         })
     }
