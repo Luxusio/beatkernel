@@ -7250,6 +7250,112 @@ function storedHistoricalFields(id = 41) {
   return { recordsList: [row, savedRecord({ id: 42, name: "replacement.bkr" })],
     recordsLoaded: { metadata: row, bytes: Uint8Array.from([66,75,82,0]), completedArchive: Uint8Array.from([66,75,82,69,83,85,76,84]), archivePlayer: 4294967295 } };
 }
+
+async function completedRecordHost(h) {
+  await h.preview(); const session = await h.launch(), worker = h.workers[0];
+  h.setNow(1700); await h.advance(8);
+  const tick = worker.last("play-step"), render = worker.last("play-render");
+  await h.receive({ kind: "play-render-done", playId: session.id, renderId: render.renderId,
+    completed: true, commandsPending: false, observedTick: tick.tickId, pendingInputs: 0 });
+  await h.receive({ kind: "play-step-done", playId: session.id, tickId: tick.tickId,
+    commandsPending: false, pendingInputs: 0, songNs: 2350000000n, hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
+  assert.equal(worker.last("play-stop").completed, true);
+  const metadata = { proof: true, players: [1], page: 0, pages: 2,
+    comparisons: false, hasComparisons: false, failed: false };
+  await h.receive(finalScore(session.id, { completedResults: metadata }));
+  const present = worker.last("play-results-present"); assert.ok(present);
+  await h.reply(present, { kind: "completed-results", completedResults: metadata });
+  return { worker, metadata, session };
+}
+
+test("record continuity: matching historical commit retires pending Results RPC and late ACK cannot revive it", async () => {
+  const h = await harness(storedHistoricalFields()); const { worker, metadata } = await completedRecordHost(h);
+  h.window.emit("keydown", { code: "PageDown", repeat: false }); await flush();
+  const oldPage = worker.last("play-results-page"); assert.ok(oldPage);
+  h.click("records-refresh"); await flush(); h.click("records-use"); await flush();
+  const request = worker.last("historical-record-present"); assert.ok(request);
+  const resultsPages = worker.messages("play-results-page").length;
+  const accepts = worker.messages("historical-record-accept").length;
+  await h.receive({ kind: "historical-record-result", id: request.id - 1, available: true,
+    error: null, gradePage: 0, gradePages: 3 });
+  assert.equal(h.get("historical-grade-page").textContent, "");
+  assert.equal(worker.messages("historical-record-accept").length, accepts);
+  const originalPost = worker.postMessage.bind(worker), captionsAtAccept = [];
+  worker.postMessage = (message, transfer) => {
+    if (message.kind === "historical-record-accept") captionsAtAccept.push(h.get("historical-grade-page").textContent);
+    return originalPost(message, transfer);
+  };
+  await h.receive({ kind: "historical-record-result", id: request.id, available: true,
+    error: null, gradePage: 0, gradePages: 3 });
+  const current = statusSnapshot(h);
+  assert.equal(worker.last("historical-record-accept").id, request.id);
+  assert.deepEqual(captionsAtAccept, [""], "accept reaches Worker before new historical controls replace prior Results");
+  await h.reply(oldPage, { kind: "completed-results", completedResults: { ...metadata, page: 1 } });
+  await h.receive({ kind: "play-completed-results", playId: oldPage.playId,
+    completedResults: metadata, error: "obsolete Results error" });
+  h.window.emit("keydown", { code: "PageDown", repeat: false }); await flush();
+  assert.equal(worker.messages("play-results-page").length, resultsPages);
+  assert.deepEqual(statusSnapshot(h), current);
+  assert.equal(h.get("historical-grade-page").textContent, "Stored record details page 1 / 3");
+  assert.equal(h.get("historical-grade-next").disabled, false);
+  await h.close();
+});
+
+test("record continuity: failed historical response and timeout retain Results navigation", async () => {
+  for (const failure of ["refused", "metadata", "timeout", "read"]) {
+    const h = await harness(storedHistoricalFields()); const { worker } = await completedRecordHost(h);
+    h.click("records-refresh"); await flush();
+    if (failure === "read") h.faults.recordsLoadError = new Error("storage read refused");
+    h.click("records-use"); await flush(); const request = worker.last("historical-record-present");
+    if (failure === "timeout") await h.advance(10000);
+    else if (failure === "refused") await h.receive({ kind: "historical-record-result", id: request.id,
+      available: false, error: "archive association refused", gradePage: null, gradePages: 0 });
+    else if (failure === "metadata") await h.receive({ kind: "historical-record-result", id: request.id,
+      available: true, error: null, gradePage: 0, gradePages: 0 });
+    h.window.emit("keydown", { code: "PageDown", repeat: false }); await flush();
+    const page = worker.last("play-results-page"); assert.ok(page, `${failure} preserves original Results keyboard controls`);
+    assert.equal(page.page, 1); assert.equal(h.get("historical-grade-page").textContent, "");
+    if (failure === "timeout") {
+      const before = worker.messages("historical-record-accept").length, previous = statusSnapshot(h);
+      await h.receive({ kind: "historical-record-result", id: request.id,
+        available: true, error: null, gradePage: 0, gradePages: 3 });
+      assert.equal(worker.messages("historical-record-accept").length, before);
+      assert.deepEqual(statusSnapshot(h), previous);
+    }
+    await h.close();
+  }
+});
+
+test("record continuity: failed replacement and timeout retain prior historical controls and canvas", async () => {
+  for (const failure of ["refused", "timeout", "read"]) {
+    const h = await harness(storedHistoricalFields()); const { worker, request: prior } = await selectedHistoricalGrades(h);
+    const clears = worker.messages("historical-record-clear").length;
+    if (failure === "read") h.faults.recordsLoadError = new Error("storage read refused");
+    h.click("records-use"); await flush();
+    assert.equal(worker.messages("historical-record-clear").length, clears, "candidate acquisition keeps accepted display");
+    assert.equal(h.get("historical-grade-page").textContent, "Stored record details page 1 / 3");
+    assert.equal(h.get("canvas").hidden, false);
+    const candidate = worker.last("historical-record-present");
+    if (failure === "timeout") await h.advance(10000);
+    if (failure === "refused") await h.receive({ kind: "historical-record-result", id: candidate.id,
+      available: false, error: "candidate refused", gradePage: null, gradePages: 0 });
+    assert.equal(h.get("historical-grade-next").disabled, false);
+    assert.equal(h.get("canvas").hidden, false);
+    h.click("historical-grade-next"); await flush();
+    assert.equal(worker.last("historical-record-page").id, prior.id);
+    if (failure === "timeout") {
+      const clear = worker.last("historical-record-clear"); assert.equal(clear.cancelId, candidate.id);
+      const status = statusSnapshot(h);
+      const accepts = worker.messages("historical-record-accept").length;
+      await h.receive({ kind: "historical-record-result", id: candidate.id, available: true,
+        error: null, gradePage: 0, gradePages: 2 });
+      assert.deepEqual(statusSnapshot(h), status);
+      assert.equal(worker.messages("historical-record-accept").length, accepts);
+      assert.equal(h.get("historical-grade-page").textContent, "Stored record details page 1 / 3");
+    }
+    await h.close();
+  }
+});
 test("historical page controls survive completed library operation and only matching ACK changes confirmed caption", async () => {
   const h = await harness(storedHistoricalFields()); const { worker, request } = await selectedHistoricalGrades(h);
   assert.equal(h.get("historical-grade-next").hidden, false); assert.equal(h.get("historical-grade-next").disabled, false);

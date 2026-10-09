@@ -27,6 +27,26 @@ authoritative. A held presentation does not erase a malformed report or claim
 completion. Verify null-observation credits, chronological recovery, legacy
 compatibility, asynchronous freshness, failure atomicity and full replay parity.
 
+Browser replay exposes its actual maximum combo as an exact u64/BigInt getter
+from the same Replay score used for hits, misses and current combo. Maximum and
+current combo may differ. Reading these fields does not create live completion
+proof or substitute an archived score.
+
+Nonzero mixer rejection counters remain terminal. The browser diagnostic names
+each offending fixed counter (`pending_full`, `voice_full`, `unknown_samples`,
+`unknown_stops`, `invalid_gains`, `invalid_rates`, `invalid_times`) and its exact
+integer value. Preserve armed-start, flags, extent and overflow validation;
+diagnostic detail does not authorize swallowing a counter or changing clock
+admission. Exercise single/multiple counters and high-word values, then retain
+actual retry evidence for any further mixer correction.
+
+The new named-counter path passed all 38 audio/play-model development tests.
+The current release WASM built and wasm-bindgen regenerated the actual
+BrowserReplay maximum-combo getter; package SHA-256 is
+`5d947a3f11cf8cf1589f9210d3f9d9dda0073bac5ac2c0f73221dfa9b4626358`.
+Generated API presence is not actual browser score or retry evidence; those
+remain independent browser QA work.
+
 Actual QA preserved a complete six-second recording that failed against
 baseline3aa4ccb at song269326157ns with `completion presentation precedes its
 output frontier`. The replay must finish after correction, including repeated

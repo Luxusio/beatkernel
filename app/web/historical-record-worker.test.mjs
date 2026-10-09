@@ -142,22 +142,208 @@ function historicalRequest(id=1,fields={}){
     completedArchive:new Uint8Array([66,75,82,69,83,85,76,84]),archivePlayer:4294967295,...fields};
 }
 
+// Ordinary fixtures model the Window's validated response followed by its
+// explicit acceptance. Race fixtures send each message separately below.
+async function presentHistorical(h, request = historicalRequest()) {
+  await h.send(request);
+  const reply = h.of("historical-record-result").findLast(value => value.id === request.id);
+  if (reply?.available === true) await h.send({ kind: "historical-record-accept", id: request.id });
+}
+
+async function completedHistoricalFixture(local = false) {
+  const h = await active({ observeOutput: () => true, ...(local ? {
+    startRequest: startRequest({ inputMode: "physical-contact",
+      localPlanWords: new Uint32Array([7, 1, 1, 0, 31, 1, 2, 0]) }),
+  } : {}) });
+  await completeOutput(h);
+  await h.send({ kind: "play-stop", playId: 7, completed: true });
+  await showResults(h);
+  return h;
+}
+
+test("record continuity: valid solo and local historical commit retires Results exactly once", async () => {
+  for (const local of [false, true]) {
+    const h = await completedHistoricalFixture(local), old = h.completedOwners[0];
+    const draws = h.views[0].resultDraws.length;
+    await presentHistorical(h, historicalRequest());
+    assert.equal(h.of("historical-record-result").at(-1).available, true);
+    const history = h.historicalOwners[0];
+    assert.equal(old.frees, 1); assert.equal(history.frees, 0);
+    assert.ok(h.trace.indexOf("construct-historical") < h.trace.indexOf("free-results"));
+    await h.tick();
+    assert.equal(h.of("render-geometry").at(-1).mode, "history");
+    assert.equal(h.views[0].historicalDraws.at(-1), history);
+    assert.equal(h.views[0].resultDraws.length, draws);
+    for (const kind of ["play-results-present", "play-results-page"]) {
+      await h.send({ kind, playId: 7, rpcId: ++h.rpcId, page: 0, comparisons: false });
+    }
+    await h.tick(); assert.equal(h.views[0].resultDraws.length, draws);
+    assert.equal(history.frees, 0); assert.equal(old.frees, 1);
+    await h.send({ kind: "dispose" }); assert.equal(history.frees, 1); assert.equal(old.frees, 1);
+  }
+});
+
+test("record continuity: failed acquisitions retain shown Results and their page RPC", async () => {
+  for (const failure of ["archive", "read", "constructor", "unavailable", "metadata"]) {
+    const options = { observeOutput: () => true };
+    const h = await active(options); await completeOutput(h);
+    await h.send({ kind: "play-stop", playId: 7, completed: true }); await showResults(h);
+    const old = h.completedOwners[0];
+    const fields = {};
+    if (failure === "archive") fields.completedArchive = new Uint8Array();
+    if (failure === "read") fields.replayFile = replayFile(() => Promise.reject(new Error("read refused"))).file;
+    if (failure === "constructor") options.historicalError = "constructor refused";
+    if (failure === "unavailable") options.historicalDiagnostic = "association refused";
+    if (failure === "metadata") options.historicalGradePages = 0;
+    await presentHistorical(h, historicalRequest(1, fields));
+    const result = h.of("historical-record-result").at(-1);
+    assert.equal(result.available, false); assert.ok(result.error);
+    assert.equal(old.frees, 0);
+    assert.ok(h.historicalOwners.every(candidate => candidate.frees === 1));
+    const page = await h.rpc("play-results-page", { page: 0, comparisons: false });
+    assert.equal(page.result.kind, "completed-results");
+    await h.tick(); assert.equal(h.of("render-geometry").at(-1).mode, "results");
+    await h.send({ kind: "dispose" }); assert.equal(old.frees, 1);
+  }
+});
+
+test("record continuity: malformed read constructor unavailable and metadata candidates retain prior history", async () => {
+  for (const failure of ["archive", "read", "constructor", "unavailable", "metadata"]) {
+    const options = {}, h = await catalogWorker(options);
+    await presentHistorical(h, historicalRequest()); const old = h.historicalOwners[0];
+    const fields = {};
+    if (failure === "archive") fields.archivePlayer = -1;
+    if (failure === "read") fields.replayFile = replayFile(() => Promise.reject(new Error("read refused"))).file;
+    if (failure === "constructor") options.historicalError = "constructor refused";
+    if (failure === "unavailable") options.historicalDiagnostic = "archive unavailable";
+    if (failure === "metadata") options.historicalGradePage = 1;
+    await presentHistorical(h, historicalRequest(2, fields));
+    assert.equal(h.of("historical-record-result").at(-1).available, false);
+    assert.equal(old.frees, 0); assert.ok(h.historicalOwners.slice(1).every(candidate => candidate.frees === 1));
+    // Restore the mock binding getters so the retained owner's public page RPC
+    // checks its original valid metadata rather than the failed candidate fault.
+    delete options.historicalDiagnostic; delete options.historicalGradePage;
+    await h.send({ kind: "historical-record-page", id: 1, rpcId: 1, page: 0 });
+    assert.equal(h.of("historical-record-page-result").at(-1).error, null);
+    await h.tick(); assert.equal(h.views[0].historicalDraws.at(-1), old);
+    await h.send({ kind: "dispose" }); assert.equal(old.frees, 1);
+  }
+});
+
+test("record continuity: latest deferred read wins without releasing history during acquisition", async () => {
+  const h = await catalogWorker(); await presentHistorical(h, historicalRequest()); const prior = h.historicalOwners[0];
+  const first = deferred(), second = deferred();
+  await presentHistorical(h, historicalRequest(2, { replayFile: replayFile(() => first.promise).file }));
+  await presentHistorical(h, historicalRequest(3, { replayFile: replayFile(() => second.promise).file }));
+  assert.equal(prior.frees, 0); await h.tick(); assert.equal(h.views[0].historicalDraws.at(-1), prior);
+  second.resolve(Uint8Array.of(66, 75, 82, 0, 255, 1).buffer); await flushJobs();
+  const current = h.historicalOwners.at(-1);
+  assert.equal(h.of("historical-record-result").at(-1).id, 3); assert.equal(prior.frees, 0);
+  await h.send({ kind: "historical-record-accept", id: 3 }); assert.equal(prior.frees, 1);
+  const replies = h.of("historical-record-result").length, owners = h.historicalOwners.length;
+  first.resolve(Uint8Array.of(66, 75, 82, 0, 255, 1).buffer); await flushJobs();
+  assert.equal(h.historicalOwners.length, owners); assert.equal(h.of("historical-record-result").length, replies);
+  await h.send({ kind: "historical-record-clear", id: 4, cancelId: 2 });
+  assert.equal(current.frees, 0); await h.tick(); assert.equal(h.views[0].historicalDraws.at(-1), current);
+  await h.send({ kind: "dispose" }); assert.equal(current.frees, 1);
+});
+
+test("record continuity: cancel new play and dispose fence a deferred candidate without resurrection", async () => {
+  for (const next of ["cancel", "play", "dispose"]) {
+    const h = await catalogWorker(); await presentHistorical(h, historicalRequest()); const prior = h.historicalOwners[0], gate = deferred();
+    await presentHistorical(h, historicalRequest(2, { replayFile: replayFile(() => gate.promise).file }));
+    assert.equal(prior.frees, 0);
+    if (next === "cancel") await h.send({ kind: "historical-record-clear", id: 3, cancelId: 2 });
+    if (next === "play") await h.send(startRequest());
+    if (next === "dispose") await h.send({ kind: "dispose" });
+    assert.equal(prior.frees, next === "cancel" ? 0 : 1);
+    const replies = h.of("historical-record-result").length;
+    gate.resolve(Uint8Array.of(66, 75, 82, 0).buffer); await flushJobs();
+    assert.equal(h.historicalOwners.length, 1); assert.equal(h.of("historical-record-result").length, replies);
+    if (next === "cancel") { await h.tick(); assert.equal(h.views[0].historicalDraws.at(-1), prior); await h.send({ kind: "dispose" }); }
+    if (next === "play") { assert.equal(h.games[0].frees, 0); await h.send({ kind: "dispose" }); }
+    assert.equal(prior.frees, 1);
+  }
+});
+
+test("record continuity: candidate invalidated at the binding edge is freed without retiring prior history", async () => {
+  const options = {}, h = await catalogWorker(options);
+  await presentHistorical(h, historicalRequest()); const prior = h.historicalOwners[0];
+  options.historicalConstructed = () => h.post({ kind: "historical-record-clear", id: 3, cancelId: 2 });
+  await presentHistorical(h, historicalRequest(2));
+  assert.equal(h.historicalOwners.length, 2);
+  assert.equal(h.historicalOwners[1].frees, 1); assert.equal(prior.frees, 0);
+  assert.equal(h.of("historical-record-result").some(reply => reply.id === 2 && reply.available), false);
+  await h.tick(); assert.equal(h.views[0].historicalDraws.at(-1), prior);
+  await h.send({ kind: "dispose" }); assert.equal(prior.frees, 1);
+});
+
+test("record continuity: legacy absent archive leaves replay available and retains eligible Results", async () => {
+  const h = await completedHistoricalFixture(), prior = h.completedOwners[0];
+  await presentHistorical(h, historicalRequest(1, { completedArchive: undefined, archivePlayer: undefined }));
+  const result = h.of("historical-record-result").at(-1);
+  assert.equal(result.available, false); assert.equal(result.error, null); assert.equal(prior.frees, 0);
+  assert.equal((await h.rpc("play-results-page", { page: 0, comparisons: false })).result.kind, "completed-results");
+  assert.equal(h.of("play-completed-results").length, 0);
+  await h.send({ kind: "dispose" }); assert.equal(prior.frees, 1);
+});
+
+test("record continuity: queued candidate reply timeout retains prior Results or history and rejects late acceptance", async () => {
+  for (const owner of ["results", "history"]) {
+    const h = owner === "results" ? await completedHistoricalFixture() : await catalogWorker();
+    if (owner === "history") await presentHistorical(h);
+    const prior = owner === "results" ? h.completedOwners[0] : h.historicalOwners[0];
+    await h.send(historicalRequest(2));
+    const queuedReply = h.of("historical-record-result").at(-1), candidate = h.historicalOwners.at(-1);
+    assert.equal(queuedReply.available, true); assert.equal(queuedReply.id, 2);
+    assert.notEqual(candidate, prior); assert.equal(candidate.frees, 0); assert.equal(prior.frees, 0);
+    await h.tick(); assert.equal(h.of("render-geometry").at(-1).mode, owner);
+    // Window has not received this success. Its timeout cancels only operation 2.
+    await h.send({ kind: "historical-record-clear", id: 3, cancelId: 2 });
+    assert.equal(candidate.frees, 1); assert.equal(prior.frees, 0);
+    await h.send({ kind: "historical-record-accept", id: queuedReply.id });
+    assert.equal(candidate.frees, 1); assert.equal(prior.frees, 0);
+    if (owner === "results") assert.equal((await h.rpc("play-results-page", { page: 0, comparisons: false })).result.kind, "completed-results");
+    else {
+      await h.send({ kind: "historical-record-page", id: 1, rpcId: 1, page: 0 });
+      assert.equal(h.of("historical-record-page-result").at(-1).error, null);
+    }
+    await h.send({ kind: "dispose" }); assert.equal(prior.frees, 1); assert.equal(candidate.frees, 1);
+  }
+});
+
+test("record continuity: staged candidate releases on newer selection new play or dispose and stale accept cannot commit", async () => {
+  for (const next of ["newer", "play", "dispose"]) {
+    const h = await catalogWorker(); await presentHistorical(h); const prior = h.historicalOwners[0];
+    await h.send(historicalRequest(2)); const stale = h.historicalOwners[1];
+    assert.equal(stale.frees, 0); assert.equal(prior.frees, 0);
+    if (next === "newer") await presentHistorical(h, historicalRequest(3));
+    if (next === "play") await h.send(startRequest());
+    if (next === "dispose") await h.send({ kind: "dispose" });
+    assert.equal(stale.frees, 1); assert.equal(prior.frees, 1);
+    await h.send({ kind: "historical-record-accept", id: 2 });
+    assert.equal(stale.frees, 1); assert.equal(prior.frees, 1);
+    if (next === "newer") { assert.equal(h.historicalOwners[2].frees, 0); await h.tick(); assert.equal(h.views[0].historicalDraws.at(-1), h.historicalOwners[2]); }
+    if (next !== "dispose") await h.send({ kind: "dispose" });
+  }
+});
+
 test("historical grade metadata comes from validated binding getters before display admission",async()=>{
-  const h=await catalogWorker({historicalGradePages:3});await h.send(historicalRequest());
+  const h=await catalogWorker({historicalGradePages:3});await presentHistorical(h, historicalRequest());
   const reply=h.of("historical-record-result").at(-1);
   assert.equal(reply.available,true);assert.equal(reply.gradePage,0);assert.equal(reply.gradePages,3);
   for(const fields of [{historicalGradePages:0},{historicalGradePages:1034},{historicalGradePages:1.5},{historicalGradePage:1}]){
-    const bad=await catalogWorker(fields);await bad.send(historicalRequest());
+    const bad=await catalogWorker(fields);await presentHistorical(bad, historicalRequest());
     const refused=bad.of("historical-record-result").at(-1);
     assert.equal(refused.available,false);assert.equal(refused.gradePage,null);assert.equal(refused.gradePages,0);assert.ok(refused.error);
     assert.equal(bad.historicalOwners[0].frees,1);await bad.tick();assert.equal(bad.views[0].historicalDraws?.length??0,0);
   }
-  const legacy=await catalogWorker();await legacy.send(historicalRequest(1,{completedArchive:undefined,archivePlayer:undefined}));
+  const legacy=await catalogWorker();await presentHistorical(legacy, historicalRequest(1,{completedArchive:undefined,archivePlayer:undefined}));
   const unavailable=legacy.of("historical-record-result").at(-1);
   assert.equal(unavailable.gradePage,null);assert.equal(unavailable.gradePages,0);
 });
 test("actual Worker grade RPCs preserve same-page no-op and successful frontier without a rendering loop",async()=>{
-  const h=await catalogWorker({historicalGradePages:3});await h.send(historicalRequest());await h.tick();
+  const h=await catalogWorker({historicalGradePages:3});await presentHistorical(h, historicalRequest());await h.tick();
   const binding=h.historicalOwners[0];const before=h.views[0].historicalDraws.length;
   await h.send({kind:"historical-record-page",id:1,rpcId:1,page:0});
   assert.deepEqual(binding.pageSetters,[]);assert.equal(h.views[0].historicalDraws.length,before);
@@ -175,7 +361,7 @@ test("actual Worker grade RPCs preserve same-page no-op and successful frontier 
 });
 test("recoverable grade preparation refusal keeps selected binding and confirmed page",async()=>{
   const h=await catalogWorker({historicalGradePages:3,historicalPageError:"grade allocation refused"});
-  await h.send(historicalRequest());await h.tick();const binding=h.historicalOwners[0];
+  await presentHistorical(h, historicalRequest());await h.tick();const binding=h.historicalOwners[0];
   await h.send({kind:"historical-record-page",id:1,rpcId:1,page:1});
   const reply=h.of("historical-record-page-result").at(-1);
   assert.equal(reply.gradePage,null);assert.equal(reply.gradePages,0);assert.match(reply.error,/grade allocation refused/);
@@ -186,7 +372,7 @@ test("recoverable grade preparation refusal keeps selected binding and confirmed
 });
 test("unexpected post-set grade metadata disposes historical display instead of adopting mismatched page",async()=>{
   for(const fields of [{historicalAfterPage:2},{historicalAfterPages:4},{historicalAfterPage:-1}]){
-    const h=await catalogWorker({historicalGradePages:3,...fields});await h.send(historicalRequest());await h.tick();
+    const h=await catalogWorker({historicalGradePages:3,...fields});await presentHistorical(h, historicalRequest());await h.tick();
     const previewDraws=h.views[0].draws,historicalDraws=h.views[0].historicalDraws.length;
     await h.send({kind:"historical-record-page",id:1,rpcId:1,page:1});
     const reply=h.of("historical-record-page-result").at(-1);
@@ -200,9 +386,9 @@ test("unexpected post-set grade metadata disposes historical display instead of 
 });
 test("cleared replacement and active-play owners refuse stale grade setters without touching gameplay",async()=>{
   for(const next of ["clear","replacement","play"]){
-    const h=await catalogWorker({historicalGradePages:3});await h.send(historicalRequest());const old=h.historicalOwners[0];
+    const h=await catalogWorker({historicalGradePages:3});await presentHistorical(h, historicalRequest());const old=h.historicalOwners[0];
     if(next==="clear")await h.send({kind:"historical-record-clear",id:2});
-    else if(next==="replacement")await h.send(historicalRequest(2));
+    else if(next==="replacement")await presentHistorical(h, historicalRequest(2));
     else await h.send(startRequest());
     await h.send({kind:"historical-record-page",id:1,rpcId:1,page:1});
     assert.ok(h.of("historical-record-page-result").at(-1).error);assert.deepEqual(old.pageSetters,[]);assert.equal(old.frees,1);
@@ -213,7 +399,7 @@ test("cleared replacement and active-play owners refuse stale grade setters with
 });
 
 test("actual Worker uses existing page bridge beyond maximum grade table through last stored comparison",async()=>{
-  const h=await catalogWorker({historicalGradePages:1033});await h.send(historicalRequest());await h.tick();const binding=h.historicalOwners[0];
+  const h=await catalogWorker({historicalGradePages:1033});await presentHistorical(h, historicalRequest());await h.tick();const binding=h.historicalOwners[0];
   assert.equal(h.of("historical-record-result").at(-1).gradePages,1033);
   for(const [rpcId,page] of [[1,1024],[2,1032]]){
     await h.send({kind:"historical-record-page",id:1,rpcId,page});const reply=h.of("historical-record-page-result").at(-1);
@@ -228,7 +414,7 @@ test("idle Worker forwards opaque bytes and original player to binding and owns 
   const h=await catalogWorker();
   const previewGeometry=h.of("render-geometry").at(-1);
   const resizeCount=h.renderPort.posts.filter(row=>row.kind==="resize").length;
-  await h.send(historicalRequest());
+  await presentHistorical(h, historicalRequest());
   const reply=h.of("historical-record-result").at(-1);assert.equal(reply.id,1);assert.equal(reply.available,true);assert.equal(reply.error,null);
   const binding=h.historicalOwners[0];assert.equal(binding.player,4294967295);
   assert.deepEqual(Array.from(binding.replay),[66,75,82,0]);assert.deepEqual(Array.from(binding.archive),[66,75,82,69,83,85,76,84]);
@@ -245,22 +431,22 @@ test("idle Worker forwards opaque bytes and original player to binding and owns 
   assert.equal(h.games.length,0);assert.equal(h.replays.length,0);
 });
 test("legacy absent archives and binding diagnostics preserve idle replay selection without completed proof",async()=>{
-  const h=await catalogWorker();await h.send(historicalRequest(1,{completedArchive:undefined,archivePlayer:undefined}));
+  const h=await catalogWorker();await presentHistorical(h, historicalRequest(1,{completedArchive:undefined,archivePlayer:undefined}));
   assert.equal(h.of("historical-record-result").at(-1).available,false);
   assert.equal(h.of("historical-record-result").at(-1).error,null);
-  const bad=await catalogWorker({historicalDiagnostic:"mismatched archive header"});await bad.send(historicalRequest());
+  const bad=await catalogWorker({historicalDiagnostic:"mismatched archive header"});await presentHistorical(bad, historicalRequest());
   const refusal=bad.of("historical-record-result").at(-1);assert.equal(refusal.available,false);assert.match(refusal.error,/mismatched archive/);
   assert.equal(bad.of("play-completed-results").length,0);assert.equal(bad.games.length,0);
-  const thrown=await catalogWorker({historicalError:"binding refused"});await thrown.send(historicalRequest());
+  const thrown=await catalogWorker({historicalError:"binding refused"});await presentHistorical(thrown, historicalRequest());
   assert.match(thrown.of("historical-record-result").at(-1).error,/binding refused/);assert.equal(thrown.of("fatal").length,0);
 });
 test("unabortable replay read cannot construct or replace results after clear or newer selection",async()=>{
   for(const next of ["clear","select","newer"]){
     const h=await catalogWorker();const gate=deferred();const selected=replayFile(()=>gate.promise);
-    await h.send(historicalRequest(1,{replayFile:selected.file}));assert.equal(selected.reads,1);assert.equal(h.historicalOwners.length,0);
+    await presentHistorical(h, historicalRequest(1,{replayFile:selected.file}));assert.equal(selected.reads,1);assert.equal(h.historicalOwners.length,0);
     if(next==="clear")await h.send({kind:"historical-record-clear",id:2});
     else if(next==="select")await h.send({kind:"select",id:3,libraryId:1,path:"song/chart.bms",rate:48000,seed:"0"});
-    else await h.send(historicalRequest(2));
+    else await presentHistorical(h, historicalRequest(2));
     const owners=h.historicalOwners.length;const responses=h.of("historical-record-result").length;
     gate.resolve(new Uint8Array([66,75,82,0]).buffer);await flushJobs();
     assert.equal(h.historicalOwners.length,owners);assert.equal(h.of("historical-record-result").length,responses);
@@ -268,10 +454,10 @@ test("unabortable replay read cannot construct or replace results after clear or
   }
 });
 test("new play invalidates historical lifetime and active gameplay refuses historical admission",async()=>{
-  const h=await catalogWorker();await h.send(historicalRequest());const binding=h.historicalOwners[0];
+  const h=await catalogWorker();await presentHistorical(h, historicalRequest());const binding=h.historicalOwners[0];
   await h.send(startRequest());assert.equal(binding.frees,1);
   const prepared=h.of("play-reply").at(-1);assert.equal(prepared.result.kind,"prepared");
-  await h.send(historicalRequest(2));const refusal=h.of("historical-record-result").at(-1);
+  await presentHistorical(h, historicalRequest(2));const refusal=h.of("historical-record-result").at(-1);
   assert.equal(refusal.available,false);assert.ok(refusal.error);assert.equal(h.historicalOwners.length,1);
   assert.equal(h.games[0].stops,0);assert.equal(h.games[0].frees,0);
   await h.send({kind:"play-stop",playId:7});assert.equal(h.games[0].frees,1);assert.equal(binding.frees,1);
@@ -468,6 +654,7 @@ async function workerHarness(options = {}) {
       this.replay=replay.slice(); this.archive=archive?.slice()??null; this.player=player; this.frees=0;
       this.page=options.historicalGradePage??0; this.pageSetters=[];
       historicalOwners.push(this);
+      options.historicalConstructed?.(this);
     }
     live(){assert.equal(this.frees,0);}
     get available(){this.live();return this.archive!==null && !options.historicalDiagnostic;}
@@ -1405,11 +1592,60 @@ async function workerHarness(options = {}) {
 
 test("historical renderer failure preserves selected bytes without gameplay authority", async () => {
   const h=await catalogWorker(),request=historicalRequest(),archive=request.completedArchive.slice();
-  await h.send(request);
+  await presentHistorical(h, request);
   const packet=h.renderPort.posts.findLast(row=>row.kind==="packet");
   assert.equal(new DataView(packet.packet.buffer).getUint16(6,true),4);
   h.renderPort.emit({kind:"render-error",generation:packet.generation,content:packet.content,message:"historical surface lost"});await flushJobs();
   assert.equal(h.historicalOwners[0].frees,1);assert.equal(h.of("fatal").length,0);
   assert.equal(h.of("play-error").length,0);assert.equal(h.games.length,0);
   assert.deepEqual(request.completedArchive,archive);assert.equal(h.of("historical-record-result").at(-1).available,false);
+});
+
+test("record continuity: old history render failure preserves staged candidate and late old failure cannot retire accepted replacement", async () => {
+  const h = await catalogWorker(); await presentHistorical(h);
+  const prior = h.historicalOwners[0];
+  const oldPacket = h.renderPort.posts.findLast(row => row.kind === "packet");
+  assert.equal(new DataView(oldPacket.packet.buffer).getUint16(6, true), 4);
+  await h.send(historicalRequest(2));
+  const queued = h.of("historical-record-result").at(-1), candidate = h.historicalOwners[1];
+  assert.equal(queued.id, 2); assert.equal(queued.available, true);
+  assert.equal(prior.frees, 0); assert.equal(candidate.frees, 0);
+  const failure = { kind: "render-error", generation: oldPacket.generation,
+    content: oldPacket.content, message: "old historical surface lost" };
+  h.renderPort.emit(failure); await flushJobs();
+  assert.equal(prior.frees, 1); assert.equal(candidate.frees, 0);
+  const notice = h.of("historical-record-result").at(-1);
+  assert.equal(notice.id, 1); assert.equal(notice.available, false);
+  await h.send({ kind: "historical-record-accept", id: queued.id }); await h.tick();
+  assert.equal(h.views[0].historicalDraws.at(-1), candidate);
+  await h.send({ kind: "historical-record-page", id: 2, rpcId: 1, page: 0 });
+  assert.equal(h.of("historical-record-page-result").at(-1).error, null);
+  const replies = h.of("historical-record-result").length;
+  h.renderPort.emit(failure); await flushJobs();
+  await h.send({ kind: "historical-record-accept", id: 2 });
+  assert.equal(prior.frees, 1); assert.equal(candidate.frees, 0);
+  assert.equal(h.of("historical-record-result").length, replies);
+  await h.send({ kind: "historical-record-page", id: 2, rpcId: 2, page: 0 });
+  assert.equal(h.of("historical-record-page-result").at(-1).error, null);
+  await h.send({ kind: "dispose" }); assert.equal(candidate.frees, 1); assert.equal(prior.frees, 1);
+});
+
+test("record continuity: old history render failure preserves newer deferred acquisition", async () => {
+  const h = await catalogWorker(); await presentHistorical(h);
+  const prior = h.historicalOwners[0], gate = deferred(), file = replayFile(() => gate.promise);
+  const oldPacket = h.renderPort.posts.findLast(row => row.kind === "packet");
+  await h.send(historicalRequest(2, { replayFile: file.file }));
+  assert.equal(file.reads, 1); assert.equal(h.historicalOwners.length, 1);
+  h.renderPort.emit({ kind: "render-error", generation: oldPacket.generation,
+    content: oldPacket.content, message: "old history lost during read" }); await flushJobs();
+  assert.equal(prior.frees, 1);
+  gate.resolve(file.bytes.slice().buffer); await flushJobs();
+  const queued = h.of("historical-record-result").at(-1);
+  assert.equal(queued.id, 2); assert.equal(queued.available, true);
+  const candidate = h.historicalOwners[1]; assert.ok(candidate); assert.equal(candidate.frees, 0);
+  await h.send({ kind: "historical-record-accept", id: 2 }); await h.tick();
+  assert.equal(h.views[0].historicalDraws.at(-1), candidate);
+  await h.send({ kind: "historical-record-page", id: 2, rpcId: 1, page: 0 });
+  assert.equal(h.of("historical-record-page-result").at(-1).error, null);
+  await h.send({ kind: "dispose" }); assert.equal(prior.frees, 1); assert.equal(candidate.frees, 1);
 });

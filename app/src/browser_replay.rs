@@ -192,6 +192,10 @@ impl BrowserReplay {
         self.replay.score().combo
     }
     #[wasm_bindgen(getter)]
+    pub fn max_combo(&self) -> u64 {
+        self.replay.score().max_combo
+    }
+    #[wasm_bindgen(getter)]
     pub fn failed(&self) -> bool {
         self.replay.failed()
     }

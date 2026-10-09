@@ -424,6 +424,68 @@ test("report words preserve unsigned high bits and an armed unavailable report c
   assert.equal(renderedCursor(actual, start), 9007199254742128n);
 });
 
+// Independent ABI oracle: app/src/browser_audio.rs::report_word maps these
+// logical u64 words onto the low/high pairs in the 56-element report buffer.
+const REJECTED_AUDIO_COUNTERS = [
+  [16, "pending_full"],
+  [17, "voice_full"],
+  [18, "unknown_samples"],
+  [19, "unknown_stops"],
+  [20, "invalid_gains"],
+  [21, "invalid_rates"],
+  [22, "invalid_times"],
+];
+
+function assertAudioCounterRejection(actual, start, expected) {
+  assert.throws(() => renderedCursor(actual, start), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /^Mixer rejected a gameplay audio command\./);
+    const counters = [...error.message.matchAll(/([a-z_]+)=(\d+)/g)]
+      .map(([, name, value]) => [name, value]);
+    assert.deepEqual(counters, expected);
+    assert.ok(error.message.length <= 512, "fixed seven-counter diagnostics remain bounded");
+    return true;
+  });
+}
+
+test("each rejected mixer report word names its exact counter and preserves full unsigned values", () => {
+  const start = 9007199254740993n;
+  for (const [index, name] of REJECTED_AUDIO_COUNTERS) {
+    for (const value of [1n, 4294967296n, 9007199254740993n, U64_MAX]) {
+      const failed = report(start);
+      setWord(failed.words, index, value);
+      assertAudioCounterRejection(failed, start, [[name, value.toString()]]);
+    }
+  }
+});
+
+test("simultaneous mixer rejections report every nonzero counter in ABI order", () => {
+  const start = 9007199254740993n;
+  const failed = report(start);
+  const values = [1n, 2n, 4294967296n, 9007199254740993n, U64_MAX, 6n, 7n];
+  for (const [offset, [index]] of REJECTED_AUDIO_COUNTERS.entries()) {
+    setWord(failed.words, index, values[offset]);
+  }
+  assertAudioCounterRejection(failed, start, [
+    ["pending_full", "1"],
+    ["voice_full", "2"],
+    ["unknown_samples", "4294967296"],
+    ["unknown_stops", "9007199254740993"],
+    ["invalid_gains", "18446744073709551615"],
+    ["invalid_rates", "6"],
+    ["invalid_times", "7"],
+  ]);
+});
+
+test("zero rejection counters accept the exact rendered cursor without inventing a failure", () => {
+  const start = 9007199254740993n;
+  const actual = report(start);
+  for (const [index] of REJECTED_AUDIO_COUNTERS) {
+    assert.equal(reportWord(actual.words, index), 0n);
+  }
+  assert.equal(renderedCursor(actual, start), 9007199254742128n);
+});
+
 test("report corruption, command rejection and wrong start cannot fabricate completed playback", () => {
   const start = 9007199254740993n;
   for (const index of [0, 5, 6, 11, 23, 25, 27]) {

@@ -3500,6 +3500,14 @@ function clearHistoricalRecord(reason = "Historical record display was cleared."
     try { worker.postMessage({ kind: "historical-record-clear", id }); } catch { /* Owner shutdown can already have released the Worker. */ }
   }
 }
+function cancelHistoricalRecord(pending, reason) {
+  if (historicalOperation !== pending) return;
+  settleHistorical(new Error(reason));
+  if (worker) {
+    try { worker.postMessage({ kind: "historical-record-clear", id: ++serial, cancelId: pending.id }); }
+    catch { /* Owner shutdown can already have released the Worker. */ }
+  }
+}
 function receiveHistoricalRecord(data) {
   const pending = historicalOperation;
   if (!pending || data.id !== pending.id || !recordCurrent(pending.operation)) {
@@ -3514,17 +3522,28 @@ function receiveHistoricalRecord(data) {
     }
     return;
   }
+  let grades = null;
   try {
     if (typeof data.available !== "boolean" || !(data.error === null || (typeof data.error === "string" && data.error.length >= 1 && data.error.length <= 4096))
       || (data.available && data.error !== null)) throw new Error("Historical Worker response is invalid.");
     if (data.available) {
-      const grades = validateHistoricalGradeSnapshot({ page: data.gradePage, pages: data.gradePages });
-      historicalGradePager.bind(pending.id, grades.page, grades.pages);
+      grades = validateHistoricalGradeSnapshot({ page: data.gradePage, pages: data.gradePages });
     } else if (data.gradePage !== null || data.gradePages !== 0) throw new Error("Unavailable historical grade metadata is invalid.");
-  } catch (error) { clearHistoricalRecord("Historical Worker response is invalid."); return; }
-  historicalSelection = data.available ? { id: pending.id, owner } : null;
-  if (data.available) canvas.hidden = false;
-  else cancelHistoricalGradePage();
+  } catch (error) { cancelHistoricalRecord(pending, "Historical Worker response is invalid."); return; }
+  if (data.available) {
+    try { worker.postMessage({ kind: "historical-record-accept", id: pending.id }); }
+    catch (error) { cancelHistoricalRecord(pending, String(error.message).slice(0, 4096)); return; }
+    historicalGradePager.bind(pending.id, grades.page, grades.pages);
+    if (completedResults === pending.completedResults) clearCompletedResults();
+    if (historicalPageOperation) clearTimeout(historicalPageOperation.timer);
+    historicalPageOperation = null;
+    historicalSelection = { id: pending.id, owner };
+    canvas.hidden = false;
+  } else if (pending.clear) {
+    historicalSelection = null;
+    cancelHistoricalGradePage();
+    if (!hasPreview && !completedResults?.shown) canvas.hidden = true;
+  }
   historicalGradeControls();
   settleHistorical(null, { available: data.available, error: data.error });
 }
@@ -3540,18 +3559,20 @@ function requestHistoricalRecord(operation, replayFile, completedArchive, archiv
   const id = ++serial;
   if (!Number.isSafeInteger(id) || id < 1) return Promise.reject(new Error("Historical operation identity exhausted."));
   return new Promise((resolve, reject) => {
-    const abort = () => clearHistoricalRecord("Historical library operation was cancelled.");
+    const abort = () => {
+      if (historicalOperation?.id === id) cancelHistoricalRecord(historicalOperation, "Historical library operation was cancelled.");
+    };
     const timer = setTimeout(() => {
-      if (historicalOperation?.id === id) clearHistoricalRecord("Historical display timed out; selected replay remains available.");
+      if (historicalOperation?.id === id) cancelHistoricalRecord(historicalOperation, "Historical display timed out; selected replay remains available.");
     }, 10000);
-    historicalOperation = { id, operation, resolve, reject, abort, timer };
+    historicalOperation = { id, operation, resolve, reject, abort, timer, completedResults, clear: completedArchive == null };
     operation.controller.signal.addEventListener("abort", abort, { once: true });
     if (!recordCurrent(operation)) { abort(); return; }
     try {
       worker.postMessage(completedArchive == null ? { kind: "historical-record-clear", id }
         : { kind: "historical-record-present", id, replayFile, completedArchive, archivePlayer },
       completedArchive == null ? [] : [completedArchive.buffer]);
-    } catch (error) { clearHistoricalRecord(String(error.message).slice(0, 4096)); }
+    } catch (error) { cancelHistoricalRecord(historicalOperation, String(error.message).slice(0, 4096)); }
   });
 }
 
@@ -3597,7 +3618,6 @@ async function recordAction(action, menuTicket = null) {
   if ((action === "use" || action === "delete" || action === "opponent") && (!Number.isSafeInteger(id) || id < 1)) return;
   const operation = { owner, controller: new AbortController(), menuTicket };
   recordsOperation = operation;
-  if (action === "use") clearHistoricalRecord();
   controls();
   status(action === "save" ? "Saving the captured recording…" : "Opening saved records…");
   let committed = "";

@@ -46,6 +46,7 @@ let roomFinalization = null;
 let roomResults = null;
 let completedResults = null;
 let historicalRecord = null;
+let historicalCandidate = null;
 let menuOwner = null;
 let menuGeneration = 0n;
 let menuVisible = false;
@@ -80,6 +81,7 @@ async function settingsProfile(request) {
     return;
   }
   const operation = { id };
+  discardHistoricalCandidate();
   settingsOperation = operation;
   try {
     if (request.kind === "settings-profile-save") {
@@ -139,8 +141,14 @@ function completedResultsFailure(results, error) {
   report("play-completed-results", { playId: results.id, completedResults: completedResultsMetadata(results), error: message(error) });
 }
 
-function discardHistoricalRecord() {
+function discardHistoricalCandidate() {
   historicalEpoch = {};
+  const previous = historicalCandidate;
+  historicalCandidate = null;
+  try { previous?.binding.free(); } catch { /* An unaccepted candidate owns no presentation. */ }
+}
+function discardHistoricalRecord() {
+  discardHistoricalCandidate();
   const previous = historicalRecord;
   historicalRecord = null;
   if (visual?.owner === previous) fenceVisual();
@@ -157,15 +165,15 @@ function historicalRequestId(request) {
 }
 async function presentHistoricalRecord(request) {
   if (!historicalRequestId(request)) return;
+  discardHistoricalCandidate();
   if (failed || !cpuReady || play || roomFinalization || importing || stagedLibrary || settingsOperation
-    || completedResults?.shown || roomResults) {
+    || roomResults) {
     historicalReply(request.id, false, "Historical display requires an initialized idle preview.");
     return;
   }
-  discardHistoricalRecord();
-  const epoch = historicalEpoch;
-  const current = () => epoch === historicalEpoch && !failed && !play && !roomFinalization && !importing
-    && !stagedLibrary && !settingsOperation && !completedResults?.shown && !roomResults;
+  const epoch = historicalEpoch = {};
+  const current = () => request.id === lastHistoricalId && epoch === historicalEpoch && !failed && !play && !roomFinalization && !importing
+    && !stagedLibrary && !settingsOperation && !roomResults;
   let binding = null;
   try {
     const file = request.replayFile;
@@ -196,7 +204,12 @@ async function presentHistoricalRecord(request) {
     if (typeof available !== "boolean" || !(error == null || (typeof error === "string" && error.length >= 1 && error.length <= 4096))
       || (available && error != null)) throw new Error("Historical presentation returned invalid metadata.");
     const grades = available ? validateHistoricalGradeSnapshot({ page: binding.grade_page, pages: binding.grade_pages }) : null;
-    if (available) { historicalRecord = { id: request.id, binding, grades, lastRpc: 0 }; binding = null; }
+    if (!current()) { const previous = binding; binding = null; previous.free(); return; }
+    if (available) {
+      // Keep the previous owner until Window accepts this correlated response.
+      historicalCandidate = { id: request.id, binding, grades, lastRpc: 0, epoch };
+      binding = null;
+    }
     else { const previous = binding; binding = null; previous.free(); }
     historicalReply(request.id, available, error ?? null, grades);
     publishVisual();
@@ -204,6 +217,21 @@ async function presentHistoricalRecord(request) {
     try { binding?.free(); } catch {}
     if (current()) { historicalReply(request.id, false, error); publishVisual(); }
   }
+}
+function acceptHistoricalRecord(request) {
+  const candidate = historicalCandidate;
+  if (!identity(request.id) || !candidate || candidate.id !== request.id) return;
+  if (request.id !== lastHistoricalId || candidate.epoch !== historicalEpoch || failed || disposed || !cpuReady
+    || play || roomFinalization || importing || stagedLibrary || settingsOperation || roomResults) {
+    discardHistoricalCandidate();
+    historicalReply(request.id, false, "Historical acceptance requires the current idle selection.");
+    return;
+  }
+  historicalCandidate = null;
+  // Detach the candidate before retirement so only the previous owners are freed.
+  discardRoomResults();
+  historicalRecord = candidate;
+  publishVisual();
 }
 function historicalPageReply(request, grades, error = null) {
   report("historical-record-page-result", { id: request.id, rpcId: request.rpcId,
@@ -251,6 +279,14 @@ function pageHistoricalRecord(request) {
 }
 
 function clearHistoricalRecord(request) {
+  if (request.cancelId != null) {
+    if (!identity(request.cancelId) || request.cancelId !== lastHistoricalId) return;
+    if (!historicalRequestId(request)) return;
+    discardHistoricalCandidate();
+    historicalReply(request.id, false);
+    publishVisual();
+    return;
+  }
   if (!historicalRequestId(request)) return;
   discardHistoricalRecord();
   historicalReply(request.id, false);
@@ -337,7 +373,12 @@ function visualFailure(context, error) {
   if (context.mode === "live" || context.mode === "local" || context.mode === "replay") failPlay(context.owner, error);
   else if (context.mode === "results") completedResultsFailure(context.owner, error);
   else if (context.mode === "room") roomResultsFailure(context.owner, error);
-  else if (context.mode === "history") { discardHistoricalRecord(); historicalReply(context.owner.id, false, error); }
+  else if (context.mode === "history") {
+    // A failing old visual does not invalidate a newer staged acquisition.
+    historicalRecord = null;
+    try { context.owner.binding.free(); } catch { /* Historical display failure has no gameplay outcome. */ }
+    historicalReply(context.owner.id, false, error);
+  }
   else report("selection-error", { id: selectedId, message: message(error) });
 }
 function scopedRenderPort(context) {
@@ -3160,6 +3201,7 @@ self.addEventListener("message", event => {
   if (request.kind === "historical-record-page") { pageHistoricalRecord(request); return; }
   if (request.kind.startsWith("menu-")) { handleMenu(request); return; }
   if (request.kind === "historical-record-clear") { clearHistoricalRecord(request); return; }
+  if (request.kind === "historical-record-accept") { acceptHistoricalRecord(request); return; }
   if (request.kind === "historical-record-present") { void presentHistoricalRecord(request); return; }
   if (request.kind === "settings-profile-save" || request.kind === "settings-profile-load") {
     void settingsProfile(request).catch(() => { /* An unavailable response port leaves Window's bounded deadline authoritative. */ });

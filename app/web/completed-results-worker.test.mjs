@@ -283,6 +283,34 @@ test("async multiplayer write and peer acknowledgement precede result release an
   assert.equal(h.views[0].resultDraws.at(-1).results, h.completedOwners[0]);
 });
 
+test("record continuity: retained joined room Results refuse historical navigation", async () => {
+  const h = await started({ samples: [], allowNetworkClock: true,
+    startRequest: startRequest({ inputMode: "physical", windowOriginNs: 0n,
+      localPlanWords: Uint32Array.of(0xffffffff, 0, 0, 0) }) });
+  assert.equal((await h.rpc("play-sample")).result.kind, "samples-end");
+  const port = { onmessage: null, onmessageerror: null, start() {}, postMessage() {}, close() {} };
+  assert.equal((await h.rpc("play-audio", { port, generation: 7, queueCapacity: 4096, timeoutMs: 50 })).result.kind, "audio-ready");
+  const opened = await h.rpc("play-room-open", { url: "https://example.test:4433/rooms/fixture", windowOriginNs: 0n });
+  assert.equal(opened.error, undefined); assert.equal(opened.result.kind, "room-opened");
+  const session = h.roomSessions[0], channel = h.roomChannels[0];
+  channel.writes[0].gate.resolve(); await flushJobs();
+  session.onReceive = () => {
+    session.participantValue = 18446744073709551615n; session.revisionValue++;
+    session.dto = { phase: 2, deadlineNs: null, members: [
+      { participant: session.participantValue, players: Uint32Array.of(0xffffffff), prepared: true },
+      { participant: 9007199254740993n, players: Uint32Array.of(800), prepared: true },
+    ] };
+  };
+  channel.reads.at(-1).gate.resolve(Uint8Array.of(1)); await flushJobs(); session.onReceive = null;
+  await h.send({ kind: "play-stop", playId: 7 });
+  const joined = h.roomResults[0]; assert.ok(joined, "real room stop retains joined Results"); assert.equal(joined.frees, 0);
+  await h.send({ kind: "historical-record-present", id: 1,
+    replayFile: replayFile().file, completedArchive: Uint8Array.of(1), archivePlayer: 0xffffffff });
+  const refused = h.of("historical-record-result").at(-1);
+  assert.equal(refused.available, false); assert.ok(refused.error); assert.equal(joined.frees, 0);
+  await h.send({ kind: "dispose" }); assert.equal(joined.frees, 1);
+});
+
 function deferred() {
   let resolve;
   let reject;
@@ -1132,6 +1160,37 @@ async function workerHarness(options = {}) {
       if (this.requestError) throw this.requestError;
       this.onRequest?.(kind);
     }
+    configure_frame_wait(timeout) { this.live(); this.frameTimeout = timeout; this.frameExpires = null; }
+    frame_wait_step(elapsed) {
+      this.live();
+      if (!this.partial) { this.frameExpires = null; return -1n; }
+      this.frameExpires ??= elapsed + this.frameTimeout;
+      if (elapsed >= this.frameExpires) throw Object.assign(new Error("scripted common frame expiry"), { code: "timeout", operation: "frame" });
+      return this.frameExpires - elapsed;
+    }
+    begin_setup(elapsed, timeout) {
+      this.live(); this.setupTimeout = timeout; this.setupExpires = elapsed + timeout; this.setupPhase = "admission";
+    }
+    setup_wait_step(elapsed) {
+      this.live();
+      if (this.setupPhase === "complete") return -1n;
+      if (this.setupPhase !== "lobby" && elapsed >= this.setupExpires) throw Object.assign(new Error("scripted common setup expiry"),
+        { code: "timeout", operation: this.setupPhase === "prepared" ? "prepared" : "setup" });
+      if (this.setupPhase === "admission" && this.dto !== null && this.participantValue !== 0n) this.setupPhase = "lobby";
+      if (this.setupPhase === "lobby" && this.dto?.phase === 2) { this.setupPhase = "prepared"; this.setupExpires = elapsed + this.setupTimeout; }
+      if (this.setupPhase === "prepared" && this.schedules.length) { this.setupPhase = "complete"; return -1n; }
+      return this.setupPhase === "lobby" ? -2n : this.setupExpires - elapsed;
+    }
+    begin_drain(elapsed, timeout) {
+      this.live(); this.drainExpires = elapsed + timeout; this.drainAdmitted = false;
+    }
+    drain_requested() { this.live(); return this.drainAdmitted === true; }
+    drain_wait_step(elapsed) {
+      this.live();
+      if (elapsed >= this.drainExpires) throw Object.assign(new Error("scripted common drain deadline"), { code: "timeout" });
+      if (this.progressComplete && !this.drainAdmitted) { this.request("drain"); this.drainAdmitted = true; }
+      return this.drainComplete ? -1n : 1000000n;
+    }
     request_seal() { this.request("seal"); }
     request_ready() { this.request("ready"); }
     request_leave() { this.request("leave"); }
@@ -1178,6 +1237,8 @@ async function workerHarness(options = {}) {
       this.publications.push({ words: words.slice(), finalPrefix });
       this.onPublish?.(words, finalPrefix);
     }
+    publication_due() { this.live(); return true; }
+    publish_progress_at(words, finalPrefix) { this.live(); this.publish_progress(words, finalPrefix); return true; }
     take_peer_progress() { this.live(); return this.peerProgress.shift() ?? null; }
     local_final_written() { this.live(); return this.finalWritten; }
     local_final_acknowledged() { this.live(); return this.finalAcknowledged; }

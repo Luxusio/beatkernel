@@ -4,6 +4,10 @@ import { nanoseconds } from "./host_model.mjs";
 const I64_MAX = 9223372036854775807n;
 const I64_MIN = -9223372036854775808n;
 const U64_MAX = 18446744073709551615n;
+const MIXER_REJECTION_COUNTERS = Object.freeze([
+  "pending_full", "voice_full", "unknown_samples", "unknown_stops",
+  "invalid_gains", "invalid_rates", "invalid_times",
+]);
 const DEFAULT_TIMING = Object.freeze({ earlyNs: 50000000n, lateNs: 50000000n, offsetNs: 0n });
 // Original samples cover base62; section preparation may add 4096 tails.
 export const ORIGINAL_PCM_SAMPLES = 62 * 62;
@@ -295,7 +299,14 @@ export function renderedCursor(report, start) {
   if (!report.available) return null;
   if (reportWord(words, 4) > reportWord(words, 2)) throw new Error("Invalid audio playback extent.");
   for (let index = 16; index <= 22; index++) {
-    if (reportWord(words, index) !== 0n) throw new Error("Mixer rejected a gameplay audio command.");
+    if (reportWord(words, index) !== 0n) {
+      const rejected = [];
+      for (let offset = 0; offset < MIXER_REJECTION_COUNTERS.length; offset++) {
+        const value = reportWord(words, 16 + offset);
+        if (value !== 0n) rejected.push(`${MIXER_REJECTION_COUNTERS[offset]}=${value}`);
+      }
+      throw new Error(`Mixer rejected a gameplay audio command. ${rejected.join(", ")}`);
+    }
   }
   const cursor = reportWord(words, 3) + reportWord(words, 4);
   if (cursor > U64_MAX) throw new Error("Audio playback cursor overflow.");
