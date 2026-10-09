@@ -1,5 +1,10 @@
 # Synchronized music section restart
 
+The fresh-owner APIs described here retain their stop/reset/start contract.
+The separate [retained-owner practice contract](REQ__gapless-practice.md) defines
+gapless loop/scrub on one continuing output timeline. Its implementation and
+native composition require separate evidence; the fresh helpers do not prove it.
+
 Section restart must select the music source frame, reconstruct logical gameplay
 at the corresponding song position, and establish a fresh output/host anchor as
 one coordinated host operation. Restoring JudgeEngine or changing Transport alone

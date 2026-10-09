@@ -1,6 +1,6 @@
 # BMS 플레이어 전체 작업 분해 구조(WBS)
 
-기준일: 2026-10-09. 목표: **범용 BeatKernel 기반의 고성능 cross-platform BMS 플레이어**.
+기준일: 2026-10-10. 목표: **범용 BeatKernel 기반의 고성능 cross-platform BMS 플레이어**.
 사용자가 요청한 전체 TODO/진행률의 기준 문서다. 현재 병렬 개발 묶음만으로
 전체 목표를 대체하지 않는다. [원래 명세](../../plan.md),
 [플레이어 요구사항](REQ__bms-player.md),
@@ -41,7 +41,7 @@ python3 tools/wbs_status.py --ready
 
 ## 근거 인덱스
 
-근거는 2026-10-08 현재 checkout에서 확인한 개발/QA 기록이다. 로그는 ignored
+근거는 각 행의 날짜와 checkout에서 확인한 개발/QA 기록이다. 로그는 ignored
 `target/`에 있으므로 새 clone에서 사라질 수 있다. 테스트 source/계약과 재현
 명령도 함께 남긴다. 로그 유실을 PASS로 대체하지 말고 필요한 scope를 재실행한다.
 
@@ -82,6 +82,7 @@ python3 tools/wbs_status.py --ready
 | E32 | `d0b062c`의 독립 input-disposition QA: `target/wf/qa-cli-input-disposition-01a11db1`; 전체 core417 PASS / 실패0 / ignored0(새 judge12/runtime8/replay6 및 doctest16 포함), core all-target Clippy PASS, desktop/webtransport app lib check PASS, DEEP code/security/docs PASS | 실제 판정 facts·정규화 거절·성공 prefix·replay 기록 후 callback·legacy hash/codec parity. 동일 v1 benchmark18회에서 연산/프레임/PCM checksum/counter 일치; 시간은 관측이며 성능 우위/zero-overhead 보증 아님. 최초 full-test compile240초 timeout 후 동일 전체 명령 cache continuation PASS. app 경고20·물리 검증·08.11 정책은 별도 |
 | E33 | `891eb85`의 독립 dense-chart QA: `target/wf/qa-cli-dense-chart-01a11dd7/REPORT.md`, `cli-results.json`; 전체 core426 PASS / 실패0(새 dense9 포함), all-target Clippy/release build/DEEP code/security/docs PASS, 실제 release CLI38건(거절28건) PASS | actual judge/replay/projector의 원본2N 기록·golden head/tail/provenance·fresh prefix 복원·narrow tail·geometry/storage 검사. 기본2만 노트 및10만 노트/64레인 실제 실행; 반복20h/week origin facts 일치. origin은 장시간 실행이 아니며 레인은 member가 아님. GPU/물리/native/soak/rebind/다인 및 전체13.05/13.08 완료는 별도 |
 | E34 | 영상 BGA 독립 DEEP code review와 qa-cli/qa-browser PASS: `target/wf/bms-video/qa-cli/`, `target/wf/bms-video/qa-browser/evidence.json`; app2124 PASS/실패0/ignored6, external51 PASS(실제 FFmpeg2 포함), Node750 PASS, native encoded-to-Scene/GPU2 PASS, 실제 Chromium23 checks PASS | VFR/B-frame/nonzero origin/preroll/backseek/EOF/반복 활성화·예산/ACK/종료·실제 native/browser GPU 및 preview/live/results/history/replay/local2/reload. Windows/macOS 실제 실행·물리 오디오 지연·모든 코덱/배포 선택은 별도. 재현 계약은 REQ__bms-video. |
+| E35 | retained practice 독립 DEEP code/security cycle4와 qa-cli PASS: `target/wf/qa-cli-gapless-01a1220c-1/`; core public debug/release 각27 PASS, 현재 app2250/0/6·native307/0/5, CLI7/7, Windows/macOS all-targets typing exit0 | 실제 Desktop→spawned worker→공통 pump→production factory→유일 converted owner의 loop/disable/scrub/F5·부분 target admission·원본 PCM/기록 검증. 실패 Stop 누적·2..4 cohort·subframe cut·양수 시작 등록/replay 검증 포함. Native 관측은 주입; stub은 타입만 증명. 물리 음향/ASIO SDK·장치/브라우저 parity·출력 교체는 별도. |
 
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
@@ -262,7 +263,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-09.08** archive 오류에도 유효 prefix를 유지하고 잘못된 선택/path/history를 원자적으로 거절한다. — 상태=D(검증완료); 선행=-; 근거=E1.
 - [x] **BK-WBS-09.09** 특정 구간 준비가 원래 note time과 overlap BGM suffix·PCM frame 선택을 유지한다. — 상태=D(검증완료); 선행=-; 근거=E0,E1.
 - [ ] **BK-WBS-09.10** F5 pinned retry·북마크·구간 편집·finite loop가 실제 UI/native에서 같은 의미로 동작한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=논리 fixture와 실제 cleanup/restart 대조.
-- [ ] **BK-WBS-09.11** gapless loop/scrub에서 같은 출력 timeline을 유지하며 reopen gap을 제거한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=source/target phase·BGM/키음·finite 경계 E2E.
+- [x] **BK-WBS-09.11** gapless loop/scrub에서 같은 출력 timeline을 유지하며 reopen gap을 제거한다. — 상태=D(검증완료); 선행=-; 근거=E35; 범위=실제 production owner/pump와 주입 native 관측을 연결한 software E2E; 물리 측정은09.12.
 - [ ] **BK-WBS-09.12** 장시간/반복 구간 재시작의 실제 키음/BGM/노트 동기화를 측정한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=물리 출력/loopback; 논리 hash만으로 완료하지 않음.
 - [ ] **BK-WBS-09.13** profile/replay/archive 저장의 interruption·동시 publish·symlink·capacity 오류를 검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=실제 파일 I/O·잘린 파일·재실행.
 
@@ -480,3 +481,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - 2026-10-08: mixed-rate rebind/helper 회귀와 실제 native HTTP/3 room 교환을 확인해
   07.03/12.03을 D로 갱신했다. 완료79→81, 활성193 유지. 전체 controller/launchers와
   actual browser/WebTransport/GUI/hardware는 해당 남은 leaf를 계속 유지한다.
+- 2026-10-10: 실제 retained-owner Desktop/pump/factory/converter 경로의 독립
+  code/security/CLI QA와 양 OS all-targets typing이 통과해09.11을 D로 갱신했다.
+  완료85→86, 활성193 유지.09.12 물리 동기화·browser parity·출력 교체와
+  전체 제품/출시 검증은 해당 남은 leaf에서 유지한다.
