@@ -1765,3 +1765,7 @@ fn joined_native_capture_codec_reconstruction_and_replay_audio_preserve_logical_
     );
     assert!(planned_times.windows(2).all(|times| times[0] < times[1]));
 }
+
+mod retained_practice {
+    include!("gapless_practice_journey_fixtures.rs");
+}

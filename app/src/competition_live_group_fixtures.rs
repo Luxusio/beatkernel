@@ -209,6 +209,7 @@ fn offline_terminal_progress_uses_actual_reports_and_remote_selection_cannot_cha
     let mut capture = LiveReplayCapture::new(&judge, domain, limits).unwrap();
     let local_player = PlayerId(u32::MAX - 5);
     let mut owner = LiveCompetition {
+        practice_options: None,
         admitted_policy_header: None,
         player: local_player,
         competition: Competition::new(capture.header().clone(), 0).unwrap(),

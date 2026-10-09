@@ -344,6 +344,7 @@ pub fn load_chart_with_seed(path: &Path, seed: u64) -> Result<BmsChart> {
 /// Per-play competition state. Socket work never runs on the gameplay thread.
 pub struct LiveCompetition {
     player: PlayerId,
+    practice_options: Option<CompetitionOptions>,
     competition: Competition,
     admitted_policy_header: Option<beatkernel::replay::ReplayHeader>,
     network: Option<NativeCompetitionNetwork>,
@@ -672,7 +673,9 @@ impl LiveCompetition {
             )?),
             None => None,
         };
-        Self::from_prepared(player, competition, network, options.setup_timeout).map(Some)
+        let mut owner = Self::from_prepared(player, competition, network, options.setup_timeout)?;
+        owner.practice_options = Some(options.clone());
+        Ok(Some(owner))
     }
 
     /// Attach already prepared comparisons and the single selected network
@@ -689,6 +692,7 @@ impl LiveCompetition {
         let network_status = network.as_ref().map(|_| NetworkStatus::Waiting);
         let mut prepared = Self {
             player,
+            practice_options: None,
             competition,
             admitted_policy_header: None,
             network,
@@ -702,6 +706,76 @@ impl LiveCompetition {
         };
         prepared.publish_presentation(true)?;
         Ok(prepared)
+    }
+
+    /// Prepare new saved opponents on the cold gameplay owner. No socket,
+    /// publication or mutation of the old comparison occurs before commit.
+    pub fn prepare_practice(
+        &self,
+        attempt: &crate::practice_session::PreparedPracticeAttempt,
+        policy: &crate::play_policy::ResolvedPlayPolicy,
+    ) -> Result<Self> {
+        // A failed network owner is still a network owner. Refuse before any
+        // replay IO or ownership transfer, even if its transport already failed.
+        if self.network.is_some()
+            || self
+                .practice_options
+                .as_ref()
+                .is_some_and(|o| o.network.is_some())
+        {
+            return Err("network competition does not support retained practice".into());
+        }
+        let options = self
+            .practice_options
+            .as_ref()
+            .ok_or("competition has no pinned saved-opponent preparation context")?;
+        if attempt.judge.effective_song_time().is_some()
+            || attempt.judge.profile() != policy.judge()
+        {
+            return Err("practice competition requires a pristine matching judge".into());
+        }
+        let header = crate::native_judge::prepare_policy_header(
+            &attempt.source,
+            &attempt.judge,
+            policy,
+            attempt.config.domain,
+            attempt.config.start,
+            attempt.config.chart_seed,
+            attempt.config.end,
+        )?;
+        // Builtin saved records retain the legacy comparison schema, exactly
+        // as initial prepare_member_section_with_policy does. The admitted
+        // native policy header is separate; do not relax replay compatibility.
+        let comparison_header = if policy.selection() == crate::play_policy::GaugeSelection::BeatKernel {
+            LiveReplayCapture::new_with_input_sounds(
+                &attempt.judge,
+                attempt.config.domain,
+                replay_limits()?,
+                attempt.config.start,
+                attempt.config.chart_seed,
+                None,
+                BmsInputMode::ButtonOnly,
+                InputSoundIdentity::from_source(&attempt.source)?,
+            )?.header().clone()
+        } else {
+            header.clone()
+        };
+        let mut competition = Competition::new(comparison_header, 8)?;
+        options.load_opponents(&attempt.source, &mut competition, replay_limits()?)?;
+        Ok(Self {
+            player: self.player,
+            practice_options: Some(options.clone()),
+            competition,
+            admitted_policy_header: Some(header),
+            network: None,
+            last_publish: None,
+            last_display: None,
+            network_failed: false,
+            network_status: None,
+            last_presentation: None,
+            network_setup_timeout: options.setup_timeout,
+            terminal: TerminalGuard::new(),
+        })
     }
 
     /// Read retained comparison evidence after cleanup without native effects.
@@ -1207,6 +1281,7 @@ mod fixtures {
             .header;
         let mut owner = LiveCompetition {
             player: PlayerId(1),
+            practice_options: None,
             competition: Competition::new(header, 0).unwrap(),
             admitted_policy_header: None,
             network: None,
@@ -1219,16 +1294,12 @@ mod fixtures {
             terminal: TerminalGuard::new(),
         };
         assert_eq!(owner.terminal_prefix(), None); // No invented prefix before an actual report.
-        assert!(
-            owner
-                .await_network_ready(|| panic!("offline competition must not acquire or wait"))
-                .unwrap()
-        );
-        assert!(
-            owner
-                .await_network_commit(|| panic!("offline commit must not wait"))
-                .unwrap()
-        );
+        assert!(owner
+            .await_network_ready(|| panic!("offline competition must not acquire or wait"))
+            .unwrap());
+        assert!(owner
+            .await_network_commit(|| panic!("offline commit must not wait"))
+            .unwrap());
         assert_eq!(owner.committed_start_schedule(), None);
         assert_eq!(owner.network_clock_now_ns().unwrap(), None);
         assert_eq!(
@@ -1344,57 +1415,49 @@ mod fixtures {
                 );
             }
         }
-        assert!(
-            LiveCompetition::prepare_section_at_with_chart_seed(
-                &inactive,
-                &source,
-                &judge,
-                ClockDomainId(17),
-                Timestamp::ZERO,
-                3,
-                Some(Timestamp::from_nanos(1))
-            )
-            .unwrap()
-            .is_none()
-        );
-        assert!(
-            LiveCompetition::prepare_section_at_with_chart_seed(
-                &inactive,
-                &source,
-                &judge,
-                ClockDomainId(17),
-                Timestamp::from_nanos(i64::MAX - 1),
-                u64::MAX,
-                Some(Timestamp::MAX)
-            )
-            .unwrap()
-            .is_none()
-        );
-        assert!(
-            LiveCompetition::prepare_at_with_chart_seed(
-                &inactive,
-                &source,
-                &judge,
-                ClockDomainId(17),
-                Timestamp::ZERO,
-                3
-            )
-            .unwrap()
-            .is_none()
-        );
-        assert!(
-            LiveCompetition::prepare_section_at_with_chart_seed(
-                &inactive,
-                &source,
-                &judge,
-                ClockDomainId(17),
-                Timestamp::ZERO,
-                3,
-                None
-            )
-            .unwrap()
-            .is_none()
-        );
+        assert!(LiveCompetition::prepare_section_at_with_chart_seed(
+            &inactive,
+            &source,
+            &judge,
+            ClockDomainId(17),
+            Timestamp::ZERO,
+            3,
+            Some(Timestamp::from_nanos(1))
+        )
+        .unwrap()
+        .is_none());
+        assert!(LiveCompetition::prepare_section_at_with_chart_seed(
+            &inactive,
+            &source,
+            &judge,
+            ClockDomainId(17),
+            Timestamp::from_nanos(i64::MAX - 1),
+            u64::MAX,
+            Some(Timestamp::MAX)
+        )
+        .unwrap()
+        .is_none());
+        assert!(LiveCompetition::prepare_at_with_chart_seed(
+            &inactive,
+            &source,
+            &judge,
+            ClockDomainId(17),
+            Timestamp::ZERO,
+            3
+        )
+        .unwrap()
+        .is_none());
+        assert!(LiveCompetition::prepare_section_at_with_chart_seed(
+            &inactive,
+            &source,
+            &judge,
+            ClockDomainId(17),
+            Timestamp::ZERO,
+            3,
+            None
+        )
+        .unwrap()
+        .is_none());
     }
     #[test]
     fn display_labels_remove_directories_controls_and_bound_unicode() {
@@ -1441,3 +1504,236 @@ mod fixtures {
 #[cfg(test)]
 #[path = "competition_solo_terminal_fixtures.rs"]
 mod solo_terminal_fixtures;
+
+#[cfg(test)]
+mod practice_tests {
+    use super::*;
+    use crate::{
+        native_judge::NativeJudgeConfig,
+        play_policy::{GaugeSelection, OriginalGaugeContext, ResolvedPlayPolicy},
+        practice_session::{prepare_attempt, PracticeAttemptConfig},
+        session_launch::SessionLaunch,
+    };
+    use beatkernel::{
+        input::{
+            ButtonEvent, ButtonState, DeviceId, EventMeta, GameControlId, GameInputEvent,
+            PhysicalControlId, PhysicalInputEvent,
+        },
+        replay::{
+            codec::{encode_replay, ReplayFile},
+            ReplaySession,
+        },
+        time::ClockPoint,
+    };
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct Saved(PathBuf);
+    impl Drop for Saved {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    fn ts(n: i64) -> Timestamp {
+        Timestamp::from_nanos(n)
+    }
+    fn config(start: i64) -> PracticeAttemptConfig {
+        PracticeAttemptConfig {
+            start: ts(start),
+            end: Some(ts(3_500_000_000)),
+            domain: ClockDomainId(71),
+            chart_seed: 0,
+            capture_limits: None,
+        }
+    }
+    fn source() -> BmsChart {
+        beatkernel_bms::parse(
+            "#BPM 60\n#RANK 2\n#WAV01 key.wav\n#00011:00010001\n",
+            Default::default(),
+        )
+        .unwrap()
+    }
+    fn launch() -> SessionLaunch {
+        SessionLaunch::new(vec!["--chart".into(), "original.bms".into()]).unwrap()
+    }
+    fn saved(source: &BmsChart, policy: &ResolvedPlayPolicy) -> Saved {
+        let attempt = prepare_attempt(source, policy, &launch(), config(500_000_000)).unwrap();
+        let header = if policy.selection() == GaugeSelection::BeatKernel {
+            LiveReplayCapture::new_with_input_sounds(
+                &attempt.judge,
+                attempt.config.domain,
+                replay_limits().unwrap(),
+                attempt.config.start,
+                0,
+                None,
+                BmsInputMode::ButtonOnly,
+                InputSoundIdentity::from_source(&attempt.source).unwrap(),
+            ).unwrap().header().clone()
+        } else {
+            crate::native_judge::prepare_policy_header(
+                &attempt.source,
+                &attempt.judge,
+                policy,
+                attempt.config.domain,
+                attempt.config.start,
+                0,
+                attempt.config.end,
+            ).unwrap()
+        };
+        let mut recording = ReplaySession::new(header.clone(), attempt.judge).unwrap();
+        for (at, state, seq) in [
+            (1_000_000_000, ButtonState::Down, 1),
+            (1_000_000_001, ButtonState::Up, 2),
+            (3_000_000_000, ButtonState::Down, 3),
+        ] {
+            recording
+                .push_input(
+                    GameInputEvent {
+                        game_control: GameControlId(0x11),
+                        physical: PhysicalInputEvent::Button(ButtonEvent {
+                            meta: EventMeta::new(
+                                DeviceId(8),
+                                ClockPoint {
+                                    domain: ClockDomainId(71),
+                                    timestamp: ts(at),
+                                },
+                                seq,
+                            ),
+                            control: PhysicalControlId::keyboard(4),
+                            state,
+                        }),
+                    },
+                    ts(at),
+                )
+                .unwrap();
+        }
+        assert_eq!(recording.results().len(), 2);
+        let path = std::env::temp_dir().join(format!(
+            "beatkernel-practice-ghost-{}-{}.bkr",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(
+            &path,
+            encode_replay(
+                &ReplayFile::new(header, recording.records().to_vec()),
+                replay_limits().unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        Saved(path)
+    }
+    fn owner(source: &BmsChart, policy: &ResolvedPlayPolicy, saved: &Saved) -> LiveCompetition {
+        let attempt = prepare_attempt(source, policy, &launch(), config(500_000_000)).unwrap();
+        LiveCompetition::prepare_member_section_with_policy(
+            PlayerId(43),
+            &CompetitionOptions {
+                ghosts: vec![(OpponentKind::Own, saved.0.clone())],
+                ..CompetitionOptions::default()
+            },
+            &attempt.source,
+            &attempt.judge,
+            policy,
+            attempt.config.domain,
+            attempt.config.start,
+            0,
+            attempt.config.end,
+        )
+        .unwrap()
+        .unwrap()
+    }
+    #[test]
+    fn saved_ghost_practice_reloads_fresh_section_and_preserves_member_and_policy() {
+        let source = source();
+        let context = OriginalGaugeContext::from_source(&source);
+        let mut policies = Vec::new();
+        for selection in [
+            GaugeSelection::BeatKernel,
+            GaugeSelection::Bms(beatkernel_bms::BmsGaugeKind::Hard),
+        ] {
+            policies.push(
+                NativeJudgeConfig {
+                    early: 0,
+                    late: 0,
+                    offset: 0,
+                    preroll: 0,
+                    output: ClockDomainId(71),
+                    end: config(500_000_000).end,
+                }
+                .resolve_play_policy(&context, selection)
+                .unwrap(),
+            );
+        }
+        policies.push(
+            ResolvedPlayPolicy::with_timing(
+                &source,
+                GaugeSelection::Bms(beatkernel_bms::BmsGaugeKind::Hard),
+                crate::play_policy::TimingPresetSelection::parse(
+                    "beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1",
+                    "rank-first",
+                )
+                .unwrap(),
+                0,
+            )
+            .unwrap(),
+        );
+        for policy in policies {
+            let saved = saved(&source, &policy);
+            let mut old = owner(&source, &policy, &saved);
+            old.competition.observe(&[], ts(3_000_000_000)).unwrap();
+            assert_eq!(old.competition.opponents()[0].score().hits, 2);
+            let attempt =
+                prepare_attempt(&source, &policy, &launch(), config(500_000_000)).unwrap();
+            let mut fresh = old.prepare_practice(&attempt, &policy).unwrap();
+            assert_eq!(fresh.player, PlayerId(43));
+            assert_eq!(fresh.native_policy_header(), old.native_policy_header());
+            assert_eq!(fresh.competition.expected_header(), old.competition.expected_header());
+            assert_eq!(fresh.competition.opponents().len(), 1);
+            assert_eq!(fresh.competition.opponents()[0].kind(), OpponentKind::Own);
+            assert_eq!(fresh.competition.opponents()[0].score().hits, 0);
+            assert_eq!(fresh.competition.opponents()[0].song_time(), None);
+            assert_eq!(
+                fresh.competition.opponents()[0].recorded_until(),
+                Some(ts(3_000_000_000))
+            );
+            assert_eq!(fresh.last_publish, None);
+            assert_eq!(fresh.last_presentation, None);
+            fresh.competition.observe(&[], ts(1_000_000_000)).unwrap();
+            assert_eq!(fresh.competition.opponents()[0].score().hits, 1);
+            assert_eq!(old.competition.opponents()[0].score().hits, 2);
+            assert!(fresh.network.is_none());
+        }
+    }
+    #[test]
+    fn incompatible_or_missing_saved_ghost_refuses_without_mutating_old_progress() {
+        let source = source();
+        let policy = ResolvedPlayPolicy::builtin(0, 0, 0).unwrap();
+        let saved = saved(&source, &policy);
+        let mut old = owner(&source, &policy, &saved);
+        old.competition.observe(&[], ts(3_000_000_000)).unwrap();
+        let incompatible =
+            prepare_attempt(&source, &policy, &launch(), config(2_000_000_000)).unwrap();
+        assert!(old.prepare_practice(&incompatible, &policy).is_err());
+        assert_eq!(old.competition.opponents()[0].score().hits, 2);
+        let same = prepare_attempt(&source, &policy, &launch(), config(500_000_000)).unwrap();
+        std::fs::remove_file(&saved.0).unwrap();
+        assert!(old.prepare_practice(&same, &policy).is_err());
+        assert_eq!(old.competition.opponents()[0].score().hits, 2);
+        assert_eq!(old.player, PlayerId(43));
+        // The pinned network selection refuses before attempting the now missing
+        // replay. It must not silently turn a network attempt into offline play.
+        let (network, _) =
+            CompetitionOptions::extract(&["--mp-host".into(), "127.0.0.1:1234".into()]).unwrap();
+        old.practice_options.as_mut().unwrap().network = network.network;
+        let error = match old.prepare_practice(&same, &policy) {
+            Ok(_) => panic!("network practice was admitted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "network competition does not support retained practice"
+        );
+        assert_eq!(old.competition.opponents()[0].score().hits, 2);
+    }
+}

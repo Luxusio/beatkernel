@@ -400,6 +400,7 @@ pub(crate) trait PumpTiming<D: GameplayDevice> {
     fn section_start(&self) -> Option<Timestamp> {
         None
     }
+    fn set_section_start(&mut self, _: Timestamp) {}
     fn audio(&self) -> Option<&crate::native_audio_presentation::NativeAudioPresentation> {
         None
     }
@@ -551,6 +552,9 @@ impl<D: GameplayDevice> PumpTiming<D> for AudioTiming<'_> {
     }
     fn section_start(&self) -> Option<Timestamp> {
         Some(self.1)
+    }
+    fn set_section_start(&mut self, start: Timestamp) {
+        self.1 = start;
     }
     fn audio(&self) -> Option<&crate::native_audio_presentation::NativeAudioPresentation> {
         Some(self.0)

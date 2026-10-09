@@ -57,7 +57,7 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
     where
         B::Error: std::error::Error + 'static,
     {
-        self.service_with(owner, map, applied, |owner| {
+        self.service_with(owner, None, map, applied, |owner| {
             owner.publish_paused(context, now)
         })
     }
@@ -73,7 +73,11 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
     where
         B::Error: std::error::Error + 'static,
     {
-        self.service_with(owner, map, applied, |owner| {
+        let refusal = context
+            .presentation
+            .has_retained_practice()
+            .then_some("output replacement is unavailable during retained practice");
+        self.service_with(owner, refusal, map, applied, |owner| {
             owner.publish_paused_audio(context, now)
         })
     }
@@ -89,13 +93,18 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
     where
         B::Error: std::error::Error + 'static,
     {
-        self.service_with(owner, map, applied, |owner| {
+        let refusal = context
+            .presentation
+            .has_retained_practice()
+            .then_some("output replacement is unavailable during retained practice");
+        self.service_with(owner, refusal, map, applied, |owner| {
             owner.publish_paused_target_audio(context, now)
         })
     }
     fn service_with<B: OutputReplacementBackend<O, Basis>, O, Basis>(
         &mut self,
         owner: &mut GameplayOutputOwner<B, O, Basis>,
+        refusal: Option<&'static str>,
         map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
         applied: &mut impl FnMut(&B::Output) -> Result<OutputCapability, String>,
         publish: impl FnOnce(
@@ -115,6 +124,14 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
                 Err(error) => return Err(error.into()),
             };
+            if let Some(error) = refusal {
+                self.reply = Some(OutputReply {
+                    id: request.id,
+                    result: Err(error.into()),
+                });
+                let _ = self.flush()?;
+                return Ok(false);
+            }
             let typed = owner
                 .current()
                 .ok_or_else(|| "current output unavailable".to_string())

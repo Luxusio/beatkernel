@@ -6,7 +6,7 @@ use super::*;
 #[cfg(test)]
 use beatkernel::input::{DeviceId, PhysicalControlId};
 use beatkernel::{
-    audio::PcmLimits,
+    audio::{AudioLimits, PcmLimits},
     time::Duration,
     transport::{Rate, Transport},
 };
@@ -203,12 +203,21 @@ fn check_counters(counters: HidCounters) -> Result<()> {
     Ok(())
 }
 /// Every seed poll validates the full roster, never just one selected member.
-pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> Result<()> {
+pub(super) fn run(
+    options: Options,
+    competition_options: CompetitionOptions,
+    launch: beatkernel_bms_runtime::session_launch::SessionLaunch,
+) -> Result<()> {
     admit_mode(
         options.local_players.len(),
         competition_options.network.is_some(),
     )?;
-    let playback_end = options.playback_end()?;
+    let retained_practice = competition_options.network.is_none();
+    let playback_end = if retained_practice {
+        None
+    } else {
+        options.playback_end()?
+    };
     let count = options.local_players.len();
     let song_origin = options.song_origin()?;
     // Check the actual output grid before assets or native owners are acquired.
@@ -232,28 +241,80 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         output: OUTPUT,
         end: options.end_ns.map(Timestamp::from_nanos),
     };
-    let (prepared, section, policy) = prepare_chart_with_policy(
-        NativeChartConfig {
-            path: &options.chart,
-            format: options.format,
-            limits: PcmLimits::new(
-                64 * 1024 * 1024,
-                256 * 1024 * 1024,
-                beatkernel_bms_runtime::DEFAULT_BMS_PCM_SAMPLES,
-            )?,
-            channels: if options.mono_stereo {
-                ChannelPolicy::MonoToStereo
-            } else {
-                ChannelPolicy::Exact
-            },
-            chart_seed: options.chart_seed,
-            start: Timestamp::from_nanos(options.start_ns),
-            bindings: &options.bindings,
+    let chart_config = NativeChartConfig {
+        path: &options.chart,
+        format: options.format,
+        limits: PcmLimits::new(
+            64 * 1024 * 1024,
+            256 * 1024 * 1024,
+            beatkernel_bms_runtime::DEFAULT_BMS_PCM_SAMPLES,
+        )?,
+        channels: if options.mono_stereo {
+            ChannelPolicy::MonoToStereo
+        } else {
+            ChannelPolicy::Exact
         },
-        &judge_config,
-        options.gauge,
-        options.timing,
-    )?;
+        chart_seed: options.chart_seed,
+        start: Timestamp::from_nanos(options.start_ns),
+        bindings: &options.bindings,
+    };
+    let (mut prepared, initial_source, section, policy) = if retained_practice {
+        let prepared = beatkernel_bms_runtime::native_chart::prepare_retained_chart_with_policy(
+            chart_config,
+            &judge_config,
+            options.gauge,
+            options.timing,
+        )?;
+        (
+            prepared.original,
+            Some(prepared.initial_source),
+            prepared.section,
+            prepared.policy,
+        )
+    } else {
+        let (prepared, section, policy) =
+            prepare_chart_with_policy(chart_config, &judge_config, options.gauge, options.timing)?;
+        (prepared, None, section, policy)
+    };
+    let max_target = if retained_practice {
+        Some(
+            beatkernel_bms_runtime::completion::SongCompletion::prepare(
+                &prepared,
+                policy.completion_late().as_nanos(),
+                policy.judge().input_offset().as_nanos(),
+                options.preroll,
+                OUTPUT,
+            )?
+            .song_extent()
+            .max(
+                options
+                    .end_ns
+                    .map(Timestamp::from_nanos)
+                    .unwrap_or(Timestamp::ZERO),
+            ),
+        )
+    } else {
+        None
+    };
+    let completion_template = judge_config.completion_with_policy(&prepared, &policy)?;
+    // Select judge identities while retaining original PCM and full sound maps.
+    let original_source = if let Some(source) = initial_source {
+        let chart = source.source.compile()?;
+        let source = std::mem::replace(&mut prepared.source, source);
+        let chart = std::mem::replace(&mut prepared.compiled.chart, chart);
+        let sounds = prepared.sounds.clone();
+        prepared.sounds.retain(|sound| {
+            prepared
+                .compiled
+                .chart
+                .objects()
+                .iter()
+                .any(|object| object.id == sound.object)
+        });
+        Some((source, chart, sounds))
+    } else {
+        None
+    };
     println!("prepared practice section={section:?}");
     if let Some(timing) = policy.timing() {
         println!(
@@ -299,11 +360,11 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         .collect();
     let PreparedCohort {
         mut network,
-        configs,
-        input_sounds,
-        hazard_sounds,
+        mut configs,
+        mut input_sounds,
+        mut hazard_sounds,
         mut states,
-        save_paths,
+        mut save_paths,
         reserved,
     } = prepare_audio_cohort_with_policy(
         &prepared,
@@ -327,15 +388,44 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         LOGICAL,
         &policy,
     )?;
+    if let Some((source, chart, sounds)) = original_source {
+        for (state, member) in states.iter_mut().zip(&configs) {
+            state.completion = completion_template
+                .as_ref()
+                .map(|template| template.prepare_practice(&prepared.source, &member.judge))
+                .transpose()?;
+        }
+        prepared.source = source;
+        prepared.compiled.chart = chart;
+        prepared.sounds = sounds;
+        let first_voice = reserved
+            .iter()
+            .map(|voice| voice.0)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or("cohort voice namespace overflow")?;
+        let mut allocator = beatkernel_bms_runtime::local_runtime::VoiceAllocator::new(first_voice);
+        for member in &mut configs {
+            let mut sounds = Vec::new();
+            sounds.try_reserve_exact(prepared.sounds.len())?;
+            sounds.extend_from_slice(&prepared.sounds);
+            allocator.remap(&mut sounds)?;
+            member.sounds = sounds;
+        }
+        input_sounds = beatkernel_bms_runtime::local_preparation::prepare_local_input_sounds(
+            &prepared, &configs, &reserved,
+        )?;
+        hazard_sounds = beatkernel_bms_runtime::local_preparation::prepare_local_mine_sounds(
+            &prepared,
+            &configs,
+            &reserved,
+            &input_sounds,
+        )?;
+    }
     let network_start = network.is_some();
-    let PreparedNativeAudio {
-        mut producer,
-        bgm,
-        mixer,
-    } = match prepare_audio(
-        prepared.bank,
-        prepared.bgm_commands,
-        NativeAudioConfig {
+    let prepared_audio = (|| -> Result<_> {
+        let audio_config = NativeAudioConfig {
             output_origin: output_origin(),
             start: Timestamp::from_nanos(options.start_ns),
             preroll: Duration::from_nanos(options.preroll),
@@ -343,10 +433,119 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             voices: options.voices,
             max_render_frames: options.buffer as usize,
             playback_end_frame: playback_end,
-            gated_start: network_start,
-        },
-    ) {
-        Ok(audio) => audio,
+            gated_start: network.is_some(),
+        };
+        let (audio, mut practice) = if retained_practice {
+            let region = beatkernel::audio::PracticeRegion::new(
+                song_origin,
+                options
+                    .end_ns
+                    .map(Timestamp::from_nanos)
+                    .unwrap_or(Timestamp::from_nanos(i64::MAX)),
+                false,
+            )?;
+            let mut members = Vec::new();
+            members.try_reserve_exact(assignments.len())?;
+            for (player, _) in &assignments {
+                let member_policy = match options.timing {
+                    Some(timing) => {
+                        beatkernel_bms_runtime::play_policy::ResolvedPlayPolicy::with_timing(
+                            &prepared.source,
+                            options.gauge,
+                            timing,
+                            options.offset,
+                        )?
+                    }
+                    None => {
+                        judge_config.resolve_play_policy(&section.original_gauge, options.gauge)?
+                    }
+                };
+                let path = save_paths
+                    .iter()
+                    .find(|(id, _)| id == player)
+                    .ok_or("missing local recording member")?
+                    .1
+                    .as_ref();
+                let member_launch = if let Some(path) = path {
+                    let original_base = launch
+                        .original_args()
+                        .chunks_exact(2)
+                        .find(|pair| pair[0] == "--record-replay")
+                        .ok_or("original local recording base missing")?;
+                    let original_path = beatkernel_bms_runtime::native_cohort::replay_path(
+                        std::path::Path::new(&original_base[1]),
+                        *player,
+                    )?;
+                    launch.for_recording_path(original_path, path.clone())?
+                } else {
+                    launch.clone()
+                };
+                members.push(beatkernel_bms_runtime::practice_playback::PracticeMember {
+                    player: *player,
+                    policy: member_policy,
+                    launch: member_launch,
+                    chart_seed: options.chart_seed,
+                    capture_limits: beatkernel_bms_runtime::native_judge::capture_limits(
+                        path.is_some(),
+                        options.replay_max_bytes,
+                        options.replay_max_records,
+                    )?,
+                });
+            }
+            let original = prepared.source.clone();
+            let overlap = beatkernel_bms_runtime::native_audio::required_bgm_overlap(
+                &prepared.bank,
+                &prepared.bgm_commands,
+            )?;
+            let gameplay_voices = options
+                .voices
+                .checked_sub(overlap)
+                .ok_or("BGM overlap exceeds total voice budget")?;
+            if gameplay_voices == 0
+                && (!prepared.sounds.is_empty()
+                    || !prepared.source.invisible.is_empty()
+                    || !prepared.source.mines.is_empty())
+            {
+                return Err("total voice budget leaves no gameplay voice".into());
+            }
+            let limits = beatkernel::audio::PracticeLimits::new(
+                prepared.bgm_commands.len().max(1),
+                overlap,
+                AudioLimits::MAX_COMMANDS,
+                8,
+                256,
+            )?;
+            let prepared_audio = beatkernel_bms_runtime::native_audio::prepare_retained_audio(
+                prepared.bank,
+                prepared.bgm_commands,
+                NativeAudioConfig {
+                    voices: gameplay_voices,
+                    ..audio_config
+                },
+                beatkernel_bms_runtime::native_audio::NativePracticeAudioConfig { region, limits },
+            )?;
+            let practice =
+                beatkernel_bms_runtime::practice_playback::PracticePlayback::new_with_completion(
+                    prepared_audio.practice,
+                    original,
+                    members,
+                    region,
+                    max_target.unwrap(),
+                    prepared_audio.audio.mixer.output_frame_basis(),
+                    u64::from(options.buffer),
+                    options.end_ns.map(Timestamp::from_nanos),
+                )?;
+            (prepared_audio.audio, Some(practice))
+        } else {
+            (
+                prepare_audio(prepared.bank, prepared.bgm_commands, audio_config)?,
+                None,
+            )
+        };
+        Ok((audio, practice))
+    })();
+    let (audio, mut practice) = match prepared_audio {
+        Ok(prepared) => prepared,
         Err(error) => {
             let mut failures = vec![format!("local audio preparation: {error}")];
             if let Err(close) = input.close() {
@@ -358,6 +557,11 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             return finish_cohort(states, save_paths, failures, save_capture);
         }
     };
+    let PreparedNativeAudio {
+        mut producer,
+        bgm,
+        mixer,
+    } = audio;
     let mut bgm = BgmSession(bgm);
     let stream = match CoreAudioStream::open(
         CoreAudioRequest {
@@ -464,6 +668,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             input_sounds,
             hazard_sounds,
         )?;
+        if retained_practice { group.set_audio_scope(beatkernel::audio::CommandScope(1)); }
         let pump = {
             let mut device = CohortDevice {
                 output: &mut output,
@@ -478,9 +683,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 .iter()
                 .map(|(player, _)| (*player, &policy))
                 .collect();
-            run_cohort_audio_with_policies_and_results(
-                &mut device,
-                NativeAudioCohortSession {
+            let session = NativeAudioCohortSession {
                     network: network.as_mut(),
                     group: &mut group,
                     states: &mut states,
@@ -491,8 +694,8 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                     end: &mut native_end,
                     delivery: &mut delivery,
                     pre_origin_inputs: &mut before_origin,
-                },
-                beatkernel_bms_runtime::native_gameplay::AudioGameplayConfig {
+                };
+            let config = beatkernel_bms_runtime::native_gameplay::AudioGameplayConfig {
                     section_start: Timestamp::from_nanos(options.start_ns),
                     gameplay: NativeGameplayConfig {
                         origin: host_origin,
@@ -506,9 +709,14 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                         pause_supported: !network_start,
                         logical_schedule: true,
                     },
-                },
-                &selected_policies,
-            )
+                };
+            if let Some(practice) = practice.as_mut() {
+                let mut recording = beatkernel_bms_runtime::native_gameplay::NativePracticeRecorder::new(save_capture);
+                beatkernel_bms_runtime::native_cohort::run_cohort_audio_with_practice_and_policies_and_results(
+                    &mut device, session, config, &selected_policies, practice, &mut recording)
+            } else {
+                run_cohort_audio_with_policies_and_results(&mut device, session, config, &selected_policies)
+            }
         };
         for state in &states {
             if let Some(telemetry) = group.member_telemetry(state.player) {
@@ -544,18 +752,47 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     if let Err(error) = close {
         failures.push(format!("input cleanup: {error}"));
     }
+    let mut final_launch = launch.clone();
+    if let Some(practice) = practice.as_ref() {
+        let attempt = practice.members()[0].launch.attempt();
+        while final_launch.attempt() < attempt {
+            final_launch = final_launch.retry()?;
+        }
+    }
+    let final_base = final_launch
+        .args()
+        .chunks_exact(2)
+        .find(|pair| pair[0] == "--record-replay")
+        .map(|pair| PathBuf::from(&pair[1]));
+    if let Some(practice) = practice.as_ref() {
+        for member in practice.members() {
+            let path = member
+                .launch
+                .args()
+                .chunks_exact(2)
+                .find(|pair| pair[0] == "--record-replay")
+                .map(|pair| PathBuf::from(&pair[1]));
+            let target = save_paths
+                .iter_mut()
+                .find(|(id, _)| *id == member.player)
+                .ok_or("missing final practice recording member")?;
+            target.1 = path;
+        }
+    }
+    let archive_paths = save_paths.clone();
     finish_cohort_with_results_and_network(
         outcome,
         states,
         network.as_mut(),
         save_paths,
         failures,
-        options.record_replay.as_deref(),
+        final_base.as_deref(),
         save_capture,
         |archive, path| {
-            beatkernel_bms_runtime::native_result_archive::save_cohort_sidecars(
+            beatkernel_bms_runtime::native_result_archive::save_cohort_sidecars_with_paths(
                 archive,
                 path.ok_or("completed archive missing base replay path")?,
+                &archive_paths,
             )
         },
     )

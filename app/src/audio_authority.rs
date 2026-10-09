@@ -2,8 +2,8 @@
 //! InputMerger owns acquired payloads; this owner reads no clock or device.
 use crate::local_input::{InputMerger, MergeError};
 use beatkernel::time::{
-    presentation::ObservationAdmission, AffineClockMapper, CalibrationError, ClockDomainId,
-    ClockInterval, ClockPair, ClockPoint, Duration, ExtrapolationPolicy, Timestamp,
+    AffineClockMapper, CalibrationError, ClockDomainId, ClockInterval, ClockPair, ClockPoint,
+    Duration, ExtrapolationPolicy, Timestamp, presentation::ObservationAdmission,
 };
 use std::{collections::VecDeque, fmt};
 
@@ -592,6 +592,62 @@ impl AudioAuthority {
         self.prepare_control_inner(epoch, raw_output, host_cutoff, now, merger, false)
     }
 
+    /// Locate a raw boundary strictly inside retained real native associations.
+    /// No extrapolation or acquisition/receive-time substitution is permitted.
+    /// The HOST cut is rounded upward: integer HOST points below it precede
+    /// the raw boundary, and points at or above it belong to the new attempt.
+    pub fn presented_boundary_host(
+        &self,
+        raw: ClockPoint,
+        now: ClockPoint,
+    ) -> Result<Option<ClockPoint>, AudioAuthorityError> {
+        self.validate_host(now)?;
+        self.logical(raw)?;
+        if raw.timestamp < self.epoch.stream_origin.timestamp {
+            return Err(AudioAuthorityError::ObservationRegression);
+        }
+        let Some(first) = self.history.front() else {
+            return Ok(None);
+        };
+        if raw.timestamp < first.source.timestamp {
+            return Err(AudioAuthorityError::HistoryExpired);
+        }
+        if self.history.len() < 2 || !self.fresh(now)? {
+            return Ok(None);
+        }
+        let Some(index) = (0..self.history.len() - 1)
+            .find(|&i| raw.timestamp <= self.history[i + 1].source.timestamp)
+        else {
+            return Ok(None);
+        };
+        let left = self.history[index];
+        let right = self.history[index + 1];
+        // Associations captured after `now` cannot authorize this operation.
+        if right.target.timestamp > now.timestamp {
+            return Ok(None);
+        }
+        let raw_span = delta(right.source.timestamp, left.source.timestamp);
+        let host_span = delta(right.target.timestamp, left.target.timestamp);
+        let distance = delta(raw.timestamp, left.source.timestamp);
+        if raw_span <= 0 || host_span <= 0 || distance < 0 {
+            return Err(AudioAuthorityError::ObservationRegression);
+        }
+        // Every timestamp difference fits u64; its full product fits u128
+        // even when it would overflow signed i128 on a long output epoch.
+        let product = (distance as u128)
+            .checked_mul(host_span as u128)
+            .ok_or(AudioAuthorityError::Overflow)?;
+        let span = raw_span as u128;
+        let offset = product / span + u128::from(product % span != 0);
+        Ok(Some(ClockPoint {
+            domain: self.epoch.host_domain,
+            timestamp: add(
+                left.target.timestamp,
+                i128::try_from(offset).map_err(|_| AudioAuthorityError::Overflow)?,
+            )?,
+        }))
+    }
+
     /// Prepare resume without consuming original input at the exact HOST cutoff.
     pub fn prepare_resume_control_cutoff(
         &self,
@@ -1057,3 +1113,115 @@ mod priming_fixtures;
 #[cfg(test)]
 #[path = "audio_authority_control_fixtures.rs"]
 mod control_fixtures;
+
+#[cfg(test)]
+mod practice_cut_tests {
+    use super::*;
+    fn point(domain: u32, ns: i64) -> ClockPoint {
+        ClockPoint {
+            domain: ClockDomainId(domain),
+            timestamp: Timestamp::from_nanos(ns),
+        }
+    }
+    fn owner() -> AudioAuthority {
+        AudioAuthority::new(
+            AudioAuthorityConfig::default(),
+            AudioAuthorityEpoch {
+                id: 8,
+                stream_origin: point(2, 100),
+                logical_origin: point(3, 500),
+                host_domain: ClockDomainId(1),
+            },
+        )
+        .unwrap()
+    }
+    #[test]
+    fn inverse_native_cut_uses_ceil_and_never_control_receive_time() {
+        let mut authority = owner();
+        authority
+            .observe(
+                8,
+                ClockPair {
+                    source: point(2, 100),
+                    target: point(1, 1000),
+                },
+            )
+            .unwrap();
+        authority
+            .observe(
+                8,
+                ClockPair {
+                    source: point(2, 103),
+                    target: point(1, 1002),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            authority
+                .presented_boundary_host(point(2, 101), point(1, 1002))
+                .unwrap(),
+            Some(point(1, 1001))
+        );
+        assert_eq!(
+            authority
+                .presented_boundary_host(point(2, 102), point(1, 1002))
+                .unwrap(),
+            Some(point(1, 1002))
+        );
+        assert_eq!(
+            authority
+                .presented_boundary_host(point(2, 104), point(1, 1002))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            authority
+                .presented_boundary_host(point(2, 101), point(1, 1001))
+                .unwrap(),
+            None
+        );
+        assert!(matches!(
+            authority.presented_boundary_host(point(7, 101), point(1, 1002)),
+            Err(AudioAuthorityError::DomainMismatch)
+        ));
+        assert_eq!(authority.committed_operation(), None);
+        assert_eq!(authority.acquired_prefix(), None);
+    }
+    #[test]
+    fn full_timestamp_span_inverse_avoids_signed_product_overflow() {
+        let mut authority = AudioAuthority::new(
+            AudioAuthorityConfig::default(),
+            AudioAuthorityEpoch {
+                id: 9,
+                stream_origin: point(2, i64::MIN),
+                logical_origin: point(3, i64::MIN),
+                host_domain: ClockDomainId(1),
+            },
+        )
+        .unwrap();
+        authority
+            .observe(
+                9,
+                ClockPair {
+                    source: point(2, i64::MIN),
+                    target: point(1, i64::MIN),
+                },
+            )
+            .unwrap();
+        authority
+            .observe(
+                9,
+                ClockPair {
+                    source: point(2, i64::MAX),
+                    target: point(1, i64::MAX),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            authority
+                .presented_boundary_host(point(2, i64::MAX - 1), point(1, i64::MAX))
+                .unwrap(),
+            Some(point(1, i64::MAX - 1))
+        );
+    }
+}

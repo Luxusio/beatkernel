@@ -1,18 +1,18 @@
 //! Latest-state presentation bridge; never called from the audio callback.
 use crate::{
     competition::ScoreSummary,
-    judgment_policy::{BmsJudgmentPolicy, BmsScoreSummary},
-    play_policy::ResolvedPlayPolicy,
     gauge::{BmsGauge, GaugeFailure, GaugeProfile},
+    judgment_policy::{BmsJudgmentPolicy, BmsScoreSummary},
     local_players::PlayerId,
     local_runtime::PlayerReport,
     mine_damage::MineDamageSummary,
     note_progress::NoteProgress,
-    player_chart::PlayerChart,
+    play_policy::ResolvedPlayPolicy,
     play_result::CompletedPlayResult,
+    player_chart::PlayerChart,
     pressed_keys::{PressedKeys, validate_mask},
     room_presentation::{
-        RoomPresentation, RoomResults, RoomUiAction, RoomUiReply, RoomUiRequest, ROOM_UI_CAPACITY,
+        ROOM_UI_CAPACITY, RoomPresentation, RoomResults, RoomUiAction, RoomUiReply, RoomUiRequest,
     },
 };
 use beatkernel::{
@@ -49,12 +49,12 @@ pub enum PlayerStatus {
     Failed(String),
 }
 
-pub use crate::native_gameplay_host::PauseState;
 #[cfg(test)]
 use crate::competition::OpponentKind;
+pub use crate::native_gameplay_host::PauseState;
 
 pub use crate::competition_presentation::{
-    GhostSnapshot, NetworkStatus, NetworkSnapshot, CompetitionSnapshot,
+    CompetitionSnapshot, GhostSnapshot, NetworkSnapshot, NetworkStatus,
 };
 
 /// One stable local member's actual reports; never an aggregate cohort score.
@@ -317,6 +317,11 @@ impl Default for PlayerSnapshot {
     }
 }
 struct Shared {
+    native_launch: Mutex<Option<crate::session_launch::SessionLaunch>>,
+    practice: Mutex<crate::practice_control::PracticeControls>,
+    practice_busy: AtomicBool,
+    practice_owner: AtomicBool,
+    practice_paused: AtomicBool,
     output: Mutex<crate::live_output_control::OutputControls>,
     output_supported: AtomicBool,
     output_closed: AtomicBool,
@@ -394,6 +399,11 @@ pub struct PlayerViewer(Arc<Shared>);
 /// Make one bounded latest-state slot; fresh channels isolate restarted sessions.
 pub fn channel() -> (PlayerPublisher, PlayerViewer) {
     let shared = Arc::new(Shared {
+        native_launch: Mutex::new(None),
+        practice: Mutex::new(crate::practice_control::PracticeControls::new()),
+        practice_busy: AtomicBool::new(false),
+        practice_owner: AtomicBool::new(false),
+        practice_paused: AtomicBool::new(false),
         output: Mutex::new(crate::live_output_control::OutputControls::new()),
         output_supported: AtomicBool::new(false),
         output_closed: AtomicBool::new(false),
@@ -413,6 +423,202 @@ pub fn channel() -> (PlayerPublisher, PlayerViewer) {
         }),
     });
     (PlayerPublisher(shared.clone()), PlayerViewer(shared))
+}
+fn settle_practice(
+    shared: &Shared,
+    controls: &mut crate::practice_control::PracticeControls,
+) -> bool {
+    let closed =
+        shared.cancel.load(Ordering::Acquire) || shared.output_closed.load(Ordering::Acquire);
+    if closed {
+        controls.revoke("practice owner cancelled or closed");
+    }
+    shared
+        .practice_busy
+        .store(controls.pending(), Ordering::Release);
+    closed
+}
+impl PlayerPublisher {
+    /// Cold native-owner advertisement; capability defaults to unsupported.
+    pub fn advertise_practice(
+        &self,
+        cap: Option<crate::practice_control::PracticeCapability>,
+    ) -> io::Result<()> {
+        let mut controls = self
+            .0
+            .practice
+            .lock()
+            .map_err(|_| io::Error::other("practice controls unavailable"))?;
+        if settle_practice(&self.0, &mut controls) {
+            return Ok(());
+        }
+        controls.advertise(cap).map_err(io::Error::other)?;
+        if cap.is_some() {
+            self.0.practice_owner.store(true, Ordering::Release);
+        }
+        self.0
+            .practice_busy
+            .store(controls.pending(), Ordering::Release);
+        Ok(())
+    }
+    pub fn take_practice_request(
+        &self,
+    ) -> io::Result<Option<crate::practice_control::PracticeRequest>> {
+        let mut controls = self.0.practice.try_lock().map_err(room_lock_error)?;
+        if settle_practice(&self.0, &mut controls) {
+            return Ok(None);
+        }
+        Ok(controls.take_request())
+    }
+    pub fn reply_practice(&self, reply: &crate::practice_control::PracticeReply) -> io::Result<()> {
+        let mut controls = self.0.practice.try_lock().map_err(room_lock_error)?;
+        if settle_practice(&self.0, &mut controls) {
+            return Err(io::Error::other("practice owner cancelled or closed"));
+        }
+        controls.reply(reply).map_err(io::Error::other)
+    }
+    /// Decided boundary publication on the game owner, never audio callback.
+    pub fn commit_practice_reply(
+        &self,
+        reply: &crate::practice_control::PracticeReply,
+    ) -> io::Result<()> {
+        let mut controls = self
+            .0
+            .practice
+            .lock()
+            .map_err(|_| io::Error::other("practice controls unavailable"))?;
+        if settle_practice(&self.0, &mut controls) {
+            return Err(io::Error::other("practice owner cancelled or closed"));
+        }
+        controls.reply(reply).map_err(io::Error::other)
+    }
+}
+pub fn advertise_practice(
+    cap: Option<crate::practice_control::PracticeCapability>,
+) -> io::Result<()> {
+    output_publisher(|p| p.advertise_practice(cap), ())
+}
+pub fn take_practice_request() -> io::Result<Option<crate::practice_control::PracticeRequest>> {
+    output_publisher(|p| p.take_practice_request(), None)
+}
+pub fn reply_practice(reply: &crate::practice_control::PracticeReply) -> io::Result<()> {
+    output_publisher(|p| p.reply_practice(reply), ())
+}
+pub fn commit_practice_reply(reply: &crate::practice_control::PracticeReply) -> io::Result<()> {
+    output_publisher(|p| p.commit_practice_reply(reply), ())
+}
+/// Pin the desktop invocation before native preparation.
+pub fn pin_native_launch(launch: crate::session_launch::SessionLaunch) -> Result<(), String> {
+    SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let current = session
+            .as_mut()
+            .ok_or("native launch requires an attached owner")?;
+        if current.native_launch.is_some() || current.chart_published {
+            return Err("native launch is already prepared".into());
+        }
+        let publication = launch.clone();
+        let mut slot = current
+            .publisher
+            .0
+            .native_launch
+            .lock()
+            .map_err(|_| "native launch publication unavailable")?;
+        current.native_launch = Some(launch);
+        *slot = Some(publication);
+        Ok(())
+    })
+}
+/// Preserve desktop retry lineage; direct native CLI pins its own arguments.
+pub fn native_launch(args: &[String]) -> Result<crate::session_launch::SessionLaunch, String> {
+    SESSION.with(|session| {
+        if let Some(launch) = session
+            .borrow()
+            .as_ref()
+            .and_then(|current| current.native_launch.as_ref())
+        {
+            if launch.args() != args {
+                return Err("native invocation differs from pinned launch".into());
+            }
+            return Ok(launch.clone());
+        }
+        crate::session_launch::SessionLaunch::new(args.to_vec())
+    })
+}
+pub fn practice_pending() -> bool {
+    output_publisher(|p| Ok(p.0.practice_busy.load(Ordering::Acquire)), false).unwrap_or(true)
+}
+impl PlayerViewer {
+    /// Move the latest boundary's canonical global invocation once. This
+    /// mailbox remains readable after native cleanup so joined retry sees the
+    /// final ordinal; no argument vector is cloned by frame polling.
+    pub fn take_native_launch(&self) -> io::Result<Option<crate::session_launch::SessionLaunch>> {
+        self.0
+            .native_launch
+            .try_lock()
+            .map_err(room_lock_error)
+            .map(|mut slot| slot.take())
+    }
+    pub fn practice_capability(
+        &self,
+    ) -> io::Result<Option<crate::practice_control::PracticeCapability>> {
+        let mut controls = self.0.practice.try_lock().map_err(room_lock_error)?;
+        if settle_practice(&self.0, &mut controls) {
+            return Ok(None);
+        }
+        Ok(controls.capability())
+    }
+    /// This channel belonged to a retained owner, even after capability revocation.
+    pub fn retained_practice_owner(&self) -> bool {
+        self.0.practice_owner.load(Ordering::Acquire)
+    }
+    pub fn practice_pending(&self) -> bool {
+        self.0.practice_busy.load(Ordering::Acquire)
+    }
+    pub fn pending_practice_request(
+        &self,
+    ) -> io::Result<Option<crate::practice_control::PracticeRequest>> {
+        let controls = self.0.practice.try_lock().map_err(room_lock_error)?;
+        Ok(controls.pending_request())
+    }
+    pub fn request_practice(
+        &self,
+        action: crate::practice_control::PracticeAction,
+    ) -> io::Result<u64> {
+        let mut controls = self.0.practice.try_lock().map_err(room_lock_error)?;
+        if settle_practice(&self.0, &mut controls) {
+            return Err(io::Error::other("practice owner cancelled or closed"));
+        }
+        if self.output_pending()
+            || self.pause_requested()
+            || self.0.practice_paused.load(Ordering::Acquire)
+        {
+            return Err(io::Error::other(
+                "practice conflicts with pause or output replacement",
+            ));
+        }
+        let id = controls.request(action).map_err(io::Error::other)?;
+        self.0.practice_busy.store(true, Ordering::Release);
+        Ok(id)
+    }
+    pub fn take_practice_reply(
+        &self,
+    ) -> io::Result<Option<crate::practice_control::PracticeReply>> {
+        Ok(self.take_practice_response()?.map(|response| response.reply))
+    }
+    /// Consumes the response and its originating action under the same lock.
+    /// Contention retains both records for a later UI poll.
+    pub fn take_practice_response(
+        &self,
+    ) -> io::Result<Option<crate::practice_control::PracticeResponse>> {
+        let mut controls = self.0.practice.try_lock().map_err(room_lock_error)?;
+        settle_practice(&self.0, &mut controls);
+        let response = controls.take_response();
+        self.0
+            .practice_busy
+            .store(controls.pending(), Ordering::Release);
+        Ok(response)
+    }
 }
 impl PlayerPublisher {
     pub fn advertise_output(
@@ -567,6 +773,10 @@ impl PlayerViewer {
         self.0.output_busy.load(Ordering::Acquire)
     }
     pub fn request_output(&self, args: Vec<String>) -> io::Result<u64> {
+        let practice = self.0.practice.try_lock().map_err(room_lock_error)?;
+        if practice.pending() {
+            return Err(io::Error::other("practice boundary is pending"));
+        }
         let mut controls = self.0.output.try_lock().map_err(room_lock_error)?;
         if settle_output(&self.0, &mut controls) {
             return Err(io::Error::new(
@@ -671,8 +881,10 @@ impl PlayerViewer {
     }
     /// Desired state only; native snapshots acknowledge actual boundaries.
     pub fn request_pause(&self, paused: bool) {
-        if !self.0.cancel.load(Ordering::Acquire) {
-            self.0.pause_requested.store(paused, Ordering::Release);
+        if let Ok(practice) = self.0.practice.try_lock() {
+            if !practice.pending() && !self.0.cancel.load(Ordering::Acquire) {
+                self.0.pause_requested.store(paused, Ordering::Release);
+            }
         }
     }
     /// Take the current coalesced snapshot; release its lock before any drawing.
@@ -709,6 +921,12 @@ impl Drop for OutputAttachmentGuard {
     fn drop(&mut self) {
         self.0.output_supported.store(false, Ordering::Release);
         self.0.output_closed.store(true, Ordering::Release);
+        if let Ok(mut controls) = self.0.practice.try_lock() {
+            controls.revoke("native play owner ended");
+            self.0
+                .practice_busy
+                .store(controls.pending(), Ordering::Release);
+        }
         self.0.output_queued.store(false, Ordering::Release);
         if let Ok(mut controls) = self.0.output.try_lock() {
             controls.close("native play owner ended");
@@ -719,6 +937,7 @@ impl Drop for OutputAttachmentGuard {
     }
 }
 struct Session {
+    native_launch: Option<crate::session_launch::SessionLaunch>,
     pressed: Vec<PressedState>,
     publisher: PlayerPublisher,
     snapshot: PlayerSnapshot,
@@ -727,6 +946,7 @@ struct Session {
     replay_policy: Option<GaugeProfile>,
     live_policy_prepared: bool,
     live_classes: Vec<Option<BmsJudgmentPolicy>>,
+    practice_generation: u64,
     pause_dirty: bool,
     room_dirty: bool,
 }
@@ -756,6 +976,10 @@ pub fn pause_requested() -> bool {
 pub fn publish_pause(pause: PauseState) {
     SESSION.with(|session| {
         if let Some(session) = session.borrow_mut().as_mut() {
+            session.publisher.0.practice_paused.store(
+                !matches!(pause, PauseState::Running | PauseState::Unavailable),
+                Ordering::Release,
+            );
             if session.snapshot.pause != pause {
                 session.snapshot.pause = pause;
                 session.pause_dirty = true;
@@ -791,6 +1015,7 @@ pub fn with_publisher<T>(
             return Err("game presentation is already attached".into());
         }
         *session.borrow_mut() = Some(Session {
+            native_launch: None,
             publisher,
             pressed: Vec::new(),
             snapshot: PlayerSnapshot::default(),
@@ -799,6 +1024,7 @@ pub fn with_publisher<T>(
             replay_policy: None,
             live_policy_prepared: false,
             live_classes: Vec::new(),
+            practice_generation: 1,
             pause_dirty: false,
             room_dirty: false,
         });
@@ -1210,6 +1436,270 @@ fn register_chart(
         current.observe_cancellation(false);
         current.publish_latest(true);
         Ok(())
+    })
+}
+
+/// Cold complete presentation for one future retained-output attempt.
+/// Its private owner identity prevents installation into a different player.
+pub struct PreparedPracticePresentation {
+    attached: Option<PreparedAttachedPracticePresentation>,
+    expected_generation: u64,
+    applied_generation: Option<u64>,
+}
+struct PreparedAttachedPracticePresentation {
+    owner: Arc<Shared>,
+    registered_chart: Arc<PlayerChart>,
+    snapshot: PlayerSnapshot,
+    publication: PlayerSnapshot,
+    pressed: Vec<PressedState>,
+    classes: Vec<Option<BmsJudgmentPolicy>>,
+    next_launch: Option<crate::session_launch::SessionLaunch>,
+    launch_publication: Option<crate::session_launch::SessionLaunch>,
+}
+
+fn practice_identity_owner_matches(
+    current: &Session,
+    staged: &PreparedAttachedPracticePresentation,
+    expected_generation: u64,
+) -> bool {
+    Arc::ptr_eq(&current.publisher.0, &staged.owner)
+        && current.practice_generation == expected_generation
+        && current
+            .snapshot
+            .chart
+            .as_ref()
+            .is_some_and(|chart| Arc::ptr_eq(chart, &staged.registered_chart))
+        && current
+            .snapshot
+            .players
+            .iter()
+            .map(|member| member.player)
+            .eq(staged.snapshot.players.iter().map(|member| member.player))
+}
+
+fn practice_session_ready(current: &Session, expected_generation: u64) -> bool {
+    expected_generation != 0
+        && current.practice_generation == expected_generation
+        && current.chart_published
+        && current.live_policy_prepared
+        && current.replay_policy.is_none()
+        && current.snapshot.room.is_none()
+        && current.snapshot.room_results.is_none()
+        && !current.snapshot.players.iter().any(|member| {
+            member
+                .competition
+                .as_ref()
+                .is_some_and(|value| value.network.is_some())
+        })
+        && !current.publisher.0.cancel.load(Ordering::Acquire)
+        && !current.publisher.0.output_closed.load(Ordering::Acquire)
+        && !current.publisher.0.pause_requested.load(Ordering::Acquire)
+        && matches!(
+            current.snapshot.pause,
+            PauseState::Running | PauseState::Unavailable
+        )
+        && matches!(
+            current.snapshot.status,
+            PlayerStatus::Loading | PlayerStatus::Playing
+        )
+}
+
+/// Prepare every member before changing any live presentation owner. The native
+/// pump must supply the exact ordered cold attempts and later qualify the audio
+/// boundary and acquired input cut; this constructor provides no clock proof.
+/// Audio-only playback keeps the existing unattached bridge's no-op behavior.
+pub fn prepare_practice_presentation(
+    expected_generation: u64,
+    attempts: &[(PlayerId, &crate::practice_session::PreparedPracticeAttempt)],
+) -> Result<PreparedPracticePresentation, Box<dyn std::error::Error>> {
+    let players: Vec<_> = attempts.iter().map(|(player, _)| *player).collect();
+    validate_players(&players)?;
+    if expected_generation == 0 {
+        return Err("practice presentation requires a nonzero generation".into());
+    }
+    SESSION.with(|session| {
+        let session = session.borrow();
+        let Some(current) = session.as_ref() else {
+            return Ok(PreparedPracticePresentation { attached: None, expected_generation, applied_generation: None });
+        };
+        if !practice_session_ready(current, expected_generation)
+            || !current.snapshot.players.iter().map(|member| member.player).eq(players.iter().copied())
+            || current.live_classes.len() != attempts.len()
+        {
+            return Err("practice presentation requires an exact registered live roster and generation".into());
+        }
+        let registered_chart = Arc::clone(current.snapshot.chart.as_ref().ok_or("practice chart missing")?);
+        // Keep the unprojected desktop invocation. Cohort member recording
+        // paths are distinct projections and must never replace this base.
+        let next_launch = current.native_launch.as_ref()
+            .map(crate::session_launch::SessionLaunch::retry).transpose()?;
+        let launch_publication = next_launch.clone();
+        let mut members = Vec::new();
+        let mut pressed = Vec::new();
+        let mut classes = Vec::new();
+        members.try_reserve_exact(attempts.len())?;
+        pressed.try_reserve_exact(attempts.len())?;
+        classes.try_reserve_exact(attempts.len())?;
+        let boundary = attempts[0].1.config;
+        for (index, (player, attempt)) in attempts.iter().enumerate() {
+            if attempt.config.start != boundary.start
+                || attempt.config.end != boundary.end
+                || attempt.config.domain != boundary.domain
+                || attempt.judge.effective_song_time().is_some()
+                || attempt.score != ScoreSummary::default()
+                || attempt.judgments != current.live_classes[index]
+                || attempt.gauge.profile() != current.snapshot.players[index].gauge.profile()
+                || attempt.gauge != BmsGauge::new(attempt.gauge.profile().try_copy()?)
+                || &attempt.source.source.compile()? != attempt.judge.chart()
+                || next_launch.as_ref().is_some_and(|launch| launch.attempt() != attempt.next_launch.attempt())
+            {
+                return Err("practice presentation requires fresh coherent selected attempts and pinned policies".into());
+            }
+            let chart = Arc::new(PlayerChart::from_compiled(&attempt.source, attempt.judge.chart())?);
+            let progress = NoteProgress::new(Arc::clone(&chart))?;
+            let mut member = LocalPlayerSnapshot::new(*player, Some(chart));
+            member.song_time = Some(boundary.start);
+            member.gauge = attempt.gauge.clone();
+            member.bms_score = attempt.judgments.as_ref().map(|_| BmsScoreSummary::default());
+            member.note_progress = Some(progress);
+            // Prior ghost progress belongs to the retired attempt. Its owner
+            // may publish a newly prepared competition after the common commit.
+            members.push(member);
+            pressed.push(PressedState::default());
+            classes.push(attempt.judgments.clone());
+        }
+        let mut snapshot = current.snapshot.clone();
+        snapshot.players = members;
+        snapshot.chart = snapshot.players[0].chart.clone();
+        snapshot.completed_end = None;
+        snapshot.completed_results = None;
+        snapshot.status = PlayerStatus::Playing;
+        snapshot.cancelled = false;
+        snapshot.sync_legacy();
+        // Clone histories/gauge maps while cold, never halfway through commit.
+        let publication = snapshot.clone();
+        Ok(PreparedPracticePresentation {
+            attached: Some(PreparedAttachedPracticePresentation {
+                owner: Arc::clone(&current.publisher.0), registered_chart,
+                snapshot, publication, pressed, classes, next_launch, launch_publication,
+            }),
+            expected_generation,
+            applied_generation: None,
+        })
+    })
+}
+
+/// Record an already applied, ordered native boundary independently of screen
+/// publication. All strings were prepared cold; this only moves complete owners.
+/// Cancellation, closing and visual lock poison cannot rewind recording identity.
+/// The native caller must qualify and order the actual boundary before calling;
+/// this metadata operation is not admission or proof of audio presentation.
+pub fn apply_practice_identity(prepared: &mut PreparedPracticePresentation, generation: u64) {
+    if generation <= prepared.expected_generation || prepared.applied_generation.is_some() {
+        return;
+    }
+    prepared.applied_generation = Some(generation);
+    let Some(staged) = prepared.attached.as_mut() else {
+        return;
+    };
+    if let Some(publication) = staged.launch_publication.take() {
+        // This mutex contains only a complete Option swap. Unwinding cannot
+        // leave a partially valid SessionLaunch, so metadata poison is recoverable.
+        let mut slot = staged
+            .owner
+            .native_launch
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *slot = Some(publication);
+        staged.owner.native_launch.clear_poison();
+    }
+    SESSION.with(|session| {
+        if let Some(current) = session.borrow_mut().as_mut() {
+            if Arc::ptr_eq(&current.publisher.0, &staged.owner)
+                && current
+                    .snapshot
+                    .chart
+                    .as_ref()
+                    .is_some_and(|chart| Arc::ptr_eq(chart, &staged.registered_chart))
+            {
+                if let Some(launch) = staged.next_launch.take() {
+                    current.native_launch = Some(launch);
+                }
+            }
+        }
+    });
+}
+
+/// Install only after the native owner proves the retained boundary. All checks
+/// and the publication lock precede the first swap; no member copy or allocation
+/// occurs between swaps. Practice mailboxes and publisher identity are retained.
+pub fn commit_practice_presentation(
+    mut prepared: PreparedPracticePresentation,
+    generation: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if generation <= prepared.expected_generation {
+        return Err("practice presentation generation did not advance".into());
+    }
+    if prepared.applied_generation.is_none() {
+        // Direct convenience callers do not carry separate native qualification.
+        // Reject stale/foreign payloads before auto-applying identity, while
+        // cancellation and observer failure still preserve a genuine boundary.
+        let current_owner = SESSION.with(|session| {
+            let session = session.borrow();
+            match (session.as_ref(), prepared.attached.as_ref()) {
+                (None, None) => true,
+                (Some(current), Some(staged)) => {
+                    practice_identity_owner_matches(current, staged, prepared.expected_generation)
+                }
+                _ => false,
+            }
+        });
+        if !current_owner {
+            return Err("practice identity requires its current prepared owner".into());
+        }
+    }
+    apply_practice_identity(&mut prepared, generation);
+    if prepared.applied_generation != Some(generation) {
+        return Err("practice presentation differs from its applied identity generation".into());
+    }
+    SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        match (session.as_mut(), prepared.attached) {
+            (None, None) => Ok(()),
+            (Some(current), Some(staged)) => {
+                if !Arc::ptr_eq(&current.publisher.0, &staged.owner)
+                    || !practice_session_ready(current, prepared.expected_generation)
+                    || !current
+                        .snapshot
+                        .chart
+                        .as_ref()
+                        .is_some_and(|chart| Arc::ptr_eq(chart, &staged.registered_chart))
+                    || !current
+                        .snapshot
+                        .players
+                        .iter()
+                        .map(|member| member.player)
+                        .eq(staged.snapshot.players.iter().map(|member| member.player))
+                {
+                    return Err("practice presentation owner, roster or generation changed".into());
+                }
+                let mut latest = staged
+                    .owner
+                    .latest
+                    .lock()
+                    .map_err(|_| "practice publication unavailable")?;
+                current.snapshot = staged.snapshot;
+                current.pressed = staged.pressed;
+                current.live_classes = staged.classes;
+                current.practice_generation = generation;
+                current.pause_dirty = false;
+                current.room_dirty = false;
+                current.last_publish = Some(Instant::now());
+                *latest = Some(staged.publication);
+                Ok(())
+            }
+            _ => Err("practice presentation attachment changed".into()),
+        }
     })
 }
 
@@ -2503,3 +2993,7 @@ mod output_startup_fixtures;
 #[cfg(test)]
 #[path = "native_live_class_fixtures.rs"]
 mod native_live_class_fixtures;
+
+#[cfg(test)]
+#[path = "practice_control_fixtures.rs"]
+mod practice_control_fixtures;

@@ -426,7 +426,15 @@ pub mod playfield_layout;
 mod policy_aware_ghost_fixtures;
 /// Exact original-song practice positions and native-setting draft updates.
 pub mod practice;
+/// Bounded requests and boundary acknowledgements for retained practice playback.
+pub mod practice_control;
 pub mod practice_loop;
+/// Shared retained-output controls, ordered boundaries and attempt preparation.
+pub mod practice_playback;
+/// Cold preparation of fresh practice attempts from the original BMS source.
+pub mod practice_session;
+#[cfg(test)]
+mod gapless_practice_native_fixtures;
 /// Portable display configuration shared by CLI, graphical drafts and profiles.
 pub mod presentation_settings;
 #[cfg(test)]

@@ -15,7 +15,7 @@ use crate::{
 };
 use beatkernel::audio::{ConvertedRenderReport, TargetFrameBasis};
 use beatkernel::{
-    audio::{Mixer, OutputFrameBasis, RenderReport, SoftwareOutputState},
+    audio::{Mixer, OutputFrameBasis, OutputOpenFailure, RenderReport, SoftwareOutputState},
     time::{ClockPair, ClockPoint},
 };
 use beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence;
@@ -42,6 +42,18 @@ pub struct GameplayOutputOwner<
     target_facts: Option<ConvertedBoundaryFacts>,
 }
 impl<B: OutputReplacementBackend<O, Basis>, O, Basis> GameplayOutputOwner<B, O, Basis> {
+    /// Acquires the initial native output through the same owned backend used
+    /// for later lifecycle operations. Failure retains the backend's exact
+    /// recovered owner, pending output and cleanup evidence.
+    pub fn open_initial(
+        mut backend: B,
+        request: B::Request,
+        complete_owner: O,
+        epoch: u64,
+    ) -> Result<Self, OutputOpenFailure<B::Error, B::Output, O>> {
+        let output = backend.open(request, complete_owner, epoch)?;
+        Ok(Self::new(backend, output))
+    }
     pub fn new(backend: B, output: B::Output) -> Self {
         let basis = backend.basis(&output);
         Self {
@@ -403,6 +415,9 @@ where
         mut context: crate::gameplay_presentation::GameplayAudioOutputContext<'_>,
         now: ClockPoint,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        if context.presentation.has_retained_practice() {
+            return Err("output replacement is unavailable during retained practice".into());
+        }
         if self.rejected.is_some() {
             return Err(
                 "ready output publication was refused; explicit cancellation required".into(),
@@ -736,6 +751,9 @@ where
         mut context: crate::gameplay_presentation::GameplayAudioOutputContext<'_>,
         now: ClockPoint,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        if context.presentation.has_retained_practice() {
+            return Err("output replacement is unavailable during retained practice".into());
+        }
         if self.rejected.is_some() {
             return Err(
                 "ready target publication was refused; explicit cancellation required".into(),

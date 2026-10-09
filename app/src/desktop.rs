@@ -43,8 +43,8 @@ use beatkernel_bms_runtime::ui::{
     catalog_search::CatalogSearch,
     clipboard::{ClipboardAction, ClipboardEdit},
     devices::{DevicesFrame, DevicesView},
-    display::{DisplayFrame, DisplayView, BUTTONS as DISPLAY_BUTTONS},
-    interaction::{logical_point, Bounds, ControlId, Gesture, WheelSteps},
+    display::{BUTTONS as DISPLAY_BUTTONS, DisplayFrame, DisplayView},
+    interaction::{Bounds, ControlId, Gesture, WheelSteps, logical_point},
     layout::NodeId,
     molecules,
     motion::{ComponentMotion, MotionScheduler},
@@ -53,8 +53,8 @@ use beatkernel_bms_runtime::ui::{
     practice::{PracticeFrame, PracticeView},
     records::{RecordsFrame, RecordsView},
     results::{ResultDetails, ResultsView},
-    selection::{SelectionFrame, SelectionItem, SelectionView, ROW_HEIGHT, VISIBLE_ROWS},
-    settings::{SettingsFrame, SettingsView, BUTTONS as SETTINGS_BUTTONS},
+    selection::{ROW_HEIGHT, SelectionFrame, SelectionItem, SelectionView, VISIBLE_ROWS},
+    settings::{BUTTONS as SETTINGS_BUTTONS, SettingsFrame, SettingsView},
     text_input::LineEditor,
 };
 use beatkernel_bms_runtime::{
@@ -81,11 +81,11 @@ use beatkernel_bms_runtime::{
 };
 use beatkernel_bms_runtime::{
     graphics::{self, BackendChoice, Presentation, Renderer},
-    scene::{Scene, UiComponentKey, UiPresentedPose, UiTransform, MAX_UI_COMPONENTS},
+    scene::{MAX_UI_COMPONENTS, Scene, UiComponentKey, UiPresentedPose, UiTransform},
 };
 use std::{
     error::Error,
-    io::Read,
+    io::{self, Read},
     path::PathBuf,
     sync::Arc,
     thread::{self, JoinHandle},
@@ -470,6 +470,27 @@ struct Game {
 }
 
 impl Game {
+    fn sync_native_launch(&mut self) -> Result<(), String> {
+        if let Some(launch) = self
+            .viewer
+            .take_native_launch()
+            .map_err(|error| error.to_string())?
+        {
+            if launch.original_args() != self.launch.original_args()
+                || launch.attempt() < self.launch.attempt()
+            {
+                return Err("native retry publication differs from the pinned invocation".into());
+            }
+            self.launch = launch;
+        }
+        Ok(())
+    }
+    fn rebase_joined_retry(&mut self) -> Result<(), String> {
+        if let Some(prepared) = &self.prepared_retry {
+            self.prepared_retry = Some(self.launch.rebase_prepared_retry(prepared)?);
+        }
+        Ok(())
+    }
     fn presentation_page_count(&self) -> usize {
         if self.joined && !self.replay {
             if let Some(results) = &self.completed_results {
@@ -546,6 +567,7 @@ impl Game {
             || self.cancelling
             || self.prepared_retry.is_some()
             || self.viewer.output_pending()
+            || self.viewer.practice_pending()
         {
             return None;
         }
@@ -624,7 +646,13 @@ impl Game {
         self.prepared_retry.is_none() && (self.joined || !self.cancelling)
     }
     fn practice_position(&self) -> Option<PracticeStart> {
-        if self.replay || self.joined || self.cancelling || self.prepared_retry.is_some() {
+        if self.replay
+            || self.joined
+            || self.cancelling
+            || self.prepared_retry.is_some()
+            || self.viewer.practice_pending()
+            || self.viewer.output_pending()
+        {
             return None;
         }
         let snapshot = self.snapshot.as_ref()?;
@@ -641,6 +669,9 @@ impl Game {
         PracticeStart::from_nanoseconds(nanos).ok()
     }
     fn mark_practice(&mut self) -> Result<(), String> {
+        if self.loop_enabled && self.viewer.practice_capability().ok().flatten().is_some() {
+            return Err("disable retained loop before changing marks".into());
+        }
         let position = self
             .practice_position()
             .ok_or("practice mark requires a live native song position")?;
@@ -652,6 +683,9 @@ impl Game {
     fn loop_controls_available(&self) -> bool {
         self.practice_position().is_some()
             && !self.network_launch()
+            && !self.viewer.practice_pending()
+            && !self.viewer.output_pending()
+            && !self.viewer.pause_requested()
             && self.snapshot.as_ref().is_some_and(|snapshot| {
                 matches!(
                     snapshot.pause,
@@ -670,6 +704,9 @@ impl Game {
         })
     }
     fn mark_loop_end(&mut self) -> Result<(), String> {
+        if self.loop_enabled && self.viewer.practice_capability().ok().flatten().is_some() {
+            return Err("disable retained loop before changing marks".into());
+        }
         if !self.loop_controls_available() {
             return Err("loop end requires a stable live nonnetwork position".into());
         }
@@ -690,7 +727,8 @@ impl Game {
         Ok(())
     }
     fn loop_due(&self) -> bool {
-        self.loop_enabled
+        !self.viewer.retained_practice_owner()
+            && self.loop_enabled
             && !self.network_launch()
             && self.joined
             && self.worker.is_none()
@@ -709,8 +747,32 @@ impl Game {
                     })
             })
     }
+    fn retained_practice_available(&self) -> bool {
+        self.loop_controls_available()
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.pause == player::PauseState::Running)
+            && self.viewer.practice_capability().ok().flatten().is_some()
+    }
+    fn request_retained_practice(
+        &self,
+        action: beatkernel_bms_runtime::practice_control::PracticeAction,
+    ) -> Result<(), String> {
+        if !self.retained_practice_available() {
+            return Err("retained practice requires stable running native nonnetwork play".into());
+        }
+        self.viewer
+            .request_practice(action)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
     fn practice_restart_available(&self) -> bool {
-        !self.replay
+        !self.network_launch()
+            && !self.viewer.practice_pending()
+            && !self.viewer.output_pending()
+            && (!self.viewer.retained_practice_owner() || self.retained_practice_available())
+            && !self.replay
             && self
                 .snapshot
                 .as_ref()
@@ -734,11 +796,7 @@ impl Game {
         if !succeeded {
             self.loop_enabled = false;
         }
-        if succeeded {
-            prepared
-        } else {
-            None
-        }
+        if succeeded { prepared } else { None }
     }
 }
 fn spawn_game(
@@ -748,13 +806,36 @@ fn spawn_game(
     local_comparisons: bool,
     replay: bool,
 ) -> Result<Game, String> {
+    spawn_game_with(
+        move |args| native(args).map_err(|error| error.to_string()),
+        launch,
+        local_page,
+        local_comparisons,
+        replay,
+    )
+}
+
+/// The production worker composition seam: injected native effects retain the
+/// same channel, TLS attachment, pinned launch and thread/join ownership.
+fn spawn_game_with<F>(
+    native: F,
+    launch: SessionLaunch,
+    local_page: usize,
+    local_comparisons: bool,
+    replay: bool,
+) -> Result<Game, String>
+where
+    F: FnOnce(&[String]) -> Result<(), String> + Send + 'static,
+{
     let args = launch.args().to_vec();
+    let native_launch = launch.clone();
     let (publisher, viewer) = player::channel();
     let worker = thread::Builder::new()
         .name("bms-game".into())
         .spawn(move || {
             player::with_publisher(publisher, || {
-                native(&args).map_err(|error| error.to_string())
+                player::pin_native_launch(native_launch)?;
+                native(&args)
             })
         })
         .map_err(|error| error.to_string())?;
@@ -831,7 +912,7 @@ pub(super) fn run_with_ui_commands(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--title-font PATH [--fallback-font PATH]...] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings or audio output in supported paused play; F3 in selection: search; F4 in settings: records; F6 in settings: practice; W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start and disable loop; F7: mark live position/loop start; F8: restart mark after cleanup; F9: pause/resume when native owner supports it; F10: mark loop end; F11: toggle native finite loop (live nonnetwork only, joins before restart; reopening may leave a gap); Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--title-font PATH [--fallback-font PATH]...] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings or audio output in supported paused play; F3 in selection: search; F4 in settings: records; F6 in settings: practice; W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start and disable loop; F7: mark live position/loop start; F8: retained scrub when supported, otherwise restart mark after cleanup; F9: pause/resume when native owner supports it; F10: mark loop end; F11: toggle retained native loop when supported; otherwise finite loop joins before restart and reopening may leave a gap (live nonnetwork only); Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -4202,8 +4283,30 @@ impl Desktop {
         if !self.ui_ready() || self.navigator.route() != (ScreenRoute::Play { replay: false }) {
             return;
         }
+        let retained = self
+            .game
+            .as_ref()
+            .is_some_and(|game| game.viewer.retained_practice_owner());
         if let Some(game) = &mut self.game {
-            self.failure = if toggle {
+            self.failure = if toggle && retained {
+                if let Some(region) = game.practice_loop {
+                    let action = if game.loop_enabled {
+                        beatkernel_bms_runtime::practice_control::PracticeAction::DisableLoop
+                    } else {
+                        beatkernel_bms_runtime::practice_control::PracticeAction::Loop {
+                            start: beatkernel::time::Timestamp::from_nanos(
+                                region.start().nanoseconds(),
+                            ),
+                            end: beatkernel::time::Timestamp::from_nanos(
+                                region.end().nanoseconds(),
+                            ),
+                        }
+                    };
+                    game.request_retained_practice(action)
+                } else {
+                    Err("mark loop start and end first".into())
+                }
+            } else if toggle {
                 game.toggle_loop()
             } else {
                 game.mark_loop_end()
@@ -4213,6 +4316,7 @@ impl Desktop {
         // A running owner's audio endpoint is immutable. Enabling repetition
         // preflights a fresh finite invocation before cancelling that owner.
         if toggle
+            && !retained
             && self.failure.is_none()
             && self.game.as_ref().is_some_and(|game| game.loop_enabled)
         {
@@ -4233,10 +4337,31 @@ impl Desktop {
         {
             return;
         }
+        if let Some(game) = &mut self.game {
+            if let Err(error) = game.sync_native_launch() {
+                self.failure = Some(format!("retry lineage: {error}"));
+                return;
+            }
+        }
         let Some(game) = &self.game else {
             return;
         };
         if !game.retry_available() || (from_bookmark && !game.practice_restart_available()) {
+            return;
+        }
+        if from_bookmark && game.viewer.retained_practice_owner() {
+            let target = beatkernel::time::Timestamp::from_nanos(
+                game.practice_bookmark
+                    .expect("bookmark admission")
+                    .nanoseconds(),
+            );
+            self.failure = game
+                .request_retained_practice(
+                    beatkernel_bms_runtime::practice_control::PracticeAction::Scrub { target },
+                )
+                .err();
+            self.gesture.cancel();
+            self.invalidate_hits();
             return;
         }
         // Preflight the exact retained invocation before signalling cancellation.
@@ -4342,7 +4467,29 @@ impl Desktop {
         self.request_close();
     }
     fn collect_game(&mut self) {
-        if let Some(game) = &self.game {
+        if let Some(game) = &mut self.game {
+            if let Err(error) = game.sync_native_launch() {
+                self.failure = Some(format!("native retry lineage: {error}"));
+            }
+            match game.viewer.take_practice_response() {
+                Ok(Some(response)) => match response.reply.result {
+                    Ok(_) => {
+                        match response.request.action {
+                            beatkernel_bms_runtime::practice_control::PracticeAction::Loop { .. } => game.loop_enabled = true,
+                            beatkernel_bms_runtime::practice_control::PracticeAction::DisableLoop => game.loop_enabled = false,
+                            beatkernel_bms_runtime::practice_control::PracticeAction::Scrub { .. } => game.loop_enabled = false,
+                        }
+                        self.failure = None;
+                    }
+                    Err(error) => {
+                        self.failure = Some(format!("practice request {}: {error}", response.reply.id))
+                    }
+                },
+                Err(error) if error.kind() != io::ErrorKind::WouldBlock => {
+                    self.failure = Some(error.to_string())
+                }
+                _ => {}
+            }
             if let Ok(Some(reply)) = game.viewer.take_output_reply() {
                 if self.navigator.route() == ScreenRoute::LiveAudio {
                     if let Some(draft) = &mut self.live_audio {
@@ -4413,9 +4560,38 @@ impl Desktop {
                 if let Some(snapshot) = game.viewer.take_latest() {
                     game.accept_snapshot(snapshot);
                 }
-                let succeeded = result.is_ok();
+                let mut succeeded = result.is_ok();
                 if let Err(error) = result {
                     self.failure = Some(error);
+                }
+                // A lap can commit between UI preflight and cancellation. Only
+                // the joined owner's final canonical ordinal is authoritative.
+                if let Err(error) = game.sync_native_launch() {
+                    self.failure = Some(format!("joined retry lineage: {error}"));
+                    succeeded = false;
+                }
+                if succeeded {
+                    if let Err(error) = game.rebase_joined_retry() {
+                        self.failure = Some(format!("joined retry lineage: {error}"));
+                        succeeded = false;
+                    } else if let Some(prepared) = game.prepared_retry.take() {
+                        let validate = if game.replay {
+                            self.validate_replay
+                        } else {
+                            self.validate
+                        };
+                        match (|| {
+                            let launch = prepared;
+                            validate(launch.args()).map_err(|error| error.to_string())?;
+                            Ok::<_, String>(launch)
+                        })() {
+                            Ok(launch) => game.prepared_retry = Some(launch),
+                            Err(error) => {
+                                self.failure = Some(format!("joined retry preflight: {error}"));
+                                succeeded = false;
+                            }
+                        }
+                    }
                 }
                 retry = game.owner_finished(succeeded);
             }
@@ -5968,7 +6144,9 @@ impl Desktop {
                     width: 170,
                     height: 30,
                 };
-                if game.practice_position().is_some() {
+                if game.practice_position().is_some()
+                    && !(game.loop_enabled && game.viewer.retained_practice_owner())
+                {
                     control(
                         pixels,
                         &mut self.hits,
@@ -5989,7 +6167,11 @@ impl Desktop {
                         point,
                         ControlId(61),
                         restart_bounds,
-                        "RESTART F8",
+                        if game.viewer.retained_practice_owner() {
+                            "SCRUB F8"
+                        } else {
+                            "RESTART F8"
+                        },
                     );
                 } else {
                     molecules::button(pixels, restart_bounds, "RESTART F8", false, false);
@@ -6010,13 +6192,24 @@ impl Desktop {
                         )
                     },
                 );
-                text(pixels, 24, 102, &caption, 1, 0xd8b36b);
+                let mode = if game.viewer.practice_pending() {
+                    "PENDING AUDIO BOUNDARY"
+                } else if game.viewer.practice_capability().ok().flatten().is_some() {
+                    "RETAINED OUTPUT"
+                } else if game.viewer.retained_practice_owner() {
+                    "RETAINED UNAVAILABLE"
+                } else {
+                    "FRESH OUTPUT; MAY GAP"
+                };
+                text(pixels, 24, 102, &format!("{caption}  {mode}"), 1, 0xd8b36b);
                 for (id, bounds, label, enabled) in [
                     (
                         ControlId(63),
                         LOOP_END_BOUNDS,
                         "END F10",
-                        game.loop_controls_available() && game.practice_bookmark.is_some(),
+                        game.loop_controls_available()
+                            && game.practice_bookmark.is_some()
+                            && !(game.loop_enabled && game.viewer.retained_practice_owner()),
                     ),
                     (
                         ControlId(64),
@@ -6026,7 +6219,10 @@ impl Desktop {
                         } else {
                             "LOOP OFF F11"
                         },
-                        game.loop_controls_available() && game.practice_loop.is_some(),
+                        game.loop_controls_available()
+                            && game.practice_loop.is_some()
+                            && (game.viewer.practice_capability().ok().flatten().is_none()
+                                || game.retained_practice_available()),
                     ),
                 ] {
                     if enabled {
@@ -7306,7 +7502,10 @@ mod tests {
             Some(ControlId(5))
         );
         assert_eq!(app.hit_motion(physical(920.0, 35.0), extent), None);
-        eprintln!("actual native UI motion: {description}; extent={extent:?}; presented_frames={presented_samples}; counters={first_frame}..{last_frame}; final_offset={:?}; stable_geometry_epoch={geometry_epoch}", destination.offset());
+        eprintln!(
+            "actual native UI motion: {description}; extent={extent:?}; presented_frames={presented_samples}; counters={first_frame}..{last_frame}; final_offset={:?}; stable_geometry_epoch={geometry_epoch}",
+            destination.offset()
+        );
         if let Ok(hold) = std::env::var("BEATKERNEL_TEST_NATIVE_UI_HOLD_MS") {
             let millis = hold.parse::<u64>().unwrap().min(5000);
             std::thread::sleep(Duration::from_millis(millis));
@@ -7432,18 +7631,20 @@ mod tests {
             (screen, ControlId(u64::MAX), 25),
             (screen, ControlId(5), 24),
         ] {
-            assert!(app
-                .request_control_motion(
+            assert!(
+                app.request_control_motion(
                     owner,
                     control,
                     native_control_motion(80.0),
                     Duration::from_nanos(time)
                 )
-                .is_err());
+                .is_err()
+            );
         }
-        assert!(app
-            .tick_control_motion(Duration::from_nanos(24), [960, 720])
-            .is_err());
+        assert!(
+            app.tick_control_motion(Duration::from_nanos(24), [960, 720])
+                .is_err()
+        );
         assert_eq!(app.ui_motion.time, Duration::from_nanos(25));
         assert_eq!(app.scene.component_transform(id), pose);
         assert!(Arc::ptr_eq(
@@ -7510,12 +7711,14 @@ mod tests {
             app.scene.component_transform(rebound).unwrap().offset(),
             [-100.0, 0.0]
         );
-        assert!(!app
-            .tick_control_motion(Duration::from_nanos(1025), [0, 720])
-            .unwrap());
-        assert!(!app
-            .tick_control_motion(Duration::from_nanos(5000), [0, 0])
-            .unwrap());
+        assert!(
+            !app.tick_control_motion(Duration::from_nanos(1025), [0, 720])
+                .unwrap()
+        );
+        assert!(
+            !app.tick_control_motion(Duration::from_nanos(5000), [0, 0])
+                .unwrap()
+        );
         assert!(!app.control_motion_active());
         app.tick_control_motion(Duration::from_nanos(5000), [960, 720])
             .unwrap();
@@ -7534,9 +7737,10 @@ mod tests {
         assert!(!app.control_motion_active());
         assert!(app.ui_motion.owners.is_empty());
         assert!(app.scene.component_id(key).is_none());
-        assert!(app
-            .tick_control_motion(Duration::from_nanos(5050), [960, 720])
-            .is_err());
+        assert!(
+            app.tick_control_motion(Duration::from_nanos(5050), [960, 720])
+                .is_err()
+        );
     }
 
     #[test]
@@ -7575,19 +7779,21 @@ mod tests {
         app.back();
         app.draw().unwrap();
         assert!(app.scene.component_id(key).is_none());
-        assert!(app
-            .ui_motion
-            .owners
-            .iter()
-            .all(|owner| owner.screen != screen));
-        assert!(app
-            .request_control_motion(
+        assert!(
+            app.ui_motion
+                .owners
+                .iter()
+                .all(|owner| owner.screen != screen)
+        );
+        assert!(
+            app.request_control_motion(
                 screen,
                 ControlId(41),
                 native_control_motion(100.0),
                 Duration::from_nanos(25)
             )
-            .is_err());
+            .is_err()
+        );
         app.open_display();
         app.draw().unwrap();
         assert_ne!(app.navigator.active_id(), Some(screen));
@@ -7732,11 +7938,13 @@ mod tests {
         for member in &mut snapshot.players {
             member.song_time = Some(Timestamp::from_nanos(500_000_000));
         }
-        assert!(background_presentations(&snapshot, 0)
-            .unwrap()
-            .0
-            .iter()
-            .all(|p| p.poor_overlay.is_none()));
+        assert!(
+            background_presentations(&snapshot, 0)
+                .unwrap()
+                .0
+                .iter()
+                .all(|p| p.poor_overlay.is_none())
+        );
         snapshot.players.clear();
         snapshot.chart = overlay.chart;
         snapshot.song_time = overlay.song_time;
@@ -7992,11 +8200,12 @@ mod tests {
         app.edit_search(None, Some("가"));
         assert_eq!(app.search_editor.value(), "A가");
         assert!(Arc::ptr_eq(&before, app.title_font.as_ref().unwrap()));
-        assert!(app
-            .input_font_error
-            .as_ref()
-            .unwrap()
-            .contains("USING BITMAP"));
+        assert!(
+            app.input_font_error
+                .as_ref()
+                .unwrap()
+                .contains("USING BITMAP")
+        );
         assert!(app.input_font.is_none());
         app.draw_selection().unwrap();
         select_all_input(&mut app);
@@ -8427,10 +8636,11 @@ mod tests {
             app.draw_settings_view().unwrap();
             assert!(app.ime.preview.is_none());
             let profile = &app.settings.as_ref().unwrap().profile;
-            assert!(app
-                .ime_editor(ImeField::Profile, profile)
-                .composition()
-                .is_none());
+            assert!(
+                app.ime_editor(ImeField::Profile, profile)
+                    .composition()
+                    .is_none()
+            );
             assert_eq!(profile.value(), "");
             assert_eq!(app.settings.as_ref().unwrap().values.native_args(), args);
             app.ime_event(Ime::Enabled);
@@ -8689,11 +8899,13 @@ mod tests {
                 1.0
             );
         }
-        assert!(catalog_scroll_lines(
-            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 1.0)),
-            (0, 0)
-        )
-        .is_nan());
+        assert!(
+            catalog_scroll_lines(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 1.0)),
+                (0, 0)
+            )
+            .is_nan()
+        );
     }
     #[test]
     fn filtered_selection_preserves_catalog_identity_and_empty_results_cannot_play_or_open_records()
@@ -8756,11 +8968,12 @@ mod tests {
         app.set_search_focus(true);
         app.activate(ControlId(1));
         assert!(!app.search_focused);
-        assert!(app
-            .failure
-            .as_deref()
-            .unwrap()
-            .contains("START BUTTON REACHED PREFLIGHT"));
+        assert!(
+            app.failure
+                .as_deref()
+                .unwrap()
+                .contains("START BUTTON REACHED PREFLIGHT")
+        );
         assert!(app.game.is_none());
     }
 
@@ -8974,11 +9187,13 @@ mod tests {
         let settings = app.settings.as_ref().unwrap();
         assert_eq!(settings.values.fields()[index].value, "604800000000001");
         assert_eq!(settings.editor.value(), "604800000000001");
-        assert!(settings
-            .message
-            .as_deref()
-            .unwrap()
-            .contains("APPLY IS SEPARATE"));
+        assert!(
+            settings
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("APPLY IS SEPARATE")
+        );
         assert_eq!(
             settings
                 .values
@@ -9242,20 +9457,24 @@ mod tests {
         let permit = scope.task_permit();
         drop(scope);
         let called = Cell::new(false);
-        assert!(scoped_metadata(permit, || {
-            called.set(true);
-            Ok(ProfileResult::Saved)
-        })
-        .is_err());
+        assert!(
+            scoped_metadata(permit, || {
+                called.set(true);
+                Ok(ProfileResult::Saved)
+            })
+            .is_err()
+        );
         assert!(!called.get());
         let scope = PanelScope::new(ScreenInstanceId(100), ());
         let permit = scope.task_permit();
-        assert!(scoped_metadata(permit, || {
-            called.set(true);
-            drop(scope); // Cancellation after work starts suppresses its result.
-            Ok(ProfileResult::Saved)
-        })
-        .is_err());
+        assert!(
+            scoped_metadata(permit, || {
+                called.set(true);
+                drop(scope); // Cancellation after work starts suppresses its result.
+                Ok(ProfileResult::Saved)
+            })
+            .is_err()
+        );
         assert!(called.get());
 
         let mut app = lifecycle_fixture();
@@ -9264,9 +9483,10 @@ mod tests {
             .unwrap();
         app.commit_route(next);
         app.game = Some(retry_fixture()); // No thread/device in this fixture.
-        assert!(app
-            .prepare_route(ScreenRoute::Results { replay: false })
-            .is_err());
+        assert!(
+            app.prepare_route(ScreenRoute::Results { replay: false })
+                .is_err()
+        );
         assert!(app.prepare_route(ScreenRoute::Selection).is_err());
         app.navigator.suspend();
         app.game.as_mut().unwrap().owner_finished(true);
@@ -9346,12 +9566,13 @@ mod tests {
         game.replay = true;
         game.launch = launch;
         game.prepared_retry = Some(retry);
-        assert!(game
-            .owner_finished(true)
-            .unwrap()
-            .args()
-            .chunks_exact(2)
-            .any(|p| p == ["--replay", "old.bkr"]));
+        assert!(
+            game.owner_finished(true)
+                .unwrap()
+                .args()
+                .chunks_exact(2)
+                .any(|p| p == ["--replay", "old.bkr"])
+        );
         assert!(game.replay);
     }
     fn retry_fixture() -> Game {
@@ -9532,15 +9753,19 @@ mod tests {
         assert!(next.loop_due());
         let launch = next.launch.retry_loop(next.practice_loop.unwrap()).unwrap();
         assert_eq!(launch.attempt(), 2);
-        assert!(launch
-            .args()
-            .chunks_exact(2)
-            .any(|p| p == ["--record-replay", "run.retry2.bkr"]));
+        assert!(
+            launch
+                .args()
+                .chunks_exact(2)
+                .any(|p| p == ["--record-replay", "run.retry2.bkr"])
+        );
         let pinned = launch.retry().unwrap();
-        assert!(!pinned
-            .args()
-            .iter()
-            .any(|arg| arg == "--start-ns" || arg == "--end-ns"));
+        assert!(
+            !pinned
+                .args()
+                .iter()
+                .any(|arg| arg == "--start-ns" || arg == "--end-ns")
+        );
     }
     #[test]
     fn rejected_loop_toggle_during_pause_transition_never_cancels_or_prepares_retry() {
@@ -9583,13 +9808,15 @@ mod tests {
         app.request_retry();
         let game = app.game.as_ref().unwrap();
         assert!(!game.loop_enabled);
-        assert!(!game
-            .prepared_retry
-            .as_ref()
-            .unwrap()
-            .args()
-            .iter()
-            .any(|a| a == "--start-ns"));
+        assert!(
+            !game
+                .prepared_retry
+                .as_ref()
+                .unwrap()
+                .args()
+                .iter()
+                .any(|a| a == "--start-ns")
+        );
         app.cancel();
         assert!(app.game.as_ref().unwrap().prepared_retry.is_none());
         let mut game = loop_fixture();
@@ -9846,9 +10073,10 @@ mod tests {
         assert!(hits.iter().any(|(id, _)| *id == ControlId(52)));
         assert!(hits.iter().any(|(id, _)| *id == ControlId(53)));
         assert!(hits.iter().any(|(id, _)| *id == ControlId(59)));
-        assert!(hits
-            .iter()
-            .all(|(id, _)| matches!(id.0,50..=59|50000..=50255)));
+        assert!(
+            hits.iter()
+                .all(|(id, _)| matches!(id.0,50..=59|50000..=50255))
+        );
         scene.clear();
         hits.clear();
         draw_records(
@@ -9863,8 +10091,8 @@ mod tests {
         assert!(hits.is_empty());
     }
     #[test]
-    fn selective_record_removal_refreshes_parent_editor_and_preserves_duplicates_and_accepted_state(
-    ) {
+    fn selective_record_removal_refreshes_parent_editor_and_preserves_duplicates_and_accepted_state()
+     {
         let mut app = lifecycle_fixture();
         app.open_settings();
         app.open_records();
@@ -9979,9 +10207,10 @@ mod tests {
         );
         assert_eq!(hits.len(), 6);
         assert!(hits.iter().any(|(id, _)| *id == ControlId(40)));
-        assert!(hits
-            .iter()
-            .all(|(id, _)| matches!(id.0, 40 | 41 | 40000..=40003)));
+        assert!(
+            hits.iter()
+                .all(|(id, _)| matches!(id.0, 40 | 41 | 40000..=40003))
+        );
         hits.clear();
         scene.clear();
         draw_display(
@@ -10018,15 +10247,17 @@ mod tests {
         assert_eq!(merged.fps, 60);
         assert_eq!(merged.lookahead_ms, 3500);
         assert_eq!(merged.presentation, Presentation::Mailbox);
-        assert!(Options::parse(&[
-            "--chart".into(),
-            "song.bms".into(),
-            "--ui-fps".into(),
-            "120".into(),
-            "--ui-fps".into(),
-            "60".into()
-        ])
-        .is_err());
+        assert!(
+            Options::parse(&[
+                "--chart".into(),
+                "song.bms".into(),
+                "--ui-fps".into(),
+                "120".into(),
+                "--ui-fps".into(),
+                "60".into()
+            ])
+            .is_err()
+        );
     }
     #[test]
     fn comparison_toggle_is_available_only_for_groups_with_retained_comparisons() {
@@ -10284,20 +10515,24 @@ mod tests {
                 Options::parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err()
             );
         }
-        assert!(Options::parse(&[
-            "--library".into(),
-            "charts".into(),
-            "--chart".into(),
-            "song.bms".into()
-        ])
-        .is_err());
+        assert!(
+            Options::parse(&[
+                "--library".into(),
+                "charts".into(),
+                "--chart".into(),
+                "song.bms".into()
+            ])
+            .is_err()
+        );
     }
     #[test]
     fn native_title_keeps_unicode_but_removes_control_characters_and_bounds_size() {
         assert!(window_title("곡\0제목", "아티스트").contains("곡제목"));
-        assert!(!window_title("bad\nname", "\0")
-            .chars()
-            .any(char::is_control));
+        assert!(
+            !window_title("bad\nname", "\0")
+                .chars()
+                .any(char::is_control)
+        );
         assert_eq!(window_title(&"A".repeat(1024), "").chars().count(), 256);
     }
     mod live_output {
@@ -10316,3 +10551,11 @@ mod desktop_grade_page_fixtures;
 #[cfg(test)]
 #[path = "desktop_comparison_page_fixtures.rs"]
 mod desktop_comparison_page_fixtures;
+
+#[cfg(test)]
+#[path = "desktop_practice_control_fixtures.rs"]
+mod desktop_practice_control_fixtures;
+
+#[cfg(test)]
+#[path = "desktop_gapless_practice_journey_fixtures.rs"]
+mod desktop_gapless_practice_journey_fixtures;

@@ -26,6 +26,43 @@ impl SessionLaunch {
     pub fn args(&self) -> &[String] {
         &self.args
     }
+    /// Immutable original invocation, including the original recording base.
+    pub fn original_args(&self) -> &[String] {
+        &self.original
+    }
+    /// Project member recording paths while preserving retry lineage.
+    pub fn for_recording_path(
+        &self,
+        original_path: std::path::PathBuf,
+        current_path: std::path::PathBuf,
+    ) -> Result<Self, String> {
+        fn replace(args: &mut [String], path: &Path) -> Result<(), String> {
+            let path = path.to_str().ok_or("recording path is not valid UTF-8")?;
+            let mut found = false;
+            for pair in args.chunks_exact_mut(2) {
+                if pair[0] == "--record-replay" {
+                    if found {
+                        return Err("duplicate recording option".into());
+                    }
+                    pair[1] = path.to_owned();
+                    found = true;
+                }
+            }
+            if !found {
+                return Err("member recording requires an original recording option".into());
+            }
+            validate(args)
+        }
+        let mut original = self.original.to_vec();
+        let mut args = self.args.clone();
+        replace(&mut original, &original_path)?;
+        replace(&mut args, &current_path)?;
+        Ok(Self {
+            original: original.into(),
+            args,
+            attempt: self.attempt,
+        })
+    }
     /// Zero is the original session; positive numbers identify retries.
     pub fn attempt(&self) -> u32 {
         self.attempt
@@ -63,6 +100,42 @@ impl SessionLaunch {
             args,
             attempt,
         })
+    }
+    /// Rebase an already selected retry after its old owner has joined. Retained
+    /// laps may advance the recording ordinal between UI preflight and cancel.
+    /// Preserve the selected bookmark/loop arguments, but derive recording
+    /// identity from the final canonical global invocation's original base.
+    pub fn rebase_prepared_retry(&self, prepared: &Self) -> Result<Self, String> {
+        if self.original != prepared.original || prepared.attempt == 0 {
+            return Err("prepared retry belongs to a different pinned invocation".into());
+        }
+        let mut next = self.retry()?;
+        if prepared.attempt > next.attempt {
+            return Err("prepared retry is ahead of the final native owner".into());
+        }
+        let recording = next
+            .args
+            .chunks_exact(2)
+            .find(|pair| pair[0] == "--record-replay")
+            .map(|pair| pair[1].clone());
+        next.args = prepared.args.clone();
+        if let Some(recording) = recording {
+            let mut found = false;
+            for pair in next.args.chunks_exact_mut(2) {
+                if pair[0] == "--record-replay" {
+                    if found {
+                        return Err("duplicate prepared recording option".into());
+                    }
+                    pair[1] = recording.clone();
+                    found = true;
+                }
+            }
+            if !found {
+                return Err("prepared retry omitted recording identity".into());
+            }
+        }
+        validate(&next.args)?;
+        Ok(next)
     }
     /// Creates one fresh finite owner from the pinned original invocation.
     /// Repeating a region never accumulates prior endpoints or capture suffixes.
@@ -156,6 +229,82 @@ fn validate(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+mod practice_lineage_tests {
+    use super::*;
+    #[test]
+    fn local_recording_projection_preserves_original_base_and_retry_ordinal() {
+        let initial = SessionLaunch::new(vec![
+            "--chart".into(),
+            "original.bms".into(),
+            "--record-replay".into(),
+            "records/game.bkr".into(),
+        ])
+        .unwrap();
+        let current = initial.retry().unwrap().retry().unwrap();
+        let projected = current
+            .for_recording_path(
+                "records/game.p2.bkr".into(),
+                "records/game.retry2.p2.bkr".into(),
+            )
+            .unwrap();
+        assert_eq!(projected.attempt(), 2);
+        assert_eq!(projected.original_args()[3], "records/game.p2.bkr");
+        assert_eq!(projected.args()[3], "records/game.retry2.p2.bkr");
+        let next = projected.retry().unwrap();
+        assert_eq!(next.attempt(), 3);
+        assert_eq!(next.args()[3], "records/game.p2.retry3.bkr");
+        assert_eq!(current.args()[3], "records/game.retry2.bkr");
+        assert_eq!(initial.args()[3], "records/game.bkr");
+        assert!(
+            current
+                .for_recording_path("records/a\nb.bkr".into(), "records/c.bkr".into())
+                .is_err()
+        );
+    }
+    #[test]
+    fn joined_retry_rebase_preserves_selected_endpoints_and_final_global_ordinal() {
+        let original = SessionLaunch::new(vec![
+            "--chart".into(),
+            "original.bms".into(),
+            "--record-replay".into(),
+            "records/game.bkr".into(),
+        ])
+        .unwrap();
+        let bookmark = PracticeStart::from_nanoseconds(123).unwrap();
+        let region =
+            PracticeLoop::new(bookmark, PracticeStart::from_nanoseconds(456).unwrap()).unwrap();
+        let selected = [
+            original.retry().unwrap(),
+            original.retry_from(bookmark).unwrap(),
+            original.retry_loop(region).unwrap(),
+        ];
+        let mut final_owner = original.clone();
+        for _ in 0..5 {
+            final_owner = final_owner.retry().unwrap();
+        }
+        for prepared in selected {
+            let rebased = final_owner.rebase_prepared_retry(&prepared).unwrap();
+            assert_eq!(rebased.attempt(), 6);
+            assert_eq!(rebased.original_args(), original.original_args());
+            assert_eq!(rebased.args()[3], "records/game.retry6.bkr");
+            assert_eq!(&rebased.args()[4..], &prepared.args()[4..]);
+            assert_eq!(prepared.attempt(), 1);
+        }
+        assert!(final_owner.rebase_prepared_retry(&original).is_err());
+        let projected = original
+            .for_recording_path("records/game.p9.bkr".into(), "records/game.p9.bkr".into())
+            .unwrap()
+            .retry()
+            .unwrap();
+        assert!(final_owner.rebase_prepared_retry(&projected).is_err());
+        let mut future = final_owner.clone();
+        for _ in 0..2 {
+            future = future.retry().unwrap();
+        }
+        assert!(final_owner.rebase_prepared_retry(&future).is_err());
+    }
+}
 #[cfg(test)]
 mod fixtures {
     use super::*;

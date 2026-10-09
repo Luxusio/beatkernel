@@ -3,7 +3,7 @@ use crate::result_archive_store::ResultArchiveStoragePort;
 use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Write},
-    path::{Path, PathBuf, Component},
+    path::{Component, Path, PathBuf},
 };
 
 pub struct NativeResultArchiveStore {
@@ -166,6 +166,55 @@ pub fn save_cohort_sidecars(
     publish_cohort_sidecars(archive, base, write_sidecar_bytes)
 }
 
+/// Publish sidecars beside the actual current member captures, retaining the
+/// whole-cohort archive at its current base. Publication remains nontransactional.
+pub fn save_cohort_sidecars_with_paths(
+    archive: &crate::result_archive::ResultArchive,
+    base: &Path,
+    paths: &[(crate::local_players::PlayerId, Option<PathBuf>)],
+) -> crate::native_gameplay::NativeGameplayResult<()> {
+    struct ActualPaths<'a> {
+        base: &'a Path,
+        paths: &'a [(crate::local_players::PlayerId, Option<PathBuf>)],
+    }
+    impl crate::result_archive_publication::ResultArchivePublicationPort for ActualPaths<'_> {
+        type Destination = PathBuf;
+        type Error = Box<dyn std::error::Error>;
+        fn destination(
+            &self,
+            player: Option<crate::local_players::PlayerId>,
+        ) -> Result<PathBuf, Self::Error> {
+            match player {
+                None => sidecar_path(self.base),
+                Some(player) => sidecar_path(
+                    self.paths
+                        .iter()
+                        .find(|(id, _)| *id == player)
+                        .and_then(|(_, path)| path.as_deref())
+                        .ok_or("completed member is missing its actual capture path")?,
+                ),
+            }
+        }
+        fn create_new(&mut self, destination: &PathBuf, bytes: &[u8]) -> Result<(), Self::Error> {
+            write_sidecar_bytes(destination, bytes)
+        }
+    }
+    crate::multiplayer_group::validate_roster(
+        &paths.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+    )?;
+    use crate::result_archive_publication::PublicationError;
+    crate::result_archive_publication::publish_archive_set(
+        archive,
+        &mut ActualPaths { base, paths },
+    )
+    .map_err(|error| match error {
+        PublicationError::Destination(error) | PublicationError::Storage(error) => error,
+        PublicationError::Archive(error) => Box::new(error),
+        PublicationError::Allocation(error) => Box::new(error),
+        PublicationError::DuplicateDestination => "duplicate completed sidecar destination".into(),
+    })
+}
+
 fn read_regular_file(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
     if max_bytes
         .checked_add(1)
@@ -233,3 +282,91 @@ pub fn read_sidecar(base: &Path) -> io::Result<Option<Vec<u8>>> {
 #[cfg(test)]
 #[path = "native_member_sidecar_fixtures.rs"]
 mod member_fixtures;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod practice_paths_fixtures {
+    use super::*;
+    use crate::{local_players::PlayerId, result_archive::member_fixtures::whole};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    struct Directory(PathBuf);
+    impl Directory {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "beatkernel-practice-sidecars-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn practice_sidecars_follow_actual_member_retry_paths_and_preserve_exclusive_storage() {
+        let directory = Directory::new();
+        let archive = whole(2);
+        let base = directory.0.join("song.retry3.bkr");
+        let paths: Vec<_> = archive
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.player,
+                    Some(
+                        directory
+                            .0
+                            .join(format!("song.p{}.retry3.bkr", entry.player.0)),
+                    ),
+                )
+            })
+            .collect();
+        save_cohort_sidecars_with_paths(&archive, &base, &paths).unwrap();
+        assert_eq!(
+            read_sidecar(&base).unwrap().unwrap(),
+            crate::result_archive::encode_archive(&archive).unwrap()
+        );
+        for (entry, (_, path)) in archive.entries().iter().zip(&paths) {
+            let bytes = read_sidecar(path.as_ref().unwrap()).unwrap().unwrap();
+            assert_eq!(
+                crate::result_archive::decode_archive(&bytes)
+                    .unwrap()
+                    .entries(),
+                std::slice::from_ref(entry)
+            );
+            assert!(!directory
+                .0
+                .join(format!("song.retry3.p{}.bkr.bkresult", entry.player.0))
+                .exists());
+        }
+        let before = read_sidecar(&base).unwrap();
+        assert!(save_cohort_sidecars_with_paths(&archive, &base, &paths).is_err());
+        assert_eq!(read_sidecar(&base).unwrap(), before);
+    }
+    #[test]
+    fn practice_missing_or_aliased_member_paths_refuse_before_any_sidecar_write() {
+        let directory = Directory::new();
+        let archive = whole(2);
+        let ids: Vec<PlayerId> = archive.entries().iter().map(|entry| entry.player).collect();
+        let base = directory.0.join("song.retry3.bkr");
+        let shared = directory.0.join("shared.retry3.bkr");
+        for paths in [
+            vec![(ids[0], Some(shared.clone())), (ids[1], None)],
+            vec![
+                (ids[0], Some(shared.clone())),
+                (ids[1], Some(shared.clone())),
+            ],
+            vec![
+                (ids[0], Some(shared.clone())),
+                (ids[0], Some(shared.clone())),
+            ],
+        ] {
+            assert!(save_cohort_sidecars_with_paths(&archive, &base, &paths).is_err());
+            assert_eq!(std::fs::read_dir(&directory.0).unwrap().count(), 0);
+        }
+    }
+}

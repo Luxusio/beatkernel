@@ -12,6 +12,18 @@ pub trait SoloCompetitionPort {
     fn expected_policy_header(&self) -> Option<&beatkernel::replay::ReplayHeader> {
         None
     }
+    /// Cold replacement preparation. Failure leaves the current observer intact.
+    /// Enabled owners must explicitly support their saved-record policy.
+    fn prepare_practice(
+        &self,
+        _: &crate::practice_session::PreparedPracticeAttempt,
+        _: &crate::play_policy::ResolvedPlayPolicy,
+    ) -> NativeGameplayResult<Self>
+    where
+        Self: Sized,
+    {
+        Err("competition owner does not support retained practice".into())
+    }
     fn observe(&mut self, report: &RuntimeReport) -> NativeGameplayResult<()>;
     fn mark_native_completed(&mut self);
 }
@@ -37,6 +49,13 @@ pub trait GroupCompetitionPort {
 pub struct NoopSoloCompetition;
 
 impl SoloCompetitionPort for NoopSoloCompetition {
+    fn prepare_practice(
+        &self,
+        _: &crate::practice_session::PreparedPracticeAttempt,
+        _: &crate::play_policy::ResolvedPlayPolicy,
+    ) -> NativeGameplayResult<Self> {
+        Ok(Self)
+    }
     fn policy_agnostic(&self) -> bool {
         true
     }

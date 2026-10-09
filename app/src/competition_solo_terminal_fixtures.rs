@@ -205,6 +205,7 @@ fn offline() -> (LiveCompetition, JudgeEngine) {
         .header;
     (
         LiveCompetition {
+            practice_options: None,
             admitted_policy_header: None,
             player: PlayerId(u32::MAX),
             competition: Competition::new(header, 0).unwrap(),

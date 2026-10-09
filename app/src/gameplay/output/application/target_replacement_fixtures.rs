@@ -44,6 +44,7 @@ impl std::error::Error for Fault {}
 enum Mode {
     Normal,
     OpenFail,
+    PartialOpenFail,
     StartFail,
     ObserveFail,
     ReportFail,
@@ -135,6 +136,14 @@ impl OutputReplacementBackend<ConvertedNativeOutputState, TargetFrameBasis> for 
                 Fault::new(11),
                 Some(owner),
             ));
+        }
+        if matches!(request.mode, Mode::PartialOpenFail) {
+            let basis = owner.target_frame_basis();
+            return Err(OutputOpenFailure::pending_state(
+                Fault::new(13),
+                output(owner, basis, epoch, request.mode, &self.calls),
+            )
+            .with_cleanup_error(Fault::new(14)));
         }
         if owner
             .reconfigure(
@@ -298,6 +307,152 @@ impl OriginalTargetNativeOutputBackend<ConvertedNativeOutputState> for Effects {
     }
 }
 type Controller = OutputReplacement<Effects, ConvertedNativeOutputState, TargetFrameBasis>;
+#[test]
+fn initial_factory_failure_preserves_complete_converter_or_partial_native_owner() {
+    for mode in [Mode::OpenFail, Mode::PartialOpenFail] {
+        let (_producer, mut state) = converted_rig(24_000, 32_000, None, None, 0);
+        state.render_pending(7).unwrap();
+        state.admit(2).unwrap();
+        let samples = state.pending_samples().to_vec();
+        let basis = state.target_frame_basis();
+        let phase = state.converter_owner().source_position();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let result = GameplayOutputOwner::open_initial(
+            Effects {
+                calls: calls.clone(),
+                retire_errors: VecDeque::new(),
+            },
+            Request { rate: 32_000, mode },
+            state,
+            17,
+        );
+        let failure = match result {
+            Ok(_) => panic!("scripted open must fail"),
+            Err(error) => error,
+        };
+        let (error, recovered, pending, cleanup) = failure.into_parts();
+        let state = match mode {
+            Mode::OpenFail => {
+                assert_eq!(*error.0, 11);
+                assert!(pending.is_none() && cleanup.is_none());
+                recovered.unwrap()
+            }
+            Mode::PartialOpenFail => {
+                assert_eq!(*error.0, 13);
+                assert_eq!(*cleanup.unwrap().0, 14);
+                assert!(recovered.is_none());
+                let mut pending = pending.unwrap();
+                assert_eq!(pending.epoch, 17);
+                assert!(!pending.retired && !pending.started);
+                pending.owner.take().unwrap()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(state.target_frame_basis(), basis);
+        assert_eq!(state.converter_owner().source_position(), phase);
+        assert_eq!(state.pending_frames(), 5);
+        assert_eq!(state.pending_samples(), samples);
+        assert_eq!(&*calls.borrow(), &["open"]);
+    }
+}
+
+#[test]
+fn initial_factory_retained_practice_renders_twenty_laps_on_same_converted_output() {
+    let format = AudioFormat::new(1000, 1).unwrap();
+    let pcm = PcmLimits::new(64, 256, 1).unwrap();
+    let mut bank = SampleBank::new(format, pcm).unwrap();
+    bank.insert(
+        SampleId(1),
+        PcmSample::new(format, vec![0.25; 8], pcm).unwrap(),
+    )
+    .unwrap();
+    let program = PreparedPracticeProgram::new(
+        &bank,
+        vec![PracticeCue {
+            voice: VoiceId(1),
+            sample: SampleId(1),
+            at: Timestamp::ZERO,
+            gain: 1.0,
+        }],
+        PracticeLimits::new(1, 1, 64, 8, 64).unwrap(),
+    )
+    .unwrap();
+    let (mut controller, endpoint) = practice_queue(&program).unwrap();
+    let (_producer, consumer) = command_queue(16).unwrap();
+    let mut mixer = Mixer::new(
+        MixerConfig::new(
+            format,
+            ClockDomainId(2),
+            Timestamp::ZERO,
+            AudioLimits::new(16, 4, 16, 256, 16).unwrap(),
+        ),
+        bank,
+        consumer,
+    )
+    .unwrap();
+    mixer
+        .install_practice(
+            program,
+            endpoint,
+            PracticeRegion::new(Timestamp::ZERO, Timestamp::from_nanos(4_000_000), true).unwrap(),
+        )
+        .unwrap();
+    let state = ConvertedNativeOutputState::new(
+        mixer,
+        DeviceFormat::new(1500, 1, SampleEncoding::Float32, None).unwrap(),
+        ChannelMatrix::default_mix(1, 1).unwrap(),
+        ResampleQuality::Linear,
+        128,
+    )
+    .unwrap();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut owner = GameplayOutputOwner::open_initial(
+        Effects {
+            calls: calls.clone(),
+            retire_errors: VecDeque::new(),
+        },
+        Request {
+            rate: 1500,
+            mode: Mode::Normal,
+        },
+        state,
+        17,
+    )
+    .unwrap();
+    let original = owner.current().unwrap() as *const Output;
+    let basis = owner.current().unwrap().basis;
+    let mut receipts = Vec::new();
+    for _ in 0..40 {
+        let state = owner.current_mut().unwrap().owner.as_mut().unwrap();
+        state.render_pending(3).unwrap();
+        assert_eq!(state.pending_samples(), &[0.25, 0.25, 0.25]);
+        state.admit(1).unwrap();
+        assert_eq!(state.pending_samples(), &[0.25, 0.25]);
+        state.admit(2).unwrap();
+        while let Ok(receipt) = controller.try_pop_projected_receipt() {
+            receipts.push(receipt);
+        }
+        assert_eq!(owner.current().unwrap() as *const Output, original);
+        assert_eq!(owner.current().unwrap().basis, basis);
+        assert_eq!(owner.last_issued_epoch(), 17);
+    }
+    // 120 actual target samples contain cuts 6..114; the exclusive end 120
+    // has no presented sample and cannot publish its next-attempt receipt.
+    assert_eq!(receipts.len(), 20);
+    assert_eq!(receipts[0].receipt.kind, PracticeBoundaryKind::Started);
+    assert_eq!(receipts[0].target_frame, 0);
+    assert_eq!(receipts[0].receipt.generation, 1);
+    for (index, projected) in receipts[1..].iter().enumerate() {
+        assert_eq!(projected.receipt.kind, PracticeBoundaryKind::Looped);
+        assert_eq!(projected.target_frame, 6 * (index as u64 + 1));
+        assert_eq!(projected.receipt.physical_frame, 4 * (index as u64 + 1));
+        assert_eq!(projected.receipt.generation, index as u64 + 2);
+        assert_eq!(projected.target_rate, 1500);
+    }
+    assert_eq!(&*calls.borrow(), &["open"]);
+    assert!(!owner.current().unwrap().retired);
+    assert!(!owner.replacement_pending());
+}
 fn relation(basis: TargetFrameBasis, frame: u64) -> ClockPair {
     controlled_pair(
         basis,
@@ -1962,4 +2117,168 @@ fn converted_ui_native_failure_keeps_complete_owner_and_correlated_error_until_c
         assert!(reply.result.is_err());
         assert!(!ui.pending());
     }
+}
+
+#[test]
+fn retained_practice_target_replacement_refuses_before_retirement_and_preserves_tail() {
+    let mut rig = Rig::new(true);
+    let mut owner = gameplay_owner(&mut rig);
+    let mixer_config = owner
+        .current()
+        .unwrap()
+        .owner
+        .as_ref()
+        .unwrap()
+        .mixer()
+        .config();
+    let source_basis = OutputFrameBasis::new(
+        ClockPoint {
+            domain: mixer_config.domain(),
+            timestamp: mixer_config.origin(),
+        },
+        mixer_config.format().sample_rate(),
+        0,
+    )
+    .unwrap();
+    rig.current.pin_practice_mixer_basis(source_basis).unwrap();
+    let before = rig.state();
+    let caches = owner_caches(&owner);
+    let original = owner.current().unwrap() as *const Output;
+    let tail = owner
+        .current()
+        .unwrap()
+        .owner
+        .as_ref()
+        .unwrap()
+        .pending_samples()
+        .to_vec();
+    let phase = owner
+        .current()
+        .unwrap()
+        .owner
+        .as_ref()
+        .unwrap()
+        .converter_owner()
+        .source_position();
+    queue_target(&mut owner, Mode::Normal);
+    for _ in 0..2 {
+        let error = owner
+            .publish_paused_target_audio(rig.context(), now())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "output replacement is unavailable during retained practice"
+        );
+        assert_eq!(owner.current().unwrap() as *const Output, original);
+        assert_eq!(owner.last_issued_epoch(), 7);
+        assert!(owner.has_work());
+        assert!(!owner.replacement_pending());
+        assert_eq!(rig.state(), before);
+        assert_eq!(owner_caches(&owner), caches);
+        assert_eq!(
+            owner
+                .current()
+                .unwrap()
+                .owner
+                .as_ref()
+                .unwrap()
+                .pending_samples(),
+            tail
+        );
+        assert_eq!(
+            owner
+                .current()
+                .unwrap()
+                .owner
+                .as_ref()
+                .unwrap()
+                .converter_owner()
+                .source_position(),
+            phase
+        );
+        assert!(rig.calls.borrow().is_empty());
+        drop(rig.runtime.hold_audio_pause().unwrap());
+    }
+}
+
+#[test]
+fn retained_practice_target_ui_rejection_is_correlated_before_mapping_and_queue() {
+    let mut rig = Rig::new(true);
+    let mut owner = gameplay_owner(&mut rig);
+    let mixer_config = owner
+        .current()
+        .unwrap()
+        .owner
+        .as_ref()
+        .unwrap()
+        .mixer()
+        .config();
+    let source_basis = OutputFrameBasis::new(
+        ClockPoint {
+            domain: mixer_config.domain(),
+            timestamp: mixer_config.origin(),
+        },
+        mixer_config.format().sample_rate(),
+        0,
+    )
+    .unwrap();
+    rig.current.pin_practice_mixer_basis(source_basis).unwrap();
+    let before = rig.state();
+    let caches = owner_caches(&owner);
+    let original = owner.current().unwrap() as *const Output;
+    let tail = owner
+        .current()
+        .unwrap()
+        .owner
+        .as_ref()
+        .unwrap()
+        .pending_samples()
+        .to_vec();
+    let (mut ui, state) = target_ui();
+    let id = state
+        .borrow_mut()
+        .controls
+        .request(target_ui_args())
+        .unwrap();
+    state.borrow_mut().blocked = true;
+    let mut map = |_: &OutputRequest, _: &Output| -> Result<Request, String> {
+        panic!("retained practice refusal must precede target mapping")
+    };
+    let mut applied = |_: &Output| -> Result<OutputCapability, String> {
+        panic!("retained practice refusal cannot publish target replacement")
+    };
+    for _ in 0..2 {
+        assert!(!ui
+            .service_target_audio(&mut owner, rig.context(), now(), &mut map, &mut applied)
+            .unwrap());
+        assert_eq!(owner.current().unwrap() as *const Output, original);
+        assert_eq!(rig.state(), before);
+        assert_eq!(owner_caches(&owner), caches);
+        assert_eq!(
+            owner
+                .current()
+                .unwrap()
+                .owner
+                .as_ref()
+                .unwrap()
+                .pending_samples(),
+            tail
+        );
+        assert_eq!(owner.last_issued_epoch(), 7);
+        assert!(!owner.has_work());
+        assert!(rig.calls.borrow().is_empty());
+    }
+    assert_eq!(state.borrow().takes, 1);
+    state.borrow_mut().blocked = false;
+    assert!(!ui
+        .service_target_audio(&mut owner, rig.context(), now(), &mut map, &mut applied)
+        .unwrap());
+    let reply = state.borrow_mut().controls.take_reply().unwrap();
+    assert_eq!(reply.id, id);
+    assert_eq!(
+        reply.result.unwrap_err(),
+        "output replacement is unavailable during retained practice"
+    );
+    assert!(!ui.pending());
+    assert!(rig.calls.borrow().is_empty());
 }

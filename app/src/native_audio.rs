@@ -1,18 +1,18 @@
 //! Common owner-thread queue/BGM/mixer composition; no native device operations.
 use crate::{
-    PreparedBms,
     bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     input_sounds::InputSoundPlan,
     mine_sounds::MineSoundPlan,
     native_gameplay::NativeGameplayResult,
     offline::OwnedStopEvidence,
+    PreparedBms,
 };
 use beatkernel::{
     audio::{
-        AudioCommand, AudioLimits, CommandProducer, CommandPushError, Mixer, MixerConfig,
-        RenderReport, SampleBank, command_queue, command_queue_with_start_gate,
+        command_queue, command_queue_with_start_gate, AudioCommand, AudioLimits, CommandProducer,
+        CommandPushError, Mixer, MixerConfig, RenderReport, SampleBank,
     },
-    runtime::{input_sound::InputSoundTimeline, hazard_sound::HazardSoundTimeline},
+    runtime::{hazard_sound::HazardSoundTimeline, input_sound::InputSoundTimeline},
     time::{ClockPoint, Duration, Timestamp},
 };
 
@@ -156,6 +156,61 @@ pub fn prepare_mine_sounds(
 }
 
 pub const LIVE_COMMAND_RESERVE: usize = 1024;
+/// Cold conservative BGM voice overlap on the actual output sample grid.
+/// Empty programs reserve no voices; gameplay uses the remaining total budget.
+pub fn required_bgm_overlap(
+    bank: &SampleBank,
+    commands: &[AudioCommand],
+) -> NativeGameplayResult<usize> {
+    let mut events = Vec::new();
+    events.try_reserve_exact(
+        commands
+            .len()
+            .checked_mul(2)
+            .ok_or("BGM overlap capacity overflow")?,
+    )?;
+    let output_rate = i128::from(bank.format().sample_rate());
+    for &command in commands {
+        let AudioCommand::Play {
+            sample, at, gain, ..
+        } = command
+        else {
+            return Err(BgmFeedError::InvalidCommand(command).into());
+        };
+        if !gain.is_finite() || at.as_nanos() < 0 {
+            return Err(BgmFeedError::InvalidCommand(command).into());
+        }
+        let pcm = bank
+            .get(sample)
+            .ok_or("BGM sample is missing from original bank")?;
+        if pcm.frames() == 0 {
+            continue;
+        }
+        let source_rate = i128::from(pcm.format().sample_rate());
+        let product = i128::try_from(pcm.frames())?
+            .checked_mul(output_rate)
+            .ok_or("BGM frame span overflow")?;
+        let frames = product / source_rate + i128::from(product % source_rate != 0);
+        let nanos = frames
+            .checked_mul(1_000_000_000)
+            .ok_or("BGM duration overflow")?;
+        let duration = nanos / output_rate + i128::from(nanos % output_rate != 0);
+        let start = i128::from(at.as_nanos());
+        events.push((start, 1i64));
+        events.push((
+            start.checked_add(duration).ok_or("BGM endpoint overflow")?,
+            -1,
+        ));
+    }
+    events.sort_unstable();
+    let mut active = 0i64;
+    let mut peak = 0i64;
+    for (_, delta) in events {
+        active += delta;
+        peak = peak.max(active);
+    }
+    Ok(usize::try_from(peak)?)
+}
 #[derive(Clone, Copy, Debug)]
 pub struct NativeAudioConfig {
     pub output_origin: ClockPoint,
@@ -171,6 +226,127 @@ pub struct PreparedNativeAudio {
     pub producer: CommandProducer,
     pub bgm: BgmFeeder,
     pub mixer: Mixer,
+}
+
+/// Explicit retained-program storage and original-song initial interval.
+#[derive(Clone, Copy, Debug)]
+pub struct NativePracticeAudioConfig {
+    pub region: beatkernel::audio::PracticeRegion,
+    pub limits: beatkernel::audio::PracticeLimits,
+}
+
+pub struct PreparedRetainedNativeAudio {
+    pub audio: PreparedNativeAudio,
+    pub practice: beatkernel::audio::PracticeController,
+}
+
+/// Cold composition for one retained native output. Gameplay capacity is
+/// `config.voices`; program overlap slots are reserved in addition to it.
+/// The original bank and original-song cue times are never section-sliced.
+pub fn prepare_retained_audio(
+    bank: SampleBank,
+    original_commands: Vec<AudioCommand>,
+    config: NativeAudioConfig,
+    practice: NativePracticeAudioConfig,
+) -> NativeGameplayResult<PreparedRetainedNativeAudio> {
+    use beatkernel::audio::{practice_queue, PracticeCue, PreparedPracticeProgram};
+    if config.playback_end_frame.is_some() {
+        return Err("retained audio requires a program region, not a finite mixer endpoint".into());
+    }
+    if config.start.as_nanos() < 0 || config.preroll.as_nanos() < 0 {
+        return Err("retained audio start and preroll must be nonnegative".into());
+    }
+    let anchor =
+        i64::try_from(i128::from(config.start.as_nanos()) - i128::from(config.preroll.as_nanos()))?;
+    if practice.region.start != Timestamp::from_nanos(anchor) {
+        return Err(
+            "retained audio region must start at the exact start-minus-preroll anchor".into(),
+        );
+    }
+    let voices = config
+        .voices
+        .checked_add(practice.limits.max_overlap)
+        .ok_or("retained audio voice capacity overflow")?;
+    // A BGM-only caller may reserve the entire total voice budget for BGM.
+    if config.voices != 0 {
+        AudioLimits::new(
+            AudioLimits::MAX_COMMANDS,
+            config.voices,
+            AudioLimits::MAX_COMMANDS,
+            config.max_render_frames,
+            AudioLimits::MAX_COMMANDS,
+        )?;
+    }
+    let limits = AudioLimits::new(
+        AudioLimits::MAX_COMMANDS,
+        voices,
+        AudioLimits::MAX_COMMANDS,
+        config.max_render_frames,
+        AudioLimits::MAX_COMMANDS,
+    )?;
+    let mut cues = Vec::new();
+    cues.try_reserve_exact(original_commands.len())?;
+    for command in original_commands {
+        let AudioCommand::Play {
+            voice,
+            sample,
+            at,
+            gain,
+        } = command
+        else {
+            return Err(BgmFeedError::InvalidCommand(command).into());
+        };
+        if at.as_nanos() < 0 {
+            return Err(BgmFeedError::InvalidCommand(command).into());
+        }
+        cues.push(PracticeCue {
+            voice,
+            sample,
+            at,
+            gain,
+        });
+    }
+    let program = PreparedPracticeProgram::new(&bank, cues, practice.limits)?;
+    program.validate_region(practice.region)?;
+    let (controller, endpoint) = practice_queue(&program)?;
+    let format = bank.format();
+    // Retain the legacy feeder interface for platform owners, but no original
+    // BGM cue can be re-enqueued by a delayed owner-thread feed after a loop.
+    let bgm = BgmFeeder::new(
+        Vec::new(),
+        BgmConfig {
+            output_origin: config.output_origin,
+            sample_rate: format.sample_rate(),
+            preroll: config.preroll,
+            lookahead: config.lookahead,
+            max_pending: AudioLimits::MAX_COMMANDS - LIVE_COMMAND_RESERVE,
+        },
+    )?;
+    let (mut producer, consumer) = if config.gated_start {
+        command_queue_with_start_gate(AudioLimits::MAX_COMMANDS)
+    } else {
+        command_queue(AudioLimits::MAX_COMMANDS)
+    }?;
+    producer.set_scope(beatkernel::audio::CommandScope(1));
+    let mut mixer = Mixer::new(
+        MixerConfig::new(
+            format,
+            config.output_origin.domain,
+            config.output_origin.timestamp,
+            limits,
+        ),
+        bank,
+        consumer,
+    )?;
+    mixer.install_practice(program, endpoint, practice.region)?;
+    Ok(PreparedRetainedNativeAudio {
+        audio: PreparedNativeAudio {
+            producer,
+            bgm,
+            mixer,
+        },
+        practice: controller,
+    })
 }
 /// Prepare against the actual PCM bank, retaining explicit callback capacity.
 pub fn prepare_audio(
@@ -311,6 +487,169 @@ mod fixtures {
             at: Timestamp::from_nanos(ns),
             gain,
         }
+    }
+    fn practice_config(
+        start: i64,
+        preroll: i64,
+        end: i64,
+    ) -> (NativeAudioConfig, NativePracticeAudioConfig) {
+        let mut audio = config();
+        audio.start = Timestamp::from_nanos(start);
+        audio.preroll = Duration::from_nanos(preroll);
+        (
+            audio,
+            NativePracticeAudioConfig {
+                region: PracticeRegion::new(
+                    Timestamp::from_nanos(start - preroll),
+                    Timestamp::from_nanos(end),
+                    false,
+                )
+                .unwrap(),
+                limits: PracticeLimits::new(8, 2, 64, 4, 8).unwrap(),
+            },
+        )
+    }
+    fn original_cues() -> Vec<AudioCommand> {
+        vec![
+            AudioCommand::Play {
+                voice: VoiceId(101),
+                sample: SampleId(1),
+                at: Timestamp::ZERO,
+                gain: 1.0,
+            },
+            AudioCommand::Play {
+                voice: VoiceId(102),
+                sample: SampleId(1),
+                at: Timestamp::from_nanos(1_000_000),
+                gain: 1.0,
+            },
+        ]
+    }
+    #[test]
+    fn retained_overlap_reserves_output_quantized_tails_and_releases_equal_endpoints() {
+        let format = AudioFormat::new(1000, 1).unwrap();
+        let limits = PcmLimits::new(8, 128, 1).unwrap();
+        let mut bank = SampleBank::new(format, limits).unwrap();
+        bank.insert(
+            SampleId(1),
+            PcmSample::new(AudioFormat::new(1500, 1).unwrap(), vec![0.5], limits).unwrap(),
+        )
+        .unwrap();
+        // One source frame lasts 2/3 ms, but occupies one full output frame.
+        assert_eq!(
+            required_bgm_overlap(&bank, &[play(0, 1.0), play(750_000, 1.0)]).unwrap(),
+            2
+        );
+        assert_eq!(
+            required_bgm_overlap(&bank, &[play(0, 1.0), play(1_000_000, 1.0)]).unwrap(),
+            1
+        );
+        assert_eq!(required_bgm_overlap(&bank, &[]).unwrap(), 0);
+        assert!(required_bgm_overlap(&bank, &[play(-1, 1.0)]).is_err());
+        assert!(required_bgm_overlap(&bank, &[play(0, f32::NAN)]).is_err());
+    }
+    #[test]
+    fn retained_bgm_only_uses_total_budget_without_a_hidden_gameplay_slot() {
+        let (mut config, mut practice) = practice_config(0, 0, 4_000_000);
+        config.voices = 0;
+        practice.limits = PracticeLimits::new(8, 2, 64, 4, 8).unwrap();
+        assert_eq!(required_bgm_overlap(&bank(), &original_cues()).unwrap(), 2);
+        let mut prepared =
+            prepare_retained_audio(bank(), original_cues(), config, practice).unwrap();
+        let mut output = [0.; 4];
+        prepared.audio.mixer.render(&mut output).unwrap();
+        assert_eq!(output, [0.25, 0.75, 0.5, 0.]);
+        practice.limits = PracticeLimits::new(8, 1, 64, 4, 8).unwrap();
+        assert!(prepare_retained_audio(bank(), original_cues(), config, practice).is_err());
+    }
+    #[test]
+    fn retained_original_multicue_backward_request_uses_same_mixer_and_explicit_scope() {
+        let (config, practice) = practice_config(1_000_000, 0, 4_000_000);
+        let mut retained =
+            prepare_retained_audio(bank(), original_cues(), config, practice).unwrap();
+        assert_eq!(retained.audio.producer.scope(), CommandScope(1));
+        assert_eq!(retained.audio.bgm.report().remaining, 0);
+        let mut first = [9.; 3];
+        retained.audio.mixer.render(&mut first).unwrap();
+        assert_eq!(first, [0.75, 0.5, 0.]);
+        let started = retained.practice.try_pop_receipt().unwrap();
+        assert_eq!(started.applied_song_time, Timestamp::from_nanos(1_000_000));
+        retained
+            .practice
+            .try_request(PracticeRequest {
+                id: 1,
+                expected_generation: 1,
+                at_playback_frame: 3,
+                region: PracticeRegion::new(
+                    Timestamp::ZERO,
+                    Timestamp::from_nanos(4_000_000),
+                    false,
+                )
+                .unwrap(),
+            })
+            .unwrap();
+        let mut second = [9.; 4];
+        retained.audio.mixer.render(&mut second).unwrap();
+        assert_eq!(second, [0.25, 0.75, 0.5, 0.]);
+        let applied = retained.practice.try_pop_receipt().unwrap();
+        assert_eq!(applied.generation, 2);
+        assert_eq!(applied.physical_frame, 3);
+        assert_eq!(applied.playback_frame, 3);
+        assert_eq!(applied.applied_song_time, Timestamp::ZERO);
+        // Producer identity never silently follows the callback generation.
+        assert_eq!(retained.audio.producer.scope(), CommandScope(1));
+    }
+    #[test]
+    fn retained_negative_preroll_anchor_and_start_gate_preserve_original_pcm() {
+        let (mut config, practice) = practice_config(0, 2_000_000, 4_000_000);
+        config.gated_start = true;
+        let mut retained =
+            prepare_retained_audio(bank(), original_cues(), config, practice).unwrap();
+        let mut silence = [9.; 2];
+        retained.audio.mixer.render(&mut silence).unwrap();
+        assert_eq!(silence, [0., 0.]);
+        assert_eq!(
+            retained.practice.try_pop_receipt(),
+            Err(PracticeError::Empty)
+        );
+        retained.audio.producer.schedule_start_at(2).unwrap();
+        let mut output = [9.; 6];
+        retained.audio.mixer.render(&mut output).unwrap();
+        assert_eq!(output, [0., 0., 0.25, 0.75, 0.5, 0.]);
+        let started = retained.practice.try_pop_receipt().unwrap();
+        assert_eq!(started.applied_song_time, Timestamp::from_nanos(-2_000_000));
+        assert_eq!(started.physical_frame, 2);
+        assert_eq!(started.playback_frame, 0);
+    }
+    #[test]
+    fn retained_cold_validation_never_drops_cues_or_accepts_finite_fence() {
+        let (config, practice) = practice_config(0, 0, 4_000_000);
+        let mut finite = config;
+        finite.playback_end_frame = Some(4);
+        assert!(prepare_retained_audio(bank(), original_cues(), finite, practice).is_err());
+        let mut wrong_anchor = practice;
+        wrong_anchor.region.start = Timestamp::from_nanos(1);
+        assert!(prepare_retained_audio(bank(), original_cues(), config, wrong_anchor).is_err());
+        let mut insufficient = practice;
+        insufficient.limits.max_overlap = 1;
+        assert!(prepare_retained_audio(bank(), original_cues(), config, insufficient).is_err());
+        insufficient = practice;
+        insufficient.limits.max_cues = 1;
+        assert!(prepare_retained_audio(bank(), original_cues(), config, insufficient).is_err());
+        let mut full = config;
+        full.voices = AudioLimits::MAX_VOICES;
+        assert!(prepare_retained_audio(bank(), original_cues(), full, practice).is_err());
+        let mut cues = original_cues();
+        cues[0] = AudioCommand::Stop {
+            voice: VoiceId(101),
+            at: Timestamp::ZERO,
+        };
+        assert!(prepare_retained_audio(bank(), cues, config, practice).is_err());
+        let mut cues = original_cues();
+        if let AudioCommand::Play { gain, .. } = &mut cues[0] {
+            *gain = f32::NAN;
+        }
+        assert!(prepare_retained_audio(bank(), cues, config, practice).is_err());
     }
     fn render(parts: &[usize]) -> Vec<f32> {
         let mut prepared = prepare_audio(bank(), vec![play(22_000_000, 1.0)], config()).unwrap();
@@ -455,12 +794,10 @@ mod fixtures {
         assert_eq!(admitted.len(), 2);
         report.playback_start_frame = u64::MAX;
         report.playback_frames = 1;
-        assert!(
-            feed_rendered(&mut bgm, Some(report), |_| panic!(
-                "overflow before admission"
-            ))
-            .is_err()
-        );
+        assert!(feed_rendered(&mut bgm, Some(report), |_| panic!(
+            "overflow before admission"
+        ))
+        .is_err());
         assert_eq!(bgm.report().total_admitted, 2);
         report.playback_start_frame = 2;
         report.playback_frames = 0;

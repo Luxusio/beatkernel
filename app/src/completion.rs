@@ -28,7 +28,10 @@ pub struct SongCompletion {
     objects: Vec<ObjectId>,
     mine_count: usize,
     judge_until: Timestamp,
+    song_extent: Timestamp,
     calibration_seconds: u64,
+    late_ns: i64,
+    input_offset_ns: i64,
     judged: bool,
     drain: OutputDrain,
 }
@@ -137,14 +140,91 @@ impl SongCompletion {
             ),
             calibration_seconds: u64::try_from(seconds)
                 .map_err(|_| CompletionError("full-song seconds overflow"))?,
+            song_extent: Timestamp::from_nanos(
+                i64::try_from(song_extent.max(1))
+                    .map_err(|_| CompletionError("full-song extent exceeds timestamps"))?,
+            ),
+            late_ns,
+            input_offset_ns,
             judged: false,
             drain: OutputDrain::new(output_domain, prepared.bank.format().sample_rate()),
+        })
+    }
+
+    /// Rebuilds completion for a fresh judgment section without replacing PCM,
+    /// the output domain or its frame grid. Original asset extent is retained
+    /// only for calibration; actual completion still needs idle native drain.
+    pub fn prepare_practice(
+        &self,
+        source: &beatkernel_bms::BmsChart,
+        judge: &JudgeEngine,
+    ) -> Result<Self, CompletionError> {
+        let compiled = source
+            .compile()
+            .map_err(|_| CompletionError("invalid practice completion chart"))?;
+        if compiled.chart.objects() != judge.chart().objects() {
+            return Err(CompletionError("practice completion judge chart differs"));
+        }
+        if judge.profile().input_offset().as_nanos() != self.input_offset_ns {
+            return Err(CompletionError(
+                "practice completion judge input offset differs",
+            ));
+        }
+        let mut objects = Vec::new();
+        objects
+            .try_reserve_exact(judge.chart().objects().len())
+            .map_err(|_| CompletionError("completion identity allocation failed"))?;
+        let mut judge_until = 0i128;
+        for object in judge.chart().objects() {
+            objects.push(object.id);
+            let endpoint = object.time.end.unwrap_or(object.time.start).as_nanos();
+            judge_until = judge_until.max(
+                i128::from(endpoint) + i128::from(self.late_ns) - i128::from(self.input_offset_ns)
+                    + 1,
+            );
+        }
+        let invisible = source
+            .compile_invisible()
+            .map_err(|_| CompletionError("invalid invisible completion timeline"))?;
+        for event in invisible {
+            judge_until = judge_until.max(i128::from(event.at.as_nanos()) + 1);
+        }
+        let mines = source
+            .compile_mines()
+            .map_err(|_| CompletionError("invalid mine completion timeline"))?;
+        if judge.hazard_count() != mines.len() {
+            return Err(CompletionError(
+                "practice completion judge hazard count differs",
+            ));
+        }
+        for event in &mines {
+            judge_until = judge_until
+                .max(i128::from(event.at.as_nanos()) - i128::from(self.input_offset_ns) + 1);
+        }
+        Ok(Self {
+            objects,
+            mine_count: mines.len(),
+            judge_until: Timestamp::from_nanos(
+                i64::try_from(judge_until)
+                    .map_err(|_| CompletionError("practice judge deadline exceeds timestamps"))?,
+            ),
+            song_extent: self.song_extent,
+            calibration_seconds: self.calibration_seconds,
+            late_ns: self.late_ns,
+            input_offset_ns: self.input_offset_ns,
+            judged: false,
+            drain: OutputDrain::new(self.drain.domain, self.drain.rate),
         })
     }
 
     /// Finite song extent for the existing Windows initial calibration policy.
     pub const fn calibration_seconds(&self) -> u64 {
         self.calibration_seconds
+    }
+    /// Original-song bound from judgment deadlines and referenced PCM durations.
+    /// This is preparation data; actual completion still requires output drain.
+    pub const fn song_extent(&self) -> Timestamp {
+        self.song_extent
     }
 
     /// Immutable unoffset deadline prepared from all retained gameplay timelines.
@@ -676,6 +756,174 @@ mod tests {
             SongCompletion::prepare(&prepared, i64::MAX, i64::MIN, 0, ClockDomainId(7)).is_err()
         );
         assert!(SongCompletion::prepare(&prepared, -1, 0, 0, ClockDomainId(7)).is_err());
+    }
+    fn practice_prepared() -> PreparedBms {
+        use beatkernel::audio::{AudioFormat, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId};
+        use beatkernel::runtime::SoundBinding;
+        let source = beatkernel_bms::parse(
+            "#BPM 120\n#WAV01 long.wav\n#00011:01\n#00111:01\n",
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        let compiled = source.compile().unwrap();
+        let limits = PcmLimits::new(4096, 4096, 1).unwrap();
+        let mut bank = SampleBank::new(AudioFormat::new(10, 1).unwrap(), limits).unwrap();
+        bank.insert(
+            SampleId(1),
+            PcmSample::new(AudioFormat::new(1, 1).unwrap(), vec![0.5; 600], limits).unwrap(),
+        )
+        .unwrap();
+        let sounds = compiled
+            .chart
+            .objects()
+            .iter()
+            .map(|object| SoundBinding {
+                object: object.id,
+                stage: beatkernel::judge::JudgeStage::Instant,
+                sample: SampleId(1),
+                voice: VoiceId(object.id.0),
+                gain: 1.,
+            })
+            .collect();
+        PreparedBms {
+            source,
+            compiled,
+            bank,
+            sounds,
+            bgm_commands: Vec::new(),
+        }
+    }
+    fn practice_judge(source: &beatkernel_bms::BmsChart, offset: i64) -> JudgeEngine {
+        crate::native_judge::NativeJudgeConfig {
+            early: 0,
+            late: 150_000_000,
+            offset,
+            preroll: 0,
+            output: ClockDomainId(7),
+            end: None,
+        }
+        .judge(source, source.compile().unwrap().chart)
+        .unwrap()
+    }
+    #[test]
+    fn practice_completion_rebuilds_backwards_identities_and_pinned_deadlines() {
+        let original = practice_prepared();
+        let template =
+            SongCompletion::prepare(&original, 150_000_000, -31, 0, ClockDomainId(7)).unwrap();
+        let selected =
+            crate::section_start::source_at(&original.source, Timestamp::from_nanos(1_000_000_000))
+                .unwrap();
+        let judge = practice_judge(&selected, -31);
+        let section = template.prepare_practice(&selected, &judge).unwrap();
+        assert_eq!(
+            section.objects,
+            vec![original.compiled.chart.objects()[1].id]
+        );
+        assert_eq!(section.judge_until, Timestamp::from_nanos(2_150_000_032));
+        let backward = crate::section_start::source_at(&original.source, Timestamp::ZERO).unwrap();
+        let judge = practice_judge(&backward, -31);
+        let restored = section.prepare_practice(&backward, &judge).unwrap();
+        assert_eq!(restored.objects.len(), 2);
+        assert_eq!(restored.song_extent(), template.song_extent());
+        assert_eq!(
+            restored.calibration_seconds(),
+            template.calibration_seconds()
+        );
+        assert_eq!(restored.drain.domain, ClockDomainId(7));
+        assert_eq!(restored.drain.rate, 10);
+        assert!(!restored.judged);
+        assert!(restored.drain.after_frame.is_none());
+        assert!(template.prepare_practice(&selected, &judge).is_err());
+        let wrong_offset = practice_judge(&selected, 0);
+        assert!(template.prepare_practice(&selected, &wrong_offset).is_err());
+    }
+    #[test]
+    fn practice_completion_recomputes_invisible_and_hazard_deadlines_from_fresh_source() {
+        let original = practice_prepared();
+        let template =
+            SongCompletion::prepare(&original, 150_000_000, -31, 0, ClockDomainId(7)).unwrap();
+        let source = beatkernel_bms::parse(
+            "#BPM 120\n#WAV01 long.wav\n#00011:01\n#00131:01\n#002D1:01\n",
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        let judge = practice_judge(&source, -31);
+        let completion = template.prepare_practice(&source, &judge).unwrap();
+        assert_eq!(completion.mine_count, 1);
+        assert_eq!(completion.judge_until, Timestamp::from_nanos(4_000_000_032));
+        let mut invisible_only = source.clone();
+        invisible_only.mines.clear();
+        let judge = practice_judge(&invisible_only, -31);
+        let completion = template.prepare_practice(&invisible_only, &judge).unwrap();
+        assert_eq!(completion.mine_count, 0);
+        assert_eq!(completion.judge_until, Timestamp::from_nanos(2_000_000_001));
+        assert!(template.prepare_practice(&source, &judge).is_err());
+    }
+    #[test]
+    fn practice_completion_excluded_ten_minute_key_tail_does_not_gate_actual_mixer_drain() {
+        use beatkernel::audio::{command_queue, AudioLimits, Mixer, MixerConfig};
+        let original = practice_prepared();
+        let template =
+            SongCompletion::prepare(&original, 150_000_000, 0, 0, ClockDomainId(7)).unwrap();
+        assert_eq!(
+            template.song_extent(),
+            Timestamp::from_nanos(602_150_000_000)
+        );
+        let selected =
+            crate::section_start::source_at(&original.source, Timestamp::from_nanos(3_000_000_000))
+                .unwrap();
+        let judge = practice_judge(&selected, 0);
+        let mut completion = template.prepare_practice(&selected, &judge).unwrap();
+        assert!(completion.objects.is_empty());
+        assert_eq!(completion.judge_until, Timestamp::ZERO);
+        let (_producer, consumer) = command_queue(8).unwrap();
+        let mut mixer = Mixer::new(
+            MixerConfig::new(
+                original.bank.format(),
+                ClockDomainId(7),
+                Timestamp::ZERO,
+                AudioLimits::new(8, 4, 8, 8, 8).unwrap(),
+            ),
+            original.bank,
+            consumer,
+        )
+        .unwrap();
+        let mut pcm = [9.; 1];
+        let first = mixer.render(&mut pcm).unwrap();
+        assert_eq!(pcm, [0.]);
+        assert!(!completion
+            .observe(
+                &judge,
+                Timestamp::from_nanos(3_000_000_000),
+                BgmFeedReport::default(),
+                Some(first),
+                point(100_000_000)
+            )
+            .unwrap());
+        let second = mixer.render(&mut pcm).unwrap();
+        assert!(!completion
+            .observe(
+                &judge,
+                Timestamp::from_nanos(3_000_000_000),
+                BgmFeedReport::default(),
+                Some(second),
+                point(199_999_999)
+            )
+            .unwrap());
+        let third = mixer.render(&mut pcm).unwrap();
+        assert!(completion
+            .observe(
+                &judge,
+                Timestamp::from_nanos(3_000_000_000),
+                BgmFeedReport::default(),
+                Some(third),
+                point(200_000_000)
+            )
+            .unwrap());
+        let reset = completion.prepare_practice(&selected, &judge).unwrap();
+        assert!(!reset.judged);
+        assert!(reset.drain.after_frame.is_none());
+        assert!(reset.drain.idle_end.is_none());
     }
     fn report(start: u64, active: usize, pending: usize) -> RenderReport {
         RenderReport {

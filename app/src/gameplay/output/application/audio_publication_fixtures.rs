@@ -1173,3 +1173,178 @@ fn asio_end_rebind_uses_original_upper_chronology_and_preserves_old_end_on_refus
     assert_eq!(boundary.playback_frame, 10);
     assert_eq!(format!("{end:?}"), before);
 }
+
+#[test]
+fn retained_practice_source_replacement_refuses_before_native_retirement() {
+    let mut rig = Rig::new();
+    let output = rig.output.take().unwrap();
+    rig.presentation
+        .pin_practice_mixer_basis(output.inner.basis)
+        .unwrap();
+    let mut owner = GameplayOutputOwner::new(
+        Backend {
+            inner: memory::Backend {
+                trace: rig.trace.clone(),
+            },
+            io: rig.io.clone(),
+        },
+        output,
+    );
+    let original = owner.current().unwrap() as *const Output;
+    let before = state(&rig);
+    let marks = marks(&rig.presentation);
+    let calls = rig.trace.borrow().calls.clone();
+    let frame = owner
+        .current()
+        .unwrap()
+        .inner
+        .mixer
+        .as_ref()
+        .unwrap()
+        .frame_cursor();
+    owner
+        .queue(request(Mode::Normal), 100_000_000)
+        .ok()
+        .unwrap();
+    for _ in 0..2 {
+        let error = owner
+            .publish_paused_audio(rig.context(), host(20_000_000))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "output replacement is unavailable during retained practice"
+        );
+        assert_eq!(owner.current().unwrap() as *const Output, original);
+        assert_eq!(
+            owner
+                .current()
+                .unwrap()
+                .inner
+                .mixer
+                .as_ref()
+                .unwrap()
+                .frame_cursor(),
+            frame
+        );
+        assert_eq!(owner.last_issued_epoch(), 0);
+        assert!(owner.has_work()); // The direct queued request is still owned.
+        assert!(!owner.replacement_pending());
+        assert_eq!(state(&rig), before);
+        assert_eq!(self::marks(&rig.presentation), marks);
+        assert_eq!(rig.trace.borrow().calls, calls);
+        assert!(rig.io.created.borrow().is_empty());
+        assert_eq!(rig.io.native_calls.get(), 0);
+        drop(rig.runtime.hold_audio_pause().unwrap());
+    }
+}
+
+#[test]
+fn retained_practice_source_ui_rejection_is_correlated_before_mapping_and_queue() {
+    use crate::gameplay::output::{
+        application::requests::GameplayOutputUi,
+        domain::control::{OutputCapability, OutputControls, OutputReply, OutputRequest},
+        ports::OutputUiPort,
+    };
+    use std::io;
+    struct Ui(Rc<RefCell<(OutputControls, bool)>>);
+    impl OutputUiPort for Ui {
+        fn advertise(&mut self, cap: Option<OutputCapability>) -> io::Result<()> {
+            self.0
+                .borrow_mut()
+                .0
+                .advertise(cap)
+                .map_err(io::Error::other)
+        }
+        fn take_request(&mut self) -> io::Result<Option<OutputRequest>> {
+            Ok(self.0.borrow_mut().0.take_request())
+        }
+        fn reply(&mut self, reply: &OutputReply) -> io::Result<()> {
+            let mut state = self.0.borrow_mut();
+            if state.1 {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            state.0.reply(reply).map_err(io::Error::other)
+        }
+        fn pending(&self) -> bool {
+            self.0.borrow().0.pending()
+        }
+    }
+    let mut rig = Rig::new();
+    let output = rig.output.take().unwrap();
+    rig.presentation
+        .pin_practice_mixer_basis(output.inner.basis)
+        .unwrap();
+    let mut owner = GameplayOutputOwner::new(
+        Backend {
+            inner: memory::Backend {
+                trace: rig.trace.clone(),
+            },
+            io: rig.io.clone(),
+        },
+        output,
+    );
+    let state = Rc::new(RefCell::new((OutputControls::new(), true)));
+    let mut ui = GameplayOutputUi::new(Ui(state.clone()));
+    ui.advertise(Some(OutputCapability {
+        host: crate::settings::SettingsHost::Linux,
+        current_args: vec![
+            "--rate".into(),
+            "48000".into(),
+            "--period-frames".into(),
+            "32".into(),
+            "--buffer-frames".into(),
+            "128".into(),
+        ],
+    }))
+    .unwrap();
+    let id = state
+        .borrow_mut()
+        .0
+        .request(vec!["--rate".into(), "32000".into()])
+        .unwrap();
+    let original = owner.current().unwrap() as *const Output;
+    let before = self::state(&rig);
+    let calls = rig.trace.borrow().calls.clone();
+    let mut map = |_: &OutputRequest, _: &Output| -> Result<Request, String> {
+        panic!("retained practice refusal must precede native request mapping")
+    };
+    let mut applied = |_: &Output| -> Result<OutputCapability, String> {
+        panic!("retained practice refusal cannot publish replacement")
+    };
+    for _ in 0..2 {
+        assert!(!ui
+            .service_audio(
+                &mut owner,
+                rig.context(),
+                host(20_000_000),
+                &mut map,
+                &mut applied
+            )
+            .unwrap());
+        assert_eq!(owner.current().unwrap() as *const Output, original);
+        assert_eq!(self::state(&rig), before);
+        assert_eq!(rig.trace.borrow().calls, calls);
+        assert!(!owner.has_work());
+        assert_eq!(owner.last_issued_epoch(), 0);
+    }
+    assert!(ui.pending());
+    state.borrow_mut().1 = false;
+    assert!(!ui
+        .service_audio(
+            &mut owner,
+            rig.context(),
+            host(20_000_000),
+            &mut map,
+            &mut applied
+        )
+        .unwrap());
+    let reply = state.borrow_mut().0.take_reply().unwrap();
+    assert_eq!(reply.id, id);
+    assert_eq!(
+        reply.result.unwrap_err(),
+        "output replacement is unavailable during retained practice"
+    );
+    assert!(!ui.pending());
+    assert_eq!(rig.trace.borrow().calls, calls);
+    assert!(rig.io.created.borrow().is_empty());
+}

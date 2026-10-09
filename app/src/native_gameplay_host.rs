@@ -123,6 +123,53 @@ pub trait NativeGameplayHost {
     fn retry_pause_publication(&mut self);
     fn publish_pause(&mut self, pause: PauseState);
     fn publish_section_end(&mut self, end: Timestamp);
+    /// Advertise only after the retained audio program and owner are installed.
+    fn advertise_practice(
+        &mut self,
+        capability: Option<crate::practice_control::PracticeCapability>,
+    ) -> NativeGameplayResult<()> {
+        if capability.is_some() {
+            return Err("native host does not support retained practice".into());
+        }
+        Ok(())
+    }
+    /// Take a cold UI request without touching an audio callback or endpoint.
+    fn take_practice_request(
+        &mut self,
+    ) -> NativeGameplayResult<Option<crate::practice_control::PracticeRequest>> {
+        Ok(None)
+    }
+    /// Publish a decided refusal or a boundary qualified by the game owner.
+    fn commit_practice_reply(
+        &mut self,
+        _: &crate::practice_control::PracticeReply,
+    ) -> NativeGameplayResult<()> {
+        Err("native host does not support retained practice acknowledgements".into())
+    }
+    /// Commit cold prepared UI state at a qualified practice boundary.
+    fn prepare_practice_presentation(
+        &mut self,
+        _: u64,
+        _: &[(PlayerId, &crate::practice_session::PreparedPracticeAttempt)],
+    ) -> NativeGameplayResult<crate::player::PreparedPracticePresentation> {
+        Err("native host does not support practice presentation preparation".into())
+    }
+    /// Observe actual fresh Runtime installation before fallible display effects.
+    /// Headless hosts have no external identity or score observer to update.
+    fn apply_practice_identity(
+        &mut self,
+        _: &mut crate::player::PreparedPracticePresentation,
+        _: u64,
+    ) {
+    }
+    /// Commit cold prepared UI state at a qualified practice boundary.
+    fn commit_practice_presentation(
+        &mut self,
+        _: crate::player::PreparedPracticePresentation,
+        _: u64,
+    ) -> NativeGameplayResult<()> {
+        Err("native host does not support practice attempt presentation".into())
+    }
     fn publish_report(&mut self, report: &RuntimeReport) -> NativeGameplayResult<()>;
     fn publish_local_reports(&mut self, reports: &[PlayerReport]) -> NativeGameplayResult<()>;
     fn diagnostic(&mut self, diagnostic: NativeGameplayDiagnostic<'_>);
@@ -209,6 +256,49 @@ impl<H: NativeGameplayHost> NativeGameplayHost for NativeScoreHost<'_, H> {
     }
     fn publish_section_end(&mut self, end: Timestamp) {
         self.host.publish_section_end(end);
+    }
+    fn advertise_practice(
+        &mut self,
+        capability: Option<crate::practice_control::PracticeCapability>,
+    ) -> NativeGameplayResult<()> {
+        self.host.advertise_practice(capability)
+    }
+    fn take_practice_request(
+        &mut self,
+    ) -> NativeGameplayResult<Option<crate::practice_control::PracticeRequest>> {
+        self.host.take_practice_request()
+    }
+    fn commit_practice_reply(
+        &mut self,
+        reply: &crate::practice_control::PracticeReply,
+    ) -> NativeGameplayResult<()> {
+        self.host.commit_practice_reply(reply)
+    }
+    fn apply_practice_identity(
+        &mut self,
+        prepared: &mut crate::player::PreparedPracticePresentation,
+        generation: u64,
+    ) {
+        *self.score = crate::competition::ScoreSummary::default();
+        self.host.apply_practice_identity(prepared, generation);
+    }
+    fn commit_practice_presentation(
+        &mut self,
+        prepared: crate::player::PreparedPracticePresentation,
+        generation: u64,
+    ) -> NativeGameplayResult<()> {
+        self.host
+            .commit_practice_presentation(prepared, generation)?;
+        *self.score = crate::competition::ScoreSummary::default();
+        Ok(())
+    }
+    fn prepare_practice_presentation(
+        &mut self,
+        generation: u64,
+        attempts: &[(PlayerId, &crate::practice_session::PreparedPracticeAttempt)],
+    ) -> NativeGameplayResult<crate::player::PreparedPracticePresentation> {
+        self.host
+            .prepare_practice_presentation(generation, attempts)
     }
     fn publish_report(&mut self, report: &RuntimeReport) -> NativeGameplayResult<()> {
         let scored = self.score.observe(&report.judge_events);

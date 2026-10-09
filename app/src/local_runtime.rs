@@ -1,17 +1,19 @@
 //! Local cohorts execute the existing Runtime with one transport and audio owner.
-use crate::local_players::{PlayerId, validate_source_routes};
+use crate::local_players::{validate_source_routes, PlayerId};
 use beatkernel::{
-    audio::{AudioCommand, CommandProducer, CommandPushError, VoiceId, command_queue},
+    audio::{
+        command_queue, AudioCommand, CommandProducer, CommandPushError, CommandScope, VoiceId,
+    },
     input::{
         BindingMap, DeviceId, DeviceSelector, PhysicalInputEvent, Position2, TouchRegion,
         TouchRouter,
     },
     judge::JudgeEngine,
     runtime::{
+        hazard_sound::{HazardSoundBinding, HazardSoundTimeline},
+        input_sound::InputSoundTimeline,
         Runtime, RuntimeError, RuntimeProcessingClock, RuntimeReport, RuntimeSoundStopReport,
         SoundBinding,
-        input_sound::InputSoundTimeline,
-        hazard_sound::{HazardSoundBinding, HazardSoundTimeline},
     },
     telemetry::RuntimeTelemetry,
     time::{ClockDomainId, ClockMapper, ClockPoint, Timestamp},
@@ -116,6 +118,106 @@ impl Drop for OwnerGuard<'_> {
 }
 
 impl RuntimeGroup {
+    /// Explicit identity for commands admitted to the retained shared output.
+    /// This never reads or adopts a callback's current generation.
+    pub fn set_audio_scope(&mut self, scope: CommandScope) {
+        self.producer.set_scope(scope);
+    }
+
+    pub fn audio_scope(&self) -> CommandScope {
+        self.producer.scope()
+    }
+
+    /// Commit fresh practice judges after the caller qualifies the rendered
+    /// boundary and retires the acquired input prefix. This does not flush PCM,
+    /// enqueue a seek, reopen output, or manufacture a native clock boundary.
+    ///
+    /// Exact roster order, pristine judges, pinned overlapping object identity,
+    /// grading windows and a fresh normal-rate transport are checked before any
+    /// owner changes. All replacement storage is prepared before the first
+    /// mutation. Existing devices, bindings, full original sound plans and
+    /// telemetry remain; chronology, held routes, fences, stop latches, endpoint
+    /// and group poison are reset for the new attempt. Configuration locks stay.
+    pub fn replace_practice_states(
+        &mut self,
+        judges: Vec<(PlayerId, JudgeEngine)>,
+        transport: Transport,
+        song_end: Option<Timestamp>,
+        scope: CommandScope,
+    ) -> Result<(), String> {
+        if judges.len() != self.members.len() {
+            return Err("practice judge count differs from cohort".into());
+        }
+        let anchor = transport.anchor();
+        if transport.anchors().len() != 1 || anchor.rate != Rate::NORMAL {
+            return Err("practice transport must be a fresh normal-rate anchor".into());
+        }
+        if song_end.is_some_and(|end| end.as_nanos() < 0 || end <= anchor.song_time) {
+            return Err("practice end must follow its song origin and be nonnegative".into());
+        }
+        if scope.0 == 0 || scope.0 <= self.audio_scope().0 {
+            return Err("practice audio scope must advance explicitly".into());
+        }
+        for (member, (player, judge)) in self.members.iter().zip(&judges) {
+            if member.player != *player {
+                return Err("practice players differ from source-plan order".into());
+            }
+            if judge.effective_song_time().is_some() {
+                return Err("practice judge must be unprocessed".into());
+            }
+            if judge.profile() != member.runtime.judge().profile() {
+                return Err("practice grading windows differ from pinned policy".into());
+            }
+            // Sections may expand backwards. Only shared identities must agree;
+            // the caller prepares all sections from the pinned original source.
+            let mut original = HashMap::new();
+            original
+                .try_reserve(member.runtime.judge().chart().objects().len())
+                .map_err(|_| "practice identity reservation failed")?;
+            for object in member.runtime.judge().chart().objects() {
+                original.insert(object.id, object);
+            }
+            for object in judge.chart().objects() {
+                if original.get(&object.id).is_some_and(|old| **old != *object) {
+                    return Err("practice object identity differs from pinned source".into());
+                }
+            }
+        }
+        let mut replacements = Vec::new();
+        replacements
+            .try_reserve_exact(self.members.len())
+            .map_err(|_| "practice transport reservation failed")?;
+        for _ in &self.members {
+            replacements.push(transport.clone());
+        }
+        let mut retired = Vec::new();
+        retired
+            .try_reserve_exact(self.members.len())
+            .map_err(|_| "practice retired owner reservation failed")?;
+        // No fallible operation or allocation remains before all owners commit.
+        for ((member, (_, judge)), replacement) in
+            self.members.iter_mut().zip(judges).zip(replacements)
+        {
+            let guard =
+                OwnerGuard::new(&mut member.runtime, &mut self.transport, &mut self.producer);
+            retired.push(guard.runtime.replace_state(judge, replacement));
+            if let Some(end) = song_end {
+                guard
+                    .runtime
+                    .set_song_end(end)
+                    .expect("fresh preflighted endpoint");
+            }
+            guard.runtime.set_audio_scope(scope);
+        }
+        self.song_end = song_end;
+        self.poisoned = false;
+        self.started = false;
+        // Custom evaluator disposal happens after the whole cohort is committed
+        // and shared producer ownership is restored, never inside an audio render.
+        drop(retired);
+        Ok(())
+    }
+
     /// Actual member clock identity, only when every member agrees.
     pub fn clock_domains(&self) -> Option<(ClockDomainId, ClockDomainId)> {
         let domains = self.members.first()?.runtime.clock_domains();
@@ -595,6 +697,26 @@ impl RuntimeGroup {
 /// Production solo adapter uses exactly the same cohort execution path.
 pub struct SoloRuntime(RuntimeGroup);
 impl SoloRuntime {
+    pub fn set_audio_scope(&mut self, scope: CommandScope) {
+        self.0.set_audio_scope(scope);
+    }
+
+    pub fn audio_scope(&self) -> CommandScope {
+        self.0.audio_scope()
+    }
+
+    /// One-player forwarding through the same atomic cohort replacement seam.
+    pub fn replace_practice_state(
+        &mut self,
+        judge: JudgeEngine,
+        transport: Transport,
+        song_end: Option<Timestamp>,
+        scope: CommandScope,
+    ) -> Result<(), String> {
+        self.0
+            .replace_practice_states(vec![(PlayerId(1), judge)], transport, song_end, scope)
+    }
+
     /// Actual normalized timeline and raw scheduling identity of the solo member.
     pub fn clock_domains(&self) -> Option<(ClockDomainId, ClockDomainId)> {
         self.0.clock_domains()
@@ -928,6 +1050,385 @@ mod fixtures {
     }
 
     #[test]
+    fn practice_refusal_preserves_every_member_and_shared_owner_even_after_poison() {
+        for case in 0..8 {
+            let (mut group, mut consumer) = group(32);
+            group.set_audio_scope(CommandScope(1));
+            group
+                .set_song_end(Timestamp::from_nanos(3_000_000))
+                .unwrap();
+            group
+                .process_input(input(1, 2_000_100), &Identity, point(2_000_100))
+                .unwrap();
+            group.fence_player(PlayerId(1)).unwrap();
+            group
+                .fence_player_sounds(PlayerId(1), Timestamp::from_nanos(2_000_100))
+                .unwrap();
+            // Genuine core-clock failure leaves the shared owner poisoned.
+            let bad = ClockPoint {
+                domain: ClockDomainId(99),
+                timestamp: Timestamp::ZERO,
+            };
+            assert!(group.advance_to(bad, &Identity, bad).is_err());
+            assert!(group.poisoned());
+            let hashes: Vec<_> = group
+                .members
+                .iter()
+                .map(|m| m.runtime.judge().stable_hash().unwrap())
+                .collect();
+            let fences: Vec<_> = group
+                .members
+                .iter()
+                .map(|m| m.runtime.gameplay_fence())
+                .collect();
+            let transport = group.transport.clone();
+            let admitted = group.admitted_audio_commands();
+            let mut judges: Vec<_> = (1..=4).map(|p| (PlayerId(p), config(p).judge)).collect();
+            let mut replacement = Transport::new(
+                Timestamp::from_nanos(10_000_000),
+                Timestamp::ZERO,
+                Rate::NORMAL,
+            );
+            let mut end = Some(Timestamp::from_nanos(3_000_000));
+            let mut scope = CommandScope(2);
+            match case {
+                0 => judges.swap(0, 1),
+                1 => {
+                    judges.pop();
+                }
+                2 => {
+                    judges[3].1.advance_to(Timestamp::ZERO).unwrap();
+                }
+                3 => {
+                    let old = &judges[3].1;
+                    judges[3].1 = JudgeEngine::new(
+                        old.chart().clone(),
+                        vec![Rule {
+                            interaction: InteractionId(1),
+                            control: GameControlId(1),
+                            evaluator: Box::new(InstantEvaluator),
+                        }],
+                        JudgeProfile::new(
+                            vec![JudgeWindow {
+                                grade: JudgeGrade(9),
+                                early: Duration::ZERO,
+                                late: Duration::ZERO,
+                            }],
+                            Duration::ZERO,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                }
+                4 => end = Some(Timestamp::from_nanos(-1)),
+                5 => scope = CommandScope(1),
+                6 => replacement
+                    .pause(Timestamp::from_nanos(10_000_000))
+                    .unwrap(),
+                _ => end = Some(Timestamp::ZERO),
+            }
+            assert!(
+                group
+                    .replace_practice_states(judges, replacement, end, scope)
+                    .is_err(),
+                "case {case}"
+            );
+            assert_eq!(group.transport(), &transport, "case {case}");
+            assert_eq!(group.audio_scope(), CommandScope(1));
+            assert_eq!(group.song_end(), Some(Timestamp::from_nanos(3_000_000)));
+            assert_eq!(group.admitted_audio_commands(), admitted);
+            assert!(group.poisoned());
+            for (index, member) in group.members.iter().enumerate() {
+                assert_eq!(member.runtime.judge().stable_hash().unwrap(), hashes[index]);
+                assert_eq!(member.runtime.gameplay_fence(), fences[index]);
+            }
+            // The same queue still contains the exact original hit and stop.
+            assert!(matches!(
+                consumer.try_pop().unwrap(),
+                AudioCommand::Play {
+                    voice: VoiceId(1),
+                    ..
+                }
+            ));
+            assert!(matches!(
+                consumer.try_pop().unwrap(),
+                AudioCommand::Stop {
+                    voice: VoiceId(1),
+                    ..
+                }
+            ));
+            assert!(consumer.try_pop().is_err());
+        }
+    }
+
+    #[test]
+    fn practice_commit_resets_all_four_members_without_replacing_bindings_or_queue() {
+        let (mut group, mut consumer) = group(32);
+        group.set_audio_scope(CommandScope(1));
+        group
+            .set_song_end(Timestamp::from_nanos(3_000_000))
+            .unwrap();
+        for player in 1..=4 {
+            group
+                .process_input(input(player, 2_000_100), &Identity, point(2_000_100))
+                .unwrap();
+            group.fence_player(PlayerId(player as u32)).unwrap();
+            group
+                .fence_player_sounds(PlayerId(player as u32), Timestamp::from_nanos(2_000_100))
+                .unwrap()
+                .unwrap();
+        }
+        let bad = ClockPoint {
+            domain: ClockDomainId(99),
+            timestamp: Timestamp::ZERO,
+        };
+        assert!(group.advance_to(bad, &Identity, bad).is_err());
+        group
+            .replace_practice_states(
+                (1..=4).map(|p| (PlayerId(p), config(p).judge)).collect(),
+                Transport::new(
+                    Timestamp::from_nanos(10_000_000),
+                    Timestamp::ZERO,
+                    Rate::NORMAL,
+                ),
+                None,
+                CommandScope(2),
+            )
+            .unwrap();
+        assert!(!group.poisoned());
+        assert_eq!(group.song_end(), None);
+        assert_eq!(group.audio_scope(), CommandScope(2));
+        for player in 1..=4 {
+            let id = PlayerId(player as u32);
+            assert_eq!(group.player_gameplay_fence(id), None);
+            assert_eq!(group.member_judge(id).unwrap().effective_song_time(), None);
+            // Same device/control and acquisition sequence 1: a fresh Down,
+            // rather than an old held key or a duplicate-sequence refusal.
+            let InputResult::Processed(reports) = group
+                .process_input(input(player, 12_000_000), &Identity, point(12_000_000))
+                .unwrap()
+            else {
+                panic!("original device lost")
+            };
+            assert_eq!(reports[0].player, id);
+            assert_eq!(
+                reports[0].report.song_time,
+                Timestamp::from_nanos(2_000_000)
+            );
+            assert_eq!(reports[0].report.judge_events.len(), 1);
+            assert_eq!(
+                reports[0].report.judge_events[0].outcome,
+                beatkernel::judge::JudgeOutcome::Hit {
+                    grade: JudgeGrade(1),
+                    delta: Duration::ZERO
+                }
+            );
+            group.fence_player(id).unwrap();
+            assert!(group
+                .fence_player_sounds(id, Timestamp::from_nanos(12_000_000))
+                .unwrap()
+                .is_some());
+        }
+        // Original producer/consumer admits all four old and all four new pairs.
+        for _ in 0..2 {
+            for player in 1..=4 {
+                assert!(
+                    matches!(consumer.try_pop().unwrap(), AudioCommand::Play { voice, .. } if voice == VoiceId(player))
+                );
+                assert!(
+                    matches!(consumer.try_pop().unwrap(), AudioCommand::Stop { voice, .. } if voice == VoiceId(player))
+                );
+            }
+        }
+        assert!(consumer.try_pop().is_err());
+    }
+
+    #[test]
+    fn practice_pins_shared_object_identity_but_allows_backward_section_expansion() {
+        let (mut group, _consumer) = group(16);
+        let replacement_judge = |shift_shared: bool| {
+            let mut source = SourceChart::new(1000, Bpm::new(60, 1).unwrap()).unwrap();
+            for (id, tick) in [(0, 1), (1, if shift_shared { 3 } else { 2 })] {
+                source.objects.push(SourceObject {
+                    id: ObjectId(id),
+                    start: Beat::new(tick).unwrap(),
+                    end: None,
+                    interaction: InteractionId(1),
+                    visual: VisualId(1),
+                    audio: None,
+                    metadata: ObjectMetadata::default(),
+                });
+            }
+            JudgeEngine::new(
+                source.compile().unwrap(),
+                vec![Rule {
+                    interaction: InteractionId(1),
+                    control: GameControlId(1),
+                    evaluator: Box::new(InstantEvaluator),
+                }],
+                config(1).judge.profile().clone(),
+            )
+            .unwrap()
+        };
+        let transport = || {
+            Transport::new(
+                Timestamp::from_nanos(10_000_000),
+                Timestamp::ZERO,
+                Rate::NORMAL,
+            )
+        };
+        let mut invalid: Vec<_> = (1..=4).map(|p| (PlayerId(p), config(p).judge)).collect();
+        invalid[3].1 = replacement_judge(true);
+        assert!(group
+            .replace_practice_states(invalid, transport(), None, CommandScope(1))
+            .is_err());
+        assert_eq!(group.audio_scope(), CommandScope(0));
+        assert_eq!(
+            group.transport().anchor().host_time,
+            Timestamp::from_nanos(100)
+        );
+        for member in &group.members {
+            assert_eq!(member.runtime.judge().chart().objects().len(), 1);
+        }
+        let mut expanded: Vec<_> = (1..=4).map(|p| (PlayerId(p), config(p).judge)).collect();
+        expanded[3].1 = replacement_judge(false);
+        group
+            .replace_practice_states(expanded, transport(), None, CommandScope(1))
+            .unwrap();
+        assert_eq!(
+            group
+                .member_judge(PlayerId(4))
+                .unwrap()
+                .chart()
+                .objects()
+                .len(),
+            2
+        );
+        let InputResult::Processed(reports) = group
+            .process_input(input(4, 11_000_000), &Identity, point(11_000_000))
+            .unwrap()
+        else {
+            panic!("expanded player's device lost")
+        };
+        assert_eq!(reports[0].report.judge_events[0].object, ObjectId(0));
+        // Expansion does not invent or reassign original sound/voice bindings.
+        assert!(reports[0].report.audio_commands.is_empty());
+    }
+
+    #[test]
+    fn practice_solo_retains_actual_mixer_and_records_fresh_pass_replay_parity() {
+        use crate::replay_capture::LiveReplayCapture;
+        use beatkernel::{
+            audio::*,
+            replay::{codec::ReplayCodecLimits, ReplaySession},
+        };
+        let member = config(1);
+        let (producer, consumer) = command_queue(32).unwrap();
+        let format = AudioFormat::new(1000, 1).unwrap();
+        let limits = PcmLimits::new(64, 64, 4).unwrap();
+        let mut bank = SampleBank::new(format, limits).unwrap();
+        bank.insert(
+            SampleId(1),
+            PcmSample::new(format, vec![0.5], limits).unwrap(),
+        )
+        .unwrap();
+        let program = PreparedPracticeProgram::new(
+            &bank,
+            vec![],
+            PracticeLimits::new(8, 1, 32, 8, 16).unwrap(),
+        )
+        .unwrap();
+        let (mut controller, endpoint) = practice_queue(&program).unwrap();
+        let mut mixer = Mixer::new(
+            MixerConfig::new(
+                format,
+                ClockDomainId(1),
+                Timestamp::ZERO,
+                AudioLimits::new(32, 4, 16, 64, 16).unwrap(),
+            ),
+            bank,
+            consumer,
+        )
+        .unwrap();
+        mixer
+            .install_practice(
+                program,
+                endpoint,
+                PracticeRegion::new(Timestamp::ZERO, Timestamp::from_nanos(3_000_000), true)
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut solo = SoloRuntime::new(
+            ClockDomainId(1),
+            ClockDomainId(1),
+            Transport::new(Timestamp::from_nanos(100), Timestamp::ZERO, Rate::NORMAL),
+            member.bindings,
+            member.judge,
+            producer,
+            member.sounds,
+            8,
+        )
+        .unwrap();
+        solo.set_audio_scope(CommandScope(1));
+        solo.process_input(input(1, 2_000_100), &Identity, point(2_000_000))
+            .unwrap();
+        solo.enqueue_audio(AudioCommand::Play {
+            voice: VoiceId(1),
+            sample: SampleId(1),
+            at: Timestamp::from_nanos(5_000_000),
+            gain: 1.0,
+        })
+        .unwrap();
+        let mut first = [0.0; 3];
+        mixer.render(&mut first).unwrap();
+        assert_eq!(first, [0.0, 0.0, 0.5]);
+        assert_eq!(controller.try_pop_receipt().unwrap().generation, 1);
+        mixer.render(&mut [0.0]).unwrap();
+        let boundary = controller.try_pop_receipt().unwrap();
+        assert_eq!(boundary.generation, 2);
+        assert_eq!(boundary.playback_frame, 3);
+        let fresh = config(1).judge;
+        let replay_limits = ReplayCodecLimits::new(
+            65_536,
+            64,
+            4096,
+            beatkernel::input::CodecLimits::new(4096, 4096).unwrap(),
+        )
+        .unwrap();
+        let mut capture = LiveReplayCapture::new(&fresh, ClockDomainId(1), replay_limits).unwrap();
+        solo.replace_practice_state(
+            fresh,
+            Transport::new(
+                Timestamp::from_nanos(10_000_000),
+                Timestamp::ZERO,
+                Rate::NORMAL,
+            ),
+            Some(Timestamp::from_nanos(3_000_000)),
+            CommandScope(2),
+        )
+        .unwrap();
+        let report = solo
+            .process_input(input(1, 12_000_000), &Identity, point(4_000_000))
+            .unwrap();
+        assert_eq!(report.judge_events.len(), 1);
+        assert_eq!(report.judge_events[0].object, ObjectId(1));
+        assert_eq!(report.judge_events[0].at, Timestamp::from_nanos(2_000_000));
+        capture.record_report(&report).unwrap();
+        let mut second = [0.0; 2];
+        let rendered = mixer.render(&mut second).unwrap();
+        assert_eq!(rendered.start_frame, 4);
+        assert_eq!(second, [0.5, 0.0]); // Old generation's future key cannot leak.
+        let file = capture.into_file();
+        let replay =
+            ReplaySession::from_records(file.header, config(1).judge, file.records).unwrap();
+        assert_eq!(replay.results(), report.judge_events);
+        assert_eq!(
+            replay.engine().stable_hash().unwrap(),
+            solo.judge().stable_hash().unwrap()
+        );
+    }
+
+    #[test]
     fn four_players_route_once_and_advance_independent_deadlines_at_shared_time() {
         let (mut group, mut consumer) = group(8);
         assert!(matches!(
@@ -958,11 +1459,9 @@ mod fixtures {
             .advance_to(point(2_000_101), &Identity, point(2_000_101))
             .unwrap();
         assert_eq!(reports.len(), 4);
-        assert!(
-            reports
-                .iter()
-                .all(|r| r.report.song_time == Timestamp::from_nanos(2_000_001))
-        );
+        assert!(reports
+            .iter()
+            .all(|r| r.report.song_time == Timestamp::from_nanos(2_000_001)));
         assert!(reports[0].report.judge_events.is_empty());
         for report in &reports[1..] {
             assert_eq!(report.report.judge_events.len(), 1);
@@ -989,18 +1488,16 @@ mod fixtures {
                 5 => members.clear(),
                 _ => members = (1..=65).map(config).collect(),
             }
-            assert!(
-                RuntimeGroup::new(
-                    ClockDomainId(1),
-                    ClockDomainId(1),
-                    Transport::new(Timestamp::ZERO, Timestamp::ZERO, Rate::NORMAL),
-                    producer,
-                    members,
-                    telemetry,
-                    &reserved
-                )
-                .is_err()
-            );
+            assert!(RuntimeGroup::new(
+                ClockDomainId(1),
+                ClockDomainId(1),
+                Transport::new(Timestamp::ZERO, Timestamp::ZERO, Rate::NORMAL),
+                producer,
+                members,
+                telemetry,
+                &reserved
+            )
+            .is_err());
         }
     }
 
@@ -1054,7 +1551,7 @@ mod fixtures {
             audio::{
                 AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample, SampleBank,
             },
-            replay::{ReplaySession, codec::ReplayCodecLimits},
+            replay::{codec::ReplayCodecLimits, ReplaySession},
             time::ClockPair,
         };
         let output = |ns| ClockPoint {
@@ -1206,7 +1703,7 @@ mod fixtures {
             audio::{
                 AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample, SampleBank,
             },
-            replay::{ReplaySession, codec::ReplayCodecLimits},
+            replay::{codec::ReplayCodecLimits, ReplaySession},
             time::ClockPair,
         };
         for count in [2, 3, 4, 64] {
@@ -1369,12 +1866,10 @@ mod fixtures {
                 .unwrap()
                 .unwrap();
             assert!(delayed.timestamp < boundary.host.timestamp);
-            assert!(
-                merger
-                    .watermark(point(6_000_100), 0, true)
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(merger
+                .watermark(point(6_000_100), 0, true)
+                .unwrap()
+                .is_none());
             assert_eq!(
                 captures
                     .values()
@@ -1496,12 +1991,10 @@ mod fixtures {
         let (mut group, mut consumer) = group(8);
         let mut event = input(1, 100);
         event.meta_mut().clock_domain = ClockDomainId(99);
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                group.process_input(event, &PanicMapper, point(100))
-            }))
-            .is_err()
-        );
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            group.process_input(event, &PanicMapper, point(100))
+        }))
+        .is_err());
         assert!(group.poisoned());
         assert_eq!(
             group.transport().anchor().host_time,
@@ -1552,7 +2045,7 @@ mod fixtures {
             audio::{
                 AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample, SampleBank,
             },
-            replay::{ReplayOperation, ReplaySession, codec::ReplayCodecLimits},
+            replay::{codec::ReplayCodecLimits, ReplayOperation, ReplaySession},
         };
         for count in [1, 2, 3, 4, 64] {
             let ids = (0..count)
@@ -1633,11 +2126,9 @@ mod fixtures {
             group
                 .set_song_end(Timestamp::from_nanos(2_000_000))
                 .unwrap();
-            assert!(
-                group
-                    .set_song_end(Timestamp::from_nanos(3_000_000))
-                    .is_err()
-            );
+            assert!(group
+                .set_song_end(Timestamp::from_nanos(3_000_000))
+                .is_err());
             assert_eq!(group.song_end(), Some(Timestamp::from_nanos(2_000_000)));
             for id in &ids {
                 let InputResult::Processed(reports) = group
@@ -1756,7 +2247,7 @@ mod fixtures {
             audio::{
                 AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample, SampleBank,
             },
-            replay::{ReplaySession, codec::ReplayCodecLimits},
+            replay::{codec::ReplayCodecLimits, ReplaySession},
             time::ClockPair,
         };
         for count in [2, 3, 4, 64] {
@@ -1903,11 +2394,10 @@ mod fixtures {
                 .transport_mut()
                 .pause(boundary.host.timestamp)
                 .unwrap();
-            assert!(
-                end.observe(Some(paused), pair(1_000_000))
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(end
+                .observe(Some(paused), pair(1_000_000))
+                .unwrap()
+                .is_none());
             for index in (1..=count).rev() {
                 let mut up = input(index as u64, 2_000_100);
                 if let PhysicalInputEvent::Button(button) = &mut up {
@@ -1953,11 +2443,10 @@ mod fixtures {
                         .unwrap();
                 }
             }
-            assert!(
-                end.observe(Some(latest), pair(4_000_000))
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(end
+                .observe(Some(latest), pair(4_000_000))
+                .unwrap()
+                .is_none());
             let terminal = end.observe(None, pair(6_000_000)).unwrap().unwrap();
             assert_eq!(terminal.host, point(5_000_100));
             let mut earlier = input(1, 4_500_100);
@@ -1969,12 +2458,10 @@ mod fixtures {
                 merger.admit(at_end, point(6_000_100)).unwrap();
             }
             let pending = merger.pending();
-            assert!(
-                merger
-                    .watermark(point(6_000_100), 0, true)
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(merger
+                .watermark(point(6_000_100), 0, true)
+                .unwrap()
+                .is_none());
             assert_eq!(merger.pending(), pending); // One backlogged source prevents any release/deadline.
             let frontier = merger
                 .watermark(point(6_000_100), 0, false)
@@ -2026,11 +2513,10 @@ mod fixtures {
             assert_eq!(merger.pending(), 0);
             for (player, capture) in captures {
                 let file = capture.into_file();
-                assert!(
-                    file.records
-                        .iter()
-                        .all(|record| record.song_time <= Timestamp::from_nanos(2_000_000))
-                );
+                assert!(file
+                    .records
+                    .iter()
+                    .all(|record| record.song_time <= Timestamp::from_nanos(2_000_000)));
                 let replay = ReplaySession::from_records(
                     file.header,
                     boundary_config(player.0).judge,

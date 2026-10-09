@@ -39,10 +39,10 @@ use std::{collections::VecDeque, error::Error, fmt, time::Duration as WallDurati
 
 pub use crate::native_gameplay_bridge::{
     run_gameplay, run_gameplay_audio_with_policy_and_result_and_score,
-    run_gameplay_audio_with_result, run_gameplay_with_control,
-    run_gameplay_with_policy_and_result_and_score, run_gameplay_with_result,
-    run_gameplay_with_result_and_score, NativeAudioGameplaySession, NativeGameplayDevice,
-    NativeGameplaySession,
+    run_gameplay_audio_with_practice_and_result_and_score, run_gameplay_audio_with_result,
+    run_gameplay_with_control, run_gameplay_with_policy_and_result_and_score,
+    run_gameplay_with_result, run_gameplay_with_result_and_score, NativeAudioGameplaySession,
+    NativeGameplayDevice, NativeGameplaySession, NativePracticeRecorder,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -523,7 +523,113 @@ pub fn run_gameplay_with_result_and_ports<
         pre_origin_inputs: session.pre_origin_inputs,
         discipline: &mut timing,
     };
-    run_gameplay_timed(device, session, None, config, control, host_port)
+    run_gameplay_timed(
+        device,
+        session,
+        None,
+        config,
+        control,
+        host_port,
+        None::<RetainedSoloPractice<crate::practice_playback::NoopPracticeRecording>>,
+    )
+}
+
+struct RetainedSoloPractice<'a, R: crate::practice_playback::PracticeRecordingPort> {
+    playback: &'a mut crate::practice_playback::PracticePlayback,
+    recording: &'a mut R,
+    last_playback_frame: u64,
+    completion_template: Option<SongCompletion>,
+}
+
+enum PracticeService {
+    Waiting,
+    Committed { fresh: bool, terminal: bool },
+}
+
+/// The same audio pump with an installed recurring program and retained output.
+/// Archives retired attempts; the session retains its final capture on every
+/// outcome for the native finisher's replay, result and score publication.
+/// An earlier pump failure remains primary if capability revocation also fails.
+pub fn run_gameplay_audio_with_practice_and_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    R: crate::practice_playback::PracticeRecordingPort,
+>(
+    device: &mut D,
+    audio: AudioGameplaySession<'_, S>,
+    config: AudioGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    practice: &mut crate::practice_playback::PracticePlayback,
+    recording: &mut R,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    crate::native_policy_admission::validate_audio_config(&config)?;
+    if audio.session.runtime.song_end() != config.gameplay.end_song
+        || config.gameplay.end_song != practice.section_end()
+    {
+        return Err("retained solo Runtime, configuration and practice section ends differ".into());
+    }
+
+    let session = audio.session;
+    let mut timing = AudioTiming(session.discipline, config.section_start);
+    let session = GameplaySession {
+        runtime: session.runtime,
+        gauge: session.gauge,
+        bgm: session.bgm,
+        discipline: &mut timing,
+        pause: session.pause,
+        end: session.end,
+        completion: session.completion,
+        capture: session.capture,
+        competition: session.competition,
+        delivery: session.delivery,
+        pre_origin_inputs: session.pre_origin_inputs,
+    };
+    let result = run_gameplay_timed(
+        device,
+        session,
+        Some(audio.merger),
+        config.gameplay,
+        control,
+        host,
+        Some(RetainedSoloPractice {
+            playback: practice,
+            recording,
+            last_playback_frame: 0,
+            completion_template: None,
+        }),
+    );
+    // The native finisher owns the final capture and derives its completed
+    // result sidecar from the same evidence. Only retired attempts archive here.
+    let revoke = host.advertise_practice(None);
+    match result {
+        Err(error) => Err(error),
+        Ok(value) => {
+            revoke?;
+            Ok(value)
+        }
+    }
+}
+
+fn archive_practice_capture<S, T, R: crate::practice_playback::PracticeRecordingPort>(
+    session: &mut GameplaySession<'_, S, T>,
+    owner: &mut RetainedSoloPractice<'_, R>,
+) -> NativeGameplayResult<()> {
+    if let Some(capture) = session.capture.take() {
+        let member = &owner.playback.members()[0];
+        let path = member
+            .launch
+            .args()
+            .chunks_exact(2)
+            .find(|pair| pair[0] == "--record-replay")
+            .ok_or("practice capture has no current recording path")?;
+        owner
+            .recording
+            .archive(member.player, std::path::Path::new(&path[1]), capture)?;
+    }
+    Ok(())
 }
 
 fn run_gameplay_timed<
@@ -532,6 +638,7 @@ fn run_gameplay_timed<
     H: NativeGameplayHost,
     S: SoloCompetitionPort,
     T: PumpTiming<D>,
+    R: crate::practice_playback::PracticeRecordingPort,
 >(
     device: &mut D,
     mut session: GameplaySession<'_, S, T>,
@@ -539,7 +646,34 @@ fn run_gameplay_timed<
     mut config: NativeGameplayConfig,
     control: &mut C,
     host_port: &mut H,
+    mut practice: Option<RetainedSoloPractice<'_, R>>,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    if practice.is_some() && !T::AUDIO {
+        return Err("retained practice requires original audio authority".into());
+    }
+    if let Some(owner) = practice.as_mut() {
+        if owner.playback.members().len() != 1
+            || owner.playback.members()[0].player != crate::local_players::PlayerId(1)
+            || session.runtime.audio_scope() != beatkernel::audio::CommandScope(1)
+            || session.end.is_some()
+        {
+            return Err(
+                "retained solo practice requires one installed unlimited scope-one owner".into(),
+            );
+        }
+        if session.runtime.song_end() != config.end_song
+            || config.end_song != owner.playback.section_end()
+        {
+            return Err(
+                "retained solo Runtime, configuration and practice section ends differ".into(),
+            );
+        }
+        session
+            .discipline
+            .audio_mut()
+            .expect("audio timing")
+            .pin_practice_mixer_basis(owner.playback.mixer_basis())?;
+    }
     if T::AUDIO {
         let epoch = session
             .discipline
@@ -627,6 +761,7 @@ fn run_gameplay_timed<
     let mut completed_through = None;
     let mut last_operation = config.origin;
     let mut last_song = config.song_origin;
+    let mut pause_song_origin = config.song_origin;
     let mut last_progress = None;
     let mut last_host = None;
     let mut keyboard = PauseKeyboard::new();
@@ -689,7 +824,7 @@ fn run_gameplay_timed<
                     evidence,
                     rendered,
                     desired,
-                    config.song_origin,
+                    pause_song_origin,
                     config.sample_rate,
                 )?;
                 if let Some(boundary) = update.boundary {
@@ -774,9 +909,11 @@ fn run_gameplay_timed<
                 }
             }
         }
-        crate::native_audio::feed_rendered(session.bgm, device.render_report()?, |command| {
-            session.runtime.enqueue_audio(command)
-        })?;
+        if practice.is_none() {
+            crate::native_audio::feed_rendered(session.bgm, device.render_report()?, |command| {
+                session.runtime.enqueue_audio(command)
+            })?;
+        }
         let received = device.host_now()?;
         if received.domain != config.origin.domain {
             return Err("native host domain changed".into());
@@ -881,6 +1018,79 @@ fn run_gameplay_timed<
         }
         if T::AUDIO {
             let input_merger = merger.as_deref_mut().expect("audio merger");
+            if let Some(owner) = practice.as_mut() {
+                // Receipts fence input and advancement before any ordinary pump
+                // work. A render cursor alone never authorizes an input cut.
+                let mut waiting = false;
+                while owner.playback.peek_receipt()?.is_some() {
+                    match service_practice_solo(
+                        device,
+                        &mut session,
+                        &mut config,
+                        input_merger,
+                        received,
+                        batch.backlog,
+                        &mut keyboard,
+                        &mut paused_boundary,
+                        &mut audio_boundary,
+                        &mut pause_committed,
+                        &mut last_song,
+                        &mut last_operation,
+                        &mut stop_evidence,
+                        host_port,
+                        owner,
+                    )? {
+                        PracticeService::Waiting => {
+                            waiting = true;
+                            break;
+                        }
+                        PracticeService::Committed { fresh, terminal } => {
+                            if fresh {
+                                keyboard = PauseKeyboard::new();
+                                paused_boundary = None;
+                                audio_boundary = None;
+                                resume_boundary = None;
+                                pause_committed = false;
+                                end_boundary = None;
+                                end_rendered = false;
+                                // Stop evidence shares the retained Mixer's
+                                // cumulative lifetime; only the attempt's
+                                // completion barrier starts over here.
+                                stop_barrier = NativeStopBarrier::default();
+                                last_progress = None;
+                                // Pause's cursor is cumulative on the same Mixer.
+                                // The song-grid origin is distinct from the new
+                                // attempt's requested start used in results.
+                                pause_song_origin = Timestamp::from_nanos(i64::try_from(
+                                    i128::from(config.song_origin.as_nanos())
+                                        - i128::from(owner.last_playback_frame) * 1_000_000_000
+                                            / i128::from(config.sample_rate),
+                                )?);
+                                host_port.publish_pause(PauseState::Running);
+                            }
+                            if terminal {
+                                return complete_gameplay(&mut session, config, host_port);
+                            }
+                        }
+                    }
+                }
+                if waiting {
+                    control.wait(WallDuration::from_millis(1))?;
+                    continue;
+                }
+                if session.pause.phase() == PausePhase::Running {
+                    if let Some(report) = device.render_report()? {
+                        owner.playback.service_request(
+                            host_port,
+                            report
+                                .playback_start_frame
+                                .checked_add(u64::try_from(report.playback_frames)?)
+                                .ok_or("practice playback cursor overflow")?,
+                        )?;
+                    }
+                }
+            }
+            let practice_end = practice.as_ref().and_then(|_| config.end_song);
             service_audio_solo(
                 device,
                 &mut session,
@@ -898,6 +1108,8 @@ fn run_gameplay_timed<
                 end_boundary,
                 &mut stop_evidence,
                 host_port,
+                None,
+                practice_end,
             )?;
             if (session.pause.phase() == PausePhase::Paused && !end_rendered)
                 || audio_boundary.is_some()
@@ -1069,7 +1281,8 @@ fn run_gameplay_timed<
                 && i128::from(cut.timestamp.as_nanos()) - i128::from(config.advance_lag.as_nanos())
                     >= i128::from(last_operation.timestamp.as_nanos())
         });
-        if stops_rendered
+        if practice.is_none()
+            && stops_rendered
             && acquired_ready
             && finite_done_with_terminal(
                 config,
@@ -1086,7 +1299,12 @@ fn run_gameplay_timed<
         {
             return complete_gameplay(&mut session, config, host_port);
         }
-        if config.end_song.is_none()
+        let natural_practice_ready = practice.as_ref().is_none_or(|owner| {
+            owner.playback.can_complete_naturally()
+                && last_song >= owner.playback.natural_completion_floor()
+        });
+        if natural_practice_ready
+            && config.end_song.is_none()
             && acquired_ready
             && !batch.backlog
             && pending.is_empty()
@@ -1656,6 +1874,184 @@ impl ClockMapper for AudioControlMapper {
     }
 }
 
+/// Qualify the earliest render receipt before draining any original input.
+/// Later receipts remain in the bounded queue until this exact cut commits.
+fn service_practice_solo<
+    D: crate::gameplay_presentation::GameplayDevice,
+    S: SoloCompetitionPort,
+    H: NativeGameplayHost,
+    T: PumpTiming<D>,
+    R: crate::practice_playback::PracticeRecordingPort,
+>(
+    device: &mut D,
+    session: &mut GameplaySession<'_, S, T>,
+    config: &mut NativeGameplayConfig,
+    merger: &mut InputMerger,
+    now: ClockPoint,
+    backlog: bool,
+    keyboard: &mut PauseKeyboard,
+    paused: &mut Option<LivePauseBoundary>,
+    transition: &mut Option<AudioLivePauseBoundary>,
+    pause_committed: &mut bool,
+    last_song: &mut Timestamp,
+    last_host_operation: &mut ClockPoint,
+    stops: &mut OwnedStopEvidence,
+    host: &mut H,
+    owner: &mut RetainedSoloPractice<'_, R>,
+) -> NativeGameplayResult<PracticeService> {
+    use beatkernel::audio::{CommandScope, PracticeBoundaryKind};
+    let Some(boundary) = owner
+        .playback
+        .qualify(session.discipline.audio().expect("audio timing"), now)?
+    else {
+        return Ok(PracticeService::Waiting);
+    };
+    service_audio_solo(
+        device,
+        session,
+        config,
+        merger,
+        now,
+        backlog,
+        keyboard,
+        paused,
+        transition,
+        pause_committed,
+        last_song,
+        last_host_operation,
+        false,
+        None,
+        stops,
+        host,
+        Some(boundary.host()),
+        None,
+    )?;
+    if backlog
+        || !session
+            .discipline
+            .audio()
+            .expect("audio timing")
+            .practice_boundary_ready(&boundary, now, merger)?
+    {
+        return Ok(PracticeService::Waiting);
+    }
+    if session.pause.phase() != PausePhase::Running || transition.is_some() || paused.is_some() {
+        return Err("practice boundary conflicts with an actual pause transition".into());
+    }
+    let mut prepared = owner.playback.prepare_boundary(&boundary, host)?;
+    let receipt = prepared.receipt;
+    let fresh = matches!(
+        receipt.kind,
+        PracticeBoundaryKind::Requested | PracticeBoundaryKind::Looped
+    );
+    let competition = if fresh {
+        let attempt = &prepared
+            .attempts
+            .first()
+            .ok_or("missing solo practice attempt")?
+            .1;
+        session
+            .competition
+            .as_ref()
+            .map(|port| port.prepare_practice(attempt, &owner.playback.members()[0].policy))
+            .transpose()?
+    } else {
+        None
+    };
+    let completion = if fresh {
+        let attempt = &prepared
+            .attempts
+            .first()
+            .ok_or("missing solo practice attempt")?
+            .1;
+        if attempt.config.end.is_none() {
+            Some(
+                owner
+                    .completion_template
+                    .as_ref()
+                    .or(session.completion.as_ref())
+                    .ok_or("full-song practice lacks original completion preparation")?
+                    .prepare_practice(&attempt.source, &attempt.judge)?,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut presentation = if fresh {
+        Some(
+            prepared
+                .presentation
+                .take()
+                .ok_or("missing practice UI state")?,
+        )
+    } else {
+        None
+    };
+    // A genuine control occurrence advances the retired attempt to the cut.
+    // Started is bootstrap evidence for the already installed initial state.
+    if receipt.kind != PracticeBoundaryKind::Started {
+        let audio_at = schedule(device, session, *config)?;
+        let report = session
+            .runtime
+            .advance_to(boundary.output(), &ExplicitDomains, audio_at)?;
+        *last_song = report.song_time;
+        *last_host_operation = boundary.host();
+        publish_with_host(session, report, stops, host)?;
+    }
+    if fresh {
+        if prepared.attempts.len() != 1 {
+            return Err("practice payload differs from solo cohort".into());
+        }
+        archive_practice_capture(session, owner)?;
+        let (_, attempt) = prepared.attempts.pop().expect("prepared solo attempt");
+        let transport = beatkernel::transport::Transport::new(
+            boundary.output().timestamp,
+            receipt.applied_song_time,
+            beatkernel::transport::Rate::NORMAL,
+        );
+        session.runtime.replace_practice_state(
+            attempt.judge,
+            transport,
+            attempt.config.end,
+            CommandScope(receipt.generation),
+        )?;
+        *session.gauge = attempt.gauge;
+        *session.capture = attempt.capture;
+        *session.competition = competition;
+        *session.end = None;
+        if owner.completion_template.is_none() {
+            owner.completion_template = session.completion.take();
+        }
+        *session.completion = completion;
+        config.song_origin = receipt.applied_song_time;
+        config.end_song = attempt.config.end;
+        session.discipline.set_section_start(attempt.config.start);
+        *last_song = receipt.applied_song_time;
+        *last_host_operation = boundary.host();
+        owner.last_playback_frame = receipt.playback_frame;
+    }
+    session
+        .discipline
+        .audio_mut()
+        .expect("audio timing")
+        .commit_practice_boundary(boundary, now, merger)?;
+    // Applied attempt identity is authoritative before fallible publication.
+    // In particular, final cleanup must archive the installed fresh capture
+    // under its new ordinal even when a screen observer refuses or cancels.
+    let applied = owner.playback.apply_boundary(&mut prepared)?;
+    if let Some(mut presentation) = presentation.take() {
+        host.apply_practice_identity(&mut presentation, receipt.generation);
+        host.commit_practice_presentation(presentation, receipt.generation)?;
+    }
+    owner.playback.publish_boundary(&applied, host)?;
+    Ok(PracticeService::Committed {
+        fresh,
+        terminal: owner.playback.terminal_ready(),
+    })
+}
+
 fn service_audio_solo<
     D: crate::gameplay_presentation::GameplayDevice,
     S: SoloCompetitionPort,
@@ -1678,6 +2074,8 @@ fn service_audio_solo<
     end_boundary: Option<EndBoundary>,
     stops: &mut OwnedStopEvidence,
     host: &mut H,
+    practice_cut: Option<ClockPoint>,
+    practice_end: Option<Timestamp>,
 ) -> NativeGameplayResult<()> {
     let Some(prefix) = session
         .discipline
@@ -1693,6 +2091,9 @@ fn service_audio_solo<
             break;
         };
         let at = point(event);
+        if practice_cut.is_some_and(|cut| at.timestamp >= cut.timestamp) {
+            break;
+        }
         if transition.is_some_and(|boundary| {
             !boundary.original.paused && at.timestamp >= boundary.original.at.timestamp
         }) {
@@ -1715,6 +2116,19 @@ fn service_audio_solo<
         else {
             break;
         };
+        // Rendering [start, end) can stop exactly at the pass endpoint
+        // before the next block publishes its genuine boundary receipt.
+        // Preserve equal/later original inputs until that receipt arrives.
+        if let Some(end) = practice_end {
+            if session
+                .runtime
+                .transport_mut()
+                .position_at(prepared.output().timestamp)?
+                >= end
+            {
+                break;
+            }
+        }
         if config.pause_supported && !keyboard.accept(event)? {
             merger.pop_ready(prefix)?;
             continue;
@@ -1739,6 +2153,9 @@ fn service_audio_solo<
         *last_song = report.song_time;
         *last_host_operation = at;
         publish_with_host(session, report, stops, host)?;
+    }
+    if practice_cut.is_some() {
+        return Ok(());
     }
     if !backlog {
         if let Some(boundary) = *transition {
@@ -1878,6 +2295,16 @@ fn service_audio_solo<
         .prepare_frontier(now, merger)?
     {
         let report = if let Some(output) = frontier.advance() {
+            if let Some(end) = practice_end {
+                if session
+                    .runtime
+                    .transport_mut()
+                    .position_at(output.timestamp)?
+                    >= end
+                {
+                    return Ok(());
+                }
+            }
             let audio_at = schedule(device, session, *config)?;
             Some(
                 session
@@ -1933,7 +2360,15 @@ pub fn run_gameplay_audio_with_result_and_ports<
         delivery: session.delivery,
         pre_origin_inputs: session.pre_origin_inputs,
     };
-    run_gameplay_timed(device, session, Some(audio.merger), config, control, host)
+    run_gameplay_timed(
+        device,
+        session,
+        Some(audio.merger),
+        config,
+        control,
+        host,
+        None::<RetainedSoloPractice<crate::practice_playback::NoopPracticeRecording>>,
+    )
 }
 pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports<
     D: crate::gameplay_presentation::GameplayDevice,

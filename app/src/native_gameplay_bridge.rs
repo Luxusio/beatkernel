@@ -266,6 +266,13 @@ pub type NativeCohortSession<'a> =
 pub type PlayerState = GameplayPlayerState<LiveCompetition>;
 
 impl SoloCompetitionPort for LiveCompetition {
+    fn prepare_practice(
+        &self,
+        attempt: &crate::practice_session::PreparedPracticeAttempt,
+        policy: &crate::play_policy::ResolvedPlayPolicy,
+    ) -> NativeGameplayResult<Self> {
+        LiveCompetition::prepare_practice(self, attempt, policy)
+    }
     fn expected_policy_header(&self) -> Option<&beatkernel::replay::ReplayHeader> {
         Some(self.native_policy_header())
     }
@@ -338,6 +345,44 @@ impl NativeGameplayHost for PlayerGameplayHost {
     }
     fn publish_section_end(&mut self, end: Timestamp) {
         player::publish_section_end(end);
+    }
+    fn advertise_practice(
+        &mut self,
+        capability: Option<crate::practice_control::PracticeCapability>,
+    ) -> NativeGameplayResult<()> {
+        Ok(player::advertise_practice(capability)?)
+    }
+    fn take_practice_request(
+        &mut self,
+    ) -> NativeGameplayResult<Option<crate::practice_control::PracticeRequest>> {
+        Ok(player::take_practice_request()?)
+    }
+    fn commit_practice_reply(
+        &mut self,
+        reply: &crate::practice_control::PracticeReply,
+    ) -> NativeGameplayResult<()> {
+        Ok(player::commit_practice_reply(reply)?)
+    }
+    fn apply_practice_identity(
+        &mut self,
+        prepared: &mut player::PreparedPracticePresentation,
+        generation: u64,
+    ) {
+        player::apply_practice_identity(prepared, generation);
+    }
+    fn commit_practice_presentation(
+        &mut self,
+        prepared: player::PreparedPracticePresentation,
+        generation: u64,
+    ) -> NativeGameplayResult<()> {
+        player::commit_practice_presentation(prepared, generation)
+    }
+    fn prepare_practice_presentation(
+        &mut self,
+        generation: u64,
+        attempts: &[(PlayerId, &crate::practice_session::PreparedPracticeAttempt)],
+    ) -> NativeGameplayResult<player::PreparedPracticePresentation> {
+        player::prepare_practice_presentation(generation, attempts)
     }
     fn publish_report(&mut self, report: &RuntimeReport) -> NativeGameplayResult<()> {
         player::publish_report(report)
@@ -531,6 +576,45 @@ impl<H: NativeGameplayHost> NativeGameplayHost for ResolvedGameplayHost<'_, '_, 
     fn publish_section_end(&mut self, end: Timestamp) {
         self.host.publish_section_end(end);
     }
+    fn advertise_practice(
+        &mut self,
+        capability: Option<crate::practice_control::PracticeCapability>,
+    ) -> NativeGameplayResult<()> {
+        self.host.advertise_practice(capability)
+    }
+    fn take_practice_request(
+        &mut self,
+    ) -> NativeGameplayResult<Option<crate::practice_control::PracticeRequest>> {
+        self.host.take_practice_request()
+    }
+    fn commit_practice_reply(
+        &mut self,
+        reply: &crate::practice_control::PracticeReply,
+    ) -> NativeGameplayResult<()> {
+        self.host.commit_practice_reply(reply)
+    }
+    fn apply_practice_identity(
+        &mut self,
+        prepared: &mut player::PreparedPracticePresentation,
+        generation: u64,
+    ) {
+        self.host.apply_practice_identity(prepared, generation);
+    }
+    fn commit_practice_presentation(
+        &mut self,
+        prepared: player::PreparedPracticePresentation,
+        generation: u64,
+    ) -> NativeGameplayResult<()> {
+        self.host.commit_practice_presentation(prepared, generation)
+    }
+    fn prepare_practice_presentation(
+        &mut self,
+        generation: u64,
+        attempts: &[(PlayerId, &crate::practice_session::PreparedPracticeAttempt)],
+    ) -> NativeGameplayResult<player::PreparedPracticePresentation> {
+        self.host
+            .prepare_practice_presentation(generation, attempts)
+    }
     fn publish_report(&mut self, report: &RuntimeReport) -> NativeGameplayResult<()> {
         self.host.publish_report(report)
     }
@@ -652,6 +736,117 @@ pub fn run_cohort_audio_with_policies_and_results<D: NativeGameplayDevice>(
         &mut SystemControl,
         &mut PlayerGameplayHost,
         policies,
+    )
+}
+
+/// Input composition shared by native startup and gameplay output owners.
+/// Cold native file effect for genuine per-attempt captures.
+pub struct NativePracticeRecorder<F> {
+    save: F,
+}
+impl<F> NativePracticeRecorder<F> {
+    pub fn new(save: F) -> Self {
+        Self { save }
+    }
+}
+impl<F> crate::practice_playback::PracticeRecordingPort for NativePracticeRecorder<F>
+where
+    F: FnMut(
+        Option<crate::replay_capture::LiveReplayCapture>,
+        Option<&std::path::Path>,
+        bool,
+    ) -> NativeGameplayResult<()>,
+{
+    fn archive(
+        &mut self,
+        _: PlayerId,
+        path: &std::path::Path,
+        capture: crate::replay_capture::LiveReplayCapture,
+    ) -> NativeGameplayResult<()> {
+        (self.save)(Some(capture), Some(path), true)
+    }
+}
+
+/// Selected solo practice through the existing native device and UI adapters.
+pub fn run_gameplay_audio_with_practice_and_result_and_score<
+    D: NativeGameplayDevice,
+    R: crate::practice_playback::PracticeRecordingPort,
+>(
+    device: &mut D,
+    session: NativeAudioGameplaySession<'_>,
+    config: crate::native_gameplay::AudioGameplayConfig,
+    score: &mut crate::competition::ScoreSummary,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    practice: &mut crate::practice_playback::PracticePlayback,
+    recording: &mut R,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    crate::native_policy_admission::validate_audio_config(&config)?;
+    if *score != crate::competition::ScoreSummary::default() {
+        return Err("practice requires a fresh initial score".into());
+    }
+    let epoch = session.session.discipline.authority().epoch();
+    let header = session
+        .session
+        .competition
+        .as_ref()
+        .filter(|port| !port.policy_agnostic())
+        .map(|port| {
+            port.expected_policy_header()
+                .ok_or("practice competition has no pinned policy header")
+        })
+        .transpose()?;
+    crate::native_policy_admission::validate_selected_in_domain(
+        session.session.runtime.judge(),
+        session.session.gauge,
+        policy,
+        session.session.capture.as_ref(),
+        header,
+        &config.gameplay,
+        epoch.logical_origin.domain,
+        Some(config.section_start),
+    )?;
+    let policies = [(PlayerId(1), policy)];
+    let mut host = PlayerGameplayHost;
+    if policy.gauge() == &crate::gauge::GaugeProfile::default() {
+        host.prepare_play_policies(&policies)?;
+    }
+    let mut resolved = ResolvedGameplayHost {
+        host: &mut host,
+        policies: &policies,
+    };
+    let mut scored = crate::native_gameplay_host::NativeScoreHost::new(&mut resolved, score);
+    crate::native_gameplay::run_gameplay_audio_with_practice_and_ports(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut scored,
+        practice,
+        recording,
+    )
+}
+
+/// Selected local cohort practice on the existing shared native output owner.
+pub fn run_cohort_audio_with_practice_and_policies_and_results<
+    D: NativeGameplayDevice,
+    R: crate::practice_playback::PracticeRecordingPort,
+>(
+    device: &mut D,
+    session: NativeAudioCohortSession<'_>,
+    config: crate::native_gameplay::AudioGameplayConfig,
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    practice: &mut crate::practice_playback::PracticePlayback,
+    recording: &mut R,
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    crate::native_cohort::run_cohort_audio_practice_with_policies_and_results_and_ports(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+        policies,
+        practice,
+        recording,
     )
 }
 

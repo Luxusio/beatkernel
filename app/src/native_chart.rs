@@ -1,8 +1,9 @@
 //! Shared native chart preparation; publication and native acquisition stay separate.
 use crate::{
-    ChannelPolicy, PreparedBms, load_prepared_with_seed,
+    load_prepared_with_seed,
     native_gameplay::NativeGameplayResult,
-    section_start::{SectionReport, prepare_at},
+    section_start::{prepare_at, SectionReport},
+    ChannelPolicy, PreparedBms,
 };
 use beatkernel::{
     audio::{AudioFormat, PcmLimits},
@@ -18,6 +19,92 @@ pub struct NativeChartConfig<'a> {
     pub chart_seed: u64,
     pub start: Timestamp,
     pub bindings: &'a BTreeMap<u8, u16>,
+}
+
+/// Original assets remain intact; only the initial judgment source is selected.
+pub struct PreparedRetainedChart {
+    pub original: PreparedBms,
+    pub initial_source: beatkernel_bms::BmsChart,
+    pub section: SectionReport,
+    pub policy: crate::play_policy::ResolvedPlayPolicy,
+}
+
+pub fn prepare_retained_chart_with_policy(
+    config: NativeChartConfig<'_>,
+    judge: &crate::native_judge::NativeJudgeConfig,
+    gauge: crate::play_policy::GaugeSelection,
+    timing: Option<crate::play_policy::TimingPresetSelection>,
+) -> NativeGameplayResult<PreparedRetainedChart> {
+    prepare_retained_with_policy(config, judge, gauge, timing, |config| {
+        load_prepared_with_seed(
+            config.path,
+            config.format,
+            config.limits,
+            config.channels,
+            config.chart_seed,
+        )
+    })
+}
+
+fn prepare_retained_with_policy(
+    config: NativeChartConfig<'_>,
+    judge: &crate::native_judge::NativeJudgeConfig,
+    gauge: crate::play_policy::GaugeSelection,
+    timing: Option<crate::play_policy::TimingPresetSelection>,
+    load: impl FnOnce(&NativeChartConfig<'_>) -> NativeGameplayResult<PreparedBms>,
+) -> NativeGameplayResult<PreparedRetainedChart> {
+    if config.start.as_nanos() < 0 {
+        return Err("practice start must be nonnegative".into());
+    }
+    let original = load(&config)?;
+    let original_gauge = crate::play_policy::OriginalGaugeContext::from_source(&original.source);
+    let policy = match timing {
+        Some(timing) => crate::play_policy::ResolvedPlayPolicy::with_timing(
+            &original.source,
+            gauge,
+            timing,
+            judge.offset,
+        )?,
+        None => judge.resolve_play_policy(&original_gauge, gauge)?,
+    };
+    // Any subsequent backward scrub may restore these lanes. Validate the
+    // complete original set before opening output, rather than the first slice.
+    for lane in original
+        .source
+        .notes
+        .iter()
+        .map(|note| note.lane)
+        .chain(original.source.invisible.iter().map(|event| event.lane))
+    {
+        if !config.bindings.contains_key(&lane.channel()) {
+            return Err(format!("missing --bind for BMS channel {:02X}", lane.channel()).into());
+        }
+    }
+    let initial_source = crate::section_start::source_at(&original.source, config.start)?;
+    let section = SectionReport {
+        original_gauge,
+        start: config.start,
+        excluded_objects: original.source.source.objects.len()
+            - initial_source.source.objects.len(),
+        excluded_crossing_holds: original
+            .compiled
+            .chart
+            .objects()
+            .iter()
+            .filter(|object| {
+                object.time.start < config.start
+                    && object.time.end.is_some_and(|end| end >= config.start)
+            })
+            .count(),
+        retired_bgm: 0,
+        tails: Vec::new(),
+    };
+    Ok(PreparedRetainedChart {
+        original,
+        initial_source,
+        section,
+        policy,
+    })
 }
 /// Load the selected branch in the exact supplied format, then validate retained lanes.
 pub fn prepare_chart(
@@ -117,7 +204,7 @@ mod fixtures {
         judge::JudgeStage,
         runtime::SoundBinding,
     };
-    use beatkernel_bms::{ParseOptions, parse_seeded};
+    use beatkernel_bms::{parse_seeded, ParseOptions};
     const TEXT: &str = "#BPM 120\n#WAV01 original.wav\n#00012:01\n#00053:0101\n#00111:01\n#00001:0101\n#00201:01\n#BGA legacy\n";
     fn limits() -> PcmLimits {
         PcmLimits::new(1024, 4096, 4).unwrap()
@@ -265,13 +352,11 @@ mod fixtures {
             prepared.compiled.chart.objects()[0].time.start,
             Timestamp::from_nanos(2_000_000_000)
         );
-        assert!(
-            prepared
-                .source
-                .notes
-                .iter()
-                .all(|n| n.lane.channel() == 0x11)
-        );
+        assert!(prepared
+            .source
+            .notes
+            .iter()
+            .all(|n| n.lane.channel() == 0x11));
         assert_eq!(section.tails.len(), 1);
         assert_eq!(section.tails[0].frame, 3);
         assert_eq!(section.tails[0].correction_ns, 200_000_000);
@@ -283,12 +368,10 @@ mod fixtures {
                 .samples(),
             &[3., 4., 5., 6., 7., 8., 9., 10., 11.]
         );
-        assert!(
-            prepared
-                .bgm_commands
-                .iter()
-                .all(|command| command.at() >= section.start)
-        );
+        assert!(prepared
+            .bgm_commands
+            .iter()
+            .all(|command| command.at() >= section.start));
         let empty = BTreeMap::new();
         let cfg = config(&empty, 550_000_000);
         let error = prepare_with(cfg, |actual| parsed(actual, TEXT))
@@ -339,6 +422,80 @@ mod fixtures {
             "rank-first",
         )
         .unwrap()
+    }
+    #[test]
+    fn retained_chart_keeps_original_pcm_cues_and_backward_judgment_source() {
+        let bindings = BTreeMap::from([(0x11, 4), (0x12, 5), (0x13, 6)]);
+        let cfg = config(&bindings, 550_000_000);
+        let original = parsed(&cfg, TEXT).unwrap();
+        let pointer = original.bank.get(SampleId(1)).unwrap().samples().as_ptr();
+        let original_commands = original.bgm_commands.clone();
+        let expected = judge_config()
+            .resolve_play_policy(
+                &crate::play_policy::OriginalGaugeContext::from_source(&original.source),
+                crate::play_policy::GaugeSelection::BeatKernel,
+            )
+            .unwrap();
+        let prepared = prepare_retained_with_policy(
+            cfg,
+            &judge_config(),
+            crate::play_policy::GaugeSelection::BeatKernel,
+            None,
+            |_| Ok(original),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared
+                .original
+                .bank
+                .get(SampleId(1))
+                .unwrap()
+                .samples()
+                .as_ptr(),
+            pointer
+        );
+        assert_eq!(
+            prepared.original.bank.get(SampleId(1)).unwrap().samples(),
+            &[0., 1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11.]
+        );
+        assert_eq!(prepared.original.bgm_commands, original_commands);
+        assert_eq!(prepared.original.source.notes.len(), 3);
+        assert_eq!(prepared.initial_source.notes.len(), 1);
+        assert_eq!(prepared.section.excluded_objects, 2);
+        assert_eq!(prepared.section.excluded_crossing_holds, 1);
+        assert!(prepared.section.tails.is_empty());
+        assert_eq!(prepared.policy, expected);
+        let backward =
+            crate::section_start::source_at(&prepared.original.source, Timestamp::ZERO).unwrap();
+        assert_eq!(backward.notes.len(), 3);
+        assert_eq!(
+            backward.compile().unwrap().chart.objects(),
+            prepared.original.compiled.chart.objects()
+        );
+    }
+    #[test]
+    fn retained_backward_lanes_are_validated_even_when_initial_slice_excludes_them() {
+        let bindings = BTreeMap::from([(0x11, 4)]);
+        let error = prepare_retained_with_policy(
+            config(&bindings, 550_000_000),
+            &judge_config(),
+            crate::play_policy::GaugeSelection::BeatKernel,
+            None,
+            |cfg| parsed(cfg, TEXT),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "missing --bind for BMS channel 12");
+        let error = prepare_retained_with_policy(
+            config(&bindings, -1),
+            &judge_config(),
+            crate::play_policy::GaugeSelection::BeatKernel,
+            None,
+            |_| panic!("negative start before IO"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "practice start must be nonnegative");
     }
     fn judge_config() -> crate::native_judge::NativeJudgeConfig {
         crate::native_judge::NativeJudgeConfig {
