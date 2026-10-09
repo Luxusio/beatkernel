@@ -1,17 +1,17 @@
 //! Host-neutral member construction over the existing chart, rules and voice allocator.
 use crate::{
-    PreparedBms,
     input_sounds::InputSoundPlan,
-    local_players::{ResolvedInputPlan, PlayerId, validate_source_routes},
+    local_players::{validate_source_routes, PlayerId, ResolvedInputPlan},
     local_runtime::{MemberConfig, VoiceAllocator},
-    mine_plan::prepare_judge,
+    mine_plan::prepare_judge_with_timing,
     mine_sounds::MineSoundPlan,
+    PreparedBms,
 };
 use beatkernel::{
     audio::{AudioCommand, VoiceId},
     input::{BindingMap, DeviceSelector},
     judge::JudgeProfile,
-    runtime::{input_sound::InputSoundTimeline, hazard_sound::HazardSoundTimeline},
+    runtime::{hazard_sound::HazardSoundTimeline, input_sound::InputSoundTimeline},
 };
 use beatkernel_bms::BmsInputMode;
 use std::collections::BTreeSet;
@@ -30,6 +30,19 @@ pub fn prepare_local_members(
     bindings: Vec<BindingMap>,
     profile: JudgeProfile,
     input_mode: BmsInputMode,
+) -> Result<PreparedLocalMembers, String> {
+    prepare_local_members_with_timing(prepared, plan, bindings, profile, input_mode, None)
+}
+
+/// Builds independent members with the same explicit immutable stage windows.
+/// Legacy callers retain their original builtin rules and snapshot bytes.
+pub fn prepare_local_members_with_timing(
+    prepared: &PreparedBms,
+    plan: &ResolvedInputPlan,
+    bindings: Vec<BindingMap>,
+    profile: JudgeProfile,
+    input_mode: BmsInputMode,
+    timing: Option<&beatkernel_bms::BmsTimingProfiles>,
 ) -> Result<PreparedLocalMembers, String> {
     if bindings.len() != plan.members().len() {
         return Err("local binding map count differs from source plan".into());
@@ -91,12 +104,13 @@ pub fn prepare_local_members(
     configs
         .try_reserve_exact(plan.members().len())
         .map_err(|_| "local member allocation failed")?;
-    let pristine = prepare_judge(
+    let pristine = prepare_judge_with_timing(
         &prepared.source,
         prepared.compiled.chart.clone(),
         profile,
         input_mode,
         beatkernel_bms::ParseOptions::default().max_objects,
+        timing,
     )?;
     let checkpoint = if plan.members().len() > 1 {
         Some(pristine.snapshot().map_err(|error| error.to_string())?)

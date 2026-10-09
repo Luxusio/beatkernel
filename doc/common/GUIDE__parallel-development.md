@@ -34,6 +34,40 @@ Group a working feature with its relevant tests and documentation into a
 meaningful commit. Avoid commits for every small progress step; keep each
 commit reviewable and the code buildable.
 
+## Throughput workflow — user decision, 2026-10-09
+
+Develop a connected feature through its actual application path as one work
+package rather than repeatedly stopping after isolated helpers. Declare stable
+shared interfaces and disjoint files first, then implement ready independent
+domain/UI/platform adapters in parallel within available capacity. Keep blocked
+hardware or tooling work separate and continue other ready implementation.
+
+Each implementation author must run focused checks of their own changed paths
+before reporting the lane ready. In particular, fixtures must reach the behavior
+being tested rather than fail during unrelated setup. Integration starts only
+after these focused checks pass and all relevant writers stop. Reserve one
+heavy compiler/full-suite/browser owner at a time; lightweight author checks
+may run when they do not conflict with that lease or changing source.
+
+Run the appropriate broad regression once after the connected batch is ready.
+For a failure, inspect the actual error and run the failing focused path while
+fixing it; do not repeat already-green unrelated suites to discover the next
+fixture error. Broaden again only when production changes, interactions or
+unresolved findings justify it. Keep required independent final review and QA;
+neither author checks nor speed goals substitute for those results.
+
+Keep compiler time/memory bounds specific to compiler processes. Do not reuse
+a compiler virtual-address limit for Node/WASM or Chromium: reserved address
+space is distinct from physical memory and an incompatible limit can prevent
+otherwise valid WebAssembly instances. Retain bounded execution and one-owner
+resource scheduling without changing services, drivers or Docker.
+
+Commit a coherent working feature with its tests/docs, not each small step.
+Report completed behavior, actual validation and the next remaining dependency;
+do not turn routine intermediate work into repeated completion cycles or
+receipt-only reruns. A focused implementation task may span turns while the
+full player Goal remains active.
+
 ## Parent-Goal parallelism
 
 On 2026-10-09 the user explicitly asked to stop security-driven interruptions.

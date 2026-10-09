@@ -10,13 +10,13 @@ import { LocalRoster, validateLocalPrepared, localReplayReceipt } from "./local-
 import { snapshotHidDevices } from "./hid-profile.mjs";
 import { snapshotBrowserSettings } from "./settings-profile.mjs";
 import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
-import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
+import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, timingPolicyFromFields, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
 const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status", "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear"].map(id => [id, byId(id)]));
 for (const id of ["local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay"]) ui[id] = byId(id);
 for (const id of ["multiplayer-mode", "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page"]) ui[id] = byId(id);
-for (const id of ["settings-save", "settings-load", "settings-status"]) ui[id] = byId(id);
+for (const id of ["judge-preset", "judge-precedence", "judge-gauge", "settings-save", "settings-load", "settings-status"]) ui[id] = byId(id);
 for (const id of ["pointer-input", "pointer-bindings"]) ui[id] = byId(id);
 for (const id of ["historical-grade-prev", "historical-grade-next", "historical-grade-page"]) ui[id] = byId(id);
 let canvas = byId("canvas");
@@ -72,6 +72,11 @@ const settingsFields = Object.freeze([
   ["capacities", "pendingCapacity", "audio-pending", 5], ["capacities", "maxFrames", "audio-frames", 5],
   ["capacities", "maxCommandsPerRender", "audio-commands", 5],
   ["section", "startSeconds", "live-start", 20], ["section", "endSeconds", "live-end", 20],
+].map(row => Object.freeze(row)));
+const timingPolicyFields = Object.freeze([
+  ["presetId", "judge-preset", "", 96],
+  ["rankPrecedence", "judge-precedence", "rank-first", 16],
+  ["gauge", "judge-gauge", "beatkernel", 16],
 ].map(row => Object.freeze(row)));
 
 function menuToken() {
@@ -298,6 +303,13 @@ function captureSettingsDraft() {
     if (typeof value !== "string" || value.length > maximum) throw new Error(`Settings ${name} exceeds its field limit.`);
     draft[group][name] = value;
   }
+  if (timingPolicyFields.some(([, id, initial]) => ui[id].value !== initial)) {
+    for (const [name, id, , maximum] of timingPolicyFields) {
+      const value = ui[id].value;
+      if (typeof value !== "string" || value.length > maximum) throw new Error(`Settings ${name} exceeds its field limit.`);
+      draft.timing[name] = value;
+    }
+  }
   draft.bindings = Object.freeze(bindingFields.map(([lane, field]) => {
     const code = field.value;
     if (typeof code !== "string" || code.length > 32) throw new Error("Keyboard settings exceed their field limit.");
@@ -308,6 +320,7 @@ function captureSettingsDraft() {
 }
 function sameSettingsDraft(left, right) {
   return settingsFields.every(([group, name]) => left[group][name] === right[group][name])
+    && timingPolicyFields.every(([name, , initial]) => (left.timing[name] ?? initial) === (right.timing[name] ?? initial))
     && left.bindings.length === right.bindings.length
     && left.bindings.every((row, index) => row[0] === right.bindings[index][0] && row[1] === right.bindings[index][1]);
 }
@@ -370,6 +383,7 @@ function receiveSettings(data) {
       if (!settingsCurrent(operation) || !settingsIdle() || !sameSettingsDraft(operation.draft, currentDraft)) throw new Error("Settings draft or ownership changed; nothing was applied.");
       // All values and the unchanged owner/draft are checked before native DOM setters.
       for (const [group, name, id] of settingsFields) ui[id].value = settings[group][name];
+      for (const [name, id, initial] of timingPolicyFields) ui[id].value = settings.timing[name] ?? initial;
       for (const [lane, field] of bindingFields) field.value = bindings.get(lane);
     } else if (operation.kind === "settings-profile-save" && data.kind === "settings-profile-saved") {
       const bytes = data.bytes;
@@ -1041,6 +1055,7 @@ function controls() {
   ui["gamepad-profile-clear"].disabled = inputLocked || selectedGamepadProfile === null;
   for (const [, field] of bindingFields) field.disabled = recordsDisabled;
   for (const field of [ui["judge-early"], ui["judge-late"], ui["judge-offset"], ui["live-start"], ui["live-end"]]) field.disabled = recordsDisabled;
+  for (const [, id] of timingPolicyFields) ui[id].disabled = recordsDisabled;
   ui["output-latency"].disabled = ui["output-rate"].disabled = recordsDisabled;
   ui["output-latency-ms"].disabled = recordsDisabled || ui["output-latency"].value !== "custom";
   for (const id of ["audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands"]) ui[id].disabled = recordsDisabled;
@@ -2030,6 +2045,7 @@ async function play(mode = "live") {
       pendingCapacity: ui["audio-pending"].value, maxFrames: ui["audio-frames"].value, maxCommandsPerRender: ui["audio-commands"].value });
     session.commandBatchLimit = Math.min(256, session.audioLimits.queueCapacity);
     session.timing = mode === "live" ? timingFromMilliseconds(ui["judge-early"].value, ui["judge-late"].value, ui["judge-offset"].value) : null;
+    session.timingPolicy = mode === "live" ? timingPolicyFromFields(ui["judge-preset"].value, ui["judge-precedence"].value, ui["judge-gauge"].value) : null;
     const section = mode === "live" ? sectionFromSeconds(ui["live-start"].value, ui["live-end"].value) : null;
     session.startNs = section?.startNs ?? null;
     session.requestedEndNs = section?.endNs;
@@ -2094,6 +2110,7 @@ async function play(mode = "live") {
     session.workerStarted = true;
     const source = mode === "replay" ? { mode, replayFile: session.replayFile }
       : { mode, inputMode: session.inputMode, seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing, startNs: session.startNs,
+        ...(session.timingPolicy === null ? {} : { timingPolicy: session.timingPolicy }),
         ...(session.requestedEndNs === undefined ? {} : { endNs: session.requestedEndNs }),
         ...(session.multiplayer ? { multiplayer: session.multiplayer } : {}),
         ...(session.opponentSelection ? { opponents: session.opponentSelection } : {}),
@@ -2310,7 +2327,9 @@ async function play(mode = "live") {
     ui.rate.value = String(session.audio.sampleRate);
     controls();
     ui.stop.focus();
-    status(mode === "replay" ? "Playing recorded replay. Stop ends this session." : "Playing. Stop ends this session; leaving the page stops playback.");
+    status(mode === "replay" ? "Playing recorded replay. Stop ends this session."
+      : session.timingPolicy ? `Playing with SEVENKEYS numerical windows v1 (8320241d), ${session.timingPolicy.rankPrecedence}, ${session.timingPolicy.gauge} gauge and BeatKernel Hold v1. Stop ends this session.`
+        : "Playing. Stop ends this session; leaving the page stops playback.");
     session.timer = setInterval(() => {
       if (session.mode === "live") {
         pollGamepads(session);

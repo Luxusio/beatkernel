@@ -6,6 +6,7 @@ import {
   presentationPoint, presentationPair, reportWord, renderedCursor,
   KEY_BINDINGS, KEY_CHOICES, snapshotBindings, bindingsFor,
   parseTimingMilliseconds, timingFromMilliseconds, validateTiming,
+  BMS_TIMING_PRESET_ID, timingPolicyFromFields, validateTimingPolicy,
   ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, startFromSeconds, validateStart, validateEnd, sectionFromSeconds,
   audioOutputFromFields, audioLimitsFromFields, replayOutputFromMetadata,
   presentationAvailability, presentationOutputAvailability, audioClockExpired,
@@ -13,6 +14,21 @@ import {
 
 const U64_MAX = 18446744073709551615n;
 const I64_MAX = 9223372036854775807n;
+
+test("explicit numerical selection snapshots immutable strings and absent selection retains legacy admission", () => {
+  assert.equal(validateTimingPolicy(), null);
+  assert.equal(timingPolicyFromFields("", "rank-first", "beatkernel"), null);
+  const fields = { presetId: BMS_TIMING_PRESET_ID, rankPrecedence: "rank-first", gauge: "groove" };
+  const snapshot = validateTimingPolicy(fields);
+  fields.gauge = "hard";
+  assert.equal(snapshot.gauge, "groove");
+  assert.ok(Object.isFrozen(snapshot));
+  for (const malformed of [null, {}, { ...fields, extra: true }, { ...fields, presetId: "" },
+    { ...fields, presetId: "v2" }, { ...fields, rankPrecedence: "" }, { ...fields, gauge: "" }]) {
+    assert.throws(() => validateTimingPolicy(malformed));
+  }
+  assert.throws(() => timingPolicyFromFields("", "rank-first", "groove"));
+});
 
 test("replay output-only admission preserves exact points and never substitutes retained evidence", () => {
   assert.deepEqual(presentationOutputAvailability(null, null), { point: null, reason: null, progressed: false });

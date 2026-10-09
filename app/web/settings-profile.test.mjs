@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { File } from "node:buffer";
 import test from "node:test";
 import { snapshotBrowserSettings, snapshotBrowserSettingsScalars, encodeBrowserSettings, decodeBrowserSettings } from "./settings-profile.mjs";
+import { BMS_TIMING_PRESET_ID } from "./play-model.mjs";
 
 globalThis.File ??= File;
 const FileType = globalThis.File;
@@ -20,6 +21,29 @@ function settings() {
 const bytes = value => new TextEncoder().encode(JSON.stringify(value));
 const file = data => new FileType([data], "portable.json", { type: "application/json" });
 const scalarDraft = value => ({ timing: value.timing, output: value.output, capacities: value.capacities, section: value.section });
+
+test("explicit timing policies round-trip while legacy profiles keep their old shape", async () => {
+  const legacy = settings();
+  assert.deepEqual(await decodeBrowserSettings(file(encodeBrowserSettings(legacy))), legacy);
+  assert.equal(Object.hasOwn(snapshotBrowserSettings(legacy).timing, "presetId"), false);
+  for (const gauge of ["beatkernel", "assist-easy", "easy", "groove", "hard", "ex-hard", "hazard"]) {
+    const selected = settings();
+    Object.assign(selected.timing, { presetId: BMS_TIMING_PRESET_ID, rankPrecedence: "defexrank-first", gauge });
+    const loaded = await decodeBrowserSettings(file(encodeBrowserSettings(selected)));
+    assert.deepEqual(loaded, selected);
+    assert.ok(Object.isFrozen(loaded.timing));
+  }
+  const policy = { presetId: BMS_TIMING_PRESET_ID, rankPrecedence: "rank-first", gauge: "beatkernel" };
+  for (const mutate of [
+    value => { delete value.presetId; }, value => { delete value.rankPrecedence; }, value => { delete value.gauge; },
+    value => { value.presetId = "unknown/v1"; }, value => { value.rankPrecedence = "last-header"; },
+    value => { value.gauge = "unknown"; }, value => { value.presetId = ""; value.gauge = "groove"; },
+  ]) {
+    const selected = settings(), fields = { ...policy }; mutate(fields);
+    Object.assign(selected.timing, fields);
+    assert.throws(() => snapshotBrowserSettings(selected));
+  }
+});
 
 test("scalar menu snapshots preserve all thirteen fields independently without weakening complete file bindings", () => {
   const original = scalarDraft(settings()), before = structuredClone(original);

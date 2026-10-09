@@ -101,3 +101,31 @@ defect in this integration; final task review/QA still requires all ACs.
 StepGameplay/local-member preparation, actual native/browser selectors and
 remaining record/competition consumers still need policy-aware wiring. Do not
 count WBS08.07 complete from this capture/replay increment.
+
+Policy-aware StepGameplay and local-member constructors now retain selected
+windows, gauge, classes, completion and capture/header identity. Native cohort
+preparation shares the same staged member helper. Browser preparation resolves
+the original source before section filtering and consumes that immutable policy
+in both solo and local audio-authoritative constructors. Numerical selection
+does not change the explicitly chosen BeatKernel or BMS gauge.
+
+The static browser Timing controls expose the pinned numerical preset,
+rank/DEFEX precedence and gauge. Live setup snapshots the selection before
+awaiting audio; replay consumes its recorded policy. Settings optionally retain
+the three timing fields together; profiles with no selected preset retain their
+old version-1 shape. Unsupported combinations return specific errors.
+
+The browser WASM type check passed. Host regression passed 1,764 tests with
+four ignored and one new fixture assertion failure; the assertion incorrectly
+forbade an unrelated pending-note timeout during wrong-contact cancellation.
+After correction, all seven Step policy fixtures passed, including the formerly
+failing case. The web regression passed 797 tests with one new finite-end mock
+failure. Its author corrected the mock and passed that focused test across six
+live construction branches plus legacy/replay; unchanged green tests were not
+repeated. Initial omitted WAV declarations and an incompatible Node virtual
+address limit were development setup mistakes, corrected without weakening
+production validation.
+
+Native CLI selection, generated current browser artifacts, actual browser
+acceptance and final independent task review/QA remain open. These results do
+not establish whole-player completion or physical audio verification.

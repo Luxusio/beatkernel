@@ -1074,3 +1074,8 @@ pub mod native_alsa_output_ui;
 
 /// Domain-organized gameplay application components.
 pub mod gameplay;
+
+// Compile the exact pure browser preparation helper on hosts without WASM IO.
+#[cfg(all(test, not(feature = "browser")))]
+#[path = "browser_timing_policy.rs"]
+mod browser_timing_policy;

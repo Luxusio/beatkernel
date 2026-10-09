@@ -51,10 +51,13 @@ fn prepared() -> BrowserPrepared {
             bgm_commands: vec![],
         },
         chart,
+        visual_preview: None,
         images: Arc::new(ImageAssets::default()),
+        movies: Arc::new(crate::video_assets::VideoAssets::default()),
         chart_seed: 0,
         start: Timestamp::ZERO,
         replay: None,
+        play_policy: None,
     }
 }
 fn button(member: usize, ns: i64, sequence: u64, state: ButtonState) -> PhysicalInputEvent {

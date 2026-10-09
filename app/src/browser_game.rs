@@ -412,15 +412,27 @@ impl BrowserGame {
             },
         )
         .map_err(error)?;
-        let (game, bank) = StepGameplay::new_audio_section(
-            prepared.prepared,
-            config,
-            input.bindings,
-            prepared.start,
-            end,
-            input_mode,
-            authority,
-        )
+        let (game, bank) = match prepared.play_policy {
+            Some(policy) => StepGameplay::new_audio_section_with_policy(
+                prepared.prepared,
+                config,
+                input.bindings,
+                prepared.start,
+                end,
+                input_mode,
+                authority,
+                policy,
+            ),
+            None => StepGameplay::new_audio_section(
+                prepared.prepared,
+                config,
+                input.bindings,
+                prepared.start,
+                end,
+                input_mode,
+                authority,
+            ),
+        }
         .map_err(error)?;
         Ok(Self {
             game,

@@ -244,16 +244,29 @@ impl BrowserLocalGame {
             },
         )
         .map_err(error)?;
-        let (game, bank) = StepLocalGameplay::new_audio_section(
-            prepared.prepared,
-            config,
-            input.plan,
-            input.bindings,
-            prepared.start,
-            end_ns.map(Timestamp::from_nanos),
-            mode,
-            authority,
-        )
+        let (game, bank) = match prepared.play_policy {
+            Some(policy) => StepLocalGameplay::new_audio_section_with_policy(
+                prepared.prepared,
+                config,
+                input.plan,
+                input.bindings,
+                prepared.start,
+                end_ns.map(Timestamp::from_nanos),
+                mode,
+                authority,
+                policy,
+            ),
+            None => StepLocalGameplay::new_audio_section(
+                prepared.prepared,
+                config,
+                input.plan,
+                input.bindings,
+                prepared.start,
+                end_ns.map(Timestamp::from_nanos),
+                mode,
+                authority,
+            ),
+        }
         .map_err(error)?;
         Ok(Self {
             game,

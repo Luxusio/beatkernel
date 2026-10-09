@@ -1,4 +1,4 @@
-import { KEY_BINDINGS, snapshotBindings, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds } from "./play-model.mjs";
+import { KEY_BINDINGS, snapshotBindings, timingFromMilliseconds, timingPolicyFromFields, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds } from "./play-model.mjs";
 
 const MAX_BYTES = 16384;
 const LANES = KEY_BINDINGS.map(([lane]) => lane).sort((a, b) => a - b);
@@ -24,7 +24,10 @@ function strings(value, limits) {
 export function snapshotBrowserSettingsScalars(value) {
   object(value, ["timing", "output", "capacities", "section"]);
   const { timing: timingValue, output: outputValue, capacities: capacityValue, section: sectionValue } = value;
-  const timing = strings(timingValue, { earlyMs: 21, lateMs: 21, offsetMs: 21 });
+  const hasPolicy = timingValue && ["presetId", "rankPrecedence", "gauge"].some(name => Object.hasOwn(timingValue, name));
+  const timing = strings(timingValue, { earlyMs: 21, lateMs: 21, offsetMs: 21,
+    ...(hasPolicy ? { presetId: 96, rankPrecedence: 16, gauge: 16 } : {}) });
+  if (hasPolicy) timingPolicyFromFields(timing.presetId, timing.rankPrecedence, timing.gauge);
   const output = strings(outputValue, { latency: 16, latencyMs: 21, rate: 10 });
   const capacities = strings(capacityValue, { queueCapacity: 5, maxVoices: 5, pendingCapacity: 5, maxFrames: 5, maxCommandsPerRender: 5 });
   const section = strings(sectionValue, { startSeconds: 20, endSeconds: 20 });

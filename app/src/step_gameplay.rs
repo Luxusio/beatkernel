@@ -12,12 +12,12 @@ use crate::{
     input_sounds::{InputSoundIdentity, InputSoundPlan},
     local_players::{PlayerId, ResolvedInputPlan},
     local_preparation::{
-        PreparedLocalMembers, prepare_local_members, prepare_local_input_sounds,
-        prepare_local_mine_sounds,
+        prepare_local_input_sounds, prepare_local_members_with_timing, prepare_local_mine_sounds,
+        PreparedLocalMembers,
     },
     local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup, SoloRuntime},
     mine_damage::{MineDamageError, MineDamageSummary},
-    mine_plan::prepare_judge,
+    mine_plan::prepare_judge_with_timing,
     mine_sounds::MineSoundPlan,
     native_judge::NativeJudgeConfig,
     offline::OwnedStopEvidence,
@@ -384,6 +384,7 @@ pub struct StepGameplay {
     score: ScoreSummary,
     mine_damage: MineDamageSummary,
     gauge: BmsGauge,
+    policy: Option<crate::play_policy::ResolvedPlayPolicy>,
     completed_result: Option<CompletedPlayResult>,
     song: Timestamp,
     host_domain: ClockDomainId,
@@ -481,6 +482,7 @@ impl StepGameplay {
             end,
             input_mode,
             None,
+            None,
         )
     }
 
@@ -502,9 +504,59 @@ impl StepGameplay {
             end,
             input_mode,
             Some(authority),
+            None,
         )
     }
 
+    /// Uses an immutable selected policy for actual stages, gauge and capture.
+    /// Config offset must agree; policy windows replace config early/late bounds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_section_with_policy(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        bindings: BindingMap,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        policy: crate::play_policy::ResolvedPlayPolicy,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            InputSetup::Solo(bindings),
+            start,
+            end,
+            input_mode,
+            None,
+            Some(policy),
+        )
+    }
+
+    /// Policy-aware preparation on the actual logical audio authority timeline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_audio_section_with_policy(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        bindings: BindingMap,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        authority: AudioAuthority,
+        policy: crate::play_policy::ResolvedPlayPolicy,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            InputSetup::Solo(bindings),
+            start,
+            end,
+            input_mode,
+            Some(authority),
+            Some(policy),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build(
         mut prepared: PreparedBms,
         config: StepGameplayConfig,
@@ -513,6 +565,7 @@ impl StepGameplay {
         end: Option<Timestamp>,
         input_mode: BmsInputMode,
         authority: Option<AudioAuthority>,
+        policy: Option<crate::play_policy::ResolvedPlayPolicy>,
     ) -> Result<(Self, SampleBank), StepGameplayError> {
         let logical_origin = if let Some(authority) = &authority {
             let epoch = authority.epoch();
@@ -600,16 +653,37 @@ impl StepGameplay {
                 "section start exceeds the host or output clock range",
             ));
         }
-        let profile = NativeJudgeConfig {
-            early: config.early_ns,
-            late: config.late_ns,
-            offset: config.offset_ns,
-            preroll: config.preroll.as_nanos(),
-            output: config.output_origin.domain,
-            end: None,
-        }
-        .profile()
-        .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
+        let profile = if let Some(policy) = &policy {
+            if policy.judge().input_offset().as_nanos() != config.offset_ns {
+                return Err(StepGameplayError::InvalidConfiguration(
+                    "selected policy offset differs from config",
+                ));
+            }
+            if let Some(timing) = policy.timing() {
+                let declared = prepared
+                    .source
+                    .judge_rank_metadata()
+                    .map_err(|error| StepGameplayError::Setup(error.to_string()))?
+                    .resolve(timing.selection().precedence);
+                if declared != Some(timing.profiles().difficulty()) {
+                    return Err(StepGameplayError::InvalidConfiguration(
+                        "selected timing differs from original source declaration",
+                    ));
+                }
+            }
+            policy.judge().clone()
+        } else {
+            NativeJudgeConfig {
+                early: config.early_ns,
+                late: config.late_ns,
+                offset: config.offset_ns,
+                preroll: config.preroll.as_nanos(),
+                output: config.output_origin.domain,
+                end: None,
+            }
+            .profile()
+            .map_err(|error| StepGameplayError::Setup(error.to_string()))?
+        };
         let sample_rate = prepared.bank.format().sample_rate();
         let playback_end_frame = end
             .map(|end| section_end_frame(start, end, config.preroll, sample_rate))
@@ -635,8 +709,10 @@ impl StepGameplay {
             Some(
                 SongCompletion::prepare(
                     &prepared,
-                    config.late_ns,
-                    config.offset_ns,
+                    policy
+                        .as_ref()
+                        .map_or(config.late_ns, |policy| policy.completion_late().as_nanos()),
+                    profile.input_offset().as_nanos(),
                     config.preroll.as_nanos(),
                     config.output_origin.domain,
                 )
@@ -690,14 +766,23 @@ impl StepGameplay {
                     }
                     mine_sounds.timeline()
                 };
-                let judge = prepare_judge(
+                let judge = prepare_judge_with_timing(
                     &prepared.source,
                     prepared.compiled.chart,
                     profile,
                     input_mode,
                     beatkernel_bms::ParseOptions::default().max_objects,
+                    policy
+                        .as_ref()
+                        .and_then(|policy| policy.timing())
+                        .map(|timing| timing.profiles()),
                 )
                 .map_err(StepGameplayError::Setup)?;
+                if let Some(policy) = &policy {
+                    policy
+                        .validate_timing(&judge, input_mode)
+                        .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
+                }
                 RuntimeSetup::Solo {
                     bindings,
                     judge,
@@ -707,9 +792,25 @@ impl StepGameplay {
             }
             InputSetup::Local(plan, bindings) => {
                 let primary = plan.members()[0].0;
-                let members =
-                    prepare_local_members(&prepared, &plan, bindings, profile, input_mode)
-                        .map_err(StepGameplayError::Setup)?;
+                let members = prepare_local_members_with_timing(
+                    &prepared,
+                    &plan,
+                    bindings,
+                    profile,
+                    input_mode,
+                    policy
+                        .as_ref()
+                        .and_then(|policy| policy.timing())
+                        .map(|timing| timing.profiles()),
+                )
+                .map_err(StepGameplayError::Setup)?;
+                if let Some(policy) = &policy {
+                    for member in &members.configs {
+                        policy
+                            .validate_timing(&member.judge, input_mode)
+                            .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
+                    }
+                }
                 let input_sounds =
                     prepare_local_input_sounds(&prepared, &members.configs, &members.reserved)
                         .map_err(StepGameplayError::Setup)?;
@@ -913,7 +1014,14 @@ impl StepGameplay {
             capture_configured: false,
             score: ScoreSummary::default(),
             mine_damage: MineDamageSummary::default(),
-            gauge: BmsGauge::default(),
+            gauge: BmsGauge::new(match &policy {
+                Some(policy) => policy
+                    .gauge()
+                    .try_copy()
+                    .map_err(|error| StepGameplayError::Setup(error.to_string()))?,
+                None => crate::gauge::GaugeProfile::default(),
+            }),
+            policy,
             completed_result: None,
             song,
             host_domain: config.host_origin.domain,
@@ -974,17 +1082,31 @@ impl StepGameplay {
                 "competition identity requires an unprocessed runtime",
             ));
         }
-        setup_gauge_header(
-            self.runtime.judge(),
-            self.logical_domain,
-            limits,
-            self.start,
-            chart_seed,
-            None,
-            self.input_mode,
-            self.input_sound_identity,
-            self.gauge.profile(),
-        )
+        if let Some(policy) = &self.policy {
+            crate::replay_capture::setup_play_policy_header(
+                self.runtime.judge(),
+                self.logical_domain,
+                limits,
+                self.start,
+                chart_seed,
+                None,
+                self.input_mode,
+                self.input_sound_identity,
+                policy,
+            )
+        } else {
+            setup_gauge_header(
+                self.runtime.judge(),
+                self.logical_domain,
+                limits,
+                self.start,
+                chart_seed,
+                None,
+                self.input_mode,
+                self.input_sound_identity,
+                self.gauge.profile(),
+            )
+        }
         .map_err(|error| StepGameplayError::Capture {
             error,
             report: None,
@@ -1021,6 +1143,15 @@ impl StepGameplay {
                 "gauge configuration requires pristine setup before capture",
             ));
         }
+        if self
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.gauge() != &profile)
+        {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "gauge differs from immutable selected policy",
+            ));
+        }
         self.gauge = BmsGauge::new(profile);
         Ok(())
     }
@@ -1040,17 +1171,31 @@ impl StepGameplay {
                 "capture configuration requires an unprocessed, unconfigured runtime",
             ));
         }
-        let capture = LiveReplayCapture::new_with_gauge(
-            self.runtime.judge(),
-            self.logical_domain,
-            limits,
-            self.start,
-            chart_seed,
-            self.end,
-            self.input_mode,
-            self.input_sound_identity,
-            self.gauge.profile(),
-        )
+        let capture = if let Some(policy) = &self.policy {
+            LiveReplayCapture::new_with_policy(
+                self.runtime.judge(),
+                self.logical_domain,
+                limits,
+                self.start,
+                chart_seed,
+                self.end,
+                self.input_mode,
+                self.input_sound_identity,
+                policy,
+            )
+        } else {
+            LiveReplayCapture::new_with_gauge(
+                self.runtime.judge(),
+                self.logical_domain,
+                limits,
+                self.start,
+                chart_seed,
+                self.end,
+                self.input_mode,
+                self.input_sound_identity,
+                self.gauge.profile(),
+            )
+        }
         .map_err(|error| StepGameplayError::Capture {
             error,
             report: None,
@@ -1929,6 +2074,10 @@ impl StepGameplay {
         &self.mine_damage
     }
     /// Fixed default-policy gauge from actual committed reports, including failures.
+    /// Immutable actual stage, gauge and judgment-class selection for this run.
+    pub fn play_policy(&self) -> Option<&crate::play_policy::ResolvedPlayPolicy> {
+        self.policy.as_ref()
+    }
     pub fn gauge(&self) -> &BmsGauge {
         &self.gauge
     }
@@ -2053,7 +2202,7 @@ impl StepLocalGameplay {
         input_mode: BmsInputMode,
     ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
         Self::build(
-            prepared, config, plan, bindings, start, end, input_mode, None,
+            prepared, config, plan, bindings, start, end, input_mode, None, None,
         )
     }
 
@@ -2076,9 +2225,63 @@ impl StepLocalGameplay {
             end,
             input_mode,
             Some(authority),
+            None,
         )
     }
 
+    /// Every member uses this immutable policy over independent judge/gauge state.
+    /// Config offset must agree; policy windows replace config early/late bounds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_section_with_policy(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        plan: ResolvedInputPlan,
+        bindings: Vec<BindingMap>,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        policy: crate::play_policy::ResolvedPlayPolicy,
+    ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            plan,
+            bindings,
+            start,
+            end,
+            input_mode,
+            None,
+            Some(policy),
+        )
+    }
+
+    /// Selected local stages on the actual logical audio authority timeline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_audio_section_with_policy(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        plan: ResolvedInputPlan,
+        bindings: Vec<BindingMap>,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        authority: AudioAuthority,
+        policy: crate::play_policy::ResolvedPlayPolicy,
+    ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            plan,
+            bindings,
+            start,
+            end,
+            input_mode,
+            Some(authority),
+            Some(policy),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build(
         prepared: PreparedBms,
         config: StepGameplayConfig,
@@ -2088,6 +2291,7 @@ impl StepLocalGameplay {
         end: Option<Timestamp>,
         input_mode: BmsInputMode,
         authority: Option<AudioAuthority>,
+        policy: Option<crate::play_policy::ResolvedPlayPolicy>,
     ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
         let mut players = Vec::new();
         let mut members = Vec::new();
@@ -2122,17 +2326,26 @@ impl StepLocalGameplay {
             end,
             input_mode,
             authority,
+            policy,
         )?;
-        members.extend(players.iter().map(|&player| LocalMemberState {
-            player,
-            score: ScoreSummary::default(),
-            mine_damage: MineDamageSummary::default(),
-            gauge: BmsGauge::default(),
-            completed_result: None,
-            capture: None,
-            capture_configured: false,
-            song: control.song,
-        }));
+        for &player in &players {
+            members.push(LocalMemberState {
+                player,
+                score: ScoreSummary::default(),
+                mine_damage: MineDamageSummary::default(),
+                gauge: BmsGauge::new(
+                    control
+                        .gauge
+                        .profile()
+                        .try_copy()
+                        .map_err(|error| StepGameplayError::Setup(error.to_string()))?,
+                ),
+                completed_result: None,
+                capture: None,
+                capture_configured: false,
+                song: control.song,
+            });
+        }
         Ok((
             Self {
                 control,
@@ -2183,6 +2396,10 @@ impl StepLocalGameplay {
             .map(|member| &member.mine_damage)
     }
     /// Independent fixed-policy gauge for one actual prepared member.
+    /// Immutable selected policy shared by the independently prepared members.
+    pub fn play_policy(&self) -> Option<&crate::play_policy::ResolvedPlayPolicy> {
+        self.control.policy.as_ref()
+    }
     pub fn gauge(&self, player: PlayerId) -> Option<&BmsGauge> {
         self.members
             .iter()
@@ -2321,17 +2538,31 @@ impl StepLocalGameplay {
             )
             .into());
         }
-        setup_gauge_header(
-            self.judge(player).expect("checked member"),
-            self.control.logical_domain,
-            limits,
-            self.control.start,
-            chart_seed,
-            None,
-            self.control.input_mode,
-            self.control.input_sound_identity,
-            self.members[self.member_index(player)?].gauge.profile(),
-        )
+        if let Some(policy) = &self.control.policy {
+            crate::replay_capture::setup_play_policy_header(
+                self.judge(player).expect("checked member"),
+                self.control.logical_domain,
+                limits,
+                self.control.start,
+                chart_seed,
+                None,
+                self.control.input_mode,
+                self.control.input_sound_identity,
+                policy,
+            )
+        } else {
+            setup_gauge_header(
+                self.judge(player).expect("checked member"),
+                self.control.logical_domain,
+                limits,
+                self.control.start,
+                chart_seed,
+                None,
+                self.control.input_mode,
+                self.control.input_sound_identity,
+                self.members[self.member_index(player)?].gauge.profile(),
+            )
+        }
         .map_err(|error| {
             StepGameplayError::Capture {
                 error,
@@ -2373,6 +2604,17 @@ impl StepLocalGameplay {
             )
             .into());
         }
+        if self
+            .control
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.gauge() != &profile)
+        {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "gauge differs from immutable selected policy",
+            )
+            .into());
+        }
         self.members[index].gauge = BmsGauge::new(profile);
         Ok(())
     }
@@ -2390,17 +2632,31 @@ impl StepLocalGameplay {
             )
             .into());
         }
-        let capture = LiveReplayCapture::new_with_gauge(
-            self.judge(player).expect("checked member"),
-            self.control.logical_domain,
-            limits,
-            self.control.start,
-            chart_seed,
-            self.control.end,
-            self.control.input_mode,
-            self.control.input_sound_identity,
-            self.members[self.member_index(player)?].gauge.profile(),
-        )
+        let capture = if let Some(policy) = &self.control.policy {
+            LiveReplayCapture::new_with_policy(
+                self.judge(player).expect("checked member"),
+                self.control.logical_domain,
+                limits,
+                self.control.start,
+                chart_seed,
+                self.control.end,
+                self.control.input_mode,
+                self.control.input_sound_identity,
+                policy,
+            )
+        } else {
+            LiveReplayCapture::new_with_gauge(
+                self.judge(player).expect("checked member"),
+                self.control.logical_domain,
+                limits,
+                self.control.start,
+                chart_seed,
+                self.control.end,
+                self.control.input_mode,
+                self.control.input_sound_identity,
+                self.members[self.member_index(player)?].gauge.profile(),
+            )
+        }
         .map_err(|error| StepGameplayError::Capture {
             error,
             report: None,
@@ -3266,3 +3522,7 @@ mod step_archived_comparison_fixtures;
 #[cfg(test)]
 #[path = "step_audio_authority_fixtures.rs"]
 mod step_audio_authority_fixtures;
+
+#[cfg(test)]
+#[path = "step_timing_policy_fixtures.rs"]
+mod timing_policy_fixtures;

@@ -6,7 +6,7 @@ use crate::{
     local_input::InputMerger,
     local_players::{PlayerId, ResolvedInputPlan, MAX_LOCAL_PLAYERS},
     local_preparation::{
-        prepare_local_input_sounds, prepare_local_members, prepare_local_mine_sounds,
+        prepare_local_input_sounds, prepare_local_members_with_timing, prepare_local_mine_sounds,
         PreparedLocalMembers,
     },
     local_runtime::{MemberConfig, RuntimeGroup},
@@ -203,12 +203,13 @@ fn prepare_cohort_inner(
             },
         ))?);
     }
-    let PreparedLocalMembers { configs, reserved } = prepare_local_members(
+    let PreparedLocalMembers { configs, reserved } = prepare_local_members_with_timing(
         prepared,
         &plan,
         maps,
         profile,
         beatkernel_bms::BmsInputMode::ButtonOnly,
+        policy.and_then(|policy| policy.timing()).map(|timing| timing.profiles()),
     )?;
     let input_sounds = prepare_local_input_sounds(prepared, &configs, &reserved)?;
     let hazard_sounds = prepare_local_mine_sounds(prepared, &configs, &reserved, &input_sounds)?;
@@ -243,7 +244,10 @@ fn prepare_cohort_inner(
                 limits,
             )?,
         };
-        let completion = judge_config.completion(prepared)?;
+        let completion = match policy {
+            Some(policy) => judge_config.completion_with_policy(prepared, policy)?,
+            None => judge_config.completion(prepared)?,
+        };
         states.push(PlayerState {
             player,
             capture,
@@ -785,6 +789,40 @@ mod fixtures {
             record_replay: Some(Path::new("records/run.bkr")),
             replay_max_bytes: 65536,
             replay_max_records: 128,
+        }
+    }
+    #[test]
+    fn selected_timing_builds_isolated_native_members_and_complete_capture_identity() {
+        use crate::play_policy::{GaugeSelection, ResolvedPlayPolicy, TimingPresetSelection};
+        use beatkernel::judge::{JudgeGrade, JudgeOutcome};
+        use beatkernel_bms::{BmsRankPrecedence, BmsTimingPreset, BmsTimingStage};
+        let mut prepared = prepared();
+        prepared.source.metadata.insert("RANK".into(), "3".into());
+        let policy = ResolvedPlayPolicy::with_timing(&prepared.source, GaugeSelection::BeatKernel,
+            TimingPresetSelection { preset: BmsTimingPreset::BeatorajaSevenKeys8320241dV1,
+                precedence: BmsRankPrecedence::RankFirst }, 0).unwrap();
+        let bindings = BTreeMap::from([(0x11, 4)]);
+        for count in [2,4,64] {
+            let assignments = (0..count).map(|index| (PlayerId(index+1),DeviceId(u64::from(index)+10))).collect::<Vec<_>>();
+            let mut config = config(&bindings);
+            config.early = policy.judge().max_early().as_nanos();
+            config.late = policy.judge().max_late().as_nanos();
+            let mut cohort = prepare_cohort_with_policy(&prepared,&assignments,&CompetitionOptions::default(),&config,&policy).unwrap();
+            for (member,state) in cohort.configs.iter().zip(&cohort.states) {
+                policy.validate_timing(&member.judge,beatkernel_bms::BmsInputMode::ButtonOnly).unwrap();
+                let setup = crate::replay_playback::decode_section_setup(&state.capture.as_ref().unwrap().header().options).unwrap();
+                assert_eq!(setup.timing.as_ref(),policy.timing());
+                assert!(state.completion.is_some());
+            }
+            let object = prepared.compiled.chart.objects()[0].clone();
+            let selected = cohort.configs[0].judge.builtin_timing(object.id).unwrap();
+            assert_eq!(selected.head, &policy.timing().unwrap().profiles().judge_profile(BmsTimingStage::KeyHead).unwrap());
+            let event = beatkernel::input::GameInputEvent { game_control: GameControlId(0x11),
+                physical: PhysicalInputEvent::Button(ButtonEvent { meta: EventMeta::new(assignments[0].1,host(0),1),
+                    control: PhysicalControlId::keyboard(4u16),state:ButtonState::Down }) };
+            let events = cohort.configs[0].judge.push_input(&event,object.time.start.checked_add(beatkernel::time::Duration::from_nanos(25_000_000)).unwrap()).unwrap();
+            assert!(matches!(events[0].outcome,JudgeOutcome::Hit { grade:JudgeGrade(2),.. }));
+            assert!(cohort.configs[1].judge.effective_song_time().is_none());
         }
     }
     #[test]

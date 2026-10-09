@@ -25,6 +25,59 @@ fn selection(precedence: BmsRankPrecedence) -> TimingPresetSelection {
 }
 
 #[test]
+fn preset_parser_and_gauge_selection_are_explicit_and_independent() {
+    let id = BmsTimingPreset::BeatorajaSevenKeys8320241dV1.id();
+    let selected = TimingPresetSelection::parse(id, "rank-first").unwrap();
+    assert_eq!(selected, selection(BmsRankPrecedence::RankFirst));
+    assert_eq!(
+        TimingPresetSelection::parse(id, "defexrank-first")
+            .unwrap()
+            .precedence,
+        BmsRankPrecedence::DefExRankFirst
+    );
+    for (id, precedence) in [
+        ("", "rank-first"),
+        ("latest", "rank-first"),
+        (id, ""),
+        (id, "guess"),
+    ] {
+        assert!(TimingPresetSelection::parse(id, precedence).is_err());
+    }
+    let source = source("#RANK 3", false);
+    let policy =
+        ResolvedPlayPolicy::with_timing(&source, GaugeSelection::BeatKernel, selected, 0).unwrap();
+    assert_eq!(policy.selection(), GaugeSelection::BeatKernel);
+    assert_eq!(policy.gauge(), &GaugeProfile::default());
+    assert_eq!(policy.total(), None);
+    assert_eq!(policy.judge().windows().len(), 4);
+    assert!(policy.judgments().is_some());
+}
+
+#[test]
+fn original_gauge_context_survives_practice_filtering() {
+    let source = source("#RANK 3", true);
+    let context = OriginalGaugeContext::from_source(&source);
+    let filtered = crate::section_start::source_at(&source, Timestamp::from_nanos(1)).unwrap();
+    assert_eq!(filtered.judged_stage_count(), 0);
+    let full = ResolvedPlayPolicy::bms_with_timing(
+        &source,
+        BmsGaugeKind::Groove,
+        selection(BmsRankPrecedence::RankFirst),
+        0,
+    )
+    .unwrap();
+    let section = ResolvedPlayPolicy::from_context_with_timing(
+        &context,
+        &filtered,
+        GaugeSelection::Bms(BmsGaugeKind::Groove),
+        selection(BmsRankPrecedence::RankFirst),
+        0,
+    )
+    .unwrap();
+    assert_eq!(full, section);
+}
+
+#[test]
 fn preset_resolves_classified_windows_and_retains_explicit_precedence() {
     let source = source("#RANK 2\n#DEFEXRANK 100", false);
     let rank = ResolvedPlayPolicy::bms_with_timing(

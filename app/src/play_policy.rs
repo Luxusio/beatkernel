@@ -15,6 +15,25 @@ pub struct TimingPresetSelection {
     pub preset: BmsTimingPreset,
     pub precedence: BmsRankPrecedence,
 }
+impl TimingPresetSelection {
+    /// Parses an explicit version and precedence shared by native/browser adapters.
+    pub fn parse(preset_id: &str, rank_precedence: &str) -> Result<Self, PolicyError> {
+        let preset = BmsTimingPreset::BeatorajaSevenKeys8320241dV1;
+        if preset_id != preset.id() {
+            return Err(PolicyError::Invalid("unknown timing preset version"));
+        }
+        let precedence = match rank_precedence {
+            "rank-first" => BmsRankPrecedence::RankFirst,
+            "defexrank-first" => BmsRankPrecedence::DefExRankFirst,
+            _ => {
+                return Err(PolicyError::Invalid(
+                    "timing preset requires explicit rank precedence",
+                ))
+            }
+        };
+        Ok(Self { preset, precedence })
+    }
+}
 
 /// Immutable selected numerical policy, retaining the caller's precedence.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -283,6 +302,34 @@ impl ResolvedPlayPolicy {
         selection: TimingPresetSelection,
         offset: i64,
     ) -> Result<Self, PolicyError> {
+        Self::with_timing(source, GaugeSelection::Bms(kind), selection, offset)
+    }
+
+    /// Selects numerical windows independently from the caller's gauge choice.
+    /// BeatKernel retains its existing default gauge; no BMS gauge is inferred.
+    pub fn with_timing(
+        source: &BmsChart,
+        gauge: GaugeSelection,
+        selection: TimingPresetSelection,
+        offset: i64,
+    ) -> Result<Self, PolicyError> {
+        Self::from_context_with_timing(
+            &OriginalGaugeContext::from_source(source),
+            source,
+            gauge,
+            selection,
+            offset,
+        )
+    }
+
+    /// Retains original gauge statistics when the source has been practice-filtered.
+    pub fn from_context_with_timing(
+        context: &OriginalGaugeContext,
+        source: &BmsChart,
+        gauge: GaugeSelection,
+        selection: TimingPresetSelection,
+        offset: i64,
+    ) -> Result<Self, PolicyError> {
         let difficulty = source
             .judge_rank_metadata()
             .map_err(PolicyError::Rank)?
@@ -309,7 +356,25 @@ impl ResolvedPlayPolicy {
                 window: *window,
             };
         }
-        let mut policy = Self::bms(source, kind, &classified, offset)?;
+        let mut policy = match gauge {
+            GaugeSelection::Bms(kind) => Self::from_context(context, kind, &classified, offset)?,
+            GaugeSelection::BeatKernel => {
+                let entries = classified.map(|entry| crate::judgment_policy::GradeClass {
+                    grade: entry.window.grade,
+                    class: entry.judgment,
+                });
+                let judgments = crate::judgment_policy::BmsJudgmentPolicy::new(&entries)
+                    .map_err(|_| PolicyError::Invalid("invalid timing hit classes"))?;
+                Self {
+                    selection: GaugeSelection::BeatKernel,
+                    judge: envelope,
+                    gauge: GaugeProfile::default(),
+                    total: None,
+                    judgments: Some(judgments),
+                    timing: None,
+                }
+            }
+        };
         policy.timing = Some(timing);
         Ok(policy)
     }

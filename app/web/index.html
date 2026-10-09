@@ -58,6 +58,13 @@
         <label>Late window (ms) <input id="judge-late" type="text" inputmode="decimal" value="50" maxlength="21" disabled></label>
         <label>Input offset (ms) <input id="judge-offset" type="text" inputmode="decimal" value="0" maxlength="21" disabled></label></div>
       <p class="hint">Live judge windows are nonnegative; input offset may be signed. Use up to six decimal places. Replay uses its recorded judge. Saved opponents and multiplayer require compatible timing settings.</p>
+      <div class="replay-controls"><label>Numerical timing preset <select id="judge-preset" disabled>
+        <option value="">Custom windows (existing default)</option>
+        <option value="beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1">SEVENKEYS numerical windows · 8320241d · v1</option>
+      </select></label>
+        <label>Declared difficulty priority <select id="judge-precedence" disabled><option value="rank-first">RANK first</option><option value="defexrank-first">DEFEXRANK first</option></select></label>
+        <label>Gauge <select id="judge-gauge" disabled><option value="beatkernel">BeatKernel</option><option value="assist-easy">Assist Easy</option><option value="easy">Easy</option><option value="groove">Groove</option><option value="hard">Hard</option><option value="ex-hard">EX Hard</option><option value="hazard">Hazard</option></select></label></div>
+      <p class="hint">The opt-in preset requires a declared RANK or a positive integer DEFEXRANK and replaces the early/late fields. It uses BeatKernel Hold semantics v1; it does not provide full beatoraja gameplay compatibility. Input offset still applies. BMS gauges require the numerical preset. Replay uses its recorded choice.</p>
       <details class="binding-editor"><summary>Keyboard bindings</summary>
         <div id="bindings" aria-label="Live lane keyboard bindings"></div>
         <button id="bindings-reset" type="button" disabled>Reset keyboard defaults</button>

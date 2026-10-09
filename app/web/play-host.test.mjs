@@ -6,6 +6,7 @@ import { Blob, File } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
+import { BMS_TIMING_PRESET_ID } from "./play-model.mjs";
 
 function deferred() {
   let resolve;
@@ -274,7 +275,7 @@ async function harness(faults = {}) {
     "multiplayer", "multiplayer-mode", "multiplayer-url", "multiplayer-role", "multiplayer-status",
     "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page",
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
-    "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end",
+    "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "judge-preset", "judge-precedence", "judge-gauge", "live-start", "live-end",
     "bindings", "bindings-reset", "settings-save", "settings-load", "settings-status", "output-latency", "output-latency-ms", "output-rate",
     "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "pointer-input", "pointer-bindings",
     "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status",
@@ -293,6 +294,9 @@ async function harness(faults = {}) {
   elements.get("judge-early").value = "50";
   elements.get("judge-late").value = "50";
   elements.get("judge-offset").value = "0";
+  elements.get("judge-preset").value = "";
+  elements.get("judge-precedence").value = "rank-first";
+  elements.get("judge-gauge").value = "beatkernel";
   elements.get("live-start").value = "0";
   elements.get("live-end").value = "";
   elements.get("local-count").value = "1";
@@ -1263,6 +1267,31 @@ test("pre-first-live touch may use matching preview submission but never static 
     }
     await h.receive(finalScore(session.id)); await h.close();
   }
+});
+
+test("actual Main portable settings preserve explicit policy fields and old profiles reset the selection", async () => {
+  const h = await harness(); await h.preview();
+  const worker = h.workers[0];
+  h.get("judge-preset").value = BMS_TIMING_PRESET_ID;
+  h.get("judge-precedence").value = "defexrank-first";
+  h.get("judge-gauge").value = "groove";
+  h.click("settings-save"); await flush();
+  const saved = worker.last("settings-profile-save");
+  assert.deepEqual(saved.settings.timing, { earlyMs: "50", lateMs: "50", offsetMs: "0",
+    presetId: BMS_TIMING_PRESET_ID, rankPrecedence: "defexrank-first", gauge: "groove" });
+  await h.receive({ kind: "settings-profile-error", id: saved.id, message: "Fixture ends download" });
+  const selected = portableSettings();
+  Object.assign(selected.timing, { presetId: BMS_TIMING_PRESET_ID, rankPrecedence: "rank-first", gauge: "hard" });
+  chooseSettings(h); await flush();
+  await h.receive({ kind: "settings-profile-loaded", id: worker.last("settings-profile-load").id, settings: selected });
+  assert.equal(h.get("judge-gauge").value, "hard");
+  assert.equal(h.get("judge-precedence").value, "rank-first");
+  chooseSettings(h); await flush();
+  await h.receive({ kind: "settings-profile-loaded", id: worker.last("settings-profile-load").id, settings: portableSettings() });
+  assert.equal(h.get("judge-preset").value, "");
+  assert.equal(h.get("judge-precedence").value, "rank-first");
+  assert.equal(h.get("judge-gauge").value, "beatkernel");
+  await h.close();
 });
 
 test("portable settings save downloads exact Worker bytes and a correlated load governs the next actual launch", async () => {
@@ -5127,6 +5156,52 @@ test("opponent preparation mismatches stop setup while malformed or failed live 
     assert.equal(h.get("opponents-status").textContent, ended);
     await h.close();
   }
+});
+
+test("actual Main snapshots explicit timing policy before audio open and replay ignores the live selectors", async () => {
+  const opening = deferred(), h = await harness({ openGate: opening });
+  await h.preview();
+  h.get("judge-preset").value = BMS_TIMING_PRESET_ID;
+  h.get("judge-precedence").value = "defexrank-first";
+  h.get("judge-gauge").value = "hard";
+  h.get("judge-offset").value = "-0.000037";
+  h.click("play");
+  assert.equal(h.opens.length, 1);
+  for (const id of ["judge-preset", "judge-precedence", "judge-gauge"]) assert.equal(h.get(id).disabled, true);
+  h.get("judge-preset").value = "";
+  h.get("judge-precedence").value = "rank-first";
+  h.get("judge-gauge").value = "beatkernel";
+  opening.resolve(h.audio); await flush();
+  const request = h.workers[0].last("play-start");
+  assert.deepEqual(request.timingPolicy, { presetId: BMS_TIMING_PRESET_ID, rankPrecedence: "defexrank-first", gauge: "hard" });
+  assert.equal(request.timing.offsetNs, -37n);
+  await h.reply(request, { kind: "prepared", title: "Selected", artist: "Fixture", notes: 1, samples: 0,
+    lanes: [0x11], startNs: 0n, opponentCount: 0, inputMode: "physical" });
+  await h.close();
+
+  const replay = await harness(); await replay.preview();
+  chooseRecording(replay, [selectedRecording().file]);
+  replay.get("judge-preset").value = "unknown";
+  replay.get("judge-precedence").value = "unknown";
+  replay.get("judge-gauge").value = "unknown";
+  const recorded = await replay.begin("replay");
+  assert.equal(Object.hasOwn(recorded, "timingPolicy"), false);
+  assert.equal(Object.hasOwn(recorded, "timing"), false);
+  await replay.close();
+});
+
+test("actual Main keeps baseline requests unchanged and refuses an unconfigured gauge before audio opens", async () => {
+  const legacy = await harness(); await legacy.preview();
+  const request = await legacy.begin();
+  assert.equal(Object.hasOwn(request, "timingPolicy"), false);
+  await legacy.close();
+  const invalid = await harness(); await invalid.preview();
+  invalid.get("judge-gauge").value = "groove";
+  invalid.click("play"); await flush();
+  assert.equal(invalid.opens.length, 0);
+  assert.equal(invalid.workers[0].messages("play-start").length, 0);
+  assert.match(invalid.get("status").textContent, /explicit numerical timing preset/);
+  await invalid.close();
 });
 
 test("live timing is captured before synchronous audio open and drafts stay locked until all owners join", async () => {

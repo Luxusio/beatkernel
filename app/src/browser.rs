@@ -21,6 +21,9 @@ use crate::{
 #[path = "browser_render.rs"]
 pub(crate) mod render;
 
+#[path = "browser_timing_policy.rs"]
+mod timing_policy;
+
 const LOOKAHEAD_NS: i64 = 2_000_000_000;
 
 /// Joined presentation only. It owns no game, samples, transport or clocks.
@@ -481,6 +484,7 @@ impl BrowserLibrary {
             chart_seed: seed,
             start: Timestamp::ZERO,
             replay: None,
+            play_policy: None,
         })
     }
 
@@ -529,6 +533,69 @@ impl BrowserLibrary {
             chart_seed: seed,
             start,
             replay: None,
+            play_policy: None,
+        })
+    }
+
+    /// Resolve an explicit immutable policy on the original chart before section
+    /// selection. The live constructor must use the same input offset.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_chart_with_policy_at(
+        &self,
+        path: &str,
+        sample_rate: u32,
+        channels: u16,
+        seed: u64,
+        start_ns: i64,
+        max_pcm_asset_bytes: u32,
+        max_pcm_total_bytes: u32,
+        max_samples: u32,
+        preset_id: &str,
+        rank_precedence: &str,
+        gauge: &str,
+        offset_ns: i64,
+    ) -> Result<BrowserPrepared, JsValue> {
+        if start_ns < 0 {
+            return Err(js_error("live section start must be nonnegative"));
+        }
+        let selection = timing_policy::parse_selection(preset_id, rank_precedence, gauge)
+            .map_err(js_error)?;
+        let start = Timestamp::from_nanos(start_ns);
+        let limits = PcmLimits::new(
+            max_pcm_asset_bytes as usize,
+            max_pcm_total_bytes as usize,
+            max_samples as usize,
+        )
+        .map_err(js_error)?;
+        let original = self.prepare_chart(
+            path,
+            sample_rate,
+            channels,
+            seed,
+            max_pcm_asset_bytes,
+            max_pcm_total_bytes,
+            max_samples,
+        )?;
+        let (prepared, policy) = timing_policy::prepare_selected_at(
+            original.prepared,
+            start,
+            limits,
+            selection,
+            offset_ns,
+        )
+        .map_err(js_error)?;
+        let chart = PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
+            .map_err(js_error)?;
+        Ok(BrowserPrepared {
+            prepared,
+            visual_preview: None,
+            chart,
+            images: original.images,
+            movies: original.movies,
+            chart_seed: seed,
+            start,
+            replay: None,
+            play_policy: Some(policy),
         })
     }
 
@@ -583,6 +650,7 @@ impl BrowserLibrary {
             chart_seed: seed,
             start,
             replay: Some(file),
+            play_policy: None,
         })
     }
 }
@@ -591,13 +659,14 @@ impl BrowserLibrary {
 #[wasm_bindgen]
 pub struct BrowserPrepared {
     pub(crate) prepared: PreparedBms,
-    visual_preview: Option<(u64, u64, u64, u32, u32, bool)>,
+    pub(crate) visual_preview: Option<(u64, u64, u64, u32, u32, bool)>,
     pub(crate) chart: PlayerChart,
     pub(crate) images: Arc<ImageAssets>,
-    movies: Arc<crate::video_assets::VideoAssets>,
+    pub(crate) movies: Arc<crate::video_assets::VideoAssets>,
     pub(crate) chart_seed: u64,
     pub(crate) start: Timestamp,
     pub(crate) replay: Option<ReplayFile>,
+    pub(crate) play_policy: Option<crate::play_policy::ResolvedPlayPolicy>,
 }
 
 #[wasm_bindgen]

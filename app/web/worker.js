@@ -2,7 +2,7 @@ import { RenderClient, validateRenderLimits, unsignedIdentity } from "./render-p
 import { validateCompletedResults, resultRequest } from "./completed-results-model.mjs";
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot } from "./host_model.mjs";
-import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, presentationOutputAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
+import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateTimingPolicy, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, presentationOutputAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { BrowserRoomOwner, ROOM_SESSION_METHODS } from "./room-owner.mjs";
 import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
@@ -2022,6 +2022,7 @@ async function preparePlay(state, request) {
       hidDevices = snapshotHidDevices(request.hidDevices);
     }
     const timing = state.mode === "live" ? validateTiming(request.timing) : null;
+    const timingPolicy = state.mode === "live" ? validateTimingPolicy(request.timingPolicy) : null;
     const requestedStart = state.mode === "live" ? validateStart(request.startNs) : null;
     const requestedEnd = state.mode === "live" ? validateEnd(requestedStart, request.endNs) : undefined;
     state.network = multiplayerConfiguration(request.multiplayer, state.mode, state.localPlan);
@@ -2121,7 +2122,11 @@ async function preparePlay(state, request) {
         64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES);
     } else {
       if (typeof request.seed !== "string" || !/^\d{1,20}$/.test(request.seed) || BigInt(request.seed) > U64_MAX) throw new Error("Invalid gameplay chart seed.");
-      prepared = requestedStart === 0n
+      prepared = timingPolicy !== null
+        ? library.prepare_chart_with_policy_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
+          64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES,
+          timingPolicy.presetId, timingPolicy.rankPrecedence, timingPolicy.gauge, timing.offsetNs)
+        : requestedStart === 0n
         ? library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES)
         : library.prepare_chart_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
           64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES);

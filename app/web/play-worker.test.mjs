@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 import { encodeKeyboardEvent, encodeTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
-import { millisecondsToNanos } from "./play-model.mjs";
+import { BMS_TIMING_PRESET_ID, millisecondsToNanos } from "./play-model.mjs";
 
 const FileType = globalThis.File ?? NodeFile;
 const ORIGIN = 9007199254740993n;
@@ -212,6 +212,7 @@ async function workerHarness(options = {}) {
     files = [];
     preparations = [];
     replayPreparations = [];
+    policyPreparations = [];
     frees = 0;
     constructor(...limits) { this.limits = limits; libraries.push(this); }
     add_file(path) { this.files.push(path); }
@@ -238,6 +239,17 @@ async function workerHarness(options = {}) {
       if (options.prepareReplayError) throw new Error(options.prepareReplayError);
       const prepared = makePrepared(path);
       if (Object.hasOwn(options, "replayStart")) prepared.start_ns = options.replayStart;
+      return prepared;
+    }
+    prepare_chart_with_policy_at(path, rate, channels, seed, startNs, ...fields) {
+      assert.equal(this.frees, 0);
+      assert.ok(this.files.includes(path));
+      const args = [rate, channels, seed, startNs, ...fields];
+      this.policyPreparations.push({ path, args });
+      if (options.preparePolicyError) throw new Error(options.preparePolicyError);
+      const prepared = makePrepared(path);
+      prepared.start_ns = startNs;
+      prepared.timingPolicy = { presetId: fields[3], rankPrecedence: fields[4], gauge: fields[5], offsetNs: fields[6] };
       return prepared;
     }
     free() { assert.equal(++this.frees, 1); }
@@ -1639,6 +1651,61 @@ function localRequest(fields = {}) {
   return startRequest({ inputMode: "physical-contact",
     localPlanWords: localPlan([[99, HID_SOURCE], [7, 1n], [31, 2n]]), hidSetup: hidSetup(), ...fields });
 }
+
+test("actual Worker routes every live owner through explicit policy preparation and leaves legacy/replay paths intact", async () => {
+  const policy = { presetId: BMS_TIMING_PRESET_ID, rankPrecedence: "defexrank-first", gauge: "hard" };
+  const timing = { earlyNs: 11n, lateNs: 22n, offsetNs: -37n };
+  for (const request of [startRequest(), startRequest({ endNs: 1000000000n }), startRequest({ inputMode: "physical" }),
+    startRequest({ inputMode: "physical-contact" }),
+    localRequest({ inputMode: "physical", localPlanWords: localPlan([[99, HID_SOURCE], [7, 1n]]) }), localRequest()]) {
+    const endFrame = request.endNs === undefined ? undefined
+      : ((request.endNs - 123n + 100000000n) * 48000n + 999999999n) / 1000000000n;
+    const h = await catalogWorker({ gameEnd: request.endNs, gameEndFrame: endFrame });
+    await h.send({ ...request, timing, timingPolicy: policy, startNs: 123n });
+    assert.equal(h.of("play-reply").at(-1)?.result?.kind, "prepared",
+      h.of("play-error").at(-1)?.message ?? "Worker did not return prepared metadata");
+    const calls = h.libraries[0].policyPreparations;
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0], { path: "song/chart.bms", args: [48000, 2, 18446744073709551615n, 123n,
+      64 * 1024 * 1024, 256 * 1024 * 1024, 62 * 62, BMS_TIMING_PRESET_ID, "defexrank-first", "hard", -37n] });
+    const constructions = request.localPlanWords ? h.localConstructions
+      : request.inputMode === "physical-contact" ? h.contactConstructions
+        : request.inputMode === "physical" ? h.physicalConstructions
+          : request.endNs === undefined ? [{ prepared: h.games[0].prepared }] : h.sectionConstructions;
+    assert.equal(constructions.length, 1);
+    assert.deepEqual(constructions[0].prepared.timingPolicy, { ...policy, offsetNs: -37n });
+    assert.equal(h.libraries[0].preparations.length, 1, "only the existing preview used the legacy preparation");
+    await h.send({ kind: "play-stop", playId: 7 });
+  }
+  const legacy = await started();
+  assert.equal(legacy.libraries[0].policyPreparations.length, 0);
+  assert.equal(legacy.libraries[0].preparations.length, 2);
+  await legacy.send({ kind: "play-stop", playId: 7 });
+  const selected = replayFile();
+  const replay = await started({ startRequest: replayRequest(selected.file, { timingPolicy: { invalid: true } }) });
+  assert.equal(replay.libraries[0].policyPreparations.length, 0);
+  assert.equal(replay.libraries[0].replayPreparations.length, 1);
+  assert.equal(replay.replays.length, 1);
+  await replay.send({ kind: "play-stop", playId: 7 });
+});
+
+test("Worker refuses malformed explicit policies before live preparation and reports resolver failures without fallback", async () => {
+  const good = { presetId: BMS_TIMING_PRESET_ID, rankPrecedence: "rank-first", gauge: "beatkernel" };
+  for (const timingPolicy of [null, {}, { ...good, presetId: "unknown" },
+    { presetId: good.presetId, gauge: good.gauge }, { ...good, gauge: "unknown" }]) {
+    const h = await catalogWorker();
+    await h.send(startRequest({ timingPolicy }));
+    assert.equal(h.libraries[0].policyPreparations.length, 0);
+    assert.equal(h.games.length + h.locals.length, 0);
+    assert.equal(h.of("play-error").length, 1);
+  }
+  const h = await catalogWorker({ preparePolicyError: "timing preset requires declared RANK or DEFEXRANK" });
+  await h.send(startRequest({ timingPolicy: good }));
+  assert.equal(h.libraries[0].policyPreparations.length, 1);
+  assert.equal(h.libraries[0].preparations.length, 1);
+  assert.equal(h.games.length, 0);
+  assert.match(h.of("play-error").at(-1).message, /requires declared/);
+});
 
 const ROOM_URL = "https://example.test:4433/rooms/fixture";
 function roomStartRequest(fields = {}) {

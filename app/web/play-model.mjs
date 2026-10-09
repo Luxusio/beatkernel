@@ -8,6 +8,31 @@ const DEFAULT_TIMING = Object.freeze({ earlyNs: 50000000n, lateNs: 50000000n, of
 // Original samples cover base62; section preparation may add 4096 tails.
 export const ORIGINAL_PCM_SAMPLES = 62 * 62;
 export const PLAY_PCM_SAMPLES = ORIGINAL_PCM_SAMPLES + 4096;
+export const BMS_TIMING_PRESET_ID = "beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1";
+const GAUGE_SELECTIONS = Object.freeze(["beatkernel", "assist-easy", "easy", "groove", "hard", "ex-hard", "hazard"]);
+
+export function timingPolicyFromFields(presetId, rankPrecedence, gauge) {
+  if (!["rank-first", "defexrank-first"].includes(rankPrecedence)) throw new Error("Choose an explicit rank precedence.");
+  if (!GAUGE_SELECTIONS.includes(gauge)) throw new Error("Choose a known gauge policy.");
+  if (presetId === "") {
+    if (gauge !== "beatkernel") throw new Error("A BMS gauge requires an explicit numerical timing preset.");
+    return null;
+  }
+  if (presetId !== BMS_TIMING_PRESET_ID) throw new Error("Unknown numerical timing preset version.");
+  return Object.freeze({ presetId, rankPrecedence, gauge });
+}
+
+export function validateTimingPolicy(value = undefined) {
+  if (value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Reflect.ownKeys(value).length !== 3
+    || Reflect.ownKeys(value).some(key => !["presetId", "rankPrecedence", "gauge"].includes(key))) {
+    throw new Error("An explicit timing policy requires preset, rank precedence and gauge.");
+  }
+  const result = timingPolicyFromFields(value.presetId, value.rankPrecedence, value.gauge);
+  if (result === null) throw new Error("Omit the timing policy to use legacy windows.");
+  return result;
+}
 
 export function startFromSeconds(value) {
   if (typeof value !== "string" || value.length > 20 || value.trim() !== value) throw new Error("Enter nonnegative start seconds with up to nine decimal places.");
