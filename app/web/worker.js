@@ -2,7 +2,7 @@ import { RenderClient, validateRenderLimits, unsignedIdentity } from "./render-p
 import { validateCompletedResults, resultRequest } from "./completed-results-model.mjs";
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot } from "./host_model.mjs";
-import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
+import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, presentationOutputAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { BrowserRoomOwner, ROOM_SESSION_METHODS } from "./room-owner.mjs";
 import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
@@ -1732,6 +1732,7 @@ function disposeGame(state) {
   state.audioPumping = false;
   state.renderObservation = null;
   state.lastPresentation = null;
+  state.lastReplayPresentedNs = null;
   state.gamepadAdapter = null;
   state.pointerSources?.clear();
   state.pointerSources = null;
@@ -1942,9 +1943,11 @@ async function preparePlay(state, request) {
     state.commandBatchLimit = commandBatchLimit;
     if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
     state.mode = request.mode ?? "live";
-    if (state.mode === "live") {
-      if (!hostTime(request.windowOriginNs)) throw new Error("Live gameplay requires the actual Window clock origin.");
+    if (state.mode === "live" || request.windowOriginNs !== undefined) {
+      if (!hostTime(request.windowOriginNs)) throw new Error("Gameplay requires the actual Window clock origin.");
       state.windowOriginNs = request.windowOriginNs;
+    }
+    if (state.mode === "live") {
       state.latencyHint = request.latencyHint;
       // Validate the selected startup allowance without reading any clock.
       audioClockExpired(0n, 0n, null, state.latencyHint);
@@ -2525,8 +2528,27 @@ function serviceLiveAudio(state, now, audioNs) {
 function observeOutput(state, observation, output) {
   renderedCursor(output, state.startFrame);
   let completed;
+  let replayEvidence;
   if (state.mode === "replay") {
-    completed = state.game.observe_output(output.words, observation.presentedNs);
+    let pair = null;
+    let point = observation.presentedNs;
+    let reason = null;
+    if (Object.hasOwn(observation, "timestamp") || observation.paired) {
+      const now = state.windowOriginNs === null ? null : currentWindowHost(state);
+      pair = Object.hasOwn(observation, "timestamp")
+        ? observation.timestamp === null ? null
+          : presentationPair(observation.timestamp, state.startFrame, state.rate, Number(now) / 1000000)
+        : observation.presentedNs === null ? null
+          : { outputNs: observation.presentedNs, hostNs: observation.presentedHostNs };
+      if (pair !== null && now !== null && (pair.hostNs > now || now - pair.hostNs > 1000000000n)) pair = null;
+      const availability = presentationAvailability(state.lastPresentation, pair);
+      pair = availability.pair;
+      point = pair?.outputNs ?? null;
+      reason = availability.reason;
+    }
+    const available = presentationOutputAvailability(state.lastReplayPresentedNs, point);
+    replayEvidence = { point: available.point, pair, reason: reason ?? available.reason };
+    completed = state.game.observe_output(output.words, available.point);
   } else {
     // An asynchronous Worklet poll may outlive the original request timestamp.
     // Refresh Window-equivalent time while retaining the original association.
@@ -2555,6 +2577,13 @@ function observeOutput(state, observation, output) {
   if (typeof completed !== "boolean" || (completed && (state.batch !== null || state.commandPumping))) {
     throw new Error("Invalid completion with outstanding gameplay commands.");
   }
+  if (replayEvidence) {
+    if (replayEvidence.point !== null) {
+      state.lastReplayPresentedNs = replayEvidence.point;
+      if (replayEvidence.pair !== null) state.lastPresentation = replayEvidence.pair;
+      if (state.presentationReason !== null) presentationUnavailable(state, null);
+    } else if (replayEvidence.reason !== null) presentationUnavailable(state, replayEvidence.reason);
+  }
   state.completed = completed;
   if (completed && state.mode === "live") captureCompletedResults(state);
   state.commandsDrained = false; // Actual output may admit more BGM work.
@@ -2566,6 +2595,7 @@ function observeOutput(state, observation, output) {
 function snapshotPresentation(state, request, direct) {
   const raw = Object.hasOwn(request, "timestamp");
   if (raw) {
+    if (state.mode === "replay" && state.windowOriginNs === null) throw new Error("Raw replay presentation requires the actual Window clock origin.");
     if (Object.hasOwn(request, "presentedNs") || Object.hasOwn(request, "presentedHostNs")) {
       throw new Error("Raw and projected presentation observations cannot be mixed.");
     }
@@ -2578,7 +2608,7 @@ function snapshotPresentation(state, request, direct) {
     const timestamp = input === null ? null : Object.freeze({
       contextTime: input.contextTime, performanceTime: input.performanceTime,
     });
-    const nowMs = state.mode === "live" ? Number(currentWindowHost(state)) / 1000000 : observedNowMs;
+    const nowMs = Number(currentWindowHost(state)) / 1000000;
     const pair = timestamp === null ? null : presentationPair(timestamp, state.startFrame, state.rate, nowMs);
     return Object.freeze({ renderId: request.renderId,
       timestamp, presentedNs: pair?.outputNs ?? null, presentedHostNs: pair?.hostNs ?? null });
@@ -2589,7 +2619,7 @@ function snapshotPresentation(state, request, direct) {
   } else if (!(request.presentedNs === null && request.presentedHostNs === null)
     && !(hostTime(request.presentedNs) && hostTime(request.presentedHostNs))) throw new Error("Invalid output presentation pair.");
   return Object.freeze({ renderId: request.renderId,
-    presentedNs: request.presentedNs, presentedHostNs: request.presentedHostNs });
+    presentedNs: request.presentedNs, presentedHostNs: request.presentedHostNs, paired: direct });
 }
 
 function publishRender(state, observation, completed) {
@@ -2887,7 +2917,7 @@ function handlePlay(request) {
       game: null, keys: null, active: false, origin: null, startFrame: null,
       batch: null, commandClient: null, commandPumping: false, audioPumping: false,
       sampleMode: null, sampleClient: null, sampleRpcId: null, sampleCount: null, commandStarted: false,
-      audioRpcId: null, renderObservation: null, lastPresentation: null,
+      audioRpcId: null, renderObservation: null, lastPresentation: null, lastReplayPresentedNs: null,
       windowOriginNs: null, latencyHint: undefined, audioNs: 0n, presentationReason: null,
       lastRpc: 0, lastTick: 0, lastRender: 0,
       lastHost: null, acquiredPrefix: null, lastSequence: null, sourceOrder: new Map(), preOriginInputs: 0,

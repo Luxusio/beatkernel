@@ -223,6 +223,19 @@ export function presentationAvailability(previous, pair) {
   if (previous !== null && pair.outputNs === previous.outputNs) return { pair: null, reason: null, progressed: false };
   return { pair, reason: null, progressed: true };
 }
+
+// Legacy replay points carry genuine output time without a host association.
+// All replay entry paths use this output frontier; never re-emit a retained point.
+export function presentationOutputAvailability(previous, point) {
+  for (const value of [previous, point]) {
+    if (value !== null && (typeof value !== "bigint" || value < 0n || value > I64_MAX)) {
+      throw new Error("Invalid replay output presentation point.");
+    }
+  }
+  if (point === null || point === previous) return { point: null, reason: null, progressed: false };
+  if (previous !== null && point < previous) return { point: null, reason: "regressing-estimate", progressed: false };
+  return { point, reason: null, progressed: true };
+}
 export function audioClockExpired(nowNs, armedHostNs, lastProgressHostNs, latencyHint = undefined) {
   for (const value of [nowNs, armedHostNs, lastProgressHostNs]) {
     if (value !== null && (typeof value !== "bigint" || value < 0n || value > I64_MAX)) {

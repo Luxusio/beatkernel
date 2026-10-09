@@ -3855,9 +3855,10 @@ test("malformed or mixed raw observations refuse before input mutation or report
   }
   for (const mode of ["live", "replay"]) {
     const { h, port, game } = await directActive({ activationFrame: 48000n,
-      ...(mode === "replay" ? { startRequest: replayRequest(replayFile().file) } : {}) });
+      ...(mode === "replay" ? { startRequest: replayRequest(replayFile().file, { windowOriginNs: 10000000000n }) } : {}) });
     const stale = port.onmessage;
     await h.send(rawObservation({ timestamp: { contextTime: 1.5, performanceTime: 1499.875 }, observedNowMs: 1500 }));
+    assert.equal(port.posts.at(-1).kind, "poll", "the continuation is genuinely pending before stop");
     await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
     await h.send(startRequest({ playId: 8 }));
     const calls = game.calls.length, messages = h.messages.length;
@@ -5845,6 +5846,136 @@ test("serialization and transferable-layout failures stay separate from stop/fre
   assert.equal(setup.of("play-error")[0].replayError, null);
   assert.equal(setup.games[0].replayTakes, 0, "a refused capture was never admitted for export");
   assertReleased(setup);
+});
+
+test("replay scalar duplicates and regression hold presentation while admitting every original report", async () => {
+  const h = await active({ startRequest: replayRequest(replayFile().file),
+    observeOutput(game, words, point) { if (point !== null) game.score.song_ns = point; return false; } });
+  const report = renderReport();
+  let renderId = 0;
+  for (const point of [200n, 200n, 199n, null, 201n]) {
+    await h.send({ kind: "play-render", playId: 7, renderId: ++renderId, report,
+      presentedNs: point, presentedHostNs: "unused legacy host" });
+  }
+  const outputs = h.replays[0].calls.filter(call => call[0] === "output");
+  assert.deepEqual(outputs.map(call => call[2]), [200n, null, null, null, 201n]);
+  for (const call of outputs) assert.deepEqual(call[1], report.words);
+  assert.equal(h.of("play-error").length, 0);
+  assert.equal(h.of("play-render-done").at(-1).songNs, 201n);
+  await h.send({ kind: "play-stop", playId: 7 });
+});
+
+test("replay raw estimates retain paired chronology and a common frontier across legacy points", async () => {
+  const h = await active({ startRequest: replayRequest(replayFile().file, { windowOriginNs: 10000000000n }),
+    activationFrame: 4800n, manualClock: true });
+  h.setNetworkNow(1202);
+  const report = renderReport({ start: 4800n }); let renderId = 0;
+  for (const timestamp of [
+    { contextTime: 0.2, performanceTime: 1199 },
+    { contextTime: 0.2, performanceTime: 1200 },
+    { contextTime: 0.199, performanceTime: 1201 },
+    { contextTime: 0.201, performanceTime: 1199 },
+    { contextTime: 0.202, performanceTime: 1198 },
+    { contextTime: 0.203, performanceTime: 1201 },
+  ]) await h.send(rawObservation({ renderId: ++renderId, timestamp, observedNowMs: 1202, report }));
+  assert.deepEqual(h.replays[0].calls.filter(call => call[0] === "output").map(call => call[2]),
+    [100000000n, null, null, null, null, 103000000n]);
+  await h.send({ kind: "play-render", playId: 7, renderId: ++renderId, report, presentedNs: 200000000n,
+    presentedHostNs: "still unused in legacy mode" });
+  await h.send(rawObservation({ renderId: ++renderId, report, observedNowMs: 1202,
+    timestamp: { contextTime: 0.25, performanceTime: 1201.5 } }));
+  assert.equal(h.replays[0].calls.filter(call => call[0] === "output").at(-1)[2], null);
+  assert.equal(h.of("play-error").length, 0);
+  await h.send({ kind: "play-stop", playId: 7 });
+});
+
+test("replay rechecks raw freshness after the genuine asynchronous Worklet poll", async () => {
+  const { h, port, game } = await directActive({ manualClock: true, activationFrame: 4800n,
+    startRequest: replayRequest(replayFile().file, { windowOriginNs: 10000000000n }) });
+  h.setNetworkNow(1500);
+  await h.send(rawObservation({ timestamp: { contextTime: 1.5, performanceTime: 1499 }, observedNowMs: 1500 }));
+  assert.equal(port.posts.at(-1).kind, "poll");
+  h.setNetworkNow(2600);
+  const report = renderReport({ start: 4800n }); await port.acknowledge({ report });
+  const held = game.calls.filter(call => call[0] === "output").at(-1);
+  assert.equal(held[2], null); assert.deepEqual(held[1], report.words);
+  assert.equal(h.of("play-error").length, 0);
+  h.setNetworkNow(2700);
+  await h.send(rawObservation({ renderId: 2, timestamp: { contextTime: 1.7, performanceTime: 2699 }, observedNowMs: 2700 }));
+  await port.acknowledge({ report });
+  assert.equal(game.calls.filter(call => call[0] === "output").at(-1)[2], 1600000000n);
+  await h.send({ kind: "play-stop", playId: 7 });
+});
+
+test("missing replay Window origin refuses raw observations without inventing an association", async () => {
+  const h = await active({ startRequest: replayRequest(replayFile().file) });
+  await h.send(rawObservation({ report: renderReport() }));
+  assert.match(h.of("play-error").at(-1).message, /actual Window clock origin/);
+  assert.equal(h.replays[0].calls.filter(call => call[0] === "output").length, 0);
+  assertReleased(h);
+});
+
+test("held replay presentation never masks a malformed genuine output report", async () => {
+  const h = await active({ startRequest: replayRequest(replayFile().file) });
+  await h.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 200n });
+  const invalid = renderReport(); invalid.words[54] = 1;
+  await h.send({ kind: "play-render", playId: 7, renderId: 2, report: invalid, presentedNs: 199n });
+  assert.equal(h.of("play-error").length, 1);
+  assert.equal(h.replays[0].calls.filter(call => call[0] === "output").length, 1);
+  assertReleased(h);
+});
+
+test("raw replay null, zero and pre-arm presentation preserve report processing without false progress", async () => {
+  const h = await active({ activationFrame: 4800n, manualClock: true,
+    startRequest: replayRequest(replayFile().file, { windowOriginNs: 10000000000n }) });
+  h.setNetworkNow(1200); const report = renderReport({ start: 4800n });
+  let renderId = 0;
+  for (const timestamp of [null, { contextTime: 0, performanceTime: 0 }, { contextTime: 0.05, performanceTime: 1199 }]) {
+    await h.send(rawObservation({ renderId: ++renderId, report, timestamp, observedNowMs: 1200 }));
+  }
+  const outputs = h.replays[0].calls.filter(call => call[0] === "output");
+  assert.deepEqual(outputs.map(call => call[2]), [null, null, null]);
+  for (const call of outputs) assert.deepEqual(call[1], report.words);
+  assert.equal(h.of("play-render-done").length, 3);
+  assert.equal(h.of("play-error").length, 0);
+  await h.send({ kind: "play-stop", playId: 7 });
+});
+
+test("direct raw and paired replay share chronology across regressing and repeated output points", async () => {
+  const { h, port, game } = await directActive({ activationFrame: 4800n, manualClock: true,
+    startRequest: replayRequest(replayFile().file, { windowOriginNs: 10000000000n }) });
+  h.setNetworkNow(1500); const report = renderReport({ start: 4800n });
+  await h.send(rawObservation({ renderId: 1, observedNowMs: 1500,
+    timestamp: { contextTime: 0.1000005, performanceTime: 1498 } }));
+  await port.acknowledge({ report });
+  await h.send({ kind: "play-render", playId: 7, renderId: 2, presentedNs: 400n, presentedHostNs: 1499000000n });
+  await port.acknowledge({ report });
+  await h.send({ kind: "play-render", playId: 7, renderId: 3, presentedNs: 500n, presentedHostNs: 1499500000n });
+  await port.acknowledge({ report });
+  await h.send({ kind: "play-render", playId: 7, renderId: 4, presentedNs: 600n, presentedHostNs: 1499800000n });
+  await port.acknowledge({ report });
+  assert.deepEqual(game.calls.filter(call => call[0] === "output").map(call => call[2]), [500n, null, null, 600n]);
+  assert.equal(h.of("play-error").length, 0);
+  await h.send({ kind: "play-stop", playId: 7 });
+});
+
+test("Rust replay refusal and invalid completion never publish successful replay progress", async () => {
+  for (const failure of ["throw", "nonboolean", "pending"]) {
+    const h = await active({ startRequest: replayRequest(replayFile().file),
+      batches: failure === "pending" ? [batch(901n)] : [],
+      observeOutput() {
+        if (failure === "throw") throw new Error("actual native replay validation refusal");
+        return failure === "nonboolean" ? 1 : true;
+      } });
+    if (failure === "pending") {
+      const commands = await h.rpc("play-commands");
+      assert.ok(commands.result, "completion is tested with genuine outstanding command ownership");
+    }
+    await h.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 200n });
+    assert.equal(h.of("play-error").length, 1);
+    assert.equal(h.of("play-render-done").length, 0);
+    assertReleased(h);
+  }
 });
 
 test("replay reads once through canonical preparation and shares original PCM, ACK and output owners without live calls", async () => {

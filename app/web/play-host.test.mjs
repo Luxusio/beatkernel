@@ -7274,6 +7274,17 @@ function presentationPacket(h, kind, fields = {}) {
 function statusSnapshot(h) {
   return { text: h.get("status").textContent, error: h.get("status").dataset.error };
 }
+test("replay setup carries the actual Window origin before audio or visual progress", async () => {
+  const h = await harness(); await h.preview();
+  chooseRecording(h, [selectedRecording().file]);
+  const start = await h.begin("replay");
+  assert.equal(start.mode, "replay");
+  assert.equal(typeof start.windowOriginNs, "bigint");
+  assert.equal(start.windowOriginNs, 9000000000n);
+  assert.equal(h.audio.arms.length, 0);
+  await h.close();
+});
+
 test("presentation feedback: preview wait restores status only on matching drawn and idle packets do not write", async () => {
   const h = await harness(); await h.preview(); const baseline = statusSnapshot(h);
   const writes = watchPlayDisplay(h);

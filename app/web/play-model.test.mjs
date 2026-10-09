@@ -8,11 +8,28 @@ import {
   parseTimingMilliseconds, timingFromMilliseconds, validateTiming,
   ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, startFromSeconds, validateStart, validateEnd, sectionFromSeconds,
   audioOutputFromFields, audioLimitsFromFields, replayOutputFromMetadata,
-  presentationAvailability, audioClockExpired,
+  presentationAvailability, presentationOutputAvailability, audioClockExpired,
 } from "./play-model.mjs";
 
 const U64_MAX = 18446744073709551615n;
 const I64_MAX = 9223372036854775807n;
+
+test("replay output-only admission preserves exact points and never substitutes retained evidence", () => {
+  assert.deepEqual(presentationOutputAvailability(null, null), { point: null, reason: null, progressed: false });
+  assert.deepEqual(presentationOutputAvailability(null, 0n), { point: 0n, reason: null, progressed: true });
+  assert.deepEqual(presentationOutputAvailability(0n, 1n), { point: 1n, reason: null, progressed: true });
+  assert.deepEqual(presentationOutputAvailability(100n, 100n), { point: null, reason: null, progressed: false });
+  assert.deepEqual(presentationOutputAvailability(100n, 99n), { point: null, reason: "regressing-estimate", progressed: false });
+  assert.deepEqual(presentationOutputAvailability(100n, null), { point: null, reason: null, progressed: false });
+  assert.equal(presentationOutputAvailability(9007199254740993n, I64_MAX).point, I64_MAX);
+});
+
+test("replay output-only admission rejects malformed previous and current coordinates", () => {
+  for (const value of [undefined, -1n, I64_MAX + 1n, 0, "0", NaN, {}, false]) {
+    assert.throws(() => presentationOutputAvailability(null, value));
+    assert.throws(() => presentationOutputAvailability(value, null));
+  }
+});
 
 test("unknown-quality association regression is explicit and does not replace accepted history", () => {
   const previous = Object.freeze({ outputNs: 100n, hostNs: 200n });

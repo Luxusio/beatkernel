@@ -2100,7 +2100,8 @@ async function play(mode = "live") {
         keyPairs: Uint32Array.from(session.bindingSelection.flatMap(row => [row[0], row[2]])) };
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
       rate: session.audio.sampleRate, commandBatchLimit: session.commandBatchLimit, ...source,
-      ...(mode === "live" ? { windowOriginNs: session.windowOriginNs, latencyHint: session.contextOptions.latencyHint } : {}) });
+      windowOriginNs: session.windowOriginNs,
+      ...(mode === "live" ? { latencyHint: session.contextOptions.latencyHint } : {}) });
     if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
     if (mode === "replay" ? prepared.mode !== "replay" : prepared.mode !== undefined && prepared.mode !== "live") throw new Error("Playback preparation mode changed.");
     if (mode === "live" && prepared.inputMode !== session.inputMode) throw new Error("Preparation did not admit the requested physical input route.");
