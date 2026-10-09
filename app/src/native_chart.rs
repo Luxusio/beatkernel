@@ -33,6 +33,60 @@ pub fn prepare_chart(
         )
     })
 }
+/// Resolves explicit timing on the original source before practice filtering.
+/// Legacy selection preserves the existing post-section gauge resolution path.
+pub fn prepare_chart_with_policy(
+    config: NativeChartConfig<'_>,
+    judge: &crate::native_judge::NativeJudgeConfig,
+    gauge: crate::play_policy::GaugeSelection,
+    timing: Option<crate::play_policy::TimingPresetSelection>,
+) -> NativeGameplayResult<(
+    PreparedBms,
+    SectionReport,
+    crate::play_policy::ResolvedPlayPolicy,
+)> {
+    prepare_with_policy(config, judge, gauge, timing, |config| {
+        load_prepared_with_seed(
+            config.path,
+            config.format,
+            config.limits,
+            config.channels,
+            config.chart_seed,
+        )
+    })
+}
+
+fn prepare_with_policy(
+    config: NativeChartConfig<'_>,
+    judge: &crate::native_judge::NativeJudgeConfig,
+    gauge: crate::play_policy::GaugeSelection,
+    timing: Option<crate::play_policy::TimingPresetSelection>,
+    load: impl FnOnce(&NativeChartConfig<'_>) -> NativeGameplayResult<PreparedBms>,
+) -> NativeGameplayResult<(
+    PreparedBms,
+    SectionReport,
+    crate::play_policy::ResolvedPlayPolicy,
+)> {
+    let mut selected = None;
+    let (prepared, section) = prepare_with(config, |config| {
+        let original = load(config)?;
+        if let Some(timing) = timing {
+            selected = Some(crate::play_policy::ResolvedPlayPolicy::with_timing(
+                &original.source,
+                gauge,
+                timing,
+                judge.offset,
+            )?);
+        }
+        Ok(original)
+    })?;
+    let policy = match selected {
+        Some(policy) => policy,
+        None => judge.resolve_play_policy(&section.original_gauge, gauge)?,
+    };
+    Ok((prepared, section, policy))
+}
+
 pub(crate) fn prepare_with(
     config: NativeChartConfig<'_>,
     load: impl FnOnce(&NativeChartConfig<'_>) -> NativeGameplayResult<PreparedBms>,
@@ -278,5 +332,166 @@ mod fixtures {
         };
         let error = prepare_with(cfg, |_| Ok(original)).err().unwrap();
         assert_eq!(error.to_string(), "section BGM requires Play commands");
+    }
+    fn selected_request() -> crate::play_policy::TimingPresetSelection {
+        crate::play_policy::TimingPresetSelection::parse(
+            beatkernel_bms::BmsTimingPreset::BeatorajaSevenKeys8320241dV1.id(),
+            "rank-first",
+        )
+        .unwrap()
+    }
+    fn judge_config() -> crate::native_judge::NativeJudgeConfig {
+        crate::native_judge::NativeJudgeConfig {
+            early: 0,
+            late: 0,
+            offset: 31,
+            preroll: 0,
+            output: beatkernel::time::ClockDomainId(2),
+            end: None,
+        }
+    }
+    #[test]
+    fn selected_native_chart_policy_uses_original_statistics_before_practice_removal() {
+        use crate::play_policy::{GaugeSelection, ResolvedPlayPolicy};
+        let bindings = BTreeMap::from([(0x11, 4)]);
+        let cfg = config(&bindings, 550_000_000);
+        let text = format!("#RANK 3\n{TEXT}");
+        let original = parsed(&cfg, &text).unwrap();
+        let expected = ResolvedPlayPolicy::with_timing(
+            &original.source,
+            GaugeSelection::Bms(beatkernel_bms::BmsGaugeKind::Groove),
+            selected_request(),
+            31,
+        )
+        .unwrap();
+        let (prepared, section, policy) = prepare_with_policy(
+            cfg,
+            &judge_config(),
+            expected.selection(),
+            Some(selected_request()),
+            |_| Ok(original),
+        )
+        .unwrap();
+        assert_eq!(policy, expected);
+        assert_eq!(section.excluded_objects, 2);
+        assert_eq!(prepared.compiled.chart.objects().len(), 1);
+        let sliced = ResolvedPlayPolicy::with_timing(
+            &prepared.source,
+            expected.selection(),
+            selected_request(),
+            31,
+        )
+        .unwrap();
+        assert_ne!(sliced.gauge(), policy.gauge());
+        let judge = judge_config()
+            .judge_with_policy(&prepared.source, prepared.compiled.chart.clone(), &policy)
+            .unwrap();
+        let header = crate::native_judge::prepare_policy_header(
+            &prepared.source,
+            &judge,
+            &policy,
+            beatkernel::time::ClockDomainId(3),
+            section.start,
+            0,
+            None,
+        )
+        .unwrap();
+        let setup = crate::replay_playback::decode_section_setup(&header.options).unwrap();
+        assert_eq!(setup.timing.as_ref(), policy.timing());
+        assert_eq!(&setup.gauge, policy.gauge());
+        assert_eq!(setup.start, section.start);
+        assert_eq!(judge.profile().input_offset().as_nanos(), 31);
+    }
+
+    #[test]
+    fn original_selected_policy_reaches_actual_native_cohort_launch_preparation() {
+        use crate::{
+            local_players::PlayerId,
+            native_cohort_setup::{prepare_audio_cohort_with_policy, CohortPreparation},
+            play_policy::GaugeSelection,
+        };
+        use beatkernel::{input::DeviceId, time::ClockDomainId};
+        let bindings = BTreeMap::from([(0x11, 4)]);
+        let text = format!("#RANK 3\n{TEXT}");
+        let (prepared, section, policy) = prepare_with_policy(
+            config(&bindings, 550_000_000),
+            &judge_config(),
+            GaugeSelection::BeatKernel,
+            Some(selected_request()),
+            |cfg| parsed(cfg, &text),
+        )
+        .unwrap();
+        let chosen = CohortPreparation {
+            host: ClockDomainId(1),
+            output: ClockDomainId(2),
+            early: policy.judge().max_early().as_nanos(),
+            late: policy.judge().max_late().as_nanos(),
+            offset: policy.judge().input_offset().as_nanos(),
+            preroll: 0,
+            start: section.start,
+            end: None,
+            chart_seed: 0,
+            bindings: &bindings,
+            record_replay: Some(Path::new("not-written.bkr")),
+            replay_max_bytes: 65536,
+            replay_max_records: 128,
+        };
+        let cohort = prepare_audio_cohort_with_policy(
+            &prepared,
+            &[(PlayerId(7), DeviceId(11)), (PlayerId(9), DeviceId(13))],
+            &crate::competition_live::CompetitionOptions::default(),
+            &chosen,
+            ClockDomainId(3),
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(cohort.states.len(), 2);
+        for (member, state) in cohort.configs.iter().zip(&cohort.states) {
+            policy
+                .validate_timing(&member.judge, beatkernel_bms::BmsInputMode::ButtonOnly)
+                .unwrap();
+            assert_eq!(state.gauge.profile(), policy.gauge());
+            let header = state.capture.as_ref().unwrap().header();
+            assert_eq!(header.normalized_clock, ClockDomainId(3));
+            let decoded = crate::replay_playback::decode_section_setup(&header.options).unwrap();
+            assert_eq!(decoded.timing.as_ref(), policy.timing());
+            assert_eq!(&decoded.gauge, policy.gauge());
+            assert_eq!(
+                state.completion.as_ref().unwrap().judge_until(),
+                Timestamp::from_nanos(2_290_000_000 - 31 + 1)
+            );
+        }
+        assert_eq!(
+            cohort.states[0].capture.as_ref().unwrap().header(),
+            cohort.states[1].capture.as_ref().unwrap().header()
+        );
+    }
+
+    #[test]
+    fn native_selected_missing_difficulty_refuses_and_absent_choice_preserves_legacy_setup() {
+        use crate::play_policy::GaugeSelection;
+        let bindings = BTreeMap::from([(0x11, 4), (0x12, 5), (0x13, 6)]);
+        assert!(prepare_with_policy(
+            config(&bindings, 0),
+            &judge_config(),
+            GaugeSelection::BeatKernel,
+            Some(selected_request()),
+            |cfg| parsed(cfg, TEXT)
+        )
+        .is_err());
+        let (prepared, section, policy) = prepare_with_policy(
+            config(&bindings, 0),
+            &judge_config(),
+            GaugeSelection::BeatKernel,
+            None,
+            |cfg| parsed(cfg, TEXT),
+        )
+        .unwrap();
+        let expected = judge_config()
+            .resolve_play_policy(&section.original_gauge, GaugeSelection::BeatKernel)
+            .unwrap();
+        assert_eq!(policy, expected);
+        assert!(policy.timing().is_none());
+        assert_eq!(prepared.compiled.chart.objects().len(), 3);
     }
 }

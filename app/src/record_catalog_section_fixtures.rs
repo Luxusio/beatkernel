@@ -1,8 +1,8 @@
 //! Deferred real pristine capture and accepted-operation prefix preview.
 use super::*;
 use crate::{
-    replay_capture::LiveReplayCapture, replay_playback::decode_section_setup,
-    settings::SettingsHost, local_players::PlayerId,
+    local_players::PlayerId, replay_capture::LiveReplayCapture,
+    replay_playback::decode_section_setup, settings::SettingsHost,
 };
 use beatkernel::{
     judge::JudgeEngine,
@@ -27,6 +27,76 @@ fn source() -> beatkernel_bms::BmsChart {
         Default::default(),
     )
     .unwrap()
+}
+
+#[test]
+fn native_record_preview_retains_selected_timing_and_rejects_equal_window_other_identity() {
+    use crate::play_policy::{GaugeSelection, ResolvedPlayPolicy, TimingPresetSelection};
+    use beatkernel_bms::{BmsInputMode, BmsRankPrecedence, BmsTimingPreset};
+    let mut source = source();
+    source.metadata.insert("RANK".into(), "2".into());
+    source.metadata.insert("DEFEXRANK".into(), "100".into());
+    let preset = BmsTimingPreset::BeatorajaSevenKeys8320241dV1;
+    let policy = ResolvedPlayPolicy::with_timing(
+        &source,
+        GaugeSelection::BeatKernel,
+        TimingPresetSelection {
+            preset,
+            precedence: BmsRankPrecedence::RankFirst,
+        },
+        0,
+    )
+    .unwrap();
+    let limits = replay_limits().unwrap();
+    let judge = crate::mine_plan::prepare_judge_with_timing(
+        &source,
+        source.compile().unwrap().chart,
+        policy.judge().clone(),
+        BmsInputMode::ButtonOnly,
+        1024,
+        Some(policy.timing().unwrap().profiles()),
+    )
+    .unwrap();
+    let file = LiveReplayCapture::new_with_policy(
+        &judge,
+        ClockDomainId(17),
+        limits,
+        Timestamp::ZERO,
+        0,
+        None,
+        BmsInputMode::ButtonOnly,
+        None,
+        &policy,
+    )
+    .unwrap()
+    .into_file();
+    let args = vec![
+        "--timing-preset".into(),
+        preset.id().into(),
+        "--rank-precedence".into(),
+        "rank-first".into(),
+    ];
+    let draft = NativeSettings::from_args(&args, SettingsHost::Linux).unwrap();
+    let selected = draft_section(&draft, &source).unwrap();
+    assert_eq!(selected.timing.as_ref(), policy.timing());
+    RecordPreview::from_file(Path::new("selected.bkr"), &source, &draft, file.clone()).unwrap();
+    let other_args = vec![
+        "--timing-preset".into(),
+        preset.id().into(),
+        "--rank-precedence".into(),
+        "defexrank-first".into(),
+    ];
+    let other = NativeSettings::from_args(&other_args, SettingsHost::Linux).unwrap();
+    let other_setup = draft_section(&other, &source).unwrap();
+    assert_eq!(selected.profile, other_setup.profile);
+    assert_eq!(selected.gauge, other_setup.gauge);
+    assert_ne!(selected.timing, other_setup.timing);
+    assert!(
+        RecordPreview::from_file(Path::new("selected.bkr"), &source, &other, file)
+            .err()
+            .unwrap()
+            .contains("profile or section differs")
+    );
 }
 fn recording(settings: &NativeSettings, times: &[i64]) -> ReplayFile {
     let source = source();
@@ -249,12 +319,10 @@ fn selected_gauge_record_comparison_matches_original_source_policy_and_refuses_o
     )
     .unwrap();
     let file = recording(&settings, &[]);
-    assert!(
-        decode_section_setup(&file.header.options)
-            .unwrap()
-            .judgments
-            .is_some()
-    );
+    assert!(decode_section_setup(&file.header.options)
+        .unwrap()
+        .judgments
+        .is_some());
     RecordPreview::from_file(Path::new("practice.bkr"), &source, &settings, file.clone()).unwrap();
     let mut legacy = file.clone();
     legacy.header.options = crate::replay_judgment_policy::split_options(&legacy.header.options)

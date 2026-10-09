@@ -129,3 +129,26 @@ production validation.
 Native CLI selection, generated current browser artifacts, actual browser
 acceptance and final independent task review/QA remain open. These results do
 not establish whole-player completion or physical audio verification.
+
+## Native selection and record previews
+
+Linux, Windows and macOS launchers accept the paired options
+`--timing-preset beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1`
+and `--rank-precedence rank-first|defexrank-first`. Both options must be supplied
+together; duplicate, incomplete and unknown selections are rejected. Gauge
+selection remains independent through `--gauge`. With neither timing option,
+the existing early/late configuration remains effective.
+
+Native preparation resolves the original chart's difficulty before filtering a
+practice section. Solo and local members consume the resulting immutable
+policy for judging, completion, recording and competition admission. Record
+previews derive the same policy from the current settings and compare full
+timing identity. Equal numerical windows with different declaration precedence
+do not make records interchangeable.
+
+The focused host library run in
+`target/wf/bms-timing-native-preview-focused.log` passed 63 tests with no failures.
+It includes the actual record-preview regression, settings-pair admission,
+staged live/capture/replay/seek and local-member fixtures. Earlier native chart
+preparation fixtures passed eight tests. These are development checks; native
+device execution and independent final CLI/browser QA remain separate.

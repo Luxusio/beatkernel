@@ -25,7 +25,7 @@ use beatkernel_bms_runtime::{
 use beatkernel_bms_runtime::{
     competition_live::CompetitionOptions,
     local_players::PlayerId,
-    native_chart::{prepare_chart, NativeChartConfig},
+    native_chart::{prepare_chart_with_policy, NativeChartConfig},
     playback_pause::NativePause,
     ChannelPolicy,
 };
@@ -102,33 +102,46 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             )
         })
         .transpose()?;
-    let (prepared, section) = prepare_chart(NativeChartConfig {
-        path: &options.chart,
-        format: pcm,
-        limits: PcmLimits::new(
-            64 * 1024 * 1024,
-            256 * 1024 * 1024,
-            beatkernel_bms_runtime::DEFAULT_BMS_PCM_SAMPLES,
-        )?,
-        channels: if options.mono_stereo {
-            ChannelPolicy::MonoToStereo
-        } else {
-            ChannelPolicy::Exact
-        },
-        chart_seed: options.chart_seed,
-        start: Timestamp::from_nanos(options.start_ns),
-        bindings: &options.bindings,
-    })?;
-    let policy = beatkernel_bms_runtime::native_judge::NativeJudgeConfig {
+    let judge_config = beatkernel_bms_runtime::native_judge::NativeJudgeConfig {
         early: options.early,
         late: options.late,
         offset: options.offset,
         preroll: options.preroll,
         output: OUTPUT,
         end: options.end_ns.map(Timestamp::from_nanos),
-    }
-    .resolve_play_policy(&section.original_gauge, options.gauge)?;
+    };
+    let (prepared, section, policy) = prepare_chart_with_policy(
+        NativeChartConfig {
+            path: &options.chart,
+            format: pcm,
+            limits: PcmLimits::new(
+                64 * 1024 * 1024,
+                256 * 1024 * 1024,
+                beatkernel_bms_runtime::DEFAULT_BMS_PCM_SAMPLES,
+            )?,
+            channels: if options.mono_stereo {
+                ChannelPolicy::MonoToStereo
+            } else {
+                ChannelPolicy::Exact
+            },
+            chart_seed: options.chart_seed,
+            start: Timestamp::from_nanos(options.start_ns),
+            bindings: &options.bindings,
+        },
+        &judge_config,
+        options.gauge,
+        options.timing,
+    )?;
     println!("prepared practice section={section:?}");
+    if let Some(timing) = policy.timing() {
+        println!(
+            "applied timing preset={} precedence={:?} difficulty={:?} semantics={}",
+            timing.selection().preset.id(),
+            timing.selection().precedence,
+            timing.profiles().difficulty(),
+            timing.interaction_semantics()
+        );
+    }
     for warning in &prepared.source.warnings {
         eprintln!("BMS warning line{}: {}", warning.line, warning.message);
     }
@@ -170,9 +183,9 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         &CohortPreparation {
             host: HOST,
             output: OUTPUT,
-            early: options.early,
-            late: options.late,
-            offset: options.offset,
+            early: policy.judge().max_early().as_nanos(),
+            late: policy.judge().max_late().as_nanos(),
+            offset: policy.judge().input_offset().as_nanos(),
             preroll: options.preroll,
             start: Timestamp::from_nanos(options.start_ns),
             end: options.end_ns.map(Timestamp::from_nanos),

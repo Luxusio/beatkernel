@@ -129,7 +129,8 @@ impl RecordPreview {
         if setup.chart_seed != expected.chart_seed {
             return Err("saved record chart seed differs from the current draft".into());
         }
-        if setup.judgments != expected.judgments
+        if setup.timing != expected.timing
+            || setup.judgments != expected.judgments
             || setup.gauge != expected.gauge
             || setup.profile != expected.profile
             || setup.start != expected.start
@@ -361,13 +362,23 @@ fn draft_section(
         output: beatkernel::time::ClockDomainId(0),
         end: None,
     };
-    let policy = config
-        .resolve_play_policy(
-            &crate::play_policy::OriginalGaugeContext::from_source(source),
+    let policy = match settings.timing_selection()? {
+        Some(timing) => crate::play_policy::ResolvedPlayPolicy::with_timing(
+            source,
             selection,
+            timing,
+            profile.input_offset().as_nanos(),
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?,
+        None => config
+            .resolve_play_policy(
+                &crate::play_policy::OriginalGaugeContext::from_source(source),
+                selection,
+            )
+            .map_err(|error| error.to_string())?,
+    };
     let judgments = policy.judgments().cloned();
+    let timing = policy.timing().cloned();
     let (profile, gauge) = policy.into_parts();
     let text = settings
         .fields()
@@ -391,7 +402,7 @@ fn draft_section(
         Some(end)
     };
     Ok(RecordedSetup {
-        timing: None,
+        timing,
         judgments,
         profile,
         gauge,

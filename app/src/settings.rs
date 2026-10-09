@@ -81,6 +81,23 @@ pub fn parse_chart_seed(value: &str) -> Result<u64, String> {
     value.parse().map_err(|_| "chart seed exceeds u64".into())
 }
 
+/// Checked optional timing pair shared by all native CLI adapters.
+/// Absence keeps caller windows; an explicit preset requires explicit precedence.
+pub fn parse_timing_selection(
+    preset: Option<&str>,
+    precedence: Option<&str>,
+) -> Result<Option<crate::play_policy::TimingPresetSelection>, String> {
+    match (preset, precedence) {
+        (None, None) => Ok(None),
+        (Some(preset), Some(precedence)) => {
+            crate::play_policy::TimingPresetSelection::parse(preset, precedence)
+                .map(Some)
+                .map_err(|error| error.to_string())
+        }
+        _ => Err("timing preset and rank precedence must be selected together".into()),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsField {
     pub flag: &'static str,
@@ -91,6 +108,16 @@ pub struct SettingsField {
 type Spec = (&'static str, &'static str, &'static str);
 
 const COMMON: &[Spec] = &[
+    (
+        "--timing-preset",
+        "TIMING PRESET",
+        "Optional beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1 numerical windows with BeatKernel Hold v1. Requires explicit rank precedence; gauge stays independent.",
+    ),
+    (
+        "--rank-precedence",
+        "RANK PRECEDENCE",
+        "With timing preset: rank-first or defexrank-first. Requires original RANK or supported positive integer DEFEXRANK; no missing-header default.",
+    ),
     (
         "--gauge",
         "GAUGE POLICY",
@@ -561,6 +588,19 @@ impl NativeSettings {
             parse_chart_seed(value)
         }
     }
+    /// Validates the editable optional timing pair before apply or launch.
+    pub fn timing_selection(
+        &self,
+    ) -> Result<Option<crate::play_policy::TimingPresetSelection>, String> {
+        let value = |flag| {
+            self.fields
+                .iter()
+                .find(|row| row.flag == flag)
+                .map(|row| row.value.as_str())
+                .filter(|value| !value.is_empty())
+        };
+        parse_timing_selection(value("--timing-preset"), value("--rank-precedence"))
+    }
     pub fn fields(&self) -> &[SettingsField] {
         &self.fields
     }
@@ -726,6 +766,50 @@ fn valid_value(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn timing_pair_is_explicit_and_native_drafts_preserve_both_fields() {
+        use beatkernel_bms::{BmsRankPrecedence, BmsTimingPreset};
+        let preset = BmsTimingPreset::BeatorajaSevenKeys8320241dV1;
+        assert!(parse_timing_selection(None, None).unwrap().is_none());
+        for bad in [
+            (Some(preset.id()), None),
+            (None, Some("rank-first")),
+            (Some("unknown"), Some("rank-first")),
+            (Some(preset.id()), Some("unknown")),
+            (Some(""), Some("rank-first")),
+        ] {
+            assert!(parse_timing_selection(bad.0, bad.1).is_err());
+        }
+        for host in [
+            SettingsHost::Linux,
+            SettingsHost::Windows,
+            SettingsHost::Macos,
+        ] {
+            let supplied = args(&[
+                "--timing-preset",
+                preset.id(),
+                "--rank-precedence",
+                "defexrank-first",
+                "--gauge",
+                "beatkernel",
+            ]);
+            let settings = NativeSettings::from_args(&supplied, host).unwrap();
+            assert_eq!(
+                settings.timing_selection().unwrap().unwrap().precedence,
+                BmsRankPrecedence::DefExRankFirst
+            );
+            assert_eq!(settings.native_args(), supplied);
+            assert!(NativeSettings::from_args(
+                &[supplied.clone(), args(&["--timing-preset", preset.id()])].concat(),
+                host
+            )
+            .is_err());
+            let incomplete =
+                NativeSettings::from_args(&args(&["--timing-preset", preset.id()]), host).unwrap();
+            assert!(incomplete.timing_selection().is_err());
+        }
+    }
+
     #[test]
     fn output_matrix_is_live_only_and_never_enters_initial_profile_schema() {
         let args = args(&["--output-matrix", "1;0.5"]);

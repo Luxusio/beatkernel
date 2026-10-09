@@ -33,6 +33,7 @@ struct Options {
     preroll: i64,
     chart_seed: u64,
     gauge: beatkernel_bms_runtime::play_policy::GaugeSelection,
+    timing: Option<beatkernel_bms_runtime::play_policy::TimingPresetSelection>,
     start_ns: i64,
     end_ns: Option<i64>,
     bgm_lookahead: i64,
@@ -102,6 +103,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut advance_lag = 2_000_000i64;
     let mut chart_seed = 0u64;
     let mut gauge = beatkernel_bms_runtime::play_policy::GaugeSelection::BeatKernel;
+    let (mut timing_preset, mut rank_precedence) = (None, None);
     let mut start_ns = 0i64;
     let mut end_ns = None;
     let mut bgm_lookahead = 3_000_000_000i64;
@@ -183,6 +185,8 @@ fn parse(args: &[String]) -> Result<Options> {
                 }
             }
             "--gauge" => gauge = value.parse()?,
+            "--timing-preset" => timing_preset = Some(value.clone()),
+            "--rank-precedence" => rank_precedence = Some(value.clone()),
             "--chart-seed" => {
                 chart_seed = beatkernel_bms_runtime::settings::parse_chart_seed(value)?;
             }
@@ -245,6 +249,10 @@ fn parse(args: &[String]) -> Result<Options> {
     if end_ns.is_some_and(|end| end <= start_ns) {
         return Err("end-ns must be strictly after start-ns".into());
     }
+    let timing = beatkernel_bms_runtime::settings::parse_timing_selection(
+        timing_preset.as_deref(),
+        rank_precedence.as_deref(),
+    )?;
     Ok(Options {
         record_replay,
         replay_max_records,
@@ -266,6 +274,7 @@ fn parse(args: &[String]) -> Result<Options> {
         preroll,
         chart_seed,
         gauge,
+        timing,
         start_ns,
         end_ns,
         bgm_lookahead,
@@ -532,7 +541,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
             "Graphical player is bms-player; this is a native developer composition. Local mode: replace --keyboard-registry with repeated --local-player ID:REGISTRY (2..64 distinct keyboards). Network local groups share one connection and start agreement.\n"
         );
         println!(
-            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nGauge timing: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Saved ghosts must match the chosen policy. Multiplayer peers must match the chosen gauge and judgment policy.\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned and strictly after start; solo or local cohort CoreAudio completes a finite prefix only after native presentation and input drain, without forcing remaining notes. Network peers must agree on the same finite section endpoint. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
+            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --timing-preset PRESET_ID --rank-precedence rank-first|defexrank-first --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nTiming preset: optional beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1 requires explicit rank precedence and original RANK or supported positive integer DEFEXRANK; gauges remain independently selected. Uses numerical hit windows with BeatKernel Hold v1, not full source LN/CN/HCN semantics. Gauge timing without preset: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Saved ghosts must match the chosen policy. Multiplayer peers must match the chosen gauge and judgment policy.\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned and strictly after start; solo or local cohort CoreAudio completes a finite prefix only after native presentation and input drain, without forcing remaining notes. Network peers must agree on the same finite section endpoint. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
@@ -564,7 +573,7 @@ mod native {
         PreparedNativeAudio,
     };
     use beatkernel_bms_runtime::{
-        native_chart::{prepare_chart, NativeChartConfig},
+        native_chart::{prepare_chart_with_policy, NativeChartConfig},
         native_end::NativeEnd,
         native_judge::{capture_limits, prepare_section_capture_for_policy, NativeJudgeConfig},
         playback_pause::NativePause,
@@ -876,26 +885,6 @@ mod native {
         let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
             4096, HOST,
         )?);
-        let (prepared, section) = prepare_chart(NativeChartConfig {
-            path: &options.chart,
-            format: options.format,
-            limits: PcmLimits::new(
-                64 * 1024 * 1024,
-                256 * 1024 * 1024,
-                beatkernel_bms_runtime::DEFAULT_BMS_PCM_SAMPLES,
-            )?,
-            channels: if options.mono_stereo {
-                ChannelPolicy::MonoToStereo
-            } else {
-                ChannelPolicy::Exact
-            },
-            chart_seed: options.chart_seed,
-            start: Timestamp::from_nanos(options.start_ns),
-            bindings: &options.bindings,
-        })?;
-        println!("prepared practice section={section:?}");
-        let input_sounds = prepare_input_sounds(&prepared)?;
-        let hazard_sounds = prepare_mine_sounds(&prepared, input_sounds.as_ref())?;
         let judge_config = NativeJudgeConfig {
             early: options.early,
             late: options.late,
@@ -904,9 +893,42 @@ mod native {
             output: OUTPUT,
             end: options.end_ns.map(Timestamp::from_nanos),
         };
-        let policy = judge_config.resolve_play_policy(&section.original_gauge, options.gauge)?;
+        let (prepared, section, policy) = prepare_chart_with_policy(
+            NativeChartConfig {
+                path: &options.chart,
+                format: options.format,
+                limits: PcmLimits::new(
+                    64 * 1024 * 1024,
+                    256 * 1024 * 1024,
+                    beatkernel_bms_runtime::DEFAULT_BMS_PCM_SAMPLES,
+                )?,
+                channels: if options.mono_stereo {
+                    ChannelPolicy::MonoToStereo
+                } else {
+                    ChannelPolicy::Exact
+                },
+                chart_seed: options.chart_seed,
+                start: Timestamp::from_nanos(options.start_ns),
+                bindings: &options.bindings,
+            },
+            &judge_config,
+            options.gauge,
+            options.timing,
+        )?;
+        println!("prepared practice section={section:?}");
+        if let Some(timing) = policy.timing() {
+            println!(
+                "applied timing preset={} precedence={:?} difficulty={:?} semantics={}",
+                timing.selection().preset.id(),
+                timing.selection().precedence,
+                timing.profiles().difficulty(),
+                timing.interaction_semantics()
+            );
+        }
+        let input_sounds = prepare_input_sounds(&prepared)?;
+        let hazard_sounds = prepare_mine_sounds(&prepared, input_sounds.as_ref())?;
         let mut gauge = beatkernel_bms_runtime::gauge::BmsGauge::new(policy.gauge().try_copy()?);
-        let mut completion = judge_config.completion(&prepared)?;
+        let mut completion = judge_config.completion_with_policy(&prepared, &policy)?;
         for warning in &prepared.source.warnings {
             eprintln!("BMS warning line {}: {}", warning.line, warning.message);
         }
@@ -982,8 +1004,8 @@ mod native {
             "requested/applied CoreAudio={:?}; exact selected attachment={selected:?}; explicit keyboard bindings={:?}; windows={}/{}ns offset={}ns preroll={}ns advance_lag={}ns voices={} channels={} queue/pending={} live_slack={SLACK}",
             audio.configuration(),
             options.bindings,
-            options.early,
-            options.late,
+            policy.judge().max_early().as_nanos(),
+            policy.judge().max_late().as_nanos(),
             options.offset,
             options.preroll,
             options.advance_lag,
@@ -1977,6 +1999,75 @@ mod fixtures {
         assert!(park_resume_event(&mut full, original.clone()).is_err());
         assert_eq!(full.len(), 4096);
         assert_eq!(full.last(), Some(&original));
+    }
+    #[test]
+    fn timing_selection_requires_exact_version_and_precedence_without_changing_gauge() {
+        use beatkernel_bms::{BmsRankPrecedence, BmsTimingPreset};
+        let base = args();
+        assert!(parse(&base).unwrap().timing.is_none());
+        let preset = BmsTimingPreset::BeatorajaSevenKeys8320241dV1;
+        for (name, precedence) in [
+            ("rank-first", BmsRankPrecedence::RankFirst),
+            ("defexrank-first", BmsRankPrecedence::DefExRankFirst),
+        ] {
+            let mut supplied = base.clone();
+            supplied.extend([
+                "--timing-preset".into(),
+                preset.id().into(),
+                "--rank-precedence".into(),
+                name.into(),
+            ]);
+            let actual = parse(&supplied).unwrap();
+            assert_eq!(actual.timing.unwrap().precedence, precedence);
+            assert_eq!(
+                actual.gauge,
+                beatkernel_bms_runtime::play_policy::GaugeSelection::BeatKernel
+            );
+            supplied.extend(["--gauge".into(), "hard".into()]);
+            assert_eq!(
+                parse(&supplied).unwrap().gauge,
+                beatkernel_bms_runtime::play_policy::GaugeSelection::Bms(
+                    beatkernel_bms::BmsGaugeKind::Hard
+                )
+            );
+        }
+        for added in [
+            vec!["--timing-preset", preset.id()],
+            vec!["--rank-precedence", "rank-first"],
+            vec![
+                "--timing-preset",
+                "unknown",
+                "--rank-precedence",
+                "rank-first",
+            ],
+            vec![
+                "--timing-preset",
+                preset.id(),
+                "--rank-precedence",
+                "unknown",
+            ],
+            vec![
+                "--timing-preset",
+                preset.id(),
+                "--rank-precedence",
+                "rank-first",
+                "--timing-preset",
+                preset.id(),
+            ],
+            vec![
+                "--timing-preset",
+                preset.id(),
+                "--rank-precedence",
+                "rank-first",
+                "--rank-precedence",
+                "rank-first",
+            ],
+            vec!["--timing-preset"],
+        ] {
+            let mut supplied = base.clone();
+            supplied.extend(added.into_iter().map(str::to_owned));
+            assert!(parse(&supplied).is_err());
+        }
     }
     #[test]
     fn gauge_selection_uses_exact_names_and_rejects_invalid_or_duplicate_values() {
