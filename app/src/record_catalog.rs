@@ -391,6 +391,7 @@ fn draft_section(
         Some(end)
     };
     Ok(RecordedSetup {
+        timing: None,
         judgments,
         profile,
         gauge,

@@ -77,3 +77,27 @@ passed 541 tests including doctests, zero failures/ignored. Its first cold build
 hit the bounded 240-second timeout; the follow-up warm run exited successfully.
 This is development evidence, not independent final task QA or all-platform
 release acceptance.
+
+The policy-aware capture header now validates actual staged rules and records
+the outer timing policy with explicit staged rule schemas. Common section
+playback reconstructs those rules, checks original source declarations, head
+envelope and hit classes, and compares the complete canonical header. Legacy
+single-profile tuple decoders refuse staged recordings instead of discarding
+the additional policy.
+
+Native header/capture preparation and admission compare full timing identity,
+including when recording is disabled. Shared timing inspection checks actual
+stage windows without parsing snapshot bytes. Source difficulty checks preserve
+RANK/DEFEX identity even when both resolve to equal numerical windows.
+
+Development integration executes actual Runtime input reports through capture,
+wire encoding/decoding, replay, visual replay and repeated seek for both input
+modes and finite/unlimited sections. Four native admission/preparation fixtures
+cover reverse mismatches, canonical roundtrips and changed/malformed source
+declarations. The full no-default-features app library run passed 1,751 tests,
+zero failed, four ignored. Independent incremental source review found no new
+defect in this integration; final task review/QA still requires all ACs.
+
+StepGameplay/local-member preparation, actual native/browser selectors and
+remaining record/competition consumers still need policy-aware wiring. Do not
+count WBS08.07 complete from this capture/replay increment.

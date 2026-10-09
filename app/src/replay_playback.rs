@@ -1,17 +1,16 @@
 //! Application identity checks and logical reconstruction of captured BMS play.
 
-use crate::{
-    input_sounds::InputSoundIdentity,
-    mine_plan::prepare_judge,
-    replay_capture::{CaptureError, setup_gauge_header},
-};
 #[cfg(test)]
 use crate::replay_capture::LiveReplayCapture;
+use crate::{
+    input_sounds::InputSoundIdentity,
+    replay_capture::{setup_gauge_header, CaptureError},
+};
 use beatkernel::{
     judge::{JudgeEngine, JudgeError, JudgeGrade, JudgeProfile, JudgeWindow},
     replay::{
+        codec::{decode_replay, encode_replay, ReplayCodecError, ReplayCodecLimits, ReplayFile},
         ReplayError, ReplayOperation, ReplaySession,
-        codec::{ReplayCodecError, ReplayCodecLimits, ReplayFile, decode_replay, encode_replay},
     },
     time::{Duration, Timestamp},
 };
@@ -122,6 +121,7 @@ pub fn read_replay(
 /// Explicit recorded setup retaining section bounds and input interaction mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedSetup {
+    pub timing: Option<crate::play_policy::ResolvedTimingPolicy>,
     pub judgments: Option<crate::judgment_policy::BmsJudgmentPolicy>,
     pub profile: JudgeProfile,
     pub gauge: crate::gauge::GaugeProfile,
@@ -168,6 +168,13 @@ fn decode_recorded_setup(
     options: &[u8],
     allow_extended: bool,
 ) -> Result<RecordedSetup, PlaybackError> {
+    let (options, timing) = crate::replay_timing_policy::split_options(options)
+        .map_err(|_| PlaybackError::Metadata("invalid timing policy"))?;
+    if !allow_extended && timing.is_some() {
+        return Err(PlaybackError::Metadata(
+            "staged timing replay requires a policy-aware consumer",
+        ));
+    }
     let (options, judgments) = crate::replay_judgment_policy::split_options(options)
         .map_err(|_| PlaybackError::Metadata("invalid judgment policy"))?;
     if !allow_extended && judgments.is_some() {
@@ -332,7 +339,27 @@ fn decode_recorded_setup(
             .validate_profile(&profile)
             .map_err(|_| PlaybackError::Metadata("judgment classes differ from judge profile"))?;
     }
+    if let Some(timing) = &timing {
+        if timing.profiles().head_envelope(profile.input_offset())? != profile {
+            return Err(PlaybackError::IdentityMismatch("timing routing envelope"));
+        }
+        let entries = timing
+            .profiles()
+            .windows(beatkernel_bms::BmsTimingStage::KeyHead)
+            .map(|entry| crate::judgment_policy::GradeClass {
+                grade: entry.window.grade,
+                class: entry.judgment,
+            });
+        let expected = crate::judgment_policy::BmsJudgmentPolicy::new(&entries)
+            .map_err(|_| PlaybackError::Metadata("invalid timing hit classes"))?;
+        if judgments.as_ref() != Some(&expected) {
+            return Err(PlaybackError::Metadata(
+                "timing hit classes differ from recorded policy",
+            ));
+        }
+    }
     Ok(RecordedSetup {
+        timing,
         profile,
         judgments,
         gauge,
@@ -418,6 +445,7 @@ fn validate_recorded_setup(
         return Err(PlaybackError::IdentityMismatch("BMS rule seed"));
     }
     let RecordedSetup {
+        timing,
         judgments,
         profile,
         gauge,
@@ -426,12 +454,29 @@ fn validate_recorded_setup(
         end,
         input_mode,
     } = decode_recorded_setup(&file.header.options, allow_extended)?;
-    let rules_identity: &[u8] = match input_mode {
-        BmsInputMode::ButtonOnly => b"beatkernel-bms/builtin-judge/v1",
-        BmsInputMode::ButtonOrContact => b"beatkernel-bms/press-judge/v1",
+    let rules_identity: &[u8] = if timing.is_some() {
+        crate::replay_capture::timing_rules_identity(input_mode)
+    } else {
+        match input_mode {
+            BmsInputMode::ButtonOnly => b"beatkernel-bms/builtin-judge/v1",
+            BmsInputMode::ButtonOrContact => b"beatkernel-bms/press-judge/v1",
+        }
     };
     if file.header.rules_identity != rules_identity {
         return Err(PlaybackError::IdentityMismatch("BMS rule schema"));
+    }
+    if let Some(timing) = &timing {
+        let declared = source
+            .judge_rank_metadata()?
+            .resolve(timing.selection().precedence);
+        if declared != Some(timing.profiles().difficulty()) {
+            return Err(PlaybackError::IdentityMismatch(
+                "declared timing difficulty",
+            ));
+        }
+        if timing.profiles().head_envelope(profile.input_offset())? != profile {
+            return Err(PlaybackError::IdentityMismatch("timing routing envelope"));
+        }
     }
     if end.is_some_and(|end| {
         file.records.iter().any(|record| {
@@ -446,12 +491,13 @@ fn validate_recorded_setup(
     }
     let selected = crate::section_start::source_at(source, start)?;
     let compiled = selected.compile()?;
-    let judge = prepare_judge(
+    let judge = crate::mine_plan::prepare_judge_with_timing(
         &selected,
         compiled.chart,
         profile,
         input_mode,
         beatkernel_bms::ParseOptions::default().max_objects,
+        timing.as_ref().map(|timing| timing.profiles()),
     )
     .map_err(PlaybackError::Hazards)?;
     let input_sounds =
@@ -469,6 +515,8 @@ fn validate_recorded_setup(
     )?;
     let expected = crate::replay_judgment_policy::wrap_header(expected, judgments.as_ref(), limits)
         .map_err(|_| PlaybackError::Metadata("invalid judgment header"))?;
+    let expected =
+        crate::replay_capture::wrap_timing_header(expected, timing.as_ref(), input_mode, limits)?;
     if expected != file.header {
         return Err(PlaybackError::IdentityMismatch(
             "compiled judge setup/profile",
@@ -478,10 +526,14 @@ fn validate_recorded_setup(
 }
 
 #[cfg(test)]
+#[path = "timing_replay_fixtures.rs"]
+mod timing_replay_fixtures;
+
+#[cfg(test)]
 mod section_fixtures {
     use super::*;
     use beatkernel::{input::codec::CodecLimits, time::ClockDomainId};
-    use beatkernel_bms::{ParseOptions, parse};
+    use beatkernel_bms::{parse, ParseOptions};
 
     fn limits() -> ReplayCodecLimits {
         ReplayCodecLimits::new(8192, 8, 4096, CodecLimits::new(4096, 1024).unwrap()).unwrap()

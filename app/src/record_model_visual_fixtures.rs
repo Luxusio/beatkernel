@@ -47,6 +47,7 @@ pub(crate) fn record_with_archive() -> (RecordPreview, ResultArchive) {
     )
     .unwrap();
     let setup = RecordedSetup {
+        timing: None,
         judgments: Some(
             BmsJudgmentPolicy::new(&[GradeClass {
                 grade: JudgeGrade(1),

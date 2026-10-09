@@ -37,6 +37,62 @@ impl ResolvedTimingPolicy {
                 .map_err(PolicyError::Timing)?,
         })
     }
+    /// Verifies actual immutable stages and the selected indexed head envelope.
+    pub fn validate_judge(
+        &self,
+        judge: &beatkernel::judge::JudgeEngine,
+        mode: beatkernel_bms::BmsInputMode,
+    ) -> Result<(), PolicyError> {
+        let expected = self
+            .profiles
+            .head_envelope(judge.profile().input_offset())
+            .map_err(PolicyError::Judge)?;
+        if &expected != judge.profile() {
+            return Err(PolicyError::Invalid(
+                "selected timing routing envelope differs",
+            ));
+        }
+        let profiles = [
+            BmsTimingStage::KeyHead,
+            BmsTimingStage::ScratchHead,
+            BmsTimingStage::KeyTail,
+            BmsTimingStage::ScratchTail,
+        ]
+        .map(|stage| self.profiles.judge_profile(stage));
+        let [key_head, scratch_head, key_tail, scratch_tail] = profiles;
+        let (key_head, scratch_head, key_tail, scratch_tail) = (
+            key_head.map_err(PolicyError::Judge)?,
+            scratch_head.map_err(PolicyError::Judge)?,
+            key_tail.map_err(PolicyError::Judge)?,
+            scratch_tail.map_err(PolicyError::Judge)?,
+        );
+        for object in judge.chart().objects() {
+            let actual = judge.builtin_timing(object.id).ok_or(PolicyError::Invalid(
+                "selected timing requires staged builtin rules",
+            ))?;
+            // BMS logical controls preserve the visible source channel code.
+            if !matches!(actual.control.0, 0x11..=0x19 | 0x21..=0x29) {
+                return Err(PolicyError::Invalid(
+                    "selected timing has an unknown BMS lane",
+                ));
+            }
+            let (head, tail) = if actual.control.0 & 15 == 6 {
+                (&scratch_head, &scratch_tail)
+            } else {
+                (&key_head, &key_tail)
+            };
+            if actual.head != head
+                || actual.tail != object.time.end.map(|_| tail)
+                || actual.accepts_contact != (mode == beatkernel_bms::BmsInputMode::ButtonOrContact)
+                || actual.semantics != self.interaction_semantics()
+            {
+                return Err(PolicyError::Invalid(
+                    "selected timing differs from actual stage rules",
+                ));
+            }
+        }
+        Ok(())
+    }
     pub const fn selection(&self) -> TimingPresetSelection {
         self.selection
     }
@@ -300,46 +356,7 @@ impl ResolvedPlayPolicy {
                 "selected timing routing envelope differs",
             ));
         }
-        let profiles = [
-            BmsTimingStage::KeyHead,
-            BmsTimingStage::ScratchHead,
-            BmsTimingStage::KeyTail,
-            BmsTimingStage::ScratchTail,
-        ]
-        .map(|stage| timing.profiles.judge_profile(stage));
-        let [key_head, scratch_head, key_tail, scratch_tail] = profiles;
-        let (key_head, scratch_head, key_tail, scratch_tail) = (
-            key_head.map_err(PolicyError::Judge)?,
-            scratch_head.map_err(PolicyError::Judge)?,
-            key_tail.map_err(PolicyError::Judge)?,
-            scratch_tail.map_err(PolicyError::Judge)?,
-        );
-        for object in judge.chart().objects() {
-            let actual = judge.builtin_timing(object.id).ok_or(PolicyError::Invalid(
-                "selected timing requires staged builtin rules",
-            ))?;
-            // BMS logical controls preserve the visible source channel code.
-            if !matches!(actual.control.0, 0x11..=0x19 | 0x21..=0x29) {
-                return Err(PolicyError::Invalid(
-                    "selected timing has an unknown BMS lane",
-                ));
-            }
-            let (head, tail) = if actual.control.0 & 15 == 6 {
-                (&scratch_head, &scratch_tail)
-            } else {
-                (&key_head, &key_tail)
-            };
-            if actual.head != head
-                || actual.tail != object.time.end.map(|_| tail)
-                || actual.accepts_contact != (mode == beatkernel_bms::BmsInputMode::ButtonOrContact)
-                || actual.semantics != timing.interaction_semantics()
-            {
-                return Err(PolicyError::Invalid(
-                    "selected timing differs from actual stage rules",
-                ));
-            }
-        }
-        Ok(())
+        timing.validate_judge(judge, mode)
     }
     /// Maximum actual late stage extent, including long-note releases.
     pub fn completion_late(&self) -> Duration {

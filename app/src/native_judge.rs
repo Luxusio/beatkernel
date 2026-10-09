@@ -73,6 +73,7 @@ impl NativeJudgeConfig {
         chart: CompiledChart,
         policy: &crate::play_policy::ResolvedPlayPolicy,
     ) -> NativeGameplayResult<JudgeEngine> {
+        validate_source_timing(source, policy)?;
         Ok(crate::mine_plan::prepare_judge_with_timing(
             source,
             chart,
@@ -124,6 +125,25 @@ impl NativeJudgeConfig {
             policy.judge().input_offset().as_nanos(), self.preroll, self.output)?))
     }
 }
+// Timing admission observes source declarations even when capture is disabled.
+// Legacy policies continue to leave otherwise unused rank metadata untouched.
+fn validate_source_timing(
+    source: &BmsChart,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+) -> NativeGameplayResult<()> {
+    if let Some(timing) = policy.timing() {
+        let selected = source
+            .judge_rank_metadata()?
+            .resolve(timing.selection().precedence);
+        if selected != Some(timing.profiles().difficulty()) {
+            return Err(
+                "selected timing differs from original source difficulty declaration".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Refuse unsupported identity preparation before native/ghost/network acquisition.
 pub fn validate_policy_competition(
     selection: crate::play_policy::GaugeSelection,
@@ -148,6 +168,8 @@ pub fn prepare_policy_header(
     if judge.effective_song_time().is_some() || judge.profile() != policy.judge() {
         return Err("selected competition requires a pristine matching judge".into());
     }
+    validate_source_timing(source, policy)?;
+    policy.validate_timing(judge, BmsInputMode::ButtonOnly)?;
     let limits = crate::competition_live::replay_limits()?;
     let header = crate::replay_capture::setup_play_policy_header(
         judge,
@@ -273,6 +295,8 @@ pub fn prepare_section_capture_for_policy(
     if judge.effective_song_time().is_some() || judge.profile() != policy.judge() {
         return Err("native policy capture requires a pristine matching judge profile".into());
     }
+    validate_source_timing(source, policy)?;
+    policy.validate_timing(judge, BmsInputMode::ButtonOnly)?;
     let Some(limits) = limits else {
         return Ok(None);
     };

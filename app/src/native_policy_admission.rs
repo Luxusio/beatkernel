@@ -86,6 +86,16 @@ pub(crate) fn validate_header_in_domain(
     {
         return Err("native policy header differs from actual judge, gauge or section".into());
     }
+    if let Some(timing) = &setup.timing {
+        timing.validate_judge(judge, setup.input_mode)?;
+    } else if judge
+        .chart()
+        .objects()
+        .iter()
+        .any(|object| judge.builtin_timing(object.id).is_some())
+    {
+        return Err("native staged rules require recorded timing identity".into());
+    }
     let identity = if let Some(bytes) = header.chart_identity.strip_prefix(b"bms-judge-setup/v1:") {
         if bytes.len() != 8 {
             return Err("native policy chart identity extent differs".into());
@@ -116,6 +126,12 @@ pub(crate) fn validate_header_in_domain(
     )?;
     let expected =
         crate::replay_judgment_policy::wrap_header(expected, setup.judgments.as_ref(), limits)?;
+    let expected = crate::replay_capture::wrap_timing_header(
+        expected,
+        setup.timing.as_ref(),
+        setup.input_mode,
+        limits,
+    )?;
     if header.rules_identity != expected.rules_identity || header.options != expected.options {
         return Err("native policy setup is not canonical".into());
     }
@@ -178,12 +194,12 @@ pub(crate) fn validate_selected_in_domain(
             logical_domain,
             section_start,
         )?;
-        if crate::replay_playback::decode_section_setup(&header.options)?
-            .judgments
-            .as_ref()
-            != policy.judgments()
-        {
+        let setup = crate::replay_playback::decode_section_setup(&header.options)?;
+        if setup.judgments.as_ref() != policy.judgments() {
             return Err("selected native judgment classes differ from recorded policy".into());
+        }
+        if setup.timing.as_ref() != policy.timing() {
+            return Err("selected native timing differs from recorded policy".into());
         }
     }
     if let (Some(capture), Some(header)) = (capture, competition) {

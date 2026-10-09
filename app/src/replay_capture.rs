@@ -5,8 +5,8 @@ use beatkernel::{
     input::encode_event,
     judge::JudgeEngine,
     replay::{
-        REPLAY_VERSION, ReplayError, ReplayHeader, ReplayRecord, ReplayRecorder,
-        codec::{ReplayCodecError, ReplayCodecLimits, ReplayFile, encode_replay},
+        codec::{encode_replay, ReplayCodecError, ReplayCodecLimits, ReplayFile},
+        ReplayError, ReplayHeader, ReplayRecord, ReplayRecorder, REPLAY_VERSION,
     },
     runtime::RuntimeReport,
     time::{ClockDomainId, Timestamp},
@@ -17,6 +17,7 @@ use std::{fs::OpenOptions, io::Write, path::Path};
 /// Capture, serialization or exclusive output creation failure.
 #[derive(Debug)]
 pub enum CaptureError {
+    TimingPolicy(crate::replay_timing_policy::PolicyError),
     JudgmentPolicy(crate::replay_judgment_policy::PolicyError),
     InvalidPolicy(&'static str),
     GaugePolicy(crate::replay_gauge_policy::PolicyError),
@@ -51,6 +52,7 @@ impl From<std::io::Error> for CaptureError {
 impl std::fmt::Display for CaptureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::TimingPolicy(error) => write!(f, "{error}"),
             Self::JudgmentPolicy(error) => write!(f, "{error}"),
             Self::InvalidPolicy(error) => write!(f, "BMS replay policy: {error}"),
             Self::GaugePolicy(error) => write!(f, "{error}"),
@@ -160,6 +162,9 @@ pub fn setup_play_policy_header(
     if judge.profile() != policy.judge() {
         return Err(CaptureError::InvalidPolicy("judge profile differs"));
     }
+    policy
+        .validate_timing(judge, input_mode)
+        .map_err(|_| CaptureError::InvalidPolicy("selected stage configuration differs"))?;
     let header = setup_gauge_header(
         judge,
         domain,
@@ -171,8 +176,38 @@ pub fn setup_play_policy_header(
         input_sounds,
         policy.gauge(),
     )?;
-    crate::replay_judgment_policy::wrap_header(header, policy.judgments(), limits)
-        .map_err(CaptureError::JudgmentPolicy)
+    let header = crate::replay_judgment_policy::wrap_header(header, policy.judgments(), limits)
+        .map_err(CaptureError::JudgmentPolicy)?;
+    wrap_timing_header(header, policy.timing(), input_mode, limits)
+}
+
+/// The staged numerical policy uses its own explicit interaction schema.
+pub(crate) fn timing_rules_identity(input_mode: BmsInputMode) -> &'static [u8] {
+    match input_mode {
+        BmsInputMode::ButtonOnly => b"beatkernel-bms/profiled-builtin-judge/v1",
+        BmsInputMode::ButtonOrContact => b"beatkernel-bms/profiled-press-judge/v1",
+    }
+}
+
+/// Applies the outer recorded timing policy and matching staged rule identity.
+/// Absent timing returns the original header unchanged.
+pub(crate) fn wrap_timing_header(
+    mut header: ReplayHeader,
+    timing: Option<&crate::play_policy::ResolvedTimingPolicy>,
+    input_mode: BmsInputMode,
+    limits: ReplayCodecLimits,
+) -> Result<ReplayHeader, CaptureError> {
+    if timing.is_some() {
+        let identity = timing_rules_identity(input_mode);
+        header.rules_identity.clear();
+        header
+            .rules_identity
+            .try_reserve_exact(identity.len())
+            .map_err(|_| CaptureError::Codec(ReplayCodecError::AllocationFailed))?;
+        header.rules_identity.extend_from_slice(identity);
+    }
+    crate::replay_timing_policy::wrap_header(header, timing, limits)
+        .map_err(CaptureError::TimingPolicy)
 }
 
 /// Canonical setup with an optional validated invisible input-sound identity.
@@ -589,7 +624,7 @@ mod section_fixtures {
         judge::{JudgeGrade, JudgeProfile, JudgeWindow},
         time::Duration,
     };
-    use beatkernel_bms::{ParseOptions, parse};
+    use beatkernel_bms::{parse, ParseOptions};
 
     fn judge() -> JudgeEngine {
         let source = parse(
@@ -658,16 +693,14 @@ mod section_fixtures {
                     + header.rules_identity.len()
                     + header.options.len()
                     + env!("CARGO_PKG_VERSION").len();
-                assert!(
-                    LiveReplayCapture::new_at_with_chart_seed(
-                        &judge,
-                        domain,
-                        limits(cap),
-                        start,
-                        seed
-                    )
-                    .is_ok()
-                );
+                assert!(LiveReplayCapture::new_at_with_chart_seed(
+                    &judge,
+                    domain,
+                    limits(cap),
+                    start,
+                    seed
+                )
+                .is_ok());
                 assert!(matches!(
                     LiveReplayCapture::new_at_with_chart_seed(
                         &judge,
@@ -745,14 +778,12 @@ mod section_fixtures {
             ),
             Err(CaptureError::Codec(ReplayCodecError::HeaderTooLarge))
         ));
-        assert!(
-            LiveReplayCapture::new_at(
-                &judge,
-                ClockDomainId(17),
-                limits(cap + 8),
-                Timestamp::from_nanos(1)
-            )
-            .is_ok()
-        );
+        assert!(LiveReplayCapture::new_at(
+            &judge,
+            ClockDomainId(17),
+            limits(cap + 8),
+            Timestamp::from_nanos(1)
+        )
+        .is_ok());
     }
 }
