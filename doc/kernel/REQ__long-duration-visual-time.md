@@ -38,6 +38,36 @@ local epoch, i128 time subtraction, head/tail coordinates and drift are checked
 across longextents, pauses, epoch rebases and backward seeks. This does not
 establish that the app consumes the core VisualProjector.
 
+## Verification commands and tolerances
+
+The logical geometry fixtures compare independent local rational/literal
+expectations with an absolute tolerance of `1e-12` in their normalized coordinate
+units. The app's unclipped local head/tail plus drift uses a `0.001` pixel
+tolerance derived from f32 renderer-input arithmetic. Neither tolerance grows
+with the twenty-hour/week absolute timestamp; neither is a universal accuracy
+guarantee for arbitrary geometry or cancellation inside a queried interval.
+
+Executed development commands, using Rust 1.98.1 from the existing local
+`target/toolchain/env.sh`, one compiler job, incremental/debug disabled, and
+the cached `target/wf/worklet-chronology-qa-cli-1/cargo` target directory:
+
+```sh
+cargo test -p beatkernel --locked --test long_duration_visual lane_local_and_cross_segment_displacement_survive_huge_prior_scroll -- --nocapture
+cargo test -p beatkernel --locked --test long_duration_visual -- --nocapture
+cargo test -p beatkernel-bms-runtime --lib --features desktop,webtransport --locked long_duration_playfield_fixtures -- --nocapture
+cargo clippy -p beatkernel --all-targets --locked --no-deps -- -D warnings
+cargo test -p beatkernel --locked
+```
+
+The first command produced the two deliberately preserved red reproductions
+before the final correction. Focused checks subsequently passed eight core
+tests and three app tests. Final all-target core Clippy exited zero with warnings
+denied. Full-core regression initially timed out during compilation, before
+executing tests; the final current-source run is recorded separately in
+`target/wf/long-duration-visual-time/core-all-test-final.log`. A compilation
+timeout is not a test PASS. Final independent review/QA evidence is recorded
+after the applicable commands finish.
+
 ## Known ceiling
 
 CPU geometry and bounded virtual schedules do not prove physical GPU rendering,
