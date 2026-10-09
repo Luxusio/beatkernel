@@ -209,6 +209,8 @@ pub mod local_setup;
 mod local_sound_stop_fixtures;
 #[cfg(test)]
 mod local_source_plan_fixtures;
+#[cfg(all(test, feature = "graphics"))]
+mod long_duration_playfield_fixtures;
 #[cfg(test)]
 mod mine_admission_fixtures;
 #[cfg(test)]
@@ -414,8 +416,6 @@ pub mod player_chart;
 mod player_chart_scan_fixtures;
 #[cfg(feature = "graphics")]
 mod playfield_gpu;
-#[cfg(all(test, feature = "graphics"))]
-mod long_duration_playfield_fixtures;
 /// Shared playfield partitions for rendering and projected physical touch routing.
 pub mod playfield_layout;
 #[cfg(test)]

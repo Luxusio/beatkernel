@@ -62,11 +62,20 @@ cargo test -p beatkernel --locked
 The first command produced the two deliberately preserved red reproductions
 before the final correction. Focused checks subsequently passed eight core
 tests and three app tests. Final all-target core Clippy exited zero with warnings
-denied. Full-core regression initially timed out during compilation, before
-executing tests; the final current-source run is recorded separately in
-`target/wf/long-duration-visual-time/core-all-test-final.log`. A compilation
-timeout is not a test PASS. Final independent review/QA evidence is recorded
-after the applicable commands finish.
+denied. Two full-core attempts timed out during compilation before executing
+tests. The unchanged final-source cache continuation exited zero: 435 tests
+and 16 doc-tests passed, with zero failures or ignored tests. Its log is
+`target/wf/long-duration-visual-time/core-all-test-continuation.log`;
+`core-all-test.log` and `core-all-test-final.log` retain the earlier compilation
+timeouts. A compilation timeout is not a test PASS. Independent deep source
+review passed revision `6f7567f`. Independent final CLI QA passed eight core
+fixtures, three long-duration app fixtures and three existing `playfield_gpu`
+fixtures; logs are `qa-core-fixture.log`, `qa-app-fixture.log` and
+`qa-app-playfield-regression.log` under the same evidence directory. The app
+regression used the produced `beatkernel_bms_runtime-2856c0784a394bbe` test
+executable with `playfield_gpu --nocapture`. A subsequent mechanical relocation
+of the identical test-module registration adds no new formatter difference
+against the existing app module-order baseline and changes no test behavior.
 
 ## Known ceiling
 
