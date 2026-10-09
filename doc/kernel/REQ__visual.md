@@ -1,5 +1,16 @@
 # Logical visual projection
 
+## Current verification boundary
+
+The user lifted verification deferral on 2026-10-06. Earlier dated deferral and
+unexecuted-example statements below describe historical evidence only.
+[Long-duration visual time](REQ__long-duration-visual-time.md) records current
+20-hour/week virtual traversal, independent local geometry oracles and any
+confirmed numerical correction. Kernel CPU projection remains separate from
+app renderer inputs and actual GPU/native presentation acceptance.
+
+## Original projection contract
+
 Phase 9 supplies renderer-independent Lane, Point and Path states keyed by
 opaque chart visual bindings. The caller provides geometry and visible song
 time windows. No GPU, skin or UI framework belongs in the kernel.

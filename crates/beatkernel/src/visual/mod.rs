@@ -229,7 +229,6 @@ struct IntervalNode {
 #[derive(Clone, Copy, Debug)]
 struct ScrollSegment {
     at: i64,
-    position: f64,
     velocity: f64,
 }
 
@@ -241,6 +240,7 @@ pub struct VisualProjector {
     nodes: Vec<IntervalNode>,
     root: Option<usize>,
     scroll: Vec<ScrollSegment>,
+    scroll_sums: Vec<f64>,
 }
 impl VisualProjector {
     /// Validates bindings and builds an interval tree in linear space.
@@ -290,36 +290,39 @@ impl VisualProjector {
         let root = build_index(chart.objects(), &mut nodes, 0, chart.objects().len());
         let mut scroll = vec![ScrollSegment {
             at: i64::MIN,
-            position: 0.0,
             velocity: 1.0,
         }];
-        // A zero origin avoids subtracting huge signed endpoints in i64.
         for marker in chart.scroll_changes() {
-            let previous = *scroll.last().expect("initial scroll segment");
             let at = marker.time.as_nanos();
-            let position = if scroll.len() == 1 {
-                at as f64
-            } else {
-                previous.position
-                    + (i128::from(at) - i128::from(previous.at)) as f64 * previous.velocity
-            };
             let velocity =
                 marker.velocity.numerator() as f64 / f64::from(marker.velocity.denominator());
-            if !position.is_finite() {
-                return Err(VisualError::Overflow);
-            }
-            scroll.push(ScrollSegment {
-                at,
-                position,
-                velocity,
-            });
+            scroll.push(ScrollSegment { at, velocity });
         }
+        // Compact range sums contain local segment areas, not absolute positions.
+        // Querying only the relevant range avoids cancellation against old history.
+        let scroll_sums = if map
+            .values()
+            .any(|projection| matches!(projection, Projection::Lane { .. }))
+        {
+            let mut sums = vec![0.0; 2 * scroll.len()];
+            for (index, pair) in scroll.windows(2).enumerate() {
+                sums[scroll.len() + index] =
+                    (i128::from(pair[1].at) - i128::from(pair[0].at)) as f64 * pair[0].velocity;
+            }
+            for index in (1..scroll.len()).rev() {
+                sums[index] = sums[2 * index] + sums[2 * index + 1];
+            }
+            sums
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             chart,
             bindings: map,
             nodes,
             root,
             scroll,
+            scroll_sums,
         })
     }
 
@@ -357,17 +360,47 @@ impl VisualProjector {
         Ok(())
     }
 
-    fn scroll_position(&self, time: Timestamp) -> f64 {
-        let count = self
-            .scroll
-            .partition_point(|segment| segment.at <= time.as_nanos());
-        let segment = self.scroll[count.saturating_sub(1)];
-        if count <= 1 {
-            time.as_nanos() as f64
-        } else {
-            segment.position
-                + (i128::from(time.as_nanos()) - i128::from(segment.at)) as f64 * segment.velocity
+    fn scroll_segment(&self, time: Timestamp) -> usize {
+        self.scroll
+            .partition_point(|segment| segment.at <= time.as_nanos())
+            .saturating_sub(1)
+    }
+
+    fn scroll_range_sum(&self, start: usize, end: usize) -> f64 {
+        let mut left = start + self.scroll.len();
+        let mut right = end + self.scroll.len();
+        let (mut before, mut after) = (0.0, 0.0);
+        while left < right {
+            if !left.is_multiple_of(2) {
+                before += self.scroll_sums[left];
+                left += 1;
+            }
+            if !right.is_multiple_of(2) {
+                right -= 1;
+                after += self.scroll_sums[right];
+            }
+            left /= 2;
+            right /= 2;
         }
+        before + after
+    }
+
+    fn scroll_distance(&self, from: Timestamp, from_segment: usize, to: Timestamp) -> f64 {
+        let to_segment = self.scroll_segment(to);
+        if from_segment == to_segment {
+            return (i128::from(to.as_nanos()) - i128::from(from.as_nanos())) as f64
+                * self.scroll[from_segment].velocity;
+        }
+        let (start, first, end, last, sign) = if from < to {
+            (from, from_segment, to, to_segment, 1.0)
+        } else {
+            (to, to_segment, from, from_segment, -1.0)
+        };
+        let head = (i128::from(self.scroll[first + 1].at) - i128::from(start.as_nanos())) as f64
+            * self.scroll[first].velocity;
+        let tail = (i128::from(end.as_nanos()) - i128::from(self.scroll[last].at)) as f64
+            * self.scroll[last].velocity;
+        (head + self.scroll_range_sum(first + 1, last) + tail) * sign
     }
 
     fn visit(
@@ -404,13 +437,12 @@ impl VisualProjector {
     ) -> Result<RenderObjectState, VisualError> {
         let result = match &self.bindings[&object.visual] {
             Projection::Lane { lane, unit } => {
-                let now = self.scroll_position(song);
-                let distance =
-                    (self.scroll_position(object.time.start) - now) / unit.as_nanos() as f64;
-                let tail_distance = object
-                    .time
-                    .end
-                    .map(|end| (self.scroll_position(end) - now) / unit.as_nanos() as f64);
+                let song_segment = self.scroll_segment(song);
+                let distance = self.scroll_distance(song, song_segment, object.time.start)
+                    / unit.as_nanos() as f64;
+                let tail_distance = object.time.end.map(|end| {
+                    self.scroll_distance(song, song_segment, end) / unit.as_nanos() as f64
+                });
                 if !distance.is_finite() || tail_distance.is_some_and(|v| !v.is_finite()) {
                     return Err(VisualError::Overflow);
                 }

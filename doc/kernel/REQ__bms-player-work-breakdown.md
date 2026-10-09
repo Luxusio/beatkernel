@@ -130,7 +130,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-02.06** 원본 clock domain/provenance를 보존하고 unknown mapping으로 판정을 진행하지 않는다. — 상태=D(검증완료); 선행=-; 근거=E0,E1.
 - [ ] **BK-WBS-02.07** 실제 native/browser 플레이의 master clock을 출력 오디오 관측에 일관되게 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=source pull/HOST 시계를 출력 진행으로 대신하지 않는 E2E.
 - [ ] **BK-WBS-02.08** backend/rate/buffer/latency 변경 시 epoch·입력 mapping·song origin을 원자적으로 갱신한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=실제 교체 경로·실패/재시도·다른 backend 검사.
-- [ ] **BK-WBS-02.09** 동일한 정수 판정 시간과 시각 보간 시간을 분리해 장시간 시각 drift를 검사한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=20시간/1주일 가상 시계와 실제 렌더 projection.
+- [ ] **BK-WBS-02.09** 동일한 정수 판정 시간과 시각 보간 시간을 분리해 장시간 시각 drift를 검사한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=[장시간 시각 계약](REQ__long-duration-visual-time.md): 실제 Rust projection에서 큰 과거 SV가 작은 이동을 지우는 결함과 마커 교차 결함 재현; indexed 상대 구간 합으로 수정 중. 실제 20시간/1주일 가상 traversal·Runtime/replay 정수 identity·app retained geometry 검증 및 GPU/physical 증거는 별도.
 - [ ] **BK-WBS-02.10** 향후 pre-play 입력 보존/폐기 규칙을 확정하고 metadata/recording 의미를 문서화한다. — 상태=P(정책선택대기); 선행=-; 필요 근거/다음=기존 미응답 정책 질문; 현재 동작 보존.
 
 ### 03. Canonical 입력·binding·수집
