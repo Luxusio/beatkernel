@@ -38,3 +38,23 @@ Independent review and QA remain required. The host previously refused agent
 allocation at its thread limit; development evidence is not a substitute for
 those results. Keep the full player Goal active and do not infer whole-screen
 or whole-product completion from this lifecycle correction.
+
+## Independent execution evidence — 2026-10-09
+
+At HEAD `10604ffe`, the independent DEEP code reviewer returned PASS. A fresh
+CLI run passed all 165 Main tests and two additional actual Main probes for
+late editor/focus/geometry rejection and preservation of two assigned sources
+in the next play-start plan. A separate actual Chromium run passed menu → live
+completion → idle two-player discovery/assignment → fresh menu → two-player
+live completion, followed by replay Stop ACK → idle three-player roster →
+fresh menu. Stale-menu-owner, play and page errors were absent.
+
+Reproduction: `node --experimental-vm-modules --test app/web/play-host.test.mjs`.
+Independent browser evidence and its owned runner are under
+`target/wf/browser-menu-after-playback/qa-browser`; CLI evidence is under the
+adjacent `qa-cli` directory. These ignored artifacts are local execution proof,
+not distributed fixtures or cross-platform hardware verification.
+
+The Harness watcher recorded no review/QA receipts for this run. Consequently
+the actual results are non-attesting and the task remains unfinished for formal
+close; neither a receipt-backed PASS nor whole-product completion is claimed.
