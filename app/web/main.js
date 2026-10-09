@@ -28,6 +28,8 @@ let rendererReady = false;
 let submittedGeometry = null;
 let menuState = null;
 let menuGeometry = null;
+let menuRetired = false;
+let retiredMenuGeneration = 0n;
 let menuPress = null;
 let menuActionId = 0n;
 let menuEditPending = null;
@@ -73,7 +75,7 @@ const settingsFields = Object.freeze([
 ].map(row => Object.freeze(row)));
 
 function menuToken() {
-  return menuState && menuState.owner === owner && menuState.worker === worker && !activePlay && !shuttingDown
+  return !menuRetired && menuState && menuState.owner === owner && menuState.worker === worker && !activePlay && !shuttingDown
     ? { menuGeneration: menuState.menuGeneration, screen: menuState.screen, revision: menuState.revision } : null;
 }
 function menuEditorIdentity() {
@@ -144,7 +146,8 @@ function menuFieldsFor(route) {
   return fields;
 }
 function receiveMenu(data) {
-  if (activePlay || shuttingDown || !worker) return;
+  if (activePlay || shuttingDown || !worker || menuRetired) return;
+  if (menuIdentity(data.menuGeneration) && data.menuGeneration <= retiredMenuGeneration) return;
   if (data.kind === "menu-error") {
     if (menuEditPending && data.menuGeneration === menuEditPending.menuGeneration
       && data.screen === menuEditPending.screen && data.revision === menuEditPending.revision) {
@@ -163,6 +166,7 @@ function receiveMenu(data) {
       || !Number.isInteger(data.selected) || data.selected < 0 || data.selected > 0xffffffff
       || !Number.isInteger(data.route) || ![1, 2, 3, 4, 5, 6, 7, 9].includes(data.route)
       || !Array.isArray(data.fields) || data.fields.length > 8192 || data.fields.some(value => typeof value !== "string" || value.length > 4096)) return;
+    if (data.menuGeneration <= retiredMenuGeneration) return;
     if (menuState?.owner === owner && (data.menuGeneration < menuState.menuGeneration
       || data.menuGeneration === menuState.menuGeneration && data.revision < menuState.revision)) return;
     if (recordsOperation?.menuTicket && (recordsOperation.menuTicket.menuGeneration !== data.menuGeneration
@@ -1333,7 +1337,7 @@ async function start() {
   canvas = fresh;
   cssExtent = [0, 0];
   submittedGeometry = null;
-  menuState = null; menuGeometry = null;
+  menuState = null; menuGeometry = null; menuRetired = false; retiredMenuGeneration = 0n;
   menuPress = null;
   menuEditPending = null; menuEditControl = null; menuComposition = null; menuSourcesPending = null;
   for (const [name, phase] of [["pointerdown", 0], ["pointermove", 1], ["pointerup", 2], ["pointercancel", 3]]) {
@@ -1472,6 +1476,7 @@ ui["settings-save"].addEventListener("click", () => requestSettings("settings-pr
 byId("menu-open").addEventListener("click", () => {
   if (!initialized || activePlay || shuttingDown || importing || preparing || !worker) return;
   cancelMenuComposition(); menuEditPending = null; menuSourcesPending = null;
+  menuRetired = false;
   worker.postMessage({ kind: "menu-open", fields: menuFieldsFor(1), roster: localRoster.exportState(), opponents: opponents.snapshot() });
 });
 byId("menu-back").addEventListener("click", () => {
@@ -2098,6 +2103,13 @@ async function play(mode = "live") {
         ...(session.requestGamepad && session.gamepadProfileFile ? { gamepadProfileFile: session.gamepadProfileFile } : {}),
         ...(session.pointerSetup ? { pointerSetup: session.pointerSetup } : {}),
         keyPairs: Uint32Array.from(session.bindingSelection.flatMap(row => [row[0], row[2]])) };
+    // The Worker suspends its menu at play-start, including refused starts.
+    // Only an explicit menu-open may make its token actionable again.
+    if (menuState) retiredMenuGeneration = menuState.menuGeneration > retiredMenuGeneration ? menuState.menuGeneration : retiredMenuGeneration;
+    menuRetired = true; menuState = null; menuGeometry = null; menuPress = null;
+    cancelMenuComposition(); menuEditPending = null; menuSourcesPending = null;
+    byId("menu-editor").hidden = true;
+    presentationStatus.invalidate(true);
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
       rate: session.audio.sampleRate, commandBatchLimit: session.commandBatchLimit, ...source,
       windowOriginNs: session.windowOriginNs,

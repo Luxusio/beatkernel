@@ -7274,6 +7274,82 @@ function presentationPacket(h, kind, fields = {}) {
 function statusSnapshot(h) {
   return { text: h.get("status").textContent, error: h.get("status").dataset.error };
 }
+test("suspended menus cannot own idle roster actions after live or replay playback", async () => {
+  for (const mode of ["live", "replay"]) {
+    const h = await harness({ touchSupported: true }); await h.preview();
+    h.click("menu-open"); await flush();
+    const old = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+      route: 3, fields: ["0", ""], selected: 0 };
+    await h.receive(old);
+    if (mode === "replay") chooseRecording(h, [selectedRecording().file]);
+    const session = await h.launch(0, mode);
+    assert.equal(h.get("menu-editor").hidden, true);
+    h.click("stop"); await flush(); await h.receive(finalScore(session.id));
+    await h.receive(old);
+    const actions = h.workers[0].messages("menu-roster-count").length;
+    await localCount(h, 2);
+    assert.equal(h.workers[0].messages("menu-roster-count").length, actions, "idle roster never addresses suspended menu");
+    assert.ok(h.get("local-source-2"));
+    assert.equal(h.get("local-discover").disabled, false);
+    h.click("local-discover"); await flush(); localAssign(h, 1, 1n); localAssign(h, 2, 2n);
+    h.click("menu-open"); await flush();
+    assert.deepEqual(Array.from(h.workers[0].last("menu-open").roster.players), [1, 2]);
+    await h.receive(old);
+    assert.equal(h.get("menu-editor").hidden, true, "old generation cannot resurrect during fresh open");
+    await h.receive({ ...old, menuGeneration: 78n });
+    await localCount(h, 3);
+    assert.equal(h.workers[0].last("menu-roster-count").menuGeneration, 78n);
+    await h.close();
+  }
+});
+
+test("audio opening failure before play-start leaves current business menu usable", async () => {
+  const opening = deferred();
+  const h = await harness({ openGate: opening }); await h.preview();
+  h.click("menu-open"); await flush();
+  await h.receive({ kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+    route: 3, fields: ["0", ""], selected: 0 });
+  h.click("play"); await flush();
+  assert.equal(h.workers[0].last("play-start"), undefined);
+  opening.reject(new Error("actual audio opening refused")); await flush();
+  await localCount(h, 2);
+  assert.equal(h.workers[0].last("menu-roster-count").menuGeneration, 77n);
+  await h.close();
+});
+
+test("dispatched play refusal and natural completion do not revive retired menu state or errors", async () => {
+  for (const refused of [true, false]) {
+    const h = await harness(); await h.preview(); h.click("menu-open"); await flush();
+    const old = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+      route: 3, fields: ["0", ""], selected: 0 };
+    await h.receive(old);
+    let id;
+    if (refused) {
+      const start = await h.begin(); id = start.playId;
+      await h.receive({ kind: "play-reply", playId: id, rpcId: start.rpcId, error: "actual preparation refused" });
+    } else {
+      const session = await h.launch(); id = session.id;
+      await h.receive({ kind: "play-render-done", playId: id, renderId: 1,
+        completed: true, songNs: 2350000000n, hits: 3n, misses: 1n, combo: 2n });
+    }
+    await h.receive(finalScore(id));
+    const ended = statusSnapshot(h);
+    await h.receive(old);
+    await h.receive({ ...old, kind: "menu-error", message: "late retired menu refusal" });
+    assert.deepEqual(statusSnapshot(h), ended);
+    await localCount(h, 2);
+    assert.equal(h.workers[0].messages("menu-roster-count").length, 0);
+    assert.ok(h.get("local-source-2"));
+    h.click("menu-open"); await flush();
+    await h.receive({ ...old, kind: "menu-error", message: "retired error after new open" });
+    assert.doesNotMatch(h.get("status").textContent, /retired error/);
+    await h.receive({ ...old, menuGeneration: 78n });
+    await localCount(h, 3);
+    assert.equal(h.workers[0].last("menu-roster-count").menuGeneration, 78n);
+    await h.close();
+  }
+});
+
 test("replay setup carries the actual Window origin before audio or visual progress", async () => {
   const h = await harness(); await h.preview();
   chooseRecording(h, [selectedRecording().file]);
