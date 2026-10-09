@@ -40,3 +40,18 @@ with three ignored native/environment cases. These are development evidence,
 not independent QA or physical driver acceptance. Logs are in
 `target/wf/windows-output-backend-switch/`; portable admission fixtures are
 `app/src/bin/windows_bms/output_switch_fixtures.rs`.
+
+Executed development commands (after sourcing `target/toolchain/env.sh`, with
+one compiler job, incremental/debug disabled, and the existing cached target
+directory):
+
+```sh
+cargo test -p beatkernel-bms-runtime --lib --features desktop,webtransport --locked settings::tests::windows_live -- --nocapture
+cargo test -p beatkernel-bms-runtime --lib --features desktop,webtransport --locked gameplay::output -- --nocapture
+cargo test -p beatkernel-bms-runtime --bin windows_bms --features desktop,webtransport --locked
+bash target/toolchain/xcheck.sh windows -p beatkernel-bms-runtime --bin windows_bms --features desktop,webtransport
+```
+
+All four exited successfully. The last command establishes non-ASIO Windows
+Rust typing only: its C/C++ compilers are stubs, it does not link or execute,
+and it cannot establish ASIO SDK/MSVC compilation or native device behavior.
