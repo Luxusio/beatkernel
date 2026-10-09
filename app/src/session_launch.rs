@@ -256,11 +256,9 @@ mod practice_lineage_tests {
         assert_eq!(next.args()[3], "records/game.p2.retry3.bkr");
         assert_eq!(current.args()[3], "records/game.retry2.bkr");
         assert_eq!(initial.args()[3], "records/game.bkr");
-        assert!(
-            current
-                .for_recording_path("records/a\nb.bkr".into(), "records/c.bkr".into())
-                .is_err()
-        );
+        assert!(current
+            .for_recording_path("records/a\nb.bkr".into(), "records/c.bkr".into())
+            .is_err());
     }
     #[test]
     fn joined_retry_rebase_preserves_selected_endpoints_and_final_global_ordinal() {

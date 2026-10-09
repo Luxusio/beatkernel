@@ -10,9 +10,9 @@ use crate::{
     play_policy::ResolvedPlayPolicy,
     play_result::CompletedPlayResult,
     player_chart::PlayerChart,
-    pressed_keys::{PressedKeys, validate_mask},
+    pressed_keys::{validate_mask, PressedKeys},
     room_presentation::{
-        ROOM_UI_CAPACITY, RoomPresentation, RoomResults, RoomUiAction, RoomUiReply, RoomUiRequest,
+        RoomPresentation, RoomResults, RoomUiAction, RoomUiReply, RoomUiRequest, ROOM_UI_CAPACITY,
     },
 };
 use beatkernel::{
@@ -28,8 +28,8 @@ use std::{
     collections::VecDeque,
     io,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -604,7 +604,9 @@ impl PlayerViewer {
     pub fn take_practice_reply(
         &self,
     ) -> io::Result<Option<crate::practice_control::PracticeReply>> {
-        Ok(self.take_practice_response()?.map(|response| response.reply))
+        Ok(self
+            .take_practice_response()?
+            .map(|response| response.reply))
     }
     /// Consumes the response and its originating action under the same lock.
     /// Contention retains both records for a later UI poll.

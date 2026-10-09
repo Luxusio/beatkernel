@@ -1349,7 +1349,10 @@ mod native {
                         },
                     };
                     if let Some(practice) = practice.as_mut() {
-                        let mut recording = beatkernel_bms_runtime::native_gameplay::NativePracticeRecorder::new(save_capture);
+                        let mut recording =
+                            beatkernel_bms_runtime::native_gameplay::NativePracticeRecorder::new(
+                                save_capture,
+                            );
                         beatkernel_bms_runtime::native_gameplay::run_gameplay_audio_with_practice_and_result_and_score(
                             &mut device, session, config, &mut score, &policy, practice, &mut recording)
                     } else {

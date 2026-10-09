@@ -2,8 +2,8 @@
 //! InputMerger owns acquired payloads; this owner reads no clock or device.
 use crate::local_input::{InputMerger, MergeError};
 use beatkernel::time::{
-    AffineClockMapper, CalibrationError, ClockDomainId, ClockInterval, ClockPair, ClockPoint,
-    Duration, ExtrapolationPolicy, Timestamp, presentation::ObservationAdmission,
+    presentation::ObservationAdmission, AffineClockMapper, CalibrationError, ClockDomainId,
+    ClockInterval, ClockPair, ClockPoint, Duration, ExtrapolationPolicy, Timestamp,
 };
 use std::{collections::VecDeque, fmt};
 

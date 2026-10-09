@@ -9,7 +9,7 @@ use crate::{
     play_policy::ResolvedPlayPolicy,
     player::PreparedPracticePresentation,
     practice_control::{PracticeAction, PracticeApplied, PracticeCapability, PracticeReply},
-    practice_session::{PracticeAttemptConfig, PreparedPracticeAttempt, prepare_attempt},
+    practice_session::{prepare_attempt, PracticeAttemptConfig, PreparedPracticeAttempt},
     replay_capture::LiveReplayCapture,
     session_launch::SessionLaunch,
 };
@@ -192,30 +192,24 @@ mod tests {
         let (mut owner, mut mixer) = setup(false);
         mixer.render(&mut [0.; 1]).unwrap();
         let first = owner.peek_receipt().unwrap().unwrap();
-        assert!(
-            owner
-                .validate(PracticeReceipt {
-                    generation: 2,
-                    ..first
-                })
-                .is_err()
-        );
-        assert!(
-            owner
-                .validate(PracticeReceipt {
-                    applied_song_time: ts(1),
-                    ..first
-                })
-                .is_err()
-        );
-        assert!(
-            owner
-                .validate(PracticeReceipt {
-                    playback_frame: 1,
-                    ..first
-                })
-                .is_err()
-        );
+        assert!(owner
+            .validate(PracticeReceipt {
+                generation: 2,
+                ..first
+            })
+            .is_err());
+        assert!(owner
+            .validate(PracticeReceipt {
+                applied_song_time: ts(1),
+                ..first
+            })
+            .is_err());
+        assert!(owner
+            .validate(PracticeReceipt {
+                playback_frame: 1,
+                ..first
+            })
+            .is_err());
     }
 
     #[test]
@@ -251,22 +245,18 @@ mod tests {
             kind: PracticeBoundaryKind::ControlRejectedRevision,
         };
         assert!(owner.validate(refused).is_ok());
-        assert!(
-            owner
-                .validate(PracticeReceipt {
-                    request_id: 12,
-                    ..refused
-                })
-                .is_err()
-        );
-        assert!(
-            owner
-                .validate(PracticeReceipt {
-                    correction_nanos: 0,
-                    ..refused
-                })
-                .is_err()
-        );
+        assert!(owner
+            .validate(PracticeReceipt {
+                request_id: 12,
+                ..refused
+            })
+            .is_err());
+        assert!(owner
+            .validate(PracticeReceipt {
+                correction_nanos: 0,
+                ..refused
+            })
+            .is_err());
         assert_eq!(owner.pending.unwrap().0.generation, 1);
         assert_eq!(
             owner.region,
@@ -340,15 +330,13 @@ mod tests {
     fn zero_player_is_refused_before_audio_render_or_control_admission() {
         let (mut owner, mut mixer) = setup(false);
         owner.members[0].player = PlayerId(0);
-        assert!(
-            PracticePlayback::validate_setup(
-                &owner.members,
-                owner.region,
-                owner.max_target,
-                owner.default_section_end
-            )
-            .is_err()
-        );
+        assert!(PracticePlayback::validate_setup(
+            &owner.members,
+            owner.region,
+            owner.max_target,
+            owner.default_section_end
+        )
+        .is_err());
         assert_eq!(owner.controller.generation(), 1);
         assert_eq!(mixer.frame_cursor(), 0);
         // Cold borrowed validation leaves both actual endpoints usable.
@@ -360,18 +348,16 @@ mod tests {
 
         let (mut owner, mixer) = setup(false);
         owner.members[0].player = PlayerId(0);
-        assert!(
-            PracticePlayback::new(
-                owner.controller,
-                owner.original,
-                owner.members,
-                owner.region,
-                owner.max_target,
-                owner.basis,
-                1
-            )
-            .is_err()
-        );
+        assert!(PracticePlayback::new(
+            owner.controller,
+            owner.original,
+            owner.members,
+            owner.region,
+            owner.max_target,
+            owner.basis,
+            1
+        )
+        .is_err());
         assert_eq!(mixer.frame_cursor(), 0);
     }
 
@@ -383,24 +369,20 @@ mod tests {
         };
         assert!(validate(owner.region, None).is_err());
         assert!(validate(owner.region, Some(ts(5))).is_err());
-        assert!(
-            validate(
-                PracticeRegion::new(ts(-2), ts(-1), false).unwrap(),
-                Some(ts(-1))
-            )
-            .is_err()
-        );
+        assert!(validate(
+            PracticeRegion::new(ts(-2), ts(-1), false).unwrap(),
+            Some(ts(-1))
+        )
+        .is_err());
         let ceiling = Timestamp::from_nanos(i64::MAX);
         assert!(validate(PracticeRegion::new(ts(0), ceiling, true).unwrap(), None).is_err());
         assert!(validate(PracticeRegion::new(ts(21), ceiling, false).unwrap(), None).is_err());
         assert!(validate(PracticeRegion::new(ts(-2), ceiling, false).unwrap(), None).is_ok());
-        assert!(
-            validate(
-                PracticeRegion::new(ts(-2), ts(4), false).unwrap(),
-                Some(ts(4))
-            )
-            .is_ok()
-        );
+        assert!(validate(
+            PracticeRegion::new(ts(-2), ts(4), false).unwrap(),
+            Some(ts(4))
+        )
+        .is_ok());
     }
 
     fn owner_payload(
@@ -486,13 +468,11 @@ mod tests {
         assert_eq!(applied.receipt(), looped);
         assert_eq!(owner.generation(), 2);
         assert_eq!(owner.members()[0].launch.attempt(), 1);
-        assert!(
-            owner.members()[0]
-                .launch
-                .args()
-                .windows(2)
-                .any(|pair| pair == ["--record-replay", "records/base.retry1.bkr"])
-        );
+        assert!(owner.members()[0]
+            .launch
+            .args()
+            .windows(2)
+            .any(|pair| pair == ["--record-replay", "records/base.retry1.bkr"]));
         assert!(prepared.next_launches.is_empty());
         assert!(owner.apply_boundary(&mut prepared).is_err());
         assert_eq!(

@@ -740,13 +740,13 @@ mod native {
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
     use beatkernel_bms_runtime::native_audio::{
-        NativeAudioConfig, PreparedNativeAudio, prepare_audio, prepare_input_sounds,
-        prepare_mine_sounds,
+        prepare_audio, prepare_input_sounds, prepare_mine_sounds, NativeAudioConfig,
+        PreparedNativeAudio,
     };
     use beatkernel_bms_runtime::{
+        native_chart::{prepare_chart_with_policy, NativeChartConfig},
+        native_judge::{capture_limits, prepare_section_capture_for_policy, NativeJudgeConfig},
         ChannelPolicy,
-        native_chart::{NativeChartConfig, prepare_chart_with_policy},
-        native_judge::{NativeJudgeConfig, capture_limits, prepare_section_capture_for_policy},
     };
     use beatkernel_bms_runtime::{
         playback_pause::NativePause,
@@ -754,13 +754,13 @@ mod native {
     };
     use beatkernel_platform::{
         audio::{
-            AudioOutputStream, AudioStreamStatus,
             presentation::{
-                PresentationError, WasapiPresentationClock,
                 discipline::{
                     DisciplineConfig, DisciplineError, ObservationAdmission, PresentationDiscipline,
                 },
+                PresentationError, WasapiPresentationClock,
             },
+            AudioOutputStream, AudioStreamStatus,
         },
         windows::{
             audio::WasapiStream,
@@ -1058,16 +1058,16 @@ mod native {
     }
     use beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation;
     use beatkernel_bms_runtime::native_audio_startup::{
-        NativeAudioSeedPort, SeededNativeAudio, new_audio_presentation, prime_native_audio,
+        new_audio_presentation, prime_native_audio, NativeAudioSeedPort, SeededNativeAudio,
     };
     use beatkernel_bms_runtime::native_gameplay::{
-        AudioGameplayConfig, InputBatch, NativeAudioGameplaySession, NativeGameplayConfig,
-        NativeGameplayDevice, NativeGameplayResult,
-        run_gameplay_audio_with_policy_and_result_and_score,
+        run_gameplay_audio_with_policy_and_result_and_score, AudioGameplayConfig, InputBatch,
+        NativeAudioGameplaySession, NativeGameplayConfig, NativeGameplayDevice,
+        NativeGameplayResult,
     };
     use beatkernel_bms_runtime::native_start::{
-        NativeStartConfig, NativeStartDevice, NativeStartObservation, NativeStartResult,
-        start_committed,
+        start_committed, NativeStartConfig, NativeStartDevice, NativeStartObservation,
+        NativeStartResult,
     };
     use beatkernel_platform::audio::presentation::validation::NativePresentationValidator;
     pub(super) struct GameplayDevice<'a> {
@@ -1821,7 +1821,10 @@ mod native {
                         },
                     };
                     if let Some(practice) = practice.as_mut() {
-                        let mut recording = beatkernel_bms_runtime::native_gameplay::NativePracticeRecorder::new(save_capture);
+                        let mut recording =
+                            beatkernel_bms_runtime::native_gameplay::NativePracticeRecorder::new(
+                                save_capture,
+                            );
                         beatkernel_bms_runtime::native_gameplay::run_gameplay_audio_with_practice_and_result_and_score(
                             &mut device, session, config, &mut score, &policy, practice, &mut recording)
                     } else {
@@ -1996,7 +1999,7 @@ mod preroll_fixtures {
     #[test]
     fn finite_completion_waits_for_native_presentation_message_drain_and_resume() {
         use beatkernel::{
-            audio::{AudioFormat, Mixer, MixerConfig, PcmLimits, SampleBank, command_queue},
+            audio::{command_queue, AudioFormat, Mixer, MixerConfig, PcmLimits, SampleBank},
             time::{ClockDomainId, ClockPair, ClockPoint},
         };
         use beatkernel_bms_runtime::{native_end::NativeEnd, playback_pause::NativePause};
@@ -2053,11 +2056,10 @@ mod preroll_fixtures {
             .unwrap()
             .unwrap();
         assert_eq!(resumed.host, host(4_000_100));
-        assert!(
-            end.observe(Some(latest), pair(4_000_000))
-                .unwrap()
-                .is_none()
-        );
+        assert!(end
+            .observe(Some(latest), pair(4_000_000))
+            .unwrap()
+            .is_none());
         let song = Timestamp::from_nanos(2_000_000);
         assert!(!finite_session_done(
             Some(2_000_000),
@@ -2178,7 +2180,7 @@ mod preroll_fixtures {
                         options
                             .local_players
                             .iter()
-                            .map(|player| player.0.0)
+                            .map(|player| player.0 .0)
                             .collect::<Vec<_>>(),
                         vec![3, u32::MAX]
                     );
@@ -2247,7 +2249,7 @@ mod preroll_fixtures {
         }
         let options = parse(&configured).unwrap();
         assert_eq!(options.local_players.len(), 4);
-        assert_eq!(options.local_players[3].0.0, u32::MAX);
+        assert_eq!(options.local_players[3].0 .0, u32::MAX);
         assert_eq!(options.local_players[0].1, "path:3");
         assert_eq!(options.advance_lag, 2_000_000);
         for value in ["0", "1000000000"] {
@@ -2438,18 +2440,16 @@ mod preroll_fixtures {
             }
         );
         assert_eq!(shift_bgm(command, 0).unwrap(), command);
-        assert!(
-            shift_bgm(
-                AudioCommand::Play {
-                    at: Timestamp::from_nanos(i64::MAX),
-                    voice: VoiceId(1),
-                    sample: SampleId(1),
-                    gain: 1.0
-                },
-                1
-            )
-            .is_err()
-        );
+        assert!(shift_bgm(
+            AudioCommand::Play {
+                at: Timestamp::from_nanos(i64::MAX),
+                voice: VoiceId(1),
+                sample: SampleId(1),
+                gain: 1.0
+            },
+            1
+        )
+        .is_err());
         assert_eq!(
             calibration_extent(3600, 10_000_000_000).unwrap(),
             3_613_000_000_000

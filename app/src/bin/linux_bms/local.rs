@@ -1,7 +1,7 @@
 //! Actual Linux local cohort: independent input/judging, one native audio owner.
 use super::native::{
-    HOST, LOGICAL, OUTPUT, TargetStartupDevice, audio_timing_config, observe_target_output,
-    open_target_output, output_origin, startup_input, startup_render, target_audio_timing_config,
+    audio_timing_config, observe_target_output, open_target_output, output_origin, startup_input,
+    startup_render, target_audio_timing_config, TargetStartupDevice, HOST, LOGICAL, OUTPUT,
 };
 use super::*;
 #[cfg(test)]
@@ -12,24 +12,24 @@ use beatkernel::{
     time::Duration,
     transport::{Rate, Transport},
 };
-use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
+use beatkernel_bms_runtime::native_audio::{prepare_audio, NativeAudioConfig, PreparedNativeAudio};
 use beatkernel_bms_runtime::native_cohort_setup::{
-    CohortPreparation, PreparedCohort, activate_audio_cohort_with_sounds,
-    admit_cohort as admit_mode, finish_cohort_with_results_and_network,
-    prepare_audio_cohort_with_policy,
-};
-use beatkernel_bms_runtime::{
-    ChannelPolicy,
-    competition_live::CompetitionOptions,
-    native_chart::{NativeChartConfig, prepare_chart_with_policy},
-    native_end::NativeEnd,
-    playback_pause::NativePause,
+    activate_audio_cohort_with_sounds, admit_cohort as admit_mode,
+    finish_cohort_with_results_and_network, prepare_audio_cohort_with_policy, CohortPreparation,
+    PreparedCohort,
 };
 #[cfg(test)]
 use beatkernel_bms_runtime::{
     competition::ScoreSummary,
     local_input::InputMerger,
-    native_cohort::{PlayerState, replay_path},
+    native_cohort::{replay_path, PlayerState},
+};
+use beatkernel_bms_runtime::{
+    competition_live::CompetitionOptions,
+    native_chart::{prepare_chart_with_policy, NativeChartConfig},
+    native_end::NativeEnd,
+    playback_pause::NativePause,
+    ChannelPolicy,
 };
 #[cfg(test)]
 use beatkernel_bms_runtime::{
@@ -38,7 +38,7 @@ use beatkernel_bms_runtime::{
     playback_pause::PauseKeyboard,
 };
 use beatkernel_bms_runtime::{
-    native_cohort::{NativeAudioCohortSession, run_cohort_audio_with_policies_and_results},
+    native_cohort::{run_cohort_audio_with_policies_and_results, NativeAudioCohortSession},
     native_gameplay::{
         AudioGameplayConfig, InputBatch, NativeCollectedInput, NativeGameplayConfig,
         NativeGameplayDevice, NativeGameplayResult,
@@ -46,13 +46,13 @@ use beatkernel_bms_runtime::{
 };
 use beatkernel_platform::{
     audio::{
-        DeviceFormat, SampleEncoding,
         presentation::discipline::{DisciplineConfig, PresentationDiscipline},
+        DeviceFormat, SampleEncoding,
     },
     linux::{AlsaRequest, MonotonicClock},
 };
 
-use beatkernel_bms_runtime::native_start::{NativeStartConfig, start_target_committed};
+use beatkernel_bms_runtime::native_start::{start_target_committed, NativeStartConfig};
 
 use beatkernel_bms_runtime::{
     gameplay_output_owner::GameplayOutputOwner, native_alsa_replacement::AlsaReplacementBackend,
@@ -1146,12 +1146,10 @@ mod fixtures {
         assert_eq!(recovered.mixer().config().playback_end_frame(), Some(441));
         assert_eq!(recovered.mixer().counters(), counters);
         assert_eq!(recovered.converter_owner().source_position().frame, 0);
-        assert!(
-            recovered
-                .pending_samples()
-                .iter()
-                .all(|sample| *sample == 0.0)
-        );
+        assert!(recovered
+            .pending_samples()
+            .iter()
+            .all(|sample| *sample == 0.0));
         let pending = recovered.pending_frames();
         if pending > 0 {
             recovered.admit(pending).unwrap();
@@ -1205,26 +1203,22 @@ mod fixtures {
                 .unwrap(),
             Some(host(10_000_000))
         );
-        assert!(
-            merger
-                .watermark(host(11_000_000), 2_000_000, false)
-                .is_err()
-        );
+        assert!(merger
+            .watermark(host(11_000_000), 2_000_000, false)
+            .is_err());
         assert!(!lag_reaches(host(12_000_000), host(11_000_000), 2_000_000).unwrap());
         assert!(lag_reaches(host(13_000_000), host(11_000_000), 2_000_000).unwrap());
         assert!(!lag_reaches(host(i64::MIN), host(i64::MIN), 1).unwrap());
         assert!(lag_reaches(host(10), host(10), -1).is_err());
-        assert!(
-            lag_reaches(
-                host(10),
-                ClockPoint {
-                    domain: OUTPUT,
-                    timestamp: Timestamp::ZERO
-                },
-                0
-            )
-            .is_err()
-        );
+        assert!(lag_reaches(
+            host(10),
+            ClockPoint {
+                domain: OUTPUT,
+                timestamp: Timestamp::ZERO
+            },
+            0
+        )
+        .is_err());
     }
     #[test]
     fn shared_pause_frontier_drains_global_order_including_boundary_without_moving_commit() {
@@ -1260,11 +1254,9 @@ mod fixtures {
             .admit(button(3, ButtonState::Up, 12, 2), host(21))
             .unwrap();
         assert_eq!(merger.pending(), 1);
-        assert!(
-            !keyboard
-                .accept(&button(1, ButtonState::Repeat, 21, 2))
-                .unwrap()
-        );
+        assert!(!keyboard
+            .accept(&button(1, ButtonState::Repeat, 21, 2))
+            .unwrap());
     }
     #[test]
     fn resume_keeps_lag_and_reconciles_all_devices_before_postboundary_inputs() {
@@ -1314,11 +1306,9 @@ mod fixtures {
         assert_eq!(admitted[0].meta().original_clock_point, Some(host(18)));
         assert_eq!(admitted[2].meta().timestamp, host(21).timestamp);
         merger.commit(frontier).unwrap();
-        assert!(
-            merger
-                .admit(button(2, ButtonState::Down, 27, 3), host(31))
-                .is_err()
-        );
+        assert!(merger
+            .admit(button(2, ButtonState::Down, 27, 3), host(31))
+            .is_err());
     }
     fn finite_states(ids: &[PlayerId], song: i64) -> Vec<PlayerState> {
         ids.iter()
@@ -1442,11 +1432,9 @@ mod fixtures {
         // Future post-end acquisition is retained by the bounded merger until
         // owner cleanup; it neither blocks this prefix nor invents gameplay.
         assert_eq!(merger.pending(), 1);
-        assert!(
-            merger
-                .admit(button(1, ButtonState::Up, 17, 2), host(30))
-                .is_err()
-        );
+        assert!(merger
+            .admit(button(1, ButtonState::Up, 17, 2), host(30))
+            .is_err());
     }
     #[test]
     fn local_replay_paths_preserve_parent_and_use_distinct_player_suffixes() {

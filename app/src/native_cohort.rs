@@ -3140,7 +3140,8 @@ mod retained_practice_fixtures {
                     assert_eq!(policy.judge().windows()[0].late, Duration::ZERO);
                     assert_eq!(policy.judge().input_offset(), Duration::ZERO);
                     let format = AudioFormat::new(1000, 1).unwrap();
-                    let pcm_limits = PcmLimits::new(64, 256, if failed_gauge { 2 } else { 1 }).unwrap();
+                    let pcm_limits =
+                        PcmLimits::new(64, 256, if failed_gauge { 2 } else { 1 }).unwrap();
                     let mut bank = SampleBank::new(format, pcm_limits).unwrap();
                     bank.insert(
                         SampleId(1),

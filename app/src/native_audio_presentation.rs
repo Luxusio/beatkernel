@@ -916,11 +916,9 @@ mod practice_boundary_tests {
             }
             owner.pin_practice_mixer_basis(mixer_basis).unwrap();
             let now = point(1, 8_000_000);
-            assert!(
-                owner
-                    .prepare_practice_boundary(projected.receipt, now)
-                    .is_err()
-            );
+            assert!(owner
+                .prepare_practice_boundary(projected.receipt, now)
+                .is_err());
             let cut = owner
                 .prepare_projected_practice_boundary(projected, now)
                 .unwrap()
@@ -954,12 +952,10 @@ mod practice_boundary_tests {
             .unwrap();
         owner.pin_practice_mixer_basis(mixer_basis).unwrap();
         let now = point(1, 8_000_000);
-        assert!(
-            owner
-                .prepare_projected_practice_boundary(projected, now)
-                .unwrap()
-                .is_none()
-        );
+        assert!(owner
+            .prepare_projected_practice_boundary(projected, now)
+            .unwrap()
+            .is_none());
         for index in 0..3 {
             let mut malformed = projected;
             match index {
@@ -967,57 +963,43 @@ mod practice_boundary_tests {
                 1 => malformed.origin = point(99, 0),
                 _ => malformed.boundary.source_frame = 2,
             }
-            assert!(
-                owner
-                    .prepare_projected_practice_boundary(malformed, now)
-                    .is_err()
-            );
+            assert!(owner
+                .prepare_projected_practice_boundary(malformed, now)
+                .is_err());
         }
     }
     #[test]
     fn no_native_progress_or_future_render_or_malformed_clock_never_authorizes() {
         let mut owner = owner(4);
-        assert!(
-            owner
-                .prepare_practice_boundary(receipt(150), point(1, 200_000_000))
-                .is_err()
-        );
+        assert!(owner
+            .prepare_practice_boundary(receipt(150), point(1, 200_000_000))
+            .is_err());
         native(&mut owner, 100_000_000);
         owner
             .pin_practice_mixer_basis(OutputFrameBasis::new(point(2, 0), 1000, 0).unwrap())
             .unwrap();
-        assert!(
-            owner
-                .prepare_practice_boundary(receipt(150), point(1, 200_000_000))
-                .unwrap()
-                .is_none()
-        );
+        assert!(owner
+            .prepare_practice_boundary(receipt(150), point(1, 200_000_000))
+            .unwrap()
+            .is_none());
         native(&mut owner, 200_000_000);
-        assert!(
-            owner
-                .prepare_practice_boundary(receipt(250), point(1, 200_000_000))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            owner
-                .prepare_practice_boundary(receipt(150), point(99, 200_000_000))
-                .is_err()
-        );
+        assert!(owner
+            .prepare_practice_boundary(receipt(250), point(1, 200_000_000))
+            .unwrap()
+            .is_none());
+        assert!(owner
+            .prepare_practice_boundary(receipt(150), point(99, 200_000_000))
+            .is_err());
         let mut malformed = receipt(150);
         malformed.playback_frame = 151;
-        assert!(
-            owner
-                .prepare_practice_boundary(malformed, point(1, 200_000_000))
-                .is_err()
-        );
+        assert!(owner
+            .prepare_practice_boundary(malformed, point(1, 200_000_000))
+            .is_err());
         malformed = receipt(150);
         malformed.correction_nanos = 1;
-        assert!(
-            owner
-                .prepare_practice_boundary(malformed, point(1, 200_000_000))
-                .is_err()
-        );
+        assert!(owner
+            .prepare_practice_boundary(malformed, point(1, 200_000_000))
+            .is_err());
     }
     #[test]
     fn retired_native_history_is_explicit_and_prepared_token_cannot_hide_expiry() {
@@ -1053,10 +1035,8 @@ mod practice_boundary_tests {
             error.downcast_ref::<AudioAuthorityError>(),
             Some(&AudioAuthorityError::HistoryExpired)
         );
-        assert!(
-            owner
-                .practice_boundary_ready(&cut, point(1, 300_000_000), &merger)
-                .is_err()
-        );
+        assert!(owner
+            .practice_boundary_ready(&cut, point(1, 300_000_000), &merger)
+            .is_err());
     }
 }

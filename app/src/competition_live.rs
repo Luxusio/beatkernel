@@ -746,20 +746,23 @@ impl LiveCompetition {
         // Builtin saved records retain the legacy comparison schema, exactly
         // as initial prepare_member_section_with_policy does. The admitted
         // native policy header is separate; do not relax replay compatibility.
-        let comparison_header = if policy.selection() == crate::play_policy::GaugeSelection::BeatKernel {
-            LiveReplayCapture::new_with_input_sounds(
-                &attempt.judge,
-                attempt.config.domain,
-                replay_limits()?,
-                attempt.config.start,
-                attempt.config.chart_seed,
-                None,
-                BmsInputMode::ButtonOnly,
-                InputSoundIdentity::from_source(&attempt.source)?,
-            )?.header().clone()
-        } else {
-            header.clone()
-        };
+        let comparison_header =
+            if policy.selection() == crate::play_policy::GaugeSelection::BeatKernel {
+                LiveReplayCapture::new_with_input_sounds(
+                    &attempt.judge,
+                    attempt.config.domain,
+                    replay_limits()?,
+                    attempt.config.start,
+                    attempt.config.chart_seed,
+                    None,
+                    BmsInputMode::ButtonOnly,
+                    InputSoundIdentity::from_source(&attempt.source)?,
+                )?
+                .header()
+                .clone()
+            } else {
+                header.clone()
+            };
         let mut competition = Competition::new(comparison_header, 8)?;
         options.load_opponents(&attempt.source, &mut competition, replay_limits()?)?;
         Ok(Self {
@@ -1568,7 +1571,10 @@ mod practice_tests {
                 None,
                 BmsInputMode::ButtonOnly,
                 InputSoundIdentity::from_source(&attempt.source).unwrap(),
-            ).unwrap().header().clone()
+            )
+            .unwrap()
+            .header()
+            .clone()
         } else {
             crate::native_judge::prepare_policy_header(
                 &attempt.source,
@@ -1578,7 +1584,8 @@ mod practice_tests {
                 attempt.config.start,
                 0,
                 attempt.config.end,
-            ).unwrap()
+            )
+            .unwrap()
         };
         let mut recording = ReplaySession::new(header.clone(), attempt.judge).unwrap();
         for (at, state, seq) in [
@@ -1688,7 +1695,10 @@ mod practice_tests {
             let mut fresh = old.prepare_practice(&attempt, &policy).unwrap();
             assert_eq!(fresh.player, PlayerId(43));
             assert_eq!(fresh.native_policy_header(), old.native_policy_header());
-            assert_eq!(fresh.competition.expected_header(), old.competition.expected_header());
+            assert_eq!(
+                fresh.competition.expected_header(),
+                old.competition.expected_header()
+            );
             assert_eq!(fresh.competition.opponents().len(), 1);
             assert_eq!(fresh.competition.opponents()[0].kind(), OpponentKind::Own);
             assert_eq!(fresh.competition.opponents()[0].score().hits, 0);

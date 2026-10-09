@@ -515,23 +515,23 @@ mod native {
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
     use beatkernel_bms_runtime::native_audio::{
-        NativeAudioConfig, PreparedNativeAudio, prepare_audio, prepare_input_sounds,
-        prepare_mine_sounds,
+        prepare_audio, prepare_input_sounds, prepare_mine_sounds, NativeAudioConfig,
+        PreparedNativeAudio,
     };
     use beatkernel_bms_runtime::{
-        ChannelPolicy,
-        native_chart::{NativeChartConfig, prepare_chart_with_policy},
-        native_judge::{NativeJudgeConfig, capture_limits, prepare_section_capture_for_policy},
+        native_chart::{prepare_chart_with_policy, NativeChartConfig},
+        native_judge::{capture_limits, prepare_section_capture_for_policy, NativeJudgeConfig},
         playback_pause::NativePause,
         player::{self},
+        ChannelPolicy,
     };
     use beatkernel_platform::{
         audio::{
-            DeviceFormat, SampleEncoding,
             presentation::discipline::{DisciplineConfig, PresentationDiscipline},
+            DeviceFormat, SampleEncoding,
         },
         linux::{
-            AlsaRequest, AlsaStatus, AlsaStream, MonotonicClock, alsa_presentation_pair_with_basis,
+            alsa_presentation_pair_with_basis, AlsaRequest, AlsaStatus, AlsaStream, MonotonicClock,
         },
     };
     use std::{collections::VecDeque, time::Duration as WallDuration};
@@ -561,8 +561,8 @@ mod native {
         )?)
     }
     use beatkernel_bms_runtime::native_start::{
-        MAX_START_INPUT_EVENTS, NativeStartConfig, NativeStartDevice, NativeStartObservation,
-        NativeStartResult, NativeTargetStartDevice, start_target_committed,
+        start_target_committed, NativeStartConfig, NativeStartDevice, NativeStartObservation,
+        NativeStartResult, NativeTargetStartDevice, MAX_START_INPUT_EVENTS,
     };
     struct StartupDevice<'a> {
         stream: &'a mut AlsaStream,
@@ -599,9 +599,9 @@ mod native {
         }
     }
     use beatkernel_bms_runtime::native_gameplay::{
-        AudioGameplayConfig, GameplaySession, InputBatch, NativeAudioGameplaySession,
-        NativeCollectedInput, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
-        run_gameplay_audio_with_policy_and_result_and_score,
+        run_gameplay_audio_with_policy_and_result_and_score, AudioGameplayConfig, GameplaySession,
+        InputBatch, NativeAudioGameplaySession, NativeCollectedInput, NativeGameplayConfig,
+        NativeGameplayDevice, NativeGameplayResult,
     };
     use beatkernel_bms_runtime::{
         gameplay_output_owner::GameplayOutputOwner, native_alsa_replacement::AlsaReplacementBackend,
@@ -1640,7 +1640,10 @@ mod native {
                         section_start: Timestamp::from_nanos(options.start_ns),
                     };
                     if let Some(practice) = practice.as_mut() {
-                        let mut recording = beatkernel_bms_runtime::native_gameplay::NativePracticeRecorder::new(save_capture);
+                        let mut recording =
+                            beatkernel_bms_runtime::native_gameplay::NativePracticeRecorder::new(
+                                save_capture,
+                            );
                         beatkernel_bms_runtime::native_gameplay::run_gameplay_audio_with_practice_and_result_and_score(
                             &mut device, session, config, &mut score, &policy, practice, &mut recording)
                     } else {
@@ -1781,8 +1784,8 @@ mod fixtures {
     fn finite_native_pause_resume_judging_capture_and_replay_share_the_retained_prefix() {
         use beatkernel::{
             audio::{
-                Mixer, MixerConfig, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId,
-                command_queue,
+                command_queue, Mixer, MixerConfig, PcmLimits, PcmSample, SampleBank, SampleId,
+                VoiceId,
             },
             chart::{
                 Beat, Bpm, InteractionId, ObjectId, ObjectMetadata, SourceChart, SourceObject,
@@ -1794,7 +1797,7 @@ mod fixtures {
             },
             interaction::InstantEvaluator,
             judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeStage, JudgeWindow, Rule},
-            replay::{ReplaySession, codec::ReplayCodecLimits},
+            replay::{codec::ReplayCodecLimits, ReplaySession},
             runtime::SoundBinding,
             time::{ClockMapper, ClockMappingQuality, Duration},
             transport::{Rate, Transport},
@@ -1933,11 +1936,10 @@ mod fixtures {
             .unwrap()
             .unwrap();
         runtime.transport_mut().pause(at.host.timestamp).unwrap();
-        assert!(
-            end.observe(Some(paused), pair(1_000_000))
-                .unwrap()
-                .is_none()
-        );
+        assert!(end
+            .observe(Some(paused), pair(1_000_000))
+            .unwrap()
+            .is_none());
         assert!(pause.request(false, pair(3_000_000)).unwrap());
         runtime.request_audio_pause(false);
         let mut pcm = [1.0; 4];
@@ -1954,11 +1956,10 @@ mod fixtures {
             .transport_mut()
             .resume(resumed.host.timestamp)
             .unwrap();
-        assert!(
-            end.observe(Some(latest), pair(4_000_000))
-                .unwrap()
-                .is_none()
-        );
+        assert!(end
+            .observe(Some(latest), pair(4_000_000))
+            .unwrap()
+            .is_none());
         let report = runtime
             .advance_to(point(5_000_100), &Identity, output(2_000_000))
             .unwrap();
@@ -2386,18 +2387,16 @@ mod fixtures {
         assert!(
             matches!(shift_bgm(command,3_000_000_000).unwrap(),AudioCommand::Play{at,..} if at.as_nanos()==3_000_000_012)
         );
-        assert!(
-            shift_bgm(
-                AudioCommand::Play {
-                    voice: VoiceId(1),
-                    sample: SampleId(1),
-                    at: Timestamp::from_nanos(i64::MAX),
-                    gain: 1.0
-                },
-                1
-            )
-            .is_err()
-        );
+        assert!(shift_bgm(
+            AudioCommand::Play {
+                voice: VoiceId(1),
+                sample: SampleId(1),
+                at: Timestamp::from_nanos(i64::MAX),
+                gain: 1.0
+            },
+            1
+        )
+        .is_err());
     }
     #[test]
     fn finite_lag_deadline_watermark_and_backlog_keep_original_event_floor() {
@@ -2432,19 +2431,17 @@ mod fixtures {
             watermark(point(0), point(i64::MAX), point(i64::MAX), 0, false).unwrap(),
             Some(point(i64::MAX))
         );
-        assert!(
-            watermark(
-                point(0),
-                point(0),
-                ClockPoint {
-                    domain: ClockDomainId(2),
-                    timestamp: Timestamp::ZERO
-                },
-                0,
-                false
-            )
-            .is_err()
-        );
+        assert!(watermark(
+            point(0),
+            point(0),
+            ClockPoint {
+                domain: ClockDomainId(2),
+                timestamp: Timestamp::ZERO
+            },
+            0,
+            false
+        )
+        .is_err());
     }
     #[test]
     fn estimated_origin_uses_supplied_pair_and_checks_domain_and_range() {
@@ -2459,29 +2456,25 @@ mod fixtures {
             estimated_origin(pair, point(0)).unwrap(),
             Timestamp::from_nanos(900)
         );
-        assert!(
-            estimated_origin(
-                pair,
-                ClockPoint {
-                    domain: ClockDomainId(3),
-                    timestamp: Timestamp::ZERO
+        assert!(estimated_origin(
+            pair,
+            ClockPoint {
+                domain: ClockDomainId(3),
+                timestamp: Timestamp::ZERO
+            }
+        )
+        .is_err());
+        assert!(estimated_origin(
+            ClockPair {
+                source: point(i64::MAX),
+                target: ClockPoint {
+                    domain: ClockDomainId(2),
+                    timestamp: Timestamp::from_nanos(i64::MIN)
                 }
-            )
-            .is_err()
-        );
-        assert!(
-            estimated_origin(
-                ClockPair {
-                    source: point(i64::MAX),
-                    target: ClockPoint {
-                        domain: ClockDomainId(2),
-                        timestamp: Timestamp::from_nanos(i64::MIN)
-                    }
-                },
-                point(0)
-            )
-            .is_err()
-        );
+            },
+            point(0)
+        )
+        .is_err());
     }
     #[test]
     fn timing_selection_requires_exact_version_and_precedence_without_changing_gauge() {
