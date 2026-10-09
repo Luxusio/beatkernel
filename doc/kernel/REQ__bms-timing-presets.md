@@ -152,3 +152,52 @@ It includes the actual record-preview regression, settings-pair admission,
 staged live/capture/replay/seek and local-member fixtures. Earlier native chart
 preparation fixtures passed eight tests. These are development checks; native
 device execution and independent final CLI/browser QA remain separate.
+
+## Independent verification — 2026-10-10
+
+Full-sweep independent code review passed. Independent CLI QA passed 96
+focused tests: adapter 7, core staged interactions 11, app timing 63, native
+chart preparation 9 and native parser selections 6. Current primary and three
+standalone native binaries built; current help and invalid selection commands
+were executed. A real selected BMS/WAV fixture reached native preparation before
+the deliberately unavailable ALSA endpoint refused. This is not physical audio
+or foreign-OS device evidence.
+
+Independent interactive Chromium QA used regenerated WASM SHA-256
+`04a5548e5b230dd5a019026680baf1806b921d50d5d0b6263858d053e93ff81e`.
+Actual live capture retained all sixteen independently checked stage windows
+and classifications. Replay retained hits/misses/combo 4/2/1 despite conflicting
+live selectors. Settings roundtrip, legacy settings reset, missing-rank
+rejection/recovery and two-member keyboard/touch capture were exercised.
+Both member recordings retained the selected numerical policy.
+
+The browser lens returned BLOCKED_ENV: remaining historical display/retry
+verification encountered software-GPU device destruction, a render
+acknowledgement timeout and a mixer-command rejection. Their environment versus
+production causes remain unproven. Evidence and screenshots are under
+`target/wf/qa-browser-bms-timing-final-20261010`; CLI evidence is under
+the structural final and executed-command transcript of
+`qa_cli_bms_timing_20261010_final`. Its commands are reproducible:
+
+```sh
+cargo test -p beatkernel-bms --test timing_preset --locked
+cargo test -p beatkernel --test profiled_interaction --locked
+cargo test -p beatkernel-bms-runtime --no-default-features --lib timing --locked
+cargo test -p beatkernel-bms-runtime --no-default-features --lib native_chart --locked
+cargo test -p beatkernel-bms-runtime --no-default-features --bin beatkernel-bms-runtime --bin linux_bms --bin windows_bms --bin macos_bms timing_selection --locked
+```
+
+The generated BMS/WAV fixtures remain under
+`target/wf/bms-timing-independent-cli-fixture` and current executables under
+`target/wf/worklet-chronology-qa-cli-1/cargo/debug`. Independent CLI output was
+not redirected to log files; executable presence alone is not PASS evidence.
+WBS08.07 remains incomplete; passing subsets do not replace the blocked lens.
+
+## Known ceiling
+
+Stored historical display was rejected while completed Results owned the
+presentation. Manual idle reprepare was attempted but subsequent GPU/render
+failures prevented proving that recovery. Replay currently exposes
+hits/misses/combo but lacks its maximum-combo getter. These broader player gaps
+are queued in TASK__browser-record-result-continuity; neither is a completed
+historical-display or replay-statistics claim.
