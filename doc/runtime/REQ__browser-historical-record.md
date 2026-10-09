@@ -105,7 +105,34 @@ drawing and page responses through the Worker harness. The unchanged unrelated
 green tests were not repeated for that focused correction.
 
 These are development handler fixtures, not actual browser GPU acceptance.
-Fresh full-sweep source review and independent CLI/browser QA remain required.
+Fresh full-sweep source review passed. Independent CLI QA passed 64 tests:
+22 historical Worker, four continuity Window/results and 38 audio-model cases.
+
+Independent browser QA with the current WASM and corrected Vulkan SwiftShader
+setup passed finite completion, save/use acceptance without chart reprepare and
+next/back page replies. It nevertheless returned **FAIL**: the visible history
+canvas remained blank after matching generation/content 5, geometry version 9,
+page 0 and a 250 ms paint delay. A viewport-only screenshot reproduced this
+without an earlier full-page capture. Canvas visibility and dimensions matched;
+there were no console or Worker errors. Draw acknowledgements and UI status
+therefore do not establish visible historical provenance or score acceptance.
+The root cause remains under investigation; do not classify this as an absent
+browser environment or declare this task complete. Evidence:
+`target/wf/qa-browser-record-continuity-vulkan/visibility/evidence.json` and
+`visibility/visible-history-viewport.png` under that same evidence directory.
+
+A subsequent minimal control reproduced missing visible colors on both direct
+main-thread and transferred Worker WebGPU canvases without loading the player
+or Rust renderer. This establishes a browser rendering/presentation failure
+independent of player scenes. Its precise internal cause and GPU texture
+contents remain unproven. Keep the original QA failure; visual player acceptance
+requires a working known-color control before another connected browser run.
+See the [headless WebGPU guide](../verification/GUIDE__headless-webgpu.md) for
+the bounded control and its actual pixel evidence.
+The independent browser reviewer inspected this new control and returned
+**BLOCKED_ENV** for visible acceptance. It preserved the original failure
+artifacts and functional passes; no additional player run or visual PASS was
+claimed. Resume visible acceptance when the known-color control works.
 
 ## Historical compile-only evidence — superseded as of 2026-10-10
 

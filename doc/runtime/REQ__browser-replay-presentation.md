@@ -45,7 +45,16 @@ The current release WASM built and wasm-bindgen regenerated the actual
 BrowserReplay maximum-combo getter; package SHA-256 is
 `5d947a3f11cf8cf1589f9210d3f9d9dda0073bac5ac2c0f73221dfa9b4626358`.
 Generated API presence is not actual browser score or retry evidence; those
-remain independent browser QA work.
+were subsequently exercised by independent browser QA on 2026-10-10.
+The actual replay reached terminal `completed=true` at song 6000000000 ns,
+with hits/misses/combo/maximum combo exactly matching capture: 1/4/0/1.
+Conflicting live selectors did not supply a replacement replay timing policy.
+Two actual local keyboard/touch recordings retained all sixteen selected
+timing windows. No mixer rejection or console/Worker error recurred. Evidence:
+`target/wf/qa-browser-record-continuity-vulkan/focused/evidence.json`.
+These passes do not resolve the blank historical screen reported in the
+[historical record contract](REQ__browser-historical-record.md); the connected
+task's browser verdict remains FAIL.
 
 Actual QA preserved a complete six-second recording that failed against
 baseline3aa4ccb at song269326157ns with `completion presentation precedes its
