@@ -7,7 +7,10 @@
 mod advanced;
 mod builtin;
 pub use advanced::{CompositeEvaluator, RepeatedEvaluator, TrackingEvaluator, TrackingInput};
-pub use builtin::{HoldEvaluator, InstantEvaluator, PressHoldEvaluator, PressInstantEvaluator};
+pub use builtin::{
+    HoldEvaluator, InstantEvaluator, PressHoldEvaluator, PressInstantEvaluator,
+    ProfiledHoldEvaluator, ProfiledInstantEvaluator,
+};
 
 use crate::{
     chart::TimedObject,

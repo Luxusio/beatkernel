@@ -19,6 +19,7 @@ mod mine_fixtures;
 mod mines;
 mod parser;
 mod rational;
+mod timing_preset;
 use beatkernel::{
     audio::SampleId,
     chart::*,
@@ -37,6 +38,10 @@ pub use judge_rank::{
     BmsDefExRank, BmsJudgeDifficulty, BmsRank, BmsRankMetadata, BmsRankPrecedence,
 };
 pub use mines::{MineDamage, MineEvent, ScheduledMine};
+pub use timing_preset::{
+    BmsClassifiedTimingWindow, BmsTimingPreset, BmsTimingPresetError, BmsTimingProfiles,
+    BmsTimingStage,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Explicit input semantics for the BMS adapter's builtin judge rules.
