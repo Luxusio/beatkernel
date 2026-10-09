@@ -21,8 +21,11 @@ pending partial owner or the separate cleanup diagnostic. Retirement/recovery
 refusal stays tagged with the current side and keeps that owner pending. There
 is no implicit fallback to the other side; a later attempt needs an explicit
 request. Both sides currently share one Mixer, so sample rate and format must
-match; conversion, the Windows composition/UI request mapping and hardware
-acceptance remain follow-up work.
+match; conversion and hardware acceptance remain follow-up work. Windows uses
+its existing WindowsRequest union and native owner rather than this generic
+helper, because it retains the HWND and original native observation metadata.
+Its target settings contract is documented in
+[Windows live backend selection](REQ__windows-output-backend-switch.md).
 
 Linux fixtures drive the actual owner and controller with the real memory Mixer
 through two distinct adapter types: a round trip with epochs 1 and 2 and resumed

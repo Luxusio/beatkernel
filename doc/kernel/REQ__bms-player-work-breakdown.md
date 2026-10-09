@@ -220,7 +220,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [ ] **BK-WBS-07.08** paused output 교체의 open/start/poll/prime/commit을 입력 merger와 원자적으로 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=2개 실제 native progressing 관측; stale publish 상태 보존.
 - [ ] **BK-WBS-07.09** rate/buffer/channel/encoding 변경을 실제 설정 요청·capability·applied 결과까지 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E19 target rate/buffer/period/matrix UI bridge 검증; 실제 launcher/encoding 제어·pending PCM 해석 보존은 계속 필요.
 - [ ] **BK-WBS-07.10** startup/pause/resume/finite end ACK가 lookahead/held-release가 아니라 native crossing을 기다린다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E16 공개 audio pump의 pause/resume/held 순서 검증; 실제 launcher owner→worker→native 관측 E2E 및 finite end는 계속 필요.
-- [ ] **BK-WBS-07.11** WASAPI↔ASIO 등 cross-backend 교체의 현재 소스 범위와 missing seam을 audit한다. — 상태=U(현황감사필요); 선행=-; 필요 근거/다음=native source/phase/history/latency/cleanup 교차 검사.
+- [ ] **BK-WBS-07.11** WASAPI↔ASIO 등 cross-backend 교체의 현재 소스 범위와 missing seam을 audit한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=WindowsRequest/공통 owner는 양쪽 open과 원래 Mixer·native clock 관측을 이미 지원; 현재 백엔드만 선택하던 Windows UI mapper와 output-only schema를 [대상 선택 계약](REQ__windows-output-backend-switch.md)에 따라 연결 중. 실제 SDK/장치 전환·latency/cleanup 검증은 남음.
 - [ ] **BK-WBS-07.12** unknown/stale/wrong-domain 관측·취소·실패·재시도가 owner를 유실하지 않는다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=모든 실제 launcher/replacement 회귀.
 - [ ] **BK-WBS-07.13** 모든 OS solo/local launchers가 실제 선택 class/gauge 정책 검증을 통해 network를 준비한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E1/E8 일부; 현재 Windows/macOS parser·foreign typing 재검사.
 - [ ] **BK-WBS-07.14** 여러 buffer/backend/rate에서 시작·정지·재개·교체의 음향 alignment를 측정한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=물리 loopback; 소프트웨어 clock 통과와 별도.

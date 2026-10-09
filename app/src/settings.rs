@@ -443,11 +443,13 @@ impl NativeSettings {
         values
             .fields
             .retain(|field| args.chunks_exact(2).any(|pair| pair[0] == field.flag));
-        if host == SettingsHost::Windows
-            && args
+        let asio = match args.chunks_exact(2).find(|pair| pair[0] == "--backend") {
+            Some(pair) => pair[1] == "asio",
+            None => args
                 .chunks_exact(2)
-                .any(|pair| pair[0] == "--output-channels")
-        {
+                .any(|pair| pair[0] == "--output-channels"),
+        };
+        if host == SettingsHost::Windows && asio {
             if let Some(field) = values
                 .fields
                 .iter_mut()
@@ -471,12 +473,15 @@ impl NativeSettings {
             ],
             SettingsHost::Windows => &[
                 "--device",
+                "--backend",
                 "--mode",
                 "--shared-policy",
                 "--buffer",
                 "--period",
                 "--output-channels",
                 "--output-matrix",
+                "--asio-view",
+                "--asio-system-clock",
                 "--asio-timer-error-ns",
                 "--asio-drift-error-ns",
                 "--asio-latency-error-ns",
@@ -529,6 +534,48 @@ impl NativeSettings {
                     field.hint = "Empty keeps the current native target rate. Source PCM rate and command timing stay fixed.";
                 }
                 _ => {}
+            }
+            if host == SettingsHost::Windows {
+                match field.flag {
+                    "--device" => {
+                        field.hint = "Device for the selected target backend. When switching to WASAPI, clear for the OS default or select an endpoint; an ASIO CLSID cannot select WASAPI. ASIO requires an installed driver CLSID.";
+                    }
+                    "--backend" => {
+                        field.hint = "wasapi or asio; empty keeps the current backend. ASIO requires the optional SDK build. Successful APPLY refreshes the draft from the actual output.";
+                    }
+                    "--buffer" => {
+                        field.label = "TARGET AUDIO BUFFER";
+                        field.hint = "Target backend buffer: default, frames:N or ns:N; ASIO accepts default or frames:N. Empty keeps the current buffer when the backend is unchanged.";
+                    }
+                    "--mode" => {
+                        field.hint = "WASAPI only: shared or exclusive. Empty keeps the current mode, or selects shared when switching to WASAPI. Inactive for ASIO.";
+                    }
+                    "--shared-policy" => {
+                        field.hint = "WASAPI only: engine or legacy. Empty keeps the current policy, or selects engine when switching to WASAPI. Inactive for ASIO.";
+                    }
+                    "--period" => {
+                        field.label = "WASAPI PROCESSING PERIOD";
+                        field.hint = "WASAPI only: default, frames:N or ns:N. Empty keeps the current period, or selects default when switching to WASAPI. Inactive for ASIO.";
+                    }
+                    "--asio-view" => {
+                        field.hint = "ASIO only: native, 32 or 64. Required when switching to ASIO. Inactive for WASAPI.";
+                    }
+                    "--output-channels" => {
+                        field.hint = "ASIO only: comma-separated driver output channel indices. Required when switching to ASIO. Inactive for WASAPI.";
+                    }
+                    "--asio-system-clock" => {
+                        field.hint = "ASIO only: multimedia. Required when switching to ASIO. Inactive for WASAPI.";
+                    }
+                    "--asio-timer-error-ns"
+                    | "--asio-drift-error-ns"
+                    | "--asio-latency-error-ns" => {
+                        field.hint = "ASIO only: nonnegative caller error estimate, not measured precision. Required when switching to ASIO. Inactive for WASAPI.";
+                    }
+                    "--asio-anchor-age-ns" => {
+                        field.hint = "ASIO only: positive maximum anchor age in nanoseconds. Required when switching to ASIO. Inactive for WASAPI.";
+                    }
+                    _ => {}
+                }
             }
         }
         Ok(settings)
@@ -766,6 +813,86 @@ fn valid_value(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn windows_live_backend_fields_are_bounded_and_host_specific() {
+        let supplied = args(&[
+            "--backend",
+            "asio",
+            "--asio-view",
+            "64",
+            "--asio-system-clock",
+            "multimedia",
+        ]);
+        let draft = NativeSettings::output_only(&supplied, SettingsHost::Windows).unwrap();
+        assert_eq!(draft.native_args(), supplied);
+        for host in [SettingsHost::Linux, SettingsHost::Macos] {
+            for flag in ["--backend", "--asio-view", "--asio-system-clock"] {
+                assert!(NativeSettings::output_only(&args(&[flag, "value"]), host).is_err());
+            }
+        }
+        for flag in ["--backend", "--asio-view", "--asio-system-clock"] {
+            assert!(
+                NativeSettings::output_only(
+                    &args(&[flag, "first", flag, "second"]),
+                    SettingsHost::Windows
+                )
+                .is_err()
+            );
+            assert!(
+                NativeSettings::output_only(
+                    &[flag.to_owned(), "x".repeat(MAX_VALUE_BYTES + 1)],
+                    SettingsHost::Windows
+                )
+                .is_err()
+            );
+            assert!(
+                NativeSettings::output_only(&args(&[flag, "bad\nvalue"]), SettingsHost::Windows)
+                    .is_err()
+            );
+        }
+        assert!(NativeSettings::output_only(&args(&["--backend"]), SettingsHost::Windows).is_err());
+    }
+
+    #[test]
+    fn windows_live_capability_labels_follow_explicit_backend_before_legacy_channels() {
+        for (backend, channels, asio) in [
+            (Some("wasapi"), Some(""), false),
+            (Some("wasapi"), Some("0,1"), false),
+            (Some("asio"), None, true),
+            (Some(""), Some("0,1"), false),
+            (None, Some("0,1"), true),
+            (None, None, false),
+        ] {
+            let mut supplied = args(&["--device", "device"]);
+            if let Some(backend) = backend {
+                supplied.extend(args(&["--backend", backend]));
+            }
+            if let Some(channels) = channels {
+                supplied.extend(args(&["--output-channels", channels]));
+            }
+            let capability =
+                NativeSettings::output_capability(&supplied, SettingsHost::Windows).unwrap();
+            assert_eq!(capability.fields().len(), supplied.len() / 2);
+            let device = capability
+                .fields()
+                .iter()
+                .find(|row| row.flag == "--device")
+                .unwrap();
+            assert_eq!(device.label == "TRUSTED ASIO DRIVER CLSID", asio);
+            assert_eq!(
+                device.hint.contains("APPLY loads this installed driver"),
+                asio
+            );
+            let expected: Vec<String> = supplied
+                .chunks_exact(2)
+                .filter(|pair| !pair[1].is_empty())
+                .flatten()
+                .cloned()
+                .collect();
+            assert_eq!(capability.native_args(), expected);
+        }
+    }
+
     #[test]
     fn timing_pair_is_explicit_and_native_drafts_preserve_both_fields() {
         use beatkernel_bms::{BmsRankPrecedence, BmsTimingPreset};

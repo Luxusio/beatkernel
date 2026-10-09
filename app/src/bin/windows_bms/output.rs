@@ -1,8 +1,8 @@
 //! Control-thread backend ownership shared by the physical-input gameplay pump.
 #[cfg(feature = "asio-sdk")]
-use super::native::OUTPUT;
-#[cfg(feature = "asio-sdk")]
 use super::native::Window;
+#[cfg(feature = "asio-sdk")]
+use super::native::OUTPUT;
 use super::*;
 #[cfg(feature = "asio-sdk")]
 use beatkernel::time::Timestamp;
@@ -21,17 +21,17 @@ use beatkernel_platform::{
         AsioPresentationObservation, MultimediaClockAnchor,
     },
     windows::asio::{
-        AsioEnumerationLimits, AsioRegistryView, AsioDriverRegistration,
         control::AsioControl,
         enumerate_asio_drivers,
         stream::{AsioStream, AsioStreamPhase},
+        AsioDriverRegistration, AsioEnumerationLimits, AsioRegistryView,
     },
 };
 use beatkernel_platform::{
     audio::{
+        presentation::discipline::{ObservationAdmission, PresentationDiscipline},
         AudioBackendKind, AudioDeviceId, AudioOutputBackend, AudioOutputStream, AudioStreamMode,
         AudioStreamRequest,
-        presentation::discipline::{ObservationAdmission, PresentationDiscipline},
     },
     windows::{
         audio::{WasapiBackend, WasapiOptions, WasapiStream},
@@ -256,8 +256,8 @@ impl Output {
     {
         use beatkernel_bms_runtime::native_audio_presentation::NativeAudioSnapshot;
         use beatkernel_platform::audio::presentation::{
-            observation_with_basis, PresentationError,
-            validation::OriginalNativePresentationEvidence,
+            observation_with_basis, validation::OriginalNativePresentationEvidence,
+            PresentationError,
         };
         match self {
             Self::Wasapi(stream) => {
@@ -689,6 +689,21 @@ pub(super) struct AsioLiveConfig {
 }
 #[cfg(feature = "asio-sdk")]
 impl AsioLiveConfig {
+    pub(super) fn from_target(
+        registration: AsioDriverRegistration,
+        plan: super::output_settings::AsioTargetPlan,
+    ) -> Self {
+        Self {
+            registration,
+            channels: plan.channels,
+            buffer: plan.buffer,
+            sample_rate: plan.sample_rate,
+            timer_error: plan.bounds.timer,
+            drift_error: plan.bounds.drift,
+            latency_error: plan.bounds.latency,
+            age: plan.bounds.age,
+        }
+    }
     pub(super) fn clock_bounds(&self) -> super::output_settings::AsioClockBounds {
         super::output_settings::AsioClockBounds {
             timer: self.timer_error,
@@ -696,12 +711,6 @@ impl AsioLiveConfig {
             latency: self.latency_error,
             age: self.age,
         }
-    }
-    pub(super) fn set_clock_bounds(&mut self, bounds: super::output_settings::AsioClockBounds) {
-        self.timer_error = bounds.timer;
-        self.drift_error = bounds.drift;
-        self.latency_error = bounds.latency;
-        self.age = bounds.age;
     }
 }
 #[cfg(feature = "asio-sdk")]
@@ -721,21 +730,6 @@ pub(super) struct AsioOutput {
 }
 #[cfg(feature = "asio-sdk")]
 impl AsioOutput {
-    pub(super) fn validate_clock_bounds(
-        &self,
-        bounds: super::output_settings::AsioClockBounds,
-    ) -> Result<()> {
-        let receipt = self.clock.sample_multimedia()?;
-        MultimediaClockAnchor::new(
-            receipt.milliseconds,
-            receipt.before.normalized,
-            receipt.after.normalized,
-            bounds.age,
-            bounds.timer,
-            bounds.drift,
-        )?;
-        Ok(())
-    }
     pub(super) fn applied_buffer_frames(&self) -> Result<u32> {
         self.buffer_frames
             .ok_or_else(|| "ASIO applied buffer metadata unavailable".into())
@@ -843,7 +837,7 @@ impl AsioOutput {
     }
     fn pump_driver_messages(&self) -> Result<()> {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage, WM_CLOSE, WM_QUIT,
+            DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_CLOSE, WM_QUIT,
         };
         // SAFETY: initialized POD message storage, owned by the native window
         // thread. The filter retains physical-input messages for the common

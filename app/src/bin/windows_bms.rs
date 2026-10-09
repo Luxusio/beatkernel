@@ -2435,3 +2435,7 @@ fn exact_keyboard_selection_has_no_attachment_fallback() {
     assert!(selected_keyboard(Some("missing"), devices).is_err());
     assert!(selected_keyboard(Some("path-A"), [("path-A", 7, 11), ("path-A", 9, 13)]).is_err());
 }
+
+#[cfg(test)]
+#[path = "windows_bms/output_switch_fixtures.rs"]
+mod output_switch_fixtures;

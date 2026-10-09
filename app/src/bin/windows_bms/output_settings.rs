@@ -1,18 +1,264 @@
-//! Portable WASAPI draft mapping; no endpoint is opened before validation.
-use beatkernel::audio::{AudioLimits, ChannelMatrix};
+//! Portable target-first Windows output draft mapping; no endpoint is opened before validation.
+use beatkernel::audio::{AudioFormat, AudioLimits, ChannelMatrix};
 use beatkernel_bms_runtime::{
     gameplay::output::domain::{
         control::OutputCapability,
-        remix::{RemixedOutputRequest, select_matrix, matrix_text},
+        remix::{matrix_text, select_matrix, RemixedOutputRequest},
     },
     settings::{NativeSettings, SettingsHost},
 };
 use beatkernel_platform::audio::{
-    AudioBackendKind, AudioDeviceId, AudioStreamRequest, AppliedStreamConfig, BufferRequest,
-    PeriodRequest, DeviceFormat,
+    AppliedStreamConfig, AudioBackendKind, AudioDeviceId, AudioStreamRequest, BufferRequest,
+    DeviceFormat, PeriodRequest,
 };
 
-#[cfg(any(feature = "asio-sdk", test))]
+pub(super) fn switch_capability(
+    mut cap: OutputCapability,
+    backend: super::Backend,
+    view: Option<super::AsioView>,
+) -> Result<OutputCapability, String> {
+    cap.current_args.extend([
+        "--backend".into(),
+        match backend {
+            super::Backend::Wasapi => "wasapi",
+            super::Backend::Asio => "asio",
+        }
+        .into(),
+    ]);
+    for flag in [
+        "--mode",
+        "--shared-policy",
+        "--period",
+        "--output-channels",
+        "--asio-view",
+        "--asio-system-clock",
+        "--asio-timer-error-ns",
+        "--asio-drift-error-ns",
+        "--asio-latency-error-ns",
+        "--asio-anchor-age-ns",
+    ] {
+        if !cap.current_args.chunks_exact(2).any(|pair| pair[0] == flag) {
+            let value = match flag {
+                "--asio-view" if backend == super::Backend::Asio => {
+                    match view.ok_or("ASIO current registry view unavailable")? {
+                        super::AsioView::Native => "native",
+                        super::AsioView::Bits32 => "32",
+                        super::AsioView::Bits64 => "64",
+                    }
+                }
+                "--asio-system-clock" if backend == super::Backend::Asio => "multimedia",
+                _ => "",
+            };
+            cap.current_args.extend([flag.into(), value.into()]);
+        }
+    }
+    cap.validate()?;
+    Ok(cap)
+}
+
+pub(super) struct WasapiTargetPlan {
+    pub(super) device: Option<AudioDeviceId>,
+    pub(super) mode: beatkernel_platform::audio::AudioStreamMode,
+    pub(super) format: DeviceFormat,
+    pub(super) buffer: BufferRequest,
+    pub(super) period: PeriodRequest,
+    pub(super) negotiation: beatkernel_platform::audio::NegotiationPolicy,
+    pub(super) matrix: Option<ChannelMatrix>,
+}
+impl WasapiTargetPlan {
+    pub(super) fn into_request(
+        self,
+        default_device: Option<AudioDeviceId>,
+    ) -> Result<RemixedOutputRequest<AudioStreamRequest>, String> {
+        let device = self
+            .device
+            .or(default_device)
+            .ok_or("OS default WASAPI endpoint must be resolved before output replacement")?;
+        let native = AudioStreamRequest::new(
+            device,
+            AudioBackendKind::Wasapi,
+            self.mode,
+            self.format,
+            self.buffer,
+            self.period,
+        )
+        .map_err(|e| e.to_string())?
+        .with_negotiation(self.negotiation);
+        Ok(RemixedOutputRequest {
+            native,
+            matrix: self.matrix,
+        })
+    }
+}
+#[cfg_attr(not(feature = "asio-sdk"), allow(dead_code))]
+pub(super) struct AsioTargetPlan {
+    pub(super) device: String,
+    pub(super) view: super::AsioView,
+    pub(super) channels: Vec<u32>,
+    pub(super) buffer: beatkernel_platform::audio::asio::AsioBufferRequest,
+    pub(super) bounds: AsioClockBounds,
+    pub(super) sample_rate: u32,
+    pub(super) matrix: Option<ChannelMatrix>,
+}
+pub(super) enum TargetPlan {
+    Wasapi(WasapiTargetPlan),
+    Asio(AsioTargetPlan),
+}
+
+/// Select target first; inactive backend fields are never interpreted.
+pub(super) fn plan_target(
+    current: &OutputCapability,
+    current_wasapi: Option<&AudioStreamRequest>,
+    source: AudioFormat,
+    matrix: Option<&ChannelMatrix>,
+    args: &[String],
+    asio_available: bool,
+) -> Result<TargetPlan, String> {
+    let current_draft = NativeSettings::output_only(&current.current_args, SettingsHost::Windows)?;
+    let draft = NativeSettings::output_only(args, SettingsHost::Windows)?;
+    let value = |draft: &NativeSettings, flag: &str| {
+        draft
+            .fields()
+            .iter()
+            .find(|f| f.flag == flag && !f.value.is_empty())
+            .map(|f| f.value.clone())
+    };
+    let current_backend = match value(&current_draft, "--backend").as_deref() {
+        Some("wasapi") => super::Backend::Wasapi,
+        Some("asio") => super::Backend::Asio,
+        None if value(&current_draft, "--output-channels").is_some() => super::Backend::Asio,
+        None => super::Backend::Wasapi,
+        _ => return Err("backend must be wasapi or asio".into()),
+    };
+    let target = match value(&draft, "--backend").as_deref() {
+        Some("wasapi") => super::Backend::Wasapi,
+        Some("asio") => super::Backend::Asio,
+        None => current_backend,
+        _ => return Err("backend must be wasapi or asio".into()),
+    };
+    let filtered: Vec<String> = draft
+        .fields()
+        .iter()
+        .filter(|f| args.chunks_exact(2).any(|pair| pair[0] == f.flag))
+        .filter(|f| match target {
+            super::Backend::Wasapi => matches!(
+                f.flag,
+                "--device"
+                    | "--buffer"
+                    | "--output-matrix"
+                    | "--mode"
+                    | "--period"
+                    | "--shared-policy"
+            ),
+            super::Backend::Asio => matches!(
+                f.flag,
+                "--device"
+                    | "--buffer"
+                    | "--output-matrix"
+                    | "--output-channels"
+                    | "--asio-timer-error-ns"
+                    | "--asio-drift-error-ns"
+                    | "--asio-latency-error-ns"
+                    | "--asio-anchor-age-ns"
+            ),
+        })
+        .flat_map(|f| [f.flag.to_owned(), f.value.clone()])
+        .collect();
+    if target == super::Backend::Wasapi {
+        return wasapi_plan(
+            if current_backend == target {
+                current_wasapi
+            } else {
+                None
+            },
+            source,
+            matrix,
+            &filtered,
+        )
+        .map(TargetPlan::Wasapi);
+    }
+    if !asio_available {
+        return Err("ASIO requires build feature asio-sdk; current output retained".into());
+    }
+    let inherited = |flag: &str| {
+        value(&draft, flag).or_else(|| {
+            (current_backend == target)
+                .then(|| value(&current_draft, flag))
+                .flatten()
+        })
+    };
+    let required = |flag: &str| {
+        inherited(flag).ok_or_else(|| format!("first ASIO selection requires explicit {flag}"))
+    };
+    let device = required("--device")?;
+    let view = match required("--asio-view")?.as_str() {
+        "native" => super::AsioView::Native,
+        "32" => super::AsioView::Bits32,
+        "64" => super::AsioView::Bits64,
+        _ => return Err("ASIO view must be native, 32 or 64".into()),
+    };
+    if required("--asio-system-clock")? != "multimedia" {
+        return Err("ASIO system clock must be explicitly multimedia".into());
+    }
+    let channels =
+        super::parse_output_channels(&required("--output-channels")?).map_err(|e| e.to_string())?;
+    let mut bounds_args = Vec::new();
+    for flag in [
+        "--asio-timer-error-ns",
+        "--asio-drift-error-ns",
+        "--asio-latency-error-ns",
+        "--asio-anchor-age-ns",
+    ] {
+        bounds_args.extend([flag.into(), required(flag)?]);
+    }
+    let bounds = asio_clock_request(
+        AsioClockBounds {
+            timer: 0,
+            drift: 0,
+            latency: 0,
+            age: 0,
+        },
+        &bounds_args,
+    )?;
+    let buffer_args = inherited("--buffer")
+        .map(|v| vec!["--buffer".into(), v])
+        .unwrap_or_default();
+    let initial_buffer = match super::size(
+        value(&current_draft, "--buffer")
+            .as_deref()
+            .filter(|_| current_backend == target)
+            .unwrap_or("default"),
+    )
+    .map_err(|e| e.to_string())?
+    {
+        None => beatkernel_platform::audio::asio::AsioBufferRequest::DriverPreferred,
+        Some((true, n)) => beatkernel_platform::audio::asio::AsioBufferRequest::Frames(n as u32),
+        _ => return Err("ASIO buffer requires preferred/default or bounded exact frames".into()),
+    };
+    let mut active = filtered;
+    // Target shared buffer value overrides current configuration.
+    if !active.chunks_exact(2).any(|p| p[0] == "--buffer") {
+        active.extend(buffer_args);
+    }
+    let (device, buffer, channels, matrix) = asio_request_for_source(
+        &device,
+        initial_buffer,
+        &channels,
+        source.channels(),
+        matrix,
+        &active,
+    )?;
+    Ok(TargetPlan::Asio(AsioTargetPlan {
+        device,
+        view,
+        channels,
+        buffer,
+        bounds,
+        sample_rate: source.sample_rate(),
+        matrix,
+    }))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct AsioClockBounds {
     pub(super) timer: u64,
@@ -20,7 +266,6 @@ pub(super) struct AsioClockBounds {
     pub(super) latency: u64,
     pub(super) age: u64,
 }
-#[cfg(any(feature = "asio-sdk", test))]
 pub(super) fn asio_clock_request(
     current: AsioClockBounds,
     args: &[String],
@@ -93,11 +338,36 @@ pub(super) fn asio_driver_index<'a>(
     found.ok_or_else(|| "selected ASIO driver is absent from the current registry view".into())
 }
 
-#[cfg(any(feature = "asio-sdk", test))]
+#[cfg(test)]
 pub(super) fn asio_request(
     device: &str,
     buffer: beatkernel_platform::audio::asio::AsioBufferRequest,
     channels: &[u32],
+    matrix: Option<&ChannelMatrix>,
+    args: &[String],
+) -> Result<
+    (
+        String,
+        beatkernel_platform::audio::asio::AsioBufferRequest,
+        Vec<u32>,
+        Option<ChannelMatrix>,
+    ),
+    String,
+> {
+    asio_request_for_source(
+        device,
+        buffer,
+        channels,
+        matrix.map_or(channels.len() as u16, ChannelMatrix::source_channels),
+        matrix,
+        args,
+    )
+}
+fn asio_request_for_source(
+    device: &str,
+    buffer: beatkernel_platform::audio::asio::AsioBufferRequest,
+    channels: &[u32],
+    source: u16,
     matrix: Option<&ChannelMatrix>,
     args: &[String],
 ) -> Result<
@@ -153,7 +423,6 @@ pub(super) fn asio_request(
             _ => return Err("ASIO live replacement does not support a period field".into()),
         }
     }
-    let source = matrix.map_or(channels.len() as u16, ChannelMatrix::source_channels);
     let (target, matrix) = select_matrix(source, matrix, text)?;
     if target as usize != selected.len() {
         return Err("ASIO matrix target width must match selected driver channels".into());
@@ -213,6 +482,7 @@ pub(super) fn asio_capability(
     Ok(cap)
 }
 
+#[cfg(test)]
 pub(super) fn request(
     current: AudioStreamRequest,
     matrix: Option<&ChannelMatrix>,
@@ -221,15 +491,42 @@ pub(super) fn request(
     if current.backend() != AudioBackendKind::Wasapi {
         return Err("live draft requires WASAPI output".into());
     }
+    let source = AudioFormat::new(
+        current.format().sample_rate(),
+        matrix.map_or(current.format().channels(), ChannelMatrix::source_channels),
+    )
+    .map_err(|e| e.to_string())?;
+    wasapi_plan(Some(&current), source, matrix, args)?.into_request(None)
+}
+fn wasapi_plan(
+    current: Option<&AudioStreamRequest>,
+    source: AudioFormat,
+    matrix: Option<&ChannelMatrix>,
+    args: &[String],
+) -> Result<WasapiTargetPlan, String> {
     let draft = NativeSettings::output_only(args, SettingsHost::Windows)?;
-    let mut device = current.device().clone();
-    let mut buffer = current.buffer();
-    let mut period = current.period();
-    let mut shared = match current.mode() {
-        beatkernel_platform::audio::AudioStreamMode::Shared(policy) => policy,
-        _ => beatkernel_platform::audio::SharedPeriodPolicy::EnginePeriod,
-    };
-    let mut exclusive = current.mode() == beatkernel_platform::audio::AudioStreamMode::Exclusive;
+    let mut device = current.map(|c| c.device().clone());
+    let mut buffer = current.map_or(BufferRequest::DeviceDefault, AudioStreamRequest::buffer);
+    let mut period = current.map_or(PeriodRequest::DeviceDefault, AudioStreamRequest::period);
+    let mut shared = current.map_or(
+        beatkernel_platform::audio::SharedPeriodPolicy::EnginePeriod,
+        |c| match c.mode() {
+            beatkernel_platform::audio::AudioStreamMode::Shared(policy) => policy,
+            _ => beatkernel_platform::audio::SharedPeriodPolicy::EnginePeriod,
+        },
+    );
+    let mut exclusive =
+        current.is_some_and(|c| c.mode() == beatkernel_platform::audio::AudioStreamMode::Exclusive);
+    // Blank device is an explicit OS-default choice, not an inherited CLSID.
+    for field in draft
+        .fields()
+        .iter()
+        .filter(|f| f.flag == "--device" && args.chunks_exact(2).any(|p| p[0] == "--device"))
+    {
+        if !field.value.is_empty() || current.is_none() {
+            device = (!field.value.is_empty()).then(|| AudioDeviceId(field.value.clone()));
+        }
+    }
     let mut text = "";
     for field in draft
         .fields()
@@ -237,7 +534,7 @@ pub(super) fn request(
         .filter(|field| !field.value.is_empty())
     {
         match field.flag {
-            "--device" => device = AudioDeviceId(field.value.clone()),
+            "--device" => {}
             "--mode" => {
                 exclusive = match field.value.as_str() {
                     "exclusive" => true,
@@ -304,23 +601,39 @@ pub(super) fn request(
     {
         return Err("legacy shared WASAPI requires the default period".into());
     }
-    let source = matrix.map_or(current.format().channels(), ChannelMatrix::source_channels);
-    let (channels, matrix) = select_matrix(source, matrix, text)?;
+    if device.as_ref().is_some_and(|d| d.0.contains('\0')) {
+        return Err("invalid WASAPI endpoint".into());
+    }
+    if device
+        .as_ref()
+        .is_some_and(|d| beatkernel_platform::audio::asio::canonical_asio_clsid(&d.0).is_ok())
+    {
+        return Err("ASIO CLSID is not a WASAPI endpoint; choose a WASAPI endpoint or clear the device field for OS default".into());
+    }
+    let (channels, matrix) = select_matrix(source.channels(), matrix, text)?;
     let format = DeviceFormat::new(
-        current.format().sample_rate(),
+        source.sample_rate(),
         channels,
-        current.format().encoding(),
-        if channels == current.format().channels() {
-            current.format().channel_mask()
-        } else {
-            None
-        },
+        current.map_or(beatkernel_platform::audio::SampleEncoding::Float32, |c| {
+            c.format().encoding()
+        }),
+        current
+            .filter(|c| channels == c.format().channels())
+            .and_then(|c| c.format().channel_mask()),
     )
     .map_err(|e| e.to_string())?;
-    let native = AudioStreamRequest::new(device, current.backend(), mode, format, buffer, period)
-        .map_err(|e| e.to_string())?
-        .with_negotiation(current.negotiation());
-    Ok(RemixedOutputRequest { native, matrix })
+    Ok(WasapiTargetPlan {
+        device,
+        mode,
+        format,
+        buffer,
+        period,
+        matrix,
+        negotiation: current.map_or(
+            beatkernel_platform::audio::NegotiationPolicy::Exact,
+            AudioStreamRequest::negotiation,
+        ),
+    })
 }
 fn buffer_text(size: BufferRequest) -> String {
     match size {
@@ -384,7 +697,7 @@ pub(super) fn capability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beatkernel_platform::audio::{AudioStreamMode, SampleEncoding, NegotiationPolicy};
+    use beatkernel_platform::audio::{AudioStreamMode, NegotiationPolicy, SampleEncoding};
     const DRIVER: &str = "{ABCDEF12-3456-7890-ABCD-EF1234567890}";
     fn current() -> AudioStreamRequest {
         AudioStreamRequest::new(
@@ -397,6 +710,116 @@ mod tests {
         )
         .unwrap()
         .with_negotiation(NegotiationPolicy::AllowSupportedRounding)
+    }
+    #[test]
+    fn actual_wasapi_switch_capability_emits_inactive_rows_without_changing_backend_label() {
+        let requested = current();
+        let applied = AppliedStreamConfig {
+            format: requested.format(),
+            requested: requested.clone(),
+            buffer_frames: 64,
+            buffer_duration: beatkernel::time::Duration::from_nanos(1_333_333),
+            period_frames: None,
+            period_duration: beatkernel::time::Duration::ZERO,
+            stream_latency: beatkernel::time::Duration::ZERO,
+            sizing_adjusted: false,
+        };
+        let cap = switch_capability(
+            capability(&applied, None).unwrap(),
+            super::super::Backend::Wasapi,
+            None,
+        )
+        .unwrap();
+        let fields = cap.settings().unwrap();
+        for flag in [
+            "--backend",
+            "--asio-view",
+            "--asio-system-clock",
+            "--output-channels",
+            "--asio-anchor-age-ns",
+        ] {
+            assert!(fields.fields().iter().any(|f| f.flag == flag));
+        }
+        let device = fields
+            .fields()
+            .iter()
+            .find(|f| f.flag == "--device")
+            .unwrap();
+        assert_ne!(device.label, "TRUSTED ASIO DRIVER CLSID");
+        assert!(fields
+            .fields()
+            .iter()
+            .find(|f| f.flag == "--output-channels")
+            .unwrap()
+            .value
+            .is_empty());
+        let TargetPlan::Wasapi(plan) = plan_target(
+            &cap,
+            Some(&requested),
+            requested.format().pcm(),
+            None,
+            &cap.current_args,
+            false,
+        )
+        .unwrap() else {
+            panic!("WASAPI capability changed target")
+        };
+        assert_eq!(plan.into_request(None).unwrap().native, requested);
+    }
+    #[test]
+    fn actual_asio_switch_capability_roundtrips_clock_view_and_inactive_wasapi_fields() {
+        let bounds = AsioClockBounds {
+            timer: 10,
+            drift: 20,
+            latency: 30,
+            age: 1_000_000_000,
+        };
+        let cap = asio_capability(
+            DRIVER,
+            beatkernel_platform::audio::asio::AsioBufferRequest::Frames(64),
+            &[0, 1],
+            None,
+        )
+        .unwrap();
+        let cap = switch_capability(
+            asio_clock_capability(cap, bounds).unwrap(),
+            super::super::Backend::Asio,
+            Some(super::super::AsioView::Bits64),
+        )
+        .unwrap();
+        let fields = cap.settings().unwrap();
+        assert_eq!(
+            fields
+                .fields()
+                .iter()
+                .find(|f| f.flag == "--device")
+                .unwrap()
+                .label,
+            "TRUSTED ASIO DRIVER CLSID"
+        );
+        for flag in ["--mode", "--period", "--shared-policy"] {
+            assert!(fields
+                .fields()
+                .iter()
+                .find(|f| f.flag == flag)
+                .unwrap()
+                .value
+                .is_empty());
+        }
+        let TargetPlan::Asio(plan) = plan_target(
+            &cap,
+            None,
+            AudioFormat::new(48_000, 2).unwrap(),
+            None,
+            &cap.current_args,
+            true,
+        )
+        .unwrap() else {
+            panic!("ASIO capability changed target")
+        };
+        assert_eq!(plan.bounds, bounds);
+        assert_eq!(plan.view, super::super::AsioView::Bits64);
+        assert_eq!(plan.channels, [0, 1]);
     }
     #[test]
     fn live_wasapi_draft_preserves_mode_rate_policy_and_original_matrix_source() {
@@ -437,14 +860,12 @@ mod tests {
             vec!["--device", "bad\0endpoint"],
             vec!["--mode", "invalid"],
         ] {
-            assert!(
-                request(
-                    current(),
-                    None,
-                    &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
-                )
-                .is_err()
-            );
+            assert!(request(
+                current(),
+                None,
+                &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            )
+            .is_err());
         }
         let original = current();
         let unchanged = request(original.clone(), None, &[]).unwrap();
@@ -508,14 +929,12 @@ mod tests {
             PeriodRequest::DeviceDefault,
         )
         .unwrap();
-        assert!(
-            request(
-                shared.clone(),
-                None,
-                &["--period".into(), "frames:32".into()]
-            )
-            .is_err()
-        );
+        assert!(request(
+            shared.clone(),
+            None,
+            &["--period".into(), "frames:32".into()]
+        )
+        .is_err());
         let preserved = request(
             shared.clone(),
             None,
@@ -594,31 +1013,27 @@ mod tests {
             vec!["--output-matrix", "1,0"],
             vec!["--output-matrix", "1,0;0,1;1,1"],
         ] {
-            assert!(
-                asio_request(
-                    DRIVER,
-                    AsioBufferRequest::DriverPreferred,
-                    &[0, 1],
-                    None,
-                    &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
-                )
-                .is_err()
-            );
+            assert!(asio_request(
+                DRIVER,
+                AsioBufferRequest::DriverPreferred,
+                &[0, 1],
+                None,
+                &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            )
+            .is_err());
         }
         assert!(asio_capability(DRIVER, AsioBufferRequest::Frames(0), &[0, 1], None).is_err());
         assert!(asio_capability(DRIVER, AsioBufferRequest::DriverPreferred, &[], None).is_err());
         assert!(
             asio_capability(DRIVER, AsioBufferRequest::DriverPreferred, &[0, 0], None).is_err()
         );
-        assert!(
-            asio_capability(
-                DRIVER,
-                AsioBufferRequest::DriverPreferred,
-                &[u32::MAX],
-                None
-            )
-            .is_err()
-        );
+        assert!(asio_capability(
+            DRIVER,
+            AsioBufferRequest::DriverPreferred,
+            &[u32::MAX],
+            None
+        )
+        .is_err());
     }
 
     #[test]
@@ -635,16 +1050,14 @@ mod tests {
         .unwrap();
         assert_eq!(reordered, [7, 4]);
         assert!(matrix.is_none());
-        assert!(
-            asio_request(
-                DRIVER,
-                buffer,
-                &reordered,
-                None,
-                &["--output-channels".into(), "7,4,2".into()]
-            )
-            .is_err()
-        );
+        assert!(asio_request(
+            DRIVER,
+            buffer,
+            &reordered,
+            None,
+            &["--output-channels".into(), "7,4,2".into()]
+        )
+        .is_err());
         let (_, _, resized, matrix) = asio_request(
             DRIVER,
             buffer,
@@ -670,16 +1083,14 @@ mod tests {
         .unwrap();
         assert_eq!(same, resized);
         assert_eq!(retained, matrix);
-        assert!(
-            asio_request(
-                DRIVER,
-                buffer,
-                &resized,
-                matrix.as_ref(),
-                &["--output-matrix".into(), "exact".into()]
-            )
-            .is_err()
-        );
+        assert!(asio_request(
+            DRIVER,
+            buffer,
+            &resized,
+            matrix.as_ref(),
+            &["--output-matrix".into(), "exact".into()]
+        )
+        .is_err());
         let (_, _, reset, cleared) = asio_request(
             DRIVER,
             buffer,
@@ -703,16 +1114,14 @@ mod tests {
         for text in ["", "0,0", "0,", "-1", "+1", "2147483648", "4294967296"] {
             assert!(super::super::parse_output_channels(text).is_err());
             if !text.is_empty() {
-                assert!(
-                    asio_request(
-                        DRIVER,
-                        AsioBufferRequest::DriverPreferred,
-                        &[0, 1],
-                        None,
-                        &["--output-channels".into(), text.into()]
-                    )
-                    .is_err()
-                );
+                assert!(asio_request(
+                    DRIVER,
+                    AsioBufferRequest::DriverPreferred,
+                    &[0, 1],
+                    None,
+                    &["--output-channels".into(), text.into()]
+                )
+                .is_err());
             }
         }
         let oversized = (0..33).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
@@ -743,14 +1152,12 @@ mod tests {
         );
         assert_eq!(engine.native.format(), original.format());
         assert_eq!(engine.native.negotiation(), original.negotiation());
-        assert!(
-            request(
-                engine.native.clone(),
-                None,
-                &["--shared-policy".into(), "legacy".into()]
-            )
-            .is_err()
-        );
+        assert!(request(
+            engine.native.clone(),
+            None,
+            &["--shared-policy".into(), "legacy".into()]
+        )
+        .is_err());
         let legacy = request(
             engine.native,
             None,
@@ -783,14 +1190,12 @@ mod tests {
             vec!["--mode", "invalid"],
             vec!["--shared-policy", "invalid"],
         ] {
-            assert!(
-                request(
-                    original.clone(),
-                    None,
-                    &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
-                )
-                .is_err()
-            );
+            assert!(request(
+                original.clone(),
+                None,
+                &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            )
+            .is_err());
         }
     }
 
@@ -875,14 +1280,12 @@ mod tests {
             asio_clock_request(current, &cap.current_args).unwrap(),
             changed
         );
-        assert!(
-            request(
-                self::current(),
-                None,
-                &["--asio-timer-error-ns".into(), "0".into()]
-            )
-            .is_err()
-        );
+        assert!(request(
+            self::current(),
+            None,
+            &["--asio-timer-error-ns".into(), "0".into()]
+        )
+        .is_err());
     }
 
     #[test]
@@ -901,13 +1304,11 @@ mod tests {
             vec!["--asio-latency-error-ns", "-1"],
             vec!["--asio-timer-error-ns", "2147483648000000"],
         ] {
-            assert!(
-                asio_clock_request(
-                    current,
-                    &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
-                )
-                .is_err()
-            );
+            assert!(asio_clock_request(
+                current,
+                &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            )
+            .is_err());
         }
     }
 }

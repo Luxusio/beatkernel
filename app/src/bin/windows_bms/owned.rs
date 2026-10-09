@@ -9,15 +9,15 @@ use beatkernel_bms_runtime::{
     gameplay::output::{
         adapters::{player::PlayerOutputUi, remix::RemixedOutputBackend},
         application::{owner::GameplayOutputOwner, requests::GameplayOutputUi},
-        ports::{OutputReplacementBackend, OutputChannelRemixBackend},
+        ports::{OutputChannelRemixBackend, OutputReplacementBackend},
     },
-    gameplay_presentation::{GameplayOutputContext, GameplayAudioOutputContext},
+    gameplay_presentation::{GameplayAudioOutputContext, GameplayOutputContext},
     live_pause::LivePauseObservation,
     native_end::{EndBoundary, NativeEnd},
 };
 use beatkernel_platform::{
     audio::{
-        AudioOutputStream, AudioStreamRequest, presentation::discipline::PresentationDiscipline,
+        presentation::discipline::PresentationDiscipline, AudioOutputStream, AudioStreamRequest,
     },
     windows::{
         audio::{WasapiBackend, WasapiOptions},
@@ -43,15 +43,26 @@ pub(super) struct OwnedOutput {
     matrix: Option<ChannelMatrix>,
     report: Option<RenderReport>,
     accepted: Option<StartupEvidence>,
+    source_channels: u16,
+    #[cfg_attr(not(feature = "asio-sdk"), allow(dead_code))]
+    clock: QpcClock,
 }
 impl OwnedOutput {
-    fn new(native: Output, epoch: u64, matrix: Option<ChannelMatrix>) -> Self {
+    fn new(
+        native: Output,
+        epoch: u64,
+        matrix: Option<ChannelMatrix>,
+        source_channels: u16,
+        clock: QpcClock,
+    ) -> Self {
         Self {
             native,
             epoch,
             matrix,
             report: None,
             accepted: None,
+            source_channels,
+            clock,
         }
     }
     fn basis(&self) -> OutputFrameBasis {
@@ -93,6 +104,7 @@ impl WindowsReplacementBackend {
         epoch: u64,
         matrix: Option<ChannelMatrix>,
     ) -> std::result::Result<OwnedOutput, OutputOpenFailure<NativeOutputError, OwnedOutput>> {
+        let source_channels = mixer.configuration().format().channels();
         let converter_matrix = match matrix
             .as_ref()
             .map(|m| ChannelMatrix::new(m.source_channels(), m.target_channels(), m.coefficients()))
@@ -114,13 +126,25 @@ impl WindowsReplacementBackend {
                 self.clock,
                 converter_matrix,
             ) {
-                Ok(output) => Ok(OwnedOutput::new(Output::Asio(output), epoch, matrix)),
+                Ok(output) => Ok(OwnedOutput::new(
+                    Output::Asio(output),
+                    epoch,
+                    matrix,
+                    source_channels,
+                    self.clock,
+                )),
                 Err(failure) => {
                     let (error, mixer, pending, cleanup) = failure.into_parts();
                     let failure = match pending {
                         Some(output) => OutputOpenFailure::pending(
                             NativeOutputError(error),
-                            OwnedOutput::new(Output::Asio(output), epoch, matrix),
+                            OwnedOutput::new(
+                                Output::Asio(output),
+                                epoch,
+                                matrix,
+                                source_channels,
+                                self.clock,
+                            ),
                         ),
                         None => OutputOpenFailure::recovered(NativeOutputError(error), mixer),
                     };
@@ -149,7 +173,15 @@ impl WindowsReplacementBackend {
             }
         };
         result
-            .map(|stream| OwnedOutput::new(Output::Wasapi(stream), epoch, matrix))
+            .map(|stream| {
+                OwnedOutput::new(
+                    Output::Wasapi(stream),
+                    epoch,
+                    matrix,
+                    source_channels,
+                    self.clock,
+                )
+            })
             .map_err(|failure| {
                 let (error, mixer) = failure.into_parts();
                 OutputOpenFailure::recovered(NativeOutputError(error.into()), mixer)
@@ -276,9 +308,14 @@ impl OutputChannelRemixBackend for WindowsReplacementBackend {
 pub(super) type WindowsOutputOwner =
     GameplayOutputOwner<RemixedOutputBackend<WindowsReplacementBackend>>;
 pub(super) fn owner(native: Output, clock: QpcClock) -> WindowsOutputOwner {
+    let source_channels = match &native {
+        Output::Wasapi(stream) => stream.configuration().format.channels(),
+        #[cfg(feature = "asio-sdk")]
+        Output::Asio(output) => output.live.channels.len() as u16,
+    };
     WindowsOutputOwner::new(
         RemixedOutputBackend::new(WindowsReplacementBackend { clock }),
-        OwnedOutput::new(native, 0, None),
+        OwnedOutput::new(native, 0, None, source_channels, clock),
     )
 }
 pub(super) fn stream(owner: &mut WindowsOutputOwner) -> Result<&mut Output> {
@@ -300,9 +337,11 @@ fn capability(
     String,
 > {
     match &output.native {
-        Output::Wasapi(stream) => {
-            super::output_settings::capability(stream.configuration(), output.matrix.as_ref())
-        }
+        Output::Wasapi(stream) => super::output_settings::switch_capability(
+            super::output_settings::capability(stream.configuration(), output.matrix.as_ref())?,
+            Backend::Wasapi,
+            None,
+        ),
         #[cfg(feature = "asio-sdk")]
         Output::Asio(native) => {
             native.applied_buffer_frames().map_err(|e| e.to_string())?;
@@ -312,7 +351,14 @@ fn capability(
                 &native.live.channels,
                 output.matrix.as_ref(),
             )?;
-            super::output_settings::asio_clock_capability(cap, native.live.clock_bounds())
+            let cap =
+                super::output_settings::asio_clock_capability(cap, native.live.clock_bounds())?;
+            let view = match native.live.registration.id.view {
+                beatkernel_platform::windows::asio::AsioRegistryView::Native => AsioView::Native,
+                beatkernel_platform::windows::asio::AsioRegistryView::Bits32 => AsioView::Bits32,
+                beatkernel_platform::windows::asio::AsioRegistryView::Bits64 => AsioView::Bits64,
+            };
+            super::output_settings::switch_capability(cap, Backend::Asio, Some(view))
         }
     }
 }
@@ -345,56 +391,91 @@ impl WindowsOutputUi {
         >,
         String,
     > {
-        match &output.native {
-            Output::Wasapi(stream) => super::output_settings::request(
-                stream.configuration().requested.clone(),
-                output.matrix.as_ref(),
-                &request.args,
-            )
-            .map(|request| {
-                beatkernel_bms_runtime::gameplay::output::domain::remix::RemixedOutputRequest {
-                    native: WindowsRequest::Wasapi(request.native),
-                    matrix: request.matrix,
-                }
-            }),
+        let current = capability(output)?;
+        let wasapi = match &output.native {
+            Output::Wasapi(stream) => Some(stream.configuration().requested.clone()),
             #[cfg(feature = "asio-sdk")]
-            Output::Asio(native) => {
-                let (device, buffer, channels, matrix) = super::output_settings::asio_request(
-                    &native.live.registration.id.clsid,
-                    native.live.buffer,
-                    &native.live.channels,
-                    output.matrix.as_ref(),
-                    &request.args,
-                )?;
-                let mut config = native.live.clone();
-                let bounds = super::output_settings::asio_clock_request(
-                    config.clock_bounds(),
-                    &request.args,
-                )?;
-                native
-                    .validate_clock_bounds(bounds)
-                    .map_err(|e| e.to_string())?;
-                config.set_clock_bounds(bounds);
-                if device != config.registration.id.clsid {
-                    let drivers = beatkernel_platform::windows::asio::enumerate_asio_drivers(
-                        config.registration.id.view,
-                        beatkernel_platform::windows::asio::AsioEnumerationLimits::default(),
+            Output::Asio(_) => None,
+        };
+        let source = beatkernel::audio::AudioFormat::new(
+            output.basis().sample_rate(),
+            output.source_channels,
+        )
+        .map_err(|e| e.to_string())?;
+        let target = super::output_settings::plan_target(
+            &current,
+            wasapi.as_ref(),
+            source,
+            output.matrix.as_ref(),
+            &request.args,
+            cfg!(feature = "asio-sdk"),
+        )?;
+        match target {
+            super::output_settings::TargetPlan::Wasapi(plan) => {
+                let default = if plan.device.is_none() {
+                    use beatkernel_platform::audio::{AudioDeviceState, AudioOutputBackend};
+                    Some(
+                        WasapiBackend
+                            .devices()
+                            .map_err(|e| e.to_string())?
+                            .into_iter()
+                            .find(|d| d.state == AudioDeviceState::Active && d.default_multimedia)
+                            .ok_or("no active OS default multimedia output")?
+                            .id,
                     )
-                    .map_err(|e| e.to_string())?;
-                    let index = super::output_settings::asio_driver_index(
-                        &device,
-                        drivers.iter().map(|driver| driver.id.clsid.as_str()),
-                    )?;
-                    config.registration = drivers[index].clone();
-                }
-                config.buffer = buffer;
-                config.channels = channels;
+                } else {
+                    None
+                };
+                let request = plan.into_request(default)?;
                 Ok(
                     beatkernel_bms_runtime::gameplay::output::domain::remix::RemixedOutputRequest {
-                        native: WindowsRequest::Asio(config),
-                        matrix,
+                        native: WindowsRequest::Wasapi(request.native),
+                        matrix: request.matrix,
                     },
                 )
+            }
+            super::output_settings::TargetPlan::Asio(plan) => {
+                #[cfg(not(feature = "asio-sdk"))]
+                {
+                    let _ = plan;
+                    Err("ASIO requires build feature asio-sdk".into())
+                }
+                #[cfg(feature = "asio-sdk")]
+                {
+                    use beatkernel_platform::windows::asio::{
+                        enumerate_asio_drivers, AsioEnumerationLimits, AsioRegistryView,
+                    };
+                    let view = match plan.view {
+                        AsioView::Native => AsioRegistryView::Native,
+                        AsioView::Bits32 => AsioRegistryView::Bits32,
+                        AsioView::Bits64 => AsioRegistryView::Bits64,
+                    };
+                    let drivers = enumerate_asio_drivers(view, AsioEnumerationLimits::default())
+                        .map_err(|e| e.to_string())?;
+                    let index = super::output_settings::asio_driver_index(
+                        &plan.device,
+                        drivers.iter().map(|d| d.id.clsid.as_str()),
+                    )?;
+                    let receipt = output
+                        .clock
+                        .sample_multimedia()
+                        .map_err(|e| e.to_string())?;
+                    beatkernel_platform::audio::asio::MultimediaClockAnchor::new(
+                        receipt.milliseconds,
+                        receipt.before.normalized,
+                        receipt.after.normalized,
+                        plan.bounds.age,
+                        plan.bounds.timer,
+                        plan.bounds.drift,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let matrix = plan.matrix.clone();
+                    let config = super::live_output::AsioLiveConfig::from_target(
+                        drivers[index].clone(),
+                        plan,
+                    );
+                    Ok(beatkernel_bms_runtime::gameplay::output::domain::remix::RemixedOutputRequest { native:WindowsRequest::Asio(config),matrix })
+                }
             }
         }
     }
