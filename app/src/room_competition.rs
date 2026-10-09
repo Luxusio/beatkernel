@@ -580,15 +580,20 @@ impl<P: RoomNetworkPort, H: RoomUiHost, R: RoomRuntimeHost> RoomCompetition<P, H
             }
             // Immediate local page/refusal results have no network receipt to await.
             if let Some(result) = pending.result.as_ref() {
-                if self
-                    .host
-                    .reply(RoomUiReply {
-                        id: pending.id,
-                        result: result.clone(),
-                    })
-                    .is_ok()
-                {
-                    continue;
+                match self.host.reply(RoomUiReply {
+                    id: pending.id,
+                    result: result.clone(),
+                }) {
+                    Ok(()) => continue,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => {
+                        self.ui_error
+                            .get_or_insert_with(|| ui_message(&error.to_string()));
+                        self.host.close_controls();
+                        self.ui_pending.clear();
+                        self.ui_dirty = true;
+                        return;
+                    }
                 }
             }
             self.ui_pending.push(pending);

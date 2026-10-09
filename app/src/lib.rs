@@ -414,6 +414,10 @@ pub mod player;
 pub mod player_chart;
 #[cfg(test)]
 mod player_chart_scan_fixtures;
+#[cfg(test)]
+mod player_network_fault_schedule_fixtures;
+#[cfg(test)]
+mod player_ui_fault_schedule_fixtures;
 #[cfg(feature = "graphics")]
 mod playfield_gpu;
 /// Shared playfield partitions for rendering and projected physical touch routing.

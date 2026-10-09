@@ -1,5 +1,21 @@
 # Deterministic Runtime fault schedules
 
+## Connected player network and UI campaigns
+
+The [player fault isolation contract](../runtime/REQ__player-fault-isolation.md)
+extends the original Runtime and PCM campaigns through real portable network
+and room-controller owners. Run the app library filter `fault_schedule_fixtures`
+with `desktop,webtransport`. I/O adapters inject bounded admission, read capture,
+full-write, publication, action and wait effects; production policy stays in
+Runtime, client/relay and RoomCompetition. Preserve all separate receipt and
+completion meanings rather than deriving success from queued frames.
+
+The initial seven-test run reproduced a fatal immediate UI reply being treated
+as contention: six passed, one failed. Its recorded red is not final acceptance.
+The corrected controller follows the existing fatal delayed-reply policy.
+Final evidence and exact commands live in the linked contract. WBS13.04 still
+retains the wider native, allocation, short-write, spawn and panic matrix.
+
 Exercise failures through the real portable Runtime, ClockMapper and audio
 command queue. Keep immutable chart times and original input metadata. Drive
 bounded explicit scripts with controlled consumption; avoid wall-clock sleeps,
