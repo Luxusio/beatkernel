@@ -311,3 +311,240 @@ fn per_component_updates_keep_actual_indexed_note_instances_scratch_and_painter_
         );
     }
 }
+
+#[test]
+fn presented_visible_rect_fractional_pivot_source_and_parent_clips_2026101005() {
+    let mut scene = Scene::with_capacity(100, 80, 4);
+    scene.rect(0, 0, 90, 80, 0xabcdef);
+    let component_key = key(51, 1);
+    let id = scene
+        .bind_component_clipped(
+            component_key,
+            &[0..1],
+            [10, 20],
+            Some(ClipRect::new([12, 22, 20, 16]).unwrap()),
+            Some(ClipRect::new([25, 25, 25, 10]).unwrap()),
+        )
+        .unwrap();
+    scene
+        .set_component_transforms(&[(id, UiTransform::new([5.5, 3.25], [2.0, 0.5], 0.75).unwrap())])
+        .unwrap();
+    scene.set_ui_translation(UiTranslation::new(4, -2).unwrap());
+    let pose = scene.presented_pose();
+    let geometry = rectangles(&scene);
+    let identity = Arc::clone(scene.geometry_stamp().0);
+    let revision = scene.geometry_stamp().1;
+
+    // Source clipping gives [12,22,32,38]. Scale about the node pivot,
+    // not the source clip origin, gives [19.5,24.25,59.5,32.25].
+    // Fixed parent clipping then translation gives these presented endpoints.
+    assert_eq!(
+        pose.visible_rect(Some(component_key), [0.0, 0.0, 90.0, 80.0]),
+        Some([29.0, 23.0, 54.0, 30.25])
+    );
+    assert_eq!(
+        pose.visible_rect(Some(component_key), [20.0, 26.0, 28.0, 34.0]),
+        Some([39.5, 24.25, 54.0, 28.25])
+    );
+    assert_eq!(
+        pose.project(Some(component_key), (29.0, 23.0)),
+        Some((14.75, 23.5))
+    );
+    assert_eq!(
+        pose.project(Some(component_key), (39.5, 26.25)),
+        Some((20.0, 30.0))
+    );
+    for point in [(28.999, 26.0), (54.0, 26.0), (40.0, 30.25)] {
+        assert_eq!(pose.project(Some(component_key), point), None, "{point:?}");
+    }
+    assert_eq!(rectangles(&scene), geometry);
+    assert_eq!(scene.geometry_stamp().1, revision);
+    assert!(Arc::ptr_eq(scene.geometry_stamp().0, &identity));
+}
+
+#[test]
+fn presented_visible_rect_local_viewport_then_translation_then_screen_clip_2026101005() {
+    let mut scene = Scene::with_capacity(100, 80, 4);
+    scene.rect(0, 0, 100, 100, 0xabcdef);
+    let component_key = key(52, 1);
+    let id = scene
+        .bind_component_clipped(
+            component_key,
+            &[0..1],
+            [0, 0],
+            Some(ClipRect::new([0, 0, 100, 100]).unwrap()),
+            Some(ClipRect::new([-50, -50, 200, 200]).unwrap()),
+        )
+        .unwrap();
+    scene
+        .set_component_transforms(&[(
+            id,
+            UiTransform::new([-10.5, -5.25], [1.0, 1.0], 1.0).unwrap(),
+        )])
+        .unwrap();
+    scene.set_ui_translation(UiTranslation::new(20, 10).unwrap());
+    let pose = scene.presented_pose();
+    // Local viewport removes negative local coordinates even though the
+    // translation would have moved them onto the presented screen.
+    assert_eq!(
+        pose.visible_rect(Some(component_key), [0.0, 0.0, 100.0, 100.0]),
+        Some([20.0, 10.0, 100.0, 80.0])
+    );
+    assert_eq!(
+        pose.project(Some(component_key), (20.0, 10.0)),
+        Some((10.5, 5.25))
+    );
+    assert_eq!(
+        pose.project(Some(component_key), (50.0, 40.0)),
+        Some((40.5, 35.25))
+    );
+    for point in [(19.999, 30.0), (40.0, 9.999), (100.0, 40.0), (50.0, 80.0)] {
+        assert_eq!(pose.project(Some(component_key), point), None, "{point:?}");
+    }
+}
+
+#[test]
+fn presented_visible_rect_hidden_clips_opacity_and_empty_intersections_2026101005() {
+    let clip = ClipRect::new([10, 20, 30, 20]).unwrap();
+    for (source, parent, opacity) in [
+        (None, Some(clip), 1.0),
+        (Some(clip), None, 1.0),
+        (Some(clip), Some(clip), 0.0),
+    ] {
+        let mut scene = Scene::with_capacity(100, 80, 4);
+        scene.rect(10, 20, 30, 20, 0xabcdef);
+        let component_key = key(53, 1);
+        let id = scene
+            .bind_component_clipped(component_key, &[0..1], [10, 20], source, parent)
+            .unwrap();
+        scene
+            .set_component_transforms(&[(
+                id,
+                UiTransform::new([0.0, 0.0], [1.0, 1.0], opacity).unwrap(),
+            )])
+            .unwrap();
+        let pose = scene.presented_pose();
+        assert_eq!(
+            pose.visible_rect(Some(component_key), [10.0, 20.0, 40.0, 40.0]),
+            None
+        );
+        assert_eq!(pose.project(Some(component_key), (20.0, 30.0)), None);
+    }
+    let mut scene = Scene::with_capacity(100, 80, 4);
+    scene.rect(10, 20, 30, 20, 0xabcdef);
+    let component_key = key(53, 2);
+    let id = scene
+        .bind_component(component_key, &[0..1], clip, Some(clip))
+        .unwrap();
+    let pose = scene.presented_pose();
+    // Touching the source edge has no area; a valid source moved beyond its
+    // fixed parent also has no area.
+    assert_eq!(
+        pose.visible_rect(Some(component_key), [40.0, 20.0, 50.0, 40.0]),
+        None
+    );
+    scene
+        .set_component_transforms(&[(id, UiTransform::new([30.0, 0.0], [1.0, 1.0], 1.0).unwrap())])
+        .unwrap();
+    assert_eq!(
+        scene
+            .presented_pose()
+            .visible_rect(Some(component_key), [10.0, 20.0, 40.0, 40.0]),
+        None
+    );
+}
+
+#[test]
+fn presented_visible_rect_snapshot_survives_live_change_and_disposal_2026101005() {
+    let mut scene = Scene::with_capacity(100, 80, 4);
+    scene.rect(10, 20, 30, 20, 0xabcdef);
+    let component_key = key(54, 1);
+    let clip = ClipRect::new([10, 20, 30, 20]).unwrap();
+    let parent = ClipRect::new([0, 0, 100, 80]).unwrap();
+    let id = scene
+        .bind_component(component_key, &[0..1], clip, Some(parent))
+        .unwrap();
+    scene
+        .set_component_transforms(&[(id, UiTransform::new([5.5, 3.25], [2.0, 0.5], 1.0).unwrap())])
+        .unwrap();
+    let accepted = scene.presented_pose();
+    let bounds = [10.0, 20.0, 40.0, 40.0];
+    let identity = Arc::clone(scene.geometry_stamp().0);
+    let revision = scene.geometry_stamp().1;
+    scene
+        .set_component_transforms(&[(id, UiTransform::new([20.0, 0.0], [1.0, 1.0], 1.0).unwrap())])
+        .unwrap();
+    scene.set_ui_translation(UiTranslation::new(7, 2).unwrap());
+    assert_eq!(
+        scene
+            .presented_pose()
+            .visible_rect(Some(component_key), bounds),
+        Some([37.0, 22.0, 67.0, 42.0])
+    );
+    assert_eq!(
+        accepted.visible_rect(Some(component_key), bounds),
+        Some([15.5, 23.25, 75.5, 33.25])
+    );
+    assert_eq!(
+        accepted.project(Some(component_key), (35.5, 28.25)),
+        Some((20.0, 30.0))
+    );
+    assert_eq!(accepted.visible_rect(Some(key(54, 99)), bounds), None);
+    assert_eq!(scene.dispose_components(ScreenInstanceId(54)), 1);
+    assert_eq!(
+        scene
+            .presented_pose()
+            .visible_rect(Some(component_key), bounds),
+        None
+    );
+    assert_eq!(
+        accepted.visible_rect(Some(component_key), bounds),
+        Some([15.5, 23.25, 75.5, 33.25])
+    );
+    assert_eq!(
+        accepted.project(Some(component_key), (35.5, 28.25)),
+        Some((20.0, 30.0))
+    );
+    assert_eq!(scene.geometry_stamp().1, revision);
+    assert!(Arc::ptr_eq(scene.geometry_stamp().0, &identity));
+}
+
+#[test]
+fn presented_visible_rect_plain_translation_and_invalid_endpoints_2026101005() {
+    let mut scene = Scene::with_capacity(100, 80, 0);
+    scene.set_ui_translation(UiTranslation::new(25, -10).unwrap());
+    let pose = scene.presented_pose();
+    assert_eq!(
+        pose.visible_rect(None, [-10.0, 5.0, 130.0, 90.0]),
+        Some([25.0, 0.0, 100.0, 70.0])
+    );
+    assert_eq!(
+        pose.visible_rect(None, [10.0, 20.0, 30.0, 40.0]),
+        Some([35.0, 10.0, 55.0, 30.0])
+    );
+    assert_eq!(pose.project(None, (25.0, 0.0)), Some((0.0, 10.0)));
+    assert_eq!(pose.project(None, (50.0, 40.0)), Some((25.0, 50.0)));
+    for point in [(24.999, 40.0), (100.0, 40.0), (50.0, 70.0)] {
+        assert_eq!(pose.project(None, point), None, "{point:?}");
+    }
+    for bounds in [
+        [10.0, 20.0, 10.0, 40.0],
+        [10.0, 20.0, 30.0, 20.0],
+        [30.0, 20.0, 10.0, 40.0],
+        [10.0, 40.0, 30.0, 20.0],
+        [100.0, 0.0, 110.0, 10.0],
+    ] {
+        assert_eq!(pose.visible_rect(None, bounds), None, "{bounds:?}");
+    }
+    for axis in 0..4 {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut bounds = [10.0, 20.0, 30.0, 40.0];
+            bounds[axis] = invalid;
+            assert_eq!(pose.visible_rect(None, bounds), None, "{bounds:?}");
+        }
+    }
+    assert_eq!(
+        pose.visible_rect(Some(key(55, 1)), [10.0, 20.0, 30.0, 40.0]),
+        None
+    );
+}

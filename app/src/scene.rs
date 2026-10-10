@@ -121,6 +121,58 @@ pub struct UiPresentedPose {
     components: [Option<ComponentBinding>; MAX_UI_COMPONENTS],
 }
 impl UiPresentedPose {
+    /// Projects finite, positive source-space endpoints `[left, top, right, bottom]`
+    /// into the visible presented viewport without changing this accepted pose.
+    /// Component source clipping precedes its pivot/scale/offset transform; fixed
+    /// parent and local viewport clipping precede scene translation. An explicit
+    /// key must be live in this snapshot, and missing clips or zero opacity hide it.
+    pub fn visible_rect(&self, key: Option<UiComponentKey>, bounds: [f64; 4]) -> Option<[f64; 4]> {
+        if bounds.iter().any(|value| !value.is_finite())
+            || bounds[0] >= bounds[2]
+            || bounds[1] >= bounds[3]
+        {
+            return None;
+        }
+        let intersect = |bounds: [f64; 4], clip: [f64; 4]| {
+            let bounds = [
+                bounds[0].max(clip[0]),
+                bounds[1].max(clip[1]),
+                bounds[2].min(clip[2]),
+                bounds[3].min(clip[3]),
+            ];
+            (bounds[0] < bounds[2] && bounds[1] < bounds[3]).then_some(bounds)
+        };
+        let viewport = [0.0, 0.0, f64::from(self.width), f64::from(self.height)];
+        let mut bounds = bounds;
+        if let Some(key) = key {
+            let binding = self
+                .components
+                .iter()
+                .flatten()
+                .find(|binding| binding.live && binding.key == key)?;
+            let transform = binding.transform;
+            if transform.opacity == 0.0 {
+                return None;
+            }
+            bounds = intersect(bounds, binding.source?.endpoints.map(|value| value as f64))?;
+            for axis in 0..2 {
+                let pivot = binding.pivot[axis] as f64;
+                let scale = f64::from(transform.scale[axis]);
+                let offset = f64::from(transform.offset[axis]);
+                bounds[axis] = (bounds[axis] - pivot) * scale + pivot + offset;
+                bounds[axis + 2] = (bounds[axis + 2] - pivot) * scale + pivot + offset;
+            }
+            bounds = intersect(bounds, binding.parent?.endpoints.map(|value| value as f64))?;
+        }
+        bounds = intersect(bounds, viewport)?;
+        for axis in 0..2 {
+            let offset = f64::from(self.translation.offset()[axis]);
+            bounds[axis] += offset;
+            bounds[axis + 2] += offset;
+        }
+        intersect(bounds, viewport)
+    }
+
     pub fn project(&self, key: Option<UiComponentKey>, point: (f64, f64)) -> Option<(f64, f64)> {
         if let Some(binding) = key.and_then(|key| {
             self.components

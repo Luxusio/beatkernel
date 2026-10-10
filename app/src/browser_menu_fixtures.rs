@@ -178,6 +178,435 @@ fn requested_menu_motion(offset: f32) -> crate::ui::motion::ComponentMotion {
     )
 }
 
+fn practice_motion_menu() -> BrowserMenu {
+    let mut menu = BrowserMenu::new(211).unwrap();
+    menu.navigate(token(&menu), ScreenRoute::Settings).unwrap();
+    menu.navigate(token(&menu), ScreenRoute::Practice).unwrap();
+    menu
+}
+
+#[test]
+fn actual_practice_motion_cold_binding_keeps_geometry_and_only_publishes_accepted_hits() {
+    use crate::{browser_menu::BrowserMenuPresentation, ui::interaction::ControlId};
+    use std::{sync::Arc, time::Duration};
+    let menu = practice_motion_menu();
+    let mut presentation = BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+    let mut scene = render_menu(&mut presentation);
+    let mut nodes = Vec::new();
+    for control in [70, 75, 71, 72, 73, 76] {
+        nodes.push(presentation.control_node(ControlId(control)).unwrap());
+    }
+    nodes.sort_by_key(|node| node.0);
+    nodes.dedup();
+    assert_eq!(nodes.len(), 6, "each actual control owns its mounted node");
+    assert!(presentation.control_node(ControlId(74)).is_err());
+    assert_eq!(presentation.hit((410.0, 390.0), [960, 720]), 0);
+    assert_eq!(presentation.hit((590.0, 390.0), [960, 720]), 73);
+    presentation
+        .request_motion(
+            token(&menu),
+            ControlId(73),
+            requested_menu_motion(-200.0),
+            Duration::ZERO,
+            &mut scene,
+        )
+        .unwrap();
+    let key = crate::scene::UiComponentKey {
+        screen: token(&menu).screen,
+        node: presentation.control_node(ControlId(73)).unwrap(),
+    };
+    let id = scene.component_id(key).unwrap();
+    let identity = Arc::clone(scene.geometry_stamp().0);
+    let revision = scene.geometry_stamp().1;
+    let packet = menu_packet(&scene);
+    let model = presentation.model.clone();
+    assert!(presentation
+        .tick_motion(Duration::from_nanos(50), [960, 720], &mut scene)
+        .unwrap());
+    assert_eq!(
+        scene.component_transform(id).unwrap().offset(),
+        [-100.0, 0.0]
+    );
+    assert_eq!(presentation.model, model);
+    assert_eq!(menu_packet(&scene), packet);
+    assert!(Arc::ptr_eq(&identity, scene.geometry_stamp().0));
+    assert_eq!(scene.geometry_stamp().1, revision);
+    assert_eq!(presentation.hit((410.0, 390.0), [960, 720]), 0);
+    assert_eq!(presentation.hit((590.0, 390.0), [960, 720]), 73);
+    assert!(presentation.publish_presented(&scene, [0, 720]).is_err());
+    assert_eq!(presentation.hit((590.0, 390.0), [960, 720]), 73);
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    assert_eq!(presentation.hit((410.0, 390.0), [960, 720]), 73);
+    assert_eq!(presentation.hit((590.0, 390.0), [960, 720]), 0);
+    assert_eq!(presentation.hit((30.0, 160.0), [960, 720]), 70);
+    assert_eq!(presentation.hit((30.0, 290.0), [960, 720]), 75);
+    assert!(presentation
+        .tick_motion(Duration::from_nanos(100), [960, 720], &mut scene)
+        .unwrap());
+    assert_eq!(presentation.hit((216.0, 390.0), [960, 720]), 0);
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    assert_eq!(presentation.hit((216.0, 390.0), [960, 720]), 73);
+    assert!(!presentation.motion_active());
+}
+
+#[test]
+fn actual_practice_editor_repaint_rebinds_fractional_pose_without_publishing_early() {
+    use crate::{browser_menu::BrowserMenuPresentation, ui::interaction::ControlId};
+    use std::time::Duration;
+    let mut menu = practice_motion_menu();
+    let mut presentation = BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+    let mut scene = render_menu(&mut presentation);
+    let node = presentation.control_node(ControlId(70)).unwrap();
+    let key = crate::scene::UiComponentKey {
+        screen: token(&menu).screen,
+        node,
+    };
+    presentation
+        .request_motion(
+            token(&menu),
+            ControlId(70),
+            requested_menu_motion(101.0),
+            Duration::ZERO,
+            &mut scene,
+        )
+        .unwrap();
+    presentation
+        .tick_motion(Duration::from_nanos(50), [960, 720], &mut scene)
+        .unwrap();
+    let pose = scene
+        .component_transform(scene.component_id(key).unwrap())
+        .unwrap();
+    assert_eq!(pose.offset(), [50.5, 0.0]);
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    assert_eq!(presentation.hit((30.0, 160.0), [960, 720]), 0);
+    assert_eq!(presentation.hit((90.0, 160.0), [960, 720]), 70);
+    menu.set_fields(
+        token(&menu),
+        vec!["1.000000001".into(), "2.000000002".into()],
+    )
+    .unwrap();
+    menu.select(token(&menu), 1).unwrap();
+    presentation.apply(menu.snapshot()).unwrap();
+    assert_eq!(
+        presentation.hit((90.0, 160.0), [960, 720]),
+        0,
+        "new business revision needs its own accepted frame"
+    );
+    presentation.compose(&mut scene).unwrap();
+    assert_eq!(presentation.control_node(ControlId(70)).unwrap(), node);
+    assert_eq!(
+        scene.component_transform(scene.component_id(key).unwrap()),
+        Some(pose)
+    );
+    menu_label(&scene, "EXACT START: 1000000001 NS");
+    menu_label(&scene, "EXACT END: 2000000002 NS");
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    assert_eq!(presentation.hit((90.0, 160.0), [960, 720]), 70);
+    assert_eq!(presentation.hit((30.0, 160.0), [960, 720]), 0);
+    assert_eq!(presentation.hit((30.0, 290.0), [960, 720]), 75);
+    presentation
+        .tick_motion(Duration::from_nanos(75), [960, 720], &mut scene)
+        .unwrap();
+    assert_eq!(
+        presentation.hit((80.0, 160.0), [960, 720]),
+        70,
+        "unpublished tick retains accepted editor position"
+    );
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    assert_eq!(presentation.hit((80.0, 160.0), [960, 720]), 0);
+}
+
+#[test]
+fn actual_practice_fixed_parent_clip_and_zero_opacity_refuse_invisible_actions() {
+    use crate::{
+        browser_menu::BrowserMenuPresentation,
+        scene::UiTransform,
+        ui::{
+            interaction::ControlId,
+            motion::{ComponentMotion, Easing},
+        },
+    };
+    use std::time::Duration;
+    let menu = practice_motion_menu();
+    let mut presentation = BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+    let mut scene = render_menu(&mut presentation);
+    presentation
+        .request_motion(
+            token(&menu),
+            ControlId(76),
+            requested_menu_motion(100.0),
+            Duration::ZERO,
+            &mut scene,
+        )
+        .unwrap();
+    presentation
+        .tick_motion(Duration::from_nanos(100), [960, 720], &mut scene)
+        .unwrap();
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    assert_eq!(presentation.hit((750.0, 390.0), [960, 720]), 76);
+    assert_eq!(
+        presentation.hit((850.0, 390.0), [960, 720]),
+        0,
+        "moved geometry stays inside the fixed action row"
+    );
+    let fade = ComponentMotion::new(
+        UiTransform::new([100.0, 0.0], [1.0, 1.0], 1.0).unwrap(),
+        UiTransform::new([100.0, 0.0], [1.0, 1.0], 0.0).unwrap(),
+        Duration::from_nanos(100),
+        Easing::Linear,
+    );
+    presentation
+        .request_motion(
+            token(&menu),
+            ControlId(76),
+            fade,
+            Duration::from_nanos(100),
+            &mut scene,
+        )
+        .unwrap();
+    presentation
+        .tick_motion(Duration::from_nanos(200), [960, 720], &mut scene)
+        .unwrap();
+    assert_eq!(presentation.hit((750.0, 390.0), [960, 720]), 76);
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    assert_eq!(presentation.hit((750.0, 390.0), [960, 720]), 0);
+    assert_eq!(presentation.hit((590.0, 390.0), [960, 720]), 73);
+}
+
+#[test]
+fn actual_practice_stale_pending_and_regressing_requests_preserve_admitted_pose() {
+    use crate::{browser_menu::BrowserMenuPresentation, ui::interaction::ControlId};
+    use std::time::Duration;
+    let menu = practice_motion_menu();
+    let mut presentation = BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+    let mut scene = render_menu(&mut presentation);
+    presentation
+        .request_motion(
+            token(&menu),
+            ControlId(73),
+            requested_menu_motion(-200.0),
+            Duration::ZERO,
+            &mut scene,
+        )
+        .unwrap();
+    presentation
+        .tick_motion(Duration::from_nanos(25), [960, 720], &mut scene)
+        .unwrap();
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    let key = crate::scene::UiComponentKey {
+        screen: token(&menu).screen,
+        node: presentation.control_node(ControlId(73)).unwrap(),
+    };
+    let id = scene.component_id(key).unwrap();
+    let pose = scene.component_transform(id);
+    let packet = menu_packet(&scene);
+    let revision = scene.geometry_stamp().1;
+    for stale in [
+        MenuToken {
+            generation: 1,
+            ..token(&menu)
+        },
+        MenuToken {
+            screen: ScreenInstanceId(u64::MAX),
+            ..token(&menu)
+        },
+        MenuToken {
+            revision: token(&menu).revision + 1,
+            ..token(&menu)
+        },
+    ] {
+        assert!(presentation
+            .request_motion(
+                stale,
+                ControlId(73),
+                requested_menu_motion(80.0),
+                Duration::from_nanos(25),
+                &mut scene
+            )
+            .is_err());
+    }
+    assert!(presentation
+        .request_motion(
+            token(&menu),
+            ControlId(74),
+            requested_menu_motion(80.0),
+            Duration::from_nanos(25),
+            &mut scene
+        )
+        .is_err());
+    assert!(presentation
+        .request_motion(
+            token(&menu),
+            ControlId(73),
+            requested_menu_motion(80.0),
+            Duration::from_nanos(24),
+            &mut scene
+        )
+        .is_err());
+    assert!(presentation
+        .tick_motion(Duration::from_nanos(24), [960, 720], &mut scene)
+        .is_err());
+    let mut pending = menu.snapshot();
+    pending.pending = true;
+    presentation.apply(pending).unwrap();
+    assert!(presentation
+        .request_motion(
+            token(&menu),
+            ControlId(73),
+            requested_menu_motion(80.0),
+            Duration::from_nanos(25),
+            &mut scene
+        )
+        .is_err());
+    assert_eq!(presentation.hit((410.0, 390.0), [960, 720]), 0);
+    assert_eq!(scene.component_transform(id), pose);
+    assert_eq!(menu_packet(&scene), packet);
+    assert_eq!(scene.geometry_stamp().1, revision);
+    assert_eq!(presentation.motion_time(), Duration::from_nanos(25));
+    presentation.apply(menu.snapshot()).unwrap();
+    assert_eq!(presentation.hit((410.0, 390.0), [960, 720]), 73);
+}
+
+#[test]
+fn actual_practice_zero_extent_back_disposes_child_and_resumes_retained_selection() {
+    use crate::{browser_menu::BrowserMenuPresentation, ui::interaction::ControlId};
+    use std::time::Duration;
+    let mut menu = BrowserMenu::new(223).unwrap();
+    let parent = token(&menu);
+    let mut presentation = BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+    let mut scene = render_menu(&mut presentation);
+    let parent_key = crate::scene::UiComponentKey {
+        screen: parent.screen,
+        node: presentation.control_node(ControlId(5)).unwrap(),
+    };
+    presentation
+        .request_motion(
+            parent,
+            ControlId(5),
+            requested_menu_motion(-200.0),
+            Duration::ZERO,
+            &mut scene,
+        )
+        .unwrap();
+    presentation
+        .tick_motion(Duration::from_nanos(25), [960, 720], &mut scene)
+        .unwrap();
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    menu.navigate_with_fields(
+        token(&menu),
+        ScreenRoute::Settings,
+        vec!["accepted settings draft".into()],
+    )
+    .unwrap();
+    presentation.apply(menu.snapshot()).unwrap();
+    presentation.compose(&mut scene).unwrap();
+    menu.navigate(token(&menu), ScreenRoute::Practice).unwrap();
+    presentation.apply(menu.snapshot()).unwrap();
+    presentation.compose(&mut scene).unwrap();
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    let child = token(&menu);
+    let child_key = crate::scene::UiComponentKey {
+        screen: child.screen,
+        node: presentation.control_node(ControlId(73)).unwrap(),
+    };
+    presentation
+        .request_motion(
+            child,
+            ControlId(73),
+            requested_menu_motion(-200.0),
+            Duration::from_nanos(25),
+            &mut scene,
+        )
+        .unwrap();
+    presentation
+        .tick_motion(Duration::from_nanos(50), [960, 720], &mut scene)
+        .unwrap();
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    assert!(!presentation
+        .tick_motion(Duration::from_nanos(50), [0, 720], &mut scene)
+        .unwrap());
+    assert_eq!(presentation.hit((410.0, 390.0), [0, 720]), 0);
+    assert!(!presentation
+        .tick_motion(Duration::from_nanos(5000), [0, 0], &mut scene)
+        .unwrap());
+    assert!(presentation.publish_presented(&scene, [0, 0]).is_err());
+    presentation
+        .tick_motion(Duration::from_nanos(5000), [960, 720], &mut scene)
+        .unwrap();
+    assert_eq!(
+        scene
+            .component_transform(scene.component_id(child_key).unwrap())
+            .unwrap()
+            .offset(),
+        [-50.0, 0.0]
+    );
+    presentation
+        .tick_motion(Duration::from_nanos(5025), [960, 720], &mut scene)
+        .unwrap();
+    assert_eq!(
+        scene
+            .component_transform(scene.component_id(child_key).unwrap())
+            .unwrap()
+            .offset(),
+        [-100.0, 0.0]
+    );
+    menu.back(token(&menu)).unwrap();
+    presentation.apply(menu.snapshot()).unwrap();
+    presentation.compose(&mut scene).unwrap();
+    assert!(scene.component_id(child_key).is_none());
+    assert!(presentation
+        .request_motion(
+            child,
+            ControlId(73),
+            requested_menu_motion(1.0),
+            Duration::from_nanos(5025),
+            &mut scene
+        )
+        .is_err());
+    menu.navigate(token(&menu), ScreenRoute::Practice).unwrap();
+    let reopened = token(&menu);
+    assert_ne!(reopened.screen, child.screen);
+    presentation.apply(menu.snapshot()).unwrap();
+    presentation.compose(&mut scene).unwrap();
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    assert_eq!(presentation.hit((590.0, 390.0), [960, 720]), 73);
+    assert!(scene.component_id(child_key).is_none());
+    menu.back(token(&menu)).unwrap();
+    presentation.apply(menu.snapshot()).unwrap();
+    menu.back(token(&menu)).unwrap();
+    presentation.apply(menu.snapshot()).unwrap();
+    presentation.compose(&mut scene).unwrap();
+    presentation
+        .tick_motion(Duration::from_nanos(10000), [960, 720], &mut scene)
+        .unwrap();
+    let rebound = scene.component_id(parent_key).unwrap();
+    assert_eq!(
+        scene.component_transform(rebound).unwrap().offset(),
+        [-50.0, 0.0]
+    );
+    presentation
+        .tick_motion(Duration::from_nanos(10025), [960, 720], &mut scene)
+        .unwrap();
+    assert_eq!(
+        scene.component_transform(rebound).unwrap().offset(),
+        [-100.0, 0.0]
+    );
+    presentation.publish_presented(&scene, [960, 720]).unwrap();
+    assert_eq!(presentation.hit((660.0, 35.0), [960, 720]), 5);
+    presentation.dispose_motion();
+    assert!(!presentation.motion_active());
+    assert_eq!(presentation.hit((660.0, 35.0), [960, 720]), 0);
+    assert!(presentation
+        .request_motion(
+            token(&menu),
+            ControlId(5),
+            requested_menu_motion(1.0),
+            Duration::from_nanos(10025),
+            &mut scene
+        )
+        .is_err());
+}
+
 #[test]
 fn actual_selection_parent_back_resume_zero_extent_and_removed_display_disposal() {
     use crate::{browser_menu::BrowserMenuPresentation, ui::interaction::ControlId};

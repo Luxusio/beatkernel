@@ -443,3 +443,208 @@ fn zero_extent_and_pending_back_preserve_parent_settings_until_an_explicit_secti
     drop(view);
     assert!(weak.upgrade().is_none());
 }
+
+#[test]
+fn practice_component_facade_resolves_all_six_actual_mounted_controls_and_absent_controls() {
+    let mut view = PracticeView::new(ScreenInstanceId(96), 960, 720).unwrap();
+    let mounted = view
+        .layout
+        .leaves()
+        .iter()
+        .filter_map(|leaf| match leaf.component {
+            Component::StartEditor(id) | Component::EndEditor(id) | Component::Action(id, _) => {
+                Some((id, leaf.id))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(mounted.len(), 6);
+    for control in [70, 75, 71, 72, 73, 76].map(ControlId) {
+        let actual_node = mounted.iter().find(|(id, _)| *id == control).unwrap().1;
+        assert_eq!(view.node_for_control(control).unwrap(), Some(actual_node));
+    }
+    for control in [0, 74, u64::MAX].map(ControlId) {
+        assert_eq!(view.node_for_control(control).unwrap(), None);
+    }
+    view.resize(480, 360).unwrap();
+    compose(&view, 480, 360);
+    assert_eq!(view.node_for_control(ControlId(76)).unwrap(), None);
+    for control in [70, 75, 71, 72, 73].map(ControlId) {
+        assert_eq!(
+            view.node_for_control(control).unwrap(),
+            Some(mounted.iter().find(|(id, _)| *id == control).unwrap().1)
+        );
+    }
+}
+
+#[test]
+fn practice_unanimated_component_composition_preserves_golden_geometry_and_hit_order() {
+    let owner = ScreenInstanceId(97);
+    let view = PracticeView::new(owner, 960, 720).unwrap();
+    let mut state = frame("invalid", "1:60");
+    state.end_focused = true;
+    state.error = Some("REJECTED".into());
+    state.hovered = Some(ControlId(72));
+    state.armed = Some(ControlId(76));
+    let expected = original_scene(&state, "INVALID START", "INVALID END");
+    view.update(state);
+    let mut scene = Scene::new(960, 720);
+    let mut hits = Vec::new();
+    view.compose_components(&mut scene, &mut hits, owner, &[])
+        .unwrap();
+    assert_eq!(geometry(&scene), geometry(&expected.0));
+    assert_eq!(regions(&hits), regions(&expected.1));
+    for point in [
+        (24.0, 150.0),
+        (929.999, 319.999),
+        (612.0, 380.0),
+        (24.0, 414.0),
+    ] {
+        assert_eq!(
+            view.hit_components(&scene, owner, point),
+            expected
+                .1
+                .iter()
+                .rev()
+                .find(|(_, b)| b.contains(point))
+                .map(|(id, _)| *id)
+        );
+    }
+    assert_eq!(
+        view.hit_components(&scene, ScreenInstanceId(98), (24.0, 150.0)),
+        None
+    );
+}
+
+#[test]
+fn practice_scaled_motion_obeys_fixed_parent_clip_opacity_and_uniform_geometry_identity() {
+    use crate::scene::{UiComponentKey, UiTransform};
+    let owner = ScreenInstanceId(99);
+    let mut view = PracticeView::new(owner, 960, 720).unwrap();
+    let node = view.node_for_control(ControlId(73)).unwrap().unwrap();
+    view.resize(480, 360).unwrap();
+    view.layout
+        .update(&[LayoutUpdate {
+            id: NodeId(0),
+            change: LayoutChange::Clip(Some(Bounds {
+                x: 0,
+                y: 0,
+                width: 450,
+                height: 360,
+            })),
+        }])
+        .unwrap();
+    view.nodes.relayout(&view.layout).unwrap();
+    let mut scene = Scene::new(480, 360);
+    let mut hits = Vec::new();
+    view.compose_components(&mut scene, &mut hits, owner, &[node])
+        .unwrap();
+    let id = scene
+        .component_id(UiComponentKey {
+            screen: owner,
+            node,
+        })
+        .unwrap();
+    let identity = scene.geometry_stamp().0.clone();
+    let revision = scene.geometry_stamp().1;
+    let rectangles = geometry(&scene);
+    let packets = view.nodes.identities();
+    let paints = view.nodes.paints();
+    // The row remains a fixed parent clip, including its original 34px height.
+    for offset in [20.0, 20.5, 20.0] {
+        let pose = UiTransform::new([offset, 0.0], [2.0, 1.5], 0.75).unwrap();
+        scene.set_component_transforms(&[(id, pose)]).unwrap();
+        let left = 404.0 + f64::from(offset);
+        for (point, expected) in [
+            ((left, 190.0), Some(ControlId(73))),
+            ((449.999, 223.999), Some(ControlId(73))),
+            ((450.0, 200.0), None),
+            ((left - 0.001, 200.0), None),
+            ((left, 224.0), None),
+            ((404.0, 200.0), None),
+            ((12.0, 75.0), Some(ControlId(70))),
+            ((208.0, 190.0), Some(ControlId(72))),
+            ((f64::NAN, 200.0), None),
+        ] {
+            assert_eq!(
+                view.hit_components(&scene, owner, point),
+                expected,
+                "{point:?}"
+            );
+        }
+        view.compose_components(&mut scene, &mut hits, owner, &[node])
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&identity, scene.geometry_stamp().0));
+        assert_eq!(scene.geometry_stamp().1, revision);
+        assert_eq!(geometry(&scene), rectangles);
+        assert_eq!(view.nodes.identities(), packets);
+        assert_eq!(view.nodes.paints(), paints);
+        assert_eq!(
+            scene.component_id(UiComponentKey {
+                screen: owner,
+                node
+            }),
+            Some(id)
+        );
+        assert_eq!(scene.component_transform(id), Some(pose));
+    }
+    scene
+        .set_component_transforms(&[(id, UiTransform::new([20.0, 0.0], [2.0, 1.5], 0.0).unwrap())])
+        .unwrap();
+    assert_eq!(view.hit_components(&scene, owner, (430.0, 200.0)), None);
+    assert_eq!(
+        view.hit_components(&scene, owner, (12.0, 75.0)),
+        Some(ControlId(70))
+    );
+    assert_eq!(scene.geometry_stamp().1, revision);
+    assert!(std::sync::Arc::ptr_eq(&identity, scene.geometry_stamp().0));
+}
+
+#[test]
+fn practice_cropped_through_end_can_move_into_view_without_changing_ordinary_layout() {
+    use crate::scene::{UiComponentKey, UiTransform};
+    let owner = ScreenInstanceId(100);
+    let mut view = PracticeView::new(owner, 960, 720).unwrap();
+    let node = view.node_for_control(ControlId(76)).unwrap().unwrap();
+    view.resize(480, 360).unwrap();
+    let ordinary = compose(&view, 480, 360);
+    assert_eq!(view.node_for_control(ControlId(76)).unwrap(), None);
+    let mut scene = Scene::new(480, 360);
+    let mut hits = Vec::new();
+    view.compose_components(&mut scene, &mut hits, owner, &[node])
+        .unwrap();
+    let id = scene
+        .component_id(UiComponentKey {
+            screen: owner,
+            node,
+        })
+        .unwrap();
+    assert_eq!(view.node_for_control(ControlId(76)).unwrap(), Some(node));
+    assert_eq!(
+        view.hit_components(&scene, owner, (350.0, 190.0)),
+        Some(ControlId(72))
+    );
+    scene
+        .set_component_transforms(&[(
+            id,
+            UiTransform::new([-250.0, 0.0], [1.0, 1.0], 1.0).unwrap(),
+        )])
+        .unwrap();
+    assert_eq!(
+        view.hit_components(&scene, owner, (350.0, 190.0)),
+        Some(ControlId(76))
+    );
+    assert_eq!(
+        view.hit_components(&scene, owner, (479.999, 223.999)),
+        Some(ControlId(76))
+    );
+    assert_eq!(view.hit_components(&scene, owner, (480.0, 190.0)), None);
+    assert_eq!(view.hit_components(&scene, owner, (350.0, 224.0)), None);
+    assert_eq!(
+        view.hit_components(&scene, owner, (12.0, 190.0)),
+        Some(ControlId(71))
+    );
+    let restored = compose(&view, 480, 360);
+    assert_eq!(geometry(&restored.0), geometry(&ordinary.0));
+    assert_eq!(regions(&restored.1), regions(&ordinary.1));
+}

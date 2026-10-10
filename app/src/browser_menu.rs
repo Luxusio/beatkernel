@@ -1153,7 +1153,11 @@ impl BrowserMenuPresentation {
                     hovered: None,
                     armed: None,
                 });
-                view.compose(scene, &mut self.hits)?;
+                if animated.is_empty() {
+                    view.compose(scene, &mut self.hits)?;
+                } else {
+                    view.compose_components(scene, &mut self.hits, model.token.screen, &animated)?;
+                }
             }
             MenuView::Display(view) => {
                 let editors = [editor(0)?, editor(1)?, editor(2)?, editor(3)?];
@@ -1247,6 +1251,7 @@ impl BrowserMenuPresentation {
             let node = match view {
                 MenuView::Selection(view, _) => view.node_for_control(control)?,
                 MenuView::Display(view) => view.node_for_control(control)?,
+                MenuView::Practice(view) => view.node_for_control(control)?,
                 _ => None,
             };
             self.pending_hits.push(PresentedHit {
@@ -1293,6 +1298,7 @@ impl BrowserMenuPresentation {
         let node = match view {
             MenuView::Selection(view, _) => view.node_for_control(control)?,
             MenuView::Display(view) => view.node_for_control(control)?,
+            MenuView::Practice(view) => view.node_for_control(control)?,
             _ => return Err("menu route does not support explicit component motion".into()),
         };
         node.ok_or_else(|| "control is not displayed".into())

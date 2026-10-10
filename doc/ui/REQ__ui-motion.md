@@ -75,6 +75,53 @@ An immutable scene geometry identity/revision is available to native adapters
 for checking cache reuse. Animation-only ticks must preserve both the identity
 and revision; reconstructing geometry is reserved for actual layout changes.
 
+## Practice motion contract — acceptance verification in progress
+
+Extend the same explicit control-motion capability to the current Practice
+screen instance. Start/end editors 70/75 and actions 71/72/73/76 resolve their
+actual retained nodes; hidden or stale controls refuse. Browser and native
+owners reuse the existing bounded scheduler and component composition. Motion
+ticks change uniforms without rebuilding geometry or changing business revision.
+Only successful presentation publishes the new pointer pose. Zero extent,
+surface retry and unpublished ticks retain the prior accepted pose. Back removes
+Practice and its tracks while resuming retained ancestors; reopening Practice
+creates a new instance.
+
+Native IME candidate rectangles must follow the accepted painted editor pose,
+including fractional movement, scale, source/parent clips, scene translation,
+opacity and viewport letterboxing. The shared immutable pose model supplies
+visible source-rectangle projection. Component keys absent from that snapshot
+refuse; genuinely unanimated staged controls carry no component key. A failed
+keyed projection must not fall back to an unanimated rectangle. Immutable prior
+snapshots remain valid after the live scene changes or disposes bindings.
+Motion-owned physical projection uses the accepted frame extent and outward
+rounding, preserving focus, Tab, preedit/commit and existing action meanings.
+
+Verify actual Practice owners, editor repaint/rebinding, unpresented versus
+accepted hits and candidate anchors, hidden/zero-opacity refusal, stale requests,
+screen removal and unchanged geometry identity/revision. Real current WASM
+Worker and native window observations remain separate from pure fixtures.
+This section specifies intended behavior; source integration is implemented,
+while actual painted-frame acceptance and fresh independent review/QA are
+pending. Other screen motion and physical performance obligations
+remain in WBS10.16/10.17.
+
+Foundation development verification (2026-10-10): the graphics-enabled app
+library's Practice filter passes 118 tests, including all four new retained
+component facade fixtures. The new `UiPresentedPose::visible_rect` filter
+executes five tests and passes all five, covering literal fractional/pivot
+projection, source/parent/viewport clipping, opacity, invalid rectangles and
+immutable snapshots after live changes/disposal. The original two failing
+Practice fixture inputs moved actions outside their fixed parent row; corrected
+horizontal probes retain strict clipping and geometry identity assertions.
+These results verify the shared foundations only. Browser/native owner
+fixtures subsequently pass five browser cases and seven native cases. Existing
+browser-menu, shared component-scene and native-related filters pass 29, 10 and
+49 cases respectively; overlapping filters are not unique-test totals. Native
+window tests remain ignored unless explicitly enabled. Actual painted Practice
+frames and independent review/QA remain pending.
+Logs are machine-local under `target/wf/practice-component-motion-01a12429/`.
+
 Native development evidence: `native-component-motion-check-development.log`
 passes the native app binary type check. The focused binary fixture run passes
 8 tests / fails 0 (`native-component-motion-focused-development.log`), including

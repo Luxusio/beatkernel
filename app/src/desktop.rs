@@ -10,6 +10,9 @@ mod clipboard_fixtures;
 #[path = "desktop_completed_results_fixtures.rs"]
 mod completed_results_fixtures;
 #[cfg(test)]
+#[path = "desktop_practice_motion_fixtures.rs"]
+mod desktop_practice_motion_fixtures;
+#[cfg(test)]
 #[path = "font_fixture.rs"]
 mod font_fixture;
 #[cfg(test)]
@@ -1658,6 +1661,9 @@ impl Desktop {
                 let screen = match self.navigator.route() {
                     ScreenRoute::Selection => self.selection_view.as_ref().map(SelectionView::id),
                     ScreenRoute::Display => self.display_view.as_ref().map(DisplayView::id),
+                    ScreenRoute::Practice => {
+                        self.practice.as_ref().map(|practice| practice.view.id())
+                    }
                     _ => None,
                 }
                 .filter(|screen| self.navigator.accepts(*screen));
@@ -1708,7 +1714,17 @@ impl Desktop {
                 .as_ref()
                 .ok_or("Display view unavailable")?
                 .node_for_control(control)?,
-            _ => return Err("native component motion requires Selection or Display".into()),
+            ScreenRoute::Practice => self
+                .practice
+                .as_ref()
+                .ok_or("Practice view unavailable")?
+                .view
+                .node_for_control(control)?,
+            _ => {
+                return Err(
+                    "native component motion requires Selection, Display or Practice".into(),
+                )
+            }
         };
         node.ok_or_else(|| "native motion control is not displayed".into())
     }
@@ -1765,7 +1781,10 @@ impl Desktop {
             self.ui_motion.pending_hits.push(NativeMotionHit {
                 control,
                 bounds,
-                key: Some(UiComponentKey { screen, node }),
+                key: self
+                    .scene
+                    .component_id(UiComponentKey { screen, node })
+                    .map(|_| UiComponentKey { screen, node }),
             });
         }
         Ok(())
@@ -1851,6 +1870,12 @@ impl Desktop {
                     .as_ref()
                     .ok_or("Display view unavailable")?
                     .compose_components(&mut self.scene, &mut self.hits, screen, &nodes),
+                ScreenRoute::Practice => self
+                    .practice
+                    .as_ref()
+                    .ok_or("Practice view unavailable")?
+                    .view
+                    .compose_components(&mut self.scene, &mut self.hits, screen, &nodes),
                 _ => unreachable!("control node preflight restricts route"),
             };
             if let Err(error) = composed {
@@ -1927,7 +1952,7 @@ impl Desktop {
         self.scene.status()?;
         if !matches!(
             self.navigator.route(),
-            ScreenRoute::Selection | ScreenRoute::Display
+            ScreenRoute::Selection | ScreenRoute::Display | ScreenRoute::Practice
         ) {
             self.ui_motion.presented_screen = None;
             self.ui_motion.presented_pose = None;
@@ -4672,6 +4697,65 @@ impl Desktop {
             ImeField::PracticeEnd => 75,
             ImeField::RecordDirectory => 58,
         });
+        if self
+            .ui_motion
+            .owners
+            .iter()
+            .any(|owner| owner.screen == target.screen)
+        {
+            if self.ui_motion.presented_screen != Some(target.screen) {
+                return None;
+            }
+            let hit = self
+                .ui_motion
+                .presented_hits
+                .iter()
+                .find(|hit| hit.control == control)?;
+            let bounds = hit.bounds;
+            let logical = self.ui_motion.presented_pose.as_ref()?.visible_rect(
+                hit.key,
+                [
+                    bounds.x as f64,
+                    bounds.y as f64,
+                    bounds.x.checked_add(bounds.width)? as f64,
+                    bounds.y.checked_add(bounds.height)? as f64,
+                ],
+            )?;
+            let physical = self.ui_motion.presented_extent;
+            let [x, y, width, height] = beatkernel_bms_runtime::viewport::Viewport::new(
+                physical,
+                [WIDTH as u32, HEIGHT as u32],
+            )
+            .ok()?
+            .rect();
+            // Keep fractional component poses until outward physical rounding.
+            // Both viewport and clipping belong to the accepted frame, even
+            // when the live window or scene has already changed.
+            let axis =
+                |begin: f64, end: f64, origin: u32, fitted: u32, logical: u32, limit: u32| {
+                    let scale = f64::from(fitted) / f64::from(logical);
+                    let first = (f64::from(origin) + begin * scale)
+                        .floor()
+                        .clamp(0.0, f64::from(limit));
+                    let last = (f64::from(origin) + end * scale)
+                        .ceil()
+                        .clamp(0.0, f64::from(limit));
+                    if first > f64::from(i32::MAX) || last > f64::from(i32::MAX) || last <= first {
+                        return None;
+                    }
+                    Some([first as u32, (last - first) as u32])
+                };
+            let [left, width] = axis(logical[0], logical[2], x, width, WIDTH as u32, physical[0])?;
+            let [top, height] = axis(
+                logical[1],
+                logical[3],
+                y,
+                height,
+                HEIGHT as u32,
+                physical[1],
+            )?;
+            return Some([left, top, width, height]);
+        }
         let bounds = self.hits.iter().find(|(id, _)| *id == control)?.1;
         if bounds.x < 0 || bounds.y < 0 || bounds.width <= 0 || bounds.height <= 0 {
             return None;
@@ -5949,7 +6033,16 @@ impl Desktop {
         });
         practice.view.set_input_font(self.input_font.clone());
         if practice.view.dirty() || self.painted_reactive != Some(id) {
-            practice.view.compose(&mut self.scene, &mut self.hits)?;
+            let nodes = self.control_motion_nodes(id);
+            if nodes.is_empty() {
+                practice.view.compose(&mut self.scene, &mut self.hits)?;
+            } else {
+                practice
+                    .view
+                    .compose_components(&mut self.scene, &mut self.hits, id, &nodes)?;
+            }
+            self.restore_control_motion(id)?;
+            self.stage_control_hits(id)?;
             self.painted_reactive = Some(id);
         }
         self.render_scene()
