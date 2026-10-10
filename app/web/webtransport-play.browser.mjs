@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { readFile, writeFile, mkdir, stat, realpath, mkdtemp, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { resolve, dirname, relative, isAbsolute } from "node:path";
+import { resolve, dirname, basename, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 
@@ -52,6 +52,19 @@ export function verifyDocument(bytes, expected) {
 export function verifyIndependentProfiles(hosts) {
   const [first, second] = hosts.map(host => resolve(host.profile));
   assert(!within(first, second) && !within(second, first), "Owned browser profiles overlap");
+}
+
+export async function canonicalProfile(path) {
+  let ancestor = resolve(path);
+  const missing = [];
+  for (;;) {
+    try { return resolve(await realpath(ancestor), ...missing); }
+    catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      missing.unshift(basename(ancestor));
+      ancestor = dirname(ancestor);
+    }
+  }
 }
 
 export function verifyPresentation(probe, renderer) {
@@ -172,6 +185,7 @@ async function snapshot(page, index, label) {
 }
 
 async function main() {
+  const evidenceDirectory = await realpath(out);
   const legacyTrust = resolve(homedir(), ".pki/nssdb");
   try { await stat(legacyTrust); throw Error("Legacy HOME NSS database exists; isolated XDG trust cannot be assumed"); }
   catch (error) { if (error.code !== "ENOENT") throw error; }
@@ -185,16 +199,17 @@ async function main() {
     assert(hosts.every(host => typeof host[field] === "string" && host[field].length > 0), `Two ${field} values required`);
     assert.equal(new Set(hosts.map(host => field === "display" ? host[field] : resolve(host[field]))).size, 2, `${field} must be independent`);
   }
-  verifyIndependentProfiles(hosts);
   for (const host of hosts) {
+    host.profile = await canonicalProfile(host.profile);
     for (const field of ["xdgDataHome", "xdgConfigHome"]) {
       assert((await stat(host[field])).isDirectory());
       host[field] = await realpath(host[field]);
     }
     try { await stat(host.profile); throw Error("Browser profile already exists"); } catch (error) { if (error.code !== "ENOENT") throw error; }
-    assert(!within(resolve(host.profile), out), "Evidence directory must be outside browser profile");
+    assert(!within(host.profile, evidenceDirectory), "Evidence directory must be outside browser profile");
     for (const field of ["xdgDataHome", "xdgConfigHome"]) assert(!within(resolve(host.profile), host[field]), "Caller trust directories must be outside owned profile");
   }
+  verifyIndependentProfiles(hosts);
   for (const field of ["xdgDataHome", "xdgConfigHome"]) assert(!within(hosts[0][field], hosts[1][field]) && !within(hosts[1][field], hosts[0][field]), `${field} trust directories overlap`);
   const manifest = JSON.parse(await readFile(required("WEBTRANSPORT_PLAY_HASHES"), "utf8"));
   for (const name of ["index.html", "main.js", "worker.js", "renderer-worker.js", "audio-worklet.js", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm", "audio-pkg/beatkernel_bms_runtime.js", "audio-pkg/beatkernel_bms_runtime_bg.wasm"]) assert(manifest[`app/web/${name}`], `Missing artifact hash: ${name}`);

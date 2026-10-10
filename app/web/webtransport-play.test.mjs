@@ -1,7 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { runBounded, verifyDocument, verifyPresentation, verifyIndependentProfiles } from "./webtransport-play.browser.mjs";
+import { mkdtemp, mkdir, symlink, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runBounded, verifyDocument, verifyPresentation, verifyIndependentProfiles, canonicalProfile } from "./webtransport-play.browser.mjs";
+
+test("missing profiles through existing directory aliases cannot share or nest ownership", async () => {
+  const owned = await mkdtemp(join(tmpdir(), "beatkernel-room-profile-test-"));
+  try {
+    const physical = join(owned, "physical"), alias = join(owned, "alias");
+    await mkdir(physical); await symlink(physical, alias, "dir");
+    const first = await canonicalProfile(join(physical, "new"));
+    assert.equal(await canonicalProfile(join(alias, "new")), first);
+    for (const target of [join(alias, "new"), join(alias, "new", "host2")]) {
+      const second = await canonicalProfile(target);
+      assert.throws(() => verifyIndependentProfiles([{ profile: first }, { profile: second }]), /profiles overlap/);
+    }
+  } finally { await rm(owned, { recursive: true, force: true }); }
+});
 
 test("independent sibling profiles preserve join-before-removal ownership", () => {
   verifyIndependentProfiles([{ profile: "/tmp/room-play/host1" }, { profile: "/tmp/room-play/host2" }]);
