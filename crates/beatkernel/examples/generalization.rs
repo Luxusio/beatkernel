@@ -1,4 +1,6 @@
 //! Six typed input patterns composed through the same runtime and replay judge.
+#[path = "generalization/pose_interaction.rs"]
+pub mod pose_interaction;
 use beatkernel::{
     audio::{command_queue, CommandConsumer},
     chart::{
@@ -11,10 +13,13 @@ use beatkernel::{
         TouchEvent, TouchPhase,
     },
     interaction::{
-        CompositeEvaluator, InteractionEvaluator, RepeatedEvaluator, TrackingEvaluator,
-        TrackingInput,
+        CompositeEvaluator, InstantEvaluator, InteractionEvaluator, InteractionState,
+        RepeatedEvaluator, TrackingEvaluator, TrackingInput,
     },
-    judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeSnapshot, JudgeWindow, Rule},
+    judge::{
+        JudgeEngine, JudgeGrade, JudgeOutcome, JudgeProfile, JudgeSnapshot, JudgeStage,
+        JudgeWindow, Rule,
+    },
     replay::{ReplayHeader, ReplayRecorder, ReplaySession, REPLAY_VERSION},
     runtime::{Runtime, RuntimeReport},
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
@@ -96,8 +101,20 @@ pub fn build_fixture() -> Result<Fixture, Box<dyn Error>> {
 }
 
 pub fn build_fixture_with_count(minimum_hits: u32) -> Result<Fixture, Box<dyn Error>> {
+    build_fixture_options(minimum_hits, None)
+}
+
+/// Eight objects covering the combined input policies without changing the legacy fixture.
+pub fn build_six_pattern_fixture(axis_mode: AxisMode) -> Result<Fixture, Box<dyn Error>> {
+    build_fixture_options(3, Some(axis_mode))
+}
+
+fn build_fixture_options(
+    minimum_hits: u32,
+    axis_mode: Option<AxisMode>,
+) -> Result<Fixture, Box<dyn Error>> {
     let mut chart = SourceChart::new(1_000_000_000, Bpm::new(60, 1)?)?;
-    let specs = [
+    let mut specs = vec![
         (1, 100, Some(300)),
         (2, 100, Some(300)),
         (3, 100, Some(300)),
@@ -106,6 +123,9 @@ pub fn build_fixture_with_count(minimum_hits: u32) -> Result<Fixture, Box<dyn Er
         (6, 100, Some(300)),
         (7, 100, Some(300)),
     ];
+    if axis_mode.is_some() {
+        specs.push((8, 200, None));
+    }
     for (id, start, end) in specs {
         chart.objects.push(SourceObject {
             id: ObjectId(id),
@@ -125,7 +145,7 @@ pub fn build_fixture_with_count(minimum_hits: u32) -> Result<Fixture, Box<dyn Er
             max_gap: Duration::from_nanos(150),
         }) as Box<dyn InteractionEvaluator>
     };
-    let rules = vec![
+    let mut rules = vec![
         Rule {
             interaction: InteractionId(1),
             control: GameControlId(1),
@@ -171,9 +191,20 @@ pub fn build_fixture_with_count(minimum_hits: u32) -> Result<Fixture, Box<dyn Er
         Rule {
             interaction: InteractionId(7),
             control: GameControlId(7),
-            evaluator: tracking(TrackingInput::Pose, vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]),
+            evaluator: if axis_mode.is_some() {
+                Box::new(pose_interaction::DerivedPoseEvaluator)
+            } else {
+                tracking(TrackingInput::Pose, vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+            },
         },
     ];
+    if axis_mode.is_some() {
+        rules.push(Rule {
+            interaction: InteractionId(8),
+            control: GameControlId(8),
+            evaluator: Box::new(InstantEvaluator),
+        });
+    }
     let judge = JudgeEngine::new(
         chart.compile()?,
         rules,
@@ -187,16 +218,34 @@ pub fn build_fixture_with_count(minimum_hits: u32) -> Result<Fixture, Box<dyn Er
         )?,
     )?;
     let origin = judge.snapshot()?;
+    let (chart_identity, rules_identity, options) = match axis_mode {
+        Some(mode) => (
+            b"six-pattern-combinations/v2".to_vec(),
+            b"tracking-repeated-composite-instant-derived-pose/v2".to_vec(),
+            format!(
+                "tolerance=0.001;gap=150ns;count={minimum_hits};same_device=true;axis_mode={};pointer_mode=relative;pose=unit-diagonal-identity-cone/v1;pose_abs_w_min=0.9;pose_norm_squared_tolerance=0.001;pointer_button_control=8",
+                axis_mode_name(mode)
+            ).into_bytes(),
+        ),
+        None => (
+            b"six-input-patterns/v1".to_vec(),
+            b"tracking-repeated-composite/v1".to_vec(),
+            format!("tolerance=0.001;gap=150ns;count={minimum_hits};same_device=true").into_bytes(),
+        ),
+    };
     let recorder = ReplayRecorder::new(ReplayHeader {
         version: REPLAY_VERSION,
-        chart_identity: b"six-input-patterns/v1".to_vec(),
-        rules_identity: b"tracking-repeated-composite/v1".to_vec(),
-        options: format!("tolerance=0.001;gap=150ns;count={minimum_hits};same_device=true")
-            .into_bytes(),
+        chart_identity,
+        rules_identity,
+        options,
         seed: 19,
         normalized_clock: ClockDomainId(2),
     })?;
-    let bindings = BindingMap::from_bindings([1, 2, 4, 5, 6, 7, 51, 52].map(|control| Binding {
+    let mut controls = vec![1, 2, 4, 5, 6, 7, 51, 52];
+    if axis_mode.is_some() {
+        controls.push(8);
+    }
+    let bindings = BindingMap::from_bindings(controls.into_iter().map(|control| Binding {
         device: DeviceSelector::Any,
         physical: physical(control),
         game_control: GameControlId(control),
@@ -339,14 +388,109 @@ pub fn fixture_events() -> Vec<PhysicalInputEvent> {
     ]
 }
 
+fn axis_mode_name(mode: AxisMode) -> &'static str {
+    match mode {
+        AxisMode::Absolute => "absolute",
+        AxisMode::Relative => "relative",
+    }
+}
+
+/// The legacy physical trajectory, plus a separate pointer-device button press.
+pub fn six_pattern_events(axis_mode: AxisMode) -> Vec<PhysicalInputEvent> {
+    let mut events = fixture_events();
+    for event in &mut events {
+        match event {
+            PhysicalInputEvent::Axis(axis) => {
+                axis.mode = axis_mode;
+                if axis_mode == AxisMode::Absolute && axis.meta.sequence == 3 {
+                    axis.value = 1.0;
+                }
+            }
+            PhysicalInputEvent::Pointer(pointer) if pointer.meta.sequence == 3 => {
+                pointer.meta.sequence = 4;
+            }
+            PhysicalInputEvent::Pose(pose) if pose.meta.sequence == 3 => {
+                pose.orientation.w = -1.0;
+            }
+            _ => {}
+        }
+    }
+    let index = events
+        .iter()
+        .position(|event| matches!(event, PhysicalInputEvent::Pointer(pointer) if pointer.meta.sequence == 2))
+        .expect("fixed fixture midpoint pointer sample");
+    events.insert(index + 1, button(50, 8, 200, 3, ButtonState::Down));
+    events
+}
+
+fn run_six_patterns(axis_mode: AxisMode) -> Result<(), Box<dyn Error>> {
+    let mut fixture = build_six_pattern_fixture(axis_mode)?;
+    let mut live_results = Vec::new();
+    for event in six_pattern_events(axis_mode) {
+        live_results.extend(fixture.input(event)?.judge_events);
+    }
+    live_results.extend(fixture.advance(400)?.judge_events);
+    if live_results.len() != 8 {
+        return Err("six-pattern fixture expected eight literal hits".into());
+    }
+    for (id, stage, time) in [
+        (1, JudgeStage::Custom(0), 300),
+        (2, JudgeStage::Custom(0), 300),
+        (3, JudgeStage::Custom(0), 300),
+        (4, JudgeStage::Custom(0), 150),
+        (5, JudgeStage::Custom(0), 200),
+        (6, JudgeStage::Custom(0), 300),
+        (7, JudgeStage::Custom(0), 300),
+        (8, JudgeStage::Instant, 200),
+    ] {
+        let expected_outcome = JudgeOutcome::Hit {
+            grade: JudgeGrade(1),
+            delta: Duration::ZERO,
+        };
+        if fixture.runtime.judge().state(ObjectId(id)) != Some(InteractionState::Completed)
+            || !live_results.iter().any(|result| {
+                result.object == ObjectId(id)
+                    && result.stage == stage
+                    && result.at == Timestamp::from_nanos(time)
+                    && result.outcome == expected_outcome
+                    && result.input.is_some()
+            })
+        {
+            return Err(format!("six-pattern literal outcome differs for object {id}").into());
+        }
+    }
+    let mut replay = fixture.replay_session()?;
+    if replay.results() != live_results
+        || replay.engine().stable_hash()? != fixture.runtime.judge().stable_hash()?
+    {
+        return Err("six-pattern live/replay results or state differs".into());
+    }
+    let final_cursor = replay.cursor();
+    let final_hash = replay.stable_hash()?;
+    replay.seek_cursor(8)?;
+    replay.seek_cursor(final_cursor)?;
+    if replay.stable_hash()? != final_hash || replay.results() != live_results {
+        return Err("six-pattern replay reconstruction differs".into());
+    }
+    println!(
+        "eight completed objects with eight hits; axis_mode={}; replay_hash={final_hash:016x}; software fixture only",
+        axis_mode_name(axis_mode)
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args == ["--help"] {
-        println!("Usage: cargo run -p beatkernel --example generalization -- [--fixture|--help]\nSix input patterns: axis, dual contacts, repeated button, chord prerequisites, pointer, pose. Physical input traverses normalization/binding/transport/runtime and is recorded from the live judge and reconstructed by the same judge implementation.");
+        println!("Usage: cargo run -p beatkernel --example generalization -- [--fixture|--six-patterns|--help]\n--fixture (default): legacy seven-object fixture.\n--six-patterns: eight-object combined policies, absolute and relative axes, pointer button instant, derived orientation-dependent pose; software fixture only.\nSix input patterns: axis, dual contacts, repeated button, chord prerequisites, pointer, pose. Physical input traverses normalization/binding/transport/runtime and is recorded from the live judge and reconstructed by the same judge implementation.");
         return Ok(());
     }
+    if args == ["--six-patterns"] {
+        run_six_patterns(AxisMode::Absolute)?;
+        return run_six_patterns(AxisMode::Relative);
+    }
     if !args.is_empty() && args != ["--fixture"] {
-        return Err("expected --fixture or --help".into());
+        return Err("expected --fixture, --six-patterns or --help".into());
     }
     let mut fixture = build_fixture()?;
     for event in fixture_events() {
