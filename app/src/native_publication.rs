@@ -44,7 +44,11 @@ pub(crate) fn publish_new_with<W: PublicationWriter>(
                 value.checked_add(1).filter(|next| *next <= STAGE_ID_LIMIT)
             })
             .map_err(|_| io::Error::other("publication staging identity exhausted"))?;
-        let identity = id ^ ((std::process::id() as u64) << 12);
+        #[cfg(target_arch = "wasm32")]
+        let process_id = 0u32;
+        #[cfg(not(target_arch = "wasm32"))]
+        let process_id = std::process::id();
+        let identity = id ^ ((process_id as u64) << 12);
         // Uppercase hex is already a valid 8.3 name, so Windows need not
         // synthesize another short-name alias for the staging file.
         let stage = parent.join(format!("{:08X}.{:03X}", identity >> 12, identity & 0xFFF));

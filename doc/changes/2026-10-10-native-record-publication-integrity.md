@@ -47,6 +47,15 @@ with `desktop,webtransport` also passes 121 tests, including the 25 helper and
 `--no-default-features` passes 17 tests. Fresh independent review/QA remain
 pending; development checks do not establish task completion.
 
+An additional exact-helper WASM probe exposed a compatibility regression before
+QA: native saving trapped on process-ID lookup before unsupported file I/O.
+The helper now uses a zero process seed on wasm32 while native targets retain
+their PID seed. The public API remains available and returns typed refusal.
+The durable probe fixture and Node tests execute the production helper with no
+host imports: ordinary save returns `Unsupported`, reserved filename returns
+`InvalidInput`, and neither traps. All three Node tests and the 25 native
+helper tests pass after this correction. Fresh final review and QA are pending.
+
 ## Known ceiling
 
 - Known ceiling: cleanup refusal may retain an owned staging file — upgrade when

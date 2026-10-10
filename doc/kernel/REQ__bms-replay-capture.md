@@ -16,6 +16,12 @@ with `InvalidInput` before filesystem effects; normal `.bkr` and other native
 filenames remain accepted. Reserving this namespace prevents another concurrent
 publication from creating a partial file at an accepted replay destination.
 
+The existing WASM-visible native save method remains available. After pure
+encoding it must return a typed unsupported-file I/O error on
+`wasm32-unknown-unknown`, rather than trapping while obtaining a process ID.
+Reserved staging basenames retain their before-effects `InvalidInput` refusal.
+Actual browser persistence continues to use the separate IndexedDB adapter.
+
 The portable finite stepped live owner must install the existing core logical
 endpoint before processing. Capture uses its immutable original start/end and
 chart seed, recording actual capped reports in the section-aware format. Input
