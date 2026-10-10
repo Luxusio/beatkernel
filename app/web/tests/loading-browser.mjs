@@ -16,7 +16,7 @@ const wasmSha = hash(await readFile("app/web/pkg/beatkernel_bms_runtime_bg.wasm"
 assert.equal(wasmSha, expected);
 await mkdir(out, { recursive: true });
 const actualWorker = await readFile("app/web/worker.js");
-const evidence = { status: "RUNNING", wasmSha, actualWorkerSha256: hash(actualWorker), reads: [], steps: [], errors: [], consoleErrors: [], cleanup: {}, ceilings: [
+const evidence = { status: "RUNNING", wasmSha, actualWorkerSha256: hash(actualWorker), reads: [], steps: [], errors: [], consoleErrors: [], httpErrors: [], cleanup: {}, ceilings: [
   "Functional software Chromium/SwiftShader evidence; timings are observations, not a throughput, latency or hardware benchmark.",
   "Pending source reads use the actual UI. While preparation is pending the host disables replacement/selection; late selection fencing is covered by deterministic Worker tests, not an invented GUI control.",
   "Browser page closure is the actual pending-owner retirement exercised here; no physical device/audio timing proof is claimed.",
@@ -118,6 +118,7 @@ try {
   const page = await browser.newPage(); await page.setViewport({ width: 1200, height: 1000 }); page.setDefaultTimeout(30000);
   page.on("pageerror", e => evidence.errors.push(String(e))); await page.evaluateOnNewDocument(windowObservation);
   page.on("console", message => { if (message.type() === "error") evidence.consoleErrors.push(message.text()); });
+  page.on("response", response => { if (response.status() >= 400) evidence.httpErrors.push({ url: response.url(), status: response.status() }); });
   await page.goto(base + "/app/web/", { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => !document.querySelector("#files").disabled);
   const reads = (name, phase = "begin") => evidence.reads.filter(x => x.name === name && x.phase === phase);

@@ -1,3 +1,4 @@
+import { catalogKeyboardSelection } from "./menu-keyboard.mjs";
 import { snapshotMenuMotion } from "./render-protocol.mjs";
 import { validateCompletedResults, validateCompletedArchive } from "./completed-results-model.mjs";
 import { snapshotFiles, nanoseconds, seconds, validateHistoricalGradeSnapshot, HistoricalGradePager } from "./host_model.mjs";
@@ -2387,6 +2388,25 @@ async function play(mode = "live") {
 }
 
 function key(event, down) {
+  if (down && !activePlay) {
+    const token = menuToken(), state = menuState;
+    const targetWorker = worker, targetOwner = owner;
+    const index = catalogKeyboardSelection(event, { route: state?.route, selected: state?.selected,
+      count: state?.fields.length, available: token !== null && !importing && !settingsOperation, playing: false });
+    if (index !== null && menuActionId < 0xffffffffffffffffn) {
+      const current = menuToken();
+      if (worker === targetWorker && owner === targetOwner && current && current.menuGeneration === token.menuGeneration
+        && current.screen === token.screen && current.revision === token.revision) {
+        event.preventDefault();
+        const after = menuToken();
+        if (worker === targetWorker && owner === targetOwner && after && after.menuGeneration === token.menuGeneration
+          && after.screen === token.screen && after.revision === token.revision) {
+          targetWorker.postMessage({ kind: "menu-select", ...token, actionId: ++menuActionId, index });
+        }
+      }
+      return;
+    }
+  }
   if (!activePlay && completedResults?.owner === owner && completedResults.shown && !completedResults.failed
     && down && !event.repeat && ["PageUp", "PageDown", "KeyC"].includes(event.code)) {
     const target = event.target;

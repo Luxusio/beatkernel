@@ -737,6 +737,13 @@ function handleMenu(request) {
       } else throw new Error("Unknown saved opponent request.");
       menuOwner.touch(menuOwner.screen, menuOwner.revision); menuOpponents = candidate;
     }
+    else if (request.kind === "menu-select") {
+      if (menuOwner.route !== 1 || !unsignedIdentity(request.actionId) || request.actionId <= lastMenuAction
+        || !Number.isInteger(request.index) || request.index < 0 || request.index >= menuOwner.fields().length)
+        throw new Error("Invalid catalog selection or action identity.");
+      menuOwner.select(request.screen, request.revision, request.index);
+      lastMenuAction = request.actionId;
+    }
     else if (request.kind === "menu-edit") {
       if (![2, 3, 7].includes(menuOwner.route)) throw new Error("This menu does not support text editing.");
       menuOwner.edit(request.screen, request.revision, request.index, request.value);

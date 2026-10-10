@@ -683,6 +683,93 @@ test("actual Worker and WASM Settings Apply validates thirteen scalars and emits
   } finally { await worker.send({ kind: "dispose" }); }
 });
 
+test("actual Worker catalog selection uses current business tokens and never prepares preview audio", async () => {
+  const worker = await readyWorker({ actualMenu: true });
+  try {
+    const files = ["a.bms", "b.bms", "c.bms"].map(path => selectedFile(path));
+    await worker.send({ kind: "import", id: 1, files });
+    await worker.send({ kind: "accept-library", id: 1 });
+    await worker.send({ kind: "select", id: 2, libraryId: 1, path: "a.bms", rate: 48000, seed: "0" });
+    const preview = worker.views[0].current;
+    const preparations = worker.libraries[0].preparations.length;
+    const accesses = worker.libraries[0].accesses.length;
+    await worker.send({ kind: "menu-open", fields: ["a.bms", "b.bms", "c.bms"] });
+    const first = worker.of("menu-state").at(-1);
+    assert.equal(first.route, 1);
+    assert.equal(first.selected, 0);
+    await worker.send({ kind: "menu-select", ...acquiredMenuToken(first), actionId: 1n, index: 1 });
+    const second = worker.of("menu-state").at(-1);
+    assert.equal(second.selected, 1);
+    assert.equal(second.screen, first.screen);
+    assert.ok(second.revision > first.revision);
+    assert.deepEqual(Array.from(second.fields), ["a.bms", "b.bms", "c.bms"]);
+    assert.equal(worker.of("menu-error").length, 0);
+
+    for (const index of [-1, 3, 0.5, undefined, "1", NaN]) {
+      const errors = worker.of("menu-error").length;
+      await worker.send({ kind: "menu-select", ...acquiredMenuToken(second), actionId: 2n, index });
+      assert.equal(worker.of("menu-error").length, errors + 1);
+      assert.deepEqual(worker.of("menu-state").at(-1), second);
+    }
+    for (const token of [acquiredMenuToken(first),
+      { ...acquiredMenuToken(second), screen: second.screen + 1n },
+      { ...acquiredMenuToken(second), menuGeneration: second.menuGeneration + 1n }]) {
+      const errors = worker.of("menu-error").length;
+      await worker.send({ kind: "menu-select", ...token, actionId: 2n, index: 2 });
+      assert.equal(worker.of("menu-error").length, errors + 1);
+      assert.deepEqual(worker.of("menu-state").at(-1), second);
+    }
+    await worker.send({ kind: "menu-select", ...acquiredMenuToken(second), actionId: 2n, index: 2 });
+    const third = worker.of("menu-state").at(-1);
+    assert.equal(third.selected, 2, "rejected requests must not consume the action identity");
+    for (const actionId of [2n, 0n, 3, "3", 18446744073709551616n]) {
+      const errors = worker.of("menu-error").length;
+      await worker.send({ kind: "menu-select", ...acquiredMenuToken(third), actionId, index: 0 });
+      assert.equal(worker.of("menu-error").length, errors + 1);
+      assert.deepEqual(worker.of("menu-state").at(-1), third);
+    }
+    await worker.send({ kind: "menu-select", ...acquiredMenuToken(third), actionId: 3n, index: 0 });
+    const reset = worker.of("menu-state").at(-1);
+    assert.equal(reset.selected, 0);
+    await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(reset), route: 2, fields: settingsMenuDraft() });
+    const settings = worker.of("menu-state").at(-1), errors = worker.of("menu-error").length;
+    await worker.send({ kind: "menu-select", ...acquiredMenuToken(settings), actionId: 4n, index: 1 });
+    assert.equal(worker.of("menu-error").length, errors + 1);
+    assert.deepEqual(worker.of("menu-state").at(-1), settings);
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(settings), actionId: 4n, control: 11n });
+    assert.equal(worker.of("menu-state").at(-1).route, 1);
+    assert.equal(worker.of("menu-state").at(-1).selected, 0);
+    assert.equal(worker.libraries[0].preparations.length, preparations);
+    assert.equal(worker.libraries[0].accesses.length, accesses);
+    assert.equal(worker.views[0].current, preview);
+    assert.equal(worker.preparedOwners.length, 1);
+    assert.equal(worker.of("selected").length, 1);
+    assert.equal(worker.games.length, 0);
+  } finally { await worker.send({ kind: "dispose" }); }
+});
+
+test("actual Worker catalog selection rejects empty and replaced retained owners atomically", async () => {
+  const worker = await readyWorker({ actualMenu: true });
+  try {
+    await worker.send({ kind: "menu-open", fields: ["first.bms"] });
+    const retired = worker.of("menu-state").at(-1);
+    await worker.send({ kind: "menu-open", fields: [] });
+    const empty = worker.of("menu-state").at(-1);
+    for (const token of [acquiredMenuToken(empty), acquiredMenuToken(retired)]) {
+      const errors = worker.of("menu-error").length;
+      await worker.send({ kind: "menu-select", ...token, actionId: 1n, index: 0 });
+      assert.equal(worker.of("menu-error").length, errors + 1);
+      assert.deepEqual(worker.of("menu-state").at(-1), empty);
+    }
+    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(empty), fields: ["available.bms", "next.bms"] });
+    const populated = worker.of("menu-state").at(-1);
+    await worker.send({ kind: "menu-select", ...acquiredMenuToken(populated), actionId: 1n, index: 1 });
+    assert.equal(worker.of("menu-state").at(-1).selected, 1);
+    assert.equal(worker.preparedOwners.length, 0);
+    assert.equal(worker.games.length, 0);
+  } finally { await worker.send({ kind: "dispose" }); }
+});
+
 test("actual Worker Settings scalar refusal preserves the accepted draft and action ID for correction", async () => {
   const worker = await readyWorker({ actualMenu: true });
   try {

@@ -60,6 +60,25 @@ and also collects console errors. A fresh review and meaningful browser rerun
 are required; the failing evidence remains in target/wf/player-cleanup-qa-browser.
 Owned browser, Xvfb and HTTP resources were cleaned up.
 
+The corrected rerun passed selected-media error retention, cached recovery and
+accepted-library replacement, then failed the catalog ArrowDown journey.
+Primary source inspection confirmed that the idle menu has no keyboard selection
+bridge: the Window handler returns without an active play session. This is an
+existing missing feature, not evidence of a new ownership regression. The
+requested navigation remains an acceptance requirement; a portable-owner
+selection adapter and real-key rerun are required. The failed evidence remains
+under target/wf/player-cleanup-qa-browser-retry1. No page errors were observed;
+one console resource 404 lacked a recorded URL and is not classified yet.
+The runner now records HTTP error URLs/statuses for the next actual run.
+
+The Window now maps catalog navigation keys to a token-correlated menu-select
+request. The Worker uses the existing portable owner's select operation;
+highlight movement does not activate or prepare a chart. Independent test
+author execution passed seven pure-adapter cases and all 56 actual Worker
+tests, including two new connected selection/admission tests. These are
+development regressions; fresh formal review and real-browser acceptance
+remain required for the changed JavaScript.
+
 Full browser/native journeys and independent live UX are not yet complete.
 Ordered hook attestation and task closure are not claimed. WBS remains 90/193.
 

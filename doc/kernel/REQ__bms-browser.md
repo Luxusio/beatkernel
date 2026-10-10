@@ -1576,6 +1576,17 @@ remain authoritative. Browser source integration still requires later generated
 bindings and actual execution to prove acceptance.
 
 
+## Catalog keyboard navigation
+
+The idle retained song catalog shall accept ArrowUp/ArrowDown and Home/End
+through the portable menu owner's selection operation. Navigation changes the
+highlight without preparing or activating a chart. Requests carry the current
+menu generation, screen, revision and monotonic action identity; stale or
+invalid requests cannot change another owner. Text editors, composition and
+active gameplay retain their own keyboard handling. Verify both the portable
+admission contract and actual trusted browser-key delivery; merely observing
+a Window key event does not prove that the menu consumed it.
+
 ## Retained keyboard bindings
 
 Expose one retained key-choice draft per supported lane with Unbound and Reset
