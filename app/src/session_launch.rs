@@ -10,6 +10,7 @@ use std::{path::Path, sync::Arc};
 #[derive(Clone, Debug)]
 pub struct SessionLaunch {
     original: Arc<[String]>,
+    resolved_original: Option<Arc<[String]>>,
     args: Vec<String>,
     attempt: u32,
 }
@@ -19,6 +20,7 @@ impl SessionLaunch {
         validate(&args)?;
         Ok(Self {
             original: args.clone().into(),
+            resolved_original: None,
             args,
             attempt: 0,
         })
@@ -29,6 +31,117 @@ impl SessionLaunch {
     /// Immutable original invocation, including the original recording base.
     pub fn original_args(&self) -> &[String] {
         &self.original
+    }
+    /// Whether native discovery has fixed the immutable retry configuration.
+    pub fn is_prepared(&self) -> bool {
+        self.resolved_original.is_some()
+    }
+    /// Complete an initial request on its worker before pinning native effects.
+    /// Requested identity stays immutable; retries use the accepted configuration.
+    pub fn prepare_with(
+        mut self,
+        prepare: impl FnOnce(&[String]) -> Result<Vec<String>, String>,
+    ) -> Result<Self, String> {
+        if self.is_prepared() {
+            return Err("native invocation is already prepared".into());
+        }
+        let args = prepare(&self.args)?;
+        validate(&args)?;
+        let replay = self.args.chunks_exact(2).any(|pair| pair[0] == "--replay");
+        for flag in ["--chart", "--replay", "--record-replay"] {
+            let requested = self
+                .args
+                .chunks_exact(2)
+                .filter(|pair| pair[0] == flag)
+                .map(|pair| pair[1].as_str())
+                .collect::<Vec<_>>();
+            let resolved = args
+                .chunks_exact(2)
+                .filter(|pair| pair[0] == flag)
+                .map(|pair| pair[1].as_str())
+                .collect::<Vec<_>>();
+            if requested != resolved {
+                return Err("native preparation changed requested file identity".into());
+            }
+        }
+        if !replay {
+            let mut remaining = args.chunks_exact(2);
+            for requested in self.args.chunks_exact(2) {
+                if !remaining.any(|resolved| resolved == requested) {
+                    return Err("native preparation changed an explicit requested option".into());
+                }
+            }
+        }
+        if replay {
+            for pair in self.args.chunks_exact(2) {
+                let flag = match pair[0].as_str() {
+                    "--alsa" => "--device",
+                    "--bgm-lookahead-ns" => "--lookahead-ns",
+                    "--replay-max-records" => "--max-records",
+                    "--replay-max-bytes" => "--max-bytes",
+                    "--chart"
+                    | "--replay"
+                    | "--device"
+                    | "--backend"
+                    | "--mode"
+                    | "--shared-policy"
+                    | "--asio-view"
+                    | "--output-channels"
+                    | "--rate"
+                    | "--channels"
+                    | "--buffer-frames"
+                    | "--period-frames"
+                    | "--preroll-ns"
+                    | "--voices"
+                    | "--seconds"
+                    | "--channel-policy"
+                    | "--asio-system-clock"
+                    | "--asio-timer-error-ns"
+                    | "--asio-drift-error-ns"
+                    | "--asio-latency-error-ns"
+                    | "--asio-anchor-age-ns" => &pair[0],
+                    "--buffer" => {
+                        if let Some(frames) = pair[1].strip_prefix("frames:") {
+                            if !args.chunks_exact(2).any(|resolved| {
+                                resolved[0] == "--buffer-frames" && resolved[1] == frames
+                            }) {
+                                return Err(
+                                    "native preparation changed an explicit replay buffer".into()
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    _ => continue, // Existing replay projection excludes live acquisition/judging.
+                };
+                if !args
+                    .chunks_exact(2)
+                    .any(|resolved| resolved[0] == flag && resolved[1] == pair[1])
+                {
+                    return Err("native preparation changed an explicit requested option".into());
+                }
+            }
+        }
+        let mut template = args.clone();
+        for flag in ["--record-replay", "--start-ns", "--end-ns"] {
+            let original = self
+                .original
+                .chunks_exact(2)
+                .find(|pair| pair[0] == flag)
+                .map(|pair| pair[1].as_str());
+            if replay && matches!(flag, "--start-ns" | "--end-ns") {
+                continue;
+            }
+            replace_option(&mut template, flag, original);
+        }
+        validate(&template)?;
+        self.resolved_original = Some(template.into());
+        self.args = args;
+        Ok(self)
+    }
+    /// Accepted immutable native configuration, independent of retry overrides.
+    pub fn prepared_original_args(&self) -> Option<&[String]> {
+        self.resolved_original.as_deref()
     }
     /// Project member recording paths while preserving retry lineage.
     pub fn for_recording_path(
@@ -57,8 +170,18 @@ impl SessionLaunch {
         let mut args = self.args.clone();
         replace(&mut original, &original_path)?;
         replace(&mut args, &current_path)?;
+        let resolved_original = self
+            .resolved_original
+            .as_ref()
+            .map(|template| {
+                let mut template = template.to_vec();
+                replace(&mut template, &original_path)?;
+                Ok::<Arc<[String]>, String>(template.into())
+            })
+            .transpose()?;
         Ok(Self {
             original: original.into(),
+            resolved_original,
             args,
             attempt: self.attempt,
         })
@@ -74,7 +197,11 @@ impl SessionLaunch {
             .attempt
             .checked_add(1)
             .ok_or("retry ordinal exhausted")?;
-        let mut args = self.original.to_vec();
+        let mut args = self
+            .resolved_original
+            .as_ref()
+            .unwrap_or(&self.original)
+            .to_vec();
         for pair in args.chunks_exact_mut(2) {
             if pair[0] == "--record-replay" {
                 if pair[1].ends_with('/') || (cfg!(windows) && pair[1].ends_with('\\')) {
@@ -97,6 +224,7 @@ impl SessionLaunch {
         validate(&args)?;
         Ok(Self {
             original: self.original.clone(),
+            resolved_original: self.resolved_original.clone(),
             args,
             attempt,
         })
@@ -106,7 +234,11 @@ impl SessionLaunch {
     /// Preserve the selected bookmark/loop arguments, but derive recording
     /// identity from the final canonical global invocation's original base.
     pub fn rebase_prepared_retry(&self, prepared: &Self) -> Result<Self, String> {
-        if self.original != prepared.original || prepared.attempt == 0 {
+        if self.original != prepared.original
+            || (prepared.resolved_original.is_some()
+                && self.resolved_original != prepared.resolved_original)
+            || prepared.attempt == 0
+        {
             return Err("prepared retry belongs to a different pinned invocation".into());
         }
         let mut next = self.retry()?;
@@ -118,7 +250,20 @@ impl SessionLaunch {
             .chunks_exact(2)
             .find(|pair| pair[0] == "--record-replay")
             .map(|pair| pair[1].clone());
-        next.args = prepared.args.clone();
+        if self.is_prepared() && !prepared.is_prepared() {
+            // A retry selected while discovery was pending retains only its
+            // deliberate section overrides, never discards accepted defaults.
+            for flag in ["--start-ns", "--end-ns"] {
+                let value = prepared
+                    .args
+                    .chunks_exact(2)
+                    .find(|pair| pair[0] == flag)
+                    .map(|pair| pair[1].as_str());
+                replace_option(&mut next.args, flag, value);
+            }
+        } else {
+            next.args = prepared.args.clone();
+        }
         if let Some(recording) = recording {
             let mut found = false;
             for pair in next.args.chunks_exact_mut(2) {
@@ -193,6 +338,20 @@ impl SessionLaunch {
         }
         validate(&retry.args)?;
         Ok(retry)
+    }
+}
+fn replace_option(args: &mut Vec<String>, flag: &str, value: Option<&str>) {
+    let index = args
+        .chunks_exact(2)
+        .position(|pair| pair[0] == flag)
+        .map(|i| i * 2);
+    match (index, value) {
+        (Some(index), Some(value)) => args[index + 1] = value.to_owned(),
+        (Some(index), None) => {
+            args.drain(index..index + 2);
+        }
+        (None, Some(value)) => args.extend([flag.to_owned(), value.to_owned()]),
+        (None, None) => {}
     }
 }
 fn validate(args: &[String]) -> Result<(), String> {

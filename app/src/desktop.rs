@@ -31,6 +31,9 @@ mod loading_fixtures;
 #[path = "desktop_loading_measurement_fixtures.rs"]
 mod loading_measurement_fixtures;
 #[cfg(test)]
+#[path = "desktop_native_preparation_fixtures.rs"]
+mod native_preparation_fixtures;
+#[cfg(test)]
 #[path = "native_remaining_motion_fixtures.rs"]
 mod native_remaining_motion_fixtures;
 #[cfg(test)]
@@ -153,6 +156,7 @@ const LOOP_TOGGLE_BOUNDS: Bounds = Bounds {
     height: 30,
 };
 type Native = fn(&[String]) -> Result<(), Box<dyn Error>>;
+type NativePreparation = fn(&[String], bool) -> Result<Vec<String>, String>;
 type QueryDevices = fn(DeviceRequest) -> Result<DeviceCatalog, Box<dyn Error>>;
 
 #[derive(Clone)]
@@ -522,6 +526,8 @@ impl Game {
             .map_err(|error| error.to_string())?
         {
             if launch.original_args() != self.launch.original_args()
+                || (self.launch.is_prepared()
+                    && launch.prepared_original_args() != self.launch.prepared_original_args())
                 || launch.attempt() < self.launch.attempt()
             {
                 return Err("native retry publication differs from the pinned invocation".into());
@@ -855,9 +861,11 @@ fn spawn_game(
     local_comparisons: bool,
     replay: bool,
     preparation_cache: Option<Arc<Mutex<beatkernel_bms_runtime::preparation::PreparationCache>>>,
+    prepare: Option<NativePreparation>,
 ) -> Result<Game, String> {
-    spawn_game_with_preparation(
+    spawn_game_with_native_preparation(
         move |args| native(args).map_err(|error| error.to_string()),
+        move |args| prepare.map_or_else(|| Ok(args.to_vec()), |prepare| prepare(args, replay)),
         launch,
         local_page,
         local_comparisons,
@@ -882,6 +890,7 @@ where
     spawn_game_with_preparation(native, launch, local_page, local_comparisons, replay, None)
 }
 
+#[cfg(test)]
 fn spawn_game_with_preparation<F>(
     native: F,
     launch: SessionLaunch,
@@ -893,15 +902,52 @@ fn spawn_game_with_preparation<F>(
 where
     F: FnOnce(&[String]) -> Result<(), String> + Send + 'static,
 {
-    let args = launch.args().to_vec();
+    spawn_game_with_native_preparation(
+        native,
+        |args| Ok(args.to_vec()),
+        launch,
+        local_page,
+        local_comparisons,
+        replay,
+        preparation_cache,
+    )
+}
+
+fn spawn_game_with_native_preparation<F, P>(
+    native: F,
+    prepare: P,
+    launch: SessionLaunch,
+    local_page: usize,
+    local_comparisons: bool,
+    replay: bool,
+    preparation_cache: Option<Arc<Mutex<beatkernel_bms_runtime::preparation::PreparationCache>>>,
+) -> Result<Game, String>
+where
+    F: FnOnce(&[String]) -> Result<(), String> + Send + 'static,
+    P: FnOnce(&[String]) -> Result<Vec<String>, String> + Send + 'static,
+{
     let native_launch = launch.clone();
     let (publisher, viewer) = player::channel();
     let worker = thread::Builder::new()
         .name("bms-game".into())
         .spawn(move || {
             player::with_publisher(publisher, || {
-                player::pin_native_launch_with_preparation(native_launch, preparation_cache)?;
-                native(&args)
+                if player::cancelled() {
+                    return Ok(());
+                }
+                let native_launch = if native_launch.is_prepared() {
+                    native_launch
+                } else {
+                    native_launch.prepare_with(prepare)?
+                };
+                if player::cancelled() {
+                    return Ok(());
+                }
+                player::pin_native_launch_with_preparation(
+                    native_launch.clone(),
+                    preparation_cache,
+                )?;
+                native(native_launch.args())
             })
         })
         .map_err(|error| error.to_string())?;
@@ -964,7 +1010,7 @@ pub(super) fn run(
     replay: Native,
     validate_replay: Native,
 ) -> Result<(), Box<dyn Error>> {
-    run_with_ui_commands(
+    run_with_ui_commands_and_preparation(
         args,
         native,
         validate,
@@ -972,6 +1018,7 @@ pub(super) fn run(
         replay,
         validate_replay,
         |_| {},
+        Some(crate::app::prepare_native_invocation),
     )
 }
 
@@ -985,6 +1032,28 @@ pub(super) fn run_with_ui_commands(
     replay: Native,
     validate_replay: Native,
     register: impl FnOnce(EventLoopProxy<DesktopUiCommand>),
+) -> Result<(), Box<dyn Error>> {
+    run_with_ui_commands_and_preparation(
+        args,
+        native,
+        validate,
+        query_devices,
+        replay,
+        validate_replay,
+        register,
+        None,
+    )
+}
+
+fn run_with_ui_commands_and_preparation(
+    args: &[String],
+    native: Native,
+    validate: Native,
+    query_devices: QueryDevices,
+    replay: Native,
+    validate_replay: Native,
+    register: impl FnOnce(EventLoopProxy<DesktopUiCommand>),
+    prepare_native: Option<NativePreparation>,
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
@@ -1010,6 +1079,7 @@ pub(super) fn run_with_ui_commands(
         records: None,
         records_view: None,
         native,
+        prepare_native,
         validate,
         query_devices,
         replay,
@@ -1707,6 +1777,7 @@ struct Desktop {
     records: Option<PanelScope<RecordsDraft>>,
     records_view: Option<RecordsView>,
     native: Native,
+    prepare_native: Option<NativePreparation>,
     validate: Native,
     query_devices: QueryDevices,
     replay: Native,
@@ -4204,6 +4275,7 @@ impl Desktop {
                 false,
                 true,
                 Some(Arc::clone(&self.preparation_cache)),
+                self.prepare_native,
             )
             .map(|game| (next, game))
         })();
@@ -5191,6 +5263,7 @@ impl Desktop {
             old.local_comparisons,
             old.replay,
             Some(Arc::clone(&self.preparation_cache)),
+            self.prepare_native,
         ) {
             Ok(mut game) => {
                 game.practice_bookmark = bookmark;
@@ -6326,6 +6399,7 @@ impl Desktop {
             false,
             false,
             Some(Arc::clone(&self.preparation_cache)),
+            self.prepare_native,
         )?;
         if let Some(window) = &self.window {
             window.set_title(&window_title(&entry.title, &entry.artist));
@@ -9375,6 +9449,7 @@ mod tests {
             records: None,
             records_view: None,
             native: native_unavailable,
+            prepare_native: None,
             validate: validate_only,
             query_devices: query_unavailable,
             replay: native_unavailable,

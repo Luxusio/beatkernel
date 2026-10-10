@@ -350,15 +350,44 @@ fn pending_profile_blocks_input_and_gpu_then_one_actual_join_begins_the_selected
             assert!(app.title_font.is_none());
         } else {
             assert!(app.catalog.is_some());
-            assert!(app.entries.is_empty());
+            let admitted_path = if route == "font" {
+                files.chart()
+            } else {
+                files.0.join("library.bms")
+            };
+            assert!(app.entries.len() <= 1);
+            for entry in &app.entries {
+                assert_eq!(
+                    entry.path, admitted_path,
+                    "profile publication admits only its configured chart inventory"
+                );
+                if route == "font" {
+                    assert_eq!(entry.title, "ÉTOILE chart.bms");
+                    assert_eq!(entry.artist, "");
+                } else {
+                    assert_eq!(entry.title, "Library original");
+                    assert_eq!(entry.artist, "Library artist");
+                }
+            }
+            assert_eq!(app.selection_items.len(), app.entries.len());
+            if route == "font" {
+                assert_eq!(
+                    app.entries.len(),
+                    1,
+                    "literal direct path precedes its optional font"
+                );
+                assert_eq!(app.catalog_search.selected(), Some(0));
+            }
             assert!(app.title_font.is_none());
-            assert!(app.start().is_err());
             let deadline = Instant::now() + WAIT;
-            while !app.catalog.as_ref().unwrap().is_finished() {
-                assert!(Instant::now() < deadline);
+            while app.catalog.is_some() || app.pending_catalog.is_some() {
+                app.collect_catalog();
+                assert!(
+                    Instant::now() < deadline,
+                    "actual catalog metadata/font did not complete after profile publication"
+                );
                 thread::yield_now();
             }
-            app.collect_catalog();
             assert!(app.catalog.is_none());
             assert_eq!(app.entries.len(), 1);
             if route == "font" {

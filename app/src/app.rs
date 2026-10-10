@@ -73,10 +73,10 @@ fn desktop(args: &[String]) -> Result<()> {
     {
         crate::desktop::run(
             args,
-            native,
+            native_prepared,
             validate_native,
             crate::devices_native::query,
-            native_replay,
+            native_replay_prepared,
             validate_replay,
         )
     }
@@ -116,6 +116,23 @@ fn native(args: &[String]) -> Result<()> {
         prepared = crate::auto_native::prepare(args)?;
         &prepared
     };
+    native_prepared(args)
+}
+
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(super) fn prepare_native_invocation(
+    args: &[String],
+    replay: bool,
+) -> std::result::Result<Vec<String>, String> {
+    if replay {
+        crate::auto_native::prepare_replay(args)
+    } else {
+        crate::auto_native::prepare(args)
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn native_prepared(args: &[String]) -> Result<()> {
     #[cfg(target_os = "windows")]
     return crate::windows_play::run_args(args);
     #[cfg(target_os = "linux")]
@@ -149,7 +166,12 @@ pub(super) fn validate_native(args: &[String]) -> Result<()> {
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 fn native_replay(args: &[String]) -> Result<()> {
     let projected = crate::auto_native::prepare_replay(args)?;
-    crate::replay_player::run_args(&projected)
+    native_replay_prepared(&projected)
+}
+
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+fn native_replay_prepared(args: &[String]) -> Result<()> {
+    crate::replay_player::run_args(args)
 }
 
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]

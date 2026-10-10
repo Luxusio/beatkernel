@@ -87,12 +87,33 @@ fn wait_for_actual_completion(app: &Desktop) {
 }
 
 #[test]
-fn desktop_loading_blocks_launch_until_the_actual_catalog_search_diagnostics_and_font_install_together()
- {
+fn desktop_streamed_paths_search_and_actions_precede_font_and_preserve_selection_on_publication() {
     let root = CatalogTree::new();
-    let (job, ready, release) = gated_catalog(&root, "title.ttf");
     let mut app = empty_selection();
-    app.catalog = Some(job);
+    app.catalog_generation = 91;
+    app.catalog_screen = app.navigator.active_id();
+    let (entered, ready) = mpsc::sync_channel(1);
+    let (release, gate) = mpsc::sync_channel(1);
+    let font_path = root.0.join("title.ttf");
+    app.catalog = Some(
+        NativeCatalog::spawn_streamed(root.0.clone(), 91, move |library, control| {
+            assert_eq!(library.entries.len(), 2);
+            assert_eq!(library.diagnostics.len(), 1);
+            entered.send(()).unwrap();
+            gate.recv_timeout(WAIT).map_err(|error| error.to_string())?;
+            prepare_catalog(library, Some(font_path), Vec::new(), control)
+        })
+        .unwrap(),
+    );
+    let deadline = Instant::now() + WAIT;
+    while !app.catalog_metadata_complete {
+        app.collect_catalog();
+        assert!(
+            Instant::now() < deadline,
+            "streamed metadata was not admitted before optional font"
+        );
+        thread::yield_now();
+    }
     ready.recv_timeout(WAIT).unwrap();
     app.collect_catalog();
     assert_eq!(
@@ -100,18 +121,23 @@ fn desktop_loading_blocks_launch_until_the_actual_catalog_search_diagnostics_and
         player_chart::ScanStage::Complete
     );
     assert_eq!(app.catalog_progress.charts, 3);
-    assert!(
-        app.catalog_message
-            .as_deref()
-            .unwrap()
-            .contains("Preparing")
-    );
-    assert!(app.entries.is_empty());
-    assert!(app.selection_items.is_empty());
-    assert!(app.catalog_search.selected().is_none());
+    assert_eq!(app.entries.len(), 2);
+    assert_eq!(app.entries[0].path, root.0.join("alpha.bms"));
+    assert_eq!(app.entries[1].path, root.0.join("etoile.bms"));
+    assert_eq!(app.selection_items.len(), 2);
+    assert_eq!(app.catalog_search.selected(), Some(0));
     assert!(app.title_font.is_none());
-    assert!(app.selection_diagnostics.is_empty());
-    assert!(app.start().is_err());
+    assert_eq!(app.selection_diagnostics.len(), 1);
+    assert!(app.selection_diagnostics[0].contains("invalid.bms"));
+    assert!(!app.catalog.as_ref().unwrap().is_finished());
+    fn selection_preflight(_: &[String]) -> Result<(), Box<dyn Error>> {
+        Err("EARLY SELECTION REACHED PREFLIGHT".into())
+    }
+    app.validate = selection_preflight;
+    assert_eq!(
+        app.start().unwrap_err(),
+        "EARLY SELECTION REACHED PREFLIGHT"
+    );
     assert!(app.game.is_none());
     assert!(
         !app.reactive_waits_for_events(),
@@ -119,23 +145,44 @@ fn desktop_loading_blocks_launch_until_the_actual_catalog_search_diagnostics_and
     );
     app.draw_selection().unwrap();
     app.scene.status().unwrap();
-    assert_eq!(
-        app.hits.iter().map(|(id, _)| id.0).collect::<Vec<_>>(),
-        vec![5, 4],
-        "loading exposes Settings/Exit, with no Start or partial chart hit"
-    );
+    for id in [1, 5, 4, 100, 101] {
+        assert!(
+            app.hits.iter().any(|(control, _)| control.0 == id),
+            "admitted selection action {id} missing before font"
+        );
+    }
     app.set_search_focus(true);
-    assert!(!app.search_focused);
+    assert!(app.search_focused);
+    app.edit_search(None, Some("étoile 作曲家"));
+    assert_eq!(app.catalog_search.indices().as_ref(), &[1]);
+    app.catalog_search.select(1).unwrap();
+    app.selected = 1;
+    let selected_path = app.entries[app.catalog_search.selected().unwrap()]
+        .path
+        .clone();
+    let diagnostics = app.selection_diagnostics.clone();
+    let progress = app.catalog_progress;
     let screen = app.navigator.active_id();
+    let route = app.navigator.route();
     for _ in 0..8 {
         app.collect_catalog();
-        assert!(app.entries.is_empty());
+        assert_eq!(
+            app.entries[app.catalog_search.selected().unwrap()].path,
+            selected_path
+        );
+        assert_eq!(app.catalog_search.indices().as_ref(), &[1]);
+        assert_eq!(app.catalog_progress, progress);
+        assert!(app.title_font.is_none());
     }
     release.send(()).unwrap();
     wait_for_actual_completion(&app);
     assert!(
-        app.start().is_err(),
-        "thread completion alone has not atomically installed selection state"
+        app.title_font.is_none(),
+        "thread completion alone does not publish its font"
+    );
+    assert_eq!(
+        app.start().unwrap_err(),
+        "EARLY SELECTION REACHED PREFLIGHT"
     );
     app.collect_catalog();
     assert!(app.catalog.is_none());
@@ -151,10 +198,15 @@ fn desktop_loading_blocks_launch_until_the_actual_catalog_search_diagnostics_and
     assert_eq!(app.selection_items[1].artist, "作曲家");
     assert_eq!(app.selection_diagnostics.len(), 1);
     assert!(app.selection_diagnostics[0].contains("invalid.bms"));
-    assert_eq!(app.catalog_search.indices().as_ref(), &[0, 1]);
-    assert_eq!(app.catalog_search.selected(), Some(0));
-    assert_eq!(app.search_editor.value(), "");
+    assert_eq!(app.catalog_search.indices().as_ref(), &[1]);
+    assert_eq!(app.catalog_search.selected(), Some(1));
+    assert_eq!(app.entries[1].path, selected_path);
+    assert_eq!(app.search_editor.value(), "étoile 作曲家");
+    assert!(app.search_focused);
+    assert_eq!(app.selection_diagnostics.as_ref(), diagnostics.as_ref());
+    assert_eq!(app.catalog_progress, progress);
     assert_eq!(app.navigator.active_id(), screen);
+    assert_eq!(app.navigator.route(), route);
     assert!(app.selection_view.is_none());
     assert!(app.title_font.as_ref().unwrap().get('É').is_some());
     assert!(app.title_font.as_ref().unwrap().get('作').is_some());

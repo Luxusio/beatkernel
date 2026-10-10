@@ -1019,6 +1019,16 @@ fn observed_text(
 #[test]
 #[ignore = "requires preserved baseline/current Linux production executables, ALSA null and owned scale-one X11/software GPU"]
 fn preserved_native_preparation_five_paired_fresh_process_trials() {
+    native_preparation_process_trials(false);
+}
+
+#[test]
+#[ignore = "requires freshly preserved current Linux production executable, ALSA null and owned scale-one X11/software GPU"]
+fn current_native_missing_channel_policy_gui_proof() {
+    native_preparation_process_trials(true);
+}
+
+fn native_preparation_process_trials(default_resolution_only: bool) {
     use std::io::Write;
     assert_eq!(
         std::env::var("BEATKERNEL_TEST_NATIVE_UI_WINDOW").as_deref(),
@@ -1029,10 +1039,12 @@ fn preserved_native_preparation_five_paired_fresh_process_trials() {
             .expect("owned artifact directory required"),
     );
     fs::create_dir_all(&artifacts).unwrap();
-    let (baseline, baseline_hash) = checked_binary(
-        "BEATKERNEL_TEST_NATIVE_LOADING_BASELINE_EXE",
-        "BEATKERNEL_TEST_NATIVE_LOADING_BASELINE_SHA",
-    );
+    let baseline = (!default_resolution_only).then(|| {
+        checked_binary(
+            "BEATKERNEL_TEST_NATIVE_LOADING_BASELINE_EXE",
+            "BEATKERNEL_TEST_NATIVE_LOADING_BASELINE_SHA",
+        )
+    });
     let (current, current_hash) = checked_binary(
         "BEATKERNEL_TEST_NATIVE_LOADING_CURRENT_EXE",
         "BEATKERNEL_TEST_NATIVE_LOADING_CURRENT_SHA",
@@ -1075,7 +1087,7 @@ fn preserved_native_preparation_five_paired_fresh_process_trials() {
     .unwrap();
     let font = artifacts.join("paired-preparation-font.ttf");
     fs::write(&font, font_fixture::font_bytes()).unwrap();
-    let args: Vec<String> = vec![
+    let mut args: Vec<String> = vec![
         "player",
         "--library",
         library.to_str().unwrap(),
@@ -1107,6 +1119,14 @@ fn preserved_native_preparation_five_paired_fresh_process_trials() {
     .into_iter()
     .map(str::to_owned)
     .collect();
+    if default_resolution_only {
+        let policy = args
+            .iter()
+            .position(|arg| arg == "--channel-policy")
+            .unwrap();
+        args.drain(policy..policy + 2);
+        assert!(!args.iter().any(|arg| arg == "--channel-policy"));
+    }
     let fixture_hashes = format!(
         "{{\"a.bms\":{},\"z.bms\":{},\"large.wav\":{},\"font\":{}}}",
         json_string(&hash(&library.join("a.bms"))),
@@ -1123,12 +1143,30 @@ fn preserved_native_preparation_five_paired_fresh_process_trials() {
     );
     let pinned_failure_probe =
         error_text_probe("native invocation differs from pinned launch", 682, 1);
-    for trial in 0..5 {
-        for (variant, executable, binary_hash) in [
-            ("baseline", &baseline, &baseline_hash),
-            ("current", &current, &current_hash),
-        ] {
-            let directory = artifacts.join(format!("preparation-{variant}-{trial}"));
+    let mut variants = Vec::new();
+    if let Some((executable, binary_hash)) = &baseline {
+        variants.push(("baseline", executable, binary_hash));
+    }
+    variants.push(("current", &current, &current_hash));
+    let trials = if default_resolution_only { 1 } else { 5 };
+    let schema = if default_resolution_only {
+        "beatkernel-native-current-default-resolution-proof/v1"
+    } else {
+        "beatkernel-native-external-preparation-paired/v1"
+    };
+    let mode = if default_resolution_only {
+        "current-only-functional-proof"
+    } else {
+        "preserved-binary-comparison"
+    };
+    for trial in 0..trials {
+        for &(variant, executable, binary_hash) in &variants {
+            let prefix = if default_resolution_only {
+                "default-resolution"
+            } else {
+                "preparation"
+            };
+            let directory = artifacts.join(format!("{prefix}-{variant}-{trial}"));
             fs::create_dir_all(&directory).unwrap();
             let mut observer = FrameObserver::spawn(&helper, &directory);
             observer.command("begin");
@@ -1303,7 +1341,7 @@ fn preserved_native_preparation_five_paired_fresh_process_trials() {
                 .map(|arg| json_string(arg))
                 .collect::<Vec<_>>()
                 .join(",");
-            let raw = format!("{{\"schema\":\"beatkernel-native-external-preparation-paired/v1\",\"variant\":{},\"trial\":{trial},\"process_id\":{pid},\"owned_window_id\":{window},\"executable_sha256\":{},\"observer_sha256\":{},\"fixture_sha256\":{fixture_hashes},\"config\":[{config}],\"environment\":{{\"LC_ALL\":\"C\",\"output\":\"ALSA null\",\"input\":\"/dev/null mandatory ioctl failure\"}},\"clock\":\"one Python time.monotonic_ns origin before production spawn\",\"marker_count\":2,\"attempts\":[{}],\"observer_roundtrip_ns\":{:?},\"sampling_interval_configured_ns\":1000000,\"deadline_ns\":120000000000,\"stdout_read_max_bytes_per_probe\":65536,\"stdout_total_limit_bytes\":1048576,\"playable\":false,\"audio_ready\":null,\"os_page_cache_controlled\":false,\"limits\":\"Input-to-prepared-log observed upper bounds include delivery, derived completion/compile and stdout observation; joined error pixels prove technical failure, never gameplay/output readiness. No codec-only counters, section/replay/replacement comparative claim.\"}}", json_string(variant), json_string(binary_hash), json_string(&hash(&helper)), records.join(","), costs);
+            let raw = format!("{{\"schema\":\"{schema}\",\"mode\":\"{mode}\",\"variant\":{},\"trial\":{trial},\"process_id\":{pid},\"owned_window_id\":{window},\"executable_sha256\":{},\"observer_sha256\":{},\"fixture_sha256\":{fixture_hashes},\"config\":[{config}],\"environment\":{{\"LC_ALL\":\"C\",\"output\":\"ALSA null\",\"input\":\"/dev/null mandatory ioctl failure\"}},\"clock\":\"one Python time.monotonic_ns origin before production spawn\",\"marker_count\":2,\"attempts\":[{}],\"observer_roundtrip_ns\":{:?},\"sampling_interval_configured_ns\":1000000,\"deadline_ns\":120000000000,\"stdout_read_max_bytes_per_probe\":65536,\"stdout_total_limit_bytes\":1048576,\"playable\":false,\"audio_ready\":null,\"os_page_cache_controlled\":false,\"limits\":\"Input-to-prepared-log observed upper bounds include delivery, derived completion/compile and stdout observation; joined error pixels prove technical failure, never gameplay/output readiness. No codec-only counters, section/replay/replacement comparative claim.\"}}", json_string(variant), json_string(binary_hash), json_string(&hash(&helper)), records.join(","), costs);
             fs::write(directory.join("events.json"), raw).unwrap();
         }
     }
