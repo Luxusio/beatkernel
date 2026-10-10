@@ -230,8 +230,54 @@ path, not natural replay completion or physical presentation. The prior
 
 ## Known ceiling
 
-Known ceiling: the measured browser replay fixture is a genuine incomplete
-capture stopped during startup, with no accepted inputs and no recorded horizon.
+The strengthened browser capture prerequisite passed in one actual preserved
+baseline process. `browser-finite-capture-development-1/observations.json`
+records two admitted inputs, 118 advances, 120 durable records and a finite
+1,500,000,000ns horizon. The live owner naturally completed with
+`replayComplete=true` and `completedResults.proof=true`; the same process then
+prepared and naturally completed that actual replay. Replay ownership does not
+export the live recording-completion proof, and none was invented. The frozen
+2,439-byte recording has SHA256
+`17a5e5f36f1f96f372fa4bcbf1e72f4265f2964c62076171983b09277d12c0e6`.
+Its prerequisite status is `CAPTURE_VALIDATED`, with no paired trials report.
+The subsequent full comparison passed all 30 processes and 70 records, with
+70 screenshots, zero page errors and ten naturally completed replay owners.
+`browser-finite-paired-development-1/` preserves raw observations and the strict
+report, which exited zero. All replay trials use the exact frozen bytes. Server
+and owned Xvfb closed successfully. New fixture hash
+`ec9e491c01e783641152d77dc0ed7e56c3c20720b9fc9480ab688def162dfd8e`
+and configuration hash
+`3c75ccfe82dc8c58be24eea096c7b32371357963d25d65ecbabbbebf99673afc`
+distinguish this stronger workload from the earlier empty-capture measurements;
+their statistics are not pooled.
+
+Prepared-resource times in milliseconds, before→after, five samples per group:
+
+| Workload | p50 | p95/max |
+| --- | --- | --- |
+| Warm preview | 44.615→13.725 | 49.670→15.960 |
+| Warm retry | 19.990→9.695 | 20.545→10.045 |
+| Section | 15.020→4.270 | 15.505→4.650 |
+| Nonempty finite replay | 42.430→35.815 | 54.985→40.765 |
+| Cold large audio | 439.950→429.190 | 456.625→451.855 |
+| Library/content replacement | 422.235→394.525 | 485.210→399.150 |
+
+Catalog first submitted usable frame was 71.885→66.360ms p50 and
+73.415→76.235ms p95/max. Every current warm trial again recorded zero
+codec/parse/compile work. These are workload-specific observations including
+the same acquisition gates and added input/frontier observers, not universal
+startup, physical latency or full-player completion claims. Development
+execution remains separate from required independent review and GUI QA.
+
+Fresh Windows GNU Rust type checking passed for `desktop,webtransport`, all
+targets, with default features disabled. The command exited zero after
+7m55s; `windows-loading-current.log` retains warnings and compiler completion.
+C/C++ archive stubs make this type evidence only, not Windows SDK linking,
+actual window/input/audio execution or physical-device evidence. macOS and
+the new native preparation comparator still need fresh execution.
+
+Known ceiling: the first two measured browser replay fixtures were genuine incomplete
+captures stopped during startup, with no accepted inputs and no recorded horizon.
 It covers replay preparation and audio setup, not nonempty replay execution,
 judgement equivalence or typical full-song recording cost. A separate native
 ALSA-null diagnostic reconstructed it and opened the exact requested output,

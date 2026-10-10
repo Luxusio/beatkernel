@@ -93,3 +93,20 @@ times are upper bounds that include sampling and observer cost. They remain
 distinct from current Renderer submission timestamps and audio readiness.
 Catalog-only comparison and current-only injected font gates do not establish
 native playable-ready, section/replay or replacement comparative performance.
+
+An externally observed native preparation marker must be emitted by both
+preserved production variants after their real original and derived preparation.
+Correlate each marker to its actual owned-window launch/retry input; include
+stdout observation and input-delivery overhead in the reported upper bound.
+Subsequent output/input setup failure remains a separate observed endpoint.
+A joined technical failure may permit a real same-owner retry and retain a
+validated original, but cannot establish playable or output readiness. Missing,
+duplicate or uncorrelated markers invalidate that trial.
+
+Replay performance fixtures must state whether recordings contain accepted
+inputs and a recorded horizon. For nonempty execution evidence, obtain trusted
+input through actual playback, wait for correlated input acknowledgement and
+advancing audio-owned presentation before stopping, and validate the saved
+capture. A startup-only empty capture proves preparation/setup alone. Never
+substitute a sleep, host-time estimate or audio-ready setup acknowledgement for
+an observed playback frontier.

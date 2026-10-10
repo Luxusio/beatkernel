@@ -11,6 +11,7 @@ import { spawn } from "node:child_process";
 import { cpus, platform, release } from "node:os";
 
 const root = process.cwd();
+const captureOnly = process.env.LOADING_LATENCY_CAPTURE_ONLY === "1";
 const out = resolve(process.env.LOADING_LATENCY_OUT ?? "target/wf/player-loading-latency/browser-latency");
 const baseline = resolve(process.env.LOADING_LATENCY_BASELINE ?? "target/wf/player-loading-latency/baseline-e421b59");
 const trials = Number(process.env.LOADING_LATENCY_TRIALS ?? 5);
@@ -18,6 +19,39 @@ assert(Number.isInteger(trials) && trials >= 5 && trials <= 20, "at least five b
 const expected = process.env.EXPECTED_WASM_SHA256;
 assert.match(expected ?? "", /^[a-f0-9]{64}$/, "identify the coordinator-built current WASM explicitly");
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
+// This only observes the published durable envelope. Actual production replay
+// preparation below still validates the chart, options and physical records.
+function replayEnvelope(bytes) {
+  assert(bytes.length > 0 && bytes.length <= 64 * 1024 * 1024);
+  let offset = 0;
+  const take = count => { assert(Number.isSafeInteger(count) && count >= 0 && offset + count <= bytes.length, "bounded replay envelope"); const value = bytes.subarray(offset, offset + count); offset += count; return value; };
+  const u64 = () => take(8).readBigUInt64LE();
+  const blob = () => { const size = u64(); assert(size <= BigInt(bytes.length)); return take(Number(size)); };
+  assert.equal(take(8).toString(), "BKREPLAY"); assert.equal(take(4).readUInt32LE(), 1);
+  take(4 + 4 + 8); // Logical version, normalized clock and seed are validated by Rust.
+  for (let index = 0; index < 4; index++) blob();
+  const calibration = take(1)[0]; assert(calibration === 0 || calibration === 1); if (calibration) blob();
+  const count = u64(); assert(count > 0n && count <= 1000000n);
+  let inputs = 0, advances = 0, horizon = null;
+  for (let index = 0n; index < count; index++) {
+    take(8); const time = take(8).readBigInt64LE();
+    assert(horizon === null || time >= horizon); horizon = time;
+    const tag = take(1)[0];
+    if (tag === 0) { take(4); blob(); inputs++; }
+    else { assert.equal(tag, 1); advances++; }
+  }
+  assert.equal(offset, bytes.length, "complete replay envelope consumed");
+  assert(inputs >= 2 && advances > 0 && horizon > 0n && horizon <= 1500000000n, "genuine nonempty input and finite advanced section required");
+  return { inputs, advances, records: Number(count), horizon_ns: String(horizon) };
+}
+let frozenReplay = null, frozenReplaySummary = null;
+if (!captureOnly) {
+  assert(process.env.LOADING_LATENCY_REPLAY_FILE, "full paired measurement requires a previously validated genuine replay file");
+  assert.match(process.env.LOADING_LATENCY_REPLAY_SHA256 ?? "", /^[a-f0-9]{64}$/);
+  frozenReplay = await readFile(resolve(process.env.LOADING_LATENCY_REPLAY_FILE));
+  assert.equal(sha(frozenReplay), process.env.LOADING_LATENCY_REPLAY_SHA256, "frozen replay SHA before any browser launch");
+  frozenReplaySummary = replayEnvelope(frozenReplay);
+}
 const baselineManifest = JSON.parse(await readFile(resolve(baseline, "manifest.json"), "utf8"));
 assert.match(baselineManifest.source_revision, /^[a-f0-9]{7,40}$/);
 assert(Object.keys(baselineManifest.artifacts).length >= 91, "complete frozen dependency tree required");
@@ -96,7 +130,7 @@ function observeWindow() {
         if (!data || typeof data.kind !== "string") return;
         const at = performance.now();
         if (data.kind === "play-stopped" && data.replay instanceof Uint8Array) state.replays.push({ playId: data.playId, bytes: Array.from(data.replay), at });
-        if (["ready", "catalog", "selected", "selection-error", "selection-progress", "play-preparation-progress", "play-reply", "play-stopped", "play-error",
+        if (["ready", "catalog", "selected", "selection-error", "selection-progress", "play-preparation-progress", "play-reply", "play-stopped", "play-error", "play-step-done", "play-render-done",
           "fatal", "render-geometry", "drawn", "render-error", "menu-state", "menu-error", "latency-observation", "audio-ready"].includes(data.kind)) {
           // PCM payloads and render packets are never copied by this observer.
           state.messages.push({ ...clone(data), at });
@@ -104,14 +138,17 @@ function observeWindow() {
       });
     }
     postMessage(message, transfer) {
-      if (["import", "accept-library", "select", "play-start", "play-stop", "resize", "menu-open", "menu-select"].includes(message?.kind)) {
+      if (["import", "accept-library", "select", "play-start", "play-stop", "play-step", "play-activate", "resize", "menu-open", "menu-select"].includes(message?.kind)) {
         state.sent.push({ at: performance.now(), kind: message.kind, id: message.id, libraryId: message.libraryId,
-          playId: message.playId, rpcId: message.rpcId, path: message.path, width: message.width, height: message.height });
+          playId: message.playId, rpcId: message.rpcId, path: message.path, width: message.width, height: message.height,
+          completed: message.completed, tickId: message.tickId, hostNs: message.hostNs === undefined ? undefined : String(message.hostNs),
+          events: message.kind === "play-step" ? message.events.map(event => ({ key: event.key, down: event.down,
+            hostNs: String(event.hostNs), sequence: String(event.sequence) })) : undefined });
       }
       return super.postMessage(message, transfer);
     }
   };
-  document.addEventListener("keydown", event => state.inputs.push({ at: performance.now(), eventAt: event.timeStamp,
+  for (const kind of ["keydown", "keyup"]) document.addEventListener(kind, event => state.inputs.push({ kind, at: performance.now(), eventAt: event.timeStamp,
     code: event.code, trusted: event.isTrusted }), true);
   const observer = new MutationObserver(() => {
     const last = state.messages.findLast(message => message.kind === "catalog");
@@ -138,6 +175,8 @@ const config = { trials, viewport: { width: 1200, height: 1000 }, largeEncodedBy
   clock: "Window performance.now; Worker phase durations use only local differences", request: "actual production Worker postMessage",
   presentation: "actual RenderClient render-geometry ACK after RendererWorker draw; visible canvas required",
   input: "trusted CDP keyboard event acquisition; excludes physical device/OS latency", warmth: "same actual accepted BrowserLibrary/cache, output rate fixed" };
+config.sectionCapture = { downAfterFrontierNs: "350000000", upAfterFrontierNs: "600000000", deadlineMs: 10000,
+  completion: "natural finite section completion with admitted input drain and genuine owner proof", replay: "one externally frozen genuine file shared by all paired trials" };
 const configHash = sha(JSON.stringify(config));
 const fixtures = {
   "bootstrap/short.bms": Buffer.from("#TITLE Benchmark bootstrap\n#BPM 120\n#RANK 2\n#WAV01 short.wav\n#00011:01010000\n"),
@@ -148,6 +187,7 @@ const fixtures = {
   "replacement/large.bms": Buffer.from("#TITLE Benchmark changed content\n#BPM 121\n#RANK 2\n#WAV01 large.wav\n#WAV02 large.wav\n#00011:01020000\n"),
   "replacement/large.wav": wav(4 * 1024 * 1024, -1),
 };
+if (frozenReplay) fixtures["frozen-replay.bkr"] = frozenReplay;
 const fixtureManifest = {};
 for (const [name, bytes] of Object.entries(fixtures)) {
   const file = resolve(out, "fixtures", name); await mkdir(resolve(file, ".."), { recursive: true }); await writeFile(file, bytes);
@@ -189,7 +229,8 @@ const records = { schema_version: 1, workload_id: "production-browser-loading-pa
       "External read gates are identical diagnostic controls; held-duration and Puppeteer/observer overhead belong to both measured workloads.",
       "Baseline has no preparation phase/job counters; unavailable historical work is never inferred from current counters."] },
   fixture_sha256: fixtureHash, config_sha256: configHash, groups: [] };
-const detail = { status: "RUNNING", fixtureManifest, config, trials: [], cleanup: {}, errors: [] };
+const detail = { status: "RUNNING", mode: captureOnly ? "capture-only prerequisite" : "paired comparison", fixtureManifest, config,
+  frozenReplay: frozenReplay ? { sha256: sha(frozenReplay), ...frozenReplaySummary } : null, trials: [], cleanup: {}, errors: [] };
 const gates = new Map(), pendingResponses = new Set(), loaded = new Map();
 const headers = { "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp", "Cache-Control": "no-store" };
 const server = createServer(async (req, res) => {
@@ -247,7 +288,7 @@ function event(name, at, start, correlation, source) {
 }
 async function checkpoint() {
   await writeFile(resolve(out, "observations.json"), JSON.stringify(detail, null, 2));
-  await writeFile(resolve(out, "trials.json"), JSON.stringify(records, null, 2));
+  if (!captureOnly) await writeFile(resolve(out, "trials.json"), JSON.stringify(records, null, 2));
 }
 async function runProcess(puppeteer, base, variant, index, scenario) {
   const owner = variant + "-" + scenario + "-" + index + "-" + randomUUID();
@@ -336,6 +377,7 @@ async function runProcess(puppeteer, base, variant, index, scenario) {
       return { input, geometry, resizeAt };
     };
     const finishRecord = async (scenarioName, temperature, library, operation, ready, geometry, extras = {}) => {
+      if (captureOnly) { trialDetail.operations.push({ scenario: scenarioName, operation, ready, geometry, ...extras }); return; }
       const observed = await snapshot(), start = operation.request.at;
       const correlation = owner + ":" + scenarioName + ":" + (operation.request.id ?? operation.request.playId);
       const relevant = observed.messages.slice(operation.before.messages).filter(message => scenarioName !== "catalog" || message.at <= geometry.at);
@@ -410,8 +452,10 @@ async function runProcess(puppeteer, base, variant, index, scenario) {
       let ready = await selected(operation), geometry = await firstGeometry(operation.before, "preview", operation.request.id);
       if (scenario === "selected_large") {
         await finishRecord("selected_large_audio", "cold", library, operation, ready, geometry, { pending, releasedAt });
-        operation = await select("large.bms"); ready = await selected(operation); geometry = await firstGeometry(operation.before, "preview", operation.request.id);
-        await finishRecord("warm_preview", "warm", library, operation, ready, geometry);
+        if (!captureOnly) {
+          operation = await select("large.bms"); ready = await selected(operation); geometry = await firstGeometry(operation.before, "preview", operation.request.id);
+          await finishRecord("warm_preview", "warm", library, operation, ready, geometry);
+        }
 
         const setValue = (selector, value) => page.$eval(selector, (element, value) => { element.value = value; element.dispatchEvent(new Event("input", { bubbles: true })); element.dispatchEvent(new Event("change", { bubbles: true })); }, value);
         await setValue("#output-rate", "48000");
@@ -428,23 +472,82 @@ async function runProcess(puppeteer, base, variant, index, scenario) {
           const audioReady = (await snapshot()).messages.slice(before.messages).find(message => message.kind === "play-reply"
             && message.playId === request.playId && message.result?.kind === "audio-ready");
           assert(audioReady, variant + " actual audio-ready acknowledgement unavailable; cannot measure audio readiness from Playing or geometry");
-          await finishRecord(name, "warm", library, { before, request }, ready, geometry, { audioReady });
-          await page.click("#stop");
+          const deadline = performance.now() + config.sectionCapture.deadlineMs;
+          const waitActual = (predicate, ...args) => page.waitForFunction(predicate, { timeout: Math.max(1, deadline - performance.now()) }, ...args);
+          let captureProgress = null;
+          if (record) {
+            assert.equal(String(ready.result.startNs), "250000000"); assert.equal(String(ready.result.endNs), "1500000000");
+            await waitActual(id => __latency.messages.some(message => message.kind === "play-render-done" && message.playId === id
+              && message.songNs !== null && BigInt(message.songNs) >= 350000000n && BigInt(message.songNs) < 1500000000n), request.playId);
+            const keyBefore = await cursor(); await page.keyboard.down("KeyZ");
+            await waitActual(id => __latency.messages.some(message => message.kind === "play-render-done" && message.playId === id
+              && message.songNs !== null && BigInt(message.songNs) >= 600000000n && BigInt(message.songNs) < 1500000000n), request.playId);
+            await page.keyboard.up("KeyZ");
+            await waitActual((id, from) => {
+              const sent = __latency.sent.slice(from).filter(message => message.kind === "play-step" && message.playId === id);
+              const down = sent.find(message => message.events.some(event => event.key === 2 && event.down === true));
+              const up = sent.find(message => message.events.some(event => event.key === 2 && event.down === false));
+              return down && up && __latency.messages.some(message => message.kind === "play-step-done" && message.playId === id && message.tickId === down.tickId)
+                && __latency.messages.some(message => message.kind === "play-step-done" && message.playId === id && message.tickId === up.tickId)
+                && __latency.messages.some(message => message.kind === "play-step-done" && message.playId === id && message.tickId >= up.tickId
+                  && message.pendingInputs === 0 && message.preOriginInputs === 0);
+            }, request.playId, keyBefore.sent);
+            const observed = await snapshot();
+            const trusted = observed.inputs.slice(keyBefore.inputs).filter(input => input.code === "KeyZ" && input.trusted);
+            assert(trusted.some(input => input.kind === "keydown") && trusted.some(input => input.kind === "keyup"));
+            const steps = observed.sent.slice(keyBefore.sent).filter(message => message.kind === "play-step" && message.playId === request.playId && message.events.length);
+            const activation = observed.sent.find(message => message.kind === "play-activate" && message.playId === request.playId); assert(activation);
+            for (const step of steps) for (const input of step.events) assert(BigInt(input.hostNs) >= BigInt(activation.hostNs), "captured input must follow the genuine activation origin");
+            captureProgress = { trusted, steps, activation, acknowledgements: observed.messages.filter(message => message.kind === "play-step-done"
+              && message.playId === request.playId && steps.some(step => step.tickId === message.tickId)) };
+          }
+          if (mode === "replay") {
+            assert.equal(String(ready.result.startNs), "250000000"); assert.equal(String(ready.result.endNs), "1500000000");
+            assert(ready.result.recordedUntilNs !== null && ready.result.recordedUntilNs !== undefined, "empty replay horizon is unavailable");
+            const horizon = BigInt(ready.result.recordedUntilNs);
+            assert(horizon >= 600000000n && horizon <= 1500000000n, "actual Rust replay must expose a positive finite recorded horizon");
+            await waitActual(id => __latency.messages.some(message => message.kind === "play-render-done" && message.playId === id
+              && message.songNs !== null && BigInt(message.songNs) >= 350000000n), request.playId);
+          }
+          await finishRecord(name, "warm", library, { before, request }, ready, geometry, { audioReady, captureProgress });
+          if (record || mode === "replay") {
+            await waitActual(id => __latency.messages.some(message => message.kind === "play-render-done" && message.playId === id
+              && message.completed === true && message.pendingInputs === 0 && message.commandsPending === false)
+              && __latency.sent.some(message => message.kind === "play-stop" && message.playId === id && message.completed === true), request.playId);
+          } else await page.click("#stop");
           await page.waitForFunction(id => __latency.messages.some(message => message.kind === "play-stopped" && message.playId === id)
-            && !document.querySelector("#play").disabled, {}, request.playId);
+            && !document.querySelector("#play").disabled, { timeout: Math.max(1, deadline - performance.now()) }, request.playId);
+          const stopped = (await snapshot()).messages.find(message => message.kind === "play-stopped" && message.playId === request.playId);
+          if (record) { assert.equal(stopped.replayComplete, true); assert.equal(stopped.completedResults?.proof, true, "actual completed live owner proof required"); }
           assert(!(await snapshot()).messages.some(message => message.kind === "play-error" && message.playId === request.playId));
+          trialDetail.operations.push({ scenario: name + "-actual-completion", playId: request.playId, stopped,
+            renderCompletion: (await snapshot()).messages.find(message => message.kind === "play-render-done" && message.playId === request.playId && message.completed === true) ?? null });
           return request.playId;
         };
-        await play("warm_retry", "live");
+        if (!captureOnly) await play("warm_retry", "live");
         await setValue("#live-start", config.sectionStart); await setValue("#live-end", config.sectionEnd);
         const captureId = await play("section", "live", true);
         const replay = await page.evaluate(id => __latency.replays.find(item => item.playId === id), captureId);
         assert(replay && replay.bytes.length > 0, "actual stopped/fenced game capture required");
         const replayPath = resolve(out, owner + "-genuine-section.bkr"); await writeFile(replayPath, Buffer.from(replay.bytes));
-        trialDetail.replay = { sha256: sha(Buffer.from(replay.bytes)), bytes: replay.bytes.length, playId: captureId, complete: false };
-        await (await page.$("#replay-file")).uploadFile(replayPath);
+        const capturedBytes = Buffer.from(replay.bytes), summary = replayEnvelope(capturedBytes);
+        trialDetail.replay = { sha256: sha(capturedBytes), bytes: capturedBytes.length, playId: captureId, complete: true, ...summary };
+        let replayInput = resolve(out, "fixtures/frozen-replay.bkr");
+        if (captureOnly) {
+          replayInput = replayPath; // Validate this actual capture before publishing the canonical artifact.
+        } else {
+          assert.equal(sha(await readFile(replayInput)), process.env.LOADING_LATENCY_REPLAY_SHA256, "same frozen replay bytes for every variant and trial");
+          trialDetail.replayWorkload = { file: replayInput, sha256: sha(frozenReplay), ...frozenReplaySummary };
+        }
+        await (await page.$("#replay-file")).uploadFile(replayInput);
         await page.waitForFunction(() => !document.querySelector("#replay-play").disabled);
         await play("replay", "replay");
+        if (captureOnly) {
+          const canonical = resolve(out, "canonical-genuine-section.bkr");
+          await writeFile(canonical, capturedBytes, { flag: "wx", mode: 0o444 });
+          detail.capture = { file: canonical, ...trialDetail.replay, validatedReplayCompletion: true,
+            provenance: "one actual immutable baseline production process, trusted keyboard, real audio frontier, natural finite completion" };
+        }
       } else {
         assert.equal(scenario, "replacement");
         const previous = library;
@@ -487,14 +590,24 @@ try {
     xvfb.once("error", reject); xvfb.once("exit", code => reject(Error("Xvfb exit " + code))); }), 10000, "owned Xvfb display");
   const require = createRequire(import.meta.url);
   const puppeteer = require(resolve(process.env.PUPPETEER_MODULE ?? "target/wf/qa-browser-parallel-player-01a119a6-1/deps/node_modules/puppeteer-core"));
-  // Interleave before/after under unchanged software configuration; each cold
-  // group gets its own processes, libraries and caches, not relabelled warm runs.
-  for (let index = 0; index < trials; index++) for (const scenario of ["catalog", "selected_large", "replacement"]) {
-    for (const variant of index % 2 ? ["after", "before"] : ["before", "after"]) await runProcess(puppeteer, base, variant, index, scenario);
+  if (captureOnly) {
+    await runProcess(puppeteer, base, "before", 0, "selected_large");
+    assert(detail.capture?.validatedReplayCompletion, "genuine capture and replay completion prerequisite required");
+    assert.equal(records.groups.length, 0, "capture-only mode cannot publish paired measurement samples");
+    detail.status = "CAPTURE_VALIDATED";
+    await checkpoint();
+    console.log(JSON.stringify({ status: detail.status, mode: detail.mode, capture: detail.capture, output: resolve(out, "observations.json") }));
+  } else {
+    // Interleave before/after under unchanged software configuration; each cold
+    // group gets its own processes, libraries and caches, not relabelled warm runs.
+    for (let index = 0; index < trials; index++) for (const scenario of ["catalog", "selected_large", "replacement"]) {
+      for (const variant of index % 2 ? ["after", "before"] : ["before", "after"]) await runProcess(puppeteer, base, variant, index, scenario);
+    }
+    for (const group of records.groups) assert.equal(group.trials.length, trials, group.scenario + " paired samples");
+    assert.equal(records.groups.length, 14, "all seven scenarios for both variants are required");
+    detail.status = "PASS"; await checkpoint();
+    console.log(JSON.stringify({ status: detail.status, trials: records.groups.map(group => ({ variant: group.variant, scenario: group.scenario, count: group.trials.length })), output: resolve(out, "trials.json") }));
   }
-  for (const group of records.groups) assert.equal(group.trials.length, trials, group.scenario + " paired samples");
-  detail.status = "PASS"; await checkpoint();
-  console.log(JSON.stringify({ status: detail.status, trials: records.groups.map(group => ({ variant: group.variant, scenario: group.scenario, count: group.trials.length })), output: resolve(out, "trials.json") }));
 } catch (error) {
   detail.status = "FAIL"; detail.failure = String(error?.stack ?? error); process.exitCode = 1;
 } finally {
