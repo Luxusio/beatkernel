@@ -486,6 +486,28 @@ buffer requests survive projection. Metadata work belongs to the game owner,
 with no device discovery or waiting on UI/audio callbacks. Compilation does not
 establish native device availability or physical timing.
 
+Resolve the invocation before pinning it for native execution. Preserve the
+requested launch lineage and accept one immutable resolved retry template;
+F5, bookmarks and loops reuse that template without rediscovering defaults.
+The invoked arguments must equal the pinned resolved arguments. Cancelled or
+failed resolution starts no playback and publishes no resolved pin. A later
+attempt may recover from failed discovery, but cannot replace an already
+accepted configuration. See [native runtime boundaries](ADR__native-runtime-boundaries.md).
+
+Replay preflight validates requested platform settings before resolution. After
+accepting a prepared replay invocation, F5 and post-join retry validation use
+the strict canonical replay parser directly. Replay-only device, buffer and
+record-limit options must survive unchanged; they must not pass through the
+live settings projection again. Invalid canonical options prevent retry without
+cancelling or replacing the current owner. Embedding hosts retain their explicit
+validator policy when no separate prepared validator is supplied.
+
+Native launch metadata polling must remain nonblocking. A busy publication
+mailbox means pending metadata, preserves the queued invocation and produces no
+technical playback failure. Drain it once after release and again after joining
+the native owner before rebasing a retry. Poison and invalid lineage remain
+real failures; pending cannot authorize stale or conflicting configuration.
+
 ## Shared local member preparation and finalization
 
 Local 2..64-player sessions share member preparation, runtime activation and

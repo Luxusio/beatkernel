@@ -47,12 +47,14 @@ nodes instead of cloning the model per node. Snapshot publication may allocate
 on actual model updates; geometry and animation paint must not add deep model
 clones. Neither change alone proves instant preparation or measured latency.
 
-The demand-resource planner and existing preparation currently parse and compile
-the selected chart separately. The library reuses acquired encoded bytes, while
-PCM and image/movie preparation remain repeated and selected media reads remain
-serial. Measure those stages separately before selecting parsed/prepared-result
-reuse or bounded overlapping reads. Preserve actual seed, recorded SectionSetup,
-format, policy, resource identity, failures and retirement when reusing data.
+Demand planning and preparation shall reuse the same validated parsed chart
+plan, and eligible warm requests shall share accepted original PCM without
+repeating decode or deep payload copies. Image/movie preparation remains fresh;
+selected resource phases remain bounded and cancellable. Measure those stages
+separately before adding overlapping reads. Preserve actual seed, recorded
+SectionSetup, format, policy, resource identity, failures and retirement when
+reusing data. Current development evidence and unfinished acceptance are
+recorded in the [loading increment](../changes/2026-10-10-player-loading-latency.md).
 
 BeatKernel's lasting product objective is to build the world's lightest and
 fastest high-performance rhythm-game player core and player. This is a target,
@@ -235,9 +237,12 @@ Expensive work must have accurate progress and cancellation rather than an
 unresponsive UI. Any resource cache must have explicit memory limits and
 invalidation; responsiveness does not justify unbounded preloading.
 
-Loading optimization and representative native/browser latency measurements
-remain pending under TASK__player-loading-latency. Existing motion correctness
-checks and software-browser screenshots are not loading-speed benchmarks.
+Loading optimization and representative native/browser latency acceptance
+remain unfinished under TASK__player-loading-latency. Defined browser workloads
+and native preparation paths now have actual development measurements; their
+scope, distributions and remaining paths are recorded in the linked loading
+increment. Existing motion correctness checks and software-browser screenshots
+are not loading-speed benchmarks.
 
 The 2026-10-10 read-only source audit found that browser library import awaited
 every supplied File's bytes before reporting its chart list. The current cleanup
@@ -245,14 +250,14 @@ replaces that path with metadata-only catalog publication and demand acquisition
 of selected resources (`app/web/worker.js`); connected browser functional QA
 subsequently passed. See the
 [final evidence and ceilings](../changes/2026-10-10-player-code-smell-cleanup.md).
-Preparation reuses encoded MemoryFiles but its decoded-audio
-cache is local to one preparation call
-(`app/src/browser.rs`, `app/src/audio_assets.rs`); canonical WAV aliases avoid
-another decode but still clone PCM for distinct SampleIds. Prioritize early
-metadata/chart-list publication and bounded warm reuse before changing PCM
-ownership. These are source observations, not measured elapsed times. Existing
-gapless practice restart uses a separate retained path and must not be described
-as reloading every asset.
+At that audit checkpoint, preparation reused encoded MemoryFiles but retained
+decoded audio only within one call (`app/src/browser.rs`,
+`app/src/audio_assets.rs`); canonical WAV aliases avoided another decode while
+still cloning PCM for distinct SampleIds. The subsequent loading candidate adds
+bounded original preparation reuse and immutable PCM sharing. The historical
+audit is not a description of that candidate and is not elapsed-time evidence.
+Existing gapless practice restart uses a separate retained path and must not be
+described as reloading every asset.
 
 ## Current implementation boundary
 

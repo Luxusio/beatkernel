@@ -323,8 +323,10 @@ candidate passed with `desktop,webtransport`
 (`windows-default-resolution-development-1.log`, exit0). The cross-check uses
 stub native compilers/archive tools: it proves Rust type compatibility, not
 Windows linking, SDK behavior or execution. It also exposed the now-unused
-legacy private `native_replay` wrapper; remove that dead wrapper before final
-candidate review rather than treating the new warning as a historical one.
+legacy private `native_replay` wrapper. A complete source-reference search
+confirmed it had no callers after the prepared Desktop routing change, and it
+was removed. Final primary-binary checks/builds must include this deletion;
+the preceding Windows check still describes its earlier source checkpoint.
 
 Known ceiling: the actual nonempty native ALSA-null replay diagnostic
 reconstructed one logical result with the 1.5-second recorded horizon and
@@ -349,6 +351,147 @@ same-process library replacement/rescan command, so restarting an executable
 cannot stand in for that comparative owner-replacement requirement. Native
 fixture owner-replacement tests and browser replacement measurements retain
 their narrower evidence scopes.
+
+The opt-in native finite-section comparator is now an uncompiled candidate:
+`desktop::loading_measurement_fixtures::preserved_native_finite_section_five_paired_fresh_process_trials`.
+It reuses the existing observer/runner, fixes identical requested start/end
+and config hash for both executables, and verifies actual start plus exclusion
+of the zero-time note in each preparation marker. Marker-observed end stays
+null. Scoped formatting/whitespace checks passed; compilation and ten actual
+paired process observations remain pending after the current macOS compiler
+lease. No native comparative section measurement is claimed yet.
+
+Inspection of the frozen genuine replay's actual binary setup confirmed chart
+seed0, start250000000ns, end1500000000ns, input offset0, one grade1 early/late
+window of50000000ns each, no timing/judgment policy and default BeatKernel
+gauge. Its v4 profile is ButtonOnly. Native Records preview must receive those
+exact settings; the older proposed default150ms window would be incompatible.
+The native GUI replay comparator is now a source candidate using unmodified
+canonical bytes and actual Records scan/preview/Watch/F5:
+`desktop::loading_measurement_fixtures::preserved_native_genuine_replay_five_paired_fresh_process_trials`.
+It requires record/chart paths and hashes through
+`BEATKERNEL_TEST_NATIVE_REPLAY_RECORD`,
+`BEATKERNEL_TEST_NATIVE_REPLAY_RECORD_SHA`,
+`BEATKERNEL_TEST_NATIVE_REPLAY_CHART` and
+`BEATKERNEL_TEST_NATIVE_REPLAY_CHART_SHA`.
+Both new comparators preserve owned failure PNGs before cleanup on navigation
+or preparation/join timeouts and detected replay technical errors. Current
+scoped formatting and diff checks passed; no compilation or GUI result exists
+yet. The original macOS all-target check remains live and owns the heavy lease.
+
+The original macOS all-target `desktop,webtransport` type check subsequently
+completed with exit0 in33m02s
+(`macos-default-resolution-development-1.log`). The prepared-routing/default
+candidate and current primary binary were type checked; Linux-only measurement
+fixtures still require their native compilation. Stub native tools mean this
+is Rust type evidence, not macOS linking, device behavior or execution.
+Existing unused helpers and the `block v0.1.6` future-incompatibility warning
+remain visible in the retained log. The heavy lease is now used to compile the
+new native finite-section/replay comparators.
+
+The fresh native comparator compilation passed in1m17s
+(`native-section-replay-compile-development-1.log`, exit0). The actual finite
+section run then passed in64.11s:10 fresh production processes,20 preparation
+attempts and20 owned-window PNGs. Both variants used identical config SHA256
+`fd0e17d6e267eaa33d4a1e00158fc5aeda142fe7a6be91d1eed73c94fef4bce0`
+and fixture hashes. Every marker exposed start250000000ns and excluded the
+zero-time head; end1500000000ns is the request, not an observed native endpoint.
+Raw records and derived `summary.json` remain under
+`native-paired-finite-section-development-1/`.
+
+| Native finite-section preparation upper bound, ms | Baseline p50 / p95=max | Current p50 / p95=max |
+|---|---:|---:|
+| First Enter |2073.040 /2202.704 |2094.494 /2108.259 |
+| Same-owner F5 |2098.019 /2167.288 |1765.338 /1936.588 |
+
+Each group has5 samples. Baseline executable235816a...288c and current
+bef6dad...ec6d were preserved unchanged; their manifests retain exact full
+hashes/source provenance. Current here predates the subsequent mailbox fix.
+The first-run median slightly regressed; the retry median improved. The observer
+and mandatory-ioctl joined frames add overhead, OS page caches are uncontrolled,
+and no output readiness/natural finite completion/physical timing is claimed.
+The current trial4 retry PNG was directly inspected.
+
+The first strict genuine replay comparison failed on baseline trial0 retry
+(`native-paired-genuine-replay-development-1.log`, exit101,20.72s). Actual
+Records scan and compatible preview succeeded, and both replay reconstruction
+markers had the same genuine1.5-second horizon/hash. The owned failure PNG
+shows `retry lineage: room controls are busy`; this is not a valid completed
+comparative trial. Source inspection found the same native-launch mailbox
+WouldBlock-to-fatal-error path in current production. The approved-plan candidate
+will defer that poll without waiting or losing the queued invocation, preserve
+post-join canonical rebasing and retain genuine poison/lineage failures.
+No failed sample is counted in the measurement table, and the immutable
+baseline/strict GUI assertions will not be rewritten to hide this failure.
+
+The mailbox change and its two independently authored deterministic regression
+cases passed the actual private preparation suite5/failed0/ignored0
+(`native-mailbox-contention-development-1.log`, exit0). The real slot stays
+queued while held, then drains the exact prepared retry2/recording lineage once.
+Actual poisoned-mutex refusal retains its queued invocation and native-specific
+diagnostic. Current production changes only the native-launch poll; room,
+practice/output admission and canonical post-join checks remain intact.
+A fresh production artifact subsequently built successfully in2m01s
+(`native-mailbox-production-build-development-1.log`), SHA256
+`525cb58fe434a39d697b6032c85d0f8cfac9eddd878f37ca3ff5ac3084488194`.
+The GUI fixture also recompiled successfully in1m22s.
+
+The second strict genuine replay comparison failed after140.67s
+(`native-paired-genuine-replay-development-2.log`, exit101). Preserved baseline
+trial0 completed its first replay and F5, with two validated reconstruction
+markers and owned joined-prefix frames. Current trial0 completed only the first
+replay: its F5 timeout PNG reports `retry preflight: unknown native setting
+--device`. This is a distinct actual accepted-invocation validation defect,
+not another mailbox contention failure. The accepted replay template correctly
+uses canonical `--device`, whereas the initial platform settings validator
+expects Linux `--alsa`; projecting the accepted template a second time fails.
+The scoped correction injects the existing strict canonical replay validator
+for prepared retries, retaining the initial requested validator and custom
+embedding policy. Both immediate and post-join retry preflight must select from
+the actual invocation's prepared state. No completed five-pair distribution is
+claimed from this incomplete run, and its failure screenshot remains preserved.
+
+The prepared replay validation correction built successfully in1m16s
+(`native-replay-prepared-validator-build-development-1.log`), executable SHA256
+`6409cbb94d0e10c4df899341a168052038fe6efe9fb0e17a31034cc54c658254`.
+Its manifest matches the current production source hashes. The first focused
+test compilation failed on an independently authored fixture's missing boxed
+error-to-String conversion; that raw log is preserved. After correcting the
+fixture, the native preparation suite passed9/failed0/ignored0 in0.43s
+(`native-replay-prepared-validator-tests-development-2.log`; build1m17s).
+Four new cases cover real canonical projection/parser across repeated retries,
+requested/prepared/custom validator selection, strict canonical rejection
+without cancelling the current owner, and actual post-join cleanup publication
+rebasing an unresolved preflight into the accepted canonical retry. These are
+connected software tests, not physical output or final independent QA evidence.
+
+The third strict genuine replay comparison passed in116.77s
+(`native-paired-genuine-replay-development-3.log`, exit0). All10 unique owned
+processes completed actual Records scan/preview, genuine first replay, joined
+prefix, F5, second matching reconstruction and joined prefix, then bounded
+cleanup. Each variant has5 fresh processes,2 attempts each, and matching
+config/fixture hashes; the derived summary validates20 actual observations.
+Root also inspected current trial4's retry PNG: the owned REPLAY prefix has no
+technical failure caption. No earlier failed trial was added to this distribution.
+
+| Genuine native replay input-to-prepared-log observed upper bound (ms) | Baseline p50 / p95 | Current p50 / p95 |
+|---|---:|---:|
+| First replay | 1417.990 / 1504.561 | 1412.596 / 1457.906 |
+| Same-owner F5 retry | 1340.011 / 1404.471 | 1045.707 / 1253.464 |
+
+Here p95 is nearest-rank, hence the maximum of5 observations. Raw evidence and
+derived summary are under `native-paired-genuine-replay-development-3/`.
+Baseline SHA remains `235816a648aac5500ea248456948627560020f0ec9fc69d6ba9cdf759148288c`;
+current SHA is `6409cbb94d0e10c4df899341a168052038fe6efe9fb0e17a31034cc54c658254`.
+The workload uses the same genuine finite recording and original large chart;
+ALSA null with an imposed3s cutoff proves logical reconstruction/preparation
+and joined prefix, not natural replay completion, output-ready or acoustic
+latency. Runs are baseline-first, OS page cache is uncontrolled, artifacts are
+unoptimized, and input/log/frame observer overhead is included. The current
+Desktop subset also passed177/failed0/ignored9 in2.59s after the correction.
+The complete fresh parent executable then passed343/failed0/ignored13 in3.52s
+(`native-prepared-replay-full-unit-development-1.log`). Opt-in native GUI tests
+remain ignored in that ordinary suite and have their separate actual runs above.
 
 The strengthened browser capture prerequisite passed in one actual preserved
 baseline process. `browser-finite-capture-development-1/observations.json`
