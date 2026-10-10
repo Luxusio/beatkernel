@@ -84,6 +84,7 @@ python3 tools/wbs_status.py --ready
 | E34 | 영상 BGA 독립 DEEP code review와 qa-cli/qa-browser PASS: `target/wf/bms-video/qa-cli/`, `target/wf/bms-video/qa-browser/evidence.json`; app2124 PASS/실패0/ignored6, external51 PASS(실제 FFmpeg2 포함), Node750 PASS, native encoded-to-Scene/GPU2 PASS, 실제 Chromium23 checks PASS | VFR/B-frame/nonzero origin/preroll/backseek/EOF/반복 활성화·예산/ACK/종료·실제 native/browser GPU 및 preview/live/results/history/replay/local2/reload. Windows/macOS 실제 실행·물리 오디오 지연·모든 코덱/배포 선택은 별도. 재현 계약은 REQ__bms-video. |
 | E35 | retained practice 독립 DEEP code/security cycle4와 qa-cli PASS: `target/wf/qa-cli-gapless-01a1220c-1/`; core public debug/release 각27 PASS, 현재 app2250/0/6·native307/0/5, CLI7/7, Windows/macOS all-targets typing exit0 | 실제 Desktop→spawned worker→공통 pump→production factory→유일 converted owner의 loop/disable/scrub/F5·부분 target admission·원본 PCM/기록 검증. 실패 Stop 누적·2..4 cohort·subframe cut·양수 시작 등록/replay 검증 포함. Native 관측은 주입; stub은 타입만 증명. 물리 음향/ASIO SDK·장치/브라우저 parity·출력 교체는 별도. |
 | E36 | `f3e7c8f`의 독립 six-style DEEP code review와 qa-cli PASS: `target/wf/qa-cli-six-patterns-01a12342-1/`; core498 PASS/실패0/ignored0(doctest16 포함), release focused38/38, strict core all-target Clippy·4파일 포맷·CLI12/12 PASS | plan §22의 Absolute/Relative axis, dual contact, fresh press repeated, held chord trigger, pointer trajectory+button Instant, caller-owned orientation pose를 실제 Runtime/record/replay와 literal 결과/원본 metadata·negative·active checkpoint로 검증. 기존7개 예제 보존, 새 모드 각8개 hit. 실제 게임 호환·물리 장치·native/browser 실행·전체 제품 성능은 별도. |
+| E37 | `01ed6a0` 소스에 대한 독립 code/security 리뷰 후 qa-cli 실행: `target/wf/qa-cli-records-01a1235f-1/`; app lib2295/0/6ignored, public replay17/0, native bins466/0/9ignored, standalone helper25/0, 실제 helper WASM Node3/0; model/browser check 및 Windows/macOS stub typecheck exit0 | 실제 개별 replay/archive staging·exclusive link·write/flush/sync/cleanup 오류·동시 게시·원본 오류/그룹 순서·예약 namespace·WASM typed refusal 검증. helper25는 lib에 포함된 반복 실행이다. profile 저장·프로세스 interruption/recovery·실제 disk exhaustion·hostile containment·directory power-loss·외국 OS 실행은 별도이며09.13은 V 유지. 전체 QA/close 절차와 실행된 테스트 결과를 구분한다. |
 
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
@@ -266,7 +267,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [ ] **BK-WBS-09.10** F5 pinned retry·북마크·구간 편집·finite loop가 실제 UI/native에서 같은 의미로 동작한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=논리 fixture와 실제 cleanup/restart 대조.
 - [x] **BK-WBS-09.11** gapless loop/scrub에서 같은 출력 timeline을 유지하며 reopen gap을 제거한다. — 상태=D(검증완료); 선행=-; 근거=E35; 범위=실제 production owner/pump와 주입 native 관측을 연결한 software E2E; 물리 측정은09.12.
 - [ ] **BK-WBS-09.12** 장시간/반복 구간 재시작의 실제 키음/BGM/노트 동기화를 측정한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=물리 출력/loopback; 논리 hash만으로 완료하지 않음.
-- [ ] **BK-WBS-09.13** profile/replay/archive 저장의 interruption·동시 publish·symlink·capacity 오류를 검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=실제 파일 I/O·잘린 파일·재실행.
+- [ ] **BK-WBS-09.13** profile/replay/archive 저장의 interruption·동시 publish·symlink·capacity 오류를 검증한다. — 상태=V(구현됨·검증대기); 선행=-; 부분 근거=E37 개별 replay/archive의 실제 파일 I/O·오류 주입·동시 게시; 필요 근거/다음=profile 저장, 잘린 파일·프로세스 interruption 후 재실행/recovery와 전체 원래 저장 안정성 기준.
 
 ### 10. UI·렌더러·선언형 컴포넌트·수명
 
@@ -500,3 +501,7 @@ Native collector termination 절에 있다.
   DEEP code review·core498/0·release38/38·CLI12/12 QA로 검증해04.12를 D로 갱신했다.
   완료86→87, 활성193 유지. 실제 게임 호환·물리 입력·native/browser 및 출시 조건은
   남은 leaf에서 유지한다.
+- 2026-10-10: 개별 native replay/archive의 완전한 게시와 원본 오류 보존을
+  실제 파일/동시 저장/public API/WASM 회귀로 검증해 E37을 추가했다.
+  profile과 interruption/recovery 등 전체09.13 기준은 남아 V를 유지한다.
+  완료87/활성193 및 전체 제품 범위는 변경하지 않았다.

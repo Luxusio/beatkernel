@@ -6,8 +6,11 @@ The final name receives complete synchronized bytes through exclusive linking;
 write/flush/sync/link refusal preserves existing targets without a partial final
 file. Group writes remain nontransactional and retain all-attempts/first-error
 ordering. Best-effort owned-stage cleanup never deletes a final or masks an
-original error. This intended strengthening replaces the partial-file limitation
-below; its implementation and independent verification are in progress.
+original error. This implemented strengthening replaces the earlier partial-file
+limitation. Independently executed filesystem and consumer regressions are
+recorded in
+[the storage change note](../changes/2026-10-10-native-record-publication-integrity.md);
+full platform runtime and broader persistence acceptance remain separate.
 
 Windows, macOS and Linux solo/local application entry points use the same
 completed-result finalization policy. Only actual typed pump completion, or

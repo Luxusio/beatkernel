@@ -9,52 +9,84 @@ encoding remains in the capture layer; filesystem operations live in its native
 adapter. Public save signatures, canonical bytes, and archive group
 prepare-all/attempt-all/first-error behavior remain unchanged.
 
-## Verification in progress
+## Independently executed software verification
 
-Final development verification: app library filter `publication` with
-`desktop,webtransport`, 115 passed, 0 failed, 0 ignored. This includes all
-21 `native_publication::fixtures` and 11 native archive consumer tests, plus
-existing publication regressions. The tests exercise actual files, exclusive links and
-concurrent publishers, with static injection for short/Interrupted/zero writes,
-partial write refusal, flush/sync refusal, and cleanup refusal. Public replay
-integration with `--no-default-features`: 14 passed, 0 failed, 0 ignored,
-including seven new consumer tests. Independent code/security review and QA
-remain pending. This document does not claim task completion. An earlier
-desktop/webtransport integration build reached its 240-second compiler timeout
-without executing assertions; it is not reported as a test PASS.
+The independent qa-cli agent executed the following commands against source
+revision `01ed6a0`, after fresh DEEP code and security reviews returned PASS.
+Every final command exited zero. Logs are under
+`target/wf/qa-cli-records-01a1235f-1/`; that ignored directory is local evidence,
+while the test sources and commands below are durable, reproducible artifacts.
 
-Pre-review inspection also corrected staging/final filename aliasing. Staging
-now uses uppercase hexadecimal 8.3 names and checked 44-bit identities, with
-conservative case/space/period/stream-base exclusion before creation. The initial
-20-test run predates this correction; the 115-test run includes its regressions.
-Filename assumptions were checked
-against Microsoft's [file naming rules](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file),
+| Verification | Actual result |
+|---|---|
+| `cargo test -p beatkernel-bms-runtime --lib --features desktop,webtransport --locked` | 2,295 passed, 0 failed, 6 ignored |
+| `cargo test -p beatkernel-bms-runtime --test replay_capture --features desktop,webtransport --locked` | 17 passed, 0 failed, 0 ignored |
+| `cargo test -p beatkernel-bms-runtime --bins --features desktop,webtransport --locked` | 466 passed, 0 failed, 9 ignored across seven binaries; main is 307 passed / 5 ignored |
+| `cargo check -p beatkernel-bms-runtime --lib --no-default-features --locked` | exit 0 |
+| `cargo check -p beatkernel-bms-runtime --lib --target wasm32-unknown-unknown --no-default-features --features browser,browser-audio --locked` | exit 0 |
+| `bash target/toolchain/xcheck.sh windows -p beatkernel-bms-runtime --lib --features desktop,webtransport` | exit 0; C/C++ stub, Rust type evidence only |
+| `bash target/toolchain/xcheck.sh macos -p beatkernel-bms-runtime --lib --features desktop,webtransport` | exit 0; C/C++ stub, Rust type evidence only |
+| Production helper compiled with `rustc --test --edition 2021 app/src/native_publication.rs`, then executed | 25 passed, 0 failed, 0 ignored |
+| Actual-helper WASM fixture compiled and executed with Node as shown below | 3 passed, 0 failed |
+| Changed Rust files formatted with `skip_children=true`, excluding inherited whole-`lib.rs` formatting debt; base diff whitespace check | exit 0 |
+| `python3 tools/wbs_status.py --json` | 87 / 193 complete, 45.08%; WBS09.13 remains V |
+
+Use the established host toolchain environment and cached build configuration
+described by [the development guide](../common/GUIDE__parallel-development.md).
+Standalone native compilation additionally uses the configured host linker.
+The durable WASM regression uses the production helper without host imports:
+
+```sh
+rustc --crate-type cdylib --target wasm32-unknown-unknown --edition 2021 \
+  app/tests/fixtures/wasm_native_publication.rs -o /tmp/native-publication.wasm
+BEATKERNEL_NATIVE_PUBLICATION_WASM=/tmp/native-publication.wasm \
+  node --test app/tests/wasm_native_publication.test.mjs
+```
+
+The helper fixtures use real files and exclusive links, concurrent publishers,
+and static injection into the production `write_all` path for
+short/Interrupted/zero/partial writes, flush/sync refusal and cleanup refusal.
+Public replay tests validate canonical accepted prefixes, identity and returned
+byte counts. Thirteen archive-consumer tests verify actual store/solo/member
+files, valid reserved-name refusal, complete concurrent winners and original
+first-error/all-attempts behavior. The standalone helper run repeats tests
+included in the full library run; these counts are not unique test totals.
+
+The first replay integration build reached its actual 240-second compiler
+timeout before assertions ran. Its log remains `replay-timeout-first.log`.
+The same command's cache continuation executed all 17 tests and exited zero.
+The timeout is not counted as a test PASS or assertion failure. Existing build
+warnings and inherited formatting debt remain; no strict whole-app lint or
+format PASS is claimed. Ignored cases remain unverified.
+
+## Corrections verified during development
+
+Pre-review inspection changed stages to uppercase hexadecimal 8.3 names with
+checked 44-bit identities and conservative native alias exclusion.
+Filename assumptions were checked against Microsoft's
+[file naming rules](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file),
 [8.3 format](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/18e63b13-ba43-4f5f-a5b7-11e871b71f14)
 and [space/period normalization](https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/file-folder-name-whitespace-characters).
 
-The first formal code review found a distinct-destination namespace overlap:
-one accepted final basename could be another publisher's stage. A standalone
-probe using the actual production generator and two publishers reproduced
-three partial bytes at the other requested final before either commit, followed
-by `AlreadyExists` and normal staging cleanup. The correction reserves exactly
-the generated hexadecimal 8.3 namespace and its native aliases, returning
-`InvalidInput` before filesystem effects; ordinary `.bkr` and `.bkresult`
-destinations remain accepted. The corrected helper's 25 tests pass when compiled
-directly with `rustc --test app/src/native_publication.rs`, demonstrating its
-standalone native-IO boundary. The corrected app library `publication` filter
-with `desktop,webtransport` also passes 121 tests, including the 25 helper and
-13 archive consumer tests. Corrected public replay integration with
-`--no-default-features` passes 17 tests. Fresh independent review/QA remain
-pending; development checks do not establish task completion.
+The first formal code review found that an accepted final basename could be
+another publisher's stage. An actual production-generator probe reproduced
+partial bytes at that requested final and deletion by normal stage cleanup.
+The correction reserves exactly the generated hexadecimal 8.3 namespace and
+its native aliases, returning `InvalidInput` before filesystem effects.
+Ordinary `.bkr` and `.bkresult` destinations remain accepted. Regression tests
+cover absent/existing reserved finals, refused-cleanup partial stages and
+successful concurrent publication to distinct accepted destinations.
 
-An additional exact-helper WASM probe exposed a compatibility regression before
-QA: native saving trapped on process-ID lookup before unsupported file I/O.
-The helper now uses a zero process seed on wasm32 while native targets retain
-their PID seed. The public API remains available and returns typed refusal.
-The durable probe fixture and Node tests execute the production helper with no
-host imports: ordinary save returns `Unsupported`, reserved filename returns
-`InvalidInput`, and neither traps. All three Node tests and the 25 native
-helper tests pass after this correction. Fresh final review and QA are pending.
+An exact-helper WASM probe exposed a process-ID trap before unsupported file
+I/O. The helper now uses a zero process seed on wasm32 while native targets
+retain their PID seed. The existing public API remains available. The durable
+WASM fixture executes the actual helper with no imports and verifies ordinary
+`Unsupported`, reserved-name `InvalidInput`, and absence of traps.
+
+Commit-backed learning: both verified corrections are captured in the owning
+publication/replay contracts and executable regression fixtures. The
+checkpoint-specific optional Git-lock workaround is rejected as a durable
+product change; it does not change the player or this publication contract.
 
 ## Known ceiling
 

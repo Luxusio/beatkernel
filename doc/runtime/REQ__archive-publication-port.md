@@ -5,8 +5,10 @@ The native adapter must now implement the
 behind the existing port, without moving filesystem effects into business
 policy. This changes individual native publication, not group transactionality,
 destination preparation, write ordering or original first-error retention.
-Implementation and independent verification are in progress; existing unproven
-power-loss/directory-containment limits remain.
+The native implementation and independently executed filesystem/public-consumer
+regressions are recorded in
+[the storage change note](../changes/2026-10-10-native-record-publication-integrity.md).
+Existing unproven power-loss/directory-containment limits remain.
 
 Whole-roster and member archive staging, duplicate detection, write ordering and
 first-error selection belong to shared business policy, not the filesystem

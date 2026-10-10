@@ -36,9 +36,12 @@ an orphan stage. File synchronization does not establish directory-entry
 power-loss durability or hostile-directory containment. Archive sets retain
 their independent prepare-all/attempt-all/first-error semantics.
 
-This intended guarantee supersedes the earlier partial-new-file limitation
-below. Implementation and independent verification are in progress in
-`TASK__native-record-publication-integrity`; no new PASS is claimed here.
+This implemented guarantee supersedes the earlier partial-new-file limitation.
+Independently executed real-filesystem, public replay and archive-consumer
+regressions are recorded in
+[the storage change note](../changes/2026-10-10-native-record-publication-integrity.md).
+Those software checks do not establish hostile-directory containment,
+directory-entry power-loss durability or actual Windows/macOS execution.
 
 A portable versioned archive preserves actual completed live results for the
 entire original 1..64 player roster, each player's existing replay setup/header

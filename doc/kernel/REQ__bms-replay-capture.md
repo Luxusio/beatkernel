@@ -7,8 +7,11 @@ write/flush/sync/link failures without a partial final replay. Filesystem
 implementation belongs to the native adapter; capture/encoding remains pure.
 The shared [individual publication contract](../runtime/REQ__completed-result-archive.md#complete-individual-native-publication)
 defines ownership, original-error precedence, best-effort cleanup and remaining
-durability limits. This supersedes the old partial-file guarantee; implementation
-and independent verification are currently in progress, not completed evidence.
+durability limits. This supersedes the old partial-file guarantee. The native
+adapter and real-filesystem regressions are implemented; independently executed
+software verification is recorded in
+[the storage change note](../changes/2026-10-10-native-record-publication-integrity.md).
+Physical device and foreign-platform runtime acceptance remain separate.
 
 The native adapter reserves hexadecimal 8.3 staging basenames and their native
 aliases. Saving to that exact internal namespace returns `CaptureError::Io`
