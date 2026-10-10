@@ -28,8 +28,12 @@ pose publication. Readonly Results uses a separate generation/content-owned
 node-target motion path in the renderer Worker. Animation frames reuse geometry
 and do not require business updates or Window rendering. Replacement, paging,
 suspension and disposal obey [the shared motion contract](REQ__ui-motion.md).
-This remaining-surface extension is under implementation; connected acceptance
-has not yet been established.
+The remaining-surface extension has independent interactive browser QA on the
+current production WASM/Workers: four menu owners, actual host editor
+motion/edit/preedit, genuine completed Results, resume/retirement and disposal.
+Readonly solo Results without comparisons does not prove connected comparison
+switching; CLI fixtures cover that capability separately. Hardware latency and
+loading-speed measurements remain unverified.
 
 Reuse the existing LocalRoster as the canonical business owner in the gameplay
 Worker. Checked snapshots carry original next-ID allocation state, members and
@@ -37,10 +41,10 @@ assignments; removal must not cause ID reuse or regeneration from surviving IDs.
 Window reconciles accepted state instead of allocating competing members. Reject
 malformed bounds/duplicates/IDs/allocator state before any owner publication.
 
-Status: Worker-local menu ownership and generation-tagged protocols are implemented
-and have development fixtures. Existing gameplay/render Worker separation is
-reused. All-route interaction, editor/permission flows and independent browser QA
-remain pending.
+Status: Worker-local menu ownership and generation-tagged protocols reuse the
+existing gameplay/render Worker separation. Independent motion-scope browser QA
+and UX pass; this does not establish all permission/device/product flows. See
+[the exact acceptance record](../changes/2026-10-10-remaining-component-motion.md).
 
 Composition commits must publish the final editor value through the existing
 correlated Worker edit transaction before Enter can apply a field. Intermediate

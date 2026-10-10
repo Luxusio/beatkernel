@@ -57,15 +57,16 @@ stale component identities, cross-screen ownership and capacity exhaustion refus
 atomically. The 64-component bound applies to actively bound motion components,
 not all mounted retained nodes. Rhythm notes remain outside this UI scheduler.
 
-Known ceiling: component source, deterministic fixtures and Selection/Display/
-Practice browser and native Desktop menu-owner integration are implemented.
-Practice independent CLI/browser QA passes; its desktop adapter acceptance is
-blocked as detailed below. Native window/GPU motion has software Vulkan evidence;
-hardware performance and full independent GUI acceptance remain pending. The other
-shared menu views currently retain their existing rendering behavior; extending
-their control-motion requests is the active remaining-component-motion task.
-Source APIs and mocked worker tests do not
-establish all-screen product animations or hardware input/paint parity.
+Known ceiling: retained component motion now connects Selection, Display,
+Practice, Settings, Records, Players, Devices and readonly Results. The remaining
+menu/Results extension has independent CLI, interactive browser and native
+software-window QA, plus separate scoped UX evidence. Native motion acceptance
+is window-rendered: its typed host fixture does not pump OS input. Fresh ordinary
+production menu keyboard/mouse/resize testing is separate evidence. Hardware
+performance, physical IME/devices and OS-driven animated hit acquisition remain
+unverified. Earlier Practice-specific acceptance blockers below are historical;
+the current extension's shared-display MCP binding succeeded. Source APIs and
+mocked tests alone do not establish all-screen product animation policy.
 
 Native Desktop motion must be requested explicitly through a typed host command
 for the actual screen instance and displayed control. It reuses mounted-node
@@ -77,7 +78,7 @@ An immutable scene geometry identity/revision is available to native adapters
 for checking cache reuse. Animation-only ticks must preserve both the identity
 and revision; reconstructing geometry is reserved for actual layout changes.
 
-## Remaining menus and readonly Results — acceptance pending
+## Remaining menus and readonly Results — software acceptance
 
 UI render transactions must preserve the original Scene when staging or
 publication fails. A public render candidate may contain only UI geometry;
@@ -137,9 +138,16 @@ monotonic presentation time never becomes an audio or gameplay clock.
 Acceptance requires public-view tests for all four menus and both Results models,
 real native/browser owner lifecycle and submitted-pose tests, current production
 WASM/RendererWorker interaction with screenshots, and native software-window
-rendering. These obligations are pending in the active task. Direct native PNG
-evidence is separate from desktop MCP binding and physical-device performance;
-this extension alone does not complete WBS10.16/10.17.
+rendering. The 2026-10-10 extension has these software-layer results: independent
+public-view tests 25, shared motion/owner filter 54, native owner tests seven,
+interactive browser QA with 14 inspected captures and native software-window QA
+with 11 captures. Same-window desktop MCP binding succeeded on shared :99;
+ordinary production OS menu input also ran. Native motion itself is
+window-rendered, not OS-driven animation input acceptance. Genuine solo browser
+Results has no comparison owner; comparison/multi-page cases remain CLI evidence.
+These limits and exact evidence are in
+[the change record](../changes/2026-10-10-remaining-component-motion.md).
+This extension alone does not complete WBS10.16/10.17.
 
 ## Practice motion contract — desktop adapter acceptance blocked
 

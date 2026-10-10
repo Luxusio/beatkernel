@@ -131,8 +131,8 @@ source presence or an advisory audit does not establish acceptance.
 The audit identified the following cleanup batches. They remain pending until
 their implementation and relevant verification actually complete:
 
-- Current motion feature: share duplicated pose restoration, keeping platform
-  admission identities and lifecycle ownership local to their adapters.
+- Current motion feature: shared pose restoration is software-verified; platform
+  admission identities and lifecycle ownership remain local to their adapters.
 - Application output: migrate internal imports to canonical domain paths and
   remove redundant native/common trait forwarding with compatibility accounted.
 - Core input/audio: index keysound bindings by object/stage while preserving
@@ -144,3 +144,26 @@ their implementation and relevant verification actually complete:
 Keep the existing four crate boundaries and native output configuration.
 Current boxed judge interactions and reactive UI callbacks have real costs;
 do not describe the complete implementation as zero-cost without evidence.
+
+## Reuse verified builds for scoped checks
+
+A current-source integration-test build may already produce the runnable
+application binary. Record its path, SHA and build provenance before another
+profile build; functional native QA can reuse that binary without claiming
+release performance. Warm test filters may similarly run the exact already
+built test executable after establishing its source/build identity, avoiding
+repeated Cargo metadata walks. A source/configuration change requires fresh
+build verification. Keep one heavy compiler/browser/GPU lease.
+
+Scoped Rust formatting uses `skip_children=true,reorder_modules=false` when
+preserving the reviewed module layout; do not recursively reformat unrelated
+modules. Record unrelated initial-check findings rather than silently editing
+those files.
+
+Current remaining-menu/Results native QA used a fresh owned window on the
+existing live `DISPLAY=:99`, matching the device-lab X11 backend. Same-window
+MCP enumeration and screenshots succeeded. Preserve that shared server; clean
+up only owned application processes. A display without an EWMH window manager
+may reject the focus helper, while direct X11 focus of an owned production
+window still permits genuine keyboard/mouse event-loop checks. Host-driven
+motion fixtures and production OS-input checks remain separate evidence tiers.

@@ -1,87 +1,84 @@
 # Remaining menu and Results component motion
 
-Settings, Records (including historical details), Players and Devices now have
-the same retained component-motion façades as Selection, Display and Practice.
-The native and browser adapters connect these façades to screen-owned motion
-tracks and submitted input poses. Genuine and frozen Results use readonly
-mounted-node targets, preserve ordinary headers and controls, and cache geometry
-between motion frames. Browser Results ownership checks both generation and
-content; replacement retires the previous owner, while page changes remove
-targets that are no longer displayed. Rendering candidates stage UI changes
-before publication and retain existing note caches.
+Settings, Records (including historical details), Players and Devices now expose
+retained component-motion façades. Native/browser owners bind actual screen
+identities and publish input poses only after successful presentation. Genuine
+and frozen readonly Results preserve ordinary headers/actions and cache geometry
+between motion frames. Page changes prune absent targets while preserving poses
+of surviving nodes. UI staging preserves existing note caches and atomic refusal.
 
-## Development evidence
+## Independent software evidence
 
-- Five public view test targets: 25 passed.
-- Graphics component regression filter: 34 passed before final adapter changes,
-  including Results geometry identity rollover and source/inherited clip cases.
-- Current Worker/host/protocol Node tests: 305 passed, exit 0. Results
-  invalid-request regressions preserve existing animation and subsequent requests.
-- The first portable Results fixture run failed all five cases because its
-  disconnected test queue could not provide admitted completion. Retaining its
-  original producer through the actual Mixer drains fixed the fixture; all five
-  now pass through the production Results owner.
-- Current combined motion regressions: 54 passed, including seven shared
-  transactional pose-restoration regressions, six remaining-menu
-  adapter cases and five portable Results owner cases. Scene transaction tests:
-  two passed, including mismatched/failed/timed candidate atomic rejection.
-- First native adapter run compiled successfully: two passed, four failed.
-  Fixture corrections preserve inherited clipping and existing ordinary Results
-  controls. Independent discovery additionally found native Records target
-  pruning and submitted-pose interaction issues; those were corrected. The
-  resulting seven native owner tests and two Scene transaction tests passed.
-- Native software-window development test before the shared restoration cleanup
-  passed on llvmpipe/Vulkan:
-  four menus and genuine Results, 12–14 submitted frames per surface, 11 original
-  PNG captures, preserved headers/ordinary controls and a partial Results page.
-  The owned test and Xvfb processes both exited 0. This is development evidence.
-- Independent final DEEP code review passed after fixing the browser acceptance
-  script to advance the actual owner revision before publishing a repaint.
-  Independent CLI/browser/native QA remains pending. The first actual browser
-  run passed Settings and Records motion/lifecycle interactions, then stopped
-  because the acceptance script attempted an illegal sibling route transition.
-  The script now returns through the actual Settings parent before Players and
-  Devices. The second actual browser run passed all four menu motion/lifecycle
-  and zero-extent checks, then stopped when its production canvas click raced
-  the accepted geometry publication. A separate real production diagnostic
-  reached visible, matching geometry without Worker/renderer errors; this is
-  diagnostic evidence, not a browser QA PASS or loading-speed benchmark.
-  The exact submitted-geometry click gate passed independent code review.
-  The third actual browser run passed all four menus, production Settings
-  editor motion/edit/preedit/stale-focus checks, genuine natural completion
-  and visible Results card motion. It then requested comparison mode despite
-  the actual solo result declaring no comparisons, so Results resume/retirement
-  acceptance remains incomplete and the overall browser verdict is FAIL.
-  There are 13 inspected original screenshots from that run; no loading or
-  physical latency claim follows. A capability-aware script fix remains to
-  be reviewed; no fourth browser execution has occurred.
+Reviewed implementation: `e0c08e4`, based on `f6d50d3`. Full DEEP review and the
+substantive source-fix reviews passed; both discovery cycles completed. Native
+Records pruning, Results accepted input, Settings hover and per-request Results
+refusal defects were corrected. No implementation or loading-performance ranking
+is inferred from test counts.
 
-These development checks and the code review do not
-complete WBS10.16/10.17 or the full BMS player Goal; WBS remains 90/193.
+- CLI: five public-view targets 25 passed; motion/owner filter 54; Scene
+  transactions two; component filter 43; browser-menu regressions 29; Results
+  regressions 16; native owner seven. The window test is ignored by default and
+  was explicitly executed by desktop QA. Filters overlap, so these are not a
+  unique-test total. Five Node targets passed 305/305. Scoped formatting, diff
+  and WBS checks passed; launcher help returned 0 and invalid mode returned 1.
+- Browser: actual headed Chromium/software SwiftShader with current production
+  WASM/Workers passed. Four menus, accepted moved hits, repaint, Back/reentry,
+  zero extent, actual host Settings editor motion/edit/preedit/stale focus,
+  genuine BMS completion and Results motion/resume/retirement/disposal passed.
+  All 14 original captures were inspected; no production console/network errors.
+  Fixture favicon 404 is unrelated. WASM SHA256:
+  `98769dda457cc0ceaee23077c0bd3520834c61565f4d196284f2c735cfed78cc`.
+- Desktop: current native fixture passed one test, 64 software Vulkan motion
+  frames and 11 inspected PNGs across four menus and genuine Results. Geometry
+  identity/revision, headers/footer, accepted hits and retirement passed.
+  Same-window MCP binding succeeded on existing :99. Motion depth is
+  **window-rendered** because the host fixture does not pump OS events.
+- Separate desktop production event-loop UX verified F2, Tab, Players/Add,
+  genuine-chart F4 Records, resize and Escape. Missing chart/device feedback
+  remains recoverable. The current test-profile production binary SHA256 was
+  `1c91bd22a348f6eccad2ee7d89f1deea66cd5e1cf7fc8034525e08bbced27986`.
+  Independent browser and desktop UX reviews passed for this explicit capability.
+- Owned browsers, Xvfb/application processes and servers ended cleanly; the
+  existing shared :99 display was preserved. No push or worktrees were created.
 
-## Known ceiling
+Raw evidence is in ignored local artifacts:
+`target/wf/remaining-motion-01a124c2/{qa-browser-final,ux-browser,qa-desktop-current,ux-desktop-current}`
+and `target/wf/worklet-chronology-qa-cli-1`. Earlier browser attempts failed on
+three acceptance-script assumptions: illegal sibling navigation, clicking before
+submitted geometry, and requesting comparisons absent from genuine completion.
+Their original failures remain preserved. Reviewed fixes use real parent return,
+exact submitted tokens and actual capability; failure observations are retained.
 
-Actual current-production browser interactions and native software-window
-acceptance remain pending. Prior direct PNG/window rendering evidence and the
-known desktop MCP window-binding limitation belong to the earlier Practice
-task; they do not establish acceptance of this change. Motion-only geometry
-reuse does not establish a physical device frame budget or cross-platform
-latency guarantee.
+## Limits and remaining work
 
-Contracts: [UI motion](../ui/REQ__ui-motion.md) and
-[browser retained menus](../ui/REQ__browser-retained-menus.md).
+Genuine solo browser Results has no comparison capability. Comparison and
+multi-page pruning are deterministic CLI evidence, not connected browser proof.
+Native page-two capture preserves the surviving card's completed clipped pose;
+it verifies retirement of previous rows, not visible text of that moved card.
+Animated OS hit acquisition, physical IME/device/audio timing, hardware frame
+budgets, foreign OS execution and broader accessibility remain unverified.
+Small bitmap labels and caller-selected overlapping transforms remain UX backlog.
 
-## Code-smell cleanup
+All required substantive code/QA lenses returned PASS; Harness closure still
+requires its ordered hook-owned attestation. These results do not complete
+WBS10.16/10.17 or the full player Goal. WBS remains 90/193.
 
-Five duplicated pose-restoration blocks now use the existing scheduler’s
-transactional `restore_poses`. It removes three temporary update Vecs and two
-individual setter loops, validates a bounded stack batch before publication,
-and preserves completed poses, elapsed progress and platform-owned lifecycles.
-The broader cleanup remains queued as TASK__player-code-smell-cleanup; this
-change does not claim that all source smells are resolved.
+## Code-smell cleanup and loading
 
-The user’s immediate-feeling loading requirement is recorded in
-[performance and testability](../kernel/REQ__performance-and-testability.md).
-Startup, screen-transition and media-preparation latency measurements remain
-pending under TASK__player-loading-latency; this motion change makes no loading
+Five pose-restoration copies now use existing transactional
+`MotionScheduler::restore_poses`, removing three temporary update Vecs and two
+individual setter loops. Bounded stack staging preserves completed poses,
+elapsed progress, geometry identity and platform-owned lifecycle. Remaining
+canonical imports/device contract/keysound indexing/ownership cleanup stays
+queued under TASK__player-code-smell-cleanup.
+
+The user's immediate-feeling loading requirement and confirmed source audit are
+in [performance and testability](../kernel/REQ__performance-and-testability.md).
+Browser import currently reads all supplied files before displaying the catalog;
+repeat preparation does not retain decoded PCM across calls; WAV aliases clone
+PCM backing. Startup/transition/media cold/warm measurements and optimization
+remain pending under TASK__player-loading-latency. This change makes no loading
 speed claim.
+
+Contracts: [UI motion](../ui/REQ__ui-motion.md),
+[browser retained menus](../ui/REQ__browser-retained-menus.md).
