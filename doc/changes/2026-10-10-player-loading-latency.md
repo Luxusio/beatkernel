@@ -645,6 +645,64 @@ WASM startup and establish neither physical output latency nor instantaneous
 loading. Warm zero counts still cover original preparation parse/compile and
 codec work only; fresh derived/replay validation remains outside those counters.
 
+Fresh affected native GUI verification on the final `7a9c` executable passed
+all six helper batches: catalog26.63s, original preparation82.64s, finite
+section90.77s, genuine replay129.23s, missing-channel policy11.93s and held-font
+catalog22.75s. The first four batches each compare five preserved-baseline
+and five current processes; preparation/section/replay require first and joined
+retry markers. Evidence lives separately in `qa-desktop-e436fcf-2/`, including
+`observed-statistics.json`; it is not pooled with the earlier failed GUI attempt.
+External observed milliseconds before→after:
+
+| Native workload | p50 | p95/max |
+| --- | --- | --- |
+| Catalog first usable frame | 1456.325→1443.880 | 1587.385→1512.115 |
+| Original cold preparation | 2769.703→2620.241 | 2955.742→3033.089 |
+| Original same-owner retry | 2656.080→2334.377 | 2749.466→2451.725 |
+| Finite-section cold preparation | 2895.639→2912.822 | 3569.848→3657.382 |
+| Finite-section same-owner retry | 2704.983→2652.059 | 3492.844→3244.570 |
+| Genuine replay cold reconstruction | 1548.051→1410.114 | 2113.472→1490.328 |
+| Genuine replay same-owner retry | 1409.897→1177.063 | 2108.657→1222.100 |
+
+Original cold tail and finite-section cold median/tail regressed in this batch.
+These external upper bounds include input delivery, process/stdout observation
+and software presentation costs. They are not parse/codec-only times or evidence
+of physical/acoustic readiness. The held-font fixture uses the fresh test-parent
+executable and retains separate provenance from the production executable.
+The visible `manual-current/actual-pending.png` shows the final status, actual
+stage/count/ESC instruction, practice caption and Cancel in separate readable
+rows. Final manual interaction/cleanup and independent CLI verification remain
+pending at this checkpoint.
+
+The subsequent independent desktop QA2 and matching UX2 both returned actual
+PASS for the changed desktop software/UI scope. Manual production PID1713707,
+window8388610 received real MCP Return, Escape, Down, Up and Return: pending
+preparation was visible, selection recovered, keyboard highlight changed, and
+re-entry followed by the expected null-output/input technical error recovered
+to selection again. Actual Exit clicking terminated the owned application with
+exit0. All owned runner/application helpers terminated; the existing display
+server was left untouched. `desktop-evidence.json` and the fresh manual PNGs
+retain correlation. These actual finals are non-attesting when hook-owned
+receipts are absent and do not authorize task closure. Independent CLI and
+foreign-target checks remain pending; full player Goal and WBS remain unfinished.
+
+Known ceiling: fresh manual Escape may have occurred after the preparation
+marker, so this run does not prove cancellation before Ready or observation of
+Stopping. It also did not capture the initial absent-snapshot state. Earlier
+actual cancellation evidence remains associated with its original executable;
+the pure current composition regression covers absent-snapshot and Loading
+geometry. Neither is relabeled as fresh interactive evidence for the other.
+
+Known ceiling: the manual FIFO attempt was refused by production regular-file
+admission and is retained separately from successful GUI evidence. Failed new
+Xvfb startup, focus-command and MCP-key invocations are not successful input or
+server-ownership evidence.
+
+Known ceiling: native GUI QA2 uses the existing live `:99` current-display
+transport. Its attempted new Xvfb startup failed because the display listener
+already existed; no ownership of that server or server cleanup is claimed.
+Only owned runner/application processes may be terminated.
+
 The strengthened browser capture prerequisite passed in one actual preserved
 baseline process. `browser-finite-capture-development-1/observations.json`
 records two admitted inputs, 118 advances, 120 durable records and a finite
