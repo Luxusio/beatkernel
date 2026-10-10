@@ -160,6 +160,33 @@ native/browser configurations. Record backend, buffer, display and workload
 parameters. Set numerical budgets from recorded baselines and product latency
 requirements; arbitrary numbers or average FPS do not establish superiority.
 
+## Loading responsiveness requirement
+
+The user explicitly requires loading to feel immediate; slow startup, screen
+transitions and repeated chart loading are product defects to measure and
+reduce. This is a required outcome, not an achieved performance claim.
+
+Measure native and browser cold startup separately from warm startup, first
+usable submitted frame, legal screen transitions, chart parsing, media
+acquisition/decoding, preparation and repeat loads. Record workload size,
+asset format, platform, backend and cache state, including tail and maximum
+latencies. Derive numerical budgets from recorded baselines and product needs;
+finite filesystem, network and decoding work cannot be represented as zero time.
+
+Keep input acquisition and visible UI responsive during preparation. Reuse
+accepted immutable assets and existing retained geometry where identity and
+lifetime permit; avoid redundant reads, decoding and geometry reconstruction.
+Use existing workers and owners rather than introducing a general loading
+framework. Preserve readiness, cancellation, failures and original ownership:
+a loading indication or cached preview cannot authorize incomplete gameplay.
+Expensive work must have accurate progress and cancellation rather than an
+unresponsive UI. Any resource cache must have explicit memory limits and
+invalidation; responsiveness does not justify unbounded preloading.
+
+Loading optimization and representative native/browser latency measurements
+remain pending under TASK__player-loading-latency. Existing motion correctness
+checks and software-browser screenshots are not loading-speed benchmarks.
+
 ## Current implementation boundary
 
 Separation is unfinished. Core runtime processing telemetry currently defaults

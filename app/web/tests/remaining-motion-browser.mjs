@@ -214,6 +214,14 @@ try {
   await live.click("#menu-open");
   await live.waitForFunction(() => __motion.messages.some(x => x.kind === "menu-state" && x.route === 1));
   const canvasClick = async (x, y) => {
+    await live.waitForFunction(() => {
+      const state = __motion.messages.findLast(x => x.kind === "menu-state");
+      const canvas = document.querySelector("#canvas"), box = canvas?.getBoundingClientRect();
+      return state && __motion.messages.some(g => g.kind === "render-geometry" && g.mode === "menu"
+        && g.menuGeneration === state.menuGeneration && g.screen === state.screen && g.revision === state.revision
+        && g.width > 0 && g.height > 0)
+        && canvas && !canvas.hidden && canvas.width > 0 && canvas.height > 0 && box.width > 0 && box.height > 0;
+    });
     const canvas = await live.$("#canvas"); await canvas.scrollIntoView();
     const box = await canvas.boundingBox(); assert(box);
     const dimensions = await live.$eval("#canvas", c => ({ width: c.width, height: c.height }));

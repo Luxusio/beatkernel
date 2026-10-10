@@ -41,7 +41,12 @@ before publication and retain existing note caches.
   run passed Settings and Records motion/lifecycle interactions, then stopped
   because the acceptance script attempted an illegal sibling route transition.
   The script now returns through the actual Settings parent before Players and
-  Devices; renewed review and browser QA are required.
+  Devices. The second actual browser run passed all four menu motion/lifecycle
+  and zero-extent checks, then stopped when its production canvas click raced
+  the accepted geometry publication. A separate real production diagnostic
+  reached visible, matching geometry without Worker/renderer errors; this is
+  diagnostic evidence, not a browser QA PASS or loading-speed benchmark.
+  Renewed review and browser QA are required after synchronizing that click.
 
 These development checks and the code review do not
 complete WBS10.16/10.17 or the full BMS player Goal; WBS remains 90/193.
@@ -66,3 +71,9 @@ individual setter loops, validates a bounded stack batch before publication,
 and preserves completed poses, elapsed progress and platform-owned lifecycles.
 The broader cleanup remains queued as TASK__player-code-smell-cleanup; this
 change does not claim that all source smells are resolved.
+
+The user’s immediate-feeling loading requirement is recorded in
+[performance and testability](../kernel/REQ__performance-and-testability.md).
+Startup, screen-transition and media-preparation latency measurements remain
+pending under TASK__player-loading-latency; this motion change makes no loading
+speed claim.
