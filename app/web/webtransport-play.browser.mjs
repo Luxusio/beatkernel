@@ -33,6 +33,46 @@ const within = (base, path) => { const rel = relative(base, path); return rel !=
 const fixedFlags = ["--no-sandbox", "--disable-dev-shm-usage", "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader", "--use-angle=vulkan", "--use-vulkan=swiftshader", "--enable-features=Vulkan", "--disable-vulkan-surface"];
 const forbidden = /ignore-certificate|ignoreCertificate|acceptInsecureCerts|serverCertificateHashes|webtransport-developer|force-quic|origin-to-force-quic|autoplay-policy|disable-web-security/i;
 
+export async function runBounded(operation, milliseconds, onStop = () => {}) {
+  const token = { stopped: false };
+  let timer;
+  try {
+    return await Promise.race([Promise.resolve().then(() => operation(token)), new Promise((_, reject) => {
+      timer = setTimeout(() => { token.stopped = true; onStop(); reject(Error("Acceptance runner deadline exceeded")); }, milliseconds);
+    })]);
+  } catch (error) { token.stopped = true; onStop(); throw error; }
+  finally { clearTimeout(timer); }
+}
+
+export function verifyDocument(bytes, expected) {
+  assert.match(expected ?? "", /^[a-f0-9]{64}$/);
+  assert.equal(hash(bytes), expected, "Actual main navigation document differs from index.html manifest");
+}
+
+export function verifyPresentation(probe, renderer) {
+  assert(renderer && !renderer.unavailable && !renderer.overflow, "Renderer observation unavailable");
+  assert.deepEqual(renderer.errors, []);
+  const outgoing = renderer.outgoing ?? [];
+  assert(!outgoing.some(x => x.kind === "render-error"), "Actual renderer rejected presentation");
+  assert(!probe.messages.some(x => x.direction === "received" && x.kind === "play-completed-results" && (x.error || x.completedResults?.failed)), "Completed Results display failed");
+  const requests = probe.messages.filter(x => x.direction === "sent" && x.kind?.startsWith("play-results-"));
+  assert(requests.length > 0, "Results RPC not issued");
+  for (const request of requests) {
+    const reply = probe.messages.find(x => x.direction === "received" && x.kind === "play-reply" && x.playId === request.playId && x.rpcId === request.rpcId);
+    assert(reply && !reply.error && reply.result?.kind === "completed-results" && !reply.result.completedResults?.failed, "Results RPC missing or failed");
+  }
+  const result = renderer.packets.findLast(x => x.kind === 5);
+  assert(result, "Actual Results packet not delivered");
+  const same = value => value.generation === result.generation && value.content === result.content;
+  const room = renderer.packets.findLast(x => x.kind === 6 && same(x));
+  assert(room, "Combined room packet not delivered");
+  for (const packet of [result, room]) assert(outgoing.some(x => x.kind === "state-ack" && same(x) && x.packetKind === packet.kind && x.sequence === packet.sequence), "Matching Results/room acknowledgement missing");
+  assert(outgoing.some(x => x.kind === "drawn" && same(x) && x.mode === "results" && BigInt(x.sequence) >= BigInt(room.sequence)), "Matching combined Results draw missing");
+  assert(outgoing.some(x => x.kind === "geometry-ack" && same(x) && x.width > 0 && x.height > 0), "Matching positive geometry acknowledgement missing");
+  assert(probe.messages.some(x => x.direction === "received" && x.kind === "render-geometry" && same(x) && x.mode === "results" && x.width > 0 && x.height > 0), "Matching positive Main Results geometry missing");
+  return { generation: result.generation, content: result.content };
+}
+
 function observation() {
   const probe = globalThis.__roomPlayProbe = { messages: [], inputs: [], visibility: [], worklets: [], overflow: false };
   const append = (list, value) => { if (list.length >= 20000) probe.overflow = true; else list.push(value); };
@@ -70,7 +110,15 @@ function observation() {
 
 // Only reads production renderer port traffic; never writes, holds or dispatches.
 function rendererObservation() {
-  const probe = globalThis.__roomRenderProbe = { packets: [], errors: [], overflow: false };
+  const probe = globalThis.__roomRenderProbe = { packets: [], outgoing: [], errors: [], overflow: false };
+  const actualPost = MessagePort.prototype.postMessage;
+  MessagePort.prototype.postMessage = function(value, transfer) {
+    if (["state-ack", "drawn", "geometry-ack", "render-error"].includes(value?.kind)) {
+      if (probe.outgoing.length >= 20000) probe.overflow = true;
+      else probe.outgoing.push(JSON.parse(JSON.stringify(value, (_, item) => typeof item === "bigint" ? String(item) : item)));
+    }
+    return actualPost.call(this, value, transfer);
+  };
   const original = MessagePort.prototype.start, observed = new WeakSet();
   MessagePort.prototype.start = function() {
     if (!observed.has(this)) {
@@ -157,6 +205,7 @@ async function main() {
     assert(!stopping, "Acceptance deadline expired");
     const host = hosts[i];
     host.ownedCache = await mkdtemp("/dev/shm/beatkernel-room-play-");
+    if (stopping) { await rm(host.ownedCache, { recursive: true }); throw Error("Acceptance stopped before launch"); }
     let browser;
     try {
       browser = await puppeteer.launch({ executablePath: required("CHROMIUM"), headless: false, userDataDir: resolve(host.profile), env: { ...process.env, DISPLAY: host.display, XDG_DATA_HOME: resolve(host.xdgDataHome), XDG_CONFIG_HOME: resolve(host.xdgConfigHome) }, args: [...fixedFlags, `--disk-cache-dir=${host.ownedCache}`, "--disk-cache-size=16777216", `--log-net-log=${resolve(out, `network-${i}.json`)}`], timeout: 30000, protocolTimeout: 60000 });
@@ -194,7 +243,9 @@ async function main() {
     });
     await page.evaluateOnNewDocument(observation);
     await page.setViewport({ width: 1200, height: 1000 });
-    await page.goto(app.href, { waitUntil: "networkidle0", timeout: 60000 });
+    const navigation = await page.goto(app.href, { waitUntil: "networkidle0", timeout: 60000 });
+    assert(navigation && navigation.ok(), "Actual main navigation failed");
+    verifyDocument(await navigation.buffer(), manifest["app/web/index.html"]);
     await wait(page, () => !document.querySelector("#files").disabled, 60000);
     await Promise.all(page.pending);
     assert(await page.evaluate(() => crossOriginIsolated && isSecureContext && document.hasFocus() && !document.hidden));
@@ -241,6 +292,16 @@ async function main() {
     }
   }));
   await Promise.all(pages.map(page => wait(page, () => __roomPlayProbe.messages.some(x => x.kind === "play-stopped") && !document.querySelector("#play").disabled, 30000)));
+  await Promise.all(pages.map(async page => {
+    const renderer = page.observedWorkers.find(worker => worker.url().endsWith("/renderer-worker.js"));
+    assert(renderer, "Actual renderer missing");
+    const until = Date.now() + 20000;
+    for (;;) {
+      assert(!stopping, "Acceptance stopped awaiting Results presentation");
+      try { verifyPresentation(await page.evaluate(() => __roomPlayProbe), await renderer.evaluate(() => __roomRenderProbe)); break; }
+      catch (error) { if (Date.now() >= until) throw error; await delay(25); }
+    }
+  }));
   const results = await Promise.all(pages.map((page, index) => snapshot(page, index, "completed")));
   const terminals = results.map(record => {
     const probe = record.probe, received = probe.messages.filter(x => x.direction === "received");
@@ -273,10 +334,7 @@ async function main() {
     assert(received.some(x => x.kind === "play-room" && x.event?.kind === "score-pages" && x.event.pages === 1));
     const start = received.find(x => x.kind === "play-room" && x.event?.kind === "start");
     assert(!probe.visibility.some(x => x.at >= start.at && x.at <= terminal.at && (x.type === "blur" || x.hidden)));
-    const renderer = record.renderer[0]; assert(renderer && !renderer.unavailable && !renderer.overflow);
-    assert.deepEqual(renderer.errors, []);
-    const result = renderer.packets.find(x => x.kind === 5); assert(result, "No actual Results packet");
-    assert(renderer.packets.some(x => x.kind === 6 && x.generation === result.generation && x.content === result.content), "No actual combined room HUD/results");
+    verifyPresentation(probe, record.renderer[0]);
     return terminal;
   });
   for (let i = 0; i < 2; i++) {
@@ -291,20 +349,20 @@ async function main() {
   }
   for (const page of pages) await Promise.all(page.artifactReads);
   assert.deepEqual(evidence.errors, []);
-  evidence.passed = true;
 }
 
+async function execute() {
 await mkdir(out, { recursive: true });
-let deadline;
 try {
-  await Promise.race([main(), new Promise((_, reject) => { deadline = setTimeout(() => { stopping = true; reject(Error("Actual two-host acceptance exceeded 240-second runner deadline")); }, 240000); })]);
+  await runBounded(main, 240000, () => { stopping = true; });
+  assert(!stopping && !evidence.failure);
+  evidence.passed = true;
 }
 catch (error) {
   evidence.failure = { message: String(error), stack: error.stack };
   for (let i = 0; i < pages.length; i++) await snapshot(pages[i], i, "failure").catch(error => evidence.errors.push({ kind: "failure-snapshot", error: String(error) }));
 } finally {
   stopping = true;
-  clearTimeout(deadline);
   for (const browser of browsers) {
     const child = browser.process();
     let closeError = null;
@@ -325,3 +383,5 @@ catch (error) {
   console.log(JSON.stringify({ passed: evidence.passed, failure: evidence.failure, cleanup: evidence.cleanup, output: out }));
   if (!evidence.passed) process.exitCode = 1;
 }
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await execute();
