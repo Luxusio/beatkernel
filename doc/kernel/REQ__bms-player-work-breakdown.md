@@ -335,6 +335,16 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 
 기능 연결: BK-011, BK-018, BK-021, BK-035, BK-055, BK-056, BK-057. 요구: plan §§16–17, 24; runtime-benchmark / acceptance-evidence.
 
+2026-10-10 입력 수집 종료 추가 개발 검증: 정상 worker 종료와 최종 FIFO 소진을
+구분하여 마지막 이벤트/cut 및 startup 보관 입력의 조기 종료를 수정했다.
+실제 collector/startup 그룹 18개와 실제 collector→solo/cohort pump→판정/기록을
+연결한 오디오 그룹 41개가 통과했다. 1~4인, marker 용량·소스/정리 오류,
+관측 시계 부족·stale·취소를 포함한다. 독립 DEEP 코드/권한 경계 검토와 CLI QA도
+PASS이며, 전체 app 2257/0/6·native main 307/0/5 및 실제 CLI 7/7을 확인했다.
+native 관측은 주입된 software 증거다. 13.04의 전체 장애 범위는 W로 유지한다.
+근거와 재현 명령은 [검증 지침](../verification/GUIDE__runtime-fault-schedules.md)의
+Native collector termination 절에 있다.
+
 - [x] **BK-WBS-13.01** seeded property/corpus가 시간·codec·compiler·replay 기준 결과와 일치한다. — 상태=D(검증완료); 선행=-; 근거=E0; 장기 fuzz 완료와 구별.
 - [ ] **BK-WBS-13.02** 모든 layer의 pure test port와 실제 adapter contract test를 coverage map으로 연결한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=UI/business/native IO 의존성·경계 표.
 - [ ] **BK-WBS-13.03** parser/compiler/input/replay/room codec에 지속 fuzz·corpus/minimization을 구축한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=REQ__layer-fuzz의 실제 sanitizer campaign·재현 artifact·minimization·오탐 방지 및 외부 지속 CI 실행.

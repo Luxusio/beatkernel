@@ -67,3 +67,24 @@ bounded overflow, cancellation, panic/error/cleanup and startup handoff. Native
 adapter fixtures and supported-host source checks supplement shared tests.
 Mock or foreign stub execution never establishes native hardware correctness,
 physical latency, scheduler guarantees or best-in-world performance.
+
+## Successful termination and final delivery
+
+Successful worker termination does not prove that the transport FIFO is empty.
+Every final event and completed-drain marker must be delivered before the
+consumer reports exhausted closure. A drain returning any FIFO record, or
+retaining transport backlog, reports `closed=false`; only a successful terminal
+drain with no records and no backlog reports `closed=true`. A zero-item budget
+cannot declare closure while transport backlog remains.
+
+The startup handoff follows the same rule for retained events and completion
+evidence: transferring either keeps that acquisition open even when the
+collector itself is already exhausted. The next empty acquisition can close.
+Original metadata and cuts are delivered exactly once and never retimestamped.
+
+This does not change immediate abort semantics of a native adapter's explicit
+`InputBatch.closed`, or turn EOF into successful song completion. Fatal source,
+capacity, panic and cleanup errors remain immediately visible. Missing or stale
+audio observations at EOF cannot manufacture a mapping, acquired frontier,
+judgment or completion; the owner performs only bounded final delivery and
+exits incomplete when the next acquisition is exhausted.

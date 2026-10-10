@@ -1,5 +1,73 @@
 # Deterministic Runtime fault schedules
 
+## Native collector termination across player boundaries
+
+The [native collector contract](../kernel/REQ__native-input-collector.md)
+distinguishes successful worker termination from exhausted final delivery.
+Exercise the actual spawned worker and startup input handoff before using
+scripted pump clocks as evidence. Join the worker or acknowledge a source
+channel fence to establish the schedule; elapsed sleeps do not prove ordering.
+
+On 2026-10-10, three pre-fix regressions failed: the collector reported closure
+with queued final records, and the startup bridge reported closure while
+transferring a retained event or completion marker. Shared collector/bridge
+qualification corrected those cases. The focused development run passed 18
+tests, including source/cleanup/panic/capacity failures and cancellation.
+These development results were subsequently checked by independent DEEP code
+review, security review and CLI QA; all three returned PASS.
+
+```sh
+cargo test -p beatkernel-bms-runtime --features desktop,webtransport --lib --locked -- \
+  --test-threads=1 native_input_fixtures native_gameplay::fixtures::startup \
+  native_gameplay::fixtures::same_collector
+```
+
+Fixture files included into another module do not create a module named after
+the file. Use the test-name filters above; the filter `native_input_gameplay`
+matches zero tests and does not establish acceptance.
+
+Preserve literal original metadata and the event/marker split with a one-item
+budget. After final nonempty delivery, the next empty drain can close; EOF
+cannot create audio mapping, acquisition evidence or successful completion.
+Actual solo/cohort campaigns must connect this collector and handoff to the
+existing merger, audio authority, Runtime and capture rather than repeat pure
+clock tests. WBS13.04 remains open for the broader fault matrix.
+
+Development logs: `target/wf/player-input-clock-fault-schedules/ac001-red.log`
+and `ac001-green.log` (ignored and machine-local).
+
+The connected `native_audio_authority` development group subsequently passed
+41 tests, including five new collector campaigns. They use the actual spawned
+collector and startup bridge with the existing solo/cohort pumps, InputMerger,
+AudioAuthority, Runtime, Mixer and capture. Native presentation observations
+are supplied by the fixture; this is software integration evidence.
+
+The campaigns cover whole and one-item final FIFO delivery, two through four
+members with literal player/source IDs and exactly-once capture, missing/single
+and stale audio relations, a full final-marker queue, source and cleanup
+failure after a committed input, and cancellation with worker close/drop/join.
+Input HOST 10ms retains song time 20ms; the valid final source cut HOST 20ms
+arrives at receipt HOST 20ms, so the existing 10ms acquisition lag remains
+effective. EOF does not supply later clock evidence to force admission.
+
+```sh
+cargo test -p beatkernel-bms-runtime --features desktop,webtransport --lib --locked \
+  native_audio_authority -- --test-threads=1
+```
+
+The first connected run was 40 passed/one test-oracle failure: the cohort
+asserted a solo-specific policy preparation record. The corrected fixture
+checks literal IDs on actual published hit rows while preserving duplicate
+counts and per-player event/capture assertions. Final development evidence:
+`target/wf/player-input-clock-fault-schedules/ac002-fixed-development.log`.
+Independent QA on source `bd8f881` ran the complete app library (2257 passed,
+zero failed, six ignored) and native main binary tests (307 passed, zero failed,
+five ignored). Production main/Linux builds and seven direct CLI cases passed;
+offline rendering produced exactly 1000 mono zero frames, 4000 bytes. The five
+changed Rust files passed Rust 2021 formatting and base-to-final whitespace
+checks. Final QA logs are under `target/wf/qa-cli-input-eof-01a12318-1/`.
+The wider WBS13.04 fault matrix and physical acceptance remain pending.
+
 ## Connected player network and UI campaigns
 
 The [player fault isolation contract](../runtime/REQ__player-fault-isolation.md)
