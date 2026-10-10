@@ -18,6 +18,16 @@ candidate exclusion applies on every target; it does not rewrite the caller's
 final filename. This avoids relying on case-sensitive filesystems or generated
 Windows short-name aliases. Native Windows execution remains separate evidence.
 
+The exact generated staging namespace (eight ASCII hexadecimal digits, a dot,
+three hexadecimal digits) and its conservative native aliases are reserved.
+Requests to publish a final basename in that namespace must return
+`io::ErrorKind::InvalidInput` before filesystem effects. This keeps every
+accepted final name disjoint from all concurrent publishers' stages, including
+after refused cleanup. Normal `.bkr` and `.bkresult` names and other native
+basenames remain accepted. This internal filename reservation also applies to
+the native replay and generic result-store adapters; existing reserved-name
+files remain untouched.
+
 Cleanup owns only a successfully created stage and closes its handle first.
 It preserves the exact primary IO error. Cleanup after successful publication
 is best effort and cannot turn a committed complete file into a refusal; the

@@ -168,6 +168,73 @@ fn invalid_store_keys_refuse_without_filesystem_effects() {
 }
 
 #[test]
+fn public_store_rejects_otherwise_valid_staging_namespace_keys_before_effects() {
+    let directory = Directory::new();
+    let mut store = NativeResultArchiveStore::new(directory.0.clone());
+    let archive = whole(1);
+    let bytes = encode_archive(&archive).unwrap();
+    // Each is a portable single component accepted by the store's key syntax.
+    // The native publication boundary must reserve the internal staging names.
+    for key in [
+        "01234567.89A",
+        "ABCDEF01.234",
+        "abcdef01.234",
+        "00000000.000",
+    ] {
+        assert_eq!(
+            store.create_new(key, &bytes).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput,
+            "key {key:?}"
+        );
+        let error = save_archive(&mut store, key, &archive).unwrap_err();
+        match error {
+            crate::result_archive_store::ArchiveStoreError::Storage(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            }
+            other => panic!("expected native publication refusal, got {other:?}"),
+        }
+        assert!(directory.names().is_empty());
+    }
+    let regular_key = "ABCDEF01.bkresult";
+    assert_eq!(
+        save_archive(&mut store, regular_key, &archive).unwrap(),
+        bytes.len()
+    );
+    assert_eq!(std::fs::read(directory.0.join(regular_key)).unwrap(), bytes);
+    assert_eq!(load_archive(&mut store, regular_key).unwrap(), archive);
+    assert_eq!(directory.names(), [std::ffi::OsString::from(regular_key)]);
+}
+
+#[test]
+fn public_store_reserved_name_refusal_preserves_existing_foreign_file() {
+    let directory = Directory::new();
+    let key = "ABCDEF01.234";
+    let path = directory.0.join(key);
+    std::fs::write(&path, b"foreign staging namespace owner").unwrap();
+    let before = directory.names();
+    let mut store = NativeResultArchiveStore::new(directory.0.clone());
+    let archive = whole(2);
+    assert_eq!(
+        store
+            .create_new(key, &encode_archive(&archive).unwrap())
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    match save_archive(&mut store, key, &archive).unwrap_err() {
+        crate::result_archive_store::ArchiveStoreError::Storage(error) => {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+        other => panic!("expected native publication refusal, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        b"foreign staging namespace owner"
+    );
+    assert_eq!(directory.names(), before);
+}
+
+#[test]
 fn solo_sidecar_is_exact_canonical_archive_and_exclusive() {
     let directory = Directory::new();
     let base = directory.0.join("solo.take.bkr");

@@ -519,6 +519,57 @@ fn replay_save_existing_directory_is_preserved_and_owned_stage_is_cleaned() {
     assert_only_entry(&directory, &target);
 }
 
+#[test]
+fn replay_save_rejects_reserved_staging_names_and_native_aliases_without_effects() {
+    let directory = TempDirectory::new();
+    for name in [
+        "0123ABCD.0EF",
+        "0123abcd.0ef",
+        " 0123ABCD.0EF",
+        "0123ABCD.0EF. ",
+        "0123ABCD.0EF:stream",
+    ] {
+        let path = directory.0.join(name);
+        assert!(
+            matches!(
+                capture_prefix(1, limits(1 << 20, 100)).save_new(&path),
+                Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+            ),
+            "reserved basename {name:?}"
+        );
+        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn replay_save_reserved_name_validation_precedes_missing_parent_io() {
+    let directory = TempDirectory::new();
+    let missing_parent = directory.0.join("missing");
+    let path = missing_parent.join("0123ABCD.0EF");
+    assert!(matches!(
+        capture_prefix(1, limits(1 << 20, 100)).save_new(&path),
+        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+    ));
+    assert!(!missing_parent.exists());
+    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 0);
+}
+
+#[test]
+fn replay_save_reserved_existing_foreign_file_is_untouched() {
+    let directory = TempDirectory::new();
+    let path = directory.0.join("0123ABCD.0EF");
+    fs::write(&path, b"foreign staging namespace occupant").unwrap();
+    assert!(matches!(
+        capture_prefix(1, limits(1 << 20, 100)).save_new(&path),
+        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+    ));
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"foreign staging namespace occupant"
+    );
+    assert_only_entry(&directory, &path);
+}
+
 #[cfg(unix)]
 #[test]
 fn replay_save_never_replaces_dangling_symlink_or_creates_its_target() {

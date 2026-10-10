@@ -76,6 +76,7 @@ impl NativeResultArchiveStore {
 impl ResultArchiveStoragePort for NativeResultArchiveStore {
     type Error = io::Error;
     /// Publishes a complete synced file exclusively; staging cleanup is best effort.
+    /// Hexadecimal 8.3 staging names and aliases fail with `InvalidInput` before I/O.
     fn create_new(&mut self, key: &str, bytes: &[u8]) -> io::Result<()> {
         let path = self.path(key)?;
         crate::native_publication::publish_new(&path, bytes)

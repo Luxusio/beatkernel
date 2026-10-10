@@ -10,6 +10,12 @@ defines ownership, original-error precedence, best-effort cleanup and remaining
 durability limits. This supersedes the old partial-file guarantee; implementation
 and independent verification are currently in progress, not completed evidence.
 
+The native adapter reserves hexadecimal 8.3 staging basenames and their native
+aliases. Saving to that exact internal namespace returns `CaptureError::Io`
+with `InvalidInput` before filesystem effects; normal `.bkr` and other native
+filenames remain accepted. Reserving this namespace prevents another concurrent
+publication from creating a partial file at an accepted replay destination.
+
 The portable finite stepped live owner must install the existing core logical
 endpoint before processing. Capture uses its immutable original start/end and
 chart seed, recording actual capped reports in the section-aware format. Input

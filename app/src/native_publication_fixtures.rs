@@ -669,3 +669,173 @@ fn failed_stage_create_never_claims_cleanup_ownership() {
     assert_eq!(fs::read(&foreign).unwrap(), b"foreign original");
     assert_eq!(dir.names(), vec![foreign]);
 }
+
+#[test]
+fn reserved_final_names_and_native_aliases_are_rejected_before_any_effect() {
+    let dir = TempDir::new();
+    let aliases = [
+        "1234ABCD.0EF",
+        "1234abcd.0ef",
+        "1234ABCD.0EF.",
+        "1234ABCD.0EF ",
+        " 1234ABCD.0EF",
+        " 1234abcd.0ef.  ",
+        "1234ABCD.0EF::$DATA",
+        "1234ABCD.0EF:stream:$DATA",
+    ];
+    for existing in [false, true] {
+        let foreign = dir.path("1234ABCD.0EF");
+        if existing {
+            fs::write(&foreign, b"foreign original").unwrap();
+        }
+        for alias in aliases {
+            let mut candidate_calls = 0;
+            let mut wrap_calls = 0;
+            let mut cleanup_calls = 0;
+            let error = publish_new_with_candidates_and_cleanup(
+                &dir.path(alias),
+                b"new complete value",
+                |file| {
+                    wrap_calls += 1;
+                    file
+                },
+                || {
+                    candidate_calls += 1;
+                    Ok(dir.path("controlled-stage"))
+                },
+                |_| {
+                    cleanup_calls += 1;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{alias:?}");
+            assert_eq!((candidate_calls, wrap_calls, cleanup_calls), (0, 0, 0));
+            if existing {
+                assert_eq!(fs::read(&foreign).unwrap(), b"foreign original");
+                assert_eq!(dir.names(), vec![foreign.clone()]);
+            } else {
+                assert!(dir.names().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn another_requested_final_cannot_accept_an_incomplete_reserved_stage() {
+    let dir = TempDir::new();
+    let stage = dir.path("1234ABCD.0EF");
+    let final_path = dir.path("first-result");
+    let observed = Arc::new(Mutex::new(Observation::default()));
+    let mut second_candidate_calls = 0;
+    let mut second_wrap_calls = 0;
+    let mut second_cleanup_calls = 0;
+    let mut first_cleanup_calls = 0;
+    let error = publish_new_with_candidates_and_cleanup(
+        &final_path,
+        b"abcdefgh",
+        |file| FaultWriter {
+            file: Some(file),
+            stage: stage.clone(),
+            final_path: final_path.clone(),
+            fault: Fault::PartialCapacity,
+            written: 0,
+            calls: 0,
+            observed: Arc::clone(&observed),
+        },
+        || Ok(stage.clone()),
+        |owned_stage| {
+            first_cleanup_calls += 1;
+            assert_closed_before_cleanup(&observed.lock().unwrap());
+            assert_eq!(fs::read(owned_stage).unwrap(), b"abc");
+            let second_error = publish_new_with_candidates_and_cleanup(
+                &stage,
+                b"second complete value",
+                |file| {
+                    second_wrap_calls += 1;
+                    file
+                },
+                || {
+                    second_candidate_calls += 1;
+                    Ok(dir.path("second-stage"))
+                },
+                |_| {
+                    second_cleanup_calls += 1;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(second_error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(fs::read(owned_stage).unwrap(), b"abc");
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "fixture cleanup refusal",
+            ))
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(28));
+    assert_eq!(first_cleanup_calls, 1);
+    assert_eq!(
+        (
+            second_candidate_calls,
+            second_wrap_calls,
+            second_cleanup_calls
+        ),
+        (0, 0, 0)
+    );
+    assert!(!final_path.exists());
+    assert_eq!(fs::read(&stage).unwrap(), b"abc");
+    assert_eq!(dir.names(), vec![stage]);
+}
+
+#[test]
+fn concurrent_distinct_nonreserved_finals_each_publish_complete_bytes() {
+    let dir = TempDir::new();
+    let paths = [dir.path("first-result"), dir.path("second-result")];
+    let payloads = [vec![0x27; 8193], vec![0xa4; 12289]];
+    let barrier = Arc::new(Barrier::new(2));
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = paths
+            .iter()
+            .zip(&payloads)
+            .map(|(path, bytes)| {
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    publish_new_with(path, bytes, |file| BarrierWriter { file, barrier })
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+    });
+    for (path, bytes) in paths.iter().zip(&payloads) {
+        assert_eq!(fs::read(path).unwrap(), *bytes);
+    }
+    let mut expected = paths.to_vec();
+    expected.sort();
+    assert_eq!(dir.names(), expected);
+}
+
+#[test]
+fn nonreserved_alias_candidates_still_refuse_before_creating_or_wrapping() {
+    let dir = TempDir::new();
+    let final_path = dir.path("record");
+    for candidate in ["RECORD", " record", "record.", "record ", "record::$DATA"] {
+        let mut wrapped = false;
+        let error = publish_new_with_candidates(
+            &final_path,
+            b"bytes",
+            |file| {
+                wrapped = true;
+                file
+            },
+            || Ok(dir.path(candidate)),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(!wrapped);
+        assert!(dir.names().is_empty());
+    }
+}

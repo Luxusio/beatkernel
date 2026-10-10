@@ -32,6 +32,21 @@ against Microsoft's [file naming rules](https://learn.microsoft.com/en-us/window
 [8.3 format](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/18e63b13-ba43-4f5f-a5b7-11e871b71f14)
 and [space/period normalization](https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/file-folder-name-whitespace-characters).
 
+The first formal code review found a distinct-destination namespace overlap:
+one accepted final basename could be another publisher's stage. A standalone
+probe using the actual production generator and two publishers reproduced
+three partial bytes at the other requested final before either commit, followed
+by `AlreadyExists` and normal staging cleanup. The correction reserves exactly
+the generated hexadecimal 8.3 namespace and its native aliases, returning
+`InvalidInput` before filesystem effects; ordinary `.bkr` and `.bkresult`
+destinations remain accepted. The corrected helper's 25 tests pass when compiled
+directly with `rustc --test app/src/native_publication.rs`, demonstrating its
+standalone native-IO boundary. The corrected app library `publication` filter
+with `desktop,webtransport` also passes 121 tests, including the 25 helper and
+13 archive consumer tests. Corrected public replay integration with
+`--no-default-features` passes 17 tests. Fresh independent review/QA remain
+pending; development checks do not establish task completion.
+
 ## Known ceiling
 
 - Known ceiling: cleanup refusal may retain an owned staging file — upgrade when

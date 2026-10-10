@@ -74,6 +74,22 @@ pub(crate) fn publish_new_with_candidates_and_cleanup<W: PublicationWriter>(
     mut candidate: impl FnMut() -> io::Result<PathBuf>,
     cleanup: impl FnMut(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
+    if let Some(name) = path.file_name() {
+        let name = name.to_string_lossy();
+        let bytes = normalized_basename(&name).as_bytes();
+        if bytes.len() == 12
+            && bytes[8] == b'.'
+            && bytes[..8]
+                .iter()
+                .chain(&bytes[9..])
+                .all(u8::is_ascii_hexdigit)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "publication filename is reserved for staging",
+            ));
+        }
+    }
     let (file, stage) = create_stage(
         &mut || {
             let stage = candidate()?;
@@ -110,21 +126,17 @@ fn stage_aliases_final(stage: &Path, final_path: &Path) -> bool {
     };
     let stage = stage.to_string_lossy();
     let final_name = final_name.to_string_lossy();
+    normalized_basename(&stage).eq_ignore_ascii_case(normalized_basename(&final_name))
+}
+
+fn normalized_basename(name: &str) -> &str {
     // Conservative on every host: case-insensitive filesystems also occur on
     // Unix, and Windows normalizes spaces/dots and permits data-stream aliases.
-    let stage = stage
-        .split(':')
+    name.split(':')
         .next()
         .unwrap_or_default()
         .trim_start_matches(' ')
-        .trim_end_matches([' ', '.']);
-    let base = final_name
-        .split(':')
-        .next()
-        .unwrap_or_default()
-        .trim_start_matches(' ')
-        .trim_end_matches([' ', '.']);
-    stage.eq_ignore_ascii_case(base)
+        .trim_end_matches([' ', '.'])
 }
 
 struct OwnedStage<C: FnMut(&Path) -> io::Result<()>> {
