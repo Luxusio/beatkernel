@@ -134,7 +134,7 @@ impl AssetSource for CountingSource<'_> {
 }
 
 #[test]
-fn resolved_audio_aliases_decode_once_but_keep_distinct_owned_expanded_pcm_and_sample_ids() {
+fn resolved_audio_aliases_decode_once_share_immutable_expanded_pcm_and_keep_distinct_sample_ids() {
     let chart = "#BPM 120\n#WAV01 音.WAV\n#WAV02 音.WAV\n#WAV03 ./音.WAV\n#WAV04 音.ogg\n#00011:0102\n#00012:03\n#00001:04\n";
     let mut files = selected(chart.as_bytes());
     files
@@ -167,8 +167,26 @@ fn resolved_audio_aliases_decode_once_but_keep_distinct_owned_expanded_pcm_and_s
         assert_eq!(sample.format(), AudioFormat::new(24_000, 2).unwrap());
         assert_eq!(sample.frames(), 3);
         assert_eq!(sample.samples(), &[0.0, 0.0, 0.5, 0.5, -0.5, -0.5]);
-        assert!(!pointers.contains(&sample.samples().as_ptr()));
+        if let Some(&first) = pointers.first() {
+            assert_eq!(sample.samples().as_ptr(), first);
+        }
         pointers.push(sample.samples().as_ptr());
+    }
+    let mut extracted = prepared
+        .bank
+        .get(SampleId(1))
+        .unwrap()
+        .try_share(pcm_limits())
+        .unwrap()
+        .try_into_samples()
+        .unwrap();
+    assert_ne!(extracted.as_ptr(), pointers[0]);
+    extracted[0] = 42.0;
+    extracted[2] = -7.0;
+    for id in 1..=4 {
+        let sample = prepared.bank.get(SampleId(id)).unwrap();
+        assert_eq!(sample.samples(), &[0.0, 0.0, 0.5, 0.5, -0.5, -0.5]);
+        assert_eq!(sample.samples().as_ptr(), pointers[0]);
     }
     let sounded: std::collections::BTreeSet<_> =
         prepared.sounds.iter().map(|sound| sound.sample).collect();
