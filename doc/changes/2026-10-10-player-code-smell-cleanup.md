@@ -79,7 +79,41 @@ tests, including two new connected selection/admission tests. These are
 development regressions; fresh formal review and real-browser acceptance
 remain required for the changed JavaScript.
 
-Full browser/native journeys and independent live UX are not yet complete.
+Fresh DEEP review and CLI delta QA returned PASS for 04719ef. The CLI lens ran
+seven adapter tests, all 56 actual Worker tests and 18 independent cases using
+the actual Window keyboard handler. Unchanged Rust, native binary and WASM
+retain the earlier executed evidence; no foreign hardware claim follows.
+
+Actual native Display QA and independent same-window UX returned scoped PASS.
+They exercised edit/cancel, invalid-value recovery, Done versus separate Apply,
+Back/reentry and 800x600/960x720 resize. Artifacts are local under
+target/wf/player-cleanup-qa-desktop and target/wf/player-cleanup-ux-desktop.
+No physical IME or isolated clipboard proof was available. The UX reviewer
+retains small bitmap-label readability at fractional 800x600 scaling as backlog.
+
+The next actual browser runner completed all ten steps, including trusted
+catalog keyboard navigation and pending-page retirement, with PASS evidence
+under target/wf/player-cleanup-qa-browser-retry2. Its HTTP diagnostic identifies
+the resource 404 as favicon.ico; no page error occurred. Owned browser, Xvfb
+and server were cleaned up. Independent browser QA inspected all nine captures.
+Independent browser UX also inspected pending/error captures and interacted
+with the actual catalog: ArrowUp changed selection and revision, and resize
+exposed existing 390px-width overflow (document width 429px). Its scoped UX
+verdict passed catalog/navigation/feedback; it did not independently replay
+the whole loading journey.
+
+The separate shared UX wrapper reached its 150-second hold deadline and records
+FAIL for that deadline; this does not replace the original committed-runner
+PASS. The invalid-rate follow-up was unexecuted after a Puppeteer chord syntax
+error and CDP disconnection at the deadline. Its remaining polling continuation
+was terminated as an owned Node process (exit 143) after browser/Xvfb/server
+cleanup. No timeout result or cleanup failure was relabeled as PASS.
+
+Remaining UX backlog includes narrow-screen overflow, long settings-heavy
+flow, preparation feedback distant from the primary action, catalog wording
+and no preparation Cancel action. Loading responsiveness/cancellation and
+measurements remain in the queued loading task; this child claims no full UX
+or performance completion.
 Ordered hook attestation and task closure are not claimed. WBS remains 90/193.
 
 ## Known ceiling
