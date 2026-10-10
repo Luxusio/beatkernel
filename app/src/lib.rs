@@ -11,6 +11,8 @@ pub mod browser_library_assets;
 #[cfg(test)]
 mod asset_source_fixtures;
 mod audio_assets;
+/// Owned cooperative chart preparation and bounded immutable original reuse.
+pub mod preparation;
 /// Shared finite audio-output authority and original acquired-input correspondence.
 pub mod audio_authority;
 /// Prepared original-song image selections shared by live and replay presentation.
@@ -564,12 +566,11 @@ mod vorbis_fixture;
 
 use beatkernel::replay::codec::{encode_replay, ReplayCodecLimits, ReplayFile};
 use beatkernel::{
-    audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, VoiceId},
-    judge::JudgeStage,
+    audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank},
     runtime::SoundBinding,
 };
-use beatkernel_bms::{parse_seeded, BmsChart, CompiledBms, ParseOptions};
-use std::{collections::BTreeMap, error::Error, path::Path};
+use beatkernel_bms::{BmsChart, CompiledBms, ParseOptions};
+use std::{error::Error, path::Path};
 
 /// Default original PCM sample capacity for the complete two-digit base62 namespace.
 pub const DEFAULT_BMS_PCM_SAMPLES: usize = 62 * 62;
@@ -805,7 +806,8 @@ fn prepare_seeded(
 /// validates mine timing/capacity before acquiring visible/BGM/invisible resources
 /// and optional WAV00. Gameplay owners install the same original mine timeline.
 /// Equal resolved keys reuse decoding within this call; source bytes and the
-/// decoder must remain stable during preparation. Each sample ID owns its PCM.
+/// decoder must remain stable during preparation. Sample IDs retain independent
+/// logical admission limits while immutable PCM payloads may be shared.
 pub fn prepare_from_source(
     chart_bytes: &[u8],
     assets: &dyn asset_source::AssetSource,
@@ -817,89 +819,17 @@ pub fn prepare_from_source(
     seed: u64,
     replay: Option<(&ReplayFile, ReplayCodecLimits)>,
 ) -> Result<PreparedBms, Box<dyn Error>> {
-    let options = ParseOptions::default();
-    let text = chart_text::decode_chart_text(
+    preparation::prepare_uncached(
         chart_bytes,
-        chart_text::ChartTextEncoding::Auto,
-        options.max_bytes,
-    )?;
-    let source = parse_seeded(&text, options, seed)?;
-    let wav_gain = source.wav_gain()?;
-    let invisible = if source.invisible.is_empty() {
-        Vec::new()
-    } else {
-        source.compile_invisible()?
-    };
-    if let Some((file, limits)) = replay {
-        replay_playback::validate_section_setup(&source, file, limits)?;
-    }
-    let compiled = source.compile()?;
-    let referenced =
-        audio_assets::referenced_samples(&source, &compiled, &invisible, pcm_limits.max_samples())?;
-    let bank = audio_assets::load_bank(
-        &source,
-        &referenced,
         assets,
         format,
         pcm_limits,
         channels,
         decoder,
         paths,
-    )?;
-
-    let objects: BTreeMap<_, _> = compiled
-        .chart
-        .objects()
-        .iter()
-        .map(|object| (object.id, object))
-        .collect();
-    let mut sounds = Vec::new();
-    sounds.try_reserve_exact(source.notes.len())?;
-    for note in &source.notes {
-        let object = objects
-            .get(&note.object)
-            .ok_or("note has no compiled object")?;
-        sounds.push(SoundBinding {
-            object: note.object,
-            stage: if object.time.end.is_some() {
-                JudgeStage::HoldHead
-            } else {
-                JudgeStage::Instant
-            },
-            sample: note.sample,
-            voice: VoiceId(note.object.0),
-            gain: wav_gain,
-        });
-    }
-    let mut bgm_commands = Vec::new();
-    bgm_commands.try_reserve_exact(compiled.bgm.len())?;
-    if !compiled.bgm.is_empty() {
-        let first_voice = objects
-            .keys()
-            .map(|id| id.0)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or("BGM voice identity overflow")?;
-        for (index, event) in compiled.bgm.iter().enumerate() {
-            let voice = first_voice
-                .checked_add(u64::try_from(index)?)
-                .ok_or("BGM voice identity overflow")?;
-            bgm_commands.push(AudioCommand::Play {
-                voice: VoiceId(voice),
-                sample: event.sample,
-                at: event.at,
-                gain: wav_gain,
-            });
-        }
-    }
-    Ok(PreparedBms {
-        source,
-        compiled,
-        bank,
-        sounds,
-        bgm_commands,
-    })
+        seed,
+        replay,
+    )
 }
 
 fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, Box<dyn Error>> {

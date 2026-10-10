@@ -438,169 +438,15 @@ impl ImageAssets {
         limits: ImageAssetLimits,
         plan: ImagePlan,
     ) -> Result<Self, String> {
-        let ImagePlan {
-            explicit_canvas,
-            canvas,
-            canvas_bytes,
-            references,
-            sources,
-        } = plan;
-        let mut bank = Self::default();
-        let mut cache = BTreeMap::<PathBuf, Cached>::new();
-        for &id in &sources {
-            let Some(name) = chart.images.get(&id) else {
-                bank.unavailable.insert(id, ImageUnavailable::Undefined);
-                continue;
-            };
-            if crate::video_assets::is_movie_name(name) {
-                bank.unavailable.insert(id, ImageUnavailable::Unsupported);
-                continue;
-            }
-            let path = match source.resolve(name, AssetPathPolicy::ImageVariants) {
-                Ok(path) => path,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    bank.unavailable.insert(id, ImageUnavailable::Missing);
-                    continue;
-                }
-                Err(e) => return Err(format!("image {} path {name}: {e}", id.0)),
-            };
-            let resource = if let Some(resource) = cache.get(&path) {
-                resource.clone()
-            } else {
-                let encoded = match source.read(&path, limits.decode.max_encoded_bytes) {
-                    Ok(encoded) => encoded,
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                        bank.unavailable.insert(id, ImageUnavailable::Missing);
-                        continue;
-                    }
-                    Err(e) => return Err(format!("image read {}: {e}", path.display())),
-                };
-                if encoded.len() > limits.decode.max_encoded_bytes {
-                    return Err("encoded image file exceeds limit".into());
-                }
-                let resource = match decode(&encoded, limits.decode) {
-                    Ok(image) => {
-                        let total = bank
-                            .decoded_bytes
-                            .checked_add(image.byte_len())
-                            .filter(|total| *total <= limits.max_decoded_bytes)
-                            .ok_or("image bank byte budget exceeded")?;
-                        bank.decoded_bytes = total;
-                        bank.unique_images += 1;
-                        Cached::Loaded(Arc::new(image))
-                    }
-                    Err(ImageDecodeError::Unsupported) => {
-                        Cached::Unavailable(ImageUnavailable::Unsupported)
-                    }
-                    Err(ImageDecodeError::InvalidData(e)) => {
-                        Cached::Unavailable(ImageUnavailable::InvalidData(e))
-                    }
-                    Err(ImageDecodeError::Limit(e)) => return Err(e),
-                };
-                cache.insert(path, resource.clone());
-                resource
-            };
-            match resource {
-                Cached::Loaded(image) => {
-                    bank.images.insert(id, image);
-                }
-                Cached::Unavailable(reason) => {
-                    bank.unavailable.insert(id, reason);
-                }
+        let mut job = ImagePreparationJob::from_plan(chart, limits, plan);
+        loop {
+            if let Some(bank) = job.advance(source, &mut |_| Ok(()))? {
+                return Ok(bank);
             }
         }
-        bank.sources
-            .try_reserve_exact(bank.unique_images)
-            .map_err(|e| e.to_string())?;
-        bank.sources
-            .extend(cache.into_values().filter_map(|resource| match resource {
-                Cached::Loaded(image) => Some(image),
-                Cached::Unavailable(_) => None,
-            }));
-        let originals = std::mem::take(&mut bank.images);
-        bank.source_ids.extend(
-            sources
-                .into_iter()
-                .map(|id| (id, originals.get(&id).cloned())),
-        );
-        let unavailable = std::mem::take(&mut bank.unavailable);
-        let mut variants: Vec<(Arc<RgbaImage>, [i32; 4], [i32; 2], Arc<RgbaImage>)> = Vec::new();
-        variants
-            .try_reserve_exact(references.len())
-            .map_err(|e| e.to_string())?;
-        for id in references {
-            let crop = chart.bga_crops.get(&id);
-            let source = crop.map_or(id, |crop| crop.source);
-            let Some(original) = originals.get(&source) else {
-                bank.unavailable.insert(
-                    id,
-                    unavailable
-                        .get(&source)
-                        .cloned()
-                        .unwrap_or(ImageUnavailable::Undefined),
-                );
-                continue;
-            };
-            let transform = if let Some(crop) = crop {
-                Some(*crop)
-            } else if explicit_canvas.is_some() && [original.width(), original.height()] != canvas {
-                Some(BgaCrop {
-                    source,
-                    source_rect: [
-                        0,
-                        0,
-                        i32::try_from(original.width())
-                            .map_err(|_| "canvas source width overflow")?,
-                        i32::try_from(original.height())
-                            .map_err(|_| "canvas source height overflow")?,
-                    ],
-                    destination: [0, 0],
-                })
-            } else {
-                None
-            };
-            let image = if let Some(crop) = transform {
-                if let Some((_, _, _, image)) =
-                    variants.iter().find(|(raw, rect, destination, _)| {
-                        Arc::ptr_eq(raw, original)
-                            && *rect == crop.source_rect
-                            && *destination == crop.destination
-                    })
-                {
-                    Arc::clone(image)
-                } else {
-                    let total = bank
-                        .decoded_bytes
-                        .checked_add(canvas_bytes)
-                        .filter(|total| *total <= limits.max_decoded_bytes)
-                        .ok_or("image bank crop byte budget exceeded")?;
-                    let image = crop_canvas_sized(original, crop, canvas)?;
-                    bank.decoded_bytes = total;
-                    variants.push((
-                        Arc::clone(original),
-                        crop.source_rect,
-                        crop.destination,
-                        Arc::clone(&image),
-                    ));
-                    image
-                }
-            } else {
-                Arc::clone(original)
-            };
-            bank.images.insert(id, image);
-        }
-        let layer_ids = chart
-            .bga
-            .iter()
-            .filter(|event| matches!(event.channel, BgaChannel::Layer | BgaChannel::Layer2))
-            .map(|event| event.image)
-            .collect();
-        let (layers, decoded_bytes) = bank.keyed_layers(&layer_ids, limits.max_decoded_bytes)?;
-        bank.layers = layers;
-        bank.decoded_bytes = decoded_bytes;
-        Ok(bank)
     }
 
+    #[cfg(test)]
     fn keyed_layers(
         &self,
         ids: &BTreeSet<ImageId>,
@@ -795,5 +641,335 @@ mod layer_fixtures {
             bank.get(ImageId(3)).unwrap().pixels(),
             &[0, 0, 0, 255, 0, 0, 1, 64]
         );
+    }
+}
+
+/// Fresh bounded image work; no library/chart borrow survives an advance.
+pub struct ImagePreparationJob {
+    plan: ImagePlan,
+    limits: ImageAssetLimits,
+    sources: std::collections::VecDeque<(ImageId, Option<String>)>,
+    references: std::collections::VecDeque<(ImageId, Option<BgaCrop>)>,
+    layer_ids: std::collections::VecDeque<ImageId>,
+    bank: ImageAssets,
+    cache: BTreeMap<PathBuf, Cached>,
+    originals: BTreeMap<ImageId, Arc<RgbaImage>>,
+    unavailable: BTreeMap<ImageId, ImageUnavailable>,
+    variants: Vec<(Arc<RgbaImage>, [i32; 4], [i32; 2], Arc<RgbaImage>)>,
+    keyed: Vec<(Arc<RgbaImage>, Arc<RgbaImage>)>,
+    completed: usize,
+    total: usize,
+    sources_finished: bool,
+    terminal: bool,
+    pending_resource: Option<PathBuf>,
+}
+impl ImagePreparationJob {
+    pub fn new(chart: &BmsChart, limits: ImageAssetLimits) -> Result<Self, String> {
+        Ok(Self::from_plan(
+            chart,
+            limits,
+            ImagePlan::new(chart, limits)?,
+        ))
+    }
+    fn from_plan(chart: &BmsChart, limits: ImageAssetLimits, plan: ImagePlan) -> Self {
+        let sources: std::collections::VecDeque<_> = plan
+            .sources
+            .iter()
+            .map(|&id| (id, chart.images.get(&id).cloned()))
+            .collect();
+        let references: std::collections::VecDeque<_> = plan
+            .references
+            .iter()
+            .map(|&id| (id, chart.bga_crops.get(&id).copied()))
+            .collect();
+        let layers: BTreeSet<_> = chart
+            .bga
+            .iter()
+            .filter(|event| matches!(event.channel, BgaChannel::Layer | BgaChannel::Layer2))
+            .map(|event| event.image)
+            .collect();
+        let layer_ids: std::collections::VecDeque<_> = layers.into_iter().collect();
+        let total = sources.len() + references.len() + layer_ids.len();
+        Self {
+            plan,
+            limits,
+            sources,
+            references,
+            layer_ids,
+            bank: ImageAssets::default(),
+            cache: BTreeMap::new(),
+            originals: BTreeMap::new(),
+            unavailable: BTreeMap::new(),
+            variants: Vec::new(),
+            keyed: Vec::new(),
+            completed: 0,
+            total,
+            sources_finished: false,
+            terminal: false,
+            pending_resource: None,
+        }
+    }
+    pub fn progress(&self) -> crate::preparation::PreparationProgress {
+        crate::preparation::PreparationProgress {
+            stage: crate::preparation::PreparationStage::Visual,
+            completed_assets: self.completed,
+            total_assets: self.total,
+        }
+    }
+    pub fn pending_resource(&self) -> Option<&Path> {
+        self.pending_resource.as_deref()
+    }
+    pub fn cancel(&mut self) {
+        self.terminal = true;
+        self.bank = ImageAssets::default();
+        self.cache.clear();
+        self.originals.clear();
+        self.variants.clear();
+        self.keyed.clear();
+        self.sources.clear();
+        self.references.clear();
+        self.layer_ids.clear();
+        self.pending_resource = None;
+    }
+    pub fn advance(
+        &mut self,
+        source: &dyn AssetSource,
+        control: &mut dyn FnMut(crate::preparation::PreparationProgress) -> Result<(), String>,
+    ) -> Result<Option<ImageAssets>, String> {
+        if self.terminal {
+            return Err("image preparation is terminal".into());
+        }
+        let progress = self.progress();
+        let result = (|| {
+            control(progress)?;
+            let before = (
+                self.sources.len(),
+                self.references.len(),
+                self.layer_ids.len(),
+            );
+            let done = self.step(source)?;
+            control(progress)?;
+            if done {
+                self.terminal = true;
+                Ok(Some(std::mem::take(&mut self.bank)))
+            } else {
+                if before
+                    != (
+                        self.sources.len(),
+                        self.references.len(),
+                        self.layer_ids.len(),
+                    )
+                {
+                    self.completed += 1;
+                }
+                Ok(None)
+            }
+        })();
+        if result.is_err() {
+            self.cancel();
+        }
+        result
+    }
+    fn step(&mut self, source: &dyn AssetSource) -> Result<bool, String> {
+        if let Some((id, name)) = self.sources.front() {
+            if self.pending_resource.is_none() {
+                let id = *id;
+                let Some(name) = name.as_ref() else {
+                    self.bank
+                        .unavailable
+                        .insert(id, ImageUnavailable::Undefined);
+                    self.sources.pop_front();
+                    return Ok(false);
+                };
+                if crate::video_assets::is_movie_name(name) {
+                    self.bank
+                        .unavailable
+                        .insert(id, ImageUnavailable::Unsupported);
+                    self.sources.pop_front();
+                    return Ok(false);
+                }
+                match source.resolve(name, AssetPathPolicy::ImageVariants) {
+                    Ok(path) => self.pending_resource = Some(path),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        self.bank.unavailable.insert(id, ImageUnavailable::Missing);
+                        self.sources.pop_front();
+                    }
+                    Err(error) => return Err(format!("image {} path {name}: {error}", id.0)),
+                }
+                return Ok(false);
+            }
+            let (id, _) = self.sources.pop_front().unwrap();
+            let path = self.pending_resource.take().unwrap();
+            let resource = if let Some(resource) = self.cache.get(&path) {
+                resource.clone()
+            } else {
+                let encoded = match source.read(&path, self.limits.decode.max_encoded_bytes) {
+                    Ok(encoded) => encoded,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        self.bank.unavailable.insert(id, ImageUnavailable::Missing);
+                        return Ok(false);
+                    }
+                    Err(e) => return Err(format!("image read {}: {e}", path.display())),
+                };
+                if encoded.len() > self.limits.decode.max_encoded_bytes {
+                    return Err("encoded image file exceeds limit".into());
+                }
+                let resource = match decode(&encoded, self.limits.decode) {
+                    Ok(image) => {
+                        let total = self
+                            .bank
+                            .decoded_bytes
+                            .checked_add(image.byte_len())
+                            .filter(|total| *total <= self.limits.max_decoded_bytes)
+                            .ok_or("image bank byte budget exceeded")?;
+                        self.bank.decoded_bytes = total;
+                        self.bank.unique_images += 1;
+                        Cached::Loaded(Arc::new(image))
+                    }
+                    Err(ImageDecodeError::Unsupported) => {
+                        Cached::Unavailable(ImageUnavailable::Unsupported)
+                    }
+                    Err(ImageDecodeError::InvalidData(e)) => {
+                        Cached::Unavailable(ImageUnavailable::InvalidData(e))
+                    }
+                    Err(ImageDecodeError::Limit(e)) => return Err(e),
+                };
+                self.cache.insert(path, resource.clone());
+                resource
+            };
+            match resource {
+                Cached::Loaded(image) => {
+                    self.bank.images.insert(id, image);
+                }
+                Cached::Unavailable(reason) => {
+                    self.bank.unavailable.insert(id, reason);
+                }
+            }
+
+            return Ok(false);
+        }
+        if !self.sources_finished {
+            self.bank
+                .sources
+                .try_reserve_exact(self.bank.unique_images)
+                .map_err(|e| e.to_string())?;
+            self.bank
+                .sources
+                .extend(
+                    std::mem::take(&mut self.cache)
+                        .into_values()
+                        .filter_map(|resource| match resource {
+                            Cached::Loaded(image) => Some(image),
+                            Cached::Unavailable(_) => None,
+                        }),
+                );
+            self.originals = std::mem::take(&mut self.bank.images);
+            self.bank.source_ids.extend(
+                self.plan
+                    .sources
+                    .iter()
+                    .map(|&id| (id, self.originals.get(&id).cloned())),
+            );
+            self.unavailable = std::mem::take(&mut self.bank.unavailable);
+            self.variants
+                .try_reserve_exact(self.references.len())
+                .map_err(|e| e.to_string())?;
+            self.keyed
+                .try_reserve_exact(self.layer_ids.len())
+                .map_err(|e| e.to_string())?;
+            self.sources_finished = true;
+        }
+        if let Some((id, crop)) = self.references.pop_front() {
+            let source = crop.as_ref().map_or(id, |crop| crop.source);
+            let Some(original) = self.originals.get(&source) else {
+                self.bank.unavailable.insert(
+                    id,
+                    self.unavailable
+                        .get(&source)
+                        .cloned()
+                        .unwrap_or(ImageUnavailable::Undefined),
+                );
+                return Ok(false);
+            };
+            let transform = if let Some(crop) = &crop {
+                Some(*crop)
+            } else if self.plan.explicit_canvas.is_some()
+                && [original.width(), original.height()] != self.plan.canvas
+            {
+                Some(BgaCrop {
+                    source,
+                    source_rect: [
+                        0,
+                        0,
+                        i32::try_from(original.width())
+                            .map_err(|_| "canvas source width overflow")?,
+                        i32::try_from(original.height())
+                            .map_err(|_| "canvas source height overflow")?,
+                    ],
+                    destination: [0, 0],
+                })
+            } else {
+                None
+            };
+            let image = if let Some(crop) = transform {
+                if let Some((_, _, _, image)) =
+                    self.variants.iter().find(|(raw, rect, destination, _)| {
+                        Arc::ptr_eq(raw, original)
+                            && *rect == crop.source_rect
+                            && *destination == crop.destination
+                    })
+                {
+                    Arc::clone(image)
+                } else {
+                    let total = self
+                        .bank
+                        .decoded_bytes
+                        .checked_add(self.plan.canvas_bytes)
+                        .filter(|total| *total <= self.limits.max_decoded_bytes)
+                        .ok_or("image bank crop byte budget exceeded")?;
+                    let image = crop_canvas_sized(original, crop, self.plan.canvas)?;
+                    self.bank.decoded_bytes = total;
+                    self.variants.push((
+                        Arc::clone(original),
+                        crop.source_rect,
+                        crop.destination,
+                        Arc::clone(&image),
+                    ));
+                    image
+                }
+            } else {
+                Arc::clone(original)
+            };
+            self.bank.images.insert(id, image);
+
+            return Ok(false);
+        }
+        if let Some(id) = self.layer_ids.pop_front() {
+            let Some(original) = self.bank.images.get(&id) else {
+                return Ok(false);
+            };
+            let keyed = if let Some((_, keyed)) = self
+                .keyed
+                .iter()
+                .find(|(raw, _)| Arc::ptr_eq(raw, original))
+            {
+                Arc::clone(keyed)
+            } else {
+                if needs_key(original) {
+                    self.bank.decoded_bytes = self
+                        .bank
+                        .decoded_bytes
+                        .checked_add(original.byte_len())
+                        .filter(|bytes| *bytes <= self.limits.max_decoded_bytes)
+                        .ok_or("image bank Layer variant byte budget exceeded")?;
+                }
+                let keyed = black_to_transparent(original)?;
+                self.keyed.push((Arc::clone(original), Arc::clone(&keyed)));
+                keyed
+            };
+            self.bank.layers.insert(id, keyed);
+            return Ok(false);
+        }
+        Ok(true)
     }
 }

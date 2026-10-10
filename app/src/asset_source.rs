@@ -45,6 +45,7 @@ pub struct MemoryFiles {
     files: BTreeMap<String, MemoryFile>,
     limits: MemoryAssetLimits,
     total_bytes: usize,
+    inventory_revision: u64,
 }
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -85,14 +86,20 @@ impl MemoryFiles {
             files: BTreeMap::new(),
             limits,
             total_bytes: 0,
+            inventory_revision: 0,
         })
     }
     /// Reserve the canonical file's bounds without acquiring its content.
     pub fn declare_file(&mut self, name: &str, length: usize) -> io::Result<()> {
         let name = key(name, self.limits.max_path_bytes)?;
         let total = self.admit_new(&name, length)?;
+        let revision = self
+            .inventory_revision
+            .checked_add(1)
+            .ok_or_else(|| invalid("selected file inventory revision exhausted"))?;
         self.files.insert(name, MemoryFile::Declared(length));
         self.total_bytes = total;
+        self.inventory_revision = revision;
         Ok(())
     }
     fn admit_new(&self, name: &str, length: usize) -> io::Result<usize> {
@@ -135,12 +142,20 @@ impl MemoryFiles {
             }
         }
         let total = self.admit_new(&name, bytes.len())?;
+        let revision = self
+            .inventory_revision
+            .checked_add(1)
+            .ok_or_else(|| invalid("selected file inventory revision exhausted"))?;
         self.files.insert(name, MemoryFile::Loaded(bytes));
         self.total_bytes = total;
+        self.inventory_revision = revision;
         Ok(())
     }
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.files.keys().map(String::as_str)
+    }
+    pub fn inventory_revision(&self) -> u64 {
+        self.inventory_revision
     }
     pub fn len(&self) -> usize {
         self.files.len()

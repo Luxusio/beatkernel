@@ -1,16 +1,15 @@
 //! Internal referenced-sample selection and bounded PCM bank preparation.
 
-use crate::{
-    AssetDecoder, ChannelPolicy, asset_paths::AssetPathPolicy, asset_source::AssetSource,
-    mine_plan::MinePlan,
-};
-use beatkernel::audio::{AudioFormat, PcmLimits, SampleBank, SampleId};
+use crate::mine_plan::MinePlan;
+#[cfg(test)]
+use crate::{asset_paths::AssetPathPolicy, asset_source::AssetSource, AssetDecoder, ChannelPolicy};
+use beatkernel::audio::SampleId;
+#[cfg(test)]
+use beatkernel::audio::{AudioFormat, PcmLimits, SampleBank};
 use beatkernel_bms::{BmsChart, CompiledBms, ParseOptions, ScheduledInvisible};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    error::Error,
-    path::PathBuf,
-};
+#[cfg(test)]
+use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeSet, error::Error};
 
 /// Selects original resource identities before any resource acquisition.
 pub(crate) fn referenced_samples(
@@ -40,7 +39,9 @@ pub(crate) fn referenced_samples(
     Ok(referenced)
 }
 
-/// Loads the selected IDs with scoped lookup and call-local decode reuse.
+/// Compatibility seam for isolated private mine-reference fixtures. Production
+/// loading uses the cooperative canonical preparation job.
+#[cfg(test)]
 pub(crate) fn load_bank(
     source: &BmsChart,
     referenced: &BTreeSet<SampleId>,

@@ -337,60 +337,12 @@ impl VideoAssets {
         limits: VideoAssetLimits,
         mut load: impl FnMut(&Path, usize) -> io::Result<VideoResourceDescriptor>,
     ) -> Result<Self, String> {
-        let mut bank = Self::default();
-        let mut cache = BTreeMap::<PathBuf, usize>::new();
-        for (id, name, transform) in plan {
-            let path = match source.resolve(&name, AssetPathPolicy::VideoVariants) {
-                Ok(path) => path,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    bank.unavailable.insert(id, VideoUnavailable::Missing);
-                    continue;
-                }
-                Err(error) => return Err(format!("video {} path {name}: {error}", id.0)),
-            };
-            if !path.to_str().is_some_and(is_movie_name) {
-                bank.unavailable.insert(
-                    id,
-                    VideoUnavailable::Unsupported(
-                        "resolved resource is not a movie extension".into(),
-                    ),
-                );
-                continue;
+        let mut job = VideoPreparationJob::from_plan(plan, limits, VideoPreparationMode::Encoded);
+        loop {
+            if let Some(bank) = job.advance_with(source, &mut load, &mut |_| Ok(()))? {
+                return Ok(bank);
             }
-            let resource = if let Some(&index) = cache.get(&path) {
-                index
-            } else {
-                let remaining = limits.max_encoded_total_bytes - bank.encoded_bytes;
-                let maximum = limits
-                    .max_encoded_file_bytes
-                    .min(usize::try_from(remaining).unwrap_or(usize::MAX));
-                let resource = match load(&path, maximum) {
-                    Ok(resource) => resource,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        bank.unavailable.insert(id, VideoUnavailable::Missing);
-                        continue;
-                    }
-                    Err(error) => return Err(format!("video read {}: {error}", path.display())),
-                };
-                bank.encoded_bytes = bank
-                    .encoded_bytes
-                    .checked_add(resource.encoded_bytes)
-                    .filter(|total| *total <= limits.max_encoded_total_bytes)
-                    .ok_or("encoded video total byte budget exceeded")?;
-                let index = bank.resources.len();
-                bank.resources.push(resource);
-                cache.insert(path, index);
-                index
-            };
-            bank.images.insert(
-                id,
-                VideoDescriptor {
-                    resource,
-                    transform,
-                },
-            );
         }
-        Ok(bank)
     }
     pub fn get(&self, image: ImageId) -> Option<&VideoDescriptor> {
         self.images.get(&image)
@@ -506,5 +458,220 @@ impl VideoAssets {
             return Err("video transfer contains unused resource".into());
         }
         Ok(bank)
+    }
+}
+
+/// Native descriptors stay file-backed; browser registrations own encoded data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoPreparationMode {
+    Encoded,
+    NativeFile,
+}
+/// A fresh movie registration job; no decoder position or library borrow is retained.
+pub struct VideoPreparationJob {
+    plan: std::collections::VecDeque<(ImageId, String, VideoTransform)>,
+    limits: VideoAssetLimits,
+    mode: VideoPreparationMode,
+    bank: VideoAssets,
+    cache: BTreeMap<PathBuf, usize>,
+    completed: usize,
+    total: usize,
+    terminal: bool,
+    pending_resource: Option<PathBuf>,
+}
+impl VideoPreparationJob {
+    pub fn new(
+        chart: &BmsChart,
+        limits: VideoAssetLimits,
+        mode: VideoPreparationMode,
+    ) -> Result<Self, String> {
+        Ok(Self::from_plan(
+            VideoAssets::plan(chart, limits)?,
+            limits,
+            mode,
+        ))
+    }
+    fn from_plan(
+        plan: Vec<(ImageId, String, VideoTransform)>,
+        limits: VideoAssetLimits,
+        mode: VideoPreparationMode,
+    ) -> Self {
+        Self {
+            total: plan.len(),
+            plan: plan.into(),
+            limits,
+            mode,
+            bank: VideoAssets::default(),
+            cache: BTreeMap::new(),
+            completed: 0,
+            terminal: false,
+            pending_resource: None,
+        }
+    }
+    pub fn progress(&self) -> crate::preparation::PreparationProgress {
+        crate::preparation::PreparationProgress {
+            stage: crate::preparation::PreparationStage::Visual,
+            completed_assets: self.completed,
+            total_assets: self.total,
+        }
+    }
+    pub fn pending_resource(&self) -> Option<&Path> {
+        self.pending_resource.as_deref()
+    }
+    pub fn cancel(&mut self) {
+        self.terminal = true;
+        self.bank = VideoAssets::default();
+        self.cache.clear();
+        self.plan.clear();
+        self.pending_resource = None;
+    }
+    pub fn advance(
+        &mut self,
+        source: &dyn AssetSource,
+        control: &mut dyn FnMut(crate::preparation::PreparationProgress) -> Result<(), String>,
+    ) -> Result<Option<VideoAssets>, String> {
+        let mode = self.mode;
+        self.advance_with(
+            source,
+            &mut |path, maximum| match mode {
+                VideoPreparationMode::Encoded => {
+                    let bytes = source.read(path, maximum)?;
+                    if bytes.len() > maximum {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "encoded video file exceeds limit",
+                        ));
+                    }
+                    Ok(VideoResourceDescriptor {
+                        encoded_bytes: bytes.len() as u64,
+                        data: VideoResource::Encoded(Arc::from(bytes.as_ref())),
+                    })
+                }
+                VideoPreparationMode::NativeFile => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let bytes = std::fs::metadata(path)?.len();
+                        if bytes > maximum as u64 {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "encoded video file exceeds limit",
+                            ));
+                        }
+                        Ok(VideoResourceDescriptor {
+                            data: VideoResource::File(path.to_owned()),
+                            encoded_bytes: bytes,
+                        })
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        Err(io::Error::new(
+                            io::ErrorKind::Unsupported,
+                            "native video files are unavailable in WASM",
+                        ))
+                    }
+                }
+            },
+            control,
+        )
+    }
+    fn advance_with(
+        &mut self,
+        source: &dyn AssetSource,
+        load: &mut dyn FnMut(&Path, usize) -> io::Result<VideoResourceDescriptor>,
+        control: &mut dyn FnMut(crate::preparation::PreparationProgress) -> Result<(), String>,
+    ) -> Result<Option<VideoAssets>, String> {
+        if self.terminal {
+            return Err("video preparation is terminal".into());
+        }
+        let progress = self.progress();
+        let result = (|| {
+            control(progress)?;
+            let before = self.plan.len();
+            let done = self.step(source, load)?;
+            control(progress)?;
+            if done {
+                self.terminal = true;
+                Ok(Some(std::mem::take(&mut self.bank)))
+            } else {
+                if self.plan.len() != before {
+                    self.completed += 1;
+                }
+                Ok(None)
+            }
+        })();
+        if result.is_err() {
+            self.cancel();
+        }
+        result
+    }
+    fn step(
+        &mut self,
+        source: &dyn AssetSource,
+        load: &mut dyn FnMut(&Path, usize) -> io::Result<VideoResourceDescriptor>,
+    ) -> Result<bool, String> {
+        let Some((id, name, _)) = self.plan.front() else {
+            return Ok(true);
+        };
+        if self.pending_resource.is_none() {
+            let id = *id;
+            match source.resolve(name, AssetPathPolicy::VideoVariants) {
+                Ok(path) if path.to_str().is_some_and(is_movie_name) => {
+                    self.pending_resource = Some(path)
+                }
+                Ok(_) => {
+                    self.bank.unavailable.insert(
+                        id,
+                        VideoUnavailable::Unsupported(
+                            "resolved resource is not a movie extension".into(),
+                        ),
+                    );
+                    self.plan.pop_front();
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    self.bank.unavailable.insert(id, VideoUnavailable::Missing);
+                    self.plan.pop_front();
+                }
+                Err(error) => return Err(format!("video {} path {name}: {error}", id.0)),
+            }
+            return Ok(false);
+        }
+        let (id, _, transform) = self.plan.pop_front().unwrap();
+        let path = self.pending_resource.take().unwrap();
+        let resource = if let Some(&index) = self.cache.get(&path) {
+            index
+        } else {
+            let remaining = self.limits.max_encoded_total_bytes - self.bank.encoded_bytes;
+            let maximum = self
+                .limits
+                .max_encoded_file_bytes
+                .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+            let resource = match load(&path, maximum) {
+                Ok(resource) => resource,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    self.bank.unavailable.insert(id, VideoUnavailable::Missing);
+                    return Ok(false);
+                }
+                Err(error) => return Err(format!("video read {}: {error}", path.display())),
+            };
+            self.bank.encoded_bytes = self
+                .bank
+                .encoded_bytes
+                .checked_add(resource.encoded_bytes)
+                .filter(|total| *total <= self.limits.max_encoded_total_bytes)
+                .ok_or("encoded video total byte budget exceeded")?;
+            let index = self.bank.resources.len();
+            self.bank.resources.push(resource);
+            self.cache.insert(path, index);
+            index
+        };
+        self.bank.images.insert(
+            id,
+            VideoDescriptor {
+                resource,
+                transform,
+            },
+        );
+
+        Ok(false)
     }
 }
