@@ -622,7 +622,7 @@ def png(path):
     def chunk(name,data): return struct.pack('>I',len(data))+name+data+struct.pack('>I',zlib.crc32(name+data)&0xffffffff)
     with open(path,'wb') as f: f.write(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',a.width,a.height,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(b''.join(rows)))+chunk(b'IEND',b''))
     return ['captured',start,now(),w,pid]
-log_file=None; log_pending=b''; log_bytes=0; markers=[]
+log_file=None; log_pending=b''; log_bytes=0; markers=[]; marker_prefix=b'prepared practice section='
 def logs():
     global log_pending,log_bytes
     start=now()
@@ -632,8 +632,8 @@ def logs():
     if len(log_pending)>65536: raise RuntimeError('production stdout line exceeded observation limit')
     while b'\n' in log_pending:
         line,log_pending=log_pending.split(b'\n',1)
-        if b'prepared practice section=' in line:
-            if not line.startswith(b'prepared practice section=') or line.count(b'prepared practice section=')!=1: raise RuntimeError('ambiguous preparation marker')
+        if marker_prefix in line:
+            if not line.startswith(marker_prefix) or line.count(marker_prefix)!=1: raise RuntimeError('ambiguous preparation marker')
             markers.append((now(),line.hex()))
             if len(markers)>2: raise RuntimeError('unexpected extra preparation marker')
     return ['logs',start,now(),len(markers),';'.join(str(at)+':'+line for at,line in markers)]
@@ -652,6 +652,7 @@ def matches(args):
             for col in range(width):
                 pixel=get_pixel(image,col,y); red=(pixel>>16)&255; green=(pixel>>8)&255; blue=pixel&255
                 foreground=red>green+15 and red>blue+15 and green>30
+                if len(args)>5 and args[5]=='blue': foreground=blue>red+15 and green>red+10
                 if foreground!=(mask[y*width+col]=='1'): matched=False
     finally: destroy_image(image)
     strict_errors()
@@ -667,6 +668,7 @@ try:
             elif command=='capture': reply=png(args[0])
             elif command=='watch':
                 if log_file is not None: raise RuntimeError('stdout observer already attached')
+                if len(args)>1: marker_prefix=args[1].encode('ascii')
                 log_file=open(args[0],'rb'); reply=['watching',now()]
             elif command=='logs': reply=logs()
             elif command=='match': reply=matches(args)
@@ -972,8 +974,11 @@ fn preserved_native_catalog_five_paired_fresh_process_trials() {
 // Match the complete original bitmap caption, including its background holes.
 // This observes production pixels; it does not call Desktop readiness helpers.
 fn error_text_probe(text: &str, y: usize, scale: usize) -> String {
+    text_probe(text, 24, y, scale, false)
+}
+fn text_probe(text: &str, left: usize, y: usize, scale: usize, blue: bool) -> String {
     let width = text.len() * 6 * scale;
-    assert!(24 + width <= 960);
+    assert!(left + width <= 960);
     let mut mask = vec![b'0'; width * 7 * scale];
     let atlas = beatkernel_bms_runtime::font::atlas().unwrap();
     for (index, character) in text.chars().enumerate() {
@@ -997,9 +1002,10 @@ fn error_text_probe(text: &str, y: usize, scale: usize) -> String {
         }
     }
     format!(
-        "match\t24\t{y}\t{width}\t{}\t{}",
+        "match\t{left}\t{y}\t{width}\t{}\t{}{}",
         7 * scale,
-        String::from_utf8(mask).unwrap()
+        String::from_utf8(mask).unwrap(),
+        if blue { "\tblue" } else { "" }
     )
 }
 
@@ -1016,20 +1022,88 @@ fn observed_text(
     (reply[2].parse().unwrap(), reply[5] == "1", cost)
 }
 
+fn wait_owned_text(
+    observer: &mut FrameObserver,
+    child: &mut OwnedProcess,
+    probe: &str,
+    window: u64,
+    deadline: Instant,
+    costs: &mut Vec<u128>,
+    directory: &std::path::Path,
+) {
+    loop {
+        if Instant::now() >= deadline {
+            observer.command(&format!(
+                "capture\t{}",
+                directory.join("navigation-timeout.png").display()
+            ));
+            panic!("owned GUI navigation text deadline exceeded; probe={probe}");
+        }
+        assert!(child.0.try_wait().unwrap().is_none());
+        let (_, matched, cost) = observed_text(observer, probe, child.0.id(), window);
+        costs.push(cost);
+        if matched {
+            return;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[test]
 #[ignore = "requires preserved baseline/current Linux production executables, ALSA null and owned scale-one X11/software GPU"]
 fn preserved_native_preparation_five_paired_fresh_process_trials() {
-    native_preparation_process_trials(false);
+    native_preparation_process_trials(NativePreparationScenario::Original);
 }
 
 #[test]
 #[ignore = "requires freshly preserved current Linux production executable, ALSA null and owned scale-one X11/software GPU"]
 fn current_native_missing_channel_policy_gui_proof() {
-    native_preparation_process_trials(true);
+    native_preparation_process_trials(NativePreparationScenario::MissingChannelPolicy);
 }
 
-fn native_preparation_process_trials(default_resolution_only: bool) {
+#[test]
+#[ignore = "requires preserved baseline/current Linux production executables, ALSA null and owned scale-one X11/software GPU"]
+fn preserved_native_finite_section_five_paired_fresh_process_trials() {
+    native_preparation_process_trials(NativePreparationScenario::FiniteSection);
+}
+#[test]
+#[ignore = "requires exact genuine canonical replay/original resources and preserved Linux production binaries with owned X11/ALSA null"]
+fn preserved_native_genuine_replay_five_paired_fresh_process_trials() {
+    native_preparation_process_trials(NativePreparationScenario::GenuineReplay);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativePreparationScenario {
+    Original,
+    MissingChannelPolicy,
+    FiniteSection,
+    GenuineReplay,
+}
+
+fn native_preparation_process_trials(scenario: NativePreparationScenario) {
     use std::io::Write;
+    let default_resolution_only = scenario == NativePreparationScenario::MissingChannelPolicy;
+    let replay = scenario == NativePreparationScenario::GenuineReplay;
+    let joined_field = if replay {
+        "joined_record_prefix_observed_ns"
+    } else {
+        "joined_error_caption_observed_ns"
+    };
+    let endpoint_field = if replay {
+        "imposed_cutoff_prefix_observed_ns"
+    } else {
+        "required_ioctl_errno25_text_observed_ns"
+    };
+    let endpoint = if replay {
+        "ALSA null, imposed seconds3 cutoff; no live input acquisition"
+    } else {
+        "/dev/null mandatory ioctl failure"
+    };
+    let observation_limits = if replay {
+        "Logical reconstruction marker follows actual original/section validation, ReplayVisual and audio plan before output open; observed joined prefix is the imposed seconds3 cutoff, not natural completion, output readiness or physical timing. No live evdev acquisition claim."
+    } else {
+        "Input-to-prepared-log observed upper bounds include delivery, derived completion/compile and stdout observation; joined error pixels prove technical failure, never gameplay/output readiness. No codec-only counters, native finite completion, replay/replacement or output-readiness claim."
+    };
     assert_eq!(
         std::env::var("BEATKERNEL_TEST_NATIVE_UI_WINDOW").as_deref(),
         Ok("1")
@@ -1087,6 +1161,45 @@ fn native_preparation_process_trials(default_resolution_only: bool) {
     .unwrap();
     let font = artifacts.join("paired-preparation-font.ttf");
     fs::write(&font, font_fixture::font_bytes()).unwrap();
+    let mut replay_hashes = String::new();
+    if replay {
+        let (record, record_hash) = checked_binary(
+            "BEATKERNEL_TEST_NATIVE_REPLAY_RECORD",
+            "BEATKERNEL_TEST_NATIVE_REPLAY_RECORD_SHA",
+        );
+        assert_eq!(
+            record_hash,
+            "17a5e5f36f1f96f372fa4bcbf1e72f4265f2964c62076171983b09277d12c0e6"
+        );
+        assert_eq!(fs::metadata(&record).unwrap().len(), 2439);
+        let (chart, chart_hash) = checked_binary(
+            "BEATKERNEL_TEST_NATIVE_REPLAY_CHART",
+            "BEATKERNEL_TEST_NATIVE_REPLAY_CHART_SHA",
+        );
+        for (source, destination, expected) in [
+            (record, library.join("canonical.bkr"), record_hash.clone()),
+            (chart.clone(), library.join("a.bms"), chart_hash),
+            (
+                chart.parent().unwrap().join("large.wav"),
+                library.join("large.wav"),
+                hash(&chart.parent().unwrap().join("large.wav")),
+            ),
+            (
+                chart.parent().unwrap().join("unrelated-hung.bin"),
+                library.join("unrelated-hung.bin"),
+                hash(&chart.parent().unwrap().join("unrelated-hung.bin")),
+            ),
+        ] {
+            fs::copy(&source, &destination).unwrap();
+            assert_eq!(hash(&source), expected);
+            assert_eq!(hash(&destination), expected);
+        }
+        replay_hashes = format!(
+            ",\"canonical.bkr\":{},\"unrelated-hung.bin\":{}",
+            json_string(&record_hash),
+            json_string(&hash(&library.join("unrelated-hung.bin")))
+        );
+    }
     let mut args: Vec<String> = vec![
         "player",
         "--library",
@@ -1127,20 +1240,98 @@ fn native_preparation_process_trials(default_resolution_only: bool) {
         args.drain(policy..policy + 2);
         assert!(!args.iter().any(|arg| arg == "--channel-policy"));
     }
+    if scenario == NativePreparationScenario::FiniteSection {
+        args.extend(["--start-ns", "250000000", "--end-ns", "1500000000"].map(str::to_owned));
+    }
+    if replay {
+        args = vec![
+            "player",
+            "--library",
+            library.to_str().unwrap(),
+            "--title-font",
+            font.to_str().unwrap(),
+            "--gpu-backend",
+            "vulkan",
+            "--present",
+            "fifo",
+            "--ui-fps",
+            "120",
+            "--evdev",
+            "/dev/null",
+            "--alsa",
+            "null",
+            "--rate",
+            "48000",
+            "--channels",
+            "2",
+            "--channel-policy",
+            "mono-stereo",
+            "--period-frames",
+            "256",
+            "--buffer-frames",
+            "1024",
+            "--preroll-ns",
+            "0",
+            "--seconds",
+            "3",
+            "--early-ns",
+            "50000000",
+            "--late-ns",
+            "50000000",
+            "--input-offset-ns",
+            "0",
+            "--chart-seed",
+            "0",
+            "--gauge",
+            "beatkernel",
+            "--start-ns",
+            "250000000",
+            "--end-ns",
+            "1500000000",
+            "--bind",
+            "11:04",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    }
+    let config = args
+        .iter()
+        .map(|arg| json_string(arg))
+        .collect::<Vec<_>>()
+        .join(",");
+    let config_path = artifacts.join("native-preparation-launch-config.json");
+    fs::write(&config_path, format!("[{config}]")).unwrap();
+    let config_hash = hash(&config_path);
+    let section_evidence = if scenario == NativePreparationScenario::FiniteSection {
+        r#"{"requested_start_ns":250000000,"requested_end_ns":1500000000,"marker_observed_start_ns":250000000,"marker_observed_end_ns":null,"limits":"SectionReport exposes start only; end is the identical actual launch request, without native endpoint execution or audio readiness evidence"}"#
+    } else {
+        "null"
+    };
     let fixture_hashes = format!(
-        "{{\"a.bms\":{},\"z.bms\":{},\"large.wav\":{},\"font\":{}}}",
+        "{{\"a.bms\":{},\"z.bms\":{},\"large.wav\":{},\"font\":{}{replay_hashes}}}",
         json_string(&hash(&library.join("a.bms"))),
         json_string(&hash(&library.join("z.bms"))),
         json_string(&hash(&wav)),
         json_string(&hash(&font))
     );
-    let joined_probe = error_text_probe("ERROR - ENTER RETURNS TO SELECTION", 650, 2);
+    let joined_probe = if replay {
+        // The retry button at x410 overlays the caption's final characters.
+        // This exact unobscured prefix exists only in the joined replay branch.
+        text_probe("RECORD PREFIX RESULTS - ENTER", 24, 65, 2, true)
+    } else {
+        error_text_probe("ERROR - ENTER RETURNS TO SELECTION", 650, 2)
+    };
     // The actual collector error wraps the /dev/null mandatory ioctl errno.
-    let ioctl_probe = error_text_probe(
-        "native input collector: Initialization(\"Linux backend: Io(Os { code: 25,",
-        682,
-        1,
-    );
+    let ioctl_probe = if replay {
+        joined_probe.clone()
+    } else {
+        error_text_probe(
+            "native input collector: Initialization(\"Linux backend: Io(Os { code: 25,",
+            682,
+            1,
+        )
+    };
     let pinned_failure_probe =
         error_text_probe("native invocation differs from pinned launch", 682, 1);
     let mut variants = Vec::new();
@@ -1151,6 +1342,10 @@ fn native_preparation_process_trials(default_resolution_only: bool) {
     let trials = if default_resolution_only { 1 } else { 5 };
     let schema = if default_resolution_only {
         "beatkernel-native-current-default-resolution-proof/v1"
+    } else if replay {
+        "beatkernel-native-external-genuine-replay-preparation-paired/v1"
+    } else if scenario == NativePreparationScenario::FiniteSection {
+        "beatkernel-native-external-finite-section-preparation-paired/v1"
     } else {
         "beatkernel-native-external-preparation-paired/v1"
     };
@@ -1163,6 +1358,10 @@ fn native_preparation_process_trials(default_resolution_only: bool) {
         for &(variant, executable, binary_hash) in &variants {
             let prefix = if default_resolution_only {
                 "default-resolution"
+            } else if replay {
+                "genuine-replay"
+            } else if scenario == NativePreparationScenario::FiniteSection {
+                "finite-section"
             } else {
                 "preparation"
             };
@@ -1182,7 +1381,15 @@ fn native_preparation_process_trials(default_resolution_only: bool) {
             );
             let pid = child.0.id();
             observer.command(&format!("arm\t{pid}"));
-            observer.command(&format!("watch\t{}", stdout_path.display()));
+            observer.command(&format!(
+                "watch\t{}{}",
+                stdout_path.display(),
+                if replay {
+                    "\treconstructed logical replay:"
+                } else {
+                    ""
+                }
+            ));
             let deadline = Instant::now() + Duration::from_secs(120);
             let mut costs = Vec::new();
             let mut next_sample = |observer: &mut FrameObserver| {
@@ -1229,21 +1436,78 @@ fn native_preparation_process_trials(default_resolution_only: bool) {
                 thread::sleep(Duration::from_millis(1));
             }
             drop(next_sample);
+            if replay {
+                observer.command("key\tF2");
+                observer.command("key\tF4");
+                wait_owned_text(
+                    &mut observer,
+                    &mut child,
+                    &text_probe("RECORDS - RECORDED PREFIX", 24, 65, 2, true),
+                    window,
+                    deadline,
+                    &mut costs,
+                    &directory,
+                );
+                observer.command("key\tReturn");
+                wait_owned_text(
+                    &mut observer,
+                    &mut child,
+                    &error_text_probe("1 RECORDS", 472, 1),
+                    window,
+                    deadline,
+                    &mut costs,
+                    &directory,
+                );
+                let (_, loading, _) = observed_text(
+                    &mut observer,
+                    &error_text_probe("LOADING RECORDS", 520, 2),
+                    pid,
+                    window,
+                );
+                assert!(!loading, "record scan still loading before preview input");
+                observer.command("key\tReturn");
+                wait_owned_text(
+                    &mut observer,
+                    &mut child,
+                    &text_probe("OPERATIONS", 24, 514, 1, true),
+                    window,
+                    deadline,
+                    &mut costs,
+                    &directory,
+                );
+                wait_owned_text(
+                    &mut observer,
+                    &mut child,
+                    &text_probe("END 1500000000 NS", 560, 514, 1, true),
+                    window,
+                    deadline,
+                    &mut costs,
+                    &directory,
+                );
+            }
             let (before, _) = observer.command("logs");
             assert_eq!(before[3], "0", "preparation marker preceded Enter");
             let mut records = Vec::new();
             let mut previous_markers = String::new();
             let mut cold_marker = None;
-            for (attempt, key) in [(0usize, "Return"), (1usize, "F5")] {
+            for (attempt, key) in [
+                (0usize, if replay { "w" } else { "Return" }),
+                (1usize, "F5"),
+            ] {
                 let (input, input_cost) = observer.command(&format!("key\t{key}"));
                 let requested = input[1].parse::<u64>().unwrap();
                 let mut cleared = attempt == 0;
                 let mut clear_at = None;
                 let (prepared, marker_hex, joined_at, error_at, exact_markers) = loop {
-                    assert!(
-                        Instant::now() < deadline,
-                        "preparation/join observation deadline exceeded"
-                    );
+                    if Instant::now() >= deadline {
+                        observer.command(&format!(
+                            "capture\t{}",
+                            directory
+                                .join(format!("preparation-join-timeout-attempt-{attempt}.png"))
+                                .display()
+                        ));
+                        panic!("preparation/join observation deadline exceeded; attempt={attempt} joined_probe={joined_probe}");
+                    }
                     assert!(child.0.try_wait().unwrap().is_none());
                     let (logs, log_cost) = observer.command("logs");
                     costs.push(log_cost);
@@ -1275,6 +1539,26 @@ fn native_preparation_process_trials(default_resolution_only: bool) {
                         clear_at.get_or_insert(joined_at);
                     }
                     if count == attempt + 1 && joined && ioctl && cleared {
+                        if replay {
+                            let (_, failed, cost) = observed_text(
+                                &mut observer,
+                                &error_text_probe("ERROR - ENTER RETURNS TO SELECTION", 650, 2),
+                                pid,
+                                window,
+                            );
+                            costs.push(cost);
+                            if failed {
+                                observer.command(&format!(
+                                    "capture\t{}",
+                                    directory
+                                        .join(format!(
+                                            "replay-technical-failure-attempt-{attempt}.png"
+                                        ))
+                                        .display()
+                                ));
+                            }
+                            assert!(!failed, "replay owner joined with technical failure instead of imposed-cutoff prefix");
+                        }
                         let marker = logs[4].split(';').last().unwrap();
                         let (stamp, content) = marker.split_once(':').unwrap();
                         let prepared = stamp.parse::<u64>().unwrap();
@@ -1294,6 +1578,24 @@ fn native_preparation_process_trials(default_resolution_only: bool) {
                 };
                 assert!(prepared <= joined_at && requested <= error_at);
                 assert!(cleared, "retry never visibly retired previous error frame");
+                if scenario == NativePreparationScenario::FiniteSection {
+                    let bytes: Vec<u8> = marker_hex
+                        .as_bytes()
+                        .chunks_exact(2)
+                        .map(|pair| {
+                            u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()
+                        })
+                        .collect();
+                    let marker = String::from_utf8(bytes).unwrap();
+                    assert!(
+                        marker.contains(", start: Timestamp(250000000),"),
+                        "actual prepared section start differs: {marker}"
+                    );
+                    assert!(
+                        marker.contains("excluded_objects: 1,"),
+                        "section did not exclude the original zero-time head: {marker}"
+                    );
+                }
                 if let Some(cold) = &cold_marker {
                     assert_eq!(cold, &marker_hex, "retry changed prepared section marker");
                 } else {
@@ -1301,15 +1603,23 @@ fn native_preparation_process_trials(default_resolution_only: bool) {
                 }
                 previous_markers = exact_markers;
                 let frame = directory.join(if attempt == 0 {
-                    "first-joined-ioctl-error.png"
+                    if replay {
+                        "first-joined-record-prefix.png"
+                    } else {
+                        "first-joined-ioctl-error.png"
+                    }
                 } else {
-                    "retry-joined-ioctl-error.png"
+                    if replay {
+                        "retry-joined-record-prefix.png"
+                    } else {
+                        "retry-joined-ioctl-error.png"
+                    }
                 });
                 let (capture, capture_cost) =
                     observer.command(&format!("capture\t{}", frame.display()));
                 assert_eq!(capture[3].parse::<u64>().unwrap(), window);
                 assert_eq!(capture[4].parse::<u32>().unwrap(), pid);
-                records.push(format!("{{\"attempt\":{attempt},\"input\":{},\"requested_ns\":{requested},\"prepared_log_observed_ns\":{prepared},\"input_to_native_prepared_log_observed_upper_bound_ns\":{},\"joined_error_caption_observed_ns\":{joined_at},\"required_ioctl_errno25_text_observed_ns\":{error_at},\"previous_error_cleared_observed_ns\":{},\"exact_marker_hex\":{},\"input_observer_roundtrip_ns\":{input_cost},\"capture_roundtrip_ns\":{capture_cost}}}", json_string(key), prepared-requested, clear_at.map_or("null".into(), |at| at.to_string()), json_string(&marker_hex)));
+                records.push(format!("{{\"attempt\":{attempt},\"input\":{},\"requested_ns\":{requested},\"prepared_log_observed_ns\":{prepared},\"input_to_native_prepared_log_observed_upper_bound_ns\":{},\"{joined_field}\":{joined_at},\"{endpoint_field}\":{error_at},\"previous_error_cleared_observed_ns\":{},\"exact_marker_hex\":{},\"input_observer_roundtrip_ns\":{input_cost},\"capture_roundtrip_ns\":{capture_cost}}}", json_string(key), prepared-requested, clear_at.map_or("null".into(), |at| at.to_string()), json_string(&marker_hex)));
             }
             let (final_logs, _) = observer.command("logs");
             assert_eq!(final_logs[3], "2");
@@ -1336,12 +1646,7 @@ fn native_preparation_process_trials(default_resolution_only: bool) {
             );
             assert_eq!(post_exit_logs[4], previous_markers);
             observer.command("quit");
-            let config = args
-                .iter()
-                .map(|arg| json_string(arg))
-                .collect::<Vec<_>>()
-                .join(",");
-            let raw = format!("{{\"schema\":\"{schema}\",\"mode\":\"{mode}\",\"variant\":{},\"trial\":{trial},\"process_id\":{pid},\"owned_window_id\":{window},\"executable_sha256\":{},\"observer_sha256\":{},\"fixture_sha256\":{fixture_hashes},\"config\":[{config}],\"environment\":{{\"LC_ALL\":\"C\",\"output\":\"ALSA null\",\"input\":\"/dev/null mandatory ioctl failure\"}},\"clock\":\"one Python time.monotonic_ns origin before production spawn\",\"marker_count\":2,\"attempts\":[{}],\"observer_roundtrip_ns\":{:?},\"sampling_interval_configured_ns\":1000000,\"deadline_ns\":120000000000,\"stdout_read_max_bytes_per_probe\":65536,\"stdout_total_limit_bytes\":1048576,\"playable\":false,\"audio_ready\":null,\"os_page_cache_controlled\":false,\"limits\":\"Input-to-prepared-log observed upper bounds include delivery, derived completion/compile and stdout observation; joined error pixels prove technical failure, never gameplay/output readiness. No codec-only counters, section/replay/replacement comparative claim.\"}}", json_string(variant), json_string(binary_hash), json_string(&hash(&helper)), records.join(","), costs);
+            let raw = format!("{{\"schema\":\"{schema}\",\"mode\":\"{mode}\",\"variant\":{},\"trial\":{trial},\"process_id\":{pid},\"owned_window_id\":{window},\"executable_sha256\":{},\"observer_sha256\":{},\"fixture_sha256\":{fixture_hashes},\"config\":[{config}],\"config_sha256\":\"{config_hash}\",\"section_evidence\":{section_evidence},\"environment\":{{\"LC_ALL\":\"C\",\"output\":\"ALSA null\",\"input\":\"{endpoint}\"}},\"clock\":\"one Python time.monotonic_ns origin before production spawn\",\"marker_count\":2,\"attempts\":[{}],\"observer_roundtrip_ns\":{:?},\"sampling_interval_configured_ns\":1000000,\"deadline_ns\":120000000000,\"stdout_read_max_bytes_per_probe\":65536,\"stdout_total_limit_bytes\":1048576,\"playable\":false,\"audio_ready\":null,\"os_page_cache_controlled\":false,\"limits\":\"{observation_limits}\"}}", json_string(variant), json_string(binary_hash), json_string(&hash(&helper)), records.join(","), costs);
             fs::write(directory.join("events.json"), raw).unwrap();
         }
     }

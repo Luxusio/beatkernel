@@ -272,3 +272,312 @@ fn same_requested_lineage_cannot_publish_a_different_accepted_native_configurati
     assert!(game.sync_native_launch().is_err());
     assert_eq!(game.launch.args().last().unwrap(), "selected-output");
 }
+
+fn requested_replay() -> SessionLaunch {
+    let mut args = [
+        "--chart",
+        "selected.bms",
+        "--replay",
+        "records/selected.bkr",
+        "--rate",
+        "48000",
+        "--channels",
+        "2",
+        "--buffer-frames",
+        "1024",
+        "--channel-policy",
+        "mono-stereo",
+        "--bgm-lookahead-ns",
+        "9000000",
+        "--replay-max-records",
+        "321",
+        "--replay-max-bytes",
+        "1048576",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    if cfg!(target_os = "windows") {
+        args = args
+            .chunks_exact(2)
+            .filter(|pair| {
+                !matches!(
+                    pair[0].as_str(),
+                    "--rate" | "--channels" | "--buffer-frames"
+                )
+            })
+            .flatten()
+            .cloned()
+            .collect();
+    }
+    if cfg!(target_os = "linux") {
+        args.extend(["--alsa", "selected-output", "--period-frames", "256"].map(str::to_owned));
+    } else {
+        args.extend(
+            [
+                "--device",
+                if cfg!(target_os = "macos") {
+                    "1"
+                } else {
+                    "selected-output"
+                },
+            ]
+            .map(str::to_owned),
+        );
+    }
+    SessionLaunch::new(args).unwrap()
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn real_replay_projection_worker_and_repeated_retry_validate_the_accepted_configuration() {
+    let mut app = super::tests::lifecycle_fixture();
+    app.validate_replay = crate::app::validate_replay;
+    app.validate_prepared_replay = Some(crate::app::validate_prepared_replay);
+    let requested = requested_replay();
+    app.validate_launch(&requested, true).unwrap();
+    let original = requested.original_args().to_vec();
+    let canonical = crate::auto_native::syntax_replay(requested.args()).unwrap();
+    // Requested settings and canonical parser arguments deliberately have different
+    // namespaces. Sending accepted arguments through the initial projection fails.
+    assert!(crate::app::validate_replay(&canonical).is_err());
+    crate::app::validate_prepared_replay(&canonical).unwrap();
+    let mut launch = requested;
+    for attempt in 0..=3 {
+        let expected = canonical.clone();
+        let mut game = spawn_game_with_native_preparation(
+            move |args| {
+                assert_eq!(args, expected);
+                crate::app::validate_prepared_replay(args).map_err(|error| error.to_string())?;
+                assert!(player::native_launch(args)?.is_prepared());
+                Ok(())
+            },
+            |args| crate::auto_native::syntax_replay(args).map_err(|error| error.to_string()),
+            launch,
+            0,
+            false,
+            true,
+            None,
+        )
+        .unwrap();
+        joined(&mut game).unwrap();
+        game.sync_native_launch().unwrap();
+        assert_eq!(game.launch.attempt(), attempt);
+        assert_eq!(game.launch.original_args(), original);
+        assert_eq!(game.launch.args(), canonical);
+        for pair in [
+            ["--lookahead-ns", "9000000"],
+            ["--max-records", "321"],
+            ["--max-bytes", "1048576"],
+            ["--buffer-frames", "1024"],
+            ["--rate", "48000"],
+            ["--channels", "2"],
+            ["--channel-policy", "mono-stereo"],
+        ] {
+            assert!(game
+                .launch
+                .args()
+                .chunks_exact(2)
+                .any(|value| value == pair));
+        }
+        assert!(game
+            .launch
+            .args()
+            .chunks_exact(2)
+            .any(|value| value[0] == "--device"
+                && value[1]
+                    == if cfg!(target_os = "macos") {
+                        "1"
+                    } else {
+                        "selected-output"
+                    }));
+        app.validate_launch(&game.launch, true).unwrap();
+        launch = game.launch.retry().unwrap();
+        app.validate_launch(&launch, true).unwrap();
+    }
+}
+
+#[test]
+fn replay_validation_selects_current_launch_state_and_preserves_custom_injection() {
+    fn reject_canonical(_: &[String]) -> Result<(), Box<dyn Error>> {
+        Err("canonical validator selected".into())
+    }
+    fn reject_requested(_: &[String]) -> Result<(), Box<dyn Error>> {
+        Err("custom requested validator selected".into())
+    }
+    let requested = requested_replay();
+    let accepted = requested
+        .clone()
+        .prepare_with(|args| crate::auto_native::syntax_replay(args).map_err(|e| e.to_string()))
+        .unwrap();
+    let mut app = super::tests::lifecycle_fixture();
+    app.validate_replay = crate::app::validate_replay;
+    app.validate_prepared_replay = Some(reject_canonical);
+    app.validate_launch(&requested.retry().unwrap(), true)
+        .unwrap();
+    assert_eq!(
+        app.validate_launch(&accepted.retry().unwrap(), true)
+            .unwrap_err()
+            .to_string(),
+        "canonical validator selected"
+    );
+    app.validate_replay = reject_requested;
+    app.validate_prepared_replay = None;
+    for launch in [&requested, &accepted] {
+        assert_eq!(
+            app.validate_launch(launch, true).unwrap_err().to_string(),
+            "custom requested validator selected"
+        );
+    }
+}
+
+#[test]
+fn rejected_canonical_replay_retry_preserves_the_joined_owner_without_cancellation() {
+    // A canonical capacity rejected by the real parser must never be dropped by
+    // reprojecting accepted options into settings and supplying parser defaults.
+    let requested = SessionLaunch::new(
+        [
+            "--chart",
+            "selected.bms",
+            "--replay",
+            "records/selected.bkr",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    )
+    .unwrap();
+    crate::app::validate_replay(requested.args()).unwrap();
+    let invalid = requested
+        .prepare_with(|args| {
+            let mut canonical =
+                crate::auto_native::syntax_replay(args).map_err(|e| e.to_string())?;
+            canonical.extend(["--max-records", "0"].map(str::to_owned));
+            Ok(canonical)
+        })
+        .unwrap();
+    assert!(crate::app::validate_prepared_replay(invalid.args()).is_err());
+    let mut game = spawn_game_with_native_preparation(
+        |_| Ok(()),
+        |_| panic!("accepted launch cannot rediscover"),
+        invalid,
+        2,
+        true,
+        true,
+        None,
+    )
+    .unwrap();
+    joined(&mut game).unwrap();
+    game.sync_native_launch().unwrap();
+    let original = game.launch.args().to_vec();
+    let mut app = super::tests::lifecycle_fixture();
+    app.validate_replay = crate::app::validate_replay;
+    app.validate_prepared_replay = Some(crate::app::validate_prepared_replay);
+    let route = app
+        .prepare_route(ScreenRoute::Play { replay: true })
+        .unwrap();
+    app.commit_route(route);
+    app.game = Some(game);
+    app.request_retry();
+    let retained = app.game.as_ref().unwrap();
+    assert!(retained.joined);
+    assert!(!retained.cancelling);
+    assert!(retained.prepared_retry.is_none());
+    assert_eq!(retained.launch.args(), original);
+    assert_eq!(retained.launch.attempt(), 0);
+    assert_eq!(retained.local_page, 2);
+    assert!(retained.local_comparisons);
+    assert!(app.failure.as_deref().unwrap().contains("retry preflight"));
+}
+
+#[test]
+fn deferred_requested_replay_retry_rebases_to_the_joined_canonical_publication() {
+    fn accepted_native(args: &[String]) -> Result<(), Box<dyn Error>> {
+        crate::app::validate_prepared_replay(args)?;
+        assert_eq!(player::native_launch(args)?.attempt(), 1);
+        Ok(())
+    }
+    let requested = requested_replay();
+    let original = requested.original_args().to_vec();
+    let accepted = requested
+        .clone()
+        .prepare_with(|args| {
+            crate::auto_native::syntax_replay(args).map_err(|error| error.to_string())
+        })
+        .unwrap();
+    let canonical = accepted.args().to_vec();
+    let (publisher, viewer) = player::channel();
+    let (entered_tx, entered) = mpsc::sync_channel(1);
+    let (release_tx, release) = mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
+        player::with_publisher(publisher, || {
+            entered_tx.send(()).unwrap();
+            release
+                .recv_timeout(WAIT)
+                .map_err(|error| error.to_string())?;
+            // Model a publication committed by the old owner during final cleanup;
+            // it remains authoritative even when UI preflight preceded the mailbox.
+            assert!(player::cancelled());
+            player::pin_native_launch(accepted)?;
+            Ok(())
+        })
+    });
+    entered.recv_timeout(WAIT).unwrap();
+    let mut app = super::tests::lifecycle_fixture();
+    app.validate_replay = crate::app::validate_replay;
+    app.validate_prepared_replay = Some(crate::app::validate_prepared_replay);
+    app.replay = accepted_native;
+    let route = app
+        .prepare_route(ScreenRoute::Play { replay: true })
+        .unwrap();
+    app.commit_route(route);
+    app.game = Some(Game {
+        viewer,
+        worker: Some(worker),
+        snapshot: None,
+        completed_results: None,
+        completed_results_error: None,
+        cancelling: false,
+        joined: false,
+        local_page: 2,
+        local_comparisons: true,
+        replay: true,
+        launch: requested,
+        prepared_retry: None,
+        practice_bookmark: None,
+        practice_loop: None,
+        loop_enabled: false,
+    });
+    app.request_retry();
+    let pending = app.game.as_ref().unwrap();
+    assert!(pending.cancelling);
+    let preflight = pending.prepared_retry.as_ref().unwrap();
+    assert!(!preflight.is_prepared());
+    assert_eq!(preflight.attempt(), 1);
+    assert_eq!(preflight.original_args(), original);
+    release_tx.send(()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while !app
+        .game
+        .as_ref()
+        .unwrap()
+        .worker
+        .as_ref()
+        .unwrap()
+        .is_finished()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "cleanup publication worker did not finish"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    app.collect_game();
+    assert!(app.failure.is_none(), "{:?}", app.failure);
+    let next = app.game.as_mut().unwrap();
+    assert!(!next.joined);
+    assert!(next.launch.is_prepared());
+    assert_eq!(next.launch.attempt(), 1);
+    assert_eq!(next.launch.original_args(), original);
+    assert_eq!(next.launch.args(), canonical);
+    joined(next).unwrap();
+    next.sync_native_launch().unwrap();
+}

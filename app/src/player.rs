@@ -562,13 +562,16 @@ pub fn practice_pending() -> bool {
 impl PlayerViewer {
     /// Move the latest boundary's canonical global invocation once. This
     /// mailbox remains readable after native cleanup so joined retry sees the
-    /// final ordinal; no argument vector is cloned by frame polling.
+    /// final ordinal; no argument vector is cloned by frame polling. Contention
+    /// leaves the queued publication untouched and reports pending.
     pub fn take_native_launch(&self) -> io::Result<Option<crate::session_launch::SessionLaunch>> {
-        self.0
-            .native_launch
-            .try_lock()
-            .map_err(room_lock_error)
-            .map(|mut slot| slot.take())
+        match self.0.native_launch.try_lock() {
+            Ok(mut slot) => Ok(slot.take()),
+            Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err(io::Error::other("native launch publication unavailable"))
+            }
+        }
     }
     pub fn practice_capability(
         &self,

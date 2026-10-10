@@ -156,6 +156,23 @@ const LOOP_TOGGLE_BOUNDS: Bounds = Bounds {
     height: 30,
 };
 type Native = fn(&[String]) -> Result<(), Box<dyn Error>>;
+fn launch_validator(
+    launch: &SessionLaunch,
+    replay: bool,
+    live: Native,
+    requested_replay: Native,
+    prepared_replay: Option<Native>,
+) -> Native {
+    if replay {
+        if launch.is_prepared() {
+            prepared_replay.unwrap_or(requested_replay)
+        } else {
+            requested_replay
+        }
+    } else {
+        live
+    }
+}
 type NativePreparation = fn(&[String], bool) -> Result<Vec<String>, String>;
 type QueryDevices = fn(DeviceRequest) -> Result<DeviceCatalog, Box<dyn Error>>;
 
@@ -1019,6 +1036,7 @@ pub(super) fn run(
         validate_replay,
         |_| {},
         Some(crate::app::prepare_native_invocation),
+        Some(crate::app::validate_prepared_replay),
     )
 }
 
@@ -1042,6 +1060,7 @@ pub(super) fn run_with_ui_commands(
         validate_replay,
         register,
         None,
+        None,
     )
 }
 
@@ -1054,6 +1073,7 @@ fn run_with_ui_commands_and_preparation(
     validate_replay: Native,
     register: impl FnOnce(EventLoopProxy<DesktopUiCommand>),
     prepare_native: Option<NativePreparation>,
+    validate_prepared_replay: Option<Native>,
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
@@ -1084,6 +1104,7 @@ fn run_with_ui_commands_and_preparation(
         query_devices,
         replay,
         validate_replay,
+        validate_prepared_replay,
         picker: None,
         local_setup: None,
         accepted_local: None,
@@ -1782,6 +1803,7 @@ struct Desktop {
     query_devices: QueryDevices,
     replay: Native,
     validate_replay: Native,
+    validate_prepared_replay: Option<Native>,
     picker: Option<PanelScope<DevicePicker>>,
     local_setup: Option<PanelScope<LocalDraft>>,
     accepted_local: Option<LocalSetup>,
@@ -1841,6 +1863,16 @@ struct Desktop {
     hits: Vec<(ControlId, Bounds)>,
 }
 impl Desktop {
+    fn validate_launch(&self, launch: &SessionLaunch, replay: bool) -> Result<(), Box<dyn Error>> {
+        let validate = launch_validator(
+            launch,
+            replay,
+            self.validate,
+            self.validate_replay,
+            self.validate_prepared_replay,
+        );
+        validate(launch.args())
+    }
     fn handle_ui_command(&mut self, command: DesktopUiCommand) {
         match command {
             DesktopUiCommand::InspectScreen { reply } => {
@@ -5190,11 +5222,7 @@ impl Desktop {
             return;
         }
         // Preflight the exact retained invocation before signalling cancellation.
-        let validate = if game.replay {
-            self.validate_replay
-        } else {
-            self.validate
-        };
+        let replay = game.replay;
         let prepared = if from_bookmark && game.loop_enabled {
             game.launch
                 .retry_loop(game.practice_loop.expect("enabled loop admission"))
@@ -5205,7 +5233,8 @@ impl Desktop {
             game.launch.retry()
         }
         .and_then(|launch| {
-            validate(launch.args()).map_err(|error| error.to_string())?;
+            self.validate_launch(&launch, replay)
+                .map_err(|error| error.to_string())?;
             Ok(launch)
         });
         match prepared {
@@ -5403,11 +5432,13 @@ impl Desktop {
                         self.failure = Some(format!("joined retry lineage: {error}"));
                         succeeded = false;
                     } else if let Some(prepared) = game.prepared_retry.take() {
-                        let validate = if game.replay {
-                            self.validate_replay
-                        } else {
-                            self.validate
-                        };
+                        let validate = launch_validator(
+                            &prepared,
+                            game.replay,
+                            self.validate,
+                            self.validate_replay,
+                            self.validate_prepared_replay,
+                        );
                         match (|| {
                             let launch = prepared;
                             validate(launch.args()).map_err(|error| error.to_string())?;
@@ -9454,6 +9485,7 @@ mod tests {
             query_devices: query_unavailable,
             replay: native_unavailable,
             validate_replay: validate_only,
+            validate_prepared_replay: None,
             picker: None,
             local_setup: None,
             accepted_local: None,

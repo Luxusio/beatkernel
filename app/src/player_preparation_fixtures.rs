@@ -17,6 +17,92 @@ fn progress(stage: PreparationStage) -> PreparationProgress {
     }
 }
 
+fn prepared_mailbox_retry() -> crate::session_launch::SessionLaunch {
+    crate::session_launch::SessionLaunch::new(
+        [
+            "--chart",
+            "mailbox.bms",
+            "--record-replay",
+            "records/mailbox.bkr",
+            "--rate",
+            "48000",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    )
+    .unwrap()
+    .prepare_with(|requested| {
+        let mut accepted = requested.to_vec();
+        accepted.extend(
+            [
+                "--channel-policy",
+                "exact",
+                "--output",
+                "accepted-output",
+                "--buffer-frames",
+                "128",
+            ]
+            .map(str::to_owned),
+        );
+        Ok(accepted)
+    })
+    .unwrap()
+    .retry()
+    .unwrap()
+    .retry()
+    .unwrap()
+}
+
+fn assert_same_mailbox_retry(
+    actual: &crate::session_launch::SessionLaunch,
+    expected: &crate::session_launch::SessionLaunch,
+) {
+    assert!(actual.is_prepared());
+    assert_eq!(actual.original_args(), expected.original_args());
+    assert_eq!(
+        actual.prepared_original_args(),
+        expected.prepared_original_args()
+    );
+    assert_eq!(actual.args(), expected.args());
+    assert_eq!(actual.attempt(), 2);
+    assert_eq!(actual.args()[3], "records/mailbox.retry2.bkr");
+}
+
+#[test]
+fn native_launch_mailbox_contention_is_pending_and_exact_retry_drains_once_after_release() {
+    let expected = prepared_mailbox_retry();
+    let (publisher, viewer) = channel();
+    with_publisher(publisher, || pin_native_launch(expected.clone())).unwrap();
+    let producer_guard = viewer.0.native_launch.lock().unwrap();
+    assert_same_mailbox_retry(producer_guard.as_ref().unwrap(), &expected);
+    assert!(viewer.take_native_launch().unwrap().is_none());
+    assert_same_mailbox_retry(producer_guard.as_ref().unwrap(), &expected);
+    drop(producer_guard);
+    let drained = viewer.take_native_launch().unwrap().unwrap();
+    assert_same_mailbox_retry(&drained, &expected);
+    assert!(viewer.take_native_launch().unwrap().is_none());
+}
+
+#[test]
+fn poisoned_native_launch_mailbox_refuses_without_consuming_queued_accepted_retry() {
+    let expected = prepared_mailbox_retry();
+    let (publisher, viewer) = channel();
+    with_publisher(publisher, || pin_native_launch(expected.clone())).unwrap();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let producer_guard = viewer.0.native_launch.lock().unwrap();
+        assert_same_mailbox_retry(producer_guard.as_ref().unwrap(), &expected);
+        panic!("fixture producer failed while publishing its native invocation");
+    }));
+    assert!(panic.is_err());
+    let error = viewer.take_native_launch().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("native"), "{diagnostic}");
+    assert!(diagnostic.contains("publication"), "{diagnostic}");
+    let retained = viewer.0.native_launch.lock().unwrap_err().into_inner();
+    assert_same_mailbox_retry(retained.as_ref().unwrap(), &expected);
+}
+
 #[test]
 fn preparation_context_is_detached_from_tls_and_snapshot_contention_is_not_failure() {
     let (publisher, viewer) = channel();

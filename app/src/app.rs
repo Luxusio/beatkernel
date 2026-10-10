@@ -3,7 +3,7 @@ use crate::Result;
 use beatkernel::time::Timestamp;
 use beatkernel_bms_runtime::{
     competition::Competition,
-    competition_live::{CompetitionOptions, load_chart_with_seed, replay_limits},
+    competition_live::{load_chart_with_seed, replay_limits, CompetitionOptions},
     replay_playback::{decode_chart_setup, read_replay, reconstruct},
 };
 use std::{fs::File, path::Path};
@@ -53,7 +53,7 @@ Saved opponents require the same compiled chart and judging profile. Multiplayer
 fn serve_multiplayer(args: &[String]) -> Result<()> {
     #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
     {
-        use beatkernel_bms_runtime::multiplayer_webtransport::{HELP, ServerOptions, run};
+        use beatkernel_bms_runtime::multiplayer_webtransport::{run, ServerOptions, HELP};
         if args == ["--help"] {
             println!("{HELP}");
             return Ok(());
@@ -164,12 +164,6 @@ pub(super) fn validate_native(args: &[String]) -> Result<()> {
 }
 
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
-fn native_replay(args: &[String]) -> Result<()> {
-    let projected = crate::auto_native::prepare_replay(args)?;
-    native_replay_prepared(&projected)
-}
-
-#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 fn native_replay_prepared(args: &[String]) -> Result<()> {
     crate::replay_player::run_args(args)
 }
@@ -178,6 +172,11 @@ fn native_replay_prepared(args: &[String]) -> Result<()> {
 pub(super) fn validate_replay(args: &[String]) -> Result<()> {
     let projected = crate::auto_native::syntax_replay(args)?;
     crate::replay_player::validate_args(&projected)
+}
+
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(super) fn validate_prepared_replay(args: &[String]) -> Result<()> {
+    crate::replay_player::validate_args(args)
 }
 
 fn compare(args: &[String]) -> Result<()> {
