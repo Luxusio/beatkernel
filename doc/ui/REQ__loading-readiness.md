@@ -20,6 +20,9 @@ keyboard-accessible Cancel action. Previous preview/catalog remains usable
 after current-owner cancellation or failure. Library replacement, settings,
 play and navigation cannot revive older work. Progress reflects actual work
 and never fabricates a completion percentage or PCM-ready catalog status.
+Native preparation stage, resource counts and cancellation guidance occupy a
+readable row separate from the play status, practice caption and controls;
+their glyphs must not overprint one another in the standard player window.
 Each preparation advance handles at most one resource phase before yielding;
 a library borrow must not survive that yield.
 

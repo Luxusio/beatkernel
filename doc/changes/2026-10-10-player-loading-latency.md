@@ -557,6 +557,34 @@ including gameplay WASM `a0f0d6ea40243b389197a579a98766afcca7dca97777c0b933112c8
 and audio WASM `775ed808697e545183a6b88f3b22bec0dbbd0cd04f76671185b7e70ac15d4b13`.
 These are development build/provenance results, not independent browser QA.
 
+Full DEEP code review and documentation review subsequently passed on
+`dbc44f8`. Independent browser QA passed actual headed functional interaction,
+five generated-WASM export tests and all30paired processes/70records/70PNGs.
+Its current artifacts still match the95-entry browser manifest; later source
+changes are native-only. Evidence is `qa-browser-final-1/` and
+`qa-browser-finite-final-1/report.json`. All owned browser/display/server
+processes terminated. The observed favicon404 requests are preserved and are
+not application resource or runtime failures. Browser loading UX also passed
+direct inspection of all10fresh functional screenshots.
+
+Independent desktop QA on the preserved `dbc44f8` production executable
+(`current-native-catalog-result/`, SHA256
+`1898a3e45a1b80ec8700478aa7872099654d2dc1b1d459ed7bd15fc9f5aa3858`)
+returned FAIL: progress at y105 overprints the existing practice caption at
+y102. Two fresh actual processes reproduce unreadable stage/resource/cancel
+text in `qa-desktop-dbc44f8-1/pending-current-snaps/current-2.png` and
+`manual-cancel/actual-pending.png`. Independent desktop UX confirmed this
+scoped feedback defect. The six actual native GUI batches all passed their
+respective catalog/original/finite/replay/missing-default/held-font assertions;
+they do not turn the overall QA failure into PASS. Manual real Return→pending,
+Escape→Stopping→joined cancellation, Return→recovered catalog and clean exit
+also passed without a completed-preparation marker after cancellation.
+`observed-statistics.json` preserves the software upper bounds and all owned
+processes/display were released. The correction reserves a separate loading
+progress row while retaining practice instructions, then requires a pure scene
+overlap regression, fresh DEEP formal review and affected desktop/UX QA.
+Final CLI/foreign-target checks wait for corrected source; WBS remains90/193.
+
 The strengthened browser capture prerequisite passed in one actual preserved
 baseline process. `browser-finite-capture-development-1/observations.json`
 records two admitted inputs, 118 advances, 120 durable records and a finite

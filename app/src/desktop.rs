@@ -8178,7 +8178,7 @@ fn draw_game_components(
             text(
                 pixels,
                 24,
-                105,
+                88,
                 &format!(
                     "PREPARING {:?}  {}/{} RESOURCES - ESC CANCEL",
                     progress.stage, progress.completed_assets, progress.total_assets
@@ -8189,7 +8189,7 @@ fn draw_game_components(
         }
     }
     let Some(snapshot) = &game.snapshot else {
-        text(pixels, 24, 80, "LOADING - ESC CANCEL", 2, 0x9bb1cf);
+        text(pixels, 24, 65, "LOADING - ESC CANCEL", 2, 0x9bb1cf);
         return Ok(());
     };
     let status = if game.prepared_retry.is_some() && !game.joined {

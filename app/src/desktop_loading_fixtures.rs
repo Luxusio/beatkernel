@@ -77,6 +77,148 @@ fn clear_selection(app: &mut Desktop) {
     app.painted_reactive = None;
 }
 
+fn scene_text_footprints(
+    scene: &Scene,
+    value: &str,
+    scale: usize,
+    color: u32,
+) -> Option<Vec<[f32; 4]>> {
+    let mut expected = Scene::new(WIDTH as u32, HEIGHT as u32);
+    text(&mut expected, 0, 0, value, scale, color);
+    let glyphs = expected.rectangles();
+    scene.rectangles().windows(glyphs.len()).find_map(|run| {
+        let origin = run.first()?.bounds;
+        run.iter()
+            .zip(glyphs)
+            .all(|(actual, expected)| {
+                actual.uv == expected.uv
+                    && actual.color == expected.color
+                    && actual.bounds[2..] == expected.bounds[2..]
+                    && actual.bounds[0] - origin[0] == expected.bounds[0]
+                    && actual.bounds[1] == origin[1]
+            })
+            .then(|| run.iter().map(|glyph| glyph.bounds).collect())
+    })
+}
+
+fn footprints_overlap(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+}
+
+#[test]
+fn desktop_actual_loading_progress_clears_status_practice_and_cancel_then_hides_when_playing() {
+    let mut app = tests::lifecycle_fixture();
+    let route = app
+        .prepare_route(ScreenRoute::Play { replay: false })
+        .unwrap();
+    app.commit_route(route);
+    let (publisher, viewer) = player::channel();
+    app.game = Some(Game {
+        viewer,
+        worker: None,
+        snapshot: None,
+        completed_results: None,
+        completed_results_error: None,
+        cancelling: false,
+        joined: false,
+        local_page: 0,
+        local_comparisons: false,
+        replay: false,
+        launch: SessionLaunch::new(vec!["--chart".into(), "loading.bms".into()]).unwrap(),
+        prepared_retry: None,
+        practice_bookmark: None,
+        practice_loop: None,
+        loop_enabled: false,
+    });
+    player::with_publisher(publisher, || {
+        let context = player::preparation_context().unwrap();
+        let progress = beatkernel_bms_runtime::preparation::PreparationProgress {
+            stage: beatkernel_bms_runtime::preparation::PreparationStage::Read,
+            completed_assets: 3,
+            total_assets: 17,
+        };
+        let label = "PREPARING Read  3/17 RESOURCES - ESC CANCEL";
+        for with_snapshot in [false, true] {
+            if with_snapshot {
+                let source = beatkernel_bms::parse(
+                    "#TITLE Loading\n#BPM 120\n",
+                    beatkernel_bms::ParseOptions::default(),
+                )
+                .unwrap();
+                let chart = source.compile().unwrap().chart;
+                player::publish_chart(&source, &chart).unwrap();
+                let game = app.game.as_mut().unwrap();
+                let snapshot = game.viewer.take_latest().unwrap();
+                assert_eq!(snapshot.status, player::PlayerStatus::Loading);
+                game.accept_snapshot(snapshot);
+            }
+            context.check(progress).unwrap();
+            assert_eq!(
+                app.game.as_ref().unwrap().viewer.preparation_progress(),
+                Some(progress)
+            );
+            app.draw().unwrap();
+            let preparation = scene_text_footprints(&app.scene, label, 1, 0x9bb1cf)
+                .expect("actual preparation stage, resource counts and ESC Cancel must draw");
+            let status = scene_text_footprints(
+                &app.scene,
+                if with_snapshot {
+                    "LOADING"
+                } else {
+                    "LOADING - ESC CANCEL"
+                },
+                2,
+                0x9bb1cf,
+            )
+            .expect("actual loading status must draw");
+            let practice = scene_text_footprints(
+                &app.scene,
+                "F7 MARK / F8 RESTART MARK  FRESH OUTPUT; MAY GAP",
+                1,
+                0xd8b36b,
+            )
+            .expect("actual practice instructions must remain readable");
+            for glyph in &preparation {
+                for other in status.iter().chain(&practice) {
+                    assert!(
+                        !footprints_overlap(*glyph, *other),
+                        "preparation glyph {glyph:?} overlaps status/practice glyph {other:?}"
+                    );
+                }
+                for (_, bounds) in &app.hits {
+                    assert!(
+                        !footprints_overlap(
+                            *glyph,
+                            [
+                                bounds.x as f32,
+                                bounds.y as f32,
+                                bounds.width as f32,
+                                bounds.height as f32,
+                            ]
+                        ),
+                        "preparation glyph overlaps an actual control"
+                    );
+                }
+            }
+            assert!(app.hits.iter().any(|(id, _)| *id == ControlId(2)));
+            assert!(scene_text_footprints(&app.scene, "CANCEL", 2, 0xf0f4ff).is_some());
+        }
+        player::publish_replay_prefix(Timestamp::ZERO, &[]).unwrap();
+        player::publish_pause(player::PauseState::Running);
+        let game = app.game.as_mut().unwrap();
+        let snapshot = game.viewer.take_latest().unwrap();
+        assert_eq!(snapshot.status, player::PlayerStatus::Playing);
+        game.accept_snapshot(snapshot);
+        assert_eq!(game.viewer.preparation_progress(), Some(progress));
+        app.draw().unwrap();
+        assert!(scene_text_footprints(&app.scene, label, 1, 0x9bb1cf).is_none());
+        assert!(scene_text_footprints(&app.scene, "PLAYING - ESC CANCEL", 2, 0x9bb1cf).is_some());
+        assert!(app.hits.iter().any(|(id, _)| *id == ControlId(2)));
+        Ok(())
+    })
+    .unwrap();
+}
+
 fn completion_after_pending_poll_preserves_catalog_result(failure: Option<&'static str>) {
     let tree = Tree::new();
     let font = tree.0.join("completion.ttf");
