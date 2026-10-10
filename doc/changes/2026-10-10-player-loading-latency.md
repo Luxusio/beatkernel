@@ -545,6 +545,10 @@ poll, complete it before the actual release decision, then require real font
 or explicit error publication on the next collection. Discovery has completed
 both allowed cycles; the corrected full diff still requires a fresh DEEP
 formal review and ordered independent CLI/browser/desktop QA.
+The native catalog suite passed8/failed0/ignored0 in0.36s
+(`catalog-result-lib-development-1.log`). The actual Desktop loading suite
+passed8/failed0/ignored0 in0.59s (`catalog-result-desktop-development-1.log`),
+including both new deterministic font/error publication regressions.
 
 Browser and browser-audio release builds on `293ed9b` passed in1m43s and1m22s,
 respectively. Matching wasm-bindgen0.2.129 generated both current packages.
