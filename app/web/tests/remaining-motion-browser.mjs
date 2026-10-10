@@ -160,6 +160,12 @@ try {
     { name: "devices", route: 6, fields: metadata, control: 21, x: 370, newX: 180, y: 630 },
   ];
   for (const c of cases) {
+    // Sibling menus are entered through their real Settings parent. The prior
+    // case deliberately reopens its screen to verify a fresh mounted owner.
+    if (c.route === 5 || c.route === 6) {
+      await ack(await menu.evaluate(() => { owner.back(owner.screen, owner.revision); return publish(); }));
+      assert.equal(await menu.evaluate(() => owner.route), 2);
+    }
     const version = await menu.evaluate(c => { owner.navigate_with_fields(owner.screen, owner.revision, c.route, c.fields); return publish(); }, c);
     await ack(version); const before = await screenshot(menu, c.name + "-before");
     let start = (await messages()).length;

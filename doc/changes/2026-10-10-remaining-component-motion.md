@@ -37,7 +37,11 @@ before publication and retain existing note caches.
   The owned test and Xvfb processes both exited 0. This is development evidence.
 - Independent final DEEP code review passed after fixing the browser acceptance
   script to advance the actual owner revision before publishing a repaint.
-  Independent CLI/browser/native QA remains pending.
+  Independent CLI/browser/native QA remains pending. The first actual browser
+  run passed Settings and Records motion/lifecycle interactions, then stopped
+  because the acceptance script attempted an illegal sibling route transition.
+  The script now returns through the actual Settings parent before Players and
+  Devices; renewed review and browser QA are required.
 
 These development checks and the code review do not
 complete WBS10.16/10.17 or the full BMS player Goal; WBS remains 90/193.
