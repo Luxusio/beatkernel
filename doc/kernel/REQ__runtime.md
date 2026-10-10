@@ -1,5 +1,16 @@
 # Integrated runtime contract (Phase 8)
 
+## Keysound binding lookup
+
+Runtime may index its constructor-owned immutable sound bindings by object and
+judge stage during setup. Lookup must visit only the matching fanout after a
+bounded search, without allocating an additional lookup result. Preserve the
+original binding order within each object/stage, exact duplicates, gain bits,
+outer judge-event order, accepted queue prefix and ordered admission failures.
+Miss and input-fallback behavior, voice-stop coverage and state/session
+replacement must remain unchanged. Setup sorting may allocate; this contract
+does not assert that the complete Runtime report path is allocation-free.
+
 The Windows composition example owns a Raw Input window and WASAPI stream with
 an explicit endpoint and shared/exclusive mode. It uses one QPC host origin,
 binds four canonical keys and publishes keysounds from judge hits. Scheduling

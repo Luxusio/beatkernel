@@ -59,6 +59,19 @@ impl SoundBinding {
     }
 }
 
+/// Borrows one event's setup-sorted fanout without scanning unrelated bindings.
+fn matching_sounds(
+    sounds: &[SoundBinding],
+    object: ObjectId,
+    stage: JudgeStage,
+) -> &[SoundBinding] {
+    let key = (object, stage);
+    let first = sounds.partition_point(|sound| (sound.object, sound.stage) < key);
+    let suffix = &sounds[first..];
+    let count = suffix.partition_point(|sound| (sound.object, sound.stage) == key);
+    &suffix[..count]
+}
+
 /// Operation failure before binding; judge fanout failures live in the report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeError {
@@ -334,12 +347,15 @@ impl Runtime {
         bindings: BindingMap,
         judge: JudgeEngine,
         producer: CommandProducer,
-        sounds: Vec<SoundBinding>,
+        mut sounds: Vec<SoundBinding>,
         telemetry_capacity: usize,
     ) -> Result<Self, RuntimeError> {
         if sounds.iter().any(|sound| !sound.gain.is_finite()) {
             return Err(RuntimeError::InvalidGain);
         }
+        // Bindings are immutable after setup. Stable sorting preserves the
+        // original fanout order, including duplicates, within each event key.
+        sounds.sort_by_key(|sound| (sound.object, sound.stage));
         let gameplay_sound_stop =
             GameplaySoundStop::new(sounds.iter().map(|sound| sound.voice).collect());
         Ok(Self {
@@ -796,7 +812,7 @@ impl Runtime {
             if !matches!(event.outcome, JudgeOutcome::Hit { .. }) {
                 continue;
             }
-            for sound in &self.sounds {
+            for sound in matching_sounds(&self.sounds, event.object, event.stage) {
                 let Some(command) = sound.command_for(event, report.audio_at.timestamp) else {
                     continue;
                 };
