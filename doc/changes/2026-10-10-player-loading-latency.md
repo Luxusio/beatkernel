@@ -182,8 +182,61 @@ unavailable. The correction removes the observed repeat-preparation regression,
 but cold/replacement medians and some audio-setup tails do not improve. The
 controlled File gate and probe overhead remain included; no universal speedup,
 page-startup performance or physical-output conclusion follows from this run.
+While large-media acquisition was held, current main-thread key dispatch p50
+was 0.415ms (p95/max 0.610ms), compared with 0.420ms (0.545ms) before. The
+resize-to-renderer-geometry acknowledgement median rose 7.890→18.340ms while
+p95/max fell 28.795→18.830ms. This is submitted-geometry acknowledgement, not
+physical display latency; the new UI also retains a visible preview where the
+old preparation route hid its canvas. These costs remain visible in the report.
+
+The preserved native binaries passed a separate catalog comparison: five fresh
+processes per variant, ten owned windows and ten captures. The same external
+X11 observer required Down to change selection and Up to restore it before
+admitting a usable-frame observation. Raw records and sampling costs live under
+`native-paired-catalog-development-2/`. Baseline binary SHA256 is
+`235816a648aac5500ea248456948627560020f0ec9fc69d6ba9cdf759148288c`;
+current binary SHA256 is
+`dc309ac7b84b57816cbb71d6bbad9d9980a2d9f45f8aa5d88f216693a602415f`.
+Fixture bytes, observer hash and arguments matched across variants.
+
+Observed native catalog times in milliseconds, before→after, five samples:
+
+| Observation | p50 | p95/max |
+| --- | --- | --- |
+| Candidate selected frame | 1100.183→1164.501 | 1252.206→1177.613 |
+| First proven usable frame upper bound | 1126.157→1184.415 | 1278.341→1196.943 |
+
+The usable-frame median rose about 58ms and the maximum fell about 81ms.
+These two-chart software-Vulkan startup observations include process launch,
+input probes, X11 sampling and observer overhead. OS page/shader caches were
+not controlled. They do not prove native preparation/output readiness or a
+universal startup improvement.
+
+The first paired attempt failed when a discovered X11 window disappeared
+before `X_QueryTree` (`BadWindow`). Its log is retained as
+`native-paired-catalog-development-1.log`. The helper now skips only a
+`BadWindow` matching the transient discovery target; all other errors and
+errors while sampling, entering input or capturing a confirmed owned window
+remain fatal. Fresh compilation and the ten-process retry passed. The fixture
+is registered in `desktop.rs` and remains an opt-in ignored test.
+
+A second, explicitly bounded native ALSA-null replay diagnostic with
+`--preroll-ns 0 --seconds 1` exited after 84 renders and 21,504 submitted
+frames, with zero xruns/failures. It admitted zero commands and retained song
+position zero for the empty capture. This verifies the bounded software-output
+path, not natural replay completion or physical presentation. The prior
+20-second timeout remains preserved alongside
+`native-null-replay-bounded-development.log`.
 
 ## Known ceiling
+
+Known ceiling: the measured browser replay fixture is a genuine incomplete
+capture stopped during startup, with no accepted inputs and no recorded horizon.
+It covers replay preparation and audio setup, not nonempty replay execution,
+judgement equivalence or typical full-song recording cost. A separate native
+ALSA-null diagnostic reconstructed it and opened the exact requested output,
+but did not naturally finish within its 20-second observation bound (exit124);
+this is not successful native replay drain or acoustic proof.
 
 Known ceiling: browser measurement `audio_ready` observes the correlated Worker
 `play-reply` result `audio-ready` (audio setup readiness), not the first armed

@@ -28,6 +28,9 @@ mod ime_fields_fixtures;
 #[path = "desktop_loading_fixtures.rs"]
 mod loading_fixtures;
 #[cfg(test)]
+#[path = "desktop_loading_measurement_fixtures.rs"]
+mod loading_measurement_fixtures;
+#[cfg(test)]
 #[path = "native_remaining_motion_fixtures.rs"]
 mod native_remaining_motion_fixtures;
 #[cfg(test)]
