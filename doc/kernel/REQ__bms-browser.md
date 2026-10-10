@@ -772,7 +772,8 @@ Memory keys normalize slash/backslash and dot components while preserving
 Unicode spelling and case. Empty, absolute, parent, drive-qualified and NUL
 paths are rejected. Duplicate normalized keys and file/directory collisions
 are rejected, rather than replaced. Audio lookup shares the native literal-first
-finite extension-variant policy; images use exact lookup. Native canonical
+finite extension-variant policy; images use the canonical literal-first finite
+ImageVariants policy in both planning and preparation. Native canonical
 containment and symlink behavior stay in the filesystem adapter.
 
 The default selected tree permits 32,768 files, 64 MiB per file, 256 MiB total
@@ -932,9 +933,11 @@ belongs to the supplied host. Files not selected by the user are unavailable.
 
 Source compilation does not prove generated bindings, WASM linking, Worker
 ordering, browser file access, canvas output, playback or physical latency.
-Fixtures may be authored and compiled; execution, browser/native acceptance and
-formal review remain deferred under the user's verification sequencing.
-Deferred Node fixtures cover the actual host metadata/time helpers and Worker
+The original milestone was authored under a verification deferral, which is now
+lifted. Current cleanup development evidence includes 54 actual Worker-source
+Node tests and a current WASM build; connected browser/native acceptance and
+independent review/QA remain pending. Node fixtures cover the actual host
+metadata/time helpers and Worker
 generation/cancellation path with mocked WASM ownership, without requiring a GPU.
 
 ## AudioWorklet component and remaining host integration

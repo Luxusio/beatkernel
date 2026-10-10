@@ -155,16 +155,6 @@ try {
   assert.equal(reads("short.bms").length, 1); assert.equal(reads("shared.wav").length, 1);
   assert.equal(reads("shared.wav", "end").length, 1);
   for (const name of ["delayed.bms", "broken.bms", "delayed.wav", "broken.wav", "unrelated-hung.bin"]) assert.equal(reads(name).length, 0);
-  // Actual keyboard navigation through the existing production menu bridge.
-  await page.click("#menu-open"); await page.waitForFunction(() => __loading.messages.some(x => x.kind === "menu-state" && x.route === 1));
-  await page.waitForFunction(() => {
-    const s = __loading.messages.findLast(x => x.kind === "menu-state");
-    return s?.route === 1 && __loading.messages.some(g => g.kind === "render-geometry" && g.mode === "menu" && g.menuGeneration === s.menuGeneration && g.screen === s.screen && g.revision === s.revision);
-  });
-  const beforeKey = await page.evaluate(() => __loading.messages.findLast(x => x.kind === "menu-state").revision);
-  await page.keyboard.press("ArrowDown");
-  await page.waitForFunction(revision => __loading.messages.some(x => x.kind === "menu-state" && x.route === 1 && BigInt(x.revision) > BigInt(revision)), {}, beforeKey);
-  await snapshot("03-actual-keyboard-catalog-navigation");
   await begin("delayed.bms");
   await bounded((async () => { while (!reads("delayed.wav").length || held.size === 0) await delay(20); })(), 10000, "actual pending selected media read");
   assert.equal(held.size, 1); const pending = await snapshot("04-genuine-selected-media-pending");
@@ -185,6 +175,17 @@ try {
   assert.equal(evidence.reads.length, beforeReplacementReads, "replacement catalog is also metadata-only");
   await begin("replacement.bms"); await prepared("Loading replacement"); await snapshot("08-accepted-new-library-replacement");
   assert.equal(reads("replacement.bms").length, 1); assert.equal(reads("shared.wav").length, 2, "new accepted library owns its own acquisition");
+  // The production menu intentionally takes presentation priority over preview.
+  // Exercise its actual keyboard bridge after the final preview readiness check.
+  await page.click("#menu-open"); await page.waitForFunction(() => __loading.messages.some(x => x.kind === "menu-state" && x.route === 1));
+  await page.waitForFunction(() => {
+    const s = __loading.messages.findLast(x => x.kind === "menu-state");
+    return s?.route === 1 && __loading.messages.some(g => g.kind === "render-geometry" && g.mode === "menu" && g.menuGeneration === s.menuGeneration && g.screen === s.screen && g.revision === s.revision);
+  });
+  const beforeKey = await page.evaluate(() => __loading.messages.findLast(x => x.kind === "menu-state").revision);
+  await page.keyboard.press("ArrowDown");
+  await page.waitForFunction(revision => __loading.messages.some(x => x.kind === "menu-state" && x.route === 1 && BigInt(x.revision) > BigInt(revision)), {}, beforeKey);
+  await snapshot("08b-actual-keyboard-catalog-navigation");
   // The UI prevents replacing a preparation mid-read; close the real pending
   // owner, then release its original acquisition and inspect cleanup separately.
   releaseDelayed = false; await begin("delayed.bms");

@@ -78,7 +78,8 @@ software processing only, never physical input-to-audio latency. Native drop and
 underrun counts are supplied explicitly by the host. Counters saturate rather than
 wrap; unavailable measurements remain absent. Reporting may allocate, and there
 is no allocation-free judge/runtime claim. Hardware benchmarks and formal
-verification are deferred by the user's instruction on 2026-09-30.
+verification were deferred by the user's instruction on 2026-09-30. That
+deferral is now lifted; actual device/performance acceptance remains unproved.
 
 ## Caller-selected processing clock
 
@@ -101,8 +102,8 @@ All clock selections invoke identical binding, chronology, Transport, Judge,
 audio queue and replay behavior. The processing clock is never an input, song,
 presentation or audio-scheduling clock; its precision proves no acoustic timing.
 Caller clock functions are trusted synchronous callbacks, outside the audio
-callback. Regression and unavailable-duration fixtures are authored for later
-execution under the standing verification deferral.
+callback. Regression and unavailable-duration fixtures were authored during the
+former verification deferral. Source alone is not evidence of their execution.
 
 The portable runtime example composes an actual canonical keyboard fixture,
 binding, chart judge, scalar queue and Mixer and renders literal PCM. This is
@@ -215,7 +216,7 @@ Freshness derives from the installed reconstructed judge. This does not reset
 or bypass song-time/output chronology. Callers changing charts still construct
 fresh runtime owners and explicit voice plans.
 
-Independent deferred fixtures cover validation/cap/identity/index boundaries,
+Independent fixtures cover validation/cap/identity/index boundaries,
 original song versus output time, fresh presses, ordinary hit precedence,
 button/contact ownership, duplicates/repeats/releases, unbound inputs, endpoint,
 partial queue admission and restoration. Compare actual Runtime output and
@@ -226,7 +227,9 @@ This establishes the real optional core Runtime path. BMS invisible preparation
 continues to refuse playback until app voice allocation, sample loading, replay
 identity and live/local/replay wiring all consume the same timeline. Core source
 and compile-only checks do not prove browser/device/audio execution or complete
-invisible-note playback. Runtime test execution and formal QA remain deferred.
+invisible-note playback. Current cleanup development evidence includes three
+input-sound cases, alongside runtime/fence/stop and eight indexed-fanout cases;
+independent review/QA are pending. The former test-execution deferral is lifted.
 
 ## Hazard outcome delivery
 

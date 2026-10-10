@@ -57,7 +57,7 @@ adapter. Native platform errors remain the original errors wrapped by existing
 result types. Existing native adapters and fixture assertions remain unchanged.
 No extra crate/dependency or per-note virtual dispatch is required.
 
-Independent deferred fixtures exercise the port and actual solo/cohort pumps
+Independent fixtures exercise the port and actual solo/cohort pumps
 using only the core estimator, memory device evidence, injected controls and
 host/competition ports. Explicitly disable core processing telemetry's native
 clock. Check original pair chronology, stale/refused observations and failed
@@ -69,7 +69,9 @@ prove assertion success.
 
 This removes the presentation type dependency from common gameplay policy;
 concrete competition internals, processing telemetry defaults, other IO
-boundaries and full adapter coverage still require work. Test execution,
-formal review/QA, hardware and performance verification remain deferred under
-the user's standing verification instruction. Full player completion and
+boundaries and full adapter coverage still require work. The original increment
+was authored during the former verification deferral, which is now lifted.
+Current cleanup development tests include four canonical/legacy compatibility
+integration cases; independent review/QA are pending. Physical hardware and
+performance acceptance still require their own evidence. Full player completion and
 SQLite-equivalent reliability are not established by this increment.
