@@ -71,7 +71,9 @@ This removes the presentation type dependency from common gameplay policy;
 concrete competition internals, processing telemetry defaults, other IO
 boundaries and full adapter coverage still require work. The original increment
 was authored during the former verification deferral, which is now lifted.
-Current cleanup development tests include four canonical/legacy compatibility
-integration cases; independent review/QA are pending. Physical hardware and
+Cleanup development tests included four canonical/legacy compatibility
+integration cases. Subsequent independent review and scoped QA passed; see the
+[final evidence and ceilings](../changes/2026-10-10-player-code-smell-cleanup.md).
+Physical hardware and
 performance acceptance still require their own evidence. Full player completion and
 SQLite-equivalent reliability are not established by this increment.

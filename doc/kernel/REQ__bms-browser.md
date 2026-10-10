@@ -934,9 +934,12 @@ belongs to the supplied host. Files not selected by the user are unavailable.
 Source compilation does not prove generated bindings, WASM linking, Worker
 ordering, browser file access, canvas output, playback or physical latency.
 The original milestone was authored under a verification deferral, which is now
-lifted. Current cleanup development evidence includes 54 actual Worker-source
-Node tests and a current WASM build; connected browser/native acceptance and
-independent review/QA remain pending. Node fixtures cover the actual host
+lifted. Cleanup development evidence initially included 54 actual Worker-source
+Node tests and a current WASM build. Subsequent keyboard integration brought
+the actual Worker suite to 56 passing tests; independent review, scoped CLI,
+connected browser and native Display QA passed. See the
+[final evidence and ceilings](../changes/2026-10-10-player-code-smell-cleanup.md),
+including separate UX depth and timeout limits. Node fixtures cover the actual host
 metadata/time helpers and Worker
 generation/cancellation path with mocked WASM ownership, without requiring a GPU.
 

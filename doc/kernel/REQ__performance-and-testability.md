@@ -206,8 +206,10 @@ checks and software-browser screenshots are not loading-speed benchmarks.
 The 2026-10-10 read-only source audit found that browser library import awaited
 every supplied File's bytes before reporting its chart list. The current cleanup
 replaces that path with metadata-only catalog publication and demand acquisition
-of selected resources (`app/web/worker.js`); connected browser acceptance is
-still pending. Preparation reuses encoded MemoryFiles but its decoded-audio
+of selected resources (`app/web/worker.js`); connected browser functional QA
+subsequently passed. See the
+[final evidence and ceilings](../changes/2026-10-10-player-code-smell-cleanup.md).
+Preparation reuses encoded MemoryFiles but its decoded-audio
 cache is local to one preparation call
 (`app/src/browser.rs`, `app/src/audio_assets.rs`); canonical WAV aliases avoid
 another decode but still clone PCM for distinct SampleIds. Prioritize early

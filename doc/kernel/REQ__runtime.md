@@ -227,9 +227,11 @@ This establishes the real optional core Runtime path. BMS invisible preparation
 continues to refuse playback until app voice allocation, sample loading, replay
 identity and live/local/replay wiring all consume the same timeline. Core source
 and compile-only checks do not prove browser/device/audio execution or complete
-invisible-note playback. Current cleanup development evidence includes three
-input-sound cases, alongside runtime/fence/stop and eight indexed-fanout cases;
-independent review/QA are pending. The former test-execution deferral is lifted.
+invisible-note playback. Cleanup development evidence included three
+input-sound cases, alongside runtime/fence/stop and eight indexed-fanout cases.
+Subsequent independent review and scoped QA passed; see the
+[final evidence and ceilings](../changes/2026-10-10-player-code-smell-cleanup.md).
+The former test-execution deferral is lifted.
 
 ## Hazard outcome delivery
 
