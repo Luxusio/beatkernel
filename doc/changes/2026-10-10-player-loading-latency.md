@@ -600,6 +600,27 @@ provenance and the final independent review remain required; old browser QA
 retains its exact immutable artifact/source scope until equivalence or current
 verification is established. The original failed build log remains preserved.
 
+On final source `e436fcf`, the corrected actual Desktop composition regression
+passed with all9 loading tests (0 failures, 0 ignored); the full parent executable
+passed346 tests (0 failures, 13 ignored). Native production compilation passed
+in1m37s. The preserved final executable in `current-native-loading-row/` has
+SHA256 `7a9c4cc5fc39d762ab18ccddb8198efa9c5eec81212d76bd50a2d63195df1a90`
+and93,629,136 bytes. The fresh full DEEP independent code review passed with
+no findings; discovery was exhausted and no further hunters were run. These
+development results and code review do not replace affected desktop/UX or
+independent CLI/foreign-target verification.
+
+Fresh browser and browser-audio release builds on that same source passed
+in1m51s and1m14s, followed by successful generation of both bindings packages.
+`current-browser-e436fcf-artifact-provenance.json` compares all95 artifact
+hashes and lengths against the immutable `293ed9b` browser manifest: every
+artifact is byte-identical. Thus the already completed actual browser QA and
+browser UX retain their browser-artifact scope after the additive Scene API
+change. This is artifact equivalence, not a new browser execution or a
+hook-owned completion receipt. The original desktop QA FAIL remains attached
+to its old executable; fresh affected desktop/UX and final CLI checks remain
+pending. WBS remains90/193.
+
 The strengthened browser capture prerequisite passed in one actual preserved
 baseline process. `browser-finite-capture-development-1/observations.json`
 records two admitted inputs, 118 advances, 120 durable records and a finite
