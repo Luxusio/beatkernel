@@ -72,3 +72,28 @@ fn tighter_asset_limits_refuse_without_consuming_original_and_empty_pcm_stays_va
     assert!(copied.into_samples().is_empty());
     assert!(empty.samples().is_empty());
 }
+
+#[test]
+fn old_deep_clone_remains_independent_when_original_has_shared_consumers() {
+    let format = AudioFormat::new(48_000, 2).unwrap();
+    let limits = PcmLimits::new(16, 64, 4).unwrap();
+    let original = PcmSample::new(format, vec![-0.0, 0.25, -2.0, 1.5], limits).unwrap();
+    let shared = original.try_share(limits).unwrap();
+    let deep = original.try_clone(limits).unwrap();
+    assert_eq!(original.samples().as_ptr(), shared.samples().as_ptr());
+    assert_ne!(deep.samples().as_ptr(), shared.samples().as_ptr());
+    let pointer = deep.samples().as_ptr();
+    let mut mutable = deep.try_into_samples().unwrap();
+    assert_eq!(
+        mutable.as_ptr(),
+        pointer,
+        "old deep clone has uniquely owned payload"
+    );
+    mutable[0] = 3.0;
+    assert_eq!(original.samples()[0].to_bits(), 0x8000_0000);
+    assert_eq!(shared.samples()[0].to_bits(), 0x8000_0000);
+    drop(original);
+    assert_eq!(shared.samples()[1], 0.25);
+    drop(shared);
+    assert_eq!(mutable, [3.0, 0.25, -2.0, 1.5]);
+}
