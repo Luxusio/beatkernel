@@ -1,5 +1,24 @@
 # Native runtime boundaries
 
+## Loading cache and worker lifetime
+
+The loading increment uses one setup-only original preparation cache owned by
+the actual Desktop/library, attached to each spawned native game worker and
+retained across joined retries. A worker-local Session alone cannot provide
+that lifetime. Setup may use its explicit Arc/Mutex attachment; UI polling,
+audio rendering and native input/output hot loops never take that cache lock.
+Clone cancellation/progress control before locking and do not hold a TLS
+RefCell borrow across IO or callbacks.
+
+The cache preserves bounded current-byte freshness and fresh policy/section/
+replay validation through the common preparation seam. Standalone/custom
+decoder paths remain compatible and uncached. Native partial catalog and font
+publication reuse existing worker/control/renderer ownership, with bounded
+retirement and nonblocking ordinary polling. This avoids a parallel asset
+server, executor or OS-specific business policy. The decision is an intended
+implementation contract; measured and independently verified completion is
+reported separately.
+
 ## Canonical device composition
 
 Production native device implementations use the common GameplayDevice port;

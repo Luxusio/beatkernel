@@ -1,5 +1,41 @@
 # Performance and deterministic testability
 
+## Bounded preparation reuse and measurements
+
+The loading increment shall retain at most one original chart/PCM cache entry,
+with 256 MiB encoded identity and 256 MiB unique PCM payload budgets, further
+limited by the caller's ordinary limits, 32 MiB chart bytes and existing parser
+item/metadata bounds. Exceeding the cache budget disables retention for that
+request; it does not reject otherwise legal preparation. SampleBank logical
+limits remain charged per SampleId. Count old cache, candidate, active consumer
+and retired-read ownership separately; cache eviction is not a whole-process
+memory bound. Image/movie payloads are freshly prepared and not cached by this
+increment.
+
+Native freshness checks acquire each current canonical resource once and
+compare/decode the same bytes, preserving the decoder's actual resolved key.
+Modification times and lengths do not prove identity. Browser cache reuse is
+scoped to immutable loaded entries in its current library/inventory identity.
+Custom decoder calls remain uncached. Seed, format/channel/path policy, limits
+and genuine replay/section validation remain part of admission. Cache only
+unsliced originals, never mutable judge/transport or derived section state.
+
+Preparation stages and current-owner cancellation shall be explicit. Native
+workers check between fallible operations; browser jobs yield between bounded
+resource phases. A ready candidate is transferred once and committed only
+after current-owner revalidation. Failure/cancel preserves the last valid
+cache. See [loading readiness](../ui/REQ__loading-readiness.md).
+
+Cold/warm comparisons preserve the complete baseline executable and browser
+dependency tree, including AudioWorklet JS/WASM. Baseline serving cannot fall
+through to rebuilt current artifacts. Record fixture/configuration/build and
+loaded-resource hashes, reset each cold trial and name the warm reused owner.
+Report first selectable path, actual presented usable frame, preparation and
+output-ready separately. New counters unavailable on the old build are marked
+incomparable. At least five software trials report p50/p95/max, counts and
+retained payload; this does not establish physical latency or world-fastest
+performance.
+
 ## Product objective
 
 During the current cleanup, the browser catalog must become actionable before

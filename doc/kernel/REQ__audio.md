@@ -32,11 +32,27 @@ for later native unequal-rate enablement, not evidence of that feature.
 
 ## Explicit setup-time PCM copies
 
+Immutable preparation sharing shall be an additional setup operation, with
+`PcmSample::try_share(limits)` and `SampleBank::try_share(limits)` preserving
+the sample format, exact f32 bits and ordinary logical capacity checks. Every
+SampleId still consumes its complete logical PCM bytes even when physical
+storage is shared. Existing `try_clone` remains an independent deep copy.
+Rendering borrows slices and must not clone a shared owner, acquire a cache
+lock or allocate/release an asset.
+
+The constructor shall preserve its supplied Vec payload allocation. With
+shared storage, `into_samples` moves that allocation only when uniquely owned;
+otherwise it returns an independent mutable copy. `try_into_samples` provides
+a fallible shared-payload copy. A safe stable Arc control block adds one cold
+metadata allocation, including empty assets; its allocation failure is not
+promised to return AudioError. Tests and measurements must distinguish this
+cost from payload-copy savings, rather than claiming universal zero cost.
+
 PcmSample::try_clone accepts explicit PCM limits and returns an independent
 owned buffer, preserving source rate, channels, frame count and exact finite
 sample values. Storage bounds precede fallible allocation. Empty samples remain
 valid. This is preparation work; rendering does not clone or release assets.
-SampleBank still counts every identity's complete PCM bytes and owned buffer.
+SampleBank still counts every identity's complete logical PCM bytes.
 
 ## Scheduling and deterministic mixing
 

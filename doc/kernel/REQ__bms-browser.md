@@ -1,5 +1,30 @@
 # Browser host and shared selected-file preparation
 
+## Staged preparation ownership
+
+The library preparation job shall own its parsed plan, current encoded resource
+and staged bank. Each advance synchronously receives the current library,
+checks its identity and executes at most one resource phase before returning
+progress or one terminal ready candidate. No library reference survives an
+await. Current-owner validation precedes candidate commit/publication; cancel,
+error and terminal reuse cannot replace the previous valid cache or preview.
+All preview/live/local/policy/section/replay entry points use this same original
+preparation path and retain genuine recording/setup validation.
+
+Library/inventory identity changes on new canonical entries; hydration of an
+existing declaration alone does not change resolver inventory. Immutable
+original PCM may be shared under unchanged logical limits. BrowserSample shall
+retain PCM until either the compatible Vec take or direct owned Float32Array
+take consumes one shared one-shot latch. The direct actual Worker export must
+avoid an intermediate shared-PCM-to-Rust-Vec copy, while transferring an
+independent JS buffer. Detach cannot mutate cached originals. Cross-WASM memory
+transfer is not claimed zero-copy.
+
+Actual progress, current-job Cancel, error recovery and selectable metadata
+wording follow [loading readiness](../ui/REQ__loading-readiness.md). Indivisible
+parse/compile/read/codec tails remain measured limits, not an instant readiness
+claim. See [reuse budgets and measurement provenance](REQ__performance-and-testability.md).
+
 ## Input collection and rendering ownership
 
 ### Coalesced touch movement acquisition
