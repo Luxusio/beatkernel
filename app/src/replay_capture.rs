@@ -12,7 +12,9 @@ use beatkernel::{
     time::{ClockDomainId, Timestamp},
 };
 use beatkernel_bms::BmsInputMode;
-use std::{fs::OpenOptions, io::Write, path::Path};
+
+#[path = "native_replay_capture.rs"]
+mod native_storage;
 
 /// Capture, serialization or exclusive output creation failure.
 #[derive(Debug)]
@@ -31,7 +33,7 @@ pub enum CaptureError {
     Replay(ReplayError),
     /// The existing bounded durable codec rejected data or capacity.
     Codec(ReplayCodecError),
-    /// A newly created output could not be written, or the path already exists.
+    /// Complete exclusive publication failed, or the path already exists.
     Io(std::io::Error),
 }
 impl From<ReplayError> for CaptureError {
@@ -602,17 +604,6 @@ impl LiveReplayCapture {
     pub fn into_bytes(self) -> Result<Vec<u8>, CaptureError> {
         let limits = self.limits;
         Ok(encode_replay(&self.into_file(), limits)?)
-    }
-    /// Encodes before exclusive file creation; invoke after native cleanup.
-    ///
-    /// Existing files remain untouched. A write/flush failure can leave a partial
-    /// newly created file. Success means a flushed write, not power-loss safety.
-    pub fn save_new(self, path: &Path) -> Result<usize, CaptureError> {
-        let bytes = self.into_bytes()?;
-        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-        file.write_all(&bytes)?;
-        file.flush()?;
-        Ok(bytes.len())
     }
 }
 

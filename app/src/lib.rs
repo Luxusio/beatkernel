@@ -376,6 +376,7 @@ mod native_policy_admission;
 mod native_policy_network_fixtures;
 #[cfg(test)]
 mod native_policy_preparation_fixtures;
+mod native_publication;
 /// Injectable diagnostic deadlines and waiting for shared native pumps.
 pub mod native_pump_control;
 mod native_pump_system;

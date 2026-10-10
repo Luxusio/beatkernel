@@ -1,8 +1,9 @@
-//! Explicit-directory file adapter. Flush is not crash-atomic durability.
+//! Explicit-directory file adapter with complete, exclusive file publication.
+//! Synced files do not imply directory durability; group saves are nontransactional.
 use crate::result_archive_store::ResultArchiveStoragePort;
 use std::{
-    fs::{File, OpenOptions},
-    io::{self, Read, Write},
+    fs::File,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
 };
 
@@ -74,12 +75,10 @@ impl NativeResultArchiveStore {
 }
 impl ResultArchiveStoragePort for NativeResultArchiveStore {
     type Error = io::Error;
-    /// On write/flush refusal a partial newly created file may remain.
+    /// Publishes a complete synced file exclusively; staging cleanup is best effort.
     fn create_new(&mut self, key: &str, bytes: &[u8]) -> io::Result<()> {
         let path = self.path(key)?;
-        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-        file.write_all(bytes)?;
-        file.flush()
+        crate::native_publication::publish_new(&path, bytes)
     }
     fn read_bounded(&mut self, key: &str, max_bytes: usize) -> io::Result<Vec<u8>> {
         let path = self.path(key)?;
@@ -97,7 +96,7 @@ pub fn sidecar_path(
     name.push(".bkresult");
     Ok(base.with_file_name(name))
 }
-/// Outer exclusive-create adapter. A refused write/flush may leave a partial new file.
+/// Outer adapter publishing a complete file exclusively; staging cleanup is best effort.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_sidecar(
     archive: &crate::result_archive::ResultArchive,
@@ -111,9 +110,7 @@ fn write_sidecar_bytes(
     path: &Path,
     bytes: &[u8],
 ) -> crate::native_gameplay::NativeGameplayResult<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(bytes)?;
-    file.flush()?;
+    crate::native_publication::publish_new(path, bytes)?;
     Ok(())
 }
 
@@ -282,6 +279,10 @@ pub fn read_sidecar(base: &Path) -> io::Result<Option<Vec<u8>>> {
 #[cfg(test)]
 #[path = "native_member_sidecar_fixtures.rs"]
 mod member_fixtures;
+
+#[cfg(test)]
+#[path = "native_result_archive_publication_fixtures.rs"]
+mod publication_fixtures;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod practice_paths_fixtures {
