@@ -1,5 +1,15 @@
 # Native BMS replay capture
 
+Native `save_new` must preserve its encoded byte-count and error API while
+publishing a complete synced staging file through exclusive creation of the
+final directory entry. It must preserve existing files and symlinks and reject
+write/flush/sync/link failures without a partial final replay. Filesystem
+implementation belongs to the native adapter; capture/encoding remains pure.
+The shared [individual publication contract](../runtime/REQ__completed-result-archive.md#complete-individual-native-publication)
+defines ownership, original-error precedence, best-effort cleanup and remaining
+durability limits. This supersedes the old partial-file guarantee; implementation
+and independent verification are currently in progress, not completed evidence.
+
 The portable finite stepped live owner must install the existing core logical
 endpoint before processing. Capture uses its immutable original start/end and
 chart seed, recording actual capped reports in the section-aware format. Input
@@ -37,15 +47,18 @@ recording remains a prefix, never a claim of a complete session.
 Recording performs control-thread allocations and bounded codec work; it does
 not execute a second judge or perform filesystem IO in the gameplay loop.
 After native cleanup attempts, the application encodes and writes the log using
-exclusive file creation. Existing output files are never overwritten. Saving
-failure is reported, and a newly created file can be partial after write failure.
+exclusive publication of a completed staging file. Existing output files are
+never overwritten. Saving failure is reported without publishing a partial
+final replay; staging cleanup remains best effort.
 Earlier gameplay or cleanup errors retain precedence over saving errors.
 
 Known ceiling: finite recording caps can stop long sessions unless explicitly
 increased. Encoded-byte limits bound durable data, not total process memory;
 temporary encoding and in-memory recording consume additional memory. A capture
 contains judgment inputs and advances, not PCM or a reproduction of physical
-audio timing. Execution tests and native recording checks remain deferred.
+audio timing. Public capture/save software tests now execute; actual device
+recording and cross-platform acceptance remain separate. Current evidence is
+tracked in [the storage change note](../changes/2026-10-10-native-record-publication-integrity.md).
 
 
 ## Finite recorded sections

@@ -1,5 +1,14 @@
 # Native completed-result saving
 
+Individual replay and whole/member sidecar files must follow the
+[complete native publication contract](REQ__completed-result-archive.md#complete-individual-native-publication).
+The final name receives complete synchronized bytes through exclusive linking;
+write/flush/sync/link refusal preserves existing targets without a partial final
+file. Group writes remain nontransactional and retain all-attempts/first-error
+ordering. Best-effort owned-stage cleanup never deletes a final or masks an
+original error. This intended strengthening replaces the partial-file limitation
+below; its implementation and independent verification are in progress.
+
 Windows, macOS and Linux solo/local application entry points use the same
 completed-result finalization policy. Only actual typed pump completion, or
 completion retained in a typed publication error, can supply archive results.
@@ -35,8 +44,10 @@ All allocation/encoding for saving occurs after the realtime pump and cleanup
 attempts; generic callback injection adds no per-note dynamic dispatch.
 Native filesystem publication remains an outer exclusive-create adapter and supports
 the original path's native filename without lossy conversion. Existing files
-are preserved. Partial new files after write/flush refusal and lack of
-power-loss/crash atomicity remain explicit limitations.
+are preserved. Each native file is published only after complete staging,
+file synchronization and handle closure. Best-effort staging cleanup,
+directory-entry power-loss durability and group transactionality remain
+explicit limitations.
 
 Capture setup must preserve the actual original start and optional end in its
 canonical header. Unlimited captures retain their existing compatibility
@@ -44,9 +55,11 @@ encoding. Browser persistence source now has its
 [own storage contract](REQ__browser-completed-result-storage.md).
 Native adjacent record lookup and browser loaded-result presentation now use the
 shared exact association policy. Local recordings saved before adjacent member
-sidecars still require explicit association or migration. Independent deferred
+sidecars still require explicit association or migration. Existing
 fixtures cover real pristine finite capture,
 typed completion/error retention, original roster associations, cancelled/prefix
-refusal, cleanup/error precedence and save ordering. Execution assertions,
-actual filesystem/device/browser tests and Windows/macOS target checks remain
-deferred under the existing verification instruction.
+refusal, cleanup/error precedence and save ordering. Current native filesystem
+publication software evidence is tracked in
+[the storage change note](../changes/2026-10-10-native-record-publication-integrity.md).
+Device/browser execution and Windows/macOS runtime remain separate acceptance;
+the earlier verification deferral no longer applies.

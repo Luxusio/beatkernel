@@ -1,5 +1,13 @@
 # Portable archive set publication port
 
+The native adapter must now implement the
+[complete individual-file guarantee](REQ__completed-result-archive.md#complete-individual-native-publication)
+behind the existing port, without moving filesystem effects into business
+policy. This changes individual native publication, not group transactionality,
+destination preparation, write ordering or original first-error retention.
+Implementation and independent verification are in progress; existing unproven
+power-loss/directory-containment limits remain.
+
 Whole-roster and member archive staging, duplicate detection, write ordering and
 first-error selection belong to shared business policy, not the filesystem
 adapter. A statically dispatched port supplies opaque comparable destinations,
@@ -18,7 +26,8 @@ then original-member order, with the first exact associated storage error retain
 Historical values remain distinct from live CompletedPlayResult evidence.
 
 The native adapter composes this shared policy with original OsString path
-construction and exclusive file creation/write/flush. Its existing callback API
+construction and exclusive publication of completely written, synced files.
+Its existing callback API
 and solo behavior stay compatible. Native destination/storage errors are unwrapped
 to preserve the original boxed error identity; policy errors retain their kind.
 The three native local composition roots continue using this single adapter.
@@ -26,24 +35,24 @@ Generic dispatch introduces no per-note allocation, virtual calls or locks;
 bounded staging allocations occur after play cleanup, with no measured
 zero-overhead or universal allocation-free claim.
 
-Independent deferred fixtures inject non-path destinations and opaque errors,
+Existing fixtures inject non-path destinations and opaque errors,
 exercise 1–64 original IDs, duplicate and late-preparation refusal with zero
 writes, invalid whole archive refusal before adapter access, linear payloads,
 all-write attempts and original error retention. Existing native callback/path
-fixtures remain unchanged. Assertions and formal review/QA are deferred; after
-both writers stop, scoped formatting and the exact four compile-only checks
-establish compilation only.
+fixtures remain unchanged. Current executable native publication evidence is
+tracked in [the storage change note](../changes/2026-10-10-native-record-publication-integrity.md);
+the earlier verification deferral no longer applies.
 
 ## Known ceiling
 
 Port implementations must honor effect-free preparation and exclusive create.
 Cross-file writes remain nontransactional and crash durability is unproven.
-Actual native filesystem/platform acceptance, complete remaining IO-layer
+Full native platform acceptance, complete remaining IO-layer
 separation and performance measurements remain unfinished.
 Allocator refusal is represented by a typed error but has not been fault-injected
 or executed in this increment.
 
-## Implementation evidence
+## Historical initial implementation evidence
 
 Both paired writers returned terminal `Writes STOPPED` before scoped formatting
 and compilation. Five deferred pure-port groups were authored. Their comparable

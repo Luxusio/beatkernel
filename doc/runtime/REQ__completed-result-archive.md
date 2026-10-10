@@ -1,5 +1,35 @@
 # Completed result archive
 
+## Complete individual native publication
+
+Native saving must encode before effects, then create an exclusively owned
+sibling staging file, write all bytes, flush and synchronize it, close the
+handle, and exclusively hard-link it to the requested final path. A write,
+flush, sync or publication refusal must never expose a partial final file or
+modify an existing regular file/symlink. No direct-final or clobbering fallback
+is permitted when links are unsupported.
+
+Generated staging names must use uppercase ASCII hexadecimal 8.3 components
+and a checked 44-bit process-separated identity. Exclusive creation handles
+collisions with a 32-attempt cap. Before creation, staging candidates must be
+excluded when their names could alias the final name through ASCII case,
+leading spaces, trailing spaces/periods or Windows stream syntax. Conservative
+candidate exclusion applies on every target; it does not rewrite the caller's
+final filename. This avoids relying on case-sensitive filesystems or generated
+Windows short-name aliases. Native Windows execution remains separate evidence.
+
+Cleanup owns only a successfully created stage and closes its handle first.
+It preserves the exact primary IO error. Cleanup after successful publication
+is best effort and cannot turn a committed complete file into a refusal; the
+final path is never deleted. Refused cleanup or process termination can leave
+an orphan stage. File synchronization does not establish directory-entry
+power-loss durability or hostile-directory containment. Archive sets retain
+their independent prepare-all/attempt-all/first-error semantics.
+
+This intended guarantee supersedes the earlier partial-new-file limitation
+below. Implementation and independent verification are in progress in
+`TASK__native-record-publication-integrity`; no new PASS is claimed here.
+
 A portable versioned archive preserves actual completed live results for the
 entire original 1..64 player roster, each player's existing replay setup/header
 identity, actual gauge policy, final gauge/outcome and full/practice extent.
@@ -30,8 +60,9 @@ exclusive-create storage port once. Reading is bounded and validates complete
 bytes before returning historical data. Pure policy code performs no file, OS,
 clock, database or network access. A separate native file adapter maps safe
 single-component keys under an explicit caller-owned directory to bounded reads
-and exclusive creation, preserving existing files. Write/flush errors can leave
-a partial newly created file; flush is not power-loss or crash-atomic durability.
+and exclusive publication, preserving existing files. Write/flush/sync errors
+leave no partial final file. Owned staging cleanup is best effort; file sync
+does not establish directory-entry power-loss durability.
 The directory must remain caller-owned. Standard-library path checks and open
 are separate operations and do not guarantee containment if another actor
 concurrently replaces directory entries or the root.
@@ -65,7 +96,9 @@ Actual execution remains unproven. Stored comparisons are display metadata, not
 trusted final rankings or additional completion proof.
 Actual native completion now also uses score-bearing version 2 under
 [the native score association contract](REQ__native-archived-score.md).
-Independent deferred tests cover golden
+Existing tests cover golden
 bytes, policy/identity round trips, malformed and later-row cases, integer bounds,
-storage refusal and exact call ordering. Assertions, filesystem/device/browser
-runtime and crash/recovery acceptance remain deferred under the user's instruction.
+storage refusal and exact call ordering. Current native publication software
+evidence is tracked in [the storage change note](../changes/2026-10-10-native-record-publication-integrity.md).
+Device/browser runtime and crash/recovery acceptance remain separate; the
+earlier user instruction to defer verification no longer applies.
