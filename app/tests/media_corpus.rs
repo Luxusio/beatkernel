@@ -288,7 +288,7 @@ fn mono_expansion_charges_asset_and_aggregate_after_channel_policy() {
 }
 
 #[test]
-fn aliases_retain_distinct_ids_and_charge_each_owned_pcm_copy() {
+fn aliases_share_immutable_pcm_and_charge_each_distinct_logical_id() {
     let chart = b"#BPM 120\n#WAV01 tap.wav\n#WAV02 ./tap.wav\n#00011:0102\n";
     let encoded = wav(24_000, 1, &[0, 16_384, -16_384]);
     let files = memory(chart, &[("tap.wav", &encoded)]);
@@ -303,9 +303,36 @@ fn aliases_retain_distinct_ids_and_charge_each_owned_pcm_copy() {
     .unwrap();
     let first = accepted.bank.get(SampleId(1)).unwrap();
     let second = accepted.bank.get(SampleId(2)).unwrap();
+    assert_eq!(accepted.bank.len(), 2);
+    assert!(!std::ptr::eq(first, second));
     assert_eq!(accepted.bank.total_bytes(), 48);
+    let expected = [0.0, 0.0, 0.5, 0.5, -0.5, -0.5];
+    assert_eq!(first.format(), AudioFormat::new(24_000, 2).unwrap());
+    assert_eq!(second.format(), first.format());
+    assert_eq!(first.samples(), expected);
     assert_eq!(first.samples(), second.samples());
-    assert_ne!(first.samples().as_ptr(), second.samples().as_ptr());
+    assert_eq!(first.samples().as_ptr(), second.samples().as_ptr());
+    let clone = first.try_clone(limits(24, 48, 2)).unwrap();
+    assert_eq!(clone.format(), first.format());
+    assert_eq!(clone.samples(), expected);
+    assert_ne!(clone.samples().as_ptr(), first.samples().as_ptr());
+    let clone_pointer = clone.samples().as_ptr();
+    let mut cloned_pcm = clone.try_into_samples().unwrap();
+    assert_eq!(cloned_pcm.as_ptr(), clone_pointer);
+    cloned_pcm[0] = 1.0;
+    let shared = second.try_share(limits(24, 48, 2)).unwrap();
+    assert_eq!(shared.format(), second.format());
+    assert_eq!(shared.samples(), expected);
+    assert_eq!(shared.samples().as_ptr(), second.samples().as_ptr());
+    let mut extracted_pcm = shared.try_into_samples().unwrap();
+    assert_eq!(extracted_pcm, expected);
+    assert_ne!(extracted_pcm.as_ptr(), second.samples().as_ptr());
+    assert_ne!(extracted_pcm.as_ptr(), cloned_pcm.as_ptr());
+    extracted_pcm[1] = -1.0;
+    assert_eq!(cloned_pcm, [1.0, 0.0, 0.5, 0.5, -0.5, -0.5]);
+    assert_eq!(extracted_pcm, [0.0, -1.0, 0.5, 0.5, -0.5, -0.5]);
+    assert_eq!(first.samples(), expected);
+    assert_eq!(second.samples(), expected);
     let error = prepare(
         &files,
         chart,

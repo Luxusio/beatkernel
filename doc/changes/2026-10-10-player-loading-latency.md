@@ -706,7 +706,8 @@ distinct sample payload pointers for canonical aliases, contradicting this
 increment's approved immutable alias sharing. Its connected fixture must be
 updated while retaining logical limits, unique acquisition/decode and independent
 public deep-clone semantics. The unchanged cached Records detail test separately
-refused a zero logical extent during suspended update; an actual archived
+failed at `view.resize(0, 0)` before its suspended-update assertions could run;
+an actual archived
 `e421b59` baseline run is pending to establish its ownership. Neither failure
 is concealed or counted as a passing test. The original and reproduction logs
 are retained under `qa-cli-final-1/`; integration/bin targets built before this
@@ -723,7 +724,8 @@ correction. Full player Goal and WBS remain unfinished.
 
 The archived `e421b59` Records test subsequently reproduced the same failure
 at fixture line478, exit101 (0passed/1failed/2359filtered), after3m24s
-compilation. It is proven preexisting; suspended cached-detail updates remain
+compilation. It is proven preexisting; zero-viewport suspension, cached-detail
+updates and exact restoration remain
 an actual full-goal repair obligation for the queued screen-ownership cleanup,
 not a fixed or relaxed requirement. CLI QA1 returned actual FAIL for the obsolete
 alias assertion and incomplete remaining scope. The corrected alias fixture
@@ -742,6 +744,34 @@ fresh compiled executable then passed all4 invisible-source fixtures
 These development results repair the obsolete assertion; fresh formal review
 and independent remaining CLI verification are still required. The preexisting
 Records failure remains open in the queued full-goal cleanup request.
+
+Independent CLI QA2 on `c676d805` completed compilation and executed 16 app
+test targets before stopping on a second obsolete alias assertion in
+`app/tests/media_corpus.rs:308`: 2,933 passed, one failed, 23 ignored, and only
+the documented baseline-proven Records case filtered. The library itself
+passed 2,366 tests with six ignored; the desktop binary passed 346 with 13
+ignored. Media corpus passed 14 and failed one. A second exact execution of
+the failing corpus case also returned exit 101. Its pointer-inequality
+expectation contradicts the approved canonical immutable PCM sharing contract;
+logical capacity and independent mutable extraction remain required.
+Evidence is preserved in
+`target/wf/player-loading-latency/qa-cli-final-2/app-tests.log` and
+`media-corpus-alias-exact.log`. Remaining integration targets, disjoint parent
+suites, nine Node suites and Linux/Windows/macOS checks did not execute in
+this attempt. QA2 returned actual FAIL; no completion or WBS promotion is
+claimed from these partial results.
+
+The corpus alias test was then corrected to require shared immutable payload
+and distinct logical entries, preserving the 48-byte accepted limit, 47-byte
+refusal and single-entry refusal. It additionally checks exact original-source
+format/PCM values, independent public deep clones, unique extraction without
+copying, and independent mutable extraction from shared payload; mutating both
+extracted buffers leaves both bank aliases unchanged. A fresh development run
+of the full `media_corpus` target passed all 15 tests, with no ignores or filters,
+after a 1m07s build. Evidence:
+`target/wf/player-loading-latency/media-corpus-development-1.log` (exit 0).
+This is development evidence; fresh independent review and the unfinished CLI
+verification remain required. Production implementation is unchanged.
 
 Known ceiling: native GUI QA2 uses the existing live `:99` current-display
 transport. Its attempted new Xvfb startup failed because the display listener
