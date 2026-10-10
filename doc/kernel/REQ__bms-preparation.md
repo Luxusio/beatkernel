@@ -98,9 +98,13 @@ not establish measured preparation speed or actual playback behavior.
 
 Fixtures author real temporary WAV assets, exact BPM/STOP/BGM/hold timing,
 explicit mono expansion, reference-only loading, custom decoding, bounded PCM,
-path rejection and more than 4096 chart notes. They are compiled but remain
-unexecuted during the user's verification deferral. No native playback, QA,
-review or runtime result is claimed by preparation authoring.
+path rejection and more than 4096 chart notes. At their original authoring
+checkpoint they were compiled without execution during the then-active
+verification deferral. That deferral has since ended: the2026-10-10 independent
+CLI QA executes all27 preparation tests plus20 new corpus/allocation tests,
+47 PASS/0 FAIL/0 ignored. The [current evidence guide](../verification/GUIDE__audio-preparation-corpus.md)
+records the exact software scope. Native playback and hardware/audio timing
+remain separate from these executed preparation tests.
 
 
 ## Shared chart character decoding

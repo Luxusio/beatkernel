@@ -24,8 +24,11 @@ codec policies and dependencies are unchanged.
 
 Development evidence: corpus15/0 then final strengthened MP3 case1/0; allocation
 5/0 with original log preserved. The final combined development run after format
-normalization passes20/0/0ignored with original log preserved. Final independent
-review and QA remain pending.
-WBS08.14 remains V; total89/193. Neither these request statistics nor authored
+normalization passes20/0/0ignored with original log preserved. Independent DEEP
+code review PASS at `255c400` preceded independent CLI QA:15 corpus,5 allocation
+and27 existing preparation tests give47 PASS/0 FAIL/0 ignored, exit0. Rust2021 format,
+baseline diff and WBS consistency checks passed; raw QA logs and measured figures
+are recorded in the guide. WBS08.14 is D within its finite software scope;
+total90/193. Neither these request statistics nor authored
 tests establish peak RAM, arbitrary codec conformance, hardware audio, whole
 player completion or receipt-backed Harness closure.

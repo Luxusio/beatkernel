@@ -58,8 +58,8 @@ named scope; authored tests or compilation alone do not satisfy it.
 Development checks under `TASK__bounded-media-malformed-corpus`, base `ab4bc81`:
 the corpus author executed15 tests successfully, then tightened the MP3 error
 assertion and reran that exact case successfully. The allocation binary ran all
-five tests successfully at the current source. Independent review and QA remain
-pending, so WBS08.14 remains V and verified progress remains89/193.
+five tests successfully at the current source. Independent review and QA
+were pending at that development checkpoint; WBS08.14 was V and progress89/193.
 After Rust2021 normalization, the combined development command executed all20
 current tests successfully (15 corpus plus5 allocation, failures0/ignored0),
 with original output in `target/wf/media-corpus-01a1249d/combined-development.log`.
@@ -86,3 +86,24 @@ were corrected before author success. Author results exist in exec session
 streams only. Allocation development original stdout/stderr is preserved at
 `target/wf/media-corpus-01a1249d/ac002/development.log`. A fresh checkout must
 execute the commands; machine-local logs are not portable acceptance artifacts.
+
+## Independent acceptance — 2026-10-10
+
+Independent DEEP code review PASS at source `255c400` preceded independent CLI
+QA. QA ran both new binaries and the existing preparation integration suite in
+one invocation: corpus15 + allocation5 + preparation27 =47 PASS, failures0 and
+ignored0, exit0. Rust2021 format, baseline diff whitespace and WBS consistency
+checks also passed. Raw logs are in
+`target/wf/media-corpus-01a1249d/qa-cli/{cargo.stdout.log,cargo.stderr.log,cargo.exit}`.
+Allocation figures above match the independent output exactly.
+
+```sh
+cargo test -p beatkernel-bms-runtime --no-default-features --test media_corpus --test media_allocation --test preparation --locked -- --test-threads=1 --nocapture
+```
+
+This fulfills the finite software preparation corpus and allocation/byte-budget
+scope of WBS08.14; its status is D and overall progress90/193. Existing compiler
+warnings remain. Full codec conformance, total memory sandbox, native hardware
+and whole player acceptance remain outside this evidence. Independent execution
+and receipt-backed Harness closure are separate; absent lifecycle attestation
+does not become an invented task PASS.
