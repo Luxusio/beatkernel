@@ -19,6 +19,16 @@ server, executor or OS-specific business policy. The decision is an intended
 implementation contract; measured and independently verified completion is
 reported separately.
 
+Native default/device resolution runs on the game worker before its exact
+invocation is pinned or executed. A requested launch retains its immutable
+lineage identity; once actual native options are resolved, one immutable retry
+template preserves the accepted device, format and explicit policies across
+F5, bookmarks, loops and member recording projections. Retries must not
+rediscover devices or compare an incomplete request with a completed invocation.
+Cancellation or resolution failure publishes no resolved pin and starts no
+native playback. Exact invocation and requested-lineage checks remain required;
+defaults are never parser placeholders passed into execution.
+
 ## Canonical device composition
 
 Production native device implementations use the common GameplayDevice port;

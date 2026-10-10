@@ -267,6 +267,89 @@ Known ceiling: native preparation markers measure observed upper bounds only;
 they do not prove audio readiness. Native section/replay/replacement comparison
 and actual native presentation/output acceptance remain unfinished.
 
+The production default-resolution correction subsequently passed nine
+`session_launch_preparation` cases and five real worker/TLS/publication cases.
+It resolves actual native options on the game worker before pinning or invoking
+the platform launcher. Requested lineage remains immutable, while one accepted
+retry template preserves resolved device/output settings and recording bases.
+Discovery failure can recover on a later F5; accepted retries do not rediscover.
+Identity and explicit-option drift, conflicting accepted publication,
+recording/bookmark/loop/rebase/member projection and cancelled discovery are
+covered by the independent test author. The first worker run passed four cases
+and failed a fixture that expected normal cancellation to return an error;
+the corrected test retains cancellation/Finished and no-pin/no-native checks,
+and all five passed on rerun. Both logs remain preserved.
+
+Fresh production binary SHA256
+`bef6dad979eb0cb73aec94da5b8d5841653512b00a1eab3c8bf9a0ea6b39ec6d`
+passed the actual current-only missing-channel-policy GUI proof: one owned
+process, real Enter and F5, exactly two preparation markers and two joined
+mandatory-ioctl error frames. Its records under
+`native-default-resolution-gui-development-1/` deliberately keep
+`audio_ready=null`. The preserved manifest records the uncommitted production
+source hashes. This proves the repaired preparation/launch boundary, not
+successful hardware gameplay, comparative speed or formal QA.
+
+The broader Desktop unit run returned337PASS/2FAIL/11ignored. Both failures
+were older whole-catalog/font atomic-readiness expectations that contradict
+incremental admission. Their replacement fixtures preserve pending-profile
+blocking and prove partial paths/actions, diagnostic contents and
+path/query/focus continuity through actual font publication. The fresh full
+rerun passed339/failed0/ignored11 in3.44s
+(`desktop-default-resolution-full-unit-development-2.log`, exit0);
+the original failing suite is retained.
+
+The existing portable SessionLaunch library regressions also passed13/failed0
+(`session-launch-existing-development-1.log`, exit0), preserving retry,
+bookmark, finite loop, chart seed and member recording behavior.
+Whitespace validation passed. Scoped Rust2021 formatting passed for the app
+entry point, Desktop, measurement fixture and two new test files. The broader
+format check reported pre-existing formatting differences in unchanged test
+blocks of SessionLaunch/catalog/startup; no unrelated reformatting was applied.
+
+Fresh current-source WASM browser library type checking passed
+(`wasm-default-resolution-development-1.log`, exit0,1m00s). Existing unused
+platform/helper warnings remain. This is compilation evidence; generated
+bindings and actual browser QA must still use a newly built artifact before
+claiming verification of the final candidate.
+
+The fresh combined Worker, Window loading-state/play-host and generated PCM
+export Node suites passed254/failed0/skipped0
+(`current-loading-node-development-1.log`, exit0,84.13s). These are executed
+model/module tests, not the required independent interactive browser QA.
+
+Fresh Windows GNU all-target Rust type checking of the default-resolution
+candidate passed with `desktop,webtransport`
+(`windows-default-resolution-development-1.log`, exit0). The cross-check uses
+stub native compilers/archive tools: it proves Rust type compatibility, not
+Windows linking, SDK behavior or execution. It also exposed the now-unused
+legacy private `native_replay` wrapper; remove that dead wrapper before final
+candidate review rather than treating the new warning as a historical one.
+
+Known ceiling: the actual nonempty native ALSA-null replay diagnostic
+reconstructed one logical result with the 1.5-second recorded horizon and
+opened the exact requested output, but did not naturally complete within its
+15-second bound (`native-finite-replay-development-1.log`, exit124). No cause,
+successful drain or acoustic conclusion is inferred from this timeout.
+
+A separate three-second diagnostic of the same genuine replay completed with
+exit0 (`native-finite-replay-bounded-development-1.log`). Its typed source
+report reached `playback_start_frame=60000` and
+`playback_end_physical_frame=Some(60000)`, then paused with no pending commands.
+The exact ALSA-null stream reported zero xruns, suspends and failures.
+This separates source endpoint completion from the unproven native presentation
+crossing; the imposed `--seconds 3` stop does not prove natural replay drain.
+
+Read-only route inspection found common executable preparation markers for
+finite native sections (`prepared practice section=`) and genuine recorded
+playback (`reconstructed logical replay:`). The latter precedes ALSA open;
+neither is an audio-ready endpoint. Five paired section/replay observations
+remain to be implemented and executed. Neither preserved native UI exposes a
+same-process library replacement/rescan command, so restarting an executable
+cannot stand in for that comparative owner-replacement requirement. Native
+fixture owner-replacement tests and browser replacement measurements retain
+their narrower evidence scopes.
+
 The strengthened browser capture prerequisite passed in one actual preserved
 baseline process. `browser-finite-capture-development-1/observations.json`
 records two admitted inputs, 118 advances, 120 durable records and a finite
