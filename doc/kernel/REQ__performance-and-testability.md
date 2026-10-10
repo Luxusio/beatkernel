@@ -2,6 +2,22 @@
 
 ## Product objective
 
+During the current cleanup, the browser catalog must become actionable before
+any media acquisition; selected preparation reads only actual referenced paths
+through the canonical inventory and existing planners. See the
+[browser acquisition contract](REQ__bms-browser.md#responsive-catalog-and-demand-acquisition).
+Retained layout painting should borrow one stable memo snapshot across its
+nodes instead of cloning the model per node. Snapshot publication may allocate
+on actual model updates; geometry and animation paint must not add deep model
+clones. Neither change alone proves instant preparation or measured latency.
+
+The demand-resource planner and existing preparation currently parse and compile
+the selected chart separately. The library reuses acquired encoded bytes, while
+PCM and image/movie preparation remain repeated and selected media reads remain
+serial. Measure those stages separately before selecting parsed/prepared-result
+reuse or bounded overlapping reads. Preserve actual seed, recorded SectionSetup,
+format, policy, resource identity, failures and retirement when reusing data.
+
 BeatKernel's lasting product objective is to build the world's lightest and
 fastest high-performance rhythm-game player core and player. This is a target,
 not an achieved ranking. Comparative claims require published workloads,
@@ -187,10 +203,12 @@ Loading optimization and representative native/browser latency measurements
 remain pending under TASK__player-loading-latency. Existing motion correctness
 checks and software-browser screenshots are not loading-speed benchmarks.
 
-The 2026-10-10 read-only source audit identified pending loading improvements:
-browser library import currently awaits every supplied File's bytes before
-reporting its chart list (`app/web/worker.js`); preparation reuses encoded
-MemoryFiles but its decoded-audio cache is local to one preparation call
+The 2026-10-10 read-only source audit found that browser library import awaited
+every supplied File's bytes before reporting its chart list. The current cleanup
+replaces that path with metadata-only catalog publication and demand acquisition
+of selected resources (`app/web/worker.js`); connected browser acceptance is
+still pending. Preparation reuses encoded MemoryFiles but its decoded-audio
+cache is local to one preparation call
 (`app/src/browser.rs`, `app/src/audio_assets.rs`); canonical WAV aliases avoid
 another decode but still clone PCM for distinct SampleIds. Prioritize early
 metadata/chart-list publication and bounded warm reuse before changing PCM

@@ -1,5 +1,15 @@
 # Display screen declarative authoring
 
+## Native screen ownership
+
+One existing PanelScope owns both the Display draft and its lazily mounted
+retained view under the same screen instance. Parent retention preserves both;
+Back or removal retires both, and reopening creates a fresh owner. Keep the
+view's drop before the draft, cancellation permits and accepted geometry/hit
+identity. Editing, IME and clipboard access the same owned draft; stale owners
+cannot update it. Cancel preserves committed display settings, while existing
+Done/apply behavior remains authoritative.
+
 The Display draft screen must express its visible hierarchy, component labels,
 spacing and styles together in typed Rust source. Its header, four labeled
 editor rows, help text, Done/Back actions and error region must be recognizable

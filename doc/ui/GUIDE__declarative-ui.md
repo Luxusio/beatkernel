@@ -1,5 +1,16 @@
 # Authoring retained screens with static layout
 
+Layout painters should borrow one immutable model snapshot for every node in a
+packet. Publish a new Rc-owned snapshot on an actual memo change, then clone
+only its Rc handle at packet entry and release the storage RefCell borrow
+before invoking painters. This keeps a packet consistent under reentrant model
+publication and avoids deep model clones on each node, relayout or component
+paint. Keep necessary scalar copies explicit. Production painters remain pure:
+full compose and relayout retain outer packet borrows, so nested publication
+inside those transactions is unsupported. The isolated binding-painter fixture
+verifies snapshot lifetime and model-storage borrow release. Model publication
+still allocates; do not describe this ownership choice as universally zero-cost.
+
 The parallel completion foundation adds persistent `MountedLayout` to these
 initial static primitives. Mount the typed declaration once; stable preorder
 `NodeId` and `LayoutUpdate` address existing size/origin/gap/clip properties.

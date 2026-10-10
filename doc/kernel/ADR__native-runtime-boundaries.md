@@ -1,5 +1,16 @@
 # Native runtime boundaries
 
+## Canonical device composition
+
+Production native device implementations use the common GameplayDevice port;
+the old NativeGameplayDevice trait remains an external compatibility adapter.
+Use canonical gameplay::output domain, application, port and adapter paths in
+production imports, retaining the small public legacy re-export modules for
+existing clients. Avoid a reverse blanket implementation or another forwarding
+trait: those add coherence risk without changing device effects. Generic
+composition preserves static dispatch; it does not prove zero overhead in every
+device or UI operation. Foreign Rust checks prove types, not native execution.
+
 Dedicated native acquisition follows [the collector contract](REQ__native-input-collector.md).
 The source adapter owns native construction, draining and cleanup on one input
 thread; shared bounded transport carries original events and ordered genuine

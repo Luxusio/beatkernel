@@ -28,14 +28,16 @@ const held = new Set();
 
 // Served wrapper imports the exact current production worker module bytes under
 // an alias in the same directory. Relative production imports stay unchanged.
-const wrapper = `const original=File.prototype.arrayBuffer;const diagnosticOwner=crypto.randomUUID();
+const fileProbe = `const original=File.prototype.arrayBuffer;const diagnosticOwner=crypto.randomUUID();
 async function log(file,phase,bytes){await fetch('/loading-read?'+new URLSearchParams({owner:diagnosticOwner,name:file.name,size:String(file.size),phase,bytes:String(bytes??0)}),{cache:'no-store'});}
 File.prototype.arrayBuffer=async function(){await log(this,'begin');
 if(this.name==='unrelated-hung.bin')return new Promise(()=>{});
 if(this.name==='broken.wav'){await log(this,'fixture-error');throw new Error('Fixture selected media acquisition failure');}
 if(this.name==='delayed.wav')await fetch('/loading-wait',{cache:'no-store'});
-const bytes=await original.call(this);await log(this,'end',bytes.byteLength);return bytes;};
-await import('/app/web/loading-actual-worker.js');`;
+const bytes=await original.call(this);await log(this,'end',bytes.byteLength);return bytes;};`;
+// Static dependencies keep init messages queued until the production listener
+// is installed. Probe evaluation precedes the exact production module.
+const wrapper = `import '/app/web/loading-file-probe.js';\nimport '/app/web/loading-actual-worker.js';`;
 
 function wav() {
   const count = 9600, b = Buffer.alloc(44 + count * 2);
@@ -66,6 +68,7 @@ const server = createServer(async (req, res) => {
     if (from === ".." || from.startsWith(".." + sep)) throw Error("outside root");
     if (url.pathname.endsWith("/")) file = resolve(file, "index.html");
     const bytes = url.pathname === "/app/web/worker.js" ? Buffer.from(wrapper)
+      : url.pathname === "/app/web/loading-file-probe.js" ? Buffer.from(fileProbe)
       : url.pathname === "/app/web/loading-actual-worker.js" ? actualWorker : await readFile(file);
     res.writeHead(200, { "Content-Type": ({ ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".css": "text/css" })[extname(file)] ?? "application/octet-stream",
       "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp", "Cache-Control": "no-store" });
@@ -79,7 +82,7 @@ function windowObservation() {
     constructor(url, options) {
       super(url, options); data.workers.push(this); this.probeURL = String(url);
       this.addEventListener("message", ({ data: message }) => {
-        if (["catalog", "import-error", "selected", "selection-error", "fatal", "menu-state", "render-geometry", "disposed"].includes(message?.kind)) {
+        if (["ready", "catalog", "import-error", "selected", "selection-error", "fatal", "menu-state", "render-geometry", "disposed"].includes(message?.kind)) {
           data.messages.push({ at: performance.now(), ...JSON.parse(JSON.stringify(message, (_, value) => typeof value === "bigint" ? String(value) : ArrayBuffer.isView(value) ? { byteLength: value.byteLength } : value)) });
         }
       });
@@ -197,7 +200,7 @@ try {
 } catch (error) {
   evidence.status = "FAIL"; evidence.failure = String(error.stack ?? error); process.exitCode = 1;
   if (browser) for (const page of await browser.pages()) {
-    try { evidence.failureWindow = await bounded(page.evaluate(() => ({ messages: globalThis.__loading?.messages, input: globalThis.__loading?.input, status: document.querySelector("#status")?.textContent })), 3000, "failure window observation"); await page.screenshot({ path: resolve(out, "failure.png"), fullPage: true }); }
+    try { evidence.failureWindow = await bounded(page.evaluate(() => ({ messages: globalThis.__loading?.messages, input: globalThis.__loading?.input, status: document.querySelector("#status")?.textContent })), 3000, "failure window observation"); await bounded(page.screenshot({ path: resolve(out, "failure.png"), fullPage: true }), 5000, "failure screenshot"); }
     catch (observationError) { evidence.failureObservationError = String(observationError); }
   }
 } finally {

@@ -722,6 +722,43 @@ audio and image algorithms through an asset source boundary.
 
 ## Selected resources
 
+### Responsive catalog and demand acquisition
+
+The supplied browser host must publish a selectable chart catalog after bounded
+metadata admission, before reading any selected file bytes. Catalog acceptance
+does not mean chart, audio or visuals are prepared. Keep the previous accepted
+library until the replacement catalog is acknowledged; rejected or stale imports
+must not replace it.
+
+The canonical MemoryFiles inventory may declare normalized names and lengths
+before acquiring bytes. Declaration reserves file count and encoded-byte limits
+once. Inserting into a declared entry requires the exact declared length and
+does not charge those limits again. Failed declaration or acquisition admission
+preserves the inventory and accounting; inserting into an already loaded entry
+remains a duplicate error. Unacquired declared reads return WouldBlock, distinct
+from missing. Exact names, extension variants and directory collisions resolve
+against the full declared inventory, never only the files already read.
+
+For preview and every live, local, section, policy and replay preparation path,
+acquire the chart first, then only the unique paths selected by the common
+seeded chart/audio/image/video planners. Replays use their validated recorded
+SectionSetup seed. Preserve invisible/mine audio, BMP00, crop source and movie
+semantics and optional visual unavailability. Unused declarations must not cause
+unrelated media reads. Existing eager add_file callers remain supported.
+
+Each accepted library has an acquisition context. Retirement synchronously
+marks it retired before nulling and freeing its WASM owner exactly once. No
+WASM reference may survive an await. Every continuation checks that context and
+the actual selection or play owner before accessing WASM or publishing a result;
+late unabortable File reads may settle but cannot revive ownership or publish
+errors under a newer request. Genuine play or settings owner reservation
+permanently invalidates pending preview and record acquisition, including when
+that owner finishes before the old read settles. Invalid metadata is rejected
+before settings reservation and cannot cancel a valid pending selection.
+Deduplicate reads only within that context and
+clean pending entries in their original context. Synchronous decode remains
+preparation work and must not be represented as instant or already ready.
+
 The user selects a folder or a set of files. Folder relative paths are retained;
 flat selection can resolve only the resource names it actually supplies. Capture
 the selected relative path into an explicit message field before transferring
@@ -740,7 +777,7 @@ containment and symlink behavior stay in the filesystem adapter.
 
 The default selected tree permits 32,768 files, 64 MiB per file, 256 MiB total
 encoded bytes and 4,096 UTF-8 bytes per path. These are configurable source
-limits. The supplied host preflights metadata before sequential file reads;
+limits. The supplied host preflights metadata before demand-selected file reads;
 Rust independently checks admission. Chart parsing, PCM and decoded-image
 budgets additionally apply. Replay identity validation precedes asset reads.
 Mixed source sample rates remain supported by the existing SampleBank/Mixer
@@ -758,9 +795,9 @@ avoids running preparation or GPU submission on the main UI thread. It does
 not establish a browser audio or gameplay thread.
 
 Imports use generations; late work must not replace a newer selection. One
-import pump retains at most one active candidate/read plus the latest queued
-metadata request. A superseded unabortable file read must settle before the
-candidate is released and the latest request starts. Read files sequentially.
+import pump retains at most one active metadata candidate plus the latest queued
+metadata request. Demand reads belong to the accepted acquisition context;
+retirement fences their effects without waiting for an unabortable File read.
 GPU initialization and
 mutating WASM calls are serialized. Chart replacement must either publish the
 prepared chart and its metadata together or retain the old selection clearly.

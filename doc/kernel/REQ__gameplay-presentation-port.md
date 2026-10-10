@@ -1,5 +1,16 @@
 # Gameplay presentation dependency injection
 
+## Canonical native device implementations
+
+Production Linux, macOS and Windows device owners implement the common
+GameplayDevice port directly, using PresentationDiscipline where the existing
+native compatibility timing path requires it. Native session and run wrappers
+accept that canonical port. Keep the public NativeGameplayDevice contract and
+its one-way adapter into GameplayDevice for existing external implementations;
+do not require their callers to add an associated Presentation type. A
+production type must not implement both traits through conflicting blanket and
+direct implementations. Existing public native session and run paths remain.
+
 The estimator-based port below remains the explicit legacy compatibility path.
 Current BMS solo/cohort launchers select static audio timing wrappers and the
 exclusive native validator/audio-authority owner described in
