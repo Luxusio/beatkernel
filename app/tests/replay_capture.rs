@@ -18,11 +18,14 @@ use beatkernel::{
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
     transport::{Rate, Transport},
 };
-use beatkernel_bms_runtime::replay_capture::LiveReplayCapture;
+use beatkernel_bms_runtime::replay_capture::{CaptureError, LiveReplayCapture};
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Barrier,
+    },
 };
 
 fn point(domain: u32, nanos: i64) -> ClockPoint {
@@ -405,4 +408,162 @@ fn exclusive_save_writes_canonical_log_and_never_overwrites_existing_file() {
     fs::write(&existing, b"keep existing bytes").unwrap();
     assert!(make_capture().save_new(&existing).is_err());
     assert_eq!(fs::read(existing).unwrap(), b"keep existing bytes");
+}
+
+fn capture_prefix(count: usize, policy: ReplayCodecLimits) -> LiveReplayCapture {
+    let mut capture = LiveReplayCapture::new(&engine(), ClockDomainId(1), policy).unwrap();
+    let (_, _consumer, reports) = reports();
+    for report in reports.iter().take(count) {
+        capture.record_report(report).unwrap();
+    }
+    capture
+}
+
+fn assert_only_entry(directory: &TempDirectory, expected: &std::path::Path) {
+    let entries: Vec<_> = fs::read_dir(&directory.0)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(entries, vec![expected.to_path_buf()]);
+}
+
+#[test]
+fn save_new_preserves_rejected_report_prefix_header_identity_and_original_limits() {
+    let directory = TempDirectory::new();
+    let path = directory.0.join("accepted-prefix.bkr");
+    let policy = limits(1 << 20, 1);
+    let mut capture = capture_prefix(1, policy);
+    let (_, _consumer, reports) = reports();
+    assert!(capture.record_report(&reports[1]).is_err());
+    let expected = ReplayFile::new(capture.header().clone(), capture.records().to_vec());
+    let expected_bytes = encode_replay(&expected, policy).unwrap();
+    assert_eq!(capture.save_new(&path).unwrap(), expected_bytes.len());
+    let actual = fs::read(&path).unwrap();
+    assert_eq!(actual, expected_bytes);
+    assert_eq!(decode_replay(&actual, policy).unwrap(), expected);
+    assert_eq!(expected.records.len(), 1);
+    assert_only_entry(&directory, &path);
+}
+
+#[test]
+fn competing_public_replay_saves_publish_exactly_one_complete_capture() {
+    let directory = TempDirectory::new();
+    let path = directory.0.join("race.bkr");
+    let policy = limits(1 << 20, 100);
+    let expected: Vec<_> = (1..=2)
+        .map(|count| capture_prefix(count, policy).into_bytes().unwrap())
+        .collect();
+    assert_ne!(expected[0], expected[1]);
+    let barrier = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = (1..=2)
+        .map(|count| {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let capture = capture_prefix(count, policy);
+                barrier.wait();
+                capture.save_new(&path)
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    let winners: Vec<_> = outcomes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, result)| result.as_ref().ok().map(|length| (index, *length)))
+        .collect();
+    assert_eq!(winners.len(), 1);
+    let (winner, length) = winners[0];
+    assert_eq!(length, expected[winner].len());
+    assert!(matches!(
+        &outcomes[1 - winner],
+        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists
+    ));
+    let actual = fs::read(&path).unwrap();
+    assert_eq!(actual, expected[winner]);
+    assert_eq!(
+        decode_replay(&actual, policy).unwrap().records.len(),
+        winner + 1
+    );
+    assert_only_entry(&directory, &path);
+}
+
+#[test]
+fn replay_save_missing_parent_preserves_io_error_and_creates_no_paths() {
+    let directory = TempDirectory::new();
+    let missing_parent = directory.0.join("missing");
+    let path = missing_parent.join("session.bkr");
+    assert!(matches!(
+        capture_prefix(1, limits(1 << 20, 100)).save_new(&path),
+        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+    assert!(!missing_parent.exists());
+    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 0);
+}
+
+#[test]
+fn replay_save_existing_directory_is_preserved_and_owned_stage_is_cleaned() {
+    let directory = TempDirectory::new();
+    let target = directory.0.join("occupied.bkr");
+    fs::create_dir(&target).unwrap();
+    let sentinel = target.join("keep.txt");
+    fs::write(&sentinel, b"foreign directory content").unwrap();
+    assert!(matches!(
+        capture_prefix(1, limits(1 << 20, 100)).save_new(&target),
+        Err(CaptureError::Io(_))
+    ));
+    assert_eq!(fs::read(sentinel).unwrap(), b"foreign directory content");
+    assert_only_entry(&directory, &target);
+}
+
+#[cfg(unix)]
+#[test]
+fn replay_save_never_replaces_dangling_symlink_or_creates_its_target() {
+    let directory = TempDirectory::new();
+    let path = directory.0.join("foreign.bkr");
+    let foreign_target = directory.0.join("missing-target");
+    std::os::unix::fs::symlink(&foreign_target, &path).unwrap();
+    assert!(matches!(
+        capture_prefix(1, limits(1 << 20, 100)).save_new(&path),
+        Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists
+    ));
+    assert_eq!(fs::read_link(&path).unwrap(), foreign_target);
+    assert!(!foreign_target.exists());
+    assert_only_entry(&directory, &path);
+}
+
+#[cfg(unix)]
+#[test]
+fn replay_save_accepts_long_native_basename_without_extending_it_for_staging() {
+    let directory = TempDirectory::new();
+    let path = directory.0.join(format!("{}.bkr", "r".repeat(240)));
+    let policy = limits(1 << 20, 100);
+    let expected = capture_prefix(1, policy).into_bytes().unwrap();
+    assert_eq!(
+        capture_prefix(1, policy).save_new(&path).unwrap(),
+        expected.len()
+    );
+    assert_eq!(fs::read(&path).unwrap(), expected);
+    assert_only_entry(&directory, &path);
+}
+
+#[cfg(unix)]
+#[test]
+fn replay_save_accepts_non_utf8_native_basename_and_removes_owned_stage() {
+    use std::os::unix::ffi::OsStringExt;
+    let directory = TempDirectory::new();
+    let path = directory
+        .0
+        .join(std::ffi::OsString::from_vec(b"native-\xff.bkr".to_vec()));
+    let policy = limits(1 << 20, 100);
+    let expected = capture_prefix(1, policy).into_bytes().unwrap();
+    assert_eq!(
+        capture_prefix(1, policy).save_new(&path).unwrap(),
+        expected.len()
+    );
+    assert_eq!(fs::read(&path).unwrap(), expected);
+    assert_only_entry(&directory, &path);
 }
