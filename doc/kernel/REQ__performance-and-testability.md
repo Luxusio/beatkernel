@@ -187,6 +187,17 @@ Loading optimization and representative native/browser latency measurements
 remain pending under TASK__player-loading-latency. Existing motion correctness
 checks and software-browser screenshots are not loading-speed benchmarks.
 
+The 2026-10-10 read-only source audit identified pending loading improvements:
+browser library import currently awaits every supplied File's bytes before
+reporting its chart list (`app/web/worker.js`); preparation reuses encoded
+MemoryFiles but its decoded-audio cache is local to one preparation call
+(`app/src/browser.rs`, `app/src/audio_assets.rs`); canonical WAV aliases avoid
+another decode but still clone PCM for distinct SampleIds. Prioritize early
+metadata/chart-list publication and bounded warm reuse before changing PCM
+ownership. These are source observations, not measured elapsed times. Existing
+gapless practice restart uses a separate retained path and must not be described
+as reloading every asset.
+
 ## Current implementation boundary
 
 Separation is unfinished. Core runtime processing telemetry currently defaults
@@ -260,9 +271,11 @@ results use a separate Worker-owned cached presentation. See
 Explicit selection/migration for old native local files, rich archived
 score/timing/comparison values and runtime acceptance remain unfinished. See
 [the archive boundary](../runtime/REQ__completed-result-archive.md).
-Browser execution remains unfinished. Test execution, hardware QA and comparative benchmarks remain deferred
-under the user's existing verification instruction; no quality target is
-considered achieved by authoring fixtures or passing compile-only checks.
+Browser execution remains unfinished. The earlier instruction to defer
+verification has been lifted: executable tests and feasible native/browser QA
+are active. Outstanding hardware QA and representative performance benchmarks
+remain unverified; authoring fixtures or passing compile-only checks does not
+establish a quality or performance target.
 
 Room network values and the command/poll/clock/stop port belong to the portable
 [room network contract](REQ__room-network-model.md). Native aliases retain API

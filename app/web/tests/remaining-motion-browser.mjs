@@ -17,7 +17,7 @@ assert.equal(wasmSha, expectedSha);
 await mkdir(out, { recursive: true });
 const evidence = { status: "RUNNING", wasmSha, steps: [], errors: [], cleanup: {}, ceilings: [
   "Software Chromium/SwiftShader functional acceptance; not physical input/audio latency or hardware performance.",
-  "Genuine solo Results exercises a partial page and comparison switching; absent-card pruning across a multi-page roster remains deterministic CLI evidence.",
+  "Genuine solo Results exercises a partial page. Comparison switching is exercised only if genuine completion reports comparison capability; otherwise comparison and multi-page absent-card pruning remain deterministic CLI evidence.",
 ] };
 const delay = ms => new Promise(r => setTimeout(r, ms));
 const bounded = (p, ms, label) => { let timer; return Promise.race([p, new Promise((_, reject) => { timer = setTimeout(() => reject(Error(label + " timeout")), ms); })]).finally(() => clearTimeout(timer)); };
@@ -120,7 +120,7 @@ function observeRenderer() {
   };
 }
 
-let browser, xvfb, profile, cacheDir;
+let browser, xvfb, profile, cacheDir, renderer;
 async function stop(child, name) {
   if (!child) return;
   if (child.exitCode === null && child.signalCode === null) {
@@ -312,7 +312,7 @@ try {
   await live.waitForFunction(() => __motion.messages.some(x => x.kind === "play-stopped"));
   const terminal = await live.evaluate(() => __motion.messages.find(x => x.kind === "play-stopped"));
   assert.equal(terminal.replayComplete, true); assert(terminal.completedResults?.proof, "natural completed owner proof required");
-  const renderer = [...workers].find(([url]) => url.endsWith("/renderer-worker.js"))?.[1]; assert(renderer);
+  renderer = [...workers].find(([url]) => url.endsWith("/renderer-worker.js"))?.[1]; assert(renderer);
   await bounded((async () => { for (;;) { if (await renderer.evaluate(() => globalThis.__motionPort?.packets.length > 0)) break; await delay(40); } })(), 10000, "original completed Results packet");
   const packet = await renderer.evaluate(() => __motionPort.packets.at(-1));
   await writeFile(resolve(out, "genuine-results.packet"), Uint8Array.from(packet));
@@ -337,8 +337,17 @@ try {
     await delay(100);
     assert.equal(await renderer.evaluate(c => __motionPort.records.slice(c.before).filter(x => x.kind === "control-ack").length, stale), 0, identity + " mismatch must refuse");
   }
-  await resultAck(await command("page", { page: 0, comparisons: true }));
-  await resultAck(await command("page", { page: 0, comparisons: false }));
+  if (terminal.completedResults.hasComparisons === true) {
+    assert(terminal.completedResults.comparisonPages > 0);
+    await resultAck(await command("page", { page: 0, comparisons: true }));
+    await resultAck(await command("page", { page: 0, comparisons: false }));
+    evidence.steps.push({ name: "genuine-results-comparison-switch", available: true });
+  } else {
+    assert.equal(terminal.completedResults.hasComparisons, false);
+    assert.equal(terminal.completedResults.comparisonPages, 0);
+    evidence.steps.push({ name: "genuine-results-comparison-switch", available: false,
+      coverage: "No comparison owner in this genuine solo completion; deterministic CLI tests retain comparison coverage." });
+  }
   const frozen = await command("resize", { width: 0, height: 0 });
   await delay(120);
   assert(await renderer.evaluate(c => __motionPort.records.slice(c.before).some(x => x.kind === "control-ack" && x.geometryVersion === c.geometry), frozen));
@@ -362,6 +371,10 @@ try {
   evidence.status = "PASS";
 } catch (error) {
   evidence.status = "FAIL"; evidence.failure = String(error.stack ?? error); process.exitCode = 1;
+  if (renderer) {
+    try { evidence.resultsRecords = await bounded(renderer.evaluate(() => globalThis.__motionPort?.records ?? []), 3000, "failure renderer observations"); }
+    catch (observationError) { evidence.failureObservationError = String(observationError); }
+  }
 } finally {
   if (browser) await bounded(browser.close(), 6000, "browser close").catch(e => { evidence.cleanup.browserCloseError = String(e); });
   await stop(browser?.process(), "browser"); await stop(xvfb, "xvfb");

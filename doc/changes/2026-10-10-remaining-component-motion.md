@@ -46,7 +46,15 @@ before publication and retain existing note caches.
   the accepted geometry publication. A separate real production diagnostic
   reached visible, matching geometry without Worker/renderer errors; this is
   diagnostic evidence, not a browser QA PASS or loading-speed benchmark.
-  Renewed review and browser QA are required after synchronizing that click.
+  The exact submitted-geometry click gate passed independent code review.
+  The third actual browser run passed all four menus, production Settings
+  editor motion/edit/preedit/stale-focus checks, genuine natural completion
+  and visible Results card motion. It then requested comparison mode despite
+  the actual solo result declaring no comparisons, so Results resume/retirement
+  acceptance remains incomplete and the overall browser verdict is FAIL.
+  There are 13 inspected original screenshots from that run; no loading or
+  physical latency claim follows. A capability-aware script fix remains to
+  be reviewed; no fourth browser execution has occurred.
 
 These development checks and the code review do not
 complete WBS10.16/10.17 or the full BMS player Goal; WBS remains 90/193.
