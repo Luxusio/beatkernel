@@ -85,3 +85,11 @@ cancellation closes both ports and wakes the current waiter. It must retain a
 macrotask boundary before admission and cannot retain queued callbacks or
 preparation owners after cancellation. Actual before/after timing and held-work
 input/cancellation verification accompany scheduling changes.
+
+Preserved native executable comparisons must observe the actual owned window
+without injecting newer Desktop hooks into the old binary. A confirmed external
+selection change and restoration may prove catalog usability; frame observation
+times are upper bounds that include sampling and observer cost. They remain
+distinct from current Renderer submission timestamps and audio readiness.
+Catalog-only comparison and current-only injected font gates do not establish
+native playable-ready, section/replay or replacement comparative performance.

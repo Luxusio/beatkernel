@@ -156,7 +156,39 @@ before/after comparison. The preserved current production binary has SHA256
 Native comparative preparation/output measurements and final independent
 review/QA still remain unfinished.
 
+The MessageChannel correction is committed as `0057f84`. The complete second
+paired browser run again passed 30 processes and all 70 records; the strict
+report accepted them. `browser-latency-development-2/` preserves raw events,
+artifact hashes, 70 screenshots and the complete report. Worker hash is
+`dfd31da8a70989471a07d38c8f85a3336b560a150435427ed39c43937a75b369`;
+gameplay/audio WASM remain unchanged from the freshly built artifacts.
+
+Prepared-resource times in milliseconds, before→after, each five samples:
+
+| Workload | p50 | p95/max |
+| --- | --- | --- |
+| Warm preview | 41.270→15.095 | 61.245→23.220 |
+| Warm retry | 20.280→7.360 | 22.500→8.045 |
+| Section | 15.305→4.935 | 17.290→11.960 |
+| Replay | 33.480→22.680 | 37.595→25.600 |
+| Cold large audio | 435.610→452.365 | 506.675→476.910 |
+| Library/content replacement | 380.445→387.005 | 420.015→437.855 |
+
+Catalog's first observed submitted usable frame p50 was 74.020→72.575ms,
+with p95/max 78.745→76.010ms. With five observations nearest-rank p95 equals
+the maximum. Warm decoded-original reuse recorded zero codec/parse/compile
+work in every current warm scenario; historical internal counters remain
+unavailable. The correction removes the observed repeat-preparation regression,
+but cold/replacement medians and some audio-setup tails do not improve. The
+controlled File gate and probe overhead remain included; no universal speedup,
+page-startup performance or physical-output conclusion follows from this run.
+
 ## Known ceiling
+
+Known ceiling: browser measurement `audio_ready` observes the correlated Worker
+`play-reply` result `audio-ready` (audio setup readiness), not the first armed
+AudioWorklet presentation frontier or physical speaker output. The actual UI
+play journey still requires AudioWorklet startup before Stop.
 
 Known ceiling: 보고서는 producer의 관측·hash·correlation 일관성을 검증하며, 실제 artifact 바이트나 물리적 지연을 독립 측정하지 않습니다.
 
