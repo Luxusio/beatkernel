@@ -83,3 +83,36 @@ precise internal rendering/compositing cause remains unproven. Exit zero
 reports diagnostic execution, not visual PASS. The browser, server and profile
 were cleaned up. Preserve these controls alongside the original failed QA:
 `target/wf/browser-record-result-continuity/minimal-webgpu/{run.mjs,evidence.json,pixel-check.json,viewport.png}`.
+
+## Headed comparison under an owned virtual display
+
+On 2026-10-10 a bounded development comparison at source `0c48454` ran
+`/usr/bin/Xvfb -displayfd 3 -screen 0 1024x768x24 -nolisten tcp` and Chromium
+with `headless: false`. It retained the Vulkan/SwiftShader configuration above;
+the exact merged Chromium launch arguments are in the evidence artifact.
+Allocate the display automatically, use a private browser profile and loopback
+server, and terminate only processes owned by the comparison.
+
+The direct main-thread red canvas and transferred-Worker green canvas both
+completed submission. Copying the actual current textures into aligned GPU
+readback buffers produced RGBA `[255,0,0,255]` and `[0,255,0,255]`; viewport
+screenshot center samples produced RGB `[255,0,0]` and `[0,255,0]`, respectively.
+The screenshot was also visually inspected. Both adapters reported
+Google/SwiftShader and `rgba8unorm`; row stride was 1,024 bytes. No application,
+device-loss or GPU validation error was observed. Browser/Xvfb stderr remains
+available, including unrelated system-service/keymap diagnostics.
+
+`node target/wf/browser-record-result-continuity/headed-known-color-20261010/run.mjs`
+exited zero after explicit texture and visible-color assertions. The owned
+Chromium and Xvfb exited zero, the server closed and the profile was removed.
+The fixture, screenshot, pixel checks and launch/cleanup evidence are under
+that ignored directory; regenerate these diagnostics if artifacts are absent.
+GPU completion, texture readback and visible presentation remain distinct
+observations. This passing headed control supplies a local prerequisite for
+connected player QA; it does not establish why the earlier headless control
+failed. Rebuild current WASM and perform independent actual record/results
+navigation and visible historical-screen QA before accepting that player flow.
+
+### Known ceiling
+
+Known ceiling: Known-color control contains no player/WASM — independent connected browser QA required before AC-004 acceptance.
