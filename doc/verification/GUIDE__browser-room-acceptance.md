@@ -61,3 +61,38 @@ the corrected existing PK11_ImportCert/CERT_ChangeCertTrust APIs succeeded.
 This setup correction did not change production transport or trust policy.
 Actual strict room gameplay needs an eligible system-trusted HTTP/3 endpoint;
 the prepared actual-play runner remains unexecuted until that prerequisite holds.
+
+## Runnable production-page fixture
+
+Run `node app/web/webtransport-play.browser.mjs` after the strict endpoint
+prerequisite is satisfied. Required environment variables are:
+
+- `WEBTRANSPORT_PLAY_APP_URL`: trusted production app navigation URL.
+- `WEBTRANSPORT_PLAY_ROOM_URL`: trusted HTTP/3 room URL.
+- `CHROMIUM` and `PUPPETEER_MODULE`: installed executable and module paths.
+- `WEBTRANSPORT_PLAY_HOSTS`: JSON array of exactly two hosts, each with
+  `display`, `profile`, `xdgDataHome` and `xdgConfigHome`.
+- `WEBTRANSPORT_PLAY_HASHES`: path to a JSON map from `app/web/<artifact>`
+  to its current SHA256. `WEBTRANSPORT_PLAY_OUT` optionally selects evidence output.
+
+Profiles must initially be absent and physically disjoint, including through
+symlink aliases; trust/config directories must already exist. The runner owns
+the new profiles and two private 16MiB tmpfs caches and removes them after
+owned browser processes terminate. Caller-owned endpoints and displays remain
+the caller's responsibility. Actual navigation response bytes are hash-checked,
+including directory URLs; Results require correlated RPC/state ACK/draw and
+positive geometry. A late operation cannot turn an expired deadline into PASS.
+
+Independent CLI QA at source `9ce2670` reports 68/68 tests, zero failures/skips:
+
+```sh
+node --experimental-vm-modules --test app/web/webtransport-play.test.mjs app/web/room-owner.test.mjs app/web/multiplayer-transport.test.mjs
+```
+
+This includes21 new portable gate cases and47 existing owner/transport cases.
+Both new scripts pass `node --check`. Actual entrypoint execution without the
+required app URL exits1 before browser launch and preserves failure evidence.
+Independent browser QA inspected raw NetLog and returned BLOCKED_ENV; it
+launched no new browser. These checks do not establish protocol or gameplay
+acceptance. Both natural completions and native/browser interoperability remain
+outstanding.
