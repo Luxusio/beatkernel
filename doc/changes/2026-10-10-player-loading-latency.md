@@ -621,6 +621,30 @@ hook-owned completion receipt. The original desktop QA FAIL remains attached
 to its old executable; fresh affected desktop/UX and final CLI checks remain
 pending. WBS remains90/193.
 
+The independent browser QA's finite comparison is separate from the earlier
+development measurements below. Its validated report is
+`qa-browser-finite-final-1/report.json`; each variant/group contains five
+samples, with nearest-rank p95 equal to the sample maximum. Observed
+milliseconds before→after:
+
+| Workload | p50 | p95/max |
+| --- | --- | --- |
+| Catalog first submitted usable frame | 75.155→71.165 | 112.340→79.600 |
+| Library/content replacement preparation | 452.410→409.600 | 475.635→437.665 |
+| Nonempty finite replay preparation | 42.315→32.270 | 65.630→35.575 |
+| Section preparation | 14.975→4.200 | 20.160→13.375 |
+| Cold large audio preparation | 398.085→438.885 | 437.345→485.215 |
+| Warm preview preparation | 44.785→13.880 | 48.635→14.220 |
+| Warm retry preparation | 18.950→8.065 | 19.735→9.305 |
+
+Cold large-audio preparation regressed in this independent observed batch;
+neither its median nor its tail supports a universal speedup claim. These
+five-sample observations include controlled acquisition gates, input/frontier
+observers and software rendering acknowledgments. They exclude browser/page/
+WASM startup and establish neither physical output latency nor instantaneous
+loading. Warm zero counts still cover original preparation parse/compile and
+codec work only; fresh derived/replay validation remains outside those counters.
+
 The strengthened browser capture prerequisite passed in one actual preserved
 baseline process. `browser-finite-capture-development-1/observations.json`
 records two admitted inputs, 118 advances, 120 durable records and a finite
