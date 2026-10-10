@@ -230,6 +230,43 @@ path, not natural replay completion or physical presentation. The prior
 
 ## Known ceiling
 
+The native preparation comparison passed ten fresh preserved production
+processes, each with a cold launch and a real F5 retry after the joined evdev
+ioctl error. `native-paired-preparation-development-2/` contains ten raw records
+and twenty owned-window captures. Exact configuration/fixture hashes matched;
+every process produced exactly two correlated preparation markers. The actual
+16 MiB mono WAV has four logical aliases (128 MiB decoded PCM), with explicit
+44.1 kHz mono output and `--channel-policy exact`.
+
+Input-to-prepared-log observed upper bounds in milliseconds, before→after:
+
+| Workload | p50 | p95/max |
+| --- | --- | --- |
+| Cold large native audio | 2216.706→2236.450 | 2353.370→2599.100 |
+| Same-owner native F5 retry | 2253.290→1878.084 | 2408.079→2073.233 |
+
+Cold median/tail regressed in this workload, while retry improved. These times
+include OS input delivery, fresh derived completion/compile and stdout
+observation, not codec-only durations or output readiness. All native trials
+intentionally end with an actual mandatory `/dev/null` evdev ioctl failure;
+`playable=false` and `audio_ready=null` are retained.
+
+The first native preparation attempt failed before any marker because omitted
+channel-policy was added after the launch was pinned. Its actual error frame
+and 126.65-second observation timeout remain under
+`native-paired-preparation-development-1/`. The comparator now supplies the
+same complete explicit configuration to both preserved binaries and rejects
+that exact pin error immediately. Source inspection confirmed the ordering
+defect also affects ordinary native default resolution; its production
+correction and independent regression tests are in progress, not yet verified.
+The first compile attempt also found a test-only private glyph reference;
+using the existing public font atlas fixed it, and subsequent native fixture
+compilation passed. All failed logs are retained.
+
+Known ceiling: native preparation markers measure observed upper bounds only;
+they do not prove audio readiness. Native section/replay/replacement comparison
+and actual native presentation/output acceptance remain unfinished.
+
 The strengthened browser capture prerequisite passed in one actual preserved
 baseline process. `browser-finite-capture-development-1/observations.json`
 records two admitted inputs, 118 advances, 120 durable records and a finite
@@ -269,7 +306,8 @@ the same acquisition gates and added input/frontier observers, not universal
 startup, physical latency or full-player completion claims. Development
 execution remains separate from required independent review and GUI QA.
 
-Fresh Windows GNU Rust type checking passed for `desktop,webtransport`, all
+Before the production default-resolution correction, fresh Windows GNU Rust
+type checking passed for `desktop,webtransport`, all
 targets, with default features disabled. The command exited zero after
 7m55s; `windows-loading-current.log` retains warnings and compiler completion.
 C/C++ archive stubs make this type evidence only, not Windows SDK linking,
