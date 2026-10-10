@@ -1,14 +1,17 @@
 use super::{AudioError, AudioFormat, PcmLimits, SampleId};
-use std::fmt;
+use std::{fmt, sync::Arc};
 
-/// Owned, finite interleaved PCM decoded before output starts.
+/// Immutable, finite interleaved PCM decoded before output starts.
 ///
-/// Assets are not cloned or freed by rendering; the sample bank owns them for
-/// the mixer's entire lifetime. Sample amplitudes need not be normalized.
+/// Setup owners may share storage; rendering only borrows it and never changes
+/// reference counts. The sample bank retains assets for the mixer's lifetime.
+/// Sample amplitudes need not be normalized. Each new payload has one cold Arc
+/// metadata allocation, including empty assets. Stable safe Arc allocation does
+/// not return control-block exhaustion as AudioError; PCM reserves are fallible.
 #[derive(Debug)]
 pub struct PcmSample {
     format: AudioFormat,
-    samples: Vec<f32>,
+    samples: Arc<Vec<f32>>,
 }
 
 impl PcmSample {
@@ -22,7 +25,10 @@ impl PcmSample {
         if samples.iter().any(|value| !value.is_finite()) {
             return Err(AudioError::NonFiniteSample);
         }
-        Ok(Self { format, samples })
+        Ok(Self {
+            format,
+            samples: Arc::new(samples),
+        })
     }
 
     /// Copies owned PCM during setup, subject to the new per-asset limit.
@@ -38,7 +44,19 @@ impl PcmSample {
         samples.extend_from_slice(&self.samples);
         Ok(Self {
             format: self.format,
-            samples,
+            samples: Arc::new(samples),
+        })
+    }
+
+    /// Shares immutable PCM during setup after checking the new per-asset limit.
+    ///
+    /// No payload allocation or copy occurs. Sharing does not relax a sample
+    /// bank's independent logical byte and sample-count admission limits.
+    pub fn try_share(&self, limits: PcmLimits) -> Result<Self, AudioError> {
+        validate_storage(self.format, self.samples.len(), limits)?;
+        Ok(Self {
+            format: self.format,
+            samples: Arc::clone(&self.samples),
         })
     }
 
@@ -91,7 +109,10 @@ impl PcmSample {
             };
             samples.push(value);
         }
-        Ok(Self { format, samples })
+        Ok(Self {
+            format,
+            samples: Arc::new(samples),
+        })
     }
 
     /// Asset sample rate and channel count; no implicit conversion is applied.
@@ -109,9 +130,32 @@ impl PcmSample {
         &self.samples
     }
 
-    /// Transfers decoded storage during setup without copying the PCM buffer.
+    /// Transfers unique storage during setup, or copies shared storage.
+    ///
+    /// The returned Vec is independently mutable. Shared payload allocation
+    /// follows Vec's infallible clone behavior; use try_into_samples to report
+    /// payload allocation failure explicitly. This is not a rendering operation.
     pub fn into_samples(self) -> Vec<f32> {
-        self.samples
+        Arc::unwrap_or_clone(self.samples)
+    }
+
+    /// Transfers unique storage, or fallibly copies shared PCM during setup.
+    ///
+    /// A unique payload keeps its original pointer without allocation. Shared
+    /// payload allocation failure returns AudioError::AllocationFailed and
+    /// leaves the other sharing owners unchanged. This consumes this owner.
+    pub fn try_into_samples(self) -> Result<Vec<f32>, AudioError> {
+        match Arc::try_unwrap(self.samples) {
+            Ok(samples) => Ok(samples),
+            Err(shared) => {
+                let mut samples = Vec::new();
+                samples
+                    .try_reserve_exact(shared.len())
+                    .map_err(|_| AudioError::AllocationFailed)?;
+                samples.extend_from_slice(&shared);
+                Ok(samples)
+            }
+        }
     }
 }
 
@@ -164,6 +208,34 @@ impl SampleBank {
         self.samples.insert(index, (id, sample));
         self.total_bytes = total_bytes;
         Ok(())
+    }
+
+    /// Shares this bank's immutable PCM during setup under new logical limits.
+    ///
+    /// Each sample identity counts its complete decoded bytes even when multiple
+    /// identities share one payload. Failure leaves this bank unchanged; only
+    /// the new entry storage allocates, never a second PCM payload.
+    pub fn try_share(&self, limits: PcmLimits) -> Result<Self, AudioError> {
+        if self.samples.len() > limits.max_samples() || self.total_bytes > limits.max_total_bytes()
+        {
+            return Err(AudioError::PcmCapacity);
+        }
+        for (_, sample) in &self.samples {
+            validate_storage(sample.format, sample.samples.len(), limits)?;
+        }
+        let mut samples = Vec::new();
+        samples
+            .try_reserve_exact(self.samples.len())
+            .map_err(|_| AudioError::AllocationFailed)?;
+        for (id, sample) in &self.samples {
+            samples.push((*id, sample.try_share(limits)?));
+        }
+        Ok(Self {
+            format: self.format,
+            limits,
+            samples,
+            total_bytes: self.total_bytes,
+        })
     }
 
     /// Borrows an asset without allocation or ownership changes.
