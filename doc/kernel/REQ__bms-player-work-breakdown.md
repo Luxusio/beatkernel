@@ -369,7 +369,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-12.01** native QUIC의 실제 connect/accept/cleanup이 같은 Tokio runtime 문맥에서 동작한다. — 상태=D(검증완료); 선행=-; 근거=E11 실제 connect/accept·positive exchange·pending cancellation/joins; SIGABRT 회귀 수정.
 - [x] **BK-WBS-12.02** 인증서 CA/server-name 오류와 identity 불일치를 실제 QUIC에서 거절한다. — 상태=D(검증완료); 선행=-; 근거=E12 실제 별도 CA/name/identity negative 사례와 no Connected/Ready/start 및 bounded join.
 - [x] **BK-WBS-12.03** 실제 WebTransport native client와 HTTP/3 relay room을 상호 연결한다. — 상태=D(검증완료); 선행=-; 근거=E14 실제 HTTP/3 native4-case와 owned relay 종료; browser는 12.04 별도.
-- [ ] **BK-WBS-12.04** 브라우저가 actual BrowserRoomOwner/WASM identity로 WebTransport room을 재생한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=trusted HTTPS profile; native/browser 상호운용.
+- [ ] **BK-WBS-12.04** 브라우저가 actual BrowserRoomOwner/WASM identity로 WebTransport room을 재생한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=[실제 room 플레이 계약](../runtime/REQ__browser-room-play.md)과 strict 2-host acceptance runner 준비. Private NSS CA의 HTTPS 수용/다른 CA 거절은 확인했으나 실제 QUIC certificate handshake가 거절되어 BLOCKED_ENV; eligible system-trusted HTTP/3 endpoint의 두 host 자연 완료·peer score·final ACK/drain 및 native/browser 상호운용 필요. Node47/syntax나 certificate bypass는 완료 근거가 아님.
 - [ ] **BK-WBS-12.05** Origin/trust/path/limits·setup cancellation·pending handshake stop/join을 검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=실제 연결/UDP traffic·no false Connected/Ready.
 - [x] **BK-WBS-12.06** 선택 class/gauge/profile/section/seed의 canonical network identity를 순수 검증한다. — 상태=D(검증완료); 선행=-; 근거=E1.
 - [x] **BK-WBS-12.07** actual selected cohort owner가 원래 member별 policy header를 port로 전달한다. — 상태=D(검증완료); 선행=-; 근거=E8; 실제 QUIC worker 종료 포함.
