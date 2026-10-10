@@ -2,6 +2,7 @@
 // Loads the actual Worker and helper sources; no generated WASM or browser.
 import assert from "node:assert/strict";
 import { File as NodeFile } from "node:buffer";
+import { MessageChannel as NodeMessageChannel } from "node:worker_threads";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { ROOM_SESSION_METHODS } from "./room-owner.mjs";
@@ -12,11 +13,28 @@ import { keyboardBindingWords } from "./physical-input.mjs";
 import { createContext, SourceTextModule, SyntheticModule, runInContext } from "node:vm";
 const FileType = globalThis.File ?? NodeFile;
 
+// Explicit task delivery, separate from Promise continuations. Closed-port
+// queued messages remain observable so tests can exercise a late delivery.
+function controlledChannels(channels, queue, auto = false) {
+  return class {
+    constructor() {
+      const state = { delivered: 0, port1: null, port2: null }; channels.push(state);
+      const port = () => ({ onmessage: null, closes: 0, start() {}, close() { this.closes++; } });
+      this.port1 = state.port1 = port(); this.port2 = state.port2 = port();
+      this.port2.postMessage = data => {
+        assert.equal(this.port2.closes, 0, "no post on closed preparation port");
+        const deliver = () => { if (this.port1.onmessage) { state.delivered++; this.port1.onmessage({ data }); } };
+        if (auto) setImmediate(deliver); else queue.push(deliver);
+      };
+    }
+  };
+}
+
 // Independent preparation acceptance uses genuine current generated bindings.
 // The queued renderer endpoint acknowledges packets; it never manufactures PCM
 // preparation, job progress, replay identity or engine readiness.
 async function realPreparationWorker(options = {}) {
-  const messages = [], transfers = [], libraries = [], jobs = [], accesses = [], timers = new Map();
+  const messages = [], transfers = [], libraries = [], jobs = [], accesses = [], timers = new Map(), channels = [], tasks = [];
   let receive, nextTimer = 0;
   const self = {
     isSecureContext: false, navigator: {}, performance: { timeOrigin: 0, now: () => 1000 },
@@ -26,6 +44,16 @@ async function realPreparationWorker(options = {}) {
   const context = createContext({ self, performance: self.performance, WebAssembly, TextEncoder, TextDecoder,
     Uint8Array, Uint32Array, Float32Array, Float64Array, ArrayBuffer, DataView, File: FileType,
     URL, Request, Response, structuredClone, console,
+    MessageChannel: options.realChannels ? class {
+      constructor() {
+        const channel = new NodeMessageChannel(); channels.push(channel);
+        for (const port of [channel.port1, channel.port2]) {
+          const close = port.close.bind(port); port.closes = 0;
+          port.close = () => { port.closes++; close(); };
+        }
+        return channel;
+      }
+    } : controlledChannels(channels, tasks),
     setTimeout(fn, ms = 0) { const id = ++nextTimer; timers.set(id, { fn, ms }); return id; },
     clearTimeout(id) { timers.delete(id); } });
   const url = new URL("./pkg/beatkernel_bms_runtime.js", import.meta.url);
@@ -51,7 +79,7 @@ async function realPreparationWorker(options = {}) {
           const job = { frees: 0, cancels: 0, advances: 0, stages: [], method: String(key) }; jobs.push(job);
           return tracked(result, "job", job);
         }
-        if (type === "job" && key === "advance") { state.advances++; state.stages.push(object.stage); }
+        if (type === "job" && key === "advance") { state.advances++; state.stages.push(object.stage); state.ready = result; }
         if (type === "job" && key === "pending_asset_path") state.pendingPath = result;
         return result;
       };
@@ -99,16 +127,20 @@ export function __actualPendingMap() { return libraryContext?.pending; }
       Promise.resolve().then(() => this.onmessage?.({ data: reply }));
     } };
   const h = {
-    messages, transfers, libraries, jobs, accesses, timers, runtime: binding.namespace,
+    messages, transfers, libraries, jobs, accesses, timers, channels, tasks, runtime: binding.namespace,
     of(kind) { return messages.filter(x => x.kind === kind); },
     async send(value) { receive({ data: value }); await flushJobs(); },
     async yieldOne() {
-      const next = [...timers].find(([, entry]) => entry.ms === 0); assert(next, "expected genuine cooperative macrotask yield");
-      timers.delete(next[0]); next[1].fn(); await flushJobs();
+      if (options.realChannels) await new Promise(resolve => setImmediate(resolve));
+      else { assert(tasks.length, "expected genuine MessageChannel task yield"); tasks.shift()(); }
+      await flushJobs();
     },
     async settle(predicate) { for (let n = 0; n < 256 && !predicate(); n++) await this.yieldOne(); assert(predicate(), "bounded genuine job must settle"); },
     diagnostics() { assert(options.observeReads); return worker.namespace.__actualReadDiagnostics(); },
     pendingMap() { assert(options.observeReads); return worker.namespace.__actualPendingMap(); },
+    assertClosedChannels() {
+      for (const channel of channels) for (const port of [channel.port1, channel.port2]) assert.equal(port.closes, 1);
+    },
     heldRead() {
       // Same-realm promise: Promise.resolve in production returns this exact
       // underlying File promise, so its actual settlement subscriptions count.
@@ -158,6 +190,38 @@ test("actual WASM phased preparation yields macrotasks and reports only correlat
   assert(h.jobs[0].advances > 2); assert.equal(h.jobs[0].frees, 1);
   assert.equal(h.of("selected")[0].title, "Actual phased fixture");
   await h.send({ kind: "dispose" }); assert.equal(h.libraries[0].frees, 1);
+  assert.equal(h.channels.length, 1, "one channel per multi-phase preparation"); h.assertClosedChannels();
+});
+
+test("actual queued Ready admission remains cancellable and closes both preparation ports", async () => {
+  for (const transition of ["cancel", "retire"]) {
+    const h = await realPreparationWorker(); await admitPreparationFiles(h); await h.send(actualSelect());
+    await h.settle(() => h.jobs[0]?.ready === true);
+    assert.equal(h.of("selected").length, 0, "Ready still requires its queued task boundary");
+    assert.equal(h.channels.length, 1); assert.equal(h.tasks.length, 1, "only one outstanding wake");
+    if (transition === "cancel") await h.send({ kind: "select-cancel", id: 2, libraryId: 1 });
+    else { await h.send({ kind: "import", id: 4, files: [selectedFile("new.bms", "#BPM 120\n")] }); await h.send({ kind: "accept-library", id: 4 }); }
+    h.assertClosedChannels(); const calls = h.accesses.length, delivered = h.channels[0].delivered;
+    await h.yieldOne(); assert.equal(h.accesses.length, calls); assert.equal(h.channels[0].delivered, delivered);
+    assert.equal(h.of("selected").length, 0); assert.equal(h.of("selection-error").length, 0);
+    assert.equal(h.jobs[0].cancels, 1); assert.equal(h.jobs[0].frees, 1);
+    await h.send({ kind: "dispose" }); h.assertClosedChannels();
+  }
+});
+
+test("actual preparation executes real Node MessageChannel task API and always closes ports", async () => {
+  const h = await realPreparationWorker({ realChannels: true });
+  try {
+    await admitPreparationFiles(h); await h.send(actualSelect());
+    assert.equal(h.of("selected").length, 0);
+    await h.settle(() => h.of("selected").length === 1);
+    assert.equal(h.channels.length, 1); h.assertClosedChannels();
+    const calls = h.accesses.length; await h.yieldOne(); assert.equal(h.accesses.length, calls);
+  } finally {
+    await h.send({ kind: "dispose" });
+    // Even a failed assertion must not leave real Node ports holding the process.
+    for (const channel of h.channels) for (const port of [channel.port1, channel.port2]) if (!port.closes) port.close();
+  }
 });
 
 test("actual preview Cancel during hydration permanently fences late success/error and keeps the old preview", async () => {
@@ -185,8 +249,11 @@ test("actual preview Cancel at phase yield releases its job exactly once and gen
   const job = h.jobs[0]; assert(job); await h.send({ kind: "select-cancel", id: 2, libraryId: 1 });
   assert.equal(job.cancels, 1); assert.equal(job.frees, 1);
   const calls = h.accesses.length; await flushJobs(); assert.equal(h.accesses.length, calls);
+  assert.equal(h.channels.length, 1); h.assertClosedChannels();
+  if (h.tasks.length) { const delivered = h.channels[0].delivered; await h.yieldOne(); assert.equal(h.channels[0].delivered, delivered); assert.equal(h.accesses.length, calls); }
   await h.send(actualSelect(3)); await h.settle(() => h.of("selected").length === 1);
   assert.equal(h.of("selected")[0].id, 3); assert.equal(h.of("selection-error").length, 0);
+  assert.equal(h.channels.length, 2); h.assertClosedChannels();
   await h.send({ kind: "dispose" });
 });
 
@@ -365,6 +432,14 @@ function selectedFile(path, content = "#BPM 120", acquire) {
 }
 
 async function workerHarness(options = {}) {
+  async function flushJobs() {
+    // Older mock cases auto-deliver genuine task boundaries, while the real
+    // binding harness above controls each MessageChannel delivery explicitly.
+    for (let turn = 0; turn < 8; turn++) {
+      await new Promise(resolve => setImmediate(resolve));
+      for (let n = 0; n < 32; n++) await Promise.resolve();
+    }
+  }
   const messages = [];
 
   // Genuine queued port and real RenderClient; only the WASM encoder/GPU edge
@@ -748,6 +823,7 @@ async function workerHarness(options = {}) {
   };
   const context = createContext({
     self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer,
+    MessageChannel: controlledChannels([], [], true),
     performance: self.performance,
     setTimeout(callback, delay) {
       const id = ++timerId; timers.set(id, callback);
@@ -841,6 +917,7 @@ async function workerHarness(options = {}) {
   await worker.evaluate();
   return {
     renderPort, visualExports, visualAcks, messages, libraries, views, timers, games, preparedOwners, calls,
+    flushTasks: flushJobs,
     setNow(value) { assert.ok(value >= now); now = value; },
     async send(request) {
       request = renderRequest(request);
@@ -1527,7 +1604,7 @@ test("overlapping selections share pending acquisition but only the newest selec
   assert.deepEqual(reads, ["song/chart.bms", "song/kick.wav"]);
   assert.equal(worker.libraries[0].preparations.length, 0);
   held.resolve(new TextEncoder().encode("pcm").buffer);
-  await flushJobs();
+  await worker.flushTasks();
   assert.deepEqual(worker.of("selected").map(row => row.id), [3]);
   assert.equal(worker.of("selection-error").length, 0);
   assert.equal(worker.libraries[0].preparations.length, 1);
@@ -1760,7 +1837,7 @@ test("invalid settings and play requests do not cancel an otherwise valid pendin
   assert.equal(worker.of("settings-profile-error").length, 3);
   assert.equal(worker.games.length, 0);
   held.resolve(new TextEncoder().encode("pending").buffer);
-  await flushJobs();
+  await worker.flushTasks();
   assert.deepEqual(worker.of("selected").map(row => row.id), [2]);
   assert.equal(worker.of("selection-error").length, 0);
   assert.equal(worker.libraries[0].preparations.length, 1);

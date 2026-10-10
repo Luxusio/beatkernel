@@ -927,8 +927,12 @@ function releasePreparation(record = preparationOwner) {
   record.cancelled = true;
   if (preparationOwner === record) preparationOwner = null;
   const job = record.job; record.job = null;
-  if (record.timer !== null) clearTimeout(record.timer);
-  record.timer = null;
+  record.queued = false;
+  const channel = record.channel; record.channel = null;
+  if (channel) {
+    channel.port1.onmessage = null;
+    channel.port1.close(); channel.port2.close();
+  }
   const wake = record.wake; record.wake = null; wake?.();
   if (job) { try { job.cancel(); } finally { job.free(); } }
 }
@@ -950,7 +954,7 @@ function preparationProgress(record, stage = record.job?.stage ?? "file-read") {
 async function prepareChartJob(context, path, current, kind, id, begin) {
   releasePreparation();
   const record = { context, path, current, kind, id, job: null, cancelled: false,
-    timer: null, wake: null, beginMs: 0, maxStepMs: 0 };
+    channel: null, queued: false, wake: null, beginMs: 0, maxStepMs: 0 };
   preparationOwner = record;
   const alive = () => preparationCurrent(record);
   try {
@@ -971,9 +975,18 @@ async function prepareChartJob(context, path, current, kind, id, begin) {
       record.maxStepMs = Math.max(record.maxStepMs, performance.now() - step);
       if (!alive()) return null;
       preparationProgress(record);
+      if (record.channel === null) {
+        record.channel = new MessageChannel();
+        record.channel.port1.onmessage = () => {
+          if (!record.queued) return;
+          record.queued = false;
+          const wake = record.wake; record.wake = null; wake?.();
+        };
+      }
       await new Promise(resolve => {
         record.wake = resolve;
-        record.timer = setTimeout(() => { record.timer = null; record.wake = null; resolve(); }, 0);
+        record.queued = true;
+        record.channel.port2.postMessage(0);
       });
       if (!alive()) return null;
       if (complete) return record.job.take_prepared(context.library);

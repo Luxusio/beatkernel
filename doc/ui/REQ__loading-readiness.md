@@ -77,3 +77,11 @@ use nearest-rank p50/p95 and observed maximum, with sample counts reported.
 The report validates record consistency; the runner must independently observe
 artifact bytes and event origins. CLI fixtures validate report mathematics and
 refusal behavior and are never player performance evidence.
+
+Cooperative preparation yields must permit current input/cancellation and Ready
+admission fencing without adding avoidable nested-timer delay. A preparation
+may own one MessageChannel with at most one pending wake; completion or
+cancellation closes both ports and wakes the current waiter. It must retain a
+macrotask boundary before admission and cannot retain queued callbacks or
+preparation owners after cancellation. Actual before/after timing and held-work
+input/cancellation verification accompany scheduling changes.

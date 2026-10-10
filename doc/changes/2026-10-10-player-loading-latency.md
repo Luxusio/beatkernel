@@ -119,6 +119,43 @@ evidence directory. The integrated preparation/catalog source and focused
 functional tests are committed as `acac653`; measurement runners and independent
 full-task review/QA remain in progress.
 
+The first complete paired browser measurement passed all 30 owned Chromium
+processes and 70 records: seven scenarios with five before and five after
+observations. The strict report consumer accepted the actual records. Evidence
+is `browser-latency-development-1/{trials,observations,report}.json`; the runner
+serves the complete frozen baseline tree and hash-checks each served artifact.
+Times begin at the observed Worker request, excluding browser/page bootstrap.
+Diagnostic File gates, trusted CDP input, screenshot and observer costs are part
+of this controlled software workload; results do not establish physical latency.
+
+The first run exposed a repeat-preparation regression despite actual warm
+decode/parse/compile counters being zero. Prepared p50 in milliseconds was
+20.085→39.055 for retry, 15.305→34.805 for section and 31.495→50.495 for replay.
+Warm preview improved 43.100→39.880, while cold large-audio readiness was nearly
+unchanged at 423.520→422.980. Tail changes are retained in the full report;
+these results cannot support a blanket speedup claim. Repeated zero-delay timer
+yield overhead is the working hypothesis. The source candidate now uses one
+preparation-owned MessageChannel, retains the Ready task boundary, and closes
+both ports on completion/cancellation. Actual Worker tests passed 67/67 and a
+scoped group passed 28/28 (overlapping counts). The first full Worker run failed
+two old mock fixtures that awaited only Promise jobs; waiting for actual task
+delivery preserved their assertions and the rerun passed. Current functional
+browser verification again passed all 11 steps on Worker SHA256
+`dfd31da8a70989471a07d38c8f85a3336b560a150435427ed39c43937a75b369`;
+comparative remeasurement remains pending.
+
+The current-only native fixture passed one parent test containing five fresh
+test processes, actual X11 windows and ten PNG captures. Font preparation was
+held while real XTest keys, resize events and renderer submissions were
+observed. Raw records separate renderer setup, catalog admission, submitted
+usable frame, delivered key/resize and font publication. Prepared/audio
+readiness is explicitly null. These records under
+`native-connected-development-1/` are structural native evidence, not
+before/after comparison. The preserved current production binary has SHA256
+`dc309ac7b84b57816cbb71d6bbad9d9980a2d9f45f8aa5d88f216693a602415f`.
+Native comparative preparation/output measurements and final independent
+review/QA still remain unfinished.
+
 ## Known ceiling
 
 Known ceiling: 보고서는 producer의 관측·hash·correlation 일관성을 검증하며, 실제 artifact 바이트나 물리적 지연을 독립 측정하지 않습니다.
