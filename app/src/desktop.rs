@@ -2913,14 +2913,7 @@ impl Desktop {
             }
             changed = true;
         }
-        if self.catalog_metadata_complete
-            && self
-                .catalog
-                .as_ref()
-                .is_some_and(NativeCatalog::is_finished)
-        {
-            self.catalog = None;
-        }
+        self.release_drained_catalog();
         if self.closing() {
             self.pending_catalog = None;
             return;
@@ -2956,6 +2949,16 @@ impl Desktop {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
+        }
+    }
+    fn release_drained_catalog(&mut self) {
+        if self.catalog_metadata_complete
+            && self
+                .catalog
+                .as_ref()
+                .is_some_and(NativeCatalog::result_consumed)
+        {
+            self.catalog = None;
         }
     }
     fn install_catalog(&mut self, mut catalog: PreparedCatalog) -> Result<(), String> {

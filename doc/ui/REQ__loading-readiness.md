@@ -7,7 +7,10 @@ output readiness are separate facts; none substitutes for another.
 Native catalog scanning shall publish admitted canonical paths in batches of
 at most 64 entries through a channel of capacity two. UI polling drains at most
 two batches without waiting. The partial list remains selectable while later
-metadata and title-font work continue. Sorting, metadata and font publication
+metadata and title-font work continue. A completed worker remains owned until
+its final font or error result is consumed; thread completion alone must not
+discard that result, including completion between UI polls. Sorting, metadata
+and font publication
 preserve the selected path, query text and focus; font upload remains UI-owned
 and cannot reset a different route. A chart becomes playable only after its
 actual complete preparation and fresh setup validation.

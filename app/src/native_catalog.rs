@@ -212,6 +212,10 @@ impl<T: Send + 'static> NativeCatalog<T> {
     pub fn is_finished(&self) -> bool {
         self.worker.as_ref().is_none_or(JoinHandle::is_finished)
     }
+    /// Completion alone does not consume the final preparation result.
+    pub fn result_consumed(&self) -> bool {
+        self.worker.is_none()
+    }
     /// The UI never waits for the writer of the coalesced latest counter slot.
     pub fn progress(&mut self) -> ScanProgress {
         if let Ok(latest) = self.control.progress.try_lock() {

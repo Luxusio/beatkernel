@@ -129,7 +129,9 @@ Diagnostic File gates, trusted CDP input, screenshot and observer costs are part
 of this controlled software workload; results do not establish physical latency.
 
 The first run exposed a repeat-preparation regression despite actual warm
-decode/parse/compile counters being zero. Prepared p50 in milliseconds was
+codec and original preparation parse/compile counters being zero. Fresh derived
+replay, invisible and mine validation work is outside these original counters
+and still executes when required. Prepared p50 in milliseconds was
 20.085→39.055 for retry, 15.305→34.805 for section and 31.495→50.495 for replay.
 Warm preview improved 43.100→39.880, while cold large-audio readiness was nearly
 unchanged at 423.520→422.980. Tail changes are retained in the full report;
@@ -176,8 +178,9 @@ Prepared-resource times in milliseconds, before→after, each five samples:
 
 Catalog's first observed submitted usable frame p50 was 74.020→72.575ms,
 with p95/max 78.745→76.010ms. With five observations nearest-rank p95 equals
-the maximum. Warm decoded-original reuse recorded zero codec/parse/compile
-work in every current warm scenario; historical internal counters remain
+the maximum. Warm decoded-original reuse recorded zero codec and original
+preparation parse/compile counters in every current warm scenario. Fresh
+derived/replay validation work is outside these counters; historical internal counters remain
 unavailable. The correction removes the observed repeat-preparation regression,
 but cold/replacement medians and some audio-setup tails do not improve. The
 controlled File gate and probe overhead remain included; no universal speedup,
@@ -532,6 +535,24 @@ exit143); it did not PASS. Fresh foreign-target checks, WASM artifacts, the
 second DEEP discovery/formal review and ordered independent QA remain required.
 These fixes and focused development results do not advance WBS or close the task.
 
+The second full DEEP review of `293ed9b` found one further catalog ownership
+race: the worker may finish after a pending poll but before a separate
+completion check. Releasing that owner at completion discards its unconsumed
+font or error result. The correction distinguishes consumed results from
+finished threads and releases a metadata-drained owner only after its final
+result has been consumed. Connected tests hold a real worker across the pending
+poll, complete it before the actual release decision, then require real font
+or explicit error publication on the next collection. Discovery has completed
+both allowed cycles; the corrected full diff still requires a fresh DEEP
+formal review and ordered independent CLI/browser/desktop QA.
+
+Browser and browser-audio release builds on `293ed9b` passed in1m43s and1m22s,
+respectively. Matching wasm-bindgen0.2.129 generated both current packages.
+`current-browser-293ed9b-artifact-provenance.json` records95 artifact hashes,
+including gameplay WASM `a0f0d6ea40243b389197a579a98766afcca7dca97777c0b933112c8bfee842e7`
+and audio WASM `775ed808697e545183a6b88f3b22bec0dbbd0cd04f76671185b7e70ac15d4b13`.
+These are development build/provenance results, not independent browser QA.
+
 The strengthened browser capture prerequisite passed in one actual preserved
 baseline process. `browser-finite-capture-development-1/observations.json`
 records two admitted inputs, 118 advances, 120 durable records and a finite
@@ -565,8 +586,9 @@ Prepared-resource times in milliseconds, before→after, five samples per group:
 | Library/content replacement | 422.235→394.525 | 485.210→399.150 |
 
 Catalog first submitted usable frame was 71.885→66.360ms p50 and
-73.415→76.235ms p95/max. Every current warm trial again recorded zero
-codec/parse/compile work. These are workload-specific observations including
+73.415→76.235ms p95/max. Every current warm trial again recorded zero codec
+and original preparation parse/compile counters. Fresh derived/replay validation
+work remains outside these counters. These are workload-specific observations including
 the same acquisition gates and added input/frontier observers, not universal
 startup, physical latency or full-player completion claims. Development
 execution remains separate from required independent review and GUI QA.

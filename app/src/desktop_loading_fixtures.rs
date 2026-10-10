@@ -77,6 +77,91 @@ fn clear_selection(app: &mut Desktop) {
     app.painted_reactive = None;
 }
 
+fn completion_after_pending_poll_preserves_catalog_result(failure: Option<&'static str>) {
+    let tree = Tree::new();
+    let font = tree.0.join("completion.ttf");
+    std::fs::write(&font, font_fixture::font_bytes()).unwrap();
+    let mut app = tests::lifecycle_fixture();
+    app.options.library = Some(tree.0.clone());
+    clear_selection(&mut app);
+    app.catalog_generation = 85;
+    app.catalog_screen = app.navigator.active_id();
+    let (entered, ready) = mpsc::sync_channel(1);
+    let (release, gate) = mpsc::sync_channel(1);
+    app.catalog = Some(
+        NativeCatalog::spawn_streamed(tree.0.clone(), 85, move |library, control| {
+            entered.send(()).unwrap();
+            gate.recv_timeout(WAIT).map_err(|error| error.to_string())?;
+            if let Some(error) = failure {
+                return Err(error.into());
+            }
+            prepare_catalog(library, Some(font), Vec::new(), control)
+        })
+        .unwrap(),
+    );
+    poll_until(&mut app, |app| app.catalog_metadata_complete);
+    ready.recv_timeout(WAIT).unwrap();
+    assert_eq!(app.entries.len(), 2);
+    assert!(app.title_font.is_none());
+    assert!(app.pending_catalog.is_none());
+    assert!(app.catalog.as_mut().unwrap().poll().is_none());
+    assert!(!app.catalog.as_ref().unwrap().result_consumed());
+
+    // Force the reviewed interleaving: the actual poll was pending, then the
+    // actual worker finishes before the production post-poll release decision.
+    release.send(()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while !app.catalog.as_ref().unwrap().is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "held catalog worker did not finish"
+        );
+        thread::yield_now();
+    }
+    assert!(!app.catalog.as_ref().unwrap().result_consumed());
+    app.release_drained_catalog();
+    assert!(
+        app.catalog.is_some(),
+        "metadata completion cannot release an unconsumed font/error result"
+    );
+    assert!(app.pending_catalog.is_none());
+    assert!(app.title_font.is_none());
+
+    // The next actual collect must consume and publish the retained result.
+    app.collect_catalog();
+    assert!(app.catalog.is_none());
+    assert!(app.pending_catalog.is_none());
+    assert_eq!(app.entries.len(), 2);
+    if let Some(error) = failure {
+        assert_eq!(
+            app.catalog_message,
+            Some(format!("Catalog unavailable: {error}"))
+        );
+        assert!(app.title_font.is_none());
+    } else {
+        assert!(
+            app.title_font.is_some(),
+            "the real prepared font must publish"
+        );
+        assert!(app.catalog_message.is_none());
+    }
+    let message = app.catalog_message.clone();
+    app.collect_catalog();
+    assert_eq!(app.catalog_message, message);
+    assert_eq!(app.title_font.is_some(), failure.is_none());
+    assert!(app.game.is_none());
+}
+
+#[test]
+fn desktop_finished_after_pending_poll_retains_owner_until_real_font_publication() {
+    completion_after_pending_poll_preserves_catalog_result(None);
+}
+
+#[test]
+fn desktop_finished_after_pending_poll_retains_owner_until_explicit_error_publication() {
+    completion_after_pending_poll_preserves_catalog_result(Some("held title font rejected"));
+}
+
 #[test]
 fn desktop_real_partial_metadata_is_selectable_while_font_owner_is_held() {
     let tree = Tree::new();

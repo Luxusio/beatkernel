@@ -34,6 +34,83 @@ impl Drop for CatalogTree {
 const WAIT: Duration = Duration::from_secs(5);
 
 #[test]
+fn actual_streamed_worker_completion_remains_unconsumed_until_one_shot_poll() {
+    for failure in [None, Some("held catalog preparation rejected")] {
+        let tree = CatalogTree::new();
+        let (entered, ready) = mpsc::sync_channel(1);
+        let (release, gate) = mpsc::sync_channel(1);
+        let mut job = NativeCatalog::spawn_streamed(tree.0.clone(), 76, move |library, _| {
+            entered.send(()).unwrap();
+            gate.recv_timeout(WAIT).map_err(|error| error.to_string())?;
+            match failure {
+                Some(error) => Err(error.into()),
+                None => Ok(library),
+            }
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + WAIT;
+        let mut entries = Vec::new();
+        let mut metadata_complete = false;
+        while !metadata_complete {
+            for message in job.drain_batches() {
+                match message {
+                    CatalogPublication::Entries {
+                        generation,
+                        entries: batch,
+                    } => {
+                        assert_eq!(generation, 76);
+                        entries.extend(batch);
+                    }
+                    CatalogPublication::MetadataComplete {
+                        generation,
+                        diagnostics,
+                    } => {
+                        assert_eq!(generation, 76);
+                        assert!(diagnostics.is_empty());
+                        metadata_complete = true;
+                    }
+                }
+            }
+            assert!(std::time::Instant::now() < deadline);
+            thread::yield_now();
+        }
+        ready.recv_timeout(WAIT).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(!job.is_finished());
+        assert!(!job.result_consumed());
+        assert!(job.poll().is_none());
+        assert!(!job.result_consumed());
+        release.send(()).unwrap();
+        while !job.is_finished() {
+            assert!(std::time::Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert!(job.drain_batches().is_empty());
+        assert!(
+            !job.result_consumed(),
+            "finished handle and drained metadata do not consume the final result"
+        );
+        let result = job
+            .poll()
+            .expect("finished real worker must publish its result");
+        match failure {
+            Some(error) => assert_eq!(result.unwrap_err(), error),
+            None => {
+                let library = result.unwrap();
+                assert_eq!(library.entries.len(), 2);
+                assert_eq!(library.entries[0].title, "Alpha");
+                assert_eq!(library.entries[1].title, "ÉTOILE");
+            }
+        }
+        assert!(job.is_finished());
+        assert!(job.result_consumed());
+        assert!(job.poll().is_none());
+        assert!(job.join().is_none());
+        assert!(job.result_consumed());
+    }
+}
+
+#[test]
 fn actual_catalog_worker_coalesces_progress_and_publishes_only_one_joined_prepared_result() {
     let root = CatalogTree::new();
     let caller = thread::current().id();
