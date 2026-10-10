@@ -18,11 +18,21 @@ await mkdir(out, { recursive: true });
 const actualWorker = await readFile("app/web/worker.js");
 const evidence = { status: "RUNNING", wasmSha, actualWorkerSha256: hash(actualWorker), reads: [], steps: [], errors: [], consoleErrors: [], httpErrors: [], cleanup: {}, ceilings: [
   "Functional software Chromium/SwiftShader evidence; timings are observations, not a throughput, latency or hardware benchmark.",
-  "Pending source reads use the actual UI. While preparation is pending the host disables replacement/selection; late selection fencing is covered by deterministic Worker tests, not an invented GUI control.",
+  "Pending source reads use actual progress and Cancel controls. Replacement/selection stays disabled until cancellation is acknowledged; broader owner fencing has separate Worker tests.",
   "Browser page closure is the actual pending-owner retirement exercised here; no physical device/audio timing proof is claimed.",
 ] };
 const delay = ms => new Promise(r => setTimeout(r, ms));
 const bounded = (promise, ms, name) => { let timer; return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error(name + " timeout")), ms); })]).finally(() => clearTimeout(timer)); };
+// Keep the poll inside its own deadline. Racing a polling promise against a
+// timer leaves that loop alive after timeout and can prevent process cleanup.
+async function waitUntil(predicate, ms, name) {
+  const deadline = performance.now() + ms;
+  while (!predicate()) {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw Error(name + " timeout");
+    await delay(Math.min(20, remaining));
+  }
+}
 let releaseDelayed = false;
 const held = new Set();
 
@@ -82,13 +92,13 @@ function windowObservation() {
     constructor(url, options) {
       super(url, options); data.workers.push(this); this.probeURL = String(url);
       this.addEventListener("message", ({ data: message }) => {
-        if (["ready", "catalog", "import-error", "selected", "selection-error", "fatal", "menu-state", "render-geometry", "disposed"].includes(message?.kind)) {
+        if (["ready", "catalog", "import-error", "selected", "selection-error", "selection-progress", "selection-cancelled", "fatal", "menu-state", "render-geometry", "disposed"].includes(message?.kind)) {
           data.messages.push({ at: performance.now(), ...JSON.parse(JSON.stringify(message, (_, value) => typeof value === "bigint" ? String(value) : ArrayBuffer.isView(value) ? { byteLength: value.byteLength } : value)) });
         }
       });
     }
     postMessage(message, transfer) {
-      if (message?.kind === "select") data.messages.push({ at: performance.now(), direction: "sent", kind: message.kind, id: message.id, libraryId: message.libraryId, path: message.path });
+      if (["select", "select-cancel"].includes(message?.kind)) data.messages.push({ at: performance.now(), direction: "sent", kind: message.kind, id: message.id, libraryId: message.libraryId, path: message.path });
       return super.postMessage(message, transfer);
     }
   };
@@ -125,7 +135,10 @@ try {
   const snapshot = async name => {
     const file = resolve(out, name + ".png"); await page.screenshot({ path: file, fullPage: true });
     const state = await page.evaluate(() => ({ status: document.querySelector("#status").textContent, error: document.querySelector("#status").dataset.error === "true", title: document.querySelector("#title").textContent,
-      chart: document.querySelector("#chart").value, prepareDisabled: document.querySelector("#prepare").disabled, messages: __loading.messages, input: __loading.input }));
+      chart: document.querySelector("#chart").value, prepareDisabled: document.querySelector("#prepare").disabled,
+      cancelHidden: document.querySelector("#prepare-cancel").hidden, cancelDisabled: document.querySelector("#prepare-cancel").disabled,
+      progressHidden: document.querySelector("#prepare-progress").hidden, progress: document.querySelector("#prepare-progress").textContent,
+      canvasHidden: document.querySelector("#canvas").hidden, messages: __loading.messages, input: __loading.input }));
     evidence.steps.push({ name, screenshot: file, ...state }); return state;
   };
   const upload = async names => {
@@ -151,20 +164,39 @@ try {
   const initialFiles = ["short.bms", "delayed.bms", "broken.bms", "shared.wav", "delayed.wav", "broken.wav", "unrelated-hung.bin"];
   const importStarted = Date.now(); await upload(initialFiles);
   assert.equal(evidence.reads.length, 0, "catalog must arrive before any selected File.arrayBuffer acquisition");
-  const catalog = await snapshot("01-metadata-catalog-no-reads"); assert.match(catalog.status, /3 chart\(s\) loaded/);
+  const catalog = await snapshot("01-metadata-catalog-no-reads"); assert.match(catalog.status, /3 chart\(s\) available/);
   evidence.catalogElapsedMs = Date.now() - importStarted;
   await begin("short.bms"); await prepared("Loading genuine short"); await snapshot("02-selected-real-chart-wav-ready");
   assert.equal(reads("short.bms").length, 1); assert.equal(reads("shared.wav").length, 1);
   assert.equal(reads("shared.wav", "end").length, 1);
   for (const name of ["delayed.bms", "broken.bms", "delayed.wav", "broken.wav", "unrelated-hung.bin"]) assert.equal(reads(name).length, 0);
   await begin("delayed.bms");
-  await bounded((async () => { while (!reads("delayed.wav").length || held.size === 0) await delay(20); })(), 10000, "actual pending selected media read");
+  await waitUntil(() => reads("delayed.wav").length > 0 && held.size > 0, 10000, "actual pending selected media read");
   assert.equal(held.size, 1); const pending = await snapshot("04-genuine-selected-media-pending");
   assert.match(pending.status, /^Preparing chart/); assert.equal(pending.prepareDisabled, true);
+  assert.equal(pending.cancelHidden, false); assert.equal(pending.cancelDisabled, false);
+  assert.equal(pending.progressHidden, false); assert.match(pending.progress, /file-read/);
+  assert.equal(pending.canvasHidden, false, "previous preview stays visible during preparation");
+  const cancelledId = pending.messages.findLast(x => x.direction === "sent" && x.kind === "select").id;
+  await page.focus("#prepare-cancel"); await page.keyboard.press("Enter");
+  await page.waitForFunction(id => __loading.messages.some(x => x.kind === "selection-cancelled" && x.id === id)
+    && !document.querySelector("#prepare").disabled, {}, cancelledId);
+  const cancelled = await snapshot("04b-trusted-keyboard-cancel-retains-preview");
+  assert.match(cancelled.status, /^Preparation cancelled/);
+  assert(cancelled.title.includes("Loading genuine short"));
+  assert.equal(cancelled.canvasHidden, false); assert.equal(cancelled.progressHidden, true);
+  assert.equal(held.size, 1, "Cancel completes before the underlying File read settles");
+  await begin("delayed.bms");
+  await page.waitForFunction(() => !document.querySelector("#prepare-progress").hidden
+    && document.querySelector("#prepare-progress").textContent.includes("file-read")
+    && !document.querySelector("#prepare-cancel").disabled);
+  assert.equal(reads("delayed.wav").length, 1, "retry subscribes to the same bounded acquisition");
   const inputBefore = await page.evaluate(() => __loading.input.length); await page.keyboard.press("KeyA");
   assert(await page.evaluate(n => __loading.input.slice(n).some(e => e.kind === "keydown" && e.code === "KeyA" && e.trusted), inputBefore));
   releaseDelayed = true; for (const response of held) { response.writeHead(204); response.end(); }
   await prepared("Loading genuine delayed"); await snapshot("05-pending-read-genuine-recovery");
+  assert.equal(await page.evaluate(id => __loading.messages.some(x => x.kind === "selected" && x.id === id), cancelledId), false,
+    "the cancelled owner never publishes when its original read settles");
   await begin("broken.bms");
   await page.waitForFunction(() => document.querySelector("#status").dataset.error === "true" && !document.querySelector("#prepare").disabled);
   const failure = await snapshot("06-selected-acquisition-error-retains-preview");
@@ -188,10 +220,9 @@ try {
   await page.keyboard.press("ArrowDown");
   await page.waitForFunction(revision => __loading.messages.some(x => x.kind === "menu-state" && x.route === 1 && BigInt(x.revision) > BigInt(revision)), {}, beforeKey);
   await snapshot("08b-actual-keyboard-catalog-navigation");
-  // The UI prevents replacing a preparation mid-read; close the real pending
-  // owner, then release its original acquisition and inspect cleanup separately.
+  // Page closure also retires an actual pending owner, independently of Cancel.
   releaseDelayed = false; await begin("delayed.bms");
-  await bounded((async () => { while (reads("delayed.wav").length < 2 || held.size === 0) await delay(20); })(), 10000, "replacement pending read");
+  await waitUntil(() => reads("delayed.wav").length >= 2 && held.size > 0, 10000, "replacement pending read");
   await snapshot("09-pending-owner-before-page-close");
   evidence.finalWindow = await page.evaluate(() => ({ messages: __loading.messages, input: __loading.input }));
   assert.equal(reads("unrelated-hung.bin").length, 0, "unrelated never-resolving file was never touched");

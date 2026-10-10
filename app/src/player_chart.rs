@@ -93,7 +93,11 @@ fn lane_order(channel: u8) -> (u8, u8) {
     let column = channel & 15;
     // Scratch belongs at the outside edge on each side of a double-play chart.
     let rank = if column == 6 {
-        if side == 1 { 0 } else { 10 }
+        if side == 1 {
+            0
+        } else {
+            10
+        }
     } else {
         column
     };
@@ -691,7 +695,7 @@ pub enum ScanStage {
     Complete,
 }
 
-/// Coalescible counters only; partial chart lists never cross this boundary.
+/// Coalescible scan counters, separate from admitted incremental metadata.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScanProgress {
     pub stage: ScanStage,
@@ -727,7 +731,17 @@ pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
 /// false checkpoint returns no partial catalog and cannot interrupt a syscall.
 pub fn scan_library_with(
     root: &Path,
+    checkpoint: impl FnMut(ScanProgress) -> bool,
+) -> Result<ChartLibrary, PlayerChartError> {
+    scan_library_streamed_with(root, checkpoint, |_| true)
+}
+
+/// Publish each real parsed canonical path before later scan/font work completes.
+/// A false callback cancels the scan; it never turns metadata into PCM readiness.
+pub fn scan_library_streamed_with(
+    root: &Path,
     mut checkpoint: impl FnMut(ScanProgress) -> bool,
+    mut publish: impl FnMut(&LibraryEntry) -> bool,
 ) -> Result<ChartLibrary, PlayerChartError> {
     let mut progress = ScanProgress::default();
     scan_boundary(&mut progress, ScanStage::Traversal, &mut checkpoint)?;
@@ -738,11 +752,13 @@ pub fn scan_library_with(
             "library root must be a non-symlink directory".into(),
         ));
     }
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| PlayerChartError(format!("{}: {error}", root.display())))?;
     let mut library = ChartLibrary {
         entries: Vec::new(),
         diagnostics: Vec::new(),
     };
-    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    let mut pending = vec![(canonical_root.clone(), 0usize)];
     progress.directories = 1;
     let mut entry_limit = false;
     'scan: while let Some((directory, depth)) = pending.pop() {
@@ -855,21 +871,42 @@ pub fn scan_library_with(
             });
             scan_boundary(&mut progress, ScanStage::Traversal, &mut checkpoint)?;
             match chart {
-                Ok(chart) => library.entries.push(LibraryEntry {
-                    title: chart
-                        .metadata
-                        .get("TITLE")
-                        .filter(|title| !title.is_empty())
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            path.file_stem()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned()
-                        }),
-                    artist: chart.metadata.get("ARTIST").cloned().unwrap_or_default(),
-                    path,
-                }),
+                Ok(chart) => {
+                    let canonical = match fs::canonicalize(&path) {
+                        Ok(canonical) if canonical.starts_with(&canonical_root) => canonical,
+                        Ok(_) => {
+                            library
+                                .diagnostics
+                                .push(format!("{}: chart path escapes library", path.display()));
+                            continue;
+                        }
+                        Err(error) => {
+                            library
+                                .diagnostics
+                                .push(format!("{}: {error}", path.display()));
+                            continue;
+                        }
+                    };
+                    let entry = LibraryEntry {
+                        title: chart
+                            .metadata
+                            .get("TITLE")
+                            .filter(|title| !title.is_empty())
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                path.file_stem()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .into_owned()
+                            }),
+                        artist: chart.metadata.get("ARTIST").cloned().unwrap_or_default(),
+                        path: canonical,
+                    };
+                    if !publish(&entry) {
+                        return Err(PlayerChartError("library scan cancelled".into()));
+                    }
+                    library.entries.push(entry);
+                }
                 Err(error) => library
                     .diagnostics
                     .push(format!("{}: {error}", path.display())),
@@ -1025,17 +1062,15 @@ mod tests {
         ));
         let mut progress = NoteProgress::new(chart.clone()).unwrap();
         let mut output = vec![99];
-        assert!(
-            chart
-                .visible_note_indices_with_progress_checked(
-                    Timestamp::ZERO,
-                    0,
-                    0,
-                    Some(&progress),
-                    &mut output
-                )
-                .is_err()
-        );
+        assert!(chart
+            .visible_note_indices_with_progress_checked(
+                Timestamp::ZERO,
+                0,
+                0,
+                Some(&progress),
+                &mut output
+            )
+            .is_err());
         assert!(output.is_empty());
         let event = |index: usize| JudgeEvent {
             object: chart.notes[index].object,
@@ -1072,17 +1107,15 @@ mod tests {
         assert_eq!(output.as_ptr(), pointer);
         assert_eq!(output.capacity(), capacity);
         let foreign = NoteProgress::new(Arc::new(chart.as_ref().clone())).unwrap();
-        assert!(
-            chart
-                .visible_note_indices_with_progress_checked(
-                    Timestamp::ZERO,
-                    0,
-                    0,
-                    Some(&foreign),
-                    &mut output
-                )
-                .is_err()
-        );
+        assert!(chart
+            .visible_note_indices_with_progress_checked(
+                Timestamp::ZERO,
+                0,
+                0,
+                Some(&foreign),
+                &mut output
+            )
+            .is_err());
         assert!(output.is_empty());
         assert_eq!(chart.note_index_by_object(chart.notes[2].object), Some(2));
     }
@@ -1213,11 +1246,9 @@ mod tests {
             .visible_note_indices_checked(Timestamp::ZERO, 0, 0, &mut output)
             .unwrap();
         assert_eq!(output.len(), MAX_VISIBLE_NOTES);
-        assert!(
-            overflow
-                .visible_note_indices_checked(Timestamp::ZERO, 0, 0, &mut output)
-                .is_err()
-        );
+        assert!(overflow
+            .visible_note_indices_checked(Timestamp::ZERO, 0, 0, &mut output)
+            .is_err());
         assert!(output.is_empty());
         let pointer = output.as_ptr();
         let capacity = output.capacity();
@@ -1226,11 +1257,9 @@ mod tests {
             .unwrap();
         assert_eq!(output.as_ptr(), pointer);
         assert_eq!(output.capacity(), capacity);
-        assert!(
-            overflow
-                .visible_notes_checked(Timestamp::ZERO, 0, 0)
-                .is_err()
-        );
+        assert!(overflow
+            .visible_notes_checked(Timestamp::ZERO, 0, 0)
+            .is_err());
         assert_eq!(
             overflow
                 .visible_notes(Timestamp::ZERO, 0, 0, usize::MAX)
@@ -1238,7 +1267,7 @@ mod tests {
             MAX_VISIBLE_NOTES
         );
     }
-    use beatkernel_bms::{ParseOptions, parse};
+    use beatkernel_bms::{parse, ParseOptions};
 
     fn model(text: &str) -> PlayerChart {
         let source = parse(text, ParseOptions::default()).unwrap();
@@ -1266,12 +1295,10 @@ mod tests {
                 .unwrap();
             assert_eq!(visible, [note]);
         }
-        assert!(
-            chart
-                .visible_notes_checked(Timestamp::from_nanos(2_500_000_001), 0, 0)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(chart
+            .visible_notes_checked(Timestamp::from_nanos(2_500_000_001), 0, 0)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1288,11 +1315,9 @@ mod tests {
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].start, Timestamp::ZERO);
         assert_eq!(visible[0].end, Some(Timestamp::from_nanos(2_000_000_000)));
-        assert!(
-            chart
-                .visible_notes(Timestamp::from_nanos(2_000_000_001), 0, 0, 10)
-                .is_empty()
-        );
+        assert!(chart
+            .visible_notes(Timestamp::from_nanos(2_000_000_001), 0, 0, 10)
+            .is_empty());
     }
 
     #[test]
@@ -1304,11 +1329,9 @@ mod tests {
                 .len(),
             2
         );
-        assert!(
-            chart
-                .visible_notes(Timestamp::MIN, i64::MAX, i64::MAX, 10)
-                .is_empty()
-        );
+        assert!(chart
+            .visible_notes(Timestamp::MIN, i64::MAX, i64::MAX, 10)
+            .is_empty());
         assert_eq!(
             chart.visible_notes(Timestamp::ZERO, i64::MAX, 0, 1).len(),
             1
@@ -1324,11 +1347,9 @@ mod tests {
                 .len(),
             MAX_VISIBLE_NOTES
         );
-        assert!(
-            dense
-                .visible_notes_checked(Timestamp::ZERO, i64::MAX, 0)
-                .is_err()
-        );
+        assert!(dense
+            .visible_notes_checked(Timestamp::ZERO, i64::MAX, 0)
+            .is_err());
         assert_eq!(
             chart
                 .visible_notes_checked(Timestamp::ZERO, i64::MAX, 0)
@@ -1401,12 +1422,10 @@ mod tests {
         fs::write(path.join("unvisited.bms"), "#BPM 60\n").unwrap();
         let library = scan_library(&root.0).unwrap();
         assert!(library.entries.is_empty());
-        assert!(
-            library
-                .diagnostics
-                .iter()
-                .any(|message| message.contains("directory/depth limit"))
-        );
+        assert!(library
+            .diagnostics
+            .iter()
+            .any(|message| message.contains("directory/depth limit")));
     }
 
     #[cfg(unix)]

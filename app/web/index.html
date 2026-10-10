@@ -29,7 +29,9 @@
         <label>Mix sample rate <input id="rate" type="number" min="1" max="4294967295" step="1" value="48000" required disabled></label>
         <label>Chart seed <input id="seed" type="text" inputmode="numeric" value="0" maxlength="20" required disabled></label>
         <button id="prepare" type="submit" disabled>Prepare chart</button>
+        <button id="prepare-cancel" type="button" hidden disabled>Cancel preparation</button>
       </form>
+      <output id="prepare-progress" class="preparation-progress" role="status" aria-live="polite" aria-atomic="true" hidden></output>
       <p class="hint">Preview uses the chosen mix rate. Play prepares audio at the browser's actual rate. Source sound rates are preserved; mono sounds become stereo.</p>
     </section>
     <section aria-label="Chart preview" class="preview">

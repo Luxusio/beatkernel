@@ -21,6 +21,8 @@ for (const id of ["multiplayer-mode", "room-seal", "room-ready", "room-leave", "
 for (const id of ["judge-preset", "judge-precedence", "judge-gauge", "settings-save", "settings-load", "settings-status"]) ui[id] = byId(id);
 for (const id of ["pointer-input", "pointer-bindings"]) ui[id] = byId(id);
 for (const id of ["historical-grade-prev", "historical-grade-next", "historical-grade-page"]) ui[id] = byId(id);
+for (const id of ["prepare-cancel", "prepare-progress"]) ui[id] = byId(id);
+let preparationTicket = null;
 let canvas = byId("canvas");
 let cssExtent = [0, 0];
 ui["touch-input"].checked = typeof window.PointerEvent === "function" && globalThis.navigator?.maxTouchPoints > 0;
@@ -1040,8 +1042,26 @@ function createSessionPointers(session) {
   });
 }
 
+function showPreparation(data) {
+  ui["prepare-progress"].hidden = false;
+  ui["prepare-progress"].textContent = `${data.stage} · ${data.completedAssets}/${data.totalAssets} resources`;
+}
+function clearPreparation() {
+  preparationTicket = null;
+  ui["prepare-progress"].hidden = true;
+  ui["prepare-progress"].textContent = "";
+}
+function cancelPreparation() {
+  const ticket = preparationTicket;
+  if (!ticket || ticket.worker !== worker || ticket.owner !== owner || !preparing) return;
+  ui["prepare-cancel"].disabled = true;
+  worker.postMessage({ kind: "select-cancel", id: ticket.id, libraryId: ticket.libraryId });
+}
+ui["prepare-cancel"].addEventListener("click", cancelPreparation);
 function controls() {
   const playing = activePlay !== null;
+  ui["prepare-cancel"].hidden = !preparing;
+  ui["prepare-cancel"].disabled = !preparing || preparationTicket === null;
   const busy = settingsOperation !== null || recordsOperation !== null || hidPermission !== null || hidOwnershipFailed || localCleanup !== null || localDiscovery !== null;
   ui["settings-save"].disabled = ui["settings-load"].disabled = settingsOperation !== null || !settingsIdle();
   ui.folder.disabled = !initialized || preparing || playing || busy || !("webkitdirectory" in ui.folder);
@@ -1111,6 +1131,7 @@ function controls() {
   historicalGradeControls();
 }
 function stop() {
+  clearPreparation();
   ++startRequest;
   if (shutdown) return shutdown;
   cancelMenuMotions();
@@ -1222,14 +1243,28 @@ function prepare() {
     clearHistoricalRecord("Prepared chart changed.");
     clearRoomResults();
     preparing = true;
-    canvas.hidden = true;
+    preparationTicket = { id: selectId, libraryId, worker, owner };
+    showPreparation({ stage: "file-read", completedAssets: 0, totalAssets: 0 });
+    canvas.hidden = !hasPreview;
     controls();
     status("Preparing chart, sounds and backgrounds…");
     worker.postMessage({ kind: "select", id: selectId, libraryId, path: ui.chart.value, rate, seed });
-  } catch (error) { preparing = false; controls(); status(error.message, true); }
+  } catch (error) { preparing = false; clearPreparation(); controls(); status(error.message, true); }
 }
 
 function received(data, sourceWorker = worker, sourceOwner = owner) {
+  if (data?.kind === "selection-progress" || data?.kind === "selection-cancelled") {
+    const ticket = preparationTicket;
+    if (!ticket || sourceWorker !== ticket.worker || sourceOwner !== ticket.owner
+      || worker !== ticket.worker || owner !== ticket.owner || data.id !== ticket.id
+      || data.libraryId !== ticket.libraryId) return;
+    if (data.kind === "selection-progress") showPreparation(data);
+    else {
+      preparing = false; clearPreparation(); canvas.hidden = !hasPreview; controls();
+      status(`Preparation cancelled. ${hasPreview ? "The previous preview is retained." : "No chart has been prepared."}`);
+    }
+    return;
+  }
   if (data?.kind === "menu-motion-reply") { receiveMenuMotionReply(data, sourceWorker, sourceOwner); return; }
   if (data?.kind?.startsWith("menu-")) { receiveMenu(data); return; }
   if (data?.kind === "render-geometry") { receiveGeometry(data); return; }
@@ -1260,12 +1295,13 @@ function received(data, sourceWorker = worker, sourceOwner = owner) {
     }
     ui.chart.append(options);
     controls();
-    status(`${data.charts.length} chart(s) loaded. Choose a sample rate and prepare a chart.`);
+    status(`${data.charts.length} chart(s) available. Choose a sample rate and prepare a chart.`);
   } else if (data.kind === "import-error" && data.id === importId) {
     importing = false;
     controls();
     status(`${data.message} Previous library and preview are retained.`, true);
   } else if (data.kind === "selected" && data.id === selectId && data.libraryId === libraryId) {
+    clearPreparation();
     preparing = false;
     hasPreview = true;
     selectedId = data.id;
@@ -1278,6 +1314,7 @@ function received(data, sourceWorker = worker, sourceOwner = owner) {
   } else if (data.kind === "drawn" || data.kind === "render-wait") {
     receivePresentation(data, sourceWorker, sourceOwner);
   } else if (data.kind === "selection-error" && data.id === selectId) {
+    clearPreparation();
     preparing = false;
     canvas.hidden = !hasPreview;
     controls();
@@ -2938,6 +2975,11 @@ function receivePlay(data) {
     return;
   }
   if (!session || data.playId !== session.id) return;
+  if (data.kind === "play-preparation-progress") {
+    if (session.phase === "preparing") showPreparation(data);
+    return;
+  }
+  if (data.kind === "play-error" || data.kind === "play-stopped") clearPreparation();
   if (data.kind === "play-room-results") {
     try {
       roomResultsMetadata(data);
@@ -2970,6 +3012,7 @@ function receivePlay(data) {
     session.rpc = null;
     clearTimeout(request.timer);
     if (session.owner === owner) controls();
+    if (data.result?.kind === "prepared" || typeof data.error === "string") clearPreparation();
     if (typeof data.error === "string") request.reject(Object.assign(new Error(data.error), { playbackRefusal: true }));
     else if (request.kind === "play-samples-upload" && !request.admitted) {
       request.reject(new Error("Sample upload completed before producer admission."));

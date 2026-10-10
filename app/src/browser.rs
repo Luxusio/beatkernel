@@ -10,12 +10,11 @@ use beatkernel::{
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    asset_paths::AssetPathPolicy,
     asset_source::{MemoryAssetLimits, MemoryFiles},
     browser_canvas::BrowserCanvas,
-    image_assets::{ImageAssetLimits, ImageAssets},
+    image_assets::ImageAssets,
     player_chart::PlayerChart,
-    prepare_from_source, ChannelPolicy, DefaultAssetDecoder, PreparedBms,
+    PreparedBms,
 };
 
 #[path = "browser_render.rs"]
@@ -380,6 +379,7 @@ impl BrowserMenuOwner {
 #[wasm_bindgen]
 pub struct BrowserLibrary {
     files: MemoryFiles,
+    preparation: crate::browser_library_assets::BrowserPreparationCache,
 }
 
 #[wasm_bindgen]
@@ -399,6 +399,8 @@ impl BrowserLibrary {
                 max_path_bytes: max_path_bytes as usize,
             })
             .map_err(js_error)?,
+            preparation: crate::browser_library_assets::BrowserPreparationCache::new()
+                .map_err(js_error)?,
         })
     }
 
@@ -414,13 +416,9 @@ impl BrowserLibrary {
         seed: u64,
         max_samples: u32,
     ) -> Result<Vec<String>, JsValue> {
-        crate::browser_library_assets::referenced_asset_paths(
-            &self.files,
-            path,
-            seed,
-            max_samples as usize,
-        )
-        .map_err(js_error)
+        self.preparation
+            .referenced_asset_paths(&self.files, path, seed, max_samples as usize)
+            .map_err(js_error)
     }
     pub fn replay_referenced_asset_paths(
         &self,
@@ -428,13 +426,9 @@ impl BrowserLibrary {
         replay_bytes: Vec<u8>,
         max_samples: u32,
     ) -> Result<Vec<String>, JsValue> {
-        crate::browser_library_assets::replay_referenced_asset_paths(
-            &self.files,
-            path,
-            &replay_bytes,
-            max_samples as usize,
-        )
-        .map_err(js_error)
+        self.preparation
+            .replay_referenced_asset_paths(&self.files, path, &replay_bytes, max_samples as usize)
+            .map_err(js_error)
     }
 
     /// The supplied JS host preflights metadata before acquiring this buffer.
@@ -456,8 +450,7 @@ impl BrowserLibrary {
             .collect()
     }
 
-    /// Prepare actual audio as well as visuals for the later gameplay owner.
-    /// Rate conversion is deliberately not hidden in this host boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_chart(
         &self,
         path: &str,
@@ -468,63 +461,18 @@ impl BrowserLibrary {
         max_pcm_total_bytes: u32,
         max_samples: u32,
     ) -> Result<BrowserPrepared, JsValue> {
-        let format = AudioFormat::new(sample_rate, channels).map_err(js_error)?;
-        let limits = PcmLimits::new(
-            max_pcm_asset_bytes as usize,
-            max_pcm_total_bytes as usize,
-            max_samples as usize,
-        )
-        .map_err(js_error)?;
-        let bytes = self
-            .files
-            .read_file(path, beatkernel_bms::ParseOptions::default().max_bytes)
-            .map_err(js_error)?;
-        let source = self.files.scope(path).map_err(js_error)?;
-        let prepared = prepare_from_source(
-            bytes,
-            &source,
-            format,
-            limits,
-            ChannelPolicy::MonoToStereo,
-            &DefaultAssetDecoder,
-            AssetPathPolicy::AudioVariants,
+        self.begin_prepare_chart(
+            path,
+            sample_rate,
+            channels,
             seed,
-            None,
-        )
-        .map_err(js_error)?;
-        let chart = PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
-            .map_err(js_error)?;
-        let images = Arc::new(
-            ImageAssets::prepare_from_source(
-                &source,
-                &prepared.source,
-                ImageAssetLimits::default(),
-            )
-            .map_err(js_error)?,
-        );
-        let movies = Arc::new(
-            crate::video_assets::VideoAssets::prepare_from_source(
-                &source,
-                &prepared.source,
-                crate::video_assets::VideoAssetLimits::default(),
-            )
-            .map_err(js_error)?,
-        );
-        Ok(BrowserPrepared {
-            prepared,
-            visual_preview: None,
-            chart,
-            images,
-            movies,
-            chart_seed: seed,
-            start: Timestamp::ZERO,
-            replay: None,
-            play_policy: None,
-        })
+            max_pcm_asset_bytes,
+            max_pcm_total_bytes,
+            max_samples,
+        )?
+        .drive(self)
     }
-
-    /// Select from freshly decoded originals once. Gameplay and visual targets
-    /// retain original song times; only overlapping BGM receives bounded suffixes.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_chart_at(
         &self,
         path: &str,
@@ -536,44 +484,18 @@ impl BrowserLibrary {
         max_pcm_total_bytes: u32,
         max_samples: u32,
     ) -> Result<BrowserPrepared, JsValue> {
-        if start_ns < 0 {
-            return Err(js_error("live section start must be nonnegative"));
-        }
-        let start = Timestamp::from_nanos(start_ns);
-        let pcm_limits = PcmLimits::new(
-            max_pcm_asset_bytes as usize,
-            max_pcm_total_bytes as usize,
-            max_samples as usize,
-        )
-        .map_err(js_error)?;
-        let original = self.prepare_chart(
+        self.begin_prepare_chart_at(
             path,
             sample_rate,
             channels,
             seed,
+            start_ns,
             max_pcm_asset_bytes,
             max_pcm_total_bytes,
             max_samples,
-        )?;
-        let (prepared, _) = crate::section_start::prepare_at(original.prepared, start, pcm_limits)
-            .map_err(js_error)?;
-        let chart = PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
-            .map_err(js_error)?;
-        Ok(BrowserPrepared {
-            prepared,
-            visual_preview: None,
-            chart,
-            images: original.images,
-            movies: original.movies,
-            chart_seed: seed,
-            start,
-            replay: None,
-            play_policy: None,
-        })
+        )?
+        .drive(self)
     }
-
-    /// Resolve an explicit immutable policy on the original chart before section
-    /// selection. The live constructor must use the same input offset.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_chart_with_policy_at(
         &self,
@@ -590,52 +512,23 @@ impl BrowserLibrary {
         gauge: &str,
         offset_ns: i64,
     ) -> Result<BrowserPrepared, JsValue> {
-        if start_ns < 0 {
-            return Err(js_error("live section start must be nonnegative"));
-        }
-        let selection =
-            timing_policy::parse_selection(preset_id, rank_precedence, gauge).map_err(js_error)?;
-        let start = Timestamp::from_nanos(start_ns);
-        let limits = PcmLimits::new(
-            max_pcm_asset_bytes as usize,
-            max_pcm_total_bytes as usize,
-            max_samples as usize,
-        )
-        .map_err(js_error)?;
-        let original = self.prepare_chart(
+        self.begin_prepare_chart_with_policy_at(
             path,
             sample_rate,
             channels,
             seed,
+            start_ns,
             max_pcm_asset_bytes,
             max_pcm_total_bytes,
             max_samples,
-        )?;
-        let (prepared, policy) = timing_policy::prepare_selected_at(
-            original.prepared,
-            start,
-            limits,
-            selection,
+            preset_id,
+            rank_precedence,
+            gauge,
             offset_ns,
-        )
-        .map_err(js_error)?;
-        let chart = PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
-            .map_err(js_error)?;
-        Ok(BrowserPrepared {
-            prepared,
-            visual_preview: None,
-            chart,
-            images: original.images,
-            movies: original.movies,
-            chart_seed: seed,
-            start,
-            replay: None,
-            play_policy: Some(policy),
-        })
+        )?
+        .drive(self)
     }
-
-    /// Decode the canonical bounded recording and prepare its actual seeded
-    /// chart section. This resource is consumed by BrowserReplay, not live play.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_replay_chart(
         &self,
         path: &str,
@@ -646,13 +539,29 @@ impl BrowserLibrary {
         max_pcm_total_bytes: u32,
         max_samples: u32,
     ) -> Result<BrowserPrepared, JsValue> {
-        let limits = crate::competition_live::replay_limits().map_err(js_error)?;
-        let file = decode_replay(&bytes, limits).map_err(js_error)?;
-        let setup =
-            crate::replay_playback::decode_section_setup(&file.header.options).map_err(js_error)?;
-        let start = setup.start;
-        let seed = setup.chart_seed;
-        let original = self.prepare_chart(
+        self.begin_prepare_replay_chart(
+            path,
+            bytes,
+            sample_rate,
+            channels,
+            max_pcm_asset_bytes,
+            max_pcm_total_bytes,
+            max_samples,
+        )?
+        .drive(self)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_prepare_chart(
+        &self,
+        path: &str,
+        sample_rate: u32,
+        channels: u16,
+        seed: u64,
+        max_pcm_asset_bytes: u32,
+        max_pcm_total_bytes: u32,
+        max_samples: u32,
+    ) -> Result<BrowserPreparationJob, JsValue> {
+        self.begin_original(
             path,
             sample_rate,
             channels,
@@ -660,33 +569,343 @@ impl BrowserLibrary {
             max_pcm_asset_bytes,
             max_pcm_total_bytes,
             max_samples,
-        )?;
-        let pcm_limits = PcmLimits::new(
-            max_pcm_asset_bytes as usize,
-            max_pcm_total_bytes as usize,
-            max_samples as usize,
+            None,
+            BrowserPreparationMode::Original,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_prepare_chart_at(
+        &self,
+        path: &str,
+        sample_rate: u32,
+        channels: u16,
+        seed: u64,
+        start_ns: i64,
+        max_pcm_asset_bytes: u32,
+        max_pcm_total_bytes: u32,
+        max_samples: u32,
+    ) -> Result<BrowserPreparationJob, JsValue> {
+        if start_ns < 0 {
+            return Err(js_error("live section start must be nonnegative"));
+        }
+        self.begin_original(
+            path,
+            sample_rate,
+            channels,
+            seed,
+            max_pcm_asset_bytes,
+            max_pcm_total_bytes,
+            max_samples,
+            None,
+            BrowserPreparationMode::Section {
+                start: Timestamp::from_nanos(start_ns),
+                policy: None,
+            },
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_prepare_chart_with_policy_at(
+        &self,
+        path: &str,
+        sample_rate: u32,
+        channels: u16,
+        seed: u64,
+        start_ns: i64,
+        max_pcm_asset_bytes: u32,
+        max_pcm_total_bytes: u32,
+        max_samples: u32,
+        preset_id: &str,
+        rank_precedence: &str,
+        gauge: &str,
+        offset_ns: i64,
+    ) -> Result<BrowserPreparationJob, JsValue> {
+        if start_ns < 0 {
+            return Err(js_error("live section start must be nonnegative"));
+        }
+        let (timing, gauge) =
+            timing_policy::parse_selection(preset_id, rank_precedence, gauge).map_err(js_error)?;
+        self.begin_original(
+            path,
+            sample_rate,
+            channels,
+            seed,
+            max_pcm_asset_bytes,
+            max_pcm_total_bytes,
+            max_samples,
+            None,
+            BrowserPreparationMode::Section {
+                start: Timestamp::from_nanos(start_ns),
+                policy: Some((timing, gauge, offset_ns)),
+            },
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_prepare_replay_chart(
+        &self,
+        path: &str,
+        bytes: Vec<u8>,
+        sample_rate: u32,
+        channels: u16,
+        max_pcm_asset_bytes: u32,
+        max_pcm_total_bytes: u32,
+        max_samples: u32,
+    ) -> Result<BrowserPreparationJob, JsValue> {
+        let file = decode_replay(
+            &bytes,
+            crate::competition_live::replay_limits().map_err(js_error)?,
         )
         .map_err(js_error)?;
-        let prepared = crate::section_start::prepare_section_replay(
-            original.prepared,
-            &file,
+        let setup =
+            crate::replay_playback::decode_section_setup(&file.header.options).map_err(js_error)?;
+        self.begin_original(
+            path,
+            sample_rate,
+            channels,
+            setup.chart_seed,
+            max_pcm_asset_bytes,
+            max_pcm_total_bytes,
+            max_samples,
+            Some(file),
+            BrowserPreparationMode::Replay { start: setup.start },
+        )
+    }
+    #[wasm_bindgen(getter)]
+    pub fn query_parse_count(&self) -> u64 {
+        self.preparation.query_counters().parses as u64
+    }
+    #[wasm_bindgen(getter)]
+    pub fn query_compile_count(&self) -> u64 {
+        self.preparation.query_counters().compiles as u64
+    }
+}
+
+impl BrowserLibrary {
+    #[allow(clippy::too_many_arguments)]
+    fn begin_original(
+        &self,
+        path: &str,
+        sample_rate: u32,
+        channels: u16,
+        seed: u64,
+        max_asset: u32,
+        max_total: u32,
+        max_samples: u32,
+        replay: Option<ReplayFile>,
+        mode: BrowserPreparationMode,
+    ) -> Result<BrowserPreparationJob, JsValue> {
+        let format = AudioFormat::new(sample_rate, channels).map_err(js_error)?;
+        let limits = PcmLimits::new(max_asset as usize, max_total as usize, max_samples as usize)
+            .map_err(js_error)?;
+        let assets = self
+            .preparation
+            .begin(&self.files, path, format, seed, limits, replay)
+            .map_err(js_error)?;
+        Ok(BrowserPreparationJob {
+            assets,
+            mode,
             limits,
-            pcm_limits,
-        )
-        .map_err(js_error)?;
+            seed,
+            assets_ready: false,
+            result: None,
+            admission: None,
+        })
+    }
+}
+#[derive(Clone, Copy)]
+enum BrowserPreparationMode {
+    Original,
+    Section {
+        start: Timestamp,
+        policy: Option<(
+            crate::play_policy::TimingPresetSelection,
+            crate::play_policy::GaugeSelection,
+            i64,
+        )>,
+    },
+    Replay {
+        start: Timestamp,
+    },
+}
+/// An owned setup job; every step receives the current library synchronously.
+#[wasm_bindgen]
+pub struct BrowserPreparationJob {
+    assets: crate::browser_library_assets::BrowserAssetPreparationJob,
+    mode: BrowserPreparationMode,
+    limits: PcmLimits,
+    seed: u64,
+    assets_ready: bool,
+    result: Option<BrowserPrepared>,
+    admission: Option<crate::preparation::PreparationAdmission>,
+}
+impl BrowserPreparationJob {
+    fn drive(mut self, library: &BrowserLibrary) -> Result<BrowserPrepared, JsValue> {
+        while !self.advance(library)? {}
+        self.take_prepared(library)
+    }
+    fn finalize(
+        &self,
+        original: crate::browser_library_assets::BrowserAssetPrepared,
+    ) -> Result<BrowserPrepared, JsValue> {
+        let crate::browser_library_assets::BrowserAssetPrepared {
+            prepared,
+            images,
+            movies,
+            replay,
+        } = original;
+        let (prepared, start, play_policy) = match self.mode {
+            BrowserPreparationMode::Original => (prepared, Timestamp::ZERO, None),
+            BrowserPreparationMode::Section {
+                start,
+                policy: None,
+            } => {
+                let (prepared, _) = crate::section_start::prepare_at(prepared, start, self.limits)
+                    .map_err(js_error)?;
+                (prepared, start, None)
+            }
+            BrowserPreparationMode::Section {
+                start,
+                policy: Some((timing, gauge, offset)),
+            } => {
+                let (prepared, policy) = timing_policy::prepare_selected_at(
+                    prepared,
+                    start,
+                    self.limits,
+                    (timing, gauge),
+                    offset,
+                )
+                .map_err(js_error)?;
+                (prepared, start, Some(policy))
+            }
+            BrowserPreparationMode::Replay { start } => {
+                let file = replay
+                    .as_ref()
+                    .ok_or_else(|| js_error("recorded setup missing"))?;
+                let prepared = crate::section_start::prepare_section_replay(
+                    prepared,
+                    file,
+                    crate::competition_live::replay_limits().map_err(js_error)?,
+                    self.limits,
+                )
+                .map_err(js_error)?;
+                (prepared, start, None)
+            }
+        };
         let chart = PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
             .map_err(js_error)?;
         Ok(BrowserPrepared {
             prepared,
             visual_preview: None,
             chart,
-            images: original.images,
-            movies: original.movies,
-            chart_seed: seed,
+            images: Arc::new(images),
+            movies: Arc::new(movies),
+            chart_seed: self.seed,
             start,
-            replay: Some(file),
-            play_policy: None,
+            replay,
+            play_policy,
         })
+    }
+}
+#[wasm_bindgen]
+impl BrowserPreparationJob {
+    pub fn advance(&mut self, library: &BrowserLibrary) -> Result<bool, JsValue> {
+        let result = (|| {
+            self.assets
+                .validate_current(&library.preparation, &library.files)
+                .map_err(js_error)?;
+            if self.result.is_some() {
+                return Ok(true);
+            }
+            if !self.assets_ready {
+                self.assets_ready = self
+                    .assets
+                    .advance(&library.preparation, &library.files)
+                    .map_err(js_error)?;
+                return Ok(false);
+            }
+            let (original, admission) = self
+                .assets
+                .stage_ready(&library.preparation, &library.files)
+                .map_err(js_error)?;
+            let prepared = self.finalize(original)?;
+            self.admission = Some(admission);
+            self.result = Some(prepared);
+            Ok(true)
+        })();
+        if result.is_err() {
+            self.cancel();
+        }
+        result
+    }
+    pub fn pending_asset_path(&self) -> Option<String> {
+        self.assets
+            .pending_resource()
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+    #[wasm_bindgen(getter)]
+    pub fn stage(&self) -> String {
+        if self.result.is_some() {
+            "ready"
+        } else if matches!(self.assets.phase(), "taken" | "cancelled") {
+            self.assets.phase()
+        } else if self.assets_ready {
+            "finalize"
+        } else {
+            self.assets.phase()
+        }
+        .to_owned()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn completed_assets(&self) -> u32 {
+        self.assets.progress().completed_assets as u32
+    }
+    #[wasm_bindgen(getter)]
+    pub fn total_assets(&self) -> u32 {
+        self.assets.progress().total_assets as u32
+    }
+    #[wasm_bindgen(getter)]
+    pub fn parse_count(&self) -> u32 {
+        self.assets.counters().parses as u32
+    }
+    #[wasm_bindgen(getter)]
+    pub fn compile_count(&self) -> u32 {
+        self.assets.counters().compiles as u32
+    }
+    #[wasm_bindgen(getter)]
+    pub fn read_count(&self) -> u32 {
+        self.assets.counters().reads as u32
+    }
+    #[wasm_bindgen(getter)]
+    pub fn decode_count(&self) -> u32 {
+        self.assets.counters().decodes as u32
+    }
+    #[wasm_bindgen(getter)]
+    pub fn shared_asset_count(&self) -> u32 {
+        self.assets.counters().shared_assets as u32
+    }
+    pub fn take_prepared(&mut self, library: &BrowserLibrary) -> Result<BrowserPrepared, JsValue> {
+        let result = (|| {
+            let admission = self
+                .admission
+                .as_ref()
+                .ok_or_else(|| js_error("browser preparation is not ready"))?;
+            self.assets
+                .admit(&library.preparation, &library.files, admission)
+                .map_err(js_error)?;
+            self.admission.take();
+            self.result
+                .take()
+                .ok_or_else(|| js_error("browser preparation was already taken"))
+        })();
+        if result.is_err() {
+            self.cancel();
+        }
+        result
+    }
+    pub fn cancel(&mut self) {
+        self.assets.cancel();
+        self.result = None;
+        self.admission = None;
+        self.assets_ready = false;
     }
 }
 

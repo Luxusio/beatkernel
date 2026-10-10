@@ -2,14 +2,199 @@
 use crate::{
     load_prepared_with_seed,
     native_gameplay::NativeGameplayResult,
+    preparation::{
+        PreparationAdmission, PreparationAdvance, PreparationJob, PreparationProgress,
+        PreparationRequest, PreparationStage,
+    },
     section_start::{prepare_at, SectionReport},
     ChannelPolicy, PreparedBms,
 };
 use beatkernel::{
     audio::{AudioFormat, PcmLimits},
+    replay::codec::{encode_replay, ReplayCodecLimits, ReplayFile},
     time::Timestamp,
 };
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{Arc, Mutex},
+};
+
+struct NativeAdmission {
+    cache: Option<Arc<Mutex<crate::preparation::PreparationCache>>>,
+    admission: PreparationAdmission,
+    context: crate::player::NativePreparationContext,
+    progress: PreparationProgress,
+}
+fn commit_original(admission: Option<NativeAdmission>) -> NativeGameplayResult<()> {
+    if let Some(admission) = admission {
+        admission.context.check(admission.progress)?;
+        if let Some(cache) = &admission.cache {
+            let mut cache = cache
+                .lock()
+                .map_err(|_| "native preparation cache unavailable")?;
+            admission.context.check(admission.progress)?;
+            cache.commit_admission(&admission.admission)?;
+        }
+    }
+    Ok(())
+}
+
+fn load_original(
+    config: &NativeChartConfig<'_>,
+) -> NativeGameplayResult<(PreparedBms, Option<NativeAdmission>)> {
+    load_original_request(
+        config.path,
+        config.format,
+        config.limits,
+        config.channels,
+        config.chart_seed,
+        None,
+    )
+}
+
+/// Fresh genuine recording validation precedes filesystem acquisition on every retry.
+pub fn load_original_for_section_replay(
+    path: &Path,
+    format: AudioFormat,
+    limits: PcmLimits,
+    channels: ChannelPolicy,
+    file: &ReplayFile,
+    replay_limits: ReplayCodecLimits,
+) -> NativeGameplayResult<PreparedBms> {
+    let (prepared, admission) =
+        load_replay_original(path, format, limits, channels, file, replay_limits)?;
+    commit_original(admission)?;
+    Ok(prepared)
+}
+
+/// The native replay setup admits its original only after fresh section derivation.
+pub fn prepare_original_for_section_replay(
+    path: &Path,
+    format: AudioFormat,
+    limits: PcmLimits,
+    channels: ChannelPolicy,
+    file: &ReplayFile,
+    replay_limits: ReplayCodecLimits,
+) -> NativeGameplayResult<PreparedBms> {
+    let (original, admission) =
+        load_replay_original(path, format, limits, channels, file, replay_limits)?;
+    let prepared =
+        crate::section_start::prepare_section_replay(original, file, replay_limits, limits)?;
+    commit_original(admission)?;
+    Ok(prepared)
+}
+
+fn load_replay_original(
+    path: &Path,
+    format: AudioFormat,
+    limits: PcmLimits,
+    channels: ChannelPolicy,
+    file: &ReplayFile,
+    replay_limits: ReplayCodecLimits,
+) -> NativeGameplayResult<(PreparedBms, Option<NativeAdmission>)> {
+    let context = crate::player::preparation_context();
+    let validating = PreparationProgress {
+        stage: PreparationStage::Parse,
+        completed_assets: 0,
+        total_assets: 0,
+    };
+    if let Some(context) = &context {
+        context.check(validating)?;
+    }
+    encode_replay(file, replay_limits)?;
+    let seed = crate::replay_playback::decode_section_setup(&file.header.options)?.chart_seed;
+    if let Some(context) = &context {
+        context.check(validating)?;
+    }
+    load_original_request(
+        path,
+        format,
+        limits,
+        channels,
+        seed,
+        Some((file, replay_limits)),
+    )
+}
+
+fn load_original_request(
+    path: &Path,
+    format: AudioFormat,
+    limits: PcmLimits,
+    channels: ChannelPolicy,
+    seed: u64,
+    replay: Option<(&ReplayFile, ReplayCodecLimits)>,
+) -> NativeGameplayResult<(PreparedBms, Option<NativeAdmission>)> {
+    let Some(context) = crate::player::preparation_context() else {
+        let prepared = match replay {
+            Some((file, replay_limits)) => crate::load_prepared_for_section_replay(
+                path,
+                format,
+                limits,
+                channels,
+                file,
+                replay_limits,
+            ),
+            None => load_prepared_with_seed(path, format, limits, channels, seed),
+        }?;
+        return Ok((prepared, None));
+    };
+    let reading = PreparationProgress {
+        stage: PreparationStage::Read,
+        completed_assets: 0,
+        total_assets: 0,
+    };
+    context.check(reading)?;
+    let chart_path = std::fs::canonicalize(path)?;
+    context.check(reading)?;
+    let root = chart_path.parent().ok_or("chart has no parent")?;
+    let chart_bytes = crate::asset_source::read_bounded(
+        &chart_path,
+        beatkernel_bms::ParseOptions::default().max_bytes,
+    )?;
+    context.check(reading)?;
+    let source = crate::asset_source::FileAssetSource::new(root)?;
+    context.check(reading)?;
+    // Exact native path encoding avoids lossy Unicode aliases in cache identity.
+    let mut identity = String::new();
+    for byte in chart_path.as_os_str().as_encoded_bytes() {
+        use std::fmt::Write;
+        write!(&mut identity, "{byte:02x}")?;
+    }
+    let request = PreparationRequest {
+        source_identity: identity,
+        seed,
+        format,
+        limits,
+        channels,
+        paths: crate::asset_paths::AssetPathPolicy::AudioVariants,
+    };
+    let cache = context.cache();
+    let mut job = match &cache {
+        Some(cache) => cache
+            .lock()
+            .map_err(|_| "native preparation cache unavailable")?
+            .begin(request, chart_bytes)?,
+        None => PreparationJob::uncached(request, chart_bytes)?,
+    };
+    // The cache lock never spans IO, decoding, progress callbacks or native setup.
+    loop {
+        let advance = job.advance(&source, replay, &mut |progress| context.check(progress))?;
+        if let PreparationAdvance::Ready(candidate) = advance {
+            context.check(job.progress())?;
+            let (prepared, admission) = candidate.into_prepared_and_admission();
+            return Ok((
+                prepared,
+                Some(NativeAdmission {
+                    cache,
+                    admission,
+                    context,
+                    progress: job.progress(),
+                }),
+            ));
+        }
+    }
+}
 
 pub struct NativeChartConfig<'a> {
     pub path: &'a Path,
@@ -35,15 +220,14 @@ pub fn prepare_retained_chart_with_policy(
     gauge: crate::play_policy::GaugeSelection,
     timing: Option<crate::play_policy::TimingPresetSelection>,
 ) -> NativeGameplayResult<PreparedRetainedChart> {
-    prepare_retained_with_policy(config, judge, gauge, timing, |config| {
-        load_prepared_with_seed(
-            config.path,
-            config.format,
-            config.limits,
-            config.channels,
-            config.chart_seed,
-        )
-    })
+    let mut admission = None;
+    let prepared = prepare_retained_with_policy(config, judge, gauge, timing, |config| {
+        let (original, pending) = load_original(config)?;
+        admission = pending;
+        Ok(original)
+    })?;
+    commit_original(admission)?;
+    Ok(prepared)
 }
 
 fn prepare_retained_with_policy(
@@ -110,15 +294,14 @@ fn prepare_retained_with_policy(
 pub fn prepare_chart(
     config: NativeChartConfig<'_>,
 ) -> NativeGameplayResult<(PreparedBms, SectionReport)> {
-    prepare_with(config, |config| {
-        load_prepared_with_seed(
-            config.path,
-            config.format,
-            config.limits,
-            config.channels,
-            config.chart_seed,
-        )
-    })
+    let mut admission = None;
+    let prepared = prepare_with(config, |config| {
+        let (original, pending) = load_original(config)?;
+        admission = pending;
+        Ok(original)
+    })?;
+    commit_original(admission)?;
+    Ok(prepared)
 }
 /// Resolves explicit timing on the original source before practice filtering.
 /// Legacy selection preserves the existing post-section gauge resolution path.
@@ -132,15 +315,14 @@ pub fn prepare_chart_with_policy(
     SectionReport,
     crate::play_policy::ResolvedPlayPolicy,
 )> {
-    prepare_with_policy(config, judge, gauge, timing, |config| {
-        load_prepared_with_seed(
-            config.path,
-            config.format,
-            config.limits,
-            config.channels,
-            config.chart_seed,
-        )
-    })
+    let mut admission = None;
+    let prepared = prepare_with_policy(config, judge, gauge, timing, |config| {
+        let (original, pending) = load_original(config)?;
+        admission = pending;
+        Ok(original)
+    })?;
+    commit_original(admission)?;
+    Ok(prepared)
 }
 
 fn prepare_with_policy(

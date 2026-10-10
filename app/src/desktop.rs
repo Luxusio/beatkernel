@@ -7,14 +7,14 @@ mod catalog_fixtures;
 #[path = "desktop_clipboard_fixtures.rs"]
 mod clipboard_fixtures;
 #[cfg(test)]
-#[path = "desktop_display_owner_fixtures.rs"]
-mod display_owner_fixtures;
-#[cfg(test)]
 #[path = "desktop_completed_results_fixtures.rs"]
 mod completed_results_fixtures;
 #[cfg(test)]
 #[path = "desktop_practice_motion_fixtures.rs"]
 mod desktop_practice_motion_fixtures;
+#[cfg(test)]
+#[path = "desktop_display_owner_fixtures.rs"]
+mod display_owner_fixtures;
 #[cfg(test)]
 #[path = "font_fixture.rs"]
 mod font_fixture;
@@ -24,6 +24,9 @@ mod ime_area_fixtures;
 #[cfg(test)]
 #[path = "desktop_ime_fields_fixtures.rs"]
 mod ime_fields_fixtures;
+#[cfg(test)]
+#[path = "desktop_loading_fixtures.rs"]
+mod loading_fixtures;
 #[cfg(test)]
 #[path = "native_remaining_motion_fixtures.rs"]
 mod native_remaining_motion_fixtures;
@@ -77,7 +80,7 @@ use beatkernel_bms_runtime::{
     font_text::{FontText, MAX_TEXT_GLYPHS},
     local_players::PlayerId,
     local_setup::LocalSetup,
-    native_catalog::{CatalogControl, NativeCatalog},
+    native_catalog::{CatalogControl, CatalogPublication, NativeCatalog},
     panel_scope::{PanelScope, TaskPermit},
     player, player_chart,
     practice::PracticeStart,
@@ -99,7 +102,7 @@ use std::{
     error::Error,
     io::{self, Read},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -408,11 +411,38 @@ fn prepare_catalog_parts(
         font,
     })
 }
+#[cfg(test)]
 fn spawn_catalog(options: &Options) -> Result<Option<NativeCatalog<PreparedCatalog>>, String> {
     if let Some(root) = &options.library {
         let font_path = options.title_font.clone();
         let fallbacks = options.fallback_fonts.clone();
         NativeCatalog::spawn(root.clone(), move |library, control| {
+            prepare_catalog(library, font_path, fallbacks, control)
+        })
+        .map(Some)
+    } else if let Some(font_path) = &options.title_font {
+        let path = options
+            .chart
+            .clone()
+            .ok_or("direct title font requires a chart")?;
+        let font_path = font_path.clone();
+        let fallbacks = options.fallback_fonts.clone();
+        NativeCatalog::spawn_prepared(move |control| {
+            prepare_direct_catalog(path, font_path, fallbacks, control)
+        })
+        .map(Some)
+    } else {
+        Ok(None)
+    }
+}
+fn spawn_catalog_generation(
+    options: &Options,
+    generation: u64,
+) -> Result<Option<NativeCatalog<PreparedCatalog>>, String> {
+    if let Some(root) = &options.library {
+        let font_path = options.title_font.clone();
+        let fallbacks = options.fallback_fonts.clone();
+        NativeCatalog::spawn_streamed(root.clone(), generation, move |library, control| {
             prepare_catalog(library, font_path, fallbacks, control)
         })
         .map(Some)
@@ -821,24 +851,41 @@ fn spawn_game(
     local_page: usize,
     local_comparisons: bool,
     replay: bool,
+    preparation_cache: Option<Arc<Mutex<beatkernel_bms_runtime::preparation::PreparationCache>>>,
 ) -> Result<Game, String> {
-    spawn_game_with(
+    spawn_game_with_preparation(
         move |args| native(args).map_err(|error| error.to_string()),
         launch,
         local_page,
         local_comparisons,
         replay,
+        preparation_cache,
     )
 }
 
 /// The production worker composition seam: injected native effects retain the
 /// same channel, TLS attachment, pinned launch and thread/join ownership.
+#[cfg(test)]
 fn spawn_game_with<F>(
     native: F,
     launch: SessionLaunch,
     local_page: usize,
     local_comparisons: bool,
     replay: bool,
+) -> Result<Game, String>
+where
+    F: FnOnce(&[String]) -> Result<(), String> + Send + 'static,
+{
+    spawn_game_with_preparation(native, launch, local_page, local_comparisons, replay, None)
+}
+
+fn spawn_game_with_preparation<F>(
+    native: F,
+    launch: SessionLaunch,
+    local_page: usize,
+    local_comparisons: bool,
+    replay: bool,
+    preparation_cache: Option<Arc<Mutex<beatkernel_bms_runtime::preparation::PreparationCache>>>,
 ) -> Result<Game, String>
 where
     F: FnOnce(&[String]) -> Result<(), String> + Send + 'static,
@@ -850,7 +897,7 @@ where
         .name("bms-game".into())
         .spawn(move || {
             player::with_publisher(publisher, || {
-                player::pin_native_launch(native_launch)?;
+                player::pin_native_launch_with_preparation(native_launch, preparation_cache)?;
                 native(&args)
             })
         })
@@ -976,6 +1023,12 @@ pub(super) fn run_with_ui_commands(
         catalog_message: None,
         catalog_progress: player_chart::ScanProgress::default(),
         catalog: None,
+        retired_catalogs: Vec::new(),
+        catalog_generation: 0,
+        catalog_metadata_complete: false,
+        catalog_screen: None,
+        pending_catalog: None,
+        preparation_cache: new_preparation_cache()?,
         entries: Vec::new(),
         selected: 0,
         selection_items,
@@ -1017,7 +1070,9 @@ pub(super) fn run_with_ui_commands(
     if app.startup.is_none() {
         app.begin_selection()?;
     }
-    event_loop.run_app(&mut app)?;
+    let event_result = event_loop.run_app(&mut app);
+    app.join_catalog_cleanup();
+    event_result?;
     if let Some(error) = app.fatal {
         return Err(error.into());
     }
@@ -1518,6 +1573,12 @@ struct RendererStartup {
     job: NativeCatalog<PreparedRenderer>,
     retired: bool,
 }
+impl Drop for RendererStartup {
+    fn drop(&mut self) {
+        self.job.cancel();
+        let _ = self.job.join();
+    }
+}
 #[derive(Clone)]
 struct NativeMotionOwner {
     screen: ScreenInstanceId,
@@ -1625,6 +1686,14 @@ impl NativeUiMotionState {
         }
     }
 }
+fn new_preparation_cache(
+) -> Result<Arc<Mutex<beatkernel_bms_runtime::preparation::PreparationCache>>, String> {
+    Ok(Arc::new(Mutex::new(
+        beatkernel_bms_runtime::preparation::PreparationCache::new(Default::default())
+            .map_err(|error| error.to_string())?,
+    )))
+}
+
 struct Desktop {
     options: Options,
     active_backend: BackendChoice,
@@ -1649,6 +1718,12 @@ struct Desktop {
     profile_io: Option<ProfileOperation>,
     startup: Option<NativeCatalog<Options>>,
     catalog: Option<NativeCatalog<PreparedCatalog>>,
+    retired_catalogs: Vec<NativeCatalog<PreparedCatalog>>,
+    catalog_generation: u64,
+    catalog_metadata_complete: bool,
+    catalog_screen: Option<ScreenInstanceId>,
+    pending_catalog: Option<(u64, PreparedCatalog)>,
+    preparation_cache: Arc<Mutex<beatkernel_bms_runtime::preparation::PreparationCache>>,
     catalog_progress: player_chart::ScanProgress,
     catalog_message: Option<String>,
     entries: Vec<Entry>,
@@ -1982,7 +2057,7 @@ impl Desktop {
         if !self.ui_ready()
             || !self.navigator.accepts(screen)
             || self.profile_io.is_some()
-            || self.catalog.is_some()
+            || (self.catalog.is_some() && self.entries.is_empty())
             || !self.hits.iter().any(|(id, _)| *id == control)
         {
             return Err("stale, suspended or undisplayed native motion control".into());
@@ -2182,7 +2257,7 @@ impl Desktop {
     ) -> Result<(), String> {
         self.ui_motion.validate_time(now)?;
         if !self.ui_ready()
-            || self.catalog.is_some()
+            || (self.catalog.is_some() && self.entries.is_empty())
             || !self.results_nodes(screen)?.contains(&node)
             || self.window.as_ref().is_some_and(|window| {
                 let size = window.inner_size();
@@ -2433,17 +2508,83 @@ impl Desktop {
             }
         }
     }
+    fn retire_catalog(&mut self) -> Result<(), String> {
+        self.collect_retired_catalogs();
+        if let Some(catalog) = &self.catalog {
+            if !catalog.is_finished() && self.retired_catalogs.len() == 2 {
+                self.catalog_message =
+                    Some("Catalog cleanup pending; existing selection remains usable".into());
+                return Err("catalog cleanup pending".into());
+            }
+        }
+        if let Some(mut catalog) = self.catalog.take() {
+            catalog.cancel();
+            if catalog.is_finished() {
+                let _ = catalog.poll();
+            } else {
+                self.retired_catalogs.push(catalog);
+            }
+        }
+        self.pending_catalog = None;
+        Ok(())
+    }
+    /// Event-loop exit owns blocking release; ordinary retirement only polls.
+    fn join_catalog_cleanup(&mut self) {
+        if let Some(startup) = &self.startup {
+            startup.cancel();
+        }
+        if let Some(catalog) = &self.catalog {
+            catalog.cancel();
+        }
+        for catalog in &self.retired_catalogs {
+            catalog.cancel();
+        }
+        if let Some(startup) = &mut self.startup {
+            let _ = startup.join();
+        }
+        if let Some(catalog) = &mut self.catalog {
+            let _ = catalog.join();
+        }
+        for catalog in &mut self.retired_catalogs {
+            let _ = catalog.join();
+        }
+        self.startup = None;
+        self.catalog = None;
+        self.retired_catalogs.clear();
+        self.pending_catalog = None;
+    }
+    fn collect_retired_catalogs(&mut self) {
+        let mut index = 0;
+        while index < self.retired_catalogs.len() {
+            if self.retired_catalogs[index].is_finished() {
+                let _ = self.retired_catalogs[index].poll();
+                self.retired_catalogs.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
     fn begin_selection(&mut self) -> Result<(), String> {
         if self.startup.is_some() || self.closing() {
             return Err("selection waits for startup profile preparation".into());
         }
-        let (catalog, message) = match spawn_catalog(&self.options) {
+        let generation = self
+            .catalog_generation
+            .checked_add(1)
+            .ok_or("catalog generation exhausted")?;
+        self.retire_catalog()?;
+        let cache = if self.catalog_generation == 0 {
+            Arc::clone(&self.preparation_cache)
+        } else {
+            new_preparation_cache()?
+        };
+        let (catalog, message) = match spawn_catalog_generation(&self.options, generation) {
             Ok(Some(catalog)) => (
                 Some(catalog),
                 Some(if self.options.library.is_some() {
                     "Loading library catalog…".into()
                 } else {
-                    "Preparing chart title font…".into()
+                    "Preparing optional chart title font…".into()
                 }),
             ),
             Ok(None) => (None, None),
@@ -2452,7 +2593,8 @@ impl Desktop {
                 Some(format!("Selection preparation unavailable: {error}")),
             ),
         };
-        let entries = if self.options.library.is_some() || self.options.title_font.is_some() {
+        // Direct paths are selectable before optional title-font work too.
+        let entries = if self.options.library.is_some() {
             Vec::new()
         } else {
             vec![direct_entry(
@@ -2470,12 +2612,18 @@ impl Desktop {
             })
             .collect::<Vec<_>>()
             .into();
-        let search = CatalogSearch::new(&items)?;
+        let mut search = CatalogSearch::new(&items)?;
+        search.set_query(self.search_editor.value())?;
+        self.catalog_generation = generation;
+        self.catalog_screen = self.navigator.active_id();
+        self.catalog_metadata_complete = self.options.library.is_none();
+        self.preparation_cache = cache;
         self.catalog = catalog;
         self.catalog_message = message;
         self.catalog_progress = player_chart::ScanProgress::default();
         self.entries = entries;
         self.selection_items = items;
+        self.selected = search.selected().unwrap_or(0);
         self.catalog_search = search;
         self.selection_diagnostics = Arc::from([]);
         if let Some(view) = &self.selection_view {
@@ -2486,74 +2634,247 @@ impl Desktop {
         Ok(())
     }
     fn catalog_busy(&self) -> bool {
-        // A worker can finish just after collect_catalog's poll. Keep waking
-        // active Selection until it has actually consumed that joined result.
-        self.catalog.as_ref().is_some_and(|catalog| {
-            !catalog.is_finished()
-                || self.closing()
-                || (!self.is_suspended()
-                    && !self.renderer_pending()
-                    && self.navigator.route() == ScreenRoute::Selection)
-        })
+        !self.retired_catalogs.is_empty()
+            || self.catalog.is_some()
+            || (self.pending_catalog.is_some()
+                && !self.is_suspended()
+                && !self.renderer_pending()
+                && self.navigator.route() == ScreenRoute::Selection
+                && self
+                    .catalog_screen
+                    .is_none_or(|screen| self.navigator.active_id() == Some(screen)))
+    }
+    /// One bounded metadata update, preserving the exact selected chart path.
+    fn install_catalog_entries(
+        &mut self,
+        generation: u64,
+        entries: Vec<player_chart::LibraryEntry>,
+    ) -> Result<(), String> {
+        if generation != self.catalog_generation || self.closing() {
+            return Err("stale catalog metadata generation".into());
+        }
+        let new_paths = entries
+            .iter()
+            .filter(|entry| !self.entries.iter().any(|old| old.path == entry.path))
+            .count();
+        if entries.len() > 128
+            || self.entries.len().saturating_add(new_paths) > 1024
+            || entries
+                .iter()
+                .enumerate()
+                .any(|(index, entry)| entries[..index].iter().any(|old| old.path == entry.path))
+        {
+            return Err("invalid catalog metadata batch".into());
+        }
+        let selected_path = self
+            .catalog_search
+            .selected()
+            .and_then(|index| self.entries.get(index))
+            .map(|entry| entry.path.clone());
+        for entry in entries {
+            let updated = Entry {
+                path: entry.path,
+                title: entry.title,
+                artist: entry.artist,
+            };
+            if let Some(index) = self.entries.iter().position(|old| old.path == updated.path) {
+                self.entries[index] = updated;
+            } else {
+                self.entries.push(updated);
+            }
+        }
+        self.entries.sort_by(|left, right| {
+            (&left.title, &left.artist, &left.path).cmp(&(&right.title, &right.artist, &right.path))
+        });
+        let items: Arc<[SelectionItem]> = self
+            .entries
+            .iter()
+            .map(|entry| SelectionItem {
+                title: entry.title.clone(),
+                artist: entry.artist.clone(),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let mut search = CatalogSearch::new(&items)?;
+        search.set_query(self.search_editor.value())?;
+        if let Some(index) =
+            selected_path.and_then(|path| self.entries.iter().position(|entry| entry.path == path))
+        {
+            if search.indices().contains(&index) {
+                search.select(index)?;
+            }
+        }
+        self.selected = search.selected().unwrap_or(0);
+        self.selection_items = items;
+        self.catalog_search = search;
+        self.selection_view = None;
+        if self.navigator.route() == ScreenRoute::Selection
+            && self.catalog_screen == self.navigator.active_id()
+        {
+            self.invalidate_hits();
+        }
+        Ok(())
     }
     fn collect_catalog(&mut self) {
-        let Some(catalog) = &mut self.catalog else {
+        self.collect_retired_catalogs();
+        if self
+            .catalog
+            .as_ref()
+            .and_then(NativeCatalog::generation)
+            .is_some_and(|generation| generation != self.catalog_generation)
+        {
+            if let Some(catalog) = &self.catalog {
+                catalog.cancel();
+            }
+            let _ = self.retire_catalog();
             return;
-        };
-        let progress = catalog.progress();
-        let changed = progress != self.catalog_progress;
-        if changed {
-            self.catalog_progress = progress;
-            self.catalog_message = Some(if self.options.library.is_some() {
-                format!(
+        }
+        let mut changed = false;
+        let mut received = Vec::new();
+        if let Some(catalog) = &mut self.catalog {
+            let progress = catalog.progress();
+            if progress != self.catalog_progress {
+                self.catalog_progress = progress;
+                changed = true;
+                self.catalog_message = Some(format!(
                     "{} - {} charts, {} entries, {} bytes",
-                    if progress.stage == player_chart::ScanStage::Complete {
-                        "Preparing search and title font"
+                    if self.catalog_metadata_complete {
+                        "Preparing optional title font"
                     } else {
                         "Loading library catalog"
                     },
                     progress.charts,
                     progress.entries,
                     progress.bytes
-                )
-            } else {
-                "Preparing chart title font…".into()
-            });
+                ));
+            }
+            received = catalog.drain_batches();
         }
-        // A hidden/suspended Selection does not receive another panel's draft
-        // or reactive bindings. The finished thread retains its owned result.
-        if !self.closing()
+        let mut entries = Vec::new();
+        for publication in received {
+            match publication {
+                CatalogPublication::Entries {
+                    generation,
+                    entries: batch,
+                } if generation == self.catalog_generation => entries.extend(batch),
+                CatalogPublication::MetadataComplete {
+                    generation,
+                    diagnostics,
+                } if generation == self.catalog_generation => {
+                    self.catalog_metadata_complete = true;
+                    self.selection_diagnostics = diagnostics.into();
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        if !entries.is_empty() && !self.closing() {
+            match self.install_catalog_entries(self.catalog_generation, entries) {
+                Ok(()) => changed = true,
+                Err(error) => self.catalog_message = Some(format!("Catalog unavailable: {error}")),
+            }
+        }
+        let legacy = self
+            .catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.generation().is_none());
+        if legacy
+            && !self.closing()
             && (self.is_suspended()
                 || self.renderer_pending()
                 || self.navigator.route() != ScreenRoute::Selection)
         {
             return;
         }
-        let result = self.catalog.as_mut().and_then(NativeCatalog::poll);
-        let completed = result.is_some();
-        if let Some(result) = result {
-            self.catalog = None;
-            if self.closing() {
-                return;
+        if let Some(result) = self.catalog.as_mut().and_then(NativeCatalog::poll) {
+            if legacy {
+                self.catalog_metadata_complete = true;
             }
-            match result.and_then(|catalog| self.install_catalog(catalog)) {
-                Ok(()) => self.catalog_message = None,
-                Err(error) => self.catalog_message = Some(format!("Catalog unavailable: {error}")),
+            match result {
+                Ok(catalog) if !self.closing() => {
+                    self.pending_catalog = Some((self.catalog_generation, catalog))
+                }
+                Ok(_) => {}
+                Err(error) if !self.closing() => {
+                    self.catalog_message = Some(format!("Catalog unavailable: {error}"))
+                }
+                Err(_) => {}
+            }
+            // If the worker finished before its final queued metadata was drained,
+            // keep its receiver until the bounded next poll observes completion.
+            if self.catalog_metadata_complete || self.pending_catalog.is_none() || self.closing() {
+                self.catalog = None;
+            }
+            changed = true;
+        }
+        if self.catalog_metadata_complete
+            && self
+                .catalog
+                .as_ref()
+                .is_some_and(NativeCatalog::is_finished)
+        {
+            self.catalog = None;
+        }
+        if self.closing() {
+            self.pending_catalog = None;
+            return;
+        }
+        if self.catalog_metadata_complete
+            && !self.is_suspended()
+            && !self.renderer_pending()
+            && self.navigator.route() == ScreenRoute::Selection
+            && self
+                .catalog_screen
+                .is_none_or(|screen| self.navigator.active_id() == Some(screen))
+        {
+            if let Some((generation, catalog)) = self.pending_catalog.take() {
+                if generation == self.catalog_generation {
+                    match self.install_catalog(catalog) {
+                        Ok(()) => {
+                            self.catalog_message = if self.entries.is_empty() {
+                                Some("No supported charts found".into())
+                            } else {
+                                None
+                            }
+                        }
+                        Err(error) => {
+                            self.catalog_message =
+                                Some(format!("Optional catalog font unavailable: {error}"))
+                        }
+                    }
+                    changed = true;
+                }
             }
         }
-        if (changed || completed) && !self.closing() && !self.is_suspended() && !self.occluded {
+        if changed && !self.is_suspended() && !self.occluded {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
         }
     }
-    fn install_catalog(&mut self, catalog: PreparedCatalog) -> Result<(), String> {
-        if self.closing() || self.is_suspended() || self.navigator.route() != ScreenRoute::Selection
+    fn install_catalog(&mut self, mut catalog: PreparedCatalog) -> Result<(), String> {
+        if self.closing()
+            || self.is_suspended()
+            || self.navigator.route() != ScreenRoute::Selection
+            || self
+                .catalog_screen
+                .is_some_and(|screen| self.navigator.active_id() != Some(screen))
         {
             return Err("catalog Selection is not active".into());
         }
-        let search_editor = LineEditor::new("", 256)?;
-        // Preflight GPU ownership before publishing any catalog component.
+        let selected_path = self
+            .catalog_search
+            .selected()
+            .and_then(|index| self.entries.get(index))
+            .map(|entry| entry.path.clone());
+        catalog.search.set_query(self.search_editor.value())?;
+        if let Some(index) = selected_path
+            .and_then(|path| catalog.entries.iter().position(|entry| entry.path == path))
+        {
+            if catalog.search.indices().contains(&index) {
+                catalog.search.select(index)?;
+            }
+        }
         let font = if let (Some(renderer), Some(atlas)) = (&mut self.renderer, &catalog.font) {
             let texture = renderer.upload_texture(atlas.image())?;
             match FontText::new(Arc::clone(atlas), texture) {
@@ -2576,13 +2897,10 @@ impl Desktop {
         }
         self.entries = catalog.entries;
         self.selection_items = catalog.items;
+        self.selected = catalog.search.selected().unwrap_or(0);
         self.catalog_search = catalog.search;
         self.selection_diagnostics = catalog.diagnostics;
         self.title_font = catalog.font;
-        self.selected = 0;
-        self.search_editor = search_editor;
-        self.search_focused = false;
-        self.catalog_wheel.reset();
         self.gesture.cancel();
         self.bind_title_font(font);
         Ok(())
@@ -3053,6 +3371,10 @@ impl Desktop {
         if let Some(catalog) = &self.catalog {
             catalog.cancel();
         }
+        for catalog in &self.retired_catalogs {
+            catalog.cancel();
+        }
+        self.pending_catalog = None;
         if let Some(clipboard) = &mut self.clipboard {
             clipboard.begin_close();
         }
@@ -3872,7 +4194,15 @@ impl Desktop {
             let draft = self.settings.as_ref().ok_or("settings unavailable")?;
             let launch = record_launch(&draft.values, &records.chart, &preview.path)?;
             (self.validate_replay)(launch.args()).map_err(|error| error.to_string())?;
-            spawn_game(self.replay, launch, 0, false, true).map(|game| (next, game))
+            spawn_game(
+                self.replay,
+                launch,
+                0,
+                false,
+                true,
+                Some(Arc::clone(&self.preparation_cache)),
+            )
+            .map(|game| (next, game))
         })();
         match result {
             Ok((next, game)) => {
@@ -4857,6 +5187,7 @@ impl Desktop {
             old.local_page,
             old.local_comparisons,
             old.replay,
+            Some(Arc::clone(&self.preparation_cache)),
         ) {
             Ok(mut game) => {
                 game.practice_bookmark = bookmark;
@@ -5056,7 +5387,7 @@ impl Desktop {
         if focused
             && (!self.ui_ready()
                 || self.navigator.route() != ScreenRoute::Selection
-                || self.catalog.is_some())
+                || (self.catalog.is_some() && self.entries.is_empty()))
         {
             return;
         }
@@ -5959,7 +6290,7 @@ impl Desktop {
         }
     }
     fn start(&mut self) -> Result<(), String> {
-        if self.catalog.is_some() {
+        if self.catalog.is_some() && self.entries.is_empty() {
             return Err(if self.options.library.is_some() {
                 "wait for the library catalog to finish loading".into()
             } else {
@@ -5985,7 +6316,14 @@ impl Desktop {
         let args = with_chart(&self.options.native, path);
         (self.validate)(&args).map_err(|error| error.to_string())?;
         let launch = SessionLaunch::new(args)?;
-        let game = spawn_game(self.native, launch, 0, false, false)?;
+        let game = spawn_game(
+            self.native,
+            launch,
+            0,
+            false,
+            false,
+            Some(Arc::clone(&self.preparation_cache)),
+        )?;
         if let Some(window) = &self.window {
             window.set_title(&window_title(&entry.title, &entry.artist));
         }
@@ -6022,7 +6360,7 @@ impl Desktop {
                 .is_none_or(|renderer| !renderer.needs_redraw())
     }
     fn draw_selection(&mut self) -> Result<(), String> {
-        if self.catalog.is_some() {
+        if self.catalog.is_some() && self.entries.is_empty() {
             let library = self.options.library.is_some();
             if let Some(view) = &self.selection_view {
                 self.ui_motion.remove(view.id(), &mut self.scene);
@@ -6068,7 +6406,7 @@ impl Desktop {
                 &mut self.scene,
                 24,
                 204,
-                "Chart selection is available when preparation finishes.",
+                "Chart paths become selectable while metadata continues.",
                 1,
                 0x9bb1cf,
             );
@@ -7348,6 +7686,7 @@ impl ApplicationHandler<DesktopUiCommand> for Desktop {
             && self.startup.is_none()
             && self.renderer_startup.is_none()
             && self.catalog.is_none()
+            && self.retired_catalogs.is_empty()
             && self
                 .clipboard
                 .as_ref()
@@ -7406,9 +7745,8 @@ impl ApplicationHandler<DesktopUiCommand> for Desktop {
         self.game = None;
         self.release_backgrounds();
         self.profile_io = None;
-        self.startup = None;
         self.renderer_startup = None;
-        self.catalog = None;
+        self.join_catalog_cleanup();
         self.clipboard = None;
     }
 }
@@ -7720,6 +8058,25 @@ fn draw_game_components(
     backgrounds: &[BgaFrame; 4],
     components: Option<(ScreenInstanceId, &[NodeId])>,
 ) -> Result<(), String> {
+    let loading = game
+        .snapshot
+        .as_ref()
+        .is_none_or(|snapshot| snapshot.status == player::PlayerStatus::Loading);
+    if loading {
+        if let Some(progress) = game.viewer.preparation_progress() {
+            text(
+                pixels,
+                24,
+                105,
+                &format!(
+                    "PREPARING {:?}  {}/{} RESOURCES - ESC CANCEL",
+                    progress.stage, progress.completed_assets, progress.total_assets
+                ),
+                1,
+                0x9bb1cf,
+            );
+        }
+    }
     let Some(snapshot) = &game.snapshot else {
         text(pixels, 24, 80, "LOADING - ESC CANCEL", 2, 0x9bb1cf);
         return Ok(());
@@ -9029,6 +9386,12 @@ mod tests {
             profile_io: None,
             startup: None,
             catalog: None,
+            retired_catalogs: Vec::new(),
+            catalog_generation: 0,
+            catalog_metadata_complete: false,
+            catalog_screen: None,
+            pending_catalog: None,
+            preparation_cache: new_preparation_cache().unwrap(),
             catalog_progress: player_chart::ScanProgress::default(),
             catalog_message: None,
             entries: vec![Entry {

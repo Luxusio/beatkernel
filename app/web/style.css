@@ -36,3 +36,6 @@ canvas[hidden] { display: none; }
 #status { min-height: 3em; overflow-wrap: anywhere; }
 #status[data-error="true"] { color: #ffb4a8; }
 @media (max-width: 600px) { main { padding: 18px 10px; } .controls, .preview { padding: 14px; } .files label, input[type="file"] { width: 100%; } }
+
+.preparation-progress { display: block; margin-top: 0.75rem; color: #aebbd1; font-size: 0.9rem; }
+.preparation-progress[hidden], #prepare-cancel[hidden] { display: none; }

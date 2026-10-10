@@ -117,6 +117,15 @@ impl ParsedPreparation {
             + self.compiled.bgm.len()
     }
 }
+/// Owned query continuation. It retains only immutable chart bytes and the
+/// canonical parsed plan, never resource IO, PCM, media, or gameplay state.
+#[derive(Clone)]
+pub struct PreparationPlan {
+    source_identity: String,
+    seed: u64,
+    chart: Arc<Vec<u8>>,
+    parsed: Arc<ParsedPreparation>,
+}
 struct CachedResource {
     encoded: Arc<Vec<u8>>,
     sample: SampleId,
@@ -173,19 +182,42 @@ impl PreparationCache {
             && job.request.source_identity.len() <= ParseOptions::default().max_bytes;
         Ok(job)
     }
+    /// Resume an exact query plan; changed source/seed/bytes take the normal
+    /// cold path. PCM reuse still requires the complete original request key.
+    pub fn begin_with_plan(
+        &self,
+        request: PreparationRequest,
+        chart_bytes: Vec<u8>,
+        plan: &PreparationPlan,
+    ) -> Result<PreparationJob> {
+        let exact = request.source_identity == plan.source_identity
+            && request.seed == plan.seed
+            && chart_bytes.as_slice() == plan.chart.as_slice();
+        let mut job = self.begin(request, chart_bytes)?;
+        if exact {
+            job.reused_plan = Some(Arc::clone(&plan.parsed));
+            job.chart = Arc::clone(&plan.chart);
+        }
+        Ok(job)
+    }
     /// Call only after current request-owner admission. A candidate is committed once.
     pub fn commit(&mut self, candidate: &PreparationCandidate) -> Result<bool> {
-        if candidate.committed.get()
-            || !candidate.permit.load(Ordering::Acquire)
-            || candidate
+        self.commit_admission(&candidate.admission)
+    }
+    /// Publish an original only after fresh section/policy/replay/media checks.
+    /// Splitting the prepared value does not bypass cancellation or one-shot use.
+    pub fn commit_admission(&mut self, admission: &PreparationAdmission) -> Result<bool> {
+        if admission.committed.get()
+            || !admission.permit.load(Ordering::Acquire)
+            || admission
                 .cache_identity
                 .as_ref()
                 .is_some_and(|id| !Arc::ptr_eq(id, &self.identity))
         {
             return Err("foreign or already committed preparation candidate".into());
         }
-        candidate.committed.set(true);
-        if let Some(original) = &candidate.original {
+        admission.committed.set(true);
+        if let Some(original) = &admission.original {
             self.original = Some(Arc::clone(original));
             Ok(true)
         } else {
@@ -206,13 +238,17 @@ pub enum PreparationAdvance {
     Pending(PreparationProgress),
     Ready(PreparationCandidate),
 }
-pub struct PreparationCandidate {
-    prepared: PreparedBms,
+/// A deferred, one-shot cache publication permit. Dropping it publishes nothing.
+pub struct PreparationAdmission {
     original: Option<Arc<CachedOriginal>>,
     cache_identity: Option<Arc<()>>,
     committed: Cell<bool>,
-    counters: PreparationCounters,
     permit: Arc<AtomicBool>,
+}
+pub struct PreparationCandidate {
+    prepared: PreparedBms,
+    admission: PreparationAdmission,
+    counters: PreparationCounters,
 }
 impl PreparationCandidate {
     pub fn prepared(&self) -> &PreparedBms {
@@ -224,6 +260,9 @@ impl PreparationCandidate {
     pub fn counters(&self) -> PreparationCounters {
         self.counters
     }
+    pub fn into_prepared_and_admission(self) -> (PreparedBms, PreparationAdmission) {
+        (self.prepared, self.admission)
+    }
 }
 pub struct PreparationJob {
     request: PreparationRequest,
@@ -231,6 +270,7 @@ pub struct PreparationJob {
     source: Option<BmsChart>,
     parsed: Option<Arc<ParsedPreparation>>,
     previous: Option<Arc<CachedOriginal>>,
+    reused_plan: Option<Arc<ParsedPreparation>>,
     cache_identity: Option<Arc<()>>,
     cache_limits: Option<PreparationCacheLimits>,
     retain_identity: bool,
@@ -259,6 +299,7 @@ impl PreparationJob {
             source: None,
             parsed: None,
             previous: None,
+            reused_plan: None,
             cache_identity: None,
             cache_limits: None,
             retain_identity: false,
@@ -291,6 +332,14 @@ impl PreparationJob {
     pub fn parsed(&self) -> Option<&ParsedPreparation> {
         self.parsed.as_deref()
     }
+    pub fn shared_plan(&self) -> Option<PreparationPlan> {
+        self.parsed.as_ref().map(|parsed| PreparationPlan {
+            source_identity: self.request.source_identity.clone(),
+            seed: self.request.seed,
+            chart: Arc::clone(&self.chart),
+            parsed: Arc::clone(parsed),
+        })
+    }
     pub fn pending_resource(&self) -> Option<&Path> {
         self.key.as_deref()
     }
@@ -305,6 +354,7 @@ impl PreparationJob {
         self.bank = None;
         self.resources.clear();
         self.previous = None;
+        self.reused_plan = None;
         self.source = None;
         self.parsed = None;
     }
@@ -356,7 +406,7 @@ impl PreparationJob {
         control(progress)?;
         match self.stage {
             PreparationStage::Parse => {
-                if self.previous.is_none() {
+                if self.reused_plan.is_none() && self.previous.is_none() {
                     let options = ParseOptions::default();
                     let text = crate::chart_text::decode_chart_text(
                         &self.chart,
@@ -373,10 +423,12 @@ impl PreparationJob {
                 self.stage = PreparationStage::Compile;
             }
             PreparationStage::Compile => {
-                let source = self
-                    .previous
+                let reusable = self
+                    .reused_plan
                     .as_ref()
-                    .map(|old| &old.parsed.source)
+                    .or_else(|| self.previous.as_ref().map(|old| &old.parsed));
+                let source = reusable
+                    .map(|plan| &plan.source)
                     .or(self.source.as_ref())
                     .ok_or("parsed preparation missing")?;
                 let gain = source.wav_gain()?;
@@ -388,17 +440,15 @@ impl PreparationJob {
                 if let Some((file, limits)) = replay {
                     crate::replay_playback::validate_section_setup(source, file, limits)?;
                 }
-                let compiled = if self.previous.is_none() {
+                let compiled = if reusable.is_none() {
                     let compiled = source.compile()?;
                     self.counters.compiles += 1;
                     Some(compiled)
                 } else {
                     None
                 };
-                let actual = self
-                    .previous
-                    .as_ref()
-                    .map(|old| &old.parsed.compiled)
+                let actual = reusable
+                    .map(|plan| &plan.compiled)
                     .or(compiled.as_ref())
                     .unwrap();
                 let referenced = referenced_samples(
@@ -408,8 +458,8 @@ impl PreparationJob {
                     self.request.limits.max_samples(),
                 )?;
                 self.samples = referenced.iter().copied().collect();
-                self.parsed = Some(if let Some(previous) = &self.previous {
-                    Arc::clone(&previous.parsed)
+                self.parsed = Some(if let Some(plan) = reusable {
+                    Arc::clone(plan)
                 } else {
                     Arc::new(ParsedPreparation {
                         source: self.source.take().unwrap(),
@@ -597,11 +647,13 @@ impl PreparationJob {
                 self.terminal = true;
                 return Ok(PreparationAdvance::Ready(PreparationCandidate {
                     prepared,
-                    original,
-                    cache_identity: self.cache_identity.clone(),
-                    committed: Cell::new(false),
+                    admission: PreparationAdmission {
+                        original,
+                        cache_identity: self.cache_identity.clone(),
+                        committed: Cell::new(false),
+                        permit: Arc::clone(&self.permit),
+                    },
                     counters: self.counters,
-                    permit: Arc::clone(&self.permit),
                 }));
             }
             PreparationStage::Visual => {

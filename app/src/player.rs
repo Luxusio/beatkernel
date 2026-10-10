@@ -321,6 +321,7 @@ impl Default for PlayerSnapshot {
 }
 struct Shared {
     native_launch: Mutex<Option<crate::session_launch::SessionLaunch>>,
+    preparation_progress: Mutex<Option<crate::preparation::PreparationProgress>>,
     practice: Mutex<crate::practice_control::PracticeControls>,
     practice_busy: AtomicBool,
     practice_owner: AtomicBool,
@@ -400,6 +401,7 @@ pub struct PlayerViewer(Arc<Shared>);
 pub fn channel() -> (PlayerPublisher, PlayerViewer) {
     let shared = Arc::new(Shared {
         native_launch: Mutex::new(None),
+        preparation_progress: Mutex::new(None),
         practice: Mutex::new(crate::practice_control::PracticeControls::new()),
         practice_busy: AtomicBool::new(false),
         practice_owner: AtomicBool::new(false),
@@ -509,6 +511,14 @@ pub fn commit_practice_reply(reply: &crate::practice_control::PracticeReply) -> 
 }
 /// Pin the desktop invocation before native preparation.
 pub fn pin_native_launch(launch: crate::session_launch::SessionLaunch) -> Result<(), String> {
+    pin_native_launch_with_preparation(launch, None)
+}
+
+/// Attach the player's cold preparation cache; audio and input never acquire it.
+pub fn pin_native_launch_with_preparation(
+    launch: crate::session_launch::SessionLaunch,
+    cache: Option<Arc<Mutex<crate::preparation::PreparationCache>>>,
+) -> Result<(), String> {
     SESSION.with(|session| {
         let mut session = session.borrow_mut();
         let current = session
@@ -525,6 +535,7 @@ pub fn pin_native_launch(launch: crate::session_launch::SessionLaunch) -> Result
             .lock()
             .map_err(|_| "native launch publication unavailable")?;
         current.native_launch = Some(launch);
+        current.preparation_cache = cache;
         *slot = Some(publication);
         Ok(())
     })
@@ -928,6 +939,8 @@ impl Drop for OutputAttachmentGuard {
 }
 struct Session {
     native_launch: Option<crate::session_launch::SessionLaunch>,
+    preparation_cache: Option<Arc<Mutex<crate::preparation::PreparationCache>>>,
+    preparation_active: Arc<AtomicBool>,
     pressed: Vec<PressedState>,
     publisher: PlayerPublisher,
     snapshot: PlayerSnapshot,
@@ -943,6 +956,7 @@ struct Session {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for Session {
     fn drop(&mut self) {
+        self.preparation_active.store(false, Ordering::Release);
         // Session belongs to the game worker, including unwind/thread exit.
         // Snapshot Arc releases on the UI/render owner never wait for video IO.
         if let Some(bank) = &self.snapshot.movies {
@@ -951,6 +965,60 @@ impl Drop for Session {
     }
 }
 thread_local! { static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) }; }
+
+/// Detached setup-only owner handles. No TLS borrow survives this snapshot.
+#[derive(Clone)]
+pub struct NativePreparationContext {
+    owner: Arc<Shared>,
+    active: Arc<AtomicBool>,
+    cache: Option<Arc<Mutex<crate::preparation::PreparationCache>>>,
+    launch: Option<crate::session_launch::SessionLaunch>,
+}
+impl NativePreparationContext {
+    pub fn cache(&self) -> Option<Arc<Mutex<crate::preparation::PreparationCache>>> {
+        self.cache.clone()
+    }
+    pub fn launch(&self) -> Option<&crate::session_launch::SessionLaunch> {
+        self.launch.as_ref()
+    }
+    /// Cancellation is mandatory; progress telemetry may skip a contended slot.
+    pub fn check(
+        &self,
+        progress: crate::preparation::PreparationProgress,
+    ) -> crate::native_gameplay::NativeGameplayResult<()> {
+        if !self.active.load(Ordering::Acquire) || self.owner.cancel.load(Ordering::Acquire) {
+            return Err("native preparation owner cancelled or retired".into());
+        }
+        if let Ok(mut slot) = self.owner.preparation_progress.try_lock() {
+            *slot = Some(progress);
+        }
+        Ok(())
+    }
+}
+/// Clone setup control before locking a cache or performing any IO/callback.
+pub fn preparation_context() -> Option<NativePreparationContext> {
+    SESSION.with(|session| {
+        session
+            .borrow()
+            .as_ref()
+            .map(|current| NativePreparationContext {
+                owner: Arc::clone(&current.publisher.0),
+                active: Arc::clone(&current.preparation_active),
+                cache: current.preparation_cache.clone(),
+                launch: current.native_launch.clone(),
+            })
+    })
+}
+impl PlayerViewer {
+    /// Optional setup telemetry; polling never acquires the preparation cache.
+    pub fn preparation_progress(&self) -> Option<crate::preparation::PreparationProgress> {
+        self.0
+            .preparation_progress
+            .try_lock()
+            .ok()
+            .and_then(|slot| *slot)
+    }
+}
 
 /// Native owner reads desired state without UI locks; cancellation wins.
 pub fn pause_requested() -> bool {
@@ -1006,6 +1074,8 @@ pub fn with_publisher<T>(
         }
         *session.borrow_mut() = Some(Session {
             native_launch: None,
+            preparation_cache: None,
+            preparation_active: Arc::new(AtomicBool::new(true)),
             publisher,
             pressed: Vec::new(),
             snapshot: PlayerSnapshot::default(),
@@ -1036,6 +1106,7 @@ pub fn with_publisher<T>(
     let mut result = run();
     SESSION.with(|session| {
         if let Some(mut current) = session.borrow_mut().take() {
+            current.preparation_active.store(false, Ordering::Release);
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(bank) = &current.snapshot.movies {
                 if let Err(reason) = bank.join() {
@@ -1331,11 +1402,10 @@ fn register_chart(
     replay_policy: Option<&GaugeProfile>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_players(players)?;
-    SESSION.with(|session| {
-        let mut session = session.borrow_mut();
-        let Some(current) = session.as_mut() else {
-            return Ok(());
-        };
+    let Some(context) = preparation_context() else {
+        return Ok(());
+    };
+    let validate = |current: &Session| -> Result<(), Box<dyn std::error::Error>> {
         if replay_policy.is_some() && !current.snapshot.players.is_empty() {
             return Err("replay policy requires a fresh presentation roster".into());
         }
@@ -1352,62 +1422,102 @@ fn register_chart(
         {
             return Err("game presentation roster cannot be replaced".into());
         }
-        let prepared = Arc::new(PlayerChart::from_compiled(source, chart)?);
-        let progress = NoteProgress::new(Arc::clone(&prepared))?;
-        let images = native_path
-            .map(|path| -> Result<_, Box<dyn std::error::Error>> {
-                let path = std::fs::canonicalize(path)?;
-                let root = path.parent().ok_or("native chart has no directory")?;
-                Ok(Arc::new(crate::image_assets::ImageAssets::prepare(
-                    root,
-                    source,
-                    crate::image_assets::ImageAssetLimits::default(),
-                )?))
-            })
-            .transpose()?;
-        let mut members = if current.snapshot.players.is_empty() {
-            players
-                .iter()
-                .map(|&player| LocalPlayerSnapshot::new(player, Some(Arc::clone(&prepared))))
-                .collect()
+        if !Arc::ptr_eq(&current.publisher.0, &context.owner) {
+            return Err("native chart preparation owner changed".into());
+        }
+        Ok(())
+    };
+    let mut members = SESSION.with(|session| {
+        let session = session.borrow();
+        let current = session
+            .as_ref()
+            .ok_or("native chart preparation owner retired")?;
+        validate(current)?;
+        Ok::<_, Box<dyn std::error::Error>>(current.snapshot.players.clone())
+    })?;
+    let visual_progress = crate::preparation::PreparationProgress {
+        stage: crate::preparation::PreparationStage::Visual,
+        completed_assets: 0,
+        total_assets: 0,
+    };
+    context.check(visual_progress)?;
+    let prepared = Arc::new(PlayerChart::from_compiled(source, chart)?);
+    let progress = NoteProgress::new(Arc::clone(&prepared))?;
+    let images = native_path
+        .map(|path| -> Result<_, Box<dyn std::error::Error>> {
+            context.check(visual_progress)?;
+            let path = std::fs::canonicalize(path)?;
+            let root = path.parent().ok_or("native chart has no directory")?;
+            let images = Arc::new(crate::image_assets::ImageAssets::prepare(
+                root,
+                source,
+                crate::image_assets::ImageAssetLimits::default(),
+            )?);
+            context.check(visual_progress)?;
+            Ok(images)
+        })
+        .transpose()?;
+    if members.is_empty() {
+        members = players
+            .iter()
+            .map(|&player| LocalPlayerSnapshot::new(player, None))
+            .collect();
+    }
+    for member in &mut members {
+        member.chart = Some(Arc::clone(&prepared));
+        member.note_progress = if member.last_judge.is_none() {
+            Some(progress.clone())
         } else {
-            current.snapshot.players.clone()
+            None
         };
-        for member in &mut members {
-            member.chart = Some(Arc::clone(&prepared));
-            member.note_progress = if member.last_judge.is_none() {
-                Some(progress.clone())
-            } else {
-                None
-            };
-        }
-        let admitted_policy = replay_policy.map(GaugeProfile::try_copy).transpose()?;
-        if let Some(policy) = &admitted_policy {
-            members[0].gauge = BmsGauge::new(policy.try_copy()?);
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(old) = &current.snapshot.movies {
+    }
+    let admitted_policy = replay_policy.map(GaugeProfile::try_copy).transpose()?;
+    if let Some(policy) = &admitted_policy {
+        members[0].gauge = BmsGauge::new(policy.try_copy()?);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Release TLS before waiting for any native movie owner.
+        let old = SESSION.with(|session| {
+            session
+                .borrow()
+                .as_ref()
+                .and_then(|current| current.snapshot.movies.clone())
+        });
+        if let Some(old) = old {
+            context.check(visual_progress)?;
             old.join()?;
+            context.check(visual_progress)?;
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        let movies = native_path
-            .map(|path| -> Result<_, Box<dyn std::error::Error>> {
-                let path = std::fs::canonicalize(path)?;
-                let root = path.parent().ok_or("native chart has no directory")?;
-                let assets = Arc::new(crate::video_assets::VideoAssets::prepare(
-                    root,
-                    source,
-                    Default::default(),
-                )?);
-                if assets.is_empty() {
-                    return Ok(None);
-                }
-                Ok(Some(crate::video_native_bank::NativeVideoBank::prepare(
-                    assets,
-                )?))
-            })
-            .transpose()?
-            .flatten();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let movies = native_path
+        .map(|path| -> Result<_, Box<dyn std::error::Error>> {
+            context.check(visual_progress)?;
+            let path = std::fs::canonicalize(path)?;
+            let root = path.parent().ok_or("native chart has no directory")?;
+            let assets = Arc::new(crate::video_assets::VideoAssets::prepare(
+                root,
+                source,
+                Default::default(),
+            )?);
+            context.check(visual_progress)?;
+            if assets.is_empty() {
+                return Ok(None);
+            }
+            let movies = crate::video_native_bank::NativeVideoBank::prepare(assets)?;
+            context.check(visual_progress)?;
+            Ok(Some(movies))
+        })
+        .transpose()?
+        .flatten();
+    context.check(visual_progress)?;
+    SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let current = session
+            .as_mut()
+            .ok_or("native chart preparation owner retired")?;
+        validate(current)?;
         if current.pressed.is_empty() {
             current.pressed = players.iter().map(|_| PressedState::default()).collect();
         }
@@ -2298,6 +2408,10 @@ impl Session {
 #[cfg(test)]
 #[path = "gauge_pressed_native_fixtures.rs"]
 mod gauge_pressed_fixtures;
+
+#[cfg(test)]
+#[path = "player_preparation_fixtures.rs"]
+mod preparation_fixtures;
 
 #[cfg(test)]
 #[path = "room_presentation_fixtures.rs"]

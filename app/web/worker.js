@@ -32,6 +32,7 @@ let disposed = false;
 let capturesPending = 0;
 let deferredFatal = null;
 let libraryContext = null;
+let preparationOwner = null;
 let stagedLibrary = null;
 let libraryId = 0;
 let importGeneration = 0;
@@ -93,6 +94,7 @@ async function settingsProfile(request) {
   const operation = { id };
   discardHistoricalCandidate();
   ++selectionEpoch;
+  releasePreparation();
   settingsOperation = operation;
   try {
     if (request.kind === "settings-profile-save") {
@@ -863,17 +865,21 @@ async function acquireMenuRecord(request) {
   }
 }
 function retireLibrary(context) {
+  if (preparationOwner?.context === context) releasePreparation();
   if (!context || context.retired) return;
   context.retired = true;
   const owned = context.library;
   context.library = null;
+  for (const reading of context.pending.values()) {
+    for (const finish of Array.from(reading.waiters)) finish({ cancelled: true });
+  }
   context.files.clear(); context.loaded.clear(); context.pending.clear();
   owned?.free();
 }
 function currentLibrary(context) {
   return !failed && !disposed && context !== null && context === libraryContext && !context.retired && context.library !== null;
 }
-async function acquireLibraryFile(context, path, current) {
+async function acquireLibraryFile(context, path, current, preparation = null) {
   if (!currentLibrary(context) || !current()) return false;
   if (context.loaded.has(path)) return true;
   const entry = context.files.get(path);
@@ -881,16 +887,33 @@ async function acquireLibraryFile(context, path, current) {
   const { file, size } = entry;
   let reading = context.pending.get(path);
   if (!reading) {
-    // The continuation retains a JS context and File, never a WASM binding.
-    reading = Promise.resolve(file.arrayBuffer()).finally(() => {
-      if (context.pending.get(path) === reading) context.pending.delete(path);
-    });
+    // One subscription per underlying read; cancelled callers remove their waiters.
+    reading = { waiters: new Set() };
     context.pending.set(path, reading);
+    const settle = result => {
+      if (context.pending.get(path) === reading) context.pending.delete(path);
+      for (const finish of Array.from(reading.waiters)) finish(result);
+    };
+    try {
+      Promise.resolve(file.arrayBuffer()).then(bytes => settle({ bytes }), error => settle({ error }));
+    } catch (error) {
+      context.pending.delete(path);
+      throw error;
+    }
   }
-  let bytes;
-  try { bytes = await reading; }
-  catch (error) { if (!currentLibrary(context) || !current()) return false; throw error; }
-  if (!currentLibrary(context) || !current()) return false;
+  const result = await new Promise(resolve => {
+    const cancel = () => finish({ cancelled: true });
+    const finish = result => {
+      reading.waiters.delete(finish);
+      if (preparation?.wake === cancel) preparation.wake = null;
+      resolve(result);
+    };
+    reading.waiters.add(finish);
+    if (preparation) preparation.wake = cancel;
+  });
+  if (result.cancelled || !currentLibrary(context) || !current()) return false;
+  if (Object.hasOwn(result, "error")) throw result.error;
+  const bytes = result.bytes;
   if (!(bytes instanceof ArrayBuffer) || bytes.resizable === true || bytes.byteLength !== size)
     throw new Error("Selected-file size changed or returned an invalid buffer.");
   if (!context.loaded.has(path)) {
@@ -899,18 +922,72 @@ async function acquireLibraryFile(context, path, current) {
   }
   return true;
 }
-async function hydrateChart(context, path, seed, replayBytes, current) {
-  if (!await acquireLibraryFile(context, path, current)) return false;
-  if (!currentLibrary(context) || !current()) return false;
-  const paths = replayBytes === null
-    ? context.library.referenced_asset_paths(path, seed, ORIGINAL_PCM_SAMPLES)
-    : context.library.replay_referenced_asset_paths(path, replayBytes, ORIGINAL_PCM_SAMPLES);
-  for (const asset of paths) {
-    if (!currentLibrary(context) || !current()) return false;
-    if (!await acquireLibraryFile(context, asset, current)) return false;
-    if (!currentLibrary(context) || !current()) return false;
-  }
-  return currentLibrary(context) && current();
+function releasePreparation(record = preparationOwner) {
+  if (!record || record.cancelled) return;
+  record.cancelled = true;
+  if (preparationOwner === record) preparationOwner = null;
+  const job = record.job; record.job = null;
+  if (record.timer !== null) clearTimeout(record.timer);
+  record.timer = null;
+  const wake = record.wake; record.wake = null; wake?.();
+  if (job) { try { job.cancel(); } finally { job.free(); } }
+}
+function preparationCurrent(record) {
+  return preparationOwner === record && !record.cancelled && currentLibrary(record.context) && record.current();
+}
+function preparationProgress(record, stage = record.job?.stage ?? "file-read") {
+  if (!preparationCurrent(record)) return;
+  const job = record.job;
+  report(record.kind === "preview" ? "selection-progress" : "play-preparation-progress", {
+    ...(record.kind === "preview" ? { id: record.id } : { playId: record.id }),
+    libraryId: record.context.id, path: record.path, stage,
+    completedAssets: job?.completed_assets ?? 0, totalAssets: job?.total_assets ?? 0,
+    parses: job?.parse_count ?? 0, compiles: job?.compile_count ?? 0,
+    reads: job?.read_count ?? 0, decodes: job?.decode_count ?? 0,
+    sharedAssets: job?.shared_asset_count ?? 0, beginMs: record.beginMs, maxStepMs: record.maxStepMs,
+  });
+}
+async function prepareChartJob(context, path, current, kind, id, begin) {
+  releasePreparation();
+  const record = { context, path, current, kind, id, job: null, cancelled: false,
+    timer: null, wake: null, beginMs: 0, maxStepMs: 0 };
+  preparationOwner = record;
+  const alive = () => preparationCurrent(record);
+  try {
+    preparationProgress(record);
+    if (!await acquireLibraryFile(context, path, alive, record) || !alive()) return null;
+    const started = performance.now();
+    record.job = begin();
+    record.beginMs = performance.now() - started;
+    while (alive()) {
+      const pending = record.job.pending_asset_path();
+      if (pending !== undefined && pending !== null) {
+        preparationProgress(record, "file-read");
+        if (!await acquireLibraryFile(context, pending, alive, record) || !alive()) return null;
+      }
+      if (!alive()) return null;
+      const step = performance.now();
+      const complete = record.job.advance(context.library);
+      record.maxStepMs = Math.max(record.maxStepMs, performance.now() - step);
+      if (!alive()) return null;
+      preparationProgress(record);
+      await new Promise(resolve => {
+        record.wake = resolve;
+        record.timer = setTimeout(() => { record.timer = null; record.wake = null; resolve(); }, 0);
+      });
+      if (!alive()) return null;
+      if (complete) return record.job.take_prepared(context.library);
+    }
+    return null;
+  } finally { releasePreparation(record); }
+}
+function cancelSelection(request) {
+  const record = preparationOwner;
+  if (!record || record.kind !== "preview" || record.id !== request.id
+    || record.context.id !== request.libraryId || !preparationCurrent(record)) return;
+  ++selectionEpoch;
+  releasePreparation(record);
+  report("selection-cancelled", { id: request.id, libraryId: request.libraryId });
 }
 async function importFiles(request, generation) {
   let candidate = null;
@@ -937,6 +1014,7 @@ async function importFiles(request, generation) {
 }
 function queueImport(request) {
   ++selectionEpoch;
+  releasePreparation();
   retireLibrary(stagedLibrary); stagedLibrary = null;
   pendingImport = { request, generation: ++importGeneration };
   importing = true;
@@ -966,6 +1044,7 @@ async function drainImports() {
 }
 async function selectChart(request) {
   const generation = importGeneration, epoch = ++selectionEpoch;
+  releasePreparation();
   const context = libraryContext;
   const playingAtEntry = play !== null;
   const currentIdentity = () => epoch === selectionEpoch && generation === importGeneration;
@@ -983,9 +1062,10 @@ async function selectChart(request) {
     if (importing || !currentLibrary(context) || request.libraryId !== libraryId) throw new Error("Wait for the selected library to finish loading.");
     if (!Number.isInteger(request.rate) || request.rate < 1 || request.rate > 0xffffffff) throw new Error("Sample rate must be a positive 32-bit integer.");
     if (typeof request.seed !== "string" || !/^\d{1,20}$/.test(request.seed) || BigInt(request.seed) > 0xffffffffffffffffn) throw new Error("Chart seed must fit an unsigned 64-bit integer.");
-    if (!await hydrateChart(context, request.path, BigInt(request.seed), null, current)) return;
-    if (!currentLibrary(context) || !current()) return;
-    prepared = context.library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES);
+    prepared = await prepareChartJob(context, request.path, current, "preview", request.id,
+      () => context.library.begin_prepare_chart(request.path, request.rate, 2, BigInt(request.seed),
+        64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES));
+    if (!prepared) return;
     if (!currentLibrary(context) || !current()) return;
     const metadata = { title: prepared.title, artist: prepared.artist, duration: prepared.duration_ns.toString(),
       notes: prepared.note_count, samples: prepared.sample_count, images: prepared.image_count };
@@ -1928,6 +2008,7 @@ function roomRequest(state, request) {
 }
 
 function disposeGame(state) {
+  if (preparationOwner?.kind === "play" && preparationOwner.id === state.id) releasePreparation();
   const sampleClient = state.sampleClient;
   state.sampleClient = null;
   sampleClient?.close();
@@ -2060,6 +2141,7 @@ function stopPlay(state, request) {
   const savedOpponents = finalOpponents(state);
   retainFinalGroup(state);
   sendRoomProgress(state, true);
+  if (preparationOwner?.kind === "play" && preparationOwner.id === state.id) releasePreparation();
   play = null;
   fenceVisual();
   if (state.network) {
@@ -2327,24 +2409,21 @@ async function preparePlay(state, request) {
       if (failed || play !== state) return;
       if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== replaySize) throw new Error("Replay file size changed or returned an invalid buffer.");
       const recording = new Uint8Array(bytes);
-      if (!await hydrateChart(context, request.path, null, recording, current)) return;
-      if (!currentLibrary(context) || !current()) return;
-      prepared = context.library.prepare_replay_chart(request.path, recording, request.rate, 2,
-        64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES);
+      prepared = await prepareChartJob(context, request.path, current, "play", state.id,
+        () => context.library.begin_prepare_replay_chart(request.path, recording, request.rate, 2,
+          64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES));
     } else {
       if (typeof request.seed !== "string" || !/^\d{1,20}$/.test(request.seed) || BigInt(request.seed) > U64_MAX) throw new Error("Invalid gameplay chart seed.");
-      if (!await hydrateChart(context, request.path, BigInt(request.seed), null, current)) return;
-      if (!currentLibrary(context) || !current()) return;
-      prepared = timingPolicy !== null
-        ? context.library.prepare_chart_with_policy_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
+      prepared = await prepareChartJob(context, request.path, current, "play", state.id, () => timingPolicy !== null
+        ? context.library.begin_prepare_chart_with_policy_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
           64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES,
           timingPolicy.presetId, timingPolicy.rankPrecedence, timingPolicy.gauge, timing.offsetNs)
         : requestedStart === 0n
-        ? context.library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES)
-        : context.library.prepare_chart_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
-          64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES);
+        ? context.library.begin_prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES)
+        : context.library.begin_prepare_chart_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
+          64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES));
     }
-    if (!currentLibrary(context) || !current()) return;
+    if (!prepared || !currentLibrary(context) || !current()) return;
     const actualStart = prepared.start_ns;
     const startNs = actualStart === undefined && requestedStart === 0n ? 0n : actualStart;
     if (typeof startNs !== "bigint") throw new Error("Prepared chart omitted its actual song start.");
@@ -2544,7 +2623,7 @@ function nextSample(game) {
     const id = sample.id;
     const rate = sample.rate;
     const channels = sample.channels;
-    const pcm = sample.take_pcm();
+    const pcm = sample.take_pcm_array();
     if (!unsigned(id) || !integer(rate, 1, 0xffffffff) || channels !== 2
       || !(pcm instanceof Float32Array) || !(pcm.buffer instanceof ArrayBuffer)
       || pcm.buffer.resizable === true || pcm.byteOffset !== 0
@@ -3148,6 +3227,7 @@ function handlePlay(request) {
       prepared: false, opponentCount: 0, opponentsFailed: false, opponentError: null, lastOpponents: null,
     };
     ++selectionEpoch;
+    releasePreparation();
     play = state; // Reserve before the ready await so stop cannot race a late owner.
     lastPlayId = state.id;
     void (async () => {
@@ -3343,6 +3423,7 @@ self.addEventListener("message", event => {
     preview?.free(); preview = null;
     discardRoomResults();
     ++selectionEpoch;
+    releasePreparation();
     retireLibrary(stagedLibrary); stagedLibrary = null;
     retireLibrary(libraryContext); libraryContext = null;
     ++importGeneration; pendingImport = null;
@@ -3377,6 +3458,7 @@ self.addEventListener("message", event => {
   if (request.kind.startsWith("menu-")) { handleMenu(request); return; }
   if (request.kind === "historical-record-clear") { clearHistoricalRecord(request); return; }
   if (request.kind === "historical-record-accept") { acceptHistoricalRecord(request); return; }
+  if (request.kind === "select-cancel") { cancelSelection(request); return; }
   if (request.kind === "historical-record-present") { void presentHistoricalRecord(request); return; }
   if (request.kind === "settings-profile-save" || request.kind === "settings-profile-load") {
     void settingsProfile(request).catch(() => { /* An unavailable response port leaves Window's bounded deadline authoritative. */ });

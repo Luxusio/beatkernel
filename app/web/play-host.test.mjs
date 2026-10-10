@@ -282,7 +282,7 @@ async function harness(faults = {}) {
     "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear",
     "local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay",
     "historical-grade-prev", "historical-grade-next", "historical-grade-page",
-    "menu-open", "menu-editor", "menu-back"]) {
+    "menu-open", "menu-editor", "menu-back", "prepare-cancel", "prepare-progress"]) {
     elements.set(id, new Element(["chart", "records", "local-page", "captured-replay", "multiplayer-mode"].includes(id) ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -586,7 +586,7 @@ async function harness(faults = {}) {
     this.setExport("RecordsStore", RecordsStore);
   }, { context });
   const modules = new Map();
-  for (const name of ["render-protocol.mjs", "presentation-status.mjs", "completed-results-model.mjs", "host_model.mjs", "play-model.mjs", "settings-profile.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "pointer-input.mjs", "local-play-host.mjs", "main.js"]) {
+  for (const name of ["render-protocol.mjs", "presentation-status.mjs", "completed-results-model.mjs", "host_model.mjs", "play-model.mjs", "settings-profile.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "pointer-input.mjs", "local-play-host.mjs", "menu-keyboard.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
     modules.set(name, new SourceTextModule(await readFile(url, "utf8"), {
       context, identifier: url.href, initializeImportMeta(meta) { meta.url = url.href; },
@@ -7708,9 +7708,11 @@ test("presentation feedback: preparing chart fences previous waits and presentat
   const h = await harness(); await h.preview(); const old = presentationPacket(h, "drawn");
   await h.receive({ ...old, kind: "render-wait" });
   h.get("prepare-form").emit("submit"); await flush(); const preparing = statusSnapshot(h);
-  assert.match(preparing.text, /Preparing chart/); assert.equal(h.get("canvas").hidden, true);
+  assert.match(preparing.text, /Preparing chart/); assert.equal(h.get("canvas").hidden, false);
+  assert.equal(h.get("prepare-cancel").disabled, false);
+  assert.equal(h.get("prepare-progress").hidden, false);
   await h.receive(old); await h.receive({ ...old, kind: "render-wait" });
-  assert.deepEqual(statusSnapshot(h), preparing); assert.equal(h.get("canvas").hidden, true);
+  assert.deepEqual(statusSnapshot(h), preparing); assert.equal(h.get("canvas").hidden, false);
   await h.close();
 });
 test("presentation feedback: stop and new play cannot revive old play status", async () => {

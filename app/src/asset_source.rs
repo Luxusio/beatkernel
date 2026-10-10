@@ -6,6 +6,7 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 pub trait AssetSource {
@@ -46,6 +47,7 @@ pub struct MemoryFiles {
     limits: MemoryAssetLimits,
     total_bytes: usize,
     inventory_revision: u64,
+    inventory_identity: Arc<()>,
 }
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -87,6 +89,7 @@ impl MemoryFiles {
             limits,
             total_bytes: 0,
             inventory_revision: 0,
+            inventory_identity: Arc::new(()),
         })
     }
     /// Reserve the canonical file's bounds without acquiring its content.
@@ -153,6 +156,10 @@ impl MemoryFiles {
     }
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.files.keys().map(String::as_str)
+    }
+    /// Stable identity of this owned inventory; it is not file-content evidence.
+    pub(crate) fn inventory_identity(&self) -> &Arc<()> {
+        &self.inventory_identity
     }
     pub fn inventory_revision(&self) -> u64 {
         self.inventory_revision

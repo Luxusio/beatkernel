@@ -3,7 +3,7 @@ use super::*;
 use crate::player_chart::ScanStage;
 use std::{
     fs,
-    sync::{mpsc, atomic::AtomicUsize},
+    sync::{atomic::AtomicUsize, mpsc},
     time::Duration,
 };
 
@@ -87,8 +87,8 @@ fn actual_catalog_worker_coalesces_progress_and_publishes_only_one_joined_prepar
 }
 
 #[test]
-fn cancellation_errors_and_drop_release_the_actual_worker_without_a_late_success_or_repeated_outcome()
- {
+fn cancellation_errors_and_drop_release_the_actual_worker_without_a_late_success_or_repeated_outcome(
+) {
     let root = CatalogTree::new();
     let (entered, ready) = mpsc::sync_channel(1);
     let (release, gate) = mpsc::sync_channel(1);
@@ -151,19 +151,28 @@ fn cancellation_errors_and_drop_release_the_actual_worker_without_a_late_success
     let (entered, ready) = mpsc::sync_channel(1);
     let (release, gate) = mpsc::sync_channel(1);
     let (finished, tail) = mpsc::sync_channel(1);
-    let owner = NativeCatalog::spawn(root.0.clone(), move |library, _| {
+    struct WorkerTail(mpsc::SyncSender<()>);
+    impl Drop for WorkerTail {
+        fn drop(&mut self) {
+            self.0.send(()).unwrap();
+        }
+    }
+    let owner = NativeCatalog::spawn(root.0.clone(), move |library, control| {
+        let _tail = WorkerTail(finished);
         entered.send(()).unwrap();
         gate.recv_timeout(WAIT).map_err(|error| error.to_string())?;
-        finished.send(()).unwrap();
+        assert!(control.is_cancelled());
         Ok(library)
     })
     .unwrap();
     ready.recv_timeout(WAIT).unwrap();
     assert!(!owner.is_finished());
     let control = owner.control.clone();
-    release.send(()).unwrap();
-    drop(owner); // Real Drop cancels and joins; no separate detached task survives it.
+    drop(owner); // Cancellation returns while the real worker is still gated.
     assert!(control.is_cancelled());
+    assert!(matches!(tail.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    release.send(()).unwrap();
+    // Observe actual destruction of the worker-owned tail after it is released.
     tail.recv_timeout(WAIT).unwrap();
     assert!(control.checkpoint().is_err());
 }
@@ -280,9 +289,158 @@ fn direct_preparation_cancellation_errors_and_drop_join_the_same_worker_once() {
     ready.recv_timeout(WAIT).unwrap();
     let control = owner.control.clone();
     assert_eq!(worker_tail.load(Ordering::SeqCst), 0);
-    release.send(()).unwrap();
     drop(owner);
     assert!(control.is_cancelled());
     assert!(control.checkpoint().is_err());
+    assert_eq!(
+        worker_tail.load(Ordering::SeqCst),
+        0,
+        "unfinished Drop must return before the held worker releases its resource"
+    );
+    release.send(()).unwrap();
+    let deadline = std::time::Instant::now() + WAIT;
+    while worker_tail.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "real worker did not release its owned resource after cancellation"
+        );
+        thread::yield_now();
+    }
     assert_eq!(worker_tail.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn streamed_metadata_is_available_before_held_font_and_all_messages_keep_generation() {
+    let tree = CatalogTree::new();
+    let (entered, ready) = mpsc::sync_channel(1);
+    let (release, gate) = mpsc::sync_channel(1);
+    let mut job = NativeCatalog::spawn_streamed(tree.0.clone(), 73, move |library, _| {
+        entered.send(()).unwrap();
+        gate.recv_timeout(WAIT).map_err(|error| error.to_string())?;
+        Ok(library)
+    })
+    .unwrap();
+    assert_eq!(job.generation(), Some(73));
+    let deadline = std::time::Instant::now() + WAIT;
+    let mut entries = Vec::new();
+    let mut metadata = false;
+    while !metadata {
+        for message in job.drain_batches() {
+            match message {
+                CatalogPublication::Entries {
+                    generation,
+                    entries: batch,
+                } => {
+                    assert_eq!(generation, 73);
+                    assert!(!batch.is_empty() && batch.len() <= 64);
+                    entries.extend(batch);
+                }
+                CatalogPublication::MetadataComplete {
+                    generation,
+                    diagnostics,
+                } => {
+                    assert_eq!(generation, 73);
+                    assert!(diagnostics.is_empty());
+                    metadata = true;
+                }
+            }
+        }
+        assert!(std::time::Instant::now() < deadline);
+        thread::yield_now();
+    }
+    ready.recv_timeout(WAIT).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(!job.is_finished());
+    assert!(job.poll().is_none());
+    release.send(()).unwrap();
+    assert_eq!(job.join().unwrap().unwrap().entries.len(), 2);
+}
+
+#[test]
+fn streamed_full_channel_has_bounded_drain_and_cancellation_unblocks_real_producer() {
+    let tree = CatalogTree::new();
+    for index in 0..150 {
+        fs::write(
+            tree.0.join(format!("many-{index:03}.bms")),
+            format!("#TITLE MANY {index:03}\n#BPM 120\n"),
+        )
+        .unwrap();
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let mut job = NativeCatalog::spawn_streamed(tree.0.clone(), 74, move |_, _| {
+        count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    })
+    .unwrap();
+    let deadline = std::time::Instant::now() + WAIT;
+    while job.progress().charts < 129 {
+        assert!(std::time::Instant::now() < deadline);
+        thread::yield_now();
+    }
+    assert!(!job.is_finished());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let messages = job.drain_batches();
+    assert_eq!(
+        messages.len(),
+        2,
+        "real channel capacity and one UI poll are bounded to two batches"
+    );
+    let mut count = 0;
+    for message in messages {
+        if let CatalogPublication::Entries {
+            generation,
+            entries,
+        } = message
+        {
+            assert_eq!(generation, 74);
+            assert!(entries.len() <= 64);
+            count += entries.len();
+        } else {
+            panic!("metadata cannot finish while scan is blocked on its third batch");
+        }
+    }
+    assert_eq!(
+        count, 65,
+        "first admitted entry is flushed before normal 64-entry batches"
+    );
+    job.cancel();
+    while !job.is_finished() {
+        assert!(std::time::Instant::now() < deadline);
+        thread::yield_now();
+    }
+    assert!(job.poll().unwrap().err().unwrap().contains("cancel"));
+    assert!(job.poll().is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn streamed_owner_drop_cancels_disconnected_full_channel_without_waiting_for_font() {
+    let tree = CatalogTree::new();
+    let (entered, ready) = mpsc::sync_channel(1);
+    let (release, gate) = mpsc::sync_channel(1);
+    let (finished, tail) = mpsc::sync_channel(1);
+    let mut job = NativeCatalog::spawn_streamed(tree.0.clone(), 75, move |library, control| {
+        entered.send(()).unwrap();
+        gate.recv_timeout(WAIT).map_err(|error| error.to_string())?;
+        assert!(control.is_cancelled());
+        finished.send(()).unwrap();
+        Ok(library)
+    })
+    .unwrap();
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        let _ = job.drain_batches();
+        if ready.try_recv().is_ok() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        thread::yield_now();
+    }
+    assert!(!job.is_finished());
+    let control = job.control.clone();
+    drop(job);
+    assert!(control.is_cancelled());
+    release.send(()).unwrap();
+    tail.recv_timeout(WAIT).unwrap();
 }

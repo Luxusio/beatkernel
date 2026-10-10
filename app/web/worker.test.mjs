@@ -8,9 +8,326 @@ import { ROOM_SESSION_METHODS } from "./room-owner.mjs";
 import { preflightMenuPacket } from "./render-protocol.mjs";
 import { LocalRoster } from "./local-play-host.mjs";
 import { KEY_BINDINGS } from "./play-model.mjs";
+import { keyboardBindingWords } from "./physical-input.mjs";
 import { createContext, SourceTextModule, SyntheticModule, runInContext } from "node:vm";
-
 const FileType = globalThis.File ?? NodeFile;
+
+// Independent preparation acceptance uses genuine current generated bindings.
+// The queued renderer endpoint acknowledges packets; it never manufactures PCM
+// preparation, job progress, replay identity or engine readiness.
+async function realPreparationWorker(options = {}) {
+  const messages = [], transfers = [], libraries = [], jobs = [], accesses = [], timers = new Map();
+  let receive, nextTimer = 0;
+  const self = {
+    isSecureContext: false, navigator: {}, performance: { timeOrigin: 0, now: () => 1000 },
+    addEventListener(kind, fn) { assert.equal(kind, "message"); receive = fn; },
+    postMessage(value, transfer = []) { messages.push(value); transfers.push(transfer); },
+  };
+  const context = createContext({ self, performance: self.performance, WebAssembly, TextEncoder, TextDecoder,
+    Uint8Array, Uint32Array, Float32Array, Float64Array, ArrayBuffer, DataView, File: FileType,
+    URL, Request, Response, structuredClone, console,
+    setTimeout(fn, ms = 0) { const id = ++nextTimer; timers.set(id, { fn, ms }); return id; },
+    clearTimeout(id) { timers.delete(id); } });
+  const url = new URL("./pkg/beatkernel_bms_runtime.js", import.meta.url);
+  const binding = new SourceTextModule(await readFile(url, "utf8"), { context, identifier: url.href,
+    initializeImportMeta(meta) { meta.url = url.href; } });
+  await binding.link(name => { throw Error("unexpected generated import " + name); }); await binding.evaluate();
+  context.actualPreparationWasm = new WebAssembly.Module(await readFile(new URL("./pkg/beatkernel_bms_runtime_bg.wasm", import.meta.url)));
+  binding.namespace.initSync(runInContext("({ module: actualPreparationWasm })", context));
+  assert.equal(typeof binding.namespace.BrowserLibrary.prototype.begin_prepare_chart, "function", "fresh generated job API is mandatory");
+  assert.equal(typeof binding.namespace.BrowserSample.prototype.take_pcm_array, "function", "fresh direct export API is mandatory");
+  function tracked(target, type, state) {
+    return new Proxy(target, { get(object, key) {
+      assert.equal(state.frees, 0, `no ${type}.${String(key)} lookup after free`);
+      const value = Reflect.get(object, key, object);
+      if (typeof value !== "function") return value;
+      return (...args) => {
+        assert.equal(state.frees, 0, `no ${type}.${String(key)} call after free`);
+        accesses.push({ type, key: String(key), state });
+        if (key === "free") state.frees++;
+        if (key === "cancel") state.cancels++;
+        const result = value.apply(object, args);
+        if (String(key).startsWith("begin_prepare_")) {
+          const job = { frees: 0, cancels: 0, advances: 0, stages: [], method: String(key) }; jobs.push(job);
+          return tracked(result, "job", job);
+        }
+        if (type === "job" && key === "advance") { state.advances++; state.stages.push(object.stage); }
+        if (type === "job" && key === "pending_asset_path") state.pendingPath = result;
+        return result;
+      };
+    } });
+  }
+  const runtime = new SyntheticModule(Object.getOwnPropertyNames(binding.namespace), function () {
+    for (const name of Object.getOwnPropertyNames(binding.namespace)) this.setExport(name, name === "default" ? async () => {} : binding.namespace[name]);
+    this.setExport("BrowserLibrary", class {
+      constructor(...args) { const state = { frees: 0, cancels: 0 }; libraries.push(state); return tracked(new binding.namespace.BrowserLibrary(...args), "library", state); }
+    });
+  }, { context });
+  const modules = new Map();
+  async function moduleFor(specifier, parent) {
+    if (specifier.endsWith("/pkg/beatkernel_bms_runtime.js") || specifier === "./pkg/beatkernel_bms_runtime.js") return runtime;
+    const target = new URL(specifier, parent.identifier);
+    if (modules.has(target.href)) return modules.get(target.href);
+    const module = new SourceTextModule(await readFile(target, "utf8"), { context, identifier: target.href,
+      initializeImportMeta(meta) { meta.url = target.href; } }); modules.set(target.href, module);
+    return module;
+  }
+  const workerUrl = new URL("./worker.js", import.meta.url);
+  const observation = options.observeReads ? `
+const __originalSelectChart = selectChart;
+const __observedSelections = [];
+selectChart = function(request) {
+  const entry = { id: request.id, settled: false }; __observedSelections.push(entry);
+  return __originalSelectChart(request).then(value => { entry.settled = true; return value; }, error => { entry.settled = true; throw error; });
+};
+export function __actualReadDiagnostics() {
+  return { selections: __observedSelections.map(entry => ({ ...entry })), owner: preparationOwner !== null,
+    pending: Array.from(libraryContext?.pending ?? [], ([path, record]) => ({ path, waiters: record.waiters?.size ?? -1 })) };
+}
+export function __actualPendingMap() { return libraryContext?.pending; }
+` : "";
+  const worker = new SourceTextModule(await readFile(workerUrl, "utf8") + observation, { context, identifier: workerUrl.href });
+  modules.set(workerUrl.href, worker); await worker.link(moduleFor); await worker.evaluate();
+  const port = { onmessage: null, starts: 0, closes: 0,
+    start() { this.starts++; }, close() { this.closes++; },
+    postMessage(request) {
+      const base = { generation: request.generation, content: request.content, operationId: request.operationId };
+      const packet = request.packet;
+      const reply = packet ? (() => { const h = new DataView(packet.buffer, packet.byteOffset, packet.byteLength); return { ...base,
+        kind: "state-ack", packetKind: h.getUint16(6, true), sequence: h.getBigUint64(24, true) }; })()
+        : { ...base, kind: "control-ack", operation: request.kind, geometryVersion: request.geometryVersion };
+      Promise.resolve().then(() => this.onmessage?.({ data: reply }));
+    } };
+  const h = {
+    messages, transfers, libraries, jobs, accesses, timers, runtime: binding.namespace,
+    of(kind) { return messages.filter(x => x.kind === kind); },
+    async send(value) { receive({ data: value }); await flushJobs(); },
+    async yieldOne() {
+      const next = [...timers].find(([, entry]) => entry.ms === 0); assert(next, "expected genuine cooperative macrotask yield");
+      timers.delete(next[0]); next[1].fn(); await flushJobs();
+    },
+    async settle(predicate) { for (let n = 0; n < 256 && !predicate(); n++) await this.yieldOne(); assert(predicate(), "bounded genuine job must settle"); },
+    diagnostics() { assert(options.observeReads); return worker.namespace.__actualReadDiagnostics(); },
+    pendingMap() { assert(options.observeReads); return worker.namespace.__actualPendingMap(); },
+    heldRead() {
+      // Same-realm promise: Promise.resolve in production returns this exact
+      // underlying File promise, so its actual settlement subscriptions count.
+      return runInContext(`(() => {
+        const state = { subscriptions: 0 }; let resolve, reject;
+        const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+        const original = promise.then;
+        promise.then = function(...args) { state.subscriptions++; return original.apply(this, args); };
+        return { promise, resolve, reject, state };
+      })()`, context);
+    },
+  };
+  await h.send({ kind: "init", renderPort: port, maxPacketBytes: 16 * 1024 * 1024, maxDiagnosticBytes: 4096, renderTimeoutMs: 10000 });
+  assert.equal(h.of("ready").length, 1);
+  return h;
+}
+function preparationWave() {
+  const b = new Uint8Array(48), v = new DataView(b.buffer); b.set(new TextEncoder().encode("RIFF")); v.setUint32(4, 40, true);
+  b.set(new TextEncoder().encode("WAVEfmt "), 8); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 24000, true); v.setUint32(28, 48000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  b.set(new TextEncoder().encode("data"), 36); v.setUint32(40, 4, true); v.setInt16(44, 8192, true); v.setInt16(46, -4096, true); return b;
+}
+const REAL_PREPARATION_CHART = "#TITLE Actual phased fixture\n#BPM 120\n#RANK 2\n#WAV01 key.wav\n#00011:00010000\n";
+function byteFile(path, bytes, read) {
+  const file = new FileType([bytes], path.split("/").at(-1));
+  file.arrayBuffer = read ?? (() => Promise.resolve(bytes.slice().buffer)); return { file, path };
+}
+async function admitPreparationFiles(h, extra = [], readWave) {
+  await h.send({ kind: "import", id: 1, files: [selectedFile("chart.bms", REAL_PREPARATION_CHART), byteFile("key.wav", preparationWave(), readWave), ...extra] });
+  assert.equal(h.of("catalog").length, 1); await h.send({ kind: "accept-library", id: 1 });
+}
+const actualSelect = (id = 2, path = "chart.bms") => ({ kind: "select", id, libraryId: 1, path, rate: 24000, seed: "0" });
+
+test("actual WASM phased preparation yields macrotasks and reports only correlated real progress before Ready", async () => {
+  const h = await realPreparationWorker(); await admitPreparationFiles(h);
+  await h.send(actualSelect());
+  assert.equal(h.of("selected").length, 0);
+  await h.settle(() => h.of("selected").length > 0);
+  const progress = h.of("selection-progress"); assert(progress.length > 2);
+  for (const p of progress) {
+    assert.equal(p.id, 2); assert.equal(p.libraryId, 1); assert.equal(p.path, "chart.bms");
+    assert.equal(typeof p.stage, "string"); assert(p.completedAssets <= p.totalAssets);
+    for (const value of [p.parses, p.compiles, p.reads, p.decodes, p.sharedAssets]) assert(Number.isInteger(value) && value >= 0);
+    assert(Number.isFinite(p.maxStepMs) && p.maxStepMs >= 0);
+  }
+  assert(progress.some(p => p.decodes === 1), "actual codec counter, not a invented percentage");
+  assert(h.jobs[0].advances > 2); assert.equal(h.jobs[0].frees, 1);
+  assert.equal(h.of("selected")[0].title, "Actual phased fixture");
+  await h.send({ kind: "dispose" }); assert.equal(h.libraries[0].frees, 1);
+});
+
+test("actual preview Cancel during hydration permanently fences late success/error and keeps the old preview", async () => {
+  for (const failure of [false, true]) {
+    const held = deferred(), h = await realPreparationWorker(); let readStarted = false;
+    await admitPreparationFiles(h, [selectedFile("pending.bms", REAL_PREPARATION_CHART.replace("key.wav", "late.wav")), byteFile("late.wav", preparationWave(), () => { readStarted = true; return held.promise; })]);
+    await h.send(actualSelect()); await h.settle(() => h.of("selected").length === 1);
+    await h.send(actualSelect(3, "pending.bms"));
+    await h.settle(() => readStarted);
+    await h.send({ kind: "select-cancel", id: 999, libraryId: 1 }); assert.equal(h.of("selection-cancelled").length, 0);
+    await h.send({ kind: "select-cancel", id: 3, libraryId: 1 });
+    assert.deepEqual(h.of("selection-cancelled").map(x => [x.id, x.libraryId]), [[3, 1]]);
+    const count = h.accesses.length;
+    if (failure) held.reject(Error("obsolete read error")); else held.resolve(preparationWave().buffer);
+    await flushJobs(); assert.equal(h.accesses.length, count, "no WASM admission after permanent cancellation");
+    assert.equal(h.of("selected").length, 1); assert.equal(h.of("selection-error").length, 0);
+    await h.send({ kind: "select-cancel", id: 3, libraryId: 1 }); assert.equal(h.of("selection-cancelled").length, 1);
+    await h.send({ kind: "dispose" }); assert.equal(h.libraries[0].frees, 1);
+  }
+});
+
+test("actual preview Cancel at phase yield releases its job exactly once and genuine retry recovers", async () => {
+  const h = await realPreparationWorker(); await admitPreparationFiles(h); await h.send(actualSelect());
+  for (let n = 0; n < 128 && !(h.jobs[0]?.advances > 0); n++) await h.yieldOne();
+  const job = h.jobs[0]; assert(job); await h.send({ kind: "select-cancel", id: 2, libraryId: 1 });
+  assert.equal(job.cancels, 1); assert.equal(job.frees, 1);
+  const calls = h.accesses.length; await flushJobs(); assert.equal(h.accesses.length, calls);
+  await h.send(actualSelect(3)); await h.settle(() => h.of("selected").length === 1);
+  assert.equal(h.of("selected")[0].id, 3); assert.equal(h.of("selection-error").length, 0);
+  await h.send({ kind: "dispose" });
+});
+
+test("actual retired library and completed settings ownership cannot revive a pending selection", async () => {
+  for (const transition of ["import", "settings", "newer-select"]) {
+    const held = deferred(), h = await realPreparationWorker(); let readStarted = false;
+    await admitPreparationFiles(h, [], () => { readStarted = true; return held.promise; }); await h.send(actualSelect());
+    await h.settle(() => readStarted);
+    if (transition === "import") {
+      await h.send({ kind: "import", id: 4, files: [selectedFile("new.bms", "#BPM 120\n")] });
+      await h.send({ kind: "accept-library", id: 4 }); assert.equal(h.libraries[0].frees, 1);
+    } else if (transition === "settings") {
+      await h.send({ kind: "settings-profile-save", id: 4, settings: JSON.parse(validSettingsProfileText()) });
+      assert.equal(h.of("settings-profile-saved").length, 1, JSON.stringify(h.of("settings-profile-error")));
+    } else {
+      await h.send(actualSelect(4));
+      await h.settle(() => h.jobs[1]?.pendingPath === "key.wav");
+    }
+    const calls = h.accesses.length; held.reject(Error("late obsolete hydration")); await flushJobs();
+    if (transition !== "newer-select") assert.equal(h.accesses.length, calls);
+    assert.equal(h.of("selected").length, 0);
+    assert.equal(h.of("selection-error").filter(x => x.id === 2).length, 0);
+    if (transition === "newer-select") assert.equal(h.of("selection-error").filter(x => x.id === 4).length, 1);
+    await h.send({ kind: "dispose" }); for (const library of h.libraries) assert.equal(library.frees, 1);
+  }
+});
+
+test("actual live local section and policy routes all use jobs and retain direct sample export", async () => {
+  const modes = [
+    {}, { startNs: 1n },
+    { startNs: 1n, timingPolicy: { presetId: "beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1", rankPrecedence: "rank-first", gauge: "groove" } },
+    { inputMode: "physical", localPlanWords: new Uint32Array([7, 0, 0, 0]), localPage: 0 },
+  ];
+  for (const extra of modes) {
+    const h = await realPreparationWorker(); await admitPreparationFiles(h);
+    await h.send({ kind: "play-start", playId: 1, rpcId: 1, libraryId: 1, path: "chart.bms", rate: 24000, seed: "0",
+      keyPairs: new Uint32Array([0x11, 4]), earlyNs: 50000000n, lateNs: 50000000n, offsetNs: 0n, windowOriginNs: 0n, ...extra });
+    await h.settle(() => h.of("play-reply").length > 0 || h.of("play-error").length > 0);
+    assert.deepEqual(h.of("play-error"), []); assert.equal(h.of("play-reply").at(-1).result.kind, "prepared");
+    assert(h.jobs[0].advances > 2); assert(h.of("play-preparation-progress").every(p => p.playId === 1 && p.libraryId === 1));
+    assert.equal(h.jobs[0].frees, 1);
+    if (!Object.hasOwn(extra, "startNs")) {
+      await h.send({ kind: "play-sample", playId: 1, rpcId: 2 });
+      const reply = h.of("play-reply").at(-1), exported = reply.result;
+      assert.equal(exported.kind, "sample"); assert(exported.pcm instanceof Float32Array);
+      assert.deepEqual(Array.from(exported.pcm), [0.25, 0.25, -0.125, -0.125]);
+      assert(h.transfers[h.messages.indexOf(reply)].includes(exported.pcm.buffer), "direct JS PCM buffer is the actual transfer owner");
+      const received = structuredClone(exported.pcm, { transfer: [exported.pcm.buffer] });
+      assert.equal(exported.pcm.buffer.byteLength, 0); assert.equal(received[0], 0.25);
+    }
+    await h.send({ kind: "play-stop", playId: 1, rpcId: 3 }); await h.send({ kind: "dispose" });
+  }
+});
+
+test("actual replay preparation validates a genuine captured SectionSetup and uses the recorded seed", async () => {
+  const h = await realPreparationWorker(), runtime = h.runtime;
+  const owner = new runtime.BrowserLibrary(8, 1024 * 1024, 2 * 1024 * 1024, 64);
+  owner.add_file("chart.bms", new TextEncoder().encode(REAL_PREPARATION_CHART)); owner.add_file("key.wav", preparationWave());
+  let bytes;
+  try {
+    const prepared = owner.prepare_chart("chart.bms", 24000, 2, 3n, 1024, 4096, 8);
+    const game = runtime.BrowserGame.new_physical(prepared, 0n, 100000000n, 50000000n, 50000000n, 0n,
+      keyboardBindingWords(new Uint32Array([0x11, 4])), undefined, 4096, 1024);
+    try { game.configure_capture(1024 * 1024, 1024); game.stop(); bytes = game.take_replay(); assert(bytes.byteLength > 0); }
+    finally { game.free(); }
+  } finally { owner.free(); }
+  await admitPreparationFiles(h);
+  await h.send({ kind: "play-start", mode: "replay", playId: 1, rpcId: 1, libraryId: 1, path: "chart.bms", rate: 24000,
+    seed: "invalid live seed must not replace recording", replayFile: new FileType([bytes], "actual.bkr"), windowOriginNs: 0n });
+  await h.settle(() => h.of("play-reply").length > 0 || h.of("play-error").length > 0);
+  assert.deepEqual(h.of("play-error"), []); assert.equal(h.of("play-reply").at(-1).result.kind, "prepared");
+  assert.equal(h.jobs[0].method, "begin_prepare_replay_chart"); assert.equal(h.jobs[0].frees, 1);
+  await h.send({ kind: "play-stop", playId: 1, rpcId: 2 }); await h.send({ kind: "dispose" });
+});
+
+test("actual play start and Stop fence the prior preview and pending play jobs before late hydration", async () => {
+  const h = await realPreparationWorker(), held = deferred(); let readStarted = false;
+  await admitPreparationFiles(h, [], () => { readStarted = true; return held.promise; });
+  await h.send(actualSelect()); await h.settle(() => readStarted);
+  await h.send({ kind: "play-start", playId: 1, rpcId: 1, libraryId: 1, path: "chart.bms", rate: 24000,
+    seed: "0", keyPairs: new Uint32Array([0x11, 4]), earlyNs: 50000000n, lateNs: 50000000n, offsetNs: 0n, windowOriginNs: 0n });
+  await h.send({ kind: "play-stop", playId: 1, rpcId: 2 });
+  const calls = h.accesses.length; held.resolve(preparationWave().buffer); await flushJobs();
+  assert.equal(h.accesses.length, calls, "late prior-preview/play bytes must not reach a freed or stopped job");
+  assert.equal(h.of("selected").length, 0); assert.equal(h.of("selection-error").length, 0);
+  assert(!h.of("play-reply").some(x => x.result?.kind === "prepared"));
+  for (const job of h.jobs) { assert.equal(job.frees, 1); assert.equal(job.cancels, 1); }
+  await h.send({ kind: "dispose" });
+});
+
+test("one held File read retains at most one waiter and every cancelled runner settles before acquisition", async () => {
+  for (const activeFinal of [false, true]) {
+    const h = await realPreparationWorker({ observeReads: true }), held = h.heldRead();
+    let fileCalls = 0;
+    await admitPreparationFiles(h, [], () => { fileCalls++; return held.promise; });
+    for (let id = 2; id < 8; id++) {
+      await h.send(actualSelect(id));
+      await h.settle(() => h.diagnostics().pending.some(p => p.path === "key.wav" && p.waiters === 1));
+      assert.equal(fileCalls, 1, "each repeated request shares the still-pending original File acquisition");
+      assert.equal(held.state.subscriptions, 1, "one actual underlying settlement subscription, not one Promise.race per cancelled request");
+      assert(h.diagnostics().pending.every(p => p.waiters <= 1));
+      await h.send({ kind: "select-cancel", id, libraryId: 1 });
+      const state = h.diagnostics();
+      assert.equal(state.owner, false);
+      assert(state.pending.every(p => p.waiters === 0), "Cancel synchronously removes its only retained callback");
+      assert(state.selections.every(entry => entry.settled), "actual selectChart finally settles while File is still permanently held");
+      assert.equal(held.state.subscriptions, 1);
+    }
+    if (activeFinal) {
+      await h.send(actualSelect(8));
+      await h.settle(() => h.diagnostics().pending.some(p => p.path === "key.wav" && p.waiters === 1));
+      assert.equal(fileCalls, 1); assert.equal(held.state.subscriptions, 1);
+    }
+    const calls = h.accesses.length;
+    held.reject(Error("original held File failed after repeated cancellation")); await flushJobs();
+    assert.equal(h.accesses.length, calls + (activeFinal ? 2 : 0), "only the active final job may release; retired jobs do not revisit WASM");
+    assert.equal(h.diagnostics().pending.length, 0); assert(h.diagnostics().selections.every(x => x.settled));
+    assert.equal(h.of("selected").length, 0); assert.equal(h.of("fatal").length, 0);
+    assert.deepEqual(h.of("selection-error").map(x => x.id), activeFinal ? [8] : []);
+    for (const job of h.jobs) { assert.equal(job.cancels, 1); assert.equal(job.frees, 1); }
+    await h.send({ kind: "dispose" }); assert.equal(h.libraries[0].frees, 1);
+  }
+});
+
+test("actual importer retirement removes held-read waiters and settles the retired runner before late bytes", async () => {
+  const h = await realPreparationWorker({ observeReads: true }), held = h.heldRead(); let fileCalls = 0;
+  await admitPreparationFiles(h, [], () => { fileCalls++; return held.promise; });
+  await h.send(actualSelect()); await h.settle(() => h.diagnostics().pending.some(p => p.waiters === 1));
+  const originalMap = h.pendingMap(), originalRecord = originalMap.get("key.wav");
+  await h.send({ kind: "import", id: 4, files: [selectedFile("new.bms", "#BPM 120\n")] });
+  await h.send({ kind: "accept-library", id: 4 });
+  assert.equal(originalRecord.waiters.size, 0); assert.equal(originalMap.size, 0);
+  assert(h.diagnostics().selections.every(x => x.settled)); assert.equal(h.libraries[0].frees, 1);
+  assert.equal(fileCalls, 1); assert.equal(held.state.subscriptions, 1);
+  const calls = h.accesses.length;
+  held.resolve(preparationWave().buffer); await flushJobs();
+  assert.equal(h.accesses.length, calls, "late original bytes cannot call the freed WASM library or replacement owner");
+  assert.equal(h.of("selected").length, 0); assert.equal(h.of("selection-error").length, 0); assert.equal(h.of("fatal").length, 0);
+  await h.send({ kind: "dispose" }); for (const library of h.libraries) assert.equal(library.frees, 1);
+});
+
 let actualMenuBinding;
 function realMenuOwner() {
   return actualMenuBinding ??= (async () => {
@@ -266,6 +583,33 @@ async function workerHarness(options = {}) {
       if (!options.omitPreparedStart) prepared.start_ns = options.replayStart ?? 0n;
       return prepared;
     }
+    // Compatibility model for existing controller/GPU-edge fixtures only.
+    // Genuine phase/PCM acceptance uses realPreparationWorker above.
+    preparationJob(method, args, replay = false) {
+      const [path] = args;
+      if (replay) this.replay_referenced_asset_paths(path, args[1], args.at(-1));
+      else this.referenced_asset_paths(path, args[3], args[method === "prepare_chart" ? 6 : 7]);
+      const references = this.plans.at(-1).method === "replay" ? options.replayReferences?.[path] ?? []
+        : typeof options.references === "function" ? options.references(path, args[3]) : options.references?.[path] ?? [];
+      let prepared, freed = false, cancelled = false;
+      return {
+        stage: "resolve", completed_assets: 0, total_assets: references.length,
+        parse_count: 0, compile_count: 0, read_count: 0, decode_count: 0, shared_asset_count: 0,
+        pending_asset_path: () => { assert(!freed); return references.find(ref => !this.files.some(x => x.path === ref)); },
+        advance: current => {
+          assert.equal(current, this); assert(!cancelled && !freed);
+          if (references.some(ref => !this.files.some(x => x.path === ref))) return false;
+          prepared = this[method](...args); return true;
+        },
+        take_prepared: current => { assert.equal(current, this); assert(!cancelled && !freed && prepared); const result = prepared; prepared = null; return result; },
+        cancel() { assert(!freed); cancelled = true; if (prepared) { prepared.free(); prepared = null; } },
+        free() { assert(!freed); freed = true; },
+      };
+    }
+    begin_prepare_chart(...args) { return this.preparationJob("prepare_chart", args); }
+    begin_prepare_chart_at(...args) { return this.preparationJob("prepare_chart_at", args); }
+    begin_prepare_chart_with_policy_at(...args) { return this.preparationJob("prepare_chart_with_policy_at", args); }
+    begin_prepare_replay_chart(...args) { return this.preparationJob("prepare_replay_chart", args, true); }
     free() { this.frees++; assert.equal(this.frees, 1); }
   }
   class BrowserView {
@@ -405,7 +749,13 @@ async function workerHarness(options = {}) {
   const context = createContext({
     self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer,
     performance: self.performance,
-    setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
+    setTimeout(callback, delay) {
+      const id = ++timerId; timers.set(id, callback);
+      // Old mock preparation cases auto-drain their simulated cooperative yield;
+      // realPreparationWorker keeps actual job yields explicit and observable.
+      if (delay === 0) Promise.resolve().then(() => { if (timers.has(id)) { timers.delete(id); callback(); } });
+      return id;
+    },
     clearTimeout(id) { timers.delete(id); },
   });
   const ActualMenuOwner = options.actualMenu ? await realMenuOwner() : null;

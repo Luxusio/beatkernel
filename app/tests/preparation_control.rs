@@ -578,6 +578,243 @@ fn ready_then_cancel_foreign_commit_and_repeated_commit_do_not_replace_last_vali
 }
 
 #[test]
+fn split_prepared_output_can_be_validated_then_admitted_without_clone_and_exactly_once() {
+    let mut cache = cache();
+    let source = Source::new();
+    let mut original_job = cache.begin(request(), CHART.to_vec()).unwrap();
+    let original = finish(&mut original_job, &source);
+    cache.commit(&original).unwrap();
+    let mut changed_source = Source::new();
+    changed_source.encoded[44..46].copy_from_slice(&16_384i16.to_le_bytes());
+    let mut job = cache.begin(request(), CHART.to_vec()).unwrap();
+    let candidate = finish(&mut job, &changed_source);
+    let pointer = candidate
+        .prepared()
+        .bank
+        .get(SampleId(1))
+        .unwrap()
+        .samples()
+        .as_ptr();
+    let (prepared, admission) = candidate.into_prepared_and_admission();
+    assert_eq!(
+        prepared.bank.get(SampleId(1)).unwrap().samples().as_ptr(),
+        pointer
+    );
+    // Genuine derived replay identity validation runs on the moved owner before promotion.
+    let (file, limits) = replay(&prepared);
+    beatkernel_bms_runtime::replay_playback::validate_section_setup(
+        &prepared.source,
+        &file,
+        limits,
+    )
+    .unwrap();
+    let mut foreign = PreparationCache::new(PreparationCacheLimits::default()).unwrap();
+    assert!(foreign.commit_admission(&admission).is_err());
+    assert_eq!(foreign.retained_bytes().pcm_bytes, 0);
+    assert!(cache.commit_admission(&admission).unwrap());
+    let retained = cache.retained_bytes();
+    assert!(cache.commit_admission(&admission).is_err());
+    assert_eq!(cache.retained_bytes(), retained);
+    let mut warm = cache.begin(request(), CHART.to_vec()).unwrap();
+    let reused = finish(&mut warm, &changed_source);
+    assert_eq!(reused.counters().decodes, 0);
+    assert_eq!(
+        reused
+            .prepared()
+            .bank
+            .get(SampleId(1))
+            .unwrap()
+            .samples()
+            .as_ptr(),
+        pointer
+    );
+    assert_eq!(
+        prepared.bank.get(SampleId(1)).unwrap().samples(),
+        &[0.5, -0.125]
+    );
+    assert_eq!(
+        original.prepared().bank.get(SampleId(1)).unwrap().samples(),
+        &[0.25, -0.125]
+    );
+}
+
+#[test]
+fn abandoned_or_cancelled_split_admission_preserves_previous_cache_and_owned_candidate_pcm() {
+    for cancel in [false, true] {
+        let mut cache = cache();
+        let source = Source::new();
+        let mut original_job = cache.begin(request(), CHART.to_vec()).unwrap();
+        let original = finish(&mut original_job, &source);
+        cache.commit(&original).unwrap();
+        let retained = cache.retained_bytes();
+        let mut changed_source = Source::new();
+        changed_source.encoded[44..46].copy_from_slice(&16_384i16.to_le_bytes());
+        let mut job = cache.begin(request(), CHART.to_vec()).unwrap();
+        let candidate = finish(&mut job, &changed_source);
+        let (prepared, admission) = candidate.into_prepared_and_admission();
+        if cancel {
+            job.cancel();
+            assert!(cache.commit_admission(&admission).is_err());
+        }
+        // An outer section/policy/visual failure abandons this admission. The
+        // candidate remains a real owned value, never an automatically published cache.
+        drop(admission);
+        assert_eq!(cache.retained_bytes(), retained);
+        assert_eq!(
+            prepared.bank.get(SampleId(1)).unwrap().samples(),
+            &[0.5, -0.125]
+        );
+        let mut recovered = cache.begin(request(), CHART.to_vec()).unwrap();
+        let recovered = finish(&mut recovered, &source);
+        assert_eq!(recovered.counters().decodes, 0);
+        assert_eq!(
+            recovered
+                .prepared()
+                .bank
+                .get(SampleId(1))
+                .unwrap()
+                .samples()
+                .as_ptr(),
+            original
+                .prepared()
+                .bank
+                .get(SampleId(1))
+                .unwrap()
+                .samples()
+                .as_ptr()
+        );
+    }
+}
+
+#[test]
+fn cleared_cache_identity_rejects_stale_split_admission_after_a_new_valid_commit() {
+    let mut cache = cache();
+    let source = Source::new();
+    let mut job = cache.begin(request(), CHART.to_vec()).unwrap();
+    let candidate = finish(&mut job, &source);
+    let (old_consumer, stale) = candidate.into_prepared_and_admission();
+    cache.clear();
+    let mut changed_source = Source::new();
+    changed_source.encoded[44..46].copy_from_slice(&16_384i16.to_le_bytes());
+    let mut job = cache.begin(request(), CHART.to_vec()).unwrap();
+    let current = finish(&mut job, &changed_source);
+    cache.commit(&current).unwrap();
+    let retained = cache.retained_bytes();
+    assert!(cache.commit_admission(&stale).is_err());
+    assert_eq!(cache.retained_bytes(), retained);
+    assert_eq!(
+        old_consumer.bank.get(SampleId(1)).unwrap().samples(),
+        &[0.25, -0.125]
+    );
+    let mut warm = cache.begin(request(), CHART.to_vec()).unwrap();
+    assert_eq!(finish(&mut warm, &changed_source).counters().decodes, 0);
+}
+
+#[test]
+fn valid_oversize_split_admission_is_uncached_and_keeps_previous_original() {
+    let source = Source::new();
+    let mut cache = PreparationCache::new(PreparationCacheLimits {
+        max_encoded_bytes: CHART.len() + source.encoded.len(),
+        max_pcm_bytes: 8,
+        max_chart_bytes: CHART.len(),
+    })
+    .unwrap();
+    let mut original_job = cache.begin(request(), CHART.to_vec()).unwrap();
+    let original = finish(&mut original_job, &source);
+    cache.commit(&original).unwrap();
+    let retained = cache.retained_bytes();
+    let mut larger = Source::new();
+    larger.encoded.extend_from_slice(&4096i16.to_le_bytes());
+    larger.encoded[4..8].copy_from_slice(&42u32.to_le_bytes());
+    larger.encoded[40..44].copy_from_slice(&6u32.to_le_bytes());
+    let mut job = cache.begin(request(), CHART.to_vec()).unwrap();
+    let candidate = finish(&mut job, &larger);
+    let (prepared, admission) = candidate.into_prepared_and_admission();
+    assert_eq!(
+        prepared.bank.get(SampleId(1)).unwrap().samples(),
+        &[0.25, -0.125, 0.125]
+    );
+    assert!(!cache.commit_admission(&admission).unwrap());
+    assert_eq!(cache.retained_bytes(), retained);
+    assert!(cache.commit_admission(&admission).is_err());
+    let mut warm = cache.begin(request(), CHART.to_vec()).unwrap();
+    let recovered = finish(&mut warm, &source);
+    assert_eq!(recovered.counters().decodes, 0);
+    assert_eq!(
+        recovered
+            .prepared()
+            .bank
+            .get(SampleId(1))
+            .unwrap()
+            .samples(),
+        &[0.25, -0.125]
+    );
+}
+
+#[test]
+fn shared_dependency_plan_still_validates_current_replay_before_asset_io() {
+    let mut cache = cache();
+    let source = Source::new();
+    let mut original_job = cache.begin(request(), CHART.to_vec()).unwrap();
+    let original = finish(&mut original_job, &source);
+    cache.commit(&original).unwrap();
+    let plan = original_job.shared_plan().unwrap();
+    let (valid, limits) = replay(original.prepared());
+    for scenario in 0..3 {
+        let source = Source::new();
+        let mut invalid = valid.clone();
+        match scenario {
+            0 => invalid.header.chart_identity.push(0),
+            1 => invalid.header.rules_identity.push(0),
+            2 => invalid.header.options = b"bms-judge-profile/v3:".to_vec(),
+            _ => unreachable!(),
+        }
+        let mut job = cache
+            .begin_with_plan(request(), CHART.to_vec(), &plan)
+            .unwrap();
+        let mut refused = false;
+        for _ in 0..128 {
+            match job.advance(&source, Some((&invalid, limits)), &mut |_| Ok(())) {
+                Err(_) => {
+                    refused = true;
+                    break;
+                }
+                Ok(PreparationAdvance::Pending(_)) => {}
+                Ok(PreparationAdvance::Ready(_)) => break,
+            }
+        }
+        assert!(refused);
+        assert_eq!(source.reads.get(), 0);
+        assert_eq!(source.resolves.get(), 0);
+    }
+    let source = Source::new();
+    let mut job = cache
+        .begin_with_plan(request(), CHART.to_vec(), &plan)
+        .unwrap();
+    let mut ready = None;
+    for _ in 0..128 {
+        match job
+            .advance(&source, Some((&valid, limits)), &mut |_| Ok(()))
+            .unwrap()
+        {
+            PreparationAdvance::Pending(_) => {}
+            PreparationAdvance::Ready(candidate) => {
+                ready = Some(candidate);
+                break;
+            }
+        }
+    }
+    let ready = ready.unwrap();
+    assert_eq!(ready.counters().parses, 0);
+    assert_eq!(ready.counters().compiles, 0);
+    assert_eq!(ready.counters().decodes, 0);
+    assert_eq!(
+        ready.prepared().bank.get(SampleId(1)).unwrap().samples(),
+        &[0.25, -0.125]
+    );
+}
+
+#[test]
 fn real_parse_compile_resolve_read_decode_channels_and_bank_failures_preserve_previous_cache() {
     let mut cache = cache();
     let original_source = Source::new();

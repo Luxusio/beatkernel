@@ -8,7 +8,7 @@ use beatkernel_bms_runtime::{
     asset_source::{AssetSource, MemoryAssetLimits, MemoryFiles},
     preparation::{
         PreparationAdvance, PreparationCache, PreparationCacheLimits, PreparationCandidate,
-        PreparationJob, PreparationRequest,
+        PreparationJob, PreparationPlan, PreparationRequest,
     },
     AssetDecoder, ChannelPolicy, DefaultAssetDecoder, PreparedBms,
 };
@@ -138,6 +138,184 @@ fn finish(job: &mut PreparationJob, source: &dyn AssetSource) -> PreparationCand
         }
     }
     panic!("bounded fixture did not reach its actual ready state")
+}
+
+fn query_plan(
+    options: PreparationRequest,
+    chart: &[u8],
+    source: &Source,
+) -> (
+    PreparationPlan,
+    *const beatkernel_bms_runtime::preparation::ParsedPreparation,
+) {
+    let mut query = PreparationJob::uncached(options, chart.to_vec()).unwrap();
+    for _ in 0..8 {
+        assert!(matches!(
+            query.advance(source, None, &mut |_| Ok(())).unwrap(),
+            PreparationAdvance::Pending(_)
+        ));
+        if let Some(parsed) = query.parsed() {
+            let pointer = parsed as *const _;
+            assert_eq!(query.counters().parses, 1);
+            assert_eq!(query.counters().compiles, 1);
+            assert_eq!(source.reads.get(), 0);
+            assert_eq!(source.resolved.get(), 0);
+            let plan = query.shared_plan().expect("owned dependency query plan");
+            query.cancel();
+            return (plan, pointer);
+        }
+    }
+    panic!("canonical dependency query never produced its parsed plan")
+}
+
+#[test]
+fn dependency_query_plan_continuation_shares_exact_parsed_owner_without_second_parse_or_compile() {
+    let source = Source::new(&[8192, -4096]);
+    let mut cache = cache();
+    let (plan, pointer) = query_plan(request(), CHART, &source);
+    let mut job = cache
+        .begin_with_plan(request(), CHART.to_vec(), &plan)
+        .unwrap();
+    let candidate = finish(&mut job, &source);
+    assert_eq!(job.parsed().unwrap() as *const _, pointer);
+    assert_eq!(candidate.counters().parses, 0);
+    assert_eq!(candidate.counters().compiles, 0);
+    assert_eq!(candidate.counters().decodes, 1);
+    assert_eq!(source.reads.get(), 1);
+    assert_eq!(
+        bits(candidate.prepared(), 1),
+        vec![0.25f32.to_bits(), (-0.125f32).to_bits()]
+    );
+    cache.commit(&candidate).unwrap();
+    let mut warm = cache
+        .begin_with_plan(request(), CHART.to_vec(), &plan)
+        .unwrap();
+    let reused = finish(&mut warm, &source);
+    assert_eq!(warm.parsed().unwrap() as *const _, pointer);
+    assert_eq!(reused.counters().parses, 0);
+    assert_eq!(reused.counters().compiles, 0);
+    assert_eq!(reused.counters().decodes, 0);
+    assert_eq!(
+        reused
+            .prepared()
+            .bank
+            .get(SampleId(1))
+            .unwrap()
+            .samples()
+            .as_ptr(),
+        candidate
+            .prepared()
+            .bank
+            .get(SampleId(1))
+            .unwrap()
+            .samples()
+            .as_ptr()
+    );
+}
+
+#[test]
+fn dependency_plan_source_seed_and_exact_chart_byte_mismatches_fall_back_to_valid_cold_parse() {
+    let source = Source::new(&[8192, -4096]);
+    let cache = cache();
+    let (plan, pointer) = query_plan(request(), CHART, &source);
+    for scenario in 0..3 {
+        let mut options = request();
+        let mut chart = CHART.to_vec();
+        match scenario {
+            0 => options.source_identity = "different/chart.bms".into(),
+            1 => options.seed = 7,
+            2 => chart = b"#VOLWAV 200\n#BPM 120\n#WAV01 key.wav\n#00011:01\n".to_vec(),
+            _ => unreachable!(),
+        }
+        let mut job = cache.begin_with_plan(options, chart, &plan).unwrap();
+        let candidate = finish(&mut job, &source);
+        assert_ne!(job.parsed().unwrap() as *const _, pointer);
+        assert_eq!(candidate.counters().parses, 1);
+        assert_eq!(candidate.counters().compiles, 1);
+        assert_eq!(candidate.counters().decodes, 1);
+        assert_eq!(
+            bits(candidate.prepared(), 1),
+            vec![0.25f32.to_bits(), (-0.125f32).to_bits()]
+        );
+        assert_eq!(
+            candidate.prepared().sounds[0].gain.to_bits(),
+            if scenario == 2 {
+                2f32.to_bits()
+            } else {
+                1f32.to_bits()
+            }
+        );
+    }
+}
+
+#[test]
+fn reused_dependency_plan_revalidates_output_channels_and_narrower_reference_limits() {
+    let source = Source::new(&[8192, -4096]);
+    let cache = cache();
+    let (plan, pointer) = query_plan(request(), ALIASES, &source);
+    let mut changed = request();
+    changed.format = AudioFormat::new(48_000, 2).unwrap();
+    changed.channels = ChannelPolicy::MonoToStereo;
+    let mut job = cache
+        .begin_with_plan(changed, ALIASES.to_vec(), &plan)
+        .unwrap();
+    let ready = finish(&mut job, &source);
+    assert_eq!(job.parsed().unwrap() as *const _, pointer);
+    assert_eq!(ready.counters().parses, 0);
+    assert_eq!(ready.counters().compiles, 0);
+    assert_eq!(
+        ready.prepared().bank.format(),
+        AudioFormat::new(48_000, 2).unwrap()
+    );
+    assert_eq!(
+        bits(ready.prepared(), 1),
+        vec![
+            0.25f32.to_bits(),
+            0.25f32.to_bits(),
+            (-0.125f32).to_bits(),
+            (-0.125f32).to_bits()
+        ]
+    );
+    let source = Source::new(&[8192, -4096]);
+    let mut narrow = request();
+    narrow.limits = PcmLimits::new(1024, 4096, 1).unwrap();
+    let mut job = cache
+        .begin_with_plan(narrow, ALIASES.to_vec(), &plan)
+        .unwrap();
+    let mut refused = false;
+    for _ in 0..128 {
+        match job.advance(&source, None, &mut |_| Ok(())) {
+            Err(_) => {
+                refused = true;
+                break;
+            }
+            Ok(PreparationAdvance::Pending(_)) => {}
+            Ok(PreparationAdvance::Ready(_)) => break,
+        }
+    }
+    assert!(refused);
+    assert_eq!(source.reads.get(), 0);
+    assert_eq!(source.resolved.get(), 0);
+    let mut exact_stereo = request();
+    exact_stereo.format = AudioFormat::new(24_000, 2).unwrap();
+    let mut job = cache
+        .begin_with_plan(exact_stereo, ALIASES.to_vec(), &plan)
+        .unwrap();
+    let mut refused = false;
+    for _ in 0..128 {
+        match job.advance(&source, None, &mut |_| Ok(())) {
+            Err(_) => {
+                refused = true;
+                break;
+            }
+            Ok(PreparationAdvance::Pending(_)) => {}
+            Ok(PreparationAdvance::Ready(_)) => break,
+        }
+    }
+    assert!(
+        refused,
+        "a parsed plan cannot authorize unrequested channel conversion"
+    );
 }
 
 #[test]

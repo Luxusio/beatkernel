@@ -5,28 +5,28 @@ use std::{
 };
 
 use crate::{
-    browser::BrowserPrepared,
     audio_authority::{AudioAuthority, AudioAuthorityConfig, AudioAuthorityEpoch},
+    browser::BrowserPrepared,
     browser_hid_input::BrowserHidSetup,
     browser_input::{
-        BrowserInputQueue, PhysicalInputSetup, TouchInputSetup, decode_input,
-        project_touch_on_surface, project_touch_position_on_surface,
+        decode_input, project_touch_on_surface, project_touch_position_on_surface,
+        BrowserInputQueue, PhysicalInputSetup, TouchInputSetup,
     },
     competition::OpponentKind,
     image_assets::ImageAssets,
     note_progress::NoteProgress,
     player_chart::PlayerChart,
     pressed_keys::PressedKeys,
-    saved_opponents::SavedOpponents,
     saved_opponent_hud::SavedOpponentHud,
+    saved_opponents::SavedOpponents,
     step_gameplay::{StepAudioBatch, StepGameplay, StepGameplayConfig, StepGameplayError},
-    worklet_audio::{OutputEvidence, decode_output, decode_section_output},
+    worklet_audio::{decode_output, decode_section_output, OutputEvidence},
 };
 use beatkernel::{
     audio::{AudioCommand, PcmSample, SampleId},
     input::{
-        Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
-        GameControlId, PhysicalControlId, PhysicalInputEvent, Position2, codec::CodecLimits,
+        codec::CodecLimits, Binding, BindingMap, ButtonEvent, ButtonState, DeviceId,
+        DeviceSelector, EventMeta, GameControlId, PhysicalControlId, PhysicalInputEvent, Position2,
     },
     judge::JudgeEvent,
     replay::codec::ReplayCodecLimits,
@@ -59,13 +59,13 @@ fn signed(value: i64) -> JsValue {
     js_sys::BigInt::from(value).into()
 }
 
-/// One setup asset; taking PCM transfers its original Rust allocation once.
+/// One setup asset; either export consumes the same immutable PCM handle once.
 #[wasm_bindgen]
 pub struct BrowserSample {
     id: u64,
     rate: u32,
     channels: u16,
-    pcm: Option<Vec<f32>>,
+    pcm: Option<PcmSample>,
 }
 impl BrowserSample {
     pub(crate) fn from_pcm(id: SampleId, sample: PcmSample) -> Self {
@@ -74,7 +74,7 @@ impl BrowserSample {
             id: id.0,
             rate: format.sample_rate(),
             channels: format.channels(),
-            pcm: Some(sample.into_samples()),
+            pcm: Some(sample),
         }
     }
 }
@@ -95,7 +95,17 @@ impl BrowserSample {
     pub fn take_pcm(&mut self) -> Result<Vec<f32>, JsValue> {
         self.pcm
             .take()
-            .ok_or_else(|| error("sample PCM was already taken"))
+            .ok_or_else(|| error("sample PCM was already taken"))?
+            .try_into_samples()
+            .map_err(error)
+    }
+    /// One independent JS allocation/copy, without materializing another Rust PCM Vec.
+    pub fn take_pcm_array(&mut self) -> Result<js_sys::Float32Array, JsValue> {
+        let sample = self
+            .pcm
+            .take()
+            .ok_or_else(|| error("sample PCM was already taken"))?;
+        Ok(js_sys::Float32Array::from(sample.samples()))
     }
 }
 
@@ -1217,31 +1227,72 @@ pub(crate) fn encode_batch(batch: StepAudioBatch) -> Result<JsValue, JsValue> {
 
 #[wasm_bindgen]
 impl BrowserGame {
-    pub fn visual_registration(&mut self, generation: u64, content: u64, max_packet_bytes: u32, max_diagnostic_bytes: u32) -> Result<Vec<u8>, JsValue> {
+    pub fn visual_registration(
+        &mut self,
+        generation: u64,
+        content: u64,
+        max_packet_bytes: u32,
+        max_diagnostic_bytes: u32,
+    ) -> Result<Vec<u8>, JsValue> {
         let roster = vec![crate::local_players::PlayerId(1)];
-        let bytes = crate::browser::render::registration(&self.chart, &self.images, &roster, generation, content, max_packet_bytes, max_diagnostic_bytes).map_err(error)?;
-        self.render_producer.register(generation, content, &self.chart, &roster).map_err(error)?;
+        let bytes = crate::browser::render::registration(
+            &self.chart,
+            &self.images,
+            &roster,
+            generation,
+            content,
+            max_packet_bytes,
+            max_diagnostic_bytes,
+        )
+        .map_err(error)?;
+        self.render_producer
+            .register(generation, content, &self.chart, &roster)
+            .map_err(error)?;
         self.render_packet_budget = max_packet_bytes;
         self.render_diagnostic_budget = max_diagnostic_bytes;
         Ok(bytes)
     }
     pub fn acknowledge_visual(&mut self, generation: u64, content: u64, sequence: u64) -> bool {
-        self.render_producer.acknowledge(generation, content, sequence)
+        self.render_producer
+            .acknowledge(generation, content, sequence)
     }
 }
 #[wasm_bindgen]
 impl BrowserGame {
     pub fn visual_frame(&mut self, sequence: u64, page: u32) -> Result<Vec<u8>, JsValue> {
-        use crate::browser_render_state::{RenderMemberScalars, RenderScore, RenderGauge, RenderJudgeEvent};
+        use crate::browser_render_state::{
+            RenderGauge, RenderJudgeEvent, RenderMemberScalars, RenderScore,
+        };
         let scalars = RenderMemberScalars {
-            song_ns: self.game.song_time().as_nanos(), pressed: self.pressed,
-            recent: self.recent.iter().map(RenderJudgeEvent::from_event).collect(),
+            song_ns: self.game.song_time().as_nanos(),
+            pressed: self.pressed,
+            recent: self
+                .recent
+                .iter()
+                .map(RenderJudgeEvent::from_event)
+                .collect(),
             score: Some(RenderScore::from_summary(self.game.score())),
             gauge: Some(RenderGauge::from_gauge(self.game.gauge())),
             competition: self.saved_hud.snapshot().cloned(),
-            saved_failed: self.saved_hud.failed(), ..RenderMemberScalars::default()
+            saved_failed: self.saved_hud.failed(),
+            ..RenderMemberScalars::default()
         };
-        let frame = self.render_producer.frame(sequence, page, &[(crate::local_players::PlayerId(1), scalars, &self.progress)], None, false).map_err(error)?;
-        self.render_producer.encode_frame(frame, self.render_packet_budget, self.render_diagnostic_budget).map_err(error)
+        let frame = self
+            .render_producer
+            .frame(
+                sequence,
+                page,
+                &[(crate::local_players::PlayerId(1), scalars, &self.progress)],
+                None,
+                false,
+            )
+            .map_err(error)?;
+        self.render_producer
+            .encode_frame(
+                frame,
+                self.render_packet_budget,
+                self.render_diagnostic_budget,
+            )
+            .map_err(error)
     }
 }

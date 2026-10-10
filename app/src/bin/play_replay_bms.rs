@@ -10,7 +10,7 @@ use beatkernel_bms_runtime::replay_audio::completed_render_cursor;
 use beatkernel_bms_runtime::{
     bgm::{BgmConfig, BgmFeeder},
     completion::ReplayCompletion,
-    load_prepared_for_section_replay,
+    native_chart::prepare_original_for_section_replay,
     native_start::HostStartWindow,
     playback_pause::{PauseIntervalObservation, PausePhase},
     player,
@@ -1153,7 +1153,7 @@ fn run(options: Options) -> Result<()> {
         CodecLimits::new(65536, 32768)?,
     )?;
     let file = read_replay(&mut File::open(&options.replay)?, limits)?;
-    let prepared = load_prepared_for_section_replay(
+    let prepared = prepare_original_for_section_replay(
         &options.chart,
         options.format,
         PcmLimits::new(
@@ -1164,16 +1164,6 @@ fn run(options: Options) -> Result<()> {
         options.channel_policy,
         &file,
         limits,
-    )?;
-    let prepared = beatkernel_bms_runtime::section_start::prepare_section_replay(
-        prepared,
-        &file,
-        limits,
-        PcmLimits::new(
-            64 * 1024 * 1024,
-            256 * 1024 * 1024,
-            beatkernel_bms_runtime::DEFAULT_BMS_PCM_SAMPLES,
-        )?,
     )?;
     for warning in &prepared.source.warnings {
         eprintln!("BMS warning line {}: {}", warning.line, warning.message);

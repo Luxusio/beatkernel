@@ -230,3 +230,34 @@ fn chart_must_be_acquired_and_strict_text_decoding_matches_existing_encoding_pol
     let bad = inventory(&[0xff, 0xfe, 0, 0], &[]);
     assert!(referenced_asset_paths(&bad, "pack/chart.bms", 0, 1).is_err());
 }
+
+#[test]
+fn declaration_hydration_keeps_inventory_revision_but_new_exact_resolution_invalidates_it() {
+    let mut files = inventory(b"#BPM 120\n#WAV01 tone.wav\n#00011:01\n", &[]);
+    files.insert("pack/tone.flac", vec![1]).unwrap();
+    let compatible = files.inventory_revision();
+    assert_eq!(paths(&files, 0, 1), ["pack/tone.flac"]);
+    files.declare_file("pack/tone.wav", 2).unwrap();
+    let exact = files.inventory_revision();
+    assert!(
+        exact > compatible,
+        "a newly preferred canonical entry changes resolution identity"
+    );
+    assert_eq!(paths(&files, 0, 1), ["pack/tone.wav"]);
+    let accounting = (files.len(), files.total_bytes());
+    assert!(files.insert("pack/tone.wav", vec![2]).is_err());
+    assert_eq!(files.inventory_revision(), exact);
+    assert_eq!((files.len(), files.total_bytes()), accounting);
+    files.insert("pack/tone.wav", vec![2, 3]).unwrap();
+    assert_eq!(
+        files.inventory_revision(),
+        exact,
+        "hydration does not change an admitted inventory key"
+    );
+    assert_eq!(paths(&files, 0, 1), ["pack/tone.wav"]);
+    assert!(files.declare_file("pack/tone.wav", 2).is_err());
+    assert!(files.insert("pack/tone.wav", vec![4, 5]).is_err());
+    assert!(files.declare_file("pack/../escape.wav", 1).is_err());
+    assert_eq!(files.inventory_revision(), exact);
+    assert_eq!(files.read_file("pack/tone.wav", 2).unwrap(), &[2, 3]);
+}
