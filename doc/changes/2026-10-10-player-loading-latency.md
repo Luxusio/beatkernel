@@ -698,6 +698,51 @@ admission and is retained separately from successful GUI evidence. Failed new
 Xvfb startup, focus-command and MCP-key invocations are not successful input or
 server-ownership evidence.
 
+Independent CLI verification passed66 focused PCM/mixer/restart/real-time
+allocation tests. The broader app command then stopped at its library tests:
+2365 passed,2 failed,6 ignored. Both failures reproduced individually on that
+fresh compiled test executable. `invisible_source_fixtures.rs` still required
+distinct sample payload pointers for canonical aliases, contradicting this
+increment's approved immutable alias sharing. Its connected fixture must be
+updated while retaining logical limits, unique acquisition/decode and independent
+public deep-clone semantics. The unchanged cached Records detail test separately
+refused a zero logical extent during suspended update; an actual archived
+`e421b59` baseline run is pending to establish its ownership. Neither failure
+is concealed or counted as a passing test. The original and reproduction logs
+are retained under `qa-cli-final-1/`; integration/bin targets built before this
+failure are not claimed executed.
+
+Actual production CLI smoke passed12 invocations: primary/mode help, invalid
+mode/zero-duration refusal, real bounded BMS+WAV rendering and repeated-output
+refusal. The32000-byte output matched exact expected mono PCM values and
+remaining silence; the repeated destination was refused without changing its
+hash. `cli-smoke.json` records executable/fixture/output hashes and command
+outputs. This narrow success does not replace the failed app suite, remaining
+Node/Linux/foreign checks or required fresh formal review after the fixture
+correction. Full player Goal and WBS remain unfinished.
+
+The archived `e421b59` Records test subsequently reproduced the same failure
+at fixture line478, exit101 (0passed/1failed/2359filtered), after3m24s
+compilation. It is proven preexisting; suspended cached-detail updates remain
+an actual full-goal repair obligation for the queued screen-ownership cleanup,
+not a fixed or relaxed requirement. CLI QA1 returned actual FAIL for the obsolete
+alias assertion and incomplete remaining scope. The corrected alias fixture
+now additionally requires both canonical alias pairs to share immutable payload,
+public deep cloning to remain independent, unique extraction to preserve its
+pointer, and shared extraction/mutation to leave all originals unchanged.
+Current-source development execution and a fresh formal review are still pending.
+The baseline compile reused and overwrote a cached library-test filename;
+current-source rebuilding is required before that artifact can be reused.
+
+The corrected current-source alias regression subsequently passed1 test
+(0failed/0ignored/2372filtered) after a fresh3m11s build, in0.35s. The same
+fresh compiled executable then passed all4 invisible-source fixtures
+(0failed/0ignored/2369filtered), in0.49s. Logs are
+`alias-contract-development-1.log` and `invisible-source-development-1.log`.
+These development results repair the obsolete assertion; fresh formal review
+and independent remaining CLI verification are still required. The preexisting
+Records failure remains open in the queued full-goal cleanup request.
+
 Known ceiling: native GUI QA2 uses the existing live `:99` current-display
 transport. Its attempted new Xvfb startup failed because the display listener
 already existed; no ownership of that server or server cleanup is claimed.

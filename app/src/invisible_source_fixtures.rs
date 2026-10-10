@@ -219,10 +219,43 @@ fn source_bytes_load_the_unique_original_union_with_base62_aliases_and_pre_io_sa
         prepared.bank.get(SampleId(1)).unwrap().samples(),
         prepared.bank.get(SampleId(10)).unwrap().samples()
     );
-    assert_ne!(
+    assert_eq!(
         prepared.bank.get(SampleId(1)).unwrap().samples().as_ptr(),
         prepared.bank.get(SampleId(10)).unwrap().samples().as_ptr()
     );
+    assert_eq!(
+        prepared.bank.get(SampleId(36)).unwrap().samples().as_ptr(),
+        prepared
+            .bank
+            .get(SampleId(3843))
+            .unwrap()
+            .samples()
+            .as_ptr()
+    );
+    let sample = prepared.bank.get(SampleId(1)).unwrap();
+    let clone = sample.try_clone(PcmLimits::new(8, 40, 5).unwrap()).unwrap();
+    assert_eq!(clone.format(), sample.format());
+    assert_eq!(clone.samples(), sample.samples());
+    assert_ne!(clone.samples().as_ptr(), sample.samples().as_ptr());
+    let clone_pointer = clone.samples().as_ptr();
+    let mut cloned_pcm = clone.try_into_samples().unwrap();
+    assert_eq!(cloned_pcm.as_ptr(), clone_pointer);
+    cloned_pcm[0] = -1.0;
+    let shared = sample.try_share(PcmLimits::new(8, 40, 5).unwrap()).unwrap();
+    assert_eq!(shared.samples().as_ptr(), sample.samples().as_ptr());
+    let mut extracted_pcm = shared.try_into_samples().unwrap();
+    assert_eq!(extracted_pcm, sample.samples());
+    assert_ne!(extracted_pcm.as_ptr(), sample.samples().as_ptr());
+    assert_ne!(extracted_pcm.as_ptr(), cloned_pcm.as_ptr());
+    extracted_pcm[1] = 1.0;
+    assert_eq!(cloned_pcm, [-1.0, -0.25]);
+    assert_eq!(extracted_pcm, [0.5, 1.0]);
+    for id in [1, 10, 36, 3843] {
+        assert_eq!(
+            prepared.bank.get(SampleId(id)).unwrap().samples(),
+            [0.5, -0.25]
+        );
+    }
     let original = prepared.source.invisible.clone();
     let pointer = prepared.bank.get(SampleId(10)).unwrap().samples().as_ptr();
     let (selected, report) = prepare_at(
@@ -254,7 +287,7 @@ fn source_bytes_load_the_unique_original_union_with_base62_aliases_and_pre_io_sa
         .is_err()
     );
     no_assets(&assets, &decoder);
-    // Alias reuse saves decode work, never per-SampleId owned PCM budget.
+    // Alias reuse saves decode work, never per-SampleId logical PCM budget.
     let assets = union_assets();
     let decoder = Decoder::default();
     assert!(
