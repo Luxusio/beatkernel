@@ -113,6 +113,16 @@ owned browser/display/server/profile/cache 정리도 확인했다. 이 근거는
 실제 음향/성능·다른 browser·full Goal 및 Harness close를 대신하지 않는다.
 [검증 변경 기록](../changes/2026-10-10-browser-record-result-continuity.md)을 따른다.
 
+E40: `703f7cc`의 Practice retained component/accepted-pose IME 연결은 독립
+DEEP code review PASS, CLI 2,796 PASS/16 ignored 및 Node 67 PASS다.
+현재 WASM의 실제 browser QA는 39 animation frames·이동 전후 클릭·editor repaint·
+opacity refusal·Back/reentry와 screenshot 6장을 PASS했다. Native ordinary 7개와
+명시 활성화한 실제 X11 window 1개도 PASS하고 직접 PNG를 검사했다. 다만 독립
+desktop QA는 runtime X11 MCP가 같은 창을 열거·캡처하지 못해 BLOCKED_ENV다.
+OS 입력/물리 IME·다른 화면·실제 하드웨어 성능 및 Harness close는 이 증거로
+충족하지 않는다. [검증 기록](../changes/2026-10-10-practice-component-motion.md)을
+따르며 10.16/10.17은 W, 전체 완료88/활성193을 유지한다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -315,7 +325,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-10.13** screen/fragment/back-stack의 suspend/resume/dispose와 취소를 명시적으로 관리한다. — 상태=D(검증완료); 선행=-; 근거=E0,E1; native/browser 전체 flow는 아래 추가.
 - [x] **BK-WBS-10.14** 노트 visible-range/index/cache가 전체 chart의 매-frame 순회를 피한다. — 상태=D(검증완료); 선행=-; 근거=E0,E1.
 - [ ] **BK-WBS-10.15** 비정상 dense 노트/큰 chart/장시간 projection에서 capacity와 정확한 표시 정책을 검증한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=GPU cache/explicit limit·성능 및 누락 검사.
-- [ ] **BK-WBS-10.16** 개별 component fractional transform/opacity/easing을 paint/hit/clip에 공통 적용한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E17/E18 browser Selection/Display, E24 native Selection/Display 소유자, E25 실제 native software Vulkan 이동/역 hit; [Practice 연결](../changes/2026-10-10-practice-component-motion.md)의 공통 API·browser/native 소유자·accepted-pose IME 구현 및 개발 fixture PASS, 현재 WASM 재빌드 완료. Practice 실제 화면/독립 QA와 나머지 화면 연동·하드웨어 검증은 필요.
+- [ ] **BK-WBS-10.16** 개별 component fractional transform/opacity/easing을 paint/hit/clip에 공통 적용한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E17/E18 browser Selection/Display, E24 native Selection/Display 소유자, E25 실제 native software Vulkan 이동/역 hit; E40 [Practice 연결](../changes/2026-10-10-practice-component-motion.md)의 공통 API·browser/native 소유자·accepted-pose IME 구현, 독립 code/CLI/browser QA 및 실제 native window/direct PNG 확인. Desktop MCP 동일 창 연결은 BLOCKED_ENV이며 나머지 화면 연동·OS 입력/IME·하드웨어 검증은 필요.
 - [ ] **BK-WBS-10.17** component animation scheduler의 frame budget·취소·suspend/resume/dispose를 구현한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E17 64-slot/수명/cache·worker scheduling, E18 browser 51프레임/dispose, E24 native 수명 fixture, E25 native 22프레임/cache/dispose; 실제 성능/frame budget 및 독립 QA 필요.
 - [ ] **BK-WBS-10.18** font fallback/Unicode/IME/clipboard/selection이 실제 native/browser 입력 방법에서 동작한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=순수 editor fixture + 실제 API/글꼴.
 - [ ] **BK-WBS-10.19** 0-size/resize/DPI/focus loss/renderer loss/close가 owner cleanup과 input geometry를 보존한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=실제 winit/GPU/browser lifecycle.

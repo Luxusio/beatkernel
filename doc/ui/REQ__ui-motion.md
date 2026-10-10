@@ -57,10 +57,11 @@ stale component identities, cross-screen ownership and capacity exhaustion refus
 atomically. The 64-component bound applies to actively bound motion components,
 not all mounted retained nodes. Rhythm notes remain outside this UI scheduler.
 
-Known ceiling: component source, deterministic fixtures and Selection/Display
-browser and native Desktop menu-owner integration are implemented. Native
-window/GPU motion has software Vulkan evidence; hardware performance and
-independent GUI QA remain pending. The other
+Known ceiling: component source, deterministic fixtures and Selection/Display/
+Practice browser and native Desktop menu-owner integration are implemented.
+Practice independent CLI/browser QA passes; its desktop adapter acceptance is
+blocked as detailed below. Native window/GPU motion has software Vulkan evidence;
+hardware performance and full independent GUI acceptance remain pending. The other
 shared menu views retain their existing rendering behavior; their control-motion
 requests are explicitly unsupported. Source APIs and mocked worker tests do not
 establish all-screen product animations or hardware input/paint parity.
@@ -75,7 +76,7 @@ An immutable scene geometry identity/revision is available to native adapters
 for checking cache reuse. Animation-only ticks must preserve both the identity
 and revision; reconstructing geometry is reserved for actual layout changes.
 
-## Practice motion contract — acceptance verification in progress
+## Practice motion contract — desktop adapter acceptance blocked
 
 Extend the same explicit control-motion capability to the current Practice
 screen instance. Start/end editors 70/75 and actions 71/72/73/76 resolve their
@@ -101,10 +102,12 @@ Verify actual Practice owners, editor repaint/rebinding, unpresented versus
 accepted hits and candidate anchors, hidden/zero-opacity refusal, stale requests,
 screen removal and unchanged geometry identity/revision. Real current WASM
 Worker and native window observations remain separate from pure fixtures.
-This section specifies intended behavior; source integration is implemented,
-while actual painted-frame acceptance and fresh independent review/QA are
-pending. Other screen motion and physical performance obligations
-remain in WBS10.16/10.17.
+This section specifies intended behavior. Source integration, independent DEEP
+code review, CLI QA and actual browser presentation/interaction pass. Native
+window rendering and direct screenshot inspection pass, but independent desktop
+QA remains BLOCKED_ENV: runtime X11 MCP could not enumerate and capture the same
+visible Practice window. Other screen motion and physical performance obligations
+remain in WBS10.16/10.17; this child is not closed.
 
 Foundation development verification (2026-10-10): the graphics-enabled app
 library's Practice filter passes 118 tests, including all four new retained
@@ -118,8 +121,18 @@ These results verify the shared foundations only. Browser/native owner
 fixtures subsequently pass five browser cases and seven native cases. Existing
 browser-menu, shared component-scene and native-related filters pass 29, 10 and
 49 cases respectively; overlapping filters are not unique-test totals. Native
-window tests remain ignored unless explicitly enabled. Actual painted Practice
-frames and independent review/QA remain pending.
+window tests remain ignored unless explicitly enabled. Independent combined CLI
+QA passes 2,796 tests with 16 ignored, plus 67 Node tests and Windows/macOS stub
+typing; foreign linking and OS execution are not established. Browser QA observes
+39 animation frames, actual old/new pointer positions, editor repaint, opacity
+refusal and fresh reentry, with six inspected screenshots and no browser errors.
+Explicit native X11 execution passes one actual Practice window test with 21
+animation frames and an inspected direct PNG. Desktop verification depth is
+window-rendered: typed host requests and accepted hit probes are exercised,
+while OS keyboard and physical IME acquisition are untested. Empty MCP window
+lists and black MCP screenshots do not prove same-window adapter binding.
+See [the verification record](../changes/2026-10-10-practice-component-motion.md)
+for preserved setup failures, cleanup and the remaining desktop acceptance gate.
 Logs are machine-local under `target/wf/practice-component-motion-01a12429/`.
 
 Native development evidence: `native-component-motion-check-development.log`
