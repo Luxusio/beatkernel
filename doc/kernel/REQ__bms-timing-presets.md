@@ -171,7 +171,7 @@ live selectors. Settings roundtrip, legacy settings reset, missing-rank
 rejection/recovery and two-member keyboard/touch capture were exercised.
 Both member recordings retained the selected numerical policy.
 
-The browser lens returned BLOCKED_ENV: remaining historical display/retry
+The earlier browser lens returned BLOCKED_ENV: remaining historical display/retry
 verification encountered software-GPU device destruction, a render
 acknowledgement timeout and a mixer-command rejection. Their environment versus
 production causes remain unproven. Evidence and screenshots are under
@@ -191,7 +191,9 @@ The generated BMS/WAV fixtures remain under
 `target/wf/bms-timing-independent-cli-fixture` and current executables under
 `target/wf/worklet-chronology-qa-cli-1/cargo/debug`. Independent CLI output was
 not redirected to log files; executable presence alone is not PASS evidence.
-WBS08.07 remains incomplete; passing subsets do not replace the blocked lens.
+That earlier run did not complete WBS08.07; passing subsets did not replace the
+blocked lens. The subsequent current-artifact acceptance below resolves the
+remaining browser behavior, while Harness attestation is checked separately.
 
 ## Known ceiling
 
@@ -208,3 +210,36 @@ replay with exact `1/4/0/1` score parity and original timing metadata, then loca
 two-player keyboard/touch stop. Independent visual inspection is confirmed;
 the continuity lens's final verdict is PASS. These follow-up observations do not automatically close the earlier
 timing task or complete its remaining WBS08.07 conditions.
+
+## Current selected-policy acceptance — 2026-10-10
+
+Fresh independent interactive browser QA at HEAD `6ac6769` uses main WASM
+`197cadc2fe3339d537d0e8460186b391c6137dec08eba5cece719a477d5ccefe`
+and unchanged audio WASM `7235be08ccf465e4b67678afa34273abe1d30ed9cdc05aafc8556fa4f42f06dc`.
+Original production Worker bytes and deadlines are preserved. Owned headed
+Xvfb/Chromium software Vulkan and a private 16 MiB tmpfs cache use the existing
+verified [browser setup](../verification/GUIDE__headless-webgpu.md).
+
+Actual selected-policy six-second capture and replay with conflicting live
+selectors finish with identical hits/misses/combo/maxCombo `1/4/0/1`. Record
+headers retain all sixteen grade/class/early/late rows across four profiles and
+the exact numerical/Hold versions. Stored score/provenance, next/back pages and
+loaded-record preview seek to 1.25 seconds and back to zero visibly work.
+Settings save/load, legacy reset, missing-rank refusal/recovery and selected
+stop/retry retain their specified policy. Two local keyboard/touch members both
+capture the same selected stage-window metadata from a 0.75-second section.
+
+The independent lens returns PASS; thirteen screenshots are visually inspected,
+with zero console/page errors or unexpected Worker failures. Both Node commands
+and owned Chromium/Xvfb exit zero; servers close and private profiles/caches are
+removed. Preserved earlier failures are not overwritten. Reproduce with
+`node target/wf/bms-timing-resume-20261010/run.mjs` and its focused `seek.mjs`;
+reports, original traces and screenshots are machine-local in that directory.
+
+Together with preceding full code review and independent CLI96 coverage, this
+completes the software numerical-preset integration scope of WBS08.07. Browser
+observation does not re-prove every core boundary or competition branch; those
+remain the prior fixture/review evidence. Actual device behavior, physical
+latency, full source-engine compatibility and the broader player remain separate.
+Task closure still requires ordered hook-owned Harness evidence; an actual PASS
+final without that evidence is non-attesting.

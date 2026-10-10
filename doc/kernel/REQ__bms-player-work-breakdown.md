@@ -123,6 +123,16 @@ OS 입력/물리 IME·다른 화면·실제 하드웨어 성능 및 Harness clos
 충족하지 않는다. [검증 기록](../changes/2026-10-10-practice-component-motion.md)을
 따르며 10.16/10.17은 W, 전체 완료88/활성193을 유지한다.
 
+E41: 현재 `6ac6769`/main WASM `197cadc2…`의 독립 browser timing QA는 실제
+선택 프리셋 capture→history→replay의 점수 `1/4/0/1`, 네 프로필의16개 판정 행,
+seek1.25/0, settings/legacy reset, missing-rank recovery, stop/retry 및
+2인 keyboard/touch 기록을 PASS했다. Screenshot13장을 시각 검사하고 오류0,
+owned browser/display/server/profile/cache cleanup을 확인했다.
+기존 독립 code review 및 CLI96과 합쳐08.07의 소프트웨어 프리셋 연결 기준을
+충족한다. [계약 및 현재 근거](REQ__bms-timing-presets.md#current-selected-policy-acceptance--2026-10-10),
+`target/wf/bms-timing-resume-20261010/REPORT.md`를 따른다. 실제 장치/물리 성능·
+전체 원본 엔진 호환·Harness close 및 전체 player 완료는 별도다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -275,7 +285,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-08.04** 선택 gauge·명시 class mapping·EX 계산이 opaque grade를 추정하지 않는다. — 상태=D(검증완료); 선행=-; 근거=E1.
 - [x] **BK-WBS-08.05** 연습 구간이 원래 TOTAL/note-count gauge context를 보존한다. — 상태=D(검증완료); 선행=-; 근거=E1.
 - [x] **BK-WBS-08.06** RANK/DEFEXRANK metadata를 typed validation·명시 precedence로 처리한다. — 상태=D(검증완료); 선행=-; 근거=E30, [typed metadata 계약](REQ__bms-judge-rank.md); timing preset은08.07에 유지.
-- [ ] **BK-WBS-08.07** key/scratch/LN-end별 versioned timing preset을 기존 ClassifiedWindow에 연결한다. — 상태=V(구현됨·검증대기); 선행=-; 근거/다음=[고정 numerical preset·staged core 계약](REQ__bms-timing-presets.md), `1d0c172`까지 ClassifiedWindow·completion·record identity·native/browser 선택 연결 구현; 독립 code review PASS, CLI96 PASS 및 현재 WASM 실제 solo/replay/settings/local capture 부분 확인. browser QA는 GPU 종료·render ACK timeout·추가 retry mixer 거절로 BLOCKED_ENV; 원인 분리와 남은 기록 표시/retry 검증 필요. 새 기본값 추정 금지.
+- [x] **BK-WBS-08.07** key/scratch/LN-end별 versioned timing preset을 기존 ClassifiedWindow에 연결한다. — 상태=D(검증완료); 선행=-; 근거=E41, [고정 numerical preset·staged core 계약](REQ__bms-timing-presets.md); ClassifiedWindow·completion·record identity·native/browser 선택 연결의 독립 code review/CLI96 및 현재 WASM의 실제 solo/history/replay/seek/settings/stop-retry/local capture PASS. 범위=opt-in software numerical windows 및 BeatKernel Hold v1; 물리 장치·전체 원본 엔진 호환 및08.08/08.09 정책은 별도. 기본값 변경 없음.
 - [ ] **BK-WBS-08.08** 기본 timing dialect와 역사적 LR2/nanasi 호환 범위를 확정한다. — 상태=P(정책선택대기); 선행=-; 필요 근거/다음=원문 spec만으로 millisecond 표를 추정하지 않음.
 - [ ] **BK-WBS-08.09** 동적 EXRANK/A0 의미와 필요한 timed policy를 primary source로 확인한다. — 상태=U(현황감사필요); 선행=-; 필요 근거/다음=서로 다른 engine 동작을 동일 표준으로 합치지 않음.
 - [x] **BK-WBS-08.10** fresh unmatched/repeat/refused 입력을 구별하는 authoritative empty-POOR disposition을 만든다. — 상태=D(검증완료); 선행=-; 근거=E32,REQ__input-disposition; penalty/dialect 선택은08.11에 유지.
@@ -504,6 +514,11 @@ Native collector termination 절에 있다.
 상세 behavior/architecture/라이선스는 연결된 기존 REQ/GUIDE/ADR이 계속 소유한다.
 
 ## 변경 이력
+
+- 2026-10-10: 기존 판정 프리셋 code review/CLI96과 현재 실제 browser의
+  남은 history/replay/seek/retry/local 검증 PASS를 대조해08.07을 D로 갱신했다.
+  완료88→89, 활성193 유지. 프리셋 software 연결과 Harness attestation/close,
+  전체 원본 엔진 호환·물리 검증을 구별한다.
 
 - 2026-10-09: 영상 BGA의 native/browser 실제 디코딩·GPU·플레이 경로와
   독립 code review/QA를 확인하여 08.17을 D로 갱신했다. 완료84→85,
