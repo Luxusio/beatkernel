@@ -32,8 +32,36 @@ per node, and native Display draft/view share an existing PanelScope lifetime.
 - Changed Rust files passed scoped rustfmt with skip_children=true and
   reorder_modules=false. WBS remains 90/193; no completion status was promoted.
 
-Independent review, foreign Rust checks and actual browser/native QA are still
-pending at this checkpoint. Development tests are not their verdicts.
+The development evidence above is distinct from the independent results below.
+
+## Independent verification checkpoint
+
+DEEP code review and CLI QA returned PASS for source revision a8cec5f. CLI QA
+executed the indexed-runtime, inventory/planner, canonical-device, retained UI,
+Display, clipboard/IME and actual Worker-source tests. It also exercised the
+public binary's help, genuine BMS/WAV render through a Unicode-and-space path,
+invalid inputs and existing-output refusal. Logs are local ignored artifacts
+under target/wf/player-cleanup-qa-cli; test filters overlap, so their counts
+are not a unique total.
+
+Linux native all-target Rust checking passed with desktop,webtransport. Windows
+and macOS equivalent all-target checks also passed; those two use C stubs and
+prove Rust types, not native SDK linking or device execution. Current WASM built
+successfully; its SHA256 is
+6904a82bf069d4e059c8b926aec6827eeebd949c4e1ff9c0953e41d415b71d8c.
+
+The first independent browser run genuinely demonstrated metadata-only catalog,
+selected BMS/WAV preparation, delayed acquisition, Window keyboard-event
+delivery and recovery with rendered preview captures. It then returned FAIL
+because the verification fixture expected an error CSS class instead of the
+production data-error attribute. The real selected-media error and retained
+preview were delivered. The fixture correction preserves production behavior
+and also collects console errors. A fresh review and meaningful browser rerun
+are required; the failing evidence remains in target/wf/player-cleanup-qa-browser.
+Owned browser, Xvfb and HTTP resources were cleaned up.
+
+Full browser/native journeys and independent live UX are not yet complete.
+Ordered hook attestation and task closure are not claimed. WBS remains 90/193.
 
 ## Known ceiling
 

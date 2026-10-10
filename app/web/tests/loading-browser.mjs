@@ -16,7 +16,7 @@ const wasmSha = hash(await readFile("app/web/pkg/beatkernel_bms_runtime_bg.wasm"
 assert.equal(wasmSha, expected);
 await mkdir(out, { recursive: true });
 const actualWorker = await readFile("app/web/worker.js");
-const evidence = { status: "RUNNING", wasmSha, actualWorkerSha256: hash(actualWorker), reads: [], steps: [], errors: [], cleanup: {}, ceilings: [
+const evidence = { status: "RUNNING", wasmSha, actualWorkerSha256: hash(actualWorker), reads: [], steps: [], errors: [], consoleErrors: [], cleanup: {}, ceilings: [
   "Functional software Chromium/SwiftShader evidence; timings are observations, not a throughput, latency or hardware benchmark.",
   "Pending source reads use the actual UI. While preparation is pending the host disables replacement/selection; late selection fencing is covered by deterministic Worker tests, not an invented GUI control.",
   "Browser page closure is the actual pending-owner retirement exercised here; no physical device/audio timing proof is claimed.",
@@ -117,12 +117,13 @@ try {
   evidence.browserCommand = browser.process().spawnargs;
   const page = await browser.newPage(); await page.setViewport({ width: 1200, height: 1000 }); page.setDefaultTimeout(30000);
   page.on("pageerror", e => evidence.errors.push(String(e))); await page.evaluateOnNewDocument(windowObservation);
+  page.on("console", message => { if (message.type() === "error") evidence.consoleErrors.push(message.text()); });
   await page.goto(base + "/app/web/", { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => !document.querySelector("#files").disabled);
   const reads = (name, phase = "begin") => evidence.reads.filter(x => x.name === name && x.phase === phase);
   const snapshot = async name => {
     const file = resolve(out, name + ".png"); await page.screenshot({ path: file, fullPage: true });
-    const state = await page.evaluate(() => ({ status: document.querySelector("#status").textContent, error: document.querySelector("#status").classList.contains("error"), title: document.querySelector("#title").textContent,
+    const state = await page.evaluate(() => ({ status: document.querySelector("#status").textContent, error: document.querySelector("#status").dataset.error === "true", title: document.querySelector("#title").textContent,
       chart: document.querySelector("#chart").value, prepareDisabled: document.querySelector("#prepare").disabled, messages: __loading.messages, input: __loading.input }));
     evidence.steps.push({ name, screenshot: file, ...state }); return state;
   };
@@ -164,7 +165,7 @@ try {
   releaseDelayed = true; for (const response of held) { response.writeHead(204); response.end(); }
   await prepared("Loading genuine delayed"); await snapshot("05-pending-read-genuine-recovery");
   await begin("broken.bms");
-  await page.waitForFunction(() => document.querySelector("#status").classList.contains("error") && !document.querySelector("#prepare").disabled);
+  await page.waitForFunction(() => document.querySelector("#status").dataset.error === "true" && !document.querySelector("#prepare").disabled);
   const failure = await snapshot("06-selected-acquisition-error-retains-preview");
   assert.match(failure.status, /Fixture selected media acquisition failure/); assert(failure.title.includes("Loading genuine delayed"));
   assert.equal(reads("broken.wav", "fixture-error").length, 1);
