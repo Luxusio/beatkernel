@@ -106,6 +106,19 @@ identify the executed artifacts. This is development verification; the required
 independent qa-browser lens still follows formal review. No comparative
 five-trial latency result or independent full-task PASS is claimed.
 
+The loading report consumer and its eight actual CLI tests now pass. Its first
+run passed four and failed four because fixture trial IDs were reused between
+groups. The corrected fixture assigns globally unique IDs and adds explicit
+duplicate-ID refusal coverage; the rerun passed eight with zero failures.
+Nearest-rank boundaries, five-trial minimum, request/event correlation,
+readiness ordering, artifact/configuration mismatch, cold/warm ownership and
+unavailable baseline measurements are covered. These synthetic CLI correctness
+fixtures are explicitly not player performance trials. Logs are
+`loading-report-development.log` and `loading-report-retry1.log` in the task
+evidence directory. The integrated preparation/catalog source and focused
+functional tests are committed as `acac653`; measurement runners and independent
+full-task review/QA remain in progress.
+
 ## Known ceiling
 
 Known ceiling: 보고서는 producer의 관측·hash·correlation 일관성을 검증하며, 실제 artifact 바이트나 물리적 지연을 독립 측정하지 않습니다.
