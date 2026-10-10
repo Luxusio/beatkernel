@@ -77,6 +77,24 @@ export function menuOpponentProjection(input) {
   return Object.freeze({ count, own, other });
 }
 
+export function snapshotMotionEndpoints(transforms, durationMs, easing = 0) {
+  if (!ArrayBuffer.isView(transforms)
+    || Object.prototype.toString.call(transforms) !== "[object Float32Array]" || transforms.length !== 10
+    || !transforms.every(Number.isFinite) || !Number.isFinite(durationMs) || durationMs < 0
+    || !Number.isInteger(easing) || easing < 0 || easing > 3) throw new Error("Invalid component motion.");
+  const values = new Float32Array(transforms);
+  for (const at of [0, 5]) {
+    if (Math.abs(values[at]) > 16777216 || Math.abs(values[at + 1]) > 16777216
+      || values[at + 2] < 1 / 16 || values[at + 2] > 16 || values[at + 3] < 1 / 16 || values[at + 3] > 16
+      || values[at + 4] < 0 || values[at + 4] > 1) throw new Error("Invalid bounded component motion endpoints.");
+  }
+  return { transforms: values, durationMs, easing };
+}
+export function snapshotMenuMotion(control, transforms, durationMs, easing = 0) {
+  if (!unsignedIdentity(control)) throw new Error("Invalid menu motion control.");
+  return { control, ...snapshotMotionEndpoints(transforms, durationMs, easing) };
+}
+
 export class RenderClient {
   #port; #generation; #content; #limit; #diagnostics; #timeout; #onError; #onGeometry;
   #pending = null; #dirty = null; #operationId = 0n; #state = "ready"; #failure = null;
@@ -159,6 +177,19 @@ export class RenderClient {
     else if (operation === "resize" && boundedU32(width) && boundedU32(height) && unsignedIdentity(geometryVersion)) snapshot = { width, height, geometryVersion };
     else if (operation === "page" && boundedU32(page) && typeof comparisons === "boolean" && unsignedIdentity(geometryVersion)) snapshot = { page, comparisons, geometryVersion };
     else if (operation === "room-page" && boundedU32(page) && unsignedIdentity(geometryVersion)) snapshot = { page, geometryVersion };
+    else if (operation === "menu-motion") {
+      const { menuGeneration, screen, revision } = fields;
+      if (!this.#menu || menuGeneration !== this.#menu.generation || screen !== this.#menu.screen
+        || revision !== this.#menu.revision || !unsignedIdentity(geometryVersion)) throw new Error("Stale menu motion control.");
+      snapshot = { ...snapshotMenuMotion(fields.control, fields.transforms, fields.durationMs, fields.easing),
+        menuGeneration, screen, revision, geometryVersion };
+    }
+    else if (operation === "results-motion") {
+      const { node, transforms, durationMs, easing } = fields;
+      if (this.#mode !== "results" || !Number.isInteger(node) || node < 0 || node >= 1024
+        || !unsignedIdentity(geometryVersion)) throw new Error("Invalid Results motion control.");
+      snapshot = { node, ...snapshotMotionEndpoints(transforms, durationMs, easing), geometryVersion };
+    }
     else if (operation === "menu-details" && boundedU32(page) && typeof details === "boolean" && unsignedIdentity(geometryVersion)) snapshot = { page, details, geometryVersion };
     else throw new Error("Invalid render control.");
     this.#available();
@@ -220,6 +251,13 @@ export class RenderClient {
       return;
     }
     if (!pending || operationId !== pending.operationId) return;
+    if (kind === "control-reject") {
+      if (!["menu-motion", "results-motion"].includes(pending.operation) || operation !== pending.operation || geometryVersion !== pending.geometryVersion
+        || typeof message !== "string" || message.length > this.#diagnostics) return;
+      clearTimeout(pending.timer); this.#pending = null;
+      pending.reject(new Error(message));
+      return;
+    }
     if (pending.menuHeader) {
       const header = pending.menuHeader;
       if (kind !== "menu-ack" || menuGeneration !== header.generation || screen !== header.screen || revision !== header.revision) return;

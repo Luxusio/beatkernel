@@ -118,3 +118,29 @@ ignored `target/toolchain/native-ui-runtime`; prepend its
 `usr/lib/x86_64-linux-gnu` directory to that test process's `LD_LIBRARY_PATH`.
 No system package installation, service or Docker change is needed. Other hosts
 must use compatible runtime packages rather than assuming these versions apply.
+
+## Code-smell cleanup during player development
+
+On 2026-10-10 the user requested cleaning code smells while continuing the full
+player Goal. Prefer removing duplicated algorithms, forwarding-only contracts
+and obsolete internal import paths over adding frameworks. Preserve genuine
+runtime behavior, audio/input boundaries, submitted UI poses and existing tests.
+Use small cohesive changes with explicit ownership and focused regressions;
+source presence or an advisory audit does not establish acceptance.
+
+The audit identified the following cleanup batches. They remain pending until
+their implementation and relevant verification actually complete:
+
+- Current motion feature: share duplicated pose restoration, keeping platform
+  admission identities and lifecycle ownership local to their adapters.
+- Application output: migrate internal imports to canonical domain paths and
+  remove redundant native/common trait forwarding with compatibility accounted.
+- Core input/audio: index keysound bindings by object/stage while preserving
+  fanout order, partial success and failure reports. Measure allocations before
+  changing report buffers or built-in/custom interaction storage.
+- UI/application: reduce repeated repaint clones and clarify cache ownership;
+  group cohesive screen state rather than introducing a universal controller.
+
+Keep the existing four crate boundaries and native output configuration.
+Current boxed judge interactions and reactive UI callbacks have real costs;
+do not describe the complete implementation as zero-cost without evidence.

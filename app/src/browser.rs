@@ -558,8 +558,8 @@ impl BrowserLibrary {
         if start_ns < 0 {
             return Err(js_error("live section start must be nonnegative"));
         }
-        let selection = timing_policy::parse_selection(preset_id, rank_precedence, gauge)
-            .map_err(js_error)?;
+        let selection =
+            timing_policy::parse_selection(preset_id, rank_precedence, gauge).map_err(js_error)?;
         let start = Timestamp::from_nanos(start_ns);
         let limits = PcmLimits::new(
             max_pcm_asset_bytes as usize,
@@ -982,6 +982,7 @@ impl BrowserView {
             menu.set_record_preview(menu.model.token, record)
                 .map_err(js_error)?;
         }
+        self.canvas.dispose_results_motion();
         Ok(revision)
     }
     pub fn draw_menu(&mut self) -> Result<(), JsValue> {
@@ -1270,6 +1271,9 @@ impl BrowserView {
             wire::WirePacket::Results(model) => {
                 let view =
                     crate::ui::results::FrozenResultsView::from_model(model).map_err(js_error)?;
+                self.canvas
+                    .register_results_motion((header.generation, header.content))
+                    .map_err(js_error)?;
                 self.visual = Some(VisualPresentation::Results {
                     view,
                     page: 0,
@@ -1287,11 +1291,15 @@ impl BrowserView {
                         unreachable!()
                     };
                     *room = Some((model, page));
+                    self.canvas.invalidate_results();
                 } else {
                     self.visual = Some(VisualPresentation::Room { model, page });
                     self.current = None;
                 }
             }
+        }
+        if registration && !combined_room && header.kind != wire::RESULTS {
+            self.canvas.dispose_results_motion();
         }
         self.visual_generation_floor = self.visual_generation_floor.max(header.generation);
         self.visual_identity = Some((header.generation, header.content, header.sequence));
@@ -1329,6 +1337,9 @@ impl BrowserView {
                 {
                     return Err(js_error("invalid visual Results page/mode"));
                 }
+                self.canvas
+                    .prune_results_motion(view, requested as usize, comparisons)
+                    .map_err(js_error)?;
                 *page = requested as usize;
                 *mode = comparisons;
             }
@@ -1350,6 +1361,7 @@ impl BrowserView {
         };
         model.project(requested as usize).map_err(js_error)?;
         *page = requested as usize;
+        self.canvas.invalidate_results();
         Ok(())
     }
     /// Applied presentation page, independent of any requested UI page.
@@ -1371,6 +1383,104 @@ impl BrowserView {
         }
     }
     pub fn draw_visual(&mut self) -> Result<(), JsValue> {
+        let now = self.canvas.results_motion_time().as_secs_f64() * 1000.0;
+        self.draw_visual_at(now).map(|_| ())
+    }
+    pub fn displayed_results_nodes(&self) -> Result<Vec<u32>, JsValue> {
+        let Some(render::VisualPresentation::Results {
+            view,
+            page,
+            comparisons,
+            ..
+        }) = self.visual.as_ref()
+        else {
+            return Err(js_error("Results not registered"));
+        };
+        view.displayed_nodes(*page, *comparisons)
+            .map_err(js_error)?
+            .into_iter()
+            .map(|node| u32::try_from(node.0).map_err(js_error))
+            .collect()
+    }
+    pub fn request_results_motion(
+        &mut self,
+        generation: u64,
+        content: u64,
+        node: u32,
+        values: js_sys::Float32Array,
+        duration_ms: f64,
+        easing: u32,
+        now_ms: f64,
+    ) -> Result<(), JsValue> {
+        if self
+            .visual_identity
+            .is_none_or(|(g, c, _)| (g, c) != (generation, content))
+        {
+            return Err(js_error("foreign Results registration"));
+        }
+        let Some(render::VisualPresentation::Results {
+            view,
+            page,
+            comparisons,
+            room,
+        }) = self.visual.as_ref()
+        else {
+            return Err(js_error("Results not registered"));
+        };
+        if node >= 1024 || values.length() != 10 {
+            return Err(js_error("invalid Results motion target/endpoints"));
+        }
+        let now = menu_presentation_time(now_ms)?;
+        let duration = menu_presentation_time(duration_ms)?;
+        let mut v = [0.0; 10];
+        values.copy_to(&mut v);
+        let from =
+            crate::scene::UiTransform::new([v[0], v[1]], [v[2], v[3]], v[4]).map_err(js_error)?;
+        let to =
+            crate::scene::UiTransform::new([v[5], v[6]], [v[7], v[8]], v[9]).map_err(js_error)?;
+        let easing = match easing {
+            0 => crate::ui::motion::Easing::Linear,
+            1 => crate::ui::motion::Easing::EaseIn,
+            2 => crate::ui::motion::Easing::EaseOut,
+            3 => crate::ui::motion::Easing::EaseInOut,
+            _ => return Err(js_error("invalid motion easing")),
+        };
+        let room = room
+            .as_ref()
+            .map(|(model, page)| model.project(*page))
+            .transpose()
+            .map_err(js_error)?;
+        self.canvas
+            .request_results_motion(
+                (generation, content),
+                crate::ui::layout::NodeId(node as usize),
+                crate::ui::motion::ComponentMotion::new(from, to, duration, easing),
+                now,
+                view,
+                *page,
+                *comparisons,
+                room,
+            )
+            .map_err(js_error)
+    }
+    pub fn results_motion_active(&self) -> bool {
+        self.canvas.results_motion_active()
+    }
+    pub fn suspend_results_motion(&mut self, now_ms: f64) -> Result<(), JsValue> {
+        self.canvas
+            .suspend_results_motion(menu_presentation_time(now_ms)?)
+            .map_err(js_error)
+    }
+    pub fn resume_results_motion(&mut self, now_ms: f64) -> Result<(), JsValue> {
+        self.canvas
+            .resume_results_motion(menu_presentation_time(now_ms)?)
+            .map_err(js_error)
+    }
+    pub fn dispose_results_motion(&mut self) {
+        self.canvas.dispose_results_motion();
+    }
+    pub fn draw_visual_at(&mut self, now_ms: f64) -> Result<bool, JsValue> {
+        let now = menu_presentation_time(now_ms)?;
         use render::VisualPresentation;
         match self
             .visual
@@ -1396,14 +1506,17 @@ impl BrowserView {
                     .map(|(model, page)| model.project(*page))
                     .transpose()
                     .map_err(js_error)?;
-                self.canvas
-                    .present_frozen_results(view, *page, *comparisons, room)
+                return self
+                    .canvas
+                    .present_frozen_results_at(view, *page, *comparisons, room, now)
+                    .map_err(js_error);
             }
             VisualPresentation::Room { model, page } => self
                 .canvas
                 .present_room_results(model.project(*page).map_err(js_error)?),
         }
-        .map_err(js_error)
+        .map_err(js_error)?;
+        Ok(!self.canvas.needs_redraw())
     }
     /// Movie descriptors are admitted separately from the unchanged visual wire.
     pub fn register_video(
@@ -1528,6 +1641,7 @@ impl BrowserView {
     pub fn retire_visual(&mut self) {
         // Renderer disposal owns any texture remaining after a removal failure.
         let _ = self.retire_video();
+        self.canvas.dispose_results_motion();
         self.visual = None;
         self.visual_identity = None;
         self.current = None;

@@ -64,6 +64,12 @@ mod browser_local_saved_fixtures;
 pub mod browser_menu;
 #[cfg(all(feature = "graphics", test))]
 mod browser_menu_fixtures;
+#[cfg(all(feature = "graphics", test))]
+mod browser_remaining_motion_fixtures;
+#[cfg(feature = "graphics")]
+pub(crate) mod browser_results_motion;
+#[cfg(all(feature = "graphics", test))]
+mod browser_results_motion_fixtures;
 /// Browser bindings for the common multiplayer session and bounded framing.
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_multiplayer;

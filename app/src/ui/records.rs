@@ -588,6 +588,7 @@ struct DetailCache {
     comparison: Option<Arc<Option<crate::competition_presentation::CompetitionSnapshot>>>,
     presentation: crate::historical_record_presentation::HistoricalRecordPresentation,
     geometry: Option<crate::scene::GeometrySnapshot>,
+    nodes: RetainedNodes,
     grade_page: usize,
     grade_geometry: crate::scene::GeometrySnapshot,
 }
@@ -641,6 +642,73 @@ fn detail_geometry(
         }
     }
     scene.geometry_snapshot().map(Some)
+}
+/// Detail packets retain the same mounted identities as their ordinary cached page.
+fn detail_nodes(
+    layout: &MountedLayout<Component>,
+    presentation: &crate::historical_record_presentation::HistoricalRecordPresentation,
+    grade_geometry: &crate::scene::GeometrySnapshot,
+    page: usize,
+    hovered: Option<ControlId>,
+    armed: Option<ControlId>,
+) -> Result<RetainedNodes, String> {
+    let extent = layout.extent();
+    let mut nodes = RetainedNodes::new(extent[0], extent[1])?;
+    nodes.static_layout_node(
+        layout,
+        &[node_id(layout, Component::Background)],
+        |_, geometry, scene, _| {
+            let bounds = geometry.bounds;
+            rect(
+                scene,
+                bounds.x,
+                bounds.y,
+                bounds.width,
+                bounds.height,
+                0x10151e,
+            );
+        },
+    )?;
+    // Keep the unshifted source before layout/ancestor cropping. RetainedNodes
+    // supplies the node-local source clip when this mounted body is animated.
+    let mut source = Scene::component_source(960, 720, 1024);
+    presentation.compose_body_for_page(page, &mut source)?;
+    source.append_geometry(grade_geometry)?;
+    source.status()?;
+    nodes.static_layout_node(
+        layout,
+        &[node_id(layout, Component::DetailBody)],
+        move |_, geometry, scene, _| {
+            if let Err(error) = append_clipped(
+                scene,
+                &source,
+                geometry,
+                [geometry.bounds.x, geometry.bounds.y],
+            ) {
+                scene.reject(error);
+            }
+        },
+    )?;
+    for (index, (control, _, label)) in DETAIL_BUTTONS.into_iter().enumerate() {
+        if detail_available(control, page, presentation.grade_page_count()) {
+            nodes.static_layout_node(
+                layout,
+                &[node_id(layout, Component::DetailButton(index))],
+                move |_, geometry, scene, hits| {
+                    button(
+                        scene,
+                        geometry.bounds,
+                        label,
+                        hovered == Some(control),
+                        armed == Some(control),
+                    );
+                    hits.push((control, geometry.bounds));
+                },
+            )?;
+        }
+    }
+    nodes.validate()?;
+    Ok(nodes)
 }
 /// Cached historical geometry is projected through the same mounted clip as its actions.
 fn append_clipped(
@@ -1204,14 +1272,24 @@ impl RecordsView {
                 .borrow()
                 .as_ref()
                 .map(|cache| {
-                    detail_geometry(
-                        &candidate,
-                        &cache.presentation,
-                        &cache.grade_geometry,
-                        cache.grade_page,
-                        self.detail_hovered.get(),
-                        self.detail_armed.get(),
-                    )
+                    Ok::<_, String>((
+                        detail_geometry(
+                            &candidate,
+                            &cache.presentation,
+                            &cache.grade_geometry,
+                            cache.grade_page,
+                            self.detail_hovered.get(),
+                            self.detail_armed.get(),
+                        )?,
+                        detail_nodes(
+                            &candidate,
+                            &cache.presentation,
+                            &cache.grade_geometry,
+                            cache.grade_page,
+                            self.detail_hovered.get(),
+                            self.detail_armed.get(),
+                        )?,
+                    ))
                 })
                 .transpose()?
         } else {
@@ -1219,8 +1297,11 @@ impl RecordsView {
         };
         self.nodes.relayout(&candidate)?;
         *self.layout.borrow_mut() = candidate;
-        if let Some(geometry) = staged {
-            self.detail_cache.borrow_mut().as_mut().unwrap().geometry = geometry;
+        if let Some((geometry, nodes)) = staged {
+            let mut cache = self.detail_cache.borrow_mut();
+            let cache = cache.as_mut().unwrap();
+            cache.geometry = geometry;
+            cache.nodes = nodes;
         }
         if self.details.get() && detail_changed {
             self.detail_dirty.set(true);
@@ -1248,6 +1329,65 @@ impl RecordsView {
                     && clipped_bounds(geometry).is_some_and(|bounds| bounds.contains(point)))
                 .then_some(*id)
             })
+    }
+    /// Resolve only controls belonging to the currently displayed record surface.
+    pub fn node_for_control(&self, control: ControlId) -> Result<Option<NodeId>, String> {
+        if self.details.get() {
+            let cache = self.detail_cache.borrow();
+            let cache = cache.as_ref().ok_or("Records details cache unavailable")?;
+            cache.nodes.node_for_control(control)
+        } else {
+            self.nodes.node_for_control(control)
+        }
+    }
+    pub fn compose_components(
+        &self,
+        scene: &mut Scene,
+        hits: &mut Vec<(ControlId, Bounds)>,
+        screen: ScreenInstanceId,
+        animated: &[NodeId],
+    ) -> Result<(), String> {
+        let cache = self.detail_cache.borrow();
+        let nodes = if self.details.get() {
+            &cache
+                .as_ref()
+                .ok_or("Records details cache unavailable")?
+                .nodes
+        } else {
+            &self.nodes
+        };
+        if self.detail_dirty.get() {
+            // A chooser/detail transition shares its screen owner. Force a cold
+            // candidate without discarding the published scene on refusal.
+            let mut candidate = scene.component_candidate();
+            let mut staged_hits = Vec::new();
+            nodes.compose_components(&mut candidate, &mut staged_hits, screen, animated)?;
+            hits.try_reserve(staged_hits.len())
+                .map_err(|_| "Records component hit allocation failed")?;
+            scene.publish_component_scene(candidate, screen);
+            hits.clear();
+            hits.extend_from_slice(&staged_hits);
+        } else {
+            nodes.compose_components(scene, hits, screen, animated)?;
+        }
+        self.detail_dirty.set(false);
+        Ok(())
+    }
+    pub fn hit_components(
+        &self,
+        scene: &Scene,
+        screen: ScreenInstanceId,
+        point: (f64, f64),
+    ) -> Option<ControlId> {
+        if self.details.get() {
+            self.detail_cache
+                .borrow()
+                .as_ref()?
+                .nodes
+                .hit_components(scene, screen, point)
+        } else {
+            self.nodes.hit_components(scene, screen, point)
+        }
     }
     pub const fn id(&self) -> ScreenInstanceId {
         self.id
@@ -1298,6 +1438,14 @@ impl RecordsView {
                     frame.hovered,
                     frame.armed,
                 )?;
+                let nodes = detail_nodes(
+                    &self.layout.borrow(),
+                    &presentation,
+                    &grade_geometry,
+                    frame.grade_page,
+                    frame.hovered,
+                    frame.armed,
+                )?;
                 staged = Some(DetailCache {
                     bms_score: preview.historical_bms_score,
                     value,
@@ -1305,6 +1453,7 @@ impl RecordsView {
                     comparison: (*preview.historical_comparison).clone(),
                     presentation,
                     geometry,
+                    nodes,
                     grade_page: frame.grade_page,
                     grade_geometry,
                 });
@@ -1332,19 +1481,28 @@ impl RecordsView {
                     frame.hovered,
                     frame.armed,
                 )?;
-                staged_geometry = Some((frame.grade_page, grade_geometry, geometry));
+                let nodes = detail_nodes(
+                    &self.layout.borrow(),
+                    &cache.presentation,
+                    &grade_geometry,
+                    frame.grade_page,
+                    frame.hovered,
+                    frame.armed,
+                )?;
+                staged_geometry = Some((frame.grade_page, grade_geometry, geometry, nodes));
             }
         }
         if let Some(cache) = staged {
             *self.detail_cache.borrow_mut() = Some(cache);
             self.detail_dirty.set(true);
         }
-        if let Some((page, grade_geometry, geometry)) = staged_geometry {
+        if let Some((page, grade_geometry, geometry, nodes)) = staged_geometry {
             let mut cache = self.detail_cache.borrow_mut();
             let cache = cache.as_mut().expect("prepared detail cache");
             cache.grade_page = page;
             cache.grade_geometry = grade_geometry;
             cache.geometry = geometry;
+            cache.nodes = nodes;
             self.detail_dirty.set(true);
         }
         if self.details.replace(frame.details) != frame.details {

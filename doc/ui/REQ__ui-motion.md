@@ -62,8 +62,9 @@ Practice browser and native Desktop menu-owner integration are implemented.
 Practice independent CLI/browser QA passes; its desktop adapter acceptance is
 blocked as detailed below. Native window/GPU motion has software Vulkan evidence;
 hardware performance and full independent GUI acceptance remain pending. The other
-shared menu views retain their existing rendering behavior; their control-motion
-requests are explicitly unsupported. Source APIs and mocked worker tests do not
+shared menu views currently retain their existing rendering behavior; extending
+their control-motion requests is the active remaining-component-motion task.
+Source APIs and mocked worker tests do not
 establish all-screen product animations or hardware input/paint parity.
 
 Native Desktop motion must be requested explicitly through a typed host command
@@ -75,6 +76,70 @@ boundary; these are presentation contracts, not gameplay clock authority.
 An immutable scene geometry identity/revision is available to native adapters
 for checking cache reuse. Animation-only ticks must preserve both the identity
 and revision; reconstructing geometry is reserved for actual layout changes.
+
+## Remaining menus and readonly Results — acceptance pending
+
+UI render transactions must preserve the original Scene when staging or
+publication fails. A public render candidate may contain only UI geometry;
+publication rejects a different logical extent, an errored candidate or active
+timed playfields before mutation. Successful publication retains existing note
+caches and uses the candidate's geometry identity and revision, so a pose-only
+change does not cause a geometry upload.
+Cold navigation from Play may stage a fresh UI candidate without copying the
+previous timed playfields. It preserves component slot epochs for checked
+rebinding and leaves the accepted Scene untouched until publication succeeds.
+
+Pose restoration uses the existing scheduler's screen identity and a bounded
+batch of mounted node/transform pairs. Resolve current live allocation epochs
+and rebind every active track before one atomic Scene transform update. A
+disposed scheduler, duplicate or absent node, invalid transform, failed Scene
+or oversized batch must leave both Scene and scheduler unchanged. Completed
+poses remain restorable, and an empty batch still validates active bindings
+without cancelling tracks. Restoration changes no time, geometry, node list,
+route admission or submitted pointer/IME pose.
+Both menu and Results renderer motion admission refusals must reject the
+individual request without terminating the renderer or an already admitted
+animation. Correlate rejection to operation, visual pair and attempted geometry
+version; preserve published geometry and allow subsequent valid requests.
+
+Settings, Records, Players and Devices must expose the same retained control/node
+association, component composition and transformed hit contract as Selection,
+Display and Practice. Both production owners must admit only currently displayed
+controls on the actual screen instance. Accepted pointer positions and native
+editor candidate rectangles follow the last successfully painted pose. Browser
+editor transactions retain their existing route/screen/revision/field correlation.
+Unpublished ticks, failed
+surface draws and zero extent cannot move input ahead of the image.
+
+Results remains readonly: explicit requests target mounted Scope, present Card
+slots or Footer nodes, without creating business actions. Genuine and frozen
+Results share the same bounded composition contract. Absent cards, duplicate
+targets, invalid transforms and foreign owners refuse before publication. Moving
+source packets retain node-local geometry and clips independently of fixed
+ancestor clips, so movement can reveal previously clipped portions correctly.
+Existing ordinary Results composition and score/completion authority are preserved.
+
+Native Results binds the active Results screen instance and admitted completed
+view. Browser Results authenticates the accepted generation/content pair and
+registration lifetime; sequence or same-owner room updates do not replace it.
+Numeric overlap between menu and Results presentation IDs must not transfer old
+Scene slots or poses; registration and mode replacement retire prior bindings.
+Replacing or retiring Results disposes its motion tracks. Page changes remove
+tracks for absent nodes and preserve surviving mounted-node poses. Zero extent
+suspends elapsed progress, and resume excludes suspended time.
+
+Motion-only frames reuse component geometry identity and revision, updating only
+uniform transforms. Cold target admission, page changes, layout changes and actual
+content changes may rebuild bounded packets. Results header/footer composition
+must preserve ordinary nonmoving geometry and painter order. Caller-supplied
+monotonic presentation time never becomes an audio or gameplay clock.
+
+Acceptance requires public-view tests for all four menus and both Results models,
+real native/browser owner lifecycle and submitted-pose tests, current production
+WASM/RendererWorker interaction with screenshots, and native software-window
+rendering. These obligations are pending in the active task. Direct native PNG
+evidence is separate from desktop MCP binding and physical-device performance;
+this extension alone does not complete WBS10.16/10.17.
 
 ## Practice motion contract — desktop adapter acceptance blocked
 

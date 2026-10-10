@@ -30,6 +30,66 @@ const ack = request => {
   return { kind: "state-ack", operationId: request.operationId, generation: header.generation,
     content: header.content, sequence: header.sequence, packetKind: header.kind };
 };
+
+function motionEndpoints() { return new Float32Array([0, 0, 1, 1, 1, 40, 10, 1.25, 0.75, 0.5]); }
+function motionMenuPacket() {
+  const bytes = new Uint8Array(48); bytes.set([66, 75, 77, 78]); const v = new DataView(bytes.buffer);
+  v.setBigUint64(4, 77n, true); v.setBigUint64(12, 3n, true); v.setBigUint64(20, 5n, true); v.setUint32(28, 2, true);
+  return bytes;
+}
+
+test("menu motion client authenticates exact acknowledged token and copies endpoints before transport", async () => {
+  const sent = []; const port = { postMessage: m => sent.push(m), start() {}, close() {} };
+  const client = new RenderClient({ port, generation: 7n, content: 9n,
+    maxPacketBytes: 4096, maxDiagnosticBytes: 1024, timeoutMs: 1000 });
+  const reply = data => port.onmessage({ data });
+  try {
+    const registration = client.menu(motionMenuPacket(), { geometryVersion: 1n });
+    reply({ kind: "menu-ack", operationId: sent[0].operationId, generation: 7n, content: 9n, menuGeneration: 77n, screen: 3n, revision: 5n }); await registration;
+    const fields = { menuGeneration: 77n, screen: 3n, revision: 5n, control: 1000n,
+      transforms: motionEndpoints(), durationMs: 1000, easing: 0, geometryVersion: 2n };
+    for (const wrong of [{ menuGeneration: 78n }, { screen: 4n }, { revision: 4n }, { control: 0n },
+      { transforms: new Float32Array(9) }, { durationMs: -1 }, { easing: 4 }]) {
+      await assert.rejects(client.control("menu-motion", { ...fields, ...wrong }));
+      assert.equal(client.pending, false); assert.equal(client.state, "ready"); assert.equal(sent.length, 1);
+    }
+    const expected = [...fields.transforms]; const pending = client.control("menu-motion", fields);
+    fields.transforms.fill(999); const request = sent.at(-1);
+    assert.equal(request.operationId, 2n); assert.deepEqual([...request.transforms], expected);
+    assert.equal(request.menuGeneration, 77n); assert.equal(request.screen, 3n); assert.equal(request.revision, 5n);
+    const good = { kind: "control-ack", operation: "menu-motion", operationId: request.operationId,
+      generation: 7n, content: 9n, geometryVersion: 2n };
+    for (const wrong of [{ generation: 8n }, { content: 10n }, { operationId: 3n }, { geometryVersion: 3n }]) {
+      reply({ ...good, ...wrong }); assert.equal(client.pending, true);
+    }
+    reply(good); await pending; assert.equal(client.pending, false);
+  } finally { client.close(); }
+});
+
+test("correlated menu motion rejection settles only its promise and allows the next control", async () => {
+  const sent = [], errors = []; const port = { postMessage: m => sent.push(m), start() {}, close() {} };
+  const client = new RenderClient({ port, generation: 7n, content: 9n, maxPacketBytes: 4096,
+    maxDiagnosticBytes: 1024, timeoutMs: 1000, onError: e => errors.push(e) });
+  const reply = data => port.onmessage({ data });
+  const fields = { menuGeneration: 77n, screen: 3n, revision: 5n, control: 1000n,
+    transforms: motionEndpoints(), durationMs: 1000, easing: 0, geometryVersion: 2n };
+  try {
+    const menu = client.menu(motionMenuPacket(), { geometryVersion: 1n });
+    reply({ kind: "menu-ack", generation: 7n, content: 9n, operationId: 1n, menuGeneration: 77n, screen: 3n, revision: 5n }); await menu;
+    const rejected = client.control("menu-motion", fields);
+    const rejection = { kind: "control-reject", operation: "menu-motion", operationId: 2n,
+      generation: 7n, content: 9n, geometryVersion: 2n, message: "unavailable target" };
+    for (const wrong of [{ content: 10n }, { generation: 8n }, { operationId: 3n }, { geometryVersion: 3n }, { operation: "resize" }]) {
+      reply({ ...rejection, ...wrong }); assert.equal(client.pending, true);
+    }
+    reply(rejection); await assert.rejects(rejected, /unavailable target/);
+    assert.equal(client.state, "ready"); assert.equal(client.failure, null); assert.deepEqual(errors, []);
+    const next = client.control("menu-motion", { ...fields, control: 1001n, geometryVersion: 3n });
+    reply(rejection); assert.equal(client.pending, true, "late rejection cannot settle a newer operation");
+    reply({ kind: "control-ack", operation: "menu-motion", operationId: 3n, generation: 7n, content: 9n, geometryVersion: 3n }); await next;
+    assert.equal(client.pending, false); assert.deepEqual(errors, []);
+  } finally { client.close(); }
+});
 async function register(h) {
   const done = h.client.packet(packet(1, 0n), { mode: "live" });
   await settle(); h.reply(ack(h.sent[0])); await done; h.sent.length = 0;

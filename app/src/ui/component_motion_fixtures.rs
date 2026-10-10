@@ -11,6 +11,325 @@ use crate::{
 };
 
 #[test]
+fn restore_poses_accepts_all_renderer_slots_independent_of_active_track_capacity() {
+    let owner = ScreenInstanceId(109);
+    let mut scene = Scene::with_capacity(200, 100, 64);
+    let mut scheduler = MotionScheduler::new(owner, 1).unwrap();
+    let mut ids = Vec::new();
+    let mut poses = Vec::new();
+    for index in 0..crate::scene::MAX_UI_COMPONENTS {
+        let (key, id) = component(&mut scene, owner, NodeId(index), 10);
+        ids.push(id);
+        poses.push((
+            key.node,
+            UiTransform::new([index as f32 + 1.0, 0.0], [1.0, 1.0], 1.0).unwrap(),
+        ));
+    }
+    let revision = scene.geometry_stamp().1;
+    assert!(scheduler.restore_poses(&mut scene, &poses).unwrap());
+    assert_eq!(scheduler.active_count(), 0);
+    for (id, (_, pose)) in ids.iter().zip(&poses) {
+        assert_eq!(scene.component_transform(*id), Some(*pose));
+    }
+    let mut overflow = poses.clone();
+    overflow.push((poses[0].0, UiTransform::default()));
+    assert!(scheduler.restore_poses(&mut scene, &overflow).is_err());
+    for (id, (_, pose)) in ids.iter().zip(&poses) {
+        assert_eq!(scene.component_transform(*id), Some(*pose));
+    }
+    assert_eq!(scene.geometry_stamp().1, revision);
+}
+
+#[test]
+fn restore_poses_preserves_completed_targets_and_geometry_without_consuming_track_capacity() {
+    let owner = ScreenInstanceId(101);
+    let mut scene = Scene::with_capacity(200, 100, 8);
+    let (completed_key, completed_id) = component(&mut scene, owner, NodeId(1), 10);
+    let (active_key, active_id) = component(&mut scene, owner, NodeId(2), 30);
+    let mut scheduler = MotionScheduler::new(owner, 1).unwrap();
+    scheduler
+        .schedule(completed_key, completed_id, motion(0), Duration::ZERO)
+        .unwrap();
+    scheduler.tick(owner, Duration::ZERO, &mut scene).unwrap();
+    assert_eq!(scheduler.active_count(), 0);
+    let completed_pose = scene.component_transform(completed_id).unwrap();
+    scheduler
+        .schedule(active_key, active_id, motion(100), Duration::ZERO)
+        .unwrap();
+    scheduler
+        .tick(owner, Duration::from_nanos(25), &mut scene)
+        .unwrap();
+    let active_pose = scene.component_transform(active_id).unwrap();
+    scene
+        .set_component_transforms(&[
+            (completed_id, UiTransform::default()),
+            (active_id, UiTransform::default()),
+        ])
+        .unwrap();
+    let identity = scene.geometry_stamp().0.clone();
+    let revision = scene.geometry_stamp().1;
+    let rectangles = scene.rectangles().as_ptr();
+    let poses = [
+        (completed_key.node, completed_pose),
+        (active_key.node, active_pose),
+    ];
+    assert!(scheduler.restore_poses(&mut scene, &poses).unwrap());
+    assert!(!scheduler.restore_poses(&mut scene, &poses).unwrap());
+    assert_eq!(scheduler.active_count(), 1);
+    assert_eq!(
+        scene.component_transform(completed_id),
+        Some(completed_pose)
+    );
+    assert_eq!(scene.component_transform(active_id), Some(active_pose));
+    assert!(std::sync::Arc::ptr_eq(&identity, scene.geometry_stamp().0));
+    assert_eq!(scene.geometry_stamp().1, revision);
+    assert_eq!(scene.rectangles().as_ptr(), rectangles);
+    scheduler
+        .tick(owner, Duration::from_nanos(50), &mut scene)
+        .unwrap();
+    assert_eq!(
+        scene.component_transform(active_id).unwrap().offset(),
+        [4.0, -2.0]
+    );
+    assert_eq!(
+        scene.component_transform(completed_id),
+        Some(completed_pose)
+    );
+}
+
+#[test]
+fn restore_poses_late_missing_target_and_duplicate_refuse_the_entire_pose_batch() {
+    let owner = ScreenInstanceId(102);
+    let mut scene = Scene::with_capacity(200, 100, 8);
+    let (key, id) = component(&mut scene, owner, NodeId(1), 10);
+    let (_, other_id) = component(&mut scene, owner, NodeId(2), 30);
+    let mut scheduler = MotionScheduler::new(owner, 1).unwrap();
+    scheduler
+        .schedule(key, id, motion(100), Duration::ZERO)
+        .unwrap();
+    scheduler
+        .tick(owner, Duration::from_nanos(25), &mut scene)
+        .unwrap();
+    let pose = scene.component_transform(id).unwrap();
+    let other_pose = scene.component_transform(other_id);
+    let requested = UiTransform::new([35.0, 5.0], [1.0, 1.0], 0.25).unwrap();
+    let identity = scene.geometry_stamp().0.clone();
+    let revision = scene.geometry_stamp().1;
+    for poses in [
+        vec![(key.node, requested), (NodeId(999), requested)],
+        vec![(key.node, requested), (key.node, requested)],
+        (0..65).map(|node| (NodeId(node), requested)).collect(),
+    ] {
+        assert!(scheduler.restore_poses(&mut scene, &poses).is_err());
+        assert_eq!(scene.component_transform(id), Some(pose));
+        assert_eq!(scene.component_transform(other_id), other_pose);
+        assert_eq!(scheduler.active_count(), 1);
+        assert!(scheduler.validate_time(Duration::from_nanos(25)).is_ok());
+        assert!(scheduler.validate_time(Duration::from_nanos(24)).is_err());
+        assert!(std::sync::Arc::ptr_eq(&identity, scene.geometry_stamp().0));
+        assert_eq!(scene.geometry_stamp().1, revision);
+    }
+    scheduler
+        .tick(owner, Duration::from_nanos(50), &mut scene)
+        .unwrap();
+    assert_eq!(scene.component_transform(id).unwrap().offset(), [4.0, -2.0]);
+}
+
+#[test]
+fn restore_poses_missing_active_binding_does_not_partially_rebind_scheduler() {
+    let owner = ScreenInstanceId(103);
+    let mut original = Scene::with_capacity(200, 100, 8);
+    let (first_key, first_id) = component(&mut original, owner, NodeId(1), 10);
+    let (second_key, second_id) = component(&mut original, owner, NodeId(2), 30);
+    let mut scheduler = MotionScheduler::new(owner, 2).unwrap();
+    for (key, id) in [(first_key, first_id), (second_key, second_id)] {
+        scheduler
+            .schedule(key, id, motion(100), Duration::ZERO)
+            .unwrap();
+    }
+    scheduler
+        .tick(owner, Duration::from_nanos(25), &mut original)
+        .unwrap();
+    let mut replacement = Scene::with_capacity(200, 100, 8);
+    // Consume a renderer epoch so this is genuinely a different allocation.
+    component(&mut replacement, ScreenInstanceId(104), NodeId(9), 50);
+    replacement.dispose_components(ScreenInstanceId(104));
+    let (_, fresh_id) = component(&mut replacement, owner, first_key.node, 10);
+    assert_ne!(fresh_id, first_id);
+    let identity = replacement.geometry_stamp().0.clone();
+    let revision = replacement.geometry_stamp().1;
+    for poses in [
+        vec![],
+        vec![(
+            first_key.node,
+            UiTransform::new([10.0, 0.0], [1.0, 1.0], 1.0).unwrap(),
+        )],
+    ] {
+        assert!(scheduler.restore_poses(&mut replacement, &poses).is_err());
+        assert_eq!(
+            replacement.component_transform(fresh_id),
+            Some(UiTransform::default())
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &identity,
+            replacement.geometry_stamp().0
+        ));
+        assert_eq!(replacement.geometry_stamp().1, revision);
+        assert_eq!(scheduler.active_count(), 2);
+    }
+    // The original scene remains a behavioral witness for both old IDs: a
+    // partially committed rebind would make this tick fail on its first track.
+    scheduler
+        .tick(owner, Duration::from_nanos(50), &mut original)
+        .unwrap();
+    for id in [first_id, second_id] {
+        assert_eq!(
+            original.component_transform(id).unwrap().offset(),
+            [4.0, -2.0]
+        );
+    }
+}
+
+#[test]
+fn restore_poses_reclaimed_epochs_keep_suspended_elapsed_progress_and_completed_pose() {
+    let owner = ScreenInstanceId(105);
+    let mut scene = Scene::with_capacity(200, 100, 8);
+    let (key, old_id) = component(&mut scene, owner, NodeId(1), 10);
+    let (completed_key, completed_id) = component(&mut scene, owner, NodeId(2), 30);
+    let mut scheduler = MotionScheduler::new(owner, 1).unwrap();
+    let completed_pose = UiTransform::new([12.0, 0.0], [1.0, 1.0], 0.5).unwrap();
+    scene
+        .set_component_transforms(&[(completed_id, completed_pose)])
+        .unwrap();
+    scheduler
+        .schedule(key, old_id, motion(100), Duration::ZERO)
+        .unwrap();
+    scheduler
+        .tick(owner, Duration::from_nanos(25), &mut scene)
+        .unwrap();
+    let quarter = scene.component_transform(old_id).unwrap();
+    scheduler.suspend(Duration::from_nanos(25)).unwrap();
+    scene.dispose_components(owner);
+    let clip = ClipRect::new([0, 0, 200, 100]).unwrap();
+    let fresh_id = scene
+        .bind_component(
+            key,
+            &[0..1],
+            ClipRect::new([10, 10, 10, 10]).unwrap(),
+            Some(clip),
+        )
+        .unwrap();
+    let fresh_completed = scene
+        .bind_component(
+            completed_key,
+            &[1..2],
+            ClipRect::new([30, 10, 10, 10]).unwrap(),
+            Some(clip),
+        )
+        .unwrap();
+    assert_ne!(fresh_id, old_id);
+    assert_ne!(fresh_completed, completed_id);
+    let revision = scene.geometry_stamp().1;
+    assert!(scheduler
+        .restore_poses(
+            &mut scene,
+            &[(key.node, quarter), (completed_key.node, completed_pose)]
+        )
+        .unwrap());
+    assert_eq!(scene.geometry_stamp().1, revision);
+    assert_eq!(
+        scene.component_transform(fresh_completed),
+        Some(completed_pose)
+    );
+    assert!(scene
+        .set_component_transforms(&[(old_id, UiTransform::default())])
+        .is_err());
+    scheduler.resume(Duration::from_nanos(1000)).unwrap();
+    assert!(!scheduler
+        .tick(owner, Duration::from_nanos(1000), &mut scene)
+        .unwrap());
+    scheduler
+        .tick(owner, Duration::from_nanos(1025), &mut scene)
+        .unwrap();
+    assert_eq!(
+        scene.component_transform(fresh_id).unwrap().offset(),
+        [4.0, -2.0]
+    );
+    assert_eq!(
+        scene.component_transform(fresh_completed),
+        Some(completed_pose)
+    );
+}
+
+#[test]
+fn restore_poses_empty_batch_keeps_live_tracks_and_disposed_owner_refuses() {
+    let owner = ScreenInstanceId(106);
+    let mut scene = Scene::with_capacity(200, 100, 4);
+    let (key, id) = component(&mut scene, owner, NodeId(1), 10);
+    let mut scheduler = MotionScheduler::new(owner, 1).unwrap();
+    scheduler
+        .schedule(key, id, motion(100), Duration::ZERO)
+        .unwrap();
+    assert!(!scheduler.restore_poses(&mut scene, &[]).unwrap());
+    assert_eq!(scheduler.active_count(), 1);
+    scheduler
+        .tick(owner, Duration::from_nanos(50), &mut scene)
+        .unwrap();
+    let pose = scene.component_transform(id);
+    assert_eq!(pose.unwrap().offset(), [4.0, -2.0]);
+    assert_eq!(scheduler.dispose(), 1);
+    for poses in [vec![], vec![(key.node, UiTransform::default())]] {
+        assert!(scheduler.restore_poses(&mut scene, &poses).is_err());
+        assert_eq!(scene.component_transform(id), pose);
+        assert_eq!(scheduler.active_count(), 0);
+        assert!(scheduler.disposed());
+    }
+}
+
+#[test]
+fn restore_poses_error_scene_refuses_even_empty_batch_without_rebinding_tracks() {
+    let owner = ScreenInstanceId(107);
+    let mut original = Scene::with_capacity(200, 100, 4);
+    let (key, id) = component(&mut original, owner, NodeId(1), 10);
+    let mut scheduler = MotionScheduler::new(owner, 1).unwrap();
+    scheduler
+        .schedule(key, id, motion(100), Duration::ZERO)
+        .unwrap();
+    let mut failed = Scene::with_capacity(200, 100, 4);
+    component(&mut failed, ScreenInstanceId(108), NodeId(9), 50);
+    failed.dispose_components(ScreenInstanceId(108));
+    let (_, fresh_id) = component(&mut failed, owner, key.node, 10);
+    for _ in 0..crate::scene::MAX_RECTANGLES {
+        failed.rect(0, 0, 1, 1, 0xffffff);
+    }
+    assert!(failed.status().is_err());
+    assert_ne!(fresh_id, id);
+    let revision = failed.geometry_stamp().1;
+    for poses in [
+        vec![],
+        vec![(
+            key.node,
+            UiTransform::new([10.0, 0.0], [1.0, 1.0], 1.0).unwrap(),
+        )],
+    ] {
+        assert!(scheduler.restore_poses(&mut failed, &poses).is_err());
+        assert_eq!(
+            failed.component_transform(fresh_id),
+            Some(UiTransform::default())
+        );
+        assert_eq!(failed.geometry_stamp().1, revision);
+        assert_eq!(scheduler.active_count(), 1);
+    }
+    scheduler
+        .tick(owner, Duration::from_nanos(50), &mut original)
+        .unwrap();
+    assert_eq!(
+        original.component_transform(id).unwrap().offset(),
+        [4.0, -2.0]
+    );
+}
+
+#[test]
 fn moving_source_clip_and_fixed_ancestor_clip_admit_the_same_half_open_edges() {
     let owner = ScreenInstanceId(91);
     let children = [Node::leaf([40, 20], 1u8).at(10, 10)];

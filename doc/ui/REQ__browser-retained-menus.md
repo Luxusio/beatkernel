@@ -1,5 +1,36 @@
 # Worker-owned shared retained browser menus
 
+Explicit host menu-motion requests must pass through the CPU Worker's actual
+visual owner and RenderClient. The Window captures the current menu token and
+submitted generation/content/geometry identity, copies endpoints and correlates
+the reply; it does not generate renderer counters or motion time. The CPU Worker
+validates both current business and acknowledged renderer identity, queues at
+most 64 independent motion requests without merging different targets, and
+revalidates each request before dispatch. Stale, malformed, full or retired
+requests receive an explicit rejection. Admission replies require an actual
+renderer control ACK; submitted pose remains governed by render-geometry
+evidence. Editing or navigating while a request is queued cannot apply motion
+to a newer owner or leave the host request unresolved.
+Both Window and CPU outstanding-request limits include the in-flight request.
+Allocate the outbound geometry version immediately before dispatch, after
+checking the captured submitted-geometry ticket. Each request settles once,
+including retirement and finite host timeout; a late ACK cannot revive it.
+Normal per-request rejection does not retire the renderer. Earlier presentation
+may make a second request with an older ticket stale; reject it explicitly.
+An unavailable or invalid target refused by the renderer's actual motion API
+returns a correlated control rejection without changing published geometry or
+accepted poses. RenderClient rejects that one request and remains usable; only
+actual transport or rendering failure follows the renderer-failure path.
+
+Explicit component motion for Settings, Records, Players and Devices must use
+the shared retained views and the actual menu token, with successful-presentation
+pose publication. Readonly Results uses a separate generation/content-owned
+node-target motion path in the renderer Worker. Animation frames reuse geometry
+and do not require business updates or Window rendering. Replacement, paging,
+suspension and disposal obey [the shared motion contract](REQ__ui-motion.md).
+This remaining-surface extension is under implementation; connected acceptance
+has not yet been established.
+
 Reuse the existing LocalRoster as the canonical business owner in the gameplay
 Worker. Checked snapshots carry original next-ID allocation state, members and
 assignments; removal must not cause ID reuse or regeneration from surviving IDs.

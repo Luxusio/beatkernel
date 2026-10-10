@@ -598,6 +598,27 @@ impl DevicesView {
     pub fn hit(&self, point: (f64, f64)) -> Option<ControlId> {
         self.nodes.hit(point)
     }
+    /// Resolve a mounted node only from this view's actual published control geometry.
+    pub fn node_for_control(&self, control: ControlId) -> Result<Option<NodeId>, String> {
+        self.nodes.node_for_control(control)
+    }
+    pub fn compose_components(
+        &self,
+        scene: &mut Scene,
+        hits: &mut Vec<(ControlId, Bounds)>,
+        screen: ScreenInstanceId,
+        animated: &[NodeId],
+    ) -> Result<(), String> {
+        self.nodes.compose_components(scene, hits, screen, animated)
+    }
+    pub fn hit_components(
+        &self,
+        scene: &Scene,
+        screen: ScreenInstanceId,
+        point: (f64, f64),
+    ) -> Option<ControlId> {
+        self.nodes.hit_components(scene, screen, point)
+    }
     pub const fn id(&self) -> ScreenInstanceId {
         self.id
     }

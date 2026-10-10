@@ -160,6 +160,53 @@ impl MotionScheduler {
         self.tracks = next;
         Ok(())
     }
+    /// Restore remembered poses using current live binding epochs. Every pose
+    /// and active track is staged before one atomic uniform update; completed
+    /// poses need no active track and do not change scheduler time or lifecycle.
+    pub fn restore_poses(
+        &mut self,
+        scene: &mut Scene,
+        poses: &[(NodeId, UiTransform)],
+    ) -> Result<bool, String> {
+        if self.disposed
+            || poses.len() > MAX_UI_COMPONENTS
+            || poses
+                .iter()
+                .enumerate()
+                .any(|(i, (node, _))| poses[..i].iter().any(|(old, _)| old == node))
+        {
+            return Err("invalid remembered motion pose set".into());
+        }
+        let mut scheduler = self.clone();
+        // Tracks not listed among remembered poses still require live bindings.
+        scheduler.rebind(scene)?;
+        let changed = if let Some(&(node, pose)) = poses.first() {
+            let first = scene
+                .component_live(UiComponentKey {
+                    screen: self.screen,
+                    node,
+                })
+                .ok_or("motion pose component not bound")?;
+            let mut updates = [(first, pose); MAX_UI_COMPONENTS];
+            for (index, &(node, pose)) in poses.iter().enumerate() {
+                UiTransform::new(pose.offset(), pose.scale(), pose.opacity())?;
+                let id = scene
+                    .component_live(UiComponentKey {
+                        screen: self.screen,
+                        node,
+                    })
+                    .ok_or("motion pose component not bound")?;
+                updates[index] = (id, pose);
+            }
+            scene.set_component_transforms(&updates[..poses.len()])?
+        } else {
+            // Even an empty restore must reject a failed scene before publishing
+            // the rebound scheduler, while retaining all active-track checks.
+            scene.set_component_transforms(&[])?
+        };
+        *self = scheduler;
+        Ok(changed)
+    }
     pub fn schedule(
         &mut self,
         key: UiComponentKey,

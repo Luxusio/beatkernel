@@ -1,4 +1,4 @@
-import { RenderClient, validateRenderLimits, unsignedIdentity } from "./render-protocol.mjs";
+import { RenderClient, validateRenderLimits, unsignedIdentity, snapshotMenuMotion } from "./render-protocol.mjs";
 import { validateCompletedResults, resultRequest } from "./completed-results-model.mjs";
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot } from "./host_model.mjs";
@@ -320,9 +320,80 @@ function roomResultsFailure(results, error) {
   fenceVisual();
   report("play-room-results", { playId: results.id, ...roomResultsMetadata(results), error: message(error) });
 }
+const MENU_MOTION_TIMEOUT_MS = 10000;
+function settleMenuMotion(context, entry, admitted, error, admittedGeometryVersion) {
+  if (entry.settled) return;
+  entry.settled = true; clearTimeout(entry.timer);
+  const index = context?.motionRequests?.indexOf(entry) ?? -1;
+  if (index >= 0) context.motionRequests.splice(index, 1);
+  report("menu-motion-reply", { requestId: entry.requestId, hostOwner: entry.hostOwner,
+    menuGeneration: entry.menuGeneration, screen: entry.screen, revision: entry.revision,
+    generation: entry.generation, content: entry.content, geometryVersion: entry.geometryVersion, admitted,
+    ...(admitted ? { admittedGeometryVersion } : { message: message(error).slice(0, 4096) }) });
+}
+function retireMenuMotions(context, reason = "Menu motion owner retired.") {
+  if (!context) return;
+  for (const entry of [...(context.motionRequests ?? []), ...(context.motionActive ? [context.motionActive] : [])])
+    settleMenuMotion(context, entry, false, new Error(reason));
+}
+function validateMenuMotionTicket(context, entry) {
+  const geometry = context?.geometry;
+  if (!context || context.mode !== "menu" || !currentVisual(context) || !menuVisible || menuOwner !== context.owner
+    || !cpuReady || failed || disposed || play || settingsOperation || importing
+    || entry.menuGeneration !== menuGeneration || entry.screen !== menuOwner.screen || entry.revision !== menuOwner.revision
+    || context.menuRevision !== entry.revision || entry.generation !== context.generation || entry.content !== context.content
+    || !geometry || geometry.geometryVersion !== entry.geometryVersion || geometry.generation !== entry.generation
+    || geometry.content !== entry.content || geometry.menuGeneration !== entry.menuGeneration || geometry.screen !== entry.screen
+    || geometry.revision !== entry.revision || geometry.width === 0 || geometry.height === 0)
+    throw new Error("Menu motion requires the exact current submitted menu ticket.");
+}
+function enqueueMenuMotion(request) {
+  const context = visual;
+  const entry = { requestId: request.requestId, hostOwner: request.hostOwner, menuGeneration: request.menuGeneration,
+    screen: request.screen, revision: request.revision, generation: request.generation, content: request.content,
+    geometryVersion: request.geometryVersion, settled: false, timer: null };
+  try {
+    if (!unsignedIdentity(entry.requestId) || !Number.isSafeInteger(entry.hostOwner) || entry.hostOwner < 0
+      || ![entry.menuGeneration, entry.screen, entry.revision, entry.generation, entry.content, entry.geometryVersion].every(unsignedIdentity))
+      throw new Error("Invalid menu motion request identity.");
+    validateMenuMotionTicket(context, entry);
+    if (entry.requestId <= (context.motionRequestId ?? 0n)) throw new Error("Duplicate menu motion request identity.");
+    if (context.motionRequests.length + (context.motionActive ? 1 : 0) >= 64) throw new Error("Menu motion request capacity exhausted.");
+    entry.motion = snapshotMenuMotion(request.control, request.transforms, request.durationMs, request.easing);
+    context.motionRequestId = entry.requestId;
+    context.motionRequests.push(entry);
+    entry.timer = setTimeout(() => settleMenuMotion(context, entry, false, new Error("Menu motion acknowledgement timed out.")), MENU_MOTION_TIMEOUT_MS);
+    publishVisual();
+  } catch (error) { settleMenuMotion(context, entry, false, error); }
+}
+async function dispatchMenuMotions(context) {
+  while (context.motionRequests.length && !context.client.pending) {
+    const entry = context.motionRequests.shift();
+    if (entry.settled) continue;
+    context.motionActive = entry;
+    try {
+      validateMenuMotionTicket(context, entry);
+      const issued = nextGeometry();
+      await context.client.control("menu-motion", { ...entry.motion, menuGeneration: entry.menuGeneration,
+        screen: entry.screen, revision: entry.revision, geometryVersion: issued });
+      if (!entry.settled) {
+        validateMenuMotionTicket(context, entry);
+        settleMenuMotion(context, entry, true, null, issued);
+      }
+    } catch (error) {
+      settleMenuMotion(context, entry, false, error);
+      if (context.client.state !== "ready") {
+        retireMenuMotions(context, "Menu renderer transport failed.");
+        if (currentVisual(context)) visualFailure(context, error);
+        break;
+      }
+    } finally { if (context.motionActive === entry) context.motionActive = null; }
+    if (!currentVisual(context)) { retireMenuMotions(context); break; }
+  }
+}
 function fenceVisual() {
   // Fence producer callbacks before gameplay or prepared owners are freed.
-  if (visual) visual.retired = true;
+  if (visual) { retireMenuMotions(visual); visual.retired = true; }
 }
 function fatal(error) {
   if (failed) return;
@@ -369,6 +440,7 @@ function currentVisual(context) {
 }
 function visualFailure(context, error) {
   if (!currentVisual(context)) return;
+  retireMenuMotions(context, "Menu renderer failed.");
   context.retired = true;
   if (context.mode === "live" || context.mode === "local" || context.mode === "replay") failPlay(context.owner, error);
   else if (context.mode === "results") completedResultsFailure(context.owner, error);
@@ -429,6 +501,7 @@ function publishVisual() {
       let context = visual;
       if (!context || !currentVisual(context)) {
         if (context) {
+          retireMenuMotions(context);
           context.retired = true;
           try { if (context.client.state === "ready") await context.client.retire(); }
           catch { context.client.close(); }
@@ -438,7 +511,7 @@ function publishVisual() {
         const latest = visualSelection();
         if (!latest) { visual = null; continue; }
         if (visualGeneration === U64_MAX) throw new Error("Visual generation exhausted.");
-        context = { ...latest, generation: ++visualGeneration, content: visualGeneration, sequence: 0n, retired: false, controls: [] };
+        context = { ...latest, generation: ++visualGeneration, content: visualGeneration, sequence: 0n, retired: false, controls: [], motionRequests: [], motionActive: null, motionRequestId: 0n };
         visual = context;
         context.client = new RenderClient({ port: scopedRenderPort(context), ...renderLimits, generation: context.generation, content: context.content,
           onError: error => visualFailure(context, error),
@@ -488,6 +561,8 @@ function publishVisual() {
         if (!currentVisual(context)) { pump.dirty = true; break; }
       }
       if (!currentVisual(context)) continue;
+      if (context.mode === "menu") await dispatchMenuMotions(context);
+      if (!currentVisual(context)) continue;
       if (context.mode === "menu" && context.source.revision > context.menuRevision) {
         const revision = context.source.revision;
         await context.client.menu(context.source.snapshot(), { geometryVersion: nextGeometry(), recordPreview: context.source.record_snapshot(), opponents: menuOpponentState() });
@@ -520,6 +595,12 @@ function publishVisual() {
     .finally(() => { if (visualPump === pump) { visualPump = null; if (pump.dirty) publishVisual(); } });
 }
 function reportMenu() {
+  if (visual?.mode === "menu") {
+    for (const entry of [...visual.motionRequests, ...(visual.motionActive ? [visual.motionActive] : [])]) {
+      try { validateMenuMotionTicket(visual, entry); }
+      catch (error) { settleMenuMotion(visual, entry, false, error); }
+    }
+  }
   if (!menuOwner || !menuVisible) return;
   report("menu-state", { menuGeneration, screen: menuOwner.screen, revision: menuOwner.revision,
     route: menuOwner.route, selected: menuOwner.selected, fields: menuOwner.fields(),
@@ -586,6 +667,7 @@ function menuFields(fields) {
   return fields;
 }
 function handleMenu(request) {
+  if (request.kind === "menu-motion") { enqueueMenuMotion(request); return; }
   try {
     if (!cpuReady || failed || disposed || play || settingsOperation || importing) throw new Error("Menus require the initialized idle gameplay owner.");
     if (request.kind === "menu-open") {
@@ -599,6 +681,7 @@ function handleMenu(request) {
         next.set_fields(next.screen, next.revision, menuFields(request.fields ?? []));
       }
       catch (error) { next.free(); throw error; }
+      retireMenuMotions(visual, "Menu motion owner replaced.");
       if (menuOwner) { menuOwner.dispose(); menuOwner.free(); }
       menuOwner = next; menuRoster = roster; menuOpponents = opponents; menuRecordFile = null;
       menuVisible = true; lastMenuAction = 0n; reportMenu(); publishVisual(); return;
@@ -3224,7 +3307,7 @@ self.addEventListener("message", event => {
     return;
   }
   if (request.kind.startsWith("play-")) {
-    if (request.kind === "play-start" && menuVisible) { menuVisible = false; menuOwner?.suspend(); }
+    if (request.kind === "play-start" && menuVisible) { retireMenuMotions(visual); menuVisible = false; menuOwner?.suspend(); }
     handlePlay(request); return;
   }
   if (request.kind === "import" || request.kind === "accept-library") {

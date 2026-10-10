@@ -1,7 +1,7 @@
 //! Retained final results from explicit immutable completion evidence.
 use super::{
     atoms::text_clipped,
-    layout::{LayoutUpdate, MountedLayout, Node},
+    layout::{LayoutUpdate, MountedLayout, Node, NodeId},
 };
 use crate::{
     competition::{OpponentKind, ScoreSummary},
@@ -9,8 +9,11 @@ use crate::{
     gauge::{GaugeFailure, GAUGE_UNITS_PER_PERCENT},
     local_players::PlayerId,
     play_result::{CompletedPlayResult, PlayResultOutcome, PlayResultScope},
-    scene::{ClipRect, GeometrySnapshot, Scene},
+    scene::{ClipRect, GeometrySnapshot, Scene, UiComponentKey, MAX_UI_COMPONENTS},
+    screen_lifecycle::ScreenInstanceId,
 };
+
+use std::{cell::RefCell, sync::Arc};
 
 pub const PLAYERS_PER_PAGE: usize = 4;
 
@@ -56,6 +59,213 @@ struct PageContent {
     scope: String,
     cards: Vec<Vec<ResultLine>>,
     footer: String,
+}
+
+// Geometry from the ordinary header is retained separately from component-tagged
+// Results. Only cold page/layout/target changes capture and bind source packets.
+struct ComponentPage {
+    owner: ScreenInstanceId,
+    page: usize,
+    comparisons: bool,
+    revision: u64,
+    nodes: Vec<NodeId>,
+    identity: Arc<()>,
+    prefix: GeometrySnapshot,
+}
+
+fn content_for<'a>(
+    pages: &'a [PageContent],
+    comparisons: &'a [PageContent],
+    page: usize,
+    comparison_mode: bool,
+) -> Result<(&'a PageContent, bool), String> {
+    let comparison_mode = comparison_mode && !comparisons.is_empty();
+    let contents = if comparison_mode { comparisons } else { pages };
+    Ok((
+        contents.get(page).ok_or("Results page is out of range")?,
+        comparison_mode,
+    ))
+}
+
+fn displayed_nodes(layout: &MountedLayout<Component>, content: &PageContent) -> Vec<NodeId> {
+    if layout.suspended() {
+        return Vec::new();
+    }
+    layout
+        .leaves()
+        .iter()
+        .filter(|leaf| match leaf.component {
+            Component::Card(index) => index < content.cards.len(),
+            Component::Scope | Component::Footer => true,
+        })
+        .map(|leaf| leaf.id)
+        .collect()
+}
+
+fn paint_content(
+    scene: &mut Scene,
+    component: Component,
+    bounds: super::interaction::Bounds,
+    content: &PageContent,
+    clip: ClipRect,
+) -> Result<(), String> {
+    let x = bounds.x as usize;
+    let y = bounds.y as usize;
+    match component {
+        Component::Scope => text_clipped(scene, x, y, &content.scope, 1, DETAIL_COLOR, clip),
+        Component::Card(index) => {
+            if let Some(card) = content.cards.get(index) {
+                for line in card {
+                    text_clipped(
+                        scene,
+                        x,
+                        y + line.y,
+                        &line.label,
+                        line.scale,
+                        line.color,
+                        clip,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        Component::Footer => text_clipped(scene, x, y, &content.footer, 1, DETAIL_COLOR, clip),
+    }
+}
+
+fn clip(bounds: super::interaction::Bounds) -> Result<Option<ClipRect>, String> {
+    if bounds.width == 0 || bounds.height == 0 {
+        Ok(None)
+    } else {
+        ClipRect::new([bounds.x, bounds.y, bounds.width, bounds.height]).map(Some)
+    }
+}
+
+fn compose_components(
+    scene: &mut Scene,
+    layout: &MountedLayout<Component>,
+    content: &PageContent,
+    cache: &RefCell<Option<ComponentPage>>,
+    owner: ScreenInstanceId,
+    page: usize,
+    comparisons: bool,
+    animated: &[NodeId],
+) -> Result<(), String> {
+    let present = |node: NodeId| {
+        !layout.suspended()
+            && layout.leaves().iter().any(|leaf| {
+                leaf.id == node
+                    && match leaf.component {
+                        Component::Card(index) => index < content.cards.len(),
+                        Component::Scope | Component::Footer => true,
+                    }
+            })
+    };
+    if owner.0 == 0
+        || animated.len() > MAX_UI_COMPONENTS
+        || animated
+            .iter()
+            .enumerate()
+            .any(|(i, node)| animated[..i].contains(node) || !present(*node))
+    {
+        return Err("invalid Results animated node set".into());
+    }
+    if !layout.suspended() && scene.logical_extent() != layout.extent() {
+        return Err("Results component extent mismatch".into());
+    }
+    if scene
+        .component_owner()
+        .is_some_and(|current| current != owner)
+    {
+        return Err("Results component scene belongs to another owner".into());
+    }
+    let cached = cache.borrow();
+    let same_scene = cached.as_ref().filter(|cached| {
+        cached.owner == owner
+            && Arc::ptr_eq(&cached.identity, scene.geometry_stamp().0)
+            && scene.component_owner() == Some(owner)
+    });
+    if same_scene.is_some_and(|cached| {
+        cached.page == page
+            && cached.comparisons == comparisons
+            && cached.revision == layout.revision()
+            && cached.nodes == animated
+    }) {
+        return Ok(());
+    }
+    let prefix = if let Some(cached) = same_scene {
+        cached.prefix.clone()
+    } else {
+        scene.static_geometry_snapshot()?
+    };
+    let mut next = scene.component_candidate();
+    next.retain_component_keys(owner, animated);
+    next.append_geometry(&prefix)?;
+    if !layout.suspended() {
+        let [width, height] = layout.extent();
+        for leaf in layout.leaves() {
+            if !present(leaf.id) {
+                continue;
+            }
+            let moving = animated.contains(&leaf.id);
+            let clips = layout
+                .component_clips(leaf.id)
+                .ok_or("Results mounted clip missing")?;
+            let source = if moving {
+                clips.source
+            } else {
+                leaf.geometry.clip
+            };
+            let mut packet = if moving {
+                Scene::component_source(width, height, 256)
+            } else {
+                Scene::with_capacity(width, height, 256)
+            };
+            if let Some(source) = clip(source)? {
+                paint_content(
+                    &mut packet,
+                    leaf.component,
+                    leaf.geometry.bounds,
+                    content,
+                    source,
+                )?;
+            }
+            let packet = packet.geometry_snapshot()?;
+            let start = next.rectangles().len() as u32;
+            let end = start + packet.rectangle_count() as u32;
+            next.append_geometry(&packet)?;
+            if moving {
+                next.bind_component_clipped(
+                    UiComponentKey {
+                        screen: owner,
+                        node: leaf.id,
+                    },
+                    &[start..end],
+                    [leaf.geometry.bounds.x, leaf.geometry.bounds.y],
+                    clip(clips.source)?,
+                    clip(clips.inherited)?,
+                )?;
+            }
+        }
+    }
+    let mut nodes = Vec::new();
+    nodes
+        .try_reserve_exact(animated.len())
+        .map_err(|error| error.to_string())?;
+    nodes.extend_from_slice(animated);
+    drop(cached);
+    scene.publish_component_scene(next, owner);
+    let identity = Arc::clone(scene.geometry_stamp().0);
+    *cache.borrow_mut() = Some(ComponentPage {
+        owner,
+        page,
+        comparisons,
+        revision: layout.revision(),
+        nodes,
+        identity,
+        prefix,
+    });
+    Ok(())
 }
 
 fn page_geometry(
@@ -172,6 +382,7 @@ pub struct ResultsView {
     layout: MountedLayout<Component>,
     page_contents: Vec<PageContent>,
     comparison_contents: Vec<PageContent>,
+    component_page: RefCell<Option<ComponentPage>>,
 }
 impl ResultsView {
     pub fn new(
@@ -256,6 +467,7 @@ impl ResultsView {
             layout,
             page_contents,
             comparison_contents: Vec::new(),
+            component_page: RefCell::new(None),
         })
     }
     /// Freeze all supplied score and comparison prefixes before creating retained packets.
@@ -376,6 +588,42 @@ impl ResultsView {
         } else {
             self.pages.len()
         }
+    }
+    /// Readonly mounted targets on the selected page; absent card slots are excluded.
+    pub fn displayed_nodes(&self, page: usize, comparisons: bool) -> Result<Vec<NodeId>, String> {
+        let (content, _) = content_for(
+            &self.page_contents,
+            &self.comparison_contents,
+            page,
+            comparisons,
+        )?;
+        Ok(displayed_nodes(&self.layout, content))
+    }
+    /// Cold capture binds node-local source geometry; repeated motion frames reuse it.
+    pub fn compose_components_mode(
+        &self,
+        scene: &mut Scene,
+        owner: ScreenInstanceId,
+        page: usize,
+        comparisons: bool,
+        animated_nodes: &[NodeId],
+    ) -> Result<(), String> {
+        let (content, comparisons) = content_for(
+            &self.page_contents,
+            &self.comparison_contents,
+            page,
+            comparisons,
+        )?;
+        compose_components(
+            scene,
+            &self.layout,
+            content,
+            &self.component_page,
+            owner,
+            page,
+            comparisons,
+            animated_nodes,
+        )
     }
     pub fn compose_mode(
         &self,
@@ -691,6 +939,7 @@ pub struct FrozenResultsView {
     layout: MountedLayout<Component>,
     page_contents: Vec<PageContent>,
     comparison_contents: Vec<PageContent>,
+    component_page: RefCell<Option<ComponentPage>>,
 }
 impl FrozenResultsView {
     pub fn from_model(model: FrozenResultsModel) -> Result<Self, String> {
@@ -755,6 +1004,7 @@ impl FrozenResultsView {
             layout,
             page_contents,
             comparison_contents,
+            component_page: RefCell::new(None),
         })
     }
     pub fn model(&self) -> &FrozenResultsModel {
@@ -769,6 +1019,42 @@ impl FrozenResultsView {
         } else {
             self.pages.len()
         }
+    }
+    /// Readonly mounted targets on the selected page; absent card slots are excluded.
+    pub fn displayed_nodes(&self, page: usize, comparisons: bool) -> Result<Vec<NodeId>, String> {
+        let (content, _) = content_for(
+            &self.page_contents,
+            &self.comparison_contents,
+            page,
+            comparisons,
+        )?;
+        Ok(displayed_nodes(&self.layout, content))
+    }
+    /// Cold capture binds node-local source geometry; repeated motion frames reuse it.
+    pub fn compose_components_mode(
+        &self,
+        scene: &mut Scene,
+        owner: ScreenInstanceId,
+        page: usize,
+        comparisons: bool,
+        animated_nodes: &[NodeId],
+    ) -> Result<(), String> {
+        let (content, comparisons) = content_for(
+            &self.page_contents,
+            &self.comparison_contents,
+            page,
+            comparisons,
+        )?;
+        compose_components(
+            scene,
+            &self.layout,
+            content,
+            &self.component_page,
+            owner,
+            page,
+            comparisons,
+            animated_nodes,
+        )
     }
     pub fn compose_mode(
         &self,
@@ -863,4 +1149,182 @@ fn simple_result_pages(
         });
     }
     Ok((stage_pages(layout, &contents)?, contents))
+}
+
+#[cfg(test)]
+mod component_geometry_tests {
+    use super::*;
+    use crate::{gauge::BmsGauge, scene::UiTransform, texture::TextureId};
+    use beatkernel::time::Timestamp;
+
+    enum View {
+        Genuine(ResultsView),
+        Frozen(FrozenResultsView),
+    }
+    impl View {
+        fn new(frozen: bool) -> Self {
+            let result =
+                CompletedPlayResult::from_completed(Timestamp::ZERO, None, &BmsGauge::default());
+            let roster: Vec<_> = (1..=5).map(PlayerId).collect();
+            let rows: Vec<_> = roster.iter().map(|&id| (id, result)).collect();
+            let view = ResultsView::new(&rows, &roster).unwrap();
+            if frozen {
+                Self::Frozen(FrozenResultsView::from_model(view.export_visual().unwrap()).unwrap())
+            } else {
+                Self::Genuine(view)
+            }
+        }
+        fn nodes(&self, page: usize) -> Vec<NodeId> {
+            match self {
+                Self::Genuine(v) => v.displayed_nodes(page, false).unwrap(),
+                Self::Frozen(v) => v.displayed_nodes(page, false).unwrap(),
+            }
+        }
+        fn compose(&self, scene: &mut Scene, page: usize, nodes: &[NodeId]) {
+            match self {
+                Self::Genuine(v) => {
+                    v.compose_components_mode(scene, ScreenInstanceId(81), page, false, nodes)
+                }
+                Self::Frozen(v) => {
+                    v.compose_components_mode(scene, ScreenInstanceId(81), page, false, nodes)
+                }
+            }
+            .unwrap();
+        }
+        fn ordinary(&self, scene: &mut Scene) {
+            match self {
+                Self::Genuine(v) => v.compose_mode(scene, 0, false),
+                Self::Frozen(v) => v.compose_mode(scene, 0, false),
+            }
+            .unwrap();
+        }
+        fn move_card_beyond_ancestor(&mut self) -> NodeId {
+            let layout = match self {
+                Self::Genuine(v) => &v.layout,
+                Self::Frozen(v) => &v.layout,
+            };
+            let card0 = layout
+                .leaves()
+                .iter()
+                .find(|leaf| leaf.component == Component::Card(0))
+                .unwrap()
+                .id;
+            let card = layout
+                .leaves()
+                .iter()
+                .find(|leaf| leaf.component == Component::Card(1))
+                .unwrap()
+                .id;
+            let updates = [LayoutUpdate {
+                id: card0,
+                change: super::super::layout::LayoutChange::Size([912, 420]),
+            }];
+            match self {
+                Self::Genuine(v) => v.update_layout(&updates),
+                Self::Frozen(v) => v.update_layout(&updates),
+            }
+            .unwrap();
+            card
+        }
+    }
+
+    fn bytes(scene: &Scene) -> Vec<u8> {
+        bytemuck::cast_slice::<_, u8>(scene.rectangles()).to_vec()
+    }
+
+    #[test]
+    fn genuine_and_frozen_preserve_actual_header_triangles_and_painter_order_on_page_rebind() {
+        for frozen in [false, true] {
+            let view = View::new(frozen);
+            let mut scene = Scene::new(960, 720);
+            scene.rect(2, 3, 9, 11, 0x123456);
+            scene.rect(15, 17, 5, 7, 0xabcdef);
+            let prefix = bytes(&scene);
+            let node = view.nodes(0)[1];
+            view.compose(&mut scene, 0, &[node]);
+            assert_eq!(&bytes(&scene)[..prefix.len()], prefix.as_slice());
+            let first = &scene.batches()[0];
+            assert_eq!(first.texture, TextureId::WHITE);
+            assert_eq!((first.first, first.count, first.component), (0, 2, 0));
+            assert!(scene.batches()[1..].iter().all(|batch| batch.first >= 2));
+            let id = scene
+                .component_id(UiComponentKey {
+                    screen: ScreenInstanceId(81),
+                    node,
+                })
+                .unwrap();
+            scene
+                .set_component_transforms(&[(
+                    id,
+                    UiTransform::new([8.0, 4.0], [1.0, 1.0], 1.0).unwrap(),
+                )])
+                .unwrap();
+            let triangles = bytes(&scene);
+            let identity = Arc::clone(scene.geometry_stamp().0);
+            let epoch = scene.geometry_stamp().1;
+            view.compose(&mut scene, 0, &[node]);
+            assert_eq!(bytes(&scene), triangles);
+            assert!(Arc::ptr_eq(&identity, scene.geometry_stamp().0));
+            assert_eq!(scene.geometry_stamp().1, epoch);
+            view.compose(&mut scene, 1, &[node]);
+            assert_eq!(&bytes(&scene)[..prefix.len()], prefix.as_slice());
+            assert_eq!(scene.batches()[0].count, 2);
+            assert_eq!(scene.component_id(id.key()), Some(id));
+            assert!(scene.geometry_stamp().1 > epoch);
+        }
+    }
+
+    #[test]
+    fn genuine_and_frozen_keep_ancestor_hidden_glyph_triangles_for_transform_reveal() {
+        for frozen in [false, true] {
+            let mut view = View::new(frozen);
+            let card = view.move_card_beyond_ancestor();
+            let mut ordinary = Scene::new(960, 720);
+            view.ordinary(&mut ordinary);
+            // Enlarging the first card pushes the next PLAYER glyph beyond
+            // the fixed column bottom (y=570); the ordinary page crops it.
+            let glyph = [24.0, 570.0, 10.0, 14.0];
+            let uv = crate::font::glyph_uv('P');
+            assert!(!ordinary
+                .rectangles()
+                .iter()
+                .any(|r| r.bounds == glyph && r.uv == uv));
+            let mut scene = Scene::new(960, 720);
+            view.compose(&mut scene, 0, &[card]);
+            let index = scene
+                .rectangles()
+                .iter()
+                .position(|r| r.bounds == glyph && r.uv == uv)
+                .expect("node-local capture must retain the whole hidden PLAYER glyph");
+            assert!(scene.batches().iter().any(|batch| batch.component != 0
+                && (batch.first as usize..(batch.first + batch.count) as usize).contains(&index)));
+            let id = scene
+                .component_id(UiComponentKey {
+                    screen: ScreenInstanceId(81),
+                    node: card,
+                })
+                .unwrap();
+            assert_eq!(scene.project_component_point(id, (26.0, 572.0)), None);
+            let source = bytes(&scene);
+            scene
+                .set_component_transforms(&[(
+                    id,
+                    UiTransform::new([0.0, -100.0], [1.0, 1.0], 1.0).unwrap(),
+                )])
+                .unwrap();
+            // This point lies inside the actual retained glyph after its
+            // transform and inside the fixed ancestor clip, not merely a box.
+            assert_eq!(
+                scene.project_component_point(id, (26.0, 472.0)),
+                Some((26.0, 572.0))
+            );
+            assert_eq!(bytes(&scene), source);
+            view.compose(&mut scene, 0, &[card]);
+            assert_eq!(bytes(&scene), source);
+            assert_eq!(
+                scene.project_component_point(id, (26.0, 472.0)),
+                Some((26.0, 572.0))
+            );
+        }
+    }
 }

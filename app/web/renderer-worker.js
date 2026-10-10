@@ -1,5 +1,5 @@
 import init, { BrowserView } from "./pkg/beatkernel_bms_runtime.js";
-import { preflightPacket, preflightMenuPayload, menuOpponentProjection, nativePacketView, validateRenderLimits, unsignedIdentity, boundedU32 } from "./render-protocol.mjs";
+import { preflightPacket, preflightMenuPayload, menuOpponentProjection, nativePacketView, validateRenderLimits, unsignedIdentity, boundedU32, snapshotMenuMotion, snapshotMotionEndpoints } from "./render-protocol.mjs";
 
 import { VideoClient } from "./video-client.mjs";
 
@@ -30,7 +30,7 @@ function stopDraw() {
 }
 function release(binding) {
   if (!binding) return;
-  try { binding.dispose_menu_motion(); binding.retire_visual(); } finally { binding.free(); }
+  try { binding.dispose_menu_motion(); binding.dispose_results_motion(); binding.retire_visual(); } finally { binding.free(); }
 }
 function diagnostic(error) {
   const text = error instanceof Error ? error.message : String(error);
@@ -70,6 +70,9 @@ function scheduleDraw(reset = true) {
       if (identity.mode === "menu") {
         presented = view.draw_menu_at(performance.now());
         if (typeof presented !== "boolean") throw new Error("Invalid menu presentation result.");
+      } else if (identity.mode === "results") {
+        presented = view.draw_visual_at(performance.now());
+        if (typeof presented !== "boolean") throw new Error("Invalid Results presentation result.");
       } else {
         view.draw_visual();
         movies?.drain();
@@ -90,7 +93,8 @@ function scheduleDraw(reset = true) {
           send(evidence);
           self.postMessage(evidence);
         }
-        if (view.needs_redraw() || (identity.mode === "menu" && view.menu_motion_active())) scheduleDraw(false);
+        if (view.needs_redraw() || (identity.mode === "menu" && view.menu_motion_active())
+          || (identity.mode === "results" && view.results_motion_active())) scheduleDraw(false);
       } else if (view.needs_redraw()) {
         if (++retries <= 3) scheduleDraw(false);
         else wait(identity);
@@ -193,6 +197,7 @@ function control(message) {
   if (kind === "retire") {
     stopDraw();
     view.dispose_menu_motion();
+    view.dispose_results_motion();
     movies?.retire();
     view.retire_visual();
     generationFloor = generationFloor > generation ? generationFloor : generation;
@@ -202,7 +207,8 @@ function control(message) {
   }
   if (kind === "menu-motion" && (current.mode !== "menu" || message.menuGeneration !== current.menu.generation
     || message.screen !== current.menu.screen || message.revision !== current.menu.revision)) return;
-  if (!unsignedIdentity(version) || version <= geometryVersion) throw new Error("Geometry version must increase.");
+  if (kind === "results-motion" && current.mode !== "results") return;
+  if (!["menu-motion", "results-motion"].includes(kind) && (!unsignedIdentity(version) || version <= geometryVersion)) throw new Error("Geometry version must increase.");
   if (kind === "resize") {
     if (!boundedU32(width) || !boundedU32(height)) throw new Error("Invalid surface extent.");
     view.resize(width, height);
@@ -210,15 +216,37 @@ function control(message) {
     if (current.mode === "menu") {
       if (extent.includes(0)) view.suspend_menu_motion(performance.now());
       else view.resume_menu_motion(performance.now());
+    } else if (current.mode === "results") {
+      if (extent.includes(0)) view.suspend_results_motion(performance.now());
+      else view.resume_results_motion(performance.now());
     }
   } else if (kind === "menu-motion") {
-    const values = message.transforms;
-    if (!unsignedIdentity(message.control) || !ArrayBuffer.isView(values)
-      || Object.prototype.toString.call(values) !== "[object Float32Array]" || values.length !== 10
-      || !values.every(Number.isFinite) || !Number.isFinite(message.durationMs) || message.durationMs < 0
-      || !Number.isInteger(message.easing) || message.easing < 0 || message.easing > 3) throw new Error("Invalid menu motion.");
-    view.request_menu_motion(message.screen, message.revision, message.control,
-      values, message.durationMs, message.easing, performance.now());
+    try {
+      if (!unsignedIdentity(version) || version <= geometryVersion) throw new Error("Geometry version must increase.");
+      const motion = snapshotMenuMotion(message.control, message.transforms, message.durationMs, message.easing);
+      if (extent.includes(0)) throw new Error("Menu motion requires nonzero backing extent.");
+      view.request_menu_motion(message.screen, message.revision, motion.control,
+        motion.transforms, motion.durationMs, motion.easing, performance.now());
+    } catch (error) {
+      // Refusal consumes only its RPC identity, never a submitted geometry or pose.
+      current.operationId = operationId;
+      send({ kind: "control-reject", operation: kind, operationId, generation, content,
+        geometryVersion: version, message: diagnostic(error) });
+      return;
+    }
+  } else if (kind === "results-motion") {
+    try {
+      if (!unsignedIdentity(version) || version <= geometryVersion) throw new Error("Geometry version must increase.");
+      if (!Number.isInteger(message.node) || message.node < 0 || message.node >= 1024) throw new Error("Invalid Results motion node.");
+      const motion = snapshotMotionEndpoints(message.transforms, message.durationMs, message.easing);
+      if (extent.includes(0)) throw new Error("Results motion requires nonzero backing extent.");
+      view.request_results_motion(generation, content, message.node, motion.transforms, motion.durationMs, motion.easing, performance.now());
+    } catch (error) {
+      current.operationId = operationId;
+      send({ kind: "control-reject", operation: kind, operationId, generation, content,
+        geometryVersion: version, message: diagnostic(error) });
+      return;
+    }
   } else if (kind === "page") {
     if (!boundedU32(page) || typeof comparisons !== "boolean") throw new Error("Invalid visual page.");
     view.set_visual_page(page, comparisons);
@@ -249,7 +277,7 @@ function receive(event) {
       comparisons: input.comparisons, geometryVersion: input.geometryVersion, menuGeneration: input.menuGeneration,
       screen: input.screen, revision: input.revision, actionId: input.actionId, x: input.x, y: input.y,
       downX: input.downX, downY: input.downY, recordPreview: input.recordPreview, details: input.details, opponents: input.opponents,
-      control: input.control, transforms: input.transforms, durationMs: input.durationMs, easing: input.easing,
+      control: input.control, node: input.node, transforms: input.transforms, durationMs: input.durationMs, easing: input.easing,
       registration: input.registration };
     if (unsignedIdentity(message.generation) && message.generation < generationFloor) return;
     if (!current && unsignedIdentity(message.generation) && message.generation <= generationFloor) return;

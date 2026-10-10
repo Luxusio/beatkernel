@@ -22,6 +22,12 @@ mod ime_area_fixtures;
 #[path = "desktop_ime_fields_fixtures.rs"]
 mod ime_fields_fixtures;
 #[cfg(test)]
+#[path = "native_remaining_motion_fixtures.rs"]
+mod native_remaining_motion_fixtures;
+#[cfg(test)]
+#[path = "native_remaining_motion_window_fixtures.rs"]
+mod native_remaining_motion_window_fixtures;
+#[cfg(test)]
 #[path = "desktop_renderer_startup_fixtures.rs"]
 mod renderer_startup_fixtures;
 #[cfg(test)]
@@ -883,6 +889,16 @@ pub(super) enum DesktopUiCommand {
         motion: ComponentMotion,
         reply: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
+    RequestNodeMotion {
+        screen: ScreenInstanceId,
+        node: NodeId,
+        motion: ComponentMotion,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    InspectResultsNodes {
+        screen: ScreenInstanceId,
+        reply: std::sync::mpsc::SyncSender<Result<Vec<NodeId>, String>>,
+    },
     InspectScreen {
         reply: std::sync::mpsc::SyncSender<Option<ScreenInstanceId>>,
     },
@@ -1495,6 +1511,7 @@ struct RendererStartup {
     job: NativeCatalog<PreparedRenderer>,
     retired: bool,
 }
+#[derive(Clone)]
 struct NativeMotionOwner {
     screen: ScreenInstanceId,
     scheduler: MotionScheduler,
@@ -1507,6 +1524,18 @@ struct NativeMotionHit {
     bounds: Bounds,
     key: Option<UiComponentKey>,
 }
+#[derive(Clone, PartialEq)]
+struct NativeResultsPaint {
+    screen: ScreenInstanceId,
+    page: usize,
+    comparisons: bool,
+    room: Option<Arc<beatkernel_bms_runtime::room_presentation::RoomPresentation>>,
+    status: player::PlayerStatus,
+    failure: Option<String>,
+    hovered: Option<ControlId>,
+    armed: [bool; 14],
+    retry: bool,
+}
 struct NativeUiMotionState {
     origin: Instant,
     time: Duration,
@@ -1517,6 +1546,7 @@ struct NativeUiMotionState {
     presented_screen: Option<ScreenInstanceId>,
     presented_extent: [u32; 2],
     disposed: bool,
+    results_paint: Option<NativeResultsPaint>,
 }
 impl Default for NativeUiMotionState {
     fn default() -> Self {
@@ -1530,6 +1560,7 @@ impl Default for NativeUiMotionState {
             presented_screen: None,
             presented_extent: [0; 2],
             disposed: false,
+            results_paint: None,
         }
     }
 }
@@ -1664,12 +1695,52 @@ impl Desktop {
                     ScreenRoute::Practice => {
                         self.practice.as_ref().map(|practice| practice.view.id())
                     }
+                    ScreenRoute::Settings => self.settings_view.as_ref().map(SettingsView::id),
+                    ScreenRoute::Records => self.records_view.as_ref().map(RecordsView::id),
+                    ScreenRoute::Players => self.players_view.as_ref().map(PlayersView::id),
+                    ScreenRoute::Devices { .. } => self.devices_view.as_ref().map(DevicesView::id),
+                    ScreenRoute::Results { replay: false }
+                        if self
+                            .results_nodes(
+                                self.navigator.active_id().unwrap_or(ScreenInstanceId(0)),
+                            )
+                            .is_ok() =>
+                    {
+                        self.navigator.active_id()
+                    }
                     _ => None,
                 }
                 .filter(|screen| self.navigator.accepts(*screen));
                 if reply.try_send(screen).is_err() {
                     self.failure =
                         Some("native UI screen reply unavailable; no motion requested".into());
+                }
+            }
+            DesktopUiCommand::InspectResultsNodes { screen, reply } => {
+                let result = self.results_nodes(screen);
+                if reply.try_send(result).is_err() {
+                    self.failure = Some("native Results node reply unavailable".into());
+                }
+            }
+            DesktopUiCommand::RequestNodeMotion {
+                screen,
+                node,
+                motion,
+                reply,
+            } => {
+                let now = self.ui_motion.origin.elapsed();
+                let result = self.request_node_motion(screen, node, motion, now);
+                let admitted = result.is_ok();
+                if reply.try_send(result).is_err() {
+                    self.failure = Some(
+                        "native Results motion reply unavailable; inspect owner before retry"
+                            .into(),
+                    );
+                }
+                if admitted {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
             DesktopUiCommand::RequestMotion {
@@ -1720,13 +1791,125 @@ impl Desktop {
                 .ok_or("Practice view unavailable")?
                 .view
                 .node_for_control(control)?,
-            _ => {
-                return Err(
-                    "native component motion requires Selection, Display or Practice".into(),
-                )
-            }
+            ScreenRoute::Settings => self
+                .settings_view
+                .as_ref()
+                .ok_or("settings view unavailable")?
+                .node_for_control(control)?,
+            ScreenRoute::Records => self
+                .records_view
+                .as_ref()
+                .ok_or("records view unavailable")?
+                .node_for_control(control)?,
+            ScreenRoute::Players => self
+                .players_view
+                .as_ref()
+                .ok_or("players view unavailable")?
+                .node_for_control(control)?,
+            ScreenRoute::Devices { .. } => self
+                .devices_view
+                .as_ref()
+                .ok_or("devices view unavailable")?
+                .node_for_control(control)?,
+            _ => return Err("native control motion requires a retained menu".into()),
         };
         node.ok_or_else(|| "native motion control is not displayed".into())
+    }
+    fn compose_menu_into(
+        &self,
+        scene: &mut Scene,
+        hits: &mut Vec<(ControlId, Bounds)>,
+        screen: ScreenInstanceId,
+        animated: &[NodeId],
+    ) -> Result<(), String> {
+        macro_rules! compose {
+            ($view:expr) => {{
+                let view = $view.ok_or("native retained menu view unavailable")?;
+                if animated.is_empty() {
+                    view.compose(scene, hits)
+                } else {
+                    view.compose_components(scene, hits, screen, animated)
+                }
+            }};
+        }
+        match self.navigator.route() {
+            ScreenRoute::Selection => compose!(self.selection_view.as_ref()),
+            ScreenRoute::Settings => compose!(self.settings_view.as_ref()),
+            ScreenRoute::Display => compose!(self.display_view.as_ref()),
+            ScreenRoute::Players => compose!(self.players_view.as_ref()),
+            ScreenRoute::Devices { .. } => compose!(self.devices_view.as_ref()),
+            ScreenRoute::Records => compose!(self.records_view.as_ref()),
+            ScreenRoute::Practice => {
+                compose!(self.practice.as_ref().map(|practice| &practice.view))
+            }
+            _ => Err("native retained menu route unavailable".into()),
+        }
+    }
+    /// Cold menu changes discover actual current associations before restoring
+    /// motion. Removed controls retire their tracks; surviving mounted nodes keep
+    /// their sampled pose. The accepted surface/hits are never discovery storage.
+    fn compose_menu_motion(&mut self, screen: ScreenInstanceId) -> Result<(), String> {
+        let Some(index) = self
+            .ui_motion
+            .owners
+            .iter()
+            .position(|owner| owner.screen == screen)
+        else {
+            let mut scene = self.scene.component_candidate();
+            let mut hits = Vec::new();
+            self.compose_menu_into(&mut scene, &mut hits, screen, &[])?;
+            self.scene.publish_render_candidate(scene)?;
+            self.hits = hits;
+            return self.stage_control_hits(screen);
+        };
+        let mut owner = self.ui_motion.owners[index].clone();
+        let mut scene = self.scene.component_candidate();
+        let mut hits = Vec::new();
+        self.compose_menu_into(&mut scene, &mut hits, screen, &[])?;
+        let mut displayed = Vec::new();
+        displayed
+            .try_reserve(hits.len())
+            .map_err(|_| "native menu target discovery allocation failed")?;
+        for &(control, _) in &hits {
+            displayed.push(self.control_node(control)?);
+        }
+        owner.nodes.retain(|(node, _)| {
+            if displayed.contains(node) {
+                true
+            } else {
+                owner.scheduler.cancel(*node);
+                false
+            }
+        });
+        let surviving: Vec<_> = owner.nodes.iter().map(|(node, _)| *node).collect();
+        scene.retain_component_keys(screen, &surviving);
+        self.compose_menu_into(&mut scene, &mut hits, screen, &surviving)?;
+        owner.scheduler.restore_poses(&mut scene, &owner.nodes)?;
+        let mut pending_hits = Vec::new();
+        pending_hits
+            .try_reserve(hits.len())
+            .map_err(|_| "native menu hit staging allocation failed")?;
+        self.ui_motion
+            .presented_hits
+            .try_reserve(
+                hits.len()
+                    .saturating_sub(self.ui_motion.presented_hits.len()),
+            )
+            .map_err(|_| "native menu accepted hit allocation failed")?;
+        for &(control, bounds) in &hits {
+            let node = self.control_node(control)?;
+            let key = UiComponentKey { screen, node };
+            pending_hits.push(NativeMotionHit {
+                control,
+                bounds,
+                key: scene.component_id(key).map(|_| key),
+            });
+        }
+        self.scene.publish_render_candidate(scene)?;
+        self.hits = hits;
+        self.ui_motion.pending_hits = pending_hits;
+        self.ui_motion.owners[index] = owner;
+        Ok(())
     }
     fn restore_control_motion(&mut self, screen: ScreenInstanceId) -> Result<(), String> {
         if let Some(owner) = self
@@ -1735,30 +1918,9 @@ impl Desktop {
             .iter_mut()
             .find(|owner| owner.screen == screen)
         {
-            let mut scheduler = owner.scheduler.clone();
-            scheduler.rebind(&self.scene)?;
-            let mut updates = [None; MAX_UI_COMPONENTS];
-            for (i, (node, pose)) in owner.nodes.iter().enumerate() {
-                let id = self
-                    .scene
-                    .component_id(UiComponentKey {
-                        screen,
-                        node: *node,
-                    })
-                    .ok_or("native motion binding unavailable")?;
-                updates[i] = Some((id, *pose));
-            }
-            // Every pose is checked before changing scene uniforms or owner IDs.
-            for update in updates.iter().flatten() {
-                if self.scene.component_transform(update.0).is_none() {
-                    return Err("native motion pose unavailable".into());
-                }
-            }
-            for update in updates.iter().flatten() {
-                self.scene
-                    .set_component_transforms(std::slice::from_ref(update))?;
-            }
-            owner.scheduler = scheduler;
+            owner
+                .scheduler
+                .restore_poses(&mut self.scene, &owner.nodes)?;
         }
         Ok(())
     }
@@ -1777,14 +1939,19 @@ impl Desktop {
             )
             .map_err(|_| "native motion presented hit allocation failed")?;
         for &(control, bounds) in &self.hits {
-            let node = self.control_node(control)?;
+            let node = if matches!(self.navigator.route(), ScreenRoute::Results { .. }) {
+                None
+            } else {
+                Some(self.control_node(control)?)
+            };
             self.ui_motion.pending_hits.push(NativeMotionHit {
                 control,
                 bounds,
-                key: self
-                    .scene
-                    .component_id(UiComponentKey { screen, node })
-                    .map(|_| UiComponentKey { screen, node }),
+                key: node.and_then(|node| {
+                    self.scene
+                        .component_id(UiComponentKey { screen, node })
+                        .map(|_| UiComponentKey { screen, node })
+                }),
             });
         }
         Ok(())
@@ -1876,6 +2043,26 @@ impl Desktop {
                     .ok_or("Practice view unavailable")?
                     .view
                     .compose_components(&mut self.scene, &mut self.hits, screen, &nodes),
+                ScreenRoute::Settings => self
+                    .settings_view
+                    .as_ref()
+                    .ok_or("settings view unavailable")?
+                    .compose_components(&mut self.scene, &mut self.hits, screen, &nodes),
+                ScreenRoute::Records => self
+                    .records_view
+                    .as_ref()
+                    .ok_or("records view unavailable")?
+                    .compose_components(&mut self.scene, &mut self.hits, screen, &nodes),
+                ScreenRoute::Players => self
+                    .players_view
+                    .as_ref()
+                    .ok_or("players view unavailable")?
+                    .compose_components(&mut self.scene, &mut self.hits, screen, &nodes),
+                ScreenRoute::Devices { .. } => self
+                    .devices_view
+                    .as_ref()
+                    .ok_or("devices view unavailable")?
+                    .compose_components(&mut self.scene, &mut self.hits, screen, &nodes),
                 _ => unreachable!("control node preflight restricts route"),
             };
             if let Err(error) = composed {
@@ -1896,6 +2083,188 @@ impl Desktop {
         self.ui_motion.owners[index].scheduler = scheduler;
         self.tick_control_motion(now, [WIDTH as u32, HEIGHT as u32])?;
         Ok(())
+    }
+    fn results_nodes(&self, screen: ScreenInstanceId) -> Result<Vec<NodeId>, String> {
+        if !self.navigator.accepts(screen)
+            || self.navigator.route() != (ScreenRoute::Results { replay: false })
+        {
+            return Err("stale or unavailable native Results owner".into());
+        }
+        let game = self
+            .game
+            .as_ref()
+            .ok_or("native Results game unavailable")?;
+        if !game.joined || game.replay {
+            return Err("native Results require admitted completion".into());
+        }
+        game.completed_results
+            .as_ref()
+            .ok_or("native completed Results unavailable")?
+            .displayed_nodes(game.local_page, game.local_comparisons)
+    }
+    fn prune_results_motion(&mut self, screen: ScreenInstanceId) -> Result<(), String> {
+        let displayed = self.results_nodes(screen)?;
+        if let Some(owner) = self
+            .ui_motion
+            .owners
+            .iter_mut()
+            .find(|owner| owner.screen == screen)
+        {
+            for (node, _) in &owner.nodes {
+                if !displayed.contains(node) {
+                    owner.scheduler.cancel(*node);
+                }
+            }
+            owner.nodes.retain(|(node, _)| displayed.contains(node));
+        }
+        Ok(())
+    }
+    fn results_paint_matches(&self, screen: ScreenInstanceId) -> bool {
+        let Some(cached) = &self.ui_motion.results_paint else {
+            return false;
+        };
+        let Some(game) = &self.game else {
+            return false;
+        };
+        let Some(snapshot) = &game.snapshot else {
+            return false;
+        };
+        cached.screen == screen
+            && cached.page == game.local_page
+            && cached.comparisons == game.local_comparisons
+            && cached.room == snapshot.room
+            && cached.status == snapshot.status
+            && cached.failure == self.failure
+            && cached.hovered == self.hit()
+            && cached.retry == game.retry_available()
+            && cached.armed
+                == [3, 6, 7, 8, 9, 60, 61, 63, 64, 90, 91, 92, 93, 94]
+                    .map(|id| self.gesture.is_armed(ControlId(id)))
+    }
+    fn record_results_paint(&mut self, screen: ScreenInstanceId) {
+        if let Some(game) = &self.game {
+            if let Some(snapshot) = &game.snapshot {
+                self.ui_motion.results_paint = Some(NativeResultsPaint {
+                    screen,
+                    page: game.local_page,
+                    comparisons: game.local_comparisons,
+                    room: snapshot.room.clone(),
+                    status: snapshot.status.clone(),
+                    failure: self.failure.clone(),
+                    hovered: self.hit(),
+                    retry: game.retry_available(),
+                    armed: [3, 6, 7, 8, 9, 60, 61, 63, 64, 90, 91, 92, 93, 94]
+                        .map(|id| self.gesture.is_armed(ControlId(id))),
+                });
+            }
+        }
+    }
+    fn request_node_motion(
+        &mut self,
+        screen: ScreenInstanceId,
+        node: NodeId,
+        motion: ComponentMotion,
+        now: Duration,
+    ) -> Result<(), String> {
+        self.ui_motion.validate_time(now)?;
+        if !self.ui_ready()
+            || self.catalog.is_some()
+            || !self.results_nodes(screen)?.contains(&node)
+            || self.window.as_ref().is_some_and(|window| {
+                let size = window.inner_size();
+                size.width == 0 || size.height == 0
+            })
+        {
+            return Err("stale, suspended or undisplayed native Results node".into());
+        }
+        let index = self
+            .ui_motion
+            .owners
+            .iter()
+            .position(|owner| owner.screen == screen);
+        if index.is_some_and(|index| self.ui_motion.owners[index].suspended) {
+            return Err("native Results motion owner suspended; present before requesting".into());
+        }
+        let mut owner = if let Some(index) = index {
+            self.ui_motion.owners[index].clone()
+        } else {
+            NativeMotionOwner {
+                screen,
+                scheduler: MotionScheduler::new(screen, MAX_UI_COMPONENTS)?,
+                nodes: Vec::new(),
+                suspended: false,
+            }
+        };
+        let added = !owner.nodes.iter().any(|(old, _)| *old == node);
+        if added {
+            if owner.nodes.len() == MAX_UI_COMPONENTS {
+                return Err("native Results component capacity exhausted".into());
+            }
+            owner
+                .nodes
+                .try_reserve(1)
+                .map_err(|_| "native Results node allocation failed")?;
+            owner.nodes.push((node, UiTransform::default()));
+        }
+        self.ui_motion
+            .owners
+            .try_reserve(usize::from(index.is_none()))
+            .map_err(|_| "native Results owner allocation failed")?;
+        // Cold composition and sampling are transactional: a failed request never
+        // replaces the accepted scene, scheduler, hits or presentation cache.
+        let candidate =
+            if self.painted_reactive != Some(screen) || !self.results_paint_matches(screen) {
+                self.scene.component_candidate()
+            } else {
+                self.scene.component_render_candidate()?
+            };
+        let previous_scene = std::mem::replace(&mut self.scene, candidate);
+        let previous_hits = self.hits.clone();
+        let previous_pending = self.ui_motion.pending_hits.clone();
+        let previous_paint = self.ui_motion.results_paint.clone();
+        let previous_reactive = self.painted_reactive;
+        let previous_time = self.ui_motion.time;
+        let previous_owner = index.map(|index| self.ui_motion.owners[index].clone());
+        let position = index.unwrap_or(self.ui_motion.owners.len());
+        if index.is_some() {
+            self.ui_motion.owners[position] = owner;
+        } else {
+            self.ui_motion.owners.push(owner);
+        }
+        let result = (|| {
+            if added || self.painted_reactive != Some(screen) || !self.results_paint_matches(screen)
+            {
+                self.painted_reactive = None;
+                self.ui_motion.results_paint = None;
+                self.draw_with_submission(false)?;
+            }
+            let key = UiComponentKey { screen, node };
+            let id = self
+                .scene
+                .component_id(key)
+                .ok_or("native Results component binding unavailable")?;
+            let mut scheduler = self.ui_motion.owners[position].scheduler.clone();
+            scheduler.rebind(&self.scene)?;
+            scheduler.schedule(key, id, motion, now)?;
+            self.ui_motion.owners[position].scheduler = scheduler;
+            self.tick_control_motion(now, [WIDTH as u32, HEIGHT as u32])?;
+            Ok(())
+        })();
+        let candidate = std::mem::replace(&mut self.scene, previous_scene);
+        let result = result.and_then(|()| self.scene.publish_render_candidate(candidate));
+        if result.is_err() {
+            if let Some(previous_owner) = previous_owner {
+                self.ui_motion.owners[position] = previous_owner;
+            } else {
+                self.ui_motion.owners.pop();
+            }
+            self.hits = previous_hits;
+            self.ui_motion.pending_hits = previous_pending;
+            self.ui_motion.results_paint = previous_paint;
+            self.painted_reactive = previous_reactive;
+            self.ui_motion.time = previous_time;
+        }
+        result
     }
     fn tick_control_motion(&mut self, now: Duration, extent: [u32; 2]) -> Result<bool, String> {
         self.ui_motion.validate_time(now)?;
@@ -1952,7 +2321,14 @@ impl Desktop {
         self.scene.status()?;
         if !matches!(
             self.navigator.route(),
-            ScreenRoute::Selection | ScreenRoute::Display | ScreenRoute::Practice
+            ScreenRoute::Selection
+                | ScreenRoute::Display
+                | ScreenRoute::Practice
+                | ScreenRoute::Settings
+                | ScreenRoute::Records
+                | ScreenRoute::Players
+                | ScreenRoute::Devices { .. }
+                | ScreenRoute::Results { .. }
         ) {
             self.ui_motion.presented_screen = None;
             self.ui_motion.presented_pose = None;
@@ -3927,11 +4303,12 @@ impl Desktop {
         {
             return None;
         }
-        if self
-            .ui_motion
-            .owners
-            .iter()
-            .any(|owner| Some(owner.screen) == self.navigator.active_id())
+        if matches!(self.navigator.route(), ScreenRoute::Results { .. })
+            || self
+                .ui_motion
+                .owners
+                .iter()
+                .any(|owner| Some(owner.screen) == self.navigator.active_id())
         {
             let window = self.window.as_ref()?;
             let size = window.inner_size();
@@ -5754,14 +6131,7 @@ impl Desktop {
         view.update(frame);
         view.set_input_font(self.input_font.clone());
         if view.dirty() || self.painted_reactive != Some(id) {
-            let nodes = self.control_motion_nodes(id);
-            if nodes.is_empty() {
-                view.compose(&mut self.scene, &mut self.hits)?;
-            } else {
-                view.compose_components(&mut self.scene, &mut self.hits, id, &nodes)?;
-            }
-            self.restore_control_motion(id)?;
-            self.stage_control_hits(id)?;
+            self.compose_menu_motion(id)?;
             self.painted_reactive = Some(id);
         }
         self.render_scene()
@@ -5780,18 +6150,7 @@ impl Desktop {
             self.painted_reactive = None;
         }
         let pending = self.profile_io.is_some();
-        let point = self.point();
-        let hovered = if pending {
-            None
-        } else {
-            point.and_then(|point| {
-                SETTINGS_BUTTONS
-                    .iter()
-                    .rev()
-                    .find(|(_, bounds, _)| bounds.contains(point))
-                    .map(|(id, _, _)| *id)
-            })
-        };
+        let hovered = if pending { None } else { self.hit() };
         let armed = if pending {
             None
         } else {
@@ -5824,7 +6183,7 @@ impl Desktop {
         })?;
         view.set_input_font(self.input_font.clone());
         if view.dirty() || self.painted_reactive != Some(id) {
-            view.compose(&mut self.scene, &mut self.hits)?;
+            self.compose_menu_motion(id)?;
             self.painted_reactive = Some(id);
         }
         self.render_scene()
@@ -5876,14 +6235,7 @@ impl Desktop {
         })?;
         view.set_input_font(self.input_font.clone());
         if view.dirty() || self.painted_reactive != Some(id) {
-            let nodes = self.control_motion_nodes(id);
-            if nodes.is_empty() {
-                view.compose(&mut self.scene, &mut self.hits)?;
-            } else {
-                view.compose_components(&mut self.scene, &mut self.hits, id, &nodes)?;
-            }
-            self.restore_control_motion(id)?;
-            self.stage_control_hits(id)?;
+            self.compose_menu_motion(id)?;
             self.painted_reactive = Some(id);
         }
         self.render_scene()
@@ -5910,7 +6262,7 @@ impl Desktop {
             .as_ref()
             .ok_or("players settings unavailable")?;
         let mut frame = players_frame(local, settings, self.profile_io.is_some());
-        frame.hovered = beatkernel_bms_runtime::ui::players::hit(&frame, self.point());
+        frame.hovered = if frame.pending { None } else { self.hit() };
         frame.armed = (30..=37)
             .chain(20000..20064)
             .map(ControlId)
@@ -5921,7 +6273,7 @@ impl Desktop {
             .ok_or("players view unavailable")?;
         view.update(frame)?;
         if view.dirty() || self.painted_reactive != Some(id) {
-            view.compose(&mut self.scene, &mut self.hits)?;
+            self.compose_menu_motion(id)?;
             self.painted_reactive = Some(id);
         }
         self.render_scene()
@@ -5945,7 +6297,7 @@ impl Desktop {
             .as_ref()
             .ok_or("devices settings unavailable")?;
         let mut frame = devices_frame(picker, settings, self.profile_io.is_some());
-        frame.hovered = beatkernel_bms_runtime::ui::devices::hit(&frame, self.point());
+        frame.hovered = if frame.pending { None } else { self.hit() };
         frame.armed = (20..=24)
             .map(ControlId)
             .find(|&id| self.gesture.is_armed(id));
@@ -5955,7 +6307,7 @@ impl Desktop {
             .ok_or("devices view unavailable")?;
         view.update(frame)?;
         if view.dirty() || self.painted_reactive != Some(id) {
-            view.compose(&mut self.scene, &mut self.hits)?;
+            self.compose_menu_motion(id)?;
             self.painted_reactive = Some(id);
         }
         self.render_scene()
@@ -5986,7 +6338,7 @@ impl Desktop {
         );
         frame.directory = self.ime_editor(ImeField::RecordDirectory, &records.directory);
         frame.error = self.input_font_error.as_deref().or(frame.error);
-        frame.hovered = beatkernel_bms_runtime::ui::records::hit(&frame, self.point());
+        frame.hovered = if frame.pending { None } else { self.hit() };
         frame.armed = (50..=61)
             .chain(66..=68)
             .map(ControlId)
@@ -5998,7 +6350,7 @@ impl Desktop {
         view.update(frame)?;
         view.set_input_font(self.input_font.clone());
         if view.dirty() || self.painted_reactive != Some(id) {
-            view.compose(&mut self.scene, &mut self.hits)?;
+            self.compose_menu_motion(id)?;
             self.painted_reactive = Some(id);
         }
         self.render_scene()
@@ -6033,21 +6385,15 @@ impl Desktop {
         });
         practice.view.set_input_font(self.input_font.clone());
         if practice.view.dirty() || self.painted_reactive != Some(id) {
-            let nodes = self.control_motion_nodes(id);
-            if nodes.is_empty() {
-                practice.view.compose(&mut self.scene, &mut self.hits)?;
-            } else {
-                practice
-                    .view
-                    .compose_components(&mut self.scene, &mut self.hits, id, &nodes)?;
-            }
-            self.restore_control_motion(id)?;
-            self.stage_control_hits(id)?;
+            self.compose_menu_motion(id)?;
             self.painted_reactive = Some(id);
         }
         self.render_scene()
     }
     fn draw(&mut self) -> Result<(), String> {
+        self.draw_with_submission(true)
+    }
+    fn draw_with_submission(&mut self, submit: bool) -> Result<(), String> {
         if self.startup.is_some()
             || self.renderer_pending()
             || self.navigator.phase() != ScreenPhase::Active
@@ -6082,6 +6428,21 @@ impl Desktop {
         if matches!(route, ScreenRoute::Devices { .. }) {
             return self.draw_devices_view();
         }
+        let results_screen = self.navigator.active_id().filter(|_| {
+            route == (ScreenRoute::Results { replay: false })
+                && self.game.as_ref().is_some_and(|game| {
+                    game.joined && !game.replay && game.completed_results.is_some()
+                })
+        });
+        if let Some(screen) = results_screen {
+            if self.painted_reactive == Some(screen) && self.results_paint_matches(screen) {
+                return if submit { self.render_scene() } else { Ok(()) };
+            }
+            self.prune_results_motion(screen)?;
+        }
+        let results_nodes = results_screen
+            .map(|screen| self.control_motion_nodes(screen))
+            .unwrap_or_default();
         self.painted_reactive = None;
         let point = self.point();
         self.invalidate_hits();
@@ -6106,7 +6467,13 @@ impl Desktop {
                 .game
                 .as_ref()
                 .ok_or("session screen data unavailable")?;
-            draw_game_with_background(pixels, game, self.options.lookahead, &backgrounds)?;
+            draw_game_components(
+                pixels,
+                game,
+                self.options.lookahead,
+                &backgrounds,
+                results_screen.map(|screen| (screen, results_nodes.as_slice())),
+            )?;
             if let Some(reason) = self.movie_controller.unavailable.first() {
                 let reason: String = reason.chars().take(96).collect();
                 text(pixels, 24, 604, &reason, 1, 0xd8b36b);
@@ -6402,7 +6769,23 @@ impl Desktop {
             );
             text(pixels, 24, 682, error, 1, 0xffaaaa);
         }
-        self.render_scene()
+        if let Some(screen) = results_screen {
+            self.restore_control_motion(screen)?;
+            self.stage_control_hits(screen)?;
+            self.painted_reactive = Some(screen);
+            self.record_results_paint(screen);
+        } else if matches!(route, ScreenRoute::Results { .. }) {
+            let screen = self
+                .navigator
+                .active_id()
+                .ok_or("native Results screen unavailable")?;
+            self.stage_control_hits(screen)?;
+        }
+        if submit {
+            self.render_scene()
+        } else {
+            Ok(())
+        }
     }
     fn render_scene(&mut self) -> Result<(), String> {
         let mut presented = false;
@@ -7313,6 +7696,15 @@ fn draw_game_with_background(
     lookahead: i64,
     backgrounds: &[BgaFrame; 4],
 ) -> Result<(), String> {
+    draw_game_components(pixels, game, lookahead, backgrounds, None)
+}
+fn draw_game_components(
+    pixels: &mut Scene,
+    game: &Game,
+    lookahead: i64,
+    backgrounds: &[BgaFrame; 4],
+    components: Option<(ScreenInstanceId, &[NodeId])>,
+) -> Result<(), String> {
     let Some(snapshot) = &game.snapshot else {
         text(pixels, 24, 80, "LOADING - ESC CANCEL", 2, 0x9bb1cf);
         return Ok(());
@@ -7350,7 +7742,17 @@ fn draw_game_with_background(
     text(pixels, 24, 65, status, 2, 0x9bb1cf);
     if game.joined && !game.replay {
         if let Some(results) = &game.completed_results {
-            results.compose_mode(pixels, game.local_page, game.local_comparisons)?;
+            if let Some((screen, nodes)) = components.filter(|(_, nodes)| !nodes.is_empty()) {
+                results.compose_components_mode(
+                    pixels,
+                    screen,
+                    game.local_page,
+                    game.local_comparisons,
+                    nodes,
+                )?;
+            } else {
+                results.compose_mode(pixels, game.local_page, game.local_comparisons)?;
+            }
         } else if let Some(error) = &game.completed_results_error {
             text(
                 pixels,

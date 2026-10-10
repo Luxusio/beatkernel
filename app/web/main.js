@@ -1,3 +1,4 @@
+import { snapshotMenuMotion } from "./render-protocol.mjs";
 import { validateCompletedResults, validateCompletedArchive } from "./completed-results-model.mjs";
 import { snapshotFiles, nanoseconds, seconds, validateHistoricalGradeSnapshot, HistoricalGradePager } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
@@ -37,6 +38,45 @@ let menuEditControl = null;
 let menuComposition = null;
 let menuSourcesPending = null;
 const menuIdentity = value => typeof value === "bigint" && value > 0n && value <= 0xffffffffffffffffn;
+const MENU_MOTION_TIMEOUT_MS = 10000;
+const menuMotionPending = new Map();
+let menuMotionRequestId = 0n;
+function settleMenuMotionHost(pending, error, reply) {
+  if (menuMotionPending.get(pending.requestId) !== pending) return;
+  menuMotionPending.delete(pending.requestId); clearTimeout(pending.timer);
+  if (error) pending.reject(error); else pending.resolve(reply);
+}
+function cancelMenuMotions(reason = "Menu motion owner retired.") {
+  for (const pending of menuMotionPending.values()) settleMenuMotionHost(pending, new Error(reason));
+}
+export async function requestMenuMotion(control, transforms, durationMs, easing = 0) {
+  const motion = snapshotMenuMotion(control, transforms, durationMs, easing);
+  const token = menuToken(), geometry = menuGeometry;
+  if (!token || !geometry || geometry.owner !== owner || geometry.worker !== worker
+    || geometry.menuGeneration !== token.menuGeneration || geometry.screen !== token.screen || geometry.revision !== token.revision)
+    throw new Error("Menu motion requires current submitted menu geometry.");
+  if (menuMotionPending.size >= 64) throw new Error("Menu motion request capacity exhausted.");
+  if (menuMotionRequestId === 0xffffffffffffffffn) throw new Error("Menu motion request identity exhausted.");
+  const requestId = ++menuMotionRequestId;
+  return new Promise((resolve, reject) => {
+    const pending = { requestId, ...token, generation: geometry.generation, content: geometry.content,
+      geometryVersion: geometry.geometryVersion, owner, worker, resolve, reject, timer: null };
+    menuMotionPending.set(requestId, pending);
+    pending.timer = setTimeout(() => settleMenuMotionHost(pending, new Error("Menu motion acknowledgement timed out.")), MENU_MOTION_TIMEOUT_MS);
+    try { pending.worker.postMessage({ kind: "menu-motion", requestId, hostOwner: pending.owner, ...token,
+      generation: pending.generation, content: pending.content, geometryVersion: pending.geometryVersion, ...motion }); }
+    catch (error) { settleMenuMotionHost(pending, error); }
+  });
+}
+function receiveMenuMotionReply(data, sourceWorker, sourceOwner) {
+  const pending = menuMotionPending.get(data.requestId);
+  if (!pending || sourceWorker !== pending.worker || sourceOwner !== pending.owner || worker !== pending.worker || owner !== pending.owner
+    || data.hostOwner !== pending.owner || data.generation !== pending.generation || data.content !== pending.content
+    || data.menuGeneration !== pending.menuGeneration || data.screen !== pending.screen || data.revision !== pending.revision
+    || data.geometryVersion !== pending.geometryVersion || typeof data.admitted !== "boolean") return;
+  if (!data.admitted && (typeof data.message !== "string" || data.message.length > 4096)) return;
+  settleMenuMotionHost(pending, data.admitted ? null : new Error(data.message), Object.freeze({ ...data }));
+}
 let shuttingDown = false;
 let shutdown = null;
 let closingOwner = null;
@@ -216,7 +256,7 @@ function receiveMenu(data) {
       refreshLocalRosterStatus();
       controls();
     }
-    if (!unchangedToken) menuGeometry = null;
+    if (!unchangedToken) { cancelMenuMotions("Menu motion token replaced."); menuGeometry = null; }
     if (menuComposition && !sameMenuEditor(menuComposition)) cancelMenuComposition();
     if (menuEditControl && !sameMenuEditor(menuEditControl)) menuEditControl = null;
     const editor = byId("menu-editor");
@@ -1072,6 +1112,7 @@ function controls() {
 function stop() {
   ++startRequest;
   if (shutdown) return shutdown;
+  cancelMenuMotions();
   shuttingDown = true;
   presentationStatus.invalidate();
   cancelMenuComposition(); menuEditPending = null; menuSourcesPending = null;
@@ -1188,6 +1229,7 @@ function prepare() {
 }
 
 function received(data, sourceWorker = worker, sourceOwner = owner) {
+  if (data?.kind === "menu-motion-reply") { receiveMenuMotionReply(data, sourceWorker, sourceOwner); return; }
   if (data?.kind?.startsWith("menu-")) { receiveMenu(data); return; }
   if (data?.kind === "render-geometry") { receiveGeometry(data); return; }
   if (shuttingDown && !data?.kind?.startsWith("play-")) return;
@@ -1352,6 +1394,7 @@ async function start() {
   canvas = fresh;
   cssExtent = [0, 0];
   submittedGeometry = null;
+  cancelMenuMotions();
   menuState = null; menuGeometry = null; menuRetired = false; retiredMenuGeneration = 0n;
   menuPress = null;
   menuEditPending = null; menuEditControl = null; menuComposition = null; menuSourcesPending = null;
@@ -2123,6 +2166,7 @@ async function play(mode = "live") {
     // The Worker suspends its menu at play-start, including refused starts.
     // Only an explicit menu-open may make its token actionable again.
     if (menuState) retiredMenuGeneration = menuState.menuGeneration > retiredMenuGeneration ? menuState.menuGeneration : retiredMenuGeneration;
+    cancelMenuMotions();
     menuRetired = true; menuState = null; menuGeometry = null; menuPress = null;
     cancelMenuComposition(); menuEditPending = null; menuSourcesPending = null;
     byId("menu-editor").hidden = true;

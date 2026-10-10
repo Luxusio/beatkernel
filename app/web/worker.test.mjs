@@ -461,6 +461,140 @@ const acquiredMenuToken = state => ({ menuGeneration: state.menuGeneration, scre
 const settingsMenuDraft = () => ["73", "12.345678", "-0.000001", "balanced", "10.000001", "044100",
   "65536", "4096", "4096", "4096", "65536", "1.000000001", "2.000000002"];
 
+async function motionWorker() {
+  const h = await readyWorker({ actualMenu: true });
+  await h.send({ kind: "resize", width: 960, height: 720 });
+  await h.send({ kind: "menu-open", fields: ["chart.bms"] });
+  const menu = h.renderPort.posts.filter(m => m.kind === "menu").at(-1);
+  const version = menu.geometryVersion ?? h.renderPort.posts.filter(m => m.kind === "resize").at(-1).geometryVersion;
+  const token = acquiredMenuToken(h.of("menu-state").at(-1));
+  h.renderPort.emit({ kind: "geometry-ack", generation: menu.generation, content: menu.content,
+    geometryVersion: version, page: 0, width: 960, height: 720, ...token });
+  await flushJobs(); assert.equal(h.of("render-geometry").at(-1).mode, "menu");
+  return h;
+}
+function cpuMotion(h, requestId = 1n, fields = {}) {
+  const geometry = h.of("render-geometry").at(-1);
+  return { kind: "menu-motion", requestId, hostOwner: 1, ...acquiredMenuToken(h.of("menu-state").at(-1)),
+    generation: geometry.generation, content: geometry.content, geometryVersion: geometry.geometryVersion,
+    control: 5n, transforms: new Float32Array([0, 0, 1, 1, 1, 40, 10, 1, 1, 1]), durationMs: 1000, easing: 0, ...fields };
+}
+function emitMenuGeometry(h, request) {
+  h.renderPort.emit({ kind: "geometry-ack", generation: request.generation, content: request.content,
+    geometryVersion: request.geometryVersion, page: 0, width: 960, height: 720,
+    ...acquiredMenuToken(h.of("menu-state").at(-1)) });
+}
+
+test("CPU motion ACK admits a copied request before paint and preserves input independence", async () => {
+  const h = await motionWorker(); try {
+    const geometry = h.of("render-geometry").at(-1); h.renderPort.blocked = true;
+    const request = cpuMotion(h); const expected = [...request.transforms]; await h.send(request); request.transforms.fill(999);
+    const dispatched = h.renderPort.posts.at(-1); assert.equal(dispatched.kind, "menu-motion");
+    assert.deepEqual([...dispatched.transforms], expected); assert.ok(dispatched.geometryVersion > geometry.geometryVersion);
+    assert.equal(h.of("menu-motion-reply").length, 0);
+    h.renderPort.ack(dispatched); await flushJobs();
+    const reply = h.of("menu-motion-reply").at(-1); assert.equal(reply.admitted, true);
+    assert.equal(reply.requestId, 1n); assert.equal(reply.geometryVersion, geometry.geometryVersion);
+    assert.equal(reply.admittedGeometryVersion, dispatched.geometryVersion);
+    assert.equal(h.of("render-geometry").at(-1), geometry, "control admission is not submission evidence");
+    assert.equal(h.of("fatal").length, 0); assert.equal(h.of("render-error").length, 0);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("CPU FIFO bounds 64 including in-flight, preserves every target and settles each separately", async () => {
+  const h = await motionWorker(); try {
+    h.renderPort.blocked = true;
+    for (let i = 1; i <= 65; i++) await h.send(cpuMotion(h, BigInt(i), { control: BigInt(1000 + i) }));
+    assert.equal(h.renderPort.posts.filter(m => m.kind === "menu-motion").length, 1);
+    const refused = h.of("menu-motion-reply"); assert.equal(refused.length, 1); assert.equal(refused[0].requestId, 65n); assert.equal(refused[0].admitted, false);
+    for (let i = 1; i <= 64; i++) {
+      const dispatched = h.renderPort.posts.filter(m => m.kind === "menu-motion").at(-1);
+      assert.equal(dispatched.control, BigInt(1000 + i));
+      h.renderPort.ack(dispatched); await flushJobs();
+    }
+    const replies = h.of("menu-motion-reply"); assert.equal(replies.length, 65);
+    assert.equal(replies.filter(m => m.admitted).length, 64); assert.equal(new Set(replies.map(m => m.requestId)).size, 65);
+    const versions = h.renderPort.posts.filter(m => m.kind === "menu-motion").map(m => m.geometryVersion);
+    assert.equal(versions.every((v, i) => i === 0 || v > versions[i - 1]), true);
+    assert.equal(h.of("render-error").length, 0);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("submitted paint can stale another queued ticket which rejects explicitly", async () => {
+  const h = await motionWorker(); try {
+    h.renderPort.blocked = true;
+    await h.send(cpuMotion(h, 1n, { control: 1000n })); await h.send(cpuMotion(h, 2n, { control: 1001n }));
+    const first = h.renderPort.posts.at(-1); emitMenuGeometry(h, first); await flushJobs();
+    h.renderPort.ack(first); await flushJobs();
+    assert.equal(h.of("menu-motion-reply").length, 2);
+    assert.equal(h.of("menu-motion-reply").find(m => m.requestId === 2n).admitted, false);
+    assert.equal(h.renderPort.posts.filter(m => m.kind === "menu-motion").length, 1);
+    await h.send(cpuMotion(h, 3n, { control: 1001n }));
+    const refreshed = h.renderPort.posts.at(-1); assert.equal(refreshed.control, 1001n);
+    h.renderPort.ack(refreshed); await flushJobs(); assert.equal(h.of("menu-motion-reply").at(-1).admitted, true);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("malformed and foreign CPU motion requests refuse locally without poisoning later requests", async () => {
+  const h = await motionWorker(); try {
+    for (const [index, fields] of [{ content: 999n }, { revision: 999n }, { geometryVersion: 999n },
+      { transforms: new Float32Array(9) }, { control: 0n }, { easing: 4 }].entries()) await h.send(cpuMotion(h, BigInt(index + 1), fields));
+    assert.equal(h.of("menu-motion-reply").length, 6); assert.equal(h.of("menu-motion-reply").some(m => m.admitted), false);
+    assert.equal(h.of("fatal").length, 0); assert.equal(h.of("render-error").length, 0);
+    await h.send(cpuMotion(h, 7n)); assert.equal(h.of("menu-motion-reply").at(-1).admitted, true);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("CPU motion deadline rejects once and late renderer ACK cannot revive the RPC", async () => {
+  const h = await motionWorker(); try {
+    h.renderPort.blocked = true; await h.send(cpuMotion(h));
+    const dispatched = h.renderPort.posts.at(-1);
+    await h.tick();
+    assert.equal(h.of("menu-motion-reply").length, 1);
+    assert.equal(h.of("menu-motion-reply")[0].admitted, false);
+    assert.match(h.of("menu-motion-reply")[0].message, /timed out/);
+    h.renderPort.ack(dispatched); await flushJobs(); assert.equal(h.of("menu-motion-reply").length, 1);
+    await h.send(cpuMotion(h, 2n)); const next = h.renderPort.posts.at(-1);
+    h.renderPort.ack(next); await flushJobs(); assert.equal(h.of("menu-motion-reply").at(-1).admitted, true);
+    assert.equal(h.of("render-error").length, 0);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("resize and menu snapshot counters precede dispatch-time motion geometry", async () => {
+  const h = await motionWorker(); try {
+    h.renderPort.blocked = true;
+    await h.send({ kind: "resize", width: 800, height: 600 }); const resize = h.renderPort.posts.at(-1);
+    await h.send(cpuMotion(h));
+    assert.equal(h.renderPort.posts.filter(m => m.kind === "menu-motion").length, 0);
+    h.renderPort.ack(resize); await flushJobs();
+    const motion = h.renderPort.posts.at(-1); assert.equal(motion.kind, "menu-motion"); assert.ok(motion.geometryVersion > resize.geometryVersion);
+    h.renderPort.ack(motion); await flushJobs();
+    h.renderPort.blocked = false;
+    await h.send({ kind: "menu-navigate", ...acquiredMenuToken(h.of("menu-state").at(-1)), route: 2, fields: settingsMenuDraft() });
+    await h.send({ kind: "menu-edit", ...acquiredMenuToken(h.of("menu-state").at(-1)), index: 0, value: "74" });
+    const menu = h.renderPort.posts.filter(m => m.kind === "menu").at(-1);
+    emitMenuGeometry(h, menu); await flushJobs(); await h.send(cpuMotion(h, 2n));
+    const last = h.renderPort.posts.filter(m => m.kind === "menu-motion").at(-1); assert.ok(last.geometryVersion > menu.geometryVersion);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+for (const terminal of ["dispose", "replace", "transport-failure", "local-reject"]) test(`CPU ${terminal} settles motion exactly once`, async () => {
+  const h = await motionWorker(); try {
+    h.renderPort.blocked = true; await h.send(cpuMotion(h)); await h.send(cpuMotion(h, 2n, { control: 6n }));
+    const first = h.renderPort.posts.at(-1);
+    if (terminal === "dispose") await h.send({ kind: "dispose" });
+    else if (terminal === "replace") await h.send({ kind: "menu-open", fields: ["new.bms"] });
+    else if (terminal === "transport-failure") { h.renderPort.emit({ kind: "render-error", generation: first.generation, content: first.content, message: "transport failed" }); await flushJobs(); }
+    else {
+      h.renderPort.emit({ kind: "control-reject", operation: "menu-motion", operationId: first.operationId, generation: first.generation, content: first.content, geometryVersion: first.geometryVersion, message: "unavailable target" }); await flushJobs();
+      const second = h.renderPort.posts.at(-1); assert.equal(second.control, 6n); h.renderPort.ack(second); await flushJobs();
+      assert.equal(h.of("render-error").length, 0);
+    }
+    const replies = h.of("menu-motion-reply"); assert.equal(replies.length, 2); assert.equal(new Set(replies.map(m => m.requestId)).size, 2);
+    h.renderPort.ack(first); await flushJobs(); assert.equal(h.of("menu-motion-reply").length, 2);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
 test("actual Worker and WASM Settings Apply validates thirteen scalars and emits the exact correlated effect", async () => {
   const worker = await readyWorker({ actualMenu: true });
   try {

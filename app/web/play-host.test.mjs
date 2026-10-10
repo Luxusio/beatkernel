@@ -331,6 +331,7 @@ async function harness(faults = {}) {
       (this.role === "renderer" ? renderers : workers).push(this);
     }
     postMessage(value, transfer = []) {
+      if (value.kind === "menu-motion") (this.motionArguments ??= []).push(value);
       traces.push(["post", value.kind]);
       if (value.kind === this.failKind) throw new Error("injected Worker post failure");
       assert.equal(this.terminations, 0, "posting after Worker termination");
@@ -585,7 +586,7 @@ async function harness(faults = {}) {
     this.setExport("RecordsStore", RecordsStore);
   }, { context });
   const modules = new Map();
-  for (const name of ["presentation-status.mjs", "completed-results-model.mjs", "host_model.mjs", "play-model.mjs", "settings-profile.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "pointer-input.mjs", "local-play-host.mjs", "main.js"]) {
+  for (const name of ["render-protocol.mjs", "presentation-status.mjs", "completed-results-model.mjs", "host_model.mjs", "play-model.mjs", "settings-profile.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "pointer-input.mjs", "local-play-host.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
     modules.set(name, new SourceTextModule(await readFile(url, "utf8"), {
       context, identifier: url.href, initializeImportMeta(meta) { meta.url = url.href; },
@@ -722,6 +723,7 @@ async function harness(faults = {}) {
     await flush();
   }
   return { get, workers, renderers, allWorkers, channels, get audio() { return audio; }, opens, traces, faults, timers, moduleToken, window, document, urls, revoked, downloads,
+    requestMenuMotion(...args) { return main.namespace.requestMenuMotion(...args); },
     recordOpens, recordCalls, recordOwners, captures, releases, hid, hidDevices, get layoutReads() { return layoutReads; },
     get gamepadReads() { return gamepadReads; },
     resize(width, height) { viewport = { width, height }; resizeObservers.at(-1).callback(); },
@@ -738,6 +740,90 @@ async function harness(faults = {}) {
     },
   };
 }
+
+const menuMotionEndpoints = () => new Float32Array([0, 0, 1, 1, 1, 40, 10, 1.25, 0.75, 0.5]);
+async function submittedMotionHost() {
+  const h = await harness(); await h.preview(); h.click("menu-open"); await flush();
+  await h.receive({ kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n, route: 2, fields: ["draft"], selected: 0 });
+  await h.receive({ kind: "render-geometry", mode: "menu", generation: 7n, content: 9n,
+    geometryVersion: 3n, page: 0, width: 960, height: 720, menuGeneration: 77n, screen: 3n, revision: 5n });
+  return h;
+}
+function menuMotionReply(request, fields = {}) {
+  const { requestId, hostOwner, menuGeneration, screen, revision, generation, content, geometryVersion } = request;
+  return { kind: "menu-motion-reply", requestId, hostOwner, menuGeneration, screen, revision,
+    generation, content, geometryVersion, admitted: true, admittedGeometryVersion: 4n, ...fields };
+}
+
+test("Window explicit motion copies endpoints and correlates every owner field before settling admission", async () => {
+  const h = await submittedMotionHost(); const game = h.workers[0];
+  try {
+    const transform = menuMotionEndpoints(), expected = [...transform];
+    let settled = 0; const promise = h.requestMenuMotion(1000n, transform, 1000).then(value => { settled++; return value; });
+    transform.fill(999); const request = game.last("menu-motion");
+    assert.deepEqual([...game.motionArguments.at(-1).transforms], expected, "host copy precedes postMessage cloning");
+    assert.equal(request.control, 1000n); assert.equal(request.geometryVersion, 3n);
+    assert.equal(request.generation, 7n); assert.equal(request.content, 9n);
+    for (const wrong of [{ requestId: request.requestId + 1n }, { hostOwner: request.hostOwner + 1 },
+      { menuGeneration: 78n }, { screen: 4n }, { revision: 4n }, { generation: 8n }, { content: 10n }, { geometryVersion: 4n }]) {
+      await h.receive(menuMotionReply(request, wrong)); assert.equal(settled, 0);
+    }
+    await h.receive(menuMotionReply(request)); await promise; assert.equal(settled, 1);
+    await h.receive(menuMotionReply(request)); assert.equal(settled, 1);
+    assert.equal(h.opens.length, 0); assert.equal(game.messages("play-step").length, 0);
+    assert.equal(game.messages("resize").at(-1)?.geometryVersion > 3n, false, "Window does not allocate renderer motion counters");
+  } finally { await h.close(); }
+});
+
+test("Window explicit motion validates endpoint bounds before consuming an RPC", async () => {
+  const h = await submittedMotionHost(); const game = h.workers[0];
+  try {
+    for (const [control, values, duration, easing] of [[0n, menuMotionEndpoints(), 1000, 0],
+      [1n, new Float32Array(9), 1000, 0], [1n, menuMotionEndpoints(), Infinity, 0], [1n, menuMotionEndpoints(), 1, 4],
+      [1n, new Float32Array([0, 0, 0, 1, 1, 0, 0, 1, 1, 1]), 1, 0],
+      [1n, new Float32Array([16777218, 0, 1, 1, 1, 0, 0, 1, 1, 1]), 1, 0]]) {
+      await assert.rejects(h.requestMenuMotion(control, values, duration, easing));
+      assert.equal(game.messages("menu-motion").length, 0);
+    }
+  } finally { await h.close(); }
+});
+
+test("Window motion deadline settles once and a late admitted reply cannot revive it", async () => {
+  const h = await submittedMotionHost(); const game = h.workers[0];
+  try {
+    const pending = h.requestMenuMotion(1000n, menuMotionEndpoints(), 1000);
+    const result = assert.rejects(pending, /timed|deadline/i); const request = game.last("menu-motion");
+    await h.advance(10000); await result;
+    await h.receive(menuMotionReply(request));
+    const next = h.requestMenuMotion(1001n, menuMotionEndpoints(), 1000);
+    await h.receive(menuMotionReply(game.last("menu-motion"))); await next;
+  } finally { await h.close(); }
+});
+
+test("Window outstanding motion bound includes in-flight and independent targets settle separately", async () => {
+  const h = await submittedMotionHost(); const game = h.workers[0];
+  try {
+    const pending = Array.from({ length: 64 }, (_, i) => h.requestMenuMotion(BigInt(1000 + i), menuMotionEndpoints(), 1000));
+    const settled = Promise.allSettled(pending);
+    await assert.rejects(h.requestMenuMotion(9999n, menuMotionEndpoints(), 1000), /limit|full|capacity|outstanding/i);
+    assert.equal(game.messages("menu-motion").length, 64);
+    const requests = game.messages("menu-motion"); assert.equal(new Set(requests.map(m => m.requestId)).size, 64);
+    for (const request of requests) await h.receive(menuMotionReply(request));
+    const results = await settled; assert.equal(results.filter(r => r.status === "fulfilled").length, 64);
+  } finally { await h.close(); }
+});
+
+for (const transition of ["replacement", "fatal", "dispose"]) test(`Window ${transition} settles owned motion and clears its deadline`, async () => {
+  const h = await submittedMotionHost(); const game = h.workers[0];
+  try {
+    const pending = h.requestMenuMotion(1000n, menuMotionEndpoints(), 1000); const result = assert.rejects(pending);
+    const request = game.last("menu-motion");
+    if (transition === "replacement") await h.receive({ kind: "menu-state", menuGeneration: 77n, screen: 4n, revision: 6n, route: 3, fields: ["0"], selected: 0 });
+    else if (transition === "fatal") await h.receive({ kind: "fatal", message: "renderer failed" });
+    else await h.close();
+    await result; await h.receive(menuMotionReply(request));
+  } finally { if (transition !== "dispose") await h.close(); }
+});
 
 async function localCount(h, count) {
   h.get("local-count").value = String(count); h.get("local-count").emit("change"); await flush();

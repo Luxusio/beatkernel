@@ -872,6 +872,7 @@ struct PresentedHit {
     bounds: crate::ui::interaction::Bounds,
     key: Option<crate::scene::UiComponentKey>,
 }
+#[derive(Clone)]
 struct MenuMotion {
     screen: ScreenInstanceId,
     scheduler: crate::ui::motion::MotionScheduler,
@@ -888,6 +889,60 @@ enum MenuView {
     Display(crate::ui::display::DisplayView),
 }
 impl MenuView {
+    fn node_for_control(
+        &self,
+        control: crate::ui::interaction::ControlId,
+    ) -> Result<Option<crate::ui::layout::NodeId>, String> {
+        match self {
+            Self::Selection(view, _) => view.node_for_control(control),
+            Self::Settings(view) => view.node_for_control(control),
+            Self::Practice(view) => view.node_for_control(control),
+            Self::Display(view) => view.node_for_control(control),
+            Self::Records(view) => view.node_for_control(control),
+            Self::Players(view) => view.node_for_control(control),
+            Self::Devices(view) => view.node_for_control(control),
+        }
+    }
+    fn dirty(&self) -> bool {
+        match self {
+            Self::Selection(view, _) => view.dirty(),
+            Self::Settings(view) => view.dirty(),
+            Self::Practice(view) => view.dirty(),
+            Self::Display(view) => view.dirty(),
+            Self::Records(view) => view.dirty(),
+            Self::Players(view) => view.dirty(),
+            Self::Devices(view) => view.dirty(),
+        }
+    }
+    fn compose(
+        &self,
+        scene: &mut crate::scene::Scene,
+        hits: &mut Vec<(
+            crate::ui::interaction::ControlId,
+            crate::ui::interaction::Bounds,
+        )>,
+        screen: ScreenInstanceId,
+        animated: &[crate::ui::layout::NodeId],
+    ) -> Result<(), String> {
+        macro_rules! compose {
+            ($view:expr) => {
+                if animated.is_empty() {
+                    $view.compose(scene, hits)
+                } else {
+                    $view.compose_components(scene, hits, screen, animated)
+                }
+            };
+        }
+        match self {
+            Self::Selection(view, _) => compose!(view),
+            Self::Settings(view) => compose!(view),
+            Self::Practice(view) => compose!(view),
+            Self::Display(view) => compose!(view),
+            Self::Records(view) => compose!(view),
+            Self::Players(view) => compose!(view),
+            Self::Devices(view) => compose!(view),
+        }
+    }
     fn id(&self) -> ScreenInstanceId {
         match self {
             Self::Selection(view, _) => view.id(),
@@ -1101,11 +1156,6 @@ impl BrowserMenuPresentation {
                     error: model.error.clone(),
                     backend_pending: model.pending,
                 });
-                if animated.is_empty() {
-                    view.compose(scene, &mut self.hits)?;
-                } else {
-                    view.compose_components(scene, &mut self.hits, model.token.screen, &animated)?;
-                }
             }
             MenuView::Settings(view) => {
                 const LABELS: [&str; 14] = [
@@ -1142,7 +1192,6 @@ impl BrowserMenuPresentation {
                     hovered: None,
                     armed: None,
                 })?;
-                view.compose(scene, &mut self.hits)?;
             }
             MenuView::Practice(view) => {
                 view.update(crate::ui::practice::PracticeFrame {
@@ -1153,11 +1202,6 @@ impl BrowserMenuPresentation {
                     hovered: None,
                     armed: None,
                 });
-                if animated.is_empty() {
-                    view.compose(scene, &mut self.hits)?;
-                } else {
-                    view.compose_components(scene, &mut self.hits, model.token.screen, &animated)?;
-                }
             }
             MenuView::Display(view) => {
                 let editors = [editor(0)?, editor(1)?, editor(2)?, editor(3)?];
@@ -1169,11 +1213,6 @@ impl BrowserMenuPresentation {
                     hovered: None,
                     armed: None,
                 })?;
-                if animated.is_empty() {
-                    view.compose(scene, &mut self.hits)?;
-                } else {
-                    view.compose_components(scene, &mut self.hits, model.token.screen, &animated)?;
-                }
             }
             MenuView::Records(view) => {
                 let directory = LineEditor::new("Browser saved records", 4096)?;
@@ -1198,7 +1237,6 @@ impl BrowserMenuPresentation {
                     hovered: None,
                     armed: None,
                 })?;
-                view.compose(scene, &mut self.hits)?;
             }
             MenuView::Players(view) => {
                 // Exact stable player ID/source pairs, followed by the source descriptor table.
@@ -1219,7 +1257,6 @@ impl BrowserMenuPresentation {
                     hovered: None,
                     armed: None,
                 })?;
-                view.compose(scene, &mut self.hits)?;
             }
             MenuView::Devices(view) => {
                 let (_, sources, can_assign, can_refresh) =
@@ -1237,8 +1274,51 @@ impl BrowserMenuPresentation {
                     hovered: None,
                     armed: None,
                 })?;
-                view.compose(scene, &mut self.hits)?;
             }
+        }
+        if !animated.is_empty() && view.dirty() {
+            // A page/capability/detail change can remove mounted action targets.
+            // Refresh associations on a private static surface, then retain only
+            // surviving node identities; accepted input still owns the last frame.
+            let mut candidate = scene.component_candidate();
+            let mut candidate_hits = Vec::new();
+            view.compose(&mut candidate, &mut candidate_hits, model.token.screen, &[])?;
+            let mut displayed = Vec::new();
+            for &(control, _) in &candidate_hits {
+                if let Some(node) = view.node_for_control(control)? {
+                    displayed.push(node);
+                }
+            }
+            let index = self
+                .motions
+                .iter()
+                .position(|m| m.screen == model.token.screen)
+                .ok_or("menu motion owner unavailable")?;
+            let mut owner = self.motions[index].clone();
+            owner.nodes.retain(|(node, _)| {
+                if displayed.contains(node) {
+                    true
+                } else {
+                    owner.scheduler.cancel(*node);
+                    false
+                }
+            });
+            let surviving: Vec<_> = owner.nodes.iter().map(|(node, _)| *node).collect();
+            candidate.retain_component_keys(model.token.screen, &surviving);
+            view.compose(
+                &mut candidate,
+                &mut candidate_hits,
+                model.token.screen,
+                &surviving,
+            )?;
+            owner
+                .scheduler
+                .restore_poses(&mut candidate, &owner.nodes)?;
+            scene.publish_component_scene(candidate, model.token.screen);
+            self.hits = candidate_hits;
+            self.motions[index] = owner;
+        } else {
+            view.compose(scene, &mut self.hits, model.token.screen, &animated)?;
         }
         self.pending_hits.clear();
         self.pending_hits
@@ -1248,12 +1328,7 @@ impl BrowserMenuPresentation {
             .try_reserve(self.hits.len().saturating_sub(self.presented_hits.len()))
             .map_err(|_| "menu presented hit allocation failed")?;
         for &(control, bounds) in &self.hits {
-            let node = match view {
-                MenuView::Selection(view, _) => view.node_for_control(control)?,
-                MenuView::Display(view) => view.node_for_control(control)?,
-                MenuView::Practice(view) => view.node_for_control(control)?,
-                _ => None,
-            };
+            let node = view.node_for_control(control)?;
             self.pending_hits.push(PresentedHit {
                 control,
                 bounds,
@@ -1268,21 +1343,7 @@ impl BrowserMenuPresentation {
             .iter_mut()
             .find(|m| m.screen == model.token.screen)
         {
-            owner.scheduler.rebind(scene)?;
-            let updates: Vec<_> = owner
-                .nodes
-                .iter()
-                .map(|(node, pose)| {
-                    scene
-                        .component_live(crate::scene::UiComponentKey {
-                            screen: owner.screen,
-                            node: *node,
-                        })
-                        .map(|id| (id, *pose))
-                        .ok_or("menu motion component unavailable")
-                })
-                .collect::<Result<_, _>>()?;
-            scene.set_component_transforms(&updates)?;
+            owner.scheduler.restore_poses(scene, &owner.nodes)?;
         }
         Ok(())
     }
@@ -1295,12 +1356,7 @@ impl BrowserMenuPresentation {
             .iter()
             .find(|v| v.id() == self.model.token.screen)
             .ok_or("menu view unavailable")?;
-        let node = match view {
-            MenuView::Selection(view, _) => view.node_for_control(control)?,
-            MenuView::Display(view) => view.node_for_control(control)?,
-            MenuView::Practice(view) => view.node_for_control(control)?,
-            _ => return Err("menu route does not support explicit component motion".into()),
-        };
+        let node = view.node_for_control(control)?;
         node.ok_or_else(|| "control is not displayed".into())
     }
     fn check_motion_time(&self, now: std::time::Duration) -> Result<(), String> {

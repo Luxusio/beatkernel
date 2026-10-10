@@ -111,6 +111,15 @@ async function rendererHarness(options = {}) {
     visual_page() { calls.push(["visual-page", this.appliedPage]); return this.appliedPage; }
     resize(width, height) { calls.push(["resize", width, height]); }
     draw_visual() { calls.push(["draw", this.model?.kind, this.appliedPage, this.model?.comparisons]); if (options.drawError) throw new Error(options.drawError); }
+    draw_visual_at(at) { this.draw_visual(); return !this.needs_redraw(); }
+    displayed_results_nodes() { return [0, 1, 2]; }
+    request_results_motion(generation, content, node, transforms, duration, easing, at) {
+      calls.push(["results-motion", generation, content, node, [...transforms], duration, easing, at]);
+    }
+    results_motion_active() { return false; }
+    suspend_results_motion(at) { calls.push(["results-suspend", at]); }
+    resume_results_motion(at) { calls.push(["results-resume", at]); }
+    dispose_results_motion() { calls.push(["results-dispose"]); }
     needs_redraw() { return this.surfaceRetry ?? options.needsRedraw ?? false; }
     retire_visual() { this.retired++; this.model = null; calls.push(["retire"]); }
     free() { this.frees++; assert.equal(this.frees, 1); calls.push(["free"]); }
@@ -284,6 +293,7 @@ for (const [name, fields] of [
   ["array transforms", { transforms: Array(10).fill(1) }],
   ["nonfinite transforms", { transforms: new Float32Array([0, 0, 1, 1, 1, Infinity, 0, 1, 1, 1]) }],
   ["NaN transforms", { transforms: new Float32Array([0, 0, 1, 1, 1, 0, 0, 1, NaN, 1]) }],
+  ["negative scale", { transforms: new Float32Array([0, 0, 1, 1, 1, 0, 0, -1, 1, 1]) }],
   ["old geometry version", { geometryVersion: 11n }],
 ]) test(`menu motion refuses ${name} before native admission or geometry publication`, async () => {
   const h = await rendererHarness();
@@ -291,22 +301,30 @@ for (const [name, fields] of [
     await h.init(); await h.send(menuRequest()); await h.draw();
     await h.send(motionRequest(fields));
     assert.equal(h.calls.filter(call => call[0] === "menu-motion").length, 0);
-    assert.ok(ofKind(h, "render-error").some(message => message.operationId === 2n));
+    assert.ok(ofKind(h, "control-reject").some(message => message.operationId === 2n));
+    assert.equal(ofKind(h, "render-error").length, 0);
     assert.equal(ofKind(h, "control-ack").filter(message => message.operationId === 2n).length, 0);
     assert.equal(ofKind(h, "geometry-ack").filter(message => message.geometryVersion === 12n).length, 0);
   } finally { await h.close(); }
 });
 
-test("native motion range refusal cannot publish a control or geometry ACK", async () => {
-  const h = await rendererHarness({ motionError: "invalid motion scale range" });
+test("native unavailable motion target refusal cannot publish a control or geometry ACK", async () => {
+  const h = await rendererHarness({ motionError: "unavailable motion target" });
   try {
     await h.init(); await h.send(menuRequest()); await h.draw();
-    await h.send(motionRequest({ transforms: new Float32Array([0, 0, 1, 1, 1, 0, 0, -1, 1, 1]) }));
+    await h.send(motionRequest());
     assert.equal(h.calls.filter(call => call[0] === "menu-motion").length, 1);
     assert.equal(h.views[0].motion, undefined);
-    assert.ok(ofKind(h, "render-error").some(message => /scale range/.test(message.message)));
+    assert.ok(ofKind(h, "control-reject").some(message => message.operationId === 2n && /unavailable motion target/.test(message.message)));
+    assert.equal(ofKind(h, "render-error").length, 0);
     assert.equal(ofKind(h, "control-ack").filter(message => message.operationId === 2n).length, 0);
     assert.equal(ofKind(h, "geometry-ack").filter(message => message.geometryVersion === 12n).length, 0);
+    const draws = ofKind(h, "drawn").length;
+    await h.draw(); assert.equal(ofKind(h, "drawn").length, draws, "refusal schedules no paint");
+    h.options.motionError = null;
+    await h.send(motionRequest({ operationId: 3n, geometryVersion: 13n }));
+    assert.ok(ofKind(h, "control-ack").some(message => message.operationId === 3n));
+    await h.draw(); assert.ok(ofKind(h, "geometry-ack").some(message => message.geometryVersion === 13n));
   } finally { await h.close(); }
 });
 

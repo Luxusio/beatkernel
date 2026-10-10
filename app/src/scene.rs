@@ -650,7 +650,9 @@ impl Scene {
         let id = self.component_id(key)?;
         self.components[id.slot].as_ref()?.live.then_some(id)
     }
-    pub(crate) fn component_candidate(&self) -> Self {
+    /// Cold UI composition starts without previous timed geometry, retaining
+    /// component slot epochs for rebinding. Publication preserves note caches.
+    pub fn component_candidate(&self) -> Self {
         let mut next = Self::with_capacity(self.width, self.height, self.rectangles.len());
         next.components = self.components.clone();
         next.next_component_epoch = self.next_component_epoch;
@@ -658,6 +660,55 @@ impl Scene {
             value.live = false;
         }
         next
+    }
+    /// Stage a bounded UI render transaction without cloning cached note data.
+    /// The shared identity lets retained views recognize an unchanged packet.
+    pub fn component_render_candidate(&self) -> Result<Self, String> {
+        self.status()?;
+        if !self.playfields.is_empty() {
+            return Err("timed playfields cannot enter a UI render transaction".into());
+        }
+        let mut next = Self::with_capacity(self.width, self.height, 0);
+        next.rectangles
+            .try_reserve_exact(self.rectangles.len())
+            .map_err(|error| error.to_string())?;
+        next.batches
+            .try_reserve_exact(self.batches.len())
+            .map_err(|error| error.to_string())?;
+        next.rectangles.extend_from_slice(&self.rectangles);
+        next.batches.extend_from_slice(&self.batches);
+        next.geometry_identity = Arc::clone(&self.geometry_identity);
+        next.geometry_epoch = self.geometry_epoch;
+        next.ui_translation = self.ui_translation;
+        next.components = self.components.clone();
+        next.component_owner = self.component_owner;
+        next.next_component_epoch = self.next_component_epoch;
+        next.source_geometry = self.source_geometry;
+        Ok(next)
+    }
+
+    /// Publish staged UI packets while retaining the live scene's note caches.
+    /// Geometry revisions belong to the candidate's edits, not publication.
+    pub fn publish_render_candidate(&mut self, next: Self) -> Result<(), String> {
+        next.status()?;
+        if self.logical_extent() != next.logical_extent() || !next.playfields.is_empty() {
+            return Err("UI render candidate extent or timed geometry mismatch".into());
+        }
+        self.rectangles = next.rectangles;
+        self.batches = next.batches;
+        self.overflow = next.overflow;
+        self.error = next.error;
+        self.geometry_identity = next.geometry_identity;
+        self.geometry_epoch = next.geometry_epoch;
+        self.ui_translation = next.ui_translation;
+        self.components = next.components;
+        self.component_owner = next.component_owner;
+        self.next_component_epoch = next.next_component_epoch;
+        self.source_geometry = next.source_geometry;
+        self.playfields.clear();
+        self.visible_note_indices.clear();
+        self.visible_mine_indices.clear();
+        Ok(())
     }
     pub fn retain_component_keys(&mut self, screen: ScreenInstanceId, nodes: &[NodeId]) {
         for component in &mut self.components {
@@ -713,6 +764,16 @@ impl Scene {
 
     /// Freeze component geometry without cloning its rectangles or batches.
     pub fn geometry_snapshot(self) -> Result<GeometrySnapshot, String> {
+        self.validate_static_geometry()?;
+        Ok(GeometrySnapshot {
+            width: self.width,
+            height: self.height,
+            rectangles: self.rectangles.into(),
+            batches: self.batches.into(),
+        })
+    }
+
+    fn validate_static_geometry(&self) -> Result<(), String> {
         self.status()?;
         if self.ui_translation != UiTranslation::default() {
             return Err("translated UI surface cannot become a static geometry packet".into());
@@ -723,11 +784,28 @@ impl Scene {
         if !self.playfields.is_empty() {
             return Err("timed playfields cannot become static UI geometry".into());
         }
+        Ok(())
+    }
+
+    /// Preserve an ordinary header for a cold component composition without
+    /// consuming the caller's scene. Animated/timed geometry cannot be frozen.
+    pub(crate) fn static_geometry_snapshot(&self) -> Result<GeometrySnapshot, String> {
+        self.validate_static_geometry()?;
+        let mut rectangles = Vec::new();
+        rectangles
+            .try_reserve_exact(self.rectangles.len())
+            .map_err(|error| error.to_string())?;
+        rectangles.extend_from_slice(&self.rectangles);
+        let mut batches = Vec::new();
+        batches
+            .try_reserve_exact(self.batches.len())
+            .map_err(|error| error.to_string())?;
+        batches.extend_from_slice(&self.batches);
         Ok(GeometrySnapshot {
             width: self.width,
             height: self.height,
-            rectangles: self.rectangles.into(),
-            batches: self.batches.into(),
+            rectangles: rectangles.into(),
+            batches: batches.into(),
         })
     }
 
@@ -1467,6 +1545,164 @@ mod tests {
         let mut unshifted = Scene::new(960, 720);
         unshifted.rect(0, 0, 1, 1, 0);
         assert!(unshifted.geometry_snapshot().is_ok());
+    }
+
+    #[test]
+    fn component_render_transaction_preserves_stamp_pose_and_note_cache() {
+        let mut scene = Scene::new(960, 720);
+        scene.rect(11, 13, 17, 19, 0x123456);
+        let key = UiComponentKey {
+            screen: ScreenInstanceId(7),
+            node: NodeId(1),
+        };
+        let id = scene
+            .bind_component(key, &[0..1], ClipRect::new([11, 13, 17, 19]).unwrap(), None)
+            .unwrap();
+        let identity = Arc::clone(scene.geometry_stamp().0);
+        let revision = scene.geometry_stamp().1;
+        let cache_storage = scene.playfield_caches.as_ptr();
+        let pose = UiTransform::new([3.0, 5.0], [1.0, 1.0], 0.5).unwrap();
+        let mut candidate = scene.component_render_candidate().unwrap();
+        candidate.set_component_transforms(&[(id, pose)]).unwrap();
+        assert_eq!(
+            scene.component_transform(id).unwrap(),
+            UiTransform::default()
+        );
+        assert!(Arc::ptr_eq(&identity, candidate.geometry_stamp().0));
+        assert_eq!(candidate.geometry_stamp().1, revision);
+        scene.publish_render_candidate(candidate).unwrap();
+        assert_eq!(scene.component_transform(id).unwrap(), pose);
+        assert!(Arc::ptr_eq(&identity, scene.geometry_stamp().0));
+        assert_eq!(scene.geometry_stamp().1, revision);
+        assert_eq!(scene.playfield_caches.as_ptr(), cache_storage);
+        let mut abandoned = scene.component_render_candidate().unwrap();
+        abandoned.clear();
+        assert_eq!(scene.rectangles.len(), 1);
+        assert_eq!(scene.component_transform(id).unwrap(), pose);
+        let mut changed = scene.component_render_candidate().unwrap();
+        changed.rect(23, 29, 31, 37, 0x654321);
+        let changed_revision = changed.geometry_stamp().1;
+        assert_ne!(changed_revision, revision);
+        scene.publish_render_candidate(changed).unwrap();
+        assert_eq!(scene.geometry_stamp().1, changed_revision);
+        assert_eq!(scene.playfield_caches.as_ptr(), cache_storage);
+    }
+
+    #[test]
+    fn component_render_transaction_refuses_timed_or_failed_scene() {
+        let mut scene = Scene::new(960, 720);
+        scene.rect(11, 13, 17, 19, 0x123456);
+        let identity = Arc::clone(scene.geometry_stamp().0);
+        let revision = scene.geometry_stamp().1;
+        assert!(scene.publish_render_candidate(Scene::new(1, 1)).is_err());
+        let mut failed = scene.component_render_candidate().unwrap();
+        failed.overflow = true;
+        assert!(scene.publish_render_candidate(failed).is_err());
+        assert!(Arc::ptr_eq(&identity, scene.geometry_stamp().0));
+        assert_eq!(scene.geometry_stamp().1, revision);
+        assert_eq!(scene.rectangles.len(), 1);
+        scene.playfields.push(PlayfieldFrame {
+            instances: Arc::from([]),
+            drift: 0.0,
+            top: 0.0,
+            bottom: 720.0,
+        });
+        assert!(scene.component_render_candidate().is_err());
+        let cold = scene.component_candidate();
+        assert!(cold.playfields.is_empty());
+        assert!(cold.rectangles.is_empty());
+        let cache_storage = scene.playfield_caches.as_ptr();
+        scene.publish_render_candidate(cold).unwrap();
+        assert_eq!(scene.playfield_caches.as_ptr(), cache_storage);
+        scene.rect(11, 13, 17, 19, 0x123456);
+        scene.playfields.push(PlayfieldFrame {
+            instances: Arc::from([]),
+            drift: 0.0,
+            top: 0.0,
+            bottom: 720.0,
+        });
+        let mut timed = Scene::new(960, 720);
+        timed.playfields = std::mem::take(&mut scene.playfields);
+        assert!(scene.publish_render_candidate(timed).is_err());
+        assert_eq!(scene.rectangles.len(), 1);
+        scene.playfields.clear();
+        scene.overflow = true;
+        assert!(scene.component_render_candidate().is_err());
+    }
+
+    #[test]
+    fn borrowed_static_prefix_is_immutable_and_preserves_live_geometry() {
+        let mut header = Scene::new(960, 720);
+        header.rect(11, 13, 17, 19, 0x123456);
+        let identity = Arc::clone(header.geometry_stamp().0);
+        let revision = header.geometry_stamp().1;
+        let prefix = header.static_geometry_snapshot().unwrap();
+        assert!(Arc::ptr_eq(&identity, header.geometry_stamp().0));
+        assert_eq!(revision, header.geometry_stamp().1);
+        header.clear();
+        header.rect(23, 29, 31, 37, 0xabcdef);
+        let mut output = Scene::new(960, 720);
+        output.append_geometry(&prefix).unwrap();
+        assert_eq!(output.rectangles[0].bounds, [11.0, 13.0, 17.0, 19.0]);
+        assert_eq!(output.rectangles.len(), 1);
+        assert_eq!(header.rectangles[0].bounds, [23.0, 29.0, 31.0, 37.0]);
+    }
+
+    #[test]
+    fn borrowed_static_prefix_refuses_nonstatic_and_failed_scenes() {
+        let mut header = Scene::new(960, 720);
+        header.rect(11, 13, 17, 19, 0x123456);
+        header.set_ui_translation(UiTranslation::new(1, 0).unwrap());
+        assert!(header.static_geometry_snapshot().is_err());
+        header.set_ui_translation(UiTranslation::default());
+        let key = UiComponentKey {
+            screen: ScreenInstanceId(7),
+            node: NodeId(1),
+        };
+        header
+            .bind_component(key, &[0..1], ClipRect::new([11, 13, 17, 19]).unwrap(), None)
+            .unwrap();
+        assert!(header.static_geometry_snapshot().is_err());
+        header.clear();
+        header.overflow = true;
+        assert!(header.static_geometry_snapshot().is_err());
+    }
+
+    #[test]
+    fn results_component_cache_survives_geometry_identity_rollover() {
+        use crate::{
+            gauge::BmsGauge,
+            local_players::PlayerId,
+            play_result::CompletedPlayResult,
+            ui::results::{FrozenResultsView, ResultsView},
+        };
+        let result = CompletedPlayResult::from_completed(
+            beatkernel::time::Timestamp::ZERO,
+            None,
+            &BmsGauge::default(),
+        );
+        let view = ResultsView::new(&[(PlayerId(1), result)], &[PlayerId(1)]).unwrap();
+        let frozen = FrozenResultsView::from_model(view.export_visual().unwrap()).unwrap();
+        for frozen_mode in [false, true] {
+            let node = view.displayed_nodes(0, false).unwrap()[1];
+            let mut scene = Scene::new(960, 720);
+            scene.geometry_epoch = u64::MAX;
+            let old = Arc::clone(scene.geometry_stamp().0);
+            let compose = |scene: &mut Scene| {
+                if frozen_mode {
+                    frozen.compose_components_mode(scene, ScreenInstanceId(83), 0, false, &[node])
+                } else {
+                    view.compose_components_mode(scene, ScreenInstanceId(83), 0, false, &[node])
+                }
+            };
+            compose(&mut scene).unwrap();
+            assert!(!Arc::ptr_eq(&old, scene.geometry_stamp().0));
+            assert_eq!(scene.geometry_stamp().1, 0);
+            let identity = Arc::clone(scene.geometry_stamp().0);
+            compose(&mut scene).unwrap();
+            assert!(Arc::ptr_eq(&identity, scene.geometry_stamp().0));
+            assert_eq!(scene.geometry_stamp().1, 0);
+        }
     }
 
     #[test]

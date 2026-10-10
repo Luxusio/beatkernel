@@ -28,6 +28,9 @@ pub(crate) struct BrowserCanvas {
         [Vec<beatkernel::judge::JudgeEvent>; crate::browser_render_state::MAX_RENDER_VISIBLE],
     extent: [u32; 2],
     menu_token: Option<crate::browser_menu::MenuToken>,
+    results_motion: Option<crate::browser_results_motion::BrowserResultsMotion>,
+    results_screen_serial: u64,
+    results_dirty: bool,
 }
 
 impl BrowserCanvas {
@@ -54,6 +57,7 @@ impl BrowserCanvas {
         now: std::time::Duration,
     ) -> Result<bool, String> {
         menu.validate_motion_time(now)?;
+        self.results_dirty = true;
         self.prepare_surface()?;
         if self.extent.contains(&0) {
             menu.tick_motion(now, self.extent, &mut self.scene)?;
@@ -116,6 +120,9 @@ impl BrowserCanvas {
             }),
             extent,
             menu_token: None,
+            results_motion: None,
+            results_screen_serial: 0,
+            results_dirty: true,
         })
     }
 
@@ -124,6 +131,7 @@ impl BrowserCanvas {
         if self.extent != extent {
             self.renderer.resize(width, height)?;
             self.extent = extent;
+            self.results_dirty = true;
         }
         Ok(())
     }
@@ -251,6 +259,7 @@ impl BrowserCanvas {
             &presentations[..visible.len()],
             &mut self.renderer,
         )?;
+        self.results_dirty = true;
         self.scene.clear();
         self.menu_token = None;
         organisms::local_player_views_with_reserved_comparison_space(
@@ -327,6 +336,7 @@ impl BrowserCanvas {
             .presentation
             .as_ref()
             .ok_or("historical record display unavailable")?;
+        self.results_dirty = true;
         self.scene.clear();
         self.menu_token = None;
         presentation.compose(&mut self.scene)?;
@@ -352,6 +362,7 @@ impl BrowserCanvas {
             .presentation
             .view()
             .ok_or("completed Results display unavailable")?;
+        self.results_dirty = true;
         self.scene.clear();
         self.menu_token = None;
         crate::ui::atoms::text(
@@ -391,6 +402,7 @@ impl BrowserCanvas {
         self.movies.clear(&mut self.renderer)?;
         self.backgrounds
             .sync_presentations(None, &[], &mut self.renderer)?;
+        self.results_dirty = true;
         self.scene.clear();
         self.menu_token = None;
         organisms::room_presentation_footer(&mut self.scene, page)?;
@@ -431,6 +443,7 @@ impl BrowserCanvas {
         )?;
         self.merge_movies(&mut frames, 1)?;
         // Clearing geometry retains Scene's visible-note and GPU instance cache.
+        self.results_dirty = true;
         self.scene.clear();
         self.menu_token = None;
         organisms::playfield_with_background(
@@ -495,6 +508,7 @@ impl BrowserCanvas {
             &mut self.renderer,
         )?;
         self.merge_movies(&mut frames, visible.len())?;
+        self.results_dirty = true;
         self.scene.clear();
         self.menu_token = None;
         if !local {
@@ -640,27 +654,93 @@ impl BrowserCanvas {
         self.movies.clear(&mut self.renderer)?;
         self.backgrounds
             .sync_presentations(None, &[], &mut self.renderer)?;
+        self.results_dirty = true;
         self.scene.clear();
         self.menu_token = None;
         history.compose(&mut self.scene)?;
         self.renderer.render(&self.scene)
     }
 
-    pub(crate) fn present_frozen_results(
+    pub(crate) fn register_results_motion(&mut self, identity: (u64, u64)) -> Result<(), String> {
+        let serial = self
+            .results_screen_serial
+            .checked_add(1)
+            .ok_or("Results screen identity exhausted")?;
+        let owner = crate::browser_results_motion::BrowserResultsMotion::new(
+            identity,
+            crate::screen_lifecycle::ScreenInstanceId(serial),
+        )?;
+        self.dispose_results_motion();
+        // Menu and Results allocators are separate: a numerical collision must
+        // never transfer another mounted owner's renderer slots or poses.
+        self.scene.retain_component_keys(owner.screen(), &[]);
+        self.results_screen_serial = serial;
+        self.results_motion = Some(owner);
+        self.results_dirty = true;
+        Ok(())
+    }
+    pub(crate) fn invalidate_results(&mut self) {
+        self.results_dirty = true;
+    }
+    pub(crate) fn results_motion_time(&self) -> std::time::Duration {
+        self.results_motion
+            .as_ref()
+            .map_or(std::time::Duration::ZERO, |owner| owner.time())
+    }
+    pub(crate) fn results_motion_active(&self) -> bool {
+        self.results_motion
+            .as_ref()
+            .is_some_and(|owner| owner.active())
+    }
+    pub(crate) fn suspend_results_motion(
+        &mut self,
+        now: std::time::Duration,
+    ) -> Result<(), String> {
+        self.results_motion
+            .as_mut()
+            .ok_or("Results not registered")?
+            .suspend(now)
+    }
+    pub(crate) fn resume_results_motion(&mut self, now: std::time::Duration) -> Result<(), String> {
+        self.results_motion
+            .as_mut()
+            .ok_or("Results not registered")?
+            .resume(now)
+    }
+    pub(crate) fn dispose_results_motion(&mut self) {
+        if let Some(mut owner) = self.results_motion.take() {
+            owner.dispose();
+            self.scene.retain_component_keys(owner.screen(), &[]);
+        }
+        self.results_dirty = true;
+    }
+    pub(crate) fn prune_results_motion(
         &mut self,
         results: &crate::ui::results::FrozenResultsView,
         page: usize,
         comparisons: bool,
-        room: Option<&crate::room_presentation::RoomPresentation>,
     ) -> Result<(), String> {
-        self.prepare_surface()?;
-        self.movies.clear(&mut self.renderer)?;
-        self.backgrounds
-            .sync_presentations(None, &[], &mut self.renderer)?;
-        self.scene.clear();
-        self.menu_token = None;
+        self.results_motion
+            .as_mut()
+            .ok_or("Results not registered")?
+            .prune(results, page, comparisons)?;
+        self.results_dirty = true;
+        Ok(())
+    }
+    fn compose_results_scene(
+        &self,
+        results: &crate::ui::results::FrozenResultsView,
+        page: usize,
+        comparisons: bool,
+        room: Option<&crate::room_presentation::RoomPresentation>,
+        owner: &mut crate::browser_results_motion::BrowserResultsMotion,
+    ) -> Result<Scene, String> {
+        let mut scene = self.scene.component_candidate();
+        scene.clear();
+        let nodes = owner.nodes();
+        scene.retain_component_keys(owner.screen(), &nodes);
         atoms::text(
-            &mut self.scene,
+            &mut scene,
             24,
             65,
             if results.has_comparisons() {
@@ -671,11 +751,94 @@ impl BrowserCanvas {
             2,
             0x9bb1cf,
         );
-        results.compose_mode(&mut self.scene, page, comparisons)?;
+        results.compose_components_mode(&mut scene, owner.screen(), page, comparisons, &nodes)?;
+        owner.restore(&mut scene)?;
         if let Some(room) = room {
-            organisms::room_presentation_footer(&mut self.scene, room)?;
+            organisms::room_presentation_footer(&mut scene, room)?;
         }
-        self.renderer.render(&self.scene)
+        scene.status()?;
+        Ok(scene)
+    }
+    pub(crate) fn request_results_motion(
+        &mut self,
+        identity: (u64, u64),
+        node: crate::ui::layout::NodeId,
+        motion: crate::ui::motion::ComponentMotion,
+        now: std::time::Duration,
+        results: &crate::ui::results::FrozenResultsView,
+        page: usize,
+        comparisons: bool,
+        room: Option<&crate::room_presentation::RoomPresentation>,
+    ) -> Result<(), String> {
+        if self.extent.contains(&0) {
+            return Err("Results motion request while backing extent is zero".into());
+        }
+        let mut owner = self
+            .results_motion
+            .as_ref()
+            .ok_or("Results not registered")?
+            .clone();
+        owner.validate_request(identity, node, now, results, page, comparisons)?;
+        let mut candidate =
+            self.compose_results_scene(results, page, comparisons, None, &mut owner)?;
+        owner.request(
+            identity,
+            node,
+            motion,
+            now,
+            results,
+            page,
+            comparisons,
+            &mut candidate,
+        )?;
+        // Foundation rebinds retain only the header prefix; append the immutable
+        // Room footer once after the final component composition.
+        if let Some(room) = room {
+            organisms::room_presentation_footer(&mut candidate, room)?;
+        }
+        candidate.status()?;
+        self.scene.publish_render_candidate(candidate)?;
+        self.results_motion = Some(owner);
+        self.results_dirty = false;
+        self.menu_token = None;
+        Ok(())
+    }
+    pub(crate) fn present_frozen_results_at(
+        &mut self,
+        results: &crate::ui::results::FrozenResultsView,
+        page: usize,
+        comparisons: bool,
+        room: Option<&crate::room_presentation::RoomPresentation>,
+        now: std::time::Duration,
+    ) -> Result<bool, String> {
+        self.results_motion
+            .as_ref()
+            .ok_or("Results not registered")?
+            .validate_time(now)?;
+        self.prepare_surface()?;
+        if self.extent.contains(&0) {
+            self.results_motion.as_mut().unwrap().suspend(now)?;
+            return Ok(false);
+        }
+        self.movies.clear(&mut self.renderer)?;
+        self.backgrounds
+            .sync_presentations(None, &[], &mut self.renderer)?;
+        if self.results_dirty {
+            let mut owner = self.results_motion.as_ref().unwrap().clone();
+            let candidate =
+                self.compose_results_scene(results, page, comparisons, room, &mut owner)?;
+            self.scene.publish_render_candidate(candidate)?;
+            self.results_motion = Some(owner);
+            self.results_dirty = false;
+        }
+        self.results_motion
+            .as_mut()
+            .unwrap()
+            .tick(now, self.extent, &mut self.scene)?;
+        self.menu_token = None;
+        let before = self.renderer.presentation_count();
+        self.renderer.render(&self.scene)?;
+        Ok(self.renderer.presentation_count() != before)
     }
 
     /// The host owns bounded retry scheduling after transient surface failures.
