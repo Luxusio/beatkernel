@@ -1,10 +1,10 @@
 //! Finite, authored malformed-media corpus through public decoding and preparation.
 use beatkernel::audio::{AudioError, AudioFormat, PcmLimits, SampleId};
 use beatkernel_bms_runtime::{
-    AssetDecoder, ChannelPolicy, DefaultAssetDecoder, PreparedBms,
     asset_paths::AssetPathPolicy,
     asset_source::{MemoryAssetLimits, MemoryFiles},
-    load_prepared, prepare_from_source,
+    load_prepared, prepare_from_source, AssetDecoder, ChannelPolicy, DefaultAssetDecoder,
+    PreparedBms,
 };
 use std::{
     error::Error,
@@ -247,18 +247,16 @@ fn mono_expansion_charges_asset_and_aggregate_after_channel_policy() {
         accepted.bank.get(SampleId(2)).unwrap().format(),
         AudioFormat::new(44_100, 2).unwrap()
     );
-    assert!(
-        prepare(
-            &files,
-            chart,
-            stereo,
-            limits(15, 32, 2),
-            ChannelPolicy::MonoToStereo
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("stereo expansion")
-    );
+    assert!(prepare(
+        &files,
+        chart,
+        stereo,
+        limits(15, 32, 2),
+        ChannelPolicy::MonoToStereo
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("stereo expansion"));
     let total = prepare(
         &files,
         chart,
@@ -271,26 +269,22 @@ fn mono_expansion_charges_asset_and_aggregate_after_channel_policy() {
         total.downcast_ref::<AudioError>(),
         Some(&AudioError::PcmCapacity)
     );
-    assert!(
-        prepare(
-            &files,
-            chart,
-            stereo,
-            limits(16, 32, 1),
-            ChannelPolicy::MonoToStereo
-        )
-        .is_err()
-    );
-    assert!(
-        prepare(
-            &files,
-            chart,
-            stereo,
-            limits(16, 32, 2),
-            ChannelPolicy::Exact
-        )
-        .is_err()
-    );
+    assert!(prepare(
+        &files,
+        chart,
+        stereo,
+        limits(16, 32, 1),
+        ChannelPolicy::MonoToStereo
+    )
+    .is_err());
+    assert!(prepare(
+        &files,
+        chart,
+        stereo,
+        limits(16, 32, 2),
+        ChannelPolicy::Exact
+    )
+    .is_err());
 }
 
 #[test]
@@ -324,16 +318,14 @@ fn aliases_retain_distinct_ids_and_charge_each_owned_pcm_copy() {
         error.downcast_ref::<AudioError>(),
         Some(&AudioError::PcmCapacity)
     );
-    assert!(
-        prepare(
-            &files,
-            chart,
-            format,
-            limits(24, 48, 1),
-            ChannelPolicy::MonoToStereo
-        )
-        .is_err()
-    );
+    assert!(prepare(
+        &files,
+        chart,
+        format,
+        limits(24, 48, 1),
+        ChannelPolicy::MonoToStereo
+    )
+    .is_err());
 }
 
 #[test]
@@ -341,31 +333,25 @@ fn within_asset_format_changes_and_mixed_vorbis_chains_reject() {
     let mut flac = flac_fixture::flac16(48_000, 1, &[1, 2], Some(2));
     flac[45] = 0x18; // The frame says stereo although STREAMINFO says mono.
     flac_fixture::refresh_flac16_checksums(&mut flac);
-    assert!(
-        decode(&flac, 8)
-            .unwrap_err()
-            .to_string()
-            .contains("channels or bit depth")
-    );
+    assert!(decode(&flac, 8)
+        .unwrap_err()
+        .to_string()
+        .contains("channels or bit depth"));
     let mut mp3 = mp3_fixture::silence(1, 2);
     mp3[192 + 3] = 0; // Second frame changes from mono to stereo.
-    assert!(
-        decode(&mp3, 8192)
-            .unwrap_err()
-            .to_string()
-            .contains("source format changed")
-    );
+    assert!(decode(&mp3, 8192)
+        .unwrap_err()
+        .to_string()
+        .contains("source format changed"));
     let mixed = [
         vorbis_fixture::link(vorbis_fixture::silence(1, 1), 101, 24_000),
         vorbis_fixture::link(vorbis_fixture::silence(1, 1), 202, 48_000),
     ]
     .concat();
-    assert!(
-        decode(&mixed, 16)
-            .unwrap_err()
-            .to_string()
-            .contains("chain changes source rate")
-    );
+    assert!(decode(&mixed, 16)
+        .unwrap_err()
+        .to_string()
+        .contains("chain changes source rate"));
     let same = [
         vorbis_fixture::link(vorbis_fixture::silence(1, 1), 101, 24_000),
         vorbis_fixture::link(vorbis_fixture::silence(1, 1), 202, 24_000),
@@ -410,22 +396,18 @@ fn structural_truncation_and_declared_metadata_refuse_before_codec_payload() {
         );
     }
     let declared_flac = flac_fixture::flac16(24_000, 1, &[1, 2], Some(1u64 << 35));
-    assert!(
-        decode(&declared_flac, 8)
-            .unwrap_err()
-            .to_string()
-            .contains("declared FLAC PCM")
-    );
+    assert!(decode(&declared_flac, 8)
+        .unwrap_err()
+        .to_string()
+        .contains("declared FLAC PCM"));
     let mut declared_ogg = ogg;
     let last = vorbis_fixture::pages(&declared_ogg).last().unwrap().0;
     declared_ogg[last + 6..last + 14].copy_from_slice(&1_000_000u64.to_le_bytes());
     vorbis_fixture::reseal_page(&mut declared_ogg, last);
-    assert!(
-        decode(&declared_ogg, 8192)
-            .unwrap_err()
-            .to_string()
-            .contains("final granule exceeds")
-    );
+    assert!(decode(&declared_ogg, 8192)
+        .unwrap_err()
+        .to_string()
+        .contains("final granule exceeds"));
 }
 
 #[test]
@@ -440,12 +422,10 @@ fn large_ignored_flac_and_wav_metadata_preserve_pcm_but_malformed_lengths_reject
     assert_eq!(decode(&flac, 4).unwrap().samples(), [0.5]);
     let mut malformed = flac;
     malformed[44] = 0x03;
-    assert!(
-        decode(&malformed, 4)
-            .unwrap_err()
-            .to_string()
-            .contains("truncated FLAC metadata body")
-    );
+    assert!(decode(&malformed, 4)
+        .unwrap_err()
+        .to_string()
+        .contains("truncated FLAC metadata body"));
 
     let original = wav(8000, 1, &[16_384]);
     let mut with_junk = original[..36].to_vec();
@@ -504,12 +484,10 @@ fn large_mp3_id3_and_vorbis_comments_preserve_audio_and_malformed_declarations_r
     );
     let mut malformed_mp3 = mp3;
     malformed_mp3[6..10].copy_from_slice(&[1, 0, 0, 0]); // Declares 2 MiB, beyond this file.
-    assert!(
-        decode(&malformed_mp3, 2304)
-            .unwrap_err()
-            .to_string()
-            .contains("truncated ID3 body")
-    );
+    assert!(decode(&malformed_mp3, 2304)
+        .unwrap_err()
+        .to_string()
+        .contains("truncated ID3 body"));
 
     let vorbis = vorbis_with_vendor(vorbis_fixture::silence(1, 48), 8192);
     assert_eq!(decode(&vorbis, 192).unwrap().frames(), 48);

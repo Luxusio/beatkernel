@@ -60,6 +60,9 @@ the corpus author executed15 tests successfully, then tightened the MP3 error
 assertion and reran that exact case successfully. The allocation binary ran all
 five tests successfully at the current source. Independent review and QA remain
 pending, so WBS08.14 remains V and verified progress remains89/193.
+After Rust2021 normalization, the combined development command executed all20
+current tests successfully (15 corpus plus5 allocation, failures0/ignored0),
+with original output in `target/wf/media-corpus-01a1249d/combined-development.log`.
 
 Observed allocation requests on this host:
 

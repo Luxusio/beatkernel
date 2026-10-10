@@ -292,7 +292,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [ ] **BK-WBS-08.11** empty-POOR의 후보/반복/게이지/combo/capture 의미를 선택 dialect에 고정한다. — 상태=P(정책선택대기); 선행=-; 필요 근거/다음=preroll 정책과 구별; replay/network identity에 포함.
 - [x] **BK-WBS-08.12** WAV/FLAC/Vorbis/MP3가 실제 bounded preparation과 Mixer 출력까지 연결된다. — 상태=D(검증완료); 선행=-; 근거=E1; 포맷별 declared trim/limits.
 - [x] **BK-WBS-08.13** same-format Ogg chaining의 BOS/EOS/serial/독립 trim/aggregate limit를 검증한다. — 상태=D(검증완료); 선행=-; 근거=E1; malformed·mixed format 전체 거절.
-- [ ] **BK-WBS-08.14** 전 포맷의 잘린 파일·큰 metadata·late decode 실패·rate/channel 정책을 확장 검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=순수/실제 파일 corpus와 allocation/byte budget.
+- [ ] **BK-WBS-08.14** 전 포맷의 잘린 파일·큰 metadata·late decode 실패·rate/channel 정책을 확장 검증한다. — 상태=V(구현됨·검증대기); 선행=-; 부분 근거=새 [준비 corpus/측정 지침](../verification/GUIDE__audio-preparation-corpus.md)의 public decoder·memory/file preparation·실제 sparse encoded-limit 및 TLS allocation-request 측정20개 개발 테스트 통과; 필요 근거/다음=최종 독립 review/CLI QA와 명시된 scope별 완료 근거. 총 RAM sandbox/전체 codec conformance·실제 음향 증거 아님.
 - [ ] **BK-WBS-08.15** static BGA BMP/PNG/JPEG·layer/poor/opacity/crop/canvas·파일명 호환을 실제 화면에서 검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=기존 순수 fixture + 실제 native/browser rendering.
 - [ ] **BK-WBS-08.16** EXBMP RGB/color-key/근사 matching의 정확한 호환 규칙을 확정한다. — 상태=P(정책선택대기); 선행=-; 필요 근거/다음=원본 engine 문서/asset 사례·허용 오차.
 - [x] **BK-WBS-08.17** video decode·timestamp/reorder/frame budget·off-thread 공급을 구현한다. — 상태=D(검증완료); 선행=-; 근거=E34,REQ__bms-video의 순수 계약과 실제 native/browser decode-to-Scene·GPU·플레이 경로; 지원 코덱/배포 선택은08.18에 유지.

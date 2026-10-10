@@ -44,7 +44,7 @@ an optional off-thread `AssetDecoder` extension. Preparation owns parsed source,
 actual BPM/STOP compilation, an immutable sample bank, head/instant sound
 bindings and song-relative BGM commands. It performs no playback, queue
 submission, clock mapping or callback work. Callers choose output format and
-PCM limits. The default app decoder accepts native FLAC, complete single-stream Ogg/Vorbis, MPEG Layer III bytes or the core's strict RIFF WAVE
+PCM limits. The default app decoder accepts native FLAC, complete sequential same-format Ogg/Vorbis links, MPEG Layer III bytes or the core's strict RIFF WAVE
 PCM16/24/32 and IEEE float32 subset. Explicit WavDecoder and caller codecs remain available;
 Other Ogg codecs/formats and remaining codec conformance still require future implementations or a caller decoder.
 

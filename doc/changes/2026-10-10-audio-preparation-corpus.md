@@ -23,7 +23,9 @@ with the existing same-format chained-stream implementation. Production code,
 codec policies and dependencies are unchanged.
 
 Development evidence: corpus15/0 then final strengthened MP3 case1/0; allocation
-5/0 with original log preserved. Final independent review and QA remain pending.
+5/0 with original log preserved. The final combined development run after format
+normalization passes20/0/0ignored with original log preserved. Final independent
+review and QA remain pending.
 WBS08.14 remains V; total89/193. Neither these request statistics nor authored
 tests establish peak RAM, arbitrary codec conformance, hardware audio, whole
 player completion or receipt-backed Harness closure.
