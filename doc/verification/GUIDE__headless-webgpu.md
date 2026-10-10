@@ -144,3 +144,33 @@ The full connected browser verdict remains FAIL; replay/local-player acceptance
 and hardware/performance claims are not supplied by the passing history subset.
 All runs terminated and their owned browser/display/server/profile resources
 were cleaned up. Earlier failed headless evidence remains valid for its setup.
+
+## Bounded Worker startup stage diagnostic — 2026-10-10
+
+A single development probe at `275255c` instrumented only server-delivered
+Worker entry responses. Production files and generated main/audio packages
+remained unchanged. Fixed-cap diagnostic messages did not clear readiness
+guards; wrappers returned original fetch/instantiation promises. Both Workers
+became ready under the original guards: gameplay in 9,467.3 ms and renderer
+in 4,587.4 ms after construction.
+
+Gameplay fetch-to-response headers took 8,216.5 ms; renderer took 3,968.4 ms.
+Streaming instantiation took 21.6/22.9 ms and renderer view creation 18.2 ms.
+Streaming time includes body transfer, validation, compilation and
+instantiation; it is not compile-only evidence. Gameplay's request reached
+the server about 8,214.7 ms after fetch invocation, then handling took 2 ms.
+Thus response acquisition dominated this observed run. Browser scheduling or
+queueing underneath that delay remains unmeasured, and the earlier failed
+run's cause remains unproven. Do not introduce compilation sharing or extend
+deadlines on the assumption that duplicate compilation caused the timeout.
+
+Worker entry markers execute after static imports, so constructor-to-entry
+includes module acquisition, dependency evaluation and scheduling. The probe
+is diagnostic evidence, not connected acceptance. Inspect
+`target/wf/browser-wasm-startup-stages-20261010/{run.mjs,evidence.json,stage-summary.json}`
+for transformations, original/served hashes, timing and cleanup. Node exited
+zero; owned browser/display/server/profile resources were cleaned up.
+
+### Known ceiling
+
+Known ceiling: Browser network scheduling cause unmeasured — upgrade when a bounded network trace is authorized
