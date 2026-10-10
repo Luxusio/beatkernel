@@ -531,13 +531,33 @@ fn normal_native_end_drains_original_events_and_is_distinct_from_failure() {
     assert!(matches!(receive(&observed), OwnerObservation::Closed(_)));
     assert!(matches!(receive(&observed), OwnerObservation::Dropped(_)));
     collector.stop_and_join().unwrap();
+    assert_eq!(collector.status(), Ok(true));
     let mut out = VecDeque::new();
+    let no_budget = collector.drain(&mut out, 0).unwrap();
+    assert_eq!(no_budget.items, 0);
+    assert_eq!(no_budget.completed_through, None);
+    assert!(no_budget.backlog);
+    assert!(!no_budget.closed, "queued terminal data is not exhaustion");
+    assert!(out.is_empty());
     let data = collector.drain(&mut out, 1).unwrap();
     assert_eq!(out, VecDeque::from([button(1)]));
+    assert_eq!(data.items, 1);
+    assert!(data.backlog);
+    assert!(!data.closed, "the final original event must reach gameplay");
     assert_eq!(data.completed_through, None);
     let cut = collector.drain(&mut out, 1).unwrap();
+    assert_eq!(cut.items, 1);
+    assert!(!cut.backlog);
+    assert!(!cut.closed, "the final original cut must reach gameplay");
     assert_eq!(cut.completed_through, Some(point(2)));
-    assert!(collector.drain(&mut out, 1).unwrap().closed);
+    for _ in 0..2 {
+        let exhausted = collector.drain(&mut out, 1).unwrap();
+        assert_eq!(exhausted.items, 0);
+        assert!(!exhausted.backlog);
+        assert!(exhausted.closed);
+        assert_eq!(exhausted.completed_through, None);
+        assert_eq!(out, VecDeque::from([button(1)]));
+    }
 }
 
 #[test]

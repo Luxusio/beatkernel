@@ -185,6 +185,7 @@ struct Device {
     collector_closed_step: Option<usize>,
     pcm: Vec<f32>,
     observed_pairs: Vec<ClockPair>,
+    native_input: Option<ConnectedCollector>,
 }
 impl Device {
     fn now(&self) -> ClockPoint {
@@ -327,6 +328,9 @@ impl GameplayDevice for Device {
         &mut self,
         events: &mut VecDeque<PhysicalInputEvent>,
     ) -> NativeGameplayResult<InputBatch> {
+        if let Some(input) = &mut self.native_input {
+            return input.acquire(self.step, events);
+        }
         if matches!(self.mode, Mode::PausePoint | Mode::PauseAsio) {
             if self.step == 4 {
                 self.desired_pause.set(true)
@@ -542,6 +546,7 @@ fn device(
             collector_closed_step: None,
             pcm: vec![],
             observed_pairs: vec![],
+            native_input: None,
         },
         producer,
         host,
@@ -1094,6 +1099,471 @@ fn host_normalized_solo_is_refused_from_actual_runtime_identity_with_capture_dis
     assert!(f.host.reports.is_empty());
 }
 
+// Channel fences establish source service and terminal cleanup, rather than
+// letting fixture receipt time stand in for native completion evidence.
+struct CollectorStep {
+    at_step: usize,
+    events: Vec<PhysicalInputEvent>,
+    cut: Option<ClockPoint>,
+    terminal: bool,
+    failure: Option<&'static str>,
+}
+struct ConnectedSource {
+    commands: std::sync::mpsc::Receiver<CollectorStep>,
+    serviced: std::sync::mpsc::Sender<()>,
+    dropped: std::sync::mpsc::Sender<()>,
+    pending_ack: bool,
+    close_failure: bool,
+    closes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl crate::native_input::NativeInputSource for ConnectedSource {
+    fn service(
+        &mut self,
+        sink: &mut crate::native_input::InputPublisher<'_>,
+        _: usize,
+    ) -> Result<crate::native_input::SourceDrain, String> {
+        if self.pending_ack {
+            self.serviced.send(()).unwrap();
+            self.pending_ack = false;
+        }
+        let command = match self.commands.try_recv() {
+            Ok(command) => command,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                return Ok(crate::native_input::SourceDrain {
+                    idle: true,
+                    ..Default::default()
+                });
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return Err("fixture command disconnected".into())
+            }
+        };
+        for event in command.events {
+            sink.publish(event).map_err(|e| e.to_string())?;
+        }
+        if let Some(error) = command.failure {
+            return Err(error.into());
+        }
+        self.pending_ack = !command.terminal;
+        Ok(crate::native_input::SourceDrain {
+            completed_through: command.cut,
+            closed: command.terminal,
+            idle: false,
+        })
+    }
+    fn close(&mut self) -> Result<(), String> {
+        self.closes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.close_failure {
+            Err("fixture close failure".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+impl Drop for ConnectedSource {
+    fn drop(&mut self) {
+        let _ = self.dropped.send(());
+    }
+}
+struct ConnectedCollector {
+    collector: crate::native_input::NativeInputCollector,
+    bridge: crate::native_gameplay_bridge::NativeCollectedInput,
+    commands: std::sync::mpsc::Sender<CollectorStep>,
+    serviced: std::sync::mpsc::Receiver<()>,
+    dropped: std::sync::mpsc::Receiver<()>,
+    schedule: VecDeque<CollectorStep>,
+    max_items: usize,
+    closes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    joined: bool,
+    terminal_error: Option<crate::native_input::CollectorError>,
+}
+impl ConnectedCollector {
+    fn new(
+        schedule: Vec<CollectorStep>,
+        max_items: usize,
+        entries: usize,
+        close_failure: bool,
+    ) -> Self {
+        let (commands, receiver) = std::sync::mpsc::channel();
+        let (ack, serviced) = std::sync::mpsc::channel();
+        let (drop_tx, dropped) = std::sync::mpsc::channel();
+        let closes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source_closes = closes.clone();
+        let mut collector = crate::native_input::NativeInputCollector::spawn(
+            crate::native_input::CollectorConfig {
+                domain: ClockDomainId(1),
+                entries,
+                bytes: 65536,
+                max_payload_bytes: 1024,
+                service_quantum: 16,
+                idle_wait: std::time::Duration::from_millis(1),
+            },
+            move || {
+                Ok(ConnectedSource {
+                    commands: receiver,
+                    serviced: ack,
+                    dropped: drop_tx,
+                    pending_ack: false,
+                    close_failure,
+                    closes: source_closes,
+                })
+            },
+        )
+        .unwrap();
+        collector.wait_ready().unwrap();
+        Self {
+            collector,
+            bridge: crate::native_gameplay_bridge::NativeCollectedInput::new().unwrap(),
+            commands,
+            serviced,
+            dropped,
+            schedule: schedule.into(),
+            max_items,
+            closes,
+            joined: false,
+            terminal_error: None,
+        }
+    }
+    fn acquire(
+        &mut self,
+        step: usize,
+        events: &mut VecDeque<PhysicalInputEvent>,
+    ) -> NativeGameplayResult<InputBatch> {
+        if self
+            .schedule
+            .front()
+            .is_some_and(|command| command.at_step == step)
+        {
+            let command = self.schedule.pop_front().unwrap();
+            let terminal = command.terminal;
+            self.commands.send(command).unwrap();
+            self.collector.wake();
+            if terminal {
+                self.dropped
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                self.terminal_error = self.collector.stop_and_join().err();
+                self.joined = true;
+            } else {
+                // Sent only on the next service call, after the previous cut
+                // was published by the real collector worker.
+                self.serviced
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            }
+        }
+        self.bridge
+            .acquire(&mut self.collector, events, self.max_items)
+    }
+    fn assert_closed_once(&self) {
+        assert!(self.joined);
+        assert_eq!(self.closes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+    fn cancel_and_join(&mut self) {
+        self.collector.cancel();
+        self.collector.stop_and_join().unwrap();
+        self.dropped
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        self.joined = true;
+        self.assert_closed_once();
+    }
+}
+fn terminal_inputs(sources: &[DeviceId]) -> CollectorStep {
+    CollectorStep {
+        at_step: 4,
+        events: sources
+            .iter()
+            .flat_map(|source| {
+                [
+                    input(10_000_000, *source, 7, 31, ButtonState::Down),
+                    input(10_000_000, *source, 7, 32, ButtonState::Up),
+                ]
+            })
+            .collect(),
+        cut: Some(host(20_000_000)),
+        terminal: true,
+        failure: None,
+    }
+}
+fn assert_collected_capture(capture: &LiveReplayCapture, source: DeviceId) {
+    let inputs = capture
+        .records()
+        .iter()
+        .filter_map(|record| match &record.operation {
+            ReplayOperation::Input(input) => Some((record.song_time, input)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inputs.len(), 2);
+    for ((song_time, input), sequence) in inputs.into_iter().zip([31, 32]) {
+        assert_eq!(song_time, Timestamp::from_nanos(20_000_000));
+        assert_eq!(input.physical.meta().source, source);
+        assert_eq!(input.physical.meta().sequence, sequence);
+        assert_eq!(
+            input.physical.meta().original_clock_point,
+            Some(host(10_000_000))
+        );
+        assert_eq!(
+            input.physical.meta().timestamp,
+            logical(20_000_000).timestamp
+        );
+        assert_eq!(input.physical.meta().clock_domain, ClockDomainId(3));
+    }
+}
+#[test]
+fn connected_collector_terminal_solo_and_split_fifo_commit_original_capture_once() {
+    for max_items in [1, 16] {
+        let mut f = Solo::new(Mode::Normal, false, true);
+        f.device.stop_after = Some(100);
+        f.device.native_input = Some(ConnectedCollector::new(
+            vec![terminal_inputs(&[DeviceId(u64::MAX)])],
+            max_items,
+            16,
+            false,
+        ));
+        let (result, score) = f.run(true);
+        assert!(result.unwrap().is_none());
+        assert_eq!(score.hits, 1);
+        assert_eq!(score.misses, 0);
+        assert_collected_capture(f.capture.as_ref().unwrap(), DeviceId(u64::MAX));
+        let hits = f
+            .host
+            .reports
+            .iter()
+            .flat_map(|r| &r.judge_events)
+            .collect::<Vec<_>>();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].object, beatkernel::chart::ObjectId(1));
+        assert_eq!(hits[0].at, Timestamp::from_nanos(20_000_000));
+        assert_eq!(
+            hits[0].outcome,
+            JudgeOutcome::Hit {
+                grade: JudgeGrade(91),
+                delta: Duration::ZERO
+            }
+        );
+        assert_eq!(hits[0].input.unwrap().sequence, 31);
+        assert_eq!(f.merger.pending(), 0);
+        assert_eq!(
+            f.presentation.authority().committed_input_host(),
+            Some(host(10_000_000))
+        );
+        f.device.native_input.as_ref().unwrap().assert_closed_once();
+        assert!(f.device.step <= 7);
+        assert!(f.completion.is_none());
+        assert!(f.host.completed.is_empty());
+    }
+}
+#[test]
+fn connected_collector_terminal_two_to_four_members_preserve_player_and_source_identity() {
+    for count in 2..=4 {
+        let mut f = Cohort::new_with_members(ClockDomainId(3), count);
+        f.device.stop_after = Some(100);
+        let sources = f.device.sources.clone();
+        f.device.native_input = Some(ConnectedCollector::new(
+            vec![terminal_inputs(&sources)],
+            1,
+            16,
+            false,
+        ));
+        assert!(f.run().unwrap().is_none());
+        assert_eq!(
+            f.states
+                .iter()
+                .map(|state| state.player)
+                .collect::<Vec<_>>(),
+            vec![PlayerId(7), PlayerId(u32::MAX), PlayerId(42), PlayerId(99)][..count]
+        );
+        let mut hit_players = f
+            .host
+            .local
+            .iter()
+            .flatten()
+            .filter(|row| {
+                row.report
+                    .judge_events
+                    .iter()
+                    .any(|event| matches!(event.outcome, JudgeOutcome::Hit { .. }))
+            })
+            .map(|row| row.player)
+            .collect::<Vec<_>>();
+        let mut expected_players =
+            vec![PlayerId(7), PlayerId(u32::MAX), PlayerId(42), PlayerId(99)][..count].to_vec();
+        hit_players.sort_by_key(|player| player.0);
+        expected_players.sort_by_key(|player| player.0);
+        assert_eq!(hit_players, expected_players);
+        for (state, source) in f.states.iter().zip(sources) {
+            assert_eq!(state.score.hits, 1);
+            assert_eq!(state.score.misses, 0);
+            assert_collected_capture(state.capture.as_ref().unwrap(), source);
+            let hits = f
+                .host
+                .local
+                .iter()
+                .flatten()
+                .filter(|r| r.player == state.player)
+                .flat_map(|r| &r.report.judge_events)
+                .collect::<Vec<_>>();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].object, beatkernel::chart::ObjectId(1));
+            assert_eq!(hits[0].at, Timestamp::from_nanos(20_000_000));
+            assert_eq!(
+                hits[0].outcome,
+                JudgeOutcome::Hit {
+                    grade: JudgeGrade(1),
+                    delta: Duration::ZERO
+                }
+            );
+            assert_eq!(hits[0].input.unwrap().source, source);
+            assert!(state.completion.is_none());
+        }
+        assert_eq!(f.merger.pending(), 0);
+        assert_eq!(
+            f.p.authority().committed_input_host(),
+            Some(host(10_000_000))
+        );
+        f.device.native_input.as_ref().unwrap().assert_closed_once();
+        assert_eq!(f.device.step, count * 2 + 5);
+    }
+}
+#[test]
+fn connected_collector_terminal_missing_single_and_stale_relation_do_not_invent_capture() {
+    for mode in [Mode::Missing, Mode::OneAnchor, Mode::Stale] {
+        let mut f = Solo::new(mode, false, true);
+        f.device.stop_after = Some(100);
+        let mut command = terminal_inputs(&[DeviceId(u64::MAX)]);
+        if mode == Mode::Stale {
+            // The clock-first pump will refuse step 3 before acquisition.
+            // Terminal step 2 therefore precedes refusal, while its split
+            // first event still has no acquired cut and cannot be admitted.
+            command.at_step = 2;
+            command.cut = Some(host(10_000_000));
+        }
+        f.device.native_input = Some(ConnectedCollector::new(vec![command], 1, 16, false));
+        let (result, score) = f.run(true);
+        if mode == Mode::Stale {
+            assert!(result.is_err());
+        } else {
+            assert!(result.unwrap().is_none());
+        }
+        assert_eq!(score, ScoreSummary::default());
+        assert_eq!(f.runtime.judge().effective_song_time(), None);
+        assert!(f.capture.as_ref().unwrap().records().is_empty());
+        assert_eq!(f.presentation.authority().committed_operation(), None);
+        assert_eq!(f.presentation.authority().committed_input_host(), None);
+        assert!(f.completion.is_none());
+        f.device.native_input.as_ref().unwrap().assert_closed_once();
+        assert!(f.device.step <= 7);
+    }
+}
+#[test]
+fn connected_collector_fatal_marker_source_and_cleanup_preserve_committed_prefix() {
+    for failure in ["marker", "source", "cleanup"] {
+        let mut f = Solo::new(Mode::Normal, false, true);
+        f.device.stop_after = Some(100);
+        let first = CollectorStep {
+            at_step: 4,
+            events: vec![input(
+                10_000_000,
+                DeviceId(u64::MAX),
+                7,
+                31,
+                ButtonState::Down,
+            )],
+            cut: Some(host(20_000_000)),
+            terminal: false,
+            failure: None,
+        };
+        let final_step = CollectorStep {
+            at_step: 7,
+            events: if failure == "marker" {
+                vec![
+                    input(20_000_000, DeviceId(u64::MAX), 8, 32, ButtonState::Down),
+                    input(20_000_000, DeviceId(u64::MAX), 8, 33, ButtonState::Up),
+                ]
+            } else {
+                vec![]
+            },
+            cut: Some(host(30_000_000)),
+            terminal: true,
+            failure: (failure == "source").then_some("fixture native failure"),
+        };
+        f.device.native_input = Some(ConnectedCollector::new(
+            vec![first, final_step],
+            16,
+            if failure == "marker" { 2 } else { 16 },
+            failure == "cleanup",
+        ));
+        let (result, score) = f.run(true);
+        assert!(result.is_err());
+        assert_eq!(score.hits, 1);
+        assert_eq!(score.misses, 0);
+        let records = f
+            .capture
+            .as_ref()
+            .unwrap()
+            .records()
+            .iter()
+            .filter_map(|record| match &record.operation {
+                ReplayOperation::Input(input) => Some((record.song_time, input)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, Timestamp::from_nanos(20_000_000));
+        assert_eq!(records[0].1.physical.meta().sequence, 31);
+        assert_eq!(
+            records[0].1.physical.meta().original_clock_point,
+            Some(host(10_000_000))
+        );
+        assert_eq!(
+            f.presentation.authority().committed_input_host(),
+            Some(host(10_000_000))
+        );
+        assert_eq!(f.device.step, 7);
+        assert!(f.completion.is_none());
+        let input = f.device.native_input.as_ref().unwrap();
+        input.assert_closed_once();
+        assert!(matches!(
+            (failure, input.terminal_error.as_ref().unwrap()),
+            ("marker", crate::native_input::CollectorError::EntryCapacity)
+                | ("source", crate::native_input::CollectorError::Source(_))
+                | ("cleanup", crate::native_input::CollectorError::Close(_))
+        ));
+    }
+}
+#[test]
+fn connected_collector_missing_clock_cancel_joins_idle_source_without_completion() {
+    let mut f = Solo::new(Mode::Missing, false, true);
+    f.device.native_input = Some(ConnectedCollector::new(
+        vec![CollectorStep {
+            at_step: 2,
+            events: vec![input(
+                10_000_000,
+                DeviceId(u64::MAX),
+                7,
+                31,
+                ButtonState::Down,
+            )],
+            cut: Some(host(10_000_000)),
+            terminal: false,
+            failure: None,
+        }],
+        16,
+        16,
+        false,
+    ));
+    assert!(f.run(true).0.unwrap().is_none());
+    assert_eq!(f.device.step, 7);
+    assert!(f.capture.as_ref().unwrap().records().is_empty());
+    assert!(f.completion.is_none());
+    assert_eq!(f.presentation.authority().committed_operation(), None);
+    assert_eq!(f.merger.pending(), 1);
+    f.device.native_input.as_mut().unwrap().cancel_and_join();
+}
+
 struct Cohort {
     device: Device,
     group: RuntimeGroup,
@@ -1109,23 +1579,25 @@ struct Cohort {
 }
 impl Cohort {
     fn new(domain: ClockDomainId) -> Self {
-        let source = source(false);
-        let selected = policy(&source, false);
-        let (device, producer, host_port) = device(
-            16,
-            false,
-            Mode::Normal,
-            vec![DeviceId(1), DeviceId(u64::MAX)],
-        );
-        let mut states = Vec::new();
-        let mut members = Vec::new();
-        for (i, (id, device)) in [
+        Self::new_with_members(domain, 2)
+    }
+    fn new_with_members(domain: ClockDomainId, count: usize) -> Self {
+        let identities = [
             (PlayerId(7), DeviceId(1)),
             (PlayerId(u32::MAX), DeviceId(u64::MAX)),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+            (PlayerId(42), DeviceId(42)),
+            (PlayerId(99), DeviceId(99)),
+        ];
+        let sources = identities[..count]
+            .iter()
+            .map(|(_, source)| *source)
+            .collect::<Vec<_>>();
+        let source = source(false);
+        let selected = policy(&source, false);
+        let (device, producer, host_port) = device(16, false, Mode::Normal, sources.clone());
+        let mut states = Vec::new();
+        let mut members = Vec::new();
+        for (i, (id, device)) in identities[..count].iter().copied().enumerate() {
             let judge = JudgeEngine::new(
                 source.compile().unwrap().chart,
                 source.rules(),
@@ -1181,13 +1653,7 @@ impl Cohort {
             device,
             group,
             states,
-            merger: InputMerger::new(
-                ClockDomainId(1),
-                host(0),
-                vec![DeviceId(1), DeviceId(u64::MAX)],
-                16,
-            )
-            .unwrap(),
+            merger: InputMerger::new(ClockDomainId(1), host(0), sources, 16).unwrap(),
             bgm: BgmFeeder::new(
                 vec![],
                 BgmConfig {

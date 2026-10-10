@@ -176,6 +176,7 @@ fn future_event_is_checked_against_original_receipt_even_without_collector_cut()
 
 enum HandoffAction {
     Drain(Vec<PhysicalInputEvent>, ClockPoint),
+    EventsOnly(Vec<PhysicalInputEvent>),
     Fence(std::sync::mpsc::Sender<()>),
 }
 struct HandoffSource(std::sync::mpsc::Receiver<HandoffAction>);
@@ -192,6 +193,11 @@ impl crate::native_input::NativeInputSource for HandoffSource {
                     sink.publish(event).map_err(|e| e.to_string())?;
                 }
                 cut = Some(completed);
+            }
+            Ok(HandoffAction::EventsOnly(events)) => {
+                for event in events {
+                    sink.publish(event).map_err(|e| e.to_string())?;
+                }
             }
             Ok(HandoffAction::Fence(done)) => {
                 done.send(()).unwrap();
@@ -295,4 +301,77 @@ fn startup_discard_then_retain_preserves_existing_counts_and_same_worker() {
     owner.acquire(&mut collector, &mut events, 4).unwrap();
     assert_eq!(events.len(), 1);
     collector.stop_and_join().unwrap();
+}
+
+#[test]
+fn startup_retained_event_only_is_delivered_before_joined_collector_exhaustion() {
+    let (mut collector, tx) = handoff_collector();
+    let original = input(10, 7, ButtonState::Down);
+    let (done, wait) = std::sync::mpsc::channel();
+    tx.send(HandoffAction::EventsOnly(vec![original.clone()]))
+        .unwrap();
+    tx.send(HandoffAction::Fence(done)).unwrap();
+    collector.wake();
+    wait.recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let mut owner = crate::native_gameplay::NativeCollectedInput::new().unwrap();
+    let mut pre = 0;
+    assert!(owner
+        .service_start(&mut collector, true, &mut pre, 1)
+        .unwrap());
+    collector.stop_and_join().unwrap();
+    assert_eq!(collector.status(), Ok(true));
+    let mut empty = VecDeque::new();
+    let drained = collector.drain(&mut empty, 1).unwrap();
+    assert!(drained.closed);
+    assert_eq!(drained.items, 0);
+    assert_eq!(drained.completed_through, None);
+
+    let mut events = VecDeque::new();
+    let transferred = owner.acquire(&mut collector, &mut events, 0).unwrap();
+    assert_eq!(events, VecDeque::from([original.clone()]));
+    assert!(!transferred.closed);
+    assert!(!transferred.backlog);
+    assert_eq!(transferred.completed_through, None);
+    assert_eq!(pre, 0);
+    for _ in 0..2 {
+        let exhausted = owner.acquire(&mut collector, &mut events, 1).unwrap();
+        assert!(exhausted.closed);
+        assert!(!exhausted.backlog);
+        assert_eq!(exhausted.completed_through, None);
+        assert_eq!(events, VecDeque::from([original.clone()]));
+    }
+}
+
+#[test]
+fn startup_retained_cut_only_is_delivered_before_joined_collector_exhaustion() {
+    let (mut collector, tx) = handoff_collector();
+    publish_handoff(&collector, &tx, vec![], point(1, 12));
+    let mut owner = crate::native_gameplay::NativeCollectedInput::new().unwrap();
+    let mut pre = 0;
+    assert!(owner
+        .service_start(&mut collector, true, &mut pre, 1)
+        .unwrap());
+    collector.stop_and_join().unwrap();
+    assert_eq!(collector.status(), Ok(true));
+    let mut empty = VecDeque::new();
+    let drained = collector.drain(&mut empty, 1).unwrap();
+    assert!(drained.closed);
+    assert_eq!(drained.items, 0);
+    assert_eq!(drained.completed_through, None);
+
+    let mut events = VecDeque::new();
+    let transferred = owner.acquire(&mut collector, &mut events, 0).unwrap();
+    assert!(!transferred.closed);
+    assert!(!transferred.backlog);
+    assert_eq!(transferred.completed_through, Some(point(1, 12)));
+    assert!(events.is_empty());
+    assert_eq!(pre, 0);
+    for _ in 0..2 {
+        let exhausted = owner.acquire(&mut collector, &mut events, 1).unwrap();
+        assert!(exhausted.closed);
+        assert!(!exhausted.backlog);
+        assert_eq!(exhausted.completed_through, None);
+        assert!(events.is_empty());
+    }
 }
