@@ -899,6 +899,7 @@ impl NativeCollectedInput {
         if events.len().saturating_add(self.retained.len()) > limit {
             return Err("native pending input capacity exceeded; restart required".into());
         }
+        let transferred_retained = !self.retained.is_empty() || self.completed_through.is_some();
         events.try_reserve(self.retained.len())?;
         events.append(&mut self.retained);
         let allowance = max_items.min(limit - events.len());
@@ -907,7 +908,7 @@ impl NativeCollectedInput {
         self.completed_through = None;
         Ok(InputBatch {
             backlog: batch.backlog,
-            closed: batch.closed,
+            closed: batch.closed && !transferred_retained,
             completed_through: cut,
         })
     }

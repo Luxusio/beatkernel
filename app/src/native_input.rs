@@ -282,7 +282,6 @@ mod threaded {
         ) -> Result<CollectorDrain, CollectorError> {
             let closed = self.status()?;
             let mut result = CollectorDrain::default();
-            result.closed = closed;
             for _ in 0..max_items.min(self.drain_limit) {
                 let entry = match self.receiver.try_recv() {
                     Ok(entry) => entry,
@@ -301,6 +300,7 @@ mod threaded {
                 result.items += 1;
             }
             result.backlog = self.shared.entries.load(Ordering::Acquire) != 0;
+            result.closed = closed && result.items == 0 && !result.backlog;
             Ok(result)
         }
         pub fn stop_and_join(&mut self) -> Result<(), CollectorError> {
