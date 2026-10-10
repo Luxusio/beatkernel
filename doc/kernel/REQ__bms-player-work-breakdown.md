@@ -99,6 +99,20 @@ continuation은 exit0이었다. [프로필 저장 계약](../runtime/REQ__native
 power-loss·외국 OS 실행·direct public profile WASM 실행은 완료 근거가 아니다.
 전체09.13은 V, 완료87/활성193을 유지하며 실행 결과와 Harness close를 구분한다.
 
+E39: production source `fc60219`와 동일한 `5a9861c`의 실제 browser 및
+browser-audio release 빌드·wasm-bindgen 생성은 exit0이다.
+`target/wf/browser-record-result-continuity/current-packages-20261010/`의
+main/audio SHA는 `3b8d338…` / `7235be08…`다. 독립 CLI는 240 handler 테스트와
+native-free WASM dependency graph·pinned wasm-bindgen 0.2.129·u64 BigInt getter를
+확인했다(`target/wf/qa-cli-browser-records-resume-20261010/`). 독립 headed browser
+QA는 실제 6초 capture→save/use history/page→원래 timing/정확한 1/4/0/1 replay→
+local keyboard/touch stop을 PASS했다
+(`target/wf/qa-browser-records-tmpfs-cache-20261010/`). 실제 GPU 화면은 시각 검사됐고
+owned browser/display/server/profile/cache 정리도 확인했다. 이 근거는11.01의
+현재 package 빌드 기준을 충족한다. 오류 주입·모든 메뉴/장치·main-thread trace·
+실제 음향/성능·다른 browser·full Goal 및 Harness close를 대신하지 않는다.
+[검증 변경 기록](../changes/2026-10-10-browser-record-result-continuity.md)을 따른다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -311,7 +325,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 
 기능 연결: BK-040, BK-041, BK-042, BK-045, BK-047, BK-050, BK-051, BK-052, BK-053. 요구: REQ__bms-browser / browser-retained-menus.
 
-- [ ] **BK-WBS-11.01** 현재 source의 실제 WASM library/AudioWorklet/render package를 빌드한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=pinned wasm-bindgen과 native-free dependency 검사.
+- [x] **BK-WBS-11.01** 현재 source의 실제 WASM library/AudioWorklet/render package를 빌드한다. — 상태=D(검증완료); 선행=-; 근거=E39; pinned wasm-bindgen 0.2.129·native-free dependency 검사 및 실제 current package 실행 확인. 전체 browser/runtime acceptance는 별도.
 - [ ] **BK-WBS-11.02** Gameplay Worker가 준비·판정·capture·network owner를 담당한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=현재 실제 bridge·stalled renderer 관찰.
 - [ ] **BK-WBS-11.03** Renderer Worker/OffscreenCanvas가 GPU와 local retained views를 소유한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=실제 current WASM renderer·Scene/메뉴 수명.
 - [ ] **BK-WBS-11.04** 모든 메뉴의 business owner·상태 packet·semantic action을 실제 Renderer view에 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=Selection/Settings/Practice/Display/Records/Players/Devices/Results.
@@ -522,3 +536,8 @@ Native collector termination 절에 있다.
   연결하고 실제 파일·교체·동시 absent 분류·원본 오류/public API 검사를
   독립 DEEP code/security 및 CLI 명령 실행으로 확인해 E38을 추가했다.
   interruption/recovery 등 전체09.13은 V, 완료87/활성193 및 전체 제품 범위를 유지한다.
+
+- 2026-10-10: 실제 current WASM main/audio 빌드와 pinned binder, 독립 native-free
+  graph 확인 및 current connected browser 실행 근거 E39로11.01을 D로 갱신했다.
+  완료87→88, 활성193 유지. 다른 browser/runtime/hardware 및 전체 출시 조건은
+  이 범위의 PASS로 완료 처리하지 않는다.

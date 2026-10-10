@@ -200,7 +200,11 @@ completed Results owned presentation. Subsequent continuity implementation
 added correlated historical acceptance and `BrowserReplay.max_combo`; current
 generated bindings expose the latter as unsigned-u64 BigInt. On 2026-10-10,
 independent headed QA visibly confirmed current stored history and score after
-six-second capture without reprepare. Full connected replay acceptance remains
-unfinished because a later run hit the actual gameplay initialization guard.
+six-second capture without reprepare. A later run initially hit the actual
+gameplay initialization guard; that failed attempt remains preserved.
 See [current continuity evidence](../runtime/REQ__browser-historical-record.md#current-headed-acceptance-evidence--2026-10-10).
-These follow-up observations do not complete the earlier timing task or WBS08.07.
+The subsequent tmpfs-cache connected script also completed current six-second
+replay with exact `1/4/0/1` score parity and original timing metadata, then local
+two-player keyboard/touch stop. Independent visual inspection is confirmed;
+the continuity lens's final verdict is PASS. These follow-up observations do not automatically close the earlier
+timing task or complete its remaining WBS08.07 conditions.

@@ -174,3 +174,28 @@ Current evidence is under `target/wf/qa-browser-records-headed-20261010/`
 and `target/wf/qa-cli-browser-records-resume-20261010/node-handlers.log`.
 All browser runs are terminal; owned Chromium/Xvfb, servers and profiles were
 cleaned up. The task remains unfinished and must not close on these subsets.
+
+## Connected verification after cache setup correction — 2026-10-10
+
+The subsequent independent connected run at `5a9861c` used original production
+Worker bytes and the same current WASM packages, with a unique owned tmpfs
+HTTP cache and 16 MiB budget. Product deadlines and clock/counter validation
+were unchanged. Its script exited zero after actual six-second capture with
+score `1/4/0/1`, save/use without chart reprepare, visible stored history and
+next/back pages, current-play six-second replay completion with exact score
+parity, and local two-player keyboard/touch stop. Actual selected timing
+metadata remained preserved in the recording and replay.
+
+Evidence and seven screenshots are under
+`target/wf/qa-browser-records-tmpfs-cache-20261010/`. The replay's terminal
+`play-render-done` matched the current play ID, `completed === true` and
+song6000000000ns. No console or Worker errors were observed. Chromium/Xvfb
+exited zero, the server closed and owned profile/cache directories were removed.
+The independent lens also visually inspected Results, stored provenance and
+score, both history pages, replay completion and local-player screenshots.
+Its actual final verdict is PASS for this connected continuity flow. Harness
+close still requires ordered hook-owned receipts. Earlier failed runs
+remain preserved as dated evidence. This bounded flow does not complete the
+full player, all browsers, joined-room navigation or physical audio acceptance.
+This latest PASS supersedes the preceding pending/failed current-flow outcome
+for this named headed setup, while retaining those failed attempts as evidence.

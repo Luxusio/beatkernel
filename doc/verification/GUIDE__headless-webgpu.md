@@ -174,3 +174,76 @@ zero; owned browser/display/server/profile resources were cleaned up.
 ### Known ceiling
 
 Known ceiling: Browser network scheduling cause unmeasured — upgrade when a bounded network trace is authorized
+
+## HTTP cache trace — 2026-10-10
+
+A subsequent single startup diagnostic at `5a9861c` recorded Chromium's
+default NetLog without Worker CDP attachment. Game Worker request 294 received
+HTTP 200 headers at tick 143753307, then spent 176 ms in
+`HTTP_CACHE_DOOM_ENTRY` and 8,230 ms in `HTTP_CACHE_CREATE_ENTRY` before response
+delegation at tick 143761713. Proxy selection was DIRECT, a socket was reused
+immediately, and the local response handler finished in 2 ms. Streaming
+instantiation took 21.7 ms. This identifies a cache interval in this run;
+it does not locate the previous run's pre-server delay or establish one cause
+for every failed initialization.
+
+The next bounded setup comparison may use a unique owned cache directory on
+`/dev/shm` with `--disk-cache-dir` and a 16 MiB `--disk-cache-size` budget.
+Check available tmpfs capacity, preserve the original browser profile location,
+packages and product deadlines, and remove only the comparison's own cache
+directory after process exit. Chromium defines the cache-directory switch in
+its [official switch declarations](https://github.com/chromium/chromium/blob/main/chrome/common/chrome_switches.h).
+The startup-only comparison below verifies this local setup; it does not
+change application behavior or establish connected acceptance.
+
+Exact mapped events and the report are under
+`target/wf/browser-wasm-startup-network-20261010/`. Node exited zero; owned
+Chromium/Xvfb exited, the server closed and the profile was removed. Startup
+diagnosis remains separate from connected acceptance.
+
+### Known ceiling
+
+Known ceiling: prior pre-server delay and renderer post-header delivery delay are not uniquely localized — upgrade when their own event evidence identifies the interval.
+
+## Owned tmpfs cache comparison — 2026-10-10
+
+One subsequent comparison used a unique `mkdtemp` cache directory on the
+verified `/dev/shm` tmpfs (64 MiB available before launch), adding only
+`--disk-cache-dir=<owned-directory>` and `--disk-cache-size=16777216` to the
+same launch setup. Profile location, production packages, diagnostic markers
+and ten-second product guards were unchanged. Actual HTTP/Code Cache files
+under that directory confirmed its use.
+
+Game `HTTP_CACHE_CREATE_ENTRY` fell from 8,230 ms to 9 ms; fetch-to-JavaScript
+headers fell from 8,453.8 ms to 24.4 ms. Renderer headers took 37.4 ms.
+WASM initialization and view creation completed within existing guards and
+the chooser enabled. This supports the bounded local cache setup correction;
+it does not prove every previous timeout had the same cause.
+
+Evidence is under `target/wf/browser-wasm-startup-tmpfs-cache-20261010/`.
+Node exited zero. Chromium required SIGKILL during bounded owned cleanup;
+Xvfb exited zero, the server closed and profile/cache directories were removed.
+Retain this cleanup distinction rather than reporting graceful browser exit.
+Connected QA must use original production Worker bytes without diagnostic
+transformation, the same exact WASM packages and unchanged completion criteria.
+
+### Known ceiling
+
+Known ceiling: startup-only diagnostic does not verify gameplay or visible history — upgrade when independent connected browser QA runs.
+
+## Independent connected acceptance with the corrected local cache
+
+Fresh independent browser QA at `5a9861c` used original production Worker
+bytes, unchanged main/audio packages and product deadlines, plus the owned
+16 MiB tmpfs cache. It returned PASS after six-second capture, save/use without
+reprepare, visibly inspected stored history and next/back pages, current-play
+six-second replay with exact `1/4/0/1` score parity and preserved timing, and
+local two-player keyboard/touch stop. Seven screenshots were visually inspected.
+There were no console, page or Worker errors. Node, Chromium and Xvfb exited
+zero; the server closed and owned profile/cache directories were removed.
+
+Evidence is under `target/wf/qa-browser-records-tmpfs-cache-20261010/`.
+This fulfills the continuity flow's browser lens on this local setup, rather
+than promoting the preceding diagnostic controls to acceptance. Earlier failed
+artifacts and their unproven causes remain preserved. Other browsers, physical
+audio/performance, the earlier timing task and the full Goal remain separate.

@@ -104,3 +104,22 @@ exact score parity remain unverified. Preserve earlier successful scoped
 replay observations as dated evidence, without promoting them to this run.
 See [current historical acceptance](REQ__browser-historical-record.md#current-headed-acceptance-evidence--2026-10-10)
 for the failure, cleanup and artifact locations.
+
+## Connected current-package replay — 2026-10-10
+
+After the measured local HTTP-cache setup correction, the independent current
+connected script reached genuine replay completion at song6000000000ns with
+the current play ID and `completed === true`. Hits/misses/combo/max-combo
+were exactly `1/4/0/1`, matching the captured record; selected original timing
+metadata was preserved despite subsequent live-control changes. Local
+two-player keyboard/touch stop also completed. Exact current packages and
+production Worker bytes were unchanged; no time or counter checks were relaxed.
+
+Artifacts are under `target/wf/qa-browser-records-tmpfs-cache-20261010/`,
+including `04-replay-exact-score-and-maximum.png` and `evidence.json`.
+The script exited zero with owned resources removed. Independent visual
+inspection confirmed the replay and local-player screenshots; its final
+verdict is PASS for this connected continuity flow. Retain the earlier failures without
+using this bounded run to claim all-browser or physical replay accuracy.
+This latest result supplies the current-package completion/parity evidence
+that the preceding attempt lacked.
