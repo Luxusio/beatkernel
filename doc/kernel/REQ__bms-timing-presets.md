@@ -195,9 +195,12 @@ WBS08.07 remains incomplete; passing subsets do not replace the blocked lens.
 
 ## Known ceiling
 
-Stored historical display was rejected while completed Results owned the
-presentation. Manual idle reprepare was attempted but subsequent GPU/render
-failures prevented proving that recovery. Replay currently exposes
-hits/misses/combo but lacks its maximum-combo getter. These broader player gaps
-are queued in TASK__browser-record-result-continuity; neither is a completed
-historical-display or replay-statistics claim.
+The earlier timing acceptance run could not display stored history while
+completed Results owned presentation. Subsequent continuity implementation
+added correlated historical acceptance and `BrowserReplay.max_combo`; current
+generated bindings expose the latter as unsigned-u64 BigInt. On 2026-10-10,
+independent headed QA visibly confirmed current stored history and score after
+six-second capture without reprepare. Full connected replay acceptance remains
+unfinished because a later run hit the actual gameplay initialization guard.
+See [current continuity evidence](../runtime/REQ__browser-historical-record.md#current-headed-acceptance-evidence--2026-10-10).
+These follow-up observations do not complete the earlier timing task or WBS08.07.

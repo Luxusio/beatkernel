@@ -142,3 +142,35 @@ groups and four actual Worker-message groups. Scoped formatting, diff whitespace
 checking and all four compile-only checks exited zero. No assertions, JavaScript
 parsing, generated binding execution, real Window lifecycle, browser/IndexedDB/GPU
 acceptance, allocation measurements, formal review or QA were performed.
+
+## Current headed acceptance evidence — 2026-10-10
+
+At source `fc60219`, rebuilt browser WASM SHA-256
+`3b8d33803fb2979ce51f04fdbf8cd5908b4eee2e2e8fc0b292755283116ab1b5`
+was exercised by independent headed Chromium QA under owned Xvfb. The
+independent red/green known-color control passed texture readback and visible
+screenshot assertions. The immutable preloaded-server run then completed an
+actual six-second capture with hits/misses/combo/max-combo `1/4/0/1`, saved and
+accepted the stored record without chart reprepare, visibly displayed stored
+provenance and score, and navigated next/back pages. Screenshots were visually
+inspected. These observations resolve the visible-history portion on this
+headed setup; they do not erase the earlier headless failures.
+
+The full connected acceptance remains **FAIL**. The first preloaded run used
+an obsolete QA selector that mistook a replay progress notification for
+completion. After correcting only that selector to the current play ID and
+`completed === true`, the next run failed the actual ten-second gameplay
+initialization guard before file controls became available. Both immutable
+4,823,503-byte WASM responses completed in 2–3 ms; CPU readiness never arrived
+before disposal. The cause remains unproven. No production timeout or clock
+validation was relaxed. Current six-second replay parity and local two-player
+keyboard/touch stop remain unverified.
+
+Independent CLI QA passed all 240 tests in the historical Worker, completed
+Results Worker, Window host and play-model suites with no failures or skips.
+This is handler evidence, separate from interactive browser acceptance.
+Current evidence is under `target/wf/qa-browser-records-headed-20261010/`
+(`interim.json`, `timed-preloaded-flow/`, `timed-preloaded-terminal-flow/`)
+and `target/wf/qa-cli-browser-records-resume-20261010/node-handlers.log`.
+All browser runs are terminal; owned Chromium/Xvfb, servers and profiles were
+cleaned up. The task remains unfinished and must not close on these subsets.

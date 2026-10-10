@@ -82,3 +82,25 @@ agent thread limit. Coordinator implementation and tests do not substitute for
 the required independent review and QA. Resume those roles when allocation is
 available, retain the full six-second completion acceptance, and do not claim
 task completion from this checkpoint.
+
+## Current package verification — 2026-10-10
+
+At source `fc60219`, the current browser WASM SHA-256 is
+`3b8d33803fb2979ce51f04fdbf8cd5908b4eee2e2e8fc0b292755283116ab1b5`;
+the AudioWorklet package hash is
+`7235be08ccf465e4b67678afa34273abe1d30ed9cdc05aafc8556fa4f42f06dc`.
+The release builds and wasm-bindgen generation exited zero. Independent CLI
+inspection confirmed wasm-bindgen 0.2.129, the browser-native-free dependency
+graph and the unsigned-u64 `BrowserReplay.max_combo` BigInt binding. These
+build/static facts do not prove replay completion.
+
+The current headed connected run proved six-second capture, saved-record
+acceptance and visible historical score `1/4/0/1`. Its replay observation
+incorrectly selected the first progress `play-render-done`; this notification
+is terminal only for the current play ID with `completed === true`. A second
+run using that corrected selector failed actual gameplay initialization before
+play began. Consequently current-package six-second replay completion and
+exact score parity remain unverified. Preserve earlier successful scoped
+replay observations as dated evidence, without promoting them to this run.
+See [current historical acceptance](REQ__browser-historical-record.md#current-headed-acceptance-evidence--2026-10-10)
+for the failure, cleanup and artifact locations.

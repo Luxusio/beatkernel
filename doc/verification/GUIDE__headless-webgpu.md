@@ -116,3 +116,31 @@ navigation and visible historical-screen QA before accepting that player flow.
 ### Known ceiling
 
 Known ceiling: Known-color control contains no player/WASM — independent connected browser QA required before AC-004 acceptance.
+
+## Connected headed player observation — 2026-10-10
+
+Independent QA repeated the known-color control successfully before loading
+the current player packages. For bounded startup diagnosis, preload the exact
+production HTML/JS/MJS/CSS/WASM bytes before launching the owned loopback server
+and browser, and log request durations. Keep product initialization deadlines,
+clock checks and replay completion criteria unchanged. Artifacts are under
+`target/wf/qa-browser-records-headed-20261010/`.
+
+In `timed-preloaded-flow`, preload took 169 ms and each 4,823,503-byte WASM
+response completed in 3 ms. CPU readiness arrived approximately 9,586 ms after
+initialization, within the product ten-second guard. Actual finite capture,
+save/use and visible historical provenance/score with next/back pages passed.
+The subsequent replay assertion selected a nonterminal progress notification.
+The corrected `timed-preloaded-terminal-flow` requires the current play ID
+and `completed === true`, retaining the same 25-second QA observation limit.
+It failed the original product initialization guard before play, despite WASM
+HTTP responses completing in 2–3 ms. CPU readiness was absent at disposal.
+
+Fast memory-served responses exclude handler file-read latency as the sole
+explanation for the latter failure; they do not locate the remaining cause.
+Investigate Worker startup and WASM initialization stages before choosing a
+fix. No further setup-only retries or timeout extensions establish acceptance.
+The full connected browser verdict remains FAIL; replay/local-player acceptance
+and hardware/performance claims are not supplied by the passing history subset.
+All runs terminated and their owned browser/display/server/profile resources
+were cleaned up. Earlier failed headless evidence remains valid for its setup.
