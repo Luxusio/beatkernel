@@ -49,6 +49,11 @@ export function verifyDocument(bytes, expected) {
   assert.equal(hash(bytes), expected, "Actual main navigation document differs from index.html manifest");
 }
 
+export function verifyIndependentProfiles(hosts) {
+  const [first, second] = hosts.map(host => resolve(host.profile));
+  assert(!within(first, second) && !within(second, first), "Owned browser profiles overlap");
+}
+
 export function verifyPresentation(probe, renderer) {
   assert(renderer && !renderer.unavailable && !renderer.overflow, "Renderer observation unavailable");
   assert.deepEqual(renderer.errors, []);
@@ -180,6 +185,7 @@ async function main() {
     assert(hosts.every(host => typeof host[field] === "string" && host[field].length > 0), `Two ${field} values required`);
     assert.equal(new Set(hosts.map(host => field === "display" ? host[field] : resolve(host[field]))).size, 2, `${field} must be independent`);
   }
+  verifyIndependentProfiles(hosts);
   for (const host of hosts) {
     for (const field of ["xdgDataHome", "xdgConfigHome"]) {
       assert((await stat(host[field])).isDirectory());

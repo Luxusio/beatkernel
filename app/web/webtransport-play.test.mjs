@@ -1,7 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { runBounded, verifyDocument, verifyPresentation } from "./webtransport-play.browser.mjs";
+import { runBounded, verifyDocument, verifyPresentation, verifyIndependentProfiles } from "./webtransport-play.browser.mjs";
+
+test("independent sibling profiles preserve join-before-removal ownership", () => {
+  verifyIndependentProfiles([{ profile: "/tmp/room-play/host1" }, { profile: "/tmp/room-play/host2" }]);
+});
+
+for (const profiles of [["/tmp/room-play", "/tmp/room-play/host2"], ["/tmp/room-play/host1", "/tmp/room-play"]]) {
+  test(`nested profile ownership refuses before launch: ${profiles[0]}`, () => {
+    assert.throws(() => verifyIndependentProfiles(profiles.map(profile => ({ profile }))), /profiles overlap/);
+  });
+}
 
 test("deadline permanently rejects an operation that settles successfully later", async () => {
   let settle, token, stopped = false, success = false;
