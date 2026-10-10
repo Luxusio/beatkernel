@@ -110,6 +110,29 @@ Application file loaders accept valid UTF-8 first, stripping a single initial UT
 Encoded input and decoded UTF-8 independently obey the parser's 8 MiB cap; output expansion and reader growth fail before parsing. Conversion runs during preparation, with a bounded scratch buffer and capped output allocation, outside audio/input callbacks. Metadata and asset paths preserve decoded Unicode and separator bytes; sound containment and strict parser/resource policies remain in force. Pure literal-byte and real parser/replay composition fixtures are prepared for later execution; build checks do not establish native path/font behavior.
 
 
+## Named malformed-media and allocation verification corpus
+
+The supported WAV/FLAC/Vorbis/MP3 preparation path shall reject structural
+truncation, malformed declared metadata and codec-stage failures without
+returning a partially prepared bank. Failure after another valid asset must
+leave a subsequent independent valid preparation unchanged. Representative
+real-file and memory-source cases must exercise the same public preparation
+pipeline, including encoded-file bounds, per-asset PCM bounds, explicit channel
+expansion, aggregate bank bounds and per-ID charges for aliased resources.
+Different source sample rates remain valid: the existing Mixer converts them.
+Within-asset format changes and mixed-format Vorbis chains remain refused.
+
+The finite corpus must distinguish container/preflight refusal from later
+compressed-codec failure after a valid preceding frame or packet. WAV validates
+the complete finite sample payload before allocation; it does not have a
+compressed late-decode stage. Allocation verification measures requests on the
+measured thread with fixture construction outside the interval, including codec
+scratch requests. Count/total/largest request figures are not peak live memory,
+RSS, stack usage or a universal malformed-file sandbox. PCM caps do not bound
+all codec metadata/setup storage. Actual corpus results and conservative
+case-specific bounds belong in the verification guide; absence of those results
+does not satisfy WBS08.14.
+
 ## Native FLAC assets
 
 DefaultAssetDecoder identifies native FLAC by its fLaC data signature; OggS uses the Vorbis policy below, ID3/MPEG sync uses the MP3 policy below, and remaining input uses the existing strict WAV parser, with codec errors surfaced rather than format substitutions. File lookup has the separate exact/compatible policy below. FlacDecoder consumes bounded already-loaded bytes through the app-only pinned Rust claxon library before playback. Source sample rate/channel count are retained; signed integer amplitudes become finite interleaved f32, then the existing exact/mono-stereo channel policy and bank limits apply. Native input/output clocks, judge rules, keysound scheduling and original-time replay are unchanged.
@@ -141,9 +164,9 @@ Each chain link has a unique serial within the physical bitstream, as required
 by [RFC 3533 section 4](https://www.rfc-editor.org/rfc/rfc3533.html#section-4).
 Reused link serials refuse rather than introducing an implicit permissive mode.
 
-Default preparation shall identify Ogg by OggS content and decode a complete single Vorbis logical stream through app-only pinned Rust lewton. Source sample rate and channel count remain unchanged; interleaved finite f32 enters the same channel expansion and PCM bank limits. Input is bounded to 64 MiB; cumulative decoded bytes are capped before owned output growth, including a preflight from the final EOS granule. Pages require exact framing, version/flags, one serial, consecutive sequence numbers, BOS/EOS and packet continuation consistency, CRC and nondecreasing defined granules. Missing end pages, corruption, trailing data, chained/multiplexed streams and other Ogg codecs reject instead of partial success. Final decoded frame count must equal the final granule for supported zero-origin streams. Application packet decoding shall trim the final audio packet against actual cumulative frames and the EOS granule, including when all audio packets share a single EOS page. Completed-page granules shall agree with cumulative decoded frames; a page granule is not applied prematurely to intermediate packets on that page. It shall not rely on the library high-level reader having observed an earlier audio page. Ordinary codec errors reject. Codec panics that unwind shall become preparation errors without changing global panic hooks; panic-abort builds and allocation/process aborts cannot be recovered by this boundary. Decoder scratch/setup/comment storage is separate from the caller PCM cap; this is not a CPU or total-memory sandbox. The identification packet must be the sole fixed 30-byte BOS packet under the Vorbis mapping, with supported source format checked before setup allocations.
+Default preparation shall identify Ogg by OggS content and decode complete Vorbis links through app-only pinned Rust lewton. Source sample rate and channel count remain unchanged across the asset; interleaved finite f32 enters the same channel expansion and PCM bank limits. Input is bounded to 64 MiB; cumulative decoded bytes are capped before owned output growth, including a preflight from each link's final EOS granule. Each link's pages require exact framing, version/flags, one serial, consecutive sequence numbers, BOS/EOS and packet continuation consistency, CRC and nondecreasing defined granules. Missing end pages, corruption, trailing data, malformed or mixed-format chains, multiplexed streams and other Ogg codecs reject instead of partial success. Final decoded frame count must equal each link's final granule for supported zero-origin streams. Application packet decoding shall trim the final audio packet against actual cumulative link frames and the EOS granule, including when all audio packets share a single EOS page. Completed-page granules shall agree with cumulative decoded link frames; a page granule is not applied prematurely to intermediate packets on that page. It shall not rely on the library high-level reader having observed an earlier audio page. Ordinary codec errors reject. Codec panics that unwind shall become preparation errors without changing global panic hooks; panic-abort builds and allocation/process aborts cannot be recovered by this boundary. Decoder scratch/setup/comment storage is separate from the caller PCM cap; this is not a CPU or total-memory sandbox. The identification packet must be the sole fixed 30-byte BOS packet under the Vorbis mapping, with supported source format checked before setup allocations.
 
-Compatible lookup includes OGG and MP3 case variants with the policy below: the literal path wins; supported original family comes first, then remaining WAV, FLAC, OGG, MP3 families. Extensionless references use that order. At most 36 unique ASCII extension-case combinations are considered. Exact custom-codec lookup and original chart/replay identity remain unchanged. Original synthetic Vorbis/Ogg fixtures, limits/container errors and actual default preparation/offline PCM composition are authored and compiled for later execution. Other Ogg codecs, chaining/multiplexing, nonzero-origin support and exhaustive codec/native acceptance remain future work.
+Compatible lookup includes OGG and MP3 case variants with the policy below: the literal path wins; supported original family comes first, then remaining WAV, FLAC, OGG, MP3 families. Extensionless references use that order. At most 36 unique ASCII extension-case combinations are considered. Exact custom-codec lookup and original chart/replay identity remain unchanged. Original synthetic Vorbis/Ogg fixtures, limits/container errors and actual default preparation/offline PCM composition are authored and compiled for later execution. Other Ogg codecs, multiplexing, nonzero-origin support and exhaustive codec/native acceptance remain future work. Sequential complete same-format chaining follows the superseding contract above.
 
 
 ## MPEG Layer III assets and declared timing
