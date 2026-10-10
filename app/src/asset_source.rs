@@ -29,8 +29,20 @@ impl Default for MemoryAssetLimits {
         }
     }
 }
+enum MemoryFile {
+    Declared(usize),
+    Loaded(Vec<u8>),
+}
+impl MemoryFile {
+    fn len(&self) -> usize {
+        match self {
+            Self::Declared(length) => *length,
+            Self::Loaded(bytes) => bytes.len(),
+        }
+    }
+}
 pub struct MemoryFiles {
-    files: BTreeMap<String, Vec<u8>>,
+    files: BTreeMap<String, MemoryFile>,
     limits: MemoryAssetLimits,
     total_bytes: usize,
 }
@@ -75,12 +87,19 @@ impl MemoryFiles {
             total_bytes: 0,
         })
     }
-    pub fn insert(&mut self, name: &str, bytes: Vec<u8>) -> io::Result<()> {
+    /// Reserve the canonical file's bounds without acquiring its content.
+    pub fn declare_file(&mut self, name: &str, length: usize) -> io::Result<()> {
         let name = key(name, self.limits.max_path_bytes)?;
-        if self.files.contains_key(&name) {
+        let total = self.admit_new(&name, length)?;
+        self.files.insert(name, MemoryFile::Declared(length));
+        self.total_bytes = total;
+        Ok(())
+    }
+    fn admit_new(&self, name: &str, length: usize) -> io::Result<usize> {
+        if self.files.contains_key(name) {
             return Err(invalid("duplicate normalized selected file path"));
         }
-        if self.is_directory(&name)
+        if self.is_directory(name)
             || name
                 .match_indices('/')
                 .any(|(at, _)| self.files.contains_key(&name[..at]))
@@ -89,15 +108,34 @@ impl MemoryFiles {
         }
         let total = self
             .total_bytes
-            .checked_add(bytes.len())
+            .checked_add(length)
             .ok_or_else(|| invalid("selected file byte count overflow"))?;
         if self.files.len() >= self.limits.max_files
-            || bytes.len() > self.limits.max_file_bytes
+            || length > self.limits.max_file_bytes
             || total > self.limits.max_total_bytes
         {
             return Err(invalid("selected file storage exceeds its limits"));
         }
-        self.files.insert(name, bytes);
+        Ok(total)
+    }
+    pub fn insert(&mut self, name: &str, bytes: Vec<u8>) -> io::Result<()> {
+        let name = key(name, self.limits.max_path_bytes)?;
+        if let Some(file) = self.files.get_mut(&name) {
+            match file {
+                MemoryFile::Declared(length) if *length == bytes.len() => {
+                    *file = MemoryFile::Loaded(bytes);
+                    return Ok(());
+                }
+                MemoryFile::Declared(_) => {
+                    return Err(invalid("selected file length differs from declaration"))
+                }
+                MemoryFile::Loaded(_) => {
+                    return Err(invalid("duplicate normalized selected file path"))
+                }
+            }
+        }
+        let total = self.admit_new(&name, bytes.len())?;
+        self.files.insert(name, MemoryFile::Loaded(bytes));
         self.total_bytes = total;
         Ok(())
     }
@@ -119,11 +157,17 @@ impl MemoryFiles {
     }
     pub fn read_file(&self, name: &str, max_bytes: usize) -> io::Result<&[u8]> {
         let name = key(name, self.limits.max_path_bytes)?;
-        if let Some(bytes) = self.files.get(&name) {
-            if bytes.len() > max_bytes {
+        if let Some(file) = self.files.get(&name) {
+            if file.len() > max_bytes {
                 return Err(invalid("encoded file exceeds preparation limit"));
             }
-            return Ok(bytes);
+            return match file {
+                MemoryFile::Loaded(bytes) => Ok(bytes),
+                MemoryFile::Declared(_) => Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "selected file content has not been acquired",
+                )),
+            };
         }
         if self.is_directory(&name) {
             return Err(io::Error::new(

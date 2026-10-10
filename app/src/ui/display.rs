@@ -358,12 +358,12 @@ impl DisplayView {
                     } else {
                         text_field_with_font(
                             scene,
-                            &editor,
+                            editor,
                             geometry.bounds,
-                            focused && !pending,
+                            *focused && !*pending,
                             font.as_ref(),
                         );
-                        if !pending {
+                        if !*pending {
                             hits.push((control, geometry.bounds));
                         }
                     }
@@ -409,7 +409,7 @@ impl DisplayView {
                 memo,
                 &view.layout,
                 &[leaf.id],
-                move |(hovered, armed, pending), _, geometry, scene, hits| {
+                move |&(hovered, armed, pending), _, geometry, scene, hits| {
                     button(scene, geometry.bounds, label, hovered, armed);
                     if !pending {
                         hits.push((control, geometry.bounds));
@@ -433,7 +433,7 @@ impl DisplayView {
             &[error_id],
             move |error, _, geometry, scene, _| {
                 if let Some(error) = error {
-                    paint_text(scene, geometry.bounds, &error, ERROR);
+                    paint_text(scene, geometry.bounds, error, ERROR);
                 }
             },
         )?;

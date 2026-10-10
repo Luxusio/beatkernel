@@ -436,7 +436,7 @@ impl PlayersView {
             &[node_id(&layout, |component| {
                 matches!(component, Component::Summary)
             })],
-            |(count, first), _, geometry, scene, _| {
+            |&(count, first), _, geometry, scene, _| {
                 paint_text(
                     scene,
                     geometry.bounds,
@@ -523,7 +523,7 @@ impl PlayersView {
             &[node_id(&layout, |component| {
                 matches!(component, Component::Hint)
             })],
-            |(solo, browser), _, geometry, scene, _| {
+            |&(solo, browser), _, geometry, scene, _| {
                 paint_text(
                     scene,
                     geometry.bounds,
@@ -562,7 +562,7 @@ impl PlayersView {
                     &layout,
                     |component| matches!(component, Component::Action(action) if action == index),
                 )],
-                move |(visible, enabled, hovered, armed, browser), _, geometry, scene, hits| {
+                move |&(visible, enabled, hovered, armed, browser), _, geometry, scene, hits| {
                     let bounds = geometry.bounds;
                     if visible {
                         button(
@@ -592,7 +592,7 @@ impl PlayersView {
             &[node_id(&layout, |component| {
                 matches!(component, Component::Pending)
             })],
-            |pending, _, geometry, scene, _| {
+            |&pending, _, geometry, scene, _| {
                 if pending {
                     paint_text(scene, geometry.bounds, "LOADING KEYBOARDS", SUMMARY);
                 }
@@ -619,10 +619,10 @@ impl PlayersView {
                     paint_text(
                         scene,
                         geometry.bounds,
-                        &value,
+                        value,
                         TextStyle {
                             scale: 1,
-                            color: if error { 0xff8e8e } else { 0x74e5c5 },
+                            color: if *error { 0xff8e8e } else { 0x74e5c5 },
                         },
                     );
                 }

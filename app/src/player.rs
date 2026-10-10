@@ -1,6 +1,9 @@
 //! Latest-state presentation bridge; never called from the audio callback.
 use crate::{
     competition::ScoreSummary,
+    gameplay::output::domain::control::{
+        OutputCapability, OutputControls, OutputReply, OutputRequest,
+    },
     gauge::{BmsGauge, GaugeFailure, GaugeProfile},
     judgment_policy::{BmsJudgmentPolicy, BmsScoreSummary},
     local_players::PlayerId,
@@ -322,7 +325,7 @@ struct Shared {
     practice_busy: AtomicBool,
     practice_owner: AtomicBool,
     practice_paused: AtomicBool,
-    output: Mutex<crate::live_output_control::OutputControls>,
+    output: Mutex<OutputControls>,
     output_supported: AtomicBool,
     output_closed: AtomicBool,
     output_queued: AtomicBool,
@@ -376,10 +379,7 @@ fn settle_room(shared: &Shared, controls: &mut RoomControls) -> bool {
         false
     }
 }
-fn settle_output(
-    shared: &Shared,
-    controls: &mut crate::live_output_control::OutputControls,
-) -> bool {
+fn settle_output(shared: &Shared, controls: &mut OutputControls) -> bool {
     if shared.output_closed.load(Ordering::Acquire) {
         controls.close("output controls closed");
         true
@@ -404,7 +404,7 @@ pub fn channel() -> (PlayerPublisher, PlayerViewer) {
         practice_busy: AtomicBool::new(false),
         practice_owner: AtomicBool::new(false),
         practice_paused: AtomicBool::new(false),
-        output: Mutex::new(crate::live_output_control::OutputControls::new()),
+        output: Mutex::new(OutputControls::new()),
         output_supported: AtomicBool::new(false),
         output_closed: AtomicBool::new(false),
         output_queued: AtomicBool::new(false),
@@ -623,10 +623,7 @@ impl PlayerViewer {
     }
 }
 impl PlayerPublisher {
-    pub fn advertise_output(
-        &self,
-        capability: Option<crate::live_output_control::OutputCapability>,
-    ) -> io::Result<()> {
+    pub fn advertise_output(&self, capability: Option<OutputCapability>) -> io::Result<()> {
         if self.0.cancel.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -665,9 +662,7 @@ impl PlayerPublisher {
         self.0.output_supported.store(supported, Ordering::Release);
         Ok(())
     }
-    pub fn take_output_request(
-        &self,
-    ) -> io::Result<Option<crate::live_output_control::OutputRequest>> {
+    pub fn take_output_request(&self) -> io::Result<Option<OutputRequest>> {
         if !self.0.output_queued.load(Ordering::Acquire) {
             return Ok(None);
         }
@@ -682,16 +677,13 @@ impl PlayerPublisher {
             .store(controls.pending(), Ordering::Release);
         Ok(request)
     }
-    pub fn reply_output(&self, reply: &crate::live_output_control::OutputReply) -> io::Result<()> {
+    pub fn reply_output(&self, reply: &OutputReply) -> io::Result<()> {
         let mut controls = self.0.output.try_lock().map_err(room_lock_error)?;
         self.complete_output_reply(&mut controls, reply)
     }
     /// Cold owner-thread publication; never call from an audio callback.
     /// A decided reply must reach shared state before the gameplay pump exits.
-    pub fn commit_output_reply(
-        &self,
-        reply: &crate::live_output_control::OutputReply,
-    ) -> io::Result<()> {
+    pub fn commit_output_reply(&self, reply: &OutputReply) -> io::Result<()> {
         let mut controls = self
             .0
             .output
@@ -701,8 +693,8 @@ impl PlayerPublisher {
     }
     fn complete_output_reply(
         &self,
-        controls: &mut crate::live_output_control::OutputControls,
-        reply: &crate::live_output_control::OutputReply,
+        controls: &mut OutputControls,
+        reply: &OutputReply,
     ) -> io::Result<()> {
         if !self.0.output_closed.load(Ordering::Acquire) {
             controls.reply(reply).map_err(io::Error::other)?;
@@ -734,18 +726,16 @@ fn output_publisher<T>(
         None => Ok(absent),
     })
 }
-pub fn advertise_output(
-    cap: Option<crate::live_output_control::OutputCapability>,
-) -> io::Result<()> {
+pub fn advertise_output(cap: Option<OutputCapability>) -> io::Result<()> {
     output_publisher(|p| p.advertise_output(cap), ())
 }
-pub fn take_output_request() -> io::Result<Option<crate::live_output_control::OutputRequest>> {
+pub fn take_output_request() -> io::Result<Option<OutputRequest>> {
     output_publisher(|p| p.take_output_request(), None)
 }
-pub fn reply_output(reply: &crate::live_output_control::OutputReply) -> io::Result<()> {
+pub fn reply_output(reply: &OutputReply) -> io::Result<()> {
     output_publisher(|p| p.reply_output(reply), ())
 }
-pub fn commit_output_reply(reply: &crate::live_output_control::OutputReply) -> io::Result<()> {
+pub fn commit_output_reply(reply: &OutputReply) -> io::Result<()> {
     output_publisher(|p| p.commit_output_reply(reply), ())
 }
 pub fn output_pending() -> bool {
@@ -757,9 +747,7 @@ impl PlayerViewer {
             && !self.0.cancel.load(Ordering::Acquire)
             && !self.0.output_closed.load(Ordering::Acquire)
     }
-    pub fn output_capability(
-        &self,
-    ) -> io::Result<Option<crate::live_output_control::OutputCapability>> {
+    pub fn output_capability(&self) -> io::Result<Option<OutputCapability>> {
         if self.0.cancel.load(Ordering::Acquire) || self.0.output_closed.load(Ordering::Acquire) {
             return Ok(None);
         }
@@ -791,7 +779,7 @@ impl PlayerViewer {
         self.0.output_queued.store(true, Ordering::Release);
         Ok(id)
     }
-    pub fn take_output_reply(&self) -> io::Result<Option<crate::live_output_control::OutputReply>> {
+    pub fn take_output_reply(&self) -> io::Result<Option<OutputReply>> {
         if !self.0.output_busy.load(Ordering::Acquire) {
             return Ok(None);
         }
@@ -2344,13 +2332,11 @@ mod fixtures {
         with_publisher(publisher, || Ok(())).unwrap(); // Diagnostic/ordinary return.
         assert_eq!(viewer.take_latest().unwrap().completed_end, None);
         let (publisher, viewer) = channel();
-        assert!(
-            with_publisher::<()>(publisher, || {
-                publish_section_end(end);
-                Err("cleanup fixture".into())
-            })
-            .is_err()
-        );
+        assert!(with_publisher::<()>(publisher, || {
+            publish_section_end(end);
+            Err("cleanup fixture".into())
+        })
+        .is_err());
         let failed = viewer.take_latest().unwrap();
         assert_eq!(failed.completed_end, Some(end)); // Keep actual prefix provenance.
         assert_eq!(
@@ -2551,12 +2537,10 @@ mod fixtures {
             let initial = viewer.take_latest().unwrap();
             assert_eq!(initial.players.len(), 4);
             let common = initial.chart.as_ref().unwrap();
-            assert!(
-                initial
-                    .players
-                    .iter()
-                    .all(|member| Arc::ptr_eq(member.chart.as_ref().unwrap(), common))
-            );
+            assert!(initial
+                .players
+                .iter()
+                .all(|member| Arc::ptr_eq(member.chart.as_ref().unwrap(), common)));
             publish_local_reports(&[
                 report(1, 1, 2, 0),
                 report(2, 2, 0, 1),
@@ -2752,10 +2736,11 @@ mod fixtures {
         with_publisher(publisher, || {
             publish_local_chart(&source, &chart, &[PlayerId(1), PlayerId(2)]).unwrap();
             let before = member_state();
-            assert!(
-                publish_replay_prefix(Timestamp::ZERO, &report(1, 0, 1, 0).report.judge_events)
-                    .is_err()
-            );
+            assert!(publish_replay_prefix(
+                Timestamp::ZERO,
+                &report(1, 0, 1, 0).report.judge_events
+            )
+            .is_err());
             assert_eq!(member_state(), before);
             Ok(())
         })
@@ -2794,14 +2779,12 @@ mod fixtures {
                 PauseState::Resuming,
             ] {
                 publish_pause(phase);
-                assert!(
-                    viewer
-                        .take_latest()
-                        .unwrap()
-                        .players
-                        .iter()
-                        .all(|p| p.pressed_lanes == 0)
-                );
+                assert!(viewer
+                    .take_latest()
+                    .unwrap()
+                    .players
+                    .iter()
+                    .all(|p| p.pressed_lanes == 0));
             }
             let mut release = report(3, 20, 0, 0);
             release.report.bound_inputs = vec![button(1, 4, 0x11, ButtonState::Up)];
@@ -2810,25 +2793,21 @@ mod fixtures {
             assert_eq!(viewer.take_latest().unwrap().players[0].pressed_lanes, 1);
             viewer.cancel();
             publish_pause(PauseState::Unavailable);
-            assert!(
-                viewer
-                    .take_latest()
-                    .unwrap()
-                    .players
-                    .iter()
-                    .all(|p| p.pressed_lanes == 0)
-            );
-            Ok(())
-        })
-        .unwrap();
-        assert!(
-            viewer
+            assert!(viewer
                 .take_latest()
                 .unwrap()
                 .players
                 .iter()
-                .all(|p| p.pressed_lanes == 0)
-        );
+                .all(|p| p.pressed_lanes == 0));
+            Ok(())
+        })
+        .unwrap();
+        assert!(viewer
+            .take_latest()
+            .unwrap()
+            .players
+            .iter()
+            .all(|p| p.pressed_lanes == 0));
     }
     #[test]
     fn ownership_overflow_is_atomic_across_scores_history_and_members() {

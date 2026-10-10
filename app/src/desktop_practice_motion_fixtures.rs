@@ -127,6 +127,7 @@ fn desktop_practice_motion_ime_unpublished_ticks_repaint_and_zero_opacity() {
         .unwrap();
     assert_eq!(app.ime_cursor_area([960, 720]), Some([24, 175, 906, 40]));
     let previous_id = app.scene.component_id(key).unwrap();
+    let previous_geometry = Arc::clone(app.scene.geometry_stamp().0);
     let previous_revision = app.scene.geometry_stamp().1;
     app.ime_event(Ime::Enabled);
     app.ime_event(Ime::Preedit("12".into(), Some((0, 2))));
@@ -143,9 +144,13 @@ fn desktop_practice_motion_ime_unpublished_ticks_repaint_and_zero_opacity() {
     app.draw().unwrap();
     let rebound = app.scene.component_id(key).unwrap();
     // Ordinary same-key recomposition deliberately preserves binding identity.
-    // Geometry advances because the admitted preview was actually repainted.
+    // Cold recomposition can replace the Scene identity and restart its epoch;
+    // use the same complete stamp comparison as the actual renderer.
     assert_eq!(rebound, previous_id);
-    assert!(app.scene.geometry_stamp().1 > previous_revision);
+    assert!(
+        !Arc::ptr_eq(&previous_geometry, app.scene.geometry_stamp().0)
+            || app.scene.geometry_stamp().1 != previous_revision
+    );
     assert!(!app.practice.as_ref().unwrap().view.dirty());
     assert_eq!(
         app.scene.component_transform(rebound).unwrap().offset(),

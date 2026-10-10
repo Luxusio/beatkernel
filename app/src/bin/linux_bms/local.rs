@@ -41,7 +41,7 @@ use beatkernel_bms_runtime::{
     native_cohort::{run_cohort_audio_with_policies_and_results, NativeAudioCohortSession},
     native_gameplay::{
         AudioGameplayConfig, InputBatch, NativeCollectedInput, NativeGameplayConfig,
-        NativeGameplayDevice, NativeGameplayResult,
+        NativeGameplayResult,
     },
 };
 use beatkernel_platform::{
@@ -55,7 +55,8 @@ use beatkernel_platform::{
 use beatkernel_bms_runtime::native_start::{start_target_committed, NativeStartConfig};
 
 use beatkernel_bms_runtime::{
-    gameplay_output_owner::GameplayOutputOwner, native_alsa_replacement::AlsaReplacementBackend,
+    gameplay::output::adapters::alsa::AlsaReplacementBackend,
+    gameplay::output::application::owner::GameplayOutputOwner,
 };
 type OwnedOutput = GameplayOutputOwner<
     beatkernel_bms_runtime::gameplay::output::adapters::remix::RemixedOutputBackend<
@@ -63,13 +64,13 @@ type OwnedOutput = GameplayOutputOwner<
     >,
     beatkernel_platform::audio::NativeOutputState,
 >;
-use beatkernel_bms_runtime::native_alsa_output_ui::{
+use beatkernel_bms_runtime::gameplay::output::adapters::alsa_ui::{
     ConvertedAlsaOutputOwner, ConvertedAlsaOutputUi,
 };
 enum CohortOutput {
     Legacy(
         OwnedOutput,
-        beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi,
+        beatkernel_bms_runtime::gameplay::output::adapters::alsa_ui::NativeAlsaOutputUi,
     ),
     Target(ConvertedAlsaOutputOwner, ConvertedAlsaOutputUi),
 }
@@ -204,7 +205,10 @@ struct CohortDevice<'a> {
     startup_end: Option<&'a mut NativeEnd>,
     startup_primed: bool,
 }
-impl NativeGameplayDevice for CohortDevice<'_> {
+use beatkernel_bms_runtime::gameplay_presentation::GameplayDevice as GameplayDevicePort;
+impl GameplayDevicePort for CohortDevice<'_> {
+    type Presentation =
+        beatkernel_platform::audio::presentation::discipline::PresentationDiscipline;
     fn observe_audio(
         &mut self,
         presentation: &mut beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,

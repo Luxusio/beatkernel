@@ -410,7 +410,7 @@ impl SettingsView {
             memo,
             &view.layout,
             &[paging],
-            |(first, count), _, geometry, scene, _| {
+            |&(first, count), _, geometry, scene, _| {
                 if count > 0 {
                     paint_text(
                         scene,
@@ -485,14 +485,8 @@ impl SettingsView {
                             return;
                         }
                         let bounds = geometry.bounds;
-                        if let Some(editor) = row.editor {
-                            text_field_with_font(
-                                scene,
-                                &editor,
-                                bounds,
-                                row.focused,
-                                font.as_ref(),
-                            );
+                        if let Some(editor) = &row.editor {
+                            text_field_with_font(scene, editor, bounds, row.focused, font.as_ref());
                         } else {
                             text_field_value_with_font(
                                 scene,
@@ -570,8 +564,8 @@ impl SettingsView {
                     return;
                 }
                 let bounds = geometry.bounds;
-                text_field_with_font(scene, &profile, bounds, focused, font.as_ref());
-                if !pending {
+                text_field_with_font(scene, profile, bounds, *focused, font.as_ref());
+                if !*pending {
                     hits.push((ControlId(15), bounds));
                 }
             },
@@ -601,10 +595,10 @@ impl SettingsView {
             &view.layout,
             &[status_id],
             |(pending, message), _, geometry, scene, _| {
-                if pending {
+                if *pending {
                     paint_text(scene, geometry.bounds, "LOADING DEVICES", NOTICE);
                 } else if let Some(message) = message {
-                    paint_text(scene, geometry.bounds, &message, MESSAGE);
+                    paint_text(scene, geometry.bounds, message, MESSAGE);
                 }
             },
         )?;
@@ -624,7 +618,7 @@ impl SettingsView {
             &[error_id],
             |error, _, geometry, scene, _| {
                 if let Some(error) = error {
-                    paint_text(scene, geometry.bounds, &error, ERROR);
+                    paint_text(scene, geometry.bounds, error, ERROR);
                 }
             },
         )?;
@@ -766,7 +760,7 @@ impl SettingsView {
             memo,
             &self.layout,
             &[node_id],
-            move |(hovered, armed, pending), _, geometry, scene, hits| {
+            move |&(hovered, armed, pending), _, geometry, scene, hits| {
                 let bounds = geometry.bounds;
                 button(scene, bounds, label, hovered, armed);
                 if !pending {

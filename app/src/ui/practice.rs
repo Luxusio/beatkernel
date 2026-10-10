@@ -299,9 +299,9 @@ impl PracticeView {
                     Component::StartEditor(control) | Component::EndEditor(control) => {
                         text_field_with_font(
                             scene,
-                            &editor,
+                            editor,
                             geometry.bounds,
-                            end == end_focused,
+                            end == *end_focused,
                             font.as_ref(),
                         );
                         hits.push((control, geometry.bounds));
@@ -350,7 +350,7 @@ impl PracticeView {
             &[error_leaf.id],
             move |error, _, geometry, scene, _| {
                 if let Some(error) = error {
-                    paint_text(scene, geometry.bounds, &error, error_style);
+                    paint_text(scene, geometry.bounds, error, error_style);
                 }
             },
         )?;
@@ -493,7 +493,7 @@ impl PracticeView {
             memo,
             &self.layout,
             &[node],
-            move |(hovered, armed), _, geometry, scene, hits| {
+            move |&(hovered, armed), _, geometry, scene, hits| {
                 button(scene, geometry.bounds, label, hovered, armed);
                 hits.push((id, geometry.bounds));
             },

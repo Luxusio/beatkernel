@@ -26,7 +26,10 @@ fn asio_pause_observation(
     observation: Option<beatkernel_platform::audio::asio::AsioPresentationObservation>,
     now: beatkernel::time::ClockPoint,
 ) -> beatkernel_bms_runtime::live_pause::LivePauseObservation {
-    beatkernel_bms_runtime::native_replacement_observation::asio_pause_observation(observation, now)
+    beatkernel_bms_runtime::gameplay::output::adapters::observation::asio_pause_observation(
+        observation,
+        now,
+    )
 }
 #[cfg(test)]
 fn seed_asio_resume(
@@ -1062,8 +1065,7 @@ mod native {
     };
     use beatkernel_bms_runtime::native_gameplay::{
         run_gameplay_audio_with_policy_and_result_and_score, AudioGameplayConfig, InputBatch,
-        NativeAudioGameplaySession, NativeGameplayConfig, NativeGameplayDevice,
-        NativeGameplayResult,
+        NativeAudioGameplaySession, NativeGameplayConfig, NativeGameplayResult,
     };
     use beatkernel_bms_runtime::native_start::{
         start_committed, NativeStartConfig, NativeStartDevice, NativeStartObservation,
@@ -1077,7 +1079,10 @@ mod native {
         pub(super) clock: &'a QpcClock,
         pub(super) collected: &'a mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
     }
-    impl NativeGameplayDevice for GameplayDevice<'_> {
+    use beatkernel_bms_runtime::gameplay_presentation::GameplayDevice as GameplayDevicePort;
+    impl GameplayDevicePort for GameplayDevice<'_> {
+        type Presentation =
+            beatkernel_platform::audio::presentation::discipline::PresentationDiscipline;
         fn observe_audio(
             &mut self,
             presentation: &mut NativeAudioPresentation,

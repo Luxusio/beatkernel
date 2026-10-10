@@ -439,7 +439,7 @@ impl NativeGameplayHost for PlayerGameplayHost {
 }
 
 /// Existing native entry point, composed with system waiting and player output.
-pub fn run_gameplay<D: NativeGameplayDevice>(
+pub fn run_gameplay<D: GameplayDevice<Presentation = PresentationDiscipline>>(
     device: &mut D,
     session: NativeGameplaySession<'_>,
     config: NativeGameplayConfig,
@@ -454,7 +454,10 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
 }
 
 /// Compatibility entry point with explicit control and legacy player output.
-pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
+pub fn run_gameplay_with_control<
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
+    C: NativePumpControl,
+>(
     device: &mut D,
     session: NativeGameplaySession<'_>,
     config: NativeGameplayConfig,
@@ -464,7 +467,7 @@ pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
 }
 
 /// Existing cohort entry point, composed outside the shared gameplay policy.
-pub fn run_cohort<D: NativeGameplayDevice>(
+pub fn run_cohort<D: GameplayDevice<Presentation = PresentationDiscipline>>(
     device: &mut D,
     session: NativeCohortSession<'_>,
     config: NativeGameplayConfig,
@@ -479,7 +482,10 @@ pub fn run_cohort<D: NativeGameplayDevice>(
 }
 
 /// Compatibility cohort entry point with explicit control and player output.
-pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
+pub fn run_cohort_with_control<
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
+    C: NativePumpControl,
+>(
     device: &mut D,
     session: NativeCohortSession<'_>,
     config: NativeGameplayConfig,
@@ -489,7 +495,7 @@ pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
 }
 
 /// Returns actual completion evidence independently of native cleanup status.
-pub fn run_gameplay_with_result<D: NativeGameplayDevice>(
+pub fn run_gameplay_with_result<D: GameplayDevice<Presentation = PresentationDiscipline>>(
     device: &mut D,
     session: NativeGameplaySession<'_>,
     config: NativeGameplayConfig,
@@ -503,7 +509,9 @@ pub fn run_gameplay_with_result<D: NativeGameplayDevice>(
     )
 }
 
-pub fn run_gameplay_with_result_and_score<D: NativeGameplayDevice>(
+pub fn run_gameplay_with_result_and_score<
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
+>(
     device: &mut D,
     session: NativeGameplaySession<'_>,
     config: NativeGameplayConfig,
@@ -519,7 +527,7 @@ pub fn run_gameplay_with_result_and_score<D: NativeGameplayDevice>(
     )
 }
 
-pub fn run_cohort_with_results<D: NativeGameplayDevice>(
+pub fn run_cohort_with_results<D: GameplayDevice<Presentation = PresentationDiscipline>>(
     device: &mut D,
     session: NativeCohortSession<'_>,
     config: NativeGameplayConfig,
@@ -635,7 +643,9 @@ impl<H: NativeGameplayHost> NativeGameplayHost for ResolvedGameplayHost<'_, '_, 
     }
 }
 
-pub fn run_gameplay_with_policy_and_result_and_score<D: NativeGameplayDevice>(
+pub fn run_gameplay_with_policy_and_result_and_score<
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
+>(
     device: &mut D,
     session: NativeGameplaySession<'_>,
     config: NativeGameplayConfig,
@@ -653,7 +663,9 @@ pub fn run_gameplay_with_policy_and_result_and_score<D: NativeGameplayDevice>(
     )
 }
 
-pub fn run_cohort_with_policies_and_results<D: NativeGameplayDevice>(
+pub fn run_cohort_with_policies_and_results<
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
+>(
     device: &mut D,
     session: NativeCohortSession<'_>,
     config: NativeGameplayConfig,
@@ -677,7 +689,7 @@ pub type NativeAudioCohortSession<'a> =
     crate::native_cohort::AudioCohortSession<'a, LiveCompetition, NativeGroupCompetition>;
 
 /// Runs actual native audio-authoritative solo play and returns completion evidence.
-pub fn run_gameplay_audio_with_result<D: NativeGameplayDevice>(
+pub fn run_gameplay_audio_with_result<D: GameplayDevice<Presentation = PresentationDiscipline>>(
     device: &mut D,
     session: NativeAudioGameplaySession<'_>,
     config: crate::native_gameplay::AudioGameplayConfig,
@@ -691,7 +703,9 @@ pub fn run_gameplay_audio_with_result<D: NativeGameplayDevice>(
     )
 }
 /// Runs selected native policy with actual accepted-score observation.
-pub fn run_gameplay_audio_with_policy_and_result_and_score<D: NativeGameplayDevice>(
+pub fn run_gameplay_audio_with_policy_and_result_and_score<
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
+>(
     device: &mut D,
     session: NativeAudioGameplaySession<'_>,
     config: crate::native_gameplay::AudioGameplayConfig,
@@ -709,7 +723,7 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score<D: NativeGameplayDevi
     )
 }
 /// Runs the native cohort with original member identity and one output authority.
-pub fn run_cohort_audio_with_results<D: NativeGameplayDevice>(
+pub fn run_cohort_audio_with_results<D: GameplayDevice<Presentation = PresentationDiscipline>>(
     device: &mut D,
     session: NativeAudioCohortSession<'_>,
     config: crate::native_gameplay::AudioGameplayConfig,
@@ -723,7 +737,9 @@ pub fn run_cohort_audio_with_results<D: NativeGameplayDevice>(
     )
 }
 /// Runs selected member policies on the native audio-authoritative cohort.
-pub fn run_cohort_audio_with_policies_and_results<D: NativeGameplayDevice>(
+pub fn run_cohort_audio_with_policies_and_results<
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
+>(
     device: &mut D,
     session: NativeAudioCohortSession<'_>,
     config: crate::native_gameplay::AudioGameplayConfig,
@@ -769,7 +785,7 @@ where
 
 /// Selected solo practice through the existing native device and UI adapters.
 pub fn run_gameplay_audio_with_practice_and_result_and_score<
-    D: NativeGameplayDevice,
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
     R: crate::practice_playback::PracticeRecordingPort,
 >(
     device: &mut D,
@@ -828,7 +844,7 @@ pub fn run_gameplay_audio_with_practice_and_result_and_score<
 
 /// Selected local cohort practice on the existing shared native output owner.
 pub fn run_cohort_audio_with_practice_and_policies_and_results<
-    D: NativeGameplayDevice,
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
     R: crate::practice_playback::PracticeRecordingPort,
 >(
     device: &mut D,

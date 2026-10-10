@@ -848,11 +848,11 @@ mod native {
     use super::*;
     use beatkernel::audio::{ChannelMatrix, ResampleQuality, StoppedMixerSource};
     use beatkernel_bms_runtime::{
-        gameplay::output::ports::OutputReplacementBackend,
-        native_alsa_output_ui::ConvertedAlsaOutputOwner,
-        native_alsa_replacement::{
+        gameplay::output::adapters::alsa::{
             ConvertedAlsaReplacementBackend, ConvertedAlsaReplacementRequest,
         },
+        gameplay::output::adapters::alsa_ui::ConvertedAlsaOutputOwner,
+        gameplay::output::ports::OutputReplacementBackend,
     };
     use beatkernel_platform::{
         audio::ConvertedNativeOutputState,

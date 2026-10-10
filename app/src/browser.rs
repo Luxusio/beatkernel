@@ -402,6 +402,41 @@ impl BrowserLibrary {
         })
     }
 
+    /// Metadata reserves the same canonical inventory entry later hydrated by add_file.
+    pub fn declare_file(&mut self, path: &str, length: u32) -> Result<(), JsValue> {
+        self.files
+            .declare_file(path, length as usize)
+            .map_err(js_error)
+    }
+    pub fn referenced_asset_paths(
+        &self,
+        path: &str,
+        seed: u64,
+        max_samples: u32,
+    ) -> Result<Vec<String>, JsValue> {
+        crate::browser_library_assets::referenced_asset_paths(
+            &self.files,
+            path,
+            seed,
+            max_samples as usize,
+        )
+        .map_err(js_error)
+    }
+    pub fn replay_referenced_asset_paths(
+        &self,
+        path: &str,
+        replay_bytes: Vec<u8>,
+        max_samples: u32,
+    ) -> Result<Vec<String>, JsValue> {
+        crate::browser_library_assets::replay_referenced_asset_paths(
+            &self.files,
+            path,
+            &replay_bytes,
+            max_samples as usize,
+        )
+        .map_err(js_error)
+    }
+
     /// The supplied JS host preflights metadata before acquiring this buffer.
     pub fn add_file(&mut self, path: &str, bytes: Vec<u8>) -> Result<(), JsValue> {
         self.files.insert(path, bytes).map_err(js_error)

@@ -659,8 +659,7 @@ mod native {
     }
     use beatkernel_bms_runtime::native_gameplay::{
         run_gameplay_audio_with_policy_and_result_and_score, InputBatch,
-        NativeAudioGameplaySession, NativeGameplayConfig, NativeGameplayDevice,
-        NativeGameplayResult,
+        NativeAudioGameplaySession, NativeGameplayConfig, NativeGameplayResult,
     };
     type OwnedOutput = beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::NativeCoreAudioOutputOwner;
     struct GameplayDevice<'a> {
@@ -670,7 +669,10 @@ mod native {
         clock: &'a MachClock,
         retained: &'a mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
     }
-    impl NativeGameplayDevice for GameplayDevice<'_> {
+    use beatkernel_bms_runtime::gameplay_presentation::GameplayDevice as GameplayDevicePort;
+    impl GameplayDevicePort for GameplayDevice<'_> {
+        type Presentation =
+            beatkernel_platform::audio::presentation::discipline::PresentationDiscipline;
         fn observe_audio(
             &mut self,
             presentation: &mut beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,

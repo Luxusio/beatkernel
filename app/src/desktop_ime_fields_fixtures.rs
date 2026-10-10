@@ -18,7 +18,7 @@ fn prepared(field: TextField) -> Desktop {
     match field {
         TextField::Display(index) => {
             app.open_display();
-            app.display.as_mut().unwrap().selected = index;
+            app.display.as_mut().unwrap().draft.selected = index;
         }
         TextField::PracticeStart | TextField::PracticeEnd => {
             app.open_practice();
@@ -46,7 +46,7 @@ fn prepared(field: TextField) -> Desktop {
 }
 fn field_error(app: &Desktop, field: TextField) -> bool {
     match field {
-        TextField::Display(_) => app.display.as_ref().unwrap().error.is_some(),
+        TextField::Display(_) => app.display.as_ref().unwrap().draft.error.is_some(),
         TextField::PracticeStart | TextField::PracticeEnd => {
             app.practice.as_ref().unwrap().error.is_some()
         }
@@ -61,10 +61,11 @@ fn rendered_preview(app: &mut Desktop, field: TextField, expected: &LineEditor) 
     // A missed Desktop preview route would now dirty the already composed view.
     match field {
         TextField::Display(index) => {
-            let draft = app.display.as_ref().unwrap();
+            let owner = app.display.as_ref().unwrap();
+            let draft = &owner.draft;
             let mut editors = draft.editors.clone();
             editors[index] = expected.clone();
-            let view = app.display_view.as_ref().unwrap();
+            let view = owner.view.as_ref().unwrap();
             assert!(!view.dirty());
             view.update(DisplayFrame {
                 editors: &editors,
@@ -181,8 +182,8 @@ fn every_new_ime_target_previews_and_paints_exact_native_ranges_then_cancels_or_
 }
 
 #[test]
-fn composition_owns_shortcuts_and_text_while_invalid_native_ranges_controls_and_limits_keep_drafts_atomic()
- {
+fn composition_owns_shortcuts_and_text_while_invalid_native_ranges_controls_and_limits_keep_drafts_atomic(
+) {
     for field in fields() {
         let mut app = prepared(field);
         let original = app.text_editor(field).unwrap().clone();
@@ -257,15 +258,17 @@ fn composition_owns_shortcuts_and_text_while_invalid_native_ranges_controls_and_
 }
 
 #[test]
-fn field_screen_and_ui_admission_changes_drop_composition_and_require_fresh_enable_for_the_current_target()
- {
+fn field_screen_and_ui_admission_changes_drop_composition_and_require_fresh_enable_for_the_current_target(
+) {
     for field in fields() {
         let mut app = prepared(field);
         let original = app.text_editor(field).unwrap().clone();
         app.ime_event(Ime::Enabled);
         app.ime_event(Ime::Preedit("old".into(), None));
         match field {
-            TextField::Display(index) => app.display.as_mut().unwrap().selected = (index + 1) % 4,
+            TextField::Display(index) => {
+                app.display.as_mut().unwrap().draft.selected = (index + 1) % 4
+            }
             TextField::PracticeStart | TextField::PracticeEnd => {
                 let draft = app.practice.as_mut().unwrap();
                 draft.end_focused = !draft.end_focused;
@@ -338,8 +341,8 @@ fn field_screen_and_ui_admission_changes_drop_composition_and_require_fresh_enab
 }
 
 #[test]
-fn actual_font_preparation_admits_only_preview_text_without_committing_or_acquiring_native_resources()
- {
+fn actual_font_preparation_admits_only_preview_text_without_committing_or_acquiring_native_resources(
+) {
     for field in fields() {
         let mut app = prepared(field);
         app.title_font = Some(Arc::new(
@@ -384,8 +387,8 @@ fn actual_font_preparation_admits_only_preview_text_without_committing_or_acquir
 }
 
 #[test]
-fn record_directory_commit_invalidates_old_catalog_and_preview_only_when_the_committed_value_changes()
- {
+fn record_directory_commit_invalidates_old_catalog_and_preview_only_when_the_committed_value_changes(
+) {
     let mut app = prepared(TextField::RecordDirectory);
     let path = PathBuf::from("old/record.bkr");
     {

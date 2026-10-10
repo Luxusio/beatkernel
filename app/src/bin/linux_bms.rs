@@ -601,10 +601,11 @@ mod native {
     use beatkernel_bms_runtime::native_gameplay::{
         run_gameplay_audio_with_policy_and_result_and_score, AudioGameplayConfig, GameplaySession,
         InputBatch, NativeAudioGameplaySession, NativeCollectedInput, NativeGameplayConfig,
-        NativeGameplayDevice, NativeGameplayResult,
+        NativeGameplayResult,
     };
     use beatkernel_bms_runtime::{
-        gameplay_output_owner::GameplayOutputOwner, native_alsa_replacement::AlsaReplacementBackend,
+        gameplay::output::adapters::alsa::AlsaReplacementBackend,
+        gameplay::output::application::owner::GameplayOutputOwner,
     };
     type OwnedOutput = GameplayOutputOwner<
         beatkernel_bms_runtime::gameplay::output::adapters::remix::RemixedOutputBackend<
@@ -612,7 +613,7 @@ mod native {
         >,
         beatkernel_platform::audio::NativeOutputState,
     >;
-    use beatkernel_bms_runtime::native_alsa_output_ui::{
+    use beatkernel_bms_runtime::gameplay::output::adapters::alsa_ui::{
         ConvertedAlsaOutputOwner, ConvertedAlsaOutputUi,
     };
     use beatkernel_platform::linux::ConvertedAlsaStream;
@@ -692,7 +693,7 @@ mod native {
         request: AlsaRequest,
         mixer: beatkernel::audio::Mixer,
     ) -> Result<ConvertedAlsaOutputOwner> {
-        use beatkernel_bms_runtime::native_alsa_replacement::{
+        use beatkernel_bms_runtime::gameplay::output::adapters::alsa::{
             ConvertedAlsaReplacementBackend, ConvertedAlsaReplacementRequest,
         };
         let matrix = beatkernel::audio::ChannelMatrix::default_mix(
@@ -753,7 +754,7 @@ mod native {
     enum SoloOutput {
         Legacy(
             OwnedOutput,
-            beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi,
+            beatkernel_bms_runtime::gameplay::output::adapters::alsa_ui::NativeAlsaOutputUi,
         ),
         Target(ConvertedAlsaOutputOwner, ConvertedAlsaOutputUi),
     }
@@ -896,7 +897,10 @@ mod native {
         startup_end: Option<&'a mut beatkernel_bms_runtime::native_end::NativeEnd>,
         startup_primed: bool,
     }
-    impl NativeGameplayDevice for GameplayDevice<'_> {
+    use beatkernel_bms_runtime::gameplay_presentation::GameplayDevice as GameplayDevicePort;
+    impl GameplayDevicePort for GameplayDevice<'_> {
+        type Presentation =
+            beatkernel_platform::audio::presentation::discipline::PresentationDiscipline;
         fn observe_audio(
             &mut self,
             presentation: &mut beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,

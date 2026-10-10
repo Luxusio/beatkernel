@@ -3,7 +3,7 @@ use crate::{
     asset_paths::AssetPathPolicy,
     asset_source::{AssetSource, FileAssetSource},
     image_crop::crop_canvas_sized,
-    image_decode::{ImageDecodeError, ImageDecodeLimits, decode},
+    image_decode::{decode, ImageDecodeError, ImageDecodeLimits},
     image_key::{black_to_transparent, needs_key},
     texture::RgbaImage,
 };
@@ -169,6 +169,32 @@ impl ImagePlan {
 }
 
 impl ImageAssets {
+    /// Resolve only the actual visual plan's source files without reading pixels.
+    pub(crate) fn referenced_paths(
+        source: &dyn AssetSource,
+        chart: &BmsChart,
+        limits: ImageAssetLimits,
+    ) -> Result<Vec<PathBuf>, String> {
+        let plan = ImagePlan::new(chart, limits)?;
+        let mut paths = BTreeSet::new();
+        for id in plan.sources {
+            let Some(name) = chart.images.get(&id) else {
+                continue;
+            };
+            if crate::video_assets::is_movie_name(name) {
+                continue;
+            }
+            match source.resolve(name, AssetPathPolicy::ImageVariants) {
+                Ok(path) => {
+                    paths.insert(path);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("image {} path {name}: {error}", id.0)),
+            }
+        }
+        Ok(paths.into_iter().collect())
+    }
+
     /// Exports immutable pixels once and keeps sharing explicit in alias indices.
     pub fn export_visual(&self) -> ImageAssetsTransfer {
         let mut resources = Vec::new();
@@ -492,7 +518,11 @@ impl ImageAssets {
                 Cached::Unavailable(_) => None,
             }));
         let originals = std::mem::take(&mut bank.images);
-        bank.source_ids.extend(sources.into_iter().map(|id| (id, originals.get(&id).cloned())));
+        bank.source_ids.extend(
+            sources
+                .into_iter()
+                .map(|id| (id, originals.get(&id).cloned())),
+        );
         let unavailable = std::mem::take(&mut bank.unavailable);
         let mut variants: Vec<(Arc<RgbaImage>, [i32; 4], [i32; 2], Arc<RgbaImage>)> = Vec::new();
         variants

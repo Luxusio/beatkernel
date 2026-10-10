@@ -6,6 +6,8 @@ pub mod asio_replay;
 pub mod asset_paths;
 /// Bounded selected-file and native asset acquisition.
 pub mod asset_source;
+/// Seeded resource planning over a bounded declared selected-file inventory.
+pub mod browser_library_assets;
 #[cfg(test)]
 mod asset_source_fixtures;
 mod audio_assets;

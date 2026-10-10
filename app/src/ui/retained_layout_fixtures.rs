@@ -302,9 +302,9 @@ fn reactive_updates_after_reflow_use_current_geometry_without_replacing_packets(
                     b.y,
                     b.width,
                     b.height,
-                    if enabled { 0xffffff } else { 0 },
+                    if *enabled { 0xffffff } else { 0 },
                 );
-                if enabled {
+                if *enabled {
                     hits.push((ControlId(id.0 as u64), b));
                 }
             },
@@ -322,6 +322,243 @@ fn reactive_updates_after_reflow_use_current_geometry_without_replacing_packets(
     enabled.set(true);
     assert_eq!(composed(&nodes, 45, 25).1, vec![(0, [0, 0, 45, 25])]);
     assert_eq!(nodes.identities(), identities);
+    scope.dispose();
+}
+
+struct CountedLayoutModel {
+    generation: u32,
+    text: String,
+    clones: Rc<Cell<usize>>,
+}
+impl Clone for CountedLayoutModel {
+    fn clone(&self) -> Self {
+        self.clones.set(self.clones.get() + 1);
+        Self {
+            generation: self.generation,
+            text: self.text.clone(),
+            clones: Rc::clone(&self.clones),
+        }
+    }
+}
+impl PartialEq for CountedLayoutModel {
+    fn eq(&self, other: &Self) -> bool {
+        self.generation == other.generation && self.text == other.text
+    }
+}
+
+#[test]
+fn borrowed_layout_snapshot_clones_once_per_update_independent_of_painted_node_count() {
+    use crate::scene::{UiComponentKey, UiTransform};
+    use crate::screen_lifecycle::ScreenInstanceId;
+    use floem_reactive::SignalUpdate;
+    let mut setup_clone_counts = Vec::new();
+    for count in [1, 16] {
+        let scope = Scope::new();
+        let generation = scope.create_rw_signal(1u32);
+        let clones = Rc::new(Cell::new(0));
+        let memo_clones = Rc::clone(&clones);
+        let memo = scope.create_memo(move |_| CountedLayoutModel {
+            generation: generation.get(),
+            text: "non-Copy owned layout text".repeat(16),
+            clones: Rc::clone(&memo_clones),
+        });
+        let children: Vec<_> = (0..count)
+            .map(|index| Node::leaf([10, 10], index as u8).at(index * 12, 10))
+            .collect();
+        let mut layout = MountedLayout::mount(Node::layer([240, 100], &children)).unwrap();
+        let ids: Vec<_> = layout.leaves().iter().map(|leaf| leaf.id).collect();
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let captured = Rc::clone(&observed);
+        let mut nodes = RetainedNodes::new(240, 100).unwrap();
+        nodes
+            .bind_layout(
+                scope,
+                memo,
+                &layout,
+                &ids,
+                move |model, id, geometry, scene, hits| {
+                    captured.borrow_mut().push((
+                        model.generation,
+                        model as *const CountedLayoutModel as usize,
+                    ));
+                    paint_control(id, geometry, scene, hits);
+                },
+            )
+            .unwrap();
+        setup_clone_counts.push(clones.get());
+        assert!(
+            clones.get() > 0,
+            "memo admission should create its owned model snapshot"
+        );
+        observed.borrow_mut().clear();
+        let before = clones.get();
+        generation.set(2);
+        assert_eq!(
+            clones.get() - before,
+            1,
+            "one memo publication must not clone per leaf"
+        );
+        let update = observed.borrow();
+        assert_eq!(update.len(), count as usize);
+        assert!(update.iter().all(|entry| *entry == update[0]));
+        assert_eq!(update[0].0, 2);
+        drop(update);
+
+        let before_geometry = clones.get();
+        composed(&nodes, 240, 100);
+        assert!(!nodes.dirty());
+        // Resize is a valid geometry-only dependency change for every node.
+        layout.resize([300, 120]).unwrap();
+        assert!(nodes.relayout(&layout).unwrap());
+        observed.borrow_mut().clear();
+        let owner = ScreenInstanceId(151 + count as u64);
+        let mut scene = Scene::new(300, 120);
+        let mut hits = Vec::new();
+        nodes
+            .compose_components(&mut scene, &mut hits, owner, &ids)
+            .unwrap();
+        assert_eq!(observed.borrow().len(), count as usize);
+        let model_addresses = observed.borrow();
+        assert!(model_addresses
+            .iter()
+            .all(|entry| *entry == model_addresses[0]));
+        drop(model_addresses);
+        let identity = scene.geometry_stamp().0.clone();
+        let revision = scene.geometry_stamp().1;
+        for id in &ids {
+            let component = scene
+                .component_id(UiComponentKey {
+                    screen: owner,
+                    node: *id,
+                })
+                .unwrap();
+            scene
+                .set_component_transforms(&[(
+                    component,
+                    UiTransform::new([0.5, 1.0], [1.0, 1.0], 1.0).unwrap(),
+                )])
+                .unwrap();
+        }
+        nodes
+            .compose_components(&mut scene, &mut hits, owner, &ids)
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&identity, scene.geometry_stamp().0));
+        assert_eq!(scene.geometry_stamp().1, revision);
+        assert_eq!(
+            clones.get(),
+            before_geometry,
+            "geometry/capture/motion must borrow the admitted model"
+        );
+        scope.dispose();
+    }
+    assert_eq!(
+        setup_clone_counts[0], setup_clone_counts[1],
+        "mount clones must not scale with leaf count"
+    );
+}
+
+#[test]
+fn reentrant_model_publication_keeps_current_packet_snapshot_and_releases_model_borrow() {
+    use floem_reactive::SignalUpdate;
+    let scope = Scope::new();
+    let generation = scope.create_rw_signal(1u32);
+    let clones = Rc::new(Cell::new(0));
+    let memo_clones = Rc::clone(&clones);
+    let memo = scope.create_memo(move |_| CountedLayoutModel {
+        generation: generation.get(),
+        text: format!("generation {}", generation.get()),
+        clones: Rc::clone(&memo_clones),
+    });
+    let children = [
+        Node::leaf([10, 10], 1u8).at(0, 0),
+        Node::leaf([10, 10], 2u8).at(20, 0),
+    ];
+    let layout = MountedLayout::mount(Node::layer([60, 30], &children)).unwrap();
+    let ids = [NodeId(1), NodeId(2)];
+    let publish = Rc::new(Cell::new(false));
+    let callback_publish = Rc::clone(&publish);
+    let observed = Rc::new(RefCell::new(Vec::new()));
+    let callback_observed = Rc::clone(&observed);
+    let mut nodes = RetainedNodes::new(60, 30).unwrap();
+    nodes
+        .bind_layout(
+            scope,
+            memo,
+            &layout,
+            &ids,
+            move |model, id, geometry, scene, hits| {
+                callback_observed.borrow_mut().push((
+                    id,
+                    model.generation,
+                    model as *const CountedLayoutModel as usize,
+                ));
+                scene.rect(
+                    geometry.bounds.x,
+                    geometry.bounds.y,
+                    geometry.bounds.width,
+                    geometry.bounds.height,
+                    model.generation,
+                );
+                hits.push((
+                    ControlId(100 * u64::from(model.generation) + id.0 as u64),
+                    geometry.bounds,
+                ));
+                if callback_publish.replace(false) {
+                    generation.set(2);
+                }
+            },
+        )
+        .unwrap();
+    // Capture the actual packet painter after releasing its packet borrow.
+    // This tests reentrant model publication, not nested Scene composition.
+    let binding = Rc::clone(nodes.packets[0].borrow().layout.as_ref().unwrap());
+    let dependencies = binding.geometries.borrow().clone();
+    observed.borrow_mut().clear();
+    publish.set(true);
+    let before = clones.get();
+    let current = (binding.paint)(&dependencies, [60, 30], &ids);
+    current.geometry.as_ref().unwrap();
+    assert_eq!(
+        current.hits.iter().map(|(id, _)| id.0).collect::<Vec<_>>(),
+        vec![101, 102],
+        "all nodes of an entered packet must retain the old snapshot"
+    );
+    assert_eq!(
+        clones.get() - before,
+        1,
+        "the reentrant memo publication clones once"
+    );
+    let calls = observed.borrow();
+    let old: Vec<_> = calls
+        .iter()
+        .filter(|(_, revision, _)| *revision == 1)
+        .collect();
+    let new: Vec<_> = calls
+        .iter()
+        .filter(|(_, revision, _)| *revision == 2)
+        .collect();
+    assert_eq!(old.len(), 2);
+    assert_eq!(new.len(), 2);
+    assert_eq!(old[0].2, old[1].2);
+    assert_eq!(new[0].2, new[1].2);
+    assert_ne!(
+        old[0].2, new[0].2,
+        "old snapshot stays alive while the new one is published"
+    );
+    drop(calls);
+    assert_eq!(
+        composed(&nodes, 60, 30).1,
+        vec![(201, [0, 0, 10, 10]), (202, [20, 0, 10, 10])]
+    );
+    let following = (binding.paint)(&dependencies, [60, 30], &ids);
+    assert_eq!(
+        following
+            .hits
+            .iter()
+            .map(|(id, _)| id.0)
+            .collect::<Vec<_>>(),
+        vec![201, 202]
+    );
     scope.dispose();
 }
 

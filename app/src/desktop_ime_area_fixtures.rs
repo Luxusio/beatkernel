@@ -13,7 +13,7 @@ fn field_app(field: TextField) -> Desktop {
             TextField::Profile => app.settings.as_mut().unwrap().profile_focused = true,
             TextField::Display(index) => {
                 app.open_display();
-                app.display.as_mut().unwrap().selected = index;
+                app.display.as_mut().unwrap().draft.selected = index;
             }
             TextField::PracticeStart | TextField::PracticeEnd => {
                 app.open_practice();

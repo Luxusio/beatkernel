@@ -880,12 +880,12 @@ impl RecordsView {
                 } else {
                     text_field_with_font(
                         scene,
-                        &directory,
+                        directory,
                         geometry.bounds,
-                        focused && !pending,
+                        *focused && !*pending,
                         font.as_ref(),
                     );
-                    if !pending {
+                    if !*pending {
                         hits.push((ControlId(58), geometry.bounds));
                     }
                 }
@@ -948,7 +948,7 @@ impl RecordsView {
             memo,
             &layout,
             &[node_id(&layout, Component::Summary)],
-            |summary, _, geometry, scene, _| {
+            |&summary, _, geometry, scene, _| {
                 let bounds = geometry.bounds;
                 if let Some((count, truncated)) = summary {
                     if count == 0 {
@@ -999,7 +999,7 @@ impl RecordsView {
             &[node_id(&layout, Component::Preview)],
             |(pending, preview), _, geometry, scene, _| {
                 let bounds = geometry.bounds;
-                if pending {
+                if *pending {
                     paint_text(scene, bounds, [0, 38], "LOADING RECORDS", 2, 0xd8b36b);
                 } else if let Some(preview) = preview {
                     if let Some(classes) = preview.bms_score {
@@ -1214,7 +1214,7 @@ impl RecordsView {
             |message, _, geometry, scene, _| {
                 let bounds = geometry.bounds;
                 if let Some(message) = message {
-                    paint_text(scene, bounds, [0, 0], &message, 1, 0x74e5c5);
+                    paint_text(scene, bounds, [0, 0], message, 1, 0x74e5c5);
                 }
             },
         )?;
@@ -1228,7 +1228,7 @@ impl RecordsView {
             |error, _, geometry, scene, _| {
                 let bounds = geometry.bounds;
                 if let Some(error) = error {
-                    text_field_value(scene, &error, bounds);
+                    text_field_value(scene, error, bounds);
                 }
             },
         )?;
@@ -1663,7 +1663,7 @@ impl RecordsView {
             memo,
             layout,
             &[node_id(layout, Component::Button(index))],
-            move |(available, hovered, armed), _, geometry, scene, hits| {
+            move |&(available, hovered, armed), _, geometry, scene, hits| {
                 let bounds = geometry.bounds;
                 if index < 2 && !available {
                     return;

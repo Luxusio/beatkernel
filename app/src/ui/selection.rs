@@ -337,7 +337,7 @@ impl SelectionView {
                 memo,
                 &view.layout,
                 &[leaf.id],
-                move |value, _, geometry, scene, hits| {
+                move |&value, _, geometry, scene, hits| {
                     if let Some((index, selected)) = value {
                         let bounds = geometry.bounds;
                         if selected {
@@ -455,7 +455,7 @@ impl SelectionView {
             memo,
             &view.layout,
             &[empty_id],
-            move |empty, _, geometry, scene, _| {
+            move |&empty, _, geometry, scene, _| {
                 if empty {
                     paint_text(
                         scene,
@@ -488,7 +488,7 @@ impl SelectionView {
             &view.layout,
             &[search_id],
             move |(editor, focused, font), _, geometry, scene, hits| {
-                text_field_with_font(scene, &editor, geometry.bounds, focused, font.as_ref());
+                text_field_with_font(scene, editor, geometry.bounds, *focused, font.as_ref());
                 hits.push((search_control, geometry.bounds));
             },
         )?;
@@ -507,7 +507,7 @@ impl SelectionView {
             memo,
             &view.layout,
             &[pending_id],
-            move |pending, _, geometry, scene, _| {
+            move |&pending, _, geometry, scene, _| {
                 if pending {
                     paint_text(scene, geometry.bounds, pending_label, pending_style);
                 }
@@ -543,7 +543,7 @@ impl SelectionView {
                             paint_text(scene, geometry.bounds, label, style)
                         }
                         Component::ErrorDetail(style) => {
-                            paint_text(scene, geometry.bounds, &error, style)
+                            paint_text(scene, geometry.bounds, error, style)
                         }
                         _ => unreachable!(),
                     }
@@ -746,7 +746,7 @@ impl SelectionView {
             memo,
             &self.layout,
             &[node],
-            move |(enabled, hovered, armed), _, geometry, scene, hits| {
+            move |&(enabled, hovered, armed), _, geometry, scene, hits| {
                 button(scene, geometry.bounds, label, hovered, armed);
                 if enabled {
                     hits.push((id, geometry.bounds));

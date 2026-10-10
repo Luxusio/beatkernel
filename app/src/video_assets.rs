@@ -201,6 +201,26 @@ pub struct VideoAssetsTransfer {
 }
 
 impl VideoAssets {
+    /// Resolve registrations selected by the existing movie/crop plan without reading.
+    pub(crate) fn referenced_paths(
+        source: &dyn AssetSource,
+        chart: &BmsChart,
+        limits: VideoAssetLimits,
+    ) -> Result<Vec<PathBuf>, String> {
+        let mut paths = BTreeSet::new();
+        for (id, name, _) in Self::plan(chart, limits)? {
+            match source.resolve(&name, AssetPathPolicy::VideoVariants) {
+                Ok(path) if path.to_str().is_some_and(is_movie_name) => {
+                    paths.insert(path);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("video {} path {name}: {error}", id.0)),
+            }
+        }
+        Ok(paths.into_iter().collect())
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub fn prepare(
         root: &Path,

@@ -7,6 +7,9 @@ mod catalog_fixtures;
 #[path = "desktop_clipboard_fixtures.rs"]
 mod clipboard_fixtures;
 #[cfg(test)]
+#[path = "desktop_display_owner_fixtures.rs"]
+mod display_owner_fixtures;
+#[cfg(test)]
 #[path = "desktop_completed_results_fixtures.rs"]
 mod completed_results_fixtures;
 #[cfg(test)]
@@ -951,7 +954,6 @@ pub(super) fn run_with_ui_commands(
         options,
         active_backend,
         display: None,
-        display_view: None,
         players_view: None,
         devices_view: None,
         practice: None,
@@ -1042,7 +1044,7 @@ impl LiveAudioDraft {
     }
     fn refresh_applied(
         &mut self,
-        capability: &beatkernel_bms_runtime::live_output_control::OutputCapability,
+        capability: &beatkernel_bms_runtime::gameplay::output::domain::control::OutputCapability,
     ) -> Result<(), String> {
         let values = capability.settings()?;
         let selected = self.selected.min(values.fields().len().saturating_sub(1));
@@ -1202,6 +1204,11 @@ const DISPLAY_FLAGS: [&str; 4] = [
     "--ui-fps",
     "--ui-lookahead-ms",
 ];
+/// One navigation-owned Display lifetime, including its lazily mounted view.
+struct NativeDisplayPanel {
+    view: Option<DisplayView>,
+    draft: DisplayDraft,
+}
 struct DisplayDraft {
     editors: [LineEditor; 4],
     selected: usize,
@@ -1621,8 +1628,7 @@ impl NativeUiMotionState {
 struct Desktop {
     options: Options,
     active_backend: BackendChoice,
-    display: Option<PanelScope<DisplayDraft>>,
-    display_view: Option<DisplayView>,
+    display: Option<PanelScope<NativeDisplayPanel>>,
     players_view: Option<PlayersView>,
     devices_view: Option<DevicesView>,
     practice: Option<PanelScope<PracticeDraft>>,
@@ -1691,7 +1697,11 @@ impl Desktop {
             DesktopUiCommand::InspectScreen { reply } => {
                 let screen = match self.navigator.route() {
                     ScreenRoute::Selection => self.selection_view.as_ref().map(SelectionView::id),
-                    ScreenRoute::Display => self.display_view.as_ref().map(DisplayView::id),
+                    ScreenRoute::Display => self
+                        .display
+                        .as_ref()
+                        .and_then(|panel| panel.view.as_ref())
+                        .map(DisplayView::id),
                     ScreenRoute::Practice => {
                         self.practice.as_ref().map(|practice| practice.view.id())
                     }
@@ -1781,8 +1791,9 @@ impl Desktop {
                 .ok_or("Selection view unavailable")?
                 .node_for_control(control)?,
             ScreenRoute::Display => self
-                .display_view
+                .display
                 .as_ref()
+                .and_then(|panel| panel.view.as_ref())
                 .ok_or("Display view unavailable")?
                 .node_for_control(control)?,
             ScreenRoute::Practice => self
@@ -1835,7 +1846,9 @@ impl Desktop {
         match self.navigator.route() {
             ScreenRoute::Selection => compose!(self.selection_view.as_ref()),
             ScreenRoute::Settings => compose!(self.settings_view.as_ref()),
-            ScreenRoute::Display => compose!(self.display_view.as_ref()),
+            ScreenRoute::Display => {
+                compose!(self.display.as_ref().and_then(|panel| panel.view.as_ref()))
+            }
             ScreenRoute::Players => compose!(self.players_view.as_ref()),
             ScreenRoute::Devices { .. } => compose!(self.devices_view.as_ref()),
             ScreenRoute::Records => compose!(self.records_view.as_ref()),
@@ -2033,8 +2046,9 @@ impl Desktop {
                     .ok_or("Selection view unavailable")?
                     .compose_components(&mut self.scene, &mut self.hits, screen, &nodes),
                 ScreenRoute::Display => self
-                    .display_view
+                    .display
                     .as_ref()
+                    .and_then(|panel| panel.view.as_ref())
                     .ok_or("Display view unavailable")?
                     .compose_components(&mut self.scene, &mut self.hits, screen, &nodes),
                 ScreenRoute::Practice => self
@@ -2655,8 +2669,8 @@ impl Desktop {
                 11
             }
             ScreenRoute::Display => {
-                if let Some(draft) = &self.display {
-                    for (slot, editor) in draft.editors.iter().enumerate() {
+                if let Some(panel) = &self.display {
+                    for (slot, editor) in panel.draft.editors.iter().enumerate() {
                         values[slot] = self.ime_editor(ImeField::Display(slot), editor).value();
                     }
                 }
@@ -2955,13 +2969,6 @@ impl Desktop {
             self.records_view = None;
         }
         release_panel(&mut self.display, &self.navigator);
-        if self
-            .display_view
-            .as_ref()
-            .is_some_and(|view| !self.navigator.retains(view.id()))
-        {
-            self.display_view = None;
-        }
         release_panel(&mut self.practice, &self.navigator);
         release_panel(&mut self.local_setup, &self.navigator);
         if self
@@ -4170,7 +4177,10 @@ impl Desktop {
                 self.commit_route(next);
                 self.display = Some(PanelScope::new(
                     self.navigator.active_id().expect("display route"),
-                    display,
+                    NativeDisplayPanel {
+                        view: None,
+                        draft: display,
+                    },
                 ));
             }
             Err(error) => self.local_error(Some(error)),
@@ -4183,6 +4193,7 @@ impl Desktop {
             self.display
                 .as_mut()
                 .ok_or("display unavailable")?
+                .draft
                 .value()
                 .map(|value| (next, value))
         });
@@ -4197,7 +4208,7 @@ impl Desktop {
             }
             Err(error) => {
                 if let Some(display) = &mut self.display {
-                    display.error = Some(error);
+                    display.draft.error = Some(error);
                 }
             }
         }
@@ -4210,10 +4221,10 @@ impl Desktop {
             KeyCode::Enter if !repeat => self.finish_display(),
             KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::Tab => {
                 if let Some(display) = &mut self.display {
-                    display.selected = match key {
-                        KeyCode::ArrowUp => display.selected.saturating_sub(1),
-                        KeyCode::Tab => (display.selected + 1) % 4,
-                        _ => (display.selected + 1).min(3),
+                    display.draft.selected = match key {
+                        KeyCode::ArrowUp => display.draft.selected.saturating_sub(1),
+                        KeyCode::Tab => (display.draft.selected + 1) % 4,
+                        _ => (display.draft.selected + 1).min(3),
                     };
                 }
             }
@@ -4224,7 +4235,7 @@ impl Desktop {
             | KeyCode::Backspace
             | KeyCode::Delete => {
                 if let Some(display) = &mut self.display {
-                    display.edit(Some(key), None);
+                    display.draft.edit(Some(key), None);
                 }
             }
             _ => {}
@@ -4421,8 +4432,11 @@ impl Desktop {
                 40 => self.finish_display(),
                 41 => self.back(),
                 40000..=40003 => {
-                    self.display.as_mut().expect("display routing").selected =
-                        (id.0 - 40000) as usize
+                    self.display
+                        .as_mut()
+                        .expect("display routing")
+                        .draft
+                        .selected = (id.0 - 40000) as usize
                 }
                 _ => {}
             }
@@ -5381,7 +5395,7 @@ impl Desktop {
                     TextField::Setting(draft.selected)
                 }
             }
-            ScreenRoute::Display => TextField::Display(self.display.as_ref()?.selected),
+            ScreenRoute::Display => TextField::Display(self.display.as_ref()?.draft.selected),
             ScreenRoute::Practice => {
                 if self.practice.as_ref()?.end_focused {
                     TextField::PracticeEnd
@@ -5410,7 +5424,7 @@ impl Desktop {
                 .filter(|draft| draft.selected == index)
                 .map(|draft| &draft.editor),
             TextField::Profile => self.settings.as_ref().map(|draft| &draft.profile),
-            TextField::Display(index) => self.display.as_ref()?.editors.get(index),
+            TextField::Display(index) => self.display.as_ref()?.draft.editors.get(index),
             TextField::PracticeStart => self.practice.as_ref().map(|draft| &draft.editor),
             TextField::PracticeEnd => self.practice.as_ref().map(|draft| &draft.end_editor),
             TextField::RecordDirectory => self.records.as_ref().map(|draft| &draft.directory),
@@ -5430,7 +5444,7 @@ impl Desktop {
                 .filter(|draft| draft.selected == index)
                 .map(|draft| &mut draft.editor),
             TextField::Profile => self.settings.as_mut().map(|draft| &mut draft.profile),
-            TextField::Display(index) => self.display.as_mut()?.editors.get_mut(index),
+            TextField::Display(index) => self.display.as_mut()?.draft.editors.get_mut(index),
             TextField::PracticeStart => self.practice.as_mut().map(|draft| &mut draft.editor),
             TextField::PracticeEnd => self.practice.as_mut().map(|draft| &mut draft.end_editor),
             TextField::RecordDirectory => self.records.as_mut().map(|draft| &mut draft.directory),
@@ -5469,8 +5483,8 @@ impl Desktop {
                 }
             }
             ScreenRoute::Display => {
-                if let Some(draft) = &mut self.display {
-                    draft.error = error;
+                if let Some(panel) = &mut self.display {
+                    panel.draft.error = error;
                 }
             }
             ScreenRoute::Practice => {
@@ -5713,7 +5727,7 @@ impl Desktop {
                     }
                     ScreenRoute::Display => {
                         if let Some(display) = &mut self.display {
-                            display.edit(None, Some(value));
+                            display.draft.edit(None, Some(value));
                         }
                     }
                     ScreenRoute::LiveAudio => {
@@ -6193,12 +6207,12 @@ impl Desktop {
             .navigator
             .active_id()
             .ok_or("display instance unavailable")?;
-        if self
-            .display_view
-            .as_ref()
-            .is_none_or(|view| view.id() != id)
-        {
-            self.display_view = Some(DisplayView::new(id, WIDTH as u32, HEIGHT as u32)?);
+        let panel = self.display.as_mut().ok_or("display data unavailable")?;
+        if panel.id() != id || panel.view.as_ref().is_some_and(|view| view.id() != id) {
+            return Err("display owner instance is stale".into());
+        }
+        if panel.view.is_none() {
+            panel.view = Some(DisplayView::new(id, WIDTH as u32, HEIGHT as u32)?);
             self.painted_reactive = None;
         }
         let pending = self.profile_io.is_some();
@@ -6214,21 +6228,22 @@ impl Desktop {
         let display = self.display.as_ref().ok_or("display data unavailable")?;
         let preview_editors: Option<[LineEditor; 4]> = self.ime.preview.as_ref().map(|_| {
             std::array::from_fn(|index| {
-                self.ime_editor(ImeField::Display(index), &display.editors[index])
+                self.ime_editor(ImeField::Display(index), &display.draft.editors[index])
                     .clone()
             })
         });
         let view = self
-            .display_view
+            .display
             .as_ref()
+            .and_then(|panel| panel.view.as_ref())
             .ok_or("display view unavailable")?;
         view.update(DisplayFrame {
-            editors: preview_editors.as_ref().unwrap_or(&display.editors),
-            selected: display.selected,
+            editors: preview_editors.as_ref().unwrap_or(&display.draft.editors),
+            selected: display.draft.selected,
             error: self
                 .input_font_error
                 .as_deref()
-                .or(display.error.as_deref()),
+                .or(display.draft.error.as_deref()),
             pending,
             hovered,
             armed,
@@ -8292,7 +8307,7 @@ mod tests {
         assert_ne!(app.navigator.active_id(), Some(screen));
         assert!(!app.control_motion_active());
         app.request_close();
-        assert!(app.display_view.is_none());
+        assert!(app.display.is_none());
     }
 
     #[test]
@@ -8774,7 +8789,7 @@ mod tests {
             0 => &app.search_editor,
             1 => &app.settings.as_ref().unwrap().editor,
             2 => &app.settings.as_ref().unwrap().profile,
-            3 => &app.display.as_ref().unwrap().editors[2],
+            3 => &app.display.as_ref().unwrap().draft.editors[2],
             4 => &app.practice.as_ref().unwrap().editor,
             5 => &app.practice.as_ref().unwrap().end_editor,
             6 => &app.records.as_ref().unwrap().directory,
@@ -8865,7 +8880,7 @@ mod tests {
                     2 => app.settings.as_mut().unwrap().profile_focused = true,
                     3 => {
                         app.open_display();
-                        app.display.as_mut().unwrap().selected = 2;
+                        app.display.as_mut().unwrap().draft.selected = 2;
                     }
                     4 | 5 => {
                         app.open_practice();
@@ -8994,7 +9009,6 @@ mod tests {
             options: Options::parse(&["--chart".into(), "fixture.bms".into()]).unwrap(),
             active_backend: BackendChoice::Auto,
             display: None,
-            display_view: None,
             players_view: None,
             devices_view: None,
             practice: None,
@@ -9616,30 +9630,50 @@ mod tests {
         let parent = app.navigator.active_id();
         app.open_display();
         app.draw().unwrap();
-        let id = app.display_view.as_ref().unwrap().id();
+        let id = app
+            .display
+            .as_ref()
+            .and_then(|panel| panel.view.as_ref())
+            .unwrap()
+            .id();
         assert!(app.reactive_waits_for_events());
-        app.display.as_mut().unwrap().editors[2] = LineEditor::new("180", 32).unwrap();
+        app.display.as_mut().unwrap().draft.editors[2] = LineEditor::new("180", 32).unwrap();
         app.draw().unwrap();
-        assert_eq!(app.display_view.as_ref().unwrap().id(), id);
-        assert!(!app.display_view.as_ref().unwrap().dirty());
+        assert_eq!(
+            app.display
+                .as_ref()
+                .and_then(|panel| panel.view.as_ref())
+                .unwrap()
+                .id(),
+            id
+        );
+        assert!(!app
+            .display
+            .as_ref()
+            .and_then(|panel| panel.view.as_ref())
+            .unwrap()
+            .dirty());
         app.finish_display();
         assert_eq!(app.navigator.active_id(), parent);
-        assert!(app.display_view.is_none());
+        assert!(app.display.is_none());
         assert_eq!(app.settings.as_ref().unwrap().presentation.fps, 180);
         assert_eq!(app.options.fps, 120);
         app.open_display();
         let child = app.navigator.active_id();
-        app.display.as_mut().unwrap().editors[2] = LineEditor::new("9", 32).unwrap();
+        app.display.as_mut().unwrap().draft.editors[2] = LineEditor::new("9", 32).unwrap();
         app.finish_display();
         assert_eq!(app.navigator.active_id(), child);
-        assert!(app.display.as_ref().unwrap().error.is_some());
+        assert!(app.display.as_ref().unwrap().draft.error.is_some());
         assert_eq!(app.settings.as_ref().unwrap().presentation.fps, 180);
         app.back();
         app.open_display();
-        assert_eq!(app.display.as_ref().unwrap().editors[2].value(), "180");
+        assert_eq!(
+            app.display.as_ref().unwrap().draft.editors[2].value(),
+            "180"
+        );
         app.draw().unwrap();
         app.request_close();
-        assert!(app.display_view.is_none());
+        assert!(app.display.is_none());
     }
 
     #[test]
@@ -9865,7 +9899,7 @@ mod tests {
         assert!(!settings_permit.is_cancelled());
         assert!(display_permit.is_active());
         app.key(KeyCode::Tab, false);
-        assert_eq!(app.display.as_ref().unwrap().selected, 1);
+        assert_eq!(app.display.as_ref().unwrap().draft.selected, 1);
         assert_eq!(app.settings.as_ref().unwrap().selected, 0);
         app.key(KeyCode::F4, false); // Hidden Settings cannot open its Records child.
         assert_eq!(app.navigator.route(), ScreenRoute::Display);

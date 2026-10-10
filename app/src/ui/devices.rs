@@ -396,7 +396,7 @@ impl DevicesView {
             memo,
             &view.layout,
             &[subtitle, player_id],
-            move |((keyboard, player), browser), id, geometry, scene, _| {
+            move |&((keyboard, player), browser), id, geometry, scene, _| {
                 if id == subtitle {
                     paint_text(
                         scene,
@@ -479,7 +479,7 @@ impl DevicesView {
             memo,
             &view.layout,
             &[node_id(&view.layout, Component::Empty)],
-            |empty, _, geometry, scene, _| {
+            |&empty, _, geometry, scene, _| {
                 if empty {
                     paint_text(
                         scene,
@@ -502,9 +502,9 @@ impl DevicesView {
             move |details, id, geometry, scene, _| {
                 if let Some((source_id, detail)) = details {
                     if id == device_id {
-                        paint_text(scene, geometry.bounds, &source_id, LABEL);
+                        paint_text(scene, geometry.bounds, source_id, LABEL);
                     } else {
-                        paint_text(scene, geometry.bounds, &detail, HELP);
+                        paint_text(scene, geometry.bounds, detail, HELP);
                     }
                 }
             },
@@ -536,7 +536,7 @@ impl DevicesView {
                 memo,
                 &view.layout,
                 &[node_id(&view.layout, Component::Action(index))],
-                move |(enabled, hovered, armed), _, geometry, scene, hits| {
+                move |&(enabled, hovered, armed), _, geometry, scene, hits| {
                     let bounds = geometry.bounds;
                     button(scene, bounds, label, hovered, armed);
                     if enabled {
@@ -552,7 +552,7 @@ impl DevicesView {
             memo,
             &view.layout,
             &[node_id(&view.layout, Component::Pending)],
-            |pending, _, geometry, scene, _| {
+            |&pending, _, geometry, scene, _| {
                 if pending {
                     paint_text(scene, geometry.bounds, "LOADING DEVICES", NOTICE);
                 }
@@ -567,7 +567,7 @@ impl DevicesView {
             &[node_id(&view.layout, Component::Error)],
             |error, _, geometry, scene, _| {
                 if let Some(error) = error {
-                    paint_text(scene, geometry.bounds, &error, ERROR);
+                    paint_text(scene, geometry.bounds, error, ERROR);
                 }
             },
         )?;

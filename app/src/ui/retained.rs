@@ -135,27 +135,30 @@ impl RetainedNodes {
         memo: Memo<T>,
         layout: &MountedLayout<C>,
         ids: &[NodeId],
-        paint: impl Fn(T, NodeId, LayoutGeometry, &mut Scene, &mut Vec<(ControlId, Bounds)>) + 'static,
+        paint: impl Fn(&T, NodeId, LayoutGeometry, &mut Scene, &mut Vec<(ControlId, Bounds)>) + 'static,
     ) -> Result<(), String> {
         if ids.len() > 1024 || self.packets.len() >= 1024 {
             return Err("retained layout exceeds node/dependency capacity".into());
         }
         let ids = ids.to_vec();
         let geometries = layout_geometries(layout, &ids)?;
-        let value = Rc::new(RefCell::new(memo.get_untracked()));
+        let value = Rc::new(RefCell::new(Rc::new(memo.get_untracked())));
         let paint_value = Rc::clone(&value);
         let painter_ids = ids.clone();
         let binding = Rc::new(LayoutBinding {
             ids,
             geometries: RefCell::new(geometries),
             paint: Box::new(move |geometry, extent, animated| {
+                // Keep one immutable snapshot for the whole packet and release
+                // the publication borrow before invoking any painter callback.
+                let value = Rc::clone(&paint_value.borrow());
                 paint_layout_packet(
                     extent,
                     &painter_ids,
                     geometry,
                     animated,
                     &|id, geometry, scene, hits| {
-                        paint(paint_value.borrow().clone(), id, geometry, scene, hits);
+                        paint(value.as_ref(), id, geometry, scene, hits);
                     },
                 )
             }),
@@ -168,7 +171,7 @@ impl RetainedNodes {
         let extent = Rc::clone(&self.extent);
         let dirty = Rc::clone(&self.dirty);
         scope.create_effect(move |_| {
-            *value.borrow_mut() = memo.get();
+            *value.borrow_mut() = Rc::new(memo.get());
             let mut next = (binding.paint)(&binding.geometries.borrow(), extent.get(), &[]);
             next.layout = Some(Rc::clone(&binding));
             #[cfg(test)]

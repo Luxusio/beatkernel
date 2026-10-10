@@ -7,6 +7,7 @@ import test from "node:test";
 import { ROOM_SESSION_METHODS } from "./room-owner.mjs";
 import { preflightMenuPacket } from "./render-protocol.mjs";
 import { LocalRoster } from "./local-play-host.mjs";
+import { KEY_BINDINGS } from "./play-model.mjs";
 import { createContext, SourceTextModule, SyntheticModule, runInContext } from "node:vm";
 
 const FileType = globalThis.File ?? NodeFile;
@@ -189,34 +190,79 @@ async function workerHarness(options = {}) {
     constructor(...limits) {
       this.limits = limits;
       this.files = [];
+      this.declarations = new Map();
+      this.plans = [];
+      this.accesses = [];
       this.preparations = [];
       this.frees = 0;
       libraries.push(this);
     }
     add_file(path, bytes) {
       assert.equal(this.frees, 0);
+      this.accesses.push(["add_file", path]);
+      assert.equal(this.declarations.get(path), bytes.byteLength, "hydrate exactly the admitted declared extent");
+      assert.ok(!this.files.some(entry => entry.path === path), "hydrate each file once");
       this.files.push({ path, bytes: Array.from(bytes) });
     }
+    declare_file(path, length) {
+      assert.equal(this.frees, 0);
+      assert.ok(!this.declarations.has(path), "declarations are unique after canonical preflight");
+      assert.ok(Number.isInteger(length) && length >= 0);
+      this.declarations.set(path, length);
+    }
     chart_paths() {
-      return this.files.map(entry => entry.path).filter(path => /\.(bms|bme|bml|pms)$/i.test(path));
+      assert.equal(this.frees, 0);
+      return [...this.declarations.keys()].filter(path => /\.(bms|bme|bml|pms)$/i.test(path));
+    }
+    referenced_asset_paths(path, seed, maxSamples) {
+      assert.equal(this.frees, 0);
+      this.accesses.push(["referenced_asset_paths", path]);
+      assert.ok(this.files.some(entry => entry.path === path), "resource planning needs acquired chart bytes");
+      this.plans.push({ method: "live", path, seed, maxSamples });
+      calls.push(["plan-live", path, seed, maxSamples]);
+      return [...(typeof options.references === "function" ? options.references(path, seed) : options.references?.[path] ?? [])];
+    }
+    replay_referenced_asset_paths(path, bytes, maxSamples) {
+      assert.equal(this.frees, 0);
+      this.accesses.push(["replay_referenced_asset_paths", path]);
+      assert.ok(this.files.some(entry => entry.path === path));
+      this.plans.push({ method: "replay", path, bytes: Array.from(bytes), maxSamples });
+      calls.push(["plan-replay", path, Array.from(bytes), maxSamples]);
+      return [...(options.replayReferences?.[path] ?? [])];
+    }
+    assertHydrated(path, replay = false) {
+      assert.equal(this.frees, 0);
+      this.accesses.push(["prepare", path]);
+      assert.ok(this.files.some(entry => entry.path === path), "prepare from acquired owning chart");
+      const plan = this.plans.findLast(plan => plan.path === path && plan.method === (replay ? "replay" : "live"));
+      assert.ok(plan, "preparation follows its resource planner");
+      const refs = replay ? options.replayReferences?.[path] ?? []
+        : typeof options.references === "function" ? options.references(path, plan.seed) : options.references?.[path] ?? [];
+      for (const resource of refs) assert.ok(this.files.some(entry => entry.path === resource), `prepare requires acquired ${resource}`);
     }
     prepare_chart(path, ...args) {
-      assert.equal(this.frees, 0);
-      assert.ok(this.files.some(entry => entry.path === path), "prepare from the owning library");
+      this.assertHydrated(path);
       this.preparations.push({ path, args });
       if (path === options.rejectPreparation) throw new Error("sample rate mismatch");
       return makePrepared(path);
     }
     prepare_chart_at(path, ...args) {
-      assert.equal(this.frees, 0);
-      assert.ok(this.files.some(entry => entry.path === path));
+      this.assertHydrated(path);
       this.preparations.push({ path, args, method: "prepare_chart_at" });
       calls.push(["prepare-section", ...args]);
       return makePrepared(path, args[3]);
     }
+    prepare_chart_with_policy_at(path, ...args) {
+      this.assertHydrated(path);
+      this.preparations.push({ path, args, method: "prepare_chart_with_policy_at" });
+      calls.push(["prepare-policy", ...args]);
+      return makePrepared(path, args[3]);
+    }
     prepare_replay_chart(path, bytes, rate) {
+      this.assertHydrated(path, true);
       calls.push(["prepare-replay", Array.from(bytes)]);
-      const prepared = this.prepare_chart(path, rate);
+      this.preparations.push({ path, args: [rate], method: "prepare_replay_chart" });
+      const prepared = makePrepared(path);
       if (!options.omitPreparedStart) prepared.start_ns = options.replayStart ?? 0n;
       return prepared;
     }
@@ -336,6 +382,16 @@ async function workerHarness(options = {}) {
   }
   views.push(new BrowserView());
   installVisualProducer(BrowserGame.prototype, 1);
+  class BrowserLocalGame extends BrowserGame {
+    static new_physical(prepared, ...args) {
+      const game = new BrowserLocalGame(prepared, ...args);
+      const plan = args[5];
+      game.players = Uint32Array.from(Array.from(plan).filter((_, index) => index % 4 === 0));
+      calls.push(["new-local-game", Array.from(game.players)]);
+      return game;
+    }
+    queue_input_blob() { assert.fail("hydration fixtures do not synthesize acquired input"); }
+  }
   const self = {
     isSecureContext: false,
     navigator: {},
@@ -365,17 +421,22 @@ async function workerHarness(options = {}) {
           };
         }
       }
+      if (options.observeRecordPreview) owner.preview_record = (...args) => {
+        options.observeRecordPreview(...args);
+        assert.fail("obsolete record acquisition must never reach its WASM admission");
+      };
       return owner;
     }
   } : class {
     constructor() { assert.fail("menu business fixtures must opt into the actual generated WASM owner"); }
   };
-  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserGame", "BrowserReplay", "BrowserMenuOwner"], function () {
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserGame", "BrowserLocalGame", "BrowserReplay", "BrowserMenuOwner"], function () {
     this.setExport("default", async () => {
       if (options.initError) throw new Error(options.initError);
     });
     this.setExport("BrowserLibrary", BrowserLibrary);
     this.setExport("BrowserGame", BrowserGame);
+    this.setExport("BrowserLocalGame", BrowserLocalGame);
     this.setExport("BrowserReplay", BrowserGame);
     this.setExport("BrowserMenuOwner", MenuOwner);
   }, { context });
@@ -460,6 +521,13 @@ async function readyWorker(options) {
 const acquiredMenuToken = state => ({ menuGeneration: state.menuGeneration, screen: state.screen, revision: state.revision });
 const settingsMenuDraft = () => ["73", "12.345678", "-0.000001", "balanced", "10.000001", "044100",
   "65536", "4096", "4096", "4096", "65536", "1.000000001", "2.000000002"];
+function validSettingsProfileText() {
+  return JSON.stringify({ kind: "beatkernel-browser-settings", version: 1,
+    timing: { earlyMs: "50", lateMs: "50", offsetMs: "0" },
+    output: { latency: "interactive", latencyMs: "20", rate: "48000" },
+    capacities: { queueCapacity: "256", maxVoices: "64", pendingCapacity: "256", maxFrames: "2048", maxCommandsPerRender: "256" },
+    section: { startSeconds: "0", endSeconds: "" }, bindings: KEY_BINDINGS.map(([lane, code]) => [lane, code]) });
+}
 
 async function motionWorker() {
   const h = await readyWorker({ actualMenu: true });
@@ -774,19 +842,43 @@ test("actual Worker keeps roster and fields when genuine owner admission or pend
       assert.equal(worker.renderPort.posts.filter(post => post.kind === "menu").length, publications);
     }
     fault = null;
+    let chartReads = 0;
+    await worker.send({ kind: "import", id: 1, files: [selectedFile("pending/chart.bms", "#BPM 120", () => {
+      chartReads++; throw new Error("catalog admission must not acquire this chart");
+    })] });
+    assert.equal(chartReads, 0);
+    await worker.send({ kind: "accept-library", id: 1 });
+    // Metadata publication has no pending byte acquisition. Use an actual
+    // unabortable profile read to retain the original idle-owner refusal case.
     const read = deferred();
-    await worker.send({ kind: "import", id: 1, files: [selectedFile("pending/chart.bms", "#BPM 120", () => read.promise)] });
+    const profile = validSettingsProfileText();
+    const profileFile = selectedFile("pending.json", profile, () => read.promise).file;
+    await worker.send({ kind: "settings-profile-load", id: 1, file: profileFile });
+    assert.equal(worker.of("settings-profile-loaded").length, 0);
     const errors = worker.of("menu-error").length;
     await worker.send({ kind: "menu-fields", ...acquiredMenuToken(accepted), fields: acquiredMenuFields([]) });
     assert.equal(worker.of("menu-error").length, errors + 1);
     assert.deepEqual(worker.of("menu-state").at(-1), accepted);
-    read.resolve(new TextEncoder().encode("#BPM 120").buffer);
+    assert.equal(worker.renderPort.posts.filter(post => post.kind === "menu").length, publications);
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(accepted), actionId: 1n, control: 35n });
+    assert.equal(worker.of("menu-error").length, errors + 2);
+    assert.deepEqual(worker.of("menu-state").at(-1), accepted);
+    read.resolve(new TextEncoder().encode(profile).buffer);
     await flushJobs();
+    assert.equal(worker.of("settings-profile-loaded").length, 1);
+    assert.equal(worker.of("settings-profile-error").length, 0);
     await worker.send({ kind: "menu-fields", ...acquiredMenuToken(accepted), fields: acquiredMenuFields([]) });
     const released = worker.of("menu-state").at(-1);
     assert.deepEqual(Array.from(released.roster.assignments), []);
     assert.deepEqual(Array.from(released.roster.players), [7, 11]);
     assert.equal(released.roster.nextPlayerId, 12);
+    assert.deepEqual(Array.from(released.fields), ["1", "1", "2", "7", "", "11", "", "0"],
+      "inventory refresh keeps the full canonical two-player field projection");
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(released), actionId: 1n, control: 35n });
+    assert.equal(worker.of("menu-error").length, errors + 2, "pending refusal must not consume an action identity");
+    const committed = worker.of("menu-state").at(-1);
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(committed), actionId: 1n, control: 35n });
+    assert.equal(worker.of("menu-error").length, errors + 3, "committed action identity cannot be reused");
   } finally { await worker.send({ kind: "dispose" }); }
 });
 
@@ -949,6 +1041,377 @@ function startGame(worker, opponents, extra = {}) {
     path: "song/chart.bms", rate: 48000, seed: "0", keyPairs: new Uint32Array([0x11, 4]),
     opponents, windowOriginNs: 0n, ...extra });
 }
+
+function trackedSelected(path, content, log, acquire) {
+  const bytes = new TextEncoder().encode(content);
+  return selectedFile(path, content, () => {
+    log.push(path);
+    return acquire ? acquire(bytes) : Promise.resolve(bytes.slice().buffer);
+  });
+}
+
+test("metadata catalog precedes every file read including unrelated hung and failing media", async () => {
+  const reads = [], held = deferred();
+  const worker = await readyWorker({ references: { "song/chart.bms": ["song/kick.wav", "song/bg.png", "song/kick.wav"] } });
+  await worker.send({ kind: "import", id: 1, files: [
+    trackedSelected("song/chart.bms", "#BPM 120", reads),
+    trackedSelected("song/kick.wav", "pcm", reads),
+    trackedSelected("song/bg.png", "image", reads),
+    trackedSelected("other/hung.wav", "hung", reads, () => held.promise),
+    trackedSelected("other/broken.wav", "broken", reads, () => { throw new Error("unrelated media must stay untouched"); }),
+    trackedSelected("other/chart.bms", "unselected", reads),
+  ] });
+  assert.deepEqual(reads, []);
+  assert.equal(worker.libraries[0].files.length, 0);
+  assert.equal(worker.libraries[0].declarations.size, 6);
+  assert.deepEqual(Array.from(worker.of("catalog")[0].charts).sort(), ["other/chart.bms", "song/chart.bms"]);
+  await worker.send({ kind: "accept-library", id: 1 });
+  assert.deepEqual(reads, []);
+  await worker.send({ kind: "select", id: 2, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "7" });
+  assert.deepEqual(reads, ["song/chart.bms", "song/kick.wav", "song/bg.png"]);
+  assert.deepEqual(worker.libraries[0].plans, [{ method: "live", path: "song/chart.bms", seed: 7n, maxSamples: 3844 }]);
+  assert.equal(worker.of("selected").at(-1).id, 2);
+  assert.equal(worker.of("selection-error").length, 0);
+  assert.equal(worker.libraries[0].files.length, 3);
+  await worker.send({ kind: "dispose" });
+  assert.equal(worker.libraries[0].frees, 1);
+});
+
+test("overlapping selections share pending acquisition but only the newest selection hydrates and publishes", async () => {
+  const reads = [], held = deferred();
+  const worker = await readyWorker({ references: { "song/chart.bms": ["song/kick.wav"] } });
+  await worker.send({ kind: "import", id: 1, files: [
+    trackedSelected("song/chart.bms", "#BPM 120", reads),
+    trackedSelected("song/kick.wav", "pcm", reads, () => held.promise),
+  ] });
+  await worker.send({ kind: "accept-library", id: 1 });
+  await worker.send({ kind: "select", id: 2, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "1" });
+  await worker.send({ kind: "select", id: 3, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "2" });
+  assert.deepEqual(reads, ["song/chart.bms", "song/kick.wav"]);
+  assert.equal(worker.libraries[0].preparations.length, 0);
+  held.resolve(new TextEncoder().encode("pcm").buffer);
+  await flushJobs();
+  assert.deepEqual(worker.of("selected").map(row => row.id), [3]);
+  assert.equal(worker.of("selection-error").length, 0);
+  assert.equal(worker.libraries[0].preparations.length, 1);
+  assert.equal(worker.libraries[0].preparations[0].args[2], 2n);
+  assert.equal(worker.libraries[0].files.filter(row => row.path === "song/kick.wav").length, 1);
+  await worker.send({ kind: "dispose" });
+});
+
+test("late obsolete chart acquisition cannot prepare or replace a newer selected chart", async () => {
+  const reads = [], held = deferred();
+  const worker = await readyWorker();
+  await worker.send({ kind: "import", id: 1, files: [
+    trackedSelected("old.bms", "old", reads, () => held.promise),
+    trackedSelected("new.bms", "new", reads),
+  ] });
+  await worker.send({ kind: "accept-library", id: 1 });
+  await worker.send({ kind: "select", id: 2, libraryId: 1, path: "old.bms", rate: 48000, seed: "0" });
+  await worker.send({ kind: "select", id: 3, libraryId: 1, path: "new.bms", rate: 48000, seed: "0" });
+  assert.equal(worker.of("selected").at(-1).path, "new.bms");
+  held.resolve(new TextEncoder().encode("old").buffer);
+  await flushJobs();
+  assert.deepEqual(worker.of("selected").map(row => row.id), [3]);
+  assert.deepEqual(worker.libraries[0].files.map(row => row.path), ["new.bms"]);
+  assert.equal(worker.of("selection-error").length, 0);
+  assert.deepEqual(reads, ["old.bms", "new.bms"]);
+  await worker.send({ kind: "dispose" });
+});
+
+test("a newer import fences old selection before ACK without prematurely freeing the accepted library", async () => {
+  const reads = [], held = deferred();
+  const worker = await readyWorker();
+  await worker.send({ kind: "import", id: 1, files: [trackedSelected("old.bms", "old", reads, () => held.promise)] });
+  await worker.send({ kind: "accept-library", id: 1 });
+  await worker.send({ kind: "select", id: 2, libraryId: 1, path: "old.bms", rate: 48000, seed: "0" });
+  const accepted = worker.libraries[0];
+  await worker.send({ kind: "import", id: 3, files: [trackedSelected("new.bms", "new", reads)] });
+  held.resolve(new TextEncoder().encode("old").buffer);
+  await flushJobs();
+  assert.equal(accepted.frees, 0);
+  assert.equal(accepted.files.length, 0);
+  assert.equal(accepted.preparations.length, 0);
+  assert.equal(worker.of("selected").length, 0);
+  assert.equal(worker.of("selection-error").length, 0);
+  assert.deepEqual(reads, ["old.bms"]);
+  await worker.send({ kind: "accept-library", id: 3 });
+  assert.equal(accepted.frees, 1);
+  await worker.send({ kind: "select", id: 4, libraryId: 3, path: "new.bms", rate: 48000, seed: "0" });
+  assert.equal(worker.of("selected").at(-1).id, 4);
+  await worker.send({ kind: "dispose" });
+});
+
+test("preview validation refuses invalid rate and seed before acquiring declared chart bytes", async () => {
+  const reads = [];
+  const worker = await readyWorker();
+  await worker.send({ kind: "import", id: 1, files: [trackedSelected("song/chart.bms", "chart", reads)] });
+  await worker.send({ kind: "accept-library", id: 1 });
+  const invalid = [{ rate: 0 }, { rate: 48000.5 }, { seed: "-1" }, { seed: "18446744073709551616" }];
+  for (const [index, fields] of invalid.entries()) {
+    await worker.send({ kind: "select", id: index + 2, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0", ...fields });
+    assert.equal(worker.of("selection-error").at(-1).id, index + 2);
+  }
+  assert.deepEqual(reads, []);
+  assert.equal(worker.libraries[0].plans.length, 0);
+  assert.equal(worker.libraries[0].preparations.length, 0);
+  await worker.send({ kind: "dispose" });
+});
+
+test("wrong acquisition extent or buffer type rejects selected preparation and can retry without a stuck pending read", async () => {
+  for (const bad of [() => new ArrayBuffer(1), () => new Uint8Array(3)]) {
+    const reads = []; let attempts = 0;
+    const worker = await readyWorker({ references: { "song/chart.bms": ["song/kick.wav"] } });
+    await worker.send({ kind: "import", id: 1, files: [
+      trackedSelected("good.bms", "good", reads),
+      trackedSelected("song/chart.bms", "chart", reads),
+      trackedSelected("song/kick.wav", "pcm", reads, bytes => Promise.resolve(++attempts === 1 ? bad() : bytes.slice().buffer)),
+    ] });
+    await worker.send({ kind: "accept-library", id: 1 });
+    await worker.send({ kind: "select", id: 2, libraryId: 1, path: "good.bms", rate: 48000, seed: "0" });
+    const original = worker.views[0].current;
+    await worker.send({ kind: "select", id: 3, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0" });
+    assert.equal(worker.views[0].current, original);
+    assert.equal(worker.of("selection-error").at(-1).id, 3);
+    assert.equal(worker.libraries[0].files.some(row => row.path === "song/kick.wav"), false);
+    assert.equal(worker.libraries[0].preparations.length, 1);
+    await worker.send({ kind: "select", id: 4, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0" });
+    assert.equal(worker.of("selected").at(-1).id, 4);
+    assert.equal(attempts, 2);
+    assert.equal(reads.filter(path => path === "song/chart.bms").length, 1);
+    assert.equal(worker.libraries[0].preparations.length, 2);
+    await worker.send({ kind: "dispose" });
+  }
+});
+
+test("ACK retirement and disposal fence every continuation of an outstanding library read", async () => {
+  for (const action of ["replace", "dispose"]) {
+    for (const settlement of ["resolve", "reject"]) {
+      const reads = [], held = deferred();
+      const worker = await readyWorker({ references: { "old.bms": ["late.wav", "never.wav"] } });
+      await worker.send({ kind: "import", id: 1, files: [
+        trackedSelected("old.bms", "old", reads),
+        trackedSelected("late.wav", "pcm", reads, () => held.promise),
+        trackedSelected("never.wav", "next", reads),
+      ] });
+      await worker.send({ kind: "accept-library", id: 1 });
+      await worker.send({ kind: "select", id: 2, libraryId: 1, path: "old.bms", rate: 48000, seed: "0" });
+      const retired = worker.libraries[0];
+      if (action === "replace") {
+        await worker.send({ kind: "import", id: 3, files: [trackedSelected("new.bms", "new", reads)] });
+        assert.equal(retired.frees, 0, "a proposal alone cannot release the admitted library");
+        await worker.send({ kind: "accept-library", id: 3 });
+        await worker.send({ kind: "select", id: 4, libraryId: 3, path: "new.bms", rate: 48000, seed: "0" });
+      } else await worker.send({ kind: "dispose" });
+      assert.equal(retired.frees, 1);
+      if (settlement === "resolve") held.resolve(new TextEncoder().encode("pcm").buffer);
+      else held.reject(new Error("obsolete late read failed"));
+      await flushJobs();
+      assert.equal(retired.frees, 1);
+      assert.deepEqual(retired.files.map(row => row.path), ["old.bms"]);
+      assert.equal(reads.includes("never.wav"), false);
+      assert.equal(worker.of("selection-error").length, 0);
+      assert.equal(worker.of("fatal").length, 0);
+      assert.deepEqual(worker.of("selected").map(row => row.id), action === "replace" ? [4] : []);
+      if (action === "replace") await worker.send({ kind: "dispose" });
+    }
+  }
+});
+
+test("Stop during selected gameplay hydration cannot admit into a replacement play owner", async () => {
+  const reads = [], held = deferred();
+  const worker = await readyWorker({ gameplay: true, references: { "song/chart.bms": ["song/held.wav"] } });
+  await worker.send({ kind: "import", id: 1, files: [
+    trackedSelected("song/chart.bms", "chart", reads),
+    trackedSelected("song/held.wav", "pcm", reads, () => held.promise),
+    trackedSelected("other.bms", "other", reads),
+  ] });
+  await worker.send({ kind: "accept-library", id: 1 });
+  await startGame(worker, []);
+  assert.equal(worker.games.length, 0);
+  await worker.send({ kind: "play-stop", playId: 1 });
+  await startGame(worker, [], { playId: 2, path: "other.bms" });
+  assert.equal(worker.games.length, 1);
+  held.resolve(new TextEncoder().encode("pcm").buffer);
+  await flushJobs();
+  assert.equal(worker.games.length, 1);
+  assert.equal(worker.games[0].prepared.path, "other.bms");
+  assert.equal(worker.of("play-reply").filter(row => row.result?.kind === "prepared").length, 1);
+  assert.equal(worker.of("play-error").length, 0);
+  assert.equal(worker.libraries[0].files.some(row => row.path === "song/held.wav"), false);
+  await worker.send({ kind: "play-stop", playId: 2 });
+  await worker.send({ kind: "dispose" });
+});
+
+test("a pending preview cannot revive after an entire play reservation and Stop cycle", async () => {
+  for (const settlement of ["resolve", "reject"]) {
+    const reads = [], held = deferred();
+    const worker = await readyWorker({ gameplay: true });
+    await worker.send({ kind: "import", id: 1, files: [
+      trackedSelected("pending.bms", "pending", reads, () => held.promise),
+      trackedSelected("cached.bms", "cached", reads),
+    ] });
+    await worker.send({ kind: "accept-library", id: 1 });
+    await worker.send({ kind: "select", id: 2, libraryId: 1, path: "cached.bms", rate: 48000, seed: "0" });
+    const accepted = worker.views[0].current;
+    await worker.send({ kind: "select", id: 3, libraryId: 1, path: "pending.bms", rate: 48000, seed: "0" });
+    await startGame(worker, [], { path: "cached.bms" });
+    assert.equal(worker.games.length, 1);
+    assert.equal(worker.of("play-reply").at(-1).result.kind, "prepared");
+    await worker.send({ kind: "play-stop", playId: 1 });
+    assert.equal(worker.of("play-stopped").length, 1);
+    const accessCount = worker.libraries[0].accesses.length;
+    const preparationCount = worker.libraries[0].preparations.length;
+    if (settlement === "resolve") held.resolve(new TextEncoder().encode("pending").buffer);
+    else held.reject(new Error("obsolete preview read failure"));
+    await flushJobs();
+    assert.equal(worker.libraries[0].accesses.length, accessCount, "a completed play cycle cannot revive a prior preview's WASM access");
+    assert.equal(worker.libraries[0].preparations.length, preparationCount);
+    assert.equal(worker.libraries[0].files.some(row => row.path === "pending.bms"), false);
+    assert.deepEqual(worker.of("selected").map(row => row.id), [2]);
+    assert.equal(worker.of("selection-error").length, 0);
+    assert.equal(worker.of("fatal").length, 0);
+    assert.equal(worker.views[0].current, accepted);
+    await worker.send({ kind: "dispose" });
+  }
+});
+
+test("a pending preview cannot revive after an entire settings load or save reservation", async () => {
+  for (const operation of ["load", "save"]) {
+    for (const settlement of ["resolve", "reject"]) {
+      const reads = [], held = deferred(), profileRead = deferred();
+      const worker = await readyWorker();
+      await worker.send({ kind: "import", id: 1, files: [trackedSelected("pending.bms", "pending", reads, () => held.promise)] });
+      await worker.send({ kind: "accept-library", id: 1 });
+      await worker.send({ kind: "select", id: 2, libraryId: 1, path: "pending.bms", rate: 48000, seed: "0" });
+      const profile = validSettingsProfileText();
+      if (operation === "load") {
+        await worker.send({ kind: "settings-profile-load", id: 1, file: selectedFile("valid.json", profile, () => profileRead.promise).file });
+        assert.equal(worker.of("settings-profile-loaded").length, 0);
+        profileRead.resolve(new TextEncoder().encode(profile).buffer);
+        await flushJobs();
+        assert.equal(worker.of("settings-profile-loaded").length, 1);
+      } else {
+        await worker.send({ kind: "settings-profile-save", id: 1, settings: JSON.parse(profile) });
+        assert.equal(worker.of("settings-profile-saved").length, 1);
+      }
+      assert.equal(worker.of("settings-profile-error").length, 0);
+      const accessCount = worker.libraries[0].accesses.length;
+      if (settlement === "resolve") held.resolve(new TextEncoder().encode("pending").buffer);
+      else held.reject(new Error("obsolete preview read failure"));
+      await flushJobs();
+      assert.equal(worker.libraries[0].accesses.length, accessCount, "completed settings ownership must still fence a prior preview");
+      assert.equal(worker.of("selected").length, 0);
+      assert.equal(worker.of("selection-error").length, 0);
+      assert.equal(worker.libraries[0].preparations.length, 0);
+      assert.equal(worker.of("fatal").length, 0);
+      await worker.send({ kind: "dispose" });
+    }
+  }
+});
+
+test("invalid settings and play requests do not cancel an otherwise valid pending preview", async () => {
+  const reads = [], held = deferred();
+  const worker = await readyWorker({ gameplay: true });
+  await worker.send({ kind: "import", id: 1, files: [trackedSelected("pending.bms", "pending", reads, () => held.promise)] });
+  await worker.send({ kind: "accept-library", id: 1 });
+  await worker.send({ kind: "select", id: 2, libraryId: 1, path: "pending.bms", rate: 48000, seed: "0" });
+  await worker.send({ kind: "settings-profile-save", id: 1, settings: {} });
+  await worker.send({ kind: "settings-profile-load", id: 2, file: { size: 1, arrayBuffer() { assert.fail("invalid non-File must never be acquired"); } } });
+  await worker.send({ kind: "settings-profile-load", id: 0, file: selectedFile("unused.json", validSettingsProfileText(), () => { assert.fail("invalid identity must not acquire"); }).file });
+  await startGame(worker, [], { playId: 0 });
+  assert.equal(worker.of("settings-profile-error").length, 3);
+  assert.equal(worker.games.length, 0);
+  held.resolve(new TextEncoder().encode("pending").buffer);
+  await flushJobs();
+  assert.deepEqual(worker.of("selected").map(row => row.id), [2]);
+  assert.equal(worker.of("selection-error").length, 0);
+  assert.equal(worker.libraries[0].preparations.length, 1);
+  await worker.send({ kind: "dispose" });
+});
+
+test("pending record acquisition cannot revive the same menu after a play and Stop cycle", async () => {
+  for (const settlement of ["resolve", "reject"]) {
+    const reads = [], held = deferred(); let admissions = 0;
+    const worker = await readyWorker({ gameplay: true, actualMenu: true, observeRecordPreview() { admissions++; } });
+    await worker.send({ kind: "import", id: 1, files: [
+      trackedSelected("pending.bms", "pending", reads, () => held.promise),
+      trackedSelected("cached.bms", "cached", reads),
+    ] });
+    await worker.send({ kind: "accept-library", id: 1 });
+    await worker.send({ kind: "select", id: 2, libraryId: 1, path: "cached.bms", rate: 48000, seed: "0" });
+    await worker.send({ kind: "menu-open", fields: ["cached.bms"] });
+    await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(worker.of("menu-state").at(-1)), route: 2, fields: settingsMenuDraft() });
+    await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(worker.of("menu-state").at(-1)), route: 4, fields: ["prefix.bkr"] });
+    const token = acquiredMenuToken(worker.of("menu-state").at(-1));
+    await worker.send({ kind: "menu-record-preview", ...token, chartPath: "pending.bms", key: "prefix", replay: Uint8Array.from([66,75,82,1]) });
+    assert.equal(reads.includes("pending.bms"), true);
+    await startGame(worker, [], { path: "cached.bms" });
+    await worker.send({ kind: "play-stop", playId: 1 });
+    const resumed = worker.of("menu-state").at(-1);
+    assert.equal(resumed.route, 4);
+    assert.equal(resumed.screen, token.screen);
+    const errors = worker.of("menu-error").length;
+    const accessCount = worker.libraries[0].accesses.length;
+    if (settlement === "resolve") held.resolve(new TextEncoder().encode("pending").buffer);
+    else held.reject(new Error("obsolete record read failure"));
+    await flushJobs();
+    assert.equal(admissions, 0);
+    assert.equal(worker.libraries[0].accesses.length, accessCount);
+    assert.equal(worker.of("menu-error").length, errors);
+    assert.equal(worker.of("fatal").length, 0);
+    await worker.send({ kind: "dispose" });
+  }
+});
+
+test("every live preparation route acquires only its seeded plan before constructing its owner", async () => {
+  const cases = [
+    { extra: {}, method: undefined },
+    { extra: { startNs: 2n }, method: "prepare_chart_at" },
+    { extra: { startNs: 2n, timingPolicy: { presetId: "beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1", rankPrecedence: "rank-first", gauge: "groove" } }, method: "prepare_chart_with_policy_at" },
+    { extra: { inputMode: "physical", localPlanWords: new Uint32Array([7, 0, 0, 0]) }, method: undefined },
+  ];
+  for (const { extra, method } of cases) {
+    const reads = [];
+    const worker = await readyWorker({ gameplay: true, references: (_path, seed) => seed === 19n ? ["needed.wav"] : ["wrong-seed.wav"] });
+    await worker.send({ kind: "import", id: 1, files: [
+      trackedSelected("song/chart.bms", "chart", reads),
+      trackedSelected("needed.wav", "pcm", reads),
+      trackedSelected("wrong-seed.wav", "unused", reads, () => { throw new Error("wrong RANDOM branch must not read"); }),
+    ] });
+    await worker.send({ kind: "accept-library", id: 1 });
+    await startGame(worker, [], { seed: "19", ...extra });
+    assert.deepEqual(reads, ["song/chart.bms", "needed.wav"]);
+    assert.equal(worker.libraries[0].plans[0].seed, 19n);
+    assert.equal(worker.libraries[0].preparations[0].method, method);
+    assert.equal(worker.games.length, 1);
+    assert.equal(worker.of("play-error").length, 0);
+    assert.equal(worker.of("play-reply").at(-1).result.kind, "prepared");
+    if (extra.localPlanWords) assert.deepEqual(Array.from(worker.games[0].players), [7]);
+    await worker.send({ kind: "dispose" });
+  }
+});
+
+test("replay resource planning receives actual recording bytes instead of the live seed draft", async () => {
+  const reads = [];
+  const worker = await readyWorker({ gameplay: true,
+    references: { "song/chart.bms": ["wrong.wav"] }, replayReferences: { "song/chart.bms": ["recorded.wav"] } });
+  await worker.send({ kind: "import", id: 1, files: [
+    trackedSelected("song/chart.bms", "chart", reads),
+    trackedSelected("recorded.wav", "pcm", reads),
+    trackedSelected("wrong.wav", "unused", reads, () => { throw new Error("live seed must not influence recorded resource plan"); }),
+  ] });
+  await worker.send({ kind: "accept-library", id: 1 });
+  const replay = opponentFile("recorded.bkr", [66,75,82,1,19]);
+  await startGame(worker, undefined, { mode: "replay", replayFile: replay.file, seed: "invalid live seed" });
+  assert.equal(replay.reads, 1);
+  assert.deepEqual(reads, ["song/chart.bms", "recorded.wav"]);
+  assert.deepEqual(worker.libraries[0].plans, [{ method: "replay", path: "song/chart.bms", bytes: [66,75,82,1,19], maxSamples: 3844 }]);
+  assert.equal(worker.games.length, 1);
+  assert.equal(worker.of("play-error").length, 0);
+  assert.ok(worker.calls.findIndex(row => row[0] === "plan-replay") < worker.calls.findIndex(row => row[0] === "prepare-replay"));
+  await worker.send({ kind: "dispose" });
+});
 
 test("section start routes fresh preparations and exact source metadata before capture while zero remains compatible", async () => {
   for (const startNs of [undefined, 0n, 1125000001n, 604800000000001n]) {
@@ -1216,14 +1679,14 @@ test("actual comparison snapshots are throttled independently and comparison fau
   await worker.send({ kind: "play-stop", playId: 3 });
 });
 
-test("overlapping imports retain only the latest pending request and free the stale candidate", async () => {
+test("successive metadata catalogs acquire no bytes and stale acknowledgements cannot adopt retired proposals", async () => {
   const worker = await readyWorker();
   const pending = deferred();
   let reads = 0;
   let skippedReads = 0;
   let newerReads = 0;
   await worker.send({ kind: "import", id: 1, files: [selectedFile("old/a.bms", "old", () => { reads++; return pending.promise; })] });
-  assert.equal(reads, 1);
+  assert.equal(reads, 0);
   assert.equal(worker.libraries.length, 1);
   await worker.send({ kind: "import", id: 2, files: [selectedFile("skipped/b.bms", "skip", () => {
     skippedReads++;
@@ -1235,22 +1698,28 @@ test("overlapping imports retain only the latest pending request and free the st
   })] });
   assert.equal(newerReads, 0);
   assert.equal(skippedReads, 0);
-  assert.equal(worker.libraries.length, 1);
-  assert.equal(worker.of("catalog").length, 0);
+  assert.equal(worker.libraries.length, 3);
+  assert.deepEqual(worker.of("catalog").map(message => message.id), [1, 2, 3]);
   pending.resolve(new TextEncoder().encode("old").buffer);
   await flushJobs();
-  assert.equal(newerReads, 1);
+  assert.equal(newerReads, 0);
   assert.equal(skippedReads, 0);
-  assert.equal(worker.libraries.length, 2);
+  assert.equal(worker.libraries.length, 3);
   assert.equal(worker.libraries[0].frees, 1);
   assert.equal(worker.libraries[0].files.length, 0);
-  assert.equal(worker.libraries[1].frees, 0);
-  assert.deepEqual(worker.libraries[1].files.map(entry => entry.path), ["new/c.bms"]);
-  assert.deepEqual(worker.of("catalog").map(message => message.id), [3]);
+  assert.equal(worker.libraries[1].frees, 1);
+  assert.equal(worker.libraries[2].frees, 0);
+  assert.deepEqual([...worker.libraries[2].declarations.keys()], ["new/c.bms"]);
+  assert.equal(worker.libraries[2].files.length, 0);
   assert.equal(worker.of("import-error").length, 0);
+  await worker.send({ kind: "accept-library", id: 1 });
+  await worker.send({ kind: "accept-library", id: 2 });
   await worker.send({ kind: "accept-library", id: 3 });
   await worker.send({ kind: "select", id: 4, libraryId: 3, path: "new/c.bms", rate: 48000, seed: "0" });
   assert.equal(worker.views[0].current.path, "new/c.bms");
+  assert.equal(newerReads, 1);
+  assert.equal(reads, 0);
+  assert.equal(skippedReads, 0);
 });
 
 test("invalid import metadata acquires no bytes and preserves the admitted library", async () => {
@@ -1297,10 +1766,9 @@ test("an ignored catalog followed by a failed import preserves the accepted libr
   assert.equal(worker.views[0].current, previousView);
   assert.equal(ignored.preparations.length, 0);
 
-  await worker.send({ kind: "import", id: 5, files: [selectedFile("failed/b.bms", "x", () => Promise.reject(new Error("file read failed")))] });
-  const failed = worker.libraries[2];
+  await worker.send({ kind: "import", id: 5, files: [selectedFile("failed/../b.bms", "x", () => { throw new Error("invalid metadata must not read"); })] });
   assert.equal(ignored.frees, 1);
-  assert.equal(failed.frees, 1);
+  assert.equal(worker.libraries.length, 2, "invalid metadata must not allocate a candidate");
   assert.equal(accepted.frees, 0);
   assert.equal(worker.of("import-error").at(-1).id, 5);
   assert.equal(worker.views[0].current, previousView);
@@ -1315,7 +1783,7 @@ test("an ignored catalog followed by a failed import preserves the accepted libr
 
   // Only acknowledgement of the current proposal may release the old owner.
   await worker.send({ kind: "import", id: 7, files: [selectedFile("accepted/new.bms")] });
-  const replacement = worker.libraries[3];
+  const replacement = worker.libraries[2];
   await worker.send({ kind: "accept-library", id: 3 });
   assert.equal(accepted.frees, 0);
   assert.equal(replacement.frees, 0);

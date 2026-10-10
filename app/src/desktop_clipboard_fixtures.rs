@@ -62,7 +62,7 @@ fn field_app(field: usize) -> Desktop {
             2 => app.settings.as_mut().unwrap().profile_focused = true,
             3 => {
                 app.open_display();
-                app.display.as_mut().unwrap().selected = 2;
+                app.display.as_mut().unwrap().draft.selected = 2;
             }
             4 | 5 => {
                 app.open_practice();
@@ -75,6 +75,29 @@ fn field_app(field: usize) -> Desktop {
     app.sync_ime();
     assert!(app.text_target().is_some(), "field {field} did not open");
     app
+}
+
+#[test]
+fn display_owner_replacement_cancels_pending_clipboard_even_with_same_editor_value() {
+    let mut app = field_app(3);
+    install(&mut app, Ok("obsolete".into()), Ok(()));
+    let old = app.display.as_ref().unwrap().id();
+    let permit = app.display.as_ref().unwrap().task_permit();
+    let baseline = editor(&app).clone();
+    app.begin_clipboard(ClipboardAction::Paste).unwrap();
+    assert!(app.pending_clipboard.is_some());
+    app.back();
+    assert!(app.display.is_none());
+    assert!(permit.is_cancelled());
+    app.open_display();
+    app.display.as_mut().unwrap().draft.selected = 2;
+    app.sync_ime();
+    assert_ne!(app.display.as_ref().unwrap().id(), old);
+    assert_eq!(editor(&app), &baseline);
+    assert!(app.pending_clipboard.is_none());
+    drain(&mut app);
+    assert_eq!(editor(&app), &baseline);
+    assert!(error(&app).is_none());
 }
 fn editor(app: &Desktop) -> &LineEditor {
     app.text_editor(app.text_target().unwrap().field).unwrap()
@@ -120,7 +143,7 @@ fn error(app: &Desktop) -> Option<&str> {
     match app.navigator.route() {
         ScreenRoute::Selection => app.failure.as_deref(),
         ScreenRoute::Settings => app.settings.as_ref().unwrap().error.as_deref(),
-        ScreenRoute::Display => app.display.as_ref().unwrap().error.as_deref(),
+        ScreenRoute::Display => app.display.as_ref().unwrap().draft.error.as_deref(),
         ScreenRoute::Practice => app.practice.as_ref().unwrap().error.as_deref(),
         ScreenRoute::Records => app.records.as_ref().unwrap().error.as_deref(),
         _ => None,
@@ -422,13 +445,12 @@ fn cancelled_requests_stay_busy_until_drained_and_closing_releases_the_fake_owne
     app.request_close();
     assert_eq!(app.navigator.route(), ScreenRoute::Closing);
     assert!(app.pending_clipboard.is_none());
-    assert!(
-        app.clipboard
-            .as_mut()
-            .unwrap()
-            .submit(ClipboardRequest::Read)
-            .is_err()
-    );
+    assert!(app
+        .clipboard
+        .as_mut()
+        .unwrap()
+        .submit(ClipboardRequest::Read)
+        .is_err());
     drain(&mut app);
     let deadline = Instant::now() + Duration::from_secs(5);
     while !app.clipboard.as_ref().unwrap().is_finished() {

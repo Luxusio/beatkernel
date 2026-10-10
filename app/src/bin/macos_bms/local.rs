@@ -42,9 +42,7 @@ use beatkernel_bms_runtime::{
 };
 use beatkernel_bms_runtime::{
     native_cohort::{run_cohort_audio_with_policies_and_results, NativeAudioCohortSession},
-    native_gameplay::{
-        InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
-    },
+    native_gameplay::{InputBatch, NativeGameplayConfig, NativeGameplayResult},
 };
 #[cfg(test)]
 use beatkernel_platform::macos::input::HidCounters;
@@ -63,7 +61,10 @@ struct CohortDevice<'a> {
     clock: &'a MachClock,
     retained: &'a mut beatkernel_bms_runtime::native_gameplay::NativeCollectedInput,
 }
-impl NativeGameplayDevice for CohortDevice<'_> {
+use beatkernel_bms_runtime::gameplay_presentation::GameplayDevice as GameplayDevicePort;
+impl GameplayDevicePort for CohortDevice<'_> {
+    type Presentation =
+        beatkernel_platform::audio::presentation::discipline::PresentationDiscipline;
     fn observe_audio(
         &mut self,
         presentation: &mut beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,

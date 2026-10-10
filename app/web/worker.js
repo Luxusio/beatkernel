@@ -31,7 +31,7 @@ let surfaceSentVersion = 0n;
 let disposed = false;
 let capturesPending = 0;
 let deferredFatal = null;
-let library = null;
+let libraryContext = null;
 let stagedLibrary = null;
 let libraryId = 0;
 let importGeneration = 0;
@@ -39,6 +39,7 @@ let importing = false;
 let pendingImport = null;
 let importPumpRunning = false;
 let selectedId = 0;
+let selectionEpoch = 0;
 let failed = false;
 let extent = [0, 0];
 let play = null;
@@ -80,12 +81,22 @@ async function settingsProfile(request) {
     report("settings-profile-error", { id, message: "Wait for an initialized idle Worker before processing settings." });
     return;
   }
+  let savedBytes = null;
+  try {
+    if (request.kind === "settings-profile-save") savedBytes = encodeBrowserSettings(request.settings);
+    else {
+      if (typeof File !== "function" || !(request.file instanceof File)) throw new Error("Choose an actual settings file.");
+      if (!Number.isSafeInteger(request.file.size) || request.file.size < 1 || request.file.size > 16384)
+        throw new Error("Choose one nonempty settings file no larger than 16 KiB.");
+    }
+  } catch (error) { report("settings-profile-error", { id, message: message(error) }); return; }
   const operation = { id };
   discardHistoricalCandidate();
+  ++selectionEpoch;
   settingsOperation = operation;
   try {
     if (request.kind === "settings-profile-save") {
-      const bytes = encodeBrowserSettings(request.settings);
+      const bytes = savedBytes;
       if (!failed && settingsOperation === operation) report("settings-profile-saved", { id, bytes }, [bytes.buffer]);
     } else {
       const settings = await decodeBrowserSettings(request.file);
@@ -709,12 +720,11 @@ function handleMenu(request) {
       if (request.source !== null && !Array.from({ length: sources }, (_, index) => fields[at + 1 + index * 5]).includes(request.source?.toString())) throw new Error("Source is not in the acquired browser inventory.");
       commitMenuRoster(roster => roster.assign(request.player, request.source));
     } else if (request.kind === "menu-record-preview") {
-      if (menuOwner.route !== 4 || !library || typeof request.chartPath !== "string" || typeof request.key !== "string"
+      if (menuOwner.route !== 4 || !libraryContext || typeof request.chartPath !== "string" || typeof request.key !== "string"
         || !(request.replay instanceof Uint8Array) || request.replay.byteLength > 64 * 1024 * 1024
         || request.archive != null && !(request.archive instanceof Uint8Array)) throw new Error("Invalid actual record preview request.");
-      menuOwner.preview_record(request.screen, request.revision, library, request.chartPath, request.key,
-        request.replay, request.archive, request.player);
-      menuRecordFile = new File([request.replay], `${request.key}.bkr`, { type: "application/octet-stream" });
+      void acquireMenuRecord(request);
+      return;
     }
     else if (request.kind.startsWith("menu-opponent-")) {
       const candidate = new SavedOpponentSelection(); for (const entry of menuOpponents.snapshot()) candidate.add(entry);
@@ -828,95 +838,159 @@ function queueVisualControl(operation, fields) {
   publishVisual();
 }
 
+async function acquireMenuRecord(request) {
+  const context = libraryContext, generation = importGeneration, epoch = selectionEpoch;
+  const current = () => epoch === selectionEpoch && menuOwner !== null && menuVisible && !play && !settingsOperation && !importing
+    && generation === importGeneration && request.menuGeneration === menuGeneration
+    && request.screen === menuOwner.screen && request.revision === menuOwner.revision;
+  try {
+    if (!await acquireLibraryFile(context, request.chartPath, current)) return;
+    if (!currentLibrary(context) || !current()) return;
+    menuOwner.preview_record(request.screen, request.revision, context.library, request.chartPath, request.key,
+      request.replay, request.archive, request.player);
+    menuRecordFile = new File([request.replay], `${request.key}.bkr`, { type: "application/octet-stream" });
+    reportMenu(); publishVisual();
+  } catch (error) {
+    if (currentLibrary(context) && current()) report("menu-error", { message: message(error),
+      menuGeneration: request.menuGeneration, screen: request.screen, revision: request.revision });
+  }
+}
+function retireLibrary(context) {
+  if (!context || context.retired) return;
+  context.retired = true;
+  const owned = context.library;
+  context.library = null;
+  context.files.clear(); context.loaded.clear(); context.pending.clear();
+  owned?.free();
+}
+function currentLibrary(context) {
+  return !failed && !disposed && context !== null && context === libraryContext && !context.retired && context.library !== null;
+}
+async function acquireLibraryFile(context, path, current) {
+  if (!currentLibrary(context) || !current()) return false;
+  if (context.loaded.has(path)) return true;
+  const entry = context.files.get(path);
+  if (!entry) throw new Error(`Selected file not found: ${path}`);
+  const { file, size } = entry;
+  let reading = context.pending.get(path);
+  if (!reading) {
+    // The continuation retains a JS context and File, never a WASM binding.
+    reading = Promise.resolve(file.arrayBuffer()).finally(() => {
+      if (context.pending.get(path) === reading) context.pending.delete(path);
+    });
+    context.pending.set(path, reading);
+  }
+  let bytes;
+  try { bytes = await reading; }
+  catch (error) { if (!currentLibrary(context) || !current()) return false; throw error; }
+  if (!currentLibrary(context) || !current()) return false;
+  if (!(bytes instanceof ArrayBuffer) || bytes.resizable === true || bytes.byteLength !== size)
+    throw new Error("Selected-file size changed or returned an invalid buffer.");
+  if (!context.loaded.has(path)) {
+    context.library.add_file(path, new Uint8Array(bytes));
+    context.loaded.add(path);
+  }
+  return true;
+}
+async function hydrateChart(context, path, seed, replayBytes, current) {
+  if (!await acquireLibraryFile(context, path, current)) return false;
+  if (!currentLibrary(context) || !current()) return false;
+  const paths = replayBytes === null
+    ? context.library.referenced_asset_paths(path, seed, ORIGINAL_PCM_SAMPLES)
+    : context.library.replay_referenced_asset_paths(path, replayBytes, ORIGINAL_PCM_SAMPLES);
+  for (const asset of paths) {
+    if (!currentLibrary(context) || !current()) return false;
+    if (!await acquireLibraryFile(context, asset, current)) return false;
+    if (!currentLibrary(context) || !current()) return false;
+  }
+  return currentLibrary(context) && current();
+}
 async function importFiles(request, generation) {
   let candidate = null;
   try {
-    // Metadata is admitted before any selected-file arrayBuffer acquisition.
     const entries = preflight(request.files);
     await ready;
-    if (generation !== importGeneration || failed) return;
-    candidate = new BrowserLibrary(LIMITS.files, LIMITS.file, LIMITS.total, LIMITS.path);
-    for (let index = 0; index < entries.length; index++) {
-      const { file, path } = entries[index];
-      const bytes = await file.arrayBuffer();
-      if (generation !== importGeneration || failed) return;
-      if (bytes.byteLength !== file.size) throw new Error("Selected-file size changed during import.");
-      candidate.add_file(path, new Uint8Array(bytes));
-      if (index % 16 === 0) report("import-progress", { id: request.id, read: index + 1, total: entries.length });
+    if (generation !== importGeneration || failed || disposed) return;
+    candidate = { library: new BrowserLibrary(LIMITS.files, LIMITS.file, LIMITS.total, LIMITS.path),
+      id: request.id, generation, files: new Map(), pending: new Map(), loaded: new Set(), retired: false };
+    for (const { file, path } of entries) {
+      const size = file.size;
+      candidate.library.declare_file(path, size);
+      candidate.files.set(path, { file, size });
     }
-    const charts = candidate.chart_paths();
+    const charts = candidate.library.chart_paths();
     if (!charts.length) throw new Error("No BMS, BME, BML or PMS chart was selected.");
-    stagedLibrary = { library: candidate, id: request.id, generation };
+    stagedLibrary = candidate;
     candidate = null;
-    // Main may already have requested a newer import before receiving this.
-    // Keep the accepted library until the current catalog is acknowledged.
+    // Catalog admission needs metadata only; preparation remains demand-loaded.
     report("catalog", { id: request.id, charts });
   } catch (error) {
-    if (generation === importGeneration && !failed) report("import-error", { id: request.id, message: message(error) });
-  } finally {
-    candidate?.free();
-  }
+    if (generation === importGeneration && !failed && !disposed) report("import-error", { id: request.id, message: message(error) });
+  } finally { retireLibrary(candidate); }
 }
-
 function queueImport(request) {
-  stagedLibrary?.library.free();
-  stagedLibrary = null;
+  ++selectionEpoch;
+  retireLibrary(stagedLibrary); stagedLibrary = null;
   pendingImport = { request, generation: ++importGeneration };
   importing = true;
   if (!importPumpRunning) void drainImports().catch(fatal);
 }
-
 function acceptLibrary(request) {
   if (!stagedLibrary || request.id !== stagedLibrary.id || stagedLibrary.generation !== importGeneration) return;
-  const previous = library;
-  library = stagedLibrary.library;
+  const previous = libraryContext;
+  libraryContext = stagedLibrary;
   libraryId = stagedLibrary.id;
   stagedLibrary = null;
-  previous?.free();
+  retireLibrary(previous);
 }
-
 async function drainImports() {
   importPumpRunning = true;
   try {
-    while (pendingImport && !failed) {
+    while (pendingImport && !failed && !disposed) {
       const { request, generation } = pendingImport;
       pendingImport = null;
       await importFiles(request, generation);
     }
   } finally {
-    // At most one unabortable read/candidate and one latest metadata request.
     importPumpRunning = false;
     importing = false;
-    if (failed) pendingImport = null;
+    if (failed || disposed) pendingImport = null;
   }
 }
-
 async function selectChart(request) {
-  const generation = importGeneration;
+  const generation = importGeneration, epoch = ++selectionEpoch;
+  const context = libraryContext;
+  const playingAtEntry = play !== null;
+  const currentIdentity = () => epoch === selectionEpoch && generation === importGeneration;
+  const current = () => currentIdentity() && !play && !settingsOperation;
   await ready;
-  if (failed || disposed || generation !== importGeneration) return;
+  if (failed || disposed || !currentIdentity()) return;
+  if (playingAtEntry) {
+    report("selection-error", { id: request.id, message: "Stop gameplay before changing the preview chart." });
+    return;
+  }
+  // A play/settings owner acquired after this request fences its continuation.
+  if (!current()) return;
   let prepared = null;
   try {
-    if (play) throw new Error("Stop gameplay before changing the preview chart.");
-    if (importing || !library || request.libraryId !== libraryId) throw new Error("Wait for the selected library to finish loading.");
+    if (importing || !currentLibrary(context) || request.libraryId !== libraryId) throw new Error("Wait for the selected library to finish loading.");
     if (!Number.isInteger(request.rate) || request.rate < 1 || request.rate > 0xffffffff) throw new Error("Sample rate must be a positive 32-bit integer.");
     if (typeof request.seed !== "string" || !/^\d{1,20}$/.test(request.seed) || BigInt(request.seed) > 0xffffffffffffffffn) throw new Error("Chart seed must fit an unsigned 64-bit integer.");
-    prepared = library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES);
-    const metadata = {
-      title: prepared.title, artist: prepared.artist, duration: prepared.duration_ns.toString(),
-      notes: prepared.note_count, samples: prepared.sample_count, images: prepared.image_count,
-    };
+    if (!await hydrateChart(context, request.path, BigInt(request.seed), null, current)) return;
+    if (!currentLibrary(context) || !current()) return;
+    prepared = context.library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES);
+    if (!currentLibrary(context) || !current()) return;
+    const metadata = { title: prepared.title, artist: prepared.artist, duration: prepared.duration_ns.toString(),
+      notes: prepared.note_count, samples: prepared.sample_count, images: prepared.image_count };
     fenceVisual();
     const previous = preview;
-    preview = prepared;
-    prepared = null;
-    previewSongNs = 0n;
-    previous?.free();
+    preview = prepared; prepared = null; previewSongNs = 0n; previous?.free();
     selectedId = request.id;
     report("selected", { id: request.id, libraryId, path: request.path, ...metadata });
     publishVisual();
   } catch (error) {
-    report("selection-error", { id: request.id, message: message(error) });
+    if (!failed && !disposed && current() && (context === null || currentLibrary(context)))
+      report("selection-error", { id: request.id, message: message(error) });
   } finally { prepared?.free(); }
 }
 
@@ -2170,10 +2244,13 @@ async function preparePlay(state, request) {
     await ready;
     if (failed || play !== state) return;
     if (importing || importPumpRunning || pendingImport || stagedLibrary
-      || !library || request.libraryId !== libraryId) throw new Error("Wait for the accepted library before starting gameplay.");
+      || !libraryContext || request.libraryId !== libraryId) throw new Error("Wait for the accepted library before starting gameplay.");
     if (typeof request.path !== "string" || !request.path.length || !integer(request.rate, 1, 0xffffffff)) {
       throw new Error("Invalid gameplay chart or sample rate.");
     }
+    const context = libraryContext;
+    const generation = importGeneration;
+    const current = () => play === state && generation === importGeneration && !failed && !disposed;
     state.rate = request.rate;
     if (request.recordReplay !== undefined && typeof request.recordReplay !== "boolean") throw new Error("Invalid replay recording choice.");
     if (hidProfileFile !== null) {
@@ -2242,19 +2319,25 @@ async function preparePlay(state, request) {
       const bytes = await replayFile.arrayBuffer();
       if (failed || play !== state) return;
       if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== replaySize) throw new Error("Replay file size changed or returned an invalid buffer.");
-      prepared = library.prepare_replay_chart(request.path, new Uint8Array(bytes), request.rate, 2,
+      const recording = new Uint8Array(bytes);
+      if (!await hydrateChart(context, request.path, null, recording, current)) return;
+      if (!currentLibrary(context) || !current()) return;
+      prepared = context.library.prepare_replay_chart(request.path, recording, request.rate, 2,
         64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES);
     } else {
       if (typeof request.seed !== "string" || !/^\d{1,20}$/.test(request.seed) || BigInt(request.seed) > U64_MAX) throw new Error("Invalid gameplay chart seed.");
+      if (!await hydrateChart(context, request.path, BigInt(request.seed), null, current)) return;
+      if (!currentLibrary(context) || !current()) return;
       prepared = timingPolicy !== null
-        ? library.prepare_chart_with_policy_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
+        ? context.library.prepare_chart_with_policy_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
           64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES,
           timingPolicy.presetId, timingPolicy.rankPrecedence, timingPolicy.gauge, timing.offsetNs)
         : requestedStart === 0n
-        ? library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES)
-        : library.prepare_chart_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
+        ? context.library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES)
+        : context.library.prepare_chart_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
           64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES);
     }
+    if (!currentLibrary(context) || !current()) return;
     const actualStart = prepared.start_ns;
     const startNs = actualStart === undefined && requestedStart === 0n ? 0n : actualStart;
     if (typeof startNs !== "bigint") throw new Error("Prepared chart omitted its actual song start.");
@@ -3057,6 +3140,7 @@ function handlePlay(request) {
       rate: null, network: null, room: null, samplesEnded: false, commandsDrained: false,
       prepared: false, opponentCount: 0, opponentsFailed: false, opponentError: null, lastOpponents: null,
     };
+    ++selectionEpoch;
     play = state; // Reserve before the ready await so stop cannot race a late owner.
     lastPlayId = state.id;
     void (async () => {
@@ -3251,8 +3335,9 @@ self.addEventListener("message", event => {
     renderPort = null;
     preview?.free(); preview = null;
     discardRoomResults();
-    stagedLibrary?.library.free(); stagedLibrary = null;
-    library?.free(); library = null;
+    ++selectionEpoch;
+    retireLibrary(stagedLibrary); stagedLibrary = null;
+    retireLibrary(libraryContext); libraryContext = null;
     ++importGeneration; pendingImport = null;
     settingsOperation = null;
     report("disposed");
