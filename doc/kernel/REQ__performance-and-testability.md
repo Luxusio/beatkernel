@@ -95,6 +95,13 @@ audit against this rule. Backend conversion stays in IO while backend-independen
 presentation/time algorithms belong in the domain.
 UI lifecycles and back-stack decisions remain testable independently of graphics.
 IO lifecycle/cleanup failures cannot fabricate business completion evidence.
+Scene exposes its existing static quad geometry as a read-only borrowed slice
+for render adapters and pure UI composition tests across crate boundaries.
+Logical bounds, color and texture UV data retain draw order; observation must
+not copy, allocate, mutate storage or change the geometry stamp. This slice
+does not expand timed playfield instances or prove GPU/physical presentation.
+Native loading feedback tests use this boundary to inspect actual composed
+glyphs and controls without a graphics device.
 
 The kernel and shared game policy must be testable without an operating-system
 device, real clock, sleep, filesystem, network, renderer or audio driver.

@@ -585,6 +585,21 @@ progress row while retaining practice instructions, then requires a pure scene
 overlap regression, fresh DEEP formal review and affected desktop/UX QA.
 Final CLI/foreign-target checks wait for corrected source; WBS remains90/193.
 
+The first pure loading-row regression build failedE0624: native Desktop tests
+are in the application binary, while Scene's existing rectangle slice was
+library-crate-private. No tests ran and its sequential full-parent/production
+build stages were not executed. After inspecting existing public APIs, the
+minimal observation correction makes the existing Rectangle type and borrowed
+Scene::rectangles accessor public. The accessor body, representation, bounds,
+storage ownership and rendering are unchanged; no geometry copy, allocation,
+mutable storage access or additional test feature is introduced. Its contract
+describes static ordered logical quads and excludes timed instance expansion
+and physical presentation. This allows the actual Desktop composition test
+to inspect glyph/control footprints without GPU IO. Fresh library/WASM build
+provenance and the final independent review remain required; old browser QA
+retains its exact immutable artifact/source scope until equivalence or current
+verification is established. The original failed build log remains preserved.
+
 The strengthened browser capture prerequisite passed in one actual preserved
 baseline process. `browser-finite-capture-development-1/observations.json`
 records two admitted inputs, 118 advances, 120 durable records and a finite

@@ -250,7 +250,7 @@ fn project_component(
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct Rectangle {
+pub struct Rectangle {
     pub bounds: [f32; 4],
     pub color: [f32; 4],
     pub uv: [f32; 4],
@@ -1119,7 +1119,10 @@ impl Scene {
         [self.width as f32, self.height as f32]
     }
 
-    pub(crate) fn rectangles(&self) -> &[Rectangle] {
+    /// Borrow the ordered static quads without copying or changing the scene.
+    /// Bounds use logical coordinates; color and texture UVs are renderer data.
+    /// Timed playfield instances and presentation transforms are not expanded here.
+    pub fn rectangles(&self) -> &[Rectangle] {
         &self.rectangles
     }
     pub(crate) fn batches(&self) -> &[DrawBatch] {
