@@ -773,6 +773,72 @@ after a 1m07s build. Evidence:
 This is development evidence; fresh independent review and the unfinished CLI
 verification remain required. Production implementation is unchanged.
 
+After the fresh full formal review returned PASS, independent CLI QA3 on
+`64a099b` executed the complete app `--tests` suite: 39 targets, 3,159 passed,
+zero failed, 38 ignored and exactly the one baseline-proven Records case
+filtered, with command exit 0. Both corrected alias fixtures passed in this
+full app execution. Evidence:
+`target/wf/player-loading-latency/qa-cli-final-3/app-tests.log` and
+`app-tests.exit`. The 38 ignored tests were not executed. Disjoint parent,
+Node and Linux/Windows/macOS checks are being run separately; this app result
+does not certify those checks or task closure.
+
+The disjoint core/parser/platform all-target test command subsequently exited
+0: 121 executed targets, 869 passed, zero failed, one ignored and no filters.
+Together with the app command this proves 4,028 Rust test passes, 39 ignores
+and the one explicitly excluded Records failure; ignored/filtered cases are
+not passes. Evidence:
+`target/wf/player-loading-latency/qa-cli-final-3/parent-disjoint.log` and
+`parent-disjoint.exit`. Browser Node suites and native/foreign all-target
+checks remain separate pending stages at this point.
+
+The subsequent nine-suite Node command exited 1: 450 tests, 309 passed and
+141 failed, with no skips. All 141 failures are located in
+`app/web/play-worker.test.mjs`. Its VM mock still exposes the legacy library
+registration/preparation API and lacks the current declaration/job API and
+MessageChannel scheduling edge. The first settings-ownership failure was
+also reproduced alone (exit 1). Evidence:
+`target/wf/player-loading-latency/qa-cli-final-3/node-web.log`.
+Linux/Windows/macOS and final formatting/WBS commands did not start because
+the sequence stopped on this failure. This Node failure requires correction
+and fresh affected verification; the successful unchanged Rust results are
+retained on their actual executed scope.
+
+Independent QA3 also executed the first failing Node case against JS-only
+sources archived from `e421b59`, reproducing the same preparation-count
+failure at `play-worker.test.mjs:1305` (zero versus one, exit 1). The current
+fixture bytes match that baseline. This proves that first failure predates
+this task; it does not establish the baseline status of all 141 failures.
+Evidence: `qa-cli-final-3/node-first-base-proof-executed.log` and
+`failure-classification.json` under the loading evidence directory.
+QA3 returned actual FAIL and released all owned compiler/process sessions.
+The Worker fixture contract is being corrected without production changes;
+fresh affected Node verification and the unexecuted platform checks remain
+required. Recompiling unchanged Rust solely to reacquire its existing 4,028
+passes is unnecessary.
+
+The gameplay Worker fixture now models declared versus hydrated files,
+incremental preparation jobs, their admission/cancel/free ownership, actual
+macrotask-delivered MessageChannel callbacks and the current PCM array export
+through its existing extraction instrumentation. Existing gameplay assertions
+remain intact; four regressions cover yielded admission, cancellation before
+publication, preparation errors and concurrent flushers. The first development
+attempt exposed reentrant queue reservation and obsolete extraction-mock
+behavior (26 passed, 119 failed); it remains preserved in
+`play-worker-development-1.log`. After correction, the full fixture passed
+146 tests with zero failures, cancellations or skips (exit 0, 148.13s) in
+`play-worker-development-2.log`, under the loading evidence directory.
+Production code and artifacts are unchanged. This is development verification;
+fresh independent review, affected nine-suite Node QA and the unexecuted
+platform checks are still required.
+
+After this JS fixture edit, 94 of the preserved browser manifest's 95 entries
+remain byte-identical. Its sole changed entry is `app/web/play-worker.test.mjs`,
+the corrected test file; runtime JavaScript, generated bindings and WASM are
+unchanged. The earlier QA3 95/95 match refers to the pre-correction source.
+Current runtime equivalence therefore retains the prior actual browser GUI
+scope, without claiming that the changed fixture has its former hash.
+
 Known ceiling: native GUI QA2 uses the existing live `:99` current-display
 transport. Its attempted new Xvfb startup failed because the display listener
 already existed; no ownership of that server or server cleanup is claimed.
