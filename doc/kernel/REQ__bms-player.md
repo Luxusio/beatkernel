@@ -325,8 +325,10 @@ by actual game preparation.
 
 The [native profile publication contract](../runtime/REQ__native-profile-publication.md)
 owns the shared staged-write/commit guarantees and reserved-name validation
-precedence. Its stronger file-safety implementation and verification are in
-progress; Save/Load/Apply behavior and profile schemas remain unchanged.
+precedence. The strengthening is implemented and has passed bounded software
+verification recorded in the linked contract. Receipt-backed Harness close and
+the remaining whole WBS09.13 interruption/recovery criteria are separate;
+Save/Load/Apply behavior and profile schemas remain unchanged.
 
 `player (--library DIR | --chart PATH) NATIVE_OPTIONS` selects the graphical
 mode; no arguments open the current directory catalog. Native configuration

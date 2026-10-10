@@ -3,8 +3,9 @@
 This contract owns the file I/O guarantees of `settings_profile::save_profile`,
 `save_player_profile`, `load_profile` and `load_player_profile`. The existing
 [player settings contract](../kernel/REQ__bms-player.md) retains Save/Load/Apply,
-operation-worker ownership and versioned codec behavior. Implementation and
-independent verification of the strengthening below are in progress.
+operation-worker ownership and versioned codec behavior. The strengthening below
+is implemented; its measured software verification is recorded in
+[the profile storage change note](../changes/2026-10-10-native-profile-publication-integrity.md).
 
 Pure models, host/schema validation and codecs remain in `settings_profile.rs`.
 Production filesystem operations belong to its private `native_settings_profile`
@@ -64,6 +65,16 @@ and commit closure for write/sync/commit/cleanup faults and deterministic races.
 Verify moved-owner retirement by creating a foreign entry at the released stage
 pathname and observing that it survives owner drop. The original self-alias
 defect requires an actual public reproduction before the source correction.
+
+On source `1920781`, independent code/security reviews passed before independent
+CLI QA executed the full app library (2,309 passed, six ignored), native bins
+(466 passed, nine ignored), public profile/replay integrations (10/17 passed),
+and the shared publisher (28 passed). The publisher tests also occur in the app
+library total. Three Node tests executed the actual helper WASM artifact;
+model/browser builds and Windows/macOS stub typechecks exited zero. These are
+bounded software results, not completion of whole WBS09.13 or a claim that the
+Harness child has closed. Reproduction commands and evidence limits are in the
+linked change note; ignored logs must be regenerated when unavailable.
 
 Known ceiling: caller-owned directories must remain stable; separate path checks
 do not guarantee hostile ancestor containment or interprocess replacement locks.
