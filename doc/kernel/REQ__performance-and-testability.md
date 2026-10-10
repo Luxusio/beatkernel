@@ -12,6 +12,12 @@ and retired-read ownership separately; cache eviction is not a whole-process
 memory bound. Image/movie payloads are freshly prepared and not cached by this
 increment.
 
+The public borrowed-chart preparation API must enforce the existing raw parser
+byte limit before allocating or copying owned chart storage. Oversized input
+retains the raw-chart-limit error and performs no asset IO or decode. Cache
+budgets cannot relax parser limits. Allocation-request tests cover this public
+refusal separately from bounded native/browser file acquisition.
+
 Native freshness checks acquire each current canonical resource once and
 compare/decode the same bytes, preserving the decoder's actual resolved key.
 Modification times and lengths do not prove identity. Browser cache reuse is

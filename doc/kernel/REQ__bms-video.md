@@ -50,6 +50,15 @@ releasing a snapshot on the UI or renderer does not wait for decoding. Browser
 decoder retirement fences sessions immediately, and Worker close waits for
 in-flight frame copies to settle before terminating the Worker.
 
+Native registration also retains cleanup ownership before a newly created bank
+is installed into the Session. Cancellation, registration failure and unwind
+join that staged service on the game worker before termination can authorize a
+retry. Successful installation transfers cleanup ownership once. Image and
+movie resource preparation checks the native cancellation control between
+resource phases, with actual completed/total visual progress. A single ongoing
+read or codec operation can finish before cancellation is observed; subsequent
+resources must not begin after that observation.
+
 ## Assets and rendering
 
 Movies are classified before static-image variant lookup. A missing or invalid

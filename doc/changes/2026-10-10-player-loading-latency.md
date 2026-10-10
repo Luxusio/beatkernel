@@ -493,6 +493,45 @@ The complete fresh parent executable then passed343/failed0/ignored13 in3.52s
 (`native-prepared-replay-full-unit-development-1.log`). Opt-in native GUI tests
 remain ignored in that ordinary suite and have their separate actual runs above.
 
+### Independent review remediation
+
+The first independent DEEP review of `e421b59..2d65b13` returned three source
+findings. Native visual registration used compatibility wrappers that ignored
+resource-level cancellation; a newly created movie bank could leave its service
+unjoined before Session installation; public uncached preparation copied rejected
+raw input before its parser bound. Native images/movies now use their existing
+phased jobs with the detached native control and combined bounded Visual counts.
+NativeFile movie descriptors remain unchanged. A game-worker-local staged guard
+joins an uninstalled bank on failure/cancellation/unwind and transfers cleanup
+ownership once to Session on success. UI/render bank destruction stays nonblocking.
+The public borrowed-chart path checks the existing8MiB raw parser limit before
+reserve/copy, retaining its InvalidData error and message without decoding twice.
+
+Fresh native attachment tests passed9/failed0/ignored0 in0.42s
+(`native-visual-cancellation-remediation-development-2.log`; build2m26s).
+Connected tests cancel synchronously during actual resource registration and
+hold a controlled actual movie service to prove join-before-terminal ordering
+and successful Session cleanup transfer. The first run returned8PASS/1FAIL:
+a new fixture incorrectly expected Loading instead of legitimate Stopping
+during cancellation. Correcting that expectation retains the held-service and
+nonterminal assertions; the final snapshot is read once. Its original failure
+log remains preserved. No production state rule was changed for that fixture.
+
+Public allocation tests passed7/failed0/ignored0 in0.23s
+(`raw-chart-allocation-remediation-development-1.log`; build3m26s).
+8MiB+1 and16MiB input reject with no chart-sized duplicate allocation and zero
+source/decoder effects; 8MiB-1 and exactly8MiB prepare a genuine referenced WAV
+with one resolve/read/decode each. The existing per-thread allocation meter
+observes requested allocation sizes, not peak resident memory.
+
+Windows desktop/webtransport all-target Rust type checking passed in8m11s on
+`2d65b13` before this remediation. The subsequent macOS check was deliberately
+stopped at its exact owned process tree after these verified source findings
+made its pending result obsolete (`macos-prepared-replay-development-1.log`,
+exit143); it did not PASS. Fresh foreign-target checks, WASM artifacts, the
+second DEEP discovery/formal review and ordered independent QA remain required.
+These fixes and focused development results do not advance WBS or close the task.
+
 The strengthened browser capture prerequisite passed in one actual preserved
 baseline process. `browser-finite-capture-development-1/observations.json`
 records two admitted inputs, 118 advances, 120 durable records and a finite

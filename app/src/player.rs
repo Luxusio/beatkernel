@@ -1404,6 +1404,43 @@ fn register_chart(
     native_path: Option<&std::path::Path>,
     replay_policy: Option<&GaugeProfile>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    register_chart_with_assets(
+        source,
+        chart,
+        players,
+        native_path,
+        replay_policy,
+        None,
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::video_native_bank::NativeVideoBank::prepare,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct StagedNativeMovies(Option<Arc<crate::video_native_bank::NativeVideoBank>>);
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for StagedNativeMovies {
+    fn drop(&mut self) {
+        if let Some(movies) = self.0.take() {
+            let _ = movies.join();
+        }
+    }
+}
+
+fn register_chart_with_assets(
+    source: &BmsChart,
+    chart: &CompiledChart,
+    players: &[PlayerId],
+    native_path: Option<&std::path::Path>,
+    replay_policy: Option<&GaugeProfile>,
+    assets: Option<&dyn crate::asset_source::AssetSource>,
+    #[cfg(not(target_arch = "wasm32"))] prepare_movies: impl FnOnce(
+        Arc<crate::video_assets::VideoAssets>,
+    ) -> Result<
+        Arc<crate::video_native_bank::NativeVideoBank>,
+        String,
+    >,
+) -> Result<(), Box<dyn std::error::Error>> {
     validate_players(players)?;
     let Some(context) = preparation_context() else {
         return Ok(());
@@ -1446,20 +1483,78 @@ fn register_chart(
     context.check(visual_progress)?;
     let prepared = Arc::new(PlayerChart::from_compiled(source, chart)?);
     let progress = NoteProgress::new(Arc::clone(&prepared))?;
-    let images = native_path
-        .map(|path| -> Result<_, Box<dyn std::error::Error>> {
-            context.check(visual_progress)?;
-            let path = std::fs::canonicalize(path)?;
-            let root = path.parent().ok_or("native chart has no directory")?;
-            let images = Arc::new(crate::image_assets::ImageAssets::prepare(
-                root,
+    let owned_assets = if assets.is_none() {
+        native_path
+            .map(|path| -> Result<_, Box<dyn std::error::Error>> {
+                context.check(visual_progress)?;
+                let path = std::fs::canonicalize(path)?;
+                let root = path.parent().ok_or("native chart has no directory")?;
+                let assets = crate::asset_source::FileAssetSource::new(root)?;
+                context.check(visual_progress)?;
+                Ok(assets)
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let assets = assets.or_else(|| {
+        owned_assets
+            .as_ref()
+            .map(|source| source as &dyn crate::asset_source::AssetSource)
+    });
+    let mut image_job = assets
+        .map(|_| {
+            crate::image_assets::ImagePreparationJob::new(
                 source,
                 crate::image_assets::ImageAssetLimits::default(),
-            )?);
-            context.check(visual_progress)?;
-            Ok(images)
+            )
         })
         .transpose()?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut video_job = assets
+        .map(|_| {
+            crate::video_assets::VideoPreparationJob::new(
+                source,
+                Default::default(),
+                crate::video_assets::VideoPreparationMode::NativeFile,
+            )
+        })
+        .transpose()?;
+    let image_total = image_job
+        .as_ref()
+        .map_or(0, |job| job.progress().total_assets);
+    #[cfg(not(target_arch = "wasm32"))]
+    let video_total = video_job
+        .as_ref()
+        .map_or(0, |job| job.progress().total_assets);
+    #[cfg(target_arch = "wasm32")]
+    let video_total = 0;
+    let total_assets = image_total
+        .checked_add(video_total)
+        .ok_or("visual resource count overflow")?;
+    let mut visual_progress = crate::preparation::PreparationProgress {
+        total_assets,
+        ..visual_progress
+    };
+    let images = if let (Some(assets), Some(job)) = (assets, image_job.as_mut()) {
+        let bank = loop {
+            if let Some(bank) = job.advance(assets, &mut |progress| {
+                context
+                    .check(crate::preparation::PreparationProgress {
+                        total_assets,
+                        ..progress
+                    })
+                    .map_err(|error| error.to_string())
+            })? {
+                break bank;
+            }
+        };
+        visual_progress.completed_assets = image_total;
+        context.check(visual_progress)?;
+        Some(Arc::new(bank))
+    } else {
+        None
+    };
     if members.is_empty() {
         members = players
             .iter()
@@ -1494,26 +1589,35 @@ fn register_chart(
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let movies = native_path
-        .map(|path| -> Result<_, Box<dyn std::error::Error>> {
+    let mut movies = StagedNativeMovies(
+        if let (Some(assets), Some(job)) = (assets, video_job.as_mut()) {
+            let bank = loop {
+                if let Some(bank) = job.advance(assets, &mut |progress| {
+                    let completed_assets = image_total
+                        .checked_add(progress.completed_assets)
+                        .ok_or("visual resource count overflow")?;
+                    context
+                        .check(crate::preparation::PreparationProgress {
+                            completed_assets,
+                            total_assets,
+                            ..progress
+                        })
+                        .map_err(|error| error.to_string())
+                })? {
+                    break bank;
+                }
+            };
+            visual_progress.completed_assets = total_assets;
             context.check(visual_progress)?;
-            let path = std::fs::canonicalize(path)?;
-            let root = path.parent().ok_or("native chart has no directory")?;
-            let assets = Arc::new(crate::video_assets::VideoAssets::prepare(
-                root,
-                source,
-                Default::default(),
-            )?);
-            context.check(visual_progress)?;
-            if assets.is_empty() {
-                return Ok(None);
+            if bank.is_empty() {
+                None
+            } else {
+                Some(prepare_movies(Arc::new(bank))?)
             }
-            let movies = crate::video_native_bank::NativeVideoBank::prepare(assets)?;
-            context.check(visual_progress)?;
-            Ok(Some(movies))
-        })
-        .transpose()?
-        .flatten();
+        } else {
+            None
+        },
+    );
     context.check(visual_progress)?;
     SESSION.with(|session| {
         let mut session = session.borrow_mut();
@@ -1533,7 +1637,7 @@ fn register_chart(
         current.snapshot.images = images;
         #[cfg(not(target_arch = "wasm32"))]
         {
-            current.snapshot.movies = movies;
+            current.snapshot.movies = movies.0.take();
         }
         current.chart_published = true;
         current.observe_cancellation(false);

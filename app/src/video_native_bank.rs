@@ -244,6 +244,26 @@ impl NativeVideoBank {
             owner: Mutex::new(Some(owner)),
         }))
     }
+    /// Controlled service ownership for deterministic registration cleanup tests.
+    #[cfg(test)]
+    pub(crate) fn prepare_with_service_for_test(
+        assets: Arc<VideoAssets>,
+        service: impl FnOnce(watch::Receiver<bool>) -> Result<(), String> + Send + 'static,
+    ) -> Result<Arc<Self>, String> {
+        let (shutdown, stop) = watch::channel(false);
+        let owner = std::thread::Builder::new()
+            .name("video-bank-controlled-service".into())
+            .spawn(move || service(stop))
+            .map_err(|error| error.to_string())?;
+        Ok(Arc::new(Self {
+            assets,
+            content: 0,
+            demands: Vec::new(),
+            ready: Vec::new(),
+            shutdown,
+            owner: Mutex::new(Some(owner)),
+        }))
+    }
     pub fn content(&self) -> u64 {
         self.content
     }

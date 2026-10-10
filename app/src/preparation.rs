@@ -727,6 +727,13 @@ pub fn prepare_uncached(
     seed: u64,
     replay: Option<(&ReplayFile, ReplayCodecLimits)>,
 ) -> Result<PreparedBms> {
+    if chart_bytes.len() > ParseOptions::default().max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "raw chart text exceeds byte limit",
+        )
+        .into());
+    }
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(chart_bytes.len())?;
     bytes.extend_from_slice(chart_bytes);

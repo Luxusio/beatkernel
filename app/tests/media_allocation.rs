@@ -1,14 +1,18 @@
 //! Finite preparation allocation-request measurements, not process-memory peaks.
 use beatkernel::audio::{AudioFormat, PcmLimits, PcmSample};
+use beatkernel_bms::ParseOptions;
 use beatkernel_bms_runtime::{
-    asset_paths::AssetPathPolicy, asset_source::MemoryFiles, prepare_from_source, AssetDecoder,
-    ChannelPolicy, DefaultAssetDecoder,
+    asset_paths::AssetPathPolicy,
+    asset_source::{AssetSource, MemoryFiles},
+    prepare_from_source, AssetDecoder, ChannelPolicy, DefaultAssetDecoder,
 };
 use std::{
     alloc::{GlobalAlloc, Layout, System},
+    borrow::Cow,
     cell::Cell,
     error::Error,
-    path::Path,
+    io,
+    path::{Path, PathBuf},
 };
 
 #[path = "../src/flac_fixture.rs"]
@@ -299,4 +303,122 @@ fn unwind_disables_measurement_before_the_next_operation() {
     assert!(!ACTIVE.with(Cell::get));
     let (_, stats) = measure(|| ());
     assert_eq!((stats.count, stats.total, stats.largest), (0, 0, 0));
+}
+
+struct PreparationEffects {
+    encoded: Vec<u8>,
+    resolves: Cell<usize>,
+    reads: Cell<usize>,
+    decodes: Cell<usize>,
+}
+impl PreparationEffects {
+    fn new() -> Self {
+        Self {
+            encoded: wav(1),
+            resolves: Cell::new(0),
+            reads: Cell::new(0),
+            decodes: Cell::new(0),
+        }
+    }
+    fn counts(&self) -> (usize, usize, usize) {
+        (self.resolves.get(), self.reads.get(), self.decodes.get())
+    }
+}
+impl AssetSource for PreparationEffects {
+    fn resolve(&self, name: &str, policy: AssetPathPolicy) -> io::Result<PathBuf> {
+        self.resolves.set(self.resolves.get() + 1);
+        assert_eq!(name, "tone.wav");
+        assert_eq!(policy, AssetPathPolicy::Exact);
+        Ok(PathBuf::from(name))
+    }
+    fn read<'a>(&'a self, key: &Path, max_bytes: usize) -> io::Result<Cow<'a, [u8]>> {
+        self.reads.set(self.reads.get() + 1);
+        assert_eq!(key, Path::new("tone.wav"));
+        assert!(self.encoded.len() <= max_bytes);
+        Ok(Cow::Borrowed(&self.encoded))
+    }
+}
+impl AssetDecoder for PreparationEffects {
+    fn decode(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+        cap: PcmLimits,
+    ) -> Result<PcmSample, Box<dyn Error>> {
+        self.decodes.set(self.decodes.get() + 1);
+        DefaultAssetDecoder.decode(path, bytes, cap)
+    }
+}
+
+fn padded_referenced_chart(size: usize) -> Vec<u8> {
+    let mut chart = b"#BPM 120\n#WAV01 tone.wav\n#00011:01\n".to_vec();
+    assert!(size >= chart.len());
+    // Comment lines remain comfortably within max_line_bytes/max_lines, so the
+    // exact raw-byte boundary is not obscured by another parser refusal.
+    while chart.len() < size {
+        let bytes = (size - chart.len()).min(4096);
+        chart.push(b';');
+        chart.resize(chart.len() + bytes - 1, b'x');
+        if bytes > 1 {
+            *chart.last_mut().unwrap() = b'\n';
+        }
+    }
+    chart
+}
+
+#[test]
+fn public_raw_chart_limit_rejects_before_duplicate_allocation_or_asset_effects() {
+    let raw_limit = ParseOptions::default().max_bytes;
+    assert_eq!(raw_limit, 8 * 1024 * 1024);
+    for size in [raw_limit + 1, raw_limit * 2] {
+        let chart = padded_referenced_chart(size);
+        let effects = PreparationEffects::new();
+        let (result, stats) = measure(|| {
+            prepare_from_source(
+                &chart,
+                &effects,
+                AudioFormat::new(48000, 1).unwrap(),
+                limits(4),
+                ChannelPolicy::Exact,
+                &effects,
+                AssetPathPolicy::Exact,
+                0,
+                None,
+            )
+        });
+        let error = result.err().expect("oversized raw chart was admitted");
+        let io_error = error
+            .downcast_ref::<io::Error>()
+            .expect("raw admission must preserve its IO error");
+        assert_eq!(io_error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(io_error.to_string(), "raw chart text exceeds byte limit");
+        assert_eq!(effects.counts(), (0, 0, 0));
+        assert!(
+            stats.largest < 64 * 1024 && stats.total < 64 * 1024,
+            "{size} rejected bytes caused chart-sized work: {stats:?}"
+        );
+    }
+}
+
+#[test]
+fn public_raw_chart_exact_boundary_still_prepares_real_referenced_pcm() {
+    let raw_limit = ParseOptions::default().max_bytes;
+    for size in [raw_limit - 1, raw_limit] {
+        let chart = padded_referenced_chart(size);
+        let effects = PreparationEffects::new();
+        let prepared = prepare_from_source(
+            &chart,
+            &effects,
+            AudioFormat::new(48000, 1).unwrap(),
+            limits(4),
+            ChannelPolicy::Exact,
+            &effects,
+            AssetPathPolicy::Exact,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(prepared.bank.total_bytes(), 4);
+        assert_eq!(effects.counts(), (1, 1, 1));
+    }
 }
