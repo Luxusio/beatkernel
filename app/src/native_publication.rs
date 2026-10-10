@@ -1,6 +1,6 @@
 //! Complete, exclusive publication in a caller-owned directory.
 //!
-//! The synced file is closed before linking its final name. Directory durability
+//! The synced file is closed before committing its final name. Directory durability
 //! and hostile directory changes are outside this boundary; staging cleanup is
 //! best effort, including after a successful publication.
 
@@ -19,6 +19,11 @@ pub(crate) trait PublicationWriter: Write {
     fn sync_all(&mut self) -> io::Result<()>;
 }
 
+pub(crate) enum CommitDisposition {
+    Linked,
+    Moved,
+}
+
 impl PublicationWriter for File {
     fn sync_all(&mut self) -> io::Result<()> {
         File::sync_all(self)
@@ -34,32 +39,64 @@ pub(crate) fn publish_new_with<W: PublicationWriter>(
     bytes: &[u8],
     wrap: impl FnOnce(File) -> W,
 ) -> io::Result<()> {
+    publish_with_writer_and_cleanup(path, bytes, wrap, link_new, |stage| fs::remove_file(stage))
+}
+
+pub(crate) fn publish_with<E: From<io::Error>>(
+    path: &Path,
+    bytes: &[u8],
+    commit: impl FnOnce(&Path, &Path) -> Result<CommitDisposition, E>,
+) -> Result<(), E> {
+    publish_with_writer_and_cleanup(
+        path,
+        bytes,
+        |file| file,
+        commit,
+        |stage| fs::remove_file(stage),
+    )
+}
+
+pub(crate) fn publish_with_writer_and_cleanup<W: PublicationWriter, E: From<io::Error>>(
+    path: &Path,
+    bytes: &[u8],
+    wrap: impl FnOnce(File) -> W,
+    commit: impl FnOnce(&Path, &Path) -> Result<CommitDisposition, E>,
+    cleanup: impl FnMut(&Path) -> io::Result<()>,
+) -> Result<(), E> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    publish_new_with_candidates(path, bytes, wrap, || loop {
-        let id = NEXT_STAGE
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1).filter(|next| *next <= STAGE_ID_LIMIT)
-            })
-            .map_err(|_| io::Error::other("publication staging identity exhausted"))?;
-        #[cfg(target_arch = "wasm32")]
-        let process_id = 0u32;
-        #[cfg(not(target_arch = "wasm32"))]
-        let process_id = std::process::id();
-        let identity = id ^ ((process_id as u64) << 12);
-        // Uppercase hex is already a valid 8.3 name, so Windows need not
-        // synthesize another short-name alias for the staging file.
-        let stage = parent.join(format!("{:08X}.{:03X}", identity >> 12, identity & 0xFFF));
-        if !stage_aliases_final(&stage, path) {
-            return Ok(stage);
-        }
-    })
+    publish_with_candidates_and_cleanup(
+        path,
+        bytes,
+        wrap,
+        || loop {
+            let id = NEXT_STAGE
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    value.checked_add(1).filter(|next| *next <= STAGE_ID_LIMIT)
+                })
+                .map_err(|_| io::Error::other("publication staging identity exhausted"))?;
+            #[cfg(target_arch = "wasm32")]
+            let process_id = 0u32;
+            #[cfg(not(target_arch = "wasm32"))]
+            let process_id = std::process::id();
+            let identity = id ^ ((process_id as u64) << 12);
+            // Uppercase hex is already a valid 8.3 name, so Windows need not
+            // synthesize another short-name alias for the staging file.
+            let stage = parent.join(format!("{:08X}.{:03X}", identity >> 12, identity & 0xFFF));
+            if !stage_aliases_final(&stage, path) {
+                return Ok(stage);
+            }
+        },
+        commit,
+        cleanup,
+    )
 }
 
 // The candidate seam keeps collision tests local while retaining the actual
 // create_new, write_all and publication operations used by the native adapter.
+#[cfg(test)]
 pub(crate) fn publish_new_with_candidates<W: PublicationWriter>(
     path: &Path,
     bytes: &[u8],
@@ -71,13 +108,25 @@ pub(crate) fn publish_new_with_candidates<W: PublicationWriter>(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn publish_new_with_candidates_and_cleanup<W: PublicationWriter>(
     path: &Path,
     bytes: &[u8],
     wrap: impl FnOnce(File) -> W,
-    mut candidate: impl FnMut() -> io::Result<PathBuf>,
+    candidate: impl FnMut() -> io::Result<PathBuf>,
     cleanup: impl FnMut(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
+    publish_with_candidates_and_cleanup(path, bytes, wrap, candidate, link_new, cleanup)
+}
+
+fn link_new(stage: &Path, final_path: &Path) -> io::Result<CommitDisposition> {
+    // hard_link creates the final name exclusively, including when it is a
+    // dangling symlink. Unsupported links refuse without a write fallback.
+    fs::hard_link(stage, final_path)?;
+    Ok(CommitDisposition::Linked)
+}
+
+pub(crate) fn validate_final_name(path: &Path) -> io::Result<()> {
     if let Some(name) = path.file_name() {
         let name = name.to_string_lossy();
         let bytes = normalized_basename(&name).as_bytes();
@@ -94,7 +143,19 @@ pub(crate) fn publish_new_with_candidates_and_cleanup<W: PublicationWriter>(
             ));
         }
     }
-    let (file, stage) = create_stage(
+    Ok(())
+}
+
+pub(crate) fn publish_with_candidates_and_cleanup<W: PublicationWriter, E: From<io::Error>>(
+    path: &Path,
+    bytes: &[u8],
+    wrap: impl FnOnce(File) -> W,
+    mut candidate: impl FnMut() -> io::Result<PathBuf>,
+    commit: impl FnOnce(&Path, &Path) -> Result<CommitDisposition, E>,
+    cleanup: impl FnMut(&Path) -> io::Result<()>,
+) -> Result<(), E> {
+    validate_final_name(path)?;
+    let (file, mut stage) = create_stage(
         &mut || {
             let stage = candidate()?;
             if stage_aliases_final(&stage, path) {
@@ -116,9 +177,11 @@ pub(crate) fn publish_new_with_candidates_and_cleanup<W: PublicationWriter>(
     // In particular, Windows cleanup must not rely on an open staging handle.
     drop(writer);
     written?;
-    // hard_link creates the final name exclusively, including when it is a
-    // dangling symlink. Unsupported links refuse without a write fallback.
-    fs::hard_link(&stage.path, path)?;
+    if let CommitDisposition::Moved = commit(&stage.path, path)? {
+        // A successful rename transfers the file; the released sibling name
+        // may now belong to another writer and must never be cleaned by us.
+        stage.armed = false;
+    }
     // Dropping the stage preserves either the primary error or committed
     // success, even when cleanup refuses. The final name is never removed.
     Ok(())
@@ -146,11 +209,14 @@ fn normalized_basename(name: &str) -> &str {
 struct OwnedStage<C: FnMut(&Path) -> io::Result<()>> {
     path: PathBuf,
     cleanup: C,
+    armed: bool,
 }
 
 impl<C: FnMut(&Path) -> io::Result<()>> Drop for OwnedStage<C> {
     fn drop(&mut self) {
-        let _ = (self.cleanup)(&self.path);
+        if self.armed {
+            let _ = (self.cleanup)(&self.path);
+        }
     }
 }
 
@@ -163,7 +229,16 @@ fn create_stage<C: FnMut(&Path) -> io::Result<()>>(
         attempts += 1;
         let path = candidate()?;
         match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => return Ok((file, OwnedStage { path, cleanup })),
+            Ok(file) => {
+                return Ok((
+                    file,
+                    OwnedStage {
+                        path,
+                        cleanup,
+                        armed: true,
+                    },
+                ))
+            }
             Err(error)
                 if error.kind() == io::ErrorKind::AlreadyExists && attempts < COLLISION_LIMIT => {}
             Err(error) => return Err(error),

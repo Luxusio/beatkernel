@@ -3,17 +3,13 @@ use crate::{
     presentation_settings::PresentationSettings,
     settings::{NativeSettings, SettingsHost},
 };
-use std::{
-    error::Error,
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-};
+#[path = "native_settings_profile.rs"]
+mod native_storage;
+
+pub use native_storage::{load_player_profile, load_profile, save_player_profile, save_profile};
 
 pub const MAX_PROFILE_BYTES: usize = 72 * 1024;
 const MAGIC: &str = "BEATKERNEL-NATIVE-PROFILE";
-static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 fn host_name(host: SettingsHost) -> &'static str {
     match host {
@@ -172,154 +168,16 @@ fn profile_records(encoded: &[u8], host: SettingsHost) -> Result<(u8, Vec<String
     Ok((version, args))
 }
 
-/// Reads a regular, non-symlink version 1 native profile with a growth-safe cap.
-pub fn load_profile(path: &Path, host: SettingsHost) -> Result<NativeSettings, Box<dyn Error>> {
-    Ok(decode_profile(&read_profile_bytes(path)?, host)?)
-}
-
-/// Reads a combined player profile or a legacy native profile with display defaults.
-pub fn load_player_profile(
-    path: &Path,
-    host: SettingsHost,
-) -> Result<PlayerProfile, Box<dyn Error>> {
-    Ok(decode_player_profile(&read_profile_bytes(path)?, host)?)
-}
-
-fn read_profile_bytes(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
-    regular_path(path)?;
-    let file = File::open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > MAX_PROFILE_BYTES as u64 {
-        return Err("profile must be a regular file at most 72 KiB".into());
-    }
-    let mut bytes = Vec::new();
-    bytes.try_reserve_exact(MAX_PROFILE_BYTES + 1)?;
-    file.take((MAX_PROFILE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_PROFILE_BYTES {
-        return Err("profile exceeds 72 KiB".into());
-    }
-    Ok(bytes)
-}
-
-/// Writes a synced, uniquely owned sibling before publishing it.
-/// Existing targets must be structurally valid same-host profiles. A new target
-/// is published with create-only hard linking; replacements use rename. Neither
-/// path promises interprocess locking or directory crash durability.
-pub fn save_profile(
-    path: &Path,
-    values: &NativeSettings,
-    host: SettingsHost,
-) -> Result<(), Box<dyn Error>> {
-    let encoded = encode_profile(values, host)?;
-    save_encoded(path, &encoded, host, validate_native_profile)
-}
-
-/// Writes version 2 using the same bounded file owner and publication protocol.
-/// Existing valid same-host version 1 or version 2 may be replaced; malformed,
-/// foreign and symlink targets remain refused. Native-only save refuses version 2.
-pub fn save_player_profile(
-    path: &Path,
-    values: &PlayerProfile,
-    host: SettingsHost,
-) -> Result<(), Box<dyn Error>> {
-    let encoded = encode_player_profile(values, host)?;
-    save_encoded(path, &encoded, host, validate_player_profile)
-}
-
-fn validate_native_profile(bytes: &[u8], host: SettingsHost) -> Result<(), String> {
-    decode_profile(bytes, host).map(|_| ())
-}
-fn validate_player_profile(bytes: &[u8], host: SettingsHost) -> Result<(), String> {
-    decode_player_profile(bytes, host).map(|_| ())
-}
-fn save_encoded(
-    path: &Path,
-    encoded: &[u8],
-    host: SettingsHost,
-    validate: fn(&[u8], SettingsHost) -> Result<(), String>,
-) -> Result<(), Box<dyn Error>> {
-    if path.file_name().is_none() {
-        return Err("profile path requires a file name".into());
-    }
-    let replacing = match fs::symlink_metadata(path) {
-        Ok(_) => {
-            validate(&read_profile_bytes(path)?, host)?;
-            true
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error.into()),
-    };
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let (mut file, mut temporary) = create_temporary(parent)?;
-    let written = (|| -> io::Result<()> {
-        file.write_all(encoded)?;
-        file.sync_all()
-    })();
-    drop(file); // Windows rename/cleanup must not depend on an open handle.
-    written?;
-    if replacing {
-        // Catch a changed/foreign/symlink target before replacement. Concurrent
-        // writers still require external coordination; this is not a lock.
-        validate(&read_profile_bytes(path)?, host)?;
-        fs::rename(temporary.path(), path)?;
-        temporary.path = None;
-    } else {
-        // Unlike rename, publication cannot replace a target created concurrently.
-        // Unsupported hard links fail explicitly without a clobbering fallback.
-        fs::hard_link(temporary.path(), path)?;
-    }
-    Ok(())
-}
-
-fn regular_path(path: &Path) -> Result<(), Box<dyn Error>> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err("profile path must be a regular file without symlinks".into());
-    }
-    Ok(())
-}
-struct OwnedTemporary {
-    path: Option<PathBuf>,
-}
-impl OwnedTemporary {
-    fn path(&self) -> &Path {
-        self.path.as_deref().expect("live owned temporary path")
-    }
-}
-impl Drop for OwnedTemporary {
-    fn drop(&mut self) {
-        if let Some(path) = &self.path {
-            let _ = fs::remove_file(path);
-        }
-    }
-}
-fn create_temporary(parent: &Path) -> Result<(File, OwnedTemporary), Box<dyn Error>> {
-    for _ in 0..32 {
-        let id = NEXT_TEMP
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1)
-            })
-            .map_err(|_| "profile temporary identity exhausted")?;
-        let path = parent.join(format!(
-            ".beatkernel-profile-{}-{id}.tmp",
-            std::process::id()
-        ));
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => return Ok((file, OwnedTemporary { path: Some(path) })),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Err("profile temporary collision limit reached".into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs, io,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
     fn values() -> NativeSettings {
         let args = [
             "--alsa",
@@ -355,11 +213,9 @@ mod tests {
                 },
             };
             let encoded = encode_player_profile(&model, host).unwrap();
-            assert!(
-                String::from_utf8(encoded.clone())
-                    .unwrap()
-                    .starts_with(&format!("{MAGIC}\t2\t{}\n", host_name(host)))
-            );
+            assert!(String::from_utf8(encoded.clone())
+                .unwrap()
+                .starts_with(&format!("{MAGIC}\t2\t{}\n", host_name(host))));
             let decoded = decode_player_profile(&encoded, host).unwrap();
             assert_eq!(decoded.native.native_args(), model.native.native_args());
             assert_eq!(decoded.presentation, model.presentation);
@@ -373,14 +229,13 @@ mod tests {
                 model.presentation
             );
             assert!(decode_profile(&encoded, host).is_err());
-            assert!(validate_native_profile(&encoded, host).is_err()); // Old save protocol cannot overwrite v2.
-            assert!(validate_player_profile(&encoded, host).is_ok());
+            assert!(decode_player_profile(&encoded, host).is_ok());
             let legacy = encode_profile(&model.native, host).unwrap();
             assert_eq!(
                 decode_player_profile(&legacy, host).unwrap().presentation,
                 PresentationSettings::default()
             );
-            assert!(validate_player_profile(&legacy, host).is_ok());
+            assert!(decode_player_profile(&legacy, host).is_ok());
         }
     }
 
@@ -413,13 +268,11 @@ mod tests {
         .unwrap();
         assert_eq!(decoded.native.native_args(), args);
         assert_eq!(decoded.presentation, model.presentation);
-        assert!(
-            !decoded
-                .native
-                .native_args()
-                .iter()
-                .any(|flag| flag == "--present")
-        );
+        assert!(!decoded
+            .native
+            .native_args()
+            .iter()
+            .any(|flag| flag == "--present"));
     }
 
     #[test]
@@ -434,10 +287,11 @@ mod tests {
             "--gpu-backend\tauto\n--present\tfifo\n--ui-fps\t29\n--ui-lookahead-ms\t2000\n",
             "--gpu-backend\tauto\n--present\tfifo\n--ui-fps\t120\n--ui-lookahead-ms\t10001\n",
         ] {
-            assert!(
-                decode_player_profile(format!("{header}{records}").as_bytes(), SettingsHost::Linux)
-                    .is_err()
-            );
+            assert!(decode_player_profile(
+                format!("{header}{records}").as_bytes(),
+                SettingsHost::Linux
+            )
+            .is_err());
         }
         for forbidden in [
             "--chart\tchart.bms\n",
@@ -447,13 +301,11 @@ mod tests {
             "--alsa\ta\tb\n",
             "\n",
         ] {
-            assert!(
-                decode_player_profile(
-                    format!("{header}{forbidden}{display}").as_bytes(),
-                    SettingsHost::Linux
-                )
-                .is_err()
-            );
+            assert!(decode_player_profile(
+                format!("{header}{forbidden}{display}").as_bytes(),
+                SettingsHost::Linux
+            )
+            .is_err());
         }
         let valid = format!("{header}{display}");
         assert!(decode_player_profile(valid.as_bytes(), SettingsHost::Windows).is_err());
@@ -462,25 +314,21 @@ mod tests {
                 .is_err()
         );
         assert!(decode_player_profile(&[255, b'\n'], SettingsHost::Linux).is_err());
-        assert!(
-            decode_player_profile(
-                format!("{MAGIC}\t3\tlinux\n{display}").as_bytes(),
-                SettingsHost::Linux
-            )
-            .is_err()
-        );
+        assert!(decode_player_profile(
+            format!("{MAGIC}\t3\tlinux\n{display}").as_bytes(),
+            SettingsHost::Linux
+        )
+        .is_err());
         let foreign_blank = NativeSettings::from_args(&[], SettingsHost::Windows).unwrap();
         assert!(encode_profile(&foreign_blank, SettingsHost::Linux).is_err());
-        assert!(
-            encode_player_profile(
-                &PlayerProfile {
-                    native: foreign_blank,
-                    presentation: PresentationSettings::default()
-                },
-                SettingsHost::Linux
-            )
-            .is_err()
-        );
+        assert!(encode_player_profile(
+            &PlayerProfile {
+                native: foreign_blank,
+                presentation: PresentationSettings::default()
+            },
+            SettingsHost::Linux
+        )
+        .is_err());
     }
 
     #[test]
@@ -578,23 +426,20 @@ mod tests {
                     .is_err()
             );
         }
-        assert!(
-            decode_profile(
-                b"BEATKERNEL-NATIVE-PROFILE\t2\tlinux\n",
-                SettingsHost::Linux
-            )
-            .is_err()
-        );
+        assert!(decode_profile(
+            b"BEATKERNEL-NATIVE-PROFILE\t2\tlinux\n",
+            SettingsHost::Linux
+        )
+        .is_err());
         assert!(decode_profile(&[255, b'\n'], SettingsHost::Linux).is_err());
         assert!(decode_profile(&vec![b'x'; MAX_PROFILE_BYTES + 1], SettingsHost::Linux).is_err());
     }
-    // Authored file regression scenarios; do not execute while QA is deferred.
     struct Directory(PathBuf);
     impl Directory {
         fn new() -> Self {
             let root = std::env::temp_dir();
             for _ in 0..32 {
-                let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+                let id = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
                 let path = root.join(format!(
                     "beatkernel-profile-test-{}-{id}",
                     std::process::id()
@@ -652,12 +497,10 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert!(load_profile(&link, SettingsHost::Linux).is_err());
         assert!(save_profile(&link, &values(), SettingsHost::Linux).is_err());
-        assert!(
-            fs::symlink_metadata(&link)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }
 

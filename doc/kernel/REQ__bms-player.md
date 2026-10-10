@@ -323,6 +323,11 @@ not promise interprocess locking, directory crash durability or cancellation
 of an in-flight OS file operation. Native resource availability remains checked
 by actual game preparation.
 
+The [native profile publication contract](../runtime/REQ__native-profile-publication.md)
+owns the shared staged-write/commit guarantees and reserved-name validation
+precedence. Its stronger file-safety implementation and verification are in
+progress; Save/Load/Apply behavior and profile schemas remain unchanged.
+
 `player (--library DIR | --chart PATH) NATIVE_OPTIONS` selects the graphical
 mode; no arguments open the current directory catalog. Native configuration
 can be supplied as flag/value pairs or edited through F2/the Settings button.

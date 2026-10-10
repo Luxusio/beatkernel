@@ -1,6 +1,7 @@
 use super::{
     publish_new, publish_new_with, publish_new_with_candidates,
-    publish_new_with_candidates_and_cleanup, PublicationWriter,
+    publish_new_with_candidates_and_cleanup, publish_with_candidates_and_cleanup,
+    CommitDisposition, PublicationWriter,
 };
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -838,4 +839,169 @@ fn nonreserved_alias_candidates_still_refuse_before_creating_or_wrapping() {
         assert!(!wrapped);
         assert!(dir.names().is_empty());
     }
+}
+
+#[test]
+fn commit_refusal_preserves_opaque_box_identity_despite_cleanup_refusal() {
+    let dir = TempDir::new();
+    let stage = dir.path("controlled-stage");
+    let final_path = dir.path("result");
+    fs::write(&final_path, b"foreign original").unwrap();
+    let observed = Arc::new(Mutex::new(Observation::default()));
+    let mut original_error_address = None;
+    let mut cleanup_calls = 0;
+    let error: Box<dyn std::error::Error> = publish_with_candidates_and_cleanup(
+        &final_path,
+        b"abcdefgh",
+        |file| FaultWriter {
+            file: Some(file),
+            stage: stage.clone(),
+            final_path: final_path.clone(),
+            fault: Fault::ShortInterrupted,
+            written: 0,
+            calls: 0,
+            observed: Arc::clone(&observed),
+        },
+        || Ok(stage.clone()),
+        |owned_stage, target| {
+            let observed = observed.lock().unwrap();
+            assert!(observed.closed);
+            assert!(observed.stage_present_at_close);
+            assert!(observed.final_present_at_close);
+            assert_eq!(observed.bytes_at_close, b"abcdefgh");
+            assert_eq!(fs::read(owned_stage).unwrap(), b"abcdefgh");
+            let error: Box<dyn std::error::Error> =
+                Box::new(fs::hard_link(owned_stage, target).unwrap_err());
+            original_error_address = Some((&*error as *const dyn std::error::Error).cast::<()>());
+            Err(error)
+        },
+        |owned_stage| {
+            cleanup_calls += 1;
+            assert!(observed.lock().unwrap().closed);
+            assert_eq!(fs::read(owned_stage).unwrap(), b"abcdefgh");
+            assert_eq!(fs::read(&final_path).unwrap(), b"foreign original");
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "fixture cleanup refusal",
+            ))
+        },
+    )
+    .unwrap_err();
+    assert_eq!(cleanup_calls, 1);
+    assert_eq!(
+        Some((&*error as *const dyn std::error::Error).cast::<()>()),
+        original_error_address
+    );
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().kind(),
+        io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(fs::read(&final_path).unwrap(), b"foreign original");
+    assert_eq!(fs::read(&stage).unwrap(), b"abcdefgh");
+    let mut expected = vec![stage, final_path];
+    expected.sort();
+    assert_eq!(dir.names(), expected);
+}
+
+#[test]
+fn moved_commit_retires_stage_ownership_and_preserves_reused_foreign_path() {
+    let dir = TempDir::new();
+    let stage = dir.path("controlled-stage");
+    let final_path = dir.path("result");
+    fs::write(&final_path, b"old complete profile").unwrap();
+    let observed = Arc::new(Mutex::new(Observation::default()));
+    let mut cleanup_calls = 0;
+    let result: io::Result<()> = publish_with_candidates_and_cleanup(
+        &final_path,
+        b"abcdefgh",
+        |file| FaultWriter {
+            file: Some(file),
+            stage: stage.clone(),
+            final_path: final_path.clone(),
+            fault: Fault::ShortInterrupted,
+            written: 0,
+            calls: 0,
+            observed: Arc::clone(&observed),
+        },
+        || Ok(stage.clone()),
+        |owned_stage, target| {
+            let observed = observed.lock().unwrap();
+            assert!(observed.closed);
+            assert!(observed.stage_present_at_close);
+            assert!(observed.final_present_at_close);
+            assert_eq!(observed.bytes_at_close, b"abcdefgh");
+            assert_eq!(fs::read(target).unwrap(), b"old complete profile");
+            fs::rename(owned_stage, target)?;
+            assert_eq!(fs::read(target).unwrap(), b"abcdefgh");
+            assert!(!owned_stage.exists());
+            let mut foreign = File::options()
+                .write(true)
+                .create_new(true)
+                .open(owned_stage)
+                .unwrap();
+            foreign
+                .write_all(b"foreign replacement at released path")
+                .unwrap();
+            foreign.flush().unwrap();
+            drop(foreign);
+            Ok(CommitDisposition::Moved)
+        },
+        |owned_stage| {
+            cleanup_calls += 1;
+            fs::remove_file(owned_stage)
+        },
+    );
+    result.unwrap();
+    assert_eq!(cleanup_calls, 0);
+    assert_eq!(fs::read(&final_path).unwrap(), b"abcdefgh");
+    assert_eq!(
+        fs::read(&stage).unwrap(),
+        b"foreign replacement at released path"
+    );
+    let mut expected = vec![stage, final_path];
+    expected.sort();
+    assert_eq!(dir.names(), expected);
+}
+
+#[test]
+fn linked_commit_observes_complete_closed_writer_then_cleans_owned_stage() {
+    let dir = TempDir::new();
+    let stage = dir.path("controlled-stage");
+    let final_path = dir.path("result");
+    let observed = Arc::new(Mutex::new(Observation::default()));
+    let mut cleanup_calls = 0;
+    let result: io::Result<()> = publish_with_candidates_and_cleanup(
+        &final_path,
+        b"abcdefgh",
+        |file| FaultWriter {
+            file: Some(file),
+            stage: stage.clone(),
+            final_path: final_path.clone(),
+            fault: Fault::ShortInterrupted,
+            written: 0,
+            calls: 0,
+            observed: Arc::clone(&observed),
+        },
+        || Ok(stage.clone()),
+        |owned_stage, target| {
+            let observed = observed.lock().unwrap();
+            assert_closed_before_cleanup(&observed);
+            assert_eq!(observed.bytes_at_close, b"abcdefgh");
+            assert_eq!(observed.writes, 5);
+            assert_eq!(fs::read(owned_stage).unwrap(), b"abcdefgh");
+            fs::hard_link(owned_stage, target)?;
+            Ok(CommitDisposition::Linked)
+        },
+        |owned_stage| {
+            cleanup_calls += 1;
+            assert_closed_before_cleanup(&observed.lock().unwrap());
+            assert_eq!(fs::read(owned_stage).unwrap(), b"abcdefgh");
+            assert_eq!(fs::read(&final_path).unwrap(), b"abcdefgh");
+            fs::remove_file(owned_stage)
+        },
+    );
+    result.unwrap();
+    assert_eq!(cleanup_calls, 1);
+    assert_eq!(fs::read(&final_path).unwrap(), b"abcdefgh");
+    assert_eq!(dir.names(), vec![final_path]);
 }
