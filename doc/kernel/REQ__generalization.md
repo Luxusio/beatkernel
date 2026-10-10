@@ -5,6 +5,42 @@ without game-name branches in core. Examples provide knob, dual-contact arc,
 roll, fret/trigger chord, pointer and pose fixtures as caller configurations.
 All use the same JudgeEngine in live play and replay.
 
+## Original six-style combination acceptance
+
+The additive software fixture must exercise both absolute and relative axis
+tracking, two concurrent touch contacts, fresh-press repeated input,
+same-device held prerequisites with a fresh trigger, pointer trajectory plus a
+separately bound button instant hit, and a caller-owned derived pose interaction.
+Existing seven-object builders and the default example route remain compatible.
+These are representative combinations, not compatibility with named games.
+
+The derived pose policy belongs to the example and uses existing evaluator
+traits. It follows a linear position path from [0,0,0] to [1,1,1] with tolerance
+0.001 and a maximum sample gap of 150ns. Its finite quaternion must have squared
+norm within 0.001 of one and abs(w) >= 0.9, inclusively; q and -q are equivalent.
+An invalid pending sample cannot acquire ownership. An invalid active owner's
+position/orientation produces one RejectedInput miss. Wrong payload, device,
+physical control or logical destination cannot steal or terminate the owner.
+Final success requires a qualifying original input; advancing time alone cannot
+manufacture a hit. Inclusive timing limits expire strictly after their boundary.
+
+Both snapshot hooks must preserve the complete immutable criterion, lifecycle,
+times, logical control, physical owner and mutable sample history. Verification
+requires literal per-style outcomes and provenance as well as live/replay parity
+and restoration from an active checkpoint.
+
+Independent DEEP code review and CLI QA on `f3e7c8f` passed: full core 498/0,
+release focused 38/38, strict core all-target Clippy and 12 debug/release CLI
+checks. Evidence is in `target/wf/qa-cli-six-patterns-01a12342-1/`.
+`tests/generalization_six_patterns.rs` names each of the six combinations and
+checks their literal outcomes, input metadata, independent negative cases and
+active checkpoint reconstruction through Runtime and replay. Both axis modes
+produce eight hits, including the pointer-device button instant and derived
+pose; the default seven-object route and all 19 legacy tests remain valid.
+`tests/derived_pose.rs` independently checks the fixed policy's 12 boundary,
+ownership, numeric, input-backed completion and snapshot cases. This verifies
+the original six-style software combinations, not physical/game compatibility.
+
 Repeated consumes fresh Down transitions within a positive ranged object,
 tracks source/control ownership across Up and Repeat, and completes after a
 configured minimum count or reports a timeout. Tracking consumes typed axis,
@@ -23,7 +59,9 @@ observed, preserving source identities and optional same-device ownership.
 Snapshots capture all these states and canonical bytes. Unsupported custom
 evaluators still fail explicitly. Configuration validation runs before engine
 construction; callbacks never parse game names or native key codes. Fixtures
-and compile checks accompany implementation; formal verification is deferred.
+and compile checks accompany implementation. Source presence alone does not
+establish current verification; scoped execution and independent review evidence
+must be recorded separately. The earlier blanket verification deferral is lifted.
 
 ## Game-owned contact reacquisition fixture
 
@@ -54,5 +92,6 @@ device/surface/logical owner, acquired contact and detached release time. Existi
 JudgeEngine snapshots and ReplaySession restoration retain those actual states.
 The generalization test source covers lifecycle boundaries, identity isolation,
 cancellation, region validation, snapshot differences and replay/seek parity.
-The example and fixtures are compiled only; execution and independent review
-remain deferred.
+Independent QA executed all 19 legacy tests in debug and release, including the
+contact-rebind cases. Physical contact behavior is not established by this
+software execution.

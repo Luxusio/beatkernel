@@ -62,8 +62,21 @@ source compilation. Runtime setup and result handling may allocate under their
 documented boundaries. Input cadence and render cadence report different native
 clock locations; neither proves physical latency or exact missing-event counts.
 
-The user's verification deferral remains authoritative: do not run fixtures,
-examples, native builds/devices, benchmarks, formal review or QA solely because
-this table identifies missing evidence. Compile/format checks are allowed.
-Retain full acceptance and revisit actual verification when that sequencing
-instruction changes. No full completion, PASS or task close is established here.
+The user's earlier verification deferral has been lifted. Current independent
+execution and review evidence may supersede the historical pending entries
+above only for the scope actually tested. The six-style software combination
+work must cover absolute/relative axis, dual contact, repeated fresh presses,
+held prerequisites plus trigger, pointer trajectory plus button instant, and
+caller-owned orientation-dependent pose through the common Runtime and replay.
+The six-style combinations now have independent DEEP code review and CLI QA
+evidence on `f3e7c8f`: full core 498/0 (including 16 doctests), release focused
+38/38, strict core all-target Clippy and 12 actual debug/release CLI checks.
+`tests/generalization_six_patterns.rs` supplies six named positive/negative
+Runtime suites and active reconstruction; `tests/derived_pose.rs` supplies 12
+caller-owned policy tests. `--six-patterns` executes eight literal hits in each
+axis mode, while the original default/`--fixture` keeps seven objects. Artifacts
+are under `target/wf/qa-cli-six-patterns-01a12342-1/`; details and limits are in
+[the generalization contract](REQ__generalization.md). This supersedes the
+historical pending wording above for the corresponding §22 software cases.
+Physical/platform/player and release requirements retain their original
+acceptance scope; the full Goal is not complete.

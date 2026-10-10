@@ -83,6 +83,7 @@ python3 tools/wbs_status.py --ready
 | E33 | `891eb85`의 독립 dense-chart QA: `target/wf/qa-cli-dense-chart-01a11dd7/REPORT.md`, `cli-results.json`; 전체 core426 PASS / 실패0(새 dense9 포함), all-target Clippy/release build/DEEP code/security/docs PASS, 실제 release CLI38건(거절28건) PASS | actual judge/replay/projector의 원본2N 기록·golden head/tail/provenance·fresh prefix 복원·narrow tail·geometry/storage 검사. 기본2만 노트 및10만 노트/64레인 실제 실행; 반복20h/week origin facts 일치. origin은 장시간 실행이 아니며 레인은 member가 아님. GPU/물리/native/soak/rebind/다인 및 전체13.05/13.08 완료는 별도 |
 | E34 | 영상 BGA 독립 DEEP code review와 qa-cli/qa-browser PASS: `target/wf/bms-video/qa-cli/`, `target/wf/bms-video/qa-browser/evidence.json`; app2124 PASS/실패0/ignored6, external51 PASS(실제 FFmpeg2 포함), Node750 PASS, native encoded-to-Scene/GPU2 PASS, 실제 Chromium23 checks PASS | VFR/B-frame/nonzero origin/preroll/backseek/EOF/반복 활성화·예산/ACK/종료·실제 native/browser GPU 및 preview/live/results/history/replay/local2/reload. Windows/macOS 실제 실행·물리 오디오 지연·모든 코덱/배포 선택은 별도. 재현 계약은 REQ__bms-video. |
 | E35 | retained practice 독립 DEEP code/security cycle4와 qa-cli PASS: `target/wf/qa-cli-gapless-01a1220c-1/`; core public debug/release 각27 PASS, 현재 app2250/0/6·native307/0/5, CLI7/7, Windows/macOS all-targets typing exit0 | 실제 Desktop→spawned worker→공통 pump→production factory→유일 converted owner의 loop/disable/scrub/F5·부분 target admission·원본 PCM/기록 검증. 실패 Stop 누적·2..4 cohort·subframe cut·양수 시작 등록/replay 검증 포함. Native 관측은 주입; stub은 타입만 증명. 물리 음향/ASIO SDK·장치/브라우저 parity·출력 교체는 별도. |
+| E36 | `f3e7c8f`의 독립 six-style DEEP code review와 qa-cli PASS: `target/wf/qa-cli-six-patterns-01a12342-1/`; core498 PASS/실패0/ignored0(doctest16 포함), release focused38/38, strict core all-target Clippy·4파일 포맷·CLI12/12 PASS | plan §22의 Absolute/Relative axis, dual contact, fresh press repeated, held chord trigger, pointer trajectory+button Instant, caller-owned orientation pose를 실제 Runtime/record/replay와 literal 결과/원본 metadata·negative·active checkpoint로 검증. 기존7개 예제 보존, 새 모드 각8개 hit. 실제 게임 호환·물리 장치·native/browser 실행·전체 제품 성능은 별도. |
 
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
@@ -166,7 +167,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-04.09** 게임/OS 분기 없이 최소 네 가지 일반화 입력·상호작용 fixture를 실행한다. — 상태=D(검증완료); 선행=-; 근거=E0.
 - [ ] **BK-WBS-04.10** 모든 오류·capacity 초과·trusted callback 경계를 계층별로 다시 audit한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=오류 전후 상태·panic/side-effect 계약.
 - [ ] **BK-WBS-04.11** 현재 source 전체에서 live class/EX/accepted lane 피드백을 실제 GUI와 일치시킨다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=실제 Runtime prefix→UI→결과 비교.
-- [ ] **BK-WBS-04.12** SDVX axis·Arcaea dual-contact·Taiko repeated·GITADORA composite·osu pointer·VR pose 여섯 일반화 fixture가 각각 실제 입력/판정 결과를 재현한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-04.04; 필요 근거/다음=plan §22의 여섯 조합을 이름별 suite/결과에 대응; 최소 네 종류 DoD만으로 여섯 조합을 완료 처리하지 않음.
+- [x] **BK-WBS-04.12** SDVX axis·Arcaea dual-contact·Taiko repeated·GITADORA composite·osu pointer·VR pose 여섯 일반화 fixture가 각각 실제 입력/판정 결과를 재현한다. — 상태=D(검증완료); 선행=BK-WBS-04.04; 근거=E36, [여섯 조합 계약](REQ__generalization.md); 범위=원본 plan §22의 대표 software 조합, 실제 게임 호환/장치 검증 아님.
 
 ### 05. 오디오 커널·PCM·명령·변환
 
@@ -495,3 +496,7 @@ Native collector termination 절에 있다.
   code/security/CLI QA와 양 OS all-targets typing이 통과해09.11을 D로 갱신했다.
   완료85→86, 활성193 유지.09.12 물리 동기화·browser parity·출력 교체와
   전체 제품/출시 검증은 해당 남은 leaf에서 유지한다.
+- 2026-10-10: 원본 §22의 여섯 조합을 실제 Runtime/기록/replay에 연결하고 독립
+  DEEP code review·core498/0·release38/38·CLI12/12 QA로 검증해04.12를 D로 갱신했다.
+  완료86→87, 활성193 유지. 실제 게임 호환·물리 입력·native/browser 및 출시 조건은
+  남은 leaf에서 유지한다.
