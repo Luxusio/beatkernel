@@ -94,8 +94,35 @@ are implemented. Fresh scoped verification passed **24/24** historical Worker
 tests and **14/14** recording admission tests (exit zero, no skips/failures):
 `target/wf/record-storage-history-remediation-development-12b87.log` and
 `target/wf/record-storage-admission-remediation-development-12b87.log`.
-Full CLI and browser QA have not run for this task; fresh review must precede
-them.
+Fresh independent formal code and security reviews then passed at `ee8d658`.
+The full independent serial Node suite passed **1096/1096**, zero failures,
+cancelled tests, skips or todo, exit zero:
+`target/wf/record-storage-qa-cli-12b87-1/node-full.log`.
+
+First independent browser QA returned **FAIL**. The full settings probe passed
+its original journeys plus real Worker storage; strict audio request completion
+passed in both Puppeteer and Worker CDP. Full render recorded **19/20** checks
+passing, but the new local-member-history case omitted enabling its touch source
+and timed out before play. Matching production input discovery respects that
+checkbox, and the existing successful local-touch case enables it explicitly.
+The new case now enables touch through the same public control; retain the
+actual failure at `target/wf/record-storage-qa-browser-render-12b87-1/`.
+Fresh affected review/browser verification remains required.
+
+After enabling touch through the existing public checkbox, scoped actual
+Chromium verification reached **local-member-history PASS** for both original
+players `[1,2]`, with exact replay/archive save/load and historical association
+assertions. No scenario failure occurred:
+`target/wf/record-storage-local-history-development-12b87-1/evidence.json`.
+As with earlier selected-case runs, the unchanged full-scope completion gate
+exits one for unexecuted scenarios. Full affected browser QA remains required.
+
+Settings evidence: `target/wf/record-storage-qa-browser-settings-12b87-1/`.
+Its PASS does not prove permanent repair of the preceding audio abort. Strict
+trusted WebTransport remains environment-blocked without an eligible endpoint;
+the actual strict entrypoint exited one before launch for missing app URL, and
+existing raw unknown-root evidence is preserved. Render local DeveloperMode
+bootstrap is explicitly development-only, with no trusted QUIC acceptance claim.
 
 ## Known ceiling
 

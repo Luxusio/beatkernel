@@ -648,6 +648,7 @@ async function main() {
   await scenario("local-member-history", async () => {
     const page = await observedPage("local-history"); await prepare(page);
     await page.click("#record");
+    if (!await page.$eval("#touch-input", x => x.checked)) await page.click("#touch-input");
     await page.$eval("#local-count", x => { x.closest("details").open = true; x.value = "2"; x.dispatchEvent(new Event("change", { bubbles: true })); });
     await page.waitForFunction(() => !document.querySelector("#local-discover").disabled); await page.click("#local-discover");
     await page.waitForFunction(() => document.querySelector("#local-source-1")?.options.length >= 3 && !document.querySelector("#local-source-1").disabled);

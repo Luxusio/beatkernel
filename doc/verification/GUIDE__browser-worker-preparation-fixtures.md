@@ -100,3 +100,9 @@ Window assertions cover immutable handle type, extent, owner, roster and joined
 completion, with traps for affected binary reads/construction and IndexedDB.
 Handle identity alone does not prove capture-buffer uniqueness: retain the
 Worker's raw alias-refusal and original member-byte assertions.
+
+Actual two-player browser fixtures must enable the public touch-input control
+before discovering keyboard plus touch sources. Desktop Chromium can expose
+only the keyboard by default; waiting for a second source without enabling it
+does not exercise local recording or storage. Preserve real source discovery,
+explicit member selection and exact per-member capture/archive assertions.
