@@ -83,6 +83,20 @@ native record catalog는 현재 선택한 실제 배속을 사용한다.
 
 ## 끝·UI·오류
 
+네이티브 solo는 `run_gameplay_audio_with_result_and_ports_with_speed`와
+`run_gameplay_audio_with_policy_and_result_and_score_and_ports_with_speed`,
+cohort는 `run_cohort_audio_with_ports_and_speed`와
+`run_cohort_audio_with_ports_and_policies_and_speed`로 시작한다.
+기존 인자 뒤에 불변 `LiveSpeedSetup`을 전달하며 기존 API 기본 동작은 보존한다.
+잘못된 setup은 기존 `NativeGameplayResult` 오류로 native 제어 효과 전에 거절한다.
+
+브라우저 solo의 `new_and_speed`, `new_section_and_speed`,
+`new_physical_and_speed`, `new_physical_contact_and_speed`와 local의
+`new_physical_and_speed`는 기존 인자 뒤에 fraction 문자열을 받는다.
+정규화한 `speed_numerator`와 `speed_denominator`는 BigInt getter로 확인한다.
+기존 Prepared의 실제 play policy를 공통 정책 생성자로 전달하며,
+기존 생성자는 원래 기본 경로를 유지한다.
+
 정수 매핑이 original end에 도달했다는 것만으로 출력 종료를 승인하지 않는다.
 실제 admitted/consumed/applied, BGM retirement/ACK와 원래 source presentation
 또는 converted target crossing이 확보됐을 때만 마지막 원곡 Advance(end)로
@@ -95,6 +109,14 @@ end에 seek하고 기존 Runtime advance를 실행할 수 있다. 이는 termina
 zero/quantized endpoint도 같은 권한이 필요하다. Renderahead, wall cutoff,
 미완료 SetRate/Stop 또는 source-only converted 관측은 종료 근거가 아니다.
 
+실제 immutable finite source 출력 종료 표식이 검증된 뒤에는 해당 Runtime의
+게임플레이 오디오 발행을 닫는다. 종료 전 시각의 유효 입력이 뒤늦게 도착해도
+원래 판정·hazard·gauge·provenance·기록을 처리하고 `audio_at`을 보존한다.
+이미 소리를 낼 수 없는 출력에 새 키음·입력음·hazard음 또는 실패 Stop을 넣지
+않으며, 기존에 발행한 명령·credit·ACK는 그대로 검증한다. 임시 pause나 숫자상
+곡 종료는 이 경계를 닫지 않는다. 변환 출력의 source가 먼저 닫혀도 target
+presentation 통과와 입력 drain 없이는 플레이 완료로 인정하지 않는다.
+
 native --speed와 기존 Settings 필드 및 browser live 배속 필드는 NUM/DEN,
 1/1 기본값과 pitch 변화 의미를 표시한다. 잘못된 값은 파일·장치·오디오
 시작 전에 거절하고 UI에서 focus를 유지한다. Preparing/Playing은 선택 snapshot을
@@ -102,6 +124,12 @@ native --speed와 기존 Settings 필드 및 browser live 배속 필드는 NUM/D
 cleanup과 stale generation fencing을 따른다. 브라우저 live/replay 배속 draft는
 구분하며 per-frame DOM이나 VDOM을 도입하지 않는다. native profile은 기존
 flag-pair 형식을 사용하고 empty/default 바이트는 유지한다.
+
+Worker live 요청의 `liveSpeed`는 fraction 문자열이며 생략하면 `1/1`이다.
+`replaySpeed`는 별도의 replay 선택 값이다. Preparing 응답은 정규화된
+`liveSpeed`와 BigInt `liveSpeedNumerator`/`liveSpeedDenominator`를 반환하며,
+기존 `endNs`/`endFrame`의 단위와 종료 권한은 유지한다. 첫 비동기 대기 전에
+선택값을 복사하고 실제 WASM getter와 프레임 경계를 대조한다.
 
 ## 검증과 남은 범위
 
