@@ -72,6 +72,9 @@ legacy tuple decoder는 nonnormal metadata를 조용히 버리지 않고 거절�
 `setup_play_policy_header_with_speed`와
 `LiveReplayCapture::new_with_policy_and_speed`는 기존 policy 인자 뒤에
 source speed를 받으며 기존 생성자들은 NORMAL 바이트를 유지한다.
+명시적인 play policy가 없는 소비자는 `new_with_gauge_and_speed`에서
+기존 `new_with_gauge` 인자 뒤에 source speed를 전달한다. 기존 judge/gauge를
+그대로 보존하며 배속을 기록하기 위해 새 판정 정책을 만들어 넣지 않는다.
 
 원곡 판정 복원에는 기록 speed를 다시 곱하지 않는다. 선택한 리플레이
 출력 배속은 기록 당시 조건과 별개다. 경쟁·saved opponent는 기존 canonical
@@ -84,6 +87,11 @@ native record catalog는 현재 선택한 실제 배속을 사용한다.
 실제 admitted/consumed/applied, BGM retirement/ACK와 원래 source presentation
 또는 converted target crossing이 확보됐을 때만 마지막 원곡 Advance(end)로
 solo/cohort 각 member의 judge/gauge/capture frontier를 닫는다.
+출력 프레임 양자화로 원곡 end보다 정수 위치가 짧으면, 위 종료 권한을
+확인한 뒤 실제 마지막 논리 operation 시점에서 같은 Transport를 명시적으로
+end에 seek하고 기존 Runtime advance를 실행할 수 있다. 이는 terminal
+원곡 종료 처리이며 새 시계나 실행 중 seek가 아니다. 선택한 불변 setup과
+기록 배속은 보존하고 이후 입력·resume를 허용하지 않는다.
 zero/quantized endpoint도 같은 권한이 필요하다. Renderahead, wall cutoff,
 미완료 SetRate/Stop 또는 source-only converted 관측은 종료 근거가 아니다.
 

@@ -598,3 +598,190 @@ fn source_speed_wraps_complete_timing_judgment_gauge_policy_without_losing_secti
     assert_eq!(decoded.end, Some(ts(4_000_000_000)));
     assert!(validate_section_setup(&source, &file, limits()).is_ok());
 }
+
+#[test]
+fn gauge_only_normal_speed_preserves_original_header_and_canonical_file_bytes() {
+    use beatkernel_bms_runtime::gauge::{GaugeProfile, GradeDelta};
+    let source = source();
+    let judge = judge(&source, &policy());
+    let gauge = GaugeProfile::new(
+        321,
+        789,
+        17,
+        -23,
+        false,
+        vec![GradeDelta {
+            grade: JudgeGrade(1),
+            delta: 41,
+        }],
+    )
+    .unwrap();
+    let old = LiveReplayCapture::new_with_gauge(
+        &judge,
+        ClockDomainId(1),
+        limits(),
+        Timestamp::ZERO,
+        0,
+        None,
+        BmsInputMode::ButtonOnly,
+        None,
+        &gauge,
+    )
+    .unwrap();
+    let new = LiveReplayCapture::new_with_gauge_and_speed(
+        &judge,
+        ClockDomainId(1),
+        limits(),
+        Timestamp::ZERO,
+        0,
+        None,
+        BmsInputMode::ButtonOnly,
+        None,
+        &gauge,
+        speed("2/2"),
+    )
+    .unwrap();
+    assert_eq!(old.header(), new.header());
+    assert_eq!(old.encoded_bytes(), new.encoded_bytes());
+    assert_eq!(old.into_bytes().unwrap(), new.into_bytes().unwrap());
+}
+
+#[test]
+fn gauge_only_source_speed_retains_arbitrary_judge_and_gauge_without_judgment_classes() {
+    use beatkernel::judge::{JudgeProfile, JudgeWindow};
+    use beatkernel_bms_runtime::gauge::{GaugeProfile, GradeDelta};
+    let source = source();
+    let profile = JudgeProfile::new(
+        vec![JudgeWindow {
+            grade: JudgeGrade(7),
+            early: Duration::from_nanos(11),
+            late: Duration::from_nanos(23),
+        }],
+        Duration::from_nanos(-19),
+    )
+    .unwrap();
+    let judge = JudgeEngine::new(
+        source.compile().unwrap().chart,
+        source.rules(),
+        profile.clone(),
+    )
+    .unwrap();
+    let gauge = GaugeProfile::new(
+        321,
+        789,
+        17,
+        -23,
+        false,
+        vec![GradeDelta {
+            grade: JudgeGrade(7),
+            delta: 41,
+        }],
+    )
+    .unwrap();
+    let legacy = LiveReplayCapture::new_with_gauge(
+        &judge,
+        ClockDomainId(1),
+        limits(),
+        Timestamp::ZERO,
+        0,
+        None,
+        BmsInputMode::ButtonOnly,
+        None,
+        &gauge,
+    )
+    .unwrap()
+    .into_file();
+    for text in ["1/2", "1/1", "2/1", "3/2"] {
+        let selected = speed(text);
+        let capture = LiveReplayCapture::new_with_gauge_and_speed(
+            &judge,
+            ClockDomainId(1),
+            limits(),
+            Timestamp::ZERO,
+            0,
+            None,
+            BmsInputMode::ButtonOnly,
+            None,
+            &gauge,
+            selected,
+        )
+        .unwrap();
+        let file = capture.into_file();
+        let decoded = decode_section_setup(&file.header.options).unwrap();
+        assert_eq!(decoded.source_speed, selected);
+        assert_eq!(decoded.profile, profile);
+        assert_eq!(decoded.gauge, gauge);
+        assert!(decoded.judgments.is_none());
+        assert!(decoded.timing.is_none());
+        let (inner, _) = split_options(&file.header.options).unwrap();
+        assert_eq!(inner, legacy.header.options);
+        assert!(inner.starts_with(b"bms-gauge-setup/v1:"));
+        let replay = reconstruct_section(&source, file.clone(), limits()).unwrap();
+        assert!(replay.results().is_empty());
+        assert_eq!(
+            replay.engine().stable_hash().unwrap(),
+            judge.stable_hash().unwrap()
+        );
+        let path = Path::new("records/arbitrary-gauge-speed.bkr");
+        assert!(RecordPreview::from_file_with_setup(
+            path,
+            &source,
+            &decoded,
+            file.clone(),
+            None,
+            None
+        )
+        .is_ok());
+        let mut wrong = decoded.clone();
+        wrong.source_speed = if selected == speed("1/1") {
+            speed("3/2")
+        } else {
+            speed("1/1")
+        };
+        assert!(RecordPreview::from_file_with_setup(
+            path,
+            &source,
+            &wrong,
+            file.clone(),
+            None,
+            None
+        )
+        .is_err());
+        if selected != speed("1/1") {
+            let total = file.header.options.len()
+                + file.header.chart_identity.len()
+                + file.header.rules_identity.len()
+                + env!("CARGO_PKG_VERSION").len();
+            let bounded = |budget| {
+                ReplayCodecLimits::new(1 << 20, 100, budget, CodecLimits::new(4096, 1024).unwrap())
+                    .unwrap()
+            };
+            assert!(LiveReplayCapture::new_with_gauge_and_speed(
+                &judge,
+                ClockDomainId(1),
+                bounded(total),
+                Timestamp::ZERO,
+                0,
+                None,
+                BmsInputMode::ButtonOnly,
+                None,
+                &gauge,
+                selected
+            )
+            .is_ok());
+            assert!(LiveReplayCapture::new_with_gauge_and_speed(
+                &judge,
+                ClockDomainId(1),
+                bounded(total - 1),
+                Timestamp::ZERO,
+                0,
+                None,
+                BmsInputMode::ButtonOnly,
+                None,
+                &gauge,
+                selected
+            )
+            .is_err());
+        }
+    }
+}

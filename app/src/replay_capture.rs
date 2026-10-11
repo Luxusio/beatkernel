@@ -486,6 +486,35 @@ impl LiveReplayCapture {
         input_sounds: Option<InputSoundIdentity>,
         gauge: &crate::gauge::GaugeProfile,
     ) -> Result<Self, CaptureError> {
+        Self::new_with_gauge_and_speed(
+            judge,
+            domain,
+            limits,
+            start,
+            chart_seed,
+            end,
+            input_mode,
+            input_sounds,
+            gauge,
+            crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+                .expect("positive normal rate"),
+        )
+    }
+
+    /// Records gauge and source speed without introducing additional play policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_gauge_and_speed(
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        limits: ReplayCodecLimits,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        input_sounds: Option<InputSoundIdentity>,
+        gauge: &crate::gauge::GaugeProfile,
+        source_speed: crate::replay_speed::ReplaySpeed,
+    ) -> Result<Self, CaptureError> {
         let header = setup_gauge_header(
             judge,
             domain,
@@ -497,6 +526,8 @@ impl LiveReplayCapture {
             input_sounds,
             gauge,
         )?;
+        let header = crate::replay_speed_policy::wrap_header(header, source_speed, limits)
+            .map_err(CaptureError::SourceSpeed)?;
         let header_bytes =
             encode_replay(&ReplayFile::new(header.clone(), Vec::new()), limits)?.len();
         Ok(Self {

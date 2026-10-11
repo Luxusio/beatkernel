@@ -2,14 +2,14 @@
 //! Hosts supply clock relations and genuine completed-render cursors. This
 //! module does not sample a platform clock or infer delivery from admission.
 use crate::{
-    PreparedBms,
-    audio_authority::{AudioAuthority, AudioAuthorityError, PreparedInput, PreparedFrontier},
-    local_input::InputMerger,
+    audio_authority::{AudioAuthority, AudioAuthorityError, PreparedFrontier, PreparedInput},
     bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     competition::{CompetitionError, ScoreSummary},
     completion::{CompletionError, SongCompletion},
     gauge::{BmsGauge, GaugeError},
     input_sounds::{InputSoundIdentity, InputSoundPlan},
+    live_speed::LiveSpeedSetup,
+    local_input::InputMerger,
     local_players::{PlayerId, ResolvedInputPlan},
     local_preparation::{
         prepare_local_input_sounds, prepare_local_members_with_timing, prepare_local_mine_sounds,
@@ -23,23 +23,25 @@ use crate::{
     offline::OwnedStopEvidence,
     play_result::CompletedPlayResult,
     replay_audio::{
-        ReplayAudioError, before_endpoint, completed_render_cursor_with_stops, section_end_frame,
+        before_endpoint, completed_render_cursor_with_stops, section_end_frame, ReplayAudioError,
     },
-    replay_capture::{CaptureError, LiveReplayCapture, setup_gauge_header},
+    replay_capture::{setup_gauge_header, CaptureError, LiveReplayCapture},
+    replay_speed::ReplaySpeed,
+    PreparedBms,
 };
 use beatkernel::{
     audio::{
-        AudioCommand, AudioCounters, AudioLimits, CommandConsumer, CommandPushError, QueuePopError,
-        RenderReport, SampleBank, command_queue,
+        command_queue, AudioCommand, AudioCounters, AudioLimits, CommandConsumer, CommandPushError,
+        QueuePopError, RenderReport, SampleBank,
     },
     chart::ObjectId,
     input::{BindingMap, PhysicalInputEvent, Position2, TouchRegion, TouchRouter},
     interaction::InteractionState,
     judge::JudgeEngine,
-    replay::{ReplayHeader, codec::ReplayCodecLimits},
+    replay::{codec::ReplayCodecLimits, ReplayHeader},
     runtime::{
-        RuntimeProcessingClock, RuntimeReport, input_sound::InputSoundTimeline,
-        hazard_sound::HazardSoundTimeline,
+        hazard_sound::HazardSoundTimeline, input_sound::InputSoundTimeline, RuntimeProcessingClock,
+        RuntimeReport,
     },
     time::{ClockDomainId, ClockMapper, ClockPair, ClockPoint, Duration, Timestamp},
     transport::{Rate, Transport},
@@ -395,6 +397,9 @@ pub struct StepGameplay {
     input_sound_identity: Option<InputSoundIdentity>,
     playback_end_frame: Option<u64>,
     preroll: Duration,
+    live_speed: Option<LiveSpeedSetup>,
+    last_operation: Option<ClockPoint>,
+    live_terminal: bool,
     activated: bool,
     started: bool,
     pending: Option<StepAudioBatch>,
@@ -464,6 +469,26 @@ impl StepGameplay {
         )
     }
 
+    /// Cold selected speed with the default button-only input mode.
+    pub fn new_section_with_speed(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        bindings: BindingMap,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        speed: ReplaySpeed,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::new_section_with_input_mode_and_speed(
+            prepared,
+            config,
+            bindings,
+            start,
+            end,
+            BmsInputMode::ButtonOnly,
+            speed,
+        )
+    }
+
     /// Own the actual section runtime with an explicit, replayable input mode.
     /// Bindings retain original physical events; the selected core rules judge them.
     pub fn new_section_with_input_mode(
@@ -481,6 +506,7 @@ impl StepGameplay {
             start,
             end,
             input_mode,
+            None,
             None,
             None,
         )
@@ -504,6 +530,7 @@ impl StepGameplay {
             end,
             input_mode,
             Some(authority),
+            None,
             None,
         )
     }
@@ -529,6 +556,7 @@ impl StepGameplay {
             input_mode,
             None,
             Some(policy),
+            None,
         )
     }
 
@@ -553,6 +581,107 @@ impl StepGameplay {
             input_mode,
             Some(authority),
             Some(policy),
+            None,
+        )
+    }
+
+    /// Cold fixed positive playback speed; input and output clocks keep physical units.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_section_with_input_mode_and_speed(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        bindings: BindingMap,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        speed: ReplaySpeed,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            InputSetup::Solo(bindings),
+            start,
+            end,
+            input_mode,
+            None,
+            None,
+            Some(speed),
+        )
+    }
+
+    /// Cold fixed positive playback speed; input and output clocks keep physical units.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_audio_section_with_speed(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        bindings: BindingMap,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        authority: AudioAuthority,
+        speed: ReplaySpeed,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            InputSetup::Solo(bindings),
+            start,
+            end,
+            input_mode,
+            Some(authority),
+            None,
+            Some(speed),
+        )
+    }
+
+    /// Cold fixed positive playback speed; input and output clocks keep physical units.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_section_with_policy_and_speed(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        bindings: BindingMap,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        policy: crate::play_policy::ResolvedPlayPolicy,
+        speed: ReplaySpeed,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            InputSetup::Solo(bindings),
+            start,
+            end,
+            input_mode,
+            None,
+            Some(policy),
+            Some(speed),
+        )
+    }
+
+    /// Cold fixed positive playback speed; input and output clocks keep physical units.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_audio_section_with_policy_and_speed(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        bindings: BindingMap,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        authority: AudioAuthority,
+        policy: crate::play_policy::ResolvedPlayPolicy,
+        speed: ReplaySpeed,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            InputSetup::Solo(bindings),
+            start,
+            end,
+            input_mode,
+            Some(authority),
+            Some(policy),
+            Some(speed),
         )
     }
 
@@ -566,6 +695,7 @@ impl StepGameplay {
         input_mode: BmsInputMode,
         authority: Option<AudioAuthority>,
         policy: Option<crate::play_policy::ResolvedPlayPolicy>,
+        speed: Option<ReplaySpeed>,
     ) -> Result<(Self, SampleBank), StepGameplayError> {
         let logical_origin = if let Some(authority) = &authority {
             let epoch = authority.epoch();
@@ -608,6 +738,11 @@ impl StepGameplay {
                 "invalid command, BGM or telemetry capacity",
             ));
         }
+        if end.is_some_and(|end| end <= start) {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "finite section end must be strictly later than start",
+            ));
+        }
         if start.as_nanos() < 0 {
             return Err(StepGameplayError::InvalidConfiguration(
                 "section start must be nonnegative",
@@ -632,12 +767,19 @@ impl StepGameplay {
                 "section contains an earlier object or unselected BGM target",
             ));
         }
-        let song =
+        let live_speed = speed
+            .map(|speed| LiveSpeedSetup::new(start, config.preroll, speed, end))
+            .transpose()
+            .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
+        let song = if let Some(setup) = live_speed {
+            setup.song_origin()
+        } else {
             start
                 .checked_sub(config.preroll)
                 .ok_or(StepGameplayError::InvalidConfiguration(
                     "section start minus preroll cannot be represented",
-                ))?;
+                ))?
+        };
         if config
             .host_origin
             .timestamp
@@ -685,10 +827,15 @@ impl StepGameplay {
             .map_err(|error| StepGameplayError::Setup(error.to_string()))?
         };
         let sample_rate = prepared.bank.format().sample_rate();
-        let playback_end_frame = end
-            .map(|end| section_end_frame(start, end, config.preroll, sample_rate))
-            .transpose()
-            .map_err(StepGameplayError::Setup)?;
+        let playback_end_frame = if let Some(setup) = live_speed {
+            setup
+                .playback_end_frame(sample_rate)
+                .map_err(|error| StepGameplayError::Setup(error.to_string()))?
+        } else {
+            end.map(|end| section_end_frame(start, end, config.preroll, sample_rate))
+                .transpose()
+                .map_err(StepGameplayError::Setup)?
+        };
         if playback_end_frame.is_some() {
             validate_section_output_evidence(
                 config.output_origin,
@@ -849,7 +996,7 @@ impl StepGameplay {
                 .bgm_commands
                 .retain(|command| !matches!(command, AudioCommand::Play { at, .. } if *at >= end));
         }
-        if start != Timestamp::ZERO {
+        if start != Timestamp::ZERO && live_speed.is_none() {
             for command in &mut prepared.bgm_commands {
                 if let AudioCommand::Play { at, .. } = command {
                     let relative = i128::from(at.as_nanos()) - i128::from(start.as_nanos());
@@ -872,7 +1019,68 @@ impl StepGameplay {
             lookahead: config.bgm_lookahead,
             max_pending: config.bgm_pending,
         };
-        let bgm = if playback_end_frame.is_some() {
+        let bgm = if let Some(setup) = live_speed {
+            let mut mapped = Vec::new();
+            let include_rate = setup.speed().rate() != Rate::NORMAL
+                && before_endpoint(
+                    config.output_origin.timestamp,
+                    config.output_origin,
+                    sample_rate,
+                    playback_end_frame,
+                )
+                .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
+            mapped
+                .try_reserve_exact(prepared.bgm_commands.len() + usize::from(include_rate))
+                .map_err(|_| StepGameplayError::AllocationFailed)?;
+            if include_rate {
+                mapped.push(AudioCommand::SetRate {
+                    at: config.output_origin.timestamp,
+                    rate: setup.speed().rate(),
+                });
+            }
+            for command in prepared.bgm_commands {
+                let AudioCommand::Play {
+                    voice,
+                    sample,
+                    at,
+                    gain,
+                } = command
+                else {
+                    return Err(StepGameplayError::Bgm {
+                        error: BgmFeedError::InvalidCommand(command),
+                        report: BgmFeedReport {
+                            remaining: bgm_count,
+                            ..BgmFeedReport::default()
+                        },
+                    });
+                };
+                if !gain.is_finite() {
+                    return Err(StepGameplayError::Bgm {
+                        error: BgmFeedError::InvalidCommand(command),
+                        report: BgmFeedReport {
+                            remaining: bgm_count,
+                            ..BgmFeedReport::default()
+                        },
+                    });
+                }
+                let at = setup
+                    .output_at(config.output_origin, at)
+                    .map_err(|error| StepGameplayError::Setup(error.to_string()))?
+                    .timestamp;
+                if before_endpoint(at, config.output_origin, sample_rate, playback_end_frame)
+                    .map_err(|error| StepGameplayError::Setup(error.to_string()))?
+                {
+                    mapped.push(AudioCommand::Play {
+                        voice,
+                        sample,
+                        at,
+                        gain,
+                    });
+                }
+            }
+            bgm_config.preroll = Duration::ZERO;
+            BgmFeeder::from_output_commands_with_rate(mapped, bgm_config, setup.speed().rate())
+        } else if playback_end_frame.is_some() {
             let mut kept = 0;
             for index in 0..prepared.bgm_commands.len() {
                 let mut command = prepared.bgm_commands[index];
@@ -932,7 +1140,13 @@ impl StepGameplay {
         })?;
         let (producer, consumer) = command_queue(config.command_capacity)
             .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
-        let transport = Transport::new(logical_origin.timestamp, song, Rate::NORMAL);
+        let transport = if let Some(setup) = live_speed {
+            setup
+                .transport(logical_origin.timestamp)
+                .map_err(|error| StepGameplayError::Setup(error.to_string()))?
+        } else {
+            Transport::new(logical_origin.timestamp, song, Rate::NORMAL)
+        };
         let mut runtime = match runtime_setup {
             RuntimeSetup::Solo {
                 bindings,
@@ -1032,6 +1246,9 @@ impl StepGameplay {
             input_sound_identity,
             playback_end_frame,
             preroll: config.preroll,
+            live_speed,
+            last_operation: None,
+            live_terminal: false,
             activated: false,
             started: false,
             pending: None,
@@ -1050,6 +1267,15 @@ impl StepGameplay {
         } else {
             Ok(())
         }
+    }
+
+    fn ensure_processing(&self) -> Result<(), StepGameplayError> {
+        if self.live_terminal {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "finite live playback is completed",
+            ));
+        }
+        Ok(())
     }
 
     fn ensure_solo(&self) -> Result<(), StepGameplayError> {
@@ -1125,6 +1351,10 @@ impl StepGameplay {
                 self.gauge.profile(),
             )
         }
+        .and_then(|header| {
+            crate::replay_speed_policy::wrap_header(header, self.playback_speed(), limits)
+                .map_err(CaptureError::SourceSpeed)
+        })
         .map_err(|error| StepGameplayError::Capture {
             error,
             report: None,
@@ -1190,7 +1420,7 @@ impl StepGameplay {
             ));
         }
         let capture = if let Some(policy) = &self.policy {
-            LiveReplayCapture::new_with_policy(
+            LiveReplayCapture::new_with_policy_and_speed(
                 self.runtime.judge(),
                 self.logical_domain,
                 limits,
@@ -1200,9 +1430,10 @@ impl StepGameplay {
                 self.input_mode,
                 self.input_sound_identity,
                 policy,
+                self.playback_speed(),
             )
         } else {
-            LiveReplayCapture::new_with_gauge(
+            LiveReplayCapture::new_with_gauge_and_speed(
                 self.runtime.judge(),
                 self.logical_domain,
                 limits,
@@ -1212,6 +1443,7 @@ impl StepGameplay {
                 self.input_mode,
                 self.input_sound_identity,
                 self.gauge.profile(),
+                self.playback_speed(),
             )
         }
         .map_err(|error| StepGameplayError::Capture {
@@ -1390,6 +1622,7 @@ impl StepGameplay {
             .solo_mut()?
             .advance_to(output, &AudioDomains, audio_at);
         if result.is_ok() {
+            self.last_operation = Some(output);
             self.commit_audio_frontier(prepared, merger);
         }
         self.observe(result).map(Some)
@@ -1423,6 +1656,7 @@ impl StepGameplay {
         audio_at: ClockPoint,
         position: Option<Position2>,
     ) -> Result<(), StepGameplayError> {
+        self.ensure_processing()?;
         let authority = self.ensure_audio()?;
         if now.domain != authority.epoch().host_domain
             || audio_at.domain != self.output_origin.domain
@@ -1493,6 +1727,11 @@ impl StepGameplay {
         if self.started || self.output_clock.is_some() {
             return Err(StepGameplayError::InvalidConfiguration(
                 "output clock configuration requires an unprocessed, unconfigured runtime",
+            ));
+        }
+        if self.live_speed.is_some() {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "fixed-speed playback requires audio authority instead of normal-rate discipline",
             ));
         }
         let discipline =
@@ -1588,8 +1827,13 @@ impl StepGameplay {
                 "activation requires the original host domain and representable section start",
             ));
         }
-        *self.runtime.transport_mut() =
-            Transport::new(host_origin.timestamp, self.song, Rate::NORMAL);
+        *self.runtime.transport_mut() = if let Some(setup) = self.live_speed {
+            setup
+                .transport(host_origin.timestamp)
+                .map_err(|error| StepGameplayError::Setup(error.to_string()))?
+        } else {
+            Transport::new(host_origin.timestamp, self.song, Rate::NORMAL)
+        };
         self.activated = true;
         Ok(())
     }
@@ -1648,6 +1892,7 @@ impl StepGameplay {
         self.ensure_legacy_clock()?;
         self.ensure_solo()?;
         self.ensure_usable()?;
+        self.ensure_processing()?;
         self.started = true;
         self.correction_watermark = None;
         let runtime = self.runtime.solo_mut()?;
@@ -1667,11 +1912,22 @@ impl StepGameplay {
         self.ensure_legacy_clock()?;
         self.ensure_solo()?;
         self.ensure_usable()?;
+        self.ensure_processing()?;
         self.started = true;
         self.correction_watermark = None;
         let result = self.runtime.solo_mut()?.advance_to(host, mapper, audio_at);
         let report = self.observe(result)?;
         self.correction_watermark = Some(host);
+        self.last_operation = Some(ClockPoint {
+            domain: self.logical_domain,
+            timestamp: if host.domain == self.logical_domain {
+                host.timestamp
+            } else {
+                mapper
+                    .map(host, self.logical_domain)
+                    .expect("successful runtime normalized host")
+            },
+        });
         Ok(report)
     }
 
@@ -1689,6 +1945,12 @@ impl StepGameplay {
                 return Err(StepGameplayError::Runtime(error));
             }
         };
+        if let Some(input) = &report.input {
+            self.last_operation = Some(ClockPoint {
+                domain: input.meta().clock_domain,
+                timestamp: input.meta().timestamp,
+            });
+        }
         self.song = report.song_time;
         if !report.audio_commands.is_empty() {
             self.reset_drain();
@@ -1801,6 +2063,31 @@ impl StepGameplay {
         presented: Option<ClockPoint>,
     ) -> Result<bool, StepGameplayError> {
         self.ensure_solo()?;
+        if self.live_speed.is_some() && self.end.is_some() && !self.live_terminal {
+            self.observe_completion_ready(rendered, presented, false, false)?;
+            if let Some(frontier) = self.prepare_live_terminal()? {
+                let audio_at = ClockPoint {
+                    domain: self.output_origin.domain,
+                    timestamp: self
+                        .output_origin
+                        .timestamp
+                        .checked_add(Duration::from_nanos(
+                            self.last_presented
+                                .expect("terminal presentation checked")
+                                .as_nanos(),
+                        ))
+                        .ok_or(StepGameplayError::InvalidConfiguration(
+                            "terminal output point overflow",
+                        ))?,
+                };
+                let result = self
+                    .runtime
+                    .solo_mut()?
+                    .advance_to(frontier, &AudioDomains, audio_at);
+                self.observe(result)?;
+                self.live_terminal = true;
+            }
+        }
         let numeric_terminal =
             self.gauge.snapshot().failure.is_some() && self.gameplay_fence().is_some();
         let completed =
@@ -1813,6 +2100,69 @@ impl StepGameplay {
             ));
         }
         Ok(completed)
+    }
+
+    /// Only actual finite execution, retired credits and source presentation
+    /// authorize the explicit terminal seek on the existing transport.
+    fn prepare_live_terminal(&mut self) -> Result<Option<ClockPoint>, StepGameplayError> {
+        let (Some(end), Some(frame), Some(_)) =
+            (self.end, self.playback_end_frame, self.live_speed)
+        else {
+            return Ok(None);
+        };
+        if let Some(report) = self.last_render {
+            // This report already passed the original evidence validator. Use
+            // its actual completed playback cursor to retire admitted credits;
+            // an ACK or the physical render extent is not a substitute.
+            let cursor = completed_render_cursor_with_stops(&report, &self.acknowledged_stops)
+                .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
+            if let Err(error) = self.bgm.retire_completed(cursor) {
+                self.failed = true;
+                return Err(StepGameplayError::Bgm {
+                    error,
+                    report: self.bgm.report(),
+                });
+            }
+        }
+        let bgm = self.bgm.report();
+        let nanos = (i128::from(frame) * 1_000_000_000 + i128::from(self.sample_rate) - 1)
+            / i128::from(self.sample_rate);
+        if self.pending.is_some()
+            || self.consumer.available_up_to(1) != 0
+            || bgm.remaining != 0
+            || bgm.outstanding != 0
+            || !self.last_render.is_some_and(|report| {
+                report.playback_end_physical_frame == Some(frame)
+                    && report.counters.commands_consumed == self.acknowledged_commands
+                    && report.counters.commands_applied == self.acknowledged_commands
+                    && report.pending_commands == 0
+            })
+            || !self
+                .last_presented
+                .is_some_and(|at| i128::from(at.as_nanos()) >= nanos)
+        {
+            return Ok(None);
+        }
+        if self.authority.as_ref().is_some_and(|authority| {
+            authority
+                .acquired_prefix()
+                .is_some_and(|prefix| authority.closed_host_prefix() != Some(prefix))
+        }) {
+            // An admitted but undrained input prefix still owns original events.
+            return Ok(None);
+        }
+        let anchor = self.runtime.transport_mut().anchor();
+        let frontier = self.last_operation.unwrap_or(ClockPoint {
+            domain: self.logical_domain,
+            timestamp: anchor.host_time,
+        });
+        // The final point is an already processed logical cutoff (or the actual
+        // cold origin for zero-frame playback), never a fabricated future HOST.
+        self.runtime
+            .transport_mut()
+            .seek(frontier.timestamp, end)
+            .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
+        Ok(Some(frontier))
     }
 
     fn observe_completion_ready(
@@ -2081,6 +2431,13 @@ impl StepGameplay {
     pub fn end_ns(&self) -> Option<i64> {
         self.end.map(|end| end.as_nanos())
     }
+    /// Immutable speed selected for this source play, independently of replay output.
+    pub fn playback_speed(&self) -> ReplaySpeed {
+        self.live_speed.map_or_else(
+            || ReplaySpeed::new(Rate::NORMAL).expect("positive normal rate"),
+            LiveSpeedSetup::speed,
+        )
+    }
     pub fn playback_end_frame(&self) -> Option<u64> {
         self.playback_end_frame
     }
@@ -2220,7 +2577,7 @@ impl StepLocalGameplay {
         input_mode: BmsInputMode,
     ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
         Self::build(
-            prepared, config, plan, bindings, start, end, input_mode, None, None,
+            prepared, config, plan, bindings, start, end, input_mode, None, None, None,
         )
     }
 
@@ -2243,6 +2600,7 @@ impl StepLocalGameplay {
             end,
             input_mode,
             Some(authority),
+            None,
             None,
         )
     }
@@ -2270,6 +2628,7 @@ impl StepLocalGameplay {
             input_mode,
             None,
             Some(policy),
+            None,
         )
     }
 
@@ -2296,6 +2655,115 @@ impl StepLocalGameplay {
             input_mode,
             Some(authority),
             Some(policy),
+            None,
+        )
+    }
+
+    /// Cold fixed positive playback speed; input and output clocks keep physical units.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_section_with_speed(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        plan: ResolvedInputPlan,
+        bindings: Vec<BindingMap>,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        speed: ReplaySpeed,
+    ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            plan,
+            bindings,
+            start,
+            end,
+            input_mode,
+            None,
+            None,
+            Some(speed),
+        )
+    }
+
+    /// Cold fixed positive playback speed; input and output clocks keep physical units.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_audio_section_with_speed(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        plan: ResolvedInputPlan,
+        bindings: Vec<BindingMap>,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        authority: AudioAuthority,
+        speed: ReplaySpeed,
+    ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            plan,
+            bindings,
+            start,
+            end,
+            input_mode,
+            Some(authority),
+            None,
+            Some(speed),
+        )
+    }
+
+    /// Cold fixed positive playback speed; input and output clocks keep physical units.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_section_with_policy_and_speed(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        plan: ResolvedInputPlan,
+        bindings: Vec<BindingMap>,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        policy: crate::play_policy::ResolvedPlayPolicy,
+        speed: ReplaySpeed,
+    ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            plan,
+            bindings,
+            start,
+            end,
+            input_mode,
+            None,
+            Some(policy),
+            Some(speed),
+        )
+    }
+
+    /// Cold fixed positive playback speed; input and output clocks keep physical units.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_audio_section_with_policy_and_speed(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        plan: ResolvedInputPlan,
+        bindings: Vec<BindingMap>,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        authority: AudioAuthority,
+        policy: crate::play_policy::ResolvedPlayPolicy,
+        speed: ReplaySpeed,
+    ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            plan,
+            bindings,
+            start,
+            end,
+            input_mode,
+            Some(authority),
+            Some(policy),
+            Some(speed),
         )
     }
 
@@ -2310,6 +2778,7 @@ impl StepLocalGameplay {
         input_mode: BmsInputMode,
         authority: Option<AudioAuthority>,
         policy: Option<crate::play_policy::ResolvedPlayPolicy>,
+        speed: Option<ReplaySpeed>,
     ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
         let mut players = Vec::new();
         let mut members = Vec::new();
@@ -2345,6 +2814,7 @@ impl StepLocalGameplay {
             input_mode,
             authority,
             policy,
+            speed,
         )?;
         for &player in &players {
             members.push(LocalMemberState {
@@ -2477,6 +2947,10 @@ impl StepLocalGameplay {
     pub fn end_ns(&self) -> Option<i64> {
         self.control.end_ns()
     }
+    /// Shared immutable source-play speed for every local member.
+    pub fn playback_speed(&self) -> ReplaySpeed {
+        self.control.playback_speed()
+    }
     pub fn playback_end_frame(&self) -> Option<u64> {
         self.control.playback_end_frame()
     }
@@ -2602,6 +3076,10 @@ impl StepLocalGameplay {
                 self.members[self.member_index(player)?].gauge.profile(),
             )
         }
+        .and_then(|header| {
+            crate::replay_speed_policy::wrap_header(header, self.control.playback_speed(), limits)
+                .map_err(CaptureError::SourceSpeed)
+        })
         .map_err(|error| {
             StepGameplayError::Capture {
                 error,
@@ -2672,7 +3150,7 @@ impl StepLocalGameplay {
             .into());
         }
         let capture = if let Some(policy) = &self.control.policy {
-            LiveReplayCapture::new_with_policy(
+            LiveReplayCapture::new_with_policy_and_speed(
                 self.judge(player).expect("checked member"),
                 self.control.logical_domain,
                 limits,
@@ -2682,9 +3160,10 @@ impl StepLocalGameplay {
                 self.control.input_mode,
                 self.control.input_sound_identity,
                 policy,
+                self.control.playback_speed(),
             )
         } else {
-            LiveReplayCapture::new_with_gauge(
+            LiveReplayCapture::new_with_gauge_and_speed(
                 self.judge(player).expect("checked member"),
                 self.control.logical_domain,
                 limits,
@@ -2694,6 +3173,7 @@ impl StepLocalGameplay {
                 self.control.input_mode,
                 self.control.input_sound_identity,
                 self.members[self.member_index(player)?].gauge.profile(),
+                self.control.playback_speed(),
             )
         }
         .map_err(|error| StepGameplayError::Capture {
@@ -2729,7 +3209,7 @@ impl StepLocalGameplay {
             )],
         >,
     ) -> Result<Option<Vec<u8>>, crate::result_archive::ArchiveError> {
-        use crate::result_archive::{ArchiveError, ResultArchive, MAX_PLAYERS, encode_archive};
+        use crate::result_archive::{encode_archive, ArchiveError, ResultArchive, MAX_PLAYERS};
         if !self.members.iter().any(|member| member.capture_configured) {
             return Ok(None);
         }
@@ -2913,6 +3393,7 @@ impl StepLocalGameplay {
             .as_ref()
             .map_or_else(|error| !error.completed_reports.is_empty(), |_| true)
         {
+            self.control.last_operation = Some(output);
             self.control.commit_audio_frontier(prepared, merger);
         }
         self.finish_reports(result, errors).map(Some)
@@ -2946,6 +3427,7 @@ impl StepLocalGameplay {
     ) -> Result<InputResult, StepLocalGameplayError> {
         self.control.ensure_legacy_clock()?;
         self.control.ensure_usable()?;
+        self.control.ensure_processing()?;
         let errors = std::mem::take(&mut self.member_error_scratch);
         let result = match position {
             Some(position) => self
@@ -2977,10 +3459,21 @@ impl StepLocalGameplay {
     ) -> Result<Vec<PlayerReport>, StepLocalGameplayError> {
         self.control.ensure_legacy_clock()?;
         self.control.ensure_usable()?;
+        self.control.ensure_processing()?;
         let errors = std::mem::take(&mut self.member_error_scratch);
         let result = self.group_mut().advance_to(host, mapper, audio_at);
         let reports = self.finish_reports(result, errors)?;
         self.control.correction_watermark = Some(host);
+        self.control.last_operation = Some(ClockPoint {
+            domain: self.control.logical_domain,
+            timestamp: if host.domain == self.control.logical_domain {
+                host.timestamp
+            } else {
+                mapper
+                    .map(host, self.control.logical_domain)
+                    .expect("successful runtime normalized host")
+            },
+        });
         Ok(reports)
     }
 
@@ -2998,6 +3491,12 @@ impl StepLocalGameplay {
         let mut reported_failure = false;
         let mut fences = [None; 64];
         for (index, PlayerReport { player, report }) in reports.iter().enumerate() {
+            if let Some(input) = &report.input {
+                self.control.last_operation = Some(ClockPoint {
+                    domain: input.meta().clock_domain,
+                    timestamp: input.meta().timestamp,
+                });
+            }
             let was_fenced = self.gameplay_fence(*player).is_some();
             if !was_fenced {
                 self.control.song = report.song_time;
@@ -3133,6 +3632,37 @@ impl StepLocalGameplay {
         presented: Option<ClockPoint>,
     ) -> Result<bool, StepLocalGameplayError> {
         self.control.ensure_usable()?;
+        if self.control.live_speed.is_some()
+            && self.control.end.is_some()
+            && !self.control.live_terminal
+        {
+            self.control
+                .observe_completion_ready(rendered, presented, false, false)?;
+            if let Some(frontier) = self.control.prepare_live_terminal()? {
+                let audio_at = ClockPoint {
+                    domain: self.control.output_origin.domain,
+                    timestamp: self
+                        .control
+                        .output_origin
+                        .timestamp
+                        .checked_add(Duration::from_nanos(
+                            self.control
+                                .last_presented
+                                .expect("terminal presentation checked")
+                                .as_nanos(),
+                        ))
+                        .ok_or(StepGameplayError::InvalidConfiguration(
+                            "terminal output point overflow",
+                        ))?,
+                };
+                let errors = std::mem::take(&mut self.member_error_scratch);
+                let result = self
+                    .group_mut()
+                    .advance_to(frontier, &AudioDomains, audio_at);
+                self.finish_reports(result, errors)?;
+                self.control.live_terminal = true;
+            }
+        }
         let judge_until = self
             .control
             .completion

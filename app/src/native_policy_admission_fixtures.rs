@@ -1,5 +1,469 @@
 // Included beneath the existing actual native-owner Mixer fixture.
+use crate::live_speed::LiveSpeedSetup;
+use crate::native_policy_admission as speed_admission;
 use crate::play_policy::{ResolvedPlayPolicy, ClassifiedWindow};
+
+fn speed_setup(start: i64, preroll: i64, fraction: &str, end: Option<i64>) -> LiveSpeedSetup {
+    LiveSpeedSetup::new(
+        Timestamp::from_nanos(start),
+        Duration::from_nanos(preroll),
+        fraction.parse().unwrap(),
+        end.map(Timestamp::from_nanos),
+    )
+    .unwrap()
+}
+fn speed_config(setup: LiveSpeedSetup) -> NativeGameplayConfig {
+    NativeGameplayConfig {
+        song_origin: setup.song_origin(),
+        playback_origin: point(2, setup.preroll().as_nanos()),
+        end_song: setup.end(),
+        ..config()
+    }
+}
+fn speed_capture(
+    f: &Fixture,
+    policy: &ResolvedPlayPolicy,
+    setup: LiveSpeedSetup,
+) -> LiveReplayCapture {
+    LiveReplayCapture::new_with_policy_and_speed(
+        f.runtime.judge(),
+        ClockDomainId(1),
+        limits(),
+        setup.start(),
+        0,
+        setup.end(),
+        beatkernel_bms::BmsInputMode::ButtonOnly,
+        None,
+        policy,
+        setup.speed(),
+    )
+    .unwrap()
+}
+fn speed_selected(
+    f: &Fixture,
+    policy: &ResolvedPlayPolicy,
+    capture: Option<&LiveReplayCapture>,
+    opponent: Option<&beatkernel::replay::ReplayHeader>,
+    cfg: &NativeGameplayConfig,
+    logical_domain: ClockDomainId,
+    setup: LiveSpeedSetup,
+) -> NativeGameplayResult<()> {
+    speed_admission::validate_selected_in_domain_with_speed(
+        f.runtime.judge(),
+        &f.gauge,
+        policy,
+        capture,
+        opponent,
+        cfg,
+        logical_domain,
+        Some(setup.start()),
+        setup,
+    )
+}
+
+#[test]
+fn selected_live_speed_admits_literal_four_rates_with_original_sections() {
+    for (fraction, origin) in [("1/2", 9), ("1/1", 7), ("2/1", 4), ("3/2", 6)] {
+        let f = custom_fixture(beatkernel_bms::BmsGaugeKind::Hard);
+        let policy = resolved(&f, beatkernel_bms::BmsGaugeKind::Hard);
+        let setup = speed_setup(10, 3, fraction, Some(100));
+        assert_eq!(setup.song_origin(), Timestamp::from_nanos(origin));
+        let capture = speed_capture(&f, &policy, setup);
+        let cfg = speed_config(setup);
+        speed_selected(
+            &f,
+            &policy,
+            Some(&capture),
+            Some(capture.header()),
+            &cfg,
+            ClockDomainId(1),
+            setup,
+        )
+        .unwrap();
+        speed_admission::validate_audio_config_with_speed(
+            &AudioGameplayConfig {
+                gameplay: cfg,
+                section_start: setup.start(),
+            },
+            setup,
+        )
+        .unwrap();
+        let transport = setup.transport(cfg.origin.timestamp).unwrap();
+        speed_admission::validate_transport_with_speed(&transport, cfg.origin.timestamp, setup)
+            .unwrap();
+        assert!(capture.records().is_empty());
+        assert!(f.runtime.judge().effective_song_time().is_none());
+        assert_eq!(f.device.step, 0);
+    }
+}
+
+#[test]
+fn selected_normalized_fraction_matches_capture_and_competition_identity() {
+    let f = custom_fixture(beatkernel_bms::BmsGaugeKind::Hard);
+    let policy = resolved(&f, beatkernel_bms::BmsGaugeKind::Hard);
+    let original = speed_setup(5, 1, "3/2", Some(100));
+    let equivalent = speed_setup(5, 1, "6/4", Some(100));
+    let capture = speed_capture(&f, &policy, original);
+    let other = speed_capture(&f, &policy, equivalent);
+    assert_eq!(capture.header(), other.header());
+    speed_selected(
+        &f,
+        &policy,
+        Some(&capture),
+        Some(other.header()),
+        &speed_config(equivalent),
+        ClockDomainId(1),
+        equivalent,
+    )
+    .unwrap();
+}
+
+#[test]
+fn selected_speed_refuses_wrong_source_start_end_and_domain_atomically() {
+    let f = custom_fixture(beatkernel_bms::BmsGaugeKind::Hard);
+    let policy = resolved(&f, beatkernel_bms::BmsGaugeKind::Hard);
+    let selected = speed_setup(10, 3, "3/2", Some(100));
+    let capture = speed_capture(&f, &policy, selected);
+    let before_gauge = f.gauge.clone();
+    let before_header = capture.header().clone();
+    for wrong in [
+        speed_setup(10, 3, "1/2", Some(100)),
+        speed_setup(11, 3, "3/2", Some(100)),
+        speed_setup(10, 3, "3/2", Some(101)),
+    ] {
+        let competitor = speed_capture(&f, &policy, wrong);
+        assert!(speed_selected(
+            &f,
+            &policy,
+            Some(&capture),
+            Some(competitor.header()),
+            &speed_config(selected),
+            ClockDomainId(1),
+            selected
+        )
+        .is_err());
+        assert_eq!(capture.header(), &before_header);
+        assert!(capture.records().is_empty());
+        assert_eq!(f.gauge, before_gauge);
+        assert!(f.runtime.judge().effective_song_time().is_none());
+        assert_eq!(f.device.step, 0);
+    }
+    assert!(speed_selected(
+        &f,
+        &policy,
+        Some(&capture),
+        None,
+        &speed_config(selected),
+        ClockDomainId(99),
+        selected
+    )
+    .is_err());
+}
+
+#[test]
+fn explicit_speed_header_uses_original_start_not_normal_preroll_inference() {
+    let f = custom_fixture(beatkernel_bms::BmsGaugeKind::Hard);
+    let policy = resolved(&f, beatkernel_bms::BmsGaugeKind::Hard);
+    let setup = speed_setup(10, 3, "3/2", Some(100));
+    let capture = speed_capture(&f, &policy, setup);
+    // Integer origin 6 plus physical P=3 would incorrectly infer start=9.
+    let cfg = speed_config(setup);
+    speed_admission::validate_header_in_domain_with_speed(
+        f.runtime.judge(),
+        f.gauge.profile(),
+        capture.header(),
+        &cfg,
+        ClockDomainId(1),
+        None,
+        setup,
+    )
+    .unwrap();
+    assert!(speed_admission::validate_header(
+        f.runtime.judge(),
+        f.gauge.profile(),
+        capture.header(),
+        &cfg
+    )
+    .is_err());
+}
+
+#[test]
+fn exact_transport_admission_rejects_same_integer_anchor_different_phase() {
+    for (selected, impostor) in [
+        (
+            speed_setup(0, 1, "1/2", None),
+            speed_setup(0, 0, "1/2", None),
+        ),
+        (
+            speed_setup(0, 3, "3/2", None),
+            speed_setup(-1, 2, "3/2", None),
+        ),
+    ] {
+        let actual = selected.transport(Timestamp::from_nanos(17)).unwrap();
+        let wrong = impostor.transport(Timestamp::from_nanos(17)).unwrap();
+        assert_eq!(actual.anchor(), wrong.anchor());
+        speed_admission::validate_transport_with_speed(
+            &actual,
+            Timestamp::from_nanos(17),
+            selected,
+        )
+        .unwrap();
+        assert!(speed_admission::validate_transport_with_speed(
+            &wrong,
+            Timestamp::from_nanos(17),
+            selected
+        )
+        .is_err());
+        let legacy = Transport::new(
+            Timestamp::from_nanos(17),
+            selected.song_origin(),
+            selected.speed().rate(),
+        );
+        assert!(speed_admission::validate_transport_with_speed(
+            &legacy,
+            Timestamp::from_nanos(17),
+            selected
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn exact_transport_refuses_wrong_origin_end_rate_and_modified_history() {
+    let setup = speed_setup(10, 3, "3/2", Some(100));
+    let origin = Timestamp::from_nanos(17);
+    for wrong in [
+        speed_setup(10, 3, "3/2", Some(101)),
+        speed_setup(10, 3, "2/1", Some(100)),
+    ] {
+        assert!(speed_admission::validate_transport_with_speed(
+            &wrong.transport(origin).unwrap(),
+            origin,
+            setup
+        )
+        .is_err());
+    }
+    let mut transport = setup.transport(origin).unwrap();
+    assert!(speed_admission::validate_transport_with_speed(
+        &transport,
+        Timestamp::from_nanos(18),
+        setup
+    )
+    .is_err());
+    transport
+        .pause_at_output_elapsed(Timestamp::from_nanos(18), 1)
+        .unwrap();
+    assert!(speed_admission::validate_transport_with_speed(&transport, origin, setup).is_err());
+    transport.resume_preroll(Timestamp::from_nanos(19)).unwrap();
+    assert!(speed_admission::validate_transport_with_speed(&transport, origin, setup).is_err());
+    let mut noop = setup.transport(origin).unwrap();
+    noop.set_rate(Timestamp::from_nanos(18), setup.speed().rate())
+        .unwrap();
+    assert_eq!(noop.anchors().len(), 1);
+    assert!(speed_admission::validate_transport_with_speed(&noop, origin, setup).is_err());
+    let mut resumed = setup.transport(origin).unwrap();
+    resumed.resume_preroll(Timestamp::from_nanos(18)).unwrap();
+    assert_eq!(resumed.anchors().len(), 1);
+    assert!(speed_admission::validate_transport_with_speed(&resumed, origin, setup).is_err());
+}
+
+#[test]
+fn selected_speed_rejects_noncanonical_header_and_different_selected_policy() {
+    let f = custom_fixture(beatkernel_bms::BmsGaugeKind::Hard);
+    let policy = resolved(&f, beatkernel_bms::BmsGaugeKind::Hard);
+    let setup = speed_setup(10, 3, "3/2", Some(100));
+    let capture = speed_capture(&f, &policy, setup);
+    for which in 0..5 {
+        let mut header = capture.header().clone();
+        match which {
+            0 => header.options.push(0),
+            1 => header.chart_identity[0] ^= 1,
+            2 => header.rules_identity.push(0),
+            3 => header.seed = 1,
+            _ => header.version = u32::MAX,
+        }
+        assert!(speed_selected(
+            &f,
+            &policy,
+            None,
+            Some(&header),
+            &speed_config(setup),
+            ClockDomainId(1),
+            setup
+        )
+        .is_err());
+    }
+    let different = resolved(&f, beatkernel_bms::BmsGaugeKind::Easy);
+    assert!(speed_selected(
+        &f,
+        &different,
+        Some(&capture),
+        None,
+        &speed_config(setup),
+        ClockDomainId(1),
+        setup
+    )
+    .is_err());
+    assert!(capture.records().is_empty());
+    assert_eq!(f.device.step, 0);
+}
+
+#[test]
+fn selected_speed_rejects_capture_already_containing_original_operations() {
+    let f = custom_fixture(beatkernel_bms::BmsGaugeKind::Hard);
+    let policy = resolved(&f, beatkernel_bms::BmsGaugeKind::Hard);
+    let setup = speed_setup(0, 0, "3/2", None);
+    let mut capture = speed_capture(&f, &policy, setup);
+    let mut processed = custom_fixture(beatkernel_bms::BmsGaugeKind::Hard);
+    let report = processed
+        .runtime
+        .advance_to(point(1, 0), &ExplicitDomains, point(2, 0))
+        .unwrap();
+    capture.record_report(&report).unwrap();
+    assert!(!capture.records().is_empty());
+    let before = capture.records().len();
+    assert!(speed_selected(
+        &f,
+        &policy,
+        Some(&capture),
+        None,
+        &speed_config(setup),
+        ClockDomainId(1),
+        setup
+    )
+    .is_err());
+    assert_eq!(capture.records().len(), before);
+    assert!(f.runtime.judge().effective_song_time().is_none());
+    assert_eq!(f.device.step, 0);
+}
+
+#[test]
+fn explicit_native_setup_mismatches_refuse_even_without_capture() {
+    let f = custom_fixture(beatkernel_bms::BmsGaugeKind::Hard);
+    let policy = resolved(&f, beatkernel_bms::BmsGaugeKind::Hard);
+    let setup = speed_setup(10, 3, "3/2", Some(100));
+    let cfg = speed_config(setup);
+    for wrong in [
+        NativeGameplayConfig {
+            song_origin: Timestamp::from_nanos(7),
+            ..cfg
+        },
+        NativeGameplayConfig {
+            end_song: Some(Timestamp::from_nanos(101)),
+            ..cfg
+        },
+        NativeGameplayConfig {
+            sample_rate: 0,
+            ..cfg
+        },
+        NativeGameplayConfig {
+            stream_origin: cfg.origin,
+            ..cfg
+        },
+    ] {
+        assert!(speed_selected(&f, &policy, None, None, &wrong, ClockDomainId(1), setup).is_err());
+    }
+    assert!(speed_admission::validate_audio_config_with_speed(
+        &AudioGameplayConfig {
+            gameplay: cfg,
+            section_start: Timestamp::from_nanos(9)
+        },
+        setup
+    )
+    .is_err());
+}
+
+#[test]
+fn nonpristine_selected_judge_is_refused_without_mutating_capture() {
+    let mut f = custom_fixture(beatkernel_bms::BmsGaugeKind::Hard);
+    let policy = resolved(&f, beatkernel_bms::BmsGaugeKind::Hard);
+    let setup = speed_setup(0, 1, "1/2", None);
+    let capture = speed_capture(&f, &policy, setup);
+    f.runtime
+        .advance_to(point(1, 0), &ExplicitDomains, point(2, 0))
+        .unwrap();
+    let before = f.runtime.judge().stable_hash().unwrap();
+    assert!(speed_selected(
+        &f,
+        &policy,
+        Some(&capture),
+        None,
+        &speed_config(setup),
+        ClockDomainId(1),
+        setup
+    )
+    .is_err());
+    assert_eq!(f.runtime.judge().stable_hash().unwrap(), before);
+    assert!(capture.records().is_empty());
+    assert_eq!(f.device.step, 0);
+}
+
+#[test]
+fn nonpristine_selected_gauge_refuses_with_pristine_judge_and_capture() {
+    let mut f = custom_fixture(beatkernel_bms::BmsGaugeKind::Hard);
+    let policy = resolved(&f, beatkernel_bms::BmsGaugeKind::Hard);
+    let setup = speed_setup(0, 1, "1/2", None);
+    let capture = speed_capture(&f, &policy, setup);
+    f.gauge
+        .observe(
+            &[],
+            &[beatkernel::judge::HazardEvent {
+                id: beatkernel::judge::HazardId(1),
+                at: Timestamp::ZERO,
+                control: GameControlId(0x11),
+                value: 1295,
+                outcome: beatkernel::judge::HazardOutcome::Triggered,
+                input: None,
+            }],
+        )
+        .unwrap();
+    let before = f.gauge.clone();
+    assert!(f.runtime.judge().effective_song_time().is_none());
+    assert!(speed_selected(
+        &f,
+        &policy,
+        Some(&capture),
+        None,
+        &speed_config(setup),
+        ClockDomainId(1),
+        setup
+    )
+    .is_err());
+    assert_eq!(f.gauge, before);
+    assert!(capture.records().is_empty());
+    assert_eq!(f.device.step, 0);
+}
+
+#[test]
+fn wide_original_section_and_physical_origins_do_not_overflow_normal_inference() {
+    let f = custom_fixture(beatkernel_bms::BmsGaugeKind::Hard);
+    let policy = resolved(&f, beatkernel_bms::BmsGaugeKind::Hard);
+    let setup = speed_setup(i64::MAX - 1, 1, "1/2", Some(i64::MAX));
+    let cfg = NativeGameplayConfig {
+        stream_origin: point(2, i64::MIN),
+        playback_origin: point(2, i64::MIN + 1),
+        ..speed_config(setup)
+    };
+    let capture = speed_capture(&f, &policy, setup);
+    speed_selected(
+        &f,
+        &policy,
+        Some(&capture),
+        None,
+        &cfg,
+        ClockDomainId(1),
+        setup,
+    )
+    .unwrap();
+    speed_admission::validate_audio_config_with_speed(
+        &AudioGameplayConfig {
+            gameplay: cfg,
+            section_start: setup.start(),
+        },
+        setup,
+    )
+    .unwrap();
+}
 fn resolved(f: &Fixture, kind: beatkernel_bms::BmsGaugeKind) -> ResolvedPlayPolicy {
     ResolvedPlayPolicy::bms(
         &f.source,

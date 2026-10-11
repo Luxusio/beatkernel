@@ -1,13 +1,15 @@
 //! Cold nondefault native policy admission; no clocks, devices or publication.
 use crate::{
     gauge::{BmsGauge, GaugeProfile, MAX_GAUGE_GRADES},
+    live_speed::LiveSpeedSetup,
     native_gameplay::{NativeGameplayConfig, NativeGameplayResult},
     replay_capture::LiveReplayCapture,
 };
 use beatkernel::{
     judge::JudgeEngine,
     replay::{ReplayHeader, REPLAY_VERSION},
-    time::{Timestamp, ClockDomainId},
+    time::{ClockDomainId, Timestamp},
+    transport::{PrerollTransportSetup, Transport},
 };
 
 pub(crate) fn validate_initial(judge: &JudgeEngine, gauge: &BmsGauge) -> NativeGameplayResult<()> {
@@ -27,17 +29,61 @@ pub(crate) fn validate_capture_in_domain(
     logical_domain: ClockDomainId,
     section_start: Option<Timestamp>,
 ) -> NativeGameplayResult<()> {
+    validate_capture_in_domain_inner(
+        judge,
+        gauge,
+        capture,
+        config,
+        logical_domain,
+        section_start,
+        None,
+    )
+}
+
+pub(crate) fn validate_capture_in_domain_with_speed(
+    judge: &JudgeEngine,
+    gauge: &GaugeProfile,
+    capture: Option<&LiveReplayCapture>,
+    config: &NativeGameplayConfig,
+    logical_domain: ClockDomainId,
+    section_start: Option<Timestamp>,
+    speed: LiveSpeedSetup,
+) -> NativeGameplayResult<()> {
+    validate_capture_in_domain_inner(
+        judge,
+        gauge,
+        capture,
+        config,
+        logical_domain,
+        section_start,
+        Some(speed),
+    )
+}
+
+fn validate_capture_in_domain_inner(
+    judge: &JudgeEngine,
+    gauge: &GaugeProfile,
+    capture: Option<&LiveReplayCapture>,
+    config: &NativeGameplayConfig,
+    logical_domain: ClockDomainId,
+    section_start: Option<Timestamp>,
+    speed: Option<LiveSpeedSetup>,
+) -> NativeGameplayResult<()> {
+    if let Some(speed) = speed {
+        validate_speed_config(config, section_start, speed)?;
+    }
     if let Some(capture) = capture {
         if !capture.records().is_empty() {
             return Err("native policy capture is already processed".into());
         }
-        validate_header_in_domain(
+        validate_header_in_domain_inner(
             judge,
             gauge,
             capture.header(),
             config,
             logical_domain,
             section_start,
+            speed,
         )?;
     }
     Ok(())
@@ -58,6 +104,46 @@ pub(crate) fn validate_header_in_domain(
     logical_domain: ClockDomainId,
     section_start: Option<Timestamp>,
 ) -> NativeGameplayResult<()> {
+    validate_header_in_domain_inner(
+        judge,
+        gauge,
+        header,
+        config,
+        logical_domain,
+        section_start,
+        None,
+    )
+}
+
+pub(crate) fn validate_header_in_domain_with_speed(
+    judge: &JudgeEngine,
+    gauge: &GaugeProfile,
+    header: &ReplayHeader,
+    config: &NativeGameplayConfig,
+    logical_domain: ClockDomainId,
+    section_start: Option<Timestamp>,
+    speed: LiveSpeedSetup,
+) -> NativeGameplayResult<()> {
+    validate_header_in_domain_inner(
+        judge,
+        gauge,
+        header,
+        config,
+        logical_domain,
+        section_start,
+        Some(speed),
+    )
+}
+
+fn validate_header_in_domain_inner(
+    judge: &JudgeEngine,
+    gauge: &GaugeProfile,
+    header: &ReplayHeader,
+    config: &NativeGameplayConfig,
+    logical_domain: ClockDomainId,
+    section_start: Option<Timestamp>,
+    speed: Option<LiveSpeedSetup>,
+) -> NativeGameplayResult<()> {
     if header.version != REPLAY_VERSION
         || header.seed != 0
         || header.options.len() > 4096
@@ -66,9 +152,13 @@ pub(crate) fn validate_header_in_domain(
         return Err("native policy header version, capacity or clock differs".into());
     }
     let setup = crate::replay_playback::decode_section_setup(&header.options)?;
-    let start = match section_start {
-        Some(start) => start,
-        None => {
+    if let Some(speed) = speed {
+        validate_speed_config(config, section_start, speed)?;
+    }
+    let start = match (speed, section_start) {
+        (Some(speed), _) => speed.start(),
+        (None, Some(start)) => start,
+        (None, None) => {
             let start = i128::from(config.song_origin.as_nanos())
                 + i128::from(config.playback_origin.timestamp.as_nanos())
                 - i128::from(config.stream_origin.timestamp.as_nanos());
@@ -82,6 +172,14 @@ pub(crate) fn validate_header_in_domain(
         || setup.gauge != *gauge
         || setup.start != start
         || setup.end != config.end_song
+        || setup.source_speed
+            != speed.map_or_else(
+                || {
+                    crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+                        .expect("positive NORMAL")
+                },
+                LiveSpeedSetup::speed,
+            )
         || setup.input_mode != beatkernel_bms::BmsInputMode::ButtonOnly
     {
         return Err("native policy header differs from actual judge, gauge or section".into());
@@ -132,6 +230,7 @@ pub(crate) fn validate_header_in_domain(
         setup.input_mode,
         limits,
     )?;
+    let expected = crate::replay_speed_policy::wrap_header(expected, setup.source_speed, limits)?;
     if header.rules_identity != expected.rules_identity || header.options != expected.options {
         return Err("native policy setup is not canonical".into());
     }
@@ -168,31 +267,84 @@ pub(crate) fn validate_selected_in_domain(
     logical_domain: ClockDomainId,
     section_start: Option<Timestamp>,
 ) -> NativeGameplayResult<()> {
+    validate_selected_in_domain_inner(
+        judge,
+        gauge,
+        policy,
+        capture,
+        competition,
+        config,
+        logical_domain,
+        section_start,
+        None,
+    )
+}
+
+pub(crate) fn validate_selected_in_domain_with_speed(
+    judge: &JudgeEngine,
+    gauge: &BmsGauge,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    capture: Option<&LiveReplayCapture>,
+    competition: Option<&ReplayHeader>,
+    config: &NativeGameplayConfig,
+    logical_domain: ClockDomainId,
+    section_start: Option<Timestamp>,
+    speed: LiveSpeedSetup,
+) -> NativeGameplayResult<()> {
+    validate_selected_in_domain_inner(
+        judge,
+        gauge,
+        policy,
+        capture,
+        competition,
+        config,
+        logical_domain,
+        section_start,
+        Some(speed),
+    )
+}
+
+fn validate_selected_in_domain_inner(
+    judge: &JudgeEngine,
+    gauge: &BmsGauge,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    capture: Option<&LiveReplayCapture>,
+    competition: Option<&ReplayHeader>,
+    config: &NativeGameplayConfig,
+    logical_domain: ClockDomainId,
+    section_start: Option<Timestamp>,
+    speed: Option<LiveSpeedSetup>,
+) -> NativeGameplayResult<()> {
+    if let Some(speed) = speed {
+        validate_speed_config(config, section_start, speed)?;
+    }
     validate_initial(judge, gauge)?;
     if judge.profile() != policy.judge() || gauge.profile() != policy.gauge() {
         return Err("selected native policy differs from actual judge or gauge".into());
     }
     policy.validate_timing(judge, beatkernel_bms::BmsInputMode::ButtonOnly)?;
-    validate_capture_in_domain(
+    validate_capture_in_domain_inner(
         judge,
         gauge.profile(),
         capture,
         config,
         logical_domain,
         section_start,
+        speed,
     )?;
     for header in capture
         .map(LiveReplayCapture::header)
         .into_iter()
         .chain(competition)
     {
-        validate_header_in_domain(
+        validate_header_in_domain_inner(
             judge,
             gauge.profile(),
             header,
             config,
             logical_domain,
             section_start,
+            speed,
         )?;
         let setup = crate::replay_playback::decode_section_setup(&header.options)?;
         if setup.judgments.as_ref() != policy.judgments() {
@@ -241,6 +393,54 @@ pub(crate) fn validate_audio_config(
             .is_some_and(|end| end < config.section_start)
     {
         return Err("invalid original audio section identity".into());
+    }
+    Ok(())
+}
+
+/// Validates the declared section without recovering preroll from a rounded song snapshot.
+pub(crate) fn validate_audio_config_with_speed(
+    config: &crate::native_gameplay::AudioGameplayConfig,
+    speed: LiveSpeedSetup,
+) -> NativeGameplayResult<()> {
+    validate_speed_config(&config.gameplay, Some(config.section_start), speed)
+}
+
+fn validate_speed_config(
+    config: &NativeGameplayConfig,
+    section_start: Option<Timestamp>,
+    speed: LiveSpeedSetup,
+) -> NativeGameplayResult<()> {
+    validate_config(config)?;
+    if speed.start().as_nanos() < 0
+        || section_start.is_some_and(|start| start != speed.start())
+        || config.song_origin != speed.song_origin()
+        || config.end_song != speed.end()
+    {
+        return Err("native selected speed differs from original section or song origin".into());
+    }
+    speed.playback_end_frame(config.sample_rate)?;
+    Ok(())
+}
+
+/// Checks the exact cold phase at the actual authority-mapped logical origin.
+/// Integer anchor equality alone cannot distinguish rounded preroll phases.
+pub(crate) fn validate_transport_with_speed(
+    transport: &Transport,
+    logical_origin: Timestamp,
+    speed: LiveSpeedSetup,
+) -> NativeGameplayResult<()> {
+    let expected = PrerollTransportSetup {
+        logical_origin,
+        original_start: speed.start(),
+        output_preroll: speed.preroll(),
+        positive_rate: speed.speed().rate(),
+        original_end: speed.end(),
+    };
+    // Equality also checks hidden command chronology: a no-op command can
+    // advance it without adding an anchor. This bounded allocation is cold.
+    let pristine = speed.transport(logical_origin)?;
+    if transport.preroll_setup() != Some(expected) || transport != &pristine {
+        return Err("native selected speed requires the exact pristine Transport phase".into());
     }
     Ok(())
 }

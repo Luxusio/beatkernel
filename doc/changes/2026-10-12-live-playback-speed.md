@@ -40,6 +40,17 @@
   각각 고쳤으며 `live-recording-1.log`부터 `live-recording-3.log`에 보존했다.
   파서나 판정 검증을 완화하지 않았다. source-speed 추가 이후의 전체 app
   회귀와 실제 플레이 소비자·독립 QA는 아직 남아 있다.
+- 공통 solo/local 플레이의 새 테스트 14개와 native policy의 public 호환
+  테스트 1개가 `live-owners-3.log`에서 통과했다. 실제 네 배속의 Mixer PCM,
+  키음·mine·gauge, 원곡 입력/기록 복원, activation, zero/quantized finite end,
+  실제 출력 표식·presentation·credit, local 2/4/64 member 종료를 검사한다.
+  64 member는 순수 component fixture이며 64 물리 장치 검증이 아니다.
+  유한 종료에서 실제 SetRate credit을 회수하지 못하던 결함은 검증된
+  RenderReport cursor로 반납하도록 수정했다. 최초 실패는 `step-live-1.log`에
+  보존했다. 새 native private admission 12개를 포함한 app 단위 테스트
+  1972개와 확장된 기록 테스트 15개는 `live-owners-2.log`에서 통과했다.
+  해당 실행의 public fixture WAV 정의 오류는 이후 수정했고, Step의 마지막
+  credit 수정 이후 전체 app 단위 테스트 재실행은 최종 회귀 단계에 남아 있다.
 - 최초 전체 core 검사 `core-full-1.log`는 컴파일 중 240초 제한으로 종료됐다
   (exit 124). 제한을 600초로 늘린 후 같은 source를 재검사했고
   `core-full-2.log`에서 62개 suite의 531개 테스트가 모두 통과했다
