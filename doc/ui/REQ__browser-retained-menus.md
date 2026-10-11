@@ -124,7 +124,8 @@ correction use existing pending/error surfaces and keep values readable.
 The original acquisition form may contain unfinished invalid timing or duplicate
 keyboard choices. Initial Settings publication must preserve those bounded raw
 strings as editable fields, without requiring valid timing or unique bindings.
-Apply and incoming profiles still require their complete semantic validation.
+Apply still requires scalar/policy validation; incoming full profiles also
+require all eighteen validated bindings.
 A valid full profile must repair that form without requiring
 the old draft to pass profile validation. Preserve its complete bounded strings
 for drift checks and uncertain-result restoration; strictly validate all values

@@ -20,17 +20,21 @@ acquisition drafts. Incoming profiles remain strictly validated; uncertain
 results restore the original bounded form rather than requiring it to be a
 valid exported profile.
 
-Development verification, before independent review and QA:
+Verification evidence at source HEAD `a45522ef9fba0f1629e0575346fbdb6eb047014d`:
 
 - Settings mapping: 12 Node tests passed; keyboard intent: 18 passed.
 - Shared Rust menus: 45 tests passed; Settings views: 14 passed.
-- Window host: 205 tests passed before review; Worker: all 85 passed using genuine WASM.
+- Window host: all 207 tests passed; Worker: all 85 passed using genuine WASM.
   Tests include failed/disposed owners, invalid post-admission menu state,
   profile repair and restoration of an unfinished original form.
   Independent code review also reproduced an initial Settings entry regression:
   unfinished timing or duplicate keys prevented draft publication. Initial
   publication now uses the existing bounded raw-field order; Apply/profile
   validation stays strict. Two initial-entry regressions failed before the fix.
+- DEEP code review and independent security review passed after that correction.
+- Full app graphics library: 2,405 passed, zero failed, five ignored.
+  Full Node suite: 978 passed, zero failed/skipped/cancelled. Changed JavaScript
+  syntax checks and diff whitespace checks passed.
 - Browser release build and generated bindings passed. WASM SHA256:
   `7a386e90245be7f00c50aa9b1b96d82f6cbe621ce479a17aa5b5ad835ac1bd5a`.
 - Actual Chromium completed seven production flows: trusted policy editing,
@@ -41,22 +45,30 @@ Development verification, before independent review and QA:
 - Browser, Xvfb, loopback server and temporary profile/cache cleanup completed.
   No product page, console or network errors were observed.
 
-Local development evidence lives in ignored
-`target/wf/settings-policy-development-12a58-6/evidence.json`; scoped command logs
-live in `target/wf/browser-retained-settings-policy/`. These observations do not
-replace independent review, QA or Harness completion receipts.
+Independent browser evidence lives in ignored
+`target/wf/settings-policy-qa-browser-12a58-1/evidence.json`; full CLI logs live
+in `target/wf/settings-policy-qa-cli-12a58-1/`. Scoped development logs remain in
+`target/wf/browser-retained-settings-policy/`. Actual independent review and QA
+finals do not themselves replace Harness-owned completion receipts.
 Two earlier development runs completed all functional stages but were rejected
 by the strict probe for an audio-WASM `ERR_ABORTED` request. Bounded request,
 server, reader and compilation observations were added without relaxing the
-network assertion. The latest instrumented execution passed with no errors;
-the earlier records remain available and independent browser QA is pending.
+network assertion. The independent required browser QA passed with no errors.
+An additional UX execution reproduced that diagnostic despite consuming all
+62,096 bytes, reaching end-of-stream, compiling the module and completing actual
+playback. The failure record is retained in
+`target/wf/settings-policy-ux-browser-12a58-1/evidence.json`. One bounded unchanged
+rerun at `target/wf/settings-policy-ux-browser-12a58-2/evidence.json` repeated the
+same strict diagnostic failure while again completing the actual user flows.
+Its cause remains unconfirmed. No assertion was relaxed or source fix claimed
+for that diagnostic. The scoped UX judgment passed, with long preset-ID clipping
+and editor focus-release ergonomics recorded as follow-up improvements.
+The independent browser QA reassessed both supplemental failures and returned
+FAIL for AC-005's strict zero-network-errors criterion. The original passing
+record is retained, but does not establish a stable final PASS. Chromium NetLog
+capture is the next investigation; this child is not verified complete.
 
 ## Known ceiling
-
-Known ceiling: current full suite and actual browser integration remain coordinator-owned — verify after Worker source freezes.
-The reporting worker's ceiling is retained here as provenance: the current
-scoped Window/Worker suites and development browser integration have since
-passed, while independent full-suite and browser QA remain pending.
 
 Physical GPU performance, native device latency and physical OS IME are not
 established by Chromium software rendering or injected composition. Keyboard
