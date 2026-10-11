@@ -9,6 +9,12 @@ Renderer는 모든 필드의 인스턴스 수와 실제 장치 버퍼 한도를 
 geometry와 버퍼 교체 중의 저장 공간을 포함한다. 로컬 기능 검증을 마쳤으며,
 독립 리뷰와 QA는 별도 완료 조건이다.
 
+독립 CLI QA의 전체 graphics unit 테스트 재실행은 2,395개 통과,
+실패 0개, ignored 5개였다. 초기 실패 한 개는 오류 뒤 정상 Scene 상태를
+기대하던 기존 borrowed-roster 테스트였으며, 첫 오류 유지와 명시적 clear
+복구를 검사하도록 수정했다. 전체 Node 테스트 931개도 통과했다.
+ignored 항목 전체의 실행이나 다른 운영체제·물리 장치 검증을 뜻하지 않는다.
+
 범위별 unit 테스트 121개와 별도의 wire 통합 테스트 11개가 통과했다.
 공개 playfield 함수, 로컬 roster/page/reservation 변환과 브라우저 상태
 변환에서 발생한 오류는 공통 candidate 경계에서 첫 오류로 유지된다.
