@@ -79,11 +79,63 @@ and stale/malformed refusal remain verified. The current Rust WASM and bindings
 also rebuild successfully; actual browser regression and fresh review/QA are
 still required.
 
-Settings Apply validates the thirteen scalar menu fields using the same bounded
+Settings Apply validates thirteen legacy scalar fields or sixteen complete
+scalar/policy fields using the same bounded
 timing/output/capacity/section rules as full settings profiles. Applying scalars
 preserves the currently selected keyboard bindings. Full profile import/export
 continues to require its kind/version/exact schema and all eighteen keyboard
 lanes; a menu draft must neither fabricate a binding map nor weaken that check.
+
+The complete Settings draft keeps indices 0–12 unchanged and appends numerical
+timing preset, rank precedence and gauge at indices 13–15. Apply checks the whole
+draft before any acquisition mirror changes. Legacy thirteen-field Apply leaves
+existing policy untouched. Loading an old full profile without policy restores
+the default triple: empty preset, `rank-first`, `beatkernel`. Empty preset with
+`defexrank-first` and `beatkernel` preserves that latent precedence text even
+though the runtime policy is absent. Existing profile encoding omits policy only
+for the exact default triple; no timing algorithm or profile version changes.
+
+Settings keyboard row/page movement must reach all fields using ordinary focus
+transitions. Up/Down, Home/End, PageUp/PageDown and Tab/ShiftTab submit existing
+field-selection intents; Escape returns to the original parent. Native editors,
+composition, modified keys, repeats and active gameplay retain input ownership.
+Browser Settings shows native-only Add Binding and Profile Path as unavailable,
+excludes their hits and refuses direct unsupported actions. Native capabilities
+remain enabled. Players Done and Back return to the same Settings parent,
+preserving its policy draft, selection, canonical roster and acquisition owner.
+
+Full profile loading while Settings or its retained child is open must not leave
+an older retained draft that can overwrite the loaded profile on the next Apply.
+One existing settings operation owns a bounded candidate. It publishes correlated
+pending state, validates the original menu token and complete acquisition draft,
+and admits only the matching candidate. Admission is a commitment boundary:
+ordinary cancellation and the file-acquisition deadline apply before admission.
+The Worker atomically replaces the original Settings draft and retained Practice
+section values, clears pending and publishes the resulting token before the
+final response. Window mirrors the already validated candidate only for that
+accepted owner/result token. Parent/child identity, route, selection, other
+drafts and roster stay intact. Held file reads remain owned until settlement;
+cancelled consumers cannot revive or accumulate candidates. After admission,
+a lost or malformed acknowledgement requires joined owner retirement/reset
+before ordinary use resumes; it cannot claim rollback while retaining an
+uncertain committed owner. Invalid files, stale tokens and pre-admission draft
+changes preserve the previous accepted configuration. Loading, refusal and
+correction use existing pending/error surfaces and keep values readable.
+The original acquisition form may contain unfinished invalid timing or duplicate
+keyboard choices. A valid full profile must repair that form without requiring
+the old draft to pass profile validation. Preserve its complete bounded strings
+for drift checks and uncertain-result restoration; strictly validate all values
+and eighteen bindings of the incoming profile before admission.
+Saving publishes correlated pending/completion state without replacing the
+retained draft. Cancellation before admission remains possible when the pending
+receipt has not arrived; it must match that operation's original token. If an
+admitted load requires owner reset, accepted acquisition values are restored
+before use resumes; the existing reset can release chart and roster owners.
+
+Verify current production Workers/WASM with trusted keyboard policy edits,
+Apply, Back/reopen, Practice and Players Done, full profile/binding roundtrip,
+and genuine finite selected-policy playback with observed audio progress.
+Injected composition events are bridge evidence, not physical OS IME evidence.
 
 Browser menu navigation and business drafts belong to the gameplay owner. The
 render Worker instantiates local shared retained views/navigator lifecycle and
