@@ -81,6 +81,13 @@ pub fn parse_chart_seed(value: &str) -> Result<u64, String> {
     value.parse().map_err(|_| "chart seed exceeds u64".into())
 }
 
+/// Parses a fixed positive pitch-changing speed as an explicit ASCII NUM/DEN.
+pub fn parse_playback_speed(value: &str) -> Result<crate::replay_speed::ReplaySpeed, String> {
+    value
+        .parse::<crate::replay_speed::ReplaySpeed>()
+        .map_err(|error| error.to_string())
+}
+
 /// Checked optional timing pair shared by all native CLI adapters.
 /// Absence keeps caller windows; an explicit preset requires explicit precedence.
 pub fn parse_timing_selection(
@@ -262,6 +269,11 @@ const COMMON: &[Spec] = &[
         "--mp-server-name",
         "QUIC SERVER NAME",
         "Certificate server identity for join; requires --mp-ca.",
+    ),
+    (
+        "--speed",
+        "PLAYBACK SPEED (NUM/DEN)",
+        "Empty uses 1/1. Positive NUM/DEN changes pitch; fixed for the entire play. Choose before starting.",
     ),
 ];
 const WINDOWS: &[Spec] = &[
@@ -633,6 +645,20 @@ impl NativeSettings {
             Ok(0)
         } else {
             parse_chart_seed(value)
+        }
+    }
+    /// Empty draft selects 1/1; incomplete fractions fail at apply or launch.
+    pub fn playback_speed(&self) -> Result<crate::replay_speed::ReplaySpeed, String> {
+        let value = self
+            .fields
+            .iter()
+            .find(|row| row.flag == "--speed")
+            .map_or("", |row| row.value.as_str());
+        if value.is_empty() {
+            crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+                .map_err(|error| error.to_string())
+        } else {
+            parse_playback_speed(value)
         }
     }
     /// Validates the editable optional timing pair before apply or launch.

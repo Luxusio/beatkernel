@@ -1,5 +1,6 @@
 //! Shared exact logical pause anchoring and conservative interval input cutoffs.
 use crate::{
+    live_speed::LiveSpeedSetup,
     native_start::HostStartWindow,
     playback_pause::{NativePause, PauseError, PauseIntervalObservation},
 };
@@ -63,15 +64,52 @@ pub fn update_live_pause(
     song_origin: Timestamp,
     sample_rate: u32,
 ) -> Result<LivePauseUpdate, PauseError> {
-    let mut next = pause.clone();
-    let update = update_live_pause_inner(
-        &mut next,
+    update_live_pause_mapping(
+        pause,
         evidence,
         rendered,
         desired,
-        song_origin,
+        LivePauseSongMapping::Legacy(song_origin),
         sample_rate,
-    )?;
+    )
+}
+
+/// Maps an acknowledged active output frame through the selected original-song phase.
+pub fn update_live_pause_with_speed(
+    pause: &mut NativePause,
+    evidence: LivePauseObservation,
+    rendered: Option<RenderReport>,
+    desired: Option<bool>,
+    setup: LiveSpeedSetup,
+    sample_rate: u32,
+) -> Result<LivePauseUpdate, PauseError> {
+    update_live_pause_mapping(
+        pause,
+        evidence,
+        rendered,
+        desired,
+        LivePauseSongMapping::Speed(setup),
+        sample_rate,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum LivePauseSongMapping {
+    Legacy(Timestamp),
+    Speed(LiveSpeedSetup),
+}
+
+fn update_live_pause_mapping(
+    pause: &mut NativePause,
+    evidence: LivePauseObservation,
+    rendered: Option<RenderReport>,
+    desired: Option<bool>,
+    mapping: LivePauseSongMapping,
+    sample_rate: u32,
+) -> Result<LivePauseUpdate, PauseError> {
+    let mut next = pause.clone();
+    let update =
+        update_live_pause_inner(&mut next, evidence, rendered, desired, mapping, sample_rate)?;
     *pause = next;
     Ok(update)
 }
@@ -86,15 +124,46 @@ pub fn update_live_audio_pause(
     song_origin: Timestamp,
     sample_rate: u32,
 ) -> Result<AudioLivePauseUpdate, PauseError> {
-    let mut next = pause.clone();
-    let update = update_live_pause_inner(
-        &mut next,
+    update_live_audio_pause_mapping(
+        pause,
         evidence,
         rendered,
         desired,
-        song_origin,
+        LivePauseSongMapping::Legacy(song_origin),
         sample_rate,
-    )?;
+    )
+}
+
+/// Retains the physical cutoff independently of the selected original-song speed.
+pub fn update_live_audio_pause_with_speed(
+    pause: &mut NativePause,
+    evidence: LivePauseObservation,
+    rendered: Option<RenderReport>,
+    desired: Option<bool>,
+    setup: LiveSpeedSetup,
+    sample_rate: u32,
+) -> Result<AudioLivePauseUpdate, PauseError> {
+    update_live_audio_pause_mapping(
+        pause,
+        evidence,
+        rendered,
+        desired,
+        LivePauseSongMapping::Speed(setup),
+        sample_rate,
+    )
+}
+
+fn update_live_audio_pause_mapping(
+    pause: &mut NativePause,
+    evidence: LivePauseObservation,
+    rendered: Option<RenderReport>,
+    desired: Option<bool>,
+    mapping: LivePauseSongMapping,
+    sample_rate: u32,
+) -> Result<AudioLivePauseUpdate, PauseError> {
+    let mut next = pause.clone();
+    let update =
+        update_live_pause_inner(&mut next, evidence, rendered, desired, mapping, sample_rate)?;
     let boundary = update
         .boundary
         .map(|original| -> Result<AudioLivePauseBoundary, PauseError> {
@@ -121,7 +190,7 @@ fn update_live_pause_inner(
     evidence: LivePauseObservation,
     rendered: Option<RenderReport>,
     desired: Option<bool>,
-    song_origin: Timestamp,
+    mapping: LivePauseSongMapping,
     sample_rate: u32,
 ) -> Result<LivePauseUpdate, PauseError> {
     if sample_rate == 0 || sample_rate > 1_000_000_000 {
@@ -193,10 +262,17 @@ fn update_live_pause_inner(
         .map(
             |(paused, window, playback_frame)| -> Result<LivePauseBoundary, PauseError> {
                 let elapsed = i128::from(playback_frame) * 1_000_000_000 / i128::from(sample_rate);
-                let song = i128::from(song_origin.as_nanos())
-                    .checked_add(elapsed)
-                    .and_then(|value| i64::try_from(value).ok())
-                    .ok_or(PauseError("live pause boundary song time overflow"))?;
+                let song = match mapping {
+                    LivePauseSongMapping::Legacy(song_origin) => i128::from(song_origin.as_nanos())
+                        .checked_add(elapsed)
+                        .and_then(|value| i64::try_from(value).ok())
+                        .map(Timestamp::from_nanos)
+                        .ok_or(PauseError("live pause boundary song time overflow"))?,
+                    LivePauseSongMapping::Speed(setup) => setup
+                        .speed()
+                        .song_at_elapsed(setup.start(), setup.preroll(), elapsed, setup.end())
+                        .map_err(|_| PauseError("live pause boundary song time overflow"))?,
+                };
                 Ok(LivePauseBoundary {
                     paused,
                     window,
@@ -206,7 +282,7 @@ fn update_live_pause_inner(
                         window.latest()
                     },
                     playback_frame,
-                    song: Timestamp::from_nanos(song),
+                    song,
                 })
             },
         )
@@ -239,7 +315,24 @@ pub fn prepare_live_transport(
     last_song: Timestamp,
 ) -> Result<Transport, PauseError> {
     validate_boundary(boundary)?;
-    prepare_transport_at(transport, boundary, boundary.at.timestamp, last_song)
+    prepare_transport_at(transport, boundary, boundary.at.timestamp, last_song, None)
+}
+
+/// Preserves the exact preroll phase at an acknowledged playback-frame cutoff.
+pub fn prepare_live_transport_with_speed(
+    transport: &Transport,
+    boundary: LivePauseBoundary,
+    last_song: Timestamp,
+    sample_rate: u32,
+) -> Result<Transport, PauseError> {
+    validate_boundary(boundary)?;
+    prepare_transport_at(
+        transport,
+        boundary,
+        boundary.at.timestamp,
+        last_song,
+        Some(sample_rate),
+    )
 }
 
 /// Stage pause or resume on the logical point of the original native transition.
@@ -250,6 +343,38 @@ pub fn prepare_live_audio_transport(
     control: &crate::audio_authority::PreparedControlCutoff,
     last_song: Timestamp,
 ) -> Result<Transport, PauseError> {
+    validate_audio_boundary(boundary, control)?;
+    prepare_transport_at(
+        transport,
+        boundary.original,
+        control.output().timestamp,
+        last_song,
+        None,
+    )
+}
+
+/// Preserves exact phase using the original authority's logical control cutoff.
+pub fn prepare_live_audio_transport_with_speed(
+    transport: &Transport,
+    boundary: AudioLivePauseBoundary,
+    control: &crate::audio_authority::PreparedControlCutoff,
+    last_song: Timestamp,
+    sample_rate: u32,
+) -> Result<Transport, PauseError> {
+    validate_audio_boundary(boundary, control)?;
+    prepare_transport_at(
+        transport,
+        boundary.original,
+        control.output().timestamp,
+        last_song,
+        Some(sample_rate),
+    )
+}
+
+fn validate_audio_boundary(
+    boundary: AudioLivePauseBoundary,
+    control: &crate::audio_authority::PreparedControlCutoff,
+) -> Result<(), PauseError> {
     validate_boundary(boundary.original)?;
     if boundary.epoch != control.epoch()
         || boundary.raw_output != control.raw_output()
@@ -260,12 +385,7 @@ pub fn prepare_live_audio_transport(
             "audio pause boundary differs from prepared control",
         ));
     }
-    prepare_transport_at(
-        transport,
-        boundary.original,
-        control.output().timestamp,
-        last_song,
-    )
+    Ok(())
 }
 
 fn prepare_transport_at(
@@ -273,7 +393,37 @@ fn prepare_transport_at(
     boundary: LivePauseBoundary,
     at: Timestamp,
     last_song: Timestamp,
+    sample_rate: Option<u32>,
 ) -> Result<Transport, PauseError> {
+    let exact_elapsed = sample_rate
+        .map(|sample_rate| {
+            if sample_rate == 0 || sample_rate > 1_000_000_000 {
+                return Err(PauseError(
+                    "live pause requires a representable nonzero frame grid",
+                ));
+            }
+            let setup = transport.preroll_setup().ok_or(PauseError(
+                "live speed pause requires the exact preroll transport setup",
+            ))?;
+            let elapsed =
+                i128::from(boundary.playback_frame) * 1_000_000_000 / i128::from(sample_rate);
+            let expected = crate::replay_speed::ReplaySpeed::new(setup.positive_rate)
+                .map_err(|_| PauseError("live speed pause transport rate is invalid"))?
+                .song_at_elapsed(
+                    setup.original_start,
+                    setup.output_preroll,
+                    elapsed,
+                    setup.original_end,
+                )
+                .map_err(|_| PauseError("live speed pause boundary song time overflow"))?;
+            if expected != boundary.song {
+                return Err(PauseError(
+                    "live speed pause boundary differs from exact transport setup",
+                ));
+            }
+            Ok(elapsed)
+        })
+        .transpose()?;
     let mut next = transport.clone();
     if boundary.paused {
         if last_song > boundary.song {
@@ -284,11 +434,17 @@ fn prepare_transport_at(
         if transport.is_paused() {
             return Err(PauseError("live pause requires a running transport"));
         }
-        next.pause(at).map_err(|_| {
-            PauseError("live pause transport cutoff violates chronology or mapping")
-        })?;
-        next.seek(at, boundary.song)
-            .map_err(|_| PauseError("live pause exact song anchor violates chronology"))?;
+        if let Some(elapsed) = exact_elapsed {
+            next.pause_at_output_elapsed(at, elapsed).map_err(|_| {
+                PauseError("live speed pause cutoff violates chronology or exact phase")
+            })?;
+        } else {
+            next.pause(at).map_err(|_| {
+                PauseError("live pause transport cutoff violates chronology or mapping")
+            })?;
+            next.seek(at, boundary.song)
+                .map_err(|_| PauseError("live pause exact song anchor violates chronology"))?;
+        }
     } else {
         if !transport.is_paused() || last_song != boundary.song {
             return Err(PauseError(
@@ -304,8 +460,18 @@ fn prepare_transport_at(
                 "live resume transport differs from the frozen song",
             ));
         }
-        next.resume(at)
-            .map_err(|_| PauseError("live resume cutoff violates transport chronology"))?;
+        if let Some(elapsed) = exact_elapsed {
+            // A duplicate exact pause verifies the acknowledged frame matches
+            // the retained frozen elapsed, including its fractional phase.
+            next.pause_at_output_elapsed(at, elapsed)
+                .map_err(|_| PauseError("live speed resume frame differs from its frozen phase"))?;
+            next.resume_preroll(at).map_err(|_| {
+                PauseError("live speed resume cutoff violates transport chronology")
+            })?;
+        } else {
+            next.resume(at)
+                .map_err(|_| PauseError("live resume cutoff violates transport chronology"))?;
+        }
     }
     Ok(next)
 }

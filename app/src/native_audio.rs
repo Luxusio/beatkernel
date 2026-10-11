@@ -2,9 +2,11 @@
 use crate::{
     bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     input_sounds::InputSoundPlan,
+    live_speed::LiveSpeedSetup,
     mine_sounds::MineSoundPlan,
     native_gameplay::NativeGameplayResult,
     offline::OwnedStopEvidence,
+    replay_speed::ReplaySpeed,
     PreparedBms,
 };
 use beatkernel::{
@@ -14,6 +16,7 @@ use beatkernel::{
     },
     runtime::{hazard_sound::HazardSoundTimeline, input_sound::InputSoundTimeline},
     time::{ClockPoint, Duration, Timestamp},
+    transport::Rate,
 };
 
 /// Keeps the original native mixer counters when Stop ownership is insufficient.
@@ -354,6 +357,18 @@ pub fn prepare_audio(
     commands: Vec<AudioCommand>,
     config: NativeAudioConfig,
 ) -> NativeGameplayResult<PreparedNativeAudio> {
+    prepare_audio_with_speed(bank, commands, config, ReplaySpeed::new(Rate::NORMAL)?)
+}
+
+/// Cold fixed-speed native composition on the unchanged physical output grid.
+/// Original BGM cues are mapped once; input sound timestamps remain output time.
+/// The origin rate command shares normal admission and retirement credit.
+pub fn prepare_audio_with_speed(
+    bank: SampleBank,
+    commands: Vec<AudioCommand>,
+    config: NativeAudioConfig,
+    speed: ReplaySpeed,
+) -> NativeGameplayResult<PreparedNativeAudio> {
     let capacity = AudioLimits::MAX_COMMANDS;
     let limits = AudioLimits::new(
         capacity,
@@ -363,46 +378,111 @@ pub fn prepare_audio(
         capacity,
     )?;
     let format = bank.format();
-    let commands = crate::section_start::relative_commands(commands, config.start)?;
-    let commands = if let Some(end) = config.playback_end_frame {
-        let mut retained = Vec::new();
-        retained.try_reserve_exact(commands.len())?;
+    let mut bgm = if speed.rate() == Rate::NORMAL {
+        let commands = crate::section_start::relative_commands(commands, config.start)?;
+        let commands = if let Some(end) = config.playback_end_frame {
+            let mut retained = Vec::new();
+            retained.try_reserve_exact(commands.len())?;
+            for command in commands {
+                let AudioCommand::Play { at, gain, .. } = command else {
+                    return Err(BgmFeedError::InvalidCommand(command).into());
+                };
+                let elapsed = i128::from(at.as_nanos()) + i128::from(config.preroll.as_nanos());
+                if !gain.is_finite() || elapsed < 0 {
+                    return Err(BgmFeedError::InvalidCommand(command).into());
+                }
+                let mapped =
+                    i64::try_from(i128::from(config.output_origin.timestamp.as_nanos()) + elapsed)
+                        .map_err(|_| BgmFeedError::Overflow)?;
+                if crate::replay_audio::before_endpoint(
+                    Timestamp::from_nanos(mapped),
+                    config.output_origin,
+                    format.sample_rate(),
+                    Some(end),
+                )? {
+                    // Keep relative time: the real feeder performs its usual single
+                    // origin/preroll mapping after this exact frame-bound check.
+                    retained.push(command);
+                }
+            }
+            retained
+        } else {
+            commands
+        };
+        BgmFeeder::new(
+            commands,
+            BgmConfig {
+                output_origin: config.output_origin,
+                sample_rate: format.sample_rate(),
+                preroll: config.preroll,
+                lookahead: config.lookahead,
+                max_pending: capacity - LIVE_COMMAND_RESERVE,
+            },
+        )?
+    } else {
+        if config.start.as_nanos() < 0 {
+            return Err("practice start must be nonnegative".into());
+        }
+        let setup = LiveSpeedSetup::new(config.start, config.preroll, speed, None)?;
+        let include_rate = crate::replay_audio::before_endpoint(
+            config.output_origin.timestamp,
+            config.output_origin,
+            format.sample_rate(),
+            config.playback_end_frame,
+        )?;
+        let mut mapped = Vec::new();
+        mapped.try_reserve_exact(
+            commands
+                .len()
+                .checked_add(usize::from(include_rate))
+                .ok_or(BgmFeedError::Overflow)?,
+        )?;
+        if include_rate {
+            mapped.push(AudioCommand::SetRate {
+                at: config.output_origin.timestamp,
+                rate: speed.rate(),
+            });
+        }
         for command in commands {
-            let AudioCommand::Play { at, gain, .. } = command else {
+            let AudioCommand::Play {
+                voice,
+                sample,
+                at,
+                gain,
+            } = command
+            else {
                 return Err(BgmFeedError::InvalidCommand(command).into());
             };
-            let elapsed = i128::from(at.as_nanos()) + i128::from(config.preroll.as_nanos());
-            if !gain.is_finite() || elapsed < 0 {
+            if !gain.is_finite() {
                 return Err(BgmFeedError::InvalidCommand(command).into());
             }
-            let mapped =
-                i64::try_from(i128::from(config.output_origin.timestamp.as_nanos()) + elapsed)
-                    .map_err(|_| BgmFeedError::Overflow)?;
+            let at = setup.output_at(config.output_origin, at)?.timestamp;
             if crate::replay_audio::before_endpoint(
-                Timestamp::from_nanos(mapped),
+                at,
                 config.output_origin,
                 format.sample_rate(),
-                Some(end),
+                config.playback_end_frame,
             )? {
-                // Keep relative time: the real feeder performs its usual single
-                // origin/preroll mapping after this exact frame-bound check.
-                retained.push(command);
+                mapped.push(AudioCommand::Play {
+                    voice,
+                    sample,
+                    at,
+                    gain,
+                });
             }
         }
-        retained
-    } else {
-        commands
+        BgmFeeder::from_output_commands_with_rate(
+            mapped,
+            BgmConfig {
+                output_origin: config.output_origin,
+                sample_rate: format.sample_rate(),
+                preroll: Duration::ZERO,
+                lookahead: config.lookahead,
+                max_pending: capacity - LIVE_COMMAND_RESERVE,
+            },
+            speed.rate(),
+        )?
     };
-    let mut bgm = BgmFeeder::new(
-        commands,
-        BgmConfig {
-            output_origin: config.output_origin,
-            sample_rate: format.sample_rate(),
-            preroll: config.preroll,
-            lookahead: config.lookahead,
-            max_pending: capacity - LIVE_COMMAND_RESERVE,
-        },
-    )?;
     let (mut producer, consumer) = if config.gated_start {
         command_queue_with_start_gate(capacity)
     } else {
