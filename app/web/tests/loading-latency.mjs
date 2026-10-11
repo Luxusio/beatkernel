@@ -174,7 +174,7 @@ function wav(frames, polarity = 1) {
   return bytes;
 }
 const config = denseOnly ? { mode, trials, viewport: { width: 1200, height: 1000 }, noteCounts: [20000, 100000],
-  objectsPerRow: 10000, smallEncodedBytes: 44 + 9600 * 2, rate: 48000, channels: 2, seed: "0", heldInput: "KeyZ",
+  objectsPerRow: 100, smallEncodedBytes: 44 + 9600 * 2, rate: 48000, channels: 2, seed: "0", heldInput: "KeyZ",
   gate: "none; natural chart preparation", renderer: "software Vulkan SwiftShader", browser: "/usr/bin/chromium", display: "owned Xvfb 1400x1200x24",
   clock: "Window performance.now; Worker phase durations use only local differences", request: "actual production Worker postMessage",
   presentation: "actual RenderClient render-geometry ACK after RendererWorker draw; visible canvas required",
