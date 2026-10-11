@@ -36,7 +36,12 @@ count/byte 범위를 확인한다. 버퍼가 부족할 때만 확장한다. 표�
 숫자 범위, 승인 용량 또는 실제 장치 한도를 넘으면 구체적인 표시 오류를
 반환한다. 일부 playfield만 정상적으로 제출한 것처럼 표시하지 않는다.
 실패한 Scene 후보는 clear 또는 새 후보를 구성하기 전까지 성공적으로
-제출할 수 없다. 오류 화면은 별도의 정상 후보로 구성한다. CPU 저장 공간의
+제출할 수 없다. 공개 playfield 구성 함수의 background, progress, 입력 mask,
+판정 feedback, lookahead와 bounds 검증 실패도 같은 규칙을 따른다.
+로컬 플레이어 화면의 roster, 페이지, comparison 예약 공간 검증과
+borrowed view 변환 전의 거절도 Scene을 실패 상태로 만든다.
+첫 오류는 이후의 정상 호출이나 다른 오류로 덮어쓰지 않는다.
+오류 화면은 별도의 정상 후보로 구성한다. CPU 저장 공간의
 복구 가능한 reservation 실패는 이전 cache를 교체하지 않고 반환한다.
 global allocator, Arc 생성, GPU 드라이버의 모든 OOM을 복구할 수 있다는
 보장은 하지 않는다. 장치 오류와 surface 복구는 기존 경로를 따른다.

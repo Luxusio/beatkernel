@@ -257,6 +257,18 @@ pub fn playfield_in_with_progress(
     )
 }
 
+fn playfield_candidate(
+    scene: &mut Scene,
+    compose: impl FnOnce(&mut Scene) -> Result<(), String>,
+) -> Result<(), String> {
+    scene.status()?;
+    let candidate = compose(scene);
+    if let Err(error) = &candidate {
+        scene.reject(error.clone());
+    }
+    candidate
+}
+
 /// Validates a background frame before any playfield geometry is painted.
 pub fn playfield_in_with_background(
     pixels: &mut Scene,
@@ -269,8 +281,7 @@ pub fn playfield_in_with_background(
     progress: Option<&crate::note_progress::NoteProgress>,
     frame: crate::bga_render::BgaFrame,
 ) -> Result<(), String> {
-    pixels.status()?;
-    let candidate: Result<(), String> = (|| {
+    playfield_candidate(pixels, |pixels| {
         frame.validate()?;
         if progress.is_some_and(|state| !state.matches_chart(chart)) {
             return Err("note progress belongs to another prepared chart".into());
@@ -360,11 +371,7 @@ pub fn playfield_in_with_background(
         }
         rect(pixels, bounds.x, line, bounds.width, 3, 0xffffff);
         pixels.status()
-    })();
-    if let Err(error) = &candidate {
-        pixels.reject(error.clone());
-    }
-    candidate
+    })
 }
 
 pub use crate::playfield_layout::LOCAL_PLAYERS_PER_PAGE;
@@ -642,20 +649,23 @@ pub fn local_players_with_background(
     show: bool,
     frames: &[crate::bga_render::BgaFrame; 4],
 ) -> Result<(), String> {
-    // Preflight the bounded roster before making the stack-only borrowed bridge.
-    page_range(players.len(), page)?;
-    let mut views = [LocalPlayerView::from(&players[0]); crate::local_players::MAX_LOCAL_PLAYERS];
-    for (destination, player) in views.iter_mut().zip(players) {
-        *destination = LocalPlayerView::from(player);
-    }
-    local_player_views_with_background(
-        scene,
-        &views[..players.len()],
-        lookahead,
-        page,
-        show,
-        frames,
-    )
+    playfield_candidate(scene, |scene| {
+        // Preflight the bounded roster before making the stack-only borrowed bridge.
+        page_range(players.len(), page)?;
+        let mut views =
+            [LocalPlayerView::from(&players[0]); crate::local_players::MAX_LOCAL_PLAYERS];
+        for (destination, player) in views.iter_mut().zip(players) {
+            *destination = LocalPlayerView::from(player);
+        }
+        local_player_views_with_background(
+            scene,
+            &views[..players.len()],
+            lookahead,
+            page,
+            show,
+            frames,
+        )
+    })
 }
 
 /// The common field composer accepts retained owners without copying their state.
@@ -681,18 +691,20 @@ pub fn local_player_views_with_reserved_comparison_space(
     frames: &[crate::bga_render::BgaFrame; 4],
     reserved: &[i64],
 ) -> Result<(), String> {
-    if reserved.len() != players.len() {
-        return Err("local comparison reservations differ from the roster".into());
-    }
-    local_player_views_with_background_impl(
-        scene,
-        players,
-        lookahead,
-        page,
-        show,
-        frames,
-        Some(reserved),
-    )
+    playfield_candidate(scene, |scene| {
+        if reserved.len() != players.len() {
+            return Err("local comparison reservations differ from the roster".into());
+        }
+        local_player_views_with_background_impl(
+            scene,
+            players,
+            lookahead,
+            page,
+            show,
+            frames,
+            Some(reserved),
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -705,21 +717,23 @@ fn local_player_views_with_background_impl(
     frames: &[crate::bga_render::BgaFrame; 4],
     reserved: Option<&[i64]>,
 ) -> Result<(), String> {
-    page_range(players.len(), page)?;
-    let mut views =
-        [VisualLocalPlayerView::from(players[0]); crate::local_players::MAX_LOCAL_PLAYERS];
-    for (destination, player) in views.iter_mut().zip(players) {
-        *destination = (*player).into();
-    }
-    visual_local_player_views(
-        scene,
-        &views[..players.len()],
-        lookahead,
-        page,
-        show,
-        frames,
-        reserved,
-    )
+    playfield_candidate(scene, |scene| {
+        page_range(players.len(), page)?;
+        let mut views =
+            [VisualLocalPlayerView::from(players[0]); crate::local_players::MAX_LOCAL_PLAYERS];
+        for (destination, player) in views.iter_mut().zip(players) {
+            *destination = (*player).into();
+        }
+        visual_local_player_views(
+            scene,
+            &views[..players.len()],
+            lookahead,
+            page,
+            show,
+            frames,
+            reserved,
+        )
+    })
 }
 
 /// Borrows the full roster while converting only the current page's feedback.
@@ -729,66 +743,69 @@ pub(crate) fn visual_local_render_state(
     frames: &[crate::bga_render::BgaFrame; 4],
     recent: &mut [Vec<JudgeEvent>; crate::browser_render_state::MAX_RENDER_VISIBLE],
 ) -> Result<(), String> {
-    let roster = state.roster();
-    let members = state.members();
-    let page = state.page() as usize;
-    let visible = page_range(roster.len(), page)?;
-    for (slot, events) in recent.iter_mut().enumerate() {
-        events.clear();
-        if slot < visible.len() {
-            let scalars = members[visible.start + slot]
-                .scalars
-                .as_ref()
-                .ok_or("visual frame unavailable")?;
-            events.extend(scalars.recent.iter().map(|event| event.event()));
+    playfield_candidate(scene, |scene| {
+        let roster = state.roster();
+        let members = state.members();
+        let page = state.page() as usize;
+        let visible = page_range(roster.len(), page)?;
+        for (slot, events) in recent.iter_mut().enumerate() {
+            events.clear();
+            if slot < visible.len() {
+                let scalars = members[visible.start + slot]
+                    .scalars
+                    .as_ref()
+                    .ok_or("visual frame unavailable")?;
+                events.extend(scalars.recent.iter().map(|event| event.event()));
+            }
         }
-    }
-    let zero = crate::browser_render_state::RenderScore {
-        hits: 0,
-        misses: 0,
-        combo: 0,
-        max_combo: 0,
-        timing: crate::timing::TimingRecord::default(),
-    };
-    let member_view = |index: usize| {
-        let member = &members[index];
-        let scalar = member.scalars.as_ref();
-        let events = if visible.contains(&index) {
-            recent[index - visible.start].as_slice()
-        } else {
-            &[]
+        let zero = crate::browser_render_state::RenderScore {
+            hits: 0,
+            misses: 0,
+            combo: 0,
+            max_combo: 0,
+            timing: crate::timing::TimingRecord::default(),
         };
-        VisualLocalPlayerView {
-            player: roster[index],
-            chart: Some(state.chart()),
-            song_time: scalar.map(|scalar| Timestamp::from_nanos(scalar.song_ns)),
-            score: scalar.and_then(|scalar| scalar.score).unwrap_or(zero),
-            bms_score: None,
-            gauge: scalar.and_then(|scalar| scalar.gauge),
-            last_judge: events.last(),
-            recent_results: events,
-            pressed_lanes: scalar.map_or(0, |scalar| scalar.pressed),
-            note_progress: Some(&member.progress),
-            competition: scalar.and_then(|scalar| scalar.competition.as_ref()),
+        let member_view = |index: usize| {
+            let member = &members[index];
+            let scalar = member.scalars.as_ref();
+            let events = if visible.contains(&index) {
+                recent[index - visible.start].as_slice()
+            } else {
+                &[]
+            };
+            VisualLocalPlayerView {
+                player: roster[index],
+                chart: Some(state.chart()),
+                song_time: scalar.map(|scalar| Timestamp::from_nanos(scalar.song_ns)),
+                score: scalar.and_then(|scalar| scalar.score).unwrap_or(zero),
+                bms_score: None,
+                gauge: scalar.and_then(|scalar| scalar.gauge),
+                last_judge: events.last(),
+                recent_results: events,
+                pressed_lanes: scalar.map_or(0, |scalar| scalar.pressed),
+                note_progress: Some(&member.progress),
+                competition: scalar.and_then(|scalar| scalar.competition.as_ref()),
+            }
+        };
+        let mut views = [member_view(0); crate::local_players::MAX_LOCAL_PLAYERS];
+        let mut reserved = [0; crate::local_players::MAX_LOCAL_PLAYERS];
+        for (index, destination) in views[..roster.len()].iter_mut().enumerate() {
+            *destination = member_view(index);
+            reserved[index] = members[index].scalars.as_ref().map_or(0, |scalar| {
+                i64::from(scalar.saved_comparison_height)
+                    + if scalar.peer_admitted { 28 } else { 0 }
+            });
         }
-    };
-    let mut views = [member_view(0); crate::local_players::MAX_LOCAL_PLAYERS];
-    let mut reserved = [0; crate::local_players::MAX_LOCAL_PLAYERS];
-    for (index, destination) in views[..roster.len()].iter_mut().enumerate() {
-        *destination = member_view(index);
-        reserved[index] = members[index].scalars.as_ref().map_or(0, |scalar| {
-            i64::from(scalar.saved_comparison_height) + if scalar.peer_admitted { 28 } else { 0 }
-        });
-    }
-    visual_local_player_views(
-        scene,
-        &views[..roster.len()],
-        state.lookahead_ns(),
-        page,
-        true,
-        frames,
-        Some(&reserved[..roster.len()]),
-    )
+        visual_local_player_views(
+            scene,
+            &views[..roster.len()],
+            state.lookahead_ns(),
+            page,
+            true,
+            frames,
+            Some(&reserved[..roster.len()]),
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -801,203 +818,208 @@ pub fn visual_local_player_views(
     frames: &[crate::bga_render::BgaFrame; 4],
     reserved: Option<&[i64]>,
 ) -> Result<(), String> {
-    if reserved.is_some_and(|spaces| spaces.len() != players.len()) {
-        return Err("local comparison reservations differ from roster".into());
-    }
-    let visible = page_range(players.len(), page)?;
-    if lookahead <= 0 {
-        return Err("local playfield lookahead must be positive".into());
-    }
-    for (index, player) in players.iter().enumerate() {
-        if player.player.0 == 0
-            || players[..index]
-                .iter()
-                .any(|other| other.player == player.player)
-            || player.recent_results.len() > 128
-            || crate::pressed_keys::validate_mask(player.pressed_lanes).is_err()
-        {
-            return Err("invalid local presentation identities/result capacity".into());
+    playfield_candidate(scene, |scene| {
+        if reserved.is_some_and(|spaces| spaces.len() != players.len()) {
+            return Err("local comparison reservations differ from roster".into());
         }
-    }
-    let count = visible.len();
-    for frame in &frames[..count] {
-        frame.validate()?;
-    }
-    for (slot, player) in players[visible.clone()].iter().enumerate() {
-        if let Some(reserved) = reserved {
-            let space = reserved[visible.start + slot];
+        let visible = page_range(players.len(), page)?;
+        if lookahead <= 0 {
+            return Err("local playfield lookahead must be positive".into());
+        }
+        for (index, player) in players.iter().enumerate() {
+            if player.player.0 == 0
+                || players[..index]
+                    .iter()
+                    .any(|other| other.player == player.player)
+                || player.recent_results.len() > 128
+                || crate::pressed_keys::validate_mask(player.pressed_lanes).is_err()
+            {
+                return Err("invalid local presentation identities/result capacity".into());
+            }
+        }
+        let count = visible.len();
+        for frame in &frames[..count] {
+            frame.validate()?;
+        }
+        for (slot, player) in players[visible.clone()].iter().enumerate() {
+            if let Some(reserved) = reserved {
+                let space = reserved[visible.start + slot];
+                let field = crate::playfield_layout::local_field_bounds_with_comparison_space(
+                    count, slot, space,
+                )?;
+                let required = if show {
+                    player
+                        .competition
+                        .map(|snapshot| competition_height(snapshot, field[2]))
+                        .transpose()?
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                if required > space {
+                    return Err("comparison exceeds its fixed reservation".into());
+                }
+            }
+            if let Some(score) = player.bms_score {
+                score
+                    .validate_for(player.score.hits, player.score.misses)
+                    .map_err(|error| error.to_string())?;
+            }
+            let class_height = if player.bms_score.is_some() { 24 } else { 0 };
+            let comparison_height = reserved
+                .map_or_else(
+                    || {
+                        if show {
+                            player
+                                .competition
+                                .map(|snapshot| {
+                                    competition_height(
+                                        snapshot,
+                                        panel_bounds(slot, count).width - 20,
+                                    )
+                                })
+                                .transpose()
+                        } else {
+                            Ok(None)
+                        }
+                    },
+                    |spaces| Ok(Some(spaces[visible.start + slot])),
+                )?
+                .unwrap_or(0);
             let field = crate::playfield_layout::local_field_bounds_with_comparison_space(
-                count, slot, space,
+                count,
+                slot,
+                comparison_height,
             )?;
-            let required = if show {
-                player
-                    .competition
-                    .map(|snapshot| competition_height(snapshot, field[2]))
-                    .transpose()?
-                    .unwrap_or(0)
+            if field[3] - class_height <= 16 {
+                return Err("local class display leaves insufficient playfield height".into());
+            }
+            if let (Some(chart), Some(now)) = (player.chart, player.song_time) {
+                if player
+                    .note_progress
+                    .is_some_and(|state| !state.matches_chart(chart))
+                {
+                    return Err("local note progress belongs to another prepared chart".into());
+                }
+                crate::judge_feedback::project(chart, now, player.recent_results)?;
+            }
+        }
+        for (index, player) in players[visible.clone()].iter().enumerate() {
+            let bounds = panel_bounds(index, count);
+            rect(
+                scene,
+                bounds.x,
+                bounds.y,
+                bounds.width,
+                bounds.height,
+                0x141d29,
+            );
+            let title = format!(
+                "P{} {}",
+                player.player.0,
+                player.chart.map_or("LOADING", |chart| chart.title.as_str())
+            );
+            let line = |dy: i64, height: i64| Bounds {
+                x: bounds.x + 10,
+                y: bounds.y + dy,
+                width: bounds.width - 20,
+                height,
+            };
+            clipped_text(scene, line(8, 14), &title, 2, 0xf0f4ff);
+            clipped_text(
+                scene,
+                line(32, 7),
+                &format!("HITS {} MISSES {}", player.score.hits, player.score.misses),
+                1,
+                0x9bb1cf,
+            );
+            clipped_text(
+                scene,
+                line(44, 7),
+                &format!(
+                    "COMBO {} MAX {}",
+                    player.score.combo, player.score.max_combo
+                ),
+                1,
+                0x9bb1cf,
+            );
+            if let Some(event) = player.last_judge.or_else(|| player.recent_results.last()) {
+                let (label, color) = crate::timing_display::judge_label(event);
+                let mut judge_bounds = line(56, 7);
+                if player.gauge.is_some() {
+                    judge_bounds.width -= 100;
+                }
+                clipped_text(scene, judge_bounds, &label, 1, color);
+            }
+            if let Some(gauge) = player.gauge {
+                molecules::gauge_hud_visual(
+                    scene,
+                    gauge,
+                    Bounds {
+                        x: bounds.x + bounds.width - 100,
+                        y: bounds.y + 56,
+                        width: 90,
+                        height: 14,
+                    },
+                )?;
+            }
+            let class_height = if let Some(score) = player.bms_score {
+                bms_score_hud(scene, &score, line(72, 24));
+                24
             } else {
                 0
             };
-            if required > space {
-                return Err("comparison exceeds its fixed reservation".into());
+            let comparisons = if show { player.competition } else { None };
+            let summary_height = comparisons
+                .map(|snapshot| competition_height(snapshot, bounds.width - 20))
+                .transpose()?
+                .unwrap_or(0);
+            let summary_height =
+                reserved.map_or(summary_height, |spaces| spaces[visible.start + index]);
+            if let Some(snapshot) = comparisons {
+                // A failed saved display clears its rows, but the admitted peer
+                // remains below their immutable reservation.
+                let peer_offset = reserved
+                    .filter(|_| snapshot.network.is_some())
+                    .map(|_| summary_height - 28);
+                competition_summary_with_peer_offset(
+                    scene,
+                    snapshot,
+                    line(72 + class_height, summary_height),
+                    peer_offset,
+                )?;
+            }
+            let field_offset = 72 + class_height + summary_height;
+            let [field_x, field_y, field_width, field_height] =
+                crate::playfield_layout::local_field_bounds(count, index)?;
+            match (player.chart, player.song_time) {
+                (Some(chart), Some(now)) => playfield_in_with_background(
+                    scene,
+                    chart,
+                    now,
+                    lookahead,
+                    Bounds {
+                        x: field_x,
+                        y: field_y + class_height + summary_height,
+                        width: field_width,
+                        height: field_height - class_height - summary_height,
+                    },
+                    player.recent_results,
+                    player.pressed_lanes,
+                    player.note_progress,
+                    frames[index],
+                )?,
+                _ => clipped_text(
+                    scene,
+                    line(field_offset + 12, 7),
+                    "WAITING FOR GAME STATE",
+                    1,
+                    0x9bb1cf,
+                ),
             }
         }
-        if let Some(score) = player.bms_score {
-            score
-                .validate_for(player.score.hits, player.score.misses)
-                .map_err(|error| error.to_string())?;
-        }
-        let class_height = if player.bms_score.is_some() { 24 } else { 0 };
-        let comparison_height = reserved
-            .map_or_else(
-                || {
-                    if show {
-                        player
-                            .competition
-                            .map(|snapshot| {
-                                competition_height(snapshot, panel_bounds(slot, count).width - 20)
-                            })
-                            .transpose()
-                    } else {
-                        Ok(None)
-                    }
-                },
-                |spaces| Ok(Some(spaces[visible.start + slot])),
-            )?
-            .unwrap_or(0);
-        let field = crate::playfield_layout::local_field_bounds_with_comparison_space(
-            count,
-            slot,
-            comparison_height,
-        )?;
-        if field[3] - class_height <= 16 {
-            return Err("local class display leaves insufficient playfield height".into());
-        }
-        if let (Some(chart), Some(now)) = (player.chart, player.song_time) {
-            if player
-                .note_progress
-                .is_some_and(|state| !state.matches_chart(chart))
-            {
-                return Err("local note progress belongs to another prepared chart".into());
-            }
-            crate::judge_feedback::project(chart, now, player.recent_results)?;
-        }
-    }
-    for (index, player) in players[visible.clone()].iter().enumerate() {
-        let bounds = panel_bounds(index, count);
-        rect(
-            scene,
-            bounds.x,
-            bounds.y,
-            bounds.width,
-            bounds.height,
-            0x141d29,
-        );
-        let title = format!(
-            "P{} {}",
-            player.player.0,
-            player.chart.map_or("LOADING", |chart| chart.title.as_str())
-        );
-        let line = |dy: i64, height: i64| Bounds {
-            x: bounds.x + 10,
-            y: bounds.y + dy,
-            width: bounds.width - 20,
-            height,
-        };
-        clipped_text(scene, line(8, 14), &title, 2, 0xf0f4ff);
-        clipped_text(
-            scene,
-            line(32, 7),
-            &format!("HITS {} MISSES {}", player.score.hits, player.score.misses),
-            1,
-            0x9bb1cf,
-        );
-        clipped_text(
-            scene,
-            line(44, 7),
-            &format!(
-                "COMBO {} MAX {}",
-                player.score.combo, player.score.max_combo
-            ),
-            1,
-            0x9bb1cf,
-        );
-        if let Some(event) = player.last_judge.or_else(|| player.recent_results.last()) {
-            let (label, color) = crate::timing_display::judge_label(event);
-            let mut judge_bounds = line(56, 7);
-            if player.gauge.is_some() {
-                judge_bounds.width -= 100;
-            }
-            clipped_text(scene, judge_bounds, &label, 1, color);
-        }
-        if let Some(gauge) = player.gauge {
-            molecules::gauge_hud_visual(
-                scene,
-                gauge,
-                Bounds {
-                    x: bounds.x + bounds.width - 100,
-                    y: bounds.y + 56,
-                    width: 90,
-                    height: 14,
-                },
-            )?;
-        }
-        let class_height = if let Some(score) = player.bms_score {
-            bms_score_hud(scene, &score, line(72, 24));
-            24
-        } else {
-            0
-        };
-        let comparisons = if show { player.competition } else { None };
-        let summary_height = comparisons
-            .map(|snapshot| competition_height(snapshot, bounds.width - 20))
-            .transpose()?
-            .unwrap_or(0);
-        let summary_height =
-            reserved.map_or(summary_height, |spaces| spaces[visible.start + index]);
-        if let Some(snapshot) = comparisons {
-            // A failed saved display clears its rows, but the admitted peer
-            // remains below their immutable reservation.
-            let peer_offset = reserved
-                .filter(|_| snapshot.network.is_some())
-                .map(|_| summary_height - 28);
-            competition_summary_with_peer_offset(
-                scene,
-                snapshot,
-                line(72 + class_height, summary_height),
-                peer_offset,
-            )?;
-        }
-        let field_offset = 72 + class_height + summary_height;
-        let [field_x, field_y, field_width, field_height] =
-            crate::playfield_layout::local_field_bounds(count, index)?;
-        match (player.chart, player.song_time) {
-            (Some(chart), Some(now)) => playfield_in_with_background(
-                scene,
-                chart,
-                now,
-                lookahead,
-                Bounds {
-                    x: field_x,
-                    y: field_y + class_height + summary_height,
-                    width: field_width,
-                    height: field_height - class_height - summary_height,
-                },
-                player.recent_results,
-                player.pressed_lanes,
-                player.note_progress,
-                frames[index],
-            )?,
-            _ => clipped_text(
-                scene,
-                line(field_offset + 12, 7),
-                "WAITING FOR GAME STATE",
-                1,
-                0x9bb1cf,
-            ),
-        }
-    }
-    scene.status()
+        scene.status()
+    })
 }
 /// Scalar-only two-row class display, clipped independently within each column.
 fn bms_score_hud(

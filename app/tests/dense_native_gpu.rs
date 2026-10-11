@@ -19,7 +19,10 @@ use beatkernel_bms_runtime::{
     note_progress::NoteProgress,
     player_chart::PlayerChart,
     scene::Scene,
-    ui::{interaction::Bounds, organisms::playfield_in_with_progress},
+    ui::{
+        interaction::Bounds,
+        organisms::{playfield_in_with_progress, visual_local_player_views, VisualLocalPlayerView},
+    },
 };
 use winit::{
     dpi::LogicalSize, event_loop::EventLoop, platform::x11::EventLoopBuilderExtX11, window::Window,
@@ -292,12 +295,68 @@ fn dense_native_gpu_grows_warms_seeks_resizes_and_rejects_late_candidate() {
     scene.clear();
     paint(&mut scene, &dense, 0, Some(&progress));
     present(&mut renderer, &scene);
+
+    // The local-roster bridge must also reject an existing prefix on preflight
+    // failure, before it composes any additional field.
+    scene.clear();
+    for _ in 0..3 {
+        paint(&mut scene, &dense, 0, Some(&progress));
+    }
+    let mut roster_view = VisualLocalPlayerView {
+        player: beatkernel_bms_runtime::local_players::PlayerId(4),
+        chart: Some(&dense),
+        song_time: Some(Timestamp::from_nanos(0)),
+        score: beatkernel_bms_runtime::browser_render_state::RenderScore::from_summary(
+            &beatkernel_bms_runtime::competition::ScoreSummary::default(),
+        ),
+        bms_score: None,
+        gauge: None,
+        last_judge: None,
+        recent_results: &[],
+        pressed_lanes: 0,
+        note_progress: Some(&foreign_progress),
+        competition: None,
+    };
+    let backgrounds = [beatkernel_bms_runtime::bga_render::BgaFrame::default(); 4];
+    let roster_error = visual_local_player_views(
+        &mut scene,
+        &[roster_view],
+        WINDOW_NS,
+        0,
+        false,
+        &backgrounds,
+        None,
+    )
+    .unwrap_err();
+    assert!(roster_error.contains("local note progress belongs to another prepared chart"));
+    assert_eq!(scene.status().unwrap_err(), roster_error);
+    let before_roster_rejection = renderer.presentation_count();
+    assert!(renderer.render(&scene).is_err());
+    assert_eq!(renderer.presentation_count(), before_roster_rejection);
+    roster_view.note_progress = Some(&progress);
+    assert!(visual_local_player_views(
+        &mut scene,
+        &[roster_view],
+        WINDOW_NS,
+        0,
+        false,
+        &backgrounds,
+        None,
+    )
+    .is_err());
+    assert_eq!(scene.status().unwrap_err(), roster_error);
+    assert!(renderer.render(&scene).is_err());
+    assert_eq!(renderer.presentation_count(), before_roster_rejection);
+    scene.clear();
+    paint(&mut scene, &dense, 0, Some(&progress));
+    present(&mut renderer, &scene);
     eprintln!(
         "dense native GPU: {description}; initial_extent={}x{}; resized_surface=800x600; \
          dense_membership=4608notes/2304mines; expected_primitives=11520; \
          seek_membership={seek_membership:?}; successful_presentations={}; \
          rejected_candidate_counter={before_rejection}; \
-         foreign_progress_rejected_counter={before_foreign_rejection}",
+         foreign_progress_rejected_counter={before_foreign_rejection}; \
+         local_roster_rejected_counter={before_roster_rejection}",
         size.width,
         size.height,
         renderer.presentation_count()

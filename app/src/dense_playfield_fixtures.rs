@@ -874,3 +874,373 @@ fn dense_playfield_public_early_input_refusals_poison_good_prefix_and_recover_re
         }
     }
 }
+
+#[test]
+fn dense_playfield_public_local_roster_bridges_poison_prefix_and_clear_recovers() {
+    use crate::{
+        bga_render::BgaFrame,
+        local_players::PlayerId,
+        player::LocalPlayerSnapshot,
+        ui::organisms::{self, LocalPlayerView, VisualLocalPlayerView},
+    };
+    use beatkernel::judge::{JudgeEvent, JudgeGrade, JudgeOutcome, JudgeStage};
+
+    let chart = Arc::new(dense_chart());
+    let pending = NoteProgress::new(Arc::clone(&chart)).unwrap();
+    let foreign = NoteProgress::new(Arc::new((*chart).clone())).unwrap();
+    let snapshot = |id| LocalPlayerSnapshot {
+        player: PlayerId(id),
+        chart: Some(Arc::clone(&chart)),
+        song_time: Some(ts(0)),
+        score: Default::default(),
+        bms_score: None,
+        mine_damage: Default::default(),
+        gauge: Default::default(),
+        last_judge: None,
+        recent_results: vec![],
+        pressed_lanes: 0,
+        note_progress: Some(pending.clone()),
+        competition: None,
+    };
+    let players: Vec<_> = (1..=4).map(&snapshot).collect();
+    let over_roster: Vec<_> = (1..=65).map(&snapshot).collect();
+    let views: Vec<_> = players.iter().map(LocalPlayerView::from).collect();
+    let visuals: Vec<_> = views
+        .iter()
+        .copied()
+        .map(VisualLocalPlayerView::from)
+        .collect();
+    let event = JudgeEvent {
+        object: chart.notes.iter().find(|n| n.end.is_none()).unwrap().object,
+        at: ts(0),
+        stage: JudgeStage::Instant,
+        input: None,
+        outcome: JudgeOutcome::Hit {
+            grade: JudgeGrade(1),
+            delta: beatkernel::time::Duration::ZERO,
+        },
+    };
+    let excessive_feedback = [event; 129];
+    let frames = [BgaFrame::default(); 4];
+    let mut scene = Scene::new(960, 720);
+    for _ in 0..4 {
+        compose_dense_public(&mut scene, &chart, &pending).unwrap();
+    }
+    let warmed: Vec<_> = scene
+        .playfields()
+        .iter()
+        .map(|f| Arc::clone(&f.instances))
+        .collect();
+    // The first three cases exercise snapshot/borrowed bridges whose own early
+    // checks must participate in the same failure boundary as visual composition.
+    for case in [
+        "snapshot empty roster",
+        "snapshot 65 roster",
+        "snapshot page",
+        "borrowed page",
+        "borrowed reservations shape",
+        "visual page",
+        "visual reservations shape",
+        "fourth foreign progress",
+        "fourth bad BGA",
+        "fourth mask",
+        "fourth feedback",
+        "zero lookahead",
+        "zero identity",
+        "duplicate identity",
+        "negative reserved layout",
+        "oversize reserved layout",
+    ] {
+        scene.clear();
+        for _ in 0..3 {
+            compose_dense_public(&mut scene, &chart, &pending).unwrap();
+        }
+        let rectangles = scene.rectangles().len();
+        let batches = scene.batches().len();
+        let epoch = scene.geometry_stamp().1;
+        let mut bad_views = visuals.clone();
+        let mut bad_frames = frames;
+        let mut horizon = 4_000_000_000;
+        let mut page = 0;
+        let mut reserved = None;
+        let negative_spaces = [0, 0, 0, -1];
+        let oversized_spaces = [0, 0, 0, 141];
+        let short_spaces = [0; 3];
+        let result = match case {
+            "snapshot empty roster" => organisms::local_players_with_background(
+                &mut scene,
+                &[],
+                horizon,
+                0,
+                false,
+                &frames,
+            ),
+            "snapshot 65 roster" => organisms::local_players_with_background(
+                &mut scene,
+                &over_roster,
+                horizon,
+                0,
+                false,
+                &frames,
+            ),
+            "snapshot page" => organisms::local_players_with_background(
+                &mut scene, &players, horizon, 1, false, &frames,
+            ),
+            "borrowed page" => organisms::local_player_views_with_background(
+                &mut scene,
+                &views,
+                horizon,
+                usize::MAX,
+                false,
+                &frames,
+            ),
+            "borrowed reservations shape" => {
+                organisms::local_player_views_with_reserved_comparison_space(
+                    &mut scene,
+                    &views,
+                    horizon,
+                    0,
+                    false,
+                    &frames,
+                    &short_spaces,
+                )
+            }
+            _ => {
+                match case {
+                    "visual page" => page = 1,
+                    "visual reservations shape" => reserved = Some(short_spaces.as_slice()),
+                    "fourth foreign progress" => bad_views[3].note_progress = Some(&foreign),
+                    "fourth bad BGA" => {
+                        bad_frames[3] = BgaFrame {
+                            active: true,
+                            unavailable: 5,
+                            ..Default::default()
+                        }
+                    }
+                    "fourth mask" => bad_views[3].pressed_lanes = 1 << 31,
+                    "fourth feedback" => bad_views[3].recent_results = &excessive_feedback,
+                    "zero lookahead" => horizon = 0,
+                    "zero identity" => bad_views[3].player = PlayerId(0),
+                    "duplicate identity" => bad_views[3].player = bad_views[0].player,
+                    "negative reserved layout" => reserved = Some(negative_spaces.as_slice()),
+                    "oversize reserved layout" => reserved = Some(oversized_spaces.as_slice()),
+                    _ => unreachable!(),
+                }
+                organisms::visual_local_player_views(
+                    &mut scene,
+                    &bad_views,
+                    horizon,
+                    page,
+                    false,
+                    &bad_frames,
+                    reserved,
+                )
+            }
+        };
+        let error = result.expect_err(case);
+        assert!(!error.is_empty(), "{case}");
+        assert_eq!(scene.status(), Err(error.clone()), "{case}");
+        assert_eq!(
+            organisms::local_players_with_background(
+                &mut scene,
+                &players,
+                4_000_000_000,
+                0,
+                false,
+                &frames
+            ),
+            Err(error.clone()),
+            "{case}"
+        );
+        assert_eq!(
+            organisms::local_player_views_with_background(
+                &mut scene,
+                &views,
+                4_000_000_000,
+                0,
+                false,
+                &frames
+            ),
+            Err(error.clone()),
+            "{case}"
+        );
+        assert_eq!(
+            organisms::local_player_views_with_reserved_comparison_space(
+                &mut scene,
+                &views,
+                4_000_000_000,
+                0,
+                false,
+                &frames,
+                &short_spaces
+            ),
+            Err(error.clone()),
+            "{case}"
+        );
+        assert_eq!(
+            organisms::visual_local_player_views(
+                &mut scene, &visuals, -1, 99, false, &frames, None
+            ),
+            Err(error.clone()),
+            "{case}"
+        );
+        assert_eq!(scene.status(), Err(error), "{case}");
+        assert_eq!(scene.playfields().len(), 3, "{case}");
+        assert_eq!(scene.rectangles().len(), rectangles, "{case}");
+        assert_eq!(scene.batches().len(), batches, "{case}");
+        assert_eq!(scene.geometry_stamp().1, epoch, "{case}");
+        for (old, frame) in warmed.iter().zip(scene.playfields()) {
+            assert!(Arc::ptr_eq(old, &frame.instances), "{case}");
+            assert_eq!(frame.instances.len(), 11520, "{case}");
+        }
+        scene.clear();
+        for _ in 0..4 {
+            compose_dense_public(&mut scene, &chart, &pending).unwrap();
+        }
+        assert!(scene.status().is_ok(), "{case}");
+        assert_eq!(scene.playfields().len(), 4, "{case}");
+        for (old, frame) in warmed.iter().zip(scene.playfields()) {
+            assert!(Arc::ptr_eq(old, &frame.instances), "{case}");
+        }
+    }
+    // Both snapshot and borrowed bridges recover to their complete local layout,
+    // retaining identical geometry allocations when the layout does not change.
+    scene.clear();
+    organisms::local_players_with_background(
+        &mut scene,
+        &players,
+        4_000_000_000,
+        0,
+        false,
+        &frames,
+    )
+    .unwrap();
+    let local_warmed: Vec<_> = scene
+        .playfields()
+        .iter()
+        .map(|f| Arc::clone(&f.instances))
+        .collect();
+    scene.clear();
+    organisms::local_player_views_with_background(
+        &mut scene,
+        &views,
+        4_000_000_000,
+        0,
+        false,
+        &frames,
+    )
+    .unwrap();
+    assert!(scene.status().is_ok());
+    assert_eq!(scene.playfields().len(), 4);
+    for (old, frame) in local_warmed.iter().zip(scene.playfields()) {
+        assert!(Arc::ptr_eq(old, &frame.instances));
+        assert_eq!(frame.instances.len(), 11520);
+    }
+}
+
+#[test]
+fn dense_playfield_cold_browser_bridge_unavailable_scalars_poison_prefix_until_clear() {
+    use crate::{
+        bga_render::BgaFrame,
+        browser_render_state::{
+            BrowserRenderState, RenderFrame, RenderMemberScalars, RenderMemberUpdate,
+        },
+        image_assets::ImageAssets,
+        local_players::PlayerId,
+        ui::organisms,
+    };
+    let chart = Arc::new(dense_chart());
+    let pending = NoteProgress::new(Arc::clone(&chart)).unwrap();
+    let roster = vec![PlayerId(1), PlayerId(2), PlayerId(3), PlayerId(4)];
+    let mut state = BrowserRenderState::import_visual(
+        7,
+        19,
+        chart.export_visual(),
+        ImageAssets::default().export_visual(),
+        roster.clone(),
+    )
+    .unwrap();
+    assert!(state
+        .members()
+        .iter()
+        .all(|member| member.scalars.is_none()));
+    let frames = [BgaFrame::default(); 4];
+    let mut scratch = std::array::from_fn(|_| Vec::new());
+    let mut scene = Scene::new(960, 720);
+    for _ in 0..3 {
+        compose_dense_public(&mut scene, &chart, &pending).unwrap();
+    }
+    let prefix: Vec<_> = scene
+        .playfields()
+        .iter()
+        .map(|f| Arc::clone(&f.instances))
+        .collect();
+    let rectangles = scene.rectangles().len();
+    let batches = scene.batches().len();
+    let epoch = scene.geometry_stamp().1;
+    let error = organisms::visual_local_render_state(&mut scene, &state, &frames, &mut scratch)
+        .unwrap_err();
+    assert_eq!(error, "visual frame unavailable");
+    assert_eq!(scene.status(), Err(error.clone()));
+    state
+        .apply_frame(&RenderFrame {
+            generation: 7,
+            content: 19,
+            sequence: 1,
+            page: 0,
+            lookahead_ns: 4_000_000_000,
+            members: roster
+                .iter()
+                .map(|id| {
+                    RenderMemberUpdate::from_progress(
+                        *id,
+                        RenderMemberScalars::default(),
+                        &pending,
+                        &pending,
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            room: None,
+            room_disabled: false,
+        })
+        .unwrap();
+    assert!(state
+        .members()
+        .iter()
+        .all(|member| member.scalars.is_some()));
+    assert_eq!(
+        organisms::visual_local_render_state(&mut scene, &state, &frames, &mut scratch),
+        Err(error.clone())
+    );
+    assert_eq!(
+        organisms::local_players_with_background(&mut scene, &[], 4_000_000_000, 0, false, &frames),
+        Err(error.clone())
+    );
+    assert_eq!(scene.status(), Err(error));
+    assert_eq!(scene.geometry_stamp().1, epoch);
+    assert_eq!(scene.rectangles().len(), rectangles);
+    assert_eq!(scene.batches().len(), batches);
+    assert_eq!(scene.playfields().len(), 3);
+    for (old, current) in prefix.iter().zip(scene.playfields()) {
+        assert!(Arc::ptr_eq(old, &current.instances));
+        assert_eq!(current.instances.len(), 11520);
+    }
+    scene.clear();
+    organisms::visual_local_render_state(&mut scene, &state, &frames, &mut scratch).unwrap();
+    assert!(scene.status().is_ok());
+    assert_eq!(scene.playfields().len(), 4);
+    let warmed: Vec<_> = scene
+        .playfields()
+        .iter()
+        .map(|f| Arc::clone(&f.instances))
+        .collect();
+    scene.clear();
+    organisms::visual_local_render_state(&mut scene, &state, &frames, &mut scratch).unwrap();
+    assert!(scene.status().is_ok());
+    assert_eq!(scene.playfields().len(), 4);
+    for (old, current) in warmed.iter().zip(scene.playfields()) {
+        assert!(Arc::ptr_eq(old, &current.instances));
+        assert_eq!(current.instances.len(), 11520);
+    }
+}
