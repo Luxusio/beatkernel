@@ -81,7 +81,7 @@ results and evidence paths are recorded after independent verification.
 
 ## Dense JSON collector contract
 
-The opt-in `tools/dense_chart_benchmark.py` collector is being implemented.
+The opt-in `tools/dense_chart_benchmark.py` collector is implemented.
 It executes an explicitly selected prebuilt example, never builds implicitly,
 and preserves the existing Rust summary and runtime/audio v1 collector.
 Command: `python3 tools/dense_chart_benchmark.py --binary
@@ -107,7 +107,20 @@ and POSIX process group, not descendants deliberately escaping that group.
 Binary consistency hashes do not authenticate executable contents or prove
 correspondence with current sources; QA needs current build identity evidence.
 The report adds no speed threshold or ranking and completes neither whole
-WBS13.05 nor13.08. Actual collector verification remains pending.
+WBS13.05 nor13.08.
+
+Independent DEEP code and security reviews passed source `87c8ba9`, followed
+by actual CLI QA:44 Python tests passed, a fresh optimized build completed,
+and the two-case/three-repeat matrix plus two stdout runs passed. Help and
+invalid/output-collision paths were executed outside repository cwd; marker
+checks proved refused paths did not launch the binary. Artifact size837856
+bytes and SHA256
+`b084252e5056db5102fe9bfc79619c3e088378101d716c11bf2ecf5fb77db955`
+were unchanged. Exact independent counts and actual wait4 CPU/RSS were
+validated; Git metadata was null under the existing bounded fallback, with
+source/build identity captured separately. Evidence:
+`target/wf/dense-chart-benchmark-qa-12be8-1/`. These local ignored artifacts
+are executable verification evidence, not protected completion receipts.
 
 ## Prior verified workload implementation
 
