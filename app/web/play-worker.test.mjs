@@ -5617,6 +5617,7 @@ test("prepared ownership, original-rate PCM transfers and setup batches retain t
   const game = h.games[0];
   const metadata = h.of("play-reply")[0].result;
   assert.deepEqual(structuredClone(metadata), { kind: "prepared", samples: 2, opponentCount: 0, startNs: 0n,
+    liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n,
     title: "Actual prepared metadata", artist: "Fixture", notes: 23, lanes: [0x11, 0x12] });
   assert.deepEqual(h.libraries[0].preparations[1].args, [48000, 2, 18446744073709551615n, 64 * 1024 * 1024, 256 * 1024 * 1024, 3844]);
   assert.deepEqual(game.args.slice(0, 5), [0n, 100000000n, 50000000n, 50000000n, 0n]);

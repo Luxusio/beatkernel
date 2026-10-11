@@ -2,7 +2,7 @@ import { RenderClient, validateRenderLimits, unsignedIdentity, snapshotMenuMotio
 import { validateCompletedResults, resultRequest } from "./completed-results-model.mjs";
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot, normalizedPath } from "./host_model.mjs";
-import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateTimingPolicy, validateStart, validateEnd, replaySpeedFromFraction, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, presentationOutputAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
+import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateTimingPolicy, validateStart, validateEnd, replaySpeedFromFraction, playbackSpeedFromFraction, playbackOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, presentationOutputAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { BrowserRoomOwner, ROOM_SESSION_METHODS } from "./room-owner.mjs";
 import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
@@ -2627,11 +2627,9 @@ async function preparePlay(state, request) {
     const commandBatchLimit = request.commandBatchLimit === undefined ? 256 : request.commandBatchLimit;
     if (!integer(commandBatchLimit, 1, 256)) throw new Error("Gameplay command batch limit must be an integer from 1 to 256.");
     state.commandBatchLimit = commandBatchLimit;
-    if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
-    state.mode = request.mode ?? "live";
-    state.replaySpeed = replaySpeedFromFraction(request.replaySpeed);
-    const normalSpeed = state.replaySpeed.numerator === state.replaySpeed.denominator;
-    if (state.mode === "live" && !normalSpeed) throw new Error("Replay speed cannot change live gameplay.");
+    const selectedSpeed = state.mode === "live" ? state.liveSpeed : state.replaySpeed;
+    const normalSpeed = selectedSpeed.numerator === selectedSpeed.denominator;
+    if (state.mode === "live" && state.replaySpeed.numerator !== state.replaySpeed.denominator) throw new Error("Replay speed cannot change live gameplay.");
     if (state.mode === "replay" && !normalSpeed && typeof BrowserReplay?.new_with_speed !== "function") {
       throw new Error("The replay binding does not provide selected speed ownership.");
     }
@@ -2717,6 +2715,13 @@ async function preparePlay(state, request) {
     const timingPolicy = state.mode === "live" ? validateTimingPolicy(request.timingPolicy) : null;
     const requestedStart = state.mode === "live" ? validateStart(request.startNs) : null;
     const requestedEnd = state.mode === "live" ? validateEnd(requestedStart, request.endNs) : undefined;
+    const speedConstructor = state.localPlan || state.physicalInput && !state.touchInput ? "new_physical_and_speed"
+      : state.touchInput ? "new_physical_contact_and_speed"
+      : requestedEnd !== undefined ? "new_section_and_speed" : "new_and_speed";
+    if (state.mode === "live" && !normalSpeed
+      && typeof (state.localPlan ? BrowserLocalGame : BrowserGame)?.[speedConstructor] !== "function") {
+      throw new Error("The gameplay binding does not provide selected live speed ownership.");
+    }
     state.network = multiplayerConfiguration(request.multiplayer, state.mode, state.localPlan);
     if (state.network && state.network.windowOriginNs !== state.windowOriginNs) {
       throw new Error("Multiplayer and live input Window clock origins differ.");
@@ -2893,7 +2898,18 @@ async function preparePlay(state, request) {
     state.movies = prepared.video_registration();
     const moved = prepared;
     prepared = null; // A consuming Rust constructor also owns the argument on Err.
-    state.game = state.mode === "replay"
+    state.game = state.mode === "live" && !normalSpeed
+      ? state.localPlan
+        ? BrowserLocalGame.new_physical_and_speed(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs,
+          state.localPlan.words, localBindings.words, requestedEnd, state.touchInput, 4096, 1024, selectedSpeed.fraction)
+        : state.touchInput
+          ? BrowserGame.new_physical_contact_and_speed(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, bindingWords, requestedEnd, 4096, 1024, selectedSpeed.fraction)
+          : state.physicalInput
+            ? BrowserGame.new_physical_and_speed(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, bindingWords, requestedEnd, 4096, 1024, selectedSpeed.fraction)
+            : requestedEnd === undefined
+              ? BrowserGame.new_and_speed(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs, selectedSpeed.fraction)
+              : BrowserGame.new_section_and_speed(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs, requestedEnd, selectedSpeed.fraction)
+      : state.mode === "replay"
       ? typeof BrowserReplay?.new_with_speed === "function"
         ? BrowserReplay.new_with_speed(moved, 100000000n, state.replaySpeed.fraction)
         : new BrowserReplay(moved, 100000000n)
@@ -2907,16 +2923,22 @@ async function preparePlay(state, request) {
           : requestedEnd === undefined
             ? new BrowserGame(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs)
             : BrowserGame.new_section(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs, requestedEnd);
-    if (state.mode === "replay") {
+    {
       const numerator = state.game.speed_numerator;
       const denominator = state.game.speed_denominator;
       if (!(normalSpeed && numerator === undefined && denominator === undefined)
-        && (numerator !== state.replaySpeed.numerator || denominator !== state.replaySpeed.denominator)) {
-        throw new Error("Actual replay speed differs from the prepared request.");
+        && (numerator !== selectedSpeed.numerator || denominator !== selectedSpeed.denominator)) {
+        throw new Error(`Actual ${state.mode === "live" ? "live" : "replay"} speed differs from the prepared request.`);
       }
-      metadata.replaySpeed = state.replaySpeed.fraction;
-      metadata.replaySpeedNumerator = state.replaySpeed.numerator;
-      metadata.replaySpeedDenominator = state.replaySpeed.denominator;
+      if (state.mode === "live") {
+        metadata.liveSpeed = selectedSpeed.fraction;
+        metadata.liveSpeedNumerator = selectedSpeed.numerator;
+        metadata.liveSpeedDenominator = selectedSpeed.denominator;
+      } else {
+        metadata.replaySpeed = selectedSpeed.fraction;
+        metadata.replaySpeedNumerator = selectedSpeed.numerator;
+        metadata.replaySpeedDenominator = selectedSpeed.denominator;
+      }
     }
     if (state.localPlan) {
       const actual = state.game.players;
@@ -2952,7 +2974,7 @@ async function preparePlay(state, request) {
       }
       metadata.pointerDevices = devices;
     }
-    const output = replayOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate, state.replaySpeed);
+    const output = playbackOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate, selectedSpeed);
     if (state.mode === "live" && output.endNs !== requestedEnd) throw new Error("Actual live section end differs from its request.");
     if (output.endFrame !== undefined) {
       metadata.endNs = output.endNs;
@@ -3648,6 +3670,18 @@ function handlePlay(request) {
     releasePreparation();
     play = state; // Reserve before the ready await so stop cannot race a late owner.
     lastPlayId = state.id;
+    try {
+      if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
+      state.mode = request.mode ?? "live";
+      state.replaySpeed = replaySpeedFromFraction(request.replaySpeed);
+      state.liveSpeed = playbackSpeedFromFraction(request.liveSpeed);
+      if (state.mode === "replay" && state.liveSpeed.numerator !== state.liveSpeed.denominator) {
+        throw new Error("Live speed cannot change replay playback.");
+      }
+    } catch (error) {
+      failPlay(state, error, request);
+      return;
+    }
     void (async () => {
       if (priorRoom) {
         const cleanupError = await priorRoom;
