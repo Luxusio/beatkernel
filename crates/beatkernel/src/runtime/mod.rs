@@ -311,6 +311,7 @@ pub struct Runtime {
     input_sounds: Option<InputSoundTimeline>,
     hazard_sounds: Option<HazardSoundTimeline>,
     gameplay_sound_stop: GameplaySoundStop,
+    gameplay_audio_sealed: bool,
     input_sounds_locked: bool,
     last_host: Option<Timestamp>,
     last_song: Option<Timestamp>,
@@ -370,6 +371,7 @@ impl Runtime {
             input_sounds: None,
             hazard_sounds: None,
             gameplay_sound_stop,
+            gameplay_audio_sealed: false,
             input_sounds_locked: false,
             last_host: None,
             last_song: None,
@@ -456,18 +458,35 @@ impl Runtime {
         self.gameplay_fence
     }
 
+    /// Irreversibly closes gameplay sound admission for this gameplay epoch.
+    /// The caller must qualify the actual finite output end first. This does
+    /// not finish judging, fence inputs, retire commands or prove presentation.
+    /// Already admitted commands and explicit `enqueue_audio` remain intact.
+    pub fn seal_gameplay_audio(&mut self) {
+        self.gameplay_audio_sealed = true;
+    }
+
+    /// Whether gameplay sounds are sealed in the current epoch.
+    pub const fn gameplay_audio_sealed(&self) -> bool {
+        self.gameplay_audio_sealed
+    }
+
     /// Attempts every configured gameplay voice once after a committed fence.
     /// `requested_at` must use this runtime's output domain. The effective time
     /// is at least the latest successfully admitted gameplay sound time, so a
     /// previously queued Play cannot follow its Stop. External `enqueue_audio`
     /// commands remain caller-owned and do not establish this watermark.
     ///
-    /// Returns `None` before fencing or after any prior stop attempt, including
-    /// partial failure. Accepted commands are not physical silence or drain proof.
+    /// Returns `None` when gameplay audio is sealed, before fencing or after
+    /// any prior stop attempt, including partial failure. Accepted commands
+    /// are not physical silence or drain proof.
     pub fn fence_gameplay_sounds(
         &mut self,
         requested_at: Timestamp,
     ) -> Option<RuntimeSoundStopReport> {
+        if self.gameplay_audio_sealed {
+            return None;
+        }
         self.gameplay_fence.as_ref()?;
         let producer = &mut self.producer;
         let counters = self.telemetry.counters_mut();
@@ -808,6 +827,9 @@ impl Runtime {
         if report.judge_error.is_some() {
             counters.rejected = counters.rejected.saturating_add(1);
         }
+        if self.gameplay_audio_sealed {
+            return;
+        }
         for event in &report.judge_events {
             if !matches!(event.outcome, JudgeOutcome::Hit { .. }) {
                 continue;
@@ -909,8 +931,9 @@ impl Runtime {
     }
     /// Replaces both gameplay owners after explicit replay reconstruction.
     /// Resets input chronology, acquisition sequences, song-end setup and the
-    /// gameplay fence; leaves telemetry, bindings, configured input/hazard sounds
-    /// and already queued audio commands intact. The caller must separately
+    /// gameplay fence and gameplay audio seal; leaves telemetry, bindings,
+    /// configured input/hazard sounds and already queued audio commands intact.
+    /// The caller must separately
     /// synchronize audio output when restoring a timeline. Configured
     /// touch regions remain, but held routes are cleared for a fresh contact start;
     /// restoring active contacts requires `replace_state_with_touch_router` instead.
@@ -957,6 +980,7 @@ impl Runtime {
         self.last_song = None;
         self.song_end = None;
         self.gameplay_fence = None;
+        self.gameplay_audio_sealed = false;
         self.gameplay_sound_stop.reset();
         self.sequences.clear();
         (previous_judge, previous_transport)

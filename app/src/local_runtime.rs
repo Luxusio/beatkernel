@@ -128,6 +128,22 @@ impl RuntimeGroup {
         self.producer.scope()
     }
 
+    /// Closes gameplay sound admission for every member of the current epoch.
+    /// The caller qualifies the actual shared finite output end; judging,
+    /// queued commands and explicit audio control remain unchanged.
+    pub fn seal_gameplay_audio(&mut self) {
+        for member in &mut self.members {
+            member.runtime.seal_gameplay_audio();
+        }
+    }
+
+    /// Whether every member's gameplay audio is sealed in this epoch.
+    pub fn gameplay_audio_sealed(&self) -> bool {
+        self.members
+            .iter()
+            .all(|member| member.runtime.gameplay_audio_sealed())
+    }
+
     /// Commit fresh practice judges after the caller qualifies the rendered
     /// boundary and retires the acquired input prefix. This does not flush PCM,
     /// enqueue a seek, reopen output, or manufacture a native clock boundary.
@@ -703,6 +719,16 @@ impl SoloRuntime {
 
     pub fn audio_scope(&self) -> CommandScope {
         self.0.audio_scope()
+    }
+
+    /// Closes only sound admission through the same cohort execution path.
+    pub fn seal_gameplay_audio(&mut self) {
+        self.0.seal_gameplay_audio();
+    }
+
+    /// Whether gameplay sound admission is sealed for this epoch.
+    pub fn gameplay_audio_sealed(&self) -> bool {
+        self.0.gameplay_audio_sealed()
     }
 
     /// One-player forwarding through the same atomic cohort replacement seam.
