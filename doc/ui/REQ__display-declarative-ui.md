@@ -1,5 +1,33 @@
 # Display screen declarative authoring
 
+## Browser field semantics and admission
+
+The shared retained browser Display presents its existing four fields as GPU
+backend, present mode, CSS width and CSS height. It supports `auto`, `fifo` and
+one to 16,384 CSS pixels per dimension, respectively; decimal strings have at
+most five digits, with leading zeros preserved. It must not label dimensions as
+UI FPS/lookahead or promise native backend choices, profile restart or a separate
+Apply. Done applies the validated browser extent immediately. Native Display
+continues to edit its existing backend/present/FPS/lookahead draft.
+
+Editing and Back alone preserve the last applied extent. Done validates all four
+fields before action admission or any Window style/accepted-state publication.
+The Window also requires the current Display route, exact owner token and four
+draft strings matching the receipt byte for byte. Malformed, stale, unsupported,
+partial or unequal receipts preserve both dimensions and the accepted snapshot.
+Invalid drafts remain repairable, with existing bounded errors. Back/reopen
+initializes from the last applied values, initially `auto/fifo/960/720`, without
+reading layout on input or gameplay frames.
+
+Choose browser presentation vocabulary once when mounting the existing
+declarative tree. Preserve node IDs, layout, retained partial updates, input,
+motion and disposal. Renderer geometry continues to follow actual CSS resize
+and DPR through the existing ResizeObserver/presentation protocol. Verify native
+and browser composed labels/help, boundary/atomic refusal fixtures, Done versus
+Back, reopened values and trusted production browser geometry/screenshots.
+This does not implement configurable browser FPS/lookahead. Strict browser
+page/console/network/audio acceptance remains required.
+
 ## Native screen ownership
 
 One existing PanelScope owns both the Display draft and its lazily mounted

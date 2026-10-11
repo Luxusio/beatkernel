@@ -1,5 +1,10 @@
 # Worker-owned shared retained browser menus
 
+Browser Display uses truthful CSS width/height fields and preserves its last
+applied dimensions on reopening. Complete correlated Done receipts must pass
+the same whole-draft validation at Worker and Window boundaries before any size
+publication. See [the Display contract](REQ__display-declarative-ui.md).
+
 Explicit host menu-motion requests must pass through the CPU Worker's actual
 visual owner and RenderClient. The Window captures the current menu token and
 submitted generation/content/geometry identity, copies endpoints and correlates

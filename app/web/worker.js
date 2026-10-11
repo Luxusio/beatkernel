@@ -14,6 +14,7 @@ import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, ga
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
 import { LocalRoster } from "./local-play-host.mjs";
 import { encodeBrowserSettings, decodeBrowserSettings, settingsMenuProfileFields, settingsMenuProfileSnapshot, settingsMenuSnapshot } from "./settings-profile.mjs";
+import { validateBrowserDisplayFields } from "./display-settings.mjs";
 import { snapshotPointerSetup } from "./pointer-profile.mjs";
 const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserHistoricalRecord } = runtime;
 let ready = null;
@@ -902,9 +903,7 @@ function handleMenu(request) {
           else settingsMenuSnapshot(fields);
         }
         if (route === 7 && control === 40n) {
-          const fields = menuOwner.fields();
-          if (fields.length !== 4 || fields[0] !== "auto" || fields[1] !== "fifo"
-            || fields.slice(2).some(value => !/^[0-9]{1,5}$/.test(value) || Number(value) < 1 || Number(value) > 16384)) throw new Error("Browser Display supports auto/fifo and one to 16384 CSS pixels.");
+          validateBrowserDisplayFields(menuOwner.fields());
         }
         const effect = menuOwner.action(request.screen, request.revision, request.actionId, control);
         reportMenu();

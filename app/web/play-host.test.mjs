@@ -60,6 +60,107 @@ function nativeGamepad(index = 0, fields = {}) {
     axes: [0.12345678901234568],
     buttons: Array.from({ length: 9 }, () => ({ value: 0, pressed: false, touched: false })), ...fields };
 }
+function watchViewportExtents(h) {
+  const writes = [], style = {}, values = { width: "", height: "" };
+  for (const property of ["width", "height"]) Object.defineProperty(style, property, {
+    configurable: true, get() { return values[property]; },
+    set(value) { writes.push([property, value]); values[property] = value; },
+  });
+  h.get("viewport").style = style;
+  return { writes, values };
+}
+function displayMenuState(fields, overrides = {}) {
+  return { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+    route: 7, fields, selected: 2, ...overrides };
+}
+async function reopenDisplayDraft(h, game, revision = 20n) {
+  await h.receive(displayMenuState(["chart.bms"], { route: 1, revision }));
+  await h.receive(displayMenuState([], { screen: 4n, revision: revision + 1n }));
+  const request = game.last("menu-fields");
+  assert.ok(request, "reopening publishes an applied Display draft");
+  assert.equal(request.screen, 4n); assert.equal(request.revision, revision + 1n);
+  return Array.from(request.fields);
+}
+
+test("Display extents: initial draft copies default CSS dimensions without measuring layout", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0], extent = watchViewportExtents(h), reads = h.layoutReads;
+    await h.receive(displayMenuState([]));
+    const fields = game.last("menu-fields").fields;
+    assert.deepEqual(Array.from(fields), ["auto", "fifo", "960", "720"]);
+    assert.equal(h.layoutReads, reads);
+    assert.deepEqual(extent.writes, [], "draft publication does not apply CSS");
+    // A receiver mutation cannot change the last accepted snapshot.
+    if (!Object.isFrozen(fields)) fields[2] = "123";
+    assert.deepEqual(await reopenDisplayDraft(h, game), ["auto", "fifo", "960", "720"]);
+    assert.deepEqual(extent.writes, []);
+  } finally { await h.close(); }
+});
+
+for (const dimensions of [["800", "600"], ["00800", "00600"], ["1", "16384"]]) {
+  test(`Display extents: Done applies both CSS dimensions and Back reopens exact ${dimensions.join("/")} strings`, async () => {
+    const h = await harness();
+    try {
+      await h.preview(); const game = h.workers[0], extent = watchViewportExtents(h);
+      const fields = ["auto", "fifo", ...dimensions], state = displayMenuState(fields);
+      await h.receive(state);
+      assert.deepEqual(extent.writes, [], "editing has no optimistic CSS publication");
+      await h.receive({ ...state, kind: "menu-effect", effect: 1n, control: 40n });
+      assert.deepEqual(extent.writes, [["width", `${dimensions[0]}px`], ["height", `${dimensions[1]}px`]]);
+      fields[2] = "123";
+      assert.deepEqual(await reopenDisplayDraft(h, game), ["auto", "fifo", ...dimensions], "applied state owns an independent copy");
+      const acceptedWrites = [...extent.writes];
+      await h.receive(displayMenuState(["auto", "fifo", "1111", "2222"], { screen: 4n, revision: 22n }));
+      assert.deepEqual(await reopenDisplayDraft(h, game, 23n), ["auto", "fifo", ...dimensions], "Back without Done discards unaccepted edits");
+      assert.deepEqual(extent.writes, acceptedWrites);
+    } finally { await h.close(); }
+  });
+}
+
+for (const fault of ["invalid-final", "nonstring", "partial", "extra", "unsupported-backend", "unsupported-present",
+  "zero-width", "overbound", "overlong", "expression", "wrong-route", "no-draft", "empty-draft",
+  "stale-revision", "wrong-screen", "wrong-generation", "valid-unequal", "leading-zero-mismatch"]) {
+  test(`Display extents: ${fault} receipt writes neither CSS dimension and cannot replace applied reopen values`, async () => {
+    const h = await harness();
+    try {
+      await h.preview(); const game = h.workers[0], extent = watchViewportExtents(h);
+      const accepted = displayMenuState(["auto", "fifo", "800", "600"]);
+      await h.receive(accepted);
+      await h.receive({ ...accepted, kind: "menu-effect", effect: 1n, control: 40n });
+      assert.deepEqual(extent.writes, [["width", "800px"], ["height", "600px"]]);
+      extent.writes.length = 0;
+      let draft = ["auto", "fifo", "1024", "768"], fields = [...draft], currentRoute = 7;
+      if (fault === "invalid-final") draft[3] = fields[3] = "0";
+      if (fault === "nonstring") draft[3] = fields[3] = 768;
+      if (fault === "partial") draft = fields = draft.slice(0, 3);
+      if (fault === "extra") draft = fields = [...draft, "extra"];
+      if (fault === "unsupported-backend") draft[0] = fields[0] = "vulkan";
+      if (fault === "unsupported-present") draft[1] = fields[1] = "immediate";
+      if (fault === "zero-width") draft[2] = fields[2] = "0";
+      if (fault === "overbound") draft[3] = fields[3] = "16385";
+      if (fault === "overlong") draft[3] = fields[3] = "000768";
+      if (fault === "expression") draft[3] = fields[3] = "calc(768px)";
+      if (fault === "wrong-route") currentRoute = 3;
+      if (fault === "no-draft") draft = undefined;
+      if (fault === "empty-draft") draft = [];
+      if (fault === "valid-unequal") fields[3] = "769";
+      if (fault === "leading-zero-mismatch") { draft[2] = "01024"; fields[2] = "1024"; }
+      const state = displayMenuState(draft, { revision: 7n, route: currentRoute });
+      await h.receive(state);
+      const effect = { ...state, kind: "menu-effect", route: 7, fields, effect: 1n, control: 40n };
+      if (fault === "stale-revision") effect.revision = 6n;
+      if (fault === "wrong-screen") effect.screen = 4n;
+      if (fault === "wrong-generation") effect.menuGeneration = 78n;
+      await h.receive(effect);
+      assert.deepEqual(extent.writes, [], "the whole receipt must pass before either style setter");
+      assert.deepEqual(extent.values, { width: "800px", height: "600px" });
+      assert.deepEqual(await reopenDisplayDraft(h, game), ["auto", "fifo", "800", "600"]);
+      assert.deepEqual(extent.writes, [], "reopening does not apply a rejected candidate");
+    } finally { await h.close(); }
+  });
+}
+
 function watchPlayDisplay(h) {
   const writes = [];
   for (const [id, property] of [["status", "textContent"], ["position", "value"],
@@ -587,7 +688,7 @@ async function harness(faults = {}) {
     this.setExport("RecordsStore", RecordsStore);
   }, { context });
   const modules = new Map();
-  for (const name of ["render-protocol.mjs", "presentation-status.mjs", "completed-results-model.mjs", "host_model.mjs", "play-model.mjs", "settings-profile.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "pointer-input.mjs", "local-play-host.mjs", "menu-keyboard.mjs", "main.js"]) {
+  for (const name of ["render-protocol.mjs", "presentation-status.mjs", "completed-results-model.mjs", "host_model.mjs", "play-model.mjs", "settings-profile.mjs", "display-settings.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "pointer-input.mjs", "local-play-host.mjs", "menu-keyboard.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
     modules.set(name, new SourceTextModule(await readFile(url, "utf8"), {
       context, identifier: url.href, initializeImportMeta(meta) { meta.url = url.href; },

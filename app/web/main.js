@@ -1,5 +1,6 @@
 import { catalogKeyboardSelection, recordsKeyboardControl, settingsKeyboardControl } from "./menu-keyboard.mjs";
 import { snapshotMenuMotion } from "./render-protocol.mjs";
+import { validateBrowserDisplayFields } from "./display-settings.mjs";
 import { validateCompletedResults, validateCompletedArchive } from "./completed-results-model.mjs";
 import { snapshotFiles, nanoseconds, seconds, validateHistoricalGradeSnapshot, HistoricalGradePager } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
@@ -31,6 +32,7 @@ let renderer = null;
 let rendererReady = false;
 let submittedGeometry = null;
 let menuState = null;
+let appliedDisplayFields = Object.freeze(["auto", "fifo", "960", "720"]);
 let menuGeometry = null;
 let menuRetired = false;
 let retiredMenuGeneration = 0n;
@@ -185,7 +187,7 @@ function menuFieldsFor(route) {
   }
   if (route === 3) return [ui["live-start"].value, ui["live-end"].value];
   if (route === 4) return Array.from(ui.records.options ?? [], option => option.value).filter(Boolean);
-  if (route === 7) return ["auto", "fifo", "960", "720"];
+  if (route === 7) return [...appliedDisplayFields];
   if (route === 6) return ["0", "0", "0", "0"];
   const inventory = localSetup?.phase === "ready" ? localSetup.inventory : [];
   const members = localRoster.players;
@@ -347,7 +349,16 @@ function receiveMenu(data) {
       catch (error) { status(String(error?.message ?? error).slice(0, 4096), true); }
     }
     else if (data.effect === 1n && data.route === 7) {
-      ui.viewport.style.width = `${data.fields[2]}px`; ui.viewport.style.height = `${data.fields[3]}px`;
+      try {
+        const accepted = validateBrowserDisplayFields(data.fields);
+        if (menuState.route !== 7 || menuState.fields.length !== 4
+          || !menuState.fields.every((value, index) => value === accepted[index])) {
+          throw new Error("Browser Display receipt does not match its current draft.");
+        }
+        ui.viewport.style.width = `${accepted[2]}px`; ui.viewport.style.height = `${accepted[3]}px`;
+        appliedDisplayFields = accepted;
+      }
+      catch (error) { status(String(error?.message ?? error).slice(0, 4096), true); }
     }
     else if (data.effect === 1n && data.route === 3) {
       ui["live-start"].value = data.fields[0]; ui["live-end"].value = data.fields[1];

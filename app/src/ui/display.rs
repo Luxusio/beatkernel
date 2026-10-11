@@ -61,7 +61,7 @@ enum Component {
     Header(&'static str, TextStyle),
     FieldLabel(usize, &'static str),
     Editor(usize, ControlId),
-    Hint(&'static str),
+    Hint(usize, &'static str),
     Action(ControlId, &'static str),
     Error,
 }
@@ -148,15 +148,15 @@ const SCREEN: N =
                         &[
                             N::leaf(
                                 [936, 7],
-                                Component::Hint("BACKEND: AUTO / VULKAN / DX12 / METAL / GL"),
+                                Component::Hint(0, "BACKEND: AUTO / VULKAN / DX12 / METAL / GL"),
                             ),
                             N::leaf(
                                 [936, 7],
-                                Component::Hint("PRESENT: FIFO / IMMEDIATE / MAILBOX"),
+                                Component::Hint(1, "PRESENT: FIFO / IMMEDIATE / MAILBOX"),
                             ),
                             N::leaf(
                                 [936, 7],
-                                Component::Hint("UI FPS: 30..240   LOOKAHEAD: 100..10000 MS"),
+                                Component::Hint(2, "UI FPS: 30..240   LOOKAHEAD: 100..10000 MS"),
                             ),
                         ],
                     ),
@@ -166,11 +166,11 @@ const SCREEN: N =
                         &[
                             N::leaf(
                                 [936, 7],
-                                Component::Hint("SAVE PROFILE + RESTART FOR GPU BACKEND"),
+                                Component::Hint(3, "SAVE PROFILE + RESTART FOR GPU BACKEND"),
                             ),
                             N::leaf(
                                 [936, 7],
-                                Component::Hint("DONE UPDATES DRAFT - APPLY IS SEPARATE"),
+                                Component::Hint(4, "DONE UPDATES DRAFT - APPLY IS SEPARATE"),
                             ),
                         ],
                     ),
@@ -253,6 +253,13 @@ pub struct DisplayView {
 }
 impl DisplayView {
     pub fn new(id: ScreenInstanceId, width: u32, height: u32) -> Result<Self, String> {
+        Self::mount(id, width, height, false)
+    }
+    /// Browser fields describe CSS extents rather than native frame timing policy.
+    pub fn new_browser(id: ScreenInstanceId, width: u32, height: u32) -> Result<Self, String> {
+        Self::mount(id, width, height, true)
+    }
+    fn mount(id: ScreenInstanceId, width: u32, height: u32, browser: bool) -> Result<Self, String> {
         let nodes = RetainedNodes::new(width, height)?;
         let mut layout = MountedLayout::mount(SCREEN)?;
         let anchors: Vec<_> = layout
@@ -270,8 +277,8 @@ impl DisplayView {
         let editors = [
             LineEditor::new("auto", 32)?,
             LineEditor::new("fifo", 32)?,
-            LineEditor::new("120", 32)?,
-            LineEditor::new("2000", 32)?,
+            LineEditor::new(if browser { "960" } else { "120" }, 32)?,
+            LineEditor::new(if browser { "720" } else { "2000" }, 32)?,
         ];
         let scope = Scope::new();
         let mut view = Self {
@@ -327,7 +334,14 @@ impl DisplayView {
                 .leaves()
                 .iter()
                 .find_map(|leaf| match leaf.component {
-                    Component::FieldLabel(field, value) if field == index => Some((leaf.id, value)),
+                    Component::FieldLabel(field, value) if field == index => Some((
+                        leaf.id,
+                        if browser {
+                            ["GPU BACKEND", "PRESENT MODE", "CSS WIDTH", "CSS HEIGHT"][index]
+                        } else {
+                            value
+                        },
+                    )),
                     _ => None,
                 })
                 .ok_or("Display field label missing")?;
@@ -375,16 +389,31 @@ impl DisplayView {
             .leaves()
             .iter()
             .copied()
-            .filter(|leaf| matches!(leaf.component, Component::Hint(_)))
+            .filter_map(|leaf| {
+                let Component::Hint(index, value) = leaf.component else {
+                    return None;
+                };
+                Some((
+                    leaf.id,
+                    if browser {
+                        [
+                            "BACKEND: AUTO",
+                            "PRESENT: FIFO",
+                            "CSS WIDTH / HEIGHT: 1..16384 PIXELS",
+                            "DONE APPLIES CSS EXTENT NOW",
+                            "BACK RETURNS WITHOUT APPLYING",
+                        ][index]
+                    } else {
+                        value
+                    },
+                ))
+            })
             .collect();
-        let hint_ids: Vec<_> = hints.iter().map(|leaf| leaf.id).collect();
+        let hint_ids: Vec<_> = hints.iter().map(|(id, _)| *id).collect();
         view.nodes
             .static_layout_node(&view.layout, &hint_ids, move |id, geometry, scene, _| {
-                if let Component::Hint(value) =
-                    hints.iter().find(|leaf| leaf.id == id).unwrap().component
-                {
-                    paint_text(scene, geometry.bounds, value, HELP);
-                }
+                let (_, value) = hints.iter().find(|(hint_id, _)| *hint_id == id).unwrap();
+                paint_text(scene, geometry.bounds, value, HELP);
             })?;
         for leaf in view.layout.leaves() {
             let Component::Action(control, label) = leaf.component else {

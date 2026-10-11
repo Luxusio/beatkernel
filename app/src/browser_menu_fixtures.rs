@@ -1970,6 +1970,165 @@ fn menu_label(scene: &crate::scene::Scene, value: &str) {
         "missing actual menu label {value}"
     );
 }
+
+// Independently render the expected copy with the existing bitmap atom, then
+// compare the actual composed row's glyph positions, colors and UVs. This also
+// catches extra or stale labels in the same region, rather than searching source.
+fn assert_display_text_row(
+    scene: &crate::scene::Scene,
+    value: &str,
+    x: usize,
+    y: usize,
+    right: f32,
+    color: u32,
+) {
+    let mut expected = crate::scene::Scene::new(960, 720);
+    crate::ui::atoms::text(&mut expected, x, y, value, 1, color);
+    let actual: Vec<_> = scene
+        .rectangles()
+        .iter()
+        .filter(|r| {
+            r.bounds[0] >= x as f32
+                && r.bounds[0] < right
+                && r.bounds[1] == y as f32
+                && r.bounds[3] == 7.0
+        })
+        .map(|r| (r.bounds, r.color, r.uv))
+        .collect();
+    assert_eq!(actual, menu_packet(&expected), "Display row {y}: {value}");
+}
+
+fn assert_browser_display_copy(scene: &crate::scene::Scene) {
+    for (y, value) in [
+        (140, "GPU BACKEND"),
+        (215, "PRESENT MODE"),
+        (290, "CSS WIDTH"),
+        (365, "CSS HEIGHT"),
+    ] {
+        assert_display_text_row(scene, value, 24, y, 256.0, 0xf0f4ff);
+    }
+    for (y, value) in [
+        (445, "BACKEND: AUTO"),
+        (460, "PRESENT: FIFO"),
+        (475, "CSS WIDTH / HEIGHT: 1..16384 PIXELS"),
+        (500, "DONE APPLIES CSS EXTENT NOW"),
+        (515, "BACK RETURNS WITHOUT APPLYING"),
+    ] {
+        assert_display_text_row(scene, value, 24, y, 960.0, 0x9bb1cf);
+    }
+}
+
+#[test]
+fn actual_display_browser_vocabulary_and_native_copy_use_identical_control_geometry() {
+    use crate::ui::{display::DisplayView, interaction::ControlId};
+    let native = DisplayView::new(ScreenInstanceId(700), 960, 720).unwrap();
+    let browser = DisplayView::new_browser(ScreenInstanceId(701), 960, 720).unwrap();
+    let mut native_scene = crate::scene::Scene::new(960, 720);
+    let mut browser_scene = crate::scene::Scene::new(960, 720);
+    let mut native_hits = Vec::new();
+    let mut browser_hits = Vec::new();
+    native.compose(&mut native_scene, &mut native_hits).unwrap();
+    browser.compose(&mut browser_scene, &mut browser_hits).unwrap();
+    assert_browser_display_copy(&browser_scene);
+    for (y, value) in [
+        (140, "GPU BACKEND"),
+        (215, "PRESENT MODE"),
+        (290, "UI FPS"),
+        (365, "LOOKAHEAD MS"),
+    ] {
+        assert_display_text_row(&native_scene, value, 24, y, 256.0, 0xf0f4ff);
+    }
+    for (y, value) in [
+        (445, "BACKEND: AUTO / VULKAN / DX12 / METAL / GL"),
+        (460, "PRESENT: FIFO / IMMEDIATE / MAILBOX"),
+        (475, "UI FPS: 30..240   LOOKAHEAD: 100..10000 MS"),
+        (500, "SAVE PROFILE + RESTART FOR GPU BACKEND"),
+        (515, "DONE UPDATES DRAFT - APPLY IS SEPARATE"),
+    ] {
+        assert_display_text_row(&native_scene, value, 24, y, 960.0, 0x9bb1cf);
+    }
+    let regions = |hits: &[(ControlId, crate::ui::interaction::Bounds)]| {
+        hits.iter()
+            .map(|(id, b)| (*id, b.x, b.y, b.width, b.height))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(regions(&native_hits), regions(&browser_hits));
+    assert_eq!(
+        regions(&browser_hits),
+        vec![
+            (ControlId(40000), 280, 130, 650, 34),
+            (ControlId(40001), 280, 205, 650, 34),
+            (ControlId(40002), 280, 280, 650, 34),
+            (ControlId(40003), 280, 355, 650, 34),
+            (ControlId(40), 24, 620, 170, 34),
+            (ControlId(41), 212, 620, 170, 34),
+        ]
+    );
+    for control in [40000, 40001, 40002, 40003, 40, 41] {
+        assert_eq!(
+            native.node_for_control(ControlId(control)).unwrap(),
+            browser.node_for_control(ControlId(control)).unwrap()
+        );
+    }
+}
+
+#[test]
+fn actual_browser_menu_mounts_css_display_and_preserves_pending_and_reopen_semantics() {
+    use crate::browser_menu::BrowserMenuPresentation;
+    let mut menu = BrowserMenu::new(702).unwrap();
+    menu.navigate_with_fields(
+        token(&menu),
+        ScreenRoute::Settings,
+        retained_policy_settings_fields(),
+    )
+    .unwrap();
+    let parent = menu.snapshot();
+    menu.navigate_with_fields(
+        token(&menu),
+        ScreenRoute::Display,
+        ["auto", "fifo", "1234", "567"]
+            .map(str::to_owned)
+            .to_vec(),
+    )
+    .unwrap();
+    let mut presentation = BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+    let first = render_menu(&mut presentation);
+    assert_browser_display_copy(&first);
+    assert_eq!(presentation.hit((300.0, 295.0), [960, 720]), 40002);
+    assert_eq!(presentation.hit((50.0, 635.0), [960, 720]), 40);
+    let mut pending = menu.snapshot();
+    pending.pending = true;
+    presentation.apply(pending).unwrap();
+    let pending_scene = render_menu(&mut presentation);
+    assert_browser_display_copy(&pending_scene);
+    assert_eq!(presentation.hit((300.0, 295.0), [960, 720]), 0);
+    assert_eq!(presentation.hit((50.0, 635.0), [960, 720]), 0);
+    presentation.apply(menu.snapshot()).unwrap();
+    assert_eq!(
+        menu_packet(&render_menu(&mut presentation)),
+        menu_packet(&first)
+    );
+    menu.back(token(&menu)).unwrap();
+    assert_eq!(menu.snapshot().route, ScreenRoute::Settings);
+    assert_eq!(menu.snapshot().token.screen, parent.token.screen);
+    assert_eq!(menu.snapshot().fields, parent.fields);
+    presentation.apply(menu.snapshot()).unwrap();
+    let settings = render_menu(&mut presentation);
+    assert_menu_label_absent(&settings, "CSS WIDTH");
+    menu.navigate_with_fields(
+        token(&menu),
+        ScreenRoute::Display,
+        ["auto", "fifo", "1234", "567"]
+            .map(str::to_owned)
+            .to_vec(),
+    )
+    .unwrap();
+    presentation.apply(menu.snapshot()).unwrap();
+    assert_eq!(
+        menu_packet(&render_menu(&mut presentation)),
+        menu_packet(&first)
+    );
+}
 fn records_menu() -> BrowserMenu {
     let record = genuine_record();
     let mut menu = BrowserMenu::new(u64::MAX).unwrap();

@@ -881,6 +881,7 @@ async function workerHarness(options = {}) {
   const helpers = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelpers = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const settingsHelpers = new SourceTextModule(await readFile(new URL("./settings-profile.mjs", import.meta.url), "utf8"), { context });
+  const displayHelpers = new SourceTextModule(await readFile(new URL("./display-settings.mjs", import.meta.url), "utf8"), { context });
   const opponentHelpers = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
   const physicalHelpers = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
   const localHelpers = new SourceTextModule(await readFile(new URL("./local-play-model.mjs", import.meta.url), "utf8"), { context });
@@ -900,6 +901,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./completed-results-model.mjs") return completedHelpers;
     if (specifier === "./play-model.mjs") return playHelpers;
     if (specifier === "./settings-profile.mjs") return settingsHelpers;
+    if (specifier === "./display-settings.mjs") return displayHelpers;
     if (specifier === "./multiplayer-owner.mjs") return network;
     if (specifier === "./room-owner.mjs") return room;
     if (specifier === "./saved-opponents.mjs") return opponentHelpers;
@@ -1581,6 +1583,107 @@ for (const terminal of ["dispose", "replace", "transport-failure", "local-reject
     const replies = h.of("menu-motion-reply"); assert.equal(replies.length, 2); assert.equal(new Set(replies.map(m => m.requestId)).size, 2);
     h.renderPort.ack(first); await flushJobs(); assert.equal(h.of("menu-motion-reply").length, 2);
   } finally { await h.send({ kind: "dispose" }); }
+});
+
+async function retainedDisplayWorker(fields) {
+  const worker = await readyWorker({ actualMenu: true });
+  await worker.send({ kind: "menu-open", fields: ["song/chart.bms"] });
+  await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(worker.of("menu-state").at(-1)), route: 2, fields: settingsMenuDraft() });
+  assert.equal(worker.of("menu-state").at(-1).route, 2);
+  await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(worker.of("menu-state").at(-1)), route: 7, fields });
+  assert.equal(worker.of("menu-state").at(-1).route, 7);
+  return worker;
+}
+
+for (const dimensions of [["1", "16384"], ["16384", "1"], ["00001", "00720"], ["00042", "00001"]]) {
+  test(`actual Worker Display Done accepts exact CSS bounds and leading zeros ${dimensions.join("x")}`, async () => {
+    const fields = ["auto", "fifo", ...dimensions];
+    const worker = await retainedDisplayWorker(fields);
+    try {
+      const draft = worker.of("menu-state").at(-1);
+      assert.deepEqual(Array.from(draft.fields), fields);
+      await worker.send({ kind: "menu-action", ...acquiredMenuToken(draft), actionId: 1n, control: 40n });
+      assert.equal(worker.of("menu-error").length, 0);
+      assert.equal(worker.of("menu-effect").length, 1);
+      const effect = worker.of("menu-effect")[0];
+      assert.equal(effect.route, 7); assert.equal(effect.control, 40n); assert.equal(effect.effect, 1n);
+      assert.deepEqual(Array.from(effect.fields), fields, "CSS decimal syntax must survive unchanged rather than becoming native FPS/lookahead");
+      assert.deepEqual(acquiredMenuToken(effect), acquiredMenuToken(worker.of("menu-state").at(-1)));
+      const accepted = worker.of("menu-state").at(-1), errors = worker.of("menu-error").length;
+      await worker.send({ kind: "menu-action", ...acquiredMenuToken(accepted), actionId: 1n, control: 40n });
+      assert.equal(worker.of("menu-error").length, errors + 1);
+      assert.equal(worker.of("menu-effect").length, 1, "accepted Done consumes its semantic action exactly once");
+      assert.deepEqual(worker.of("menu-state").at(-1), accepted);
+      assert.equal(worker.games.length, 0); assert.equal(worker.preparedOwners.length, 0);
+    } finally { await worker.send({ kind: "dispose" }); }
+  });
+}
+
+test("actual Worker Display invalid final extent and unsupported modes refuse atomically then repair with the same action ID", async () => {
+  const worker = await retainedDisplayWorker(["auto", "fifo", "00042", "00720"]);
+  try {
+    for (const [index, value] of [[3, "0"], [3, "16385"], [3, "000001"], [3, "1.5"], [3, ""],
+      [3, " 720"], [3, "1e3"], [2, "0"], [2, "16385"], [0, "vulkan"], [1, "immediate"]]) {
+      await worker.send({ kind: "menu-edit", ...acquiredMenuToken(worker.of("menu-state").at(-1)), index, value });
+      const invalid = worker.of("menu-state").at(-1), errors = worker.of("menu-error").length;
+      const publications = worker.renderPort.posts.length;
+      assert.equal(invalid.fields[index], value, "the editor preserves invalid draft text until Done validation");
+      await worker.send({ kind: "menu-action", ...acquiredMenuToken(invalid), actionId: 1n, control: 40n });
+      assert.equal(worker.of("menu-error").length, errors + 1);
+      assert.equal(worker.of("menu-effect").length, 0);
+      assert.deepEqual(worker.of("menu-state").at(-1), invalid, "refusal leaves selection, draft, screen and revision unchanged");
+      assert.equal(worker.renderPort.posts.length, publications, "refused Done publishes no accepted renderer model");
+      await worker.send({ kind: "menu-edit", ...acquiredMenuToken(invalid), index, value: ["auto", "fifo", "00042", "00720"][index] });
+    }
+    const repaired = worker.of("menu-state").at(-1);
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(repaired), actionId: 1n, control: 40n });
+    assert.equal(worker.of("menu-effect").length, 1, "every refused Done leaves the same action ID available for repair");
+    assert.equal(worker.of("menu-effect")[0].effect, 1n, "refused attempts do not advance the effect counter");
+    assert.deepEqual(Array.from(worker.of("menu-effect")[0].fields), ["auto", "fifo", "00042", "00720"]);
+    const accepted = worker.of("menu-state").at(-1), errors = worker.of("menu-error").length;
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(accepted), actionId: 1n, control: 40n });
+    assert.equal(worker.of("menu-error").length, errors + 1);
+    assert.equal(worker.of("menu-effect").length, 1);
+    assert.deepEqual(worker.of("menu-state").at(-1), accepted);
+  } finally { await worker.send({ kind: "dispose" }); }
+});
+
+test("actual Worker Display partial counts and stale tokens cannot consume Done admission before a valid retry", async () => {
+  const fields = ["auto", "fifo", "960", "720"];
+  const worker = await retainedDisplayWorker(fields);
+  try {
+    const original = worker.of("menu-state").at(-1);
+    for (const malformed of [[], fields.slice(0, 3), [...fields, "extra"]]) {
+      await worker.send({ kind: "menu-fields", ...acquiredMenuToken(worker.of("menu-state").at(-1)), fields: malformed });
+      const draft = worker.of("menu-state").at(-1), errors = worker.of("menu-error").length;
+      const publications = worker.renderPort.posts.length;
+      assert.deepEqual(Array.from(draft.fields), malformed);
+      await worker.send({ kind: "menu-action", ...acquiredMenuToken(draft), actionId: 1n, control: 40n });
+      assert.equal(worker.of("menu-error").length, errors + 1);
+      assert.equal(worker.of("menu-effect").length, 0);
+      assert.deepEqual(worker.of("menu-state").at(-1), draft);
+      assert.equal(worker.renderPort.posts.length, publications);
+    }
+    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(worker.of("menu-state").at(-1)), fields });
+    const repaired = worker.of("menu-state").at(-1);
+    for (const token of [acquiredMenuToken(original), { ...acquiredMenuToken(repaired), menuGeneration: repaired.menuGeneration + 1n },
+      { ...acquiredMenuToken(repaired), screen: repaired.screen + 1n }]) {
+      const errors = worker.of("menu-error").length, publications = worker.renderPort.posts.length;
+      await worker.send({ kind: "menu-action", ...token, actionId: 1n, control: 40n });
+      assert.equal(worker.of("menu-error").length, errors + 1);
+      assert.equal(worker.of("menu-effect").length, 0);
+      assert.deepEqual(worker.of("menu-state").at(-1), repaired);
+      assert.equal(worker.renderPort.posts.length, publications);
+    }
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(repaired), actionId: 1n, control: 40n });
+    assert.equal(worker.of("menu-effect").length, 1);
+    assert.equal(worker.of("menu-effect")[0].effect, 1n);
+    assert.deepEqual(Array.from(worker.of("menu-effect")[0].fields), fields);
+    const accepted = worker.of("menu-state").at(-1);
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(accepted), actionId: 1n, control: 40n });
+    assert.equal(worker.of("menu-effect").length, 1);
+    assert.deepEqual(worker.of("menu-state").at(-1), accepted);
+  } finally { await worker.send({ kind: "dispose" }); }
 });
 
 test("actual Worker and WASM Settings Apply validates thirteen scalars and emits the exact correlated effect", async () => {

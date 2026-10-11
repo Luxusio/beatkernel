@@ -25,7 +25,7 @@ for (const name of ["CHROMIUM", "PUPPETEER_MODULE", "SETTINGS_POLICY_OUT"]) asse
 const out = resolve(root, process.env.SETTINGS_POLICY_OUT);
 await mkdir(out); // Refuse reuse of evidence from another run.
 const sources = {};
-for (const file of ["main.js", "worker.js", "renderer-worker.js", "settings-profile.mjs", "menu-keyboard.mjs", "play-model.mjs", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm"])
+for (const file of ["main.js", "worker.js", "renderer-worker.js", "settings-profile.mjs", "display-settings.mjs", "menu-keyboard.mjs", "play-model.mjs", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm"])
   sources[file] = await readFile(resolve(root, "app/web", file));
 assert.equal(sha(sources["pkg/beatkernel_bms_runtime_bg.wasm"]), expected, "production WASM identity mismatch");
 const evidence = { status: "RUNNING", wasmSha256: expected, source: Object.fromEntries(Object.entries(sources).map(([name, bytes]) => [name, sha(bytes)])),
@@ -108,7 +108,7 @@ function rendererObservation() {
   const record = (direction, message) => {
     if (probe.records.length >= 12000) { probe.overflow = true; return; }
     const result = { direction };
-    for (const key of ["kind", "operation", "status", "operationId", "generation", "content", "sequence", "packetKind", "mode", "control", "index", "menuGeneration", "screen", "revision", "geometryVersion", "message"])
+    for (const key of ["kind", "operation", "status", "operationId", "generation", "content", "sequence", "packetKind", "mode", "control", "index", "menuGeneration", "screen", "revision", "geometryVersion", "width", "height", "message"])
       if (message?.[key] !== undefined) result[key] = typeof message[key] === "bigint" ? String(message[key]) : message[key];
     const diagnostics = message?.kind === "terminal" ? message : message?.diagnostics;
     if (diagnostics?.diagnosticVersion !== undefined) {
@@ -346,6 +346,98 @@ try {
   const disabledActions = await renderer.evaluate(n => __settingsRenderer.records.slice(n).filter(x => x.kind === "menu-action" && ["12", "15"].includes(x.control)), rendererBefore);
   assert.equal(disabledActions.length, 0); assert.deepEqual(await state(), disabledState);
   evidence.steps.push({ name: "disabled-native-no-hit", points: [[410, 630], [400, 570]], originalPolicy: preserved.fields.slice(13, 16) });
+  // Display anchors reflow to the backing surface, while editor allocations and
+  // row gaps remain fixed. Hit the actual clipped control; scaling an entire
+  // 960x720 fixture point would select the wrong row after an extent change.
+  const displayPoint = async (kind, index = 0) => {
+    await geometry(); const current = await state(); assert.equal(current.route, 7);
+    const g = (await messages()).findLast(x => x.kind === "render-geometry" && x.mode === "menu"
+      && x.menuGeneration === current.menuGeneration && x.screen === current.screen && x.revision === current.revision);
+    assert(g && g.width > 0 && g.height > 0);
+    const left = Math.floor(24 * g.width / 960) + (kind === "field" ? 256 : kind === "back" ? 188 : 0);
+    const top = Math.floor((kind === "field" ? 130 : 620) * g.height / 720) + (kind === "field" ? index * 75 : 0);
+    const right = Math.min(g.width, left + (kind === "field" ? 650 : 170)), bottom = Math.min(g.height, top + 34);
+    assert(right > left && bottom > top, "Display control must have an actual visible hit extent");
+    const element = await page.$("#canvas"); await element.scrollIntoView(); const box = await element.boundingBox(); assert(box);
+    await page.mouse.click(box.x + (left + right) * box.width / (2 * g.width), box.y + (top + bottom) * box.height / (2 * g.height));
+    if (kind === "field") await page.waitForFunction(index => __settingsProbe.messages.findLast(x => x.kind === "menu-state")?.selected === index, {}, index);
+  };
+  const viewport = () => page.$eval("#viewport", e => {
+    const bounds = e.getBoundingClientRect(); return { width: bounds.width, height: bounds.height,
+      styleWidth: e.style.width, styleHeight: e.style.height, dpr: devicePixelRatio };
+  });
+  const displayParent = await state(), initialExtent = await viewport();
+  const assertDisplayParent = async () => {
+    const parent = await state(); assert.equal(parent.route, 2); assert.equal(parent.screen, displayParent.screen);
+    assert.equal(parent.menuGeneration, displayParent.menuGeneration); assert.equal(parent.selected, displayParent.selected);
+    assert.deepEqual(parent.fields, displayParent.fields); await ownership(true);
+  };
+  const openDisplay = async fields => {
+    // The parent action row also keeps fixed child widths after its anchor reflows.
+    await geometry(); const s = await state(); assert.equal(s.route, 2);
+    const g = (await messages()).findLast(x => x.kind === "render-geometry" && x.mode === "menu"
+      && x.menuGeneration === s.menuGeneration && x.screen === s.screen && x.revision === s.revision);
+    const canvas = await page.$("#canvas"); await canvas.scrollIntoView(); const box = await canvas.boundingBox(); assert(box && g);
+    // Settings header is anchored at (265,60): Display is the third 125px button,
+    // with two preceding 11px gaps, so its row-relative left edge is272.
+    const x = Math.floor(265 * g.width / 960) + 272 + 62;
+    const y = Math.floor(60 * g.height / 720) + 17;
+    assert(x < g.width && y < g.height);
+    await page.mouse.click(box.x + x * box.width / g.width, box.y + y * box.height / g.height);
+    await route(7); await geometry(); assert.deepEqual((await state()).fields, fields); await ownership(true);
+  };
+  const acceptDisplay = async fields => {
+    const before = (await messages()).length; await displayPoint("done");
+    await page.waitForFunction(n => __settingsProbe.messages.slice(n).some(x => x.kind === "menu-effect" && x.route === 7 && x.effect === "1"), {}, before);
+    const effect = (await messages()).slice(before).find(x => x.kind === "menu-effect" && x.route === 7 && x.effect === "1");
+    assert.deepEqual(effect.fields, fields);
+    await page.waitForFunction((width, height) => {
+      const e = document.querySelector("#viewport"), b = e.getBoundingClientRect();
+      const s = __settingsProbe.messages.findLast(x => x.kind === "menu-state");
+      return b.width === width && b.height === height && e.style.width === width + "px" && e.style.height === height + "px"
+        && __settingsProbe.messages.some(x => x.kind === "render-geometry" && x.mode === "menu"
+          && x.menuGeneration === s.menuGeneration && x.screen === s.screen && x.revision === s.revision
+          && x.width === Math.round(width * devicePixelRatio) && x.height === Math.round(height * devicePixelRatio));
+    }, {}, Number(fields[2]), Number(fields[3]));
+    const bounds = await viewport(), current = await state();
+    const submitted = (await messages()).findLast(x => x.kind === "render-geometry" && x.mode === "menu"
+      && x.menuGeneration === current.menuGeneration && x.screen === current.screen && x.revision === current.revision
+      && x.width === Math.round(bounds.width * bounds.dpr) && x.height === Math.round(bounds.height * bounds.dpr));
+    assert(submitted);
+    await bounded((async () => { for (;;) {
+      const records = await renderer.evaluate(() => __settingsRenderer.records);
+      if (records.some(x => x.kind === "geometry-ack" && x.geometryVersion === submitted.geometryVersion
+        && x.menuGeneration === submitted.menuGeneration && x.screen === submitted.screen && x.revision === submitted.revision
+        && x.width === submitted.width && x.height === submitted.height)) break;
+      await delay(40);
+    } })(), 10000, "actual submitted Display geometry ACK");
+    return { effect, bounds, submitted };
+  };
+  await openDisplay(["auto", "fifo", "960", "720"]); await screenshot("display-css-labels-and-hints");
+  await displayPoint("field", 2); await edit(2, "1000");
+  const discardStart = (await messages()).length; await page.click("#menu-back"); await route(2); await assertDisplayParent();
+  assert.deepEqual(await viewport(), initialExtent);
+  assert(!(await messages()).slice(discardStart).some(x => x.kind === "menu-effect" && x.route === 7 && x.effect === "1"));
+  await openDisplay(["auto", "fifo", "960", "720"]);
+  await displayPoint("field", 2); await edit(2, "1000"); await displayPoint("field", 3); await edit(3, "700");
+  const resizedDisplay = await acceptDisplay(["auto", "fifo", "1000", "700"]); await screenshot("display-applied-css-extent");
+  await displayPoint("back"); await route(2); await assertDisplayParent();
+  await openDisplay(["auto", "fifo", "1000", "700"]); await screenshot("display-reopened-applied-fields");
+  await displayPoint("field", 3); await edit(3, "0");
+  const invalidDisplay = await state(), invalidExtent = await viewport(), invalidDisplayStart = (await messages()).length;
+  await displayPoint("done");
+  await page.waitForFunction(n => __settingsProbe.messages.slice(n).some(x => x.kind === "menu-error"), {}, invalidDisplayStart);
+  assert(!(await messages()).slice(invalidDisplayStart).some(x => x.kind === "menu-effect" && x.route === 7 && x.effect === "1"));
+  assert.deepEqual(await state(), invalidDisplay); assert.deepEqual(await viewport(), invalidExtent);
+  await screenshot("display-invalid-final-dimension");
+  await displayPoint("field", 3); await edit(3, "720"); await displayPoint("field", 2); await edit(2, "960");
+  const restoredDisplay = await acceptDisplay(["auto", "fifo", "960", "720"]);
+  await page.click("#menu-back"); await route(2); await assertDisplayParent();
+  await openDisplay(["auto", "fifo", "960", "720"]); await page.click("#menu-back"); await route(2); await assertDisplayParent();
+  evidence.steps.push({ name: "trusted-display-discard-apply-reopen-invalid-repair", parent: displayParent, initialExtent,
+    resizedDisplay, invalidDisplay, invalidExtent, restoredDisplay,
+    screenshotCopyToInspect: ["CSS WIDTH", "CSS HEIGHT", "BACKEND: AUTO", "PRESENT: FIFO", "CSS WIDTH / HEIGHT: 1..16384 PIXELS",
+      "DONE APPLIES CSS EXTENT NOW", "BACK RETURNS WITHOUT APPLYING"] });
   // Actual composition bridge: preedit cannot publish a draft; end publishes and
   // ordinary retained Apply consumes the matching edit acknowledgement.
   await release("canvas"); await policyLast(); await page.click("#menu-editor"); const compositionStart = (await messages()).length;

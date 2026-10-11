@@ -1641,6 +1641,7 @@ async function workerHarness(options = {}) {
   const helper = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelper = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const settingsHelper = new SourceTextModule(await readFile(new URL("./settings-profile.mjs", import.meta.url), "utf8"), { context });
+  const displayHelper = new SourceTextModule(await readFile(new URL("./display-settings.mjs", import.meta.url), "utf8"), { context });
   const opponentHelper = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
   const physicalHelper = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
   const hidProfileHelper = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
@@ -1664,6 +1665,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./host_model.mjs") return helper;
     if (specifier === "./play-model.mjs") return playHelper;
     if (specifier === "./settings-profile.mjs") return settingsHelper;
+    if (specifier === "./display-settings.mjs") return displayHelper;
     if (specifier === "./multiplayer-owner.mjs") return network;
     if (specifier === "./saved-opponents.mjs") return opponentHelper;
     if (specifier === "./physical-input.mjs") return physicalHelper;

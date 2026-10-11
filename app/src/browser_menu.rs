@@ -1156,7 +1156,7 @@ impl BrowserMenuPresentation {
                 ScreenRoute::Records => MenuView::Records(crate::ui::records::RecordsView::new(id, 960, 720)?),
                 ScreenRoute::Players => MenuView::Players(crate::ui::players::PlayersView::new(id, 960, 720)?),
                 ScreenRoute::Devices { .. } => MenuView::Devices(crate::ui::devices::DevicesView::new(id, 960, 720)?),
-                ScreenRoute::Display => MenuView::Display(crate::ui::display::DisplayView::new(id, 960, 720)?),
+                ScreenRoute::Display => MenuView::Display(crate::ui::display::DisplayView::new_browser(id, 960, 720)?),
                 _ => return Err("menu body requires shared menu route; Results uses genuine frozen visual owner".into()),
             };
             self.views.push(view);
