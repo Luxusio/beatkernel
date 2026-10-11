@@ -39,11 +39,14 @@ async function realPreparationWorker(options = {}) {
   const self = {
     isSecureContext: false, navigator: {}, performance: { timeOrigin: 0, now: () => 1000 },
     addEventListener(kind, fn) { assert.equal(kind, "message"); receive = fn; },
-    postMessage(value, transfer = []) { messages.push(value); transfers.push(transfer); },
+    postMessage(value, transfer = []) { options.beforePost?.(value, transfer); messages.push(value); transfers.push(transfer); },
   };
-  const context = createContext({ self, performance: self.performance, WebAssembly, TextEncoder, TextDecoder,
+  const audioWasm = options.compile ? { Module: WebAssembly.Module, Instance: WebAssembly.Instance,
+    Memory: WebAssembly.Memory, Table: WebAssembly.Table, Global: WebAssembly.Global,
+    instantiate: WebAssembly.instantiate, compile: options.compile } : WebAssembly;
+  const context = createContext({ self, performance: self.performance, WebAssembly: audioWasm, TextEncoder, TextDecoder,
     Uint8Array, Uint32Array, Float32Array, Float64Array, ArrayBuffer, DataView, File: FileType,
-    URL, Request, Response, structuredClone, console,
+    URL, Request, Response, structuredClone, console, AbortController, fetch: options.fetch,
     MessageChannel: options.realChannels ? class {
       constructor() {
         const channel = new NodeMessageChannel(); channels.push(channel);
@@ -114,7 +117,8 @@ export function __actualReadDiagnostics() {
 }
 export function __actualPendingMap() { return libraryContext?.pending; }
 ` : "";
-  const worker = new SourceTextModule(await readFile(workerUrl, "utf8") + observation, { context, identifier: workerUrl.href });
+  const worker = new SourceTextModule(await readFile(workerUrl, "utf8") + observation, { context, identifier: workerUrl.href,
+    initializeImportMeta(meta) { meta.url = workerUrl.href; } });
   modules.set(workerUrl.href, worker); await worker.link(moduleFor); await worker.evaluate();
   const port = { onmessage: null, starts: 0, closes: 0,
     start() { this.starts++; }, close() { this.closes++; },
@@ -128,6 +132,7 @@ export function __actualPendingMap() { return libraryContext?.pending; }
     } };
   const h = {
     messages, transfers, libraries, jobs, accesses, timers, channels, tasks, runtime: binding.namespace,
+    async init() { await h.send({ kind: "init", renderPort: port, maxPacketBytes: 16 * 1024 * 1024, maxDiagnosticBytes: 4096, renderTimeoutMs: 10000 }); },
     of(kind) { return messages.filter(x => x.kind === kind); },
     async send(value) { receive({ data: value }); await flushJobs(); },
     async yieldOne() {
@@ -153,8 +158,7 @@ export function __actualPendingMap() { return libraryContext?.pending; }
       })()`, context);
     },
   };
-  await h.send({ kind: "init", renderPort: port, maxPacketBytes: 16 * 1024 * 1024, maxDiagnosticBytes: 4096, renderTimeoutMs: 10000 });
-  assert.equal(h.of("ready").length, 1);
+  if (!options.skipInit) { await h.init(); assert.equal(h.of("ready").length, 1); }
   return h;
 }
 function preparationWave() {
@@ -173,6 +177,217 @@ async function admitPreparationFiles(h, extra = [], readWave) {
   assert.equal(h.of("catalog").length, 1); await h.send({ kind: "accept-library", id: 1 });
 }
 const actualSelect = (id = 2, path = "chart.bms") => ({ kind: "select", id, libraryId: 1, path, rate: 24000, seed: "0" });
+
+const AUDIO_FIXTURE_BYTES = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+const AUDIO_SETUP_LIMIT = 64 * 1024 * 1024;
+async function audioSetupWorker(options = {}) {
+  const fetches = [], compiles = [], compilePromises = [], readers = [];
+  const chunks = options.chunks ?? [AUDIO_FIXTURE_BYTES.subarray(0, 3), new Uint8Array(0), AUDIO_FIXTURE_BYTES.subarray(3)];
+  const makeReader = () => ({ index: 0, cancels: 0, releases: 0,
+    async read() { return this.index < chunks.length ? { done: false, value: chunks[this.index++] } : { done: true }; },
+    cancel() { this.cancels++; return options.cancelPromise ?? Promise.resolve(); },
+    releaseLock() { this.releases++; } });
+  const reader = makeReader();
+  const h = await realPreparationWorker({ ...options,
+    fetch: (url, init) => {
+      fetches.push({ url, init });
+      if (options.fetch) return options.fetch(url, init);
+      const responseReader = fetches.length === 1 ? reader : makeReader();
+      return Promise.resolve({ ok: true, body: { getReader() { readers.push(responseReader); return responseReader; } } });
+    },
+    compile: bytes => { compiles.push(new Uint8Array(bytes.buffer ?? bytes, bytes.byteOffset ?? 0, bytes.byteLength));
+      const promise = options.compile ? options.compile(bytes) : WebAssembly.compile(bytes);
+      compilePromises.push(promise); return promise; } });
+  const send = h.send.bind(h);
+  return Object.assign(h, { fetches, compiles, readers, reader,
+    async send(value) { await send(value); for (let turn = 0; turn < 8; turn++) { await new Promise(resolve => setImmediate(resolve)); await flushJobs(); } },
+    async audioReady(id) {
+      assert(compilePromises.length, "actual compile has started before waiting for its completion");
+      let timeout;
+      try { await Promise.race([compilePromises.at(-1), new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(Error("actual audio compile did not settle within five seconds")), 5000);
+      })]); } finally { clearTimeout(timeout); }
+      await flushJobs(); assert(h.of("audio-module-ready").some(reply => reply.id === id), "settled actual compile must publish its current id");
+    },
+    async deadline() { const entry = [...h.timers].find(([, value]) => value.ms === 10000);
+      assert(entry, "audio setup has its ten-second deadline"); h.timers.delete(entry[0]); entry[1].fn(); await flushJobs(); } });
+}
+function assertAudioError(h, id) {
+  const reply = h.of("audio-module-error").find(row => row.id === id);
+  assert(reply, `optional audio error belongs to ${id}`);
+  assert.equal(typeof reply.message, "string"); assert(reply.message.length > 0 && reply.message.length <= 4096);
+  assert.equal(h.of("fatal").length, 0, "optional audio failure leaves business CPU usable");
+  return reply;
+}
+
+test("audio setup actual WASM CPU readiness precedes preparation and invalid identities never perform IO", async () => {
+  const h = await audioSetupWorker({ skipInit: true });
+  await h.send({ kind: "audio-load", id: 1 }); assert.equal(h.fetches.length, 0); assert.equal(h.compiles.length, 0);
+  await h.init(); assert.equal(h.of("ready").length, 1);
+  for (const id of [undefined, null, 0, -1, 1.5, "1", NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) await h.send({ kind: "audio-load", id });
+  assert.equal(h.fetches.length, 0); assert.equal(h.compiles.length, 0); assert.equal(h.of("audio-module-ready").length, 0);
+  await admitPreparationFiles(h); await h.send(actualSelect()); await h.settle(() => h.of("selected").length === 1);
+  assert.equal(h.of("fatal").length, 0); await h.send({ kind: "dispose" });
+});
+
+test("audio setup compiles exactly admitted bytes at the fixed package URL and clones a genuine cached Module", async () => {
+  const h = await audioSetupWorker(); await h.send({ kind: "audio-load", id: 11 }); await h.audioReady(11);
+  assert.equal(h.fetches.length, 1);
+  assert.equal(String(h.fetches[0].url), new URL("./audio-pkg/beatkernel_bms_runtime_bg.wasm", new URL("./worker.js", import.meta.url)).href);
+  assert(h.fetches[0].init.signal instanceof AbortSignal); assert.equal(h.fetches[0].init.signal.aborted, false);
+  assert.equal(h.compiles.length, 1); assert.deepEqual(h.compiles[0], AUDIO_FIXTURE_BYTES);
+  const ready = h.of("audio-module-ready"); assert.equal(ready.length, 1); assert.equal(ready[0].id, 11);
+  assert(ready[0].module instanceof WebAssembly.Module);
+  assert.deepEqual(Array.from(h.transfers[h.messages.indexOf(ready[0])]), [], "compiled Module never enters transfer list");
+  const cloned = structuredClone(ready[0]); assert(cloned.module instanceof WebAssembly.Module); new WebAssembly.Instance(cloned.module);
+  assert.equal(h.reader.cancels, 0, "fully consumed body must not be canceled after completion");
+  assert.equal(h.timers.size, 0); await h.send({ kind: "audio-load", id: 12 });
+  assert.equal(h.of("audio-module-ready").at(-1).id, 12); assert.equal(h.of("audio-module-ready").at(-1).module, ready[0].module);
+  assert.equal(h.fetches.length, 1); assert.equal(h.compiles.length, 1); await h.send({ kind: "dispose" });
+});
+
+test("audio setup identical active id is ignored and competing id cannot replace physical single flight", async () => {
+  const held = deferred(), h = await audioSetupWorker({ fetch: () => held.promise });
+  await h.send({ kind: "audio-load", id: 21 }); await h.send({ kind: "audio-load", id: 21 }); await h.send({ kind: "audio-load", id: 22 });
+  assert.equal(h.fetches.length, 1); assert.equal(h.compiles.length, 0); assertAudioError(h, 22);
+  assert.equal(h.of("audio-module-error").filter(row => row.id === 21).length, 0);
+  held.resolve({ ok: true, body: { getReader: () => h.reader } }); await flushJobs(); await h.audioReady(21);
+  assert.deepEqual(h.of("audio-module-ready").map(row => row.id), [21]); await h.send({ kind: "dispose" });
+});
+
+test("audio setup rejects HTTP, body, reader, read, malformed chunk and compile failures without fatal", async () => {
+  const cases = [
+    { fetch: async () => { throw Error("fetch denied"); } },
+    { fetch: async () => ({ ok: false, body: {} }) },
+    { fetch: async () => ({ ok: true, body: null }) },
+    { fetch: async () => ({ ok: true, body: { getReader() { throw Error("reader denied"); } } }) },
+    { fetch: async () => ({ ok: true, body: { getReader: () => ({ read: async () => { throw Error("read denied"); }, cancel() {}, releaseLock() {} }) } }) },
+    ...[null, [0, 97], new Uint16Array([1]), new ArrayBuffer(8)].map(value => ({ chunks: [value] })),
+    { chunks: [new Uint8Array(0)] },
+    { compile: async () => { throw Error("x".repeat(10000)); } },
+  ];
+  for (let index = 0; index < cases.length; index++) {
+    const h = await audioSetupWorker(cases[index]), id = 30 + index; await h.send({ kind: "audio-load", id });
+    assertAudioError(h, id); assert.equal(h.of("audio-module-ready").length, 0); assert.equal(h.timers.size, 0);
+    await admitPreparationFiles(h); assert.equal(h.of("catalog").length, 1); await h.send({ kind: "dispose" });
+  }
+});
+
+test("audio setup admits exactly 64 MiB and refuses overflow before inspecting or copying the excess chunk", async () => {
+  const module = await WebAssembly.compile(AUDIO_FIXTURE_BYTES);
+  for (const overflow of [false, true]) {
+    const full = new Uint8Array(AUDIO_SETUP_LIMIT); full[0] = 19; full[full.length - 1] = 37;
+    const extra = new Proxy(new Uint8Array(1), { get(target, key) {
+      if (key === "byteLength") return 1;
+      assert.fail(`overflow chunk must not be copied or inspected through ${String(key)}`);
+    } });
+    const h = await audioSetupWorker({ chunks: overflow ? [full, extra] : [full], compile: async () => module });
+    await h.send({ kind: "audio-load", id: 50 });
+    if (overflow) { assertAudioError(h, 50); assert.equal(h.compiles.length, 0); }
+    else { assert.equal(h.compiles.length, 1); assert.equal(h.compiles[0].length, AUDIO_SETUP_LIMIT);
+      assert.equal(h.compiles[0][0], 19); assert.equal(h.compiles[0].at(-1), 37); assert.equal(h.of("audio-module-ready")[0].module, module); }
+    await h.send({ kind: "dispose" });
+  }
+});
+
+test("audio setup failure permits explicit fresh-id retry without an automatic retry", async () => {
+  let first = true; const h = await audioSetupWorker({ compile: async bytes => { if (first) { first = false; throw Error("first compile failed"); } return WebAssembly.compile(bytes); } });
+  await h.send({ kind: "audio-load", id: 60 }); assertAudioError(h, 60); assert.equal(h.fetches.length, 1);
+  await flushJobs(); assert.equal(h.fetches.length, 1);
+  await h.send({ kind: "audio-load", id: 60 }); assert.equal(h.fetches.length, 1); assert.equal(h.compiles.length, 1);
+  await h.send({ kind: "audio-load", id: 61 }); await h.audioReady(61);
+  assert.equal(h.fetches.length, 2); assert.equal(h.compiles.length, 2); assert.equal(h.of("audio-module-ready").at(-1).id, 61);
+  await h.send({ kind: "dispose" });
+});
+
+test("audio setup publication clone failure retires the deadline and reports bounded optional failure", async () => {
+  const h = await audioSetupWorker({ beforePost(value) { if (value.kind === "audio-module-ready") throw new DOMException("cannot clone Module", "DataCloneError"); } });
+  await h.send({ kind: "audio-load", id: 70 }); assertAudioError(h, 70);
+  assert.equal(h.of("audio-module-ready").length, 0); assert.equal(h.timers.size, 0); await h.send({ kind: "dispose" });
+});
+
+test("audio setup fetch and read deadline retires publication without awaiting never-settling cancellation", async () => {
+  for (const stage of ["fetch", "read"]) {
+    const held = deferred(), never = deferred();
+    const h = await audioSetupWorker({ cancelPromise: never.promise,
+      ...(stage === "fetch" ? { fetch: () => held.promise } : {}) });
+    if (stage === "read") h.reader.read = () => held.promise;
+    await h.send({ kind: "audio-load", id: 80 }); await h.deadline();
+    assertAudioError(h, 80); assert.equal(h.fetches[0].init.signal.aborted, true); assert.equal(h.timers.size, 0);
+    await h.send({ kind: "audio-load", id: 81 }); assertAudioError(h, 81); assert.equal(h.fetches.length, 1);
+    if (stage === "fetch") held.resolve({ ok: true, body: { getReader: () => h.reader } }); else held.resolve({ done: true });
+    await flushJobs(); assert.equal(h.of("audio-module-ready").length, 0);
+    assert.equal(h.of("audio-module-error").filter(row => row.id === 80).length, 1); await h.send({ kind: "dispose" });
+    assert.equal(h.of("disposed").length, 1, "never-settling cancel cannot hold shutdown");
+  }
+});
+
+test("audio setup compile timeout keeps physical capacity until settlement and never caches late success", async () => {
+  const held = deferred(); let first = true;
+  const h = await audioSetupWorker({ compile: bytes => { if (first) { first = false; return held.promise; } return WebAssembly.compile(bytes); } });
+  await h.send({ kind: "audio-load", id: 90 }); assert.equal(h.compiles.length, 1); await h.deadline(); assertAudioError(h, 90);
+  await h.send({ kind: "audio-load", id: 91 }); assertAudioError(h, 91); assert.equal(h.compiles.length, 1); assert.equal(h.fetches.length, 1);
+  held.resolve(await WebAssembly.compile(AUDIO_FIXTURE_BYTES)); await flushJobs(); assert.equal(h.of("audio-module-ready").length, 0);
+  await h.send({ kind: "audio-load", id: 92 }); await h.audioReady(92); assert.equal(h.fetches.length, 2); assert.equal(h.compiles.length, 2);
+  assert.deepEqual(h.of("audio-module-ready").map(row => row.id), [92]); await h.send({ kind: "dispose" });
+});
+
+test("audio setup dispose and fatal entry abort pending fetch and suppress late success or optional failure", async () => {
+  for (const terminal of ["dispose", "fatal"]) for (const reject of [false, true]) {
+    const held = deferred(), h = await audioSetupWorker({ fetch: () => held.promise }); await h.send({ kind: "audio-load", id: 100 });
+    if (terminal === "dispose") await h.send({ kind: "dispose" }); else await h.init();
+    assert.equal(h.fetches[0].init.signal.aborted, true); assert.equal(h.timers.size, 0);
+    if (reject) held.reject(Error("late obsolete fetch")); else held.resolve({ ok: true, body: { getReader: () => h.reader } });
+    await flushJobs(); assert.equal(h.of("audio-module-ready").length, 0); assert.equal(h.of("audio-module-error").length, 0);
+    assert.equal(h.compiles.length, 0); if (terminal === "fatal") assert.equal(h.of("fatal").length, 1);
+  }
+});
+
+test("audio setup dispose and fatal suppress uncancelable compile completion without awaiting reader cancellation", async () => {
+  for (const terminal of ["dispose", "fatal"]) for (const reject of [false, true]) {
+    const held = deferred(), never = deferred(), h = await audioSetupWorker({ compile: () => held.promise, cancelPromise: never.promise });
+    await h.send({ kind: "audio-load", id: 110 }); assert.equal(h.compiles.length, 1);
+    if (terminal === "dispose") await h.send({ kind: "dispose" }); else await h.init();
+    assert.equal(h.fetches[0].init.signal.aborted, true); assert.equal(h.timers.size, 0);
+    if (reject) held.reject(Error("late obsolete compile")); else held.resolve(await WebAssembly.compile(AUDIO_FIXTURE_BYTES));
+    await flushJobs(); assert.equal(h.of("audio-module-ready").length, 0); assert.equal(h.of("audio-module-error").length, 0);
+  }
+});
+
+test("audio setup retires at fatal or refused disposal entry before actual active gameplay capture is joined", async () => {
+  for (const terminal of ["fatal", "dispose"]) for (const stage of ["fetch", "compile"]) {
+    const held = deferred(); let h, abortedAtCapture = false;
+    h = await audioSetupWorker({ ...(stage === "fetch" ? { fetch: () => held.promise } : { compile: () => held.promise }),
+      beforePost(value) { if (value.kind === "play-error" || value.kind === "play-stopped") {
+        abortedAtCapture = h.fetches[0].init.signal.aborted;
+      } } });
+    await admitPreparationFiles(h);
+    await h.send({ kind: "play-start", playId: 1, rpcId: 1, libraryId: 1, path: "chart.bms", rate: 24000, seed: "0",
+      keyPairs: new Uint32Array([0x11, 4]), earlyNs: 50000000n, lateNs: 50000000n, offsetNs: 0n,
+      windowOriginNs: 0n, recordReplay: true });
+    await h.settle(() => h.of("play-reply").length > 0 || h.of("play-error").length > 0);
+    assert.equal(h.of("play-error").length, 0); assert.equal(h.of("play-reply").at(-1).result.kind, "prepared");
+    await h.send({ kind: "audio-load", id: 120 });
+    if (stage === "compile") assert.equal(h.compiles.length, 1);
+    if (terminal === "fatal") await h.init();
+    else {
+      await h.send({ kind: "dispose" }); assert.equal(h.of("dispose-error").length, 1);
+      assert.equal(h.of("disposed").length, 0, "existing gameplay disposal refusal is preserved");
+      await h.send({ kind: "play-stop", playId: 1, rpcId: 2 });
+    }
+    assert.equal(h.fetches[0].init.signal.aborted, true); assert.equal(abortedAtCapture, true);
+    const capture = h.of(terminal === "fatal" ? "play-error" : "play-stopped").at(-1);
+    assert(capture.replay instanceof Uint8Array); assert(capture.replay.byteLength > 0, "actual Rust capture is retained");
+    if (terminal === "fatal") {
+      assert.equal(h.of("fatal").length, 1);
+      assert(h.messages.indexOf(capture) < h.messages.indexOf(h.of("fatal")[0]), "existing capture-before-fatal ordering is preserved");
+    }
+    if (stage === "fetch") held.resolve({ ok: true, body: { getReader: () => h.reader } });
+    else held.resolve(await WebAssembly.compile(AUDIO_FIXTURE_BYTES));
+    await flushJobs(); assert.equal(h.of("audio-module-ready").length, 0); assert.equal(h.of("audio-module-error").length, 0);
+    assert.equal(h.timers.size, 0); await h.send({ kind: "dispose" });
+  }
+});
 
 test("actual WASM phased preparation yields macrotasks and reports only correlated real progress before Ready", async () => {
   const h = await realPreparationWorker(); await admitPreparationFiles(h);

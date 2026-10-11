@@ -51,6 +51,7 @@ function windowObservation() {
       return literal ? Array.from(v) : { byteLength: v.byteLength };
     }
     if (v instanceof ArrayBuffer) return { byteLength: v.byteLength };
+    if (v instanceof WebAssembly.Module) return { actualModule: true };
     if (v instanceof MessagePort) return "original transferred port";
     return v;
   }));
@@ -102,6 +103,57 @@ function windowObservation() {
   };
   for (const kind of ["keydown", "keyup", "pointerdown", "pointerup", "compositionstart", "compositionend"])
     document.addEventListener(kind, event => add(probe.input, { kind, trusted: event.isTrusted, code: event.code, target: event.target?.id }), true);
+}
+function businessAudioObservation() {
+  const probe = globalThis.__settingsRenderer;
+  probe.audioSetup = [];
+  const add = value => { if (probe.audioSetup.length < 12000) probe.audioSetup.push(value); else probe.overflow = true; };
+  const compiled = new WeakMap();
+  let nextFetch = 0, nextCompile = 0;
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = function(...args) {
+    const url = String(args[0]?.url ?? args[0]);
+    if (!url.includes("/audio-pkg/beatkernel_bms_runtime_bg.wasm")) return nativeFetch.apply(this, args);
+    const id = ++nextFetch, mark = (kind, extra = {}) => add({ id, kind, url, at: performance.now(), ...extra });
+    mark("fetch-start");
+    return nativeFetch.apply(this, args).then(response => {
+      mark("fetch-response", { status: response.status, type: response.type, contentLength: response.headers.get("content-length") });
+      if (response.body) {
+        const body = response.body, getReader = body.getReader;
+        body.getReader = function(...readerArgs) {
+          const reader = getReader.apply(this, readerArgs), read = reader.read, cancel = reader.cancel, release = reader.releaseLock;
+          let bytes = 0;
+          mark("reader-acquired");
+          reader.read = function(...readArgs) {
+            return read.apply(this, readArgs).then(result => { bytes += result.value?.byteLength ?? 0; mark("reader-read", { done: result.done, chunkBytes: result.value?.byteLength ?? 0, bytes }); return result; }, error => { mark("reader-error", { bytes, error: String(error) }); throw error; });
+          };
+          reader.cancel = function(...cancelArgs) { mark("reader-cancel", { bytes, reason: String(cancelArgs[0]) }); return cancel.apply(this, cancelArgs); };
+          reader.releaseLock = function(...releaseArgs) { mark("reader-release", { bytes }); return release.apply(this, releaseArgs); };
+          return reader;
+        };
+      }
+      return response;
+    }, error => { mark("fetch-error", { error: String(error) }); throw error; });
+  };
+  const nativeCompile = WebAssembly.compile;
+  WebAssembly.compile = function(bytes, ...args) {
+    const compileId = ++nextCompile, byteLength = bytes.byteLength;
+    add({ kind: "wasm-compile-start", compileId, at: performance.now(), byteLength });
+    return nativeCompile.call(this, bytes, ...args).then(module => {
+      compiled.set(module, compileId);
+      add({ kind: "wasm-compile-done", compileId, at: performance.now(), byteLength, actualModule: module instanceof WebAssembly.Module });
+      return module;
+    }, error => { add({ kind: "wasm-compile-error", compileId, at: performance.now(), byteLength, error: String(error) }); throw error; });
+  };
+  const post = globalThis.postMessage;
+  globalThis.postMessage = function(value, ...args) {
+    const result = post.call(this, value, ...args);
+    if (value?.kind === "audio-module-ready") add({ kind: value.kind, id: value.id, at: performance.now(), actualModule: value.module instanceof WebAssembly.Module, compileId: compiled.get(value.module) });
+    return result;
+  };
+  globalThis.addEventListener("message", ({ data }) => {
+    if (data?.kind === "audio-load") add({ kind: data.kind, id: data.id, at: performance.now() });
+  });
 }
 function rendererObservation() {
   const probe = globalThis.__settingsRenderer = { records: [], overflow: false };
@@ -174,7 +226,8 @@ function capturedInputs(bytes) {
   return { inputs, advances, records: Number(count), horizon };
 }
 
-let browser, xvfb, profile, cache, server, page, renderer, business, networkSession;
+let browser, xvfb, profile, cache, server, page, renderer, business, networkSession, onWorkerTargetAttached;
+const workerNetworkSessions = new Map(), workerNetworkTasks = new Set();
 const networkStart = Date.now();
 const networkRecord = (kind, detail) => {
   if (evidence.networkLifecycle.length < 1500) evidence.networkLifecycle.push({ order: evidence.networkLifecycle.length, elapsedMs: Date.now() - networkStart, lastCompletedStep: evidence.steps.at(-1)?.name ?? "initialization", kind, ...detail });
@@ -218,10 +271,11 @@ try {
       if (from === ".." || from.startsWith(".." + sep)) throw Error("outside root");
       if (pathname.endsWith("/")) file = resolve(file, "index.html");
       const name = relative(resolve(root, "app/web"), file);
-      const bytes = pathname === "/app/web/worker.js" ? Buffer.from("import './settings-policy-observer.js';\nimport './settings-policy-actual-worker.js';\n")
+      const bytes = pathname === "/app/web/worker.js" ? Buffer.from("import './settings-policy-business-observer.js';\nimport './settings-policy-actual-worker.js';\n")
         : pathname === "/app/web/settings-policy-actual-worker.js" ? sources["worker.js"]
         : pathname === "/app/web/renderer-worker.js" ? Buffer.from("import './settings-policy-observer.js';\nimport './settings-policy-actual-renderer.js';\n")
         : pathname === "/app/web/settings-policy-observer.js" ? Buffer.from(`(${rendererObservation.toString()})();`)
+        : pathname === "/app/web/settings-policy-business-observer.js" ? Buffer.from(`(${rendererObservation.toString()})();\n(${businessAudioObservation.toString()})();`)
           : pathname === "/app/web/settings-policy-actual-renderer.js" ? sources["renderer-worker.js"] : sources[name] ?? await readFile(file);
       if (audioRequest) networkRecord("server-audio-body", { url: request.url, byteLength: bytes.byteLength, sha256: sha(bytes) });
       response.writeHead(200, { "Content-Length": String(bytes.byteLength), "Content-Type": ({ ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".css": "text/css" })[extname(file)] ?? "application/octet-stream",
@@ -259,6 +313,59 @@ try {
   networkSession.on("Network.loadingFailed", event => { if (cdpRequests.has(event.requestId)) networkRecord("cdp-failed", event); });
   page.on("workercreated", worker => { if (worker.url().endsWith("/renderer-worker.js")) renderer = worker; if (worker.url().endsWith("/worker.js")) business = worker; });
   const diagnostic = (list, entry) => { if (list.length < 100) list.push(entry); };
+  // Page Network events alone need not cover dedicated Worker requests. Pause
+  // newly attached targets only until their own Network listener is installed;
+  // always resume them, including when instrumentation fails.
+  onWorkerTargetAttached = event => {
+    const task = (async () => {
+      let session;
+      try {
+        session = networkSession.connection().session(event.sessionId);
+        assert(session, "attached target session missing");
+        assert(workerNetworkTasks.size < 16, "bounded target setup observation overflow");
+        if (event.targetInfo.type !== "worker") return;
+        assert(workerNetworkSessions.size < 16, "bounded Worker network target observation overflow");
+        const requests = new Map(), listeners = [];
+        const target = { targetId: event.targetInfo.targetId, targetURL: event.targetInfo.url, sessionId: event.sessionId };
+        const on = (name, callback) => { session.on(name, callback); listeners.push([name, callback]); };
+        workerNetworkSessions.set(event.sessionId, { session, listeners });
+        on("Network.requestWillBeSent", value => {
+          if (requests.size >= 1000) { evidence.networkOverflow = true; return; }
+          requests.set(value.requestId, value.request.url);
+          if (value.request.url.includes("/audio-pkg/beatkernel_bms_runtime_bg.wasm")) networkRecord("worker-cdp-request", { ...target, requestId: value.requestId, url: value.request.url, method: value.request.method, timestamp: value.timestamp, type: value.type });
+        });
+        on("Network.responseReceived", value => {
+          const url = requests.get(value.requestId);
+          if (value.response.status >= 400) diagnostic(evidence.networkErrors, { ...target, url: value.response.url, status: value.response.status });
+          if (url?.includes("/audio-pkg/beatkernel_bms_runtime_bg.wasm")) networkRecord("worker-cdp-response", { ...target, requestId: value.requestId, url, timestamp: value.timestamp, status: value.response.status, mimeType: value.response.mimeType, encodedDataLength: value.response.encodedDataLength, protocol: value.response.protocol });
+        });
+        on("Network.dataReceived", value => { if (requests.get(value.requestId)?.includes("/audio-pkg/beatkernel_bms_runtime_bg.wasm")) networkRecord("worker-cdp-data", { ...target, ...value }); });
+        on("Network.loadingFinished", value => {
+          const url = requests.get(value.requestId);
+          if (url?.includes("/audio-pkg/beatkernel_bms_runtime_bg.wasm")) networkRecord("worker-cdp-finished", { ...target, url, ...value });
+          requests.delete(value.requestId);
+        });
+        on("Network.loadingFailed", value => {
+          const url = requests.get(value.requestId);
+          const detail = { ...target, url, ...value };
+          diagnostic(evidence.networkErrors, detail);
+          networkRecord("worker-cdp-failed", detail);
+          requests.delete(value.requestId);
+        });
+        await bounded(session.send("Network.enable"), 5000, "Worker Network enable");
+        networkRecord("worker-cdp-enabled", target);
+      } catch (error) {
+        diagnostic(evidence.errors, "Worker network observation: " + String(error));
+      } finally {
+        if (session) try { await bounded(session.send("Runtime.runIfWaitingForDebugger"), 5000, "attached target resume"); }
+        catch (error) { diagnostic(evidence.errors, "Worker observation resume: " + String(error)); }
+      }
+    })();
+    workerNetworkTasks.add(task);
+    task.finally(() => workerNetworkTasks.delete(task));
+  };
+  networkSession.on("Target.attachedToTarget", onWorkerTargetAttached);
+  await bounded(networkSession.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }), 5000, "Worker network autoattach");
   page.on("pageerror", error => diagnostic(evidence.errors, String(error)));
   page.on("console", message => { if (message.type() === "error" && !message.location().url?.endsWith("favicon.ico")) diagnostic(evidence.consoleErrors, message.text()); });
   page.on("response", response => { if (response.status() >= 400 && !response.url().endsWith("favicon.ico")) diagnostic(evidence.networkErrors, { url: response.url(), status: response.status() }); });
@@ -599,6 +706,35 @@ try {
   evidence.steps.push({ name: "captured-replay-independent-of-later-live-binding", capturedSha256: sha(captured), replayRequest, replayTerminal });
   await page.screenshot({ path: resolve(out, "captured-replay-results.png"), fullPage: true });
   evidence.renderer = await renderer.evaluate(() => __settingsRenderer); evidence.business = await business.evaluate(() => __settingsRenderer); evidence.window = await page.evaluate(() => __settingsProbe);
+  await bounded(Promise.all([...workerNetworkTasks]), 10000, "Worker network observation settlement");
+  assert.equal(evidence.window.fetchLifecycle.length, 0, "Window must not fetch/read/compile audio WASM");
+  const setup = evidence.business.audioSetup;
+  assert(Array.isArray(setup), "production business Worker audio observation missing");
+  const setupOf = kind => setup.filter(record => record.kind === kind);
+  assert.equal(setupOf("fetch-start").length, 1, "one actual Worker audio fetch");
+  assert.equal(setupOf("fetch-response").length, 1); assert.equal(setupOf("fetch-response")[0].status, 200);
+  assert.equal(setupOf("reader-acquired").length, 1);
+  const doneReads = setupOf("reader-read").filter(record => record.done);
+  assert.equal(doneReads.length, 1); assert.equal(doneReads[0].bytes, 62096, "entire real audio module body consumed");
+  assert.equal(setupOf("reader-cancel").length, 0, "completed actual reader must not be canceled");
+  assert.equal(setupOf("reader-release").length, 1); assert.equal(setupOf("reader-release")[0].bytes, 62096);
+  assert.equal(setupOf("wasm-compile-start").length, 1); assert.equal(setupOf("wasm-compile-start")[0].byteLength, 62096);
+  assert.equal(setupOf("wasm-compile-done").length, 1);
+  const compiled = setupOf("wasm-compile-done")[0]; assert.equal(compiled.byteLength, 62096); assert.equal(compiled.actualModule, true);
+  assert.equal(setupOf("audio-load").length, 1); assert.equal(setupOf("audio-module-ready").length, 1);
+  const publication = setupOf("audio-module-ready")[0];
+  assert.equal(publication.actualModule, true); assert.equal(publication.compileId, compiled.compileId);
+  assert.equal(publication.id, setupOf("audio-load")[0].id);
+  const requests = evidence.window.messages.filter(record => record.direction === "sent" && record.kind === "audio-load");
+  const receipts = evidence.window.messages.filter(record => record.direction === "received" && record.kind === "audio-module-ready");
+  assert.equal(requests.length, 1); assert.equal(receipts.length, 1);
+  assert.equal(requests[0].id, publication.id); assert.equal(receipts[0].id, publication.id); assert.deepEqual(receipts[0].module, { actualModule: true });
+  assert(!setup.some(record => ["fetch-error", "reader-error", "wasm-compile-error"].includes(record.kind)), "Worker setup must not conceal application errors");
+  const workerFetches = evidence.networkLifecycle.filter(record => record.kind === "worker-cdp-request");
+  assert.equal(workerFetches.length, 1, "Worker audio request must have independent CDP network coverage");
+  const workerFetch = workerFetches[0];
+  assert(evidence.networkLifecycle.some(record => record.kind === "worker-cdp-enabled" && record.sessionId === workerFetch.sessionId && record.order < workerFetch.order), "Worker Network observation must precede fetch");
+  assert(evidence.networkLifecycle.some(record => record.kind === "worker-cdp-finished" && record.sessionId === workerFetch.sessionId && record.requestId === workerFetch.requestId), "actual Worker audio request must complete in CDP");
   assert(!evidence.renderer.overflow && !evidence.business.overflow && !evidence.window.overflow, "bounded observation overflow invalidates evidence");
   assert(!evidence.networkOverflow, "bounded network lifecycle overflow invalidates diagnostics");
   assert(evidence.window.input.some(x => x.kind === "keydown" && x.trusted && x.code === "PageDown"));
@@ -615,6 +751,14 @@ try {
   if (business) try { evidence.business = await bounded(business.evaluate(() => __settingsRenderer), 3000, "failure business"); } catch (e) { evidence.businessObservationError = String(e); }
 } finally {
   networkRecord("cleanup-start", { status: evidence.status });
+  if (networkSession && onWorkerTargetAttached) networkSession.off("Target.attachedToTarget", onWorkerTargetAttached);
+  await bounded(Promise.all([...workerNetworkTasks]), 10000, "Worker network cleanup settlement").catch(error => { evidence.cleanup.workerNetworkSettlementError = String(error); });
+  for (const { session, listeners } of workerNetworkSessions.values()) {
+    for (const [name, callback] of listeners) session.off(name, callback);
+    await bounded(session.detach(), 3000, "Worker network detach").catch(error => { (evidence.cleanup.workerNetworkDetachErrors ??= []).push(String(error)); });
+  }
+  workerNetworkSessions.clear();
+  if (networkSession) await bounded(networkSession.send("Target.setAutoAttach", { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }), 3000, "Worker network autoattach cleanup").catch(error => { evidence.cleanup.workerNetworkAutoattachError = String(error); });
   if (browser) await bounded(browser.close(), 6000, "browser close").catch(e => { evidence.cleanup.browserCloseError = String(e); });
   await stop(browser?.process(), "browser"); await stop(xvfb, "xvfb");
   if (server) { server.closeAllConnections(); await bounded(new Promise(r => server.close(r)), 3000, "HTTPS close"); }

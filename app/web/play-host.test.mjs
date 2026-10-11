@@ -459,6 +459,9 @@ async function harness(faults = {}) {
         ...posted.opponents[index], file: entry.file,
       }));
       this.posts.push({ value: posted, transferCount: transfer.length, transfer: [...transfer] });
+      if (value.kind === "audio-load" && !faults.holdAudioModule) queueMicrotask(() => this.emit("message", {
+        data: structuredClone({ kind: "audio-module-ready", id: value.id, module: moduleToken }),
+      }));
       if (this.role === "game" && ["resize", "play-page"].includes(value.kind)) this.geometryVersion++;
       if (value.kind === "dispose" && !faults.holdDispose) queueMicrotask(() => this.emit("message", { data: { kind: "disposed" } }));
       // Mechanical legacy compatibility: the actual Worker acknowledges clear
@@ -586,7 +589,7 @@ async function harness(faults = {}) {
       return faults.openGate?.promise ?? Promise.resolve(audio);
     }
   }
-  const moduleToken = {};
+  const moduleToken = new WebAssembly.Module(Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0]));
   class ControlledURL extends URL {
     static createObjectURL(blob) {
       if (faults.downloadError) throw new Error(faults.downloadError);
@@ -614,21 +617,11 @@ async function harness(faults = {}) {
       parse() { assert.fail("Window must not parse settings JSON"); },
       stringify() { assert.fail("Window must not encode settings JSON"); },
     } : JSON,
-    WebAssembly: { compile: async binary => {
-      assert.deepEqual(Array.from(binary), [0, 97, 115, 109, 1, 0, 0, 0]);
-      return moduleToken;
-    } },
-    fetch: async () => {
-      let read = false;
-      return { ok: true, body: { getReader: () => ({
-        async read() {
-          if (read) return { done: true };
-          read = true;
-          return { done: false, value: Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0]) };
-        },
-        async cancel() {}, releaseLock() {},
-      }) } };
+    WebAssembly: { Module: WebAssembly.Module,
+      compile() { assert.fail("Window must not compile audio WASM"); },
+      compileStreaming() { assert.fail("Window must not compile audio WASM streams"); },
     },
+    fetch() { assert.fail("Window must not fetch audio WASM"); },
     setTimeout(callback, delay) {
       const id = ++nextTimer;
       timers.set(id, { callback, at: now + delay, interval: null });
@@ -716,7 +709,9 @@ async function harness(faults = {}) {
       value = { commandsPending: false,
         ...(value.kind === "play-render-done" ? { observedTick: target.last("play-step")?.tickId ?? 0 } : {}), ...value };
     }
-    target.emit("message", { data: structuredClone(value) });
+    const data = structuredClone(value);
+    if (data.kind === "audio-module-ready") (target.audioModuleReplies ??= []).push(data);
+    target.emit("message", { data });
     await flush();
   }
   async function reply(request, result, echoInputMode = true) {
@@ -732,7 +727,7 @@ async function harness(faults = {}) {
     assert.equal(request?.kind, "play-samples-upload");
     await receive({ kind: "play-samples-admitted", playId: request.playId, rpcId: request.rpcId, count });
   }
-  async function preview() {
+  async function preview(requireAudio = true) {
     await flush();
     const worker = workers.at(-1);
     await receive({ kind: "ready" });
@@ -751,7 +746,8 @@ async function harness(faults = {}) {
     get("seek-form").emit("submit");
     const seek = worker.last("seek");
     await receive({ kind: "position", id: seek.id, selectedId: selected.id, ns: "12345678901" });
-    assert.equal(get("play").disabled, false);
+    if (requireAudio) assert.equal(get("play").disabled, false);
+    else assert.equal(get("play").disabled, true, "preview does not require pending audio preparation");
     return { title: get("title").textContent, details: get("details").textContent, position: get("position").value };
   }
   async function begin(mode = "live") {
@@ -842,6 +838,99 @@ async function harness(faults = {}) {
     },
   };
 }
+
+test("Window audio setup: CPU preview remains available while one Module request is pending", async () => {
+  const h = await harness({ holdAudioModule: true });
+  try {
+    await h.preview(false); const game = h.workers[0], request = game.last("audio-load");
+    assert.ok(Number.isSafeInteger(request.id) && request.id > 0);
+    assert.equal(game.messages("audio-load").length, 1);
+    assert.equal(h.get("files").disabled, false);
+    assert.equal(h.get("prepare-form").hidden, false);
+    assert.match(h.get("title").textContent, /Accepted preview/);
+    h.click("play"); await flush(); assert.equal(game.messages("play-start").length, 0);
+    await h.receive({ kind: "ready" });
+    assert.equal(game.messages("audio-load").length, 1, "duplicate CPU ready preserves the pending ticket");
+    await h.receive({ kind: "audio-module-ready", id: request.id, module: h.moduleToken });
+    assert.equal(h.get("play").disabled, false);
+    const start = await h.begin(); assert.ok(start);
+    assert.ok(h.opens[0].options.module instanceof WebAssembly.Module);
+  } finally { await h.close(); }
+});
+
+for (const fault of ["missing-id", "wrong-id", "unsafe-id", "fake-module", "missing-module", "renderer"]) {
+  test(`Window audio setup: ${fault} cannot enable Play or consume the current ticket`, async () => {
+    const h = await harness({ holdAudioModule: true });
+    try {
+      await h.preview(false); const game = h.workers[0], request = game.last("audio-load");
+      const reply = { kind: "audio-module-ready", id: request.id, module: h.moduleToken };
+      if (fault === "missing-id") delete reply.id;
+      if (fault === "wrong-id") reply.id++;
+      if (fault === "unsafe-id") reply.id = Number.MAX_SAFE_INTEGER + 1;
+      if (fault === "fake-module") reply.module = {};
+      if (fault === "missing-module") delete reply.module;
+      await h.receive(reply, fault === "renderer" ? h.renderers[0] : game);
+      assert.equal(h.get("play").disabled, true); assert.equal(h.opens.length, 0);
+      await h.receive({ kind: "audio-module-ready", id: request.id, module: h.moduleToken });
+      assert.equal(h.get("play").disabled, false, "malformed publication cannot retire a valid ticket");
+      assert.equal(game.messages("audio-load").length, 1);
+    } finally { await h.close(); }
+  });
+}
+
+test("Window audio setup: duplicate ready and terminal replies cannot replace an accepted Module", async () => {
+  const h = await harness({ holdAudioModule: true });
+  try {
+    await h.preview(false); const game = h.workers[0], request = game.last("audio-load");
+    await h.receive({ kind: "audio-module-ready", id: request.id, module: h.moduleToken });
+    await h.receive({ kind: "ready" });
+    const replacement = new WebAssembly.Module(Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0]));
+    await h.receive({ kind: "audio-module-ready", id: request.id, module: replacement });
+    await h.receive({ kind: "audio-module-error", id: request.id, message: "obsolete failure" });
+    assert.equal(game.messages("audio-load").length, 1); assert.equal(h.get("play").disabled, false);
+    assert.doesNotMatch(h.get("status").textContent, /obsolete failure/);
+    assert.ok(await h.begin());
+    assert.equal(h.opens[0].options.module, game.audioModuleReplies[0].module, "duplicate reply cannot replace the originally accepted Module");
+  } finally { await h.close(); }
+});
+
+test("Window audio setup: optional bounded failure retains preview and import without automatic retry", async () => {
+  const h = await harness({ holdAudioModule: true });
+  try {
+    await h.preview(false); const game = h.workers[0], request = game.last("audio-load");
+    await h.receive({ kind: "audio-module-error", id: request.id + 1, message: "wrong ticket" });
+    assert.doesNotMatch(h.get("status").textContent, /wrong ticket/);
+    await h.receive({ kind: "audio-module-error", id: request.id, message: "x".repeat(5000) });
+    assert.equal(h.get("play").disabled, true); assert.equal(h.get("files").disabled, false);
+    assert.match(h.get("title").textContent, /Accepted preview/);
+    assert.equal(h.get("status").dataset.error, "true");
+    assert.ok(h.get("status").textContent.length <= 4200, "status prefix plus bounded diagnostic");
+    const status = h.get("status").textContent;
+    await h.receive({ kind: "audio-module-ready", id: request.id, module: h.moduleToken });
+    assert.equal(h.get("play").disabled, true); assert.equal(h.get("status").textContent, status);
+    await h.receive({ kind: "ready" }); assert.equal(game.messages("audio-load").length, 1);
+  } finally { await h.close(); }
+});
+
+test("Window audio setup: stop and restored owner reject the previous Worker's pending responses", async () => {
+  const h = await harness({ holdAudioModule: true });
+  try {
+    await h.preview(false); const old = h.workers[0], oldRequest = old.last("audio-load");
+    h.window.emit("pagehide"); await flush();
+    await h.receive({ kind: "audio-module-ready", id: oldRequest.id, module: h.moduleToken }, old);
+    assert.equal(h.get("play").disabled, true);
+    h.window.emit("pageshow", { persisted: true }); await flush();
+    await h.preview(false); const current = h.workers.at(-1), request = current.last("audio-load");
+    assert.notEqual(current, old);
+    await h.receive({ kind: "audio-module-ready", id: request.id, module: h.moduleToken }, old);
+    await h.receive({ kind: "audio-module-error", id: request.id, message: "retired owner" }, old);
+    await h.receive({ kind: "audio-module-ready", id: oldRequest.id, module: h.moduleToken }, current);
+    assert.equal(h.get("play").disabled, true); assert.doesNotMatch(h.get("status").textContent, /retired owner/);
+    await h.receive({ kind: "audio-module-ready", id: request.id, module: h.moduleToken }, current);
+    assert.equal(h.get("play").disabled, false);
+    assert.equal(current.messages("audio-load").length, 1);
+  } finally { await h.close(); }
+});
 
 const menuMotionEndpoints = () => new Float32Array([0, 0, 1, 1, 1, 40, 10, 1.25, 0.75, 0.5]);
 async function submittedMotionHost() {

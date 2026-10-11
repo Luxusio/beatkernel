@@ -19,6 +19,10 @@ import { snapshotPointerSetup } from "./pointer-profile.mjs";
 const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserHistoricalRecord } = runtime;
 let ready = null;
 let cpuReady = false;
+let audioSetup = null;
+let audioModule = null;
+let audioSetupRetired = false;
+let lastAudioSetupId = 0;
 let preview = null;
 let previewSongNs = 0n;
 let renderPort = null;
@@ -71,6 +75,101 @@ const NO_OPPONENTS = Object.freeze([]);
 
 function report(kind, fields = {}, transfer = []) { self.postMessage({ kind, ...fields }, transfer); }
 function message(error) { return String(error?.message ?? error).slice(0, 4096); }
+function currentAudioSetup(operation) {
+  return audioSetup === operation && !operation.retired && !audioSetupRetired && !failed && !disposed;
+}
+function cancelAudioReader(operation) {
+  if (!operation.reader || operation.readerDone || operation.cancelRequested) return;
+  operation.cancelRequested = true;
+  try { Promise.resolve(operation.reader.cancel()).catch(() => {}); } catch {}
+}
+function retireAudioSetup() {
+  audioSetupRetired = true;
+  if (!audioSetup) return;
+  audioSetup.retired = true;
+  clearTimeout(audioSetup.timer);
+  audioSetup.controller.abort();
+  cancelAudioReader(audioSetup);
+}
+function audioSetupError(id, error) {
+  // A cloning/transport failure remains optional; do not make preview fatal.
+  try { report("audio-module-error", { id, message: message(error) }); } catch {}
+}
+async function prepareAudioModule(operation) {
+  try {
+    const response = await fetch(new URL("./audio-pkg/beatkernel_bms_runtime_bg.wasm", import.meta.url),
+      { signal: operation.controller.signal });
+    if (!currentAudioSetup(operation)) return;
+    if (!response.ok || !response.body) throw new Error("Audio WASM requires a successful response with a body.");
+    operation.reader = response.body.getReader();
+    const limit = 64 * 1024 * 1024;
+    let storage = new Uint8Array(64 * 1024);
+    let length = 0;
+    for (;;) {
+      const chunk = await operation.reader.read();
+      if (!currentAudioSetup(operation)) return;
+      if (!chunk || typeof chunk.done !== "boolean") throw new Error("Invalid audio WASM body read.");
+      if (chunk.done) { operation.readerDone = true; break; }
+      if (!(chunk.value instanceof Uint8Array)) throw new Error("Audio WASM body must contain byte chunks.");
+      if (chunk.value.byteLength === 0) continue;
+      if (chunk.value.byteLength > limit - length) throw new Error("Audio WASM exceeds the 64 MiB setup limit.");
+      const nextLength = length + chunk.value.byteLength;
+      if (nextLength > storage.byteLength) {
+        let capacity = storage.byteLength;
+        while (capacity < nextLength) capacity = Math.min(limit, capacity * 2);
+        const grown = new Uint8Array(capacity);
+        grown.set(storage.subarray(0, length));
+        storage = grown;
+      }
+      storage.set(chunk.value, length);
+      length = nextLength;
+    }
+    const module = await WebAssembly.compile(storage.subarray(0, length));
+    if (!currentAudioSetup(operation)) return;
+    clearTimeout(operation.timer);
+    report("audio-module-ready", { id: operation.id, module });
+    audioModule = module;
+  } catch (error) {
+    if (currentAudioSetup(operation)) audioSetupError(operation.id, error);
+  } finally {
+    clearTimeout(operation.timer);
+    cancelAudioReader(operation);
+    try { operation.reader?.releaseLock(); } catch {}
+    // Retired fetch/compile retains physical single-flight capacity until here.
+    if (audioSetup === operation) audioSetup = null;
+  }
+}
+function loadAudioModule(request) {
+  if (!Number.isSafeInteger(request.id) || request.id < 1 || audioSetupRetired) return;
+  if (!cpuReady) { audioSetupError(request.id, new Error("Initialize gameplay before preparing audio.")); return; }
+  if (audioSetup) {
+    if (audioSetup.id !== request.id || audioSetup.retired)
+      audioSetupError(request.id, new Error("Audio setup is already pending."));
+    return;
+  }
+  if (audioModule) {
+    try { report("audio-module-ready", { id: request.id, module: audioModule }); }
+    catch (error) { audioSetupError(request.id, error); }
+    return;
+  }
+  if (request.id <= lastAudioSetupId) {
+    audioSetupError(request.id, new Error("Retry audio setup with a fresh request id."));
+    return;
+  }
+  const operation = { id: request.id, controller: new AbortController(), reader: null,
+    readerDone: false, cancelRequested: false, retired: false, timer: null };
+  lastAudioSetupId = request.id;
+  audioSetup = operation;
+  operation.timer = setTimeout(() => {
+    if (!currentAudioSetup(operation)) return;
+    operation.retired = true;
+    clearTimeout(operation.timer);
+    operation.controller.abort();
+    cancelAudioReader(operation);
+    audioSetupError(operation.id, new Error("Audio WASM setup exceeded the ten-second deadline."));
+  }, 10000);
+  void prepareAudioModule(operation);
+}
 function menuToken() {
   return { menuGeneration, screen: menuOwner.screen, revision: menuOwner.revision };
 }
@@ -488,6 +587,7 @@ function fenceVisual() {
   if (visual) { retireMenuMotions(visual); visual.retired = true; }
 }
 function fatal(error) {
+  retireAudioSetup();
   if (failed) return;
   if (capturesPending) {
     deferredFatal ??= error;
@@ -3503,6 +3603,7 @@ function handlePlay(request) {
 self.addEventListener("message", event => {
   const request = event.data;
   if (request?.kind === "dispose") {
+    retireAudioSetup();
     if (play || roomFinalization || capturesPending) { report("dispose-error", { message: "Join gameplay capture and room cleanup before disposing the Worker." }); return; }
     if (disposed) return;
     disposed = true;
@@ -3548,6 +3649,7 @@ self.addEventListener("message", event => {
     ready.catch(fatal);
     return;
   }
+  if (request.kind === "audio-load") { loadAudioModule(request); return; }
   if (request.kind === "historical-record-page") { pageHistoricalRecord(request); return; }
   if (request.kind.startsWith("menu-")) { handleMenu(request); return; }
   if (request.kind === "historical-record-clear") { clearHistoricalRecord(request); return; }

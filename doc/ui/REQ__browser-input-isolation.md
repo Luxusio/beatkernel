@@ -3,6 +3,13 @@
 Status: selected implementation contract. This work does not complete the
 parked audio-authority migration or its actual-browser acceptance.
 
+Audio package fetch, body accumulation/copy and compilation must run in the
+existing business Worker, with a correlated Module-only Window handoff.
+[Audio module preparation](../runtime/REQ__browser-audio-module-loading.md)
+defines independent preview readiness, limits, timeout and retirement. This
+requirement is pending implementation and verification; no latency superiority
+or cancellation fix follows from the ownership change alone.
+
 Keyboard, HID, touch and pointer callbacks capture their original samples and
 send already acquired input. Their dispatch path must not synchronously query
 Gamepads. Sample eligible live Gamepads on the existing 8 ms cadence immediately

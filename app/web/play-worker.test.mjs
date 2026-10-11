@@ -1191,6 +1191,10 @@ async function workerHarness(options = {}) {
   };
   const context = createContext({
     self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
+    fetch: options.fetch,
+    WebAssembly: options.compile ? new Proxy(WebAssembly, { get(target, key) {
+      return key === "compile" ? options.compile : Reflect.get(target, key);
+    } }) : WebAssembly,
     MessageChannel: PreparationMessageChannel,
     performance: { timeOrigin: 10000, now() { return networkNow; } },
     setTimeout(callback, delay = 0) {
@@ -1233,7 +1237,9 @@ async function workerHarness(options = {}) {
     this.setExport("WebTransportChannel", RoomChannel);
   }, { context });
   const renderClient = new SourceTextModule(await readFile(new URL("./render-protocol.mjs", import.meta.url), "utf8"), { context });
-  const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
+  const workerUrl = new URL("./worker.js", import.meta.url);
+  const worker = new SourceTextModule(await readFile(workerUrl, "utf8"), { context, identifier: workerUrl.href,
+    initializeImportMeta(meta) { meta.url = workerUrl.href; } });
   await worker.link(specifier => {
     if (specifier === "./render-protocol.mjs") return renderClient;
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
@@ -3509,6 +3515,49 @@ test("a blocked renderer preserves original pending input, direct audio ACK and 
   const acks = h.visualAcks.length;
   h.renderPort.ack(pending); await flushJobs();
   assert.equal(h.visualAcks.length, acks, "retired ACK never reads the freed gameplay owner");
+});
+
+test("audio setup fatal retires pending fetch or compile before retained room capture permits global failure", async () => {
+  for (const stage of ["fetch", "compile"]) {
+    const audio = deferred(), fetches = [], compiles = [];
+    const bytes = Uint8Array.of(0, 97, 115, 109, 1, 0, 0, 0);
+    const response = () => { let read = false; return { ok: true, body: { getReader() { return {
+      async read() { if (read) return { done: true }; read = true; return { done: false, value: bytes }; },
+      cancel() { return Promise.resolve(); }, releaseLock() {},
+    }; } } }; };
+    const h = await roomPrepared({ roomHoldAfterClose: true,
+      fetch(url, init) { fetches.push({ url, init }); return stage === "fetch" ? audio.promise : Promise.resolve(response()); },
+      compile(binary) { compiles.push(new Uint8Array(binary.buffer, binary.byteOffset, binary.byteLength)); return audio.promise; } });
+    const game = h.locals[0], event = await committedRoom(h);
+    await h.rpc("play-activate", { hostNs: event.targetHostNs, targetHostNs: event.targetHostNs, startFrame: START });
+    await h.send({ kind: "audio-load", id: 140 });
+    assert.equal(fetches.length, 1); assert.equal(fetches[0].init.signal.aborted, false);
+    assert.equal(compiles.length, stage === "compile" ? 1 : 0);
+    if (stage === "compile") assert.deepEqual(compiles[0], bytes);
+    const channel = h.roomChannels[0];
+    await h.send({ kind: "play-stop", playId: 7 });
+    assert.equal(game.frees, 1);
+    assert.equal(h.of("play-stopped").length, 0); assert.equal(h.of("play-error").length, 0);
+    assert.equal(h.of("fatal").length, 0, "retained room read keeps the genuine capture pending");
+    const heldRead = channel.reads.at(-1);
+    await h.send(null);
+    assert.equal(fetches[0].init.signal.aborted, true, "fatal entry aborts audio before joining pending capture");
+    assert.equal(h.of("fatal").length, 0, "existing global fatal remains deferred until capture delivery");
+    if (stage === "fetch") audio.resolve(response()); else audio.resolve(await WebAssembly.compile(bytes));
+    await flushJobs();
+    assert.equal(h.of("audio-module-ready").length, 0); assert.equal(h.of("audio-module-error").length, 0);
+    assert.equal(fetches.length, 1); assert.equal(compiles.length, stage === "compile" ? 1 : 0);
+    assert.equal(h.of("play-stopped").length, 0); assert.equal(h.of("play-error").length, 0); assert.equal(h.of("fatal").length, 0);
+    heldRead.gate.resolve(Uint8Array.of(1)); await flushJobs();
+    const captures = [...h.of("play-stopped"), ...h.of("play-error")].filter(row => row.playId === 7);
+    assert.equal(captures.length, 1); const capture = captures[0];
+    assert.equal(capture.replays[0].replayComplete, false); assert(capture.replays[0].replay instanceof Uint8Array);
+    assert(capture.replays[0].replay.byteLength > 0); assert.equal(capture.room.finalQueued, true);
+    assert.deepEqual(game.disposals, ["group-progress", "stop", "take:4294967295", "free"]);
+    assert.equal(h.of("fatal").length, 1);
+    assert(h.messages.indexOf(capture) < h.messages.indexOf(h.of("fatal")[0]), "retained genuine capture is delivered before global fatal");
+    assert.equal(h.of("audio-module-ready").length, 0); assert.equal(h.of("audio-module-error").length, 0);
+  }
 });
 
 test("terminal graphics failure delivers actual room capture before delayed cleanup permits global fatal", async () => {

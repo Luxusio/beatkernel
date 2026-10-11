@@ -103,6 +103,7 @@ let importing = false;
 let preparing = false;
 let hasPreview = false;
 let audioModule = null;
+let audioSetupTicket = null;
 let activePlay = null;
 let roomResults = null;
 let completedResults = null;
@@ -1262,6 +1263,7 @@ function controls() {
   historicalGradeControls();
 }
 function stop() {
+  audioSetupTicket = null;
   clearPreparation();
   ++startRequest;
   if (shutdown) return shutdown;
@@ -1384,6 +1386,23 @@ function prepare() {
 }
 
 function received(data, sourceWorker = worker, sourceOwner = owner) {
+  if (data?.kind === "audio-module-ready" || data?.kind === "audio-module-error") {
+    const ticket = audioSetupTicket;
+    if (!ticket || ticket.settled || shuttingDown || sourceWorker !== ticket.worker
+      || sourceOwner !== ticket.owner || worker !== ticket.worker || owner !== ticket.owner
+      || data.id !== ticket.id) return;
+    if (data.kind === "audio-module-ready") {
+      if (!(data.module instanceof WebAssembly.Module)) return;
+      ticket.settled = true;
+      audioModule = data.module;
+      controls();
+    } else {
+      if (typeof data.message !== "string") return;
+      ticket.settled = true;
+      status(`Chart preview remains available. ${data.message.slice(0, 4096)}`, true);
+    }
+    return;
+  }
   if (data?.kind === "selection-progress" || data?.kind === "selection-cancelled") {
     const ticket = preparationTicket;
     if (!ticket || sourceWorker !== ticket.worker || sourceOwner !== ticket.owner
@@ -1406,10 +1425,11 @@ function received(data, sourceWorker = worker, sourceOwner = owner) {
     || (typeof data?.kind === "string" && data.kind.startsWith("settings-profile-"))) { receiveSettings(data); return; }
   if (data.kind.startsWith("play-")) { receivePlay(data); return; }
   if (data.kind === "ready") {
+    if (sourceWorker !== worker || sourceOwner !== owner || initialized) return;
     initialized = true;
     controls();
     status("Choose a song folder, or select a chart and its resources together." + (rendererReady ? "" : " Graphics are initializing independently."));
-    void loadAudio(owner);
+    requestAudioModule();
   } else if (data.kind === "fatal") fatal(new Error(data.message));
   else if (data.kind === "import-progress" && data.id === importId) status(`Reading files: ${data.read} / ${data.total}`);
   else if (data.kind === "catalog" && data.id === importId) {
@@ -1908,32 +1928,16 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("keydown", event => key(event, true));
 window.addEventListener("keyup", event => key(event, false));
 
-async function loadAudio(generation) {
+function requestAudioModule() {
+  if (audioSetupTicket || !worker || !initialized || shuttingDown) return;
+  const ticket = { id: ++serial, owner, worker, settled: false };
+  audioSetupTicket = ticket;
   try {
-    const response = await fetch(new URL("./audio-pkg/beatkernel_bms_runtime_bg.wasm", import.meta.url));
-    if (!response.ok || !response.body) throw new Error("Build the separate browser-audio package to enable Play.");
-    const reader = response.body.getReader();
-    const chunks = [];
-    let bytes = 0;
-    try {
-      for (;;) {
-        const next = await reader.read();
-        if (next.done) break;
-        bytes += next.value.byteLength;
-        if (bytes > 64 * 1024 * 1024) throw new Error("Audio WASM exceeds the 64 MiB setup limit.");
-        chunks.push(next.value);
-      }
-    } catch (error) { await reader.cancel().catch(() => {}); throw error; }
-    finally { reader.releaseLock(); }
-    const binary = new Uint8Array(bytes);
-    let offset = 0;
-    for (const chunk of chunks) { binary.set(chunk, offset); offset += chunk.byteLength; }
-    const compiled = await WebAssembly.compile(binary);
-    if (generation !== owner) return;
-    audioModule = compiled;
-    controls();
+    if (!Number.isSafeInteger(ticket.id) || ticket.id <= 0) throw new Error("Audio setup request identity is exhausted.");
+    ticket.worker.postMessage({ kind: "audio-load", id: ticket.id });
   } catch (error) {
-    if (generation === owner) status(`Chart preview remains available. ${String(error.message).slice(0, 4096)}`, true);
+    ticket.settled = true;
+    status(`Chart preview remains available. ${String(error?.message ?? error).slice(0, 4096)}`, true);
   }
 }
 
