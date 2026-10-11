@@ -88,12 +88,24 @@ metadata, and two decoded-image/GPU banks. Progress accounting retains
 `3 * roster_count + 8` snapshots: current/ACK/receiver state for all members,
 four pending sender members and four staged receiver members. Each snapshot
 counts packed pages plus directory/Arc metadata and bounded scalars; two encoded
-frame buffers are additional. At most four fields, 2,048 visible notes and 2,048
-visible mines per field reach the existing renderer admission boundary. Surface
+frame buffers are additional. At most four fields reach the renderer; note and
+mine visibility shares the existing combined source admission rather than a
+2,048-object presentation limit. Retained playfield storage is accounted at
+source-derived maxima because caches, scratch and uploaded geometry can outlive
+the current registration. Surface
 and depth attachments, static presentation caches, PCM, browser implementation
 storage and non-visual gameplay state are separate. This estimator does not
 promise that the maximum admitted combination fits a particular browser/device;
 actual allocation/device failure follows the explicit failure/cleanup contract.
+
+[Dense playfield presentation](REQ__dense-playfield-presentation.md) specifies
+complete indexed projection within shared source admission,
+lazy retained GPU growth checked against the actual device, and separate
+current/replacement CPU/GPU accounting for four visible fields. That correction
+is implemented with focused CPU/wire tests and actual native/browser software
+GPU regression runs. Independent review and QA remain separate close conditions.
+The requirement document and actual verification evidence govern acceptance.
+The peak estimator remains observational, not runtime aggregate-memory admission.
 
 At the existing one-million-item/64-player maximum, the conservative committed
 frame bound is 1,073,008 bytes, plus its 40-byte wire header. The progress/scalar
