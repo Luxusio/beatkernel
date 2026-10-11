@@ -101,6 +101,303 @@ fn composed(
 }
 
 #[test]
+fn initial_zero_layout_static_and_reactive_packets_restore_latest_values_without_hidden_paint() {
+    use crate::{scene::UiComponentKey, screen_lifecycle::ScreenInstanceId};
+    use floem_reactive::SignalUpdate;
+    for extent in [[0, 0], [0, 40], [60, 0]] {
+        let scope = Scope::new();
+        let value = scope.create_rw_signal(1u32);
+        let memo = scope.create_memo(move |_| value.get());
+        let children = [
+            Node::leaf([10, 10], 1u8).at(5, 5),
+            Node::leaf([10, 10], 2).at(25, 5),
+        ];
+        let mut layout = MountedLayout::mount(Node::layer([60, 40], &children)).unwrap();
+        layout.resize(extent).unwrap();
+        let mut nodes = RetainedNodes::new(extent[0], extent[1]).unwrap();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let static_calls = Rc::clone(&calls);
+        nodes
+            .static_layout_node(&layout, &[NodeId(1)], move |id, geometry, scene, hits| {
+                static_calls.borrow_mut().push((id, 0));
+                paint_control(id, geometry, scene, hits);
+            })
+            .unwrap();
+        let reactive_calls = Rc::clone(&calls);
+        nodes
+            .bind_layout(
+                scope,
+                memo,
+                &layout,
+                &[NodeId(2)],
+                move |value, id, geometry, scene, hits| {
+                    reactive_calls.borrow_mut().push((id, *value));
+                    paint_control(id, geometry, scene, hits);
+                    hits.last_mut().unwrap().0 = ControlId(u64::from(*value) * 100 + id.0 as u64);
+                },
+            )
+            .unwrap();
+        let identities = nodes.identities();
+        nodes.validate().unwrap();
+        assert!(calls.borrow().is_empty());
+        value.set(2);
+        value.set(3);
+        layout
+            .update(&[LayoutUpdate {
+                id: NodeId(2),
+                change: LayoutChange::Origin([35, 15]),
+            }])
+            .unwrap();
+        nodes.relayout(&layout).unwrap();
+        assert!(
+            calls.borrow().is_empty(),
+            "hidden memo/layout changes must not invoke painters"
+        );
+        let owner = ScreenInstanceId(201);
+        let mut scene = Scene::new(60, 40);
+        let mut hits = vec![(
+            ControlId(999),
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 60,
+                height: 40,
+            },
+        )];
+        scene.rect(0, 0, 60, 40, 0);
+        nodes.compose(&mut scene, &mut hits).unwrap();
+        assert!(scene.rectangles().is_empty());
+        assert!(hits.is_empty());
+        nodes
+            .compose_components(&mut scene, &mut hits, owner, &[NodeId(2)])
+            .unwrap();
+        assert!(scene.rectangles().is_empty());
+        assert!(hits.is_empty());
+        assert_eq!(nodes.hit((6.0, 6.0)), None);
+        assert_eq!(nodes.hit_components(&scene, owner, (36.0, 16.0)), None);
+        layout.resize([60, 40]).unwrap();
+        assert!(nodes.relayout(&layout).unwrap());
+        assert_eq!(nodes.identities(), identities);
+        nodes
+            .compose_components(&mut scene, &mut hits, owner, &[NodeId(2)])
+            .unwrap();
+        assert!(scene
+            .component_id(UiComponentKey {
+                screen: owner,
+                node: NodeId(2)
+            })
+            .is_some());
+        assert_eq!(
+            nodes.hit_components(&scene, owner, (36.0, 16.0)),
+            Some(ControlId(302))
+        );
+        assert_eq!(
+            nodes.hit_components(&scene, ScreenInstanceId(202), (36.0, 16.0)),
+            None
+        );
+        assert_eq!(
+            composed(&nodes, 60, 40),
+            (
+                vec![[5.0, 5.0, 10.0, 10.0], [35.0, 15.0, 10.0, 10.0]],
+                vec![(1, [5, 5, 10, 10]), (302, [35, 15, 10, 10])],
+            )
+        );
+        assert!(calls
+            .borrow()
+            .iter()
+            .filter(|(id, _)| *id == NodeId(2))
+            .all(|(_, value)| *value == 3));
+        scope.dispose();
+    }
+}
+
+#[test]
+fn suspended_component_packets_clear_old_hits_and_restore_same_binding_pose_with_latest_memo() {
+    use crate::{
+        scene::{UiComponentKey, UiTransform},
+        screen_lifecycle::ScreenInstanceId,
+    };
+    use floem_reactive::SignalUpdate;
+    let scope = Scope::new();
+    let value = scope.create_rw_signal(1u32);
+    let memo = scope.create_memo(move |_| value.get());
+    let mut layout = MountedLayout::mount(Node::leaf([30, 20], 1u8)).unwrap();
+    let mut nodes = RetainedNodes::new(30, 20).unwrap();
+    nodes
+        .bind_layout(
+            scope,
+            memo,
+            &layout,
+            &[NodeId(0)],
+            |value, _, geometry, scene, hits| {
+                let b = geometry.bounds;
+                scene.rect(b.x, b.y, b.width, b.height, *value);
+                hits.push((ControlId(u64::from(*value)), b));
+            },
+        )
+        .unwrap();
+    let identities = nodes.identities();
+    let owner = ScreenInstanceId(203);
+    let key = UiComponentKey {
+        screen: owner,
+        node: NodeId(0),
+    };
+    let mut scene = Scene::new(30, 20);
+    let mut hits = Vec::new();
+    nodes
+        .compose_components(&mut scene, &mut hits, owner, &[NodeId(0)])
+        .unwrap();
+    let component = scene.component_id(key).unwrap();
+    let pose = UiTransform::new([2.5, 1.0], [1.0, 1.0], 1.0).unwrap();
+    scene
+        .set_component_transforms(&[(component, pose)])
+        .unwrap();
+    let original = composed(&nodes, 30, 20);
+    for extent in [[0, 0], [0, 20], [30, 0]] {
+        layout.resize(extent).unwrap();
+        nodes.relayout(&layout).unwrap();
+        nodes
+            .compose_components(&mut scene, &mut hits, owner, &[NodeId(0)])
+            .unwrap();
+        assert!(scene.rectangles().is_empty());
+        assert!(hits.is_empty());
+        assert_eq!(nodes.hit((5.0, 5.0)), None);
+        assert_eq!(nodes.hit_components(&scene, owner, (5.0, 5.0)), None);
+        assert_eq!(composed(&nodes, 30, 20), (vec![], vec![]));
+    }
+    value.set(7);
+    value.set(9);
+    layout.resize([30, 20]).unwrap();
+    nodes.relayout(&layout).unwrap();
+    nodes
+        .compose_components(&mut scene, &mut hits, owner, &[NodeId(0)])
+        .unwrap();
+    assert_eq!(scene.component_id(key), Some(component));
+    assert_eq!(scene.component_transform(component), Some(pose));
+    assert_eq!(nodes.identities(), identities);
+    assert_eq!(
+        nodes.hit_components(&scene, owner, (5.0, 5.0)),
+        Some(ControlId(9))
+    );
+    assert_eq!(scene.rectangles()[0].color, [0.0, 0.0, 9.0 / 255.0, 1.0]);
+    let restored = composed(&nodes, 30, 20);
+    assert_eq!(restored.0, original.0);
+    assert_eq!(restored.1, vec![(9, [0, 0, 30, 20])]);
+    scope.dispose();
+}
+
+#[test]
+fn suspension_preserves_explicit_invalid_node_layout_animated_and_restore_paint_refusals() {
+    use crate::screen_lifecycle::ScreenInstanceId;
+    let mut layout = MountedLayout::mount(Node::leaf([30, 20], 1u8)).unwrap();
+    let mut nodes = RetainedNodes::new(30, 20).unwrap();
+    let refuse = Rc::new(Cell::new(false));
+    let fault = Rc::clone(&refuse);
+    nodes
+        .static_layout_node(&layout, &[NodeId(0)], move |id, geometry, scene, hits| {
+            paint_control(id, geometry, scene, hits);
+            if fault.get() {
+                for _ in 0..crate::scene::MAX_RECTANGLES {
+                    scene.rect(0, 0, 1, 1, 0);
+                }
+            }
+        })
+        .unwrap();
+    let identities = nodes.identities();
+    layout.resize([0, 0]).unwrap();
+    nodes.relayout(&layout).unwrap();
+    let revision = layout.revision();
+    assert!(layout
+        .update(&[LayoutUpdate {
+            id: NodeId(0),
+            change: LayoutChange::Size([-1, 20])
+        }])
+        .is_err());
+    assert_eq!(layout.revision(), revision);
+    assert!(nodes
+        .static_layout_node(&layout, &[NodeId(99)], paint_control)
+        .is_err());
+    assert_eq!(nodes.identities(), identities);
+    let owner = ScreenInstanceId(204);
+    let mut scene = Scene::new(30, 20);
+    let mut hits = Vec::new();
+    nodes
+        .compose_components(&mut scene, &mut hits, owner, &[NodeId(0)])
+        .unwrap();
+    let stamp = scene.geometry_stamp().1;
+    for (screen, animated) in [
+        (ScreenInstanceId(0), vec![NodeId(0)]),
+        (owner, vec![NodeId(0), NodeId(0)]),
+        (owner, vec![NodeId(99)]),
+    ] {
+        assert!(nodes
+            .compose_components(&mut scene, &mut hits, screen, &animated)
+            .is_err());
+        assert_eq!(scene.geometry_stamp().1, stamp);
+        assert!(scene.rectangles().is_empty());
+        assert!(hits.is_empty());
+    }
+    layout.resize([30, 20]).unwrap();
+    refuse.set(true);
+    assert!(nodes.relayout(&layout).is_err());
+    assert_eq!(nodes.identities(), identities);
+    assert_eq!(nodes.hit((5.0, 5.0)), None);
+    assert_eq!(composed(&nodes, 30, 20), (vec![], vec![]));
+    refuse.set(false);
+    assert!(nodes.relayout(&layout).unwrap());
+    assert_eq!(
+        composed(&nodes, 30, 20),
+        (vec![[0.0, 0.0, 30.0, 20.0]], vec![(0, [0, 0, 30, 20])])
+    );
+}
+
+#[test]
+fn nonlayout_once_painter_keeps_zero_scene_refusal_and_nonreplayable_extent_semantics() {
+    for extent in [[0, 0], [0, 20], [30, 0]] {
+        let calls = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&calls);
+        let mut nodes = RetainedNodes::new(extent[0], extent[1]).unwrap();
+        nodes.static_node(move |scene, _| {
+            observed.set(observed.get() + 1);
+            scene.rect(0, 0, 1, 1, 0);
+        });
+        assert_eq!(calls.get(), 1);
+        assert!(nodes.validate().is_err());
+        assert!(nodes
+            .compose(&mut Scene::new(30, 20), &mut Vec::new())
+            .is_err());
+        assert_eq!(calls.get(), 1);
+        assert!(Scene::new(extent[0], extent[1])
+            .geometry_snapshot()
+            .is_err());
+    }
+    let mut nodes = RetainedNodes::new(30, 20).unwrap();
+    nodes.static_node(|scene, hits| {
+        scene.rect(0, 0, 30, 20, 0);
+        hits.push((
+            ControlId(1),
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 30,
+                height: 20,
+            },
+        ));
+    });
+    let before = composed(&nodes, 30, 20);
+    let mut layout = MountedLayout::mount(Node::leaf([30, 20], 1u8)).unwrap();
+    layout.resize([45, 25]).unwrap();
+    assert!(nodes.relayout(&layout).is_err());
+    assert_eq!(composed(&nodes, 30, 20), before);
+    layout.resize([0, 0]).unwrap();
+    assert!(nodes.relayout(&layout).unwrap());
+    assert_eq!(composed(&nodes, 30, 20), (vec![], vec![]));
+    layout.resize([30, 20]).unwrap();
+    assert!(nodes.relayout(&layout).is_err());
+    assert_eq!(composed(&nodes, 30, 20), (vec![], vec![]));
+}
+
+#[test]
 fn retained_reflow_repaints_only_dependent_packets_and_reuses_unchanged_frames() {
     let row = [Node::leaf([20, 10], 1u8), Node::leaf([30, 10], 2)];
     let branches = [

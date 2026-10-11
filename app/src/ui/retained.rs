@@ -26,7 +26,7 @@ struct LayoutDependency {
 }
 #[derive(Clone)]
 struct Packet {
-    geometry: Result<GeometrySnapshot, String>,
+    geometry: Result<Option<GeometrySnapshot>, String>,
     hits: Vec<(ControlId, Bounds)>,
     layout: Option<Rc<LayoutBinding>>,
     parts: Vec<ComponentPart>,
@@ -185,26 +185,21 @@ impl RetainedNodes {
         Ok(())
     }
     /// Stage all dependent packets first. Refusal leaves bounds, clips, packets
-    /// and admission unchanged. Suspension preserves packets for later restoration.
+    /// and admission unchanged. Suspension retains dependencies for restoration.
     pub(crate) fn relayout<C: Copy>(&self, layout: &MountedLayout<C>) -> Result<bool, String> {
         let extent = layout.extent();
         let previous_extent = self.extent.get();
-        if layout.suspended() {
-            if previous_extent == extent {
-                return Ok(false);
-            }
-            self.extent.set(extent);
-            self.dirty.set(true);
-            return Ok(true);
-        }
         let mut candidates = Vec::new();
         candidates
             .try_reserve_exact(self.packets.len())
             .map_err(|_| "retained layout allocation failed")?;
         for (index, packet) in self.packets.iter().enumerate() {
             let packet = packet.borrow();
+            if layout.suspended() {
+                packet.geometry.as_ref().map_err(Clone::clone)?;
+            }
             let Some(binding) = packet.layout.as_ref() else {
-                if extent != previous_extent {
+                if extent != previous_extent && !layout.suspended() {
                     return Err("retained extent changes require layout-bound packets".into());
                 }
                 continue;
@@ -232,16 +227,22 @@ impl RetainedNodes {
         if candidates.is_empty() && extent == previous_extent {
             return Ok(false);
         }
-        let mut validation = Scene::with_capacity(extent[0], extent[1], 64);
-        for (index, packet) in self.packets.iter().enumerate() {
-            if let Some((_, _, next)) = candidates
-                .iter()
-                .find(|(candidate, _, _)| *candidate == index)
-            {
-                validation.append_geometry(next.geometry.as_ref().map_err(Clone::clone)?)?;
-            } else {
-                validation
-                    .append_geometry(packet.borrow().geometry.as_ref().map_err(Clone::clone)?)?;
+        if !layout.suspended() {
+            let mut validation = Scene::with_capacity(extent[0], extent[1], 64);
+            for (index, packet) in self.packets.iter().enumerate() {
+                if let Some((_, _, next)) = candidates
+                    .iter()
+                    .find(|(candidate, _, _)| *candidate == index)
+                {
+                    if let Some(geometry) = next.geometry.as_ref().map_err(Clone::clone)? {
+                        validation.append_geometry(geometry)?;
+                    }
+                } else {
+                    let packet = packet.borrow();
+                    if let Some(geometry) = packet.geometry.as_ref().map_err(Clone::clone)? {
+                        validation.append_geometry(geometry)?;
+                    }
+                }
             }
         }
         for (index, geometries, next) in candidates {
@@ -299,7 +300,9 @@ impl RetainedNodes {
         }
         for packet in &self.packets {
             let packet = packet.borrow();
-            scene.append_geometry(packet.geometry.as_ref().map_err(Clone::clone)?)?;
+            if let Some(geometry) = packet.geometry.as_ref().map_err(Clone::clone)? {
+                scene.append_geometry(geometry)?;
+            }
             hits.extend_from_slice(&packet.hits);
         }
         self.dirty.set(false);
@@ -419,9 +422,13 @@ impl RetainedNodes {
                     .geometry
                     .as_ref()
                     .map_err(Clone::clone)?
-                    .rectangle_count() as u32;
+                    .as_ref()
+                    .map_or(0, |geometry| geometry.rectangle_count() as u32);
             }
             let geometry = geometry.ok_or("animated node has no mounted packet association")?;
+            if self.extent.get().contains(&0) {
+                continue;
+            }
             let pivot = [geometry.geometry.bounds.x, geometry.geometry.bounds.y];
             let b = geometry.clips.source;
             let source = if b.width == 0 || b.height == 0 {
@@ -441,7 +448,9 @@ impl RetainedNodes {
         next.retain_component_keys(screen, animated);
         if !self.extent.get().contains(&0) {
             for packet in &presented {
-                next.append_geometry(packet.geometry.as_ref().map_err(Clone::clone)?)?;
+                if let Some(geometry) = packet.geometry.as_ref().map_err(Clone::clone)? {
+                    next.append_geometry(geometry)?;
+                }
             }
             for (node, ranges, pivot, source, parent) in &bindings {
                 next.bind_component_clipped(
@@ -546,7 +555,7 @@ fn paint_packet(
     let mut hits = Vec::new();
     paint(&mut scene, &mut hits);
     Packet {
-        geometry: scene.geometry_snapshot(),
+        geometry: scene.geometry_snapshot().map(Some),
         hits,
         layout: None,
         parts: Vec::new(),
@@ -592,6 +601,26 @@ fn paint_layout_packet(
     animated: &[NodeId],
     paint: &impl Fn(NodeId, LayoutGeometry, &mut Scene, &mut Vec<(ControlId, Bounds)>),
 ) -> Packet {
+    if extent.contains(&0) {
+        return Packet {
+            geometry: Ok(None),
+            hits: Vec::new(),
+            layout: None,
+            parts: ids
+                .iter()
+                .zip(geometries)
+                .map(|(&node, dependency)| ComponentPart {
+                    node,
+                    rectangles: 0..0,
+                    hits: 0..0,
+                    geometry: dependency.geometry,
+                    clips: dependency.clips,
+                })
+                .collect(),
+            #[cfg(test)]
+            paints: 1,
+        };
+    }
     let mut scene = if animated.is_empty() {
         Scene::with_capacity(extent[0], extent[1], 64)
     } else {
@@ -688,7 +717,7 @@ fn paint_layout_packet(
         Ok(())
     })();
     Packet {
-        geometry: result.and_then(|_| scene.geometry_snapshot()),
+        geometry: result.and_then(|_| scene.geometry_snapshot()).map(Some),
         hits,
         layout: None,
         parts,

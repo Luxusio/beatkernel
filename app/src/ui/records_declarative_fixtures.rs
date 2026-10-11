@@ -130,6 +130,322 @@ fn row_node(view: &RecordsView, slot: usize) -> NodeId {
         .id
 }
 
+fn hit_packet(hits: &[(ControlId, Bounds)]) -> Vec<(u64, [i64; 4])> {
+    hits.iter()
+        .map(|(id, b)| (id.0, [b.x, b.y, b.width, b.height]))
+        .collect()
+}
+
+fn hovered_detail_frame<'a>(
+    directory: &'a LineEditor,
+    catalog: &'a RecordCatalog,
+    preview: &'a RecordPreview,
+    page: usize,
+) -> RecordsFrame<'a> {
+    let mut update = frame(directory, catalog, Some(preview));
+    update.details = true;
+    update.grade_page = page;
+    update.hovered = Some(ControlId(67));
+    update.armed = Some(ControlId(67));
+    update
+}
+
+fn assert_hidden_records_surfaces(view: &RecordsView, details: bool) {
+    let mut scene = Scene::new(960, 720);
+    scene.rect(0, 0, 960, 720, 0);
+    let mut hits = vec![(
+        ControlId(999),
+        Bounds {
+            x: 0,
+            y: 0,
+            width: 960,
+            height: 720,
+        },
+    )];
+    view.compose(&mut scene, &mut hits).unwrap();
+    assert!(scene.rectangles().is_empty());
+    assert!(hits.is_empty());
+    let animated = node_id(
+        &view.layout.borrow(),
+        if details {
+            Component::DetailButton(0)
+        } else {
+            Component::Directory
+        },
+    );
+    view.compose_components(&mut scene, &mut hits, view.id(), &[animated])
+        .unwrap();
+    assert!(scene.rectangles().is_empty());
+    assert!(hits.is_empty());
+    for point in [
+        (30.0, 180.0),
+        (170.0, 115.0),
+        (755.0, 621.0),
+        (431.0, 576.0),
+    ] {
+        assert_eq!(view.hit(point), None);
+        assert_eq!(view.hit_components(&scene, view.id(), point), None);
+    }
+}
+
+fn assert_cached_metadata(view: &RecordsView, preview: &RecordPreview) -> *const GhostSnapshot {
+    let cache = view.detail_cache.borrow();
+    let cache = cache.as_ref().unwrap();
+    assert!(Arc::ptr_eq(
+        cache.score.as_ref().unwrap(),
+        preview.historical_score.as_ref().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        cache.comparison.as_ref().unwrap(),
+        preview.historical_comparison.as_ref().unwrap()
+    ));
+    assert_eq!(
+        cache.presentation.comparison(),
+        Some(preview.historical_comparison.as_ref().unwrap().as_ref())
+    );
+    cache
+        .presentation
+        .comparison()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .ghosts
+        .as_ptr()
+}
+
+fn assert_restored_component_surface(
+    view: &RecordsView,
+    details: bool,
+    expected: &Scene,
+    expected_hits: &[(ControlId, Bounds)],
+) {
+    use crate::scene::UiComponentKey;
+    let animated = node_id(
+        &view.layout.borrow(),
+        if details {
+            Component::DetailButton(0)
+        } else {
+            Component::Directory
+        },
+    );
+    let mut scene = Scene::new(960, 720);
+    let mut hits = Vec::new();
+    view.compose_components(&mut scene, &mut hits, view.id(), &[animated])
+        .unwrap();
+    assert_eq!(packet(&scene), packet(expected));
+    assert_eq!(hit_packet(&hits), hit_packet(expected_hits));
+    assert!(scene
+        .component_id(UiComponentKey {
+            screen: view.id(),
+            node: animated
+        })
+        .is_some());
+    for (id, b) in hits {
+        let point = (b.x as f64 + 1.0, b.y as f64 + 1.0);
+        assert_eq!(view.hit_components(&scene, view.id(), point), Some(id));
+        assert_eq!(
+            view.hit_components(&scene, ScreenInstanceId(view.id().0 + 100), point),
+            None
+        );
+    }
+}
+
+#[test]
+fn initial_zero_chooser_and_historical_pages_restore_exact_active_surface_and_actions() {
+    let catalog = catalog(1);
+    let directory = LineEditor::new("records", 4096).unwrap();
+    let preview = preview(&catalog.entries[0]);
+    for extent in [[0, 0], [0, 720], [960, 0]] {
+        for page in [None, Some(0), Some(3), Some(4)] {
+            let owner = ScreenInstanceId(1250);
+            let view = RecordsView::new(owner, extent[0], extent[1]).unwrap();
+            let reference = RecordsView::new(ScreenInstanceId(1251), 960, 720).unwrap();
+            let update = || {
+                let mut update = frame(&directory, &catalog, Some(&preview));
+                update.details = page.is_some();
+                update.grade_page = page.unwrap_or(0);
+                update
+            };
+            view.update(update()).unwrap();
+            reference.update(update()).unwrap();
+            let identities = view.nodes.identities();
+            let mounted = view
+                .layout
+                .borrow()
+                .leaves()
+                .iter()
+                .map(|leaf| leaf.id)
+                .collect::<Vec<_>>();
+            let presenter = page.map(|_| assert_cached_metadata(&view, &preview));
+            assert_hidden_records_surfaces(&view, page.is_some());
+            view.resize(960, 720).unwrap();
+            let (actual, actual_hits) = compose(&view, 960, 720);
+            let (expected, expected_hits) = compose(&reference, 960, 720);
+            assert_eq!(packet(&actual), packet(&expected));
+            assert_eq!(hit_packet(&actual_hits), hit_packet(&expected_hits));
+            assert_restored_component_surface(&view, page.is_some(), &expected, &expected_hits);
+            assert_eq!(view.id(), owner);
+            assert_eq!(view.nodes.identities(), identities);
+            assert_eq!(
+                view.layout
+                    .borrow()
+                    .leaves()
+                    .iter()
+                    .map(|leaf| leaf.id)
+                    .collect::<Vec<_>>(),
+                mounted
+            );
+            if let Some(pointer) = presenter {
+                assert_eq!(assert_cached_metadata(&view, &preview), pointer);
+            }
+            for (id, b) in actual_hits {
+                assert_eq!(view.hit((b.x as f64 + 1.0, b.y as f64 + 1.0)), Some(id));
+            }
+        }
+    }
+}
+
+#[test]
+fn hidden_chooser_editor_font_catalog_pending_and_hover_restore_latest_reference_scene() {
+    use crate::{font_atlas::FontAtlas, texture::TextureId};
+    let mut atlas = FontAtlas::new(crate::font_fixture::font_bytes(), 14.0, 128, 128, 16).unwrap();
+    atlas.prepare('A').unwrap();
+    atlas.prepare('가').unwrap();
+    let texture = TextureId::allocate().unwrap();
+    let font = FontText::new(Arc::new(atlas), texture).unwrap();
+    let old_catalog = catalog(1);
+    let old_directory = LineEditor::new("records", 4096).unwrap();
+    let latest_catalog = catalog(25);
+    let directory = LineEditor::new("가A", 4096).unwrap();
+    let preview = preview(&latest_catalog.entries[11]);
+    let view = RecordsView::new(ScreenInstanceId(1252), 960, 720).unwrap();
+    view.update(frame(&old_directory, &old_catalog, None))
+        .unwrap();
+    compose(&view, 960, 720);
+    let identities = view.nodes.identities();
+    view.resize(0, 720).unwrap();
+    view.set_input_font(Some(font.clone()));
+    let latest = |pending| {
+        let mut update = frame(&directory, &latest_catalog, Some(&preview));
+        update.first = 10;
+        update.selected = Some(11);
+        update.pending = pending;
+        update.hovered = Some(ControlId(51));
+        update.armed = Some(ControlId(51));
+        update.message = Some("LATEST CATALOG");
+        update
+    };
+    view.update(latest(true)).unwrap();
+    assert_hidden_records_surfaces(&view, false);
+    view.update(latest(false)).unwrap();
+    assert_hidden_records_surfaces(&view, false);
+    view.resize(960, 720).unwrap();
+    let reference = RecordsView::new(ScreenInstanceId(1253), 960, 720).unwrap();
+    reference.set_input_font(Some(font));
+    reference.update(latest(false)).unwrap();
+    let (actual, hits) = compose(&view, 960, 720);
+    let (expected, expected_hits) = compose(&reference, 960, 720);
+    assert_eq!(packet(&actual), packet(&expected));
+    assert_eq!(hit_packet(&hits), hit_packet(&expected_hits));
+    assert_restored_component_surface(&view, false, &expected, &expected_hits);
+    assert!(actual
+        .batches()
+        .iter()
+        .any(|batch| batch.texture == texture));
+    label(&actual, "LATEST CATALOG");
+    assert!(hits.iter().any(|(id, _)| *id == ControlId(50011)));
+    assert_eq!(view.nodes.identities(), identities);
+}
+
+#[test]
+fn hidden_detail_page_hover_and_replacement_metadata_preserve_matching_cache_and_reject_candidates()
+{
+    let catalog = catalog(1);
+    let directory = LineEditor::new("records", 4096).unwrap();
+    let original = preview(&catalog.entries[0]);
+    let view = RecordsView::new(ScreenInstanceId(1254), 960, 720).unwrap();
+    view.update(hovered_detail_frame(&directory, &catalog, &original, 0))
+        .unwrap();
+    compose(&view, 960, 720);
+    let pointer = assert_cached_metadata(&view, &original);
+    let identities = view.nodes.identities();
+    for extent in [[0, 0], [0, 720], [960, 0]] {
+        view.resize(extent[0], extent[1]).unwrap();
+        for page in [1, 3, 4] {
+            view.update(hovered_detail_frame(&directory, &catalog, &original, page))
+                .unwrap();
+            assert_eq!(assert_cached_metadata(&view, &original), pointer);
+            assert_hidden_records_surfaces(&view, true);
+        }
+    }
+    let mut replacement = preview(&catalog.entries[0]);
+    let score = ScoreSummary {
+        hits: 12,
+        max_combo: 12,
+        grades: [(42, 12)].into(),
+        ..Default::default()
+    };
+    replacement.historical_score = Some(Arc::new(ArchivedScore::from_summary(&score).unwrap()));
+    replacement.historical_comparison = Some(Arc::new(Some(CompetitionSnapshot {
+        ghosts: vec![GhostSnapshot {
+            label: "new-hidden-own.bkr".into(),
+            ..original
+                .historical_comparison
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .ghosts[0]
+                .clone()
+        }],
+        network: Some(NetworkSnapshot {
+            status: NetworkStatus::Stopped,
+            progress: None,
+        }),
+    })));
+    view.update(hovered_detail_frame(&directory, &catalog, &replacement, 1))
+        .unwrap();
+    let replacement_pointer = assert_cached_metadata(&view, &replacement);
+    assert_ne!(replacement_pointer, pointer);
+    let mut invalid = hovered_detail_frame(&directory, &catalog, &replacement, 1);
+    invalid.pending = true;
+    assert!(view.update(invalid).is_err());
+    let mut invalid = hovered_detail_frame(&directory, &catalog, &replacement, usize::MAX);
+    invalid.selected = Some(1);
+    assert!(view.update(invalid).is_err());
+    let revision = view.layout.borrow().revision();
+    assert!(view
+        .update_layout(&[LayoutUpdate {
+            id: NodeId(usize::MAX),
+            change: LayoutChange::Size([1, 1])
+        }])
+        .is_err());
+    assert_eq!(view.layout.borrow().revision(), revision);
+    assert_eq!(
+        assert_cached_metadata(&view, &replacement),
+        replacement_pointer
+    );
+    assert_hidden_records_surfaces(&view, true);
+    view.resize(960, 720).unwrap();
+    let reference = RecordsView::new(ScreenInstanceId(1255), 960, 720).unwrap();
+    reference
+        .update(hovered_detail_frame(&directory, &catalog, &replacement, 1))
+        .unwrap();
+    let (actual, hits) = compose(&view, 960, 720);
+    let (expected, expected_hits) = compose(&reference, 960, 720);
+    assert_eq!(packet(&actual), packet(&expected));
+    assert_eq!(hit_packet(&hits), hit_packet(&expected_hits));
+    assert_restored_component_surface(&view, true, &expected, &expected_hits);
+    label(&actual, "SAVED REPLAY OPERATION PREFIX");
+    label(&actual, "new-hidden-own.bkr");
+    assert_eq!(view.nodes.identities(), identities);
+    assert_eq!(
+        assert_cached_metadata(&view, &replacement),
+        replacement_pointer
+    );
+}
+
 #[test]
 fn mounted_catalog_keeps_original_controls_prefix_and_stored_meanings_in_painter_order() {
     let catalog = catalog(25);
