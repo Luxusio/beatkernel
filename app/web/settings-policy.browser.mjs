@@ -104,6 +104,14 @@ function rendererObservation() {
     const result = { direction };
     for (const key of ["kind", "operation", "status", "operationId", "generation", "content", "sequence", "packetKind", "mode", "control", "index", "menuGeneration", "screen", "revision", "geometryVersion", "message"])
       if (message?.[key] !== undefined) result[key] = typeof message[key] === "bigint" ? String(message[key]) : message[key];
+    const diagnostics = message?.kind === "terminal" ? message : message?.diagnostics;
+    if (diagnostics?.diagnosticVersion !== undefined) {
+      result.diagnostics = {};
+      for (const key of ["diagnosticVersion", "origin", "ownerPhase", "currentFramePresent", "currentFrame", "blockFramesPresent", "blockFrames",
+        "expectedFramePresent", "expectedFrameLow", "expectedFrameHigh", "startFramePresent", "startFrameLow", "startFrameHigh",
+        "successfulArmFramePresent", "successfulArmFrame"])
+        if (diagnostics[key] !== undefined) result.diagnostics[key] = diagnostics[key];
+    }
     if (message?.report?.words instanceof Uint32Array) result.report = { available: message.report.available, words: Array.from(message.report.words) };
     if (message?.packet instanceof Uint8Array) {
       const bytes = message.packet;

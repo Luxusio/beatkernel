@@ -76,7 +76,10 @@ terminal status 6 during real playback, with incomplete replay and no completed
 Results. Its relationship to the fetch diagnostic is unproven; browser shutdown
 required termination after a close timeout. The runner now also preserves the
 business Worker's bounded records on failure, where the original failure path
-only preserved Window and renderer observations. Syntax checking passed; this
+only preserved Window and renderer observations. The forwarding observer also
+retains the known versioned terminal diagnostic fields (origin, actual/expected
+frames, start and successful arm) instead of dropping those original facts.
+Syntax checking passed; this
 diagnostic addition awaits independent review and runtime verification.
 This child is not verified complete.
 
