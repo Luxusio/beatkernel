@@ -7997,3 +7997,133 @@ test("Records catalog publication: off-route metadata remains DOM-only and save 
     assert.equal(h.get("records-refresh").disabled, false);
   } finally { await h.close(); }
 });
+
+test("Records keyboard host: admitted rows and Back send exact tokens and increasing actions without speculative state changes", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 4, fields: ["41", "42", "43", "44"], selected: 1 };
+    await h.receive(state);
+    const title = h.get("title").textContent, recordValue = h.get("records").value;
+    let actionId = 0n;
+    for (const [code, control] of [["ArrowUp", 50000n], ["ArrowDown", 50002n],
+      ["Home", 50000n], ["End", 50003n], ["Escape", 55n]]) {
+      const before = game.messages("menu-action").length;
+      const key = h.window.emit("keydown", { code }); await flush();
+      assert.equal(key.defaultPrevented, true);
+      assert.equal(game.messages("menu-action").length, before + 1);
+      const sent = game.last("menu-action");
+      assert.ok(sent.actionId > actionId); actionId = sent.actionId;
+      assert.deepEqual(sent, { kind: "menu-action", menuGeneration: 77n, screen: 3n,
+        revision: 6n, actionId, control });
+      assert.equal(h.get("title").textContent, title);
+      assert.equal(h.get("records").value, recordValue);
+    }
+    assert.equal(game.messages("menu-select").length, 0);
+    assert.equal(h.recordCalls.length, 0, "row intent cannot acquire or mutate stored replay bytes");
+    await h.receive({ ...state, revision: 7n, selected: 3 });
+    const actions = game.messages("menu-action").length;
+    for (const code of ["ArrowDown", "End"]) {
+      assert.equal(h.window.emit("keydown", { code }).defaultPrevented, false);
+    }
+    assert.equal(game.messages("menu-action").length, actions);
+    const moved = h.window.emit("keydown", { code: "ArrowUp" }); await flush();
+    assert.equal(moved.defaultPrevented, true);
+    assert.equal(game.last("menu-action").revision, 7n);
+    assert.equal(game.last("menu-action").control, 50002n);
+    assert.ok(game.last("menu-action").actionId > actionId);
+  } finally { await h.close(); }
+});
+
+test("Records keyboard host: empty catalog admits Back but no row navigation", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    await h.receive({ kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 4, fields: [], selected: 0 });
+    const actions = game.messages("menu-action").length;
+    for (const code of ["ArrowUp", "ArrowDown", "Home", "End"]) {
+      assert.equal(h.window.emit("keydown", { code }).defaultPrevented, false);
+    }
+    assert.equal(game.messages("menu-action").length, actions);
+    assert.equal(h.window.emit("keydown", { code: "Escape" }).defaultPrevented, true);
+    await flush();
+    assert.equal(game.messages("menu-action").length, actions + 1);
+    assert.equal(game.last("menu-action").control, 55n);
+    assert.equal(game.last("menu-action").revision, 6n);
+    assert.equal(h.recordCalls.length, 0);
+  } finally { await h.close(); }
+});
+
+test("Records keyboard host: reentrant preventDefault cannot publish an old revision or retired Window action", async () => {
+  for (const transition of ["revision", "owner"]) {
+    const h = await harness();
+    try {
+      await h.preview(); const game = h.workers[0];
+      const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+        route: 4, fields: ["41", "42"], selected: 0 };
+      await h.receive(state);
+      const actions = game.messages("menu-action").length;
+      let changed;
+      const key = h.window.emit("keydown", { code: "ArrowDown", preventDefault() {
+        this.defaultPrevented = true;
+        if (transition === "revision") changed = h.receive({ ...state, revision: 7n });
+        else h.window.emit("pagehide");
+      } });
+      if (changed) await changed;
+      await flush();
+      assert.equal(key.defaultPrevented, true);
+      assert.equal(game.messages("menu-action").length, actions);
+      if (transition === "revision") {
+        h.window.emit("keydown", { code: "ArrowDown" }); await flush();
+        assert.equal(game.messages("menu-action").length, actions + 1);
+        assert.equal(game.last("menu-action").revision, 7n);
+      }
+    } finally { await h.close(); }
+  }
+});
+
+test("Records keyboard host: native editors composition modifiers repeats and gameplay keep their own keys", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 4, fields: ["41", "42"], selected: 0 };
+    await h.receive(state);
+    const actions = game.messages("menu-action").length;
+    // index.html declares this editor as INPUT; the general fake factory uses
+    // the element ID as its tag for this otherwise unclassified element.
+    h.get("menu-editor").tagName = "input";
+    for (const fields of [{ target: h.get("records") }, { target: h.get("menu-editor") },
+      { target: { tagName: "TEXTAREA" } }, { target: { tagName: "DIV", isContentEditable: true } },
+      { isComposing: true }, { repeat: true }, { ctrlKey: true }, { altKey: true }, { metaKey: true }, { shiftKey: true }]) {
+      for (const code of ["ArrowDown", "Escape"]) {
+        assert.equal(h.window.emit("keydown", { code, ...fields }).defaultPrevented, false);
+      }
+    }
+    assert.equal(game.messages("menu-action").length, actions);
+    const session = await h.launch();
+    for (const code of ["ArrowDown", "Home", "End", "Escape"]) h.window.emit("keydown", { code });
+    await flush();
+    assert.equal(game.messages("menu-action").length, actions);
+    h.click("stop"); await flush(); await h.receive(finalScore(session.id));
+  } finally { await h.close(); }
+});
+
+test("Records keyboard host: Selection retains row RPC and its existing modifier policy", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    await h.receive({ kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 1, fields: ["first.bms", "second.bms", "third.bms"], selected: 1 });
+    const actions = game.messages("menu-action").length;
+    assert.equal(h.window.emit("keydown", { code: "ArrowDown", shiftKey: true }).defaultPrevented, true);
+    await flush();
+    const selected = game.last("menu-select");
+    assert.equal(selected.index, 2); assert.equal(selected.revision, 6n);
+    assert.equal(selected.menuGeneration, 77n); assert.equal(selected.screen, 3n);
+    assert.equal(game.messages("menu-action").length, actions);
+    assert.equal(h.window.emit("keydown", { code: "Escape" }).defaultPrevented, false);
+  } finally { await h.close(); }
+});

@@ -152,6 +152,13 @@ Absent/wrong-kind removal is unavailable. Clear removes selected opponents only.
 Back/reopen preserves the canonical opponent draft and the original Settings
 parent; later valid actions must not restore a removed entry accidentally.
 
+When Records owns ordinary keyboard input, ArrowUp/Down/Home/End select the
+current row and Escape returns to its original Settings parent, including an
+empty catalog. Repeats, composition, modified keys, native text/select editors
+and active gameplay retain their existing input ownership. Same-row boundary
+keys do not publish redundant actions. Keyboard requests use current menu/action
+identity and cannot target a replaced Window or menu revision.
+
 Scan after an actual catalog change must make current stored rows available in
 the retained screen while preserving the literal selection if it still exists.
 Asynchronous acquisition/publication uses the existing current-menu token,
