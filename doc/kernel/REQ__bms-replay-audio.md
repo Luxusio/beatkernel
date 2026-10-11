@@ -118,6 +118,13 @@ presentation or acoustic alignment.
 
 ## Real-time fixed replay speed integration
 
+The separate [live speed contract](REQ__live-playback-speed.md) defines the
+planned original-play speed metadata. Recorded source speed describes play
+conditions; it does not multiply original-song replay operations or the
+independently selected replay output speed. NORMAL records retain existing
+bytes. Nonnormal source metadata requires a bounded policy-aware decoder and
+canonical setup validation. This live integration is not yet verified.
+
 The [real-time replay speed contract](REQ__realtime-replay-speed.md) defines
 the fixed positive-speed common/native/browser integration. Selected positive speed affects
 both actual planner/Mixer readheads and genuine presentation-to-original-song

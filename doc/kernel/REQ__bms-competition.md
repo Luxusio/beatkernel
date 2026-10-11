@@ -1,5 +1,16 @@
 # Unified BMS application and competition
 
+## Selected source playback speed
+
+The [live speed contract](REQ__live-playback-speed.md) extends the existing
+canonical source setup conditions with the normalized positive speed used
+during original play. Equal reduced fractions match; different source speeds
+do not match for saved-opponent or room enrollment. NORMAL preserves legacy
+setup bytes. Record reconstruction uses original-song operations without
+applying source speed again; replay output speed is independently selectable.
+This does not add ranked score authority. The live integration is currently
+being implemented and is not runtime acceptance evidence.
+
 ## Coordinated room drain protocol
 
 Extend BKMR v2 additively with DrainReady (tag 16) and DrainComplete (tag 17),
