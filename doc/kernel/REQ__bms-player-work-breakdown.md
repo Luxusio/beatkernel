@@ -278,7 +278,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-05.10** startup source gate를 한 번 올림하고 실제 PCM onset/target 경계와 일치시킨다. — 상태=D(검증완료); 선행=-; 근거=E1: 44.1→48kHz, 589µs→source26/target29.
 - [ ] **BK-WBS-05.11** 실제 backend callback 성공/오류 경로의 alloc/dealloc/lock/I/O를 audit한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=준비와 callback 경계를 포함한 계측.
 - [ ] **BK-WBS-05.12** 미지원 format/channel/rate/period와 native 쓰기 실패를 구체 오류로 반환한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=모든 backend 실제 applied-config 검사.
-- [ ] **BK-WBS-05.13** pitch 변화 허용 배속의 sample read-head/resampling과 명령 rate가 선언한 재생 속도에 맞는 PCM을 만든다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-05.01; 필요 근거/다음=plan §11.4; [offline replay 배속 개발 근거](../changes/2026-10-12-replay-render-playback-speed.md)는 shared planner·실제 PCM·optimized CLI43경로를 확인했고 독립 검증은 진행 중; Mixer rate fixture와 실제 Runtime/Transport 연동 범위를 분리하여 검사; device sample-rate 변경을 playback speed로 대신하지 않음.
+- [ ] **BK-WBS-05.13** pitch 변화 허용 배속의 sample read-head/resampling과 명령 rate가 선언한 재생 속도에 맞는 PCM을 만든다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-05.01; 필요 근거/다음=plan §11.4; [offline replay 배속 독립 검증](../changes/2026-10-12-replay-render-playback-speed.md)은 shared planner·실제 PCM·DEEP code/security PASS·QA40테스트/optimized CLI54경로까지 확인; 실제 common/native/browser replay와 live/retained practice의 속도·시계·pause/seek 연동은 남음; device sample-rate 변경을 playback speed로 대신하지 않음.
 - [ ] **BK-WBS-05.14** ReverseTimelineOnly/ReverseSamples/Mute 선택 정책의 명령·원본 sample 방향·무음 결과를 검증한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-09.02; 필요 근거/다음=core runtime/playback.rs 및 reverse_playback fixture를 현재 scope로 확인; Transport reverse만으로 sample 정책을 완료 처리하지 않음.
 
 ### 06. 플랫폼별 Native IO backend

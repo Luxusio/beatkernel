@@ -2,7 +2,9 @@
 
 Status: planner, renderer and CLI implementation have coordinator development evidence
 in the [change record](../changes/2026-10-12-replay-render-playback-speed.md).
-Independent DEEP code/security reviews pass; QA is pending. This implements part of original WBS05.13 without marking
+Independent DEEP code/security reviews and executed-command QA pass. Final
+documentation review and task verify/close follow the pre-close evidence record.
+This implements part of original WBS05.13 without marking
 its remaining real-time/native/browser acceptance complete.
 
 The replay sound planner and offline renderer accept an explicit positive core

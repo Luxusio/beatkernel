@@ -65,9 +65,11 @@ refusal retain their existing admission contracts. CLI speed is explicit
 and rejects malformed values before file access.
 
 The [scoped speed contract](REQ__replay-render-playback-speed.md) owns exact
-API/rounding/queue/error semantics and planned verification. Implementation and
-independent acceptance are tracked there; this section does not claim those
-checks have passed. No native/browser real-time rate control or pitch-preserving
+API/rounding/queue/error semantics and verification. Its linked change record
+contains independent DEEP code/security PASS and actual CLI QA:40 related tests,
+54 optimized command paths, unchanged recording/hash and literal PCM. Final
+documentation review and task close follow that pre-close snapshot.
+No native/browser real-time rate control or pitch-preserving
 DSP is implied by offline output speed.
 
 Known ceiling: capture records logical judge operations, not original native
