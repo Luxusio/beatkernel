@@ -79,7 +79,37 @@ Reproduce with `cargo test -p beatkernel --locked --test dense_chart_stress`,
 then the built example with default options or `--help`. Exact executed QA
 results and evidence paths are recorded after independent verification.
 
-## Verified implementation
+## Dense JSON collector contract
+
+The opt-in `tools/dense_chart_benchmark.py` collector is being implemented.
+It executes an explicitly selected prebuilt example, never builds implicitly,
+and preserves the existing Rust summary and runtime/audio v1 collector.
+Command: `python3 tools/dense_chart_benchmark.py --binary
+target/release/examples/dense_chart_stress --output target/dense-report.json`.
+The output parent must exist and the destination must be new, including no
+dangling symlink. Stdout is the default when `--output` is omitted.
+
+Its fixed sequential matrix is 20000 notes/8 lanes/16 cycles/origin0 and
+100000 notes/64 lanes/4 cycles/origin0. `--repeats` admits 1..10, default3;
+`--timeout` admits finite 1..240 seconds per child, default30. Each observation
+must match the exact nine-line schema1/workload/configuration and independent
+count, prefix, target and inclusive visibility expectations. Repeat identity
+is compared within each case, excluding informational timings; assertion mode
+must remain consistent. Phase nanoseconds admit bounded unsigned u128 values.
+
+The complete report contains raw output/argv, wall nanoseconds, whole-child
+CPU seconds/peak RSS bytes where available, artifact SHA256/size verified
+unchanged after the matrix, host and read-only Git metadata, and explicit nulls for
+unavailable native/audio/GPU/physical/whole-player/wall-clock-soak metrics.
+No partially successful matrix is published. Existing owned-process execution
+and atomic no-overwrite publication are reused. Cleanup covers the owned child
+and POSIX process group, not descendants deliberately escaping that group.
+Binary consistency hashes do not authenticate executable contents or prove
+correspondence with current sources; QA needs current build identity evidence.
+The report adds no speed threshold or ranking and completes neither whole
+WBS13.05 nor13.08. Actual collector verification remains pending.
+
+## Prior verified workload implementation
 
 Frozen source `891eb85` passed independent DEEP code, security and documentation
 review followed by CLI QA. Evidence is in
