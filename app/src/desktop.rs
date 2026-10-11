@@ -40,6 +40,9 @@ mod native_remaining_motion_fixtures;
 #[path = "native_remaining_motion_window_fixtures.rs"]
 mod native_remaining_motion_window_fixtures;
 #[cfg(test)]
+#[path = "desktop_panel_ownership_fixtures.rs"]
+mod panel_ownership_fixtures;
+#[cfg(test)]
 #[path = "desktop_renderer_startup_fixtures.rs"]
 mod renderer_startup_fixtures;
 #[cfg(test)]
@@ -3161,6 +3164,7 @@ impl Desktop {
         synchronize_panel(&mut self.display, &self.navigator);
         synchronize_panel(&mut self.practice, &self.navigator);
         synchronize_panel(&mut self.local_setup, &self.navigator);
+        synchronize_panel(&mut self.live_audio, &self.navigator);
         synchronize_panel(&mut self.settings, &self.navigator);
     }
     fn ui_ready(&self) -> bool {
@@ -10563,7 +10567,7 @@ mod tests {
             .any(|p| p == ["--replay", "old.bkr"]));
         assert!(game.replay);
     }
-    fn retry_fixture() -> Game {
+    pub(super) fn retry_fixture() -> Game {
         let (_publisher, viewer) = player::channel();
         Game {
             viewer,
