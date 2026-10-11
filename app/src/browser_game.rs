@@ -17,6 +17,7 @@ use crate::{
     note_progress::NoteProgress,
     player_chart::PlayerChart,
     pressed_keys::PressedKeys,
+    replay_speed::ReplaySpeed,
     saved_opponent_hud::SavedOpponentHud,
     saved_opponents::SavedOpponents,
     step_gameplay::{StepAudioBatch, StepGameplay, StepGameplayConfig, StepGameplayError},
@@ -183,6 +184,7 @@ impl BrowserGame {
             offset_ns,
             key_pairs,
             None,
+            None,
         )
     }
     /// Use the same live owner with an immutable original-song endpoint.
@@ -205,6 +207,7 @@ impl BrowserGame {
             offset_ns,
             key_pairs,
             Some(Timestamp::from_nanos(end_ns)),
+            None,
         )
     }
     /// Prepare device-aware bindings for canonical physical event blobs.
@@ -232,6 +235,7 @@ impl BrowserGame {
             max_encoded_input,
             max_payload_input,
             BmsInputMode::ButtonOnly,
+            None,
         )
     }
 
@@ -261,6 +265,120 @@ impl BrowserGame {
             max_encoded_input,
             max_payload_input,
             BmsInputMode::ButtonOrContact,
+            None,
+        )
+    }
+
+    /// Consume live preparation with a strict positive pitch-changing fraction.
+    pub fn new_and_speed(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        key_pairs: Vec<u32>,
+        fraction: &str,
+    ) -> Result<Self, JsValue> {
+        let speed: ReplaySpeed = fraction.parse().map_err(error)?;
+        Self::construct(
+            prepared,
+            host_origin_ns,
+            preroll_ns,
+            early_ns,
+            late_ns,
+            offset_ns,
+            key_pairs,
+            None,
+            Some(speed),
+        )
+    }
+
+    /// Consume live preparation with a strict positive pitch-changing fraction.
+    pub fn new_section_and_speed(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        key_pairs: Vec<u32>,
+        end_ns: i64,
+        fraction: &str,
+    ) -> Result<Self, JsValue> {
+        let speed: ReplaySpeed = fraction.parse().map_err(error)?;
+        Self::construct(
+            prepared,
+            host_origin_ns,
+            preroll_ns,
+            early_ns,
+            late_ns,
+            offset_ns,
+            key_pairs,
+            Some(Timestamp::from_nanos(end_ns)),
+            Some(speed),
+        )
+    }
+
+    /// Consume live preparation with a strict positive pitch-changing fraction.
+    pub fn new_physical_and_speed(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        binding_words: Vec<u32>,
+        end_ns: Option<i64>,
+        max_encoded_input: u32,
+        max_payload_input: u32,
+        fraction: &str,
+    ) -> Result<Self, JsValue> {
+        let speed: ReplaySpeed = fraction.parse().map_err(error)?;
+        Self::construct_physical(
+            prepared,
+            host_origin_ns,
+            preroll_ns,
+            early_ns,
+            late_ns,
+            offset_ns,
+            binding_words,
+            end_ns,
+            max_encoded_input,
+            max_payload_input,
+            BmsInputMode::ButtonOnly,
+            Some(speed),
+        )
+    }
+
+    /// Consume live preparation with a strict positive pitch-changing fraction.
+    pub fn new_physical_contact_and_speed(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        binding_words: Vec<u32>,
+        end_ns: Option<i64>,
+        max_encoded_input: u32,
+        max_payload_input: u32,
+        fraction: &str,
+    ) -> Result<Self, JsValue> {
+        let speed: ReplaySpeed = fraction.parse().map_err(error)?;
+        Self::construct_physical(
+            prepared,
+            host_origin_ns,
+            preroll_ns,
+            early_ns,
+            late_ns,
+            offset_ns,
+            binding_words,
+            end_ns,
+            max_encoded_input,
+            max_payload_input,
+            BmsInputMode::ButtonOrContact,
+            Some(speed),
         )
     }
 }
@@ -278,6 +396,7 @@ impl BrowserGame {
         max_encoded_input: u32,
         max_payload_input: u32,
         input_mode: BmsInputMode,
+        speed: Option<ReplaySpeed>,
     ) -> Result<Self, JsValue> {
         let input = PhysicalInputSetup::new(
             &binding_words,
@@ -297,6 +416,7 @@ impl BrowserGame {
             input,
             end_ns.map(Timestamp::from_nanos),
             input_mode,
+            speed,
         )
     }
 
@@ -309,6 +429,7 @@ impl BrowserGame {
         offset_ns: i64,
         key_pairs: Vec<u32>,
         end: Option<Timestamp>,
+        speed: Option<ReplaySpeed>,
     ) -> Result<Self, JsValue> {
         if prepared.replay.is_some() {
             return Err(error("replay resources require the replay owner"));
@@ -359,6 +480,7 @@ impl BrowserGame {
             },
             end,
             BmsInputMode::ButtonOnly,
+            speed,
         )
     }
 
@@ -373,6 +495,7 @@ impl BrowserGame {
         input: PhysicalInputSetup,
         end: Option<Timestamp>,
         input_mode: BmsInputMode,
+        speed: Option<ReplaySpeed>,
     ) -> Result<Self, JsValue> {
         if prepared.replay.is_some() || host_origin_ns < 0 {
             return Err(error(
@@ -422,8 +545,8 @@ impl BrowserGame {
             },
         )
         .map_err(error)?;
-        let (game, bank) = match prepared.play_policy {
-            Some(policy) => StepGameplay::new_audio_section_with_policy(
+        let (game, bank) = match (prepared.play_policy, speed) {
+            (Some(policy), None) => StepGameplay::new_audio_section_with_policy(
                 prepared.prepared,
                 config,
                 input.bindings,
@@ -433,7 +556,7 @@ impl BrowserGame {
                 authority,
                 policy,
             ),
-            None => StepGameplay::new_audio_section(
+            (None, None) => StepGameplay::new_audio_section(
                 prepared.prepared,
                 config,
                 input.bindings,
@@ -441,6 +564,27 @@ impl BrowserGame {
                 end,
                 input_mode,
                 authority,
+            ),
+            (Some(policy), Some(speed)) => StepGameplay::new_audio_section_with_policy_and_speed(
+                prepared.prepared,
+                config,
+                input.bindings,
+                prepared.start,
+                end,
+                input_mode,
+                authority,
+                policy,
+                speed,
+            ),
+            (None, Some(speed)) => StepGameplay::new_audio_section_with_speed(
+                prepared.prepared,
+                config,
+                input.bindings,
+                prepared.start,
+                end,
+                input_mode,
+                authority,
+                speed,
             ),
         }
         .map_err(error)?;
@@ -1039,6 +1183,15 @@ impl BrowserGame {
     #[wasm_bindgen(getter)]
     pub fn end_ns(&self) -> Option<i64> {
         self.game.end_ns()
+    }
+    /// Normalized immutable source-play speed.
+    #[wasm_bindgen(getter)]
+    pub fn speed_numerator(&self) -> i64 {
+        self.game.playback_speed().rate().numerator()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn speed_denominator(&self) -> u64 {
+        self.game.playback_speed().rate().denominator()
     }
     #[wasm_bindgen(getter)]
     pub fn playback_end_frame(&self) -> Option<u64> {

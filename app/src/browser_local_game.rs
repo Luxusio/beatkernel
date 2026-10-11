@@ -2,13 +2,13 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use crate::{
-    browser::BrowserPrepared,
     audio_authority::{AudioAuthority, AudioAuthorityConfig, AudioAuthorityEpoch},
-    browser_game::{BrowserSample, OUTPUT, LOGICAL, encode_batch, encode_saved_opponents},
+    browser::BrowserPrepared,
+    browser_game::{encode_batch, encode_saved_opponents, BrowserSample, LOGICAL, OUTPUT},
     browser_hid_input::BrowserHidSetup,
     browser_input::{
-        BrowserInputQueue, LocalPhysicalInputSetup, LocalTouchPageRouting, TouchInputSetup, decode_input,
-        project_touch_on_surface, project_touch_position_on_surface,
+        decode_input, project_touch_on_surface, project_touch_position_on_surface,
+        BrowserInputQueue, LocalPhysicalInputSetup, LocalTouchPageRouting, TouchInputSetup,
     },
     competition::OpponentKind,
     image_assets::ImageAssets,
@@ -17,19 +17,20 @@ use crate::{
     note_progress::NoteProgress,
     player_chart::PlayerChart,
     pressed_keys::PressedKeys,
+    replay_speed::ReplaySpeed,
     room_opponent_hud::{RoomHudStatus, RoomOpponentHud},
     saved_opponent_hud::SavedOpponentHud,
     saved_opponents::SavedOpponents,
     step_gameplay::{
         StepGameplayConfig, StepGameplayError, StepLocalGameplay, StepLocalGameplayError,
     },
-    worklet_audio::{OutputEvidence, decode_output, decode_section_output},
+    worklet_audio::{decode_output, decode_section_output, OutputEvidence},
 };
 use beatkernel::{
     audio::{PcmSample, SampleId},
     input::{
-        Binding, ButtonEvent, ButtonState, DeviceId, EventMeta, PhysicalControlId,
-        PhysicalInputEvent, Position2, codec::CodecLimits,
+        codec::CodecLimits, Binding, ButtonEvent, ButtonState, DeviceId, EventMeta,
+        PhysicalControlId, PhysicalInputEvent, Position2,
     },
     judge::JudgeEvent,
     replay::codec::ReplayCodecLimits,
@@ -162,6 +163,75 @@ impl BrowserLocalGame {
         max_encoded_input: u32,
         max_payload_input: u32,
     ) -> Result<Self, JsValue> {
+        Self::construct_physical(
+            prepared,
+            host_origin_ns,
+            preroll_ns,
+            early_ns,
+            late_ns,
+            offset_ns,
+            plan_words,
+            binding_words,
+            end_ns,
+            contact,
+            max_encoded_input,
+            max_payload_input,
+            None,
+        )
+    }
+
+    /// Consume live preparation with one immutable shared positive fraction.
+    pub fn new_physical_and_speed(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        plan_words: Vec<u32>,
+        binding_words: Vec<u32>,
+        end_ns: Option<i64>,
+        contact: bool,
+        max_encoded_input: u32,
+        max_payload_input: u32,
+        fraction: &str,
+    ) -> Result<Self, JsValue> {
+        let speed: ReplaySpeed = fraction.parse().map_err(error)?;
+
+        Self::construct_physical(
+            prepared,
+            host_origin_ns,
+            preroll_ns,
+            early_ns,
+            late_ns,
+            offset_ns,
+            plan_words,
+            binding_words,
+            end_ns,
+            contact,
+            max_encoded_input,
+            max_payload_input,
+            Some(speed),
+        )
+    }
+}
+
+impl BrowserLocalGame {
+    fn construct_physical(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        plan_words: Vec<u32>,
+        binding_words: Vec<u32>,
+        end_ns: Option<i64>,
+        contact: bool,
+        max_encoded_input: u32,
+        max_payload_input: u32,
+        speed: Option<ReplaySpeed>,
+    ) -> Result<Self, JsValue> {
         if prepared.replay.is_some() || host_origin_ns < 0 {
             return Err(error(
                 "live resources and a nonnegative browser host origin are required",
@@ -183,8 +253,8 @@ impl BrowserLocalGame {
             input_bindings.extend_from_slice(bindings.bindings());
         }
         let chart = Arc::new(prepared.chart);
-        let touch_page_routing = LocalTouchPageRouting::new(&input.plan, &chart.lanes)
-            .map_err(error)?;
+        let touch_page_routing =
+            LocalTouchPageRouting::new(&input.plan, &chart.lanes).map_err(error)?;
         let mut members = Vec::new();
         members
             .try_reserve_exact(input.plan.members().len())
@@ -244,8 +314,8 @@ impl BrowserLocalGame {
             },
         )
         .map_err(error)?;
-        let (game, bank) = match prepared.play_policy {
-            Some(policy) => StepLocalGameplay::new_audio_section_with_policy(
+        let (game, bank) = match (prepared.play_policy, speed) {
+            (Some(policy), None) => StepLocalGameplay::new_audio_section_with_policy(
                 prepared.prepared,
                 config,
                 input.plan,
@@ -256,7 +326,7 @@ impl BrowserLocalGame {
                 authority,
                 policy,
             ),
-            None => StepLocalGameplay::new_audio_section(
+            (None, None) => StepLocalGameplay::new_audio_section(
                 prepared.prepared,
                 config,
                 input.plan,
@@ -265,6 +335,31 @@ impl BrowserLocalGame {
                 end_ns.map(Timestamp::from_nanos),
                 mode,
                 authority,
+            ),
+            (Some(policy), Some(speed)) => {
+                StepLocalGameplay::new_audio_section_with_policy_and_speed(
+                    prepared.prepared,
+                    config,
+                    input.plan,
+                    input.bindings,
+                    prepared.start,
+                    end_ns.map(Timestamp::from_nanos),
+                    mode,
+                    authority,
+                    policy,
+                    speed,
+                )
+            }
+            (None, Some(speed)) => StepLocalGameplay::new_audio_section_with_speed(
+                prepared.prepared,
+                config,
+                input.plan,
+                input.bindings,
+                prepared.start,
+                end_ns.map(Timestamp::from_nanos),
+                mode,
+                authority,
+                speed,
             ),
         }
         .map_err(error)?;
@@ -296,7 +391,10 @@ impl BrowserLocalGame {
             opponent_bytes: 0,
         })
     }
+}
 
+#[wasm_bindgen]
+impl BrowserLocalGame {
     #[wasm_bindgen(getter)]
     pub fn players(&self) -> Vec<u32> {
         self.game.players().iter().map(|player| player.0).collect()
@@ -339,6 +437,15 @@ impl BrowserLocalGame {
     #[wasm_bindgen(getter)]
     pub fn end_ns(&self) -> Option<i64> {
         self.game.end_ns()
+    }
+    /// Normalized immutable source-play speed shared by every member.
+    #[wasm_bindgen(getter)]
+    pub fn speed_numerator(&self) -> i64 {
+        self.game.playback_speed().rate().numerator()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn speed_denominator(&self) -> u64 {
+        self.game.playback_speed().rate().denominator()
     }
     #[wasm_bindgen(getter)]
     pub fn playback_end_frame(&self) -> Option<u64> {
@@ -591,8 +698,14 @@ impl BrowserLocalGame {
             return Err(error("room HUD changed the actual local roster"));
         }
         let hud = RoomOpponentHud::new(ParticipantId(own), &members).map_err(error)?;
-        let lobby = crate::room_presentation::RoomLobby::new(Some(ParticipantId(own)), 1,
-            Some(crate::multiplayer_group_rooms::GroupRoomPhase::Prepared), None, members).map_err(error)?;
+        let lobby = crate::room_presentation::RoomLobby::new(
+            Some(ParticipantId(own)),
+            1,
+            Some(crate::multiplayer_group_rooms::GroupRoomPhase::Prepared),
+            None,
+            members,
+        )
+        .map_err(error)?;
         self.room_lobby = Some(Arc::new(lobby));
         self.room_hud = Some(hud);
         Ok(())
@@ -691,9 +804,13 @@ impl BrowserLocalGame {
         self.game
             .configure_touch_router(PlayerId(player), setup.router)
             .map_err(error)?;
-        self.touch_page_routing.configure(
-            PlayerId(player), regions, self.members[index].comparison_height(),
-        ).map_err(error)?;
+        self.touch_page_routing
+            .configure(
+                PlayerId(player),
+                regions,
+                self.members[index].comparison_height(),
+            )
+            .map_err(error)?;
         self.members[index].touch_configured = true;
         Ok(())
     }
@@ -701,7 +818,8 @@ impl BrowserLocalGame {
     /// Move only the configured router's bounds for a visible page. Hidden
     /// members admit new contacts as unbound while retaining every held owner.
     pub fn set_touch_page(&mut self, player: u32, page: u32) -> Result<bool, JsValue> {
-        self.touch_page_routing.set_page(&mut self.game, PlayerId(player), page)
+        self.touch_page_routing
+            .set_page(&mut self.game, PlayerId(player), page)
             .map_err(error)
     }
 
@@ -1097,16 +1215,27 @@ impl BrowserLocalGame {
                 [css_width, css_height],
                 [surface_width, surface_height],
                 crate::playfield_layout::LOGICAL_EXTENT,
-            ).map_err(error)?;
+            )
+            .map_err(error)?;
             if self.game.failed() || received_host_ns < 0 {
-                return Err(error("input queue requires usable nonnegative HOST acquisition"));
+                return Err(error(
+                    "input queue requires usable nonnegative HOST acquisition",
+                ));
             }
-            let queue = self.input_queue.as_mut()
+            let queue = self
+                .input_queue
+                .as_mut()
                 .ok_or_else(|| error("input queue is not activated"))?;
             queue.register_source(input.meta().source).map_err(error)?;
-            queue.admit_on_page(
-                input, point(HOST, received_host_ns), Some(position), page, &self.touch_page_routing,
-            ).map_err(error)
+            queue
+                .admit_on_page(
+                    input,
+                    point(HOST, received_host_ns),
+                    Some(position),
+                    page,
+                    &self.touch_page_routing,
+                )
+                .map_err(error)
         })();
         self.queue_result(result)
     }
@@ -1138,7 +1267,12 @@ impl BrowserLocalGame {
                 .input_queue
                 .as_mut()
                 .ok_or_else(|| error("input queue is not activated"))?
-                .process_next_local_on_page(&mut self.game, &mut self.touch_page_routing, now, audio_at);
+                .process_next_local_on_page(
+                    &mut self.game,
+                    &mut self.touch_page_routing,
+                    now,
+                    audio_at,
+                );
             match result {
                 Ok(Some(report)) => {
                     self.accept_input(Ok(report))?;
@@ -1307,44 +1441,107 @@ mod gauge_pressed_fixtures;
 
 #[wasm_bindgen]
 impl BrowserLocalGame {
-    pub fn visual_registration(&mut self, generation: u64, content: u64, max_packet_bytes: u32, max_diagnostic_bytes: u32) -> Result<Vec<u8>, JsValue> {
-        let roster = self.members.iter().map(|member| member.player).collect::<Vec<_>>();
-        let bytes = crate::browser::render::registration(&self.chart, &self.images, &roster, generation, content, max_packet_bytes, max_diagnostic_bytes).map_err(error)?;
-        self.render_producer.register(generation, content, &self.chart, &roster).map_err(error)?;
+    pub fn visual_registration(
+        &mut self,
+        generation: u64,
+        content: u64,
+        max_packet_bytes: u32,
+        max_diagnostic_bytes: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let roster = self
+            .members
+            .iter()
+            .map(|member| member.player)
+            .collect::<Vec<_>>();
+        let bytes = crate::browser::render::registration(
+            &self.chart,
+            &self.images,
+            &roster,
+            generation,
+            content,
+            max_packet_bytes,
+            max_diagnostic_bytes,
+        )
+        .map_err(error)?;
+        self.render_producer
+            .register(generation, content, &self.chart, &roster)
+            .map_err(error)?;
         self.render_packet_budget = max_packet_bytes;
         self.render_diagnostic_budget = max_diagnostic_bytes;
         Ok(bytes)
     }
     pub fn acknowledge_visual(&mut self, generation: u64, content: u64, sequence: u64) -> bool {
-        self.render_producer.acknowledge(generation, content, sequence)
+        self.render_producer
+            .acknowledge(generation, content, sequence)
     }
 }
 #[wasm_bindgen]
 impl BrowserLocalGame {
     pub fn visual_frame(&mut self, sequence: u64, page: u32) -> Result<Vec<u8>, JsValue> {
-        use crate::browser_render_state::{RenderMemberScalars, RenderScore, RenderGauge, RenderJudgeEvent};
-        if page as usize >= self.members.len().div_ceil(4) { return Err(error("invalid local visual page")); }
+        use crate::browser_render_state::{
+            RenderGauge, RenderJudgeEvent, RenderMemberScalars, RenderScore,
+        };
+        if page as usize >= self.members.len().div_ceil(4) {
+            return Err(error("invalid local visual page"));
+        }
         let start = page as usize * 4;
-        let visible = self.members.get(start..(start + 4).min(self.members.len())).ok_or_else(|| error("invalid local visual page"))?;
-        let members = visible.iter().map(|member| {
-            let scalars = RenderMemberScalars {
-                song_ns: self.game.member_song_time(member.player).ok_or("local member song frontier unavailable")?.as_nanos(),
-                pressed: member.pressed,
-                recent: member.recent.iter().map(RenderJudgeEvent::from_event).collect(),
-                score: Some(RenderScore::from_summary(self.game.score(member.player).ok_or("local member score unavailable")?)),
-                gauge: self.game.gauge(member.player).map(RenderGauge::from_gauge),
-                competition: member.saved_hud.snapshot().cloned(),
-                saved_comparison_height: member.saved_comparison_height() as u32,
-                peer_admitted: member.peer_admitted,
-                saved_failed: member.saved_hud.failed(), peer_failed: member.saved_hud.peer_failed(),
-            };
-            Ok((member.player, scalars, &member.progress))
-        }).collect::<Result<Vec<_>, String>>().map_err(error)?;
+        let visible = self
+            .members
+            .get(start..(start + 4).min(self.members.len()))
+            .ok_or_else(|| error("invalid local visual page"))?;
+        let members = visible
+            .iter()
+            .map(|member| {
+                let scalars = RenderMemberScalars {
+                    song_ns: self
+                        .game
+                        .member_song_time(member.player)
+                        .ok_or("local member song frontier unavailable")?
+                        .as_nanos(),
+                    pressed: member.pressed,
+                    recent: member
+                        .recent
+                        .iter()
+                        .map(RenderJudgeEvent::from_event)
+                        .collect(),
+                    score: Some(RenderScore::from_summary(
+                        self.game
+                            .score(member.player)
+                            .ok_or("local member score unavailable")?,
+                    )),
+                    gauge: self.game.gauge(member.player).map(RenderGauge::from_gauge),
+                    competition: member.saved_hud.snapshot().cloned(),
+                    saved_comparison_height: member.saved_comparison_height() as u32,
+                    peer_admitted: member.peer_admitted,
+                    saved_failed: member.saved_hud.failed(),
+                    peer_failed: member.saved_hud.peer_failed(),
+                };
+                Ok((member.player, scalars, &member.progress))
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(error)?;
         let room = match (&self.room_lobby, &self.room_hud) {
-            (Some(lobby), Some(hud)) => Some(crate::room_presentation::RoomPresentation::new(lobby.clone(), self.room_render_status, Some(hud), None).map_err(error)?),
+            (Some(lobby), Some(hud)) => Some(
+                crate::room_presentation::RoomPresentation::new(
+                    lobby.clone(),
+                    self.room_render_status,
+                    Some(hud),
+                    None,
+                )
+                .map_err(error)?,
+            ),
             _ => None,
         };
-        let frame = self.render_producer.frame(sequence, page, &members, room, self.room_hud_disabled).map_err(error)?;
-        self.render_producer.encode_frame(frame, self.render_packet_budget, self.render_diagnostic_budget).map_err(error)
+        let frame = self
+            .render_producer
+            .frame(sequence, page, &members, room, self.room_hud_disabled)
+            .map_err(error)?;
+        self.render_producer
+            .encode_frame(
+                frame,
+                self.render_packet_budget,
+                self.render_diagnostic_budget,
+            )
+            .map_err(error)
     }
 }
