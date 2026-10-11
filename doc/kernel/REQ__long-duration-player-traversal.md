@@ -1,8 +1,9 @@
 # Continuous long-duration virtual player traversal
 
-Status: focused coordinator integration passes6/6. Optimized whole20h/week
-executions and a byte-identical repeated week pass; independent review/QA and
-final documentation review remain pending. This advances original WBS13.05
+Status: source `a61b03a` passed independent DEEP code/security review followed
+by fresh CLI QA:6/6 integration tests and36 actual command paths, including
+complete20h/week and deterministic repeats. Final documentation review and
+ordered Harness verify/close remain pending. This advances original WBS13.05
 while preserving its scope.
 
 The opt-in `long_duration_player` example starts at song zero and uses the
@@ -75,6 +76,15 @@ Independent QA records source/artifact identity, exact arguments, stdout/stderr,
 exit codes, full coverage counters and repeated deterministic facts. Summary
 hashes identify observations, not executable authentication. No full payload or
 pointer address is printed; successful summary follows all original invariants.
+
+Independent execution evidence is retained in
+`target/wf/long-duration-player-qa-12c37-1/`: exact argv, original stdout/stderr,
+exits, per-path facts, source/artifact identity, test/build/format logs and WBS.
+QA covered12 successful/help/edge and24 rejected paths, with an independent
+literal PCM hash validator. Whole week verified604800003 physical samples,
+336 original edges,252 judges,168 BGM samples and empty terminal queues.
+See the [development and acceptance record](../changes/2026-10-12-long-duration-player-traversal.md)
+for retained failures, remediations and precise evidence scope.
 
 ## Known ceiling
 

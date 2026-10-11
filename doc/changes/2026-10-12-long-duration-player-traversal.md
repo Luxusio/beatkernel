@@ -1,15 +1,10 @@
 # Continuous long-duration virtual player traversal
 
-Status: workload and independent tests have reached coordinator verification.
-The first compilation and two subsequent focused executions exposed adapter
-setup defects; the corrected focused suite now passes6/6. Optimized complete
-20h/week executions now pass. Independent security review passed; the first
-DEEP code review found one missing serialized replay decode boundary, now
-corrected and reverified. The second DEEP code review verified that actual BGM
-commands also need to consume compiled source cues; that correction is complete
-and reverified.
-Fresh code review, QA and final document review remain pending; full player Goal
-and original WBS13.05 are unfinished.
+Status: source `a61b03a` passed independent DEEP code/security review followed
+by CLI QA. Fresh independent integration6/6 and36 actual CLI paths passed,
+including complete20h/week and deterministic repeats. Both earlier review
+findings are corrected. Final document review and ordered Harness verify/close
+remain pending; full player Goal and original WBS13.05 are unfinished.
 
 The [contract](../kernel/REQ__long-duration-player-traversal.md) requires actual
 production audio-authoritative playback from song zero through every output
@@ -102,6 +97,40 @@ Actual20h/week/repeated-week executions passed and matched the earlier expected
 stdout byte for byte. Original outputs, exact argv and exits are retained as
 `compiled-bgm-*.stdout`/stderr and `compiled-bgm-cli-results.json`. Neither PCM
 expectations nor the original input/timing/hold-tail workload policy changed.
+
+## Independent acceptance evidence
+
+Final code review3 and security review3 passed with zero findings at
+`a61b03ae73713a3533f59fcf157751b7ea0884ca`; code review retained DEEP and used
+the formal-only exhausted discovery path to inspect the complete eight-file
+change and verify both prior remediations. Actual CLI QA then passed all four
+roles and6/6 fresh integration tests (6.22s compilation,1.53s execution), scoped
+formatting, an optimized build and36 direct commands:12 successful/help/edge
+paths and24 invalid paths. No source changed during QA.
+
+QA executed default20h, explicit/repeated20h, complete/repeated168h and
+168h/65536;1h blocks128/8191/65536; odd3h; reversed flag order and help.
+Rejected paths covered both bounds, aggregate budget, duplicate/missing/unknown
+flags, positional/equals/help combinations, overflow, empty, signed, whitespace,
+Unicode and nondecimal values. All refusals returned1 with diagnostics and no
+stdout. Independent Python literal PCM hashes matched every successful case;
+default/explicit/repeated20h and repeated168h outputs matched byte for byte.
+
+Week counts remained604800000 playback/604800003 physical samples,336 original
+edges,252 original/reconstructed judges,168 BGM samples,148014 combined render/
+record operations and297 checkpoints. Three genuine held frames, zero repair
+records and empty terminal input/command/voice queues were verified. The focused
+suite also checked canonical encoded-byte decoding/reconstruction, literal
+original metadata and seven genuine original-port failure scenarios.
+
+Raw evidence is in `target/wf/long-duration-player-qa-12c37-1/`: original test/
+build/format logs, exact command argv/exits/times and per-path stdout/stderr,
+`run_matrix.py`, `cli-results.json`, `identity.json` and `wbs.json`. The accepted
+optimized artifact is2648896 bytes, SHA256
+`6b48842d1ce6b37de0ea8f2f62d6ccaa9e8600c204b6bc04ff1ae4b0ce66356d`.
+All QA sessions53878/31589/21209 finished with exit0; command leases released.
+WBS remains91/193,47.15%,102 unfinished and4 conditional. This evidence closes
+the child's executable software checks, not original13.05/13.08 or the Goal.
 
 ## Known ceiling
 
