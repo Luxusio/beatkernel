@@ -11,6 +11,315 @@ use beatkernel::{
 };
 use std::sync::Arc;
 
+#[path = "render_wire.rs"]
+mod dense_wire;
+
+fn dense_browser_chart() -> Arc<crate::player_chart::PlayerChart> {
+    let text = format!(
+        "#BPM 60\n#WAV01 tone\n#LNTYPE 1\n#00051:{}\n#00012:{}\n#000D3:{}",
+        "0101".repeat(2304),
+        "01".repeat(2304),
+        "1E".repeat(2304)
+    );
+    let source = beatkernel_bms::parse(&text, Default::default()).unwrap();
+    Arc::new(
+        crate::player_chart::PlayerChart::from_compiled(&source, &source.compile().unwrap().chart)
+            .unwrap(),
+    )
+}
+
+#[test]
+fn dense_browser_wire_import_paints_four_complete_fields_on_every_roster_page() {
+    use dense_wire::{VisualRegistration, WireHeader, WireLimits, WirePacket};
+    let chart = dense_browser_chart();
+    assert_eq!((chart.notes.len(), chart.mines().len()), (4608, 2304));
+    let ids: Vec<_> = (1..=64).map(crate::local_players::PlayerId).collect();
+    let limits = WireLimits {
+        max_packet_bytes: 512 * 1024 * 1024,
+        image: Default::default(),
+        max_diagnostic_bytes: 1024 * 1024,
+    };
+    let header = |kind, sequence| WireHeader {
+        kind,
+        generation: 7,
+        content: 19,
+        sequence,
+        payload_len: 0,
+    };
+    let packet = WirePacket::Registration(VisualRegistration {
+        chart: chart.export_visual(),
+        images: crate::image_assets::ImageAssets::default().export_visual(),
+        roster: ids.clone(),
+    });
+    let bytes =
+        dense_wire::encode_packet(header(dense_wire::REGISTRATION, 0), &packet, limits).unwrap();
+    assert_eq!(u16::from_le_bytes(bytes[4..6].try_into().unwrap()), 1);
+    let (_, WirePacket::Registration(registration)) =
+        dense_wire::decode_packet(&bytes, limits).unwrap()
+    else {
+        panic!("registration");
+    };
+    let mut state = BrowserRenderState::import_visual(
+        7,
+        19,
+        registration.chart,
+        registration.images,
+        registration.roster,
+    )
+    .unwrap();
+    assert!(!Arc::ptr_eq(&chart, state.chart()));
+    let pending = crate::note_progress::NoteProgress::new(chart.clone()).unwrap();
+    let mut scratch = std::array::from_fn(|_| Vec::new());
+    let mut scene = crate::scene::Scene::new(960, 720);
+    for (page, visible) in ids.chunks(4).enumerate() {
+        let mut update = frame(
+            page as u32,
+            page as u64 + 1,
+            visible
+                .iter()
+                .map(|id| {
+                    RenderMemberUpdate::from_progress(*id, scalars(&[], 0), &pending, &pending)
+                        .unwrap()
+                })
+                .collect(),
+        );
+        update.lookahead_ns = 4_000_000_000;
+        let bytes = dense_wire::encode_packet(
+            header(dense_wire::FRAME, update.sequence),
+            &WirePacket::Frame(update),
+            limits,
+        )
+        .unwrap();
+        let (_, WirePacket::Frame(decoded)) = dense_wire::decode_packet(&bytes, limits).unwrap()
+        else {
+            panic!("frame");
+        };
+        state.apply_frame(&decoded).unwrap();
+        scene.clear();
+        crate::ui::organisms::visual_local_render_state(
+            &mut scene,
+            &state,
+            &[crate::bga_render::BgaFrame::default(); 4],
+            &mut scratch,
+        )
+        .unwrap();
+        assert!(scene.status().is_ok());
+        assert_eq!(scene.playfields().len(), 4);
+        for (slot, field) in scene.playfields().iter().enumerate() {
+            assert_eq!(field.instances.len(), 11520);
+            let [x, y, width, height] =
+                crate::playfield_layout::local_field_bounds(4, slot).unwrap();
+            // Every chart note contributes its complete ordered primitive group.
+            let mut cursor = 0;
+            for note in &chart.notes {
+                let kinds: &[f32] = if note.end.is_some() {
+                    &[0., 1., 2.]
+                } else {
+                    &[2.]
+                };
+                for &kind in kinds {
+                    let instance = &field.instances[cursor];
+                    assert_eq!(instance.appearance[0], kind);
+                    let left = x + note.lane_index as i64 * width / 3;
+                    let right = x + (note.lane_index as i64 + 1) * width / 3;
+                    let inset = if kind == 0. { 6 } else { 3 };
+                    assert_eq!(
+                        instance.geometry[..2],
+                        [
+                            (left + inset) as f32,
+                            (right - left - 2 * inset).max(1) as f32
+                        ]
+                    );
+                    for (actual, time) in [
+                        (instance.geometry[2], note.start),
+                        (instance.geometry[3], note.end.unwrap_or(note.start)),
+                    ] {
+                        let expected = (y + height - 24) as f64
+                            - time.as_nanos() as f64 * (height - 28) as f64 / 4_000_000_000.;
+                        assert!((f64::from(actual) - expected).abs() < 0.001);
+                    }
+                    cursor += 1;
+                }
+            }
+            assert_eq!(cursor, 9216);
+            assert!(
+                field.instances[9216..]
+                    .iter()
+                    .all(|mine| mine.appearance == [2., 239. / 255., 99. / 255., 114. / 255.])
+            );
+            for (instance, mine) in field.instances[9216..].iter().zip(chart.mines()) {
+                let expected = (y + height - 24) as f64
+                    - mine.at.as_nanos() as f64 * (height - 28) as f64 / 4_000_000_000.;
+                assert!((f64::from(instance.geometry[2]) - expected).abs() < 0.001);
+                assert_eq!(instance.geometry[2], instance.geometry[3]);
+            }
+        }
+        let retained: Vec<_> = scene
+            .playfields()
+            .iter()
+            .map(|f| f.instances.clone())
+            .collect();
+        scene.clear();
+        crate::ui::organisms::visual_local_render_state(
+            &mut scene,
+            &state,
+            &[crate::bga_render::BgaFrame::default(); 4],
+            &mut scratch,
+        )
+        .unwrap();
+        for (field, old) in scene.playfields().iter().zip(retained) {
+            assert!(Arc::ptr_eq(&field.instances, &old));
+        }
+    }
+    assert_eq!((state.sequence(), state.page()), (16, 15));
+    for id in &ids {
+        assert_eq!(
+            state.member(*id).unwrap().progress.state(4607),
+            Some(NoteState::Pending)
+        );
+    }
+    let mut progress = pending.clone();
+    for (sequence, complete, expected_count) in [(17, false, 6912), (18, true, 2304)] {
+        let packed: Vec<_> = chart
+            .notes
+            .chunks(4096)
+            .map(|notes| {
+                let mut bits = [0u64; 128];
+                for (offset, note) in notes.iter().enumerate() {
+                    let value = if complete || note.end.is_none() { 2 } else { 1 };
+                    bits[offset / 32] |= value << (2 * (offset % 32));
+                }
+                bits
+            })
+            .collect();
+        let pages: Vec<_> = chart
+            .notes
+            .chunks(4096)
+            .enumerate()
+            .map(
+                |(index, notes)| crate::note_progress::NoteProgressPageUpdate {
+                    index,
+                    valid_count: notes.len(),
+                    completed_count: notes.iter().filter(|n| complete || n.end.is_none()).count(),
+                    packed_states: &packed[index],
+                },
+            )
+            .collect();
+        progress.apply_page_updates(&pages, None).unwrap();
+        let mut update = frame(
+            15,
+            sequence,
+            ids[60..]
+                .iter()
+                .map(|id| {
+                    RenderMemberUpdate::from_progress(*id, scalars(&[], 0), &progress, &pending)
+                        .unwrap()
+                })
+                .collect(),
+        );
+        update.lookahead_ns = 4_000_000_000;
+        let bytes = dense_wire::encode_packet(
+            header(dense_wire::FRAME, sequence),
+            &WirePacket::Frame(update),
+            limits,
+        )
+        .unwrap();
+        let (_, WirePacket::Frame(decoded)) = dense_wire::decode_packet(&bytes, limits).unwrap()
+        else {
+            panic!("frame");
+        };
+        state.apply_frame(&decoded).unwrap();
+        scene.clear();
+        crate::ui::organisms::visual_local_render_state(
+            &mut scene,
+            &state,
+            &[crate::bga_render::BgaFrame::default(); 4],
+            &mut scratch,
+        )
+        .unwrap();
+        assert_eq!(scene.playfields().len(), 4);
+        for field in scene.playfields() {
+            assert_eq!(field.instances.len(), expected_count);
+            if !complete {
+                for pair in field.instances[..4608].chunks_exact(2) {
+                    assert_eq!([pair[0].appearance[0], pair[1].appearance[0]], [0., 1.]);
+                }
+            }
+            assert!(
+                field.instances[expected_count - 2304..]
+                    .iter()
+                    .all(|mine| mine.appearance == [2., 239. / 255., 99. / 255., 114. / 255.])
+            );
+        }
+        assert!(state.apply_frame(&decoded).is_err());
+        assert_eq!(state.sequence(), sequence);
+    }
+}
+
+#[test]
+fn requested_playfield_storage_counts_distinct_retained_and_replacement_allocations() {
+    use crate::playfield_gpu::{NoteInstance, PlayfieldCache, PlayfieldFrame};
+    use std::mem::size_of;
+    assert_eq!(beatkernel::chart::MAX_SOURCE_ITEMS, 1_000_000);
+    assert_eq!(size_of::<NoteInstance>(), 32);
+    // A source admitted as a million holds needs three million primitives.
+    // Four visible fields retain buffers even when all 64 roster entries exist.
+    assert_eq!(MAX_RENDER_GPU_NOTE_BYTES, 384_000_000);
+    let gpu_current_and_replacement = 768_000_000u64;
+    let geometry_payloads = 1_536_000_000u64;
+    // Renderer A, current cache B, staged C Vec and its replacement C Arc are
+    // four distinct payloads. Arc clones held by Scene reuse those allocations.
+    let geometry_headers = 4
+        * (6 * size_of::<usize>()
+            + size_of::<Vec<NoteInstance>>()
+            + size_of::<PlayfieldFrame>()
+            + size_of::<Option<Arc<[NoteInstance]>>>()) as u64;
+    let retained_record = size_of::<(crate::player_chart::PlayerNote, bool)>()
+        .max(size_of::<crate::player_chart::PlayerMine>());
+    let old_and_staged_cache_metadata = 8_000_000 * retained_record as u64;
+    let cache_headers = 4 * (size_of::<PlayfieldCache>() + 2 * size_of::<Vec<usize>>()) as u64;
+    // One note query Vec and one mine query Vec are shared across the fields.
+    // Their capacity can persist from different old charts, each at source max.
+    let shared_query_scratch =
+        2_000_000 * size_of::<usize>() as u64 + 2 * size_of::<Vec<usize>>() as u64;
+    let history_scratch = 512 * size_of::<beatkernel::judge::JudgeEvent>() as u64
+        + 4 * size_of::<Vec<beatkernel::judge::JudgeEvent>>() as u64;
+    let oracle = gpu_current_and_replacement
+        + geometry_payloads
+        + geometry_headers
+        + old_and_staged_cache_metadata
+        + cache_headers
+        + shared_query_scratch
+        + history_scratch;
+    assert_eq!(peak_playfield_storage_bytes().unwrap(), oracle);
+    assert!(oracle > 2_304_000_000);
+    // Only progress and scalar retention grow with roster size. Geometry and
+    // GPU retention are a four-field allowance, not 64 full GPU allocations.
+    for notes in [0, 1, 4096, 4097, 4608, 1_000_000] {
+        let four = peak_visual_transport_bytes(0, notes, 4).unwrap();
+        let sixty_four = peak_visual_transport_bytes(0, notes, 64).unwrap();
+        assert!(four >= oracle);
+        assert_eq!(
+            sixty_four - four,
+            (BrowserRenderState::peak_progress_bytes(notes, 64).unwrap()
+                - BrowserRenderState::peak_progress_bytes(notes, 4).unwrap()) as u64
+        );
+        assert_eq!(
+            peak_visual_transport_bytes(1, notes, 64).unwrap() - sixty_four,
+            6
+        );
+    }
+    assert!(peak_visual_transport_bytes(0, 1_000_001, 64).is_err());
+    for roster in [0, 65, usize::MAX] {
+        assert!(peak_visual_transport_bytes(0, 1, roster).is_err());
+    }
+    if usize::BITS == 64 {
+        assert!(peak_visual_transport_bytes(usize::MAX, 1, 64).is_err());
+    }
+    // The estimate itself creates no aggregate-memory admission rule.
+    assert!(peak_visual_transport_bytes(MAX_RENDER_REGISTRATION_BYTES + 1, 4608, 64).is_ok());
+}
+
 struct JudgedChart {
     chart: Arc<crate::player_chart::PlayerChart>,
     events: Vec<beatkernel::judge::JudgeEvent>,

@@ -429,7 +429,13 @@ mod player_network_fault_schedule_fixtures;
 mod player_ui_fault_schedule_fixtures;
 #[cfg(feature = "graphics")]
 mod playfield_gpu;
+#[cfg(all(test, feature = "graphics"))]
+mod dense_playfield_fixtures;
+
 pub(crate) mod presentation_budget;
+#[cfg(test)]
+#[path = "presentation_budget_fixtures.rs"]
+mod presentation_budget_fixtures;
 /// Shared playfield partitions for rendering and projected physical touch routing.
 pub mod playfield_layout;
 #[cfg(test)]

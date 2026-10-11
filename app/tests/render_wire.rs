@@ -25,6 +25,292 @@ fn limits() -> WireLimits {
         max_diagnostic_bytes: 1024 * 1024,
     }
 }
+
+#[test]
+fn dense_cold_wire_registration_progress_and_late_invalid_page_are_atomic() {
+    use beatkernel_bms_runtime::note_progress::{NoteProgress, NoteProgressPageUpdate, NoteState};
+    let text = format!(
+        "#BPM 60\n#WAV01 tone\n#LNTYPE 1\n#00051:{}\n#00012:{}\n#000D3:{}",
+        "0101".repeat(2304),
+        "01".repeat(2304),
+        "1E".repeat(2304)
+    );
+    let source = beatkernel_bms::parse(&text, Default::default()).unwrap();
+    let chart = Arc::new(
+        player_chart::PlayerChart::from_compiled(&source, &source.compile().unwrap().chart)
+            .unwrap(),
+    );
+    assert_eq!((chart.notes.len(), chart.mines().len()), (4608, 2304));
+    let roster: Vec<_> = (1..=64).map(PlayerId).collect();
+    let registration = WirePacket::Registration(VisualRegistration {
+        chart: chart.export_visual(),
+        images: image_assets::ImageAssets::default().export_visual(),
+        roster: roster.clone(),
+    });
+    let cold = encode_packet(header(REGISTRATION), &registration, limits()).unwrap();
+    assert_eq!(u16::from_le_bytes(cold[4..6].try_into().unwrap()), 1);
+    let (h, WirePacket::Registration(decoded)) = decode_packet(&cold, limits()).unwrap() else {
+        panic!("registration");
+    };
+    let mut state = BrowserRenderState::import_visual(
+        h.generation,
+        h.content,
+        decoded.chart,
+        decoded.images,
+        decoded.roster,
+    )
+    .unwrap();
+    assert_eq!(state.chart().notes, chart.notes);
+    assert_eq!(state.chart().mines(), chart.mines());
+    let pending = NoteProgress::new(chart.clone()).unwrap();
+    let mut holding = pending.clone();
+    let bits: Vec<_> = chart
+        .notes
+        .chunks(4096)
+        .map(|notes| {
+            let mut bits = [0u64; 128];
+            for (offset, note) in notes.iter().enumerate() {
+                let value = if note.end.is_some() { 1 } else { 2 };
+                bits[offset / 32] |= value << (2 * (offset % 32));
+            }
+            bits
+        })
+        .collect();
+    let pages: Vec<_> = chart
+        .notes
+        .chunks(4096)
+        .enumerate()
+        .map(|(index, notes)| NoteProgressPageUpdate {
+            index,
+            valid_count: notes.len(),
+            completed_count: notes.iter().filter(|n| n.end.is_none()).count(),
+            packed_states: &bits[index],
+        })
+        .collect();
+    holding.apply_page_updates(&pages, None).unwrap();
+    let mut scene = beatkernel_bms_runtime::scene::Scene::new(960, 720);
+    for (page, visible) in roster.chunks(4).enumerate() {
+        let frame = RenderFrame {
+            generation: h.generation,
+            content: h.content,
+            sequence: page as u64 + 1,
+            page: page as u32,
+            lookahead_ns: 4_000_000_000,
+            members: visible
+                .iter()
+                .map(|id| {
+                    RenderMemberUpdate::from_progress(
+                        *id,
+                        RenderMemberScalars {
+                            song_ns: 0,
+                            ..Default::default()
+                        },
+                        &holding,
+                        &pending,
+                    )
+                    .unwrap()
+                })
+                .collect(),
+            room: None,
+            room_disabled: false,
+        };
+        let mut fh = header(FRAME);
+        fh.sequence = frame.sequence;
+        let bytes = encode_packet(fh, &WirePacket::Frame(frame), limits()).unwrap();
+        let (_, WirePacket::Frame(decoded)) = decode_packet(&bytes, limits()).unwrap() else {
+            panic!("frame");
+        };
+        state.apply_frame(&decoded).unwrap();
+        let mut notes = Vec::new();
+        let mut mines = Vec::new();
+        for id in visible {
+            let progress = &state.member(*id).unwrap().progress;
+            for (index, note) in chart.notes.iter().enumerate() {
+                assert_eq!(
+                    progress.state(index),
+                    Some(if note.end.is_some() {
+                        NoteState::Holding
+                    } else {
+                        NoteState::Completed
+                    })
+                );
+            }
+            state
+                .chart()
+                .visible_note_indices_with_progress_checked(
+                    Timestamp::ZERO,
+                    4_000_000_000,
+                    0,
+                    Some(progress),
+                    &mut notes,
+                )
+                .unwrap();
+            assert_eq!(
+                notes,
+                chart
+                    .notes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, n)| n.end.is_some().then_some(i))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(notes.len(), 2304);
+        }
+        state
+            .chart()
+            .visible_mine_indices_checked(Timestamp::ZERO, 4_000_000_000, 0, &mut mines)
+            .unwrap();
+        assert_eq!(mines, (0..2304).collect::<Vec<_>>());
+        scene.clear();
+        let views: Vec<_> = roster
+            .iter()
+            .map(|id| {
+                let member = state.member(*id).unwrap();
+                let scalar = member.scalars.as_ref();
+                ui::organisms::VisualLocalPlayerView {
+                    player: *id,
+                    chart: Some(state.chart()),
+                    song_time: scalar.map(|s| Timestamp::from_nanos(s.song_ns)),
+                    score: RenderScore {
+                        hits: 0,
+                        misses: 0,
+                        combo: 0,
+                        max_combo: 0,
+                        timing: Default::default(),
+                    },
+                    bms_score: None,
+                    gauge: None,
+                    last_judge: None,
+                    recent_results: &[],
+                    pressed_lanes: scalar.map_or(0, |s| s.pressed),
+                    note_progress: Some(&member.progress),
+                    competition: None,
+                }
+            })
+            .collect();
+        ui::organisms::visual_local_player_views(
+            &mut scene,
+            &views,
+            state.lookahead_ns(),
+            state.page() as usize,
+            true,
+            &[beatkernel_bms_runtime::bga_render::BgaFrame::default(); 4],
+            None,
+        )
+        .unwrap();
+        assert!(scene.status().is_ok());
+        assert!(!scene.rectangles().is_empty());
+        assert!(
+            state.apply_frame(&decoded).is_err(),
+            "stale frame must not advance ACK baseline"
+        );
+        assert_eq!(state.sequence(), page as u64 + 1);
+    }
+    // A real final-page extent passes the byte grammar only when it matches the
+    // receiver chart; late rejection must leave every visible member untouched.
+    let before: Vec<_> = roster[60..]
+        .iter()
+        .map(|id| {
+            let member = state.member(*id).unwrap();
+            (
+                member.scalars.clone(),
+                (0..4608)
+                    .map(|n| member.progress.state(n))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let mut completed = holding.clone();
+    let bits = [[0xaaaa_aaaa_aaaa_aaaau64; 128], {
+        let mut tail = [0u64; 128];
+        tail[..16].fill(0xaaaa_aaaa_aaaa_aaaa);
+        tail
+    }];
+    completed
+        .apply_page_updates(
+            &[
+                NoteProgressPageUpdate {
+                    index: 0,
+                    valid_count: 4096,
+                    completed_count: 4096,
+                    packed_states: &bits[0],
+                },
+                NoteProgressPageUpdate {
+                    index: 1,
+                    valid_count: 512,
+                    completed_count: 512,
+                    packed_states: &bits[1],
+                },
+            ],
+            None,
+        )
+        .unwrap();
+    let mut next = RenderFrame {
+        generation: h.generation,
+        content: h.content,
+        sequence: 17,
+        page: 15,
+        lookahead_ns: 4_000_000_000,
+        room: None,
+        room_disabled: false,
+        members: roster[60..]
+            .iter()
+            .map(|id| {
+                RenderMemberUpdate::from_progress(
+                    *id,
+                    RenderMemberScalars {
+                        song_ns: 123,
+                        ..Default::default()
+                    },
+                    &completed,
+                    &holding,
+                )
+                .unwrap()
+            })
+            .collect(),
+    };
+    let last = next.members[3].pages.last_mut().unwrap();
+    last.valid_count = 513;
+    let mut fh = header(FRAME);
+    fh.sequence = 17;
+    let bytes = encode_packet(fh, &WirePacket::Frame(next.clone()), limits()).unwrap();
+    let (_, WirePacket::Frame(bad)) = decode_packet(&bytes, limits()).unwrap() else {
+        panic!("frame");
+    };
+    assert!(state.apply_frame(&bad).is_err());
+    assert_eq!((state.sequence(), state.page()), (16, 15));
+    for (id, (scalar, progress)) in roster[60..].iter().zip(before) {
+        let member = state.member(*id).unwrap();
+        assert_eq!(member.scalars, scalar);
+        assert_eq!(
+            (0..4608)
+                .map(|n| member.progress.state(n))
+                .collect::<Vec<_>>(),
+            progress
+        );
+        assert_eq!(member.progress.state(4607), holding.state(4607));
+        assert!(!member.progress.all_completed(0, 4608));
+    }
+    next.members[3].pages.last_mut().unwrap().valid_count = 512;
+    let bytes = encode_packet(fh, &WirePacket::Frame(next), limits()).unwrap();
+    let (_, WirePacket::Frame(good)) = decode_packet(&bytes, limits()).unwrap() else {
+        panic!("frame");
+    };
+    state.apply_frame(&good).unwrap();
+    assert_eq!(state.sequence(), 17);
+    for id in &roster[60..] {
+        assert!(state.member(*id).unwrap().progress.all_completed(0, 4608));
+    }
+    // Hidden members retain their own committed progress on the completed page.
+    assert!(
+        !state
+            .member(roster[0])
+            .unwrap()
+            .progress
+            .all_completed(0, 4608)
+    );
+}
+
 fn header(kind: u16) -> WireHeader {
     WireHeader {
         kind,
