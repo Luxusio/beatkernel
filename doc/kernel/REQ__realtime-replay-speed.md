@@ -43,6 +43,15 @@ Host는 시작 시 고정한 선택과 응답을 대조한다. 기존 1배속 �
 설정한 조회 결과에서 그 anchor를 wide 정수로 빼면, 음수 출력 origin이
 허용하는 전체 signed physical span에서도 중간 negative gap narrowing으로
 유효한 곡 시간을 잘못 거절하지 않는다. 새 시계나 pause 정책을 도입하지 않는다.
+변환 출력의 누적 TargetTime도 0 기준의 signed duration으로 먼저 좁히지
+않는다. 표현 가능한 음수 anchor에 더한 실제 TargetTime 결과에서 wide
+duration을 복원한 뒤, 공급된 곡 anchor에서 빼고 최종 값만 좁힌다.
+기존의 누적 duration nanosecond floor는 한 번만 적용한다. 결과 자체가
+표현 불가능하면 기존 typed 오류로 거절하며 owner 상태를 채택하지 않는다.
+동일 NativePause의 target presentation-origin 매핑도 gap과 유효한
+playback-origin/startup 차이를 wide로 합친 후 최종 값만 좁힌다. 중간
+`original - gap`이 표현 불가능하더라도 최종 상쇄 결과가 표현 가능하면
+거절하지 않는다. 기존 domain·startup·presentation 순서 검증은 유지한다.
 
 계산은 checked wide 정수로 수행한다. 검증된 원본 finite end가 있으면 wide
 곡 값을 먼저 cap하고 Timestamp로 한 번만 좁힌다. 비유한 overflow는 오류다.

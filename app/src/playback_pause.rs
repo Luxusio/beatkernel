@@ -1152,8 +1152,11 @@ impl NativePause {
             {
                 return Err(PauseError("target playback origin precedes mapped startup"));
             }
-            let paused = self.song_origin_after_pause(original)?;
-            let value = i128::from(paused.as_nanos())
+            let anchor = Timestamp::from_nanos(i64::MAX);
+            let paused = self.song_origin_after_pause(anchor)?;
+            let value = i128::from(original.as_nanos())
+                + i128::from(paused.as_nanos())
+                - i128::from(anchor.as_nanos())
                 + i128::from(playback_origin.timestamp.as_nanos())
                 - i128::from(startup.timestamp.as_nanos());
             return Ok(Timestamp::from_nanos(
@@ -1185,17 +1188,20 @@ impl NativePause {
     /// Applies the cumulative gap once, avoiding per-pause rounding drift.
     pub fn song_origin_after_pause(&self, original: Timestamp) -> Result<Timestamp, PauseError> {
         if let Some(target) = self.target {
-            let zero = ClockPoint {
+            // Preserve a full signed clock span before subtracting the gap
+            // from the supplied song anchor. The duration is still floored once.
+            let duration_origin = ClockPoint {
                 domain: self.origin.domain,
-                timestamp: Timestamp::ZERO,
+                timestamp: Timestamp::from_nanos(i64::MIN),
             };
             let gap = target
                 .total_gap
-                .point(zero)
+                .point(duration_origin)
                 .map_err(|_| PauseError("target pause duration overflow"))?
                 .timestamp
                 .as_nanos();
-            let value = i128::from(original.as_nanos()) - i128::from(gap);
+            let gap = i128::from(gap) - i128::from(duration_origin.timestamp.as_nanos());
+            let value = i128::from(original.as_nanos()) - gap;
             return Ok(Timestamp::from_nanos(
                 i64::try_from(value).map_err(|_| PauseError("target song origin overflow"))?,
             ));

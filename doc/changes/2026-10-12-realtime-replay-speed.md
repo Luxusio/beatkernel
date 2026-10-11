@@ -1,6 +1,6 @@
 # 실제 리플레이 owner의 고정 배속 연결
 
-상태: 구현·개발 검사 완료, 독립 review/QA 대기. 기준 HEAD 5ed217c.
+상태: 개발 검사 완료 후 독립 review의 결함 1건 수정 중. 기준 HEAD 5ed217c.
 이 작업은 공통 StepReplay, native replay CLI/pause와 browser replay setup에
 동일한 고정 유리수 배속을 전달하고, 실제 출력 presentation을 원본 곡 시간으로
 변환한다. 요구 계약은 [실시간 배속](../kernel/REQ__realtime-replay-speed.md)이다.
@@ -148,6 +148,32 @@ draw ACK·재생 화면, natural completion, 사용자 stop/retry를 확인했�
 각 배속의 mid-play·종료 screenshot에 원본 관측과 source hash를 보관한다.
 해당 owned browser/server는 종료했다. 이는 coordinator 개발 증거이며,
 필수 독립 qa-browser·qa-cli와 code/security review PASS를 대체하지 않는다.
+
+da11de4에 대한 첫 독립 DEEP code review는 FIX_NOW 1건으로 FAIL,
+security review는 PASS였다. converted NativePause가 cumulative TargetTime을
+ZERO 기준으로 i64에 먼저 좁혀, 음수 output origin이 허용하는 유효한
+full-span pause gap을 거절하는 결함이다. 공통 `playback_pause.rs`를 AC003
+수정 범위에 추가하고, 실제 TargetTime의 단일 floor를 유지하며 duration을
+wide로 복원한 뒤 공급된 anchor에서 빼고 마지막 값만 좁힌다. 독립 작성한
+controlled converted-target 회귀를 먼저 기존 source에서 실패 확인한 뒤
+수정한다. 실제 수세기 길이의 PCM 실행·하드웨어 검증을 주장하지 않는다.
+수정 후 새로운 독립 review와 필수 QA를 통과하기 전에는 close하지 않는다.
+추가한 두 converted gap 회귀는 기존 source에서 각각 실제 실패했다
+(`converted-gap-red-1.log`, exit 101). 직접 호출하는 presentation-origin
+계산에도 같은 중간 narrowing이 있어, 공급된 곡 anchor와 유효한 startup
+shift의 상쇄를 마지막에 합치도록 수정 범위를 명시했다. 별도 세 번째
+회귀도 기존 source에서 실제 실패했다(`converted-origin-red-1.log`,
+exit 101). 모두 동일한 `target pause duration overflow`를 재현했으며
+기존 13개 회귀 기대값은 바꾸지 않았다.
+수정은 공통 NativePause의 두 target 분기에 한정됐다. 새 public API·상태·
+시계 없이 기존 TargetTime과 after-pause anchor를 재사용한다. 수정 후
+전체 `replay_pause_speed`는 16개 통과, 실패 0이었다
+(`converted-gap-green-1.log`). 기존 NativePause 소비자 회귀와 native/foreign/
+WASM 확인, 두 번째 독립 review와 필수 QA는 아직 진행해야 한다.
+기존 public/native/interval/converted/rebind/live/local/practice/replay pause
+소비자를 포함한 `cargo test ... --lib pause`도 100개 통과, 실패 0이었다
+(`native-pause-regressions-1.log`). 수정 후 Windows·macOS 타입 검사와
+desktop 소비자 check, 실제 두 WASM 패키지 재생성·검사를 다시 수행한다.
 
 Known ceiling: 고정 양수 pitch-changing 리플레이 범위다. runtime/live/
 retained/reverse와 물리 출력 검증은 원래 전체 Goal에 남는다. WBS는

@@ -4,17 +4,19 @@ use beatkernel::{
     audio::{
         command_queue, AudioCommand, AudioCounters, AudioFormat, AudioLimits, ChannelMatrix,
         CommandProducer, Mixer, MixerConfig, PcmLimits, PcmSample, RenderReport, ResampleQuality,
-        SampleBank, SampleId, TargetFrameBasis, VoiceId,
+        SampleBank, SampleId, TargetBoundary, TargetFrameBasis, TargetTime, VoiceId,
     },
     time::{ClockDomainId, ClockPair, ClockPoint, Duration, Timestamp},
     transport::Rate,
 };
 use beatkernel_bms_runtime::{
     native_start::StartInterval,
-    playback_pause::{PauseIntervalObservation, PausePhase},
+    playback_pause::{NativePause, PauseIntervalObservation, PausePhase},
     replay_pause::ReplayPause,
 };
-use beatkernel_platform::audio::{ConvertedNativeOutputState, DeviceFormat, SampleEncoding};
+use beatkernel_platform::audio::{
+    ConvertedBoundaryFacts, ConvertedNativeOutputState, DeviceFormat, SampleEncoding,
+};
 
 fn point(domain: u32, ns: i64) -> ClockPoint {
     ClockPoint {
@@ -784,5 +786,313 @@ fn controlled_full_signed_span_gap_cancels_before_timestamp_narrowing() {
     assert_eq!(
         pause.presentation_song(point(11, 3)).unwrap(),
         Some(Timestamp::from_nanos(45_500_003))
+    );
+}
+
+fn declared_full_span_target_fixture() -> (
+    TargetFrameBasis,
+    ConvertedBoundaryFacts,
+    ConvertedBoundaryFacts,
+    RenderReport,
+    RenderReport,
+) {
+    // Deliberately declared typed business-port observations. No converter,
+    // physical device, or 2^63-frame execution is claimed by this fixture.
+    let origin = point(11, i64::MIN);
+    let hz = 1_000_000_000;
+    let basis = TargetFrameBasis::new(origin, TargetTime::from_frames(0, hz).unwrap(), hz).unwrap();
+    let huge_gap = i64::MAX as u64 + 2;
+    let paused_facts = ConvertedBoundaryFacts {
+        origin: Some(origin),
+        source_rate: hz,
+        pause: Some(TargetBoundary {
+            source_frame: 0,
+            target_frame_offset: 0,
+            target_time: TargetTime::from_frames(0, hz).unwrap(),
+        }),
+        ..ConvertedBoundaryFacts::default()
+    };
+    let resumed_facts = ConvertedBoundaryFacts {
+        resume: Some(TargetBoundary {
+            source_frame: huge_gap,
+            target_frame_offset: 0,
+            target_time: TargetTime::from_frames(huge_gap, hz).unwrap(),
+        }),
+        ..paused_facts
+    };
+    let paused = RenderReport {
+        start_frame: 0,
+        frames: 1,
+        playback_start_frame: 0,
+        playback_frames: 0,
+        paused: true,
+        playback_end_physical_frame: None,
+        active_voices: 0,
+        pending_commands: 0,
+        song_position: Timestamp::ZERO,
+        producer_disconnected: false,
+        counters: AudioCounters {
+            rendered_frames: 1,
+            ..AudioCounters::default()
+        },
+    };
+    let resumed = RenderReport {
+        start_frame: huge_gap,
+        playback_frames: 1,
+        paused: false,
+        counters: AudioCounters {
+            rendered_frames: huge_gap + 1,
+            ..AudioCounters::default()
+        },
+        ..paused
+    };
+    (basis, paused_facts, resumed_facts, paused, resumed)
+}
+
+#[test]
+fn controlled_converted_full_signed_span_gap_cancels_before_timestamp_narrowing() {
+    let (basis, paused_facts, resumed_facts, paused, resumed) = declared_full_span_target_fixture();
+    let origin = basis.origin();
+    let mut replay = ReplayPause::new_with_rate(
+        origin,
+        ClockDomainId(22),
+        1_000_000_000,
+        Timestamp::from_nanos(50_000_000),
+        Duration::from_nanos(3_000_000),
+        Rate::new(3, 2).unwrap(),
+    )
+    .unwrap()
+    .with_target_basis(7, basis)
+    .unwrap();
+    let first = ClockPair {
+        source: origin,
+        target: point(22, 0),
+    };
+    replay
+        .request_target(true, 7, basis, paused_facts, first)
+        .unwrap();
+    let frozen = replay
+        .observe_target(7, basis, paused_facts, Some(paused), first)
+        .unwrap()
+        .unwrap();
+    assert!(frozen.paused);
+    assert_eq!(frozen.song.as_nanos(), 45_500_000);
+    let later = ClockPair {
+        source: point(11, i64::MIN + 1),
+        target: point(22, 1),
+    };
+    replay
+        .request_target(false, 7, basis, paused_facts, later)
+        .unwrap();
+    let crossing = ClockPair {
+        source: point(11, 1),
+        target: point(22, 3),
+    };
+    let previous = replay.last_render_report();
+    assert!(replay
+        .observe_target(8, basis, resumed_facts, Some(resumed), crossing)
+        .is_err());
+    assert_eq!(replay.phase(), PausePhase::Resuming);
+    assert_eq!(replay.last_render_report(), previous);
+    let mut wrong = resumed_facts;
+    wrong.origin = Some(point(11, i64::MIN + 1));
+    assert!(replay
+        .observe_target(7, basis, wrong, Some(resumed), crossing)
+        .is_err());
+    assert_eq!(replay.last_render_report(), previous);
+    let boundary = replay
+        .observe_target(7, basis, resumed_facts, Some(resumed), crossing)
+        .unwrap()
+        .unwrap();
+    assert!(!boundary.paused);
+    assert_eq!(boundary.song.as_nanos(), 45_500_000);
+    assert_eq!(replay.presentation_song(point(11, 0)).unwrap(), None);
+    assert_eq!(
+        replay.presentation_song(point(11, 1)).unwrap(),
+        Some(Timestamp::from_nanos(45_500_000))
+    );
+    assert_eq!(
+        replay.presentation_song(point(11, 3)).unwrap(),
+        Some(Timestamp::from_nanos(45_500_003))
+    );
+}
+
+#[test]
+fn controlled_converted_native_gap_narrows_only_final_shifted_song_origin() {
+    let (basis, paused_facts, resumed_facts, paused, resumed) = declared_full_span_target_fixture();
+    let mut native = NativePause::new(basis.origin(), ClockDomainId(22), 1_000_000_000)
+        .unwrap()
+        .with_target_basis(7, basis)
+        .unwrap();
+    let first = ClockPair {
+        source: basis.origin(),
+        target: point(22, 0),
+    };
+    native.request_in_epoch(7, true, first).unwrap();
+    assert!(
+        native
+            .observe_target(7, basis, paused_facts, Some(paused), first)
+            .unwrap()
+            .unwrap()
+            .paused
+    );
+    let later = ClockPair {
+        source: point(11, i64::MIN + 1),
+        target: point(22, 1),
+    };
+    native.request_in_epoch(7, false, later).unwrap();
+    let crossing = ClockPair {
+        source: point(11, 1),
+        target: point(22, 3),
+    };
+    assert!(
+        !native
+            .observe_target(7, basis, resumed_facts, Some(resumed), crossing)
+            .unwrap()
+            .unwrap()
+            .paused
+    );
+    assert_eq!(
+        native
+            .song_origin_after_pause(Timestamp::from_nanos(i64::MAX))
+            .unwrap(),
+        Timestamp::from_nanos(-2)
+    );
+    assert_eq!(
+        native
+            .song_origin_after_pause(Timestamp::from_nanos(1))
+            .unwrap(),
+        Timestamp::from_nanos(i64::MIN)
+    );
+    assert!(native.song_origin_after_pause(Timestamp::ZERO).is_err());
+    assert!(native
+        .song_origin_after_pause(Timestamp::from_nanos(i64::MIN))
+        .is_err());
+    assert_eq!(native.phase(), PausePhase::Running);
+    assert_eq!(native.last_render_report(), Some(resumed));
+    // Refused final results must leave the successful anchored result intact.
+    assert_eq!(
+        native
+            .song_origin_after_pause(Timestamp::from_nanos(i64::MAX))
+            .unwrap(),
+        Timestamp::from_nanos(-2)
+    );
+}
+
+#[test]
+fn controlled_converted_presentation_origin_combines_gap_and_shift_before_narrowing() {
+    // These typed coordinates supplement the actual converter tests above;
+    // they do not claim executing a multi-century physical output prefix.
+    let (basis, mut paused_facts, mut resumed_facts, paused, resumed) =
+        declared_full_span_target_fixture();
+    let startup = TargetBoundary {
+        source_frame: 0,
+        target_frame_offset: 0,
+        target_time: TargetTime::from_frames(0, 1_000_000_000).unwrap(),
+    };
+    paused_facts.startup = Some(startup);
+    resumed_facts.startup = Some(startup);
+    let mut native = NativePause::new(basis.origin(), ClockDomainId(22), 1_000_000_000)
+        .unwrap()
+        .with_target_basis(7, basis)
+        .unwrap();
+    let first = ClockPair {
+        source: basis.origin(),
+        target: point(22, 0),
+    };
+    native.request_in_epoch(7, true, first).unwrap();
+    assert!(
+        native
+            .observe_target(7, basis, paused_facts, Some(paused), first)
+            .unwrap()
+            .unwrap()
+            .paused
+    );
+    let later = ClockPair {
+        source: point(11, i64::MIN + 1),
+        target: point(22, 1),
+    };
+    native.request_in_epoch(7, false, later).unwrap();
+    let crossing = ClockPair {
+        source: point(11, 1),
+        target: point(22, 3),
+    };
+    assert!(
+        !native
+            .observe_target(7, basis, resumed_facts, Some(resumed), crossing)
+            .unwrap()
+            .unwrap()
+            .paused
+    );
+    let before = format!("{native:?}");
+    assert_eq!(
+        native
+            .song_origin_for_presentation(Timestamp::ZERO, point(11, 1))
+            .unwrap(),
+        Timestamp::ZERO
+    );
+    assert_eq!(
+        native
+            .song_origin_for_presentation(Timestamp::ZERO, point(11, 3))
+            .unwrap(),
+        Timestamp::from_nanos(2)
+    );
+    assert!(native
+        .song_origin_for_presentation(Timestamp::ZERO, point(99, 1))
+        .is_err());
+    assert!(native
+        .song_origin_for_presentation(Timestamp::from_nanos(i64::MAX), point(11, 3))
+        .is_err());
+    assert!(native
+        .song_origin_for_presentation(Timestamp::from_nanos(i64::MIN), basis.origin())
+        .is_err());
+    assert_eq!(format!("{native:?}"), before);
+
+    // Origin MIN has no representable point before its zero-time startup. A
+    // separate small negative-origin fixture pins the actual prestartup gate.
+    let small_origin = point(11, -10);
+    let small_basis = TargetFrameBasis::new(
+        small_origin,
+        TargetTime::from_frames(0, 1_000_000_000).unwrap(),
+        1_000_000_000,
+    )
+    .unwrap();
+    let mut small = NativePause::new(small_origin, ClockDomainId(22), 1_000_000_000)
+        .unwrap()
+        .with_target_basis(7, small_basis)
+        .unwrap();
+    let facts = ConvertedBoundaryFacts {
+        origin: Some(small_origin),
+        source_rate: 1_000_000_000,
+        startup: Some(TargetBoundary {
+            source_frame: 2,
+            target_frame_offset: 0,
+            target_time: TargetTime::from_frames(2, 1_000_000_000).unwrap(),
+        }),
+        ..ConvertedBoundaryFacts::default()
+    };
+    assert!(small
+        .observe_target(
+            7,
+            small_basis,
+            facts,
+            None,
+            ClockPair {
+                source: small_origin,
+                target: point(22, 0)
+            }
+        )
+        .unwrap()
+        .is_none());
+    let before = format!("{small:?}");
+    assert!(small
+        .song_origin_for_presentation(Timestamp::ZERO, point(11, -9))
+        .is_err());
+    assert_eq!(format!("{small:?}"), before);
+    assert_eq!(
+        small
+            .song_origin_for_presentation(Timestamp::ZERO, point(11, -8))
+            .unwrap(),
+        Timestamp::ZERO
     );
 }
