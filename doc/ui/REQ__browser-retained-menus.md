@@ -79,10 +79,13 @@ and stale/malformed refusal remain verified. The current Rust WASM and bindings
 also rebuild successfully; actual browser regression and fresh review/QA are
 still required.
 
-Settings Apply validates thirteen legacy scalar fields or sixteen complete
-scalar/policy fields using the same bounded
+Settings Apply validates thirteen legacy scalar fields, sixteen scalar/policy
+fields, or the complete thirty-four-field binding draft using the same bounded
 timing/output/capacity/section rules as full settings profiles. Applying scalars
-preserves the currently selected keyboard bindings. Full profile import/export
+preserves the currently selected keyboard bindings. The complete draft appends
+eighteen physical codes and validates every field atomically, as specified in
+[the binding contract](REQ__browser-retained-keyboard-bindings.md).
+Full profile import/export
 continues to require its kind/version/exact schema and all eighteen keyboard
 lanes; a menu draft must neither fabricate a binding map nor weaken that check.
 
