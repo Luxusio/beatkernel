@@ -905,6 +905,26 @@ retention of prior behavioral/type-check/GUI evidence for this declaration-only
 move, preserving its actual pre-reorder artifact provenance. This review does
 not establish post-fix formatting PASS, receipt attestation or task closure.
 
+Independent CLI QA5 subsequently returned PASS on committed `1146f77` for the
+planned scoped acceptance. Fresh edition-2021 rustfmt checks covered all 41
+task-changed Rust paths: 35 clean paths and six paths with 46 exact baseline
+formatting edits, with zero new formatter edits. Individual checks on those
+six baseline-debt paths still exited 1; neither scoped classification nor this
+verdict turns the historical broad formatting failure into PASS. Library-root
+residual edits fell from 16 to 15 after the declaration relocation.
+`qa-cli-final-5/scoped-format-summary.json` and
+`format-hunk-classification.json` preserve the comparison and raw check results.
+
+QA5 independently recomputed the retained 4,028 Rust passes, 39 ignored and
+one Records exclusion, the 454 Node passes and all three successful platform
+type checks. It verified the actual preserved artifact hashes and their
+pre-reorder provenance; no new build identity or repeated runtime execution
+is claimed. Fresh diff/WBS checks passed, still 90/193. Two failed retention
+helper attempts remain preserved separately; corrected execution exited 0.
+The substantive CLI acceptance is now PASS, while hook attestation and task
+closure remain unproven. The queued Records repair and foreign/physical-device
+limitations remain unchanged.
+
 Known ceiling: native GUI QA2 uses the existing live `:99` current-display
 transport. Its attempted new Xvfb startup failed because the display listener
 already existed; no ownership of that server or server cleanup is claimed.
