@@ -50,3 +50,24 @@ Binding tests with actual generated WASM complement these Worker fixtures;
 actual finite recording/save/comparison still requires interactive browser
 acceptance. Node fixture passes do not prove GPU, physical input or acoustic
 timing. Commands and observed results belong in the task change ledger.
+
+## Compiled Module handoff
+
+When a fixture uses host `structuredClone` for Worker messages, inject the same
+host `WebAssembly` into nested VM contexts. Otherwise the cloned Module and
+the receiving fixture's Module constructor belong to different realms, and a
+genuine Module can fail the production `instanceof` guard. Keep the real
+guard; align the fixture's constructor and clone environment instead.
+Inject the shared fixture's real host scheduling primitives, including
+`queueMicrotask`, into nested contexts too. A missing scheduler can make the
+fake Worker throw before it delivers the Module, leaving Play unavailable.
+Check the feedback immediately after CPU ready, before later preview feedback
+overwrites the diagnostic. Do not replace queued replies with synchronous ones.
+
+Record the Module actually delivered in the cloned Worker reply. Assert that
+AudioHost receives that exact object and that it is a genuine Module, rather
+than comparing it with the sending Worker's original object. Structured clone
+preserves executable content, not JavaScript reference identity. Express
+reference checks as boolean assertions so a failure does not place a Module
+inside Node test-runner error serialization and obscure the original error.
+Preserve the synchronous trusted-click assertion around AudioHost opening.

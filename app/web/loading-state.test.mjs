@@ -12,7 +12,7 @@ async function harness() {
     const source = await readFile(url, "utf8");
     assert.match(source, /async function harness\(faults = \{\}\)/);
     assert(source.includes('"prepare-cancel"') && source.includes('"prepare-progress"'), "existing DOM fixture must admit the new real controls");
-    const context = createContext({ console, URL, structuredClone, AbortController, AbortSignal,
+    const context = createContext({ console, URL, structuredClone, WebAssembly, queueMicrotask, AbortController, AbortSignal,
       TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, DataView, ArrayBuffer });
     let registrations = 0;
     const modules = new Map();

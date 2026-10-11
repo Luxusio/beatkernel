@@ -459,9 +459,11 @@ async function harness(faults = {}) {
         ...posted.opponents[index], file: entry.file,
       }));
       this.posts.push({ value: posted, transferCount: transfer.length, transfer: [...transfer] });
-      if (value.kind === "audio-load" && !faults.holdAudioModule) queueMicrotask(() => this.emit("message", {
-        data: structuredClone({ kind: "audio-module-ready", id: value.id, module: moduleToken }),
-      }));
+      if (value.kind === "audio-load" && !faults.holdAudioModule) queueMicrotask(() => {
+        const data = structuredClone({ kind: "audio-module-ready", id: value.id, module: moduleToken });
+        (this.audioModuleReplies ??= []).push(data);
+        this.emit("message", { data });
+      });
       if (this.role === "game" && ["resize", "play-page"].includes(value.kind)) this.geometryVersion++;
       if (value.kind === "dispose" && !faults.holdDispose) queueMicrotask(() => this.emit("message", { data: { kind: "disposed" } }));
       // Mechanical legacy compatibility: the actual Worker acknowledges clear
@@ -4453,7 +4455,9 @@ test("user gesture opens real host boundary before awaits, then transfers sample
   h.click("play");
   assert.equal(h.opens.length, 1, "open must run in the synchronous click task");
   assert.equal(h.opens[0].gesture, true);
-  assert.equal(h.opens[0].options.module, h.moduleToken);
+  assert.ok(h.opens[0].options.module instanceof WebAssembly.Module);
+  assert.equal(h.opens[0].options.module === h.workers[0].audioModuleReplies[0].module, true,
+    "AudioHost receives the actual Module delivered by structured clone");
   await flush();
   const worker = h.workers[0];
   const start = worker.last("play-start");

@@ -1,6 +1,7 @@
 # Browser audio module preparation ownership
 
-Status: implementation in progress; no independent verification claim.
+Status: implementation reviewed and actual browser checks pass; full Node
+verification remains unfinished after test-environment remediation.
 
 Audio package preparation is being moved from Window into the existing
 business Worker. Window will receive only a correlated compiled Module, while
@@ -32,8 +33,39 @@ The actual-WASM fixtures establish real gameplay/capture; this separate room
 fixture controls transport and model owners and does not claim real QUIC or
 physical playback. Evidence:
 `target/wf/audio-setup-room-retirement-development-12b49.log`.
-The production-browser ownership probe remains pending. No new WBS item is
-promoted or task closed.
+Independent deep code/security review returned PASS at source `a4e56ad`.
+Both independent production QA-browser and UX runs completed all twelve
+journeys with zero page, console or network errors. Window audio preparation
+records were zero; Worker read/compiled the real 62,096-byte package once,
+published the actual Module and independent CDP recorded request completion.
+Actual live/captured replay and original Display/profile journeys passed.
+Evidence: `target/wf/audio-setup-qa-browser-12b49-1/evidence.json` and
+`target/wf/audio-setup-ux-browser-12b49-1/evidence.json`. Both runs recorded
+Chrome/Xvfb exit zero, closed HTTPS and removed owned profile/cache/TLS;
+two already-removed CDP session detach diagnostics per run are preserved.
+The QA-browser bootstrap initially lacked CHROMIUM and failed before browser
+creation; the actual run used `/usr/bin/chromium` and its bootstrap log remains.
+
+The first independent full Node suite actually finished 924 passed / five
+failed (929 reported tests), exit one. Four loading-state failures came from
+the nested fixture's missing `queueMicrotask`: direct CPU-ready diagnostics
+confirmed the fake Worker could not send its reply. Aligning host WebAssembly
+alone still failed those four tests; both the constructor and real scheduler
+are now injected. The other failure was Node error deserialization following
+an obsolete gesture assertion comparing the delivered cloned Module with the
+sender's original object; remaining tests in that file were not established
+by this failed run. Original evidence is preserved in
+`target/wf/audio-setup-qa-cli-12b49-1/node-full.log`.
+
+The fixture now records the actual delivered Module, checks genuine type and
+identity with the AudioHost argument using a boolean assertion, and retains
+synchronous trusted-gesture checks. Product and browser-probe sources were not
+changed. Sixteen focused loading/ownership/gesture tests pass after remediation;
+the earlier four failures and successful correction are respectively recorded
+in `audio-setup-fixture-remediation-development-12b49.log` and
+`audio-setup-fixture-remediation-fixed-development-12b49.log` under `target/wf/`.
+Fresh independent review and complete-suite rerun are still required. No new
+WBS item is promoted or task closed.
 
 ## Known ceiling
 
