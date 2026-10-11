@@ -302,13 +302,11 @@ fn dense_cold_wire_registration_progress_and_late_invalid_page_are_atomic() {
         assert!(state.member(*id).unwrap().progress.all_completed(0, 4608));
     }
     // Hidden members retain their own committed progress on the completed page.
-    assert!(
-        !state
-            .member(roster[0])
-            .unwrap()
-            .progress
-            .all_completed(0, 4608)
-    );
+    assert!(!state
+        .member(roster[0])
+        .unwrap()
+        .progress
+        .all_completed(0, 4608));
 }
 
 fn header(kind: u16) -> WireHeader {

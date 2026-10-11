@@ -1071,7 +1071,26 @@ fn borrowed_local_views_retain_actual_prefix_references_and_match_owned_scene_pa
     );
     assert_eq!(packet(&retained), before);
     assert_eq!(retained.geometry_stamp().1, stamp.1);
+    let error = retained.status().unwrap_err();
+    assert_eq!(error, "invalid local player roster or display page");
+    assert_eq!(
+        local_player_views_with_background(
+            &mut retained,
+            &views,
+            2_000_000_000,
+            15,
+            false,
+            &frames
+        ),
+        Err(error.clone())
+    );
+    assert_eq!(retained.status(), Err(error));
+    assert_eq!(packet(&retained), before);
+    retained.clear();
+    local_player_views_with_background(&mut retained, &views, 2_000_000_000, 15, false, &frames)
+        .unwrap();
     retained.status().unwrap();
+    assert_eq!(packet(&retained), before);
 }
 
 #[test]

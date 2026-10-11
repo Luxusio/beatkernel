@@ -142,11 +142,9 @@ fn dense_browser_wire_import_paints_four_complete_fields_on_every_roster_page() 
                 }
             }
             assert_eq!(cursor, 9216);
-            assert!(
-                field.instances[9216..]
-                    .iter()
-                    .all(|mine| mine.appearance == [2., 239. / 255., 99. / 255., 114. / 255.])
-            );
+            assert!(field.instances[9216..]
+                .iter()
+                .all(|mine| mine.appearance == [2., 239. / 255., 99. / 255., 114. / 255.]));
             for (instance, mine) in field.instances[9216..].iter().zip(chart.mines()) {
                 let expected = (y + height - 24) as f64
                     - mine.at.as_nanos() as f64 * (height - 28) as f64 / 4_000_000_000.;
@@ -245,11 +243,9 @@ fn dense_browser_wire_import_paints_four_complete_fields_on_every_roster_page() 
                     assert_eq!([pair[0].appearance[0], pair[1].appearance[0]], [0., 1.]);
                 }
             }
-            assert!(
-                field.instances[expected_count - 2304..]
-                    .iter()
-                    .all(|mine| mine.appearance == [2., 239. / 255., 99. / 255., 114. / 255.])
-            );
+            assert!(field.instances[expected_count - 2304..]
+                .iter()
+                .all(|mine| mine.appearance == [2., 239. / 255., 99. / 255., 114. / 255.]));
         }
         assert!(state.apply_frame(&decoded).is_err());
         assert_eq!(state.sequence(), sequence);
