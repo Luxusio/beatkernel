@@ -19,8 +19,7 @@ function strings(value, limits) {
   return Object.freeze(result);
 }
 
-// The retained Settings menu owns scalar strings and optional timing policy. Keyboard
-// bindings remain with the actual Window input owner and full profile codec.
+// Legacy retained Settings drafts own scalar strings and optional timing policy.
 export function snapshotBrowserSettingsScalars(value) {
   object(value, ["timing", "output", "capacities", "section"]);
   const { timing: timingValue, output: outputValue, capacities: capacityValue, section: sectionValue } = value;
@@ -69,6 +68,25 @@ export function settingsMenuSnapshot(fields) {
   });
 }
 
+export function settingsMenuProfileFields(value) {
+  const { timing, output, capacities, section, bindings } = snapshotBrowserSettings(value);
+  return Object.freeze([
+    ...settingsMenuFields({ timing, output, capacities, section }),
+    ...bindings.map(([, code]) => code),
+  ]);
+}
+
+export function settingsMenuProfileSnapshot(fields) {
+  if (!Array.isArray(fields) || fields.length !== 34) {
+    throw new Error("Browser settings profile draft requires thirty-four fields.");
+  }
+  const scalars = settingsMenuSnapshot(fields.slice(0, 16));
+  return snapshotBrowserSettings({
+    kind: "beatkernel-browser-settings", version: 1, ...scalars,
+    bindings: LANES.map((lane, index) => [lane, fields[16 + index]]),
+  });
+}
+
 // Shared bounded DTO validation; only the Worker calls the file/JSON helpers.
 export function snapshotBrowserSettings(value) {
   object(value, ["kind", "version", "timing", "output", "capacities", "section", "bindings"]);
@@ -81,9 +99,11 @@ export function snapshotBrowserSettings(value) {
   const rows = [];
   for (let index = 0; index < LANES.length; index++) {
     const row = bindingValue[index];
-    if (!Array.isArray(row) || row.length !== 2) throw new Error("Settings bindings require lane and key-code pairs.");
+    if (!Array.isArray(row) || row.length !== 2) throw new Error(`Settings binding index ${index} requires a lane and key-code pair.`);
     const lane = row[0], code = row[1];
-    if (!LANES.includes(lane) || typeof code !== "string" || code.length > 32) throw new Error("Invalid settings keyboard binding.");
+    if (!LANES.includes(lane)) throw new Error(`Invalid settings keyboard lane at binding index ${index}.`);
+    const context = `Settings binding index ${index}, lane ${lane.toString(16)}, menu field ${16 + LANES.indexOf(lane)}`;
+    if (typeof code !== "string" || code.length > 32) throw new Error(`${context} must contain a bounded physical key code.`);
     rows.push(Object.freeze([lane, code]));
   }
   snapshotBindings(rows);

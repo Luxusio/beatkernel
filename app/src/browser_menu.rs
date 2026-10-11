@@ -97,8 +97,10 @@ impl BrowserMenu {
         values: Vec<String>,
     ) -> Result<(), String> {
         self.admit(token)?;
-        if values.len() != 16 {
-            return Err("profile settings replacement requires sixteen fields".into());
+        if !matches!(values.len(), 16 | 34) {
+            return Err(
+                "profile settings replacement requires sixteen or thirty-four fields".into(),
+            );
         }
         validate_fields(&values)?;
         let parent = self
@@ -113,6 +115,9 @@ impl BrowserMenu {
             .iter()
             .position(|draft| draft.0 == parent)
             .ok_or("retained Settings draft unavailable")?;
+        if self.drafts[parent_index].1.len() == 34 && values.len() != 34 {
+            return Err("replacement cannot truncate Settings bindings".into());
+        }
         if self.drafts[parent_index].2 >= values.len() {
             return Err("replacement cannot preserve Settings selection".into());
         }
@@ -243,12 +248,13 @@ impl BrowserMenu {
         self.drafts.retain(|draft| next.retains(draft.0));
         if let Some(id) = screen {
             if !self.drafts.iter().any(|draft| draft.0 == id) {
-                let values =
-                    if route == ScreenRoute::Practice && matches!(self.fields().len(), 13 | 16) {
-                        vec![self.fields()[11].clone(), self.fields()[12].clone()]
-                    } else {
-                        Vec::new()
-                    };
+                let values = if route == ScreenRoute::Practice
+                    && matches!(self.fields().len(), 13 | 16 | 34)
+                {
+                    vec![self.fields()[11].clone(), self.fields()[12].clone()]
+                } else {
+                    Vec::new()
+                };
                 self.drafts.push((id, values, 0));
             }
         }
@@ -477,9 +483,9 @@ impl BrowserMenu {
                         .iter_mut()
                         .find(|draft| draft.0 == parent)
                         .ok_or("practice settings draft unavailable")?;
-                    if !matches!(draft.1.len(), 13 | 16) {
+                    if !matches!(draft.1.len(), 13 | 16 | 34) {
                         return Err(
-                            "browser settings draft requires thirteen or sixteen fields".into()
+                            "browser settings draft requires thirteen, sixteen or thirty-four fields".into()
                         );
                     }
                     draft.1[11] = seconds_text(start.nanoseconds());
@@ -1291,7 +1297,7 @@ impl BrowserMenuPresentation {
                 });
             }
             MenuView::Settings(view) => {
-                const LABELS: [&str; 16] = [
+                const LABELS: [&str; 34] = [
                     "EARLY WINDOW (MS)",
                     "LATE WINDOW (MS)",
                     "INPUT OFFSET (MS)",
@@ -1308,6 +1314,24 @@ impl BrowserMenuPresentation {
                     "TIMING PRESET",
                     "RANK PRECEDENCE",
                     "GAUGE",
+                    "LANE 11",
+                    "LANE 12",
+                    "LANE 13",
+                    "LANE 14",
+                    "LANE 15",
+                    "LANE 16",
+                    "LANE 17",
+                    "LANE 18",
+                    "LANE 19",
+                    "LANE 21",
+                    "LANE 22",
+                    "LANE 23",
+                    "LANE 24",
+                    "LANE 25",
+                    "LANE 26",
+                    "LANE 27",
+                    "LANE 28",
+                    "LANE 29",
                 ];
                 let fields: Vec<_> = model.fields.iter().enumerate().map(|(index, value)| crate::settings::SettingsField {
                     flag: "", label: LABELS.get(index).copied().unwrap_or("BROWSER SETTING"),
@@ -1315,6 +1339,7 @@ impl BrowserMenuPresentation {
                         13 => "Empty = legacy; preset: beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1",
                         14 => "rank-first or defexrank-first",
                         15 => "beatkernel, assist-easy, easy, groove, hard, ex-hard, hazard; BMS gauges require a preset",
+                        16..=33 => "Physical KeyboardEvent.code (e.g. KeyA); empty = unbound.",
                         _ => "Browser capabilities apply. Native drivers and callback buffer size are unavailable.",
                     }, value: value.clone() }).collect();
                 let selected = model.selected.min(fields.len().saturating_sub(1));
