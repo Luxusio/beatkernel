@@ -120,6 +120,10 @@ Route commits synchronize surviving scopes and dispose exiting children before
 parents. Application suspend/resume synchronizes all retained scopes. Back
 reactivates the original parent identity and subscriptions. A disposed permit
 can never become active again, including after a fresh entry of the same route.
+LiveAudio follows the same suspend/resume synchronization as Settings, Records,
+Players, Devices, Display and Practice. A cloned LiveAudio task permit must
+report Suspended while the Navigator is suspended, Active only after its owner
+resumes, and permanently Disposed after its route leaves the retained ancestry.
 Only Active permits with matching Navigator admission may start metadata work
 or present a completed result. Previously admitted cooperative work may finish
 while Retained or Suspended; those phases do not cancel the task. Suspension
@@ -249,6 +253,21 @@ migration and GUI/performance acceptance remain unfinished and user-deferred.
 
 
 ## Shared retained node composition
+
+Zero width or height suspends drawable publication, including initial view
+construction and historical Records detail construction. The retained view
+continues accepting model, page, focus, pending and layout updates without
+mounting a replacement scope. Ordinary and component composition emit no
+geometry or hit regions while suspended. Restoring a nonzero viewport paints
+the latest accepted model with the original mounted identities; unchanged
+historical metadata retains its score/comparison ownership and presenter data.
+
+Suspended packet source is distinct from invalid geometry. Genuine layout,
+painting and component errors remain explicit and cannot partially replace a
+previously accepted layout. Public Scene geometry snapshots still require a
+nonzero logical extent. Suspension cannot fabricate a viewport or enable old
+pointer targets. Pure zero-extent fixtures supplement actual resize/navigation
+verification when a native window cannot expose a zero-sized surface.
 
 Selection, Practice, Settings, Display, Records, Players and Devices use one RetainedNodes
 implementation for packet construction, dependency binding, dirty state and ordered composition.

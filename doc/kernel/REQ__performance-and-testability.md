@@ -71,6 +71,21 @@ when optimizing latency, CPU, memory, startup and distribution size.
 
 ## Layer boundary
 
+Allocation cleanup requires named before/after workloads, separating cold
+association, report staging and outward UI publication. Cover solo and multiple
+players, empty and bounded judgment histories, hazard-only reports and custom
+opaque gauge grades. Preserve owned public snapshots and independent cloning,
+whole-report/batch refusal, replay policy association and ordered histories.
+Optimizing redundant staging must not commit a gauge before later score or
+input validation succeeds. Unavoidable outward allocations remain reported;
+an already efficient path may remain unchanged with measured evidence.
+
+Native panel cleanup audits draft/view ownership at creation, lazy mount,
+pending completion, child retention, Back, fresh reopen and Closing. Split
+fields alone are not a demonstrated lifetime failure. Reuse the Navigator and
+PanelScope retention/identity fences and make only justified cohesive ownership
+changes; views do not acquire ownership of native sessions or metadata joins.
+
 The user explicitly requires complete separation of UI Layer, Business Layer
 and Native IO Layer with natural dependency injection. These are dependency and
 ownership boundaries, not a requirement for three additional crates.
