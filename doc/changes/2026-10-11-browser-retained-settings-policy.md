@@ -1,5 +1,24 @@
 # Retained browser Settings policy and profile admission
 
+Current verification status: AC-005 remains FAIL. At committed source HEAD
+`3df14d7380723bbf2ac5fdc2a463581f69c9c5a8`, one strict run passed and the unchanged
+confirmation again reported audio-WASM CDP/Puppeteer `ERR_ABORTED`. Both declared
+and consumed exactly 62,096 bytes and completed all seven genuine flows with
+replay/archive/Results ACK. Exact Content-Length is insufficient to remove the
+intermittent diagnostic. Neither final run reproduced the earlier isolated
+status-6 playback failure; its cause is still unconfirmed. Retain both records
+under `target/wf/settings-policy-qa-browser-12a58-{3,3b}/`.
+Current independent CLI checks passed: 45 mapping/keyboard/audio-diagnostic,
+51 focused host/Worker, 45 Rust menu and 14 shared Settings tests. Product Rust,
+JavaScript and unit-test files are unchanged since the retained full-suite runs
+(2,405 Rust / 978 Node); those counts are prior runs, not new full-suite runs.
+Code review passed; CLI's overall verdict is FAIL because it incorporates the
+delegated AC-005 failure despite its own 155 passing checks. Stable browser
+acceptance is unproven. This child remains
+unfinished and WBS is not promoted. Following the user's standing direction to
+work on other available items when stuck, retain this investigation and continue
+independent Goal development rather than weakening checks or retrying indefinitely.
+
 The retained Settings menu now exposes numerical timing preset, rank precedence
 and gauge alongside the thirteen existing scalar fields. Shared pure conversion
 and validation preserve legacy Apply omission, absent full-profile defaults and
@@ -79,14 +98,16 @@ business Worker's bounded records on failure, where the original failure path
 only preserved Window and renderer observations. The forwarding observer also
 retains the known versioned terminal diagnostic fields (origin, actual/expected
 frames, start and successful arm) instead of dropping those original facts.
-Syntax checking passed; this
-diagnostic addition awaits independent review and runtime verification.
+Syntax checking passed; at that checkpoint the diagnostic addition awaited
+independent review and runtime verification.
 The diagnostic addition passed independent static review; a subsequent actual
 committed run again completed all seven flows but failed the network criterion.
 An otherwise identical, one-trial diagnostic copy explicitly serving the owned
 static bytes with exact Content-Length passed every strict criterion, with normal
 CDP/Puppeteer request completion. The probe server now declares that exact length;
-this framing remediation awaits independent review and committed runtime QA.
+At that checkpoint the framing remediation awaited independent review and
+committed runtime QA. Those completed later: review passed, but unchanged
+browser stability confirmation failed as recorded at the top of this note.
 The counterfactual supports the framing hypothesis, not a proven Chromium root
 cause or a claimed remedy for the earlier separate status-6 failure. Evidence:
 `target/wf/settings-policy-qa-browser-12a58-2/` and
