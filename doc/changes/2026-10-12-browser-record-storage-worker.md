@@ -1,7 +1,8 @@
 # Browser record storage Worker migration
 
-Status: implementation in progress; independent code/security and full QA are
-pending. This task is not complete and does not promote a WBS item.
+Status: implementation candidate under review remediation; fresh independent
+review and full QA are pending. This task is not complete and does not promote
+a WBS item.
 
 The selected [ownership contract](../runtime/REQ__browser-record-storage.md)
 moves existing record-store operations and replay/archive binary work into the
@@ -80,6 +81,21 @@ and successful body consumption/compilation followed by `net::ERR_ABORTED`
 without Worker CDP completion. The new storage migration neither diagnoses nor
 waives it. Preserve the original strict diagnostics in affected production
 probes and record any new run's actual outcome.
+
+First independent DEEP formal code review at `582b3e4` returned **FAIL**, with
+two required corrections: canceled historical replay/archive acquisitions
+could overlap, and sparse original-player arrays could bypass save preflight.
+The independent security review returned PASS at that source; source changes
+still require fresh applicable review before QA. Historical acquisition will
+retain one physical slot through actual settlement and explicitly refuse busy
+requests while retaining prior presentation. Save roster validation must visit
+every array position before reading bodies. Matching contract/test corrections
+are implemented. Fresh scoped verification passed **24/24** historical Worker
+tests and **14/14** recording admission tests (exit zero, no skips/failures):
+`target/wf/record-storage-history-remediation-development-12b87.log` and
+`target/wf/record-storage-admission-remediation-development-12b87.log`.
+Full CLI and browser QA have not run for this task; fresh review must precede
+them.
 
 ## Known ceiling
 

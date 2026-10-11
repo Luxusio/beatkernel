@@ -264,22 +264,78 @@ test("record continuity: malformed read constructor unavailable and metadata can
   }
 });
 
-test("record continuity: latest deferred read wins without releasing history during acquisition", async () => {
+test("record continuity: busy historical acquisition retains prior history and requires fresh retry after native settlement", async () => {
   const h = await catalogWorker(); await presentHistorical(h, historicalRequest()); const prior = h.historicalOwners[0];
-  const first = deferred(), second = deferred();
-  await presentHistorical(h, historicalRequest(2, { replayFile: replayFile(() => first.promise).file }));
-  await presentHistorical(h, historicalRequest(3, { replayFile: replayFile(() => second.promise).file }));
+  const first = deferred(), selected = replayFile(() => first.promise), competing = replayFile();
+  await presentHistorical(h, historicalRequest(2, { replayFile: selected.file }));
+  await presentHistorical(h, historicalRequest(3, { replayFile: competing.file }));
+  assert.equal(selected.reads, 1); assert.equal(competing.reads, 0, "busy request cannot start a second physical read");
+  const busy = h.of("historical-record-result").at(-1);
+  assert.equal(busy.id, 3); assert.equal(busy.available, false); assert.ok(busy.error && busy.error.length <= 4096);
   assert.equal(prior.frees, 0); await h.tick(); assert.equal(h.views[0].historicalDraws.at(-1), prior);
-  second.resolve(Uint8Array.of(66, 75, 82, 0, 255, 1).buffer); await flushJobs();
-  const current = h.historicalOwners.at(-1);
-  assert.equal(h.of("historical-record-result").at(-1).id, 3); assert.equal(prior.frees, 0);
-  await h.send({ kind: "historical-record-accept", id: 3 }); assert.equal(prior.frees, 1);
-  const replies = h.of("historical-record-result").length, owners = h.historicalOwners.length;
-  first.resolve(Uint8Array.of(66, 75, 82, 0, 255, 1).buffer); await flushJobs();
-  assert.equal(h.historicalOwners.length, owners); assert.equal(h.of("historical-record-result").length, replies);
   await h.send({ kind: "historical-record-clear", id: 4, cancelId: 2 });
+  await h.send(historicalRequest(5, { replayFile: competing.file })); assert.equal(competing.reads, 0);
+  const replies = h.of("historical-record-result").length;
+  first.resolve(selected.bytes.slice().buffer); await flushJobs();
+  assert.equal(h.historicalOwners.length, 1); assert.equal(h.of("historical-record-result").length, replies);
+  await h.send(historicalRequest(6, { replayFile: competing.file }));
+  assert.equal(competing.reads, 1); assert.equal(h.of("historical-record-result").at(-1).id, 6);
+  assert.equal(h.of("historical-record-result").at(-1).available, true); assert.equal(prior.frees, 0);
+  const current = h.historicalOwners.at(-1);
+  assert.deepEqual(Array.from(current.replay), Array.from(competing.bytes));
+  assert.deepEqual(Array.from(current.archive), [66,75,82,69,83,85,76,84]); assert.equal(current.player, 4294967295);
+  await h.send({ kind: "historical-record-accept", id: 6 }); assert.equal(prior.frees, 1);
+  await h.send({ kind: "historical-record-clear", id: 7, cancelId: 2 });
   assert.equal(current.frees, 0); await h.tick(); assert.equal(h.views[0].historicalDraws.at(-1), current);
   await h.send({ kind: "dispose" }); assert.equal(current.frees, 1);
+});
+
+test("physical historical replay and archive reads remain single flight after cancellation until real resolve or rejection", async () => {
+  for (const stage of ["replay", "archive"]) for (const settlement of ["resolve", "reject"]) {
+    const h = await catalogWorker(); await presentHistorical(h, historicalRequest());
+    const prior = h.historicalOwners[0], held = deferred();
+    const selected = replayFile(stage === "replay" ? () => held.promise : null);
+    const archive = new Blob([Uint8Array.of(66,75,82,69,83,85,76,84)]);
+    let archiveReads = 0; archive.arrayBuffer = () => { archiveReads++; return stage === "archive" ? held.promise :
+      Promise.resolve(Uint8Array.of(66,75,82,69,83,85,76,84).buffer); };
+    await h.send(historicalRequest(2, { replayFile: selected.file, completedArchive: archive }));
+    assert.equal(selected.reads, 1); assert.equal(archiveReads, stage === "archive" ? 1 : 0);
+    const competing = replayFile(); let competingArchiveReads = 0;
+    const competingArchive = new Blob([Uint8Array.of(66,75,82,69,83,85,76,84)]);
+    competingArchive.arrayBuffer = () => { competingArchiveReads++; return Promise.resolve(Uint8Array.of(66,75,82,69,83,85,76,84).buffer); };
+    await h.send(historicalRequest(3, { replayFile: competing.file, completedArchive: competingArchive }));
+    let refusal = h.of("historical-record-result").at(-1);
+    assert.equal(refusal.id, 3); assert.equal(refusal.available, false); assert.ok(refusal.error && refusal.error.length <= 4096);
+    assert.equal(competing.reads, 0); assert.equal(competingArchiveReads, 0); assert.equal(h.historicalOwners.length, 1);
+    await h.send({ kind: "historical-record-clear", id: 4, cancelId: 2 });
+    await h.send(historicalRequest(5, { replayFile: competing.file, completedArchive: competingArchive }));
+    refusal = h.of("historical-record-result").at(-1);
+    assert.equal(refusal.id, 5); assert.equal(refusal.available, false); assert.ok(refusal.error && refusal.error.length <= 4096);
+    assert.equal(competing.reads, 0); assert.equal(competingArchiveReads, 0, "cancellation never releases the live native body read");
+    assert.equal(prior.frees, 0); await h.tick(); assert.equal(h.views[0].historicalDraws.at(-1), prior);
+    await h.send({ kind: "historical-record-page", id: 1, rpcId: 1, page: 0 });
+    assert.equal(h.of("historical-record-page-result").at(-1).error, null, "accepted history remains usable during competing acquisition");
+    const replies = h.of("historical-record-result").length;
+    if (settlement === "resolve") held.resolve(stage === "replay" ? selected.bytes.slice().buffer : Uint8Array.of(66,75,82,69,83,85,76,84).buffer);
+    else held.reject(new Error("retired historical body acquisition failed"));
+    await flushJobs();
+    assert.equal(h.of("historical-record-result").length, replies); assert.equal(h.historicalOwners.length, 1);
+    assert.equal(archiveReads, stage === "archive" ? 1 : 0, "retired replay read cannot advance into archive acquisition");
+    assert.equal(prior.frees, 0); assert.equal(h.of("fatal").length, 0);
+    await h.send(historicalRequest(6, { replayFile: competing.file, completedArchive: competingArchive }));
+    const admitted = h.of("historical-record-result").at(-1);
+    assert.equal(admitted.id, 6); assert.equal(admitted.available, true); assert.equal(admitted.error, null);
+    assert.equal(competing.reads, 1); assert.equal(competingArchiveReads, 1); assert.equal(prior.frees, 0);
+    const candidate = h.historicalOwners.at(-1);
+    assert.deepEqual(Array.from(candidate.replay), Array.from(competing.bytes));
+    assert.deepEqual(Array.from(candidate.archive), [66,75,82,69,83,85,76,84]); assert.equal(candidate.player, 4294967295);
+    await h.send({ kind: "historical-record-accept", id: 6 }); assert.equal(prior.frees, 1); assert.equal(candidate.frees, 0);
+    await h.tick(); assert.equal(h.views[0].historicalDraws.at(-1), candidate);
+    await h.send({ kind: "historical-record-clear", id: 7, cancelId: 2 }); assert.equal(candidate.frees, 0);
+    await h.send({ kind: "historical-record-page", id: 6, rpcId: 1, page: 0 });
+    assert.equal(h.of("historical-record-page-result").at(-1).error, null);
+    await h.send({ kind: "dispose" }); assert.equal(candidate.frees, 1); assert.equal(prior.frees, 1);
+  }
 });
 
 test("record continuity: cancel new play and dispose fence a deferred candidate without resurrection", async () => {

@@ -55,6 +55,7 @@ let roomResults = null;
 let completedResults = null;
 let historicalRecord = null;
 let historicalCandidate = null;
+let historicalAcquiring = false;
 let menuOwner = null;
 let menuGeneration = 0n;
 let menuVisible = false;
@@ -143,11 +144,12 @@ function closeRecords(request) {
 function saveRecordValue(value) {
   if (!value || typeof value !== "object") throw new Error("Recording save value is required.");
   const { replayFile, archiveBlob, archivePlayer, player } = value;
-  const players = value.players;
+  if (!Array.isArray(value.players) || value.players.length < 1 || value.players.length > 64)
+    throw new Error("Recording original player roster is invalid.");
+  const players = Array.from(value.players);
   recordHandleSize(replayFile, RECORD_BYTES, true);
   if (archiveBlob !== null) recordHandleSize(archiveBlob, ARCHIVE_BYTES);
-  if (!Array.isArray(players) || players.length < 1 || players.length > 64
-    || players.some(id => !Number.isInteger(id) || id < 1 || id > 0xffffffff)
+  if (players.some(id => !Number.isInteger(id) || id < 1 || id > 0xffffffff)
     || new Set(players).size !== players.length || !players.includes(player)
     || (archiveBlob === null ? archivePlayer !== null : !(archiveBlob instanceof Blob)
       || archiveBlob.size < 1 || archiveBlob.size > ARCHIVE_BYTES || archivePlayer !== player))
@@ -535,6 +537,11 @@ async function presentHistoricalRecord(request) {
     historicalReply(request.id, false, "Historical display requires an initialized idle preview.");
     return;
   }
+  if (historicalAcquiring) {
+    historicalReply(request.id, false, "Wait for the current historical recording acquisition to finish.");
+    return;
+  }
+  historicalAcquiring = true;
   const epoch = historicalEpoch = {};
   const current = () => request.id === lastHistoricalId && epoch === historicalEpoch && !failed && !disposed && !play && !roomFinalization && !importing
     && !stagedLibrary && !settingsOperation && !roomResults;
@@ -579,6 +586,9 @@ async function presentHistoricalRecord(request) {
   } catch (error) {
     try { binding?.free(); } catch {}
     if (current()) { historicalReply(request.id, false, error); publishVisual(); }
+  } finally {
+    // Retiring a candidate cannot cancel its outstanding File/Blob body read.
+    historicalAcquiring = false;
   }
 }
 function acceptHistoricalRecord(request) {

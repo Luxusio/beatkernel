@@ -166,6 +166,34 @@ test("record identity ignores invalid and duplicate IDs and preserves the physic
   await h.send({ kind: "records-close", id: 12 });
 });
 
+test("sparse original record rosters survive metadata cloning and are refused before any handle read or storage effect", async () => {
+  const store = controlledRecordStore(), h = await recordWorker(store);
+  const file = new FileType([Uint8Array.of(66,75,82,0)], "original.bkr");
+  const archive = new Blob([Uint8Array.of(66,75,82,69,83,85,76,84)]);
+  let bodyReads = 0;
+  file.arrayBuffer = archive.arrayBuffer = () => { bodyReads++; assert.fail("sparse roster must be rejected before binary acquisition"); };
+  const trailing = [1]; trailing.length = 2;
+  const leading = new Array(2); leading[1] = 1;
+  const middle = [1]; middle.length = 3; middle[2] = 7;
+  let id = 1;
+  for (const sparse of [trailing, leading, middle]) for (const hasArchive of [false, true]) {
+    // Node File cloning is modeled separately; bounded metadata cloning really
+    // retains holes just as the Worker message envelope does.
+    const roster = structuredClone(sparse);
+    const hole = sparse.findIndex((_, index) => !Object.hasOwn(sparse, index));
+    assert.ok(hole >= 0); assert.equal(Object.hasOwn(roster, hole), false); assert.equal(roster.length, sparse.length);
+    const value = recordSaveValue({ players: roster, player: 1, replayFile: file,
+      archiveBlob: hasArchive ? archive : null, archivePlayer: hasArchive ? 1 : null });
+    const requestId = id++;
+    await h.send({ kind: "records-request", id: requestId, action: "save", value });
+    const refusal = h.of("records-reply").at(-1);
+    assert.equal(refusal.id, requestId); assert.equal(refusal.action, "save"); assert.equal(refusal.result, null);
+    assert.equal(typeof refusal.error, "string"); assert.ok(refusal.error.length > 0 && refusal.error.length <= 4096);
+    assert.equal(bodyReads, 0); assert.equal(store.opens.length, 0); assert.equal(store.calls.length, 0);
+    assert.equal(h.of("fatal").length, 0);
+  }
+});
+
 test("record close during each uncancelable save read fences mutation and retains capacity until settlement", async () => {
   for (const stage of ["replay", "archive"]) {
     const store = controlledRecordStore(), h = await recordWorker(store), held = deferred();

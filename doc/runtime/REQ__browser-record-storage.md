@@ -46,11 +46,14 @@ valid presentation until the current candidate is accepted. A selected replay
 or opponent remains usable after its database entry is deleted or refresh fails.
 Legacy records without an archive retain replay selection.
 
-Menu preview permits one physical replay/archive acquisition at a time.
+Menu preview and historical presentation each permit one physical
+replay/archive acquisition at a time.
 Competing previews acquire no body; navigation or cancellation cannot release
 that slot before the original uncancelable read settles. Retired completion
-cannot replace the current preview, and explicit retry is available after
-settlement. This slot does not prevent unrelated gameplay.
+cannot replace the current presentation. A busy historical request receives a
+bounded correlated refusal and retains the prior valid presentation; it does
+not start another read or queue an automatic retry. Explicit fresh retry is
+available after settlement. These slots do not prevent unrelated gameplay.
 
 ## Record protocol
 

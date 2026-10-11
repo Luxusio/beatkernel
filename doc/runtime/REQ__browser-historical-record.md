@@ -9,6 +9,14 @@ pass; actual browser clone/lifetime and independent verification are pending.
 Original member association, candidate acceptance
 and preservation of prior valid presentation remain required.
 
+Historical replay/archive acquisition retains one physical slot until the
+actual read chain settles, even after cancellation. Competing requests receive
+bounded correlated refusal without another body read or automatic retry; the
+prior accepted presentation remains usable. Fresh explicit retry follows
+settlement. Newer identity still fences old replies and candidates. This
+supersedes concurrent deferred-read admission, without allowing stale
+completion to replace the current selection.
+
 Using a stored replay sends its immutable replay File, optional whole result
 archive Blob and explicit original player ID to the initialized idle Worker.
 The Worker owns IndexedDB and binary reads. Window owns UI controls, immutable
