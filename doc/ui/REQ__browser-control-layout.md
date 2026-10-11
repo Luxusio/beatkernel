@@ -20,5 +20,8 @@ behavior. Verify genuine preparation, recording/save and replay through the
 existing ordinary player workflow with unchanged Worker/business/audio owners.
 
 This control contract does not establish canvas font quality, physical input or
-audio latency, full touch support or whole-player completion. Implementation and
-independent acceptance belong to TASK__browser-controls-responsive-layout.
+audio latency, full touch support or whole-player completion. Source `d03670b`
+implements this contract. Independent source review passed; browser QA observed
+containment across all seven widths and actual preparation/capture/save/replay,
+and independent UX passed actual narrow/desktop keyboard and recovery journeys.
+Final task closure additionally requires Harness-owned ordered receipts.
