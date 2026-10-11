@@ -3,7 +3,7 @@ use crate::{
     *,
 };
 use beatkernel::{audio::SampleId, chart::*, time::Duration};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 struct Row {
     measure: usize,
     channel: u8,
@@ -164,12 +164,22 @@ fn define<K: Ord, V>(
     label: &'static str,
     policy: DuplicatePolicy,
 ) -> Result<(), BmsError> {
-    if policy == DuplicatePolicy::Reject && map.contains_key(&key) {
-        return Err(fail(line, BmsErrorKind::Duplicate(label)));
+    if policy == DuplicatePolicy::Reject {
+        match map.entry(key) {
+            Entry::Occupied(_) => return Err(fail(line, BmsErrorKind::Duplicate(label))),
+            Entry::Vacant(entry) => {
+                entry.insert(value);
+            }
+        }
+    } else {
+        map.insert(key, value);
     }
-    map.insert(key, value);
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "parser_define_fixtures.rs"]
+mod define_fixtures;
 fn visible(channel: u8) -> bool {
     matches!(channel, 0x11..=0x19 | 0x21..=0x29)
 }
