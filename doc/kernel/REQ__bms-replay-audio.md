@@ -110,3 +110,23 @@ actual consumed/applied counts equal to the admitted plan. Commands queued after
 the retained fence cannot count as executed; accounting mismatch fails. This
 is a finite fence rather than an idle-voice drain. Native/offline callers remain
 strict until explicitly integrated; runtime acceptance is still pending.
+
+## Real-time fixed replay speed integration
+
+The [real-time replay speed contract](REQ__realtime-replay-speed.md) defines
+the ongoing common/native/browser integration. Selected positive speed affects
+both actual planner/Mixer readheads and genuine presentation-to-original-song
+mapping. Preroll and acknowledged pause gaps remain output durations. A finite
+original end caps wide song time before narrowing; it cannot hide an uncapped
+numeric error. Legacy constructors remain normal-speed wrappers.
+
+Quantization can leave presented song time just short of the original end,
+including a zero output-frame fence. Only exact executed/admitted command
+accounting, completed feeder/ACK retirement and genuine source presentation or
+original converted target crossing authorize processing remaining original
+records up to that original end. This adds no advance beyond the validated
+original end, fabricated record completion or host-clock substitute. The
+records-independent `FiniteReplayCompletion::output_finished` exposes that
+existing output authority to native integration; final completion still
+requires actual finished records. Full real-time integration and independent
+runtime acceptance remain pending.
