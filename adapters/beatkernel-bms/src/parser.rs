@@ -4,6 +4,8 @@ use crate::{
 };
 use beatkernel::{audio::SampleId, chart::*, time::Duration};
 use std::collections::{BTreeMap, btree_map::Entry};
+#[path = "parser_metadata.rs"]
+mod parser_metadata;
 struct Row {
     measure: usize,
     channel: u8,
@@ -1195,15 +1197,12 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
             .as_ref()
             .filter(|event| event.value != 0)
             .map(|event| SampleId(u64::from(event.value)));
-        let mut bytes = vec![1, note.lane.channel()];
-        bytes.extend(note.head.value.to_le_bytes());
-        bytes.extend((note.head.line as u64).to_le_bytes());
-        if let Some(tail) = tail_sample {
-            bytes.push(1);
-            bytes.extend((tail.0 as u16).to_le_bytes());
-        } else {
-            bytes.push(0);
-        }
+        let bytes = parser_metadata::note_metadata(
+            note.lane.channel(),
+            note.head.value,
+            note.head.line,
+            tail_sample,
+        );
         source.objects.push(SourceObject {
             id,
             start: Beat::new(note.head.tick)
