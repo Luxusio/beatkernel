@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { File } from "node:buffer";
 import test from "node:test";
 import { snapshotBrowserSettings, snapshotBrowserSettingsScalars, encodeBrowserSettings, decodeBrowserSettings } from "./settings-profile.mjs";
+import * as settingsProfile from "./settings-profile.mjs";
 import { BMS_TIMING_PRESET_ID } from "./play-model.mjs";
 
 globalThis.File ??= File;
@@ -21,6 +22,117 @@ function settings() {
 const bytes = value => new TextEncoder().encode(JSON.stringify(value));
 const file = data => new FileType([data], "portable.json", { type: "application/json" });
 const scalarDraft = value => ({ timing: value.timing, output: value.output, capacities: value.capacities, section: value.section });
+// Literal menu order is an independent contract oracle, not derived from the mapper.
+const legacyMenuFields = () => ["12.345678", "0.000001", "-0.000001", "custom", "10.000001", "044100",
+  "65536", "4096", "4096", "4096", "65536", "604800.000000001", "604800.000000002"];
+
+test("settings menu mapping emits sixteen immutable strings with exact legacy order and absent-profile defaults", () => {
+  assert.equal(typeof settingsProfile.settingsMenuFields, "function");
+  const expected = [...legacyMenuFields(), "", "rank-first", "beatkernel"];
+  for (const original of [settings(), scalarDraft(settings())]) {
+    const before = structuredClone(original);
+    const fields = settingsProfile.settingsMenuFields(original);
+    assert.deepEqual(fields, expected);
+    assert.ok(Object.isFrozen(fields));
+    assert.equal(fields.length, 16);
+    assert.ok(fields.every(value => typeof value === "string"));
+    assert.deepEqual(original, before);
+    original.timing.earlyMs = "73";
+    assert.deepEqual(fields, expected);
+    assert.throws(() => { fields[13] = BMS_TIMING_PRESET_ID; }, TypeError);
+  }
+});
+
+test("thirteen menu fields omit policy keys and produce independent deeply frozen scalar ownership", () => {
+  assert.equal(typeof settingsProfile.settingsMenuSnapshot, "function");
+  const fields = legacyMenuFields(), before = [...fields];
+  const snapshot = settingsProfile.settingsMenuSnapshot(fields);
+  assert.deepEqual(snapshot, scalarDraft(settings()));
+  assert.deepEqual(Object.keys(snapshot.timing), ["earlyMs", "lateMs", "offsetMs"]);
+  for (const value of [snapshot, ...Object.values(snapshot)]) assert.ok(Object.isFrozen(value));
+  assert.equal(Object.hasOwn(snapshot, "bindings"), false);
+  assert.deepEqual(fields, before);
+  fields[0] = "73";
+  assert.equal(snapshot.timing.earlyMs, "12.345678");
+  assert.throws(() => { snapshot.section.startSeconds = "0"; }, TypeError);
+});
+
+test("complete menu policies preserve exact strings including explicit defaults and latent rank precedence", () => {
+  assert.equal(typeof settingsProfile.settingsMenuSnapshot, "function");
+  assert.equal(typeof settingsProfile.settingsMenuFields, "function");
+  const policies = [["", "rank-first", "beatkernel"], ["", "defexrank-first", "beatkernel"],
+    ...["rank-first", "defexrank-first"].flatMap(rank =>
+      ["beatkernel", "assist-easy", "easy", "groove", "hard", "ex-hard", "hazard"]
+        .map(gauge => [BMS_TIMING_PRESET_ID, rank, gauge]))];
+  for (const [presetId, rankPrecedence, gauge] of policies) {
+    const fields = [...legacyMenuFields(), presetId, rankPrecedence, gauge], before = [...fields];
+    const expected = scalarDraft(settings());
+    Object.assign(expected.timing, { presetId, rankPrecedence, gauge });
+    const snapshot = settingsProfile.settingsMenuSnapshot(fields);
+    assert.deepEqual(snapshot, expected);
+    for (const value of [snapshot, ...Object.values(snapshot)]) assert.ok(Object.isFrozen(value));
+    assert.deepEqual(settingsProfile.settingsMenuFields(snapshot), before);
+    assert.deepEqual(fields, before);
+    fields[14] = "changed-after-snapshot";
+    assert.equal(snapshot.timing.rankPrecedence, rankPrecedence);
+  }
+});
+
+test("menu mapping rejects malformed counts nonstrings field bounds and policy values without changing inputs", () => {
+  assert.equal(typeof settingsProfile.settingsMenuSnapshot, "function");
+  const valid = [...legacyMenuFields(), BMS_TIMING_PRESET_ID, "rank-first", "beatkernel"];
+  const malformed = [null, {}, "settings", [], ...[12, 14, 15, 17].map(length =>
+    Array.from({ length }, (_, index) => valid[index] ?? ""))];
+  const limits = [21, 21, 21, 16, 21, 10, 5, 5, 5, 5, 5, 20, 20, 96, 16, 16];
+  for (let index = 0; index < valid.length; index++) {
+    for (const value of [null, 1, undefined, "x".repeat(limits[index] + 1)]) {
+      const fields = [...valid]; fields[index] = value; malformed.push(fields);
+    }
+    const sparse = [...valid]; delete sparse[index]; malformed.push(sparse);
+  }
+  for (const [index, value] of [[0, "-1"], [1, "1e2"], [2, "0.0000001"], [3, "automatic"],
+    [4, "60000.000001"], [5, "0"], [6, "65537"], [7, "4097"], [8, "0"], [9, "4097"],
+    [10, "65537"], [11, "+0"], [12, "604800.000000001"], [13, "unknown/v1"],
+    [14, "last-header"], [15, "unknown"]]) {
+    const fields = [...valid]; fields[index] = value; malformed.push(fields);
+  }
+  const missingPreset = [...valid]; missingPreset[13] = ""; missingPreset[15] = "groove";
+  malformed.push(missingPreset);
+  for (const fields of malformed) {
+    const before = structuredClone(fields);
+    assert.throws(() => settingsProfile.settingsMenuSnapshot(fields));
+    assert.deepEqual(fields, before);
+  }
+});
+
+test("menu conversion keeps complete profile binding validation and eighteen-lane codec round trips unchanged", async () => {
+  assert.equal(typeof settingsProfile.settingsMenuFields, "function");
+  assert.equal(typeof settingsProfile.settingsMenuSnapshot, "function");
+  for (const policy of [undefined,
+    { presetId: BMS_TIMING_PRESET_ID, rankPrecedence: "defexrank-first", gauge: "hard" },
+    { presetId: "", rankPrecedence: "defexrank-first", gauge: "beatkernel" }]) {
+    const original = settings();
+    if (policy) Object.assign(original.timing, policy);
+    const before = structuredClone(original);
+    const fields = settingsProfile.settingsMenuFields(original);
+    assert.deepEqual(fields, [...legacyMenuFields(), ...(policy
+      ? [policy.presetId, policy.rankPrecedence, policy.gauge] : ["", "rank-first", "beatkernel"])]);
+    const scalar = settingsProfile.settingsMenuSnapshot(fields);
+    assert.equal(Object.hasOwn(scalar, "bindings"), false);
+    assert.deepEqual(original, before);
+    assert.deepEqual(await decodeBrowserSettings(file(encodeBrowserSettings(original))), before);
+    assert.equal(original.bindings.length, 18);
+    assert.deepEqual(original.bindings, settings().bindings);
+  }
+  for (const mutate of [value => { value.bindings.pop(); }, value => { value.bindings = []; },
+    value => { value.bindings[1][1] = "KeyA"; }, value => { value.timing.gauge = "hard"; },
+    value => { value.timing.earlyMs = "-1"; }, value => { value.kind = "foreign"; }]) {
+    const malformed = settings(); mutate(malformed);
+    const before = structuredClone(malformed);
+    assert.throws(() => settingsProfile.settingsMenuFields(malformed));
+    assert.deepEqual(malformed, before);
+  }
+});
 
 test("explicit timing policies round-trip while legacy profiles keep their old shape", async () => {
   const legacy = settings();

@@ -129,3 +129,95 @@ test("Records keyboard intent does not mutate frozen state or prevent browser de
   assert.equal(recordsKeyboardControl(key, accepted), 50002n);
   assert.equal(accepted.selected, 1);
 });
+
+import { settingsKeyboardControl } from "./menu-keyboard.mjs";
+const settingsState = fields => state({ route: 2, count: 16, ...fields });
+const settingsKeys = ["ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown", "Tab", "Escape"];
+
+test("Settings keyboard reaches every field with existing semantic controls", () => {
+  for (const [code, selected, expected] of [
+    ["ArrowUp", 2, 1001n], ["ArrowDown", 1, 1002n],
+    ["Home", 12, 1000n], ["End", 1, 1015n],
+    ["PageDown", 0, 1010n], ["PageDown", 10, 1015n],
+    ["PageUp", 15, 1005n], ["PageUp", 10, 1000n],
+    ["Tab", 12, 1013n], ["Escape", 15, 11n],
+  ]) assert.equal(settingsKeyboardControl(event(code), settingsState({ selected })), expected);
+  assert.equal(settingsKeyboardControl(event("Tab", { shiftKey: true }), settingsState({ selected: 13 })), 1012n);
+  assert.equal(settingsKeyboardControl(event("End"), settingsState({ count: 128 })), 1127n);
+  for (let selected = 0; selected < 16; selected++) {
+    assert.equal(settingsKeyboardControl(event("ArrowDown"), settingsState({ selected })),
+      selected === 15 ? null : 1000n + BigInt(selected + 1));
+    assert.equal(settingsKeyboardControl(event("Tab", { shiftKey: true }), settingsState({ selected })),
+      selected === 0 ? null : 1000n + BigInt(selected - 1));
+  }
+});
+
+test("Settings navigation clamps without repeating same-row actions or wrapping Tab", () => {
+  for (const [code, selected, fields] of [
+    ["ArrowUp", 0, {}], ["Home", 0, {}], ["PageUp", 0, {}],
+    ["ArrowDown", 15, {}], ["End", 15, {}], ["PageDown", 15, {}],
+    ["Tab", 15, {}], ["Tab", 0, { shiftKey: true }],
+  ]) assert.equal(settingsKeyboardControl(event(code, fields), settingsState({ selected })), null);
+  assert.equal(settingsKeyboardControl(event("PageUp"), settingsState({ selected: 3 })), 1000n);
+  assert.equal(settingsKeyboardControl(event("PageDown"), settingsState({ selected: 13 })), 1015n);
+  for (const code of settingsKeys.filter(code => code !== "Escape")) {
+    assert.equal(settingsKeyboardControl(event(code), settingsState({ selected: 0, count: 1 })), null);
+  }
+  assert.equal(settingsKeyboardControl(event("Tab", { shiftKey: true }), settingsState({ selected: 0, count: 1 })), null);
+  assert.equal(settingsKeyboardControl(event("Escape"), settingsState({ selected: 0, count: 1 })), 11n);
+});
+
+test("Settings keys leave editors, IME, repeats and modified input with their owners", () => {
+  for (const code of settingsKeys) {
+    for (const target of [
+      { tagName: "INPUT" }, { tagName: "textarea" }, { tagName: "SELECT" },
+      { tagName: "DIV", isContentEditable: true },
+    ]) assert.equal(settingsKeyboardControl(event(code, { target }), settingsState({})), null);
+    for (const flag of ["isComposing", "repeat", "ctrlKey", "altKey", "metaKey"]) {
+      assert.equal(settingsKeyboardControl(event(code, { [flag]: true }), settingsState({})), null);
+      assert.equal(settingsKeyboardControl(event(code, { [flag]: true, shiftKey: true }), settingsState({})), null);
+    }
+    if (code !== "Tab") {
+      assert.equal(settingsKeyboardControl(event(code, { shiftKey: true }), settingsState({})), null);
+    }
+  }
+  assert.equal(settingsKeyboardControl(event("Tab", { shiftKey: true }), settingsState({})), 1000n);
+});
+
+test("Settings keys refuse unavailable, gameplay and other-screen projections", () => {
+  for (const fields of [
+    { available: false }, { available: undefined }, { available: 1 }, { playing: true },
+    ...[0, 1, 3, 4, 5, 6, 7, 9, "2"].map(route => ({ route })),
+  ]) for (const code of settingsKeys) {
+    assert.equal(settingsKeyboardControl(event(code), settingsState(fields)), null);
+  }
+});
+
+test("Settings count and selection bounds also fence Escape without granting defaults", () => {
+  for (const fields of [
+    { count: 0 }, { count: -1 }, { count: 129 }, { count: 1.5 }, { count: NaN },
+    { count: Infinity }, { count: "16" }, { count: undefined },
+    { selected: -1 }, { selected: 16 }, { selected: 0.5 }, { selected: NaN },
+    { selected: Infinity }, { selected: "1" }, { selected: undefined },
+  ]) for (const code of settingsKeys) {
+    assert.equal(settingsKeyboardControl(event(code), settingsState(fields)), null);
+  }
+  for (const invalid of [null, undefined, {}, []]) {
+    assert.equal(settingsKeyboardControl(event("Escape"), invalid), null);
+    assert.equal(settingsKeyboardControl(invalid, settingsState({})), null);
+  }
+  for (const code of ["Enter", "KeyZ", "Space", ""]) {
+    assert.equal(settingsKeyboardControl(event(code), settingsState({})), null);
+  }
+});
+
+test("Settings keyboard computes intent without mutating state or preventing defaults", () => {
+  const accepted = Object.freeze(settingsState({ selected: 0 }));
+  const key = Object.freeze(event("PageDown", {
+    target: Object.freeze({ tagName: "CANVAS" }),
+    preventDefault() { assert.fail("Window owns admission and preventDefault"); },
+  }));
+  assert.equal(settingsKeyboardControl(key, accepted), 1010n);
+  assert.equal(accepted.selected, 0);
+  assert.equal(accepted.count, 16);
+});

@@ -5,6 +5,277 @@ use crate::browser_menu::{
 };
 use crate::screen_lifecycle::{ScreenInstanceId, ScreenRoute};
 
+// Literal wire-order oracle: the final three values are policy, not bindings.
+fn retained_policy_settings_fields() -> Vec<String> {
+    [
+        "5", "6", "-2", "output", "0", "48000", "8", "4", "8", "256", "8",
+        "1.000000001", "2.000000002", "", "defexrank-first", "beatkernel",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+fn retained_policy_settings_menu() -> BrowserMenu {
+    let mut menu = BrowserMenu::new(401).unwrap();
+    menu.navigate_with_fields(
+        token(&menu),
+        ScreenRoute::Settings,
+        retained_policy_settings_fields(),
+    )
+    .unwrap();
+    menu.select(token(&menu), 14).unwrap();
+    menu
+}
+
+#[test]
+fn browser_profile_pending_and_atomic_practice_commit_have_exact_t0_t1_t2_tokens() {
+    use crate::browser_menu::{BrowserMenuPresentation, MenuOperationStatus};
+    let mut menu = retained_policy_settings_menu();
+    let parent = menu.snapshot();
+    menu.accept_action(parent.token, 40, 74).unwrap();
+    menu.select(token(&menu), 1).unwrap();
+    let original = menu.snapshot();
+    let t0 = original.token;
+    assert!(menu.has_settings_parent());
+    menu.set_operation_status(t0, MenuOperationStatus::Pending).unwrap();
+    let pending = menu.snapshot();
+    let t1 = pending.token;
+    assert_eq!(t1, MenuToken { revision: t0.revision + 1, ..t0 });
+    assert!(pending.pending);
+    assert_eq!(pending.fields, original.fields);
+    assert_eq!(pending.selected, original.selected);
+    for action in [71, 72, 73] {
+        assert!(menu.accept_action(t1, 41, action).is_err());
+        assert_eq!(menu.snapshot(), pending);
+    }
+    assert!(menu.navigate(t1, ScreenRoute::Settings).is_err());
+    assert!(menu.set_fields(t1, vec!["99".into(), "100".into()]).is_err());
+    assert!(menu.edit(t1, 0, "99".into()).is_err());
+    assert!(menu.select(t1, 0).is_err());
+    let mut presentation = BrowserMenuPresentation::new(pending.clone()).unwrap();
+    let mut scene = render_menu(&mut presentation);
+    assert_eq!(presentation.hit((590.0, 390.0), [960, 720]), 0);
+    assert!(presentation.request_motion(t1, crate::ui::interaction::ControlId(73), requested_menu_motion(20.0), std::time::Duration::ZERO, &mut scene).is_err());
+    let mut loaded = retained_policy_settings_fields();
+    loaded[0] = "9".into();
+    loaded[11] = "5.000000005".into();
+    loaded[12] = "6.000000006".into();
+    loaded[14] = "rank-first".into();
+    assert!(menu.replace_settings_fields(t0, loaded.clone()).is_err());
+    assert!(menu.replace_settings_fields(MenuToken { revision: t1.revision + 1, ..t1 }, loaded.clone()).is_err());
+    assert_eq!(menu.snapshot(), pending);
+    menu.replace_settings_fields(t1, loaded.clone()).unwrap();
+    let committed = menu.snapshot();
+    assert_eq!(committed.token, MenuToken { revision: t1.revision + 1, ..t1 });
+    assert_eq!(committed.route, ScreenRoute::Practice);
+    assert_eq!(committed.selected, original.selected);
+    assert_eq!(committed.fields, ["5.000000005", "6.000000006"]);
+    assert!(!committed.pending);
+    assert_eq!(committed.error, None);
+    assert!(menu.accept_action(committed.token, 40, 71).is_err());
+    assert_eq!(menu.snapshot(), committed, "profile commit preserves the last admitted action");
+    assert_eq!(menu.accept_action(committed.token, 41, 71).unwrap(), MenuEffect::None);
+    let returned = menu.snapshot();
+    assert_eq!(returned.token.screen, parent.token.screen);
+    assert_eq!(returned.selected, parent.selected);
+    assert_eq!(returned.fields, loaded, "Practice Done cannot resurrect its pre-profile section");
+}
+
+#[test]
+fn browser_profile_preflight_refusals_preserve_pending_child_and_retained_parent() {
+    use crate::browser_menu::MenuOperationStatus;
+    for malformed in [
+        vec!["value".into(); 15],
+        vec!["value".into(); 17],
+        { let mut f = retained_policy_settings_fields(); f[13] = "x".repeat(4097); f },
+        { let mut f = retained_policy_settings_fields(); f[11] = "invalid".into(); f },
+        { let mut f = retained_policy_settings_fields(); f[11] = "3".into(); f[12] = "2".into(); f },
+    ] {
+        let mut menu = retained_policy_settings_menu();
+        let parent = menu.snapshot();
+        menu.accept_action(parent.token, 50, 74).unwrap();
+        menu.select(token(&menu), 1).unwrap();
+        menu.set_operation_status(token(&menu), MenuOperationStatus::Pending).unwrap();
+        let pending = menu.snapshot();
+        assert!(menu.replace_settings_fields(pending.token, malformed).is_err());
+        assert_eq!(menu.snapshot(), pending);
+        menu.set_operation_status(pending.token, MenuOperationStatus::Idle).unwrap();
+        let cleared = menu.snapshot();
+        assert_eq!(cleared.token.revision, pending.token.revision + 1);
+        assert!(!cleared.pending);
+        assert_eq!(cleared.fields, pending.fields);
+        assert!(menu.accept_action(cleared.token, 50, 72).is_err());
+        menu.accept_action(cleared.token, 51, 72).unwrap();
+        assert_eq!(menu.snapshot().token.screen, parent.token.screen);
+        assert_eq!(menu.fields(), parent.fields, "failure must not partially replace ancestor fields");
+        assert_eq!(menu.selected(), parent.selected);
+    }
+}
+
+#[test]
+fn browser_profile_players_commit_keeps_roster_identity_selection_and_action_counter() {
+    use crate::browser_menu::MenuOperationStatus;
+    let mut menu = retained_policy_settings_menu();
+    let parent = menu.snapshot();
+    let roster = acquired_browser_member_fields();
+    menu.navigate_with_fields(parent.token, ScreenRoute::Players, roster.clone()).unwrap();
+    menu.select(token(&menu), 1).unwrap();
+    menu.accept_action(token(&menu), 60, 32).unwrap();
+    let original = menu.snapshot();
+    menu.set_operation_status(original.token, MenuOperationStatus::Pending).unwrap();
+    let t1 = token(&menu);
+    let mut loaded = retained_policy_settings_fields();
+    loaded[11] = "7".into();
+    loaded[12] = "8".into();
+    menu.replace_settings_fields(t1, loaded.clone()).unwrap();
+    let committed = menu.snapshot();
+    assert_eq!(committed.token, MenuToken { revision: t1.revision + 1, ..t1 });
+    assert_eq!(committed.token.screen, original.token.screen);
+    assert_eq!(committed.route, original.route);
+    assert_eq!(committed.selected, original.selected);
+    assert_eq!(committed.fields, roster);
+    assert!(menu.accept_action(committed.token, 60, 30).is_err());
+    assert_eq!(menu.accept_action(committed.token, 61, 30).unwrap(), MenuEffect::None);
+    assert_eq!(menu.snapshot().token.screen, parent.token.screen);
+    assert_eq!(menu.selected(), parent.selected);
+    assert_eq!(menu.fields(), loaded);
+}
+
+#[test]
+fn browser_profile_without_settings_ancestor_refuses_replacement_without_mutation() {
+    let mut menu = BrowserMenu::new(409).unwrap();
+    assert!(!menu.has_settings_parent());
+    let original = menu.snapshot();
+    assert!(menu.replace_settings_fields(original.token, retained_policy_settings_fields()).is_err());
+    assert_eq!(menu.snapshot(), original);
+}
+
+#[test]
+fn browser_profile_commit_preserves_nested_devices_and_players_drafts() {
+    use crate::browser_menu::MenuOperationStatus;
+    let mut menu = retained_policy_settings_menu();
+    let parent = menu.snapshot();
+    let roster = acquired_browser_member_fields();
+    menu.navigate_with_fields(parent.token, ScreenRoute::Players, roster.clone()).unwrap();
+    menu.select(token(&menu), 1).unwrap();
+    let players = menu.snapshot();
+    let devices = paged_browser_local_fields(2, 3);
+    menu.navigate_with_fields(players.token, ScreenRoute::Devices { players: true }, devices.clone()).unwrap();
+    menu.select(token(&menu), 2).unwrap();
+    let child = menu.snapshot();
+    menu.set_operation_status(child.token, MenuOperationStatus::Pending).unwrap();
+    let t1 = token(&menu);
+    let mut loaded = retained_policy_settings_fields();
+    loaded[0] = "11".into();
+    menu.replace_settings_fields(t1, loaded.clone()).unwrap();
+    let committed = menu.snapshot();
+    assert_eq!(committed.token, MenuToken { revision: t1.revision + 1, ..t1 });
+    assert_eq!(committed.route, child.route);
+    assert_eq!(committed.selected, child.selected);
+    assert_eq!(committed.fields, devices);
+    menu.back(committed.token).unwrap();
+    assert_eq!(menu.snapshot().token.screen, players.token.screen);
+    assert_eq!(menu.fields(), roster);
+    assert_eq!(menu.selected(), players.selected);
+    menu.accept_action(token(&menu), 1, 30).unwrap();
+    assert_eq!(menu.snapshot().token.screen, parent.token.screen);
+    assert_eq!(menu.fields(), loaded);
+    assert_eq!(menu.selected(), parent.selected);
+}
+
+#[test]
+fn browser_settings_policy_fields_publish_page_two_labels_and_exact_edit_controls() {
+    use crate::browser_menu::BrowserMenuPresentation;
+    let mut menu = retained_policy_settings_menu();
+    let mut presentation = BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+    let scene = render_menu(&mut presentation);
+    for label in ["TIMING PRESET", "RANK PRECEDENCE", "GAUGE"] {
+        menu_label(&scene, label);
+    }
+    for (index, y) in [(13, 253.0), (14, 292.0), (15, 331.0)] {
+        assert_eq!(presentation.hit((310.0, y), [960, 720]), 1000 + index);
+        menu.select(token(&menu), index as usize).unwrap();
+        presentation.apply(menu.snapshot()).unwrap();
+        render_menu(&mut presentation);
+        assert_eq!(menu.snapshot().selected, index as usize);
+    }
+    assert_eq!(menu.fields(), retained_policy_settings_fields());
+    assert_eq!(decode_snapshot(&encode_snapshot(&menu.snapshot()).unwrap()).unwrap(), menu.snapshot());
+}
+
+#[test]
+fn browser_settings_native_only_controls_have_no_hit_action_or_motion_target() {
+    use crate::{browser_menu::BrowserMenuPresentation, ui::interaction::ControlId};
+    let mut menu = retained_policy_settings_menu();
+    let mut presentation = BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+    let mut scene = render_menu(&mut presentation);
+    for (control, point) in [(12, (450.0, 635.0)), (15, (400.0, 575.0))] {
+        assert_eq!(presentation.hit(point, [960, 720]), 0);
+        assert!(presentation.control_node(ControlId(control)).is_err());
+        assert!(presentation.request_motion(token(&menu), ControlId(control), requested_menu_motion(10.0), std::time::Duration::ZERO, &mut scene).is_err());
+        let before = menu.snapshot();
+        assert!(menu.accept_action(before.token, 1, control).is_err());
+        assert_eq!(menu.snapshot(), before);
+    }
+    for (control, point) in [(10, (50.0, 635.0)), (11, (230.0, 635.0)), (13, (610.0, 635.0)), (14, (800.0, 635.0)), (74, (300.0, 75.0)), (17, (700.0, 75.0))] {
+        assert_eq!(presentation.hit(point, [960, 720]), control);
+    }
+    assert_eq!(menu.accept_action(token(&menu), 1, 10).unwrap(), MenuEffect::Apply, "refused controls cannot consume the action counter");
+}
+
+#[test]
+fn browser_practice_inherits_both_settings_shapes_and_done_preserves_policy_and_parent_selection() {
+    for count in [13, 16] {
+        let mut original = retained_policy_settings_fields();
+        original.truncate(count);
+        let mut menu = BrowserMenu::new(403).unwrap();
+        menu.navigate_with_fields(token(&menu), ScreenRoute::Settings, original.clone()).unwrap();
+        menu.select(token(&menu), count - 1).unwrap();
+        let parent = menu.snapshot();
+        menu.accept_action(parent.token, 1, 74).unwrap();
+        assert_eq!(menu.fields(), ["1.000000001", "2.000000002"]);
+        menu.set_fields(token(&menu), vec!["3.000000003".into(), "4.000000004".into()]).unwrap();
+        let child = menu.snapshot();
+        assert_eq!(menu.accept_action(child.token, 2, 71).unwrap(), MenuEffect::None);
+        let returned = menu.snapshot();
+        assert_eq!(returned.token.screen, parent.token.screen);
+        assert_eq!(returned.route, ScreenRoute::Settings);
+        assert_eq!(returned.selected, parent.selected);
+        original[11] = "3.000000003".into();
+        original[12] = "4.000000004".into();
+        assert_eq!(returned.fields, original);
+        assert!(menu.accept_action(child.token, 3, 71).is_err());
+        assert!(menu.accept_action(returned.token, 2, 10).is_err());
+        assert_eq!(menu.snapshot(), returned);
+        assert_eq!(menu.accept_action(returned.token, 3, 10).unwrap(), MenuEffect::Apply);
+    }
+}
+
+#[test]
+fn browser_players_done_and_back_restore_original_settings_without_consuming_stale_actions() {
+    for done in [30, 31] {
+        let mut menu = retained_policy_settings_menu();
+        let parent = menu.snapshot();
+        let roster = acquired_browser_member_fields();
+        menu.navigate_with_fields(parent.token, ScreenRoute::Players, roster.clone()).unwrap();
+        menu.select(token(&menu), 1).unwrap();
+        let players = menu.snapshot();
+        assert_eq!(players.fields, roster);
+        assert_eq!(menu.accept_action(players.token, 9, done).unwrap(), MenuEffect::None);
+        let returned = menu.snapshot();
+        assert_eq!(returned.token.screen, parent.token.screen);
+        assert_eq!(returned.route, ScreenRoute::Settings);
+        assert_eq!(returned.fields, parent.fields);
+        assert_eq!(returned.selected, parent.selected);
+        assert!(menu.accept_action(players.token, 10, done).is_err());
+        assert!(menu.accept_action(returned.token, 9, 10).is_err());
+        assert_eq!(menu.snapshot(), returned);
+        assert_eq!(menu.accept_action(returned.token, 10, 10).unwrap(), MenuEffect::Apply);
+        menu.navigate_with_fields(token(&menu), ScreenRoute::Players, roster.clone()).unwrap();
+        assert_eq!(menu.fields(), roster, "Done cannot alter the canonical supplied roster");
+    }
+}
+
 fn token(menu: &BrowserMenu) -> MenuToken {
     menu.snapshot().token
 }

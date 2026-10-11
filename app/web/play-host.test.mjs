@@ -333,6 +333,7 @@ async function harness(faults = {}) {
     postMessage(value, transfer = []) {
       if (value.kind === "menu-motion") (this.motionArguments ??= []).push(value);
       traces.push(["post", value.kind]);
+      faults.observePost?.(value);
       if (value.kind === this.failKind) throw new Error("injected Worker post failure");
       assert.equal(this.terminations, 0, "posting after Worker termination");
       // The fake canvas has no native transferable. Other data follows the real
@@ -8126,4 +8127,477 @@ test("Records keyboard host: Selection retains row RPC and its existing modifier
     assert.equal(game.messages("menu-action").length, actions);
     assert.equal(h.window.emit("keydown", { code: "Escape" }).defaultPrevented, false);
   } finally { await h.close(); }
+});
+
+// Literal Window acquisition oracle: deliberately independent of the new mapper.
+const retainedPolicyIds = ["judge-preset", "judge-precedence", "judge-gauge"];
+const retainedPolicy = [BMS_TIMING_PRESET_ID, "defexrank-first", "hard"];
+function retainedSettingsValues(h) {
+  return [...settingsFields.map(([, , id]) => h.get(id).value), ...retainedPolicyIds.map(id => h.get(id).value)];
+}
+function completeSettingsDraft(h) {
+  return [...settingsDraft(h), ...retainedPolicyIds.map(id => [id, h.get(id).value])];
+}
+function retainedToken(state) {
+  return { menuGeneration: state.menuGeneration, screen: state.screen, revision: state.revision };
+}
+function profileWithPolicy() {
+  const profile = portableSettings();
+  Object.assign(profile.timing, { presetId: retainedPolicy[0], rankPrecedence: retainedPolicy[1], gauge: retainedPolicy[2] });
+  return profile;
+}
+function profileMenuValues(profile) {
+  return [...settingsFields.map(([group, key]) => profile[group][key]),
+    profile.timing.presetId ?? "", profile.timing.rankPrecedence ?? "rank-first", profile.timing.gauge ?? "beatkernel"];
+}
+async function retainedProfileRequest(h, route = 2) {
+  await h.preview();
+  const game = h.workers[0];
+  const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+    route, fields: route === 2 ? retainedSettingsValues(h) : ["0", ""], selected: route === 2 ? 14 : 1,
+    hasSettingsParent: true };
+  await h.receive(state); chooseSettings(h); await flush();
+  const request = game.last("settings-profile-load"); assert.ok(request);
+  assert.deepEqual(request.menuToken, retainedToken(state));
+  return { game, state, request };
+}
+async function profilePending(h, transaction) {
+  const { state, request } = transaction;
+  const pending = { ...state, revision: state.revision + 1n, pending: true,
+    settingsOperationId: request.id, previousToken: retainedToken(state) };
+  await h.receive(pending);
+  return pending;
+}
+async function profileCandidate(h, transaction, pending, settings = profileWithPolicy()) {
+  await h.receive({ kind: "settings-profile-candidate", id: transaction.request.id,
+    menuToken: retainedToken(pending), settings });
+}
+
+test("retained policy: Settings publishes sixteen acquired strings and Apply preserves all eighteen bindings", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    retainedPolicyIds.forEach((id, index) => { h.get(id).value = retainedPolicy[index]; });
+    const acquired = retainedSettingsValues(h), bindings = settingsDraft(h).slice(13);
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 2, fields: [], selected: 0 };
+    await h.receive(state);
+    assert.deepEqual(game.last("menu-fields").fields, acquired);
+    const fields = profileMenuValues(profileWithPolicy());
+    await h.receive({ ...state, revision: 7n, fields });
+    await h.receive({ ...state, kind: "menu-effect", revision: 7n, fields, effect: 1n, control: 10n });
+    assert.deepEqual(retainedSettingsValues(h), fields);
+    assert.deepEqual(settingsDraft(h).slice(13), bindings);
+    h.click("settings-save"); await flush();
+    assert.deepEqual(game.last("settings-profile-save").settings.timing, profileWithPolicy().timing);
+  } finally { await h.close(); }
+});
+
+test("retained policy: late invalid policy or partial count calls no mirror setter; legacy thirteen preserves policy", async () => {
+  for (const fault of ["preset", "precedence", "gauge", "fourteen", "fifteen", "seventeen", "legacy"]) {
+    const h = await harness();
+    try {
+      await h.preview(); retainedPolicyIds.forEach((id, index) => { h.get(id).value = retainedPolicy[index]; });
+      const before = completeSettingsDraft(h), writes = [];
+      for (const id of [...settingsFields.map(([, , id]) => id), ...retainedPolicyIds]) {
+        const element = h.get(id); let value = element.value;
+        Object.defineProperty(element, "value", { configurable: true, get() { return value; },
+          set(next) { writes.push(id); value = next; } });
+      }
+      let fields = profileMenuValues(profileWithPolicy());
+      if (fault === "preset") fields[13] = "unknown-preset";
+      if (fault === "precedence") fields[14] = "unknown-precedence";
+      if (fault === "gauge") fields[15] = "unknown-gauge";
+      if (fault === "fourteen") fields = fields.slice(0, 14);
+      if (fault === "fifteen") fields = fields.slice(0, 15);
+      if (fault === "seventeen") fields.push("extra");
+      if (fault === "legacy") fields = fields.slice(0, 13);
+      const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n, route: 2, fields, selected: 0 };
+      await h.receive(state); writes.length = 0;
+      await h.receive({ ...state, kind: "menu-effect", effect: 1n, control: 10n });
+      if (fault === "legacy") {
+        assert.deepEqual(retainedSettingsValues(h), [...fields, ...retainedPolicy]);
+        assert.deepEqual(settingsDraft(h).slice(13), before.slice(13, 31));
+      } else {
+        assert.deepEqual(writes, [], fault);
+        assert.deepEqual(completeSettingsDraft(h), before, fault);
+      }
+    } finally { await h.close(); }
+  }
+});
+
+test("retained policy: Settings keyboard reaches page two with token fencing and native IME guards", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 2, fields: retainedSettingsValues(h), selected: 4 };
+    await h.receive(state);
+    for (const [code, shiftKey, control] of [["PageDown", false, 1014n], ["End", false, 1015n],
+      ["Home", false, 1000n], ["Tab", false, 1005n], ["Tab", true, 1003n], ["Escape", false, 11n]]) {
+      assert.equal(h.window.emit("keydown", { code, shiftKey }).defaultPrevented, true);
+      await flush(); const action = game.last("menu-action");
+      assert.equal(action.control, control); assert.equal(action.revision, 6n);
+    }
+    const count = game.messages("menu-action").length;
+    for (const guard of [{ isComposing: true }, { repeat: true }, { ctrlKey: true }, { altKey: true },
+      { metaKey: true }, { shiftKey: true }, { target: { tagName: "INPUT" } }, { target: { isContentEditable: true } }]) {
+      assert.equal(h.window.emit("keydown", { code: "PageDown", ...guard }).defaultPrevented, false);
+    }
+    assert.equal(game.messages("menu-action").length, count);
+    const editor = h.get("menu-editor"); editor.emit("compositionstart"); editor.value = "nearest";
+    editor.emit("input", { isComposing: true }); assert.equal(game.messages("menu-edit").length, 0);
+    editor.emit("compositionend"); editor.emit("keydown", { code: "Enter" });
+    assert.equal(game.messages("menu-action").length, count, "Apply waits for exact edit acknowledgment");
+    await h.receive({ ...state, revision: 7n, fields: state.fields.map((value, index) => index === 4 ? "nearest" : value) });
+    assert.equal(game.last("menu-action").control, 10n);
+    assert.equal(game.last("menu-action").revision, 7n);
+  } finally { await h.close(); }
+});
+
+test("retained profile: T0/T1 admission clears read deadline before post and T2 precedes exactly one cached mirror publication", async () => {
+  const h = await harness();
+  try {
+    const transaction = await retainedProfileRequest(h), before = completeSettingsDraft(h);
+    const readTimers = new Set(h.timers.keys());
+    const expiredRead = [...h.timers.values()].find(timer => timer.interval === null && timer.at === 11000)?.callback;
+    assert.ok(expiredRead);
+    const pending = await profilePending(h, transaction);
+    const candidate = profileWithPolicy();
+    h.faults.observePost = value => {
+      if (value.kind === "settings-profile-admit") {
+        assert.ok([...readTimers].some(id => !h.timers.has(id)), "acquisition deadline is cleared before admit crosses the port");
+      }
+    };
+    await profileCandidate(h, transaction, pending, candidate);
+    assert.deepEqual(transaction.game.last("settings-profile-admit"), { kind: "settings-profile-admit",
+      id: transaction.request.id, menuToken: retainedToken(pending) });
+    assert.deepEqual(completeSettingsDraft(h), before, "candidate never publishes mirrors");
+    expiredRead(); await flush();
+    assert.equal(transaction.game.messages("settings-profile-cancel").length, 0, "already queued read deadline cannot discard admitted intent");
+    assert.equal(h.get("play").disabled, true);
+    candidate.timing.earlyMs = "999"; // The frozen validated acquisition candidate is authoritative.
+    const result = { ...pending, revision: pending.revision + 1n, pending: false,
+      previousToken: retainedToken(pending), fields: profileMenuValues(profileWithPolicy()) };
+    await h.receive(result);
+    assert.deepEqual(completeSettingsDraft(h), before, "domain commit acknowledgment alone does not publish mirrors");
+    const final = { kind: "settings-profile-loaded", id: transaction.request.id,
+      admittedToken: retainedToken(pending), resultToken: retainedToken(result), settings: portableSettings() };
+    const writes = [];
+    for (const id of [...settingsFields.map(([, , id]) => id), ...retainedPolicyIds,
+      ...portableSettings().bindings.map(([lane]) => `binding-${lane.toString(16)}`)]) {
+      const element = h.get(id); let value = element.value;
+      Object.defineProperty(element, "value", { configurable: true, get() { return value; }, set(next) { writes.push(id); value = next; } });
+    }
+    await h.receive(final);
+    assert.deepEqual(retainedSettingsValues(h), profileMenuValues(profileWithPolicy()));
+    for (const [lane, code] of portableSettings().bindings) assert.equal(h.get(`binding-${lane.toString(16)}`).value, code);
+    assert.equal(writes.length, 34);
+    await h.receive(final); assert.equal(writes.length, 34, "duplicate final cannot publish again");
+    assert.equal(h.get("settings-load").disabled, false);
+    assert.equal(transaction.game.terminations, 0);
+    const start = await h.begin();
+    assert.deepEqual(start.timingPolicy, { presetId: retainedPolicy[0], rankPrecedence: retainedPolicy[1], gauge: retainedPolicy[2] });
+    assert.equal(start.startNs, 1000000001n); assert.equal(start.endNs, 2000000002n);
+    h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  } finally { await h.close(); }
+});
+
+test("retained profile: pending T1 adoption requires exact operation T0 owner route fields and selection", async () => {
+  for (const fault of ["id", "previous-token", "route", "screen", "fields", "selection", "owner"]) {
+    const h = await harness();
+    try {
+      const transaction = await retainedProfileRequest(h), before = completeSettingsDraft(h);
+      const pending = { ...transaction.state, revision: 7n, pending: true,
+        settingsOperationId: transaction.request.id, previousToken: retainedToken(transaction.state) };
+      if (fault === "id") pending.settingsOperationId++;
+      if (fault === "previous-token") pending.previousToken.revision--;
+      if (fault === "route") pending.route = 3;
+      if (fault === "screen") pending.screen++;
+      if (fault === "fields") pending.fields = pending.fields.map((value, index) => index === 0 ? "51" : value);
+      if (fault === "selection") pending.selected--;
+      if (fault === "owner") { h.window.emit("pagehide"); await flush(); }
+      await h.receive(pending, transaction.game);
+      await profileCandidate(h, transaction, pending);
+      assert.equal(transaction.game.messages("settings-profile-admit").length, 0, fault);
+      assert.deepEqual(completeSettingsDraft(h), before, fault);
+    } finally { await h.close(); }
+  }
+});
+
+test("retained profile: candidate validates full schema original binding and policy draft token and settled editor", async () => {
+  for (const fault of ["missing-binding", "unknown-key", "policy", "binding-drift", "policy-drift", "scalar-drift", "revision"]) {
+    const h = await harness();
+    try {
+      const transaction = await retainedProfileRequest(h), pending = await profilePending(h, transaction);
+      const candidate = profileWithPolicy();
+      if (fault === "missing-binding") candidate.bindings.pop();
+      if (fault === "unknown-key") candidate.output.extra = "invalid";
+      if (fault === "policy") candidate.timing.gauge = "unknown";
+      if (fault === "binding-drift") h.get("binding-11").value = "KeyQ";
+      if (fault === "policy-drift") h.get("judge-gauge").value = "hard";
+      if (fault === "scalar-drift") h.get("judge-early").value = "51";
+      if (fault === "revision") await h.receive({ ...pending, revision: 8n });
+      const before = completeSettingsDraft(h);
+      await profileCandidate(h, transaction, pending, candidate);
+      assert.equal(transaction.game.messages("settings-profile-admit").length, 0, fault);
+      assert.deepEqual(completeSettingsDraft(h), before, fault);
+      assert.equal(transaction.game.messages("play-start").length, 0);
+    } finally { await h.close(); }
+  }
+});
+
+test("retained profile: pre-admission timeout cancels held read and late candidate cannot revive operation", async () => {
+  const h = await harness();
+  try {
+    const transaction = await retainedProfileRequest(h), pending = await profilePending(h, transaction);
+    const before = completeSettingsDraft(h);
+    await h.advance(10000);
+    assert.deepEqual(transaction.game.last("settings-profile-cancel"), { kind: "settings-profile-cancel",
+      id: transaction.request.id, menuToken: retainedToken(pending) });
+    await profileCandidate(h, transaction, pending);
+    assert.equal(transaction.game.messages("settings-profile-admit").length, 0);
+    assert.deepEqual(completeSettingsDraft(h), before);
+    assert.equal(transaction.game.terminations, 0);
+    assert.equal(transaction.game.messages("play-start").length, 0);
+  } finally { await h.close(); }
+});
+
+test("retained profile: admitted malformed or lost final joins Worker retirement before ordinary use", async () => {
+  for (const fault of ["no-final", "wrong-result", "wrong-admitted", "final-before-state"]) {
+    const h = await harness({ holdDispose: true });
+    try {
+      const transaction = await retainedProfileRequest(h), pending = await profilePending(h, transaction);
+      const before = completeSettingsDraft(h);
+      await profileCandidate(h, transaction, pending);
+      assert.ok(transaction.game.last("settings-profile-admit"));
+      const result = { ...pending, revision: 8n, pending: false,
+        previousToken: retainedToken(pending), fields: profileMenuValues(profileWithPolicy()) };
+      if (fault !== "final-before-state") await h.receive(result);
+      if (fault === "no-final") await h.advance(10000);
+      else {
+        const final = { kind: "settings-profile-loaded", id: transaction.request.id,
+          admittedToken: retainedToken(pending), resultToken: retainedToken(result), settings: profileWithPolicy() };
+        if (fault === "wrong-result") final.resultToken.revision++;
+        if (fault === "wrong-admitted") final.admittedToken.revision--;
+        await h.receive(final);
+      }
+      assert.equal(transaction.game.messages("settings-profile-cancel").length, 0, "admission cannot be rolled back with cancel");
+      assert.deepEqual(completeSettingsDraft(h), before);
+      h.click("play"); h.click("menu-open"); chooseSettings(h); await flush();
+      assert.equal(transaction.game.messages("play-start").length, 0);
+      assert.equal(h.opens.length, 0);
+      assert.ok(transaction.game.last("dispose"), "uncertain admitted owner begins joined retirement");
+      await h.receive({ kind: "disposed" }, transaction.game); await flush();
+      for (const renderer of h.renderers) if (renderer.terminations === 0) await h.receive({ kind: "disposed" }, renderer);
+      await flush();
+      assert.equal(transaction.game.terminations, 1);
+      assert.deepEqual(completeSettingsDraft(h), before, "rebuild starts with last accepted acquisition mirrors");
+      assert.ok(h.workers.length > 1, "retirement rebuilds a fresh owner");
+    } finally {
+      h.faults.holdDispose = false; h.window.emit("pagehide"); await flush();
+      for (const owner of h.allWorkers) if (owner.terminations === 0) await h.receive({ kind: "disposed" }, owner);
+      await h.close();
+    }
+  }
+});
+
+test("retained policy: no Settings ancestor uses single phase full profile defaults without fabricating a parent", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    retainedPolicyIds.forEach((id, index) => { h.get(id).value = retainedPolicy[index]; });
+    chooseSettings(h); await flush(); const request = game.last("settings-profile-load");
+    assert.ok(request.menuToken == null);
+    await h.receive({ kind: "settings-profile-loaded", id: request.id, settings: portableSettings() });
+    assert.deepEqual(retainedPolicyIds.map(id => h.get(id).value), ["", "rank-first", "beatkernel"]);
+    assert.equal(game.messages("settings-profile-admit").length, 0);
+    assert.equal(game.messages("menu-action").length, 0);
+    for (const [lane, code] of portableSettings().bindings) assert.equal(h.get(`binding-${lane.toString(16)}`).value, code);
+    assert.equal(h.get("settings-load").disabled, false);
+  } finally { await h.close(); }
+});
+
+test("retained profile: mismatched admitted T2 fields retire immediately and late valid final cannot revive the owner", async () => {
+  const h = await harness({ holdDispose: true });
+  try {
+    retainedPolicyIds.forEach((id, index) => { h.get(id).value = retainedPolicy[index]; });
+    await h.preview(); h.get("binding-11").value = "KeyQ";
+    const transaction = await retainedProfileRequest(h), pending = await profilePending(h, transaction);
+    const before = completeSettingsDraft(h);
+    await profileCandidate(h, transaction, pending);
+    assert.ok(transaction.game.last("settings-profile-admit"));
+    const acceptedFields = profileMenuValues(profileWithPolicy());
+    const result = { ...pending, revision: pending.revision + 1n, pending: false,
+      previousToken: retainedToken(pending), fields: acceptedFields.map((value, index) => index === 0 ? "51" : value) };
+    await h.receive(result);
+    assert.ok(transaction.game.last("dispose"), "wrong fields in the exact T2 receipt start retirement before final or watchdog");
+    assert.equal(transaction.game.terminations, 0, "the held dispose join has not completed");
+    assert.equal(h.workers.length, 1, "a replacement cannot start before joined retirement");
+    assert.deepEqual(completeSettingsDraft(h), before, "all accepted scalar policy and binding mirrors remain intact");
+    h.click("play"); h.click("menu-open"); chooseSettings(h); await flush();
+    assert.equal(transaction.game.messages("play-start").length, 0);
+    assert.equal(transaction.game.messages("settings-profile-load").length, 1);
+    assert.equal(h.opens.length, 0);
+    assert.equal(transaction.game.messages("settings-profile-cancel").length, 0);
+    const final = { kind: "settings-profile-loaded", id: transaction.request.id,
+      admittedToken: retainedToken(pending), resultToken: retainedToken(result), settings: profileWithPolicy() };
+    await h.receive(final, transaction.game);
+    assert.deepEqual(completeSettingsDraft(h), before, "valid late final cannot publish while the retiring owner is joined");
+    await h.receive({ kind: "disposed" }, transaction.game); await flush();
+    assert.equal(h.workers.length, 1, "the remaining renderer join still blocks ordinary use");
+    for (const renderer of h.renderers) if (renderer.terminations === 0) await h.receive({ kind: "disposed" }, renderer);
+    await flush();
+    assert.equal(transaction.game.terminations, 1);
+    assert.ok(h.workers.length > 1, "only the completed join permits a rebuilt owner");
+    assert.deepEqual(completeSettingsDraft(h), before);
+    await h.receive({ ...result, fields: acceptedFields }, transaction.game);
+    await h.receive(final, transaction.game);
+    assert.deepEqual(completeSettingsDraft(h), before, "old owner messages cannot revive after replacement either");
+    assert.equal(h.workers.at(-1).messages("play-start").length, 0);
+  } finally {
+    h.faults.holdDispose = false; h.window.emit("pagehide"); await flush();
+    for (const owner of h.allWorkers) if (owner.terminations === 0) await h.receive({ kind: "disposed" }, owner);
+    await h.close();
+  }
+});
+
+test("retained profile: pending Settings gates keyboard editor navigation source preparation and motion", async () => {
+  const h = await harness();
+  try {
+    const transaction = await retainedProfileRequest(h), pending = await profilePending(h, transaction);
+    const game = transaction.game;
+    const counts = Object.fromEntries(["menu-action", "menu-edit", "menu-open", "select", "seek", "menu-motion"]
+      .map(kind => [kind, game.messages(kind).length]));
+    for (const code of ["Tab", "PageDown", "Escape"]) assert.equal(h.window.emit("keydown", { code }).defaultPrevented, false);
+    const editor = h.get("menu-editor"); editor.value = "changed";
+    editor.emit("input"); editor.emit("compositionstart"); editor.emit("compositionend"); editor.emit("keydown", { code: "Enter" });
+    h.click("menu-back"); h.click("menu-open"); h.click("play");
+    h.get("prepare-form").emit("submit"); h.get("seek-form").emit("submit");
+    await assert.rejects(h.requestMenuMotion(1000n, menuMotionEndpoints(), 1000), /busy|pending|settings|unavailable|ready|geometry/i);
+    await flush();
+    for (const [kind, count] of Object.entries(counts)) assert.equal(game.messages(kind).length, count, kind);
+    assert.equal(h.opens.length, 0);
+    assert.equal(h.get("menu-editor").disabled, true);
+    await profileCandidate(h, transaction, pending);
+    assert.ok(game.last("settings-profile-admit"), "ignored busy editor events cannot create unsent edits");
+  } finally { await h.close(); }
+});
+
+test("retained profile: active Practice retains child token and selected field through parent adoption", async () => {
+  const h = await harness();
+  try {
+    const transaction = await retainedProfileRequest(h, 3), pending = await profilePending(h, transaction);
+    await profileCandidate(h, transaction, pending);
+    assert.ok(transaction.game.last("settings-profile-admit"));
+    const profile = profileWithPolicy();
+    const result = { ...pending, revision: 8n, pending: false, previousToken: retainedToken(pending),
+      fields: [profile.section.startSeconds, profile.section.endSeconds] };
+    await h.receive(result);
+    await h.receive({ kind: "settings-profile-loaded", id: transaction.request.id,
+      admittedToken: retainedToken(pending), resultToken: retainedToken(result), settings: profile });
+    assert.deepEqual(retainedSettingsValues(h), profileMenuValues(profile));
+    assert.equal(h.get("menu-editor").value, profile.section.endSeconds);
+    h.click("menu-back"); await flush();
+    const back = transaction.game.last("menu-action");
+    assert.equal(back.control, 72n); assert.deepEqual(retainedToken(back), retainedToken(result));
+  } finally { await h.close(); }
+});
+
+test("retained profile: Save adopts exact pending and final receipts without load admission or draft mutation", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 2, fields: retainedSettingsValues(h), selected: 14, hasSettingsParent: true };
+    await h.receive(state); const before = completeSettingsDraft(h);
+    h.click("settings-save"); await flush(); const request = game.last("settings-profile-save");
+    assert.deepEqual(request.menuToken, retainedToken(state));
+    const pending = await profilePending(h, { state, request });
+    const bytes = Uint8Array.from([123, 125]);
+    await h.receive({ kind: "settings-profile-saved", id: request.id + 1, bytes, resultToken: retainedToken(pending) });
+    assert.equal(h.downloads.length, 0);
+    assert.equal(h.get("settings-save").disabled, true);
+    const result = { ...pending, revision: 8n, pending: false, previousToken: retainedToken(pending) };
+    await h.receive(result);
+    await h.receive({ kind: "settings-profile-saved", id: request.id, bytes, resultToken: retainedToken(result) });
+    assert.equal(h.downloads.length, 1);
+    assert.equal(game.messages("settings-profile-admit").length, 0);
+    assert.deepEqual(completeSettingsDraft(h), before);
+    assert.equal(h.get("settings-save").disabled, false);
+  } finally { await h.close(); }
+});
+
+for (const fault of ["empty-early-ms", "duplicate-binding"]) {
+  test(`retained profile repair: valid import replaces an original ${fault} acquisition draft`, async () => {
+    const h = await harness();
+    try {
+      await h.preview(); const game = h.workers[0];
+      const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+        route: 2, fields: retainedSettingsValues(h), selected: 14, hasSettingsParent: true };
+      await h.receive(state);
+      if (fault === "empty-early-ms") h.get("judge-early").value = "";
+      else h.get("binding-11").value = h.get("binding-12").value;
+      const original = completeSettingsDraft(h);
+      chooseSettings(h); await flush(); const request = game.last("settings-profile-load");
+      assert.ok(request, "loading a validated replacement remains available to repair invalid acquisition controls");
+      assert.deepEqual(request.menuToken, retainedToken(state));
+      const transaction = { game, state, request };
+      const pending = await profilePending(h, transaction);
+      assert.deepEqual(completeSettingsDraft(h), original);
+      const candidate = profileWithPolicy();
+      await profileCandidate(h, transaction, pending, candidate);
+      assert.deepEqual(game.last("settings-profile-admit"), { kind: "settings-profile-admit",
+        id: request.id, menuToken: retainedToken(pending) }, "only the incoming full profile requires business validation");
+      assert.deepEqual(completeSettingsDraft(h), original, "admission still has no optimistic mirrors");
+      const result = { ...pending, revision: 8n, pending: false, previousToken: retainedToken(pending),
+        fields: profileMenuValues(candidate) };
+      await h.receive(result);
+      await h.receive({ kind: "settings-profile-loaded", id: request.id,
+        admittedToken: retainedToken(pending), resultToken: retainedToken(result), settings: candidate });
+      assert.deepEqual(retainedSettingsValues(h), profileMenuValues(candidate));
+      for (const [lane, code] of candidate.bindings) assert.equal(h.get(`binding-${lane.toString(16)}`).value, code);
+      assert.equal(h.get("settings-load").disabled, false);
+      assert.equal(game.terminations, 0);
+    } finally { await h.close(); }
+  });
+}
+
+test("retained profile repair: admitted bad receipt rebuilds the bounded original raw draft even when invalid", async () => {
+  const h = await harness({ holdDispose: true });
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 2, fields: retainedSettingsValues(h), selected: 14, hasSettingsParent: true };
+    await h.receive(state);
+    h.get("judge-early").value = "";
+    h.get("binding-11").value = h.get("binding-12").value;
+    const original = completeSettingsDraft(h);
+    chooseSettings(h); await flush(); const request = game.last("settings-profile-load");
+    const transaction = { game, state, request }, pending = await profilePending(h, transaction);
+    await profileCandidate(h, transaction, pending);
+    assert.ok(game.last("settings-profile-admit"));
+    // A post-admission native acquisition change cannot replace the captured
+    // raw restoration draft while the uncertain owner is being retired.
+    h.get("judge-early").value = "75"; h.get("binding-11").value = "KeyQ";
+    const result = { ...pending, revision: 8n, pending: false, previousToken: retainedToken(pending),
+      fields: profileMenuValues(profileWithPolicy()).map((value, index) => index === 0 ? "51" : value) };
+    await h.receive(result);
+    assert.ok(game.last("dispose"));
+    assert.equal(h.workers.length, 1);
+    h.click("play"); await flush(); assert.equal(h.opens.length, 0);
+    await h.receive({ kind: "disposed" }, game);
+    for (const renderer of h.renderers) if (renderer.terminations === 0) await h.receive({ kind: "disposed" }, renderer);
+    await flush();
+    assert.equal(game.terminations, 1);
+    assert.ok(h.workers.length > 1);
+    assert.deepEqual(completeSettingsDraft(h), original, "restoration preserves bounded raw strings rather than validating the discarded original form");
+    await h.receive({ kind: "settings-profile-loaded", id: request.id,
+      admittedToken: retainedToken(pending), resultToken: retainedToken(result), settings: profileWithPolicy() }, game);
+    assert.deepEqual(completeSettingsDraft(h), original);
+  } finally {
+    h.faults.holdDispose = false; h.window.emit("pagehide"); await flush();
+    for (const owner of h.allWorkers) if (owner.terminations === 0) await h.receive({ kind: "disposed" }, owner);
+    await h.close();
+  }
 });

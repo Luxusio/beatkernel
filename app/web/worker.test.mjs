@@ -956,6 +956,371 @@ function validSettingsProfileText() {
     section: { startSeconds: "0", endSeconds: "" }, bindings: KEY_BINDINGS.map(([lane, code]) => [lane, code]) });
 }
 
+// Literal wire oracle: keep this independent of settingsMenuFields so a wrong
+// ordered-index mapping cannot make both the implementation and test agree.
+const retainedPolicyId = "beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1";
+const completeSettingsDraft = () => [...settingsMenuDraft(), retainedPolicyId, "defexrank-first", "groove"];
+const importedSettingsFields = () => ["50", "50", "0", "interactive", "20", "48000", "256", "64", "256", "2048", "256", "3", "9", retainedPolicyId, "defexrank-first", "groove"];
+function retainedProfile() {
+  const dto = JSON.parse(validSettingsProfileText());
+  dto.bindings.sort((a, b) => a[0] - b[0]);
+  Object.assign(dto.timing, { presetId: retainedPolicyId, rankPrecedence: "defexrank-first", gauge: "groove" });
+  dto.section = { startSeconds: "3", endSeconds: "9" };
+  return dto;
+}
+async function retainedSettingsWorker(child = false) {
+  const h = await readyWorker({ actualMenu: true });
+  await h.send({ kind: "menu-open", fields: ["chart.bms"] });
+  await h.send({ kind: "menu-navigate", ...acquiredMenuToken(h.of("menu-state").at(-1)), route: 2, fields: completeSettingsDraft() });
+  const parent = h.of("menu-state").at(-1);
+  if (child) await h.send({ kind: "menu-navigate", ...acquiredMenuToken(parent), route: 3, fields: ["1.000000001", "2.000000002"] });
+  return { h, parent, initial: h.of("menu-state").at(-1) };
+}
+function assertProfileTransition(state, previous, id, pending) {
+  assert.equal(state.settingsOperationId, id);
+  assert.deepEqual(acquiredMenuToken(state.previousToken), acquiredMenuToken(previous));
+  assert.equal(state.screen, previous.screen);
+  assert.equal(state.menuGeneration, previous.menuGeneration);
+  assert.equal(state.revision, previous.revision + 1n);
+  assert.equal(state.pending, pending);
+  assert.equal(state.hasSettingsParent, true);
+}
+
+test("retained policy complete Apply publishes sixteen exact strings and rejects late policy atomically", async () => {
+  const { h } = await retainedSettingsWorker();
+  try {
+    for (const [index, invalid] of [[13, "unknown-preset"], [14, "rank-last"], [15, "unknown-gauge"]]) {
+      await h.send({ kind: "menu-edit", ...acquiredMenuToken(h.of("menu-state").at(-1)), index, value: invalid });
+      const before = h.of("menu-state").at(-1), errors = h.of("menu-error").length;
+      await h.send({ kind: "menu-action", ...acquiredMenuToken(before), actionId: 1n, control: 10n });
+      assert.equal(h.of("menu-error").length, errors + 1);
+      assert.equal(h.of("menu-effect").length, 0);
+      assert.deepEqual(h.of("menu-state").at(-1), before, "late policy refusal preserves owner, draft and action ID");
+      await h.send({ kind: "menu-edit", ...acquiredMenuToken(before), index, value: completeSettingsDraft()[index] });
+    }
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(h.of("menu-state").at(-1)), actionId: 1n, control: 10n });
+    assert.equal(h.of("menu-effect").length, 1);
+    assert.deepEqual(Array.from(h.of("menu-effect")[0].fields), completeSettingsDraft());
+    assert.deepEqual(acquiredMenuToken(h.of("menu-effect")[0]), acquiredMenuToken(h.of("menu-state").at(-1)));
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("retained policy native-only actions explicitly refuse without consuming action identity", async () => {
+  const { h, initial } = await retainedSettingsWorker();
+  try {
+    for (const control of [12n, 15n]) {
+      const errors = h.of("menu-error").length;
+      await h.send({ kind: "menu-action", ...acquiredMenuToken(initial), actionId: 1n, control });
+      assert.equal(h.of("menu-error").length, errors + 1);
+      assert.equal(h.of("menu-effect").length, 0);
+      assert.deepEqual(h.of("menu-state").at(-1), initial);
+    }
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(initial), actionId: 1n, control: 10n });
+    assert.equal(h.of("menu-effect").length, 1);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("retained policy partial and unknown Apply counts refuse while thirteen fields retain omission", async () => {
+  const { h } = await retainedSettingsWorker();
+  try {
+    for (const count of [14, 15, 17]) {
+      const fields = [...completeSettingsDraft(), "extra"].slice(0, count);
+      await h.send({ kind: "menu-fields", ...acquiredMenuToken(h.of("menu-state").at(-1)), fields });
+      const before = h.of("menu-state").at(-1), errors = h.of("menu-error").length;
+      await h.send({ kind: "menu-action", ...acquiredMenuToken(before), control: 10n, actionId: 1n });
+      assert.equal(h.of("menu-error").length, errors + 1);
+      assert.equal(h.of("menu-effect").length, 0); assert.deepEqual(h.of("menu-state").at(-1), before);
+    }
+    await h.send({ kind: "menu-fields", ...acquiredMenuToken(h.of("menu-state").at(-1)), fields: settingsMenuDraft() });
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(h.of("menu-state").at(-1)), control: 10n, actionId: 1n });
+    assert.deepEqual(Array.from(h.of("menu-effect").at(-1).fields), settingsMenuDraft());
+    assert.equal(h.of("menu-effect").at(-1).fields.length, 13, "legacy omission never fabricates policy strings");
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("retained profile candidate survives read finally and strict T1 admission commits parent and Practice once", async () => {
+  const { h, parent, initial: t0 } = await retainedSettingsWorker(true);
+  try {
+    const dto = retainedProfile(), id = 71;
+    await h.send({ kind: "settings-profile-load", id, menuToken: acquiredMenuToken(t0), settings: JSON.parse(validSettingsProfileText()), file: selectedFile("policy.json", JSON.stringify(dto)).file });
+    const t1 = h.of("menu-state").at(-1), candidate = h.of("settings-profile-candidate").at(-1);
+    assertProfileTransition(t1, t0, id, true);
+    assert.deepEqual(Array.from(t1.fields), Array.from(t0.fields));
+    assert(candidate, "fully decoded profile remains a candidate, not an accepted load");
+    assert.equal(candidate.id, id); assert.deepEqual(acquiredMenuToken(candidate.menuToken), acquiredMenuToken(t1));
+    assert.deepEqual(structuredClone(candidate.settings), dto);
+    assert.equal(candidate.settings.bindings.length, 18);
+    assert.equal(h.of("settings-profile-loaded").length, 0);
+    // An unrelated higher revision and original T0 never authorize admission.
+    for (const menuToken of [acquiredMenuToken(t0), { ...acquiredMenuToken(t1), revision: t1.revision + 1n }]) {
+      await h.send({ kind: "settings-profile-admit", id, menuToken });
+      assert.equal(h.of("settings-profile-loaded").length, 0);
+      assert.deepEqual(h.of("menu-state").at(-1), t1);
+    }
+    // An asynchronous finally must retain the same candidate/operation owner.
+    await h.flushTasks();
+    let retryReads = 0;
+    await h.send({ kind: "settings-profile-load", id: 72, menuToken: acquiredMenuToken(t1), settings: dto,
+      file: selectedFile("retry.json", JSON.stringify(dto), () => { retryReads++; throw Error("busy candidate must not acquire"); }).file });
+    assert.equal(retryReads, 0);
+    const firstReply = h.messages.length;
+    await h.send({ kind: "settings-profile-admit", id, menuToken: acquiredMenuToken(t1) });
+    const t2 = h.of("menu-state").at(-1), loaded = h.of("settings-profile-loaded").at(-1);
+    assertProfileTransition(t2, t1, id, false);
+    assert.equal(t2.route, 3); assert.equal(t2.selected, t0.selected);
+    assert.deepEqual(Array.from(t2.fields), ["3", "9"]);
+    assert.equal(loaded.id, id); assert.deepEqual(acquiredMenuToken(loaded.admittedToken), acquiredMenuToken(t1));
+    assert.deepEqual(acquiredMenuToken(loaded.resultToken), acquiredMenuToken(t2));
+    assert.deepEqual(structuredClone(loaded.settings), dto);
+    const replies = h.messages.slice(firstReply);
+    assert.equal(replies.findIndex(x => x === loaded), replies.findIndex(x => x === t2) + 1, "T2 and final success are published consecutively");
+    await h.send({ kind: "settings-profile-admit", id, menuToken: acquiredMenuToken(t1) });
+    await h.send({ kind: "settings-profile-cancel", id, menuToken: acquiredMenuToken(t1) });
+    assert.equal(h.of("settings-profile-loaded").length, 1);
+    assert.deepEqual(h.of("menu-state").at(-1), t2);
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(t2), actionId: 1n, control: 72n });
+    const restored = h.of("menu-state").at(-1);
+    assert.equal(restored.screen, parent.screen);
+    assert.deepEqual(Array.from(restored.fields), importedSettingsFields(), "stale Practice values cannot overwrite loaded parent section or policy");
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(restored), actionId: 2n, control: 10n });
+    assert.deepEqual(Array.from(h.of("menu-effect").at(-1).fields), importedSettingsFields());
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("retained profile held read cancellation accepts original T0 or current T1 but retains underlying read capacity", async () => {
+  for (const useOriginal of [true, false]) {
+    const { h, initial: t0 } = await retainedSettingsWorker(); const held = deferred();
+    try {
+      const dto = retainedProfile(), id = 81; let reads = 0;
+      await h.send({ kind: "settings-profile-load", id, menuToken: acquiredMenuToken(t0), settings: dto,
+        file: selectedFile("held.json", JSON.stringify(dto), () => { reads++; return held.promise; }).file });
+      const t1 = h.of("menu-state").at(-1); assertProfileTransition(t1, t0, id, true);
+      for (const [wrongId, menuToken] of [[id + 1, acquiredMenuToken(t0)], [id, { ...acquiredMenuToken(t1), revision: t1.revision + 1n }]]) {
+        await h.send({ kind: "settings-profile-cancel", id: wrongId, menuToken });
+        assert.deepEqual(h.of("menu-state").at(-1), t1);
+      }
+      await h.send({ kind: "settings-profile-cancel", id, menuToken: acquiredMenuToken(useOriginal ? t0 : t1) });
+      const idle = h.of("menu-state").at(-1); assertProfileTransition(idle, t1, id, false);
+      assert.deepEqual(Array.from(idle.fields), completeSettingsDraft());
+      let retryReads = 0;
+      await h.send({ kind: "settings-profile-load", id: 82, menuToken: acquiredMenuToken(idle), settings: dto,
+        file: selectedFile("retry.json", JSON.stringify(dto), () => { retryReads++; return Promise.resolve(new TextEncoder().encode(JSON.stringify(dto)).buffer); }).file });
+      assert.equal(reads, 1); assert.equal(retryReads, 0, "retired unabortable read still owns the one bounded slot");
+      held.resolve(new TextEncoder().encode(JSON.stringify(dto)).buffer); await h.flushTasks();
+      assert.equal(h.of("settings-profile-candidate").length, 0); assert.equal(h.of("settings-profile-loaded").length, 0);
+      await h.send({ kind: "settings-profile-load", id: 83, menuToken: acquiredMenuToken(idle), settings: dto, file: selectedFile("valid.json", JSON.stringify(dto)).file });
+      assert.equal(h.of("settings-profile-candidate").at(-1).id, 83, "underlying settlement releases capacity for a genuine retry");
+    } finally { held.resolve(new TextEncoder().encode(validSettingsProfileText()).buffer); await h.flushTasks(); await h.send({ kind: "dispose" }); }
+  }
+});
+
+test("retained profile candidate cancellation drops DTO and late admit cannot revive it", async () => {
+  const { h, initial: t0 } = await retainedSettingsWorker();
+  try {
+    const id = 91, dto = retainedProfile();
+    await h.send({ kind: "settings-profile-load", id, menuToken: acquiredMenuToken(t0), settings: dto, file: selectedFile("valid.json", JSON.stringify(dto)).file });
+    const t1 = h.of("menu-state").at(-1); assert(h.of("settings-profile-candidate").length === 1);
+    await h.send({ kind: "settings-profile-cancel", id, menuToken: acquiredMenuToken(t1) });
+    const idle = h.of("menu-state").at(-1); assertProfileTransition(idle, t1, id, false);
+    await h.send({ kind: "settings-profile-admit", id, menuToken: acquiredMenuToken(t1) });
+    assert.equal(h.of("settings-profile-loaded").length, 0); assert.deepEqual(h.of("menu-state").at(-1), idle);
+    await h.send({ kind: "settings-profile-save", id: 92, menuToken: acquiredMenuToken(idle), settings: dto });
+    assert.equal(h.of("settings-profile-saved").at(-1).id, 92);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("retained profile pending gates navigation, keyboard selection, acquisition, input and motion", async () => {
+  const { h, initial: t0 } = await retainedSettingsWorker(); const held = deferred();
+  try {
+    await h.send({ kind: "resize", width: 960, height: 720 });
+    const dto = retainedProfile();
+    await h.send({ kind: "settings-profile-load", id: 95, menuToken: acquiredMenuToken(t0), settings: dto,
+      file: selectedFile("held.json", JSON.stringify(dto), () => held.promise).file });
+    const t1 = h.of("menu-state").at(-1); assertProfileTransition(t1, t0, 95, true);
+    const posts = h.renderPort.posts.length;
+    for (const request of [
+      { kind: "menu-open", fields: ["replacement.bms"] },
+      { kind: "menu-navigate", route: 3, fields: ["4", "8"] },
+      { kind: "menu-edit", index: 13, value: "" },
+      { kind: "menu-fields", fields: settingsMenuDraft() },
+      { kind: "menu-action", control: 1015n, actionId: 1n },
+      { kind: "menu-action", control: 10n, actionId: 1n },
+      { kind: "menu-input", event: "keydown", key: "End" },
+    ]) {
+      const errors = h.of("menu-error").length;
+      await h.send({ ...acquiredMenuToken(t1), ...request });
+      assert.equal(h.of("menu-error").length, errors + 1);
+      assert.deepEqual(h.of("menu-state").at(-1), t1);
+    }
+    const latestMenu = h.renderPort.posts.findLast(x => x.kind === "menu");
+    await h.send({ kind: "menu-motion", requestId: 1n, hostOwner: 1, ...acquiredMenuToken(t1),
+      generation: latestMenu.generation, content: latestMenu.content, geometryVersion: 1n, control: 1000n,
+      transforms: new Float32Array([0, 0, 1, 1, 1, 40, 10, 1, 1, 1]), durationMs: 1000, easing: 0 });
+    assert.equal(h.of("menu-motion-reply").at(-1).admitted, false);
+    assert.equal(h.renderPort.posts.length, posts, "pending input/acquisition/motion never reach the renderer");
+    assert.equal(h.of("menu-effect").length, 0);
+    held.resolve(new TextEncoder().encode(JSON.stringify(dto)).buffer); await h.flushTasks();
+    await h.send({ kind: "settings-profile-cancel", id: 95, menuToken: acquiredMenuToken(t1) });
+    const idle = h.of("menu-state").at(-1);
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(idle), control: 10n, actionId: 1n });
+    assert.equal(h.of("menu-effect").length, 1, "pending refusals never consume the last action counter");
+  } finally { held.resolve(new TextEncoder().encode(validSettingsProfileText()).buffer); await h.flushTasks(); await h.send({ kind: "dispose" }); }
+});
+
+test("retained profile stale request acquires no bytes and malformed late policy never replaces draft", async () => {
+  const { h, initial: t0 } = await retainedSettingsWorker();
+  try {
+    let reads = 0; const dto = retainedProfile();
+    for (const menuToken of [undefined, { ...acquiredMenuToken(t0), revision: t0.revision + 1n }, { ...acquiredMenuToken(t0), screen: t0.screen + 1n }]) {
+      await h.send({ kind: "settings-profile-load", id: 96, menuToken, settings: dto,
+        file: selectedFile("unused.json", JSON.stringify(dto), () => { reads++; throw Error("stale request must not read"); }).file });
+      assert.deepEqual(h.of("menu-state").at(-1), t0);
+    }
+    assert.equal(reads, 0);
+    dto.timing.gauge = "invalid-late-policy";
+    await h.send({ kind: "settings-profile-load", id: 97, menuToken: acquiredMenuToken(t0), settings: retainedProfile(), file: selectedFile("invalid.json", JSON.stringify(dto)).file });
+    assert.equal(h.of("settings-profile-candidate").length, 0); assert.equal(h.of("settings-profile-loaded").length, 0);
+    assert.equal(h.of("settings-profile-error").at(-1).id, 97);
+    const idle = h.of("menu-state").at(-1);
+    assert.equal(idle.pending, false); assert.deepEqual(Array.from(idle.fields), completeSettingsDraft());
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(idle), control: 10n, actionId: 1n });
+    assert.equal(h.of("menu-effect").length, 1);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("retained profile save publishes exact pending and Idle receipts before full eighteen-binding bytes", async () => {
+  const { h, initial: t0 } = await retainedSettingsWorker();
+  try {
+    const start = h.messages.length, dto = retainedProfile(), id = 101;
+    await h.send({ kind: "settings-profile-save", id, menuToken: acquiredMenuToken(t0), settings: dto });
+    const states = h.messages.slice(start).filter(x => x.kind === "menu-state");
+    assert.equal(states.length, 2); const [t1, t2] = states;
+    assertProfileTransition(t1, t0, id, true); assertProfileTransition(t2, t1, id, false);
+    for (const state of states) assert.deepEqual(Array.from(state.fields), completeSettingsDraft());
+    const saved = h.of("settings-profile-saved").at(-1);
+    assert.equal(saved.id, id); assert.deepEqual(acquiredMenuToken(saved.resultToken), acquiredMenuToken(t2));
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(saved.bytes)), dto);
+    assert.equal(h.messages.indexOf(saved), h.messages.indexOf(t2) + 1);
+    assert.equal(h.of("settings-profile-candidate").length, 0);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("retained profile no Settings ancestor preserves single-phase legacy full profile with eighteen bindings", async () => {
+  const h = await readyWorker({ actualMenu: true });
+  try {
+    await h.send({ kind: "menu-open", fields: ["chart.bms"] });
+    const before = h.of("menu-state").at(-1), dto = JSON.parse(validSettingsProfileText());
+    dto.bindings.sort((a, b) => a[0] - b[0]);
+    await h.send({ kind: "settings-profile-load", id: 111, settings: dto, file: selectedFile("legacy.json", JSON.stringify(dto)).file });
+    assert.equal(h.of("settings-profile-candidate").length, 0);
+    assert.equal(h.of("settings-profile-loaded").length, 1);
+    assert.deepEqual(structuredClone(h.of("settings-profile-loaded")[0].settings), dto);
+    assert.equal(h.of("settings-profile-loaded")[0].settings.bindings.length, 18);
+    assert.deepEqual(h.of("menu-state").at(-1), before, "no fabricated Settings parent or pending transition");
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("retained profile pending refuses source inventory replacement and preserves Players and parent policy", async () => {
+  const { h, parent } = await retainedSettingsWorker(); const held = deferred();
+  try {
+    const inventory = acquiredMenuFields([acquiredSource(1, "keyboard"), acquiredSource(41)]);
+    await h.send({ kind: "menu-navigate", ...acquiredMenuToken(parent), route: 5, fields: inventory });
+    const t0 = h.of("menu-state").at(-1), dto = retainedProfile();
+    await h.send({ kind: "settings-profile-load", id: 121, menuToken: acquiredMenuToken(t0), settings: dto,
+      file: selectedFile("held.json", JSON.stringify(dto), () => held.promise).file });
+    const t1 = h.of("menu-state").at(-1); assertProfileTransition(t1, t0, 121, true);
+    const errors = h.of("menu-error").length;
+    await h.send({ kind: "menu-fields", ...acquiredMenuToken(t1), fields: acquiredMenuFields([acquiredSource(1, "keyboard")]) });
+    assert.equal(h.of("menu-error").length, errors + 1); assert.deepEqual(h.of("menu-state").at(-1), t1);
+    held.resolve(new TextEncoder().encode(JSON.stringify(dto)).buffer); await h.flushTasks();
+    await h.send({ kind: "settings-profile-admit", id: 121, menuToken: acquiredMenuToken(t1) });
+    const loadedChild = h.of("menu-state").at(-1);
+    assert.equal(loadedChild.screen, t0.screen); assert.equal(loadedChild.selected, t0.selected);
+    assert.deepEqual(Array.from(loadedChild.fields), Array.from(t0.fields));
+    assert.deepEqual(structuredClone(loadedChild.roster), structuredClone(t0.roster));
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(loadedChild), actionId: 1n, control: 30n });
+    const returned = h.of("menu-state").at(-1);
+    assert.equal(returned.screen, parent.screen); assert.deepEqual(Array.from(returned.fields), importedSettingsFields());
+  } finally { held.resolve(new TextEncoder().encode(validSettingsProfileText()).buffer); await h.flushTasks(); await h.send({ kind: "dispose" }); }
+});
+
+test("retained profile legacy full load restores the exact default policy triple", async () => {
+  const { h, initial: t0 } = await retainedSettingsWorker();
+  try {
+    const dto = JSON.parse(validSettingsProfileText()); dto.bindings.sort((a, b) => a[0] - b[0]);
+    await h.send({ kind: "settings-profile-load", id: 131, menuToken: acquiredMenuToken(t0), settings: retainedProfile(), file: selectedFile("legacy.json", JSON.stringify(dto)).file });
+    const t1 = h.of("menu-state").at(-1);
+    assert.deepEqual(structuredClone(h.of("settings-profile-candidate").at(-1).settings), dto);
+    await h.send({ kind: "settings-profile-admit", id: 131, menuToken: acquiredMenuToken(t1) });
+    const t2 = h.of("menu-state").at(-1);
+    assert.deepEqual(Array.from(t2.fields), ["50", "50", "0", "interactive", "20", "48000", "256", "64", "256", "2048", "256", "0", "", "", "rank-first", "beatkernel"]);
+    assert.deepEqual(structuredClone(h.of("settings-profile-loaded").at(-1).settings), dto);
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(t2), actionId: 1n, control: 10n });
+    assert.deepEqual(Array.from(h.of("menu-effect").at(-1).fields), Array.from(t2.fields));
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+for (const phase of ["candidate", "held-read"]) {
+  for (const retirement of ["fatal", "dispose"]) {
+    for (const settlement of phase === "held-read" ? ["resolve", "reject"] : ["already-settled"]) {
+      test(`retained profile ${phase} owner ${retirement} suppresses late ${settlement} and admission`, async () => {
+        const { h, initial: t0 } = await retainedSettingsWorker();
+        const read = deferred(), dto = retainedProfile(), id = 141;
+        let readCalls = 0;
+        try {
+          await h.send({ kind: "settings-profile-load", id, menuToken: acquiredMenuToken(t0), settings: dto,
+            file: selectedFile("owned.json", JSON.stringify(dto), () => { readCalls++; return read.promise; }).file });
+          const t1 = h.of("menu-state").at(-1);
+          assertProfileTransition(t1, t0, id, true);
+          assert.equal(readCalls, 1);
+          if (phase === "candidate") {
+            read.resolve(new TextEncoder().encode(JSON.stringify(dto)).buffer); await h.flushTasks();
+            const candidate = h.of("settings-profile-candidate").at(-1);
+            assert.equal(candidate.id, id);
+            assert.deepEqual(acquiredMenuToken(candidate.menuToken), acquiredMenuToken(t1));
+          }
+          assert.equal(h.of("settings-profile-candidate").length, phase === "candidate" ? 1 : 0);
+          assert.equal(h.of("settings-profile-loaded").length, 0);
+          if (retirement === "fatal") {
+            // A second initialization is a genuine public Worker fatal path.
+            await h.send({ kind: "init" });
+            assert.equal(h.of("fatal").length, 1);
+          } else {
+            await h.send({ kind: "dispose" });
+            assert.equal(h.of("disposed").length, 1);
+          }
+          const afterRetirement = h.messages.length;
+          const candidates = h.of("settings-profile-candidate").length;
+          const loaded = h.of("settings-profile-loaded").length;
+          const errors = h.of("settings-profile-error").length;
+          const states = h.of("menu-state").length;
+          const publications = h.renderPort.posts.length;
+          await h.send({ kind: "settings-profile-admit", id, menuToken: acquiredMenuToken(t1) });
+          await h.send({ kind: "settings-profile-cancel", id, menuToken: acquiredMenuToken(t0) });
+          if (phase === "held-read") {
+            if (settlement === "resolve") read.resolve(new TextEncoder().encode(JSON.stringify(dto)).buffer);
+            else read.reject(Error("retired profile File read failed"));
+            await h.flushTasks();
+          }
+          await h.send({ kind: "settings-profile-admit", id, menuToken: acquiredMenuToken(t1) });
+          await h.send({ kind: "menu-fields", ...acquiredMenuToken(t1), fields: settingsMenuDraft() });
+          assert.equal(h.of("settings-profile-candidate").length, candidates);
+          assert.equal(h.of("settings-profile-loaded").length, loaded);
+          assert.equal(h.of("settings-profile-error").length, errors);
+          assert.equal(h.of("menu-state").length, states);
+          assert.deepEqual(h.of("menu-state").at(-1), t1, "retired owner never publishes a model replacement");
+          assert.equal(h.renderPort.posts.length, publications, "late operation completion cannot revive rendering");
+          assert.deepEqual(h.messages.slice(afterRetirement), [], "retirement suppresses both late success and late read failure");
+          assert.equal(readCalls, 1);
+        } finally {
+          read.resolve(new TextEncoder().encode(JSON.stringify(dto)).buffer); await h.flushTasks();
+          await h.send({ kind: "dispose" });
+        }
+      });
+    }
+  }
+}
+
 async function motionWorker() {
   const h = await readyWorker({ actualMenu: true });
   await h.send({ kind: "resize", width: 960, height: 720 });
@@ -1334,16 +1699,6 @@ test("actual Worker rejects stale and malformed acquired inventories without pub
     assert.ok(refreshed.revision > accepted.revision);
   } finally { await worker.send({ kind: "dispose" }); }
 });
-
-function assertProfileTransition(state, previous, id, pending) {
-  assert.equal(state.settingsOperationId, id);
-  assert.deepEqual(acquiredMenuToken(state.previousToken), acquiredMenuToken(previous));
-  assert.equal(state.screen, previous.screen);
-  assert.equal(state.menuGeneration, previous.menuGeneration);
-  assert.equal(state.revision, previous.revision + 1n);
-  assert.equal(state.pending, pending);
-  assert.equal(state.hasSettingsParent, true);
-}
 
 test("actual Worker keeps roster and fields when genuine owner admission or pending operation refuses inventory refresh", async () => {
   let fault = null;
