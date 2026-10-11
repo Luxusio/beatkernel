@@ -10,6 +10,24 @@ import { encodeKeyboardEvent, encodeTouchEvent, encodeRawHidEvent } from "./phys
 import { millisecondsToNanos } from "./play-model.mjs";
 
 const FileType = globalThis.File ?? NodeFile;
+// Node may clone a File as Blob. Model immutable receiving File endpoints
+// explicitly; actual Chromium cloning/lifetime is a separate browser gate.
+function cloneImmutableReceipt(value, transfer) {
+  const cloned = structuredClone(value, { transfer });
+  const preserve = (source, target) => {
+    if (source?.replay instanceof FileType) target.replay = new FileType([source.replay], source.replay.name);
+    if (source?.replayFile instanceof FileType) target.replayFile = new FileType([source.replayFile], source.replayFile.name);
+    if (source?.replays) source.replays.forEach((row, index) => preserve(row, target.replays[index]));
+    if (source?.result && target?.result) preserve(source.result, target.result);
+  };
+  preserve(value, cloned);
+  return cloned;
+}
+async function immutableBytes(handle) {
+  assert.ok(handle instanceof Blob, "capture body is an immutable handle");
+  return Array.from(new Uint8Array(await handle.arrayBuffer()));
+}
+
 const ORIGIN = 9007199254740993n;
 const START = 9007199254741999n;
 const SCORE = { song_ns: 123456789012345n, hits: 17n, misses: 3n, combo: 9n, max_combo: 15n };
@@ -155,7 +173,7 @@ async function observeDone(h) {
 }
 function historicalRequest(id=1,fields={}){
   return {kind:"historical-record-present",id,replayFile:new FileType([new Uint8Array([66,75,82,0])],"selected.bkr"),
-    completedArchive:new Uint8Array([66,75,82,69,83,85,76,84]),archivePlayer:4294967295,...fields};
+    completedArchive:new Blob([new Uint8Array([66,75,82,69,83,85,76,84])]),archivePlayer:4294967295,...fields};
 }
 
 // Ordinary fixtures model the Window's validated response followed by its
@@ -206,7 +224,7 @@ test("record continuity: failed acquisitions retain shown Results and their page
     await h.send({ kind: "play-stop", playId: 7, completed: true }); await showResults(h);
     const old = h.completedOwners[0];
     const fields = {};
-    if (failure === "archive") fields.completedArchive = new Uint8Array();
+    if (failure === "archive") fields.completedArchive = new Blob();
     if (failure === "read") fields.replayFile = replayFile(() => Promise.reject(new Error("read refused"))).file;
     if (failure === "constructor") options.historicalError = "constructor refused";
     if (failure === "unavailable") options.historicalDiagnostic = "association refused";
@@ -467,6 +485,28 @@ test("unabortable replay read cannot construct or replace results after clear or
     gate.resolve(new Uint8Array([66,75,82,0]).buffer);await flushJobs();
     assert.equal(h.historicalOwners.length,owners);assert.equal(h.of("historical-record-result").length,responses);
     if(next==="newer")assert.equal(h.of("historical-record-result").at(-1).id,2);
+  }
+});
+
+test("uncancelable historical archive read rechecks candidate ownership and preserves prior accepted history", async () => {
+  for (const boundary of ["clear", "newer", "play", "dispose"]) {
+    const h = await catalogWorker(); await presentHistorical(h, historicalRequest());
+    const prior = h.historicalOwners[0], held = deferred();
+    const archive = new Blob([Uint8Array.of(66,75,82,69,83,85,76,84)]);
+    let reads = 0; archive.arrayBuffer = () => { reads++; return held.promise; };
+    await h.send(historicalRequest(2, { completedArchive: archive }));
+    assert.equal(reads, 1); assert.equal(h.historicalOwners.length, 1); assert.equal(prior.frees, 0);
+    if (boundary === "clear") await h.send({ kind: "historical-record-clear", id: 3, cancelId: 2 });
+    if (boundary === "newer") await presentHistorical(h, historicalRequest(3));
+    if (boundary === "play") await h.send(startRequest());
+    if (boundary === "dispose") await h.send({ kind: "dispose" });
+    const owners = h.historicalOwners.length, replies = h.of("historical-record-result").length;
+    held.resolve(Uint8Array.of(66,75,82,69,83,85,76,84).buffer); await flushJobs();
+    assert.equal(h.historicalOwners.length, owners); assert.equal(h.of("historical-record-result").length, replies);
+    assert.equal(h.of("fatal").length, 0);
+    if (boundary === "clear") { assert.equal(prior.frees, 0); await h.tick(); assert.equal(h.views[0].historicalDraws.at(-1), prior); }
+    if (boundary === "newer") assert.equal(h.of("historical-record-result").at(-1).id, 3);
+    if (boundary === "play") assert.equal(h.games[0].frees, 0);
   }
 });
 test("new play invalidates historical lifetime and active gameplay refuses historical admission",async()=>{
@@ -1607,12 +1647,12 @@ async function workerHarness(options = {}) {
     isSecureContext: false, navigator: {},
     postMessage(value, transfer = []) {
       transfers.push([...transfer]);
-      messages.push(structuredClone(value, { transfer }));
+      messages.push(cloneImmutableReceipt(value, transfer));
     },
     addEventListener(name, callback) { assert.equal(name, "message"); receive = callback; },
   };
   const context = createContext({
-    MessageChannel: PreparationMessageChannel, self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
+    MessageChannel: PreparationMessageChannel, self, structuredClone, DataView, File: FileType, Blob, queueMicrotask, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
     performance: { timeOrigin: 10000, now() {
       return networkNow;
     } },
@@ -1639,6 +1679,7 @@ async function workerHarness(options = {}) {
   }, { context });
   const resultsModel = new SourceTextModule(await readFile(new URL("./completed-results-model.mjs", import.meta.url), "utf8"), { context });
   const helper = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
+  const recordStore = new SourceTextModule(await readFile(new URL("./record-store.mjs", import.meta.url), "utf8"), { context });
   const playHelper = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const settingsHelper = new SourceTextModule(await readFile(new URL("./settings-profile.mjs", import.meta.url), "utf8"), { context });
   const displayHelper = new SourceTextModule(await readFile(new URL("./display-settings.mjs", import.meta.url), "utf8"), { context });
@@ -1659,6 +1700,7 @@ async function workerHarness(options = {}) {
   const renderClient = new SourceTextModule(await readFile(new URL("./render-protocol.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
+    if (specifier === "./record-store.mjs") return recordStore;
     if (specifier === "./render-protocol.mjs") return renderClient;
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./completed-results-model.mjs") return resultsModel;
@@ -1719,14 +1761,14 @@ async function workerHarness(options = {}) {
 
 
 test("historical renderer failure preserves selected bytes without gameplay authority", async () => {
-  const h=await catalogWorker(),request=historicalRequest(),archive=request.completedArchive.slice();
+  const h=await catalogWorker(),request=historicalRequest(),archive=await immutableBytes(request.completedArchive);
   await presentHistorical(h, request);
   const packet=h.renderPort.posts.findLast(row=>row.kind==="packet");
   assert.equal(new DataView(packet.packet.buffer).getUint16(6,true),4);
   h.renderPort.emit({kind:"render-error",generation:packet.generation,content:packet.content,message:"historical surface lost"});await flushJobs();
   assert.equal(h.historicalOwners[0].frees,1);assert.equal(h.of("fatal").length,0);
   assert.equal(h.of("play-error").length,0);assert.equal(h.games.length,0);
-  assert.deepEqual(request.completedArchive,archive);assert.equal(h.of("historical-record-result").at(-1).available,false);
+  assert.deepEqual(await immutableBytes(request.completedArchive),archive);assert.equal(h.of("historical-record-result").at(-1).available,false);
 });
 
 test("record continuity: old history render failure preserves staged candidate and late old failure cannot retire accepted replacement", async () => {

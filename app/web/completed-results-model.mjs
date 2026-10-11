@@ -32,7 +32,37 @@ export function resultRequest(results, request) {
   return { ...results, lastRpc: request.rpcId, page: request.page, pages, comparisons: request.comparisons };
 }
 
-// Opaque transfer admission only. Rust owns binary decoding and completion classification.
+// Immutable handle admission only. The Worker owns binary validation and construction.
+export function validateCapturedReplay(message, { playId, recording, natural, mode }) {
+  if (!message || typeof message !== "object" || !identity(playId) || message.playId !== playId
+    || typeof recording !== "boolean" || typeof natural !== "boolean"
+    || (mode !== "live" && mode !== "replay")) throw new Error("Invalid captured replay owner.");
+  const { replay, replayComplete, replayError } = message;
+  if (!recording && replay === undefined && replayComplete === undefined && replayError === undefined) {
+    return { file: null, complete: false, error: null };
+  }
+  if (typeof replayComplete !== "boolean" || !(replayError === null
+    || (typeof replayError === "string" && replayError.length <= 4096))) {
+    throw new Error("Invalid replay export metadata.");
+  }
+  if ((!recording || mode !== "live") && (replay !== null || replayError !== null)) {
+    throw new Error("Captured replay does not belong to a recorded live owner.");
+  }
+  if (replay === null) {
+    if (replayComplete) throw new Error("Complete replay has no encoded data.");
+    return { file: null, complete: false, error: replayError };
+  }
+  if (typeof File !== "function" || !(replay instanceof File)
+    || (replayComplete && (!natural || message.kind !== "play-stopped"))) {
+    throw new Error("Invalid replay export ownership or immutable handle.");
+  }
+  // Native metadata getters reject prototype-shaped impostors without reading the body.
+  Object.getOwnPropertyDescriptor(File.prototype, "name").get.call(replay);
+  const size = Object.getOwnPropertyDescriptor(Blob.prototype, "size").get.call(replay);
+  if (size < 1 || size > 64 * 1024 * 1024) throw new Error("Invalid captured replay size.");
+  return { file: replay, complete: replayComplete, error: replayError };
+}
+
 export function validateCompletedArchive(message, { playId, players, recording, mode }) {
   if (!message || typeof message !== "object" || !Number.isSafeInteger(playId) || playId <= 0
     || message.playId !== playId || !Array.isArray(players) || players.length < 1 || players.length > 64
@@ -41,7 +71,7 @@ export function validateCompletedArchive(message, { playId, players, recording, 
     || (mode !== "live" && mode !== "replay")) throw new Error("Invalid completed archive owner or original roster.");
   const { completedArchive, archivePlayers, archiveError } = message;
   if (completedArchive === undefined && archivePlayers === undefined && archiveError === undefined) {
-    return { bytes: null, error: null };
+    return { blob: null, error: null };
   }
   if (!(archiveError === null || (typeof archiveError === "string" && archiveError.length >= 1 && archiveError.length <= 4096))) {
     throw new Error("Invalid completed archive diagnostic.");
@@ -51,19 +81,15 @@ export function validateCompletedArchive(message, { playId, players, recording, 
   }
   if (completedArchive === null) {
     if (archivePlayers !== null) throw new Error("Absent completed archive has a roster.");
-    return { bytes: null, error: archiveError };
+    return { blob: null, error: archiveError };
   }
-  const bytes = completedArchive;
-  if (archiveError !== null || !(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
-    || bytes.buffer.resizable === true || bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength
-    || bytes.byteLength < 1 || bytes.byteLength > 5 * 1024 * 1024
+  const blob = completedArchive;
+  if (archiveError !== null || typeof Blob !== "function" || !(blob instanceof Blob)
     || !Array.isArray(archivePlayers) || archivePlayers.length !== players.length
     || players.some((player,index) => archivePlayers[index] !== player)) {
-    throw new Error("Invalid completed archive transferable layout or original roster.");
+    throw new Error("Invalid completed archive immutable handle or original roster.");
   }
-  if (message.replay?.buffer === bytes.buffer || (Array.isArray(message.replays)
-    && (message.replays.length > 64 || message.replays.some(row => row?.replay?.buffer === bytes.buffer)))) {
-    throw new Error("Completed archive must own a separate transferable buffer.");
-  }
-  return { bytes, error: null };
+  const size = Object.getOwnPropertyDescriptor(Blob.prototype, "size").get.call(blob);
+  if (size < 1 || size > 5 * 1024 * 1024) throw new Error("Invalid completed archive size.");
+  return { blob, error: null };
 }

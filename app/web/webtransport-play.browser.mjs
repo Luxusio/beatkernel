@@ -96,6 +96,8 @@ function observation() {
   const append = (list, value) => { if (list.length >= 20000) probe.overflow = true; else list.push(value); };
   const copy = value => JSON.parse(JSON.stringify(value, (_, item) => {
     if (typeof item === "bigint") return String(item);
+    if (item instanceof File) return { actualFile: true, name: item.name, size: item.size };
+    if (item instanceof Blob) return { actualBlob: true, size: item.size };
     if (item instanceof Uint32Array) return Array.from(item);
     if (ArrayBuffer.isView(item)) return { byteLength: item.byteLength };
     if (item instanceof ArrayBuffer) return { byteLength: item.byteLength };
@@ -213,6 +215,11 @@ async function main() {
   for (const field of ["xdgDataHome", "xdgConfigHome"]) assert(!within(hosts[0][field], hosts[1][field]) && !within(hosts[1][field], hosts[0][field]), `${field} trust directories overlap`);
   const manifest = JSON.parse(await readFile(required("WEBTRANSPORT_PLAY_HASHES"), "utf8"));
   for (const name of ["index.html", "main.js", "worker.js", "renderer-worker.js", "audio-worklet.js", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm", "audio-pkg/beatkernel_bms_runtime.js", "audio-pkg/beatkernel_bms_runtime_bg.wasm"]) assert(manifest[`app/web/${name}`], `Missing artifact hash: ${name}`);
+  evidence.derivedDependencyHashes = {};
+  for (const name of ["record-store.mjs", "completed-results-model.mjs", "local-play-host.mjs"]) {
+    const path = `app/web/${name}`;
+    if (!manifest[path]) manifest[path] = evidence.derivedDependencyHashes[path] = hash(await readFile(resolve(root, path)));
+  }
   for (const [path, expected] of Object.entries(manifest)) {
     assert(path.startsWith("app/web/") && within(resolve(root, "app/web"), resolve(root, path)) && /^[a-f0-9]{64}$/.test(expected));
     assert(within(await realpath(resolve(root, "app/web")), await realpath(resolve(root, path))), `Artifact symlink escapes app/web: ${path}`);
@@ -339,9 +346,9 @@ async function main() {
     const terminal = received.find(x => x.kind === "play-stopped");
     assert(terminal.completedResults?.proof);
     assert.equal(terminal.replays?.length, 1);
-    assert(terminal.replays[0].replayComplete && terminal.replays[0].replay?.byteLength > 0);
+    assert(terminal.replays[0].replayComplete && terminal.replays[0].replay?.actualFile && terminal.replays[0].replay.size > 0);
     assert.equal(terminal.replays[0].replayError, null);
-    assert(terminal.completedArchive?.byteLength > 0);
+    assert(terminal.completedArchive?.actualBlob && terminal.completedArchive.size > 0);
     assert.equal(terminal.replayError, null); assert.equal(terminal.archiveError, null);
     assert.equal(terminal.completedResultsError, null);
     assert.equal(terminal.room.error, null);

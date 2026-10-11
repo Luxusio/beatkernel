@@ -1348,6 +1348,13 @@ authored host fixtures do not imply browser/audio execution was verified.
 
 ## Explicit local recording library
 
+The selected [record-storage ownership migration](../runtime/REQ__browser-record-storage.md)
+moves the existing database operations and binary copies into the gameplay
+Worker, with immutable File/Blob handles retained by Window for explicit
+selection, save retry and download. Worker/Window source and scoped Node checks
+are integrated; production probes and independent acceptance remain pending.
+The requirements below retain their original recording semantics.
+
 The browser shall offer explicit Save last recording, Refresh saved records,
 Use saved replay and Delete selected record actions. No automatic save, upload,
 pruning or deletion shall occur. Saved bytes shall be the actual canonical
@@ -1375,7 +1382,9 @@ fresh owner. Stale results shall never replace current selection or page state.
 Signed replay/preroll readout shall format one sign and the absolute exact
 nanosecond magnitude, including negative subsecond time and i64 minimum.
 Preview time admission shall remain nonnegative. Browser storage, binding,
-audio and authored fixture execution remain deferred until scheduled.
+audio and authored fixture execution were deferred at the original checkpoint.
+That historical verification deferral is no longer a development rule; current
+results and unfinished checks must be recorded in the active change ledger.
 
 
 ## Bounded room-frame byte transport

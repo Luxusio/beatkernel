@@ -1,3 +1,5 @@
+import { validateCapturedReplay } from "./completed-results-model.mjs";
+
 const U64_MAX = 18446744073709551615n;
 const sourceId = value => typeof value === "bigint" && value >= 0n && value <= U64_MAX;
 const failure = error => String(error?.message ?? error).slice(0, 4096);
@@ -105,7 +107,6 @@ export function localReplayReceipt(plan, data, { recording, natural, bytesPerMem
     return plan.players.map(player => empty(player, "Invalid local replay receipt."));
   }
   let total = 0;
-  const buffers = new Set();
   return plan.players.map((player, index) => {
     try {
       const row = data.replays[index];
@@ -117,17 +118,16 @@ export function localReplayReceipt(plan, data, { recording, natural, bytesPerMem
         if (row.replayComplete) throw new Error("Complete player replay has no data.");
         return empty(player, row.replayError);
       }
-      const bytes = row.replay;
-      if (!recording || row.replayError !== null || !(bytes instanceof Uint8Array)
-        || !(bytes.buffer instanceof ArrayBuffer) || bytes.buffer.resizable === true
-        || bytes.byteOffset !== 0 || bytes.length !== bytes.buffer.byteLength || bytes.length === 0
-        || bytes.length > bytesPerMember || total + bytes.length > 64 * 1024 * 1024 || buffers.has(bytes.buffer)
-        || (row.replayComplete && (!natural || data.kind !== "play-stopped"))) {
-        throw new Error("Invalid player replay ownership or bounded layout.");
+      if (row.replayError !== null) throw new Error("Invalid player replay ownership or bounded handle.");
+      const capture = validateCapturedReplay({ replay: row.replay, replayComplete: row.replayComplete,
+        replayError: row.replayError, kind: data.kind, playId: data.playId },
+        { playId: data.playId, recording, natural, mode: "live" });
+      const size = Object.getOwnPropertyDescriptor(Blob.prototype, "size").get.call(capture.file);
+      if (size > bytesPerMember || total + size > 64 * 1024 * 1024) {
+        throw new Error("Invalid player replay ownership or bounded handle.");
       }
-      total += bytes.length;
-      buffers.add(bytes.buffer);
-      return { player, replay: bytes, replayError: null, replayComplete: row.replayComplete };
+      total += size;
+      return { player, replay: capture.file, replayError: null, replayComplete: capture.complete };
     } catch (error) { return empty(player, failure(error)); }
   });
 }

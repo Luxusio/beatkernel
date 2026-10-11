@@ -1,7 +1,7 @@
 import { RenderClient, validateRenderLimits, unsignedIdentity, snapshotMenuMotion } from "./render-protocol.mjs";
 import { validateCompletedResults, resultRequest } from "./completed-results-model.mjs";
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
-import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot } from "./host_model.mjs";
+import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot, normalizedPath } from "./host_model.mjs";
 import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateTimingPolicy, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, presentationOutputAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { BrowserRoomOwner, ROOM_SESSION_METHODS } from "./room-owner.mjs";
@@ -16,6 +16,7 @@ import { LocalRoster } from "./local-play-host.mjs";
 import { encodeBrowserSettings, decodeBrowserSettings, settingsMenuProfileFields, settingsMenuProfileSnapshot, settingsMenuSnapshot } from "./settings-profile.mjs";
 import { validateBrowserDisplayFields } from "./display-settings.mjs";
 import { snapshotPointerSetup } from "./pointer-profile.mjs";
+import { RecordsStore } from "./record-store.mjs";
 const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserHistoricalRecord } = runtime;
 let ready = null;
 let cpuReady = false;
@@ -62,6 +63,7 @@ let menuRoster = null;
 let menuAssignPlayer = null;
 let menuOpponents = null;
 let menuRecordFile = null;
+let menuRecordAcquiring = false;
 let historicalEpoch = {};
 let lastHistoricalId = 0;
 let roomResultsEpoch = {};
@@ -75,6 +77,177 @@ const NO_OPPONENTS = Object.freeze([]);
 
 function report(kind, fields = {}, transfer = []) { self.postMessage({ kind, ...fields }, transfer); }
 function message(error) { return String(error?.message ?? error).slice(0, 4096); }
+let recordsStore = null;
+let recordsOpening = null;
+let recordsOperation = null;
+let recordsClosing = null;
+let recordsEpoch = 0;
+let lastRecordsId = 0;
+let recordsRetired = false;
+const RECORD_BYTES = 64 * 1024 * 1024;
+const ARCHIVE_BYTES = 5 * 1024 * 1024;
+function recordId(id) { return Number.isSafeInteger(id) && id > 0; }
+function recordError(error) { return message(error) || "Recording operation failed."; }
+function recordHandleSize(handle, limit, file = false) {
+  if (!(handle instanceof Blob) || file && !(handle instanceof File)) throw new Error("Recording requires an immutable binary handle.");
+  if (file) Object.getOwnPropertyDescriptor(File.prototype, "name").get.call(handle);
+  const size = Object.getOwnPropertyDescriptor(Blob.prototype, "size").get.call(handle);
+  if (size < 1 || size > limit) throw new Error("Recording handle exceeds its bounded extent.");
+  return size;
+}
+function recordReply(request, result, error = null) {
+  report("records-reply", { id: request.id, action: request.action, result, error: error === null ? null : recordError(error) });
+}
+function recordCurrent(operation) {
+  return recordsOperation === operation && operation.epoch === recordsEpoch && !operation.retired && !recordsRetired && !failed && !disposed;
+}
+function recordFence() {
+  ++recordsEpoch;
+  if (recordsOperation) recordsOperation.retired = true;
+  recordsOpening?.close();
+  recordsStore?.close();
+}
+function cleanupDeadline(promise) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Recording cleanup timed out; commit status may be unknown.")), 10000);
+    promise.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+  });
+}
+function joinRecords() {
+  const opening = recordsOpening, store = recordsStore, operation = recordsOperation;
+  return cleanupDeadline(Promise.all([opening?.terminal, store?.terminal, operation?.physical])).then(() => {
+    if (recordsOpening === opening) recordsOpening = null;
+    if (recordsStore === store) recordsStore = null;
+  });
+}
+function closeRecords(request) {
+  if (!recordId(request.id)) return;
+  if (recordsClosing?.id === request.id) {
+    void recordsClosing.done.then(error => report("records-closed", { id: request.id, error }));
+    return;
+  }
+  if (request.id <= lastRecordsId) return;
+  if (recordsClosing && !recordsClosing.finished) {
+    report("records-closed", { id: request.id, error: "Recording cleanup is already in progress." }); return;
+  }
+  lastRecordsId = request.id;
+  recordFence();
+  const closing = { id: request.id, finished: false, done: null };
+  recordsClosing = closing;
+  closing.done = joinRecords().then(() => null, recordError).then(error => {
+    closing.finished = true;
+    report("records-closed", { id: closing.id, error });
+    return error;
+  });
+}
+function saveRecordValue(value) {
+  if (!value || typeof value !== "object") throw new Error("Recording save value is required.");
+  const { replayFile, archiveBlob, archivePlayer, player } = value;
+  const players = value.players;
+  recordHandleSize(replayFile, RECORD_BYTES, true);
+  if (archiveBlob !== null) recordHandleSize(archiveBlob, ARCHIVE_BYTES);
+  if (!Array.isArray(players) || players.length < 1 || players.length > 64
+    || players.some(id => !Number.isInteger(id) || id < 1 || id > 0xffffffff)
+    || new Set(players).size !== players.length || !players.includes(player)
+    || (archiveBlob === null ? archivePlayer !== null : !(archiveBlob instanceof Blob)
+      || archiveBlob.size < 1 || archiveBlob.size > ARCHIVE_BYTES || archivePlayer !== player))
+    throw new Error("Recording handle or original player association is invalid.");
+  const source = value.metadata;
+  if (!source || typeof source.name !== "string" || !source.name.length || source.name.length > 512
+    || Array.from(source.name).length > 256 || typeof source.complete !== "boolean"
+    || typeof source.chartPath !== "string" || source.chartPath.length > 4096)
+    throw new Error("Recording metadata is invalid.");
+  const metadata = { name: source.name, chartPath: normalizedPath(source.chartPath, 4096), complete: source.complete };
+  for (const key of ["hits", "misses", "combo"]) {
+    const score = source[key];
+    if (score !== null && (typeof score !== "bigint" || score < 0n || score > U64_MAX)) throw new Error("Recording score is invalid.");
+    metadata[key] = score;
+  }
+  return { metadata, replayFile, archiveBlob, archivePlayer };
+}
+async function recordBody(handle, limit) {
+  const size = recordHandleSize(handle, limit);
+  const buffer = await handle.arrayBuffer();
+  if (!(buffer instanceof ArrayBuffer) || buffer.resizable === true || buffer.byteLength !== size || size < 1 || size > limit)
+    throw new Error("Recording acquisition changed its bounded extent.");
+  return new Uint8Array(buffer);
+}
+function requestRecords(request) {
+  if (!recordId(request.id)) return;
+  if (recordsOperation?.id === request.id) return;
+  if (request.id <= lastRecordsId) { recordReply(request, null, "Recording operation ID must increase."); return; }
+  if (!cpuReady || play || capturesPending || roomFinalization || importing || stagedLibrary || preparationOwner || settingsOperation
+    || recordsRetired || recordsOperation || recordsClosing && !recordsClosing.finished) {
+    recordReply(request, null, "Recording operation requires an initialized idle owner with no pending cleanup."); return;
+  }
+  let value;
+  try {
+    if (!["list", "load", "save", "remove"].includes(request.action)) throw new Error("Unknown recording action.");
+    if (["load", "remove"].includes(request.action) && !recordId(request.recordId)) throw new Error("Recording database key is invalid.");
+    if (request.action === "save") value = saveRecordValue(request.value);
+  } catch (error) { recordReply(request, null, error); return; }
+  lastRecordsId = request.id;
+  const operation = { id: request.id, epoch: recordsEpoch, retired: false, physical: null };
+  recordsOperation = operation;
+  const timer = setTimeout(() => {
+    if (!recordCurrent(operation)) return;
+    recordReply(request, null, "Recording operation timed out; commit status may be unknown.");
+    recordFence();
+  }, 10000);
+  operation.physical = (async () => {
+    let successful = false;
+    try {
+      let bytes, completedArchive;
+      if (value) {
+        bytes = await recordBody(value.replayFile, RECORD_BYTES);
+        if (!recordCurrent(operation)) return;
+        if (value.archiveBlob !== null) {
+          completedArchive = await recordBody(value.archiveBlob, ARCHIVE_BYTES);
+          if (!recordCurrent(operation)) return;
+        }
+      }
+      if (!recordsStore) {
+        const lease = RecordsStore.openTracked(); recordsOpening = lease;
+        const store = await lease.ready;
+        recordsStore = store;
+        if (!recordCurrent(operation)) { store.close(); return; }
+        await lease.terminal;
+        if (!recordCurrent(operation)) return;
+        if (recordsOpening === lease) recordsOpening = null;
+      }
+      if (!recordCurrent(operation)) return;
+      const store = recordsStore;
+      let result;
+      if (request.action === "list") result = { entries: await store.list() };
+      else if (request.action === "save") result = { metadata: await store.save({ ...value.metadata, bytes,
+        completedArchive, archivePlayer: value.archivePlayer }) };
+      else if (request.action === "remove") result = { removed: await store.remove(request.recordId) };
+      else {
+        const loaded = await store.load(request.recordId);
+        if (!recordCurrent(operation)) return;
+        result = { metadata: loaded.metadata,
+          replayFile: new File([loaded.bytes], loaded.metadata.name, { type: "application/octet-stream" }),
+          archiveBlob: loaded.completedArchive ? new Blob([loaded.completedArchive], { type: "application/octet-stream" }) : null,
+          archivePlayer: loaded.archivePlayer ?? null };
+      }
+      if (!recordCurrent(operation)) return;
+      successful = true;
+      recordReply(request, result);
+    } catch (error) {
+      if (recordCurrent(operation)) recordReply(request, null, error);
+    } finally {
+      clearTimeout(timer);
+      // Failed/canceled caller promises cannot release native transaction capacity.
+      if (!successful || operation.retired) {
+        recordsOpening?.close(); recordsStore?.close();
+        await Promise.all([recordsOpening?.terminal, recordsStore?.terminal]);
+        recordsOpening = null; recordsStore = null;
+      }
+      if (recordsOperation === operation) recordsOperation = null;
+    }
+  })();
+  void operation.physical.catch(() => {});
+}
 function currentAudioSetup(operation) {
   return audioSetup === operation && !operation.retired && !audioSetupRetired && !failed && !disposed;
 }
@@ -231,7 +404,7 @@ async function settingsProfile(request) {
   }
   if (id <= lastSettingsId) return;
   lastSettingsId = id;
-  if (!cpuReady || settingsOperation || play || roomFinalization || importing || stagedLibrary) {
+  if (!cpuReady || settingsOperation || recordsOperation && !recordsOperation.retired || play || roomFinalization || importing || stagedLibrary) {
     report("settings-profile-error", { id, message: "Wait for an initialized idle Worker before processing settings." });
     return;
   }
@@ -363,24 +536,21 @@ async function presentHistoricalRecord(request) {
     return;
   }
   const epoch = historicalEpoch = {};
-  const current = () => request.id === lastHistoricalId && epoch === historicalEpoch && !failed && !play && !roomFinalization && !importing
+  const current = () => request.id === lastHistoricalId && epoch === historicalEpoch && !failed && !disposed && !play && !roomFinalization && !importing
     && !stagedLibrary && !settingsOperation && !roomResults;
   let binding = null;
   try {
     const file = request.replayFile;
     const replaySize = file?.size;
-    if (!file || !Number.isSafeInteger(replaySize) || replaySize < 1 || replaySize > 64 * 1024 * 1024
+    if (!(file instanceof File) || !Number.isSafeInteger(replaySize) || replaySize < 1 || replaySize > 64 * 1024 * 1024
       || typeof file.arrayBuffer !== "function") throw new Error("Historical replay file exceeds its bound.");
-    const archive = request.completedArchive;
+    const archiveHandle = request.completedArchive;
     const player = request.archivePlayer;
-    if (archive != null) {
-      if (!(archive instanceof Uint8Array) || !(archive.buffer instanceof ArrayBuffer)
-        || archive.buffer.resizable === true || archive.byteOffset !== 0 || archive.byteLength !== archive.buffer.byteLength
-        || archive.byteLength < 1 || archive.byteLength > 5 * 1024 * 1024
-        || (player != null && (!Number.isInteger(player) || player < 1 || player > 0xffffffff))) {
+    if (archiveHandle != null) {
+      if (!(archiveHandle instanceof Blob) || archiveHandle.size < 1 || archiveHandle.size > ARCHIVE_BYTES
+        || (player != null && (!Number.isInteger(player) || player < 1 || player > 0xffffffff)))
         throw new Error("Historical archive envelope is invalid.");
-      }
-    } else if (player != null) throw new Error("Historical player association requires archive bytes.");
+    } else if (player != null) throw new Error("Historical player association requires an archive.");
     await ready;
     if (!current()) return;
     const bytes = await file.arrayBuffer();
@@ -388,7 +558,9 @@ async function presentHistoricalRecord(request) {
     if (!(bytes instanceof ArrayBuffer) || bytes.resizable === true || bytes.byteLength !== replaySize) {
       throw new Error("Historical replay acquisition changed its bounded extent.");
     }
-    binding = new BrowserHistoricalRecord(new Uint8Array(bytes), archive ?? undefined, player ?? undefined);
+    const archive = archiveHandle == null ? undefined : await recordBody(archiveHandle, ARCHIVE_BYTES);
+    if (!current()) return;
+    binding = new BrowserHistoricalRecord(new Uint8Array(bytes), archive, player ?? undefined);
     if (!current()) { const previous = binding; binding = null; previous.free(); return; }
     const available = binding.available;
     const error = binding.error;
@@ -587,6 +759,8 @@ function fenceVisual() {
   if (visual) { retireMenuMotions(visual); visual.retired = true; }
 }
 function fatal(error) {
+  recordsRetired = true;
+  recordFence();
   retireAudioSetup();
   if (failed) return;
   if (capturesPending) {
@@ -611,7 +785,8 @@ function fatal(error) {
   discardRoomResults();
   cancelRoomFinalization();
   fenceVisual();
-  report("fatal", { message: message(error) });
+  void joinRecords().then(() => report("fatal", { message: message(error) }), cause =>
+    report("fatal", { message: message(`${message(error)}; ${recordError(cause)}`) }));
 }
 function captureDelivered() {
   --capturesPending;
@@ -908,8 +1083,8 @@ function handleMenu(request) {
       commitMenuRoster(roster => roster.assign(request.player, request.source));
     } else if (request.kind === "menu-record-preview") {
       if (menuOwner.route !== 4 || !libraryContext || typeof request.chartPath !== "string" || typeof request.key !== "string"
-        || !(request.replay instanceof Uint8Array) || request.replay.byteLength > 64 * 1024 * 1024
-        || request.archive != null && !(request.archive instanceof Uint8Array)) throw new Error("Invalid actual record preview request.");
+        || !(request.replayFile instanceof File) || request.replayFile.size < 1 || request.replayFile.size > RECORD_BYTES
+        || request.archiveBlob != null && (!(request.archiveBlob instanceof Blob) || request.archiveBlob.size < 1 || request.archiveBlob.size > ARCHIVE_BYTES)) throw new Error("Invalid actual record preview request.");
       void acquireMenuRecord(request);
       return;
     }
@@ -1028,20 +1203,34 @@ function queueVisualControl(operation, fields) {
 }
 
 async function acquireMenuRecord(request) {
+  if (menuRecordAcquiring) {
+    report("menu-error", { message: "Wait for the current recorded prefix acquisition to finish.",
+      menuGeneration: request.menuGeneration, screen: request.screen, revision: request.revision });
+    return;
+  }
+  menuRecordAcquiring = true;
   const context = libraryContext, generation = importGeneration, epoch = selectionEpoch;
-  const current = () => epoch === selectionEpoch && menuOwner !== null && menuVisible && !play && !settingsOperation && !importing
+  const current = () => !failed && !disposed && epoch === selectionEpoch && menuOwner !== null && menuVisible && !play && !settingsOperation && !importing
     && generation === importGeneration && request.menuGeneration === menuGeneration
     && request.screen === menuOwner.screen && request.revision === menuOwner.revision;
   try {
+    if (!current()) return;
+    const replay = await recordBody(request.replayFile, RECORD_BYTES);
+    if (!current()) return;
+    const archive = request.archiveBlob == null ? undefined : await recordBody(request.archiveBlob, ARCHIVE_BYTES);
+    if (!current()) return;
     if (!await acquireLibraryFile(context, request.chartPath, current)) return;
     if (!currentLibrary(context) || !current()) return;
     menuOwner.preview_record(request.screen, request.revision, context.library, request.chartPath, request.key,
-      request.replay, request.archive, request.player);
-    menuRecordFile = new File([request.replay], `${request.key}.bkr`, { type: "application/octet-stream" });
+      replay, archive, request.player);
+    menuRecordFile = request.replayFile;
     reportMenu(); publishVisual();
   } catch (error) {
     if (currentLibrary(context) && current()) report("menu-error", { message: message(error),
       menuGeneration: request.menuGeneration, screen: request.screen, revision: request.revision });
+  } finally {
+    // Stale publication does not cancel an in-flight File/Blob body read.
+    menuRecordAcquiring = false;
   }
 }
 function retireLibrary(context) {
@@ -2264,7 +2453,7 @@ function disposeGame(state) {
     try {
       const bytes = game.take_replay();
       if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
-        || bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength
+        || bytes.buffer.resizable === true || bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength
         || bytes.length === 0 || bytes.length > 64 * 1024 * 1024) throw new Error("Recorded replay has an invalid bounded transferable layout.");
       result.replay = bytes;
     } catch (cause) { result.replayError = message(cause); }
@@ -2275,16 +2464,23 @@ function disposeGame(state) {
     result.archivePlayers = null;
     result.archiveError = "Completed archive must own a separate transferable buffer.";
   }
+  if (result.completedArchive) {
+    try { result.completedArchive = new Blob([result.completedArchive], { type: "application/octet-stream" }); }
+    catch (cause) { result.completedArchive = null; result.archivePlayers = null; result.archiveError = recordError(cause); }
+  }
+  const captureFile = bytes => new File([bytes], "recording.bkr", { type: "application/octet-stream" });
+  if (result.replay) {
+    try { result.replay = captureFile(result.replay); }
+    catch (cause) { result.replay = null; result.replayError = recordError(cause); }
+  }
+  for (const row of result.replays ?? []) if (row.replay) {
+    try { row.replay = captureFile(row.replay); }
+    catch (cause) { row.replay = null; row.replayError = recordError(cause); }
+  }
   try { game.free(); } catch (cause) { result.cleanupError ??= cause; }
   return result;
 }
 
-function replayTransfers(replay, replays, completedArchive) {
-  const buffers = replays ? replays.filter(row => row.replay !== null).map(row => row.replay.buffer)
-    : replay ? [replay.buffer] : [];
-  if (completedArchive) buffers.push(completedArchive.buffer);
-  return buffers;
-}
 
 function failPlay(state, error, request = null) {
   if (play !== state) return;
@@ -2315,7 +2511,7 @@ function failPlay(state, error, request = null) {
     completedArchive, archivePlayers, archiveError, replay, replayComplete: false, replayError, ...score, ...(replays ? { replays } : {}),
     ...(state.network ? { multiplayer: multiplayerOutcome(state.network) } : {}),
     ...(state.room ? { room: roomOutcome(state.room), roomResults: roomResultsMetadata(state.roomResults) } : {}),
-    ...(savedOpponents ? { savedOpponents } : {}) }, replayTransfers(replay, replays, completedArchive));
+    ...(savedOpponents ? { savedOpponents } : {}) });
     captureDelivered();
     if (state.fatalAfterCapture) fatal(state.fatalAfterCapture);
   };
@@ -2360,9 +2556,9 @@ function stopPlay(state, request) {
       ...(state.room ? { room: roomOutcome(state.room), roomResults: roomResultsMetadata(state.roomResults) } : {}),
       ...(savedOpponents ? { savedOpponents } : {}), ...(replays ? { replays } : {}) };
     if (cleanupFailure) report("play-error", { playId: state.id, message: message(cleanupFailure), released: false,
-      ...result, replayComplete: false }, replayTransfers(replay, replays, completedArchive));
+      ...result, replayComplete: false });
     else report("play-stopped", { playId: state.id, ...result,
-      replayComplete: completed && replay !== null }, replayTransfers(replay, replays, completedArchive));
+      replayComplete: completed && replay !== null });
     captureDelivered();
   };
   publishVisual();
@@ -3603,6 +3799,8 @@ function handlePlay(request) {
 self.addEventListener("message", event => {
   const request = event.data;
   if (request?.kind === "dispose") {
+    recordsRetired = true;
+    recordFence();
     retireAudioSetup();
     if (play || roomFinalization || capturesPending) { report("dispose-error", { message: "Join gameplay capture and room cleanup before disposing the Worker." }); return; }
     if (disposed) return;
@@ -3623,7 +3821,7 @@ self.addEventListener("message", event => {
     ++importGeneration; pendingImport = null;
     if (settingsOperation) { settingsOperation.retired = true; settingsOperation.candidate = null; }
     settingsOperation = null;
-    report("disposed");
+    void joinRecords().then(() => report("disposed"), error => report("dispose-error", { message: recordError(error) }));
     return;
   }
   if (failed || disposed) { closeAudioHandoff(request); return; }
@@ -3649,6 +3847,8 @@ self.addEventListener("message", event => {
     ready.catch(fatal);
     return;
   }
+  if (request.kind === "records-close") { closeRecords(request); return; }
+  if (request.kind === "records-request") { requestRecords(request); return; }
   if (request.kind === "audio-load") { loadAudioModule(request); return; }
   if (request.kind === "historical-record-page") { pageHistoricalRecord(request); return; }
   if (request.kind.startsWith("menu-")) { handleMenu(request); return; }
@@ -3664,18 +3864,18 @@ self.addEventListener("message", event => {
     return;
   }
   if (!ready) { closeAudioHandoff(request); return fatal(new Error("Initialize gameplay before sending commands.")); }
-  if (settingsOperation && request.kind !== "resize") {
+  if ((settingsOperation || recordsOperation && !recordsOperation.retired) && request.kind !== "resize") {
     closeAudioHandoff(request);
     if (request.kind === "play-start") {
-      report("play-error", { playId: request.playId, rpcId: request.rpcId, released: true, message: "Wait for settings processing before starting gameplay." });
+      report("play-error", { playId: request.playId, rpcId: request.rpcId, released: true, message: "Wait for settings or recording processing before starting gameplay." });
     } else if (request.kind.startsWith("play-") && identity(request.playId) && identity(request.rpcId)) {
-      report("play-reply", { playId: request.playId, rpcId: request.rpcId, error: "Wait for settings processing before sending gameplay requests." });
+      report("play-reply", { playId: request.playId, rpcId: request.rpcId, error: "Wait for settings or recording processing before sending gameplay requests." });
     } else if (request.kind === "import" || request.kind === "accept-library") {
-      report("import-error", { id: request.id, message: "Wait for settings processing before importing files." });
+      report("import-error", { id: request.id, message: "Wait for settings or recording processing before importing files." });
     } else if (request.kind === "select") {
-      report("selection-error", { id: request.id, message: "Wait for settings processing before preparing a chart." });
+      report("selection-error", { id: request.id, message: "Wait for settings or recording processing before preparing a chart." });
     } else if (request.kind === "seek") {
-      report("seek-error", { id: request.id, selectedId, message: "Wait for settings processing before changing the preview." });
+      report("seek-error", { id: request.id, selectedId, message: "Wait for settings or recording processing before changing the preview." });
     }
     return;
   }

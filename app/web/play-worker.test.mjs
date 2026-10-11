@@ -9,6 +9,24 @@ import { encodeKeyboardEvent, encodeTouchEvent, encodeRawHidEvent } from "./phys
 import { BMS_TIMING_PRESET_ID, millisecondsToNanos } from "./play-model.mjs";
 
 const FileType = globalThis.File ?? NodeFile;
+// Node may clone a File as Blob. Model immutable receiving File endpoints
+// explicitly; actual Chromium cloning/lifetime is a separate browser gate.
+function cloneImmutableReceipt(value, transfer) {
+  const cloned = structuredClone(value, { transfer });
+  const preserve = (source, target) => {
+    if (source?.replay instanceof FileType) target.replay = new FileType([source.replay], source.replay.name);
+    if (source?.replayFile instanceof FileType) target.replayFile = new FileType([source.replayFile], source.replayFile.name);
+    if (source?.replays) source.replays.forEach((row, index) => preserve(row, target.replays[index]));
+    if (source?.result && target?.result) preserve(source.result, target.result);
+  };
+  preserve(value, cloned);
+  return cloned;
+}
+async function immutableBytes(handle) {
+  assert.ok(handle instanceof Blob, "capture body is an immutable handle");
+  return Array.from(new Uint8Array(await handle.arrayBuffer()));
+}
+
 const ORIGIN = 9007199254740993n;
 const START = 9007199254741999n;
 const SCORE = { song_ns: 123456789012345n, hits: 17n, misses: 3n, combo: 9n, max_combo: 15n };
@@ -1185,12 +1203,12 @@ async function workerHarness(options = {}) {
     isSecureContext: false, navigator: {},
     postMessage(value, transfer = []) {
       transfers.push([...transfer]);
-      messages.push(structuredClone(value, { transfer }));
+      messages.push(cloneImmutableReceipt(value, transfer));
     },
     addEventListener(name, callback) { assert.equal(name, "message"); receive = callback; },
   };
   const context = createContext({
-    self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
+    self, structuredClone, DataView, File: FileType, Blob, queueMicrotask, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
     fetch: options.fetch,
     WebAssembly: options.compile ? new Proxy(WebAssembly, { get(target, key) {
       return key === "compile" ? options.compile : Reflect.get(target, key);
@@ -1219,6 +1237,7 @@ async function workerHarness(options = {}) {
   }, { context });
   const completedHelper = new SourceTextModule(await readFile(new URL("./completed-results-model.mjs", import.meta.url), "utf8"), { context });
   const helper = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
+  const recordStore = new SourceTextModule(await readFile(new URL("./record-store.mjs", import.meta.url), "utf8"), { context });
   const playHelper = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const settingsHelper = new SourceTextModule(await readFile(new URL("./settings-profile.mjs", import.meta.url), "utf8"), { context });
   const displayHelper = new SourceTextModule(await readFile(new URL("./display-settings.mjs", import.meta.url), "utf8"), { context });
@@ -1241,6 +1260,7 @@ async function workerHarness(options = {}) {
   const worker = new SourceTextModule(await readFile(workerUrl, "utf8"), { context, identifier: workerUrl.href,
     initializeImportMeta(meta) { meta.url = workerUrl.href; } });
   await worker.link(specifier => {
+    if (specifier === "./record-store.mjs") return recordStore;
     if (specifier === "./render-protocol.mjs") return renderClient;
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./host_model.mjs") return helper;
@@ -2162,7 +2182,7 @@ test("room snapshots carry actual participant and ordered full-width DTOs withou
   assert.equal(game.stops, 1); assert.equal(game.frees, 1);
   const terminal = h.of("play-error").at(-1);
   assert.deepEqual(terminal.replays.map(row => row.player), game.memberIds);
-  assert.ok(terminal.replays.every(row => row.replay instanceof Uint8Array && !row.replayComplete));
+  assert.ok(terminal.replays.every(row => row.replay instanceof FileType && !row.replayComplete));
   const count = h.messages.length;
   h.roomChannels[0].reads.at(-1).gate.resolve(Uint8Array.of(1)); await flushJobs();
   assert.equal(h.messages.length, count);
@@ -2213,7 +2233,7 @@ test("fatal room I/O and malformed complete snapshots retain capture prefixes wh
     channel.writes.at(-1).gate.resolve(); await flushJobs();
     assert.deepEqual(session.credits, credits, "late transport fulfillment cannot credit a freed session");
     assert.equal(h.of("play-error").length, 1); assert.equal(session.frees, 1);
-    assert.ok(h.of("play-error")[0].replays.every(row => row.replay instanceof Uint8Array && row.replayComplete === false));
+    assert.ok(h.of("play-error")[0].replays.every(row => row.replay instanceof FileType && row.replayComplete === false));
     assert.equal(h.of("play-room").filter(row => row.event.kind === "closed").length, 1);
     await h.send({ kind: "play-stop", playId: 7 });
     assert.equal(game.stops, 1); assert.equal(session.frees, 1);
@@ -2500,7 +2520,7 @@ test("room HUD capability and binding failures fence only presentation and prese
     const final = h.of("play-stopped").at(-1);
     assert.equal(game.frees, 1); assert.equal(h.roomSessions[0].frees, 1); assert.equal(final.room.error, null);
     assert.equal(final.room.peers[0].sequence, 2n);
-    assert.ok(final.replays[0].replay instanceof Uint8Array);
+    assert.ok(final.replays[0].replay instanceof FileType);
     assert.equal(game.frees, 1); assert.equal(session.frees, 1);
   }
 });
@@ -2572,7 +2592,7 @@ test("explicit Stop captures the actual room prefix before freeing gameplay and 
   assert.deepEqual(final.room, { participant: 18446744073709551615n, finalQueued: true,
     finalWritten: false, finalAcknowledged: false, localComplete: false, finalDrain: "cancelled", error: null, peers: [] });
   assert.equal(final.replays[0].replayComplete, false);
-  assert.ok(final.replays[0].replay instanceof Uint8Array);
+  assert.ok(final.replays[0].replay instanceof FileType);
   assert.deepEqual(game.disposals, ["group-progress", "stop", "take:4294967295", "free"]);
   assert.equal(session.requests.includes("leave"), false);
 });
@@ -2615,7 +2635,7 @@ test("an activated room fault fences only publication and joins stale continuati
   assert.match(final.room.error, /Room read failed/);
   assert.equal(final.room.finalQueued, false); assert.equal(final.room.finalWritten, false);
   assert.equal(final.room.finalAcknowledged, false); assert.equal(final.room.finalDrain, "cancelled");
-  assert.ok(final.replays[0].replay instanceof Uint8Array); assert.equal(h.games[0].frees, 0);
+  assert.ok(final.replays[0].replay instanceof FileType); assert.equal(h.games[0].frees, 0);
   await h.send({ kind: "play-stop", playId: 8 });
 
   for (const badWords of [new Uint32Array(), new Uint32Array(12),
@@ -2628,7 +2648,7 @@ test("an activated room fault fences only publication and joins stale continuati
     assert.equal(refused.of("play-room").filter(row => row.event.kind === "closed").length, 1);
     assert.equal(refused.locals[0].frees, 0); assert.equal(refused.of("play-error").length, 0);
     await refused.send({ kind: "play-stop", playId: 7 });
-    assert.ok(refused.of("play-stopped")[0].replays[0].replay instanceof Uint8Array);
+    assert.ok(refused.of("play-stopped")[0].replays[0].replay instanceof FileType);
   }
 });
 
@@ -2696,7 +2716,7 @@ test("natural room drain retains peer and receipt callbacks after gameplay dispo
   assert.equal(final.room.finalAcknowledged, true); assert.equal(final.room.localComplete, true);
   assert.deepEqual(final.room.peers, [{ participant: 9007199254740993n,
     sequence: 18446744073709551615n, finalPrefix: true, words: original }]);
-  assert.equal(final.replays[0].replayComplete, true); assert.ok(final.replays[0].replay instanceof Uint8Array);
+  assert.equal(final.replays[0].replayComplete, true); assert.ok(final.replays[0].replay instanceof FileType);
   assert.deepEqual(game.disposals, ["group-progress", "stop", "take:4294967295", "free"]);
   assert.equal(game.calls.length, calls); assert.equal(session.publications.length, 1);
   assert.equal(game.roomHudCalls.length, hudCalls, "retained final-drain prefixes never revisit the freed HUD binding");
@@ -2868,7 +2888,7 @@ test("retained room archive and rendering faults remain presentation-only and ev
     const terminal = h.of("play-stopped").at(-1);
     assert.equal(h.locals[0].frees, 1); assert.equal(session.frees, 1); assert.equal(terminal.replays[0].replayComplete, true);
     assert.equal(terminal.room.finalDrain, "complete"); assert.equal(terminal.room.error, null);
-    const replay = terminal.replays[0].replay.slice();
+    const replay = await immutableBytes(terminal.replays[0].replay);
     if (options.roomResultsDrawError) await h.tick();
     if (options.roomResultsPageError) {
       const rpc = await requestRoom(h, "play-room-page", { page: 0 }); assert.ok(roomReply(h, rpc).error);
@@ -2880,7 +2900,7 @@ test("retained room archive and rendering faults remain presentation-only and ev
     } else assert.equal(terminal.roomResults.failed, true);
     assert.ok(h.roomResults.every(archive => archive.frees === 1));
     assert.equal(h.of("fatal").length, 0); assert.equal(h.of("play-error").length, 0);
-    assert.deepEqual(terminal.replays[0].replay, replay); assert.equal(h.locals[0].frees, 1);
+    assert.deepEqual(await immutableBytes(terminal.replays[0].replay), replay); assert.equal(h.locals[0].frees, 1);
     await h.send({ kind: "seek", id: 9, selectedId: 2, ns: "0" });
     assert.ok(h.roomResults.every(archive => archive.frees === 1));
   }
@@ -2945,7 +2965,7 @@ test("room drain failure preserves genuine local completion while actual gamepla
     }
     assert.equal(final.room.finalQueued, true); assert.equal(final.room.finalWritten, false);
     assert.equal(final.room.finalAcknowledged, false); assert.equal(final.room.localComplete, false);
-    assert.equal(final.replays[0].replayComplete, mode !== "cleanup"); assert.ok(final.replays[0].replay instanceof Uint8Array);
+    assert.equal(final.replays[0].replayComplete, mode !== "cleanup"); assert.ok(final.replays[0].replay instanceof FileType);
     assert.equal(h.of("play-error").length, mode === "cleanup" ? 1 : 0); assert.equal(game.frees, 1); assert.equal(session.frees, 1);
     if (mode === "cleanup") { assert.equal(final.released, false); assert.match(final.message, /actual channel cleanup failed/); }
     assert.equal(channel.closes, 1); assert.equal(h.roomPort.closes, 1);
@@ -2961,7 +2981,7 @@ test("room drain failure preserves genuine local completion while actual gamepla
   if (h.of("play-error").length === 0) { h.setNetworkNow(11000); await h.runTimer(1); }
   const failed = h.of("play-error").at(-1);
   assert.match(failed.message, /actual gameplay free failed/); assert.equal(failed.released, false);
-  assert.equal(failed.replays[0].replayComplete, false); assert.ok(failed.replays[0].replay instanceof Uint8Array);
+  assert.equal(failed.replays[0].replayComplete, false); assert.ok(failed.replays[0].replay instanceof FileType);
   assert.equal(h.of("play-stopped").length, 0); assert.equal(channel.closes, 1); assert.equal(session.frees, 1);
 });
 
@@ -3052,7 +3072,7 @@ test("local saved records admit per member before touch setup and isolate one fa
   assert.equal(groups[2].opponents, null); assert.equal(groups[2].error, "actual member comparison failed");
   assert.equal(game.savedReads, 3); assert.deepEqual([...game.memberHudDisables], [[31, 1]]);
   assert.deepEqual(game.disposals.slice(-6), ["opponents", "stop", "take:99", "take:7", "take:31", "free"]);
-  assert.ok(stopped.replays.every(row => row.replay instanceof Uint8Array && row.replayError === null && row.replayComplete === false));
+  assert.ok(stopped.replays.every(row => row.replay instanceof FileType && row.replayError === null && row.replayComplete === false));
   assert.equal(stopped.localScores.length, 3); assert.equal(game.stops, 1); assert.equal(game.frees, 1);
   const reads = game.savedReads;
   await h.send(step({ tickId: 4 })); await h.send({ kind: "play-stop", playId: 7 });
@@ -3310,9 +3330,11 @@ test("local captures preserve independent member prefixes through setup, seriali
     assert.equal(receipt.replays[0].replayError, null); assert.equal(receipt.replays[2].replayError, null);
     assert.equal(game.memberReplayTakes.size, 3); assert.equal(game.stops, 1); assert.equal(game.frees, 1);
     const transfer = h.transfers[h.messages.indexOf(receipt)];
-    assert.equal(transfer.length, 2); assert.equal(new Set(transfer).size, 2);
-    assert.equal(transfer[0], game.memberReplayBytes.get(99).buffer); assert.equal(transfer[1], game.memberReplayBytes.get(31).buffer);
-    assert.equal(transfer.every(buffer => buffer.byteLength === 0), true);
+    assert.equal(transfer.length, 0, "only admitted immutable handles cross the capture boundary");
+    assert.deepEqual(await immutableBytes(receipt.replays[0].replay), fault === "duplicate" ? Array.from(shared) : [66,75,82,99]);
+    assert.deepEqual(await immutableBytes(receipt.replays[2].replay), [66,75,82,31]);
+    assert.equal(game.memberReplayBytes.get(99).buffer.byteLength, 4);
+    assert.equal(game.memberReplayBytes.get(31).buffer.byteLength, 4);
   }
   const partial = await active({ startRequest: localRequest({ recordReplay: true }),
     inputHidBlob(game) { game.memberScores.get(99).hits = 18n; throw new Error("actual committed member report failure"); },
@@ -3511,7 +3533,7 @@ test("a blocked renderer preserves original pending input, direct audio ACK and 
   assert.equal(h.visualExports.length, exports + 1);
   await h.send({ kind: "play-stop", playId: 7 });
   assert.equal(game.replayTakes, 1);
-  assert.ok(h.of("play-stopped").at(-1).replay instanceof Uint8Array);
+  assert.ok(h.of("play-stopped").at(-1).replay instanceof FileType);
   const acks = h.visualAcks.length;
   h.renderPort.ack(pending); await flushJobs();
   assert.equal(h.visualAcks.length, acks, "retired ACK never reads the freed gameplay owner");
@@ -3551,8 +3573,8 @@ test("audio setup fatal retires pending fetch or compile before retained room ca
     heldRead.gate.resolve(Uint8Array.of(1)); await flushJobs();
     const captures = [...h.of("play-stopped"), ...h.of("play-error")].filter(row => row.playId === 7);
     assert.equal(captures.length, 1); const capture = captures[0];
-    assert.equal(capture.replays[0].replayComplete, false); assert(capture.replays[0].replay instanceof Uint8Array);
-    assert(capture.replays[0].replay.byteLength > 0); assert.equal(capture.room.finalQueued, true);
+    assert.equal(capture.replays[0].replayComplete, false); assert(capture.replays[0].replay instanceof FileType);
+    assert(capture.replays[0].replay.size > 0); assert.equal(capture.room.finalQueued, true);
     assert.deepEqual(game.disposals, ["group-progress", "stop", "take:4294967295", "free"]);
     assert.equal(h.of("fatal").length, 1);
     assert(h.messages.indexOf(capture) < h.messages.indexOf(h.of("fatal")[0]), "retained genuine capture is delivered before global fatal");
@@ -3582,7 +3604,7 @@ test("terminal graphics failure delivers actual room capture before delayed clea
   const final = h.of("play-error").find(row => row.playId === 7);
   assert.ok(final); assert.match(final.message, /GPU device lost/);
   assert.equal(final.replays[0].replayComplete, false);
-  assert.ok(final.replays[0].replay instanceof Uint8Array);
+  assert.ok(final.replays[0].replay instanceof FileType);
   assert.equal(final.room.localComplete, false);
   assert.equal(final.room.finalQueued, true);
   assert.deepEqual(game.disposals, ["group-progress", "stop", "take:4294967295", "free"]);
@@ -4219,7 +4241,7 @@ test("saved prefixes refresh the Worker HUD at most four times per second and ex
     ["other", "<other>", SCORE.song_ns + 123n, null, maximum, maximum, maximum, maximum],
   ]);
   assert.equal(stopped.replayError, null); assert.equal(stopped.replayComplete, false);
-  assert.ok(stopped.replay instanceof Uint8Array);
+  assert.ok(stopped.replay instanceof FileType);
   assertReleased(h, { ...SCORE, song_ns: SCORE.song_ns + 123n });
   const messageCount = h.messages.length;
   await h.send({ kind: "play-stop", playId: 7 }); await h.send(step({ tickId: 4 }));
@@ -4268,7 +4290,7 @@ test("comparison errors hide the HUD once and remain separate from actual local 
     assert.ok(stopped.savedOpponents.error.length > 0);
     if (failure === "getter") assert.match(stopped.savedOpponents.error, /actual comparison prefix failure.*HUD disable failed/);
     assert.equal(game.savedReads, 1); assert.equal(game.hudDisables, 1);
-    assert.equal(stopped.replayError, null); assert.ok(stopped.replay instanceof Uint8Array);
+    assert.equal(stopped.replayError, null); assert.ok(stopped.replay instanceof FileType);
     assert.equal(stopped.replayComplete, false); assertReleased(h);
   }
   const selected = replayFile();
@@ -6046,7 +6068,7 @@ test("paired observations are preflighted together and preserve order before a c
   assertReleased(fault);
 });
 
-test("recording is opt-in before preparation and transfers one stopped-owner prefix without copying its identity", async () => {
+test("recording is opt-in before preparation and exports one immutable stopped-owner prefix with exact genuine bytes", async () => {
   for (const recordReplay of [undefined, false, true]) {
     const h = await active({ recordReplay });
     const game = h.games[0];
@@ -6062,12 +6084,11 @@ test("recording is opt-in before preparation and transfers one stopped-owner pre
     assert.deepEqual(game.disposals, recordReplay ? ["stop", "take", "free"] : ["stop", "free"]);
     const transfer = h.transfers[h.messages.indexOf(receipt)];
     if (recordReplay) {
-      assert.deepEqual(Array.from(receipt.replay), [66, 75, 82, 255, 0, 1]);
-      assert.equal(receipt.replay.byteOffset, 0);
-      assert.equal(receipt.replay.byteLength, receipt.replay.buffer.byteLength);
-      assert.equal(transfer.length, 1);
-      assert.equal(transfer[0], game.replayBytes.buffer);
-      assert.equal(game.replayBytes.buffer.byteLength, 0, "owned bytes leave the Worker exactly once");
+      assert.deepEqual(await immutableBytes(receipt.replay), [66, 75, 82, 255, 0, 1]);
+      assert.ok(receipt.replay instanceof FileType);
+      assert.equal(receipt.replay.size, game.replayBytes.byteLength);
+      assert.equal(transfer.length, 0, "Window receives no capture byte buffer");
+      assert.equal(game.replayBytes.buffer.byteLength, 6, "File construction retains the genuine Worker bytes without transfer detachment");
     } else {
       assert.equal(receipt.replay, null);
       assert.equal(transfer.length, 0);
@@ -6111,7 +6132,7 @@ test("complete capture requires current actual completion, while stale proof and
     const receipt = h.of("play-error")[0];
     assert.equal(receipt.replayComplete, false);
     assert.equal(receipt.released, true);
-    assert.ok(receipt.replay instanceof Uint8Array);
+    assert.ok(receipt.replay instanceof FileType);
     assertReleased(h);
   }
   const partial = await active({ recordReplay: true, input(game) {
@@ -6763,7 +6784,7 @@ test("invalid remote ownership fences only the active network while one member H
   assert.equal(receipt.multiplayer.peers[0].error, null); assert.equal(receipt.multiplayer.peers[2].error, null);
   assert.ok(receipt.multiplayer.peers.every(row => row.final && row.progress !== null));
   assert.equal(receipt.savedOpponents.localOpponents[1].opponents[0].label, "other prefix");
-  assert.ok(receipt.replays.every(row => row.replay instanceof Uint8Array && row.replayError === null));
+  assert.ok(receipt.replays.every(row => row.replay instanceof FileType && row.replayError === null));
 });
 
 test("actual group word snapshots precede disposal and one pending write plus peer ACK retain final ownership", async () => {
@@ -6804,7 +6825,7 @@ test("actual group word snapshots precede disposal and one pending write plus pe
     assert.ok(result.multiplayer.error); assert.equal(result.multiplayer.finalWritten, false);
     assert.equal(result.multiplayer.finalAcknowledged, false); assert.equal(failed.networks[0].submissions.length, 0);
     assert.equal(failed.locals[0].stops, 1); assert.equal(failed.locals[0].frees, 1);
-    assert.ok(result.replays.every(row => row.replay instanceof Uint8Array));
+    assert.ok(result.replays.every(row => row.replay instanceof FileType));
   }
 });
 
@@ -6925,7 +6946,7 @@ test("peer display failure is isolated from saved comparisons, local capture and
   assert.equal(receipt.multiplayer.finalWritten, true); assert.equal(receipt.multiplayer.finalAcknowledged, true);
   assert.equal(receipt.multiplayer.error, null); assert.equal(receipt.savedOpponents.error, null);
   assert.equal(receipt.savedOpponents.opponents[0].label, "own");
-  assert.ok(receipt.replay instanceof Uint8Array); assert.equal(receipt.replayError, null);
+  assert.ok(receipt.replay instanceof FileType); assert.equal(receipt.replayError, null);
   assert.equal(receipt.replayComplete, false); assertReleased(h);
   await h.send(startRequest({ playId: 8 }));
   const count = h.messages.length; owner.emit({ kind: "final-progress", ...final });
@@ -7167,7 +7188,7 @@ test("a pending resize keeps the ordered local frame ahead of a newer resize whi
   assert.deepEqual([resized.page,resized.width,resized.height],[1,960,720]);
   assert.equal(h.of("play-error").length,0);assert.equal(game.frees,0);
   await h.send({kind:"play-stop",playId:7});
-  assert.ok(h.of("play-stopped").at(-1).replays.every(row=>row.replay instanceof Uint8Array));
+  assert.ok(h.of("play-stopped").at(-1).replays.every(row=>row.replay instanceof FileType));
 });
 
 test("a newer unsent page coalesces after an older queued resize without exporting the superseded frame", async () => {
@@ -7241,7 +7262,7 @@ test("delayed local contacts retain their acquisition page after the current pag
   assert.equal(h.of("play-error").length, 0);
   assert.equal(h.of("play-step-done").at(-1).pendingInputs, 3);
   await h.send({ kind: "play-stop", playId: 7 });
-  assert.ok(h.of("play-stopped").at(-1).replays.every(row => row.replay instanceof Uint8Array));
+  assert.ok(h.of("play-stopped").at(-1).replays.every(row => row.replay instanceof FileType));
 });
 
 test("invalid or missing local acquisition page refuses the entire batch before any input mutation and preserves captures", async () => {
@@ -7255,7 +7276,7 @@ test("invalid or missing local acquisition page refuses the entire batch before 
     const error = h.of("play-error").at(-1);
     assert.ok(error); assert.match(error.message, /page/i);
     assert.equal(game.frees, 1);
-    assert.ok(error.replays.every(row => row.replay instanceof Uint8Array && row.replayComplete === false));
+    assert.ok(error.replays.every(row => row.replay instanceof FileType && row.replayComplete === false));
     assert.equal(h.of("play-step-done").length, 0);
   }
 });

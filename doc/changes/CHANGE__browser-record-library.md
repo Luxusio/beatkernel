@@ -1,5 +1,12 @@
 # Explicit browser record library
 
+Historical implementation checkpoint. Its execution deferral below is not an
+active development rule. The selected
+[record-storage Worker migration](../runtime/REQ__browser-record-storage.md)
+retains these storage/capture semantics. Worker/Window source and scoped Node
+checks are integrated; production probes and fresh independent verification
+remain pending.
+
 The browser host offers explicit save, metadata refresh, saved-replay selection
 and selected-record deletion. RecordsStore uses same-origin IndexedDB with
 separate bounded metadata and canonical byte stores. Listing acquires no replay
@@ -23,7 +30,8 @@ nonnegative. Behavior is specified in
 [the browser requirement](../kernel/REQ__bms-browser.md).
 
 Known ceiling: browser storage is best effort and may be removed by the
-browser/user; explicit download remains available. JavaScript/IndexedDB/browser
+browser/user; explicit download remains available. At this historical checkpoint,
+JavaScript/IndexedDB/browser
 execution, generated bindings, audio/GPU/hardware behavior, authored fixture
 assertions and formal review/QA remain deferred. Browser competition against
 stored records and WebTransport integration are still unfinished Goal work.

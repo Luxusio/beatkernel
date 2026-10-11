@@ -10,6 +10,24 @@ import { encodeKeyboardEvent, encodeTouchEvent, encodeRawHidEvent } from "./phys
 import { millisecondsToNanos } from "./play-model.mjs";
 
 const FileType = globalThis.File ?? NodeFile;
+// Node may clone a File as Blob. Model immutable receiving File endpoints
+// explicitly; actual Chromium cloning/lifetime is a separate browser gate.
+function cloneImmutableReceipt(value, transfer) {
+  const cloned = structuredClone(value, { transfer });
+  const preserve = (source, target) => {
+    if (source?.replay instanceof FileType) target.replay = new FileType([source.replay], source.replay.name);
+    if (source?.replayFile instanceof FileType) target.replayFile = new FileType([source.replayFile], source.replayFile.name);
+    if (source?.replays) source.replays.forEach((row, index) => preserve(row, target.replays[index]));
+    if (source?.result && target?.result) preserve(source.result, target.result);
+  };
+  preserve(value, cloned);
+  return cloned;
+}
+async function immutableBytes(handle) {
+  assert.ok(handle instanceof Blob, "capture body is an immutable handle");
+  return Array.from(new Uint8Array(await handle.arrayBuffer()));
+}
+
 const ORIGIN = 9007199254740993n;
 const START = 9007199254741999n;
 const SCORE = { song_ns: 123456789012345n, hits: 17n, misses: 3n, combo: 9n, max_combo: 15n };
@@ -193,7 +211,7 @@ test("cold Results restore the latest successful comparison choice across retire
     assert.equal(geometry.geometryVersion,control.geometryVersion);
     assert.deepEqual([geometry.mode,geometry.page,geometry.width,geometry.height],["results",selected,640,480]);
     assert.equal(h.of("play-error").length,0);assert.equal(h.of("fatal").length,0);
-    assert.equal(capture.completedResults.proof,true);assert.ok(capture.replay instanceof Uint8Array);
+    assert.equal(capture.completedResults.proof,true);assert.ok(capture.replay instanceof FileType);
     await h.send({kind:"dispose"});assert.equal(h.completedOwners[0].frees,1);
   }
 });
@@ -324,7 +342,7 @@ test("record continuity: retained joined room Results refuse historical navigati
   await h.send({ kind: "play-stop", playId: 7 });
   const joined = h.roomResults[0]; assert.ok(joined, "real room stop retains joined Results"); assert.equal(joined.frees, 0);
   await h.send({ kind: "historical-record-present", id: 1,
-    replayFile: replayFile().file, completedArchive: Uint8Array.of(1), archivePlayer: 0xffffffff });
+    replayFile: replayFile().file, completedArchive: new Blob([Uint8Array.of(1)]), archivePlayer: 0xffffffff });
   const refused = h.of("historical-record-result").at(-1);
   assert.equal(refused.available, false); assert.ok(refused.error); assert.equal(joined.frees, 0);
   await h.send({ kind: "dispose" }); assert.equal(joined.frees, 1);
@@ -1470,13 +1488,13 @@ async function workerHarness(options = {}) {
     isSecureContext: false, navigator: {},
     postMessage(value, transfer = []) {
       transfers.push([...transfer]);
-      messages.push(structuredClone(value, { transfer }));
+      messages.push(cloneImmutableReceipt(value, transfer));
     },
     addEventListener(name, callback) { assert.equal(name, "message"); receive = callback; },
   };
   const context = createContext({
     MessageChannel: PreparationMessageChannel,
-    self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
+    self, structuredClone, DataView, File: FileType, Blob, queueMicrotask, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
     performance: { timeOrigin: 10000, now() {
       return networkNow;
     } },
@@ -1502,6 +1520,7 @@ async function workerHarness(options = {}) {
   }, { context });
   const resultsModel = new SourceTextModule(await readFile(new URL("./completed-results-model.mjs", import.meta.url), "utf8"), { context });
   const helper = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
+  const recordStore = new SourceTextModule(await readFile(new URL("./record-store.mjs", import.meta.url), "utf8"), { context });
   const playHelper = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const settingsHelper = new SourceTextModule(await readFile(new URL("./settings-profile.mjs", import.meta.url), "utf8"), { context });
   const displayHelper = new SourceTextModule(await readFile(new URL("./display-settings.mjs", import.meta.url), "utf8"), { context });
@@ -1522,6 +1541,7 @@ async function workerHarness(options = {}) {
   const renderClient = new SourceTextModule(await readFile(new URL("./render-protocol.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
+    if (specifier === "./record-store.mjs") return recordStore;
     if (specifier === "./render-protocol.mjs") return renderClient;
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./completed-results-model.mjs") return resultsModel;
@@ -1584,7 +1604,7 @@ async function workerHarness(options = {}) {
 test("renderer failure preserves genuine completion and capture after Window cleanup", async () => {
   const h=await active({recordReplay:true,observeOutput:()=>true});
   await completeOutput(h); await h.send({kind:"play-stop",playId:7,completed:true});
-  const terminal=h.of("play-stopped").at(-1),replay=terminal.replay.slice();
+  const terminal=h.of("play-stopped").at(-1),replay=await immutableBytes(terminal.replay);
   assert.equal(h.visualExports.some(row=>row.kind===5),false);
   await showResults(h);
   const packet=h.renderPort.posts.findLast(row=>row.kind==="packet");
@@ -1593,7 +1613,7 @@ test("renderer failure preserves genuine completion and capture after Window cle
   assert.equal(h.completedOwners[0].frees,0);
   h.renderPort.emit({kind:"render-error",generation:packet.generation,content:packet.content,message:"result device lost"});await flushJobs();
   assert.equal(h.of("play-error").length,0);assert.equal(h.of("fatal").length,0);
-  assert.equal(terminal.completedResults.proof,true);assert.deepEqual(terminal.replay,replay);
+  assert.equal(terminal.completedResults.proof,true);assert.deepEqual(await immutableBytes(terminal.replay),replay);
   assert.equal(h.games[0].frees,1);
   assert.equal(h.completedOwners[0].frees,0,"graphics failure preserves the genuine completed authority");
   const notice=h.of("play-completed-results").at(-1);

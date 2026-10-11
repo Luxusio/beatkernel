@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 
 let hostHarness;
-async function harness() {
+async function harness(faults = {}) {
   if (!hostHarness) {
     const url = new URL("./play-host.test.mjs", import.meta.url);
     const source = await readFile(url, "utf8");
@@ -29,7 +29,7 @@ async function harness() {
     await module.evaluate(); assert(registrations > 20, "reuse fixture helpers while suppressing all unrelated test execution");
     assert.equal(typeof module.namespace.harness, "function"); hostHarness = module.namespace.harness;
   }
-  return hostHarness();
+  return hostHarness(faults);
 }
 const flush = async () => { for (let i = 0; i < 48; i++) await Promise.resolve(); };
 const progress = (request, fields = {}) => ({ kind: "selection-progress", id: request.id, libraryId: request.libraryId, path: request.path,
@@ -108,5 +108,25 @@ test("actual Window allows the existing menu editor input path while current pre
     const edit = worker.last("menu-edit"); assert(edit, "legal active editor input reaches its existing business route");
     assert.equal(edit.screen, 3n); assert.equal(edit.index, 0); assert.equal(edit.value, "51");
     h.click("prepare-cancel"); await h.receive({ kind: "selection-cancelled", id: request.id, libraryId: request.libraryId });
+  } finally { await h.close(); }
+});
+
+test("actual Window keeps menu keyboard editing independent of a pending Worker record listing", async () => {
+  const h = await harness({ holdRecordsReply: true });
+  try {
+    await h.preview(); const worker = h.workers.at(-1);
+    h.click("menu-open"); await flush();
+    await h.receive({ kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 5n,
+      route: 2, selected: 0, fields: ["50", "50", "0"] });
+    h.click("records-refresh"); await flush();
+    const request = worker.last("records-request"); assert.equal(request.action, "list");
+    assert.equal(h.get("records-refresh").disabled, true);
+    h.get("menu-editor").value = "51";
+    h.get("menu-editor").emit("input", { isComposing: false }); await flush();
+    const edit = worker.last("menu-edit"); assert.ok(edit);
+    assert.equal(edit.screen, 3n); assert.equal(edit.index, 0); assert.equal(edit.value, "51");
+    assert.equal(h.recordCalls.length, 0, "Window listing intent has no database/body work");
+    await h.receive({ kind: "records-reply", id: request.id, action: "list", result: { entries: [] }, error: null });
+    assert.equal(h.get("records-refresh").disabled, false);
   } finally { await h.close(); }
 });

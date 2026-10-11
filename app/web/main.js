@@ -1,11 +1,10 @@
 import { catalogKeyboardSelection, recordsKeyboardControl, settingsKeyboardControl } from "./menu-keyboard.mjs";
 import { snapshotMenuMotion } from "./render-protocol.mjs";
 import { validateBrowserDisplayFields } from "./display-settings.mjs";
-import { validateCompletedResults, validateCompletedArchive } from "./completed-results-model.mjs";
-import { snapshotFiles, nanoseconds, seconds, validateHistoricalGradeSnapshot, HistoricalGradePager } from "./host_model.mjs";
+import { validateCompletedResults, validateCompletedArchive, validateCapturedReplay } from "./completed-results-model.mjs";
+import { normalizedPath, snapshotFiles, nanoseconds, seconds, validateHistoricalGradeSnapshot, HistoricalGradePager } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
 import { PresentationStatus } from "./presentation-status.mjs";
-import { RecordsStore } from "./record-store.mjs";
 import { HidInputOwner } from "./hid-input.mjs";
 import { GamepadInputOwner } from "./gamepad-input.mjs";
 import { PointerInputOwner } from "./pointer-input.mjs";
@@ -681,7 +680,7 @@ let capturedReplays = [];
 let replayURL = null;
 let replayURLTimer = null;
 let selectedReplay = null;
-let recordsStore = null;
+let recordsClosing = null;
 let recordsOperation = null;
 let historicalOperation = null;
 let historicalSelection = null;
@@ -1283,7 +1282,7 @@ function stop() {
   seeking = false;
   clearRoomResults();
   revokeReplayURL();
-  closeRecords();
+  const recordsStopped = closeRecords();
   cancelHidPermission();
   const sourcesStopped = releaseLocalSources("Local sources released with the page.");
   const playStopped = stopPlay("Playback stopped with the page.");
@@ -1302,9 +1301,10 @@ function stop() {
   controls();
   void (async () => {
     try {
+      const recordsError = await recordsStopped;
       await Promise.all([sourcesStopped, playStopped]);
       const errors = await Promise.all([disposeOwner(game, "Gameplay"), disposeOwner(graphics, "Renderer")]);
-      cleanupError = errors.filter(error => error !== null).join(" ") || null;
+      cleanupError = [recordsError, ...errors].filter(error => error !== null).join(" ") || null;
     } finally {
       terminateOwner(game);
       terminateOwner(graphics);
@@ -1386,6 +1386,8 @@ function prepare() {
 }
 
 function received(data, sourceWorker = worker, sourceOwner = owner) {
+  if (data?.kind === "records-closed") { receiveRecordsClosed(data, sourceWorker); return; }
+  if (data?.kind === "records-reply") { receiveRecordsReply(data, sourceWorker, sourceOwner); return; }
   if (data?.kind === "audio-module-ready" || data?.kind === "audio-module-error") {
     const ticket = audioSetupTicket;
     if (!ticket || ticket.settled || shuttingDown || sourceWorker !== ticket.worker
@@ -1634,6 +1636,10 @@ async function start() {
       if (["ready", "disposed", "dispose-error", "fatal"].includes(event.data?.kind)) clearTimeout(gameReadyTimer);
       if (event.data?.kind === "disposed" || event.data?.kind === "dispose-error") {
         disposal.get(game)?.(event.data.kind === "dispose-error" ? `Gameplay disposal failed: ${String(event.data.message).slice(0, 4096)}` : null);
+        return;
+      }
+      if (event.data?.kind === "records-closed" && recordsClosing?.worker === game) {
+        receiveRecordsClosed(event.data, game);
         return;
       }
       if (worker === game && (generation === owner
@@ -3390,7 +3396,7 @@ function stopPlay(reason, failed = false, completed = false) {
           }
         } else if (session.replay !== null) {
           revokeReplayURL();
-          lastReplay = { bytes: session.replay.bytes, complete: session.replay.complete && !failed, id: session.id,
+          lastReplay = { replayFile: session.replay.file, players: [1], complete: session.replay.complete && !failed, id: session.id,
             chartPath: session.chartPath, hits: score?.hits ?? null, misses: score?.misses ?? null, combo: score?.combo ?? null,
             ...(session.completedArchive ? { completedArchive: session.completedArchive, archivePlayer: 1 } : {}) };
           ui.export.textContent = `Download last replay (${lastReplay.complete ? "complete" : "prefix"})`;
@@ -3419,7 +3425,7 @@ function archiveReceipt(session, data) {
     if (session.owner !== owner && !(shuttingDown && session.owner === closingOwner && activePlay === session)) throw new Error("Completed archive belongs to a previous library owner.");
     const archive = validateCompletedArchive(data, { playId: session.id,
       players: session.localPlan?.players ?? [1], recording: session.recordReplay, mode: session.mode });
-    session.completedArchive = archive.bytes;
+    session.completedArchive = archive.blob;
     if (archive.error !== null) session.archiveError = archive.error;
   } catch (error) {
     session.completedArchive = null;
@@ -3436,24 +3442,10 @@ function replayReceipt(session, data) {
     return;
   }
   try {
-    // A non-recording older peer may omit export fields, but cannot publish bytes.
-    if (!session.recordReplay && data.replay === undefined && data.replayComplete === undefined
-      && data.replayError === undefined) return;
-    if (typeof data.replayComplete !== "boolean" || !(data.replayError === null
-      || (typeof data.replayError === "string" && data.replayError.length <= 4096))) throw new Error("Invalid replay export metadata.");
-    if (data.replay === null) {
-      if (data.replayComplete) throw new Error("Complete replay has no encoded data.");
-    } else {
-      const bytes = data.replay;
-      if (!session.recordReplay || !(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
-        || bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength
-        || bytes.length === 0 || bytes.length > 64 * 1024 * 1024
-        || (data.replayComplete && (data.kind !== "play-stopped" || !session.naturalFinishRequested))) {
-        throw new Error("Invalid replay export ownership or layout.");
-      }
-      session.replay = { bytes, complete: data.replayComplete };
-    }
-    if (data.replayError !== null) session.replayError = data.replayError;
+    const capture = validateCapturedReplay(data, { playId: session.id, recording: session.recordReplay,
+      natural: session.naturalFinishRequested, mode: session.mode });
+    session.replay = capture.file === null ? null : { file: capture.file, complete: capture.complete };
+    if (capture.error !== null) session.replayError = capture.error;
   } catch (error) {
     session.replay = null;
     session.replayError = String(error.message).slice(0, 4096);
@@ -3500,7 +3492,7 @@ function showLocalResults(session, failed, publish = true) {
       + (replay?.replayError ? ` · Replay unavailable: ${replay.replayError}`
         : replay?.replay ? ` · ${replay.replayComplete && !failed ? "Complete recording" : "Recorded prefix"}` : " · No recording");
     rows.append(item);
-    if (replay?.replay) recordings.push({ player, bytes: replay.replay, complete: replay.replayComplete && !failed,
+    if (replay?.replay) recordings.push({ player, players: [...session.localPlan.players], replayFile: replay.replay, complete: replay.replayComplete && !failed,
       id: session.id, chartPath: session.chartPath, hits: score.hits, misses: score.misses, combo: score.combo,
       ...(session.completedArchive ? { completedArchive: session.completedArchive, archivePlayer: player } : {}) });
   }
@@ -3526,7 +3518,7 @@ function downloadReplay() {
   let link = null;
   try {
     revokeReplayURL();
-    replayURL = URL.createObjectURL(new Blob([lastReplay.bytes], { type: "application/octet-stream" }));
+    replayURL = URL.createObjectURL(lastReplay.replayFile);
     link = document.createElement("a");
     link.href = replayURL;
     link.download = replayFilename(lastReplay);
@@ -3795,9 +3787,7 @@ function receiveHistoricalRecord(data) {
 }
 function requestHistoricalRecord(operation, replayFile, completedArchive, archivePlayer) {
   if (!recordCurrent(operation) || !worker) return Promise.reject(new Error("Historical operation was cancelled."));
-  if (completedArchive != null && (!(completedArchive instanceof Uint8Array) || !(completedArchive.buffer instanceof ArrayBuffer)
-    || completedArchive.buffer.resizable === true || completedArchive.byteOffset !== 0 || completedArchive.byteLength !== completedArchive.buffer.byteLength
-    || completedArchive.byteLength < 1 || completedArchive.byteLength > 5 * 1024 * 1024
+  if (completedArchive != null && (!recordBlob(completedArchive, 5 * 1024 * 1024)
     || !Number.isInteger(archivePlayer) || archivePlayer < 1 || archivePlayer > 0xffffffff)) {
     return Promise.reject(new Error("Stored historical archive envelope is invalid."));
   }
@@ -3816,35 +3806,141 @@ function requestHistoricalRecord(operation, replayFile, completedArchive, archiv
     if (!recordCurrent(operation)) { abort(); return; }
     try {
       worker.postMessage(completedArchive == null ? { kind: "historical-record-clear", id }
-        : { kind: "historical-record-present", id, replayFile, completedArchive, archivePlayer },
-      completedArchive == null ? [] : [completedArchive.buffer]);
+        : { kind: "historical-record-present", id, replayFile, completedArchive, archivePlayer });
     } catch (error) { cancelHistoricalRecord(historicalOperation, String(error.message).slice(0, 4096)); }
   });
 }
 
 function closeRecords() {
   clearHistoricalRecord("Historical library operation was cancelled.");
-  recordsOperation?.controller.abort();
+  const operation = recordsOperation;
   recordsOperation = null;
-  const previous = recordsStore;
-  recordsStore = null;
-  previous?.close();
+  operation?.controller.abort();
+  if (operation?.rpc) settleRecordsRpc(operation, new Error("Record library operation was cancelled."));
+  if (recordsClosing?.worker === worker) return recordsClosing.promise;
+  const target = worker;
+  if (!target || terminated.has(target)) return Promise.resolve(null);
+  const id = ++serial;
+  if (!Number.isSafeInteger(id) || id < 1) return Promise.resolve("Record cleanup identity exhausted.");
+  const ticket = { id, worker: target, timer: null, resolve: null, promise: null };
+  ticket.promise = new Promise(resolve => { ticket.resolve = resolve; });
+  recordsClosing = ticket;
+  ticket.timer = setTimeout(() => finishRecordsClose(ticket, "Record cleanup timed out; commit status is unknown."), 10000);
+  try { target.postMessage({ kind: "records-close", id }); }
+  catch (error) { finishRecordsClose(ticket, `Record cleanup failed: ${String(error.message).slice(0, 4096)}`); }
+  return ticket.promise;
+}
+function finishRecordsClose(ticket, error) {
+  if (recordsClosing !== ticket) return;
+  clearTimeout(ticket.timer);
+  recordsClosing = null;
+  ticket.resolve(error);
+}
+function receiveRecordsClosed(data, sourceWorker) {
+  const ticket = recordsClosing;
+  if (!ticket || ticket.worker !== sourceWorker || data.id !== ticket.id
+    || !(data.error === null || (typeof data.error === "string" && data.error.length >= 1 && data.error.length <= 4096))) return;
+  finishRecordsClose(ticket, data.error);
 }
 function recordCurrent(operation, expectedMenuTicket = operation.menuTicket) {
   const token = expectedMenuTicket ? menuToken() : null;
-  return recordsOperation === operation && operation.owner === owner && !operation.controller.signal.aborted
+  return recordsOperation === operation && operation.owner === owner && operation.worker === worker
+    && !operation.controller.signal.aborted && !shuttingDown
     && (!expectedMenuTicket || token && token.menuGeneration === expectedMenuTicket.menuGeneration
       && token.screen === expectedMenuTicket.screen && token.revision === expectedMenuTicket.revision);
 }
-async function openRecords(operation) {
-  if (recordsStore && !recordsStore.closed) return recordsStore;
-  const opened = await RecordsStore.open({ signal: operation.controller.signal });
-  if (!recordCurrent(operation)) {
-    opened.close();
-    throw new Error("Record library operation was cancelled.");
+function recordBlob(value, maximum) {
+  try { return value instanceof Blob && Object.getOwnPropertyDescriptor(Blob.prototype, "size").get.call(value) >= 1
+    && Object.getOwnPropertyDescriptor(Blob.prototype, "size").get.call(value) <= maximum; }
+  catch { return false; }
+}
+function recordFile(value) {
+  try { return value instanceof File && typeof Object.getOwnPropertyDescriptor(File.prototype, "name").get.call(value) === "string"
+    && recordBlob(value, 64 * 1024 * 1024); }
+  catch { return false; }
+}
+function recordMetadata(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || !Number.isSafeInteger(value.id) || value.id < 1 || typeof value.name !== "string"
+    || value.name.length < 1 || value.name.length > 512 || Array.from(value.name).length > 256
+    || typeof value.chartPath !== "string" || value.chartPath.length > 4096 || normalizedPath(value.chartPath, 4096) !== value.chartPath
+    || typeof value.complete !== "boolean" || !Number.isSafeInteger(value.createdAt) || value.createdAt < 0
+    || !Number.isSafeInteger(value.byteLength) || value.byteLength < 1 || value.byteLength > 64 * 1024 * 1024
+    || [value.hits, value.misses, value.combo].some(score => !(score === null
+      || (typeof score === "bigint" && score >= 0n && score <= 18446744073709551615n)))) throw new Error("Record metadata is invalid.");
+  const archived = value.archiveByteLength != null || value.archivePlayer != null;
+  if (archived && (!Number.isInteger(value.archiveByteLength) || value.archiveByteLength < 1
+    || value.archiveByteLength > 5 * 1024 * 1024 || !Number.isInteger(value.archivePlayer)
+    || value.archivePlayer < 1 || value.archivePlayer > 0xffffffff)) throw new Error("Record archive metadata is invalid.");
+  return { id: value.id, name: value.name, chartPath: value.chartPath, complete: value.complete,
+    createdAt: value.createdAt, byteLength: value.byteLength, hits: value.hits, misses: value.misses, combo: value.combo,
+    ...(archived ? { archiveByteLength: value.archiveByteLength, archivePlayer: value.archivePlayer } : {}) };
+}
+function recordsResult(action, result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Record reply is invalid.");
+  if (action === "list") {
+    if (!Array.isArray(result.entries) || result.entries.length > 128) throw new Error("Record list is invalid.");
+    const entries = Array.from(result.entries, recordMetadata);
+    let total = 0;
+    for (let index = 0; index < entries.length; index++) {
+      if (index && entries[index - 1].id <= entries[index].id) throw new Error("Record list order is invalid.");
+      total += entries[index].byteLength + (entries[index].archiveByteLength ?? 0);
+    }
+    if (total > 256 * 1024 * 1024) throw new Error("Record list capacity is invalid.");
+    return { entries };
   }
-  recordsStore = opened;
-  return opened;
+  if (action === "remove") {
+    if (typeof result.removed !== "boolean") throw new Error("Record removal reply is invalid.");
+    return { removed: result.removed };
+  }
+  const metadata = recordMetadata(result.metadata);
+  if (action === "save") return { metadata };
+  if (!recordFile(result.replayFile) || result.replayFile.size !== metadata.byteLength
+    || result.replayFile.name !== metadata.name || (result.archiveBlob === null
+      ? result.archivePlayer !== null || metadata.archiveByteLength != null
+      : !recordBlob(result.archiveBlob, 5 * 1024 * 1024) || result.archiveBlob.size !== metadata.archiveByteLength
+        || result.archivePlayer !== metadata.archivePlayer)) throw new Error("Loaded record handles are invalid.");
+  return { metadata, replayFile: result.replayFile, archiveBlob: result.archiveBlob, archivePlayer: result.archivePlayer };
+}
+function settleRecordsRpc(operation, error, result) {
+  const pending = operation.rpc;
+  if (!pending) return;
+  operation.rpc = null;
+  clearTimeout(pending.timer);
+  if (error) pending.reject(error); else pending.resolve(result);
+}
+function receiveRecordsReply(data, sourceWorker, sourceOwner) {
+  const operation = recordsOperation, pending = operation?.rpc;
+  if (!pending || !recordCurrent(operation) || sourceWorker !== operation.worker || sourceOwner !== operation.owner
+    || data.id !== pending.id || data.action !== pending.action) return;
+  try {
+    if (data.error === null) {
+      const result = recordsResult(pending.action, data.result);
+      if ((pending.action === "load") && result.metadata.id !== pending.recordId) return;
+      settleRecordsRpc(operation, null, result);
+    } else if (typeof data.error === "string" && data.error.length >= 1 && data.error.length <= 4096 && data.result === null) {
+      settleRecordsRpc(operation, new Error(data.error));
+    }
+  } catch { /* Malformed replies cannot publish UI or settle a different operation. */ }
+}
+function requestRecords(operation, action, fields = {}) {
+  if (!recordCurrent(operation)) return Promise.reject(new Error("Record library operation was cancelled."));
+  const id = ++serial;
+  if (!Number.isSafeInteger(id) || id < 1) return Promise.reject(new Error("Record operation identity exhausted."));
+  return new Promise((resolve, reject) => {
+    const pending = { id, action, recordId: fields.recordId, resolve, reject, timer: null };
+    operation.rpc = pending;
+    pending.timer = setTimeout(() => {
+      if (operation.rpc !== pending) return;
+      const message = "Record operation timed out; write commit status may be unknown. Reopen and inspect before retrying.";
+      if (recordCurrent(operation)) status(`${operation.committed ?? ""}Record library failed: ${message} Current replay and download remain available.`, true);
+      settleRecordsRpc(operation, new Error(message));
+      void closeRecords();
+      controls();
+    }, 10000);
+    try { operation.worker.postMessage({ kind: "records-request", id, action, ...fields }); }
+    catch (error) { settleRecordsRpc(operation, error); }
+  });
 }
 function showRecords(entries) {
   const previous = ui.records.value;
@@ -3864,19 +3960,26 @@ async function recordAction(action, menuTicket = null) {
   if ((action === "use" || action === "delete" || action === "opponent") && (!Number.isSafeInteger(id) || id < 1)) return;
   const catalogTicket = menuState?.route === 4 ? menuToken() : null;
   const catalogWorker = worker;
-  const operation = { owner, controller: new AbortController(), menuTicket };
+  const operation = { owner, worker, controller: new AbortController(), menuTicket, rpc: null };
+  operation.controller.signal.addEventListener("abort", () => {
+    settleRecordsRpc(operation, new Error("Record library operation was cancelled."));
+    if (recordsOperation === operation) void closeRecords();
+  }, { once: true });
   recordsOperation = operation;
   controls();
   status(action === "save" ? "Saving the captured recording…" : "Opening saved records…");
   let committed = "";
   try {
     const choice = action === "opponent" ? opponentChoice() : null;
-    const store = await openRecords(operation);
-    if (!recordCurrent(operation)) return;
-    if (action === "use" || action === "opponent") {
-      const loaded = await store.load(id);
+    if (recordsClosing?.worker === worker) {
+      const error = await recordsClosing.promise;
       if (!recordCurrent(operation)) return;
-      const file = new File([loaded.bytes], loaded.metadata.name, { type: "application/octet-stream" });
+      if (error) throw new Error(error);
+    }
+    if (action === "use" || action === "opponent") {
+      const loaded = await requestRecords(operation, "load", { recordId: id });
+      if (!recordCurrent(operation)) return;
+      const file = loaded.replayFile;
       if (action === "opponent") {
         addOpponent(file, `record:${id}`, choice);
         status("Saved opponent selected. Live Play checks it against the prepared chart.");
@@ -3886,16 +3989,12 @@ async function recordAction(action, menuTicket = null) {
         ui["replay-file"].value = "";
         ui["replay-name"].textContent = `${file.name} · ${file.size} bytes · matching chart: ${loaded.metadata.chartPath}`;
         if (menuTicket) {
-          const replay = loaded.bytes;
-          const archive = loaded.completedArchive ?? null;
-          const transfers = [replay.buffer];
-          if (archive && archive.buffer !== replay.buffer) transfers.push(archive.buffer);
           worker.postMessage({ kind: "menu-record-preview", ...menuTicket, key: String(id), chartPath: loaded.metadata.chartPath,
-            replay, archive, player: loaded.archivePlayer ?? undefined }, transfers);
+            replayFile: file, archiveBlob: loaded.archiveBlob, player: loaded.archivePlayer ?? undefined });
           status("Inspecting the actual recorded prefix on the gameplay owner…");
           return;
         }
-        const historical = await requestHistoricalRecord(operation, file, loaded.completedArchive, loaded.archivePlayer);
+        const historical = await requestHistoricalRecord(operation, file, loaded.archiveBlob, loaded.archivePlayer);
         if (!recordCurrent(operation)) return;
         status("Saved replay selected. Prepare its matching chart, then choose Play replay."
           + (historical.error ? ` Stored historical display unavailable: ${historical.error}`
@@ -3903,18 +4002,20 @@ async function recordAction(action, menuTicket = null) {
       }
     } else {
       if (action === "save") {
-        await store.save({ bytes: captured.bytes, name: replayFilename(captured),
-          chartPath: captured.chartPath, complete: captured.complete,
-          hits: captured.hits, misses: captured.misses, combo: captured.combo,
-          ...(captured.completedArchive ? { completedArchive: captured.completedArchive, archivePlayer: captured.archivePlayer } : {}) });
+        await requestRecords(operation, "save", { value: {
+          metadata: { name: replayFilename(captured), chartPath: captured.chartPath, complete: captured.complete,
+            hits: captured.hits, misses: captured.misses, combo: captured.combo },
+          replayFile: captured.replayFile, archiveBlob: captured.completedArchive ?? null,
+          archivePlayer: captured.completedArchive ? captured.archivePlayer : null,
+          players: captured.players, player: captured.player ?? 1 } });
         if (!recordCurrent(operation)) return;
-        committed = "Recording saved. ";
+        committed = operation.committed = "Recording saved. ";
       } else if (action === "delete") {
-        const removed = await store.remove(id);
+        const { removed } = await requestRecords(operation, "remove", { recordId: id });
         if (!recordCurrent(operation)) return;
-        committed = removed ? "Selected record deleted. " : "Selected record was already absent. ";
+        committed = operation.committed = removed ? "Selected record deleted. " : "Selected record was already absent. ";
       }
-      const entries = await store.list();
+      const { entries } = await requestRecords(operation, "list");
       if (!recordCurrent(operation)) return;
       showRecords(entries);
       status(`${committed}${entries.length} saved record(s).`);

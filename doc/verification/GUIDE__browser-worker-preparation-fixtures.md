@@ -71,3 +71,32 @@ preserves executable content, not JavaScript reference identity. Express
 reference checks as boolean assertions so a failure does not place a Module
 inside Node test-runner error serialization and obscure the original error.
 Preserve the synchronous trusted-click assertion around AudioHost opening.
+
+## Immutable recording handles and native storage completion
+
+Align real host File and Blob constructors with the VM endpoints. Node's
+structured clone can return a Blob for a File; use an explicit immutable File
+endpoint fixture for Window tests and retain actual Chromium verification for
+browser clone and lifetime claims. The fixture must not reacquire accessors
+while walking a cloned message: preserve enumerable data properties, bound the
+walk and fence cycles. Keep single-acquisition assertions in place.
+
+Check whether the Worker harness initializes automatically before sending init.
+Normal recording tests must assert one ready receipt and no fatal receipt;
+pre-ready refusal tests explicitly opt out of automatic initialization. Genuine
+File body reads can require a native event-loop turn. Wait for a bounded named
+milestone in the affected recording tests, keeping the existing preparation
+task queue and deliberately held reads unchanged.
+
+Storage cancellation tests distinguish rejected caller promises from actual
+opening and transaction terminal events. Hold and release those native events
+separately, assert that physical capacity remains occupied, and preserve the
+unknown-commit diagnostic when terminal evidence is missing. Record catalogs
+use the production newest-first order; historical tests select the original
+record explicitly rather than relying on an ascending fake catalog.
+
+Inspect exact replay and archive bytes in the Worker or test driver. Production
+Window assertions cover immutable handle type, extent, owner, roster and joined
+completion, with traps for affected binary reads/construction and IndexedDB.
+Handle identity alone does not prove capture-buffer uniqueness: retain the
+Worker's raw alias-refusal and original member-byte assertions.

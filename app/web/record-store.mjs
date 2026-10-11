@@ -150,21 +150,44 @@ function scanMetadata(store, operation, watch, done) {
   });
 }
 
+// A cleanup deadline reports missing evidence; it never settles the physical
+// terminal promise or releases native work that can still finish later.
+function joinCleanup(terminal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new RecordStoreError("cleanup-timeout", "close",
+      "Recording cleanup timed out; its commit status is unknown. Reopen only after native cleanup terminates.")), 10000);
+    terminal.then(() => { clearTimeout(timer); resolve(); });
+  });
+}
+
 export class RecordsStore {
   #db;
   #timeoutMs;
   #closed = false;
   #pending = new Set();
+  #transactions = new Set();
+  #openingEnded = false;
+  #connectionClosed = false;
+  #resolveTerminal;
+  #terminal = new Promise(resolve => { this.#resolveTerminal = resolve; });
 
-  constructor(token, db, timeoutMs) {
+  constructor(token, db, timeoutMs, openingTerminal) {
     if (token !== OWNER) throw new TypeError("Use RecordsStore.open().");
     this.#db = db;
     this.#timeoutMs = timeoutMs;
+    openingTerminal.then(() => { this.#openingEnded = true; this.#finishTerminal(); });
     db.onversionchange = () => this.#fence(new RecordStoreError("versionchange", "close", "Recording database version changed; reopen it explicitly."));
-    db.onclose = () => this.#fence(new RecordStoreError("closed", "close", "Recording database connection closed unexpectedly."));
+    db.onclose = () => {
+      this.#connectionClosed = true;
+      this.#fence(new RecordStoreError("closed", "close", "Recording database connection closed unexpectedly."));
+    };
   }
 
   static async open(options = {}) {
+    return this.openTracked(options).ready;
+  }
+
+  static openTracked(options = {}) {
     requireValue(options !== null && typeof options === "object", "validation", "open", "Recording store options are invalid.");
     const { timeoutMs = 10000, signal } = options;
     requireValue(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60000,
@@ -177,61 +200,119 @@ export class RecordsStore {
     try { factory = options.factory === undefined ? globalThis.indexedDB : options.factory; }
     catch (cause) { throw new RecordStoreError("unavailable", "open", "IndexedDB is unavailable.", cause); }
     requireValue(factory && typeof factory.open === "function", "unavailable", "open", "IndexedDB is unavailable.");
-    return new Promise((resolve, reject) => {
-      let request;
-      let openingConnection;
-      let settled = false;
-      let timer;
-      const cleanupConnection = db => { try { db?.close(); } catch {} };
-      const abortUpgrade = () => { try { request?.transaction?.abort(); } catch {} };
-      const settle = (error, owner) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", abort);
-        if (error) { abortUpgrade(); cleanupConnection(openingConnection); reject(error); }
-        else resolve(owner);
+    let request;
+    let openingConnection;
+    let owner;
+    let settled = false;
+    let retired = false;
+    let requestEnded = false;
+    let connectionClosed = false;
+    let timer;
+    let resolveReady;
+    let rejectReady;
+    let resolveTerminal;
+    const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+    const terminal = new Promise(resolve => { resolveTerminal = resolve; });
+    const transactions = new Set();
+    const finishTerminal = () => {
+      if (requestEnded && transactions.size === 0 &&
+        (!retired || !openingConnection || connectionClosed || owner)) resolveTerminal();
+    };
+    const cleanupConnection = db => {
+      try { if (db) { db.close(); if (db === openingConnection) connectionClosed = true; } } catch {}
+      finishTerminal();
+    };
+    const abortTransactions = () => {
+      for (const transaction of transactions) { try { transaction.abort(); } catch {} }
+    };
+    const trackTransaction = transaction => {
+      if (!transaction || transactions.has(transaction)) return;
+      transactions.add(transaction);
+      const ended = () => { transactions.delete(transaction); finishTerminal(); };
+      transaction.oncomplete = ended;
+      transaction.onabort = ended;
+    };
+    const settle = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      if (error) {
+        retired = true;
+        abortTransactions();
+        cleanupConnection(openingConnection);
+        rejectReady(error);
+      } else { owner = value; resolveReady(owner); }
+      finishTerminal();
+    };
+    const abort = () => settle(new RecordStoreError("aborted", "open", "Recording database opening was cancelled."));
+    const close = () => {
+      retired = true;
+      if (owner) owner.close();
+      else {
+        settle(new RecordStoreError("closed", "open", "Recording database opening was closed."));
+        abortTransactions();
+        cleanupConnection(openingConnection);
+      }
+    };
+    const closeAndJoin = () => {
+      close();
+      return joinCleanup(terminal.then(() => owner?.terminal));
+    };
+    timer = setTimeout(() => settle(new RecordStoreError("timeout", "open", "Recording database opening timed out.")), timeoutMs);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) { abort(); requestEnded = true; finishTerminal(); }
+    else try {
+      request = factory.open(DATABASE, 1);
+      request.onblocked = () => settle(new RecordStoreError("blocked", "open", "Recording database opening is blocked by another connection."));
+      request.onerror = () => {
+        requestEnded = true;
+        settle(storageError("open", request.error));
+        finishTerminal();
       };
-      const abort = () => settle(new RecordStoreError("aborted", "open", "Recording database opening was cancelled."));
-      timer = setTimeout(() => settle(new RecordStoreError("timeout", "open", "Recording database opening timed out.")), timeoutMs);
-      signal?.addEventListener("abort", abort, { once: true });
-      if (signal?.aborted) { abort(); return; }
-      try {
-        request = factory.open(DATABASE, 1);
-        request.onblocked = () => settle(new RecordStoreError("blocked", "open", "Recording database opening is blocked by another connection."));
-        request.onerror = () => settle(storageError("open", request.error));
-        request.onupgradeneeded = () => {
-          if (settled) { abortUpgrade(); cleanupConnection(request.result); return; }
-          try {
-            const db = request.result;
-            openingConnection = db;
-            for (const name of STORES) {
-              if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, { keyPath: "id", autoIncrement: name === "metadata" });
-            }
-            validateSchema(db, request.transaction);
-          } catch (cause) {
-            settle(storageError("open", cause));
-            cleanupConnection(request.result);
+      request.onupgradeneeded = () => {
+        openingConnection = request.result;
+        connectionClosed = false;
+        trackTransaction(request.transaction);
+        if (settled) { abortTransactions(); cleanupConnection(openingConnection); return; }
+        try {
+          for (const name of STORES) {
+            if (!openingConnection.objectStoreNames.contains(name)) openingConnection.createObjectStore(name,
+              { keyPath: "id", autoIncrement: name === "metadata" });
           }
-        };
-        request.onsuccess = () => {
-          const db = request.result;
-          openingConnection = db;
-          if (settled) { cleanupConnection(db); return; }
-          try {
-            // Schema attributes are available synchronously; this readonly
-            // inspection queues no requests and performs no mutation.
-            requireValue(STORES.every(name => db.objectStoreNames.contains(name)),
-              "corrupt", "open", "Recording database schema is incomplete.");
-            validateSchema(db, db.transaction(STORES, "readonly"));
-            settle(null, new RecordsStore(OWNER, db, timeoutMs));
-          } catch (cause) { cleanupConnection(db); settle(storageError("open", cause)); }
-        };
-      } catch (cause) { settle(storageError("open", cause)); }
-    });
+          validateSchema(openingConnection, request.transaction);
+        } catch (cause) { settle(storageError("open", cause)); }
+      };
+      request.onsuccess = () => {
+        requestEnded = true;
+        const db = request.result;
+        if (db !== openingConnection) connectionClosed = false;
+        openingConnection = db;
+        if (settled) { cleanupConnection(db); return; }
+        try {
+          requireValue(STORES.every(name => db.objectStoreNames.contains(name)),
+            "corrupt", "open", "Recording database schema is incomplete.");
+          const inspection = db.transaction(STORES, "readonly");
+          trackTransaction(inspection);
+          validateSchema(db, inspection);
+          settle(null, new RecordsStore(OWNER, db, timeoutMs, terminal));
+        } catch (cause) { settle(storageError("open", cause)); }
+        finishTerminal();
+      };
+    } catch (cause) {
+      requestEnded = true;
+      settle(storageError("open", cause));
+      finishTerminal();
+    }
+    return { ready, terminal, close, closeAndJoin };
   }
 
   get closed() { return this.#closed; }
+  get terminal() { return this.#terminal; }
+
+  #finishTerminal() {
+    if (this.#closed && this.#connectionClosed && this.#openingEnded && this.#transactions.size === 0) this.#resolveTerminal();
+  }
 
   #ensureOpen(operation) {
     if (this.#closed) throw new RecordStoreError("closed", operation, "Recording database owner is closed.");
@@ -243,11 +324,17 @@ export class RecordsStore {
     this.#db.onversionchange = null;
     this.#db.onclose = null;
     for (const cancel of this.#pending) cancel(error);
-    try { this.#db.close(); } catch {}
+    try { this.#db.close(); this.#connectionClosed = true; } catch {}
+    this.#finishTerminal();
   }
 
   close() {
     this.#fence(new RecordStoreError("closed", "close", "Recording database owner was closed."));
+  }
+
+  closeAndJoin() {
+    this.close();
+    return joinCleanup(this.#terminal);
   }
 
   #transaction(operation, stores, mode, start) {
@@ -257,6 +344,14 @@ export class RecordsStore {
         this.#ensureOpen(operation);
         transaction = this.#db.transaction(stores, mode);
       } catch (cause) { reject(storageError(operation, cause)); return; }
+      this.#transactions.add(transaction);
+      let nativeEnded = false;
+      const endNative = () => {
+        if (nativeEnded) return;
+        nativeEnded = true;
+        this.#transactions.delete(transaction);
+        this.#finishTerminal();
+      };
       let settled = false;
       let failure;
       let result;
@@ -288,10 +383,14 @@ export class RecordsStore {
         };
       };
       transaction.oncomplete = () => {
+        endNative();
         // Request success is not a commit. Only this event can resolve.
         settle(failure ?? (ready ? undefined : new RecordStoreError("storage", operation, "Recording transaction completed without a result.")));
       };
-      transaction.onabort = () => settle(failure ?? storageError(operation, transaction.error));
+      transaction.onabort = () => {
+        endNative();
+        settle(failure ?? storageError(operation, transaction.error));
+      };
       transaction.onerror = event => fail(event.target?.error ?? transaction.error);
       this.#pending.add(cancel);
       timer = setTimeout(() => this.#fence(new RecordStoreError("timeout", operation,

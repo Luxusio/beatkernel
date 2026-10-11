@@ -10,6 +10,24 @@ import { encodeKeyboardEvent, encodeTouchEvent, encodeRawHidEvent } from "./phys
 import { millisecondsToNanos } from "./play-model.mjs";
 
 const FileType = globalThis.File ?? NodeFile;
+// Node may clone a File as Blob. Model immutable receiving File endpoints
+// explicitly; actual Chromium cloning/lifetime is a separate browser gate.
+function cloneImmutableReceipt(value, transfer) {
+  const cloned = structuredClone(value, { transfer });
+  const preserve = (source, target) => {
+    if (source?.replay instanceof FileType) target.replay = new FileType([source.replay], source.replay.name);
+    if (source?.replayFile instanceof FileType) target.replayFile = new FileType([source.replayFile], source.replayFile.name);
+    if (source?.replays) source.replays.forEach((row, index) => preserve(row, target.replays[index]));
+    if (source?.result && target?.result) preserve(source.result, target.result);
+  };
+  preserve(value, cloned);
+  return cloned;
+}
+async function immutableBytes(handle) {
+  assert.ok(handle instanceof Blob, "capture body is an immutable handle");
+  return Array.from(new Uint8Array(await handle.arrayBuffer()));
+}
+
 const ORIGIN = 9007199254740993n;
 const START = 9007199254741999n;
 const SCORE = { song_ns: 123456789012345n, hits: 17n, misses: 3n, combo: 9n, max_combo: 15n };
@@ -144,26 +162,26 @@ async function showResults(h) {
   return reply;
 }
 async function observeDone(h) { await completeOutput(h); }
-test("actual disposal exports one standalone archive before replay consumption and transfers exactly once",async()=>{
+test("actual disposal exports one immutable standalone archive before replay consumption exactly once",async()=>{
   const h=await active({recordReplay:true,observeOutput:()=>true});await observeDone(h);
   await h.send({kind:"play-stop",playId:7,completed:true});const final=h.of("play-stopped").at(-1);
-  assert.deepEqual(Array.from(final.completedArchive),[66,75,82,69,83,85,76,84]);
+  assert.deepEqual(await immutableBytes(final.completedArchive),[66,75,82,69,83,85,76,84]);
   assert.deepEqual(Array.from(final.archivePlayers),[1]);assert.equal(final.archiveError,null);
   assert.ok(h.trace.indexOf("archive-export")<h.trace.indexOf("stop-game"));
   assert.ok(h.trace.indexOf("archive-export")<h.trace.indexOf("take-replay"));
-  const transfers=h.transfers[h.messages.indexOf(final)];assert.equal(transfers.length,2);assert.equal(new Set(transfers).size,2);
+  const transfers=h.transfers[h.messages.indexOf(final)];assert.equal(transfers.length,0, "immutable capture/archive handles need no binary transfer entries");
   assert.equal(h.games[0].frees,1);assert.equal(h.trace.filter(value=>value==="archive-export").length,1);
   await h.send({kind:"play-stop",playId:7,completed:true});assert.equal(h.games[0].frees,1);
 });
-test("whole local roster transfers one archive beside exact original per-member replays",async()=>{
+test("whole local roster exports one immutable archive beside exact original per-member replay Files",async()=>{
   const request=startRequest({inputMode:"physical-contact",recordReplay:true,localPlanWords:new Uint32Array([4294967295,1,1,0,7,1,2,0])});
   const h=await active({startRequest:request,observeOutput:()=>true});await observeDone(h);
   await h.send({kind:"play-stop",playId:7,completed:true});const final=h.of("play-stopped").at(-1);
   assert.deepEqual(Array.from(final.archivePlayers),[4294967295,7]);
   assert.deepEqual(Array.from(final.replays,row=>row.player),[4294967295,7]);
-  assert.deepEqual(Array.from(final.replays,row=>Array.from(row.replay)),[[66,75,82,255],[66,75,82,7]]);
+  assert.deepEqual(await Promise.all(final.replays.map(row => immutableBytes(row.replay))),[[66,75,82,255],[66,75,82,7]]);
   const transfers=h.transfers[h.messages.indexOf(final)];
-  assert.equal(transfers.length,3);assert.equal(new Set(transfers).size,3);
+  assert.equal(transfers.length,0, "local capture and archive leave as immutable handles");
   assert.equal(h.trace.filter(value=>value==="archive-export").length,1);
   assert.ok(h.trace.indexOf("archive-export")<h.trace.indexOf("take-replay:4294967295"));
   assert.equal(h.locals[0].frees,1);
@@ -172,12 +190,59 @@ test("archive refusal stays diagnostic while genuine proof, replay export and cl
   const h=await active({recordReplay:true,observeOutput:()=>true,archiveError:"late archive refused"});await observeDone(h);
   await h.send({kind:"play-stop",playId:7,completed:true});const final=h.of("play-stopped").at(-1);
   assert.equal(final.completedArchive,null);assert.equal(final.archivePlayers,null);assert.match(final.archiveError,/late archive refused/);
-  assert.equal(final.completedResults.proof,true);assert.ok(final.replay instanceof Uint8Array);
+  assert.equal(final.completedResults.proof,true);assert.ok(final.replay instanceof FileType);
   assert.equal(h.games[0].stops,1);assert.equal(h.games[0].frees,1);
   const next=await active({recordReplay:true,observeOutput:()=>true,freeError:"cleanup refused"});await observeDone(next);
   await next.send({kind:"play-stop",playId:7,completed:true});const failed=next.of("play-error").at(-1);
-  assert.ok(failed.completedArchive instanceof Uint8Array);assert.equal(failed.completedResults.proof,true);
+  assert.ok(failed.completedArchive instanceof Blob);assert.equal(failed.completedResults.proof,true);
   assert.equal(failed.released,false);assert.equal(failed.replayComplete,false);
+});
+test("immutable capture construction errors retain bounded diagnostics and do not fabricate usable recordings", async () => {
+  const replay = await active({ recordReplay: true, observeOutput: () => true, captureFileError: "immutable replay allocation refused" });
+  await observeDone(replay); await replay.send({ kind: "play-stop", playId: 7, completed: true });
+  const failedReplay = replay.of("play-stopped").at(-1);
+  assert.equal(failedReplay.replay, null); assert.equal(failedReplay.replayComplete, false);
+  assert.match(failedReplay.replayError, /immutable replay allocation refused/);
+  assert.equal(replay.games[0].frees, 1); assert.equal(replay.of("fatal").length, 0);
+  const archive = await active({ recordReplay: true, observeOutput: () => true, captureBlobError: "immutable archive allocation refused" });
+  await observeDone(archive); await archive.send({ kind: "play-stop", playId: 7, completed: true });
+  const failedArchive = archive.of("play-stopped").at(-1);
+  assert.equal(failedArchive.completedArchive, null); assert.equal(failedArchive.archivePlayers, null);
+  assert.match(failedArchive.archiveError, /immutable archive allocation refused/);
+  assert.ok(failedArchive.replay instanceof FileType); assert.equal(failedArchive.completedResults.proof, true);
+  assert.deepEqual(await immutableBytes(failedArchive.replay), [66,75,82,255,0,1]);
+  assert.equal(archive.games[0].frees, 1); assert.equal(archive.of("fatal").length, 0);
+});
+test("solo and local raw archive alias is refused before Blob construction without losing genuine replay prefixes", async () => {
+  for (const local of [false, true]) {
+    const shared = Uint8Array.of(66,75,82,255,0,1); let blobConstructions = 0;
+    const options = { observeOutput: () => true,
+      archiveExportBytes: () => shared, captureBlobConstruct() { blobConstructions++; },
+      ...(local ? { startRequest: startRequest({ inputMode: "physical-contact", recordReplay: true,
+        localPlanWords: new Uint32Array([4294967295,1,1,0,7,1,2,0]) }),
+        localReplayBytes: player => player === 4294967295 ? shared : Uint8Array.of(66,75,82,7) }
+        : { recordReplay: true, replayBytes: () => shared }) };
+    const h = await active(options); await observeDone(h);
+    await h.send({ kind: "play-stop", playId: 7, completed: true });
+    const result = h.of("play-stopped").at(-1);
+    assert.equal(result.completedArchive, null); assert.equal(result.archivePlayers, null);
+    assert.match(result.archiveError, /separate transferable buffer/);
+    assert.equal(blobConstructions, 0, "raw buffer alias is rejected before constructing an archive handle");
+    assert.equal(result.completedResults.proof, true);
+    if (local) {
+      assert.deepEqual(result.replays.map(row => row.player), [4294967295,7]);
+      assert.deepEqual(await Promise.all(result.replays.map(row => immutableBytes(row.replay))), [[66,75,82,255,0,1],[66,75,82,7]]);
+      assert.ok(result.replays.every(row => row.replayComplete === true && row.replayError === null));
+      assert.equal(h.locals[0].memberReplayTakes.size, 2); assert.equal(h.locals[0].stops, 1); assert.equal(h.locals[0].frees, 1);
+    } else {
+      assert.deepEqual(await immutableBytes(result.replay), [66,75,82,255,0,1]);
+      assert.equal(result.replayComplete, true); assert.equal(result.replayError, null);
+      assert.equal(h.games[0].replayTakes, 1); assert.equal(h.games[0].stops, 1); assert.equal(h.games[0].frees, 1);
+    }
+    assert.deepEqual(Array.from(shared), [66,75,82,255,0,1]);
+    assert.equal(h.transfers[h.messages.indexOf(result)].length, 0);
+    assert.equal(h.of("fatal").length, 0); assert.equal(h.of("play-error").length, 0);
+  }
 });
 test("prefix and disabled recordings cannot manufacture archives and stale owner stop cannot export again",async()=>{
   for(const recordReplay of [false,true]){
@@ -617,7 +682,7 @@ async function workerHarness(options = {}) {
       assert.equal(this.memberReplayTakes?.size ?? 0,0);
       trace.push("archive-export");
       if (options.archiveError) throw new Error(options.archiveError);
-      return this.completedEvidence ? new Uint8Array(options.archiveBytes ?? [66,75,82,69,83,85,76,84]) : null;
+      return this.completedEvidence ? (options.archiveExportBytes ? options.archiveExportBytes() : new Uint8Array(options.archiveBytes ?? [66,75,82,69,83,85,76,84])) : null;
     }
     static new_physical_contact(prepared, ...args) {
       contactConstructions.push({ prepared, args });
@@ -1293,12 +1358,18 @@ async function workerHarness(options = {}) {
     isSecureContext: false, navigator: {},
     postMessage(value, transfer = []) {
       transfers.push([...transfer]);
-      messages.push(structuredClone(value, { transfer }));
+      messages.push(cloneImmutableReceipt(value, transfer));
     },
     addEventListener(name, callback) { assert.equal(name, "message"); receive = callback; },
   };
   const context = createContext({
-    self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
+    self, structuredClone, DataView,
+    File: options.captureFileError ? new Proxy(FileType, { construct() { throw new Error(options.captureFileError); } }) : FileType,
+    Blob: options.captureBlobError || options.captureBlobConstruct ? new Proxy(Blob, {
+      construct(target, args) { options.captureBlobConstruct?.(); if (options.captureBlobError) throw new Error(options.captureBlobError);
+        return Reflect.construct(target, args); }
+    }) : Blob,
+    queueMicrotask, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
     MessageChannel: PreparationMessageChannel,
     performance: { timeOrigin: 10000, now() {
       return networkNow;
@@ -1325,6 +1396,7 @@ async function workerHarness(options = {}) {
   }, { context });
   const resultsModel = new SourceTextModule(await readFile(new URL("./completed-results-model.mjs", import.meta.url), "utf8"), { context });
   const helper = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
+  const recordStore = new SourceTextModule(await readFile(new URL("./record-store.mjs", import.meta.url), "utf8"), { context });
   const playHelper = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const settingsHelper = new SourceTextModule(await readFile(new URL("./settings-profile.mjs", import.meta.url), "utf8"), { context });
   const displayHelper = new SourceTextModule(await readFile(new URL("./display-settings.mjs", import.meta.url), "utf8"), { context });
@@ -1345,6 +1417,7 @@ async function workerHarness(options = {}) {
   const renderClient = new SourceTextModule(await readFile(new URL("./render-protocol.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
+    if (specifier === "./record-store.mjs") return recordStore;
     if (specifier === "./render-protocol.mjs") return renderClient;
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./completed-results-model.mjs") return resultsModel;

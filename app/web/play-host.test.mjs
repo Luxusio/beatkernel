@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { Blob, File } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 import { BMS_TIMING_PRESET_ID } from "./play-model.mjs";
 
@@ -16,9 +17,37 @@ function deferred() {
 }
 async function flush() {
   for (let index = 0; index < 48; index++) await Promise.resolve();
+  await nextTurn();
+  for (let index = 0; index < 48; index++) await Promise.resolve();
 }
 function command(voice = 1n) {
   return { kind: 0, voice, sample: 1n, at: 100000000n, gain: 0.5, value: 0n, denominator: 0n };
+}
+function captureFile(bytes) {
+  return new File([bytes], "capture.bkr", { type: "application/octet-stream" });
+}
+// Node clones File as Blob on some releases. Model the existing immutable
+// endpoint explicitly; actual Chromium proves cross-worker File cloning.
+function cloneHandles(value) {
+  const cloned = structuredClone(value);
+  const visited = new WeakSet();
+  let fields = 0;
+  function preserve(source, target) {
+    if (!source || typeof source !== "object" || !target || typeof target !== "object"
+      || source instanceof Blob || ArrayBuffer.isView(source) || visited.has(source)) return;
+    visited.add(source);
+    for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(source))) {
+      assert.ok(++fields <= 4096, "fixture immutable endpoint envelopes remain bounded");
+      // structuredClone has already acquired each enumerable accessor exactly
+      // once. Only own data properties can need the Node File endpoint seam.
+      if (!descriptor.enumerable || !Object.hasOwn(descriptor, "value")) continue;
+      const child = descriptor.value;
+      if (child instanceof File) target[key] = child;
+      else preserve(child, target[key]);
+    }
+  }
+  preserve(value, cloned);
+  return cloned;
 }
 function finalScore(playId, overrides = {}) {
   return { kind: "play-stopped", playId, songNs: 2350000000n,
@@ -443,7 +472,7 @@ async function harness(faults = {}) {
       const portHandoff = portKey !== null;
       const posted = portHandoff ? { ...structuredClone({ ...value, [portKey]: undefined, canvas: undefined }),
         [portKey]: value[portKey], ...(value.canvas ? { canvas: value.canvas } : {}) }
-        : structuredClone(value);
+        : cloneHandles(value);
       if (portHandoff) {
         assert.ok(transfer.includes(value[portKey]), "native channel endpoint is transferred");
         value[portKey].transfers++;
@@ -459,6 +488,8 @@ async function harness(faults = {}) {
         ...posted.opponents[index], file: entry.file,
       }));
       this.posts.push({ value: posted, transferCount: transfer.length, transfer: [...transfer] });
+      if (value.kind === "records-request") queueMicrotask(() => void recordEndpoint(this, posted));
+      if (value.kind === "records-close") queueMicrotask(() => void closeRecordEndpoint(this, posted));
       if (value.kind === "audio-load" && !faults.holdAudioModule) queueMicrotask(() => {
         const data = structuredClone({ kind: "audio-module-ready", id: value.id, module: moduleToken });
         (this.audioModuleReplies ??= []).push(data);
@@ -613,7 +644,12 @@ async function harness(faults = {}) {
   const context = createContext({
     document, window, Worker, MessageChannel, ResizeObserver, Option,
     navigator: browserNavigator,
-    AbortController, AbortSignal, URL: ControlledURL, Blob, TextEncoder, TextDecoder, File, Uint8Array, Uint32Array, Float32Array, DataView,
+    AbortController, AbortSignal, URL: ControlledURL,
+    Blob: faults.noWindowRecordBinary ? new Proxy(Blob, { construct() { assert.fail("Window must not construct capture/archive Blobs"); } }) : Blob,
+    TextEncoder, TextDecoder,
+    File: faults.noWindowRecordBinary ? new Proxy(File, { construct() { assert.fail("Window must not construct capture Files"); } }) : File,
+    Uint8Array, Uint32Array, Float32Array, DataView,
+    indexedDB: { open() { assert.fail("Window must not open record storage"); } },
     ArrayBuffer, structuredClone, performance: { timeOrigin: 9000, now: () => now },
     JSON: faults.noWindowSettingsJson ? {
       parse() { assert.fail("Window must not parse settings JSON"); },
@@ -661,7 +697,9 @@ async function harness(faults = {}) {
       recordCalls.push({ method: "save", value: structuredClone(value), store: this });
       if (faults.recordsSaveGate) await faults.recordsSaveGate.promise;
       if (faults.recordsSaveError) throw faults.recordsSaveError;
-      return savedRecord();
+      return savedRecord({ name: value.name, chartPath: value.chartPath, complete: value.complete,
+        hits: value.hits, misses: value.misses, combo: value.combo, byteLength: value.bytes.byteLength,
+        ...(value.completedArchive ? { archiveByteLength: value.completedArchive.byteLength, archivePlayer: value.archivePlayer } : {}) });
     }
     async load(id) {
       assert.equal(this.closed, false);
@@ -679,9 +717,50 @@ async function harness(faults = {}) {
     }
     close() { if (!this.closed) { this.closed = true; this.closes++; } }
   }
-  const recordsModule = new SyntheticModule(["RecordsStore"], function () {
-    this.setExport("RecordsStore", RecordsStore);
-  }, { context });
+  // The controlled store is reachable only from the fake gameplay Worker.
+  // Main.js may neither import this adapter nor acquire binary bodies.
+  async function recordEndpoint(worker, request) {
+    if (faults.holdRecordsReply) return;
+    try {
+      if (!worker.recordOwner || worker.recordOwner.closed) {
+        const controller = new AbortController();
+        worker.recordOpening = controller;
+        const store = await RecordsStore.open({ signal: controller.signal });
+        if (controller.signal.aborted || worker.terminations) { store.close(); throw new Error("record operation cancelled; commit status unknown"); }
+        worker.recordOwner = store;
+      }
+      const store = worker.recordOwner;
+      let result;
+      if (request.action === "list") result = { entries: await store.list() };
+      else if (request.action === "load") {
+        const loaded = await store.load(request.recordId);
+        result = { metadata: loaded.metadata,
+          replayFile: loaded.replayFile ?? new File([loaded.bytes], loaded.metadata.name, { type: "application/octet-stream" }),
+          archiveBlob: loaded.archiveBlob ?? (loaded.completedArchive ? new Blob([loaded.completedArchive]) : null),
+          archivePlayer: loaded.archivePlayer ?? null };
+      } else if (request.action === "save") {
+        const value = request.value;
+        const bytes = new Uint8Array(await Blob.prototype.arrayBuffer.call(value.replayFile));
+        const completedArchive = value.archiveBlob === null ? null
+          : new Uint8Array(await Blob.prototype.arrayBuffer.call(value.archiveBlob));
+        if (store.closed) throw new Error("record operation cancelled; commit status unknown");
+        result = { metadata: await store.save({ ...value.metadata, bytes, completedArchive, archivePlayer: value.archivePlayer }) };
+      } else if (request.action === "remove") result = { removed: await store.remove(request.recordId) };
+      else throw new Error("invalid record action");
+      if (store.closed || worker.terminations) return;
+      worker.emit("message", { data: cloneHandles({ kind: "records-reply", id: request.id, action: request.action, result, error: null }) });
+    } catch (error) {
+      if (!worker.terminations) worker.emit("message", { data: { kind: "records-reply", id: request.id,
+        action: request.action, result: null, error: String(error.message).slice(0, 4096) } });
+    }
+  }
+  async function closeRecordEndpoint(worker, request) {
+    worker.recordOpening?.abort();
+    worker.recordOwner?.close();
+    if (faults.recordsCloseGate) await faults.recordsCloseGate.promise;
+    if (!worker.terminations) worker.emit("message", { data: { kind: "records-closed", id: request.id,
+      error: faults.recordsCloseError?.message ?? null } });
+  }
   const modules = new Map();
   for (const name of ["render-protocol.mjs", "presentation-status.mjs", "completed-results-model.mjs", "host_model.mjs", "play-model.mjs", "settings-profile.mjs", "display-settings.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "pointer-input.mjs", "local-play-host.mjs", "menu-keyboard.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
@@ -692,7 +771,7 @@ async function harness(faults = {}) {
   const main = modules.get("main.js");
   await main.link(specifier => {
     if (specifier === "./audio-host.mjs") return audioModule;
-    if (specifier === "./record-store.mjs") return recordsModule;
+    if (specifier === "./record-store.mjs") assert.fail("Window must not import or own record storage");
     const linked = modules.get(specifier.replace(/^\.\//, ""));
     assert.ok(linked, `unexpected import ${specifier}`);
     return linked;
@@ -711,7 +790,7 @@ async function harness(faults = {}) {
       value = { commandsPending: false,
         ...(value.kind === "play-render-done" ? { observedTick: target.last("play-step")?.tickId ?? 0 } : {}), ...value };
     }
-    const data = structuredClone(value);
+    const data = cloneHandles(value);
     if (data.kind === "audio-module-ready") (target.audioModuleReplies ??= []).push(data);
     target.emit("message", { data });
     await flush();
@@ -840,6 +919,200 @@ async function harness(faults = {}) {
     },
   };
 }
+
+test("Window record RPC: immutable capture saves and downloads without any Window body or constructor work", async () => {
+  const h = await harness({ noWindowRecordBinary: true });
+  try {
+    await h.preview(); h.get("record").checked = true;
+    const session = await h.launch(); h.click("stop"); await flush();
+    const bytes = Uint8Array.of(66, 75, 82, 9, 255), file = captureFile(bytes);
+    file.arrayBuffer = () => assert.fail("production Window must not read capture bodies");
+    await h.receive(finalScore(session.id, { replay: file, replayComplete: false, replayError: null }));
+    assert.equal(h.get("records-save").disabled, false);
+    h.click("records-save"); await flush();
+    const request = h.workers[0].messages("records-request").find(message => message.action === "save");
+    assert.ok(request); assert.equal(request.value.replayFile, file);
+    assert.equal(Object.hasOwn(request.value, "bytes"), false);
+    assert.deepEqual(request.value.players, [1]); assert.equal(request.value.player, 1);
+    assert.equal(request.value.archiveBlob, null); assert.equal(request.value.archivePlayer, null);
+    assert.deepEqual(h.recordCalls.find(call => call.method === "save").value.bytes, bytes);
+    assert.equal(h.workers[0].posts.find(post => post.value === request).transferCount, 0);
+    h.click("export"); assert.equal(h.urls[0].blob, file, "object URL uses the retained immutable handle directly");
+    assert.deepEqual(new Uint8Array(await Blob.prototype.arrayBuffer.call(h.urls[0].blob)), bytes);
+  } finally { await h.close(); }
+});
+
+test("Window record RPC: local save retains selected original member and the whole-roster immutable archive", async () => {
+  const h = await harness({ touchSupported: true, noWindowRecordBinary: true });
+  try {
+    await h.preview(); await localCount(h, 2); h.click("local-discover"); await flush();
+    localAssign(h, 1, 1n); localAssign(h, 2, 2n); h.get("record").checked = true;
+    const session = await h.launch(), game = h.workers[0];
+    h.setNow(1700); await h.advance(8); const tick = game.last("play-step"), render = game.last("play-render");
+    await h.receive({ kind: "play-render-done", playId: session.id, renderId: render.renderId,
+      observedTick: tick.tickId, pendingInputs: 0, commandsPending: false, completed: true });
+    await h.receive({ kind: "play-step-done", playId: session.id, tickId: tick.tickId,
+      songNs: 2350000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0,
+      pendingInputs: 0, commandsPending: false });
+    assert.equal(game.last("play-stop").completed, true);
+    const first = Uint8Array.of(66,75,82,1), second = Uint8Array.of(66,75,82,2);
+    const archiveBytes = Uint8Array.of(66,75,82,69,83,85,76,84), archive = new Blob([archiveBytes]);
+    archive.arrayBuffer = () => assert.fail("Window must not read whole-roster archive");
+    await h.receive(localFinal(session.start, { replays: [
+      { player: 1, replay: captureFile(first), replayComplete: true, replayError: null },
+      { player: 2, replay: captureFile(second), replayComplete: true, replayError: null },
+    ], completedArchive: archive, archivePlayers: [1,2], archiveError: null }));
+    assert.equal(h.get("records-save").disabled, true, "member selection remains explicit");
+    h.get("captured-replay").value = "2"; h.get("captured-replay").emit("change");
+    h.click("records-save"); await flush();
+    const request = game.messages("records-request").find(message => message.action === "save");
+    assert.equal(request.value.player, 2); assert.equal(request.value.archivePlayer, 2);
+    assert.deepEqual(request.value.players, [1,2]); assert.ok(request.value.archiveBlob instanceof Blob);
+    const saved = h.recordCalls.find(call => call.method === "save").value;
+    assert.deepEqual(saved.bytes, second); assert.deepEqual(saved.completedArchive, archiveBytes);
+    assert.equal(saved.archivePlayer, 2); assert.equal(saved.hits, 2n); assert.equal(saved.complete, true);
+    h.click("export"); assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), second);
+    assert.match(h.downloads.at(-1).filename, /player-2-complete/);
+  } finally { await h.close(); }
+});
+
+test("Window record RPC: wrong id action and Worker cannot settle a current catalog operation", async () => {
+  const h = await harness({ holdRecordsReply: true });
+  try {
+    await h.preview(); h.click("records-refresh"); await flush();
+    const game = h.workers[0], request = game.last("records-request");
+    assert.equal(request.action, "list"); assert.ok(Number.isSafeInteger(request.id) && request.id > 0);
+    const reply = { kind: "records-reply", id: request.id, action: "list", result: { entries: [savedRecord()] }, error: null };
+    const rows = h.get("records").children.map(row => row.value), status = h.get("status").textContent;
+    for (const fields of [{ id: request.id - 1 }, { id: request.id + 1 }, { action: "load" }]) {
+      await h.receive({ ...reply, ...fields });
+      assert.deepEqual(h.get("records").children.map(row => row.value), rows);
+      assert.equal(h.get("status").textContent, status);
+      assert.equal(h.get("records-refresh").disabled, true);
+    }
+    await h.receive(reply, h.renderers[0]);
+    assert.deepEqual(h.get("records").children.map(row => row.value), rows);
+    await h.receive(reply); assert.equal(h.get("records").value, "41");
+    const published = h.get("status").textContent;
+    await h.receive({ ...reply, result: { entries: [savedRecord({ id: 42 })] } });
+    assert.equal(h.get("records").value, "41"); assert.equal(h.get("status").textContent, published);
+    assert.equal(h.recordCalls.length, 0, "a forged/stale response cannot invoke storage");
+  } finally { await h.close(); }
+});
+
+test("Window record RPC: malformed catalog and load envelopes never replace a retained replay", async () => {
+  const malformed = [
+    { result: null, error: null }, { result: { entries: null }, error: null },
+    { result: { entries: [savedRecord(), savedRecord()] }, error: null },
+    { result: { entries: [savedRecord({ id: 41 }), savedRecord({ id: 42 })] }, error: null },
+    { result: { entries: [savedRecord({ hits: "7" })] }, error: null },
+    { result: null, error: "" }, { result: null, error: "x".repeat(4097) },
+  ];
+  for (const fields of malformed) {
+    const h = await harness({ holdRecordsReply: true });
+    try {
+      await h.preview(); const selected = selectedRecording(); chooseRecording(h, [selected.file]);
+      const name = h.get("replay-name").textContent;
+      h.click("records-refresh"); await flush(); const request = h.workers[0].last("records-request");
+      await h.receive({ kind: "records-reply", id: request.id, action: request.action, ...fields });
+      assert.equal(h.get("replay-name").textContent, name); assert.equal(selected.reads, 0);
+      assert.equal(h.get("records").children.some(row => row.value === "41"), false);
+      assert.equal(h.opens.length, 0);
+    } finally { await h.close(); }
+  }
+  for (const fields of [
+    { replayFile: Uint8Array.of(1, 2, 3, 4) },
+    { replayFile: new Blob([Uint8Array.of(1, 2, 3, 4)]) },
+    { replayFile: new File([Uint8Array.of(1, 2, 3)], "saved-prefix.bkr") },
+    { replayFile: new File([Uint8Array.of(1, 2, 3, 4)], "other.bkr") },
+    { archiveBlob: new Blob([Uint8Array.of(1)]), archivePlayer: 1 },
+    { archiveBlob: undefined, archivePlayer: undefined },
+  ]) {
+    const h = await harness({ holdRecordsReply: true });
+    try {
+      await h.preview(); const selected = selectedRecording(); chooseRecording(h, [selected.file]);
+      const name = h.get("replay-name").textContent;
+      h.click("records-refresh"); await flush(); let request = h.workers[0].last("records-request");
+      await h.receive({ kind: "records-reply", id: request.id, action: "list", error: null, result: { entries: [savedRecord()] } });
+      h.click("records-use"); await flush(); request = h.workers[0].last("records-request");
+      assert.equal(request.action, "load"); assert.equal(request.recordId, 41);
+      await h.receive({ kind: "records-reply", id: request.id, action: "load", error: null,
+        result: { metadata: savedRecord(), replayFile: new File([Uint8Array.of(1,2,3,4)], "saved-prefix.bkr"),
+          archiveBlob: null, archivePlayer: null, ...fields } });
+      assert.equal(h.get("replay-name").textContent, name); assert.equal(selected.reads, 0);
+      assert.equal(h.workers[0].messages("historical-record-present").length, 0);
+    } finally { await h.close(); }
+  }
+});
+
+test("Window record RPC: pagehide rejects old UI replies while joining the captured closing Worker", async () => {
+  const gate = deferred(), h = await harness({ holdRecordsReply: true, recordsCloseGate: gate });
+  try {
+    await h.preview(); h.click("records-refresh"); await flush();
+    const old = h.workers[0], request = old.last("records-request");
+    h.window.emit("pagehide"); await flush(); const close = old.last("records-close");
+    assert.ok(close); assert.ok(close.id > request.id);
+    assert.equal(old.messages("dispose").length, 0, "shutdown must await actual record-owner join");
+    const status = h.get("status").textContent, rows = h.get("records").children.map(row => row.value);
+    await h.receive({ kind: "records-reply", id: request.id, action: "list", result: { entries: [savedRecord()] }, error: null }, old);
+    await h.receive({ kind: "records-closed", id: close.id + 1, error: null }, old);
+    assert.equal(h.get("status").textContent, status); assert.deepEqual(h.get("records").children.map(row => row.value), rows);
+    assert.equal(old.messages("dispose").length, 0);
+    gate.resolve(); await flush();
+    assert.equal(old.messages("dispose").length, 1, "matching closing-owner receipt survives the normal owner increment");
+    assert.equal(old.terminations, 1);
+    delete h.faults.recordsCloseGate;
+    h.window.emit("pageshow", { persisted: true }); await h.preview();
+    const current = h.workers.at(-1); assert.notEqual(current, old);
+    h.click("records-refresh"); await flush(); const fresh = current.last("records-request");
+    await h.receive({ kind: "records-reply", id: request.id, action: "list", result: { entries: [savedRecord({ id: 42 })] }, error: null }, old);
+    assert.equal(h.get("records-refresh").disabled, true);
+    await h.receive({ kind: "records-reply", id: fresh.id, action: "list", result: { entries: [savedRecord()] }, error: null });
+    assert.equal(h.get("records").value, "41");
+  } finally { gate.resolve(); delete h.faults.recordsCloseGate; await h.close(); }
+});
+
+test("Window record RPC: interrupted save reports unknown commit and never automatically retries", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); h.get("record").checked = true;
+    const session = await h.launch(); h.click("stop"); await flush();
+    const bytes = Uint8Array.of(66,75,82,255);
+    await h.receive(finalScore(session.id, { replay: captureFile(bytes), replayComplete: false, replayError: null }));
+    h.faults.holdRecordsReply = true;
+    h.click("records-save"); await flush(); const game = h.workers[0], write = game.last("records-request");
+    assert.equal(write.action, "save"); await h.advance(10001);
+    assert.match(h.get("status").textContent, /unknown|inspect|commit/i);
+    assert.equal(game.messages("records-request").filter(message => message.action === "save").length, 1);
+    assert.ok(game.last("records-close"));
+    h.click("export"); assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), bytes);
+    const previous = h.get("status").textContent;
+    await h.receive({ kind: "records-reply", id: write.id, action: "save", error: null, result: { metadata: savedRecord() } });
+    assert.equal(h.get("status").textContent, previous);
+    delete h.faults.holdRecordsReply;
+    h.click("records-refresh"); await flush();
+    assert.equal(game.messages("records-request").filter(message => message.action === "save").length, 1);
+  } finally { await h.close(); }
+});
+
+test("Window record RPC: valid solo diagnostic retains exact prefix after Worker termination", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); h.get("record").checked = true; const session = await h.launch();
+    h.click("stop"); await flush(); const bytes = Uint8Array.of(66,75,82,255), file = captureFile(bytes);
+    await h.receive(finalScore(session.id, { replay: file, replayComplete: false, replayError: "codec retained only the genuine prefix" }));
+    assert.equal(h.get("export").disabled, false); assert.match(h.get("export").textContent, /prefix/i);
+    h.window.emit("pagehide"); await flush(); assert.equal(h.workers[0].terminations, 1);
+    h.window.emit("pageshow", { persisted: true }); await h.preview();
+    h.click("export"); assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), bytes);
+    h.faults.recordsSaveError = new Error("quota rejected retained prefix");
+    h.click("records-save"); await flush();
+    assert.match(h.get("status").textContent, /quota rejected retained prefix/);
+    delete h.faults.recordsSaveError; h.click("records-save"); await flush();
+    const saved = h.recordCalls.filter(call => call.method === "save"); assert.equal(saved.length, 2);
+    assert.deepEqual(saved[1].value.bytes, bytes); assert.equal(saved[1].value.complete, false);
+  } finally { await h.close(); }
+});
 
 test("Window audio setup: CPU preview remains available while one Module request is pending", async () => {
   const h = await harness({ holdAudioModule: true });
@@ -1485,7 +1758,7 @@ test("renderer transport failure joins capture receipt and audio cleanup before 
   assert.equal(game.last("play-stop").playId, session.id);
   assert.equal(h.audio.stopStarts, 1); assert.equal(game.terminations, 0);
   await h.receive(finalScore(session.id, { kind: "play-error", message: "renderer transport lost",
-    replay: Uint8Array.from([9, 8, 7]), replayComplete: false, replayError: null }));
+    replay: captureFile(Uint8Array.from([9, 8, 7])), replayComplete: false, replayError: null }));
   assert.equal(game.terminations, 0, "capture receipt alone cannot release pending audio cleanup");
   stopping.resolve(); await flush();
   assert.equal(game.terminations, 1); assert.equal(renderer.terminations, 1);
@@ -1987,9 +2260,9 @@ test("joined local capture retains each valid member prefix for explicit downloa
       { player: 3, songNs: 2350000000n, hits: 18446744073709551615n, misses: 0n, combo: 0n, maxCombo: 18446744073709551615n },
     ],
     replays: [
-      { player: 1, replay: first, replayError: null, replayComplete: false },
+      { player: 1, replay: captureFile(first), replayError: null, replayComplete: false },
       { player: 2, replay: null, replayError: "member 2 codec capacity refused", replayComplete: false },
-      { player: 3, replay: third, replayError: null, replayComplete: false },
+      { player: 3, replay: captureFile(third), replayError: null, replayComplete: false },
     ],
   });
   h.click("stop"); await flush(); await h.receive(result);
@@ -3361,7 +3634,7 @@ test("the library opens only explicitly and saves joined capture bytes and actua
   h.click("stop");
   await flush();
   const bytes = Uint8Array.from([7, 8, 9, 255]);
-  await h.receive(finalScore(session.id, { replay: bytes, replayComplete: false, replayError: null,
+  await h.receive(finalScore(session.id, { replay: captureFile(bytes), replayComplete: false, replayError: null,
     hits: 18446744073709551615n, misses: 0n, combo: 7n }));
   assert.equal(h.get("records-save").disabled, true, "Worker receipt alone cannot release capture ownership");
   stopGate.resolve();
@@ -3782,7 +4055,7 @@ test("recording locks its session choice and exposes prefix downloads only after
     await flush();
     assert.equal(h.workers[0].last("play-stop").completed, false);
     const bytes = Uint8Array.from([66, 75, 82, 0, 255]);
-    const receipt = finalScore(session.id, { replay: bytes, replayComplete: false, replayError: null });
+    const receipt = finalScore(session.id, { replay: captureFile(bytes), replayComplete: false, replayError: null });
     if (audioFirst) { stopGate.resolve(); await flush(); }
     else await h.receive(receipt);
     assert.equal(h.get("export").disabled, true, "one cleanup receipt cannot expose owned capture bytes");
@@ -3829,7 +4102,7 @@ test("only natural completion labels a joined replay complete and real cleanup f
       tickId: worker.last("play-step").tickId, songNs: 50000000n,
       hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
     assert.equal(worker.last("play-stop").completed, true);
-    const receipt = finalScore(session.id, { replay: Uint8Array.from([1, 2, 3]),
+    const receipt = finalScore(session.id, { replay: captureFile(Uint8Array.from([1, 2, 3])),
       replayComplete: cleanup !== "worker", replayError: null,
       ...(cleanup === "worker" ? { kind: "play-error", released: false, message: "game free failed" } : {}) });
     await h.receive(receipt);
@@ -3858,10 +4131,11 @@ test("missing, unowned and malformed export evidence cannot become a downloadabl
   for (const [record, fields] of [
     [true, {}],
     [true, { replay: null, replayComplete: true, replayError: null }],
-    [true, { replay: bytes(), replayComplete: true, replayError: null }],
+    [true, { replay: captureFile(bytes()), replayComplete: true, replayError: null }],
+    [true, { replay: bytes(), replayComplete: false, replayError: null }],
     [true, { replay: bytes().subarray(1), replayComplete: false, replayError: null }],
-    [true, { replay: new Uint8Array(0), replayComplete: false, replayError: null }],
-    [false, { replay: bytes(), replayComplete: false, replayError: null }],
+    [true, { replay: captureFile(new Uint8Array(0)), replayComplete: false, replayError: null }],
+    [false, { replay: captureFile(bytes()), replayComplete: false, replayError: null }],
     [true, { replay: null, replayComplete: false, replayError: "actual codec refused the byte limit" }],
   ]) {
     const h = await harness();
@@ -3889,7 +4163,7 @@ test("one retained replay survives a failed export and its URLs are replaced onl
   const first = await h.launch();
   h.click("stop");
   await flush();
-  await h.receive(finalScore(first.id, { replay: Uint8Array.from([7, 8]), replayComplete: false, replayError: null }));
+  await h.receive(finalScore(first.id, { replay: captureFile(Uint8Array.from([7, 8])), replayComplete: false, replayError: null }));
   h.click("export");
   assert.equal(h.urls.length, 1);
   h.faults.downloadError = "browser denied URL allocation";
@@ -3915,7 +4189,7 @@ test("one retained replay survives a failed export and its URLs are replaced onl
   const replacement = await h.launch();
   h.click("stop");
   await flush();
-  await h.receive(finalScore(replacement.id, { replay: Uint8Array.from([9, 10]), replayComplete: false, replayError: null }));
+  await h.receive(finalScore(replacement.id, { replay: captureFile(Uint8Array.from([9, 10])), replayComplete: false, replayError: null }));
   assert.deepEqual(h.revoked, h.urls.map(entry => entry.url));
   const count = h.urls.length;
   h.click("export");
@@ -4401,7 +4675,7 @@ test("Window explicitly negotiates physical input before PCM and preserves nativ
   h.click("stop"); await flush();
   assert.equal(worker.last("play-stop").completed, false);
   await h.receive(finalScore(start.playId, { hits: 1n, misses: 0n, combo: 1n,
-    replay: Uint8Array.from([66, 75, 82, 1]), replayComplete: false, replayError: null }));
+    replay: captureFile(Uint8Array.from([66, 75, 82, 1])), replayComplete: false, replayError: null }));
   assert.match(h.get("export").textContent, /prefix/);
   assert.match(h.get("status").textContent, /Hits 1.*Misses 0.*Combo 1/);
   await h.close();
@@ -5098,7 +5372,7 @@ test("local saved targets freeze before audio acquisition and member comparisons
   h.click("stop"); await flush();
   const prefix = Uint8Array.from([66, 75, 82, 1]);
   const receipt = localFinal(start, {
-    replays: [{ player: 1, replay: prefix, replayError: null, replayComplete: false },
+    replays: [{ player: 1, replay: captureFile(prefix), replayError: null, replayComplete: false },
       { player: 2, replay: null, replayError: "second recording export failed", replayComplete: false }],
     savedOpponents: { opponents: null, error: null, localOpponents: [
       { player: 1, opponents: comparison(start.playId, { kind: "own", label: "Own prefix", songNs: -9223372036854775808n,
@@ -5157,7 +5431,7 @@ test("retired targets and malformed member comparison receipts cannot be reassig
     h.click("stop"); await flush();
     const receipt = localFinal(session.start, {
       savedOpponents: { localOpponents: groups, opponents: null, error: null },
-      replays: [1, 2].map(player => ({ player, replay: Uint8Array.from([66, 75, 82, player]), replayError: null, replayComplete: false })),
+      replays: [1, 2].map(player => ({ player, replay: captureFile(Uint8Array.from([66, 75, 82, player])), replayError: null, replayComplete: false })),
     });
     await h.receive(receipt);
     if (failure === "owned-row") {
@@ -5253,7 +5527,7 @@ test("unavailable or stale final comparisons cannot alter local recording result
     }
     h.click("stop"); await flush();
     const rows = comparison(session.id, fault === "malformed" ? { hits: "9007199254740993" } : {}).opponents;
-    await h.receive(finalScore(session.id, { replay: Uint8Array.from([66, 75, 82, 255]), replayComplete: false, replayError: null,
+    await h.receive(finalScore(session.id, { replay: captureFile(Uint8Array.from([66, 75, 82, 255])), replayComplete: false, replayError: null,
       ...(fault === "missing" ? {} : { savedOpponents: { opponents: rows, error: null } }) }));
     assert.match(h.get("opponents-status").textContent, /Final saved comparisons unavailable.*Local result unchanged/);
     if (fault === "previously-failed") assert.match(h.get("opponents-status").textContent, /first comparison failure/);
@@ -5425,7 +5699,7 @@ test("opponent preparation mismatches stop setup while malformed or failed live 
     await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0, playId: session.id, tickId: worker.last("play-step").tickId,
       songNs: 50000000n, hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
     assert.equal(worker.last("play-stop").completed, true);
-    await h.receive(finalScore(session.id, { replay: Uint8Array.from([66, 75, 82]), replayComplete: true, replayError: null,
+    await h.receive(finalScore(session.id, { replay: captureFile(Uint8Array.from([66, 75, 82])), replayComplete: true, replayError: null,
       savedOpponents: failure === "binding" ? { opponents: null, error: "actual comparison failure" }
         : { opponents: comparison(session.id, { hits: "7" }).opponents, error: null } }));
     assert.match(h.get("status").textContent, /Song completed/);
@@ -5638,7 +5912,7 @@ test("finite live controls capture one pre-gesture section and join input, outpu
   await stepDone(worker.last("play-step"));
   assert.equal(worker.last("play-stop").completed, true);
   await h.receive(finalScore(start.playId, { songNs: 1000000001n, hits: 4n, combo: 3n,
-    replay: Uint8Array.from([1, 2, 3]), replayComplete: true, replayError: null }));
+    replay: captureFile(Uint8Array.from([1, 2, 3])), replayComplete: true, replayError: null }));
   assert.equal(h.get("export").disabled, true);
   assert.equal(endField.disabled, true);
   stopping.resolve(); await flush();
@@ -5690,7 +5964,7 @@ test("invalid or mismatched live ends preserve drafts for retry and manual prefi
   await h.reply(worker.last("play-activate"), null);
   h.click("stop"); await flush();
   assert.equal(worker.last("play-stop").completed, false);
-  await h.receive(finalScore(start.playId, { replay: Uint8Array.from([4, 5]), replayComplete: false, replayError: null }));
+  await h.receive(finalScore(start.playId, { replay: captureFile(Uint8Array.from([4, 5])), replayComplete: false, replayError: null }));
   assert.match(h.get("export").textContent, /prefix/);
   assert.doesNotMatch(h.get("status").textContent, /Section completed/);
   assert.equal(endField.value, "2");
@@ -6516,7 +6790,7 @@ test("one automatic member records and saves its actual cohort row while an inde
   const bytes = Uint8Array.from([66, 75, 82, 1, 255]);
   const receipt = localFinal(start, { hits: 777n, misses: 777n, combo: 777n,
     localScores: [{ player: 1, songNs: 2350000000n, hits: 9007199254740993n, misses: 1n, combo: 2n, maxCombo: 3n }],
-    replays: [{ player: 1, replay: bytes, replayError: null, replayComplete: true }],
+    replays: [{ player: 1, replay: captureFile(bytes), replayError: null, replayComplete: true }],
     multiplayer: { finalWritten: true, finalAcknowledged: true, error: null,
       peers: [localPeer(1, 0xffffffff, { final: true, progress: { songNs: 604800000000001n,
         hits: 18446744073709551615n, misses: 0n, combo: 4n, maxCombo: 5n } })] } });
@@ -6555,7 +6829,7 @@ test("automatic cohort metadata refusal and failed prefixes release for retry wi
   const h = await harness(); await h.preview(); h.get("record").checked = true;
   const failed = await launchPeerSession(h), prefix = Uint8Array.from([66, 75, 82, 9]);
   const failure = localFinal(failed, { kind: "play-error", message: "actual member input failure", released: true,
-    replays: [{ player: 1, replay: prefix, replayError: null, replayComplete: false }],
+    replays: [{ player: 1, replay: captureFile(prefix), replayError: null, replayComplete: false }],
     multiplayer: { finalWritten: false, finalAcknowledged: false, error: "group disconnected", peers: [localPeer(1, null, { status: "disconnected" })] } });
   await h.receive(failure); assert.match(h.get("status").textContent, /actual member input failure/);
   h.get("captured-replay").value = "1"; h.get("captured-replay").emit("change"); h.click("export"); await flush();
@@ -6704,9 +6978,9 @@ test("joined local network results retain separate full-width peer prefixes and 
     songNs: 2350000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
   assert.equal(worker.last("play-stop").completed, true);
   const final = localFinal(start, { replays: [
-    { player: 1, replay: first, replayError: null, replayComplete: true },
+    { player: 1, replay: captureFile(first), replayError: null, replayComplete: true },
     { player: 2, replay: null, replayError: "member 2 export refused", replayComplete: false },
-    { player: 3, replay: third, replayError: null, replayComplete: true },
+    { player: 3, replay: captureFile(third), replayError: null, replayComplete: true },
   ], multiplayer: { finalWritten: true, finalAcknowledged: false, error: "group ACK deadline", peers } });
   await h.receive(final);
   assert.deepEqual(writes, []); assert.equal(h.get("play").disabled, true);
@@ -6753,8 +7027,8 @@ test("malformed local peer envelopes reject the entire comparison without scalar
     const start = await launchLocalPeers(h), first = Uint8Array.from([66, 75, 82, 1]), second = Uint8Array.from([66, 75, 82, 2]);
     h.click("stop"); await flush();
     await h.receive(localFinal(start, { replays: [
-      { player: 1, replay: first, replayError: null, replayComplete: false },
-      { player: 2, replay: second, replayError: null, replayComplete: false },
+      { player: 1, replay: captureFile(first), replayError: null, replayComplete: false },
+      { player: 2, replay: captureFile(second), replayError: null, replayComplete: false },
     ], multiplayer: { finalWritten: true, finalAcknowledged: true, error: null, peers: malformed(valid()),
       peer: { ...localPeer(1, 91), progress: { songNs: 0n, hits: 777777n, misses: 0n, combo: 0n, maxCombo: 0n } } } }));
     const text = h.get("multiplayer-status").textContent;
@@ -6875,7 +7149,7 @@ test("peer display errors and malformed or absent final prefixes never change lo
       assert.equal(h.audio.stopStarts, 0); assert.equal(h.workers[0].messages("play-stop").length, 0);
     }
     h.click("stop"); await flush();
-    await h.receive(localFinal(start, { replays: [{ player: 1, replay: Uint8Array.from([66, 75, 82]), replayComplete: false, replayError: null }],
+    await h.receive(localFinal(start, { replays: [{ player: 1, replay: captureFile(Uint8Array.from([66, 75, 82])), replayComplete: false, replayError: null }],
       multiplayer: { finalWritten: true, finalAcknowledged: true, error: null, peers: [localPeer(1, 91, peer)] } }));
     assert.match(content(h.get("local-results")), /Player 1.*Hits 1.*Misses 0/);
     h.get("captured-replay").value = "1"; h.get("captured-replay").emit("change");
@@ -7215,7 +7489,7 @@ test("a valid playing room closure preserves Window input and output while final
       room: { participant: ROOM_PARTICIPANT, finalQueued: true, finalWritten: written,
         finalAcknowledged: acknowledged, localComplete: acknowledged, finalDrain: "cancelled",
         error: "room stream lost after activation", peers: [] },
-      replays: [{ player, replay: Uint8Array.of(66, 75, 82, 1), replayError: null, replayComplete: false }],
+      replays: [{ player, replay: captureFile(Uint8Array.of(66, 75, 82, 1)), replayError: null, replayComplete: false }],
     }));
     assert.equal(h.audio.stopStarts, 1); assert.equal(worker.messages("play-stop").length, 1);
     assert.match(h.get("multiplayer-status").textContent, expected);
@@ -7273,7 +7547,7 @@ test("joined room drain outcomes remain distinct while the natural cleanup wait 
       room: { participant: ROOM_PARTICIPANT, finalQueued: true, finalWritten: true,
         finalAcknowledged: true, localComplete: true, finalDrain,
         error: finalDrain === "failed" ? "actual coordinated drain timeout" : null, peers: [] },
-      replays: [{ player, replay: Uint8Array.of(66, 75, 82, 1), replayError: null, replayComplete: true }],
+      replays: [{ player, replay: captureFile(Uint8Array.of(66, 75, 82, 1)), replayError: null, replayComplete: true }],
     });
     await h.receive(result);
     assert.deepEqual(writes, [], "the audio owner has not finished cleanup");
@@ -7310,7 +7584,7 @@ async function stoppedRoomResults(h, { count = 4, metadata = { page: 1, pages: 2
     roomResults: metadata,
     room: { participant: ROOM_PARTICIPANT, finalQueued: true, finalWritten: false,
       finalAcknowledged: false, localComplete: false, finalDrain: "cancelled", error: null, peers: [] },
-    replays: [{ player, replay: Uint8Array.of(66, 75, 82, 1), replayError: null, replayComplete: false }],
+    replays: [{ player, replay: captureFile(Uint8Array.of(66, 75, 82, 1)), replayError: null, replayComplete: false }],
   });
   await h.receive(terminal);
   return { start, worker, terminal, player };
@@ -7520,6 +7794,7 @@ test("room Leave, closure, deadline and cancellation settle the schedule wait an
 
 async function selectedHistoricalGrades(h, pages = 3) {
   await h.preview(); h.click("records-refresh"); await flush();
+  h.get("records").value = "41"; h.get("records").emit("change"); await flush();
   h.click("records-use"); await flush();
   const worker = h.workers.at(-1), request = worker.last("historical-record-present");
   assert.ok(request, "actual completed-record load requests Worker historical presentation");
@@ -7527,8 +7802,8 @@ async function selectedHistoricalGrades(h, pages = 3) {
   return { worker, request };
 }
 function storedHistoricalFields(id = 41) {
-  const row = savedRecord({ id });
-  return { recordsList: [row, savedRecord({ id: 42, name: "replacement.bkr" })],
+  const row = savedRecord({ id, archiveByteLength: 8, archivePlayer: 4294967295 });
+  return { recordsList: [savedRecord({ id: 42, name: "replacement.bkr" }), row],
     recordsLoaded: { metadata: row, bytes: Uint8Array.from([66,75,82,0]), completedArchive: Uint8Array.from([66,75,82,69,83,85,76,84]), archivePlayer: 4294967295 } };
 }
 
@@ -7553,7 +7828,8 @@ test("record continuity: matching historical commit retires pending Results RPC 
   const h = await harness(storedHistoricalFields()); const { worker, metadata } = await completedRecordHost(h);
   h.window.emit("keydown", { code: "PageDown", repeat: false }); await flush();
   const oldPage = worker.last("play-results-page"); assert.ok(oldPage);
-  h.click("records-refresh"); await flush(); h.click("records-use"); await flush();
+  h.click("records-refresh"); await flush();
+  h.get("records").value = "41"; h.get("records").emit("change"); await flush(); h.click("records-use"); await flush();
   const request = worker.last("historical-record-present"); assert.ok(request);
   const resultsPages = worker.messages("play-results-page").length;
   const accepts = worker.messages("historical-record-accept").length;
@@ -7586,6 +7862,7 @@ test("record continuity: failed historical response and timeout retain Results n
   for (const failure of ["refused", "metadata", "timeout", "read"]) {
     const h = await harness(storedHistoricalFields()); const { worker } = await completedRecordHost(h);
     h.click("records-refresh"); await flush();
+  h.get("records").value = "41"; h.get("records").emit("change"); await flush();
     if (failure === "read") h.faults.recordsLoadError = new Error("storage read refused");
     h.click("records-use"); await flush(); const request = worker.last("historical-record-present");
     if (failure === "timeout") await h.advance(10000);
@@ -7698,7 +7975,8 @@ test("saved-record selection change aborts unabortable library read before stale
   const gate = deferred(); const h = await harness({ ...storedHistoricalFields(), recordsLoadGate: gate }); await h.preview();
   const original = selectedRecording(); chooseRecording(h, [original.file]);
   const name = h.get("replay-name").textContent;
-  h.click("records-refresh"); await flush(); h.click("records-use"); await flush();
+  h.click("records-refresh"); await flush();
+  h.get("records").value = "41"; h.get("records").emit("change"); await flush(); h.click("records-use"); await flush();
   assert.equal(h.recordCalls.filter(call => call.method === "load").length, 1);
   h.get("records").value = "42"; h.get("records").emit("change"); await flush();
   gate.resolve(); await flush();
@@ -8024,7 +8302,8 @@ test("presentation feedback: stored history can wait and recover before preparin
   await h.receive({ kind: "ready" });
   await h.receive({ kind: "ready" }, h.renderers.at(-1));
   assert.equal(h.workers[0].last("select"), undefined);
-  h.click("records-refresh"); await flush(); h.click("records-use"); await flush();
+  h.click("records-refresh"); await flush();
+  h.get("records").value = "41"; h.get("records").emit("change"); await flush(); h.click("records-use"); await flush();
   const request = h.workers[0].last("historical-record-present");
   assert.ok(request, "history presentation does not require a prepared preview");
   await h.receive({ kind: "historical-record-result", id: request.id, available: true, error: null, gradePage: 0, gradePages: 1 });
@@ -8067,7 +8346,7 @@ test("Records catalog publication: DOM refresh save and delete publish each comp
     await h.preview(); h.get("record").checked = true;
     const session = await h.launch(); h.click("stop"); await flush();
     const captured = Uint8Array.from([7, 8, 9, 255]);
-    await h.receive(finalScore(session.id, { replay: captured, replayComplete: false, replayError: null }));
+    await h.receive(finalScore(session.id, { replay: captureFile(captured), replayComplete: false, replayError: null }));
     assert.equal(h.get("records-save").disabled, false);
     const game = h.workers[0];
     h.click("menu-open"); await flush();

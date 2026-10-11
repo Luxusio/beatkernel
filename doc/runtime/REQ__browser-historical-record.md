@@ -1,8 +1,18 @@
 # Browser loaded historical result presentation
 
-Using a stored replay may send its original replay bytes, optional whole result
-archive and explicit original player ID to the initialized idle Worker. Window
-owns IndexedDB reads, UI controls and operation cancellation only. It does not
+Ownership update, implementation candidate; independent acceptance pending:
+[record storage](REQ__browser-record-storage.md) moves IndexedDB and immutable
+File/Blob preparation into the existing gameplay Worker. Window requests
+records using correlated bounded metadata and retain immutable handles;
+historical/menu archive reads stay in Worker. Scoped Node development checks
+pass; actual browser clone/lifetime and independent verification are pending.
+Original member association, candidate acceptance
+and preservation of prior valid presentation remain required.
+
+Using a stored replay sends its immutable replay File, optional whole result
+archive Blob and explicit original player ID to the initialized idle Worker.
+The Worker owns IndexedDB and binary reads. Window owns UI controls, immutable
+handle retention and correlated operation cancellation. It does not
 decode archive gameplay fields, calculate outcomes, render result geometry or
 schedule a rendering loop. Loading a historical result never creates live
 CompletedPlayResult evidence or CompletedResults metadata with proof=true.

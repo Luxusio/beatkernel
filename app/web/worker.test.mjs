@@ -13,6 +13,346 @@ import { keyboardBindingWords } from "./physical-input.mjs";
 import { createContext, SourceTextModule, SyntheticModule, runInContext } from "node:vm";
 const FileType = globalThis.File ?? NodeFile;
 
+// Public RecordsStore lease double. Native request/transaction terminal events
+// are separately controlled from callers rejected by close(). AC001 exercises
+// the same public lease using actual RecordsStore and an IndexedDB factory.
+function controlledRecordStore({ holdOpen = false, holdTransaction = false, cleanupError = null } = {}) {
+  const opens = [], calls = [], transactions = [];
+  const metadata = { id: 17, name: "Original member", chartPath: "song/chart.bms", complete: true,
+    hits: 17n, misses: 3n, combo: 9n, byteLength: 4, archiveByteLength: 8, archivePlayer: 0xffffffff };
+  const makeLease = () => {
+    const opening = deferred(), openTerminal = deferred(), storeTerminal = deferred();
+    let closed = false, opened = false;
+    const finishStore = () => { if (closed && opened && transactions.every(tx => tx.ended)) storeTerminal.resolve(); };
+    const operation = (action, value) => {
+      calls.push({ action, value });
+      if (closed) return Promise.reject(new Error("closed record owner"));
+      const caller = deferred();
+      const tx = { action, value, ended: false,
+        complete() { if (this.ended) return; this.ended = true;
+          caller.resolve(action === "list" ? [metadata] : action === "save" ? metadata : action === "remove" ? true :
+            { metadata, bytes: Uint8Array.of(66,75,82,0), completedArchive: Uint8Array.of(66,75,82,69,83,85,76,84), archivePlayer: 0xffffffff });
+          finishStore(); },
+        abort() { if (this.ended) return; this.ended = true; caller.reject(new Error("native transaction aborted")); finishStore(); },
+        rejectCaller() { caller.reject(new Error("record operation canceled")); },
+      };
+      transactions.push(tx);
+      if (!holdTransaction) tx.complete();
+      return caller.promise;
+    };
+    const store = { terminal: storeTerminal.promise,
+      list: () => operation("list"), load: id => operation("load", id),
+      save: value => operation("save", value), remove: id => operation("remove", id),
+      close() { if (closed) return; closed = true; lease.closes++;
+        for (const tx of transactions) if (!tx.ended) tx.rejectCaller(); finishStore(); },
+      closeAndJoin() { store.close(); return cleanupError ? Promise.reject(new Error(cleanupError)) : store.terminal; },
+    };
+    const lease = { ready: opening.promise, terminal: openTerminal.promise, closes: 0,
+      close() { store.close(); if (!opened) opening.reject(new Error("opening canceled")); },
+      closeAndJoin() { lease.close(); return cleanupError ? Promise.reject(new Error(cleanupError)) :
+        Promise.all([lease.terminal, store.terminal]).then(() => undefined); },
+      finishOpen() { if (opened) return; opened = true; openTerminal.resolve();
+        if (!closed) opening.resolve(store); finishStore(); },
+    };
+    opens.push(lease);
+    if (!holdOpen) lease.finishOpen();
+    return lease;
+  };
+  return { opens, calls, transactions, metadata, openTracked: makeLease };
+}
+
+function recordSaveValue(fields = {}) {
+  return { metadata: { name: "Original member", chartPath: "song/chart.bms", complete: true,
+    hits: 17n, misses: 3n, combo: 9n }, replayFile: new FileType([Uint8Array.of(66,75,82,0)], "member.bkr"),
+    archiveBlob: new Blob([Uint8Array.of(66,75,82,69,83,85,76,84)]), archivePlayer: 0xffffffff,
+    players: [0xffffffff, 7], player: 0xffffffff, ...fields };
+}
+
+async function recordWorker(recordsStore) {
+  const h = await realPreparationWorker({ recordsStore });
+  assert.equal(h.of("ready").length, 1); assert.equal(h.of("fatal").length, 0); return h;
+}
+
+async function settleRecord(predicate) {
+  // Native Node File/Blob reads can settle on a later event-loop turn. Keep
+  // controlled preparation delivery unchanged and wait only at explicit
+  // expected record milestones, never through intentionally held reads/DBs.
+  const deadline = performance.now() + 5000;
+  while (!predicate() && performance.now() < deadline) {
+    await new Promise(resolve => setImmediate(resolve)); await flushJobs();
+  }
+  assert.ok(predicate(), "bounded native record milestone must settle");
+}
+
+test("record requests lazily open and preserve exact action results and original archive player", async () => {
+  const store = controlledRecordStore(), h = await recordWorker(store);
+  assert.equal(store.opens.length, 0, "ready never automatically opens storage");
+  await h.send({ kind: "records-request", id: 1, action: "list" });
+  const listed = h.of("records-reply").at(-1);
+  assert.deepEqual(structuredClone(listed), { kind: "records-reply", id: 1, action: "list", result: { entries: [store.metadata] }, error: null });
+  await h.send({ kind: "records-request", id: 2, action: "load", recordId: 17 });
+  const loaded = h.of("records-reply").at(-1);
+  assert.equal(loaded.error, null); assert.equal(loaded.result.archivePlayer, 0xffffffff);
+  assert.ok(loaded.result.replayFile instanceof FileType); assert.ok(loaded.result.archiveBlob instanceof Blob);
+  assert.equal(loaded.result.replayFile.name, store.metadata.name, "loaded immutable File preserves the stored display name");
+  assert.deepEqual(Array.from(new Uint8Array(await loaded.result.replayFile.arrayBuffer())), [66,75,82,0]);
+  assert.deepEqual(Array.from(new Uint8Array(await loaded.result.archiveBlob.arrayBuffer())), [66,75,82,69,83,85,76,84]);
+  const value = recordSaveValue();
+  await h.send({ kind: "records-request", id: 3, action: "save", value });
+  await settleRecord(() => h.of("records-reply").some(row => row.id === 3));
+  assert.deepEqual(structuredClone(h.of("records-reply").at(-1)), { kind: "records-reply", id: 3, action: "save", result: { metadata: store.metadata }, error: null });
+  const saved = store.calls.find(row => row.action === "save").value;
+  assert.deepEqual(Array.from(saved.bytes), [66,75,82,0]);
+  assert.deepEqual(Array.from(saved.completedArchive), [66,75,82,69,83,85,76,84]);
+  assert.equal(saved.archivePlayer, 0xffffffff); assert.equal(saved.hits, 17n); assert.equal(saved.chartPath, "song/chart.bms");
+  await h.send({ kind: "records-request", id: 4, action: "remove", recordId: 17 });
+  assert.deepEqual(structuredClone(h.of("records-reply").at(-1)), { kind: "records-reply", id: 4, action: "remove", result: { removed: true }, error: null });
+  assert.equal(store.calls.find(row => row.action === "remove").value, 17);
+  assert.equal(store.opens.length, 1, "successful idle owner is reused");
+  await h.send({ kind: "records-close", id: 5 });
+  assert.deepEqual(structuredClone(h.of("records-closed").at(-1)), { kind: "records-closed", id: 5, error: null });
+});
+
+test("record metadata and handle preflight occurs before opening or any body read", async () => {
+  const store = controlledRecordStore(), h = await recordWorker(store);
+  let reads = 0, id = 1;
+  const file = new FileType([Uint8Array.of(1)], "member.bkr");
+  file.arrayBuffer = () => { reads++; assert.fail("invalid metadata must never read a body"); };
+  const invalid = [
+    { metadata: { ...recordSaveValue().metadata, name: "" } },
+    { metadata: { ...recordSaveValue().metadata, chartPath: "../escape.bms" } },
+    { metadata: { ...recordSaveValue().metadata, hits: 1 } },
+    { metadata: { ...recordSaveValue().metadata, hits: -1n } },
+    { metadata: { ...recordSaveValue().metadata, combo: 18446744073709551616n } },
+    { players: [7,7], player: 7, archivePlayer: 7 }, { players: [], player: 1 },
+    { player: 1 }, { archivePlayer: 7 }, { archiveBlob: null, archivePlayer: 0xffffffff },
+    { replayFile: { size: 1, arrayBuffer() { assert.fail("fake handle"); } } },
+    { replayFile: new FileType([], "empty.bkr") }, { archiveBlob: new Blob() },
+    { replayFile: Object.assign(Object.create(FileType.prototype), { arrayBuffer() { assert.fail("spoofed File body"); } }) },
+    { archiveBlob: Object.assign(Object.create(Blob.prototype), { arrayBuffer() { assert.fail("spoofed Blob body"); } }) },
+  ];
+  for (const fields of invalid) {
+    await h.send({ kind: "records-request", id: id++, action: "save", value: recordSaveValue({ replayFile: file, ...fields }) });
+    const reply = h.of("records-reply").at(-1);
+    assert.equal(reply.result, null); assert.equal(typeof reply.error, "string");
+    assert.ok(reply.error.length > 0 && reply.error.length <= 4096);
+  }
+  for (const recordId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    await h.send({ kind: "records-request", id: id++, action: "load", recordId });
+    assert.equal(h.of("records-reply").at(-1).result, null);
+  }
+  assert.equal(reads, 0); assert.equal(store.opens.length, 0); assert.equal(store.calls.length, 0);
+  assert.equal(h.of("fatal").length, 0);
+});
+
+test("record identity ignores invalid and duplicate IDs and preserves the physical busy slot", async () => {
+  const store = controlledRecordStore({ holdTransaction: true }), h = await recordWorker(store);
+  for (const id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN]) await h.send({ kind: "records-request", id, action: "list" });
+  assert.equal(store.opens.length, 0); assert.equal(h.of("records-reply").length, 0);
+  await h.send({ kind: "records-request", id: 10, action: "list" });
+  await h.send({ kind: "records-request", id: 10, action: "list" });
+  assert.equal(store.calls.length, 1); assert.equal(h.of("records-reply").length, 0);
+  await h.send({ kind: "records-request", id: 11, action: "remove", recordId: 17 });
+  assert.equal(store.calls.length, 1); assert.equal(h.of("records-reply").at(-1).id, 11);
+  assert.equal(h.of("records-reply").at(-1).result, null);
+  store.transactions[0].complete(); await flushJobs();
+  assert.equal(h.of("records-reply").at(-1).id, 10); assert.equal(h.of("records-reply").at(-1).error, null);
+  await h.send({ kind: "records-request", id: 10, action: "list" });
+  await h.send({ kind: "records-request", id: 9, action: "list" });
+  assert.equal(store.calls.length, 1, "used/lower IDs cannot repeat storage");
+  await h.send({ kind: "records-request", id: 11, action: "remove", recordId: 17 });
+  assert.equal(store.calls.length, 2, "a busy refusal did not consume the later physical ID");
+  store.transactions[1].complete(); await flushJobs();
+  await h.send({ kind: "records-close", id: 12 });
+});
+
+test("record close during each uncancelable save read fences mutation and retains capacity until settlement", async () => {
+  for (const stage of ["replay", "archive"]) {
+    const store = controlledRecordStore(), h = await recordWorker(store), held = deferred();
+    const value = recordSaveValue(); let replayReads = 0, archiveReads = 0;
+    value.replayFile.arrayBuffer = () => { replayReads++; return stage === "replay" ? held.promise : Promise.resolve(Uint8Array.of(66,75,82,0).buffer); };
+    value.archiveBlob.arrayBuffer = () => { archiveReads++; return stage === "archive" ? held.promise : Promise.resolve(Uint8Array.of(66,75,82,69,83,85,76,84).buffer); };
+    await h.send({ kind: "records-request", id: 1, action: "save", value });
+    assert.equal(replayReads, 1); assert.equal(archiveReads, stage === "archive" ? 1 : 0);
+    await h.send({ kind: "records-close", id: 2 });
+    assert.equal(h.of("records-closed").length, 0, "caller fencing does not terminate a File read");
+    await h.send({ kind: "records-request", id: 3, action: "list" });
+    assert.equal(store.calls.length, 0, "replacement cannot bypass the outstanding body read");
+    held.resolve((stage === "replay" ? Uint8Array.of(66,75,82,0) : Uint8Array.of(66,75,82,69,83,85,76,84)).buffer);
+    await flushJobs();
+    assert.equal(store.calls.filter(row => row.action === "save").length, 0);
+    assert.equal(archiveReads, stage === "archive" ? 1 : 0, "canceled replay cannot trigger archive acquisition");
+    assert.equal(h.of("records-reply").some(row => row.id === 1 && row.error === null), false);
+    assert.deepEqual(structuredClone(h.of("records-closed").at(-1)), { kind: "records-closed", id: 2, error: null });
+    await h.send({ kind: "records-request", id: 3, action: "list" });
+    assert.equal(h.of("records-reply").at(-1).error, null, "explicit fresh retry after actual settlement succeeds");
+    await h.send({ kind: "records-close", id: 4 });
+  }
+});
+
+test("record close joins delayed native open and transaction events instead of canceled caller promises", async () => {
+  for (const phase of ["open", "transaction"]) {
+    const store = controlledRecordStore({ holdOpen: phase === "open", holdTransaction: phase === "transaction" });
+    const h = await recordWorker(store);
+    await h.send({ kind: "records-request", id: 1, action: "list" });
+    await h.send({ kind: "records-close", id: 2 });
+    await h.send({ kind: "records-close", id: 2 });
+    assert.equal(store.opens[0].closes, 1, "duplicate close starts no extra physical cleanup");
+    assert.equal(h.of("records-closed").length, 0);
+    await h.send({ kind: "records-close", id: 3 });
+    const competing = h.of("records-closed").find(row => row.id === 3);
+    assert.equal(typeof competing?.error, "string");
+    await h.send({ kind: "records-request", id: 4, action: "list" });
+    assert.equal(store.opens.length, 1);
+    if (phase === "open") store.opens[0].finishOpen(); else store.transactions[0].abort();
+    await flushJobs();
+    const closed = h.of("records-closed").filter(row => row.id === 2);
+    assert.ok(closed.length >= 1); assert.ok(closed.every(row => row.error === null));
+    assert.equal(h.of("records-reply").some(row => row.id === 1 && row.error === null), false);
+    const closes = store.opens[0].closes;
+    await h.send({ kind: "records-close", id: 1 }); assert.equal(store.opens[0].closes, closes);
+  }
+});
+
+test("record cleanup timeout reports failure and keeps the physical owner until a late native terminal event", async () => {
+  for (const phase of ["open", "transaction"]) {
+    const store = controlledRecordStore({ holdOpen: phase === "open", holdTransaction: phase === "transaction" });
+    const h = await recordWorker(store);
+    await h.send({ kind: "records-request", id: 1, action: "list" });
+    await h.send({ kind: "records-close", id: 2 });
+    for (let n = 0; n < 8 && h.of("records-closed").length === 0; n++) {
+      const timer = [...h.timers].find(([, entry]) => entry.ms === 10000);
+      assert.ok(timer, "bounded native cleanup deadline exists");
+      h.timers.delete(timer[0]); timer[1].fn(); await flushJobs();
+    }
+    const outcome = h.of("records-closed").find(row => row.id === 2);
+    assert.ok(outcome && typeof outcome.error === "string" && outcome.error.length > 0 && outcome.error.length <= 4096);
+    await h.send({ kind: "records-request", id: 3, action: "list" });
+    assert.equal(store.opens.length, 1, "timeout is not native terminal evidence");
+    assert.equal(store.calls.length, phase === "open" ? 0 : 1);
+    if (phase === "open") store.opens[0].finishOpen(); else store.transactions[0].abort();
+    await flushJobs();
+    assert.equal(h.of("records-closed").some(row => row.id === 2 && row.error === null), false,
+      "late cleanup must not rewrite the earlier failed outcome");
+    await h.send({ kind: "records-request", id: 3, action: "list" });
+    assert.equal(store.opens.length, 2, "fresh explicit recovery follows actual native termination");
+    if (phase === "open") store.opens[1].finishOpen(); else store.transactions.at(-1).complete();
+    await flushJobs();
+    assert.equal(h.of("records-reply").at(-1).error, null);
+    await h.send({ kind: "records-close", id: 4 });
+  }
+});
+
+test("record save snapshots all bounded metadata before an awaited immutable body read", async () => {
+  const store = controlledRecordStore(), h = await recordWorker(store), held = deferred();
+  const value = recordSaveValue(); value.replayFile.arrayBuffer = () => held.promise;
+  await h.send({ kind: "records-request", id: 1, action: "save", value });
+  value.metadata.name = "Mutated after admission"; value.metadata.hits = 123n;
+  value.metadata.chartPath = "wrong/chart.bms"; value.archivePlayer = 7; value.player = 7; value.players.reverse();
+  held.resolve(Uint8Array.of(66,75,82,0).buffer); await flushJobs();
+  await settleRecord(() => store.calls.some(row => row.action === "save"));
+  const saved = store.calls.find(row => row.action === "save")?.value;
+  assert.ok(saved); assert.equal(saved.name, "Original member"); assert.equal(saved.hits, 17n);
+  assert.equal(saved.chartPath, "song/chart.bms"); assert.equal(saved.archivePlayer, 0xffffffff);
+  await h.send({ kind: "records-close", id: 2 });
+});
+
+test("record save acquisition rejects changed or failed bodies without reaching persistent mutation", async () => {
+  for (const stage of ["replay", "archive"]) for (const failure of ["wrong-size", "reject"]) {
+    const store = controlledRecordStore(), h = await recordWorker(store), value = recordSaveValue();
+    const handle = stage === "replay" ? value.replayFile : value.archiveBlob;
+    handle.arrayBuffer = () => failure === "reject" ? Promise.reject(new Error("body acquisition refused")) : Promise.resolve(Uint8Array.of(1).buffer);
+    await h.send({ kind: "records-request", id: 1, action: "save", value });
+    await settleRecord(() => h.of("records-reply").some(row => row.id === 1));
+    assert.equal(store.calls.filter(row => row.action === "save").length, 0);
+    assert.equal(h.of("records-reply").at(-1).result, null); assert.ok(h.of("records-reply").at(-1).error);
+    assert.equal(h.of("fatal").length, 0);
+    await h.send({ kind: "records-request", id: 2, action: "list" });
+    assert.equal(h.of("records-reply").at(-1).error, null, "optional acquisition errors permit explicit recovery");
+    await h.send({ kind: "records-close", id: 3 });
+  }
+});
+
+test("retired record body read reserves storage capacity while unrelated gameplay preparation remains available", async () => {
+  const store = controlledRecordStore(), h = await gameWorker({ recordsStore: store }), held = deferred();
+  const value = recordSaveValue(); value.replayFile.arrayBuffer = () => held.promise;
+  await h.send({ kind: "records-request", id: 1, action: "save", value });
+  await h.send({ kind: "records-close", id: 2 });
+  assert.equal(h.of("records-closed").length, 0);
+  await startGame(h, [], { recordReplay: true });
+  assert.equal(h.of("play-reply").at(-1).result.kind, "prepared");
+  assert.equal(h.games.length, 1); assert.equal(h.games[0].frees, 0);
+  await h.send({ kind: "records-request", id: 3, action: "list" });
+  assert.equal(store.calls.length, 0); assert.equal(h.of("records-reply").at(-1).result, null);
+  held.resolve(Uint8Array.of(66,75,82,0).buffer); await flushJobs();
+  assert.equal(store.calls.filter(row => row.action === "save").length, 0);
+  assert.equal(h.of("records-reply").some(row => row.id === 1 && row.error === null), false);
+  assert.equal(h.of("records-closed").at(-1).error, null); assert.equal(h.games[0].frees, 0);
+  await h.send({ kind: "play-stop", playId: 1 });
+  const capture = h.of("play-stopped").at(-1); assert.ok(capture.replay instanceof FileType);
+  assert.deepEqual(Array.from(new Uint8Array(await capture.replay.arrayBuffer())), [66,75,82]);
+  assert.equal(h.games[0].frees, 1);
+});
+
+test("record disposal and fatal entry wait for actual native transaction terminal and suppress late UI", async () => {
+  for (const boundary of ["dispose", "fatal"]) {
+    const store = controlledRecordStore({ holdTransaction: true }), h = await recordWorker(store);
+    await h.send({ kind: "records-request", id: 1, action: "list" });
+    await h.send(boundary === "dispose" ? { kind: "dispose" } : null);
+    assert.equal(store.opens[0].closes, 1, "record owner fenced at entry");
+    assert.equal(h.of(boundary === "dispose" ? "disposed" : "fatal").length, 0);
+    assert.equal(h.of("records-reply").some(row => row.id === 1 && row.error === null), false);
+    store.transactions[0].abort(); await flushJobs();
+    assert.equal(h.of(boundary === "dispose" ? "disposed" : "fatal").length, 1);
+    assert.equal(h.of("records-reply").some(row => row.id === 1 && row.error === null), false);
+  }
+});
+
+test("missing native storage terminal reports disposal failure and cannot publish a successful disposed receipt", async () => {
+  const store = controlledRecordStore({ holdTransaction: true }), h = await recordWorker(store);
+  await h.send({ kind: "records-request", id: 1, action: "list" });
+  await h.send({ kind: "dispose" });
+  assert.equal(h.of("disposed").length, 0); assert.equal(store.opens[0].closes, 1);
+  for (let n = 0; n < 8 && h.of("dispose-error").length === 0; n++) {
+    const timer = [...h.timers].find(([, entry]) => entry.ms === 10000);
+    assert.ok(timer, "disposal storage cleanup has a finite deadline");
+    h.timers.delete(timer[0]); timer[1].fn(); await flushJobs();
+  }
+  const failure = h.of("dispose-error").at(-1);
+  assert.ok(failure); assert.equal(typeof failure.message, "string");
+  assert.ok(failure.message.length > 0 && failure.message.length <= 4096);
+  assert.equal(h.of("disposed").length, 0, "unknown native cleanup never becomes successful release");
+  store.transactions[0].abort(); await flushJobs();
+  assert.equal(h.of("disposed").length, 0, "late terminal event cannot rewrite the completed failed receipt");
+});
+
+test("close at an interrupted save commit preserves unknown outcome without success or automatic write retry", async () => {
+  const store = controlledRecordStore({ holdTransaction: true }), h = await recordWorker(store);
+  await h.send({ kind: "records-request", id: 1, action: "save", value: recordSaveValue() });
+  await settleRecord(() => store.calls.some(row => row.action === "save"));
+  assert.equal(store.calls.filter(row => row.action === "save").length, 1);
+  await h.send({ kind: "records-close", id: 2 });
+  assert.equal(h.of("records-closed").length, 0);
+  store.transactions[0].complete(); await flushJobs();
+  assert.equal(h.of("records-reply").some(row => row.id === 1 && row.error === null), false);
+  assert.equal(store.calls.filter(row => row.action === "save").length, 1, "no inferred rollback or automatic retry");
+  assert.equal(h.of("records-closed").at(-1).error, null, "native transaction completion proves cleanup, not the retired UI operation");
+});
+
+test("records are optional before CPU readiness and during active gameplay", async () => {
+  const store = controlledRecordStore(), early = await realPreparationWorker({ recordsStore: store, skipInit: true });
+  await early.send({ kind: "records-request", id: 1, action: "list" });
+  assert.equal(store.opens.length, 0); assert.equal(early.of("records-reply").at(-1).result, null);
+  assert.equal(early.of("fatal").length, 0); await early.init(); assert.equal(early.of("ready").length, 1);
+  const activeStore = controlledRecordStore(), h = await gameWorker({ recordsStore: activeStore });
+  await startGame(h, []);
+  await h.send({ kind: "records-request", id: 1, action: "list" });
+  assert.equal(activeStore.opens.length, 0); assert.equal(h.of("records-reply").at(-1).result, null);
+  assert.equal(h.of("fatal").length, 0); assert.equal(h.games[0].frees, 0);
+  await h.send({ kind: "records-close", id: 2 }); assert.equal(h.games[0].frees, 0, "hidden storage close preserves gameplay owner");
+  await h.send({ kind: "play-stop", playId: 1 }); assert.equal(h.games[0].frees, 1);
+});
+
 // Explicit task delivery, separate from Promise continuations. Closed-port
 // queued messages remain observable so tests can exercise a late delivery.
 function controlledChannels(channels, queue, auto = false) {
@@ -45,7 +385,7 @@ async function realPreparationWorker(options = {}) {
     Memory: WebAssembly.Memory, Table: WebAssembly.Table, Global: WebAssembly.Global,
     instantiate: WebAssembly.instantiate, compile: options.compile } : WebAssembly;
   const context = createContext({ self, performance: self.performance, WebAssembly: audioWasm, TextEncoder, TextDecoder,
-    Uint8Array, Uint32Array, Float32Array, Float64Array, ArrayBuffer, DataView, File: FileType,
+    Uint8Array, Uint32Array, Float32Array, Float64Array, ArrayBuffer, DataView, File: FileType, Blob, queueMicrotask,
     URL, Request, Response, structuredClone, console, AbortController, fetch: options.fetch,
     MessageChannel: options.realChannels ? class {
       constructor() {
@@ -120,6 +460,7 @@ export function __actualPendingMap() { return libraryContext?.pending; }
   const worker = new SourceTextModule(await readFile(workerUrl, "utf8") + observation, { context, identifier: workerUrl.href,
     initializeImportMeta(meta) { meta.url = workerUrl.href; } });
   modules.set(workerUrl.href, worker); await worker.link(moduleFor); await worker.evaluate();
+  if (options.recordsStore) modules.get(new URL("./record-store.mjs", workerUrl).href).namespace.RecordsStore.openTracked = options.recordsStore.openTracked;
   const port = { onmessage: null, starts: 0, closes: 0,
     start() { this.starts++; }, close() { this.closes++; },
     postMessage(request) {
@@ -377,7 +718,7 @@ test("audio setup retires at fatal or refused disposal entry before actual activ
     }
     assert.equal(h.fetches[0].init.signal.aborted, true); assert.equal(abortedAtCapture, true);
     const capture = h.of(terminal === "fatal" ? "play-error" : "play-stopped").at(-1);
-    assert(capture.replay instanceof Uint8Array); assert(capture.replay.byteLength > 0, "actual Rust capture is retained");
+    assert(capture.replay instanceof FileType); assert(capture.replay.size > 0, "actual Rust capture is retained");
     if (terminal === "fatal") {
       assert.equal(h.of("fatal").length, 1);
       assert(h.messages.indexOf(capture) < h.messages.indexOf(h.of("fatal")[0]), "existing capture-before-fatal ordering is preserved");
@@ -1037,7 +1378,7 @@ async function workerHarness(options = {}) {
     },
   };
   const context = createContext({
-    self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer,
+    self, structuredClone, DataView, File: FileType, Blob, queueMicrotask, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer,
     MessageChannel: controlledChannels([], [], true),
     performance: self.performance,
     setTimeout(callback, delay) {
@@ -1094,6 +1435,7 @@ async function workerHarness(options = {}) {
   }, { context });
   const completedHelpers = new SourceTextModule(await readFile(new URL("./completed-results-model.mjs", import.meta.url), "utf8"), { context });
   const helpers = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
+  const recordStore = new SourceTextModule(await readFile(new URL("./record-store.mjs", import.meta.url), "utf8"), { context });
   const playHelpers = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const settingsHelpers = new SourceTextModule(await readFile(new URL("./settings-profile.mjs", import.meta.url), "utf8"), { context });
   const displayHelpers = new SourceTextModule(await readFile(new URL("./display-settings.mjs", import.meta.url), "utf8"), { context });
@@ -1110,6 +1452,7 @@ async function workerHarness(options = {}) {
   const renderClient = new SourceTextModule(await readFile(new URL("./render-protocol.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
+    if (specifier === "./record-store.mjs") return recordStore;
     if (specifier === "./render-protocol.mjs") return renderClient;
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./host_model.mjs") return helpers;
@@ -1132,6 +1475,7 @@ async function workerHarness(options = {}) {
     throw new Error(`Unexpected Worker import: ${specifier}`);
   });
   await worker.evaluate();
+  if (options.recordsStore) recordStore.namespace.RecordsStore.openTracked = options.recordsStore.openTracked;
   return {
     renderPort, visualExports, visualAcks, messages, libraries, views, timers, games, preparedOwners, calls,
     flushTasks: flushJobs,
@@ -2690,7 +3034,7 @@ test("pending record acquisition cannot revive the same menu after a play and St
     await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(worker.of("menu-state").at(-1)), route: 2, fields: settingsMenuDraft() });
     await worker.send({ kind: "menu-navigate", ...acquiredMenuToken(worker.of("menu-state").at(-1)), route: 4, fields: ["prefix.bkr"] });
     const token = acquiredMenuToken(worker.of("menu-state").at(-1));
-    await worker.send({ kind: "menu-record-preview", ...token, chartPath: "pending.bms", key: "prefix", replay: Uint8Array.from([66,75,82,1]) });
+    await worker.send({ kind: "menu-record-preview", ...token, chartPath: "pending.bms", key: "prefix", replayFile: new FileType([Uint8Array.from([66,75,82,1])], "prefix.bkr"), archiveBlob: null, player: 1 });
     assert.equal(reads.includes("pending.bms"), true);
     await startGame(worker, [], { path: "cached.bms" });
     await worker.send({ kind: "play-stop", playId: 1 });
@@ -2707,6 +3051,71 @@ test("pending record acquisition cannot revive the same menu after a play and St
     assert.equal(worker.of("menu-error").length, errors);
     assert.equal(worker.of("fatal").length, 0);
     await worker.send({ kind: "dispose" });
+  }
+});
+
+test("actual menu preview retains one physical File or Blob read across menu replacement and gameplay until genuine settlement", async () => {
+  for (const stage of ["replay", "archive"]) for (const settlement of ["resolve", "reject"]) {
+    const h = await realPreparationWorker({ realChannels: true }), runtime = h.runtime;
+    const library = new runtime.BrowserLibrary(8, 1024 * 1024, 2 * 1024 * 1024, 64);
+    let bytes;
+    try {
+      library.add_file("chart.bms", new TextEncoder().encode(REAL_PREPARATION_CHART));
+      library.add_file("key.wav", preparationWave());
+      const prepared = library.prepare_chart("chart.bms", 24000, 2, 3n, 1024, 4096, 8);
+      const game = runtime.BrowserGame.new_physical(prepared, 0n, 100000000n, 50000000n, 50000000n, 0n,
+        keyboardBindingWords(new Uint32Array([0x11,4])), undefined, 4096, 1024);
+      try { game.configure_capture(1024 * 1024, 1024); game.stop(); bytes = game.take_replay(); }
+      finally { game.free(); }
+    } finally { library.free(); }
+    assert.ok(bytes.byteLength > 0, "retry uses actual canonical captured replay bytes");
+    await admitPreparationFiles(h); await h.send(actualSelect()); await h.settle(() => h.of("selected").length === 1);
+    const openRecordsMenu = async () => {
+      await h.send({ kind: "menu-open", fields: ["chart.bms"] });
+      await h.send({ kind: "menu-navigate", ...acquiredMenuToken(h.of("menu-state").at(-1)), route: 2, fields: settingsMenuDraft() });
+      await h.send({ kind: "menu-navigate", ...acquiredMenuToken(h.of("menu-state").at(-1)), route: 4, fields: ["actual-prefix.bkr"] });
+      return acquiredMenuToken(h.of("menu-state").at(-1));
+    };
+    let token = await openRecordsMenu(); const held = deferred();
+    const file = new FileType([bytes], "actual-prefix.bkr"), archive = new Blob([Uint8Array.of(66,75,82,69,83,85,76,84)]);
+    let replayReads = 0, archiveReads = 0;
+    file.arrayBuffer = () => { replayReads++; return stage === "replay" ? held.promise : Promise.resolve(bytes.slice().buffer); };
+    archive.arrayBuffer = () => { archiveReads++; return held.promise; };
+    const preview = fields => ({ kind: "menu-record-preview", ...token, chartPath: "chart.bms", key: "actual-prefix.bkr",
+      replayFile: file, archiveBlob: stage === "archive" ? archive : null, player: 1, ...fields });
+    await h.send(preview());
+    assert.equal(replayReads, 1); assert.equal(archiveReads, stage === "archive" ? 1 : 0);
+    const pendingState = h.of("menu-state").at(-1), publications = h.of("menu-state").length;
+    await h.send(preview());
+    assert.equal(replayReads, 1); assert.equal(archiveReads, stage === "archive" ? 1 : 0);
+    assert.equal(h.of("menu-state").length, publications); assert.equal(h.of("menu-state").at(-1), pendingState);
+    assert.match(h.of("menu-error").at(-1).message, /acquisition|finish|wait/i);
+    token = await openRecordsMenu();
+    await h.send(preview());
+    assert.equal(replayReads, 1, "new menu owner cannot replace the outstanding native binary read");
+    assert.equal(archiveReads, stage === "archive" ? 1 : 0);
+    await h.send({ kind: "play-start", playId: 1, rpcId: 1, libraryId: 1, path: "chart.bms", rate: 24000, seed: "0",
+      keyPairs: new Uint32Array([0x11,4]), windowOriginNs: 0n });
+    await h.settle(() => h.of("play-reply").length > 0 || h.of("play-error").length > 0);
+    assert.equal(h.of("play-error").length, 0); assert.equal(h.of("play-reply").at(-1).result.kind, "prepared");
+    await h.send({ kind: "play-stop", playId: 1 }); assert.equal(h.of("play-stopped").length, 1);
+    const stateCount = h.of("menu-state").length, errorCount = h.of("menu-error").length;
+    if (settlement === "resolve") held.resolve(stage === "replay" ? bytes.slice().buffer : Uint8Array.of(66,75,82,69,83,85,76,84).buffer);
+    else held.reject(new Error("retired immutable acquisition failed"));
+    await flushJobs();
+    assert.equal(h.of("menu-state").length, stateCount, "obsolete read cannot publish into resumed/current menu");
+    assert.equal(h.of("menu-error").length, errorCount, "obsolete acquisition failure cannot replace current feedback");
+    assert.equal(h.of("fatal").length, 0);
+    token = await openRecordsMenu();
+    const retryStateCount = h.of("menu-state").length;
+    const retry = new FileType([bytes], "actual-prefix.bkr"); let retryReads = 0;
+    retry.arrayBuffer = () => { retryReads++; return Promise.resolve(bytes.slice().buffer); };
+    await h.send(preview({ replayFile: retry, archiveBlob: null }));
+    assert.equal(retryReads, 1, "explicit retry acquires only after the old physical operation settles");
+    assert.equal(h.of("menu-error").length, errorCount, "actual WASM admits the genuine captured retry");
+    assert.equal(h.of("menu-state").length, retryStateCount + 1);
+    assert.ok(h.of("menu-state").at(-1).revision > token.revision);
+    await h.send({ kind: "dispose" }); assert.equal(h.of("disposed").length, 1);
   }
 });
 
@@ -3287,7 +3696,8 @@ test("missing renderer ACK deadline fails play with its actual incomplete captur
   assert.ok(final); assert.match(final.message, /acknowledgement timed out/);
   assert.equal(final.hits, 17n); assert.equal(final.misses, 3n);
   assert.equal(final.replayComplete, false);
-  assert.deepEqual(Array.from(final.replay), [66,75,82]);
+  assert.ok(final.replay instanceof FileType);
+  assert.deepEqual(Array.from(new Uint8Array(await final.replay.arrayBuffer())), [66,75,82]);
   assert.equal(worker.games[0].frees, 1);
   assert.equal(worker.visualAcks.length, count, "timeout does not fabricate producer baseline adoption");
 });

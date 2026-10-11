@@ -131,7 +131,9 @@ async function harness() {
     request.result = db;
     request.transaction.db = db;
     request.emit("upgradeneeded", { oldVersion: 0, newVersion: 1 });
+    request.transaction.complete();
     request.succeed(db);
+    for (const transaction of db.transactions) transaction.complete();
     return { store: await success(result), db };
   }
   return { RecordsStore, RecordStoreError, factory, timers, allocations, Database, opening, opened,
@@ -156,6 +158,261 @@ function bothStores(transaction, mode) {
   assert.equal(transaction.mode, mode);
   assert.deepEqual([...transaction.names].sort(), ["metadata", "recordings"]);
 }
+
+function trackedOpening(h, options = {}) {
+  const lease = h.RecordsStore.openTracked({ factory: h.factory, ...options });
+  return { lease, ready: track(lease.ready), terminal: track(lease.terminal), request: h.factory.opens.at(-1) };
+}
+function successfulOpen(h, request, { upgrade = true, finish = true } = {}) {
+  const db = new h.Database();
+  if (upgrade) {
+    request.result = db;
+    request.transaction.db = db;
+    request.emit("upgradeneeded", { oldVersion: 0, newVersion: 1 });
+    if (finish) request.transaction.complete();
+  } else {
+    db.createObjectStore("metadata", { keyPath: "id", autoIncrement: true });
+    db.createObjectStore("recordings", { keyPath: "id", autoIncrement: false });
+  }
+  request.succeed(db);
+  if (finish) for (const transaction of db.transactions) transaction.complete();
+  return db;
+}
+function delayedAbort(transaction) {
+  transaction.abort = () => { transaction.aborts++; };
+}
+async function expireCleanup(h) {
+  const entry = [...h.timers].find(([, timer]) => timer.delay === 10000);
+  assert.ok(entry, "cleanup must have a fixed ten-second deadline");
+  const [id, timer] = entry;
+  h.timers.delete(id);
+  timer.callback();
+  await flush();
+}
+
+test("tracked opening separates rejected callers from a late native open terminal and cannot resurrect ownership", async () => {
+  for (const reason of ["blocked", "aborted", "timeout", "closed"]) {
+    const h = await harness();
+    const controller = new AbortController();
+    const { lease, ready, terminal, request } = trackedOpening(h, { signal: controller.signal });
+    if (reason === "blocked") request.emit("blocked");
+    else if (reason === "aborted") controller.abort();
+    else if (reason === "timeout") await h.timeout();
+    else lease.close();
+    await failure(ready, reason);
+    await flush();
+    assert.equal(terminal.state, "pending", "caller rejection is not native request termination");
+    const joined = attempt(() => lease.closeAndJoin());
+    await flush();
+    assert.equal(joined.state, "pending");
+    const late = new h.Database();
+    request.succeed(late);
+    await success(joined);
+    await success(terminal);
+    assert.ok(late.closes >= 1);
+    assert.equal(late.transactions.length, 0);
+    assert.equal(late.schemas.length, 0);
+    assert.equal(ready.state, "rejected");
+    assert.equal(h.timers.size, 0);
+  }
+});
+
+test("opening cleanup timeout leaves native terminal pending until a genuine late request error", async () => {
+  const h = await harness();
+  const { lease, ready, terminal, request } = trackedOpening(h);
+  const joined = attempt(() => lease.closeAndJoin());
+  await failure(ready, "closed");
+  await expireCleanup(h);
+  const error = await failure(joined, "cleanup-timeout");
+  assert.ok(error instanceof h.RecordStoreError);
+  assert.equal(terminal.state, "pending");
+  request.error = new DOMException("opening canceled", "AbortError");
+  request.emit("error");
+  await success(terminal);
+  await success(attempt(() => lease.closeAndJoin()));
+  assert.equal(h.timers.size, 0);
+});
+
+test("tracked opening waits for both upgrade and schema transaction terminals after ready resolves", async () => {
+  const h = await harness();
+  const { lease, ready, terminal, request } = trackedOpening(h);
+  const db = successfulOpen(h, request, { finish: false });
+  const store = await success(ready);
+  assert.equal(store.closed, false);
+  assert.equal(db.transactions.length, 1, "schema inspection has an owned native transaction");
+  await flush();
+  assert.equal(terminal.state, "pending");
+  request.transaction.complete();
+  await flush();
+  assert.equal(terminal.state, "pending", "upgrade alone cannot join outstanding schema inspection");
+  const schema = db.transactions[0];
+  schema.complete();
+  await success(terminal);
+  const storeTerminal = track(store.terminal);
+  await flush();
+  assert.equal(storeTerminal.state, "pending", "opening completion does not close the live owner");
+  await success(attempt(() => store.closeAndJoin()));
+  await success(storeTerminal);
+  assert.equal(db.closes, 1);
+  await success(attempt(() => lease.closeAndJoin()));
+});
+
+test("canceled upgrade waits for actual abort even after native open failure", async () => {
+  const h = await harness();
+  const controller = new AbortController();
+  const { lease, ready, terminal, request } = trackedOpening(h, { signal: controller.signal });
+  const db = new h.Database();
+  request.result = db;
+  request.transaction.db = db;
+  request.emit("upgradeneeded", { oldVersion: 0, newVersion: 1 });
+  delayedAbort(request.transaction);
+  controller.abort();
+  await failure(ready, "aborted");
+  const joined = attempt(() => lease.closeAndJoin());
+  request.error = new DOMException("upgrade aborted", "AbortError");
+  request.emit("error");
+  await flush();
+  assert.equal(joined.state, "pending");
+  assert.equal(terminal.state, "pending");
+  assert.ok(request.transaction.aborts >= 1);
+  request.transaction.emit("abort");
+  await success(joined);
+  await success(terminal);
+  assert.ok(db.closes >= 1);
+  request.succeed(db);
+  await flush();
+  assert.equal(ready.state, "rejected");
+  assert.equal(db.transactions.length, 0);
+});
+
+test("a late upgrade after caller cancellation is aborted without schema creation and cannot fake terminal cleanup", async () => {
+  const h = await harness();
+  const { lease, ready, terminal, request } = trackedOpening(h);
+  lease.close();
+  await failure(ready, "closed");
+  const db = new h.Database();
+  request.result = db;
+  request.transaction.db = db;
+  delayedAbort(request.transaction);
+  request.emit("upgradeneeded", { oldVersion: 0, newVersion: 1 });
+  request.succeed(db);
+  const joined = attempt(() => lease.closeAndJoin());
+  await flush();
+  assert.equal(terminal.state, "pending");
+  assert.ok(request.transaction.aborts >= 1);
+  assert.equal(db.schemas.length, 0);
+  assert.equal(db.transactions.length, 0);
+  await expireCleanup(h);
+  await failure(joined, "cleanup-timeout");
+  assert.equal(terminal.state, "pending", "bounded caller cleanup failure does not manufacture upgrade termination");
+  request.transaction.emit("abort");
+  await success(terminal);
+  await success(attempt(() => lease.closeAndJoin()));
+  assert.equal(ready.state, "rejected");
+  assert.ok(db.closes >= 1);
+});
+
+test("missing schema transaction terminal is explicit cleanup failure and late completion only joins a closed owner", async () => {
+  const h = await harness();
+  const { ready, terminal: openingTerminal, request } = trackedOpening(h);
+  const db = successfulOpen(h, request, { upgrade: false, finish: false });
+  const store = await success(ready);
+  const schema = db.transactions[0];
+  delayedAbort(schema);
+  const terminal = track(store.terminal);
+  const joined = attempt(() => store.closeAndJoin());
+  assert.equal(store.closed, true);
+  await expireCleanup(h);
+  await failure(joined, "cleanup-timeout");
+  assert.equal(terminal.state, "pending");
+  assert.equal(openingTerminal.state, "pending");
+  schema.complete();
+  await success(terminal);
+  await success(openingTerminal);
+  await failure(attempt(() => store.list()), "closed");
+  assert.equal(db.transactions.length, 1);
+  assert.equal(db.closes, 1);
+});
+
+test("closeAndJoin fences operation callers immediately but joins each actual transaction separately", async () => {
+  const h = await harness();
+  const { store, db } = await h.opened();
+  const listed = attempt(() => store.list());
+  const read = db.transactions.at(-1);
+  const saved = attempt(() => store.save(input()));
+  const write = db.transactions.at(-1);
+  scan(write.request("metadata", "cursor"), []);
+  write.request("metadata", "add").succeed(3);
+  write.request("recordings", "add").succeed(3);
+  delayedAbort(read); delayedAbort(write);
+  const terminal = track(store.terminal);
+  const joined = attempt(() => store.closeAndJoin());
+  assert.equal(store.closed, true);
+  await failure(listed, "closed");
+  await failure(saved, "closed");
+  assert.ok(read.aborts >= 1); assert.ok(write.aborts >= 1);
+  assert.equal(joined.state, "pending");
+  write.error = new DOMException("write error before native abort", "UnknownError");
+  write.emit("error");
+  await flush();
+  assert.equal(joined.state, "pending", "transaction error is not a native complete or abort terminal");
+  read.emit("abort");
+  await flush();
+  assert.equal(joined.state, "pending");
+  assert.equal(terminal.state, "pending");
+  write.emit("abort");
+  await success(joined);
+  await success(terminal);
+  assert.equal(db.closes, 1);
+  assert.equal(h.timers.size, 0);
+});
+
+test("commit racing with close cannot turn a canceled save into success but its real completion releases cleanup", async () => {
+  const h = await harness();
+  const { store, db } = await h.opened();
+  const saved = attempt(() => store.save(input()));
+  const write = db.transactions.at(-1);
+  scan(write.request("metadata", "cursor"), []);
+  write.request("metadata", "add").succeed(5);
+  write.request("recordings", "add").succeed(5);
+  write.abort = () => { write.aborts++; throw new DOMException("already committing", "InvalidStateError"); };
+  const joined = attempt(() => store.closeAndJoin());
+  await failure(saved, "closed");
+  await flush();
+  assert.equal(joined.state, "pending");
+  write.complete();
+  await success(joined);
+  assert.equal(saved.state, "rejected", "unknown committed outcome is never reported as successful save");
+  await failure(attempt(() => store.save(input())), "closed");
+  const reopened = await h.opened();
+  const listed = attempt(() => reopened.store.list());
+  const read = reopened.db.transactions.at(-1);
+  scan(read.request("metadata", "cursor"), [stored(5)]);
+  read.complete();
+  assert.deepEqual(Array.from(await success(listed), row => row.id), [5], "explicit reopen inspects authoritative commit state");
+  await success(attempt(() => reopened.store.closeAndJoin()));
+});
+
+test("operation timeout rejects callers but cannot release missing native transaction cleanup", async () => {
+  const h = await harness();
+  const { store, db } = await h.opened();
+  const saved = attempt(() => store.save(input()));
+  const transaction = db.transactions.at(-1);
+  delayedAbort(transaction);
+  await h.timeout();
+  await failure(saved, "timeout");
+  assert.equal(store.closed, true);
+  const terminal = track(store.terminal);
+  const joined = attempt(() => store.closeAndJoin());
+  await expireCleanup(h);
+  await failure(joined, "cleanup-timeout");
+  assert.equal(terminal.state, "pending");
+  transaction.emit("abort");
+  await success(terminal);
+  await success(attempt(() => store.closeAndJoin()));
+  assert.equal(saved.state, "rejected");
+  assert.equal(h.timers.size, 0);
+});
 
 test("archive save validates IDs and whole standalone buffers before snapshots or transaction effects", async () => {
   const h=await harness();const {store,db}=await h.opened();const before=db.transactions.length;

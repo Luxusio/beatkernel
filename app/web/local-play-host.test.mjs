@@ -11,9 +11,12 @@ function assigned(sources = [1n, 2n, MAX]) {
   return { roster, plan: roster.snapshot(sources) };
 }
 function receipt(plan, alter = row => row) {
-  return { kind: "play-stopped", replay: null, replayComplete: false,
-    replays: plan.players.map(player => alter({ player, replay: Uint8Array.from([66, 75, 82, player]),
+  return { kind: "play-stopped", playId: 31, replay: null, replayComplete: false,
+    replays: plan.players.map(player => alter({ player, replay: replayFile(4),
       replayError: null, replayComplete: false })) };
+}
+function replayFile(size) {
+  return new File([new Uint8Array(size)], "capture.bkr", { type: "application/octet-stream" });
 }
 const admission = { recording: true, natural: false, bytesPerMember: 4 };
 
@@ -180,25 +183,24 @@ test("one malformed member export cannot replace other exact owned prefixes or f
   const complete = receipt(plan, row => ({ ...row, replayComplete: true }));
   const valid = localReplayReceipt(plan, complete, { ...admission, natural: true });
   assert.ok(valid.every(row => row.replayComplete && row.replayError === null));
-  valid.forEach((row, index) => assert.equal(row.replay, complete.replays[index].replay));
+  valid.forEach((row, index) => assert.equal(row.replay === complete.replays[index].replay, true));
   for (const change of [row => ({ ...row, player: 1 }), row => ({ ...row, replay: null, replayComplete: true }),
-    row => ({ ...row, replay: new Uint8Array(0) }), row => ({ ...row, replay: new Uint8Array(5) }),
-    row => ({ ...row, replay: new Uint8Array(5).subarray(1) }), row => ({ ...row, replay: [1, 2] }),
+    row => ({ ...row, replay: replayFile(0) }), row => ({ ...row, replay: replayFile(5) }),
+    row => ({ ...row, replay: new Blob([new Uint8Array(4)]) }), row => ({ ...row, replay: [1, 2] }),
+    row => ({ ...row, replay: new Uint8Array(4) }),
+    row => ({ ...row, replay: { size: 4, name: "fake.bkr", arrayBuffer() { throw new Error("must not read"); } } }),
     row => ({ ...row, replayError: "codec refused", replayComplete: false }),
+    row => ({ ...row, replayError: "", replayComplete: false }),
     row => ({ ...row, replayError: "x".repeat(4097) }), row => ({ ...row, replayComplete: true })]) {
     const data = receipt(plan); data.replays[1] = change(data.replays[1]);
     const rows = localReplayReceipt(plan, data, admission);
     assert.equal(rows[1].replay, null); assert.equal(rows[1].replayComplete, false); assert.equal(typeof rows[1].replayError, "string");
-    assert.equal(rows[0].replay, data.replays[0].replay); assert.equal(rows[2].replay, data.replays[2].replay);
+    assert.equal(rows[0].replay === data.replays[0].replay, true); assert.equal(rows[2].replay === data.replays[2].replay, true);
   }
-  const duplicate = receipt(plan); duplicate.replays[1].replay = duplicate.replays[0].replay;
-  const kept = localReplayReceipt(plan, duplicate, admission);
-  assert.equal(kept[0].replay, duplicate.replays[0].replay); assert.equal(kept[1].replay, null);
-  assert.equal(kept[2].replay, duplicate.replays[2].replay);
   const prefix = receipt(plan); prefix.kind = "play-error";
   prefix.replays[1] = { player: 2, replay: null, replayError: "actual member export failure", replayComplete: false };
   const failed = localReplayReceipt(plan, prefix, { ...admission, natural: true });
-  assert.equal(failed[1].replayError, "actual member export failure"); assert.equal(failed[0].replay, prefix.replays[0].replay);
+  assert.equal(failed[1].replayError, "actual member export failure"); assert.equal(failed[0].replay === prefix.replays[0].replay, true);
   assert.ok(failed.every(row => row.replayComplete === false));
   const unrecorded = receipt(plan, row => ({ ...row, replay: null }));
   assert.ok(localReplayReceipt(plan, unrecorded, { ...admission, recording: false }).every(row => row.replay === null && row.replayError === null));
@@ -206,8 +208,87 @@ test("one malformed member export cannot replace other exact owned prefixes or f
     assert.ok(localReplayReceipt(plan, receipt(plan), { ...admission, bytesPerMember: cap })
       .every(row => row.replay === null && typeof row.replayError === "string"));
   }
-  for (const data of [{}, { ...prefix, replay: new Uint8Array([1]) }, { ...prefix, replayComplete: true },
+  for (const data of [{}, { ...prefix, replay: replayFile(1) }, { ...prefix, replayComplete: true },
     { ...prefix, replays: prefix.replays.slice(0, 2) }]) {
     assert.ok(localReplayReceipt(plan, data, admission).every(row => row.replay === null && typeof row.replayError === "string"));
+  }
+});
+
+test("immutable local handles preserve nonsequential original member order without reading binary bodies", () => {
+  const plan = { players: [77, 9, 0xffffffff] };
+  const data = receipt(plan, row => ({ ...row, replayComplete: true }));
+  for (const row of data.replays) {
+    for (const name of ["arrayBuffer", "text", "stream", "slice", "bytes"]) {
+      Object.defineProperty(row.replay, name, { value() { assert.fail(`Window admission called File.${name}`); } });
+    }
+  }
+  const rows = localReplayReceipt(plan, data, { ...admission, natural: true });
+  assert.deepEqual(rows.map(row => row.player), plan.players);
+  rows.forEach((row, index) => {
+    assert.equal(row.replay === data.replays[index].replay, true);
+    assert.equal(row.replayComplete, true); assert.equal(row.replayError, null);
+    assert.deepEqual(Object.keys(row).sort(), ["player", "replay", "replayComplete", "replayError"]);
+  });
+  const reordered = receipt(plan); reordered.replays.reverse();
+  const refused = localReplayReceipt(plan, reordered, admission);
+  assert.equal(refused[0].replay, null); assert.equal(refused[2].replay, null);
+  assert.equal(refused[1].player, 9); assert.equal(refused[1].replay === reordered.replays[1].replay, true);
+  const foreign = receipt(plan); foreign.replays[1].player = 1;
+  assert.equal(localReplayReceipt(plan, foreign, admission)[1].replay, null,
+    "cannot substitute player one for original member nine");
+});
+
+test("maximum 64-member capture admits exactly the aggregate allowance without inferring byte identity from handles", () => {
+  const plan = { players: Array.from({ length: 64 }, (_, index) => index + 101) };
+  const memberBudget = 1024 * 1024;
+  const sharedHandle = replayFile(memberBudget);
+  const data = receipt(plan, row => ({ ...row, replay: sharedHandle, replayComplete: true }));
+  const rows = localReplayReceipt(plan, data, { recording: true, natural: true, bytesPerMember: memberBudget });
+  assert.equal(rows.length, 64);
+  assert.deepEqual(rows.map(row => row.player), plan.players);
+  assert.equal(rows.reduce((sum, row) => sum + (row.replay?.size ?? 0), 0), 64 * 1024 * 1024);
+  assert.ok(rows.every(row => row.replay === sharedHandle && row.replayComplete && row.replayError === null),
+    "handle identity neither proves aliasing nor authenticates underlying capture bytes");
+  const oversized = receipt(plan, row => ({ ...row, replay: sharedHandle }));
+  oversized.replays[63].replay = replayFile(memberBudget + 1);
+  const partial = localReplayReceipt(plan, oversized, { recording: true, natural: false, bytesPerMember: memberBudget });
+  assert.ok(partial.slice(0, 63).every(row => row.replay === sharedHandle));
+  assert.equal(partial[63].player, 164); assert.equal(partial[63].replay, null);
+  assert.equal(typeof partial[63].replayError, "string");
+  const invalidBudget = localReplayReceipt(plan, data,
+    { recording: true, natural: true, bytesPerMember: memberBudget + 1 });
+  assert.ok(invalidBudget.every(row => row.replay === null && !row.replayComplete && typeof row.replayError === "string"));
+});
+
+test("local handle admission uses actual File size and brand rather than spoofed own fields", () => {
+  const { plan } = assigned();
+  const data = receipt(plan);
+  Object.defineProperty(data.replays[0].replay, "size", { get() { assert.fail("read spoofed File size"); } });
+  const oversized = replayFile(5);
+  Object.defineProperty(oversized, "size", { value: 4 });
+  data.replays[1].replay = oversized;
+  const fake = Object.create(File.prototype);
+  Object.defineProperties(fake, { size: { value: 4 }, name: { value: "fake.bkr" } });
+  data.replays[2].replay = fake;
+  const rows = localReplayReceipt(plan, data, admission);
+  assert.equal(rows[0].replay === data.replays[0].replay, true);
+  assert.equal(rows[1].replay, null); assert.equal(rows[2].replay, null);
+  assert.ok(rows.slice(1).every(row => !row.replayComplete && typeof row.replayError === "string"));
+});
+
+test("local null captures retain bounded per-member errors and reject fabricated completion or unrecorded data", () => {
+  const { plan } = assigned();
+  const data = receipt(plan);
+  data.replays[1] = { player: 2, replay: null, replayError: "x".repeat(4096), replayComplete: false };
+  const rows = localReplayReceipt(plan, data, admission);
+  assert.equal(rows[1].replayError, "x".repeat(4096));
+  assert.equal(rows[0].replay === data.replays[0].replay, true);
+  assert.equal(rows[2].replay === data.replays[2].replay, true);
+  const unrecorded = localReplayReceipt(plan, receipt(plan), { ...admission, recording: false });
+  assert.ok(unrecorded.every(row => row.replay === null && !row.replayComplete && typeof row.replayError === "string"));
+  for (const kind of ["play-error", "play-canceled"]) {
+    const complete = receipt(plan, row => ({ ...row, replayComplete: true })); complete.kind = kind;
+    assert.ok(localReplayReceipt(plan, complete, { ...admission, natural: true })
+      .every(row => row.replay === null && !row.replayComplete && typeof row.replayError === "string"));
   }
 });

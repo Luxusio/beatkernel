@@ -27,7 +27,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const out = resolve(process.env.RENDER_INTEGRATION_OUT ?? resolve(root, "target/wf/browser-render-worker/integration-development-1"));
 const port = Number(process.env.RENDER_INTEGRATION_PORT ?? 8101);
 const selectedCase = process.env.RENDER_INTEGRATION_CASE ?? null;
-const required = ["ready-preview", "surface-zero-resize", "genuine-completed", "history", "replay", "live-stalled-input-audio", "local-touch", "cumulative-after-ack", "terminal-capture-cleanup", "stale-owner", "room", "combined-results-room", "malformed-atomic", "cold-sequence-atomic", "mode-admission-atomic"];
+const required = ["ready-preview", "surface-zero-resize", "genuine-completed", "history", "replay", "record-cancel-reopen-retention", "local-member-history", "live-stalled-input-audio", "local-touch", "cumulative-after-ack", "terminal-capture-cleanup", "stale-owner", "room", "combined-results-room", "malformed-atomic", "cold-sequence-atomic", "mode-admission-atomic"];
 const evidence = { kind: "development-browser-integration", selectedCase, required, checks: [], scenarios: [], ceiling: [], source: {}, workers: [] };
 let browser, server, backend, tls, browserOptions;
 const browsers = new Set();
@@ -76,12 +76,26 @@ async function serve() {
 // acquisitions and capture bytes. No protocol responses or timestamps are made.
 function windowObservation() {
   const data = globalThis.__renderIntegration = { messages: [], statuses: [], input: [], captures: [], owners: [], worklets: [], geometry: [] };
+  data.windowWork = { database: 0, bodies: 0, construction: 0 };
+  data.downloads = [];
+  const createURL = URL.createObjectURL;
+  URL.createObjectURL = function(value) { data.downloads.push({ actualFile: value instanceof File, size: value.size }); return createURL.call(this, value); };
+  const open = IDBFactory.prototype.open;
+  IDBFactory.prototype.open = function(...args) { data.windowWork.database++; return open.apply(this, args); };
+  for (const method of ["arrayBuffer", "text", "stream", "slice"]) {
+    const original = Blob.prototype[method];
+    Blob.prototype[method] = function(...args) { if (data.captures.length) data.windowWork.bodies++; return original.apply(this, args); };
+  }
+  for (const name of ["File", "Blob"]) {
+    const Original = globalThis[name];
+    globalThis[name] = new Proxy(Original, { construct(target, args, receiver) { if (data.captures.length) data.windowWork.construction++; return Reflect.construct(target, args, receiver); } });
+  }
   const summary = value => {
     const output = {};
-    for (const key of ["kind", "id", "playId", "rpcId", "tickId", "renderId", "generation", "content", "geometryVersion", "mode", "message", "error", "reason", "page", "pages", "width", "height", "completed", "replayComplete", "hits", "misses", "combo", "pendingInputs", "ackSequence", "released", "watermark", "nowNs", "contextFrame", "result", "event", "completedResults", "roomResults"]) {
+    for (const key of ["kind", "id", "action", "recordId", "value", "playId", "rpcId", "tickId", "renderId", "generation", "content", "geometryVersion", "mode", "message", "error", "reason", "page", "pages", "width", "height", "completed", "replayComplete", "hits", "misses", "combo", "pendingInputs", "ackSequence", "released", "watermark", "nowNs", "contextFrame", "result", "event", "completedResults", "roomResults"]) {
       if (value?.[key] !== undefined) {
         const x = value[key];
-        output[key] = typeof x === "bigint" ? String(x) : x && typeof x === "object" ? JSON.parse(JSON.stringify(x, (k, v) => typeof v === "bigint" ? String(v) : ArrayBuffer.isView(v) ? { byteLength: v.byteLength } : v)) : x;
+        output[key] = typeof x === "bigint" ? String(x) : x && typeof x === "object" ? JSON.parse(JSON.stringify(x, (k, v) => typeof v === "bigint" ? String(v) : v instanceof File ? { actualFile: true, name: v.name, size: v.size } : v instanceof Blob ? { actualBlob: true, size: v.size } : ArrayBuffer.isView(v) ? { byteLength: v.byteLength } : v)) : x;
       }
     }
     if (value?.events) output.events = JSON.parse(JSON.stringify(value.events, (k, v) => typeof v === "bigint" ? String(v) : v));
@@ -98,8 +112,7 @@ function windowObservation() {
         data.messages.push({ direction: "received", url: this.probeURL, at: performance.now(), ...summary(event.data) });
         const payload = event.data;
         if (payload?.kind === "render-geometry") data.geometry.push({ ...payload });
-        if (payload?.replay instanceof Uint8Array) data.captures.push({ kind: payload.kind, playId: payload.playId, complete: payload.replayComplete, bytes: Array.from(payload.replay), archive: payload.completedArchive instanceof Uint8Array ? Array.from(payload.completedArchive) : null });
-        for (const record of payload?.replays ?? []) if (record.replay instanceof Uint8Array) data.captures.push({ kind: payload.kind, playId: payload.playId, player: record.player, complete: record.replayComplete, bytes: Array.from(record.replay), archive: payload.completedArchive instanceof Uint8Array ? Array.from(payload.completedArchive) : null });
+        for (const record of payload?.replays ?? [{ replay: payload?.replay, replayComplete: payload?.replayComplete }]) if (record.replay instanceof File) data.captures.push({ kind: payload.kind, playId: payload.playId, player: record.player, complete: record.replayComplete, actualFile: true, byteLength: record.replay.size, actualArchive: payload.completedArchive instanceof Blob, archiveByteLength: payload.completedArchive?.size ?? 0 });
       });
     }
     postMessage(value, transfer) {
@@ -129,6 +142,39 @@ function windowObservation() {
 function workerObservation() {
   if (globalThis.__renderPortProbe) return;
   const probe = globalThis.__renderPortProbe = { records: [], packets: [], hold: false, held: [], port: null };
+  probe.captures = []; probe.loads = []; probe.capturePending = 0; probe.captureErrors = []; probe.storage = [];
+  const transaction = IDBDatabase.prototype.transaction;
+  IDBDatabase.prototype.transaction = function(...args) {
+    const tx = transaction.apply(this, args);
+    for (const kind of ["complete", "abort", "error"]) tx.addEventListener(kind, () => { if (probe.storage.length < 12000) probe.storage.push({ kind, mode: tx.mode, stores: Array.from(tx.objectStoreNames) }); else probe.captureErrors.push("storage observation ceiling"); });
+    return tx;
+  };
+  const post = globalThis.postMessage;
+  globalThis.postMessage = function(value, ...args) {
+    const result = post.call(this, value, ...args);
+    if (value?.kind === "records-reply" && value.action === "load" && value.error === null) {
+      probe.capturePending++;
+      (async () => {
+        const { replayFile, archiveBlob, archivePlayer } = value.result;
+        if (!(replayFile instanceof File) || replayFile.size < 1 || replayFile.size > 1048576 || archiveBlob?.size > 1048576 || probe.loads.length >= 64) throw Error("loaded capture observation ceiling");
+        probe.loads.push({ id: value.id, player: archivePlayer, bytes: Array.from(new Uint8Array(await replayFile.arrayBuffer())), archive: archiveBlob instanceof Blob ? Array.from(new Uint8Array(await archiveBlob.arrayBuffer())) : null });
+      })().catch(error => probe.captureErrors.push(String(error))).finally(() => probe.capturePending--);
+    }
+    if (["play-stopped", "play-error"].includes(value?.kind)) for (const record of value.replays ?? [{ replay: value.replay, replayComplete: value.replayComplete }]) {
+      if (!(record.replay instanceof File)) continue;
+      const captured = { kind: value.kind, playId: value.playId, player: record.player, complete: record.replayComplete, bytes: null, archive: null };
+      if (probe.captures.length >= 64) { probe.captureErrors.push("capture observation count ceiling"); continue; }
+      probe.captures.push(captured);
+      probe.capturePending++;
+      (async () => {
+        if (record.replay.size < 1 || record.replay.size > 1048576 || value.completedArchive?.size > 1048576) throw Error("capture observation ceiling");
+        const bytes = Array.from(new Uint8Array(await record.replay.arrayBuffer()));
+        const archive = value.completedArchive instanceof Blob ? Array.from(new Uint8Array(await value.completedArchive.arrayBuffer())) : null;
+        captured.bytes = bytes; captured.archive = archive;
+      })().catch(error => probe.captureErrors.push(String(error))).finally(() => probe.capturePending--);
+    }
+    return result;
+  };
   // Test-only reader for the small actual tap-note fixture. The wire field
   // order is render_wire.rs write_frame; unsupported comparison/room packets
   // are recorded as unparsed, never treated as successful state evidence.
@@ -412,18 +458,33 @@ async function prepare(page, chart = "short.bms") {
   assert.match(await status(page), /^Chart prepared/);
   await page.waitForFunction(old => __renderIntegration.messages.some(x => x.kind === "render-geometry" && x.mode === "preview" && x.generation !== old), {}, previous);
 }
-async function snapshot(page, name) {
-  const window = await page.evaluate(() => ({ messages: __renderIntegration.messages, input: __renderIntegration.input, statuses: __renderIntegration.statuses, worklets: __renderIntegration.worklets, captures: __renderIntegration.captures.map(({ bytes, archive, ...rest }) => ({ ...rest, byteLength: bytes.length, archiveByteLength: archive?.length ?? 0 })) }));
+async function snapshot(page, name, { unprepared = false } = {}) {
+  const window = await page.evaluate(() => ({ messages: __renderIntegration.messages, input: __renderIntegration.input, statuses: __renderIntegration.statuses, worklets: __renderIntegration.worklets, captures: __renderIntegration.captures, windowWork: __renderIntegration.windowWork }));
+  assert.deepEqual(window.windowWork, { database: 0, bodies: 0, construction: 0 }, "Window record ownership trap");
   const workers = [];
   for (const [url, worker] of page.probeWorkers) {
     if (page.pausedWorker === worker) { workers.push({ url, externallyPaused: true }); continue; }
-    try { workers.push({ url, ...(await worker.evaluate(() => ({ records: __renderPortProbe?.records, held: __renderPortProbe?.held.length }))) }); }
+    try { workers.push({ url, ...(await worker.evaluate(() => ({ records: __renderPortProbe?.records, held: __renderPortProbe?.held.length, storage: __renderPortProbe?.storage, captureErrors: __renderPortProbe?.captureErrors }))) }); }
     catch (error) { workers.push({ url, unavailable: String(error) }); }
   }
-  evidence.scenarios.push({ name, status: await status(page), window, workers });
+  let unpreparedCanvas = null;
+  if (unprepared) {
+    unpreparedCanvas = await page.evaluate(() => ({ hidden: document.querySelector("#canvas").hidden, playDisabled: document.querySelector("#play").disabled, chart: document.querySelector("#chart").value }));
+    assert.deepEqual(unpreparedCanvas, { hidden: true, playDisabled: true, chart: "" }, "Fresh Worker has no prepared chart or visible gameplay canvas");
+  }
+  evidence.scenarios.push({ name, status: await status(page), window, workers, ...(unprepared ? { unpreparedCanvas } : {}) });
   await page.screenshot({ path: resolve(out, `${name}.png`), fullPage: true });
-  await (await page.$("#canvas")).screenshot({ path: resolve(out, `${name}-canvas.png`) });
+  if (!unprepared) await (await page.$("#canvas")).screenshot({ path: resolve(out, `${name}-canvas.png`) });
   return { window, workers };
+}
+async function captureBodies(page) {
+  const worker = [...page.probeWorkers.values()].find(x => x.url().endsWith("/worker.js"));
+  assert(worker, "Actual capture Worker required");
+  const deadline = Date.now() + 10000;
+  while (await worker.evaluate(() => __renderPortProbe.capturePending)) { assert(Date.now() < deadline, "Worker capture observation timeout"); await delay(20); }
+  const observed = await worker.evaluate(() => ({ captures: __renderPortProbe.captures, errors: __renderPortProbe.captureErrors }));
+  assert.deepEqual(observed.errors, []);
+  return observed.captures;
 }
 async function scenario(name, body) {
   if (selectedCase && selectedCase !== name) return;
@@ -496,6 +557,7 @@ async function main() {
   const puppeteer = process.env.PUPPETEER_MODULE ? require(resolve(process.env.PUPPETEER_MODULE)) : (await import("puppeteer-core")).default;
   await serve();
   evidence.source = { root, command: "node app/web/render-integration.browser.mjs", main: "app/web/main.js", game: "app/web/worker.js", renderer: "app/web/renderer-worker.js", actualWorklet: "app/web/audio-worklet.js" };
+  evidence.source.hashes = Object.fromEntries(await Promise.all(["main.js", "worker.js", "renderer-worker.js", "record-store.mjs", "completed-results-model.mjs", "local-play-host.mjs", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm"].map(async name => [name, createHash("sha256").update(await readFile(resolve(root, "app/web", name))).digest("hex")])));
   browserOptions = { executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage", "--enable-unsafe-webgpu", "--use-angle=swiftshader", "--enable-features=Vulkan", "--use-vulkan=swiftshader", "--ignore-certificate-errors", `--ignore-certificate-errors-spki-list=${tls.spki}`, "--autoplay-policy=no-user-gesture-required"] };
   if (process.env.RENDER_WEBTRANSPORT_DEVELOPER_MODE === "1") browserOptions.args.push("--webtransport-developer-mode");
   evidence.source.certificateTrust = { generatedLocalCertificate: !process.env.TLS_CERT, spkiPinned: true, webtransportDeveloperMode: process.env.RENDER_WEBTRANSPORT_DEVELOPER_MODE === "1", productionTLSAcceptance: false };
@@ -539,7 +601,7 @@ async function main() {
     assert(terminal?.replayComplete, `No genuine natural completion: ${await status(page)}`);
     assert(terminal.completedResults?.proof, "No genuine completed Results owner");
     check("genuine-completed", true, terminal);
-    const captures = await page.evaluate(() => __renderIntegration.captures);
+    const captures = await captureBodies(page);
     const complete = captures.find(x => x.complete); assert(complete?.archive?.length);
     await writeFile(resolve(out, "genuine-complete.bkr"), Uint8Array.from(complete.bytes));
     await writeFile(resolve(out, "genuine-complete.bkr.bkresult"), Uint8Array.from(complete.archive));
@@ -550,7 +612,10 @@ async function main() {
     assert.match(await status(page), /Stored historical result displayed/);
     const historical = await snapshot(page, "history");
     assert(historical.workers.find(x => x.url.endsWith("/renderer-worker.js"))?.records.some(x => x.direction === "received" && x.packet?.kind === 4));
-    check("history", true, "Actual saved original completion archive through main.js RecordsStore UI and native HISTORY packet");
+    check("history", true, "Actual Worker save/load of original completion archive and native HISTORY packet");
+    await page.click("#records-delete");
+    await page.waitForFunction(() => !document.querySelector("#records-refresh").disabled && document.querySelector("#status").textContent.includes("Selected record deleted"));
+    assert.equal(await page.$eval("#replay-play", x => x.disabled), false, "selected cloned File survives database deletion");
     await page.click("#replay-play"); await playing(page); await stopped(page);
     const replay = await snapshot(page, "replay");
     const replayStart = replay.window.messages.findLast(x => x.direction === "sent" && x.kind === "play-start" && x.mode === "replay");
@@ -558,6 +623,65 @@ async function main() {
     assert(replay.window.messages.some(x => x.direction === "received" && x.kind === "play-stopped" && x.playId === replayStart.playId));
     assert(replay.window.messages.some(x => x.kind === "play-render-done" && x.playId === replayStart.playId));
     check("replay", true, "Actual captured original replay through main.js and AudioWorklet, correlated to its new play owner");
+    const beforeClose = await page.evaluate(() => __renderIntegration.messages.length);
+    await page.evaluate(() => { document.querySelector("#records-refresh").click(); dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })); });
+    await page.waitForFunction(n => __renderIntegration.messages.slice(n).some(x => x.direction === "terminated" && x.url.endsWith("/worker.js")), { timeout: 20000 }, beforeClose);
+    const closing = await page.evaluate(n => __renderIntegration.messages.slice(n), beforeClose);
+    const close = closing.find(x => x.direction === "sent" && x.kind === "records-close");
+    assert(close); assert(closing.some(x => x.kind === "records-closed" && x.id === close.id && x.error === null), "actual native record cleanup before Worker stop");
+    await page.evaluate(() => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await page.waitForFunction(() => !document.querySelector("#files").disabled && !document.querySelector("#records-save").disabled, { timeout: 60000 });
+    await Promise.all(page.probePending);
+    await page.click("#export");
+    assert.deepEqual(await page.evaluate(() => __renderIntegration.downloads.at(-1)), { actualFile: true, size: complete.bytes.length }, "retained original File downloads after Worker termination");
+    const reopenedStart = await page.evaluate(() => __renderIntegration.messages.length);
+    await page.click("#records-save");
+    await page.waitForFunction(() => document.querySelector("#records").value && !document.querySelector("#records-use").disabled);
+    const reopened = await snapshot(page, "record-cancel-reopen-retention", { unprepared: true });
+    const saved = reopened.window.messages.slice(reopenedStart).find(x => x.kind === "records-request" && x.action === "save");
+    assert(saved?.value.replayFile.actualFile); assert.equal(saved.value.replayFile.size, complete.bytes.length);
+    assert(saved.value.archiveBlob.actualBlob); assert.equal(saved.value.archiveBlob.size, complete.archive.length);
+    assert(reopened.workers.find(x => x.url.endsWith("/worker.js"))?.storage.some(x => x.kind === "complete" && x.mode === "readwrite"));
+    check("record-cancel-reopen-retention", true, { closing, saved, lifecycle: "Synthetic pagehide/pageshow drives real Window shutdown, Worker close/dispose/termination and fresh Worker save of retained immutable handles" });
+    await closePage(page);
+  });
+  await scenario("local-member-history", async () => {
+    const page = await observedPage("local-history"); await prepare(page);
+    await page.click("#record");
+    await page.$eval("#local-count", x => { x.closest("details").open = true; x.value = "2"; x.dispatchEvent(new Event("change", { bubbles: true })); });
+    await page.waitForFunction(() => !document.querySelector("#local-discover").disabled); await page.click("#local-discover");
+    await page.waitForFunction(() => document.querySelector("#local-source-1")?.options.length >= 3 && !document.querySelector("#local-source-1").disabled);
+    await page.select("#local-source-1", "1"); await page.select("#local-source-2", "2");
+    await page.click("#play"); await playing(page); await stopped(page, 20000);
+    const bodies = await captureBodies(page); assert.deepEqual(bodies.map(x => x.player), [1, 2]);
+    assert(bodies.every(x => x.complete && x.bytes.length > 0 && x.archive?.length > 0));
+    assert.deepEqual(bodies[0].archive, bodies[1].archive, "exact original whole-roster archive");
+    for (const member of bodies) {
+      await page.select("#captured-replay", String(member.player));
+      const before = await page.evaluate(() => __renderIntegration.messages.length);
+      await page.click("#records-save"); await page.waitForFunction(() => !document.querySelector("#records-use").disabled);
+      const save = await page.evaluate(n => __renderIntegration.messages.slice(n).find(x => x.kind === "records-reply" && x.action === "save" && x.error === null), before);
+      assert(save, "actual member save commit reply");
+      await page.select("#records", String(save.result.metadata.id));
+      await page.click("#records-use");
+      await page.waitForFunction(() => document.querySelector("#status").textContent.includes("Stored historical result displayed") || document.querySelector("#status").classList.contains("error"));
+      assert.match(await status(page), /Stored historical result displayed/);
+      const info = await snapshot(page, `local-history-player-${member.player}`);
+      const request = info.window.messages.slice(before).find(x => x.kind === "records-request" && x.action === "save");
+      assert.deepEqual(request.value.players, [1, 2]); assert.equal(request.value.player, member.player); assert.equal(request.value.archivePlayer, member.player);
+      assert.equal(request.value.replayFile.size, member.bytes.length); assert.equal(request.value.archiveBlob.size, member.archive.length);
+      const load = info.window.messages.slice(before).find(x => x.kind === "records-reply" && x.action === "load");
+      assert.equal(load.result.archivePlayer, member.player); assert(load.result.replayFile.actualFile && load.result.archiveBlob.actualBlob);
+      await captureBodies(page);
+      const worker = [...page.probeWorkers.values()].find(x => x.url().endsWith("/worker.js"));
+      const original = await worker.evaluate(id => __renderPortProbe.loads.find(x => x.id === id), load.id);
+      assert.deepEqual(original.bytes, member.bytes, "exact original member replay after save/load");
+      assert.deepEqual(original.archive, member.archive, "exact whole-roster archive after save/load");
+      assert(info.workers.find(x => x.url.endsWith("/renderer-worker.js"))?.records.some(x => x.packet?.kind === 4));
+      await page.click("#records-delete"); await page.waitForFunction(() => !document.querySelector("#records-refresh").disabled && document.querySelector("#status").textContent.includes("Selected record deleted"));
+      assert.equal(await page.$eval("#replay-play", x => x.disabled), false);
+    }
+    check("local-member-history", true, { players: bodies.map(x => x.player), archiveBytes: bodies[0].archive.length });
     await closePage(page);
   });
   await scenario("local-touch", async () => {
@@ -584,7 +708,7 @@ async function main() {
     assert(submitted.some(x => x.kind === "touch" && x.page === 0));
     assert(submitted.some(x => typeof x.key === "number" && typeof x.down === "boolean"));
     await page.click("#stop"); await stopped(page);
-    const captures = await page.evaluate(() => __renderIntegration.captures.map(x => ({ player: x.player, bytes: x.bytes.length, complete: x.complete })));
+    const captures = (await captureBodies(page)).map(x => ({ player: x.player, bytes: x.bytes.length, complete: x.complete }));
     assert.equal(new Set(captures.map(x => x.player)).size, 2);
     check("local-touch", true, { submitted, captures, originalAcquisitions: info.window.input.filter(x => x.trusted && (x.pointerType === "touch" || x.kind === "keydown")) });
     await closePage(page);

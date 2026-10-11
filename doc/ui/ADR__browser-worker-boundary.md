@@ -21,6 +21,17 @@ acceptance unfinished;
 records the actual results and remaining limits. The
 [audio preparation contract](../runtime/REQ__browser-audio-module-loading.md)
 governs optional errors and independent preview readiness.
+
+The record-storage implementation candidate reuses this gameplay Worker for
+IndexedDB operations and replay/archive binary reads, copies and File/Blob
+creation. Window retains only immutable handles and bounded record metadata;
+handles survive Worker retirement for download and explicit save retry. A
+Worker-local capture ID would lose that lifetime. Independent acceptance remains pending,
+under [the record-storage contract](../runtime/REQ__browser-record-storage.md).
+Actual native database termination must be distinguished from cancellation of
+caller promises; cleanup timeouts report unknown/failed cleanup rather than a
+successful join. No additional IO Worker or database schema change is selected.
+
 The rendering Worker owns OffscreenCanvas, Scene construction, GPU
 submission, immutable chart presentation data and BGA texture caches. It never
 advances gameplay or samples a song clock independently.

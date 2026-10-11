@@ -25,7 +25,7 @@ for (const name of ["CHROMIUM", "PUPPETEER_MODULE", "SETTINGS_POLICY_OUT"]) asse
 const out = resolve(root, process.env.SETTINGS_POLICY_OUT);
 await mkdir(out); // Refuse reuse of evidence from another run.
 const sources = {};
-for (const file of ["main.js", "worker.js", "renderer-worker.js", "settings-profile.mjs", "display-settings.mjs", "menu-keyboard.mjs", "play-model.mjs", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm"])
+for (const file of ["main.js", "worker.js", "renderer-worker.js", "record-store.mjs", "completed-results-model.mjs", "local-play-host.mjs", "settings-profile.mjs", "display-settings.mjs", "menu-keyboard.mjs", "play-model.mjs", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm"])
   sources[file] = await readFile(resolve(root, "app/web", file));
 assert.equal(sha(sources["pkg/beatkernel_bms_runtime_bg.wasm"]), expected, "production WASM identity mismatch");
 const evidence = { status: "RUNNING", wasmSha256: expected, source: Object.fromEntries(Object.entries(sources).map(([name, bytes]) => [name, sha(bytes)])),
@@ -40,14 +40,23 @@ const bounded = (promise, ms, label) => { let timer; return Promise.race([promis
 const clean = value => JSON.parse(JSON.stringify(value, (_, v) => typeof v === "bigint" ? String(v) : v));
 function windowObservation() {
   const probe = globalThis.__settingsProbe = { messages: [], input: [], fetchLifecycle: [], overflow: false };
+  probe.windowWork = { database: 0, bodies: 0, construction: 0 };
+  const open = IDBFactory.prototype.open;
+  IDBFactory.prototype.open = function(...args) { probe.windowWork.database++; return open.apply(this, args); };
+  const captured = () => probe.messages.some(x => x.kind === "play-stopped" && x.replay?.actualFile);
+  for (const method of ["arrayBuffer", "text", "stream", "slice"]) {
+    const original = Blob.prototype[method];
+    Blob.prototype[method] = function(...args) { if (captured()) probe.windowWork.bodies++; return original.apply(this, args); };
+  }
+  for (const name of ["File", "Blob"]) globalThis[name] = new Proxy(globalThis[name], { construct(target, args, receiver) { if (captured()) probe.windowWork.construction++; return Reflect.construct(target, args, receiver); } });
   const add = (list, value) => { if (list.length < 12000) list.push(value); else probe.overflow = true; };
   const summary = value => JSON.parse(JSON.stringify(value, (_, v) => {
     if (typeof v === "bigint") return String(v);
-    if (v instanceof File) return { name: v.name, size: v.size };
+    if (v instanceof File) return { actualFile: true, name: v.name, size: v.size };
+    if (v instanceof Blob) return { actualBlob: true, size: v.size };
     if (ArrayBuffer.isView(v)) {
       const literal = value?.kind === "settings-profile-saved" && v === value.bytes && v.byteLength <= 16384
-        || value?.kind === "play-start" && v === value.keyPairs && v instanceof Uint32Array && v.length <= 36
-        || value?.kind === "play-stopped" && v === value.replay && v instanceof Uint8Array && v.byteLength <= 1048576;
+        || value?.kind === "play-start" && v === value.keyPairs && v instanceof Uint32Array && v.length <= 36;
       return literal ? Array.from(v) : { byteLength: v.byteLength };
     }
     if (v instanceof ArrayBuffer) return { byteLength: v.byteLength };
@@ -106,6 +115,17 @@ function windowObservation() {
 }
 function businessAudioObservation() {
   const probe = globalThis.__settingsRenderer;
+  probe.captures = []; probe.loads = []; probe.capturePending = 0; probe.captureErrors = [];
+  probe.storage = [];
+  const transaction = IDBDatabase.prototype.transaction;
+  IDBDatabase.prototype.transaction = function(...args) {
+    const tx = transaction.apply(this, args);
+    for (const kind of ["complete", "abort", "error"]) tx.addEventListener(kind, () => {
+      if (probe.storage.length < 12000) probe.storage.push({ kind, mode: tx.mode, stores: Array.from(tx.objectStoreNames) });
+      else probe.overflow = true;
+    });
+    return tx;
+  };
   probe.audioSetup = [];
   const add = value => { if (probe.audioSetup.length < 12000) probe.audioSetup.push(value); else probe.overflow = true; };
   const compiled = new WeakMap();
@@ -148,6 +168,27 @@ function businessAudioObservation() {
   const post = globalThis.postMessage;
   globalThis.postMessage = function(value, ...args) {
     const result = post.call(this, value, ...args);
+    if (value?.kind === "records-reply" && value.action === "load" && value.error === null) {
+      probe.capturePending++;
+      (async () => {
+        const file = value.result.replayFile;
+        if (!(file instanceof File) || file.size < 1 || file.size > 1048576 || probe.loads.length >= 64) throw Error("loaded File observation ceiling");
+        probe.loads.push({ id: value.id, bytes: Array.from(new Uint8Array(await file.arrayBuffer())) });
+      })().catch(error => probe.captureErrors.push(String(error))).finally(() => probe.capturePending--);
+    }
+    if (["play-stopped", "play-error"].includes(value?.kind)) {
+      const records = value.replays ?? [{ replay: value.replay, replayComplete: value.replayComplete }];
+      for (const record of records) {
+        if (!(record.replay instanceof File)) continue;
+        probe.capturePending++;
+        (async () => {
+          if (record.replay.size < 1 || record.replay.size > 1048576) throw Error("capture observation ceiling");
+          const bytes = Array.from(new Uint8Array(await record.replay.arrayBuffer()));
+          if (probe.captures.length >= 64) throw Error("capture observation count ceiling");
+          probe.captures.push({ playId: value.playId, player: record.player, actualFile: true, size: record.replay.size, bytes });
+        })().catch(error => probe.captureErrors.push(String(error))).finally(() => probe.capturePending--);
+      }
+    }
     if (value?.kind === "audio-module-ready") add({ kind: value.kind, id: value.id, at: performance.now(), actualModule: value.module instanceof WebAssembly.Module, compileId: compiled.get(value.module) });
     return result;
   };
@@ -660,8 +701,11 @@ try {
   const liveMessages = (await messages()).slice(playStart), terminal = liveMessages.find(x => ["play-stopped", "play-error"].includes(x.kind));
   assert.equal(terminal.kind, "play-stopped", JSON.stringify(terminal)); assert.equal(terminal.replayComplete, true); assert(terminal.completedResults?.proof, "genuine terminal Results proof required");
   assert.equal(BigInt(terminal.hits), 1n, "genuine lane11 judgment must be a hit"); assert.equal(BigInt(terminal.misses), 0n);
-  assert(Array.isArray(terminal.replay), "bounded original captured bytes required");
-  const captured = Buffer.from(terminal.replay), capture = capturedInputs(captured); await writeFile(resolve(out, "retained-keyA.bkr"), captured);
+  assert(terminal.replay?.actualFile && terminal.replay.size > 0, "actual received cloned File required");
+  await bounded((async () => { while (await business.evaluate(() => __settingsRenderer.capturePending)) await delay(20); })(), 10000, "original Worker File observation");
+  const observedCapture = await business.evaluate(id => ({ errors: __settingsRenderer.captureErrors, capture: __settingsRenderer.captures.find(x => x.playId === id) }), liveRequest.playId);
+  assert.deepEqual(observedCapture.errors, []); assert(observedCapture.capture?.actualFile);
+  const captured = Buffer.from(observedCapture.capture.bytes), capture = capturedInputs(captured); assert.equal(captured.length, terminal.replay.size); await writeFile(resolve(out, "retained-keyA.bkr"), captured);
   const acquired = liveMessages.filter(x => x.kind === "play-step" && x.direction === "sent" && x.events?.length);
   assert.deepEqual(acquired.flatMap(x => x.events).map(({ key, down }) => ({ key, down })), [{ key: 19, down: true }, { key: 19, down: false }]);
   const activation = liveMessages.find(x => x.kind === "play-activate" && x.direction === "sent"); assert(activation);
@@ -688,6 +732,27 @@ try {
   assert(renderEvidence.records.some(x => x.kind === "state-ack" && x.generation === results.packet.generation && x.content === results.packet.content && x.sequence === results.packet.sequence), "actual correlated Results ACK required");
   await writeFile(resolve(out, "results.packet"), Buffer.from(results.bytes));
   await page.screenshot({ path: resolve(out, "genuine-results.png"), fullPage: true });
+  const storageStart = (await messages()).length;
+  await page.waitForFunction(() => !document.querySelector("#records-save").disabled);
+  await page.click("#records-save");
+  await page.waitForFunction(() => document.querySelector("#records").value && !document.querySelector("#records-use").disabled);
+  await page.click("#records-use");
+  await page.waitForFunction(() => document.querySelector("#status").textContent.includes("Stored historical result displayed") || document.querySelector("#status").classList.contains("error"));
+  assert.match(await page.$eval("#status", x => x.textContent), /Stored historical result displayed/);
+  await page.click("#records-delete");
+  await page.waitForFunction(() => !document.querySelector("#records-refresh").disabled && document.querySelector("#status").textContent.includes("Selected record deleted"));
+  assert.equal(await page.$eval("#replay-play", x => x.disabled), false, "selected cloned File remains usable after deletion");
+  const recordWire = (await messages()).slice(storageStart);
+  for (const action of ["save", "list", "load", "remove"]) assert(recordWire.some(x => x.kind === "records-reply" && x.action === action && x.error === null), `actual ${action} reply required`);
+  const loadedRecord = recordWire.find(x => x.kind === "records-reply" && x.action === "load").result;
+  assert(loadedRecord.replayFile?.actualFile && loadedRecord.archiveBlob?.actualBlob); assert.equal(loadedRecord.replayFile.size, captured.length); assert.equal(loadedRecord.archivePlayer, 1);
+  const storage = await business.evaluate(() => __settingsRenderer.storage);
+  assert(storage.filter(x => x.kind === "complete" && x.mode === "readwrite").length >= 2, "actual Worker save/delete commits required");
+  await bounded((async () => { while (await business.evaluate(() => __settingsRenderer.capturePending)) await delay(20); })(), 10000, "loaded original File observation");
+  const loadedBytes = await business.evaluate(() => ({ loads: __settingsRenderer.loads, errors: __settingsRenderer.captureErrors }));
+  assert.deepEqual(loadedBytes.errors, []); assert.deepEqual(Buffer.from(loadedBytes.loads.at(-1).bytes), captured, "exact original replay survives Chromium File cloning/save/load");
+  assert.deepEqual(await page.evaluate(() => __settingsProbe.windowWork), { database: 0, bodies: 0, construction: 0 });
+  evidence.steps.push({ name: "actual-worker-record-save-list-load-history-delete", recordWire, storage });
   // A subsequent accepted live binding cannot reinterpret the captured inputs.
   await page.click("#menu-open"); await route(1); await click(800, 35); await route(2); await ownership(true);
   await select("Home", 0); await select("PageDown", 10); for (let i = 11; i <= 16; i++) await select("ArrowDown", i);
@@ -706,6 +771,7 @@ try {
   evidence.steps.push({ name: "captured-replay-independent-of-later-live-binding", capturedSha256: sha(captured), replayRequest, replayTerminal });
   await page.screenshot({ path: resolve(out, "captured-replay-results.png"), fullPage: true });
   evidence.renderer = await renderer.evaluate(() => __settingsRenderer); evidence.business = await business.evaluate(() => __settingsRenderer); evidence.window = await page.evaluate(() => __settingsProbe);
+  assert.deepEqual(evidence.window.windowWork, { database: 0, bodies: 0, construction: 0 }, "Window affected storage/binary work must remain zero");
   await bounded(Promise.all([...workerNetworkTasks]), 10000, "Worker network observation settlement");
   assert.equal(evidence.window.fetchLifecycle.length, 0, "Window must not fetch/read/compile audio WASM");
   const setup = evidence.business.audioSetup;
