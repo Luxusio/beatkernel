@@ -1,8 +1,8 @@
 # Retained cohort transition stress
 
-Status: the workload integration tests pass11/11 and the release CLI passes
-10 coordinator execution paths; independent code review and QA remain pending
-for this child. The first
+Status: source1712136 passed independent DEEP code/security reviews and actual
+CLI QA. Final durable documentation review and Harness close remain pending.
+The first
 integration execution reported six passing and five failing tests. Correcting
 the workload setup and terminal-boundary accounting produced the current
 passing run; this is coordinator development verification, not independent QA.
@@ -64,6 +64,31 @@ arguments all exited1 without a success banner. Original stdout/stderr and
 `development-cli-results.json` preserve all10 command outcomes in the same
 local evidence directory. This confirms repeatable software observations,
 not native latency, physical playback or independent acceptance.
+
+## Independent acceptance
+
+Both selected defect hunters returned empty candidate arrays. The formal code
+review and independent security review each returned PASS with zero findings
+against all six committed files at1712136. Actual QA began after both finals
+and passed fresh11 integration tests (6.44s compilation,0.16s execution), scoped
+rustfmt and current optimized build (6.52s).
+
+The independent CLI matrix passed30 direct executions:12 help/happy/edge paths
+and18 invalid paths. It includes default2/8/8,1/2/3/4/64 members with repeated
+mixed notes, identical repeated64 stdout, single attempt/note, one-note repeated
+attempts, cycles64 and notes64 separately. Invalid arguments exited1 with
+diagnostics and no success stdout. No exhaustive maximum cross-product,
+physical/native/GPU/network or long wall-clock acceptance is asserted.
+
+`target/wf/cohort-transition-stress-qa-12bfe-1/` preserves `tests.log`,
+`format.log`, `build.log`, `identity.json`, `cli-results.json`, `wbs.json` and all
+original stdout/stderr. The optimized artifact was3236848 bytes with SHA256
+`da9ddf6fc9b0042d02db02e5dc7ad73d9489ec8a94f00c8d37eb7d0476e48b28`,
+unchanged throughout execution. These ignored artifacts remain local evidence.
+All QA sessions58890/85580/53091 terminated successfully and leases were
+released. Existing library/bin and new example test-helper dead-code warnings
+remain; scoped formatting and required commands passed. Global WBS remains
+91/193(47.15%); full13.05/13.08 and player Goal remain unfinished.
 
 ## Known ceiling
 

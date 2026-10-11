@@ -1,6 +1,8 @@
 # Retained player cohort transition stress
 
-Status: planned implementation; actual workload verification is pending.
+Status: implemented software workload; independent DEEP code/security reviews
+and actual CLI QA passed for source1712136. Durable outcome review and Harness
+close are separate gates.
 This supplements original WBS13.05 and does not complete its full scope.
 
 The opt-in `cohort_transition_stress` example uses actual production solo
@@ -90,3 +92,24 @@ invalid/edge paths under sequential finite resource limits. Independent tests
 may call implementation-under-test, but expected facts must not derive from
 its generators/oracle helpers. Hardware/GPU/network, real64 remote hosts,
 comparative speed and full wall-clock soak remain separate original obligations.
+
+## Actual software evidence
+
+Independent QA freshly passed11 integration tests, scoped formatting, an
+optimized build and30 CLI paths:12 help/happy/edge executions and18 invalid
+inputs. The member matrix covers1/2/3/4/64, repeated64 output is byte-identical,
+and cycles64/notes64 edges are separate bounded configurations rather than an
+exhaustive Cartesian product. The64-member3-attempt3-note case preserves192
+original captures,1152 authored/captured input edges and2 fresh transitions.
+Both independent defect-hunter inputs were empty; formal code and security
+reviews returned PASS with no findings before QA began.
+
+Raw results and source/build identity are in
+`target/wf/cohort-transition-stress-qa-12bfe-1/`; the ignored local directory is
+not committed or portable. The optimized artifact is3236848 bytes with SHA256
+`da9ddf6fc9b0042d02db02e5dc7ad73d9489ec8a94f00c8d37eb7d0476e48b28`,
+verified unchanged throughout those executions. Source1712136 and original
+stdout/stderr are preserved in that identity record. The
+[change record](../changes/2026-10-12-cohort-transition-stress.md) retains failed
+development attempts, the private compiler recipe and measurement ceilings.
+Original WBS13.05/13.08 and complete player acceptance remain unfinished.

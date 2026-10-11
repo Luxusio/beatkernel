@@ -155,6 +155,18 @@ CLI 및 문서 리뷰 PASS 후 Harness 검증·close를 통과했다. Python44 P
 identity를 보존했다. 64레인은64명이 아니고 GPU/물리/장시간/전체 player 성능 및
 원본13.05/13.08은 미완료다. 이 근거만으로 완료 개수를 올리지 않는다.
 
+E44: `1712136`의 [실제 cohort transition workload](REQ__cohort-transition-stress.md)는
+production solo/cohort pump, original member capture, retained Mixer PCM과
+pause/replacement policy를 사용한다. 독립 DEEP code/security PASS 다음 fresh
+CLI QA11개 테스트·release 빌드·30실행(정상/경계12, 잘못된 입력18)을 통과했다.
+1/2/3/4/64명 및 반복 attempt, 별도 cycles64/notes64 경계와 byte-identical
+64명 재실행을 검증했다. `target/wf/cohort-transition-stress-qa-12bfe-1/`과
+[개발 실패·독립 검증 기록](../changes/2026-10-12-cohort-transition-stress.md)을 따른다.
+Practice 중 output replacement는 실제 application 거절을 확인했고, 성공 rebind는
+별도로 허용된 paused composition이다. 물리/native worker retirement, GPU/network,
+전체20h/week timeline·wall-clock soak 및 성공 interleaving을 증명하지 않는다.
+원본13.05/13.08 및 완료91/193은 유지한다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -420,7 +432,7 @@ Native collector termination 절에 있다.
 - [ ] **BK-WBS-13.02** 모든 layer의 pure test port와 실제 adapter contract test를 coverage map으로 연결한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=UI/business/native IO 의존성·경계 표.
 - [ ] **BK-WBS-13.03** parser/compiler/input/replay/room codec에 지속 fuzz·corpus/minimization을 구축한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=REQ__layer-fuzz의 실제 sanitizer campaign·재현 artifact·minimization·오탐 방지 및 외부 지속 CI 실행.
 - [ ] **BK-WBS-13.04** 수집·queue·clock·output·network·UI에 deterministic fault/chaos schedule을 구축한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=입력/시계/queue의 18개 fixture 및 Runtime→Mixer mono/stereo PCM 거절·원래 owner 회수·실제 consumer 해제의 13개 scenario(19개 pair) 독립 code review/CLI QA 통과, [검증 지침](../verification/GUIDE__runtime-fault-schedules.md). [연결된 player network/UI 계약](../runtime/REQ__player-fault-isolation.md)의 7개 새 테스트로 실제 Runtime prefix·client/relay wire/ACK/drain·portable room controller UI 장애를 검사하고 치명 즉시 UI reply 오류 누락을 재현·수정; 최종 app 전체 2172 PASS/0 FAIL/6 ignored, 독립 code review·CLI QA·문서 검토 PASS(QA는 신규 7 및 기존 관련 67개 재실행). 실제 native output/network/UI·allocation/short write/spawn/panic 동시 경계는 남음.
-- [ ] **BK-WBS-13.05** 대규모 노트·64-member·오랜 플레이·반복 seek/rebind의 soak/stress를 실행한다. — 상태=W(구현·연동중); 선행=-; 근거/다음=E33/E43,REQ__dense-chart-stress의 actual judge/replay/projector 및 dense 자식 CPU/RSS report 검증 완료; 전체 player CPU/memory/queue/owner leak·20h/1week 전체 가상 timeline·다인/rebind/soak는 계속 필요.
+- [ ] **BK-WBS-13.05** 대규모 노트·64-member·오랜 플레이·반복 seek/rebind의 soak/stress를 실행한다. — 상태=W(구현·연동중); 선행=-; 근거/다음=E33/E43 dense judge/replay/projector·자식 CPU/RSS report와 E44 실제64-member retained practice/pause/refusal·별도 admitted rebind software 검증 완료; 전체 player CPU/memory/queue/owner leak·20h/1week 전체 가상 timeline·실제 native·장시간 soak는 계속 필요.
 - [ ] **BK-WBS-13.06** 전체 RT callback과 판정 hot path alloc/lock/I/O/error 경로를 계측한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=일반/오류/포화·모든 backend; scoped 테스트만 확대하지 않음.
 - [ ] **BK-WBS-13.07** p50/p95/p99/max·drop/xrun·scheduler jitter 계측을 재현 workload에 연결한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=계측 위치/provenance/용량·관측 불가 표시.
 - [ ] **BK-WBS-13.08** 성능 기준 workload·CPU/RAM/GPU/배포 artifact/실행 절차를 고정한다. — 상태=W(구현·연동중); 선행=-; 근거/다음=E31/E43 fixed runtime/dense software matrix의 CPU/RSS/artifact report 검증 완료; 전체 player 대형 chart·dense UI stall·다인·GPU·장시간 비교는 계속 필요.
