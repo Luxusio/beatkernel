@@ -1,7 +1,9 @@
 # Retained cohort transition stress
 
 Status: source1712136 passed independent DEEP code/security reviews and actual
-CLI QA. Final durable documentation review and Harness close remain pending.
+CLI QA. Final durable documentation review passed with zero findings, followed
+by ordered Harness verification PASS and successful task close for
+run01a12bfe-28cc-71ab-b21d-f0bd9685d211. Evidence commit:5c31dd7.
 The first
 integration execution reported six passing and five failing tests. Correcting
 the workload setup and terminal-boundary accounting produced the current

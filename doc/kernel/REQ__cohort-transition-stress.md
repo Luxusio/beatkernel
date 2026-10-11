@@ -1,8 +1,9 @@
 # Retained player cohort transition stress
 
 Status: implemented software workload; independent DEEP code/security reviews
-and actual CLI QA passed for source1712136. Durable outcome review and Harness
-close are separate gates.
+and actual CLI QA passed for source1712136. The independent durable outcome
+review also passed; ordered Harness verification and task close subsequently
+passed for run01a12bfe-28cc-71ab-b21d-f0bd9685d211. Evidence commit:5c31dd7.
 This supplements original WBS13.05 and does not complete its full scope.
 
 The opt-in `cohort_transition_stress` example uses actual production solo
