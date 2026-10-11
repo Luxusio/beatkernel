@@ -238,11 +238,66 @@ fn dense_native_gpu_grows_warms_seeks_resizes_and_rejects_late_candidate() {
     scene.clear();
     paint(&mut scene, &dense, 0, Some(&progress));
     present(&mut renderer, &scene);
+
+    // Equal chart values in a distinct owner must not authorize foreign progress.
+    // An early public validation error poisons the entire three-field candidate.
+    scene.clear();
+    for _ in 0..3 {
+        paint(&mut scene, &dense, 0, Some(&progress));
+    }
+    let foreign_chart = Arc::new((*dense).clone());
+    assert!(!Arc::ptr_eq(&dense, &foreign_chart));
+    assert_eq!(dense.notes, foreign_chart.notes);
+    let foreign_progress = NoteProgress::new(foreign_chart).unwrap();
+    let first_error = playfield_in_with_progress(
+        &mut scene,
+        &dense,
+        Timestamp::from_nanos(0),
+        WINDOW_NS,
+        Bounds {
+            x: 80,
+            y: 64,
+            width: 640,
+            height: 528,
+        },
+        &[],
+        0,
+        Some(&foreign_progress),
+    )
+    .unwrap_err();
+    assert!(first_error.contains("note progress belongs to another prepared chart"));
+    assert_eq!(scene.status().unwrap_err(), first_error);
+    let before_foreign_rejection = renderer.presentation_count();
+    assert!(renderer.render(&scene).is_err());
+    assert_eq!(renderer.presentation_count(), before_foreign_rejection);
+    assert!(playfield_in_with_progress(
+        &mut scene,
+        &dense,
+        Timestamp::from_nanos(0),
+        WINDOW_NS,
+        Bounds {
+            x: 80,
+            y: 64,
+            width: 640,
+            height: 528,
+        },
+        &[],
+        0,
+        Some(&progress),
+    )
+    .is_err());
+    assert_eq!(scene.status().unwrap_err(), first_error);
+    assert!(renderer.render(&scene).is_err());
+    assert_eq!(renderer.presentation_count(), before_foreign_rejection);
+    scene.clear();
+    paint(&mut scene, &dense, 0, Some(&progress));
+    present(&mut renderer, &scene);
     eprintln!(
         "dense native GPU: {description}; initial_extent={}x{}; resized_surface=800x600; \
          dense_membership=4608notes/2304mines; expected_primitives=11520; \
          seek_membership={seek_membership:?}; successful_presentations={}; \
-         rejected_candidate_counter={before_rejection}",
+         rejected_candidate_counter={before_rejection}; \
+         foreign_progress_rejected_counter={before_foreign_rejection}",
         size.width,
         size.height,
         renderer.presentation_count()

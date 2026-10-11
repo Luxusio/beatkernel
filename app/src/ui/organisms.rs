@@ -269,94 +269,102 @@ pub fn playfield_in_with_background(
     progress: Option<&crate::note_progress::NoteProgress>,
     frame: crate::bga_render::BgaFrame,
 ) -> Result<(), String> {
-    frame.validate()?;
-    if progress.is_some_and(|state| !state.matches_chart(chart)) {
-        return Err("note progress belongs to another prepared chart".into());
-    }
-    crate::pressed_keys::validate_mask(pressed_lanes)?;
-    let feedback = crate::judge_feedback::project(chart, now, recent)?;
-    if lookahead <= 0 {
-        return Err("playfield lookahead must be positive".into());
-    }
-    let lanes = chart.lanes.len();
-    let [width, height] = pixels.dimensions();
-    if bounds.x < 0
-        || bounds.y < 0
-        || bounds.width <= 0
-        || bounds.height < 32
-        || i128::from(bounds.x) + i128::from(bounds.width) > width as i128
-        || i128::from(bounds.y) + i128::from(bounds.height) > height as i128
-        || i128::from(bounds.width) < lanes as i128 * 13
-    {
-        return Err("playfield bounds do not fit viewport or lane geometry".into());
-    }
-    let top = bounds.y + 4;
-    let line = bounds.y + bounds.height - 24;
-    for lane in 0..lanes {
-        let (left, right) = partition_lane(lane, lanes, bounds.x, bounds.width);
-        let background = if lane % 2 == 0 { 0x1d2734 } else { 0x18212c };
-        rect(
-            pixels,
-            left,
-            top,
-            right - left - 1,
-            line - top + 24,
-            background,
-        );
-        clipped_text(
-            pixels,
-            Bounds {
-                x: left + 3,
-                y: line + 10,
-                width: right - left - 3,
-                height: 7,
-            },
-            &(lane + 1).to_string(),
-            1,
-            0xa9bdd5,
-        );
-    }
-    crate::bga_render::paint(
-        pixels,
-        frame,
-        Bounds {
-            x: bounds.x,
-            y: top,
-            width: bounds.width,
-            height: line - top,
-        },
-    )?;
-    pixels.playfield_with_progress(chart, now, lookahead, bounds, progress)?;
-    for lane in 0..lanes {
-        let (left, right) = partition_lane(lane, lanes, bounds.x, bounds.width);
-        let background: u32 = if lane % 2 == 0 { 0x1d2734 } else { 0x18212c };
-        if crate::pressed_keys::lane_bit(beatkernel::input::GameControlId(u32::from(
-            chart.lanes[lane],
-        )))
-        .is_some_and(|bit| pressed_lanes & bit != 0)
+    pixels.status()?;
+    let candidate: Result<(), String> = (|| {
+        frame.validate()?;
+        if progress.is_some_and(|state| !state.matches_chart(chart)) {
+            return Err("note progress belongs to another prepared chart".into());
+        }
+        crate::pressed_keys::validate_mask(pressed_lanes)?;
+        let feedback = crate::judge_feedback::project(chart, now, recent)?;
+        if lookahead <= 0 {
+            return Err("playfield lookahead must be positive".into());
+        }
+        let lanes = chart.lanes.len();
+        let [width, height] = pixels.dimensions();
+        if bounds.x < 0
+            || bounds.y < 0
+            || bounds.width <= 0
+            || bounds.height < 32
+            || i128::from(bounds.x) + i128::from(bounds.width) > width as i128
+            || i128::from(bounds.y) + i128::from(bounds.height) > height as i128
+            || i128::from(bounds.width) < lanes as i128 * 13
         {
-            // Draw over notes, below judgment feedback and the white line.
-            rect(pixels, left + 1, line - 22, right - left - 3, 16, 0x416ca0);
+            return Err("playfield bounds do not fit viewport or lane geometry".into());
         }
-        if let Some(feedback) = feedback[lane] {
-            let color = match feedback.event.outcome {
-                JudgeOutcome::Hit { .. } => 0x74e5c5,
-                JudgeOutcome::Miss { .. } => 0xef6372,
-            };
-            let lifetime = crate::judge_feedback::FEEDBACK_LIFETIME_NS;
-            let mut faded = 0u32;
-            for shift in [16, 8, 0] {
-                let source = i64::from((color >> shift) & 255);
-                let target = i64::from((background >> shift) & 255);
-                let channel =
-                    (source * (lifetime - feedback.age_ns) + target * feedback.age_ns) / lifetime;
-                faded |= (channel as u32) << shift;
+        let top = bounds.y + 4;
+        let line = bounds.y + bounds.height - 24;
+        for lane in 0..lanes {
+            let (left, right) = partition_lane(lane, lanes, bounds.x, bounds.width);
+            let background = if lane % 2 == 0 { 0x1d2734 } else { 0x18212c };
+            rect(
+                pixels,
+                left,
+                top,
+                right - left - 1,
+                line - top + 24,
+                background,
+            );
+            clipped_text(
+                pixels,
+                Bounds {
+                    x: left + 3,
+                    y: line + 10,
+                    width: right - left - 3,
+                    height: 7,
+                },
+                &(lane + 1).to_string(),
+                1,
+                0xa9bdd5,
+            );
+        }
+        crate::bga_render::paint(
+            pixels,
+            frame,
+            Bounds {
+                x: bounds.x,
+                y: top,
+                width: bounds.width,
+                height: line - top,
+            },
+        )?;
+        pixels.playfield_with_progress(chart, now, lookahead, bounds, progress)?;
+        for lane in 0..lanes {
+            let (left, right) = partition_lane(lane, lanes, bounds.x, bounds.width);
+            let background: u32 = if lane % 2 == 0 { 0x1d2734 } else { 0x18212c };
+            if crate::pressed_keys::lane_bit(beatkernel::input::GameControlId(u32::from(
+                chart.lanes[lane],
+            )))
+            .is_some_and(|bit| pressed_lanes & bit != 0)
+            {
+                // Draw over notes, below judgment feedback and the white line.
+                rect(pixels, left + 1, line - 22, right - left - 3, 16, 0x416ca0);
             }
-            rect(pixels, left + 1, line - 6, right - left - 3, 6, faded);
+            if let Some(feedback) = feedback[lane] {
+                let color = match feedback.event.outcome {
+                    JudgeOutcome::Hit { .. } => 0x74e5c5,
+                    JudgeOutcome::Miss { .. } => 0xef6372,
+                };
+                let lifetime = crate::judge_feedback::FEEDBACK_LIFETIME_NS;
+                let mut faded = 0u32;
+                for shift in [16, 8, 0] {
+                    let source = i64::from((color >> shift) & 255);
+                    let target = i64::from((background >> shift) & 255);
+                    let channel = (source * (lifetime - feedback.age_ns)
+                        + target * feedback.age_ns)
+                        / lifetime;
+                    faded |= (channel as u32) << shift;
+                }
+                rect(pixels, left + 1, line - 6, right - left - 3, 6, faded);
+            }
         }
+        rect(pixels, bounds.x, line, bounds.width, 3, 0xffffff);
+        pixels.status()
+    })();
+    if let Err(error) = &candidate {
+        pixels.reject(error.clone());
     }
-    rect(pixels, bounds.x, line, bounds.width, 3, 0xffffff);
-    pixels.status()
+    candidate
 }
 
 pub use crate::playfield_layout::LOCAL_PLAYERS_PER_PAGE;
@@ -1495,6 +1503,13 @@ mod tests {
         .is_err());
         assert!(scene.rectangles().is_empty());
         assert!(scene.playfields().is_empty());
+        let error = scene.status().unwrap_err();
+        assert_eq!(
+            playfield(&mut scene, &chart, Timestamp::ZERO, 1_000_000_000),
+            Err(error.clone())
+        );
+        assert_eq!(scene.status(), Err(error));
+        scene.clear();
         playfield(&mut scene, &chart, Timestamp::ZERO, 1_000_000_000).unwrap();
         assert!(scene
             .rectangles()
@@ -1656,6 +1671,13 @@ mod tests {
         .is_err());
         assert!(scene.rectangles().is_empty());
         assert!(scene.playfields().is_empty());
+        let error = scene.status().unwrap_err();
+        assert_eq!(
+            playfield(&mut scene, &chart, Timestamp::ZERO, 1_000_000_000),
+            Err(error.clone())
+        );
+        assert_eq!(scene.status(), Err(error));
+        scene.clear();
         let mut players: Vec<_> = [(3, progress.clone()), (u32::MAX, pending)]
             .into_iter()
             .map(|(id, note_progress)| LocalPlayerSnapshot {

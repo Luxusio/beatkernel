@@ -537,3 +537,340 @@ fn dense_playfield_all_64_roster_pages_keep_four_complete_retained_fields() {
     assert!(organisms::local_players(&mut scene, &players, 4_000_000_000, 16).is_err());
     assert!(scene.playfields().is_empty());
 }
+
+fn compose_dense_public(
+    scene: &mut Scene,
+    chart: &PlayerChart,
+    progress: &NoteProgress,
+) -> Result<(), String> {
+    crate::ui::organisms::playfield_in_with_progress(
+        scene,
+        chart,
+        ts(0),
+        4_000_000_000,
+        bounds(),
+        &[],
+        0,
+        Some(progress),
+    )
+}
+
+#[test]
+fn dense_playfield_public_foreign_progress_fourth_field_poison_is_sticky_until_clear() {
+    use crate::{bga_render::BgaFrame, ui::organisms};
+    let chart = Arc::new(dense_chart());
+    let pending = NoteProgress::new(Arc::clone(&chart)).unwrap();
+    // Equal chart values do not authorize progress from another preparation.
+    let foreign_chart = Arc::new((*chart).clone());
+    assert!(!Arc::ptr_eq(&chart, &foreign_chart));
+    assert_eq!(chart.notes, foreign_chart.notes);
+    assert_eq!(chart.mines(), foreign_chart.mines());
+    let foreign = NoteProgress::new(foreign_chart).unwrap();
+    let mut scene = Scene::new(960, 720);
+    for _ in 0..4 {
+        compose_dense_public(&mut scene, &chart, &pending).unwrap();
+    }
+    let warmed: Vec<_> = scene
+        .playfields()
+        .iter()
+        .map(|f| Arc::clone(&f.instances))
+        .collect();
+    scene.clear();
+    for _ in 0..3 {
+        compose_dense_public(&mut scene, &chart, &pending).unwrap();
+    }
+    let rectangles = scene.rectangles().len();
+    let batches = scene.batches().len();
+    let epoch = scene.geometry_stamp().1;
+    let error = organisms::playfield_in_with_background(
+        &mut scene,
+        &chart,
+        ts(0),
+        4_000_000_000,
+        bounds(),
+        &[],
+        0,
+        Some(&foreign),
+        BgaFrame::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error, "note progress belongs to another prepared chart");
+    assert_eq!(scene.status(), Err(error.clone()));
+    assert_eq!(
+        compose_dense_public(&mut scene, &chart, &pending),
+        Err(error.clone())
+    );
+    // An unrelated, earlier background validation must not replace the first
+    // error or make the existing three-field prefix a successful candidate.
+    assert_eq!(
+        organisms::playfield_in_with_background(
+            &mut scene,
+            &chart,
+            ts(0),
+            4_000_000_000,
+            bounds(),
+            &[],
+            0,
+            Some(&pending),
+            BgaFrame {
+                active: true,
+                unavailable: 5,
+                ..Default::default()
+            },
+        ),
+        Err(error.clone())
+    );
+    assert_eq!(scene.status(), Err(error));
+    assert_eq!(scene.playfields().len(), 3);
+    assert_eq!(scene.rectangles().len(), rectangles);
+    assert_eq!(scene.batches().len(), batches);
+    assert_eq!(scene.geometry_stamp().1, epoch);
+    for (old, current) in warmed.iter().zip(scene.playfields()) {
+        assert!(Arc::ptr_eq(old, &current.instances));
+        assert_eq!(current.instances.len(), 11520);
+    }
+    scene.clear();
+    for _ in 0..4 {
+        compose_dense_public(&mut scene, &chart, &pending).unwrap();
+    }
+    assert!(scene.status().is_ok());
+    assert_eq!(scene.playfields().len(), 4);
+    for (old, current) in warmed.iter().zip(scene.playfields()) {
+        assert!(Arc::ptr_eq(old, &current.instances));
+        assert_eq!(current.instances.len(), 11520);
+    }
+}
+
+#[test]
+fn dense_playfield_public_early_input_refusals_poison_good_prefix_and_recover_retained_fields() {
+    use crate::{
+        bga_render::{BgaFrame, BgaSprite},
+        texture::TextureId,
+        ui::organisms,
+    };
+    use beatkernel::judge::{JudgeEvent, JudgeGrade, JudgeOutcome, JudgeStage};
+    let chart = Arc::new(dense_chart());
+    let pending = NoteProgress::new(Arc::clone(&chart)).unwrap();
+    let tap = chart.notes.iter().find(|note| note.end.is_none()).unwrap();
+    let event = JudgeEvent {
+        object: tap.object,
+        at: ts(0),
+        stage: JudgeStage::Instant,
+        input: None,
+        outcome: JudgeOutcome::Hit {
+            grade: JudgeGrade(1),
+            delta: beatkernel::time::Duration::ZERO,
+        },
+    };
+    let cases = [
+        (
+            "BGA selection",
+            4_000_000_000,
+            bounds(),
+            vec![],
+            0,
+            BgaFrame {
+                active: true,
+                unavailable: 5,
+                ..Default::default()
+            },
+            "invalid BGA frame selection",
+        ),
+        (
+            "BGA sprite",
+            4_000_000_000,
+            bounds(),
+            vec![],
+            0,
+            BgaFrame {
+                active: true,
+                base: Some(BgaSprite {
+                    texture: TextureId::FONT,
+                    width: 0,
+                    height: 1,
+                }),
+                ..Default::default()
+            },
+            "invalid BGA sprite extent",
+        ),
+        (
+            "pressed bit 18",
+            4_000_000_000,
+            bounds(),
+            vec![],
+            1 << 18,
+            BgaFrame::default(),
+            "pressed lane mask exceeds eighteen lanes",
+        ),
+        (
+            "pressed bit 31",
+            4_000_000_000,
+            bounds(),
+            vec![],
+            1 << 31,
+            BgaFrame::default(),
+            "pressed lane mask exceeds eighteen lanes",
+        ),
+        (
+            "129 feedback events",
+            4_000_000_000,
+            bounds(),
+            vec![event; 129],
+            0,
+            BgaFrame::default(),
+            "judge feedback exceeds result or lane capacity",
+        ),
+        (
+            "zero horizon",
+            0,
+            bounds(),
+            vec![],
+            0,
+            BgaFrame::default(),
+            "playfield lookahead must be positive",
+        ),
+        (
+            "negative horizon",
+            -1,
+            bounds(),
+            vec![],
+            0,
+            BgaFrame::default(),
+            "playfield lookahead must be positive",
+        ),
+        (
+            "negative x",
+            4_000_000_000,
+            Bounds { x: -1, ..bounds() },
+            vec![],
+            0,
+            BgaFrame::default(),
+            "playfield bounds do not fit viewport or lane geometry",
+        ),
+        (
+            "zero width",
+            4_000_000_000,
+            Bounds {
+                width: 0,
+                ..bounds()
+            },
+            vec![],
+            0,
+            BgaFrame::default(),
+            "playfield bounds do not fit viewport or lane geometry",
+        ),
+        (
+            "height 31",
+            4_000_000_000,
+            Bounds {
+                height: 31,
+                ..bounds()
+            },
+            vec![],
+            0,
+            BgaFrame::default(),
+            "playfield bounds do not fit viewport or lane geometry",
+        ),
+        (
+            "viewport overflow",
+            4_000_000_000,
+            Bounds {
+                width: 881,
+                ..bounds()
+            },
+            vec![],
+            0,
+            BgaFrame::default(),
+            "playfield bounds do not fit viewport or lane geometry",
+        ),
+        (
+            "three lanes need 39 pixels",
+            4_000_000_000,
+            Bounds {
+                width: 38,
+                ..bounds()
+            },
+            vec![],
+            0,
+            BgaFrame::default(),
+            "playfield bounds do not fit viewport or lane geometry",
+        ),
+    ];
+    let mut scene = Scene::new(960, 720);
+    for _ in 0..4 {
+        compose_dense_public(&mut scene, &chart, &pending).unwrap();
+    }
+    let warmed: Vec<_> = scene
+        .playfields()
+        .iter()
+        .map(|f| Arc::clone(&f.instances))
+        .collect();
+    for (label, horizon, field, recent, mask, frame, expected) in cases {
+        scene.clear();
+        for _ in 0..3 {
+            compose_dense_public(&mut scene, &chart, &pending).unwrap();
+        }
+        let rectangles = scene.rectangles().len();
+        let batches = scene.batches().len();
+        let epoch = scene.geometry_stamp().1;
+        let error = organisms::playfield_in_with_background(
+            &mut scene,
+            &chart,
+            ts(0),
+            horizon,
+            field,
+            &recent,
+            mask,
+            Some(&pending),
+            frame,
+        )
+        .unwrap_err();
+        assert_eq!(error, expected, "{label}");
+        assert_eq!(scene.status(), Err(error.clone()), "{label}");
+        assert_eq!(
+            compose_dense_public(&mut scene, &chart, &pending),
+            Err(error.clone()),
+            "{label}"
+        );
+        // This simultaneously supplies other invalid reasons. Once poisoned,
+        // the first refusal remains the observable result of every attempt.
+        assert_eq!(
+            organisms::playfield_in_with_background(
+                &mut scene,
+                &chart,
+                ts(0),
+                -1,
+                Bounds { x: -1, ..bounds() },
+                &[],
+                1 << 31,
+                Some(&pending),
+                BgaFrame {
+                    active: true,
+                    unavailable: 5,
+                    ..Default::default()
+                }
+            ),
+            Err(error.clone()),
+            "{label}"
+        );
+        assert_eq!(scene.status(), Err(error), "{label}");
+        assert_eq!(scene.playfields().len(), 3, "{label}");
+        assert_eq!(scene.rectangles().len(), rectangles, "{label}");
+        assert_eq!(scene.batches().len(), batches, "{label}");
+        assert_eq!(scene.geometry_stamp().1, epoch, "{label}");
+        for (old, current) in warmed.iter().zip(scene.playfields()) {
+            assert!(Arc::ptr_eq(old, &current.instances), "{label}");
+            assert_eq!(current.instances.len(), 11520, "{label}");
+        }
+        scene.clear();
+        for _ in 0..4 {
+            compose_dense_public(&mut scene, &chart, &pending).unwrap();
+        }
+        assert!(scene.status().is_ok(), "{label}");
+        assert_eq!(scene.playfields().len(), 4, "{label}");
+        for (old, current) in warmed.iter().zip(scene.playfields()) {
+            assert!(Arc::ptr_eq(old, &current.instances), "{label}");
+            assert_eq!(current.instances.len(), 11520, "{label}");
+        }
+    }
+}
