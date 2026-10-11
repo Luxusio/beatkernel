@@ -220,3 +220,48 @@ Known ceiling: actual LiveAudio GUI acceptance requires an accessible real or
 virtual evdev device; this environment cannot currently supply one. Complete
 browser QA and remaining typing still proceed. Full task and player completion
 remain unproven; the four successful native panels do not replace that gap.
+
+Final independent CLI QA returned PASS: Linux, Windows and macOS all-target
+checks exited0, in addition to the already recorded app, allocation and actual
+CLI checks. Windows/macOS remain foreign Rust type checks using C stubs.
+
+Independent browser QA rebuilt both production packages: browser WASM SHA256
+`a10a6f49b8b26402f29abe3ae3ed63b6bb8ecaff22cd160360a80cd19250fe54`
+and browser-audio WASM SHA256
+`dde5198fb9779d4f1f8c5927ca446f929ea1fcdab8c8ca1a15ebaf46f35453b8`.
+Actual preparation, finite capture/save, finite replay completion, Records
+details, hidden updates/restore and retained Settings parent identity passed.
+A separate genuine full-song capture and saved-opponent competition also
+completed; its stored comparison page restored the latest hidden grade change.
+These successful journeys do not replace the finite comparison failure below.
+
+The browser lens returned FAIL for a verified pre-existing finite-section
+saved-opponent defect. The actual first replay (1,930 bytes) and archive
+(415 bytes) were saved, but a same-section comparison was rejected with
+`IncompatibleSetup`. Solo and local `competition_header()` use an absent end,
+while `configure_capture()` includes the configured end in canonical options.
+Strict replay admission compares those options. A repair must also preserve
+`competition_identity_for_section()`'s existing endpoint-only network envelope:
+it deliberately rejects headers that already carry a finite end. Simply
+replacing four absent-end arguments would violate that network contract.
+
+Fresh-package supporting Node checks passed97 of106 cases. The same nine
+historical Worker failures reproduced on baseline14f5362. Read-only preparation
+for the next repair identified missing declaration/incremental-preparation APIs
+in that fixture; a scratch-only modernization passed all22 original historical
+tests without changing their assertions. It is not a committed repair.
+
+Independent browser UX passed its exercised retained Records resize/content,
+fresh child identity and exact Settings parent/Selection Back scope. Its first
+Details Back click is excluded: a diagnostic direct Worker action advanced the
+Worker counter independently of the Window counter. Fresh reentry evidence is
+distinct. Existing small bitmap text and dense configuration remain backlog.
+Native UX retained the missing-evdev ceiling. All owned GUI/server processes
+were joined after UX; no browser or compiler remains owned by these QA lanes.
+
+Known ceiling: the task remains unfinished. Native LiveAudio still lacks an
+actual evdev journey; finite saved-opponent comparison and the nine historical
+Worker fixture failures require the queued recording-regression repair.
+Actual browser FAIL and native BLOCKED_ENV do not authorize task close or WBS
+promotion. Browser and UX transcripts live under the matching `qa-browser-1`
+and `ux-browser-1` directories in the existing task scratch root.
