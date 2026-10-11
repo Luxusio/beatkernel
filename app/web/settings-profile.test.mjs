@@ -4,7 +4,7 @@ import { File } from "node:buffer";
 import test from "node:test";
 import { snapshotBrowserSettings, snapshotBrowserSettingsScalars, encodeBrowserSettings, decodeBrowserSettings } from "./settings-profile.mjs";
 import * as settingsProfile from "./settings-profile.mjs";
-import { BMS_TIMING_PRESET_ID } from "./play-model.mjs";
+import { BMS_TIMING_PRESET_ID, snapshotBindings } from "./play-model.mjs";
 
 globalThis.File ??= File;
 const FileType = globalThis.File;
@@ -25,6 +25,158 @@ const scalarDraft = value => ({ timing: value.timing, output: value.output, capa
 // Literal menu order is an independent contract oracle, not derived from the mapper.
 const legacyMenuFields = () => ["12.345678", "0.000001", "-0.000001", "custom", "10.000001", "044100",
   "65536", "4096", "4096", "4096", "65536", "604800.000000001", "604800.000000002"];
+
+// These literal lane/code/ID oracles deliberately do not follow KEY_BINDINGS' creation order.
+const sortedDefaultRows = () => [[17, "KeyZ"], [18, "KeyS"], [19, "KeyX"], [20, "KeyD"],
+  [21, "KeyC"], [22, "ShiftLeft"], [23, "Space"], [24, "KeyF"], [25, "KeyV"],
+  [33, "KeyN"], [34, "KeyJ"], [35, "KeyM"], [36, "KeyK"], [37, "Comma"],
+  [38, "ShiftRight"], [39, "Slash"], [40, "KeyL"], [41, "Period"]];
+const defaultProfileMenuFields = () => ["12.345678", "0.000001", "-0.000001", "custom", "10.000001", "044100",
+  "65536", "4096", "4096", "4096", "65536", "604800.000000001", "604800.000000002",
+  "", "rank-first", "beatkernel", "KeyZ", "KeyS", "KeyX", "KeyD", "KeyC", "ShiftLeft",
+  "Space", "KeyF", "KeyV", "KeyN", "KeyJ", "KeyM", "KeyK", "Comma", "ShiftRight", "Slash", "KeyL", "Period"];
+const defaultKeyIdentities = () => [[17, "KeyZ", 2], [18, "KeyS", 3], [19, "KeyX", 4], [20, "KeyD", 5],
+  [21, "KeyC", 6], [22, "ShiftLeft", 1], [23, "Space", 9], [24, "KeyF", 7], [25, "KeyV", 8],
+  [33, "KeyN", 11], [34, "KeyJ", 12], [35, "KeyM", 13], [36, "KeyK", 14], [37, "Comma", 15],
+  [38, "ShiftRight", 10], [39, "Slash", 18], [40, "KeyL", 16], [41, "Period", 17]];
+function assertFrozenProfile(profile) {
+  for (const value of [profile, profile.timing, profile.output, profile.capacities, profile.section,
+    profile.bindings, ...profile.bindings]) assert.ok(Object.isFrozen(value));
+}
+
+test("full menu conversion exposes exactly thirty-four rows in literal sorted lane order with stable physical IDs", () => {
+  assert.equal(typeof settingsProfile.settingsMenuProfileFields, "function");
+  assert.equal(typeof settingsProfile.settingsMenuProfileSnapshot, "function");
+  const original = settings(); original.bindings = sortedDefaultRows().reverse();
+  const before = structuredClone(original), expected = defaultProfileMenuFields();
+  const fields = settingsProfile.settingsMenuProfileFields(original);
+  assert.deepEqual(fields, expected);
+  assert.equal(fields.length, 34);
+  assert.ok(Object.isFrozen(fields));
+  assert.ok(fields.every(value => typeof value === "string"));
+  assert.deepEqual(original, before);
+  const snapshot = settingsProfile.settingsMenuProfileSnapshot(expected);
+  const dto = settings(); dto.bindings = sortedDefaultRows();
+  Object.assign(dto.timing, { presetId: "", rankPrecedence: "rank-first", gauge: "beatkernel" });
+  assert.deepEqual(snapshot, dto);
+  assertFrozenProfile(snapshot);
+  assert.deepEqual(snapshotBindings(snapshot.bindings), defaultKeyIdentities());
+  assert.notEqual(snapshot.timing, original.timing);
+  assert.notEqual(snapshot.bindings, original.bindings);
+  assert.ok(snapshot.bindings.every(row => !original.bindings.includes(row)));
+  original.bindings[0][1] = "KeyB"; original.timing.earlyMs = "73"; expected[16] = "KeyA";
+  assert.deepEqual(fields, defaultProfileMenuFields());
+  assert.deepEqual(snapshot, dto);
+  assert.throws(() => { fields[33] = "KeyA"; }, TypeError);
+  assert.throws(() => { snapshot.bindings[17][1] = "KeyA"; }, TypeError);
+});
+
+test("full menu accepts explicit unbound rows and remaps physical keys without fallback or ID renumbering", () => {
+  const fields = defaultProfileMenuFields(); fields[16] = "KeyA"; fields[17] = "";
+  const snapshot = settingsProfile.settingsMenuProfileSnapshot(fields), expected = settings();
+  expected.bindings = [[17, "KeyA"], [18, ""], [19, "KeyX"], [20, "KeyD"], [21, "KeyC"],
+    [22, "ShiftLeft"], [23, "Space"], [24, "KeyF"], [25, "KeyV"], [33, "KeyN"],
+    [34, "KeyJ"], [35, "KeyM"], [36, "KeyK"], [37, "Comma"], [38, "ShiftRight"],
+    [39, "Slash"], [40, "KeyL"], [41, "Period"]];
+  Object.assign(expected.timing, { presetId: "", rankPrecedence: "rank-first", gauge: "beatkernel" });
+  assert.deepEqual(snapshot, expected);
+  assert.deepEqual(snapshotBindings(snapshot.bindings), [[17, "KeyA", 19], [19, "KeyX", 4], [20, "KeyD", 5],
+    [21, "KeyC", 6], [22, "ShiftLeft", 1], [23, "Space", 9], [24, "KeyF", 7], [25, "KeyV", 8],
+    [33, "KeyN", 11], [34, "KeyJ", 12], [35, "KeyM", 13], [36, "KeyK", 14], [37, "Comma", 15],
+    [38, "ShiftRight", 10], [39, "Slash", 18], [40, "KeyL", 16], [41, "Period", 17]]);
+  assert.deepEqual(settingsProfile.settingsMenuProfileFields(snapshot), fields);
+  const emptyBindings = defaultProfileMenuFields(); emptyBindings.fill("", 16);
+  const unbound = settingsProfile.settingsMenuProfileSnapshot(emptyBindings);
+  assert.deepEqual(unbound.bindings, [[17, ""], [18, ""], [19, ""], [20, ""], [21, ""], [22, ""],
+    [23, ""], [24, ""], [25, ""], [33, ""], [34, ""], [35, ""], [36, ""], [37, ""], [38, ""],
+    [39, ""], [40, ""], [41, ""]]);
+  assert.deepEqual(snapshotBindings(unbound.bindings), []);
+  assert.deepEqual(settingsProfile.settingsMenuProfileFields(unbound), emptyBindings);
+  assertFrozenProfile(unbound);
+});
+
+test("full menu strict shape scalar and binding validation refuse atomically including the final row", () => {
+  const valid = defaultProfileMenuFields();
+  const malformed = [null, {}, "settings", [], Array(34).fill(""),
+    ...Array.from({ length: 36 }, (_, length) => length).filter(length => length !== 34)
+      .map(length => Array.from({ length }, (_, index) => valid[index] ?? ""))];
+  const limits = [21, 21, 21, 16, 21, 10, 5, 5, 5, 5, 5, 20, 20, 96, 16, 16,
+    32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32];
+  for (let index = 0; index < 34; index++) {
+    for (const value of [null, 1, undefined, "x".repeat(limits[index] + 1)]) {
+      const fields = [...valid]; fields[index] = value; malformed.push(fields);
+    }
+    const sparse = [...valid]; delete sparse[index]; malformed.push(sparse);
+  }
+  for (const [index, value] of [[0, "-1"], [1, "1e2"], [2, "0.0000001"], [3, "automatic"],
+    [4, "60000.000001"], [5, "0"], [6, "65537"], [7, "4097"], [8, "0"], [9, "4097"],
+    [10, "65537"], [11, "+0"], [12, "604800.000000001"], [13, "unknown/v1"],
+    [14, "last-header"], [15, "unknown"], [15, "groove"]]) {
+    const fields = [...valid]; fields[index] = value; malformed.push(fields);
+  }
+  for (let index = 16; index < 34; index++) {
+    for (const code of ["Escape", "UnknownKey", "keyA", "KeyA ", " KeyA"]) {
+      const fields = [...valid]; fields[index] = code; malformed.push(fields);
+    }
+    const duplicate = [...valid]; duplicate[index] = valid[index === 16 ? 33 : 16]; malformed.push(duplicate);
+  }
+  for (const fields of malformed) {
+    const before = structuredClone(fields);
+    assert.throws(() => settingsProfile.settingsMenuProfileSnapshot(fields));
+    assert.deepEqual(fields, before);
+  }
+  assert.deepEqual(settingsProfile.settingsMenuProfileSnapshot(valid).bindings, sortedDefaultRows());
+});
+
+test("full profile menu input keeps complete schema checks and refuses incomplete or malformed binding records", () => {
+  const changes = [value => { value.bindings.pop(); }, value => { value.bindings.push([17, "KeyB"]); },
+    value => { value.bindings = []; }, value => { value.bindings[17] = [17, "KeyB"]; },
+    value => { value.bindings[17] = [42, "Period"]; }, value => { value.bindings[17][1] = "KeyA"; },
+    value => { value.bindings[17][1] = "Escape"; }, value => { value.bindings[17][1] = "UnknownKey"; },
+    value => { value.bindings[17][1] = "x".repeat(33); }, value => { value.bindings[17][1] = null; },
+    value => { value.bindings[17] = [41, "Period", 17]; }, value => { value.bindings[17][0] = "41"; },
+    value => { delete value.bindings[17]; }, value => { value.version = 2; },
+    value => { value.kind = "foreign"; }, value => { value.chart = "foreign.bms"; },
+    value => { value.timing.extra = "0"; }, value => { value.timing.earlyMs = "-1"; }];
+  for (const change of changes) {
+    const value = settings(); change(value); const before = structuredClone(value);
+    assert.throws(() => settingsProfile.settingsMenuProfileFields(value));
+    assert.deepEqual(value, before);
+  }
+  for (const value of [null, [], "settings", scalarDraft(settings())]) {
+    assert.throws(() => settingsProfile.settingsMenuProfileFields(value));
+  }
+});
+
+test("full menu preserves policy defaults latent precedence and version-one codec while legacy helpers remain scalar only", async () => {
+  for (const policy of [undefined, { presetId: "", rankPrecedence: "defexrank-first", gauge: "beatkernel" },
+    { presetId: BMS_TIMING_PRESET_ID, rankPrecedence: "defexrank-first", gauge: "hard" }]) {
+    const original = settings(); original.bindings = sortedDefaultRows();
+    if (policy) Object.assign(original.timing, policy);
+    const before = structuredClone(original), expectedFields = defaultProfileMenuFields();
+    if (policy) expectedFields.splice(13, 3, policy.presetId, policy.rankPrecedence, policy.gauge);
+    assert.deepEqual(settingsProfile.settingsMenuProfileFields(original), expectedFields);
+    const expected = structuredClone(original);
+    if (!policy) Object.assign(expected.timing, { presetId: "", rankPrecedence: "rank-first", gauge: "beatkernel" });
+    const snapshot = settingsProfile.settingsMenuProfileSnapshot(expectedFields);
+    assert.deepEqual(snapshot, expected); assertFrozenProfile(snapshot);
+    const encoded = encodeBrowserSettings(snapshot);
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(encoded)), expected);
+    assert.deepEqual(await decodeBrowserSettings(file(encoded)), expected);
+    assert.equal(snapshot.version, 1);
+    assert.deepEqual(original, before);
+    assert.deepEqual(await decodeBrowserSettings(file(encodeBrowserSettings(original))), before);
+    const legacyFields = settingsProfile.settingsMenuFields(original);
+    assert.deepEqual(legacyFields, expectedFields.slice(0, 16));
+    const scalar = settingsProfile.settingsMenuSnapshot(legacyFields);
+    assert.equal(Object.hasOwn(scalar, "bindings"), false);
+    assert.equal(Object.hasOwn(scalar, "kind"), false);
+    assert.deepEqual(settingsProfile.settingsMenuSnapshot(legacyMenuFields()), scalarDraft(settings()));
+    assert.throws(() => settingsProfile.settingsMenuSnapshot(expectedFields));
+    assert.throws(() => settingsProfile.settingsMenuProfileSnapshot(legacyFields));
+    assert.throws(() => settingsProfile.settingsMenuProfileSnapshot(legacyMenuFields()));
+  }
+});
 
 test("settings menu mapping emits sixteen immutable strings with exact legacy order and absent-profile defaults", () => {
   assert.equal(typeof settingsProfile.settingsMenuFields, "function");

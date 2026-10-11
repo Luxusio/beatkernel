@@ -221,3 +221,21 @@ test("Settings keyboard computes intent without mutating state or preventing def
   assert.equal(accepted.selected, 0);
   assert.equal(accepted.count, 16);
 });
+
+test("34-field Settings crosses the scalar/binding boundary and retains late editor ownership", () => {
+  const retained = selected => Object.freeze(settingsState({ count: 34, selected }));
+  for (const [key, selected, expected] of [
+    ["ArrowDown", 15, 1016n], ["ArrowUp", 16, 1015n],
+    ["PageDown", 20, 1030n], ["PageDown", 30, 1033n],
+    ["PageUp", 33, 1023n], ["End", 16, 1033n], ["Home", 33, 1000n],
+    ["Tab", 32, 1033n], ["Escape", 33, 11n],
+  ]) assert.equal(settingsKeyboardControl(event(key), retained(selected)), expected);
+  for (const key of ["ArrowDown", "PageDown", "End", "Tab"])
+    assert.equal(settingsKeyboardControl(event(key), retained(33)), null);
+  assert.equal(settingsKeyboardControl(event("Tab", { shiftKey: true }), retained(33)), 1032n);
+  for (const key of settingsKeys) {
+    assert.equal(settingsKeyboardControl(event(key, { target: { tagName: "INPUT", id: "menu-editor" } }), retained(33)), null);
+    assert.equal(settingsKeyboardControl(event(key, { isComposing: true }), retained(33)), null);
+    assert.equal(settingsKeyboardControl(event(key), settingsState({ count: 34, selected: 34 })), null);
+  }
+});

@@ -33,6 +33,7 @@ const evidence = { status: "RUNNING", wasmSha256: expected, source: Object.fromE
     "Actual Chromium SwiftShader, production Window/Worker/RenderWorker and genuine finite audio-output completion; no physical GPU, device latency or throughput claim.",
     "Trusted pointer and keyboard acquisitions; injected DOM composition proves bridge ordering only. Physical OS IME remains unverified.",
     "Screenshots document disabled native controls; independent domain fixtures establish their capability and semantic refusal rules.",
+    "Literal observation is limited to 36 prepared key-pair words, 16 KiB profile bytes, and 1 MiB finite captured replay bytes; fixture parsing accepts at most 20,000 records.",
   ] };
 const delay = ms => new Promise(r => setTimeout(r, ms));
 const bounded = (promise, ms, label) => { let timer; return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error(label + " timeout")), ms); })]).finally(() => clearTimeout(timer)); };
@@ -43,7 +44,12 @@ function windowObservation() {
   const summary = value => JSON.parse(JSON.stringify(value, (_, v) => {
     if (typeof v === "bigint") return String(v);
     if (v instanceof File) return { name: v.name, size: v.size };
-    if (ArrayBuffer.isView(v)) return value?.kind === "settings-profile-saved" && v.byteLength <= 16384 ? Array.from(v) : { byteLength: v.byteLength };
+    if (ArrayBuffer.isView(v)) {
+      const literal = value?.kind === "settings-profile-saved" && v === value.bytes && v.byteLength <= 16384
+        || value?.kind === "play-start" && v === value.keyPairs && v instanceof Uint32Array && v.length <= 36
+        || value?.kind === "play-stopped" && v === value.replay && v instanceof Uint8Array && v.byteLength <= 1048576;
+      return literal ? Array.from(v) : { byteLength: v.byteLength };
+    }
     if (v instanceof ArrayBuffer) return { byteLength: v.byteLength };
     if (v instanceof MessagePort) return "original transferred port";
     return v;
@@ -100,7 +106,7 @@ function windowObservation() {
 function rendererObservation() {
   const probe = globalThis.__settingsRenderer = { records: [], overflow: false };
   const record = (direction, message) => {
-    if (probe.records.length >= 4000) { probe.overflow = true; return; }
+    if (probe.records.length >= 12000) { probe.overflow = true; return; }
     const result = { direction };
     for (const key of ["kind", "operation", "status", "operationId", "generation", "content", "sequence", "packetKind", "mode", "control", "index", "menuGeneration", "screen", "revision", "geometryVersion", "message"])
       if (message?.[key] !== undefined) result[key] = typeof message[key] === "bigint" ? String(message[key]) : message[key];
@@ -132,6 +138,42 @@ function rendererObservation() {
   };
 }
 
+// Independent, deliberately narrow fixture parser for the production codec
+// layouts in crates/beatkernel/src/{replay,input}/codec.rs. No replay rewriting.
+function capturedInputs(bytes) {
+  assert(bytes.length > 0 && bytes.length <= 1048576);
+  let position = 0;
+  const take = count => { assert(Number.isSafeInteger(count) && count >= 0 && position + count <= bytes.length, "bounded capture extent"); const part = bytes.subarray(position, position + count); position += count; return part; };
+  const u64 = () => take(8).readBigUInt64LE();
+  const blob = () => { const length = u64(); assert(length <= 1048576n); return take(Number(length)); };
+  assert.equal(take(8).toString(), "BKREPLAY"); assert.equal(take(4).readUInt32LE(), 1);
+  assert.equal(take(4).readUInt32LE(), 1); take(4 + 8);
+  for (let i = 0; i < 4; i++) blob();
+  const calibration = take(1)[0]; assert(calibration === 0 || calibration === 1); if (calibration) blob();
+  const count = u64(); assert(count > 0n && count <= 20000n);
+  const inputs = []; let advances = 0, horizon = null;
+  for (let ordinal = 0n; ordinal < count; ordinal++) {
+    assert.equal(u64(), ordinal); const songNs = take(8).readBigInt64LE(); assert(horizon === null || songNs >= horizon); horizon = songNs;
+    const operation = take(1)[0];
+    if (operation === 1) { advances++; continue; }
+    assert.equal(operation, 0); const lane = take(4).readUInt32LE(), physical = blob();
+    let cursor = 0;
+    const p = length => { assert(cursor + length <= physical.length); const result = physical.subarray(cursor, cursor + length); cursor += length; return result; };
+    const option = read => { const tag = p(1)[0]; assert(tag === 0 || tag === 1); if (tag) read(); };
+    assert.equal(p(4).toString(), "BKPI"); assert.equal(p(2).readUInt16LE(), 1); assert.equal(p(1)[0], 0, "fixture input is a real button");
+    const source = p(8).readBigUInt64LE(), timestampNs = p(8).readBigInt64LE(), domain = p(4).readUInt32LE(), sequence = p(8).readBigUInt64LE();
+    option(() => { p(4); option(() => p(4)); option(() => p(12)); }); option(() => p(12));
+    assert.equal(p(1)[0], 0, "physical keyboard HID control"); assert.equal(p(2).readUInt16LE(), 7);
+    const key = p(2).readUInt16LE(), state = p(1)[0]; assert(state === 0 || state === 1); assert.equal(cursor, physical.length);
+    inputs.push({ lane, key, down: state === 0, source, timestampNs, domain, sequence, songNs });
+  }
+  assert.equal(position, bytes.length); assert(advances > 0 && horizon > 3000000000n && horizon < 10000000000n);
+  assert.equal(inputs.length, 2, "exact trusted Down/Up capture, without unmapped KeyZ");
+  assert.deepEqual(inputs.map(({ lane, key, down }) => ({ lane, key, down })), [{ lane: 17, key: 19, down: true }, { lane: 17, key: 19, down: false }]);
+  assert(inputs[1].sequence > inputs[0].sequence); assert(inputs.every(input => input.source === 1n));
+  return { inputs, advances, records: Number(count), horizon };
+}
+
 let browser, xvfb, profile, cache, server, page, renderer, business, networkSession;
 const networkStart = Date.now();
 const networkRecord = (kind, detail) => {
@@ -147,7 +189,9 @@ async function stop(child, name) {
   evidence.cleanup[name] = { exitCode: child.exitCode, signal: child.signalCode };
 }
 try {
-  const fixture = "#TITLE Retained policy actual playback\n#BPM 120\n#RANK 2\n#DEFEXRANK 100\n#TOTAL 320\n#WAV01 tone.wav\n#00011:00010000\n";
+  // Genuine lane11 note at 3 seconds leaves enough audio-startup time for
+  // trusted acquisition, while remaining a small finite production workload.
+  const fixture = "#TITLE Retained policy actual playback\n#BPM 120\n#RANK 2\n#DEFEXRANK 100\n#TOTAL 320\n#WAV01 tone.wav\n#00111:0001\n";
   const frames = 9600, sample = Buffer.alloc(44 + frames * 2);
   sample.write("RIFF"); sample.writeUInt32LE(sample.length - 8, 4); sample.write("WAVEfmt ", 8);
   sample.writeUInt32LE(16, 16); sample.writeUInt16LE(1, 20); sample.writeUInt16LE(1, 22);
@@ -273,40 +317,71 @@ try {
   const apply = async () => {
     const before = (await messages()).length; await click(100, 637);
     await page.waitForFunction(n => __settingsProbe.messages.slice(n).some(x => x.kind === "menu-effect" && x.route === 2 && x.effect === "1"), {}, before);
-    const effect = (await messages()).slice(before).find(x => x.kind === "menu-effect" && x.route === 2 && x.effect === "1"); assert.equal(effect.fields.length, 16); return effect;
+    const effect = (await messages()).slice(before).find(x => x.kind === "menu-effect" && x.route === 2 && x.effect === "1"); assert.equal(effect.fields.length, 34); return effect;
   };
   const policy = [BMS_TIMING_PRESET_ID, "defexrank-first", "easy"];
   const mirrors = () => page.evaluate(() => ["judge-preset", "judge-precedence", "judge-gauge"].map(id => document.querySelector("#" + id).value));
   await page.click("#menu-open"); await route(1); await click(800, 35); await route(2); await geometry();
-  assert.equal((await state()).fields.length, 16);
-  await release("canvas"); await select("PageDown", 10); await select("End", 15); await select("ArrowUp", 14); await select("ArrowUp", 13);
+  const originalBindings = ["KeyZ", "KeyS", "KeyX", "KeyD", "KeyC", "ShiftLeft", "Space", "KeyF", "KeyV",
+    "KeyN", "KeyJ", "KeyM", "KeyK", "Comma", "ShiftRight", "Slash", "KeyL", "Period"];
+  const lanes = [17, 18, 19, 20, 21, 22, 23, 24, 25, 33, 34, 35, 36, 37, 38, 39, 40, 41];
+  assert.equal((await state()).fields.length, 34);
+  assert.deepEqual((await state()).fields.slice(16), originalBindings);
+  const bindingMirrors = () => page.evaluate(() => Array.from(document.querySelectorAll('[id^="binding-"]')).filter(e => e.tagName === "SELECT").map(e => [e.id, e.value, e.disabled]));
+  const ownership = async locked => {
+    const values = await bindingMirrors(); assert.equal(values.length, 18); assert(values.every(row => row[2] === locked));
+    assert.equal(await page.$eval("#bindings-reset", e => e.disabled), locked);
+  };
+  await ownership(true);
+  const policyLast = async () => { await select("Home", 0); await select("PageDown", 10); for (let i = 11; i <= 15; i++) await select("ArrowDown", i); };
+  await release("canvas"); await policyLast(); await select("ArrowUp", 14); await select("ArrowUp", 13);
   await edit(13, policy[0]); await release("background"); await select("ArrowDown", 14); await edit(14, policy[1]);
-  await release("tab"); await release("canvas"); await select("End", 15); await edit(15, policy[2]);
-  await screenshot("policy-page-two"); const accepted = await apply(); assert.deepEqual(accepted.fields.slice(13), policy); assert.deepEqual(await mirrors(), policy);
+  await release("tab"); await release("canvas"); await select("ArrowDown", 15); await edit(15, policy[2]);
+  await screenshot("policy-page-two"); const accepted = await apply(); assert.deepEqual(accepted.fields.slice(13, 16), policy); assert.deepEqual(await mirrors(), policy);
   evidence.steps.push({ name: "trusted-keyboard-policy-apply", accepted });
-  const preserved = await state(); await page.click("#menu-back"); await route(1); await click(800, 35); await route(2); assert.deepEqual((await state()).fields.slice(13), policy);
+  const preserved = await state(); await page.click("#menu-back"); await route(1); await ownership(false); await click(800, 35); await route(2); assert.deepEqual((await state()).fields.slice(13, 16), policy);
   await screenshot("native-controls-unavailable");
   const rendererBefore = await renderer.evaluate(() => __settingsRenderer.records.length);
   const disabledState = await state(); await click(410, 630); await click(400, 570); await delay(150);
   const disabledActions = await renderer.evaluate(n => __settingsRenderer.records.slice(n).filter(x => x.kind === "menu-action" && ["12", "15"].includes(x.control)), rendererBefore);
   assert.equal(disabledActions.length, 0); assert.deepEqual(await state(), disabledState);
-  evidence.steps.push({ name: "disabled-native-no-hit", points: [[410, 630], [400, 570]], originalPolicy: preserved.fields.slice(13) });
+  evidence.steps.push({ name: "disabled-native-no-hit", points: [[410, 630], [400, 570]], originalPolicy: preserved.fields.slice(13, 16) });
   // Actual composition bridge: preedit cannot publish a draft; end publishes and
   // ordinary retained Apply consumes the matching edit acknowledgement.
-  await release("canvas"); await select("End", 15); await page.click("#menu-editor"); const compositionStart = (await messages()).length;
+  await release("canvas"); await policyLast(); await page.click("#menu-editor"); const compositionStart = (await messages()).length;
   await page.evaluate(() => { const e = document.querySelector("#menu-editor"); e.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "groove" })); e.value = "groove"; e.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertCompositionText", data: "groove", isComposing: true })); });
   await delay(100); assert.equal((await messages()).slice(compositionStart).filter(x => x.kind === "menu-edit" && x.direction === "sent").length, 0);
   await page.evaluate(() => document.querySelector("#menu-editor").dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "groove" })));
   await page.waitForFunction(() => __settingsProbe.messages.findLast(x => x.kind === "menu-state")?.fields[15] === "groove"); await apply(); assert.equal((await mirrors())[2], "groove");
   await edit(15, "easy"); await apply(); evidence.steps.push({ name: "injected-composition-bridge", physicalIME: false });
+  // Late row, invalid repair, and real input row are separate literal oracles.
+  await select("End", 33); await edit(33, "KeyB");
+  const editorOwner = await state(), editorStart = (await messages()).length;
+  await page.keyboard.press("Home"); await page.keyboard.press("End");
+  assert.equal((await state()).selected, 33); assert.equal((await state()).revision, editorOwner.revision);
+  assert(!(await messages()).slice(editorStart).some(x => x.direction === "sent" && x.kind === "menu-action"));
+  assert.equal(await page.$eval("#binding-29", e => e.value), "Period", "draft must not publish optimistically");
+  await screenshot("binding-row-33"); await apply(); assert.equal(await page.$eval("#binding-29", e => e.value), "KeyB");
+  await page.click("#menu-back"); await route(1); await ownership(false); await click(800, 35); await route(2);
+  await select("End", 33); assert.equal((await state()).fields[33], "KeyB");
+  await edit(33, "KeyZ"); const invalidStart = (await messages()).length; await click(100, 637);
+  await page.waitForFunction(n => __settingsProbe.messages.slice(n).some(x => x.kind === "menu-error"), {}, invalidStart);
+  assert(!(await messages()).slice(invalidStart).some(x => x.kind === "menu-effect" && x.effect === "1"));
+  assert.equal((await state()).fields[33], "KeyZ"); assert.equal(await page.$eval("#binding-29", e => e.value), "KeyB");
+  await edit(33, "KeyB"); await apply();
+  await select("Home", 0); await select("PageDown", 10); for (let i = 11; i <= 16; i++) await select("ArrowDown", i);
+  await edit(16, "KeyA"); assert.equal(await page.$eval("#binding-11", e => e.value), "KeyZ"); await apply();
+  assert.equal(await page.$eval("#binding-11", e => e.value), "KeyA"); await select("End", 33);
+  evidence.steps.push({ name: "retained-late-binding-invalid-repair-and-lane11-apply", fields: (await state()).fields });
   // Back discards Practice edits; Done updates only the retained parent until Apply.
-  const beforePractice = await state(); await click(320, 77); await route(3); await click(400, 170); await edit(0, "0.125");
-  await page.click("#menu-back"); await route(2); assert.deepEqual((await state()).fields, beforePractice.fields);
-  await click(320, 77); await route(3); await click(400, 170); await edit(0, "0.125"); await click(100, 397); await route(2);
-  assert.equal((await state()).fields[11], "0.125"); assert.deepEqual((await state()).fields.slice(13), policy);
+  const beforePractice = await state(); await click(320, 77); await route(3); await ownership(true); await click(400, 170); await edit(0, "0.125");
+  await page.click("#menu-back"); await route(2); assert.deepEqual((await state()).fields, beforePractice.fields); assert.equal((await state()).selected, 33);
+  await click(320, 77); await route(3); await ownership(true); await click(400, 170); await edit(0, "0.125"); await click(100, 397); await route(2);
+  assert.equal((await state()).fields[11], "0.125"); assert.deepEqual((await state()).fields.slice(13, 16), policy);
+  assert.deepEqual((await state()).fields.slice(16), beforePractice.fields.slice(16)); assert.equal((await state()).selected, 33);
   assert.equal(await page.$eval("#live-start", e => e.value), "0"); await apply(); assert.equal(await page.$eval("#live-start", e => e.value), "0.125");
   evidence.steps.push({ name: "practice-back-and-done", parent: await state() });
-  const parent = await state(); await click(735, 77); await route(5); await geometry(); const players = await state(); await screenshot("players");
+  const parent = await state(); await click(735, 77); await route(5); await ownership(true); await geometry(); const players = await state(); await screenshot("players");
   await click(90, 637); await route(2); const returned = await state();
   assert.equal(returned.screen, parent.screen); assert.equal(returned.menuGeneration, parent.menuGeneration); assert.equal(returned.selected, parent.selected);
   assert.deepEqual(returned.fields, parent.fields); assert.deepEqual(returned.roster, players.roster); await screenshot("players-done-parent");
@@ -319,14 +394,27 @@ try {
     const bytes = Buffer.from(response.bytes); await writeFile(resolve(out, name + ".json"), bytes); return JSON.parse(bytes.toString());
   };
   const baselineProfile = await save("accepted-profile"); assert.equal(baselineProfile.bindings.length, 18);
+  const badProfile = structuredClone(baselineProfile); badProfile.timing.earlyMs = "999"; badProfile.bindings[17][1] = "KeyA";
+  await writeFile(resolve(out, "invalid-last-binding-profile.json"), JSON.stringify(badProfile));
+  const invalidProfileStart = (await messages()).length, invalidProfileParent = await state(), invalidProfileMirrors = await bindingMirrors();
+  await (await page.$("#settings-load")).uploadFile(resolve(out, "invalid-last-binding-profile.json"));
+  await page.waitForFunction(n => __settingsProbe.messages.slice(n).some(x => x.kind === "settings-profile-error"), {}, invalidProfileStart);
+  await page.waitForFunction(() => __settingsProbe.messages.findLast(x => x.kind === "menu-state")?.pending === false);
+  assert.deepEqual((await state()).fields, invalidProfileParent.fields); assert.equal((await state()).selected, 33);
+  assert.deepEqual(await bindingMirrors(), invalidProfileMirrors); await ownership(true);
+  assert(!(await messages()).slice(invalidProfileStart).some(x => x.kind === "settings-profile-admit" || x.kind === "settings-profile-loaded"));
+  evidence.steps.push({ name: "invalid-profile-preserves-complete-parent", parent: await state(), original: invalidProfileParent });
   const loadedProfile = structuredClone(baselineProfile); loadedProfile.section.startSeconds = "0";
   loadedProfile.timing.earlyMs = "37"; loadedProfile.timing.gauge = "groove";
-  [loadedProfile.bindings[0][1], loadedProfile.bindings[1][1]] = [loadedProfile.bindings[1][1], loadedProfile.bindings[0][1]];
+  assert.deepEqual(baselineProfile.bindings, lanes.map((lane, index) => [lane, index === 0 ? "KeyA" : index === 17 ? "KeyB" : originalBindings[index]]));
+  [loadedProfile.bindings[1][1], loadedProfile.bindings[2][1]] = [loadedProfile.bindings[2][1], loadedProfile.bindings[1][1]];
   await writeFile(resolve(out, "import-profile.json"), JSON.stringify(loadedProfile));
   const loadStart = (await messages()).length; const loadParent = await state(); await click(670, 637);
   await (await page.$("#settings-load")).uploadFile(resolve(out, "import-profile.json"));
   await page.waitForFunction(() => document.querySelector("#settings-status").textContent.startsWith("Settings loaded.")); await geometry();
   const afterLoad = await state(); assert.equal(afterLoad.screen, loadParent.screen); assert.equal(afterLoad.selected, loadParent.selected);
+  assert.equal(afterLoad.selected, 33); await ownership(true);
+  assert.deepEqual(afterLoad.fields.slice(16), loadedProfile.bindings.map(row => row[1]));
   assert.equal(afterLoad.fields[0], "37"); assert.equal(afterLoad.fields[11], "0"); assert.equal(afterLoad.fields[15], "groove");
   const wire = (await messages()).slice(loadStart), pending = wire.find(x => x.kind === "menu-state" && x.pending === true), candidate = wire.find(x => x.kind === "settings-profile-candidate"), admit = wire.find(x => x.kind === "settings-profile-admit"), loaded = wire.find(x => x.kind === "settings-profile-loaded");
   assert(pending && candidate && admit && loaded, "actual profile proposal/admission/final receipts required");
@@ -341,15 +429,47 @@ try {
   assert(committed && wire.indexOf(committed) < wire.indexOf(loaded), "T2 menu receipt must precede final loaded reply");
   assert.deepEqual(committed.previousToken, tokenOf(pending)); assert.deepEqual(loaded.resultToken, tokenOf(committed));
   assert(wire.indexOf(pending) < wire.indexOf(candidate) && wire.indexOf(candidate) < wire.indexOf(admit) && wire.indexOf(admit) < wire.indexOf(loaded));
+  await click(320, 77); await route(3); await ownership(true); await click(100, 397); await route(2);
+  assert.equal((await state()).selected, 33); assert.deepEqual((await state()).fields, afterLoad.fields);
+  await click(735, 77); await route(5); await ownership(true); await click(90, 637); await route(2);
+  assert.equal((await state()).selected, 33); assert.deepEqual((await state()).fields, afterLoad.fields);
   await apply(); const exported = await save("roundtrip-profile"); assert.deepEqual(exported, loadedProfile, "exact complete 18-binding profile roundtrip; stale retained fields must not overwrite upload");
   await page.click("#menu-back"); await route(1); await click(800, 35); await route(2); assert.equal((await state()).fields[15], "groove"); await apply(); assert.deepEqual(await save("reopened-profile"), loadedProfile);
   evidence.steps.push({ name: "profile-admission-exact-roundtrip", pending, candidate, admit, loaded, exported });
   // Finite production playback is mandatory. Original output reports provide
   // advancing audio frontier and actual terminal proof, never a host sleep clock.
-  await page.click("#record"); const playStart = (await messages()).length; await page.click("#play");
+  await page.click("#record"); const playStart = (await messages()).length, playInputStart = await page.evaluate(() => __settingsProbe.input.length); await page.click("#play");
+  await page.waitForFunction(n => __settingsProbe.messages.slice(n).some(x => x.kind === "play-start" && x.direction === "sent"), {}, playStart);
+  const liveRequest = (await messages()).slice(playStart).find(x => x.kind === "play-start" && x.direction === "sent");
+  assert(Array.isArray(liveRequest.keyPairs)); assert.equal(liveRequest.keyPairs.length, 36);
+  const preparedPairs = Array.from({ length: 18 }, (_, i) => liveRequest.keyPairs.slice(i * 2, i * 2 + 2));
+  assert.deepEqual(preparedPairs.find(row => row[0] === 17), [17, 19]); assert(!preparedPairs.some(row => row[0] === 17 && row[1] === 2));
+  const waitSong = ns => page.waitForFunction((id, ns) => __settingsProbe.messages.some(x => x.kind === "play-render-done" && x.playId === id && x.songNs !== null && BigInt(x.songNs) >= BigInt(ns)), { timeout: 15000 }, liveRequest.playId, String(ns));
+  await waitSong(2000000000n);
+  const unmappedStart = (await messages()).length; await page.keyboard.down("KeyZ"); await page.keyboard.up("KeyZ"); await waitSong(2300000000n);
+  assert(!(await messages()).slice(unmappedStart).some(x => x.kind === "play-step" && x.events?.some(event => event.key === 2)), "old KeyZ must not acquire gameplay input");
+  await waitSong(2970000000n);
+  const observedBeforeKey = (await messages()).findLast(x => x.kind === "play-render-done" && x.playId === liveRequest.playId);
+  assert(BigInt(observedBeforeKey.songNs) < 3080000000n, "actual song observation must leave a genuine hit window");
+  await page.keyboard.down("KeyA"); await page.keyboard.up("KeyA");
+  await page.waitForFunction(id => {
+    const steps = __settingsProbe.messages.filter(x => x.kind === "play-step" && x.direction === "sent" && x.playId === id);
+    return [true, false].every(down => steps.some(step => step.events?.some(event => event.key === 19 && event.down === down)
+      && __settingsProbe.messages.some(reply => reply.kind === "play-step-done" && reply.playId === id && reply.tickId === step.tickId)));
+  }, { timeout: 10000 }, liveRequest.playId);
   await page.waitForFunction(n => __settingsProbe.messages.slice(n).some(x => ["play-stopped", "play-error"].includes(x.kind)), { timeout: 45000 }, playStart);
   const liveMessages = (await messages()).slice(playStart), terminal = liveMessages.find(x => ["play-stopped", "play-error"].includes(x.kind));
   assert.equal(terminal.kind, "play-stopped", JSON.stringify(terminal)); assert.equal(terminal.replayComplete, true); assert(terminal.completedResults?.proof, "genuine terminal Results proof required");
+  assert.equal(BigInt(terminal.hits), 1n, "genuine lane11 judgment must be a hit"); assert.equal(BigInt(terminal.misses), 0n);
+  assert(Array.isArray(terminal.replay), "bounded original captured bytes required");
+  const captured = Buffer.from(terminal.replay), capture = capturedInputs(captured); await writeFile(resolve(out, "retained-keyA.bkr"), captured);
+  const acquired = liveMessages.filter(x => x.kind === "play-step" && x.direction === "sent" && x.events?.length);
+  assert.deepEqual(acquired.flatMap(x => x.events).map(({ key, down }) => ({ key, down })), [{ key: 19, down: true }, { key: 19, down: false }]);
+  const activation = liveMessages.find(x => x.kind === "play-activate" && x.direction === "sent"); assert(activation);
+  assert(acquired.flatMap(x => x.events).every(event => BigInt(event.hostNs) >= BigInt(activation.hostNs)));
+  const trusted = await page.evaluate(n => __settingsProbe.input.slice(n).filter(x => ["KeyA", "KeyZ"].includes(x.code)), playInputStart);
+  for (const code of ["KeyA", "KeyZ"]) for (const kind of ["keydown", "keyup"]) assert(trusted.some(x => x.code === code && x.kind === kind && x.trusted));
+  evidence.steps.push({ name: "genuine-retained-lane11-input-capture", observedBeforeKey, preparedPairs, acquired, activation, capture, capturedSha256: sha(captured), trusted });
   const preparation = liveMessages.find(x => x.direction === "sent" && x.kind === "play-start");
   assert(preparation, "actual play preparation request required"); assert.deepEqual(preparation.timingPolicy, { presetId: policy[0], rankPrecedence: policy[1], gauge: "groove" });
   const output = liveMessages.filter(x => x.direction === "received" && x.kind === "play-render-done"); assert(output.length > 1, "genuine advancing output observations required");
@@ -369,7 +489,24 @@ try {
   assert(renderEvidence.records.some(x => x.kind === "state-ack" && x.generation === results.packet.generation && x.content === results.packet.content && x.sequence === results.packet.sequence), "actual correlated Results ACK required");
   await writeFile(resolve(out, "results.packet"), Buffer.from(results.bytes));
   await page.screenshot({ path: resolve(out, "genuine-results.png"), fullPage: true });
-  evidence.renderer = renderEvidence; evidence.window = await page.evaluate(() => __settingsProbe);
+  // A subsequent accepted live binding cannot reinterpret the captured inputs.
+  await page.click("#menu-open"); await route(1); await click(800, 35); await route(2); await ownership(true);
+  await select("Home", 0); await select("PageDown", 10); for (let i = 11; i <= 16; i++) await select("ArrowDown", i);
+  await edit(16, "KeyE"); await apply(); assert.equal(await page.$eval("#binding-11", e => e.value), "KeyE");
+  await page.click("#menu-back"); await route(1); await ownership(false);
+  await (await page.$("#replay-file")).uploadFile(resolve(out, "retained-keyA.bkr"));
+  await page.waitForFunction(() => !document.querySelector("#replay-play").disabled);
+  const replayStart = (await messages()).length; await page.click("#replay-play");
+  await page.waitForFunction(n => __settingsProbe.messages.slice(n).some(x => ["play-stopped", "play-error"].includes(x.kind)), { timeout: 45000 }, replayStart);
+  const replayWire = (await messages()).slice(replayStart), replayRequest = replayWire.find(x => x.kind === "play-start" && x.direction === "sent"), replayTerminal = replayWire.find(x => ["play-stopped", "play-error"].includes(x.kind));
+  assert(replayRequest); assert.equal(replayRequest.mode, "replay"); assert.equal(replayRequest.keyPairs, undefined);
+  assert.equal(replayTerminal.kind, "play-stopped", JSON.stringify(replayTerminal)); assert.equal(BigInt(replayTerminal.hits), 1n); assert.equal(BigInt(replayTerminal.misses), 0n);
+  assert(!replayWire.some(x => x.kind === "play-step" && x.events?.length), "recorded input playback must not acquire live keys");
+  assert(replayWire.some(x => x.kind === "play-render-done" && x.completed === true && x.pendingInputs === 0 && x.commandsPending === false));
+  assert.equal(await page.$eval("#binding-11", e => e.value), "KeyE");
+  evidence.steps.push({ name: "captured-replay-independent-of-later-live-binding", capturedSha256: sha(captured), replayRequest, replayTerminal });
+  await page.screenshot({ path: resolve(out, "captured-replay-results.png"), fullPage: true });
+  evidence.renderer = await renderer.evaluate(() => __settingsRenderer); evidence.business = await business.evaluate(() => __settingsRenderer); evidence.window = await page.evaluate(() => __settingsProbe);
   assert(!evidence.renderer.overflow && !evidence.business.overflow && !evidence.window.overflow, "bounded observation overflow invalidates evidence");
   assert(!evidence.networkOverflow, "bounded network lifecycle overflow invalidates diagnostics");
   assert(evidence.window.input.some(x => x.kind === "keydown" && x.trusted && x.code === "PageDown"));

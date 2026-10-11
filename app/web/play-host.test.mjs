@@ -8132,8 +8132,13 @@ test("Records keyboard host: Selection retains row RPC and its existing modifier
 // Literal Window acquisition oracle: deliberately independent of the new mapper.
 const retainedPolicyIds = ["judge-preset", "judge-precedence", "judge-gauge"];
 const retainedPolicy = [BMS_TIMING_PRESET_ID, "defexrank-first", "hard"];
+const retainedBindingIds = ["11", "12", "13", "14", "15", "16", "17", "18", "19",
+  "21", "22", "23", "24", "25", "26", "27", "28", "29"].map(lane => `binding-${lane}`);
 function retainedSettingsValues(h) {
   return [...settingsFields.map(([, , id]) => h.get(id).value), ...retainedPolicyIds.map(id => h.get(id).value)];
+}
+function retainedBindingValues(h) {
+  return [...retainedSettingsValues(h), ...retainedBindingIds.map(id => h.get(id).value)];
 }
 function completeSettingsDraft(h) {
   return [...settingsDraft(h), ...retainedPolicyIds.map(id => [id, h.get(id).value])];
@@ -8148,13 +8153,15 @@ function profileWithPolicy() {
 }
 function profileMenuValues(profile) {
   return [...settingsFields.map(([group, key]) => profile[group][key]),
-    profile.timing.presetId ?? "", profile.timing.rankPrecedence ?? "rank-first", profile.timing.gauge ?? "beatkernel"];
+    profile.timing.presetId ?? "", profile.timing.rankPrecedence ?? "rank-first", profile.timing.gauge ?? "beatkernel",
+    ...[17, 18, 19, 20, 21, 22, 23, 24, 25, 33, 34, 35, 36, 37, 38, 39, 40, 41]
+      .map(lane => profile.bindings.find(row => row[0] === lane)[1])];
 }
 async function retainedProfileRequest(h, route = 2) {
   await h.preview();
   const game = h.workers[0];
   const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
-    route, fields: route === 2 ? retainedSettingsValues(h) : ["0", ""], selected: route === 2 ? 14 : 1,
+    route, fields: route === 2 ? retainedBindingValues(h) : ["0", ""], selected: route === 2 ? 33 : 1,
     hasSettingsParent: true };
   await h.receive(state); chooseSettings(h); await flush();
   const request = game.last("settings-profile-load"); assert.ok(request);
@@ -8173,17 +8180,17 @@ async function profileCandidate(h, transaction, pending, settings = profileWithP
     menuToken: retainedToken(pending), settings });
 }
 
-test("retained policy: Settings publishes sixteen acquired strings and Apply preserves all eighteen bindings", async () => {
+test("retained policy: Settings publishes all34 acquired strings and legacy16 Apply preserves all eighteen bindings", async () => {
   const h = await harness();
   try {
     await h.preview(); const game = h.workers[0];
     retainedPolicyIds.forEach((id, index) => { h.get(id).value = retainedPolicy[index]; });
-    const acquired = retainedSettingsValues(h), bindings = settingsDraft(h).slice(13);
+    const acquired = retainedBindingValues(h), bindings = settingsDraft(h).slice(13);
     const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
       route: 2, fields: [], selected: 0 };
     await h.receive(state);
     assert.deepEqual(game.last("menu-fields").fields, acquired);
-    const fields = profileMenuValues(profileWithPolicy());
+    const fields = profileMenuValues(profileWithPolicy()).slice(0, 16);
     await h.receive({ ...state, revision: 7n, fields });
     await h.receive({ ...state, kind: "menu-effect", revision: 7n, fields, effect: 1n, control: 10n });
     assert.deepEqual(retainedSettingsValues(h), fields);
@@ -8204,7 +8211,7 @@ test("retained policy: late invalid policy or partial count calls no mirror sett
         Object.defineProperty(element, "value", { configurable: true, get() { return value; },
           set(next) { writes.push(id); value = next; } });
       }
-      let fields = profileMenuValues(profileWithPolicy());
+      let fields = profileMenuValues(profileWithPolicy()).slice(0, 16);
       if (fault === "preset") fields[13] = "unknown-preset";
       if (fault === "precedence") fields[14] = "unknown-precedence";
       if (fault === "gauge") fields[15] = "unknown-gauge";
@@ -8224,6 +8231,158 @@ test("retained policy: late invalid policy or partial count calls no mirror sett
       }
     } finally { await h.close(); }
   }
+});
+
+test("retained bindings: raw34 publication uses literal lane order despite unsorted controls and unfinished drafts", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0];
+    h.get("judge-early").value = "";
+    const raw = ["KeyA", "KeyA", "", "unfinished", "KeyC", "ShiftLeft", "Space", "KeyF", "KeyV",
+      "KeyN", "KeyJ", "KeyM", "KeyK", "Comma", "KeyQ", "Slash", "KeyL", "Escape"];
+    retainedBindingIds.forEach((id, index) => { h.get(id).value = raw[index]; });
+    h.get("bindings").children.reverse();
+    const original = completeSettingsDraft(h);
+    await h.receive({ kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 2, fields: [], selected: 0, hasSettingsParent: true });
+    const fields = Array.from(game.last("menu-fields").fields);
+    assert.equal(fields.length, 34);
+    assert.deepEqual(fields.slice(16), raw);
+    assert.equal(fields[0], ""); assert.equal(fields[16], "KeyA"); assert.equal(fields[33], "Escape");
+    assert.deepEqual(completeSettingsDraft(h), original);
+  } finally { await h.close(); }
+});
+
+test("retained bindings: full Apply publishes all mirrors only after accepted effect and supplies physical KeyA19 input", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0], before = completeSettingsDraft(h), writes = [];
+    for (const [id] of before) {
+      const element = h.get(id); let value = element.value;
+      Object.defineProperty(element, "value", { configurable: true, get() { return value; },
+        set(next) { writes.push(id); value = next; } });
+    }
+    const profile = profileWithPolicy();
+    profile.section = { startSeconds: "0", endSeconds: "" };
+    const fields = profileMenuValues(profile);
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 2, fields, selected: 16, hasSettingsParent: true };
+    await h.receive(state);
+    assert.deepEqual(completeSettingsDraft(h), before, "row state alone cannot publish acquisition mirrors");
+    assert.deepEqual(writes, []);
+    await h.receive({ ...state, kind: "menu-effect", revision: 5n, effect: 1n, control: 10n });
+    assert.deepEqual(completeSettingsDraft(h), before, "stale effect cannot publish keys");
+    await h.receive({ ...state, kind: "menu-effect", effect: 1n, control: 10n });
+    assert.deepEqual(retainedBindingValues(h), fields);
+    assert.equal(writes.length, 34);
+    assert.equal(new Set(writes).size, 34, "Apply publishes each scalar policy and binding mirror once");
+    // Leave the draft owner before acquiring a standalone playback snapshot.
+    await h.receive({ ...state, revision: 7n, route: 1, fields: ["chart.bms"], selected: 0, hasSettingsParent: false });
+    const session = await h.launch(), start = session.start;
+    const pairs = Array.from(start.keyPairs);
+    const lane = pairs.findIndex((word, index) => index % 2 === 0 && word === 17);
+    assert.equal(pairs[lane + 1], 19);
+    assert.ok(!pairs.some((word, index) => index % 2 === 0 && word === 17 && pairs[index + 1] === 2));
+    assert.match(h.get("keys").textContent, /11: KeyA/);
+    // Any gameplay form acquisition would now throw, while the snapshot remains usable.
+    for (const id of retainedBindingIds) Object.defineProperty(h.get(id), "value", {
+      configurable: true, get() { assert.fail("gameplay keyboard handler reads a binding form"); }, set() {} });
+    h.setNow(1300);
+    const steps = game.messages("play-step").length;
+    assert.equal(h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300 }).defaultPrevented, false);
+    assert.equal(game.messages("play-step").length, steps);
+    assert.equal(h.window.emit("keydown", { code: "KeyA", repeat: false, timeStamp: 1300 }).defaultPrevented, true);
+    const down = game.last("play-step");
+    assert.deepEqual(down.events, [{ hostNs: 1300000000n, key: 19, down: true, sequence: 1n }]);
+    h.window.emit("keyup", { code: "KeyA", timeStamp: 1300 });
+    await h.receive({ kind: "play-step-done", commandsPending: false, pendingInputs: 0,
+      playId: start.playId, tickId: down.tickId, songNs: 50000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+    assert.deepEqual(game.last("play-step").events, [{ hostNs: 1300000000n, key: 19, down: false, sequence: 2n }]);
+    retainedBindingIds.forEach((id, index) => Object.defineProperty(h.get(id), "value", {
+      configurable: true, writable: true, value: fields[16 + index] }));
+    h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  } finally { await h.close(); }
+});
+
+test("retained bindings: invalid final row or partial full shape calls zero scalar policy and binding setters", async () => {
+  for (const fault of ["escape", "unknown", "duplicate", "overlong", "partial", "extra"]) {
+    const h = await harness();
+    try {
+      await h.preview(); const original = completeSettingsDraft(h), writes = [];
+      for (const [id] of original) {
+        const element = h.get(id); let value = element.value;
+        Object.defineProperty(element, "value", { configurable: true, get() { return value; },
+          set(next) { writes.push(id); value = next; } });
+      }
+      let fields = profileMenuValues(profileWithPolicy());
+      if (fault === "escape") fields[33] = "Escape";
+      if (fault === "unknown") fields[33] = "KeyUnsupported";
+      if (fault === "duplicate") fields[33] = fields[16];
+      if (fault === "overlong") fields[33] = "x".repeat(1025);
+      if (fault === "partial") fields = fields.slice(0, 33);
+      if (fault === "extra") fields.push("");
+      const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+        route: 2, fields, selected: 0, hasSettingsParent: true };
+      await h.receive(state); writes.length = 0;
+      await h.receive({ ...state, kind: "menu-effect", effect: 1n, control: 10n });
+      assert.deepEqual(writes, [], fault);
+      assert.deepEqual(completeSettingsDraft(h), original, fault);
+    } finally { await h.close(); }
+  }
+});
+
+test("retained bindings: row33 composition and correlated edit acknowledgment leave bindings unchanged until Apply", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); const game = h.workers[0], original = completeSettingsDraft(h);
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 2, fields: retainedBindingValues(h), selected: 33, hasSettingsParent: true };
+    await h.receive(state);
+    const editor = h.get("menu-editor");
+    editor.emit("compositionstart"); editor.value = "KeyQ"; editor.emit("input", { isComposing: true });
+    editor.emit("keydown", { code: "Enter", isComposing: true });
+    assert.equal(game.messages("menu-edit").length, 0);
+    assert.equal(game.messages("menu-action").length, 0);
+    assert.deepEqual(completeSettingsDraft(h), original);
+    editor.emit("compositionend"); editor.emit("keydown", { code: "Enter" });
+    assert.equal(game.last("menu-edit").index, 33);
+    assert.equal(game.last("menu-edit").value, "KeyQ");
+    assert.equal(game.messages("menu-action").length, 0, "Apply waits for full binding edit receipt");
+    assert.deepEqual(completeSettingsDraft(h), original);
+    const fields = [...state.fields]; fields[33] = "KeyQ";
+    await h.receive({ ...state, revision: 7n, fields });
+    assert.equal(game.last("menu-action").control, 10n);
+    assert.equal(game.last("menu-action").revision, 7n);
+    assert.deepEqual(completeSettingsDraft(h), original, "edit acknowledgment has no optimistic keys");
+    await h.receive({ ...state, kind: "menu-effect", revision: 7n, fields, effect: 1n, control: 10n });
+    assert.deepEqual(retainedBindingValues(h), fields);
+  } finally { await h.close(); }
+});
+
+test("retained bindings: Settings ancestry locks original selects and guards emitted reset until owner exit", async () => {
+  const h = await harness();
+  try {
+    await h.preview();
+    h.get("binding-11").value = "KeyA";
+    const original = completeSettingsDraft(h);
+    const base = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 2, fields: retainedBindingValues(h), selected: 33, hasSettingsParent: true };
+    // Practice=3, Players=5, Devices=9 use accepted ancestry rather than route inference.
+    for (const [index, route] of [2, 3, 5, 9].entries()) {
+      await h.receive({ ...base, screen: BigInt(3 + index), revision: BigInt(6 + index), route,
+        fields: route === 2 ? base.fields : ["0", ""], selected: route === 2 ? 33 : 0 });
+      for (const id of retainedBindingIds) assert.equal(h.get(id).disabled, true, `${route}:${id}`);
+      assert.equal(h.get("bindings-reset").disabled, true);
+      h.get("bindings-reset").emit("click"); await flush();
+      assert.deepEqual(completeSettingsDraft(h), original, "direct gesture cannot bypass retained ownership");
+    }
+    await h.receive({ ...base, screen: 9n, revision: 10n, route: 1, fields: ["chart.bms"], selected: 0,
+      hasSettingsParent: false });
+    for (const id of retainedBindingIds) assert.equal(h.get(id).disabled, false, id);
+    assert.equal(h.get("bindings-reset").disabled, false);
+    h.click("bindings-reset"); await flush();
+    assert.equal(h.get("binding-11").value, "KeyZ");
+  } finally { await h.close(); }
 });
 
 test("retained policy: Settings keyboard reaches page two with token fencing and native IME guards", async () => {
@@ -8290,7 +8449,7 @@ test("retained profile: T0/T1 admission clears read deadline before post and T2 
       Object.defineProperty(element, "value", { configurable: true, get() { return value; }, set(next) { writes.push(id); value = next; } });
     }
     await h.receive(final);
-    assert.deepEqual(retainedSettingsValues(h), profileMenuValues(profileWithPolicy()));
+    assert.deepEqual(retainedBindingValues(h), profileMenuValues(profileWithPolicy()));
     for (const [lane, code] of portableSettings().bindings) assert.equal(h.get(`binding-${lane.toString(16)}`).value, code);
     assert.equal(writes.length, 34);
     await h.receive(final); assert.equal(writes.length, 34, "duplicate final cannot publish again");
@@ -8314,7 +8473,7 @@ test("retained profile: pending T1 adoption requires exact operation T0 owner ro
       if (fault === "previous-token") pending.previousToken.revision--;
       if (fault === "route") pending.route = 3;
       if (fault === "screen") pending.screen++;
-      if (fault === "fields") pending.fields = pending.fields.map((value, index) => index === 0 ? "51" : value);
+      if (fault === "fields") pending.fields = pending.fields.map((value, index) => index === 33 ? "KeyQ" : value);
       if (fault === "selection") pending.selected--;
       if (fault === "owner") { h.window.emit("pagehide"); await flush(); }
       await h.receive(pending, transaction.game);
@@ -8334,7 +8493,7 @@ test("retained profile: candidate validates full schema original binding and pol
       if (fault === "missing-binding") candidate.bindings.pop();
       if (fault === "unknown-key") candidate.output.extra = "invalid";
       if (fault === "policy") candidate.timing.gauge = "unknown";
-      if (fault === "binding-drift") h.get("binding-11").value = "KeyQ";
+      if (fault === "binding-drift") h.get("binding-29").value = "KeyQ";
       if (fault === "policy-drift") h.get("judge-gauge").value = "hard";
       if (fault === "scalar-drift") h.get("judge-early").value = "51";
       if (fault === "revision") await h.receive({ ...pending, revision: 8n });
@@ -8364,7 +8523,7 @@ test("retained profile: pre-admission timeout cancels held read and late candida
 });
 
 test("retained profile: admitted malformed or lost final joins Worker retirement before ordinary use", async () => {
-  for (const fault of ["no-final", "wrong-result", "wrong-admitted", "final-before-state"]) {
+  for (const fault of ["no-final", "wrong-result", "wrong-admitted", "final-before-state", "partial-fields"]) {
     const h = await harness({ holdDispose: true });
     try {
       const transaction = await retainedProfileRequest(h), pending = await profilePending(h, transaction);
@@ -8373,6 +8532,7 @@ test("retained profile: admitted malformed or lost final joins Worker retirement
       assert.ok(transaction.game.last("settings-profile-admit"));
       const result = { ...pending, revision: 8n, pending: false,
         previousToken: retainedToken(pending), fields: profileMenuValues(profileWithPolicy()) };
+      if (fault === "partial-fields") result.fields = result.fields.slice(0, 16);
       if (fault !== "final-before-state") await h.receive(result);
       if (fault === "no-final") await h.advance(10000);
       else {
@@ -8429,7 +8589,7 @@ test("retained profile: mismatched admitted T2 fields retire immediately and lat
     assert.ok(transaction.game.last("settings-profile-admit"));
     const acceptedFields = profileMenuValues(profileWithPolicy());
     const result = { ...pending, revision: pending.revision + 1n, pending: false,
-      previousToken: retainedToken(pending), fields: acceptedFields.map((value, index) => index === 0 ? "51" : value) };
+      previousToken: retainedToken(pending), fields: acceptedFields.map((value, index) => index === 33 ? "KeyQ" : value) };
     await h.receive(result);
     assert.ok(transaction.game.last("dispose"), "wrong fields in the exact T2 receipt start retirement before final or watchdog");
     assert.equal(transaction.game.terminations, 0, "the held dispose join has not completed");
@@ -8496,7 +8656,7 @@ test("retained profile: active Practice retains child token and selected field t
     await h.receive(result);
     await h.receive({ kind: "settings-profile-loaded", id: transaction.request.id,
       admittedToken: retainedToken(pending), resultToken: retainedToken(result), settings: profile });
-    assert.deepEqual(retainedSettingsValues(h), profileMenuValues(profile));
+    assert.deepEqual(retainedBindingValues(h), profileMenuValues(profile));
     assert.equal(h.get("menu-editor").value, profile.section.endSeconds);
     h.click("menu-back"); await flush();
     const back = transaction.game.last("menu-action");
@@ -8509,7 +8669,7 @@ test("retained profile: Save adopts exact pending and final receipts without loa
   try {
     await h.preview(); const game = h.workers[0];
     const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
-      route: 2, fields: retainedSettingsValues(h), selected: 14, hasSettingsParent: true };
+      route: 2, fields: retainedBindingValues(h), selected: 33, hasSettingsParent: true };
     await h.receive(state); const before = completeSettingsDraft(h);
     h.click("settings-save"); await flush(); const request = game.last("settings-profile-save");
     assert.deepEqual(request.menuToken, retainedToken(state));
@@ -8535,7 +8695,7 @@ for (const fault of ["empty-early-ms", "duplicate-binding"]) {
       await h.preview(); const game = h.workers[0];
       if (fault === "empty-early-ms") h.get("judge-early").value = "";
       else h.get("binding-11").value = h.get("binding-12").value;
-      const original = completeSettingsDraft(h), expected = retainedSettingsValues(h);
+      const original = completeSettingsDraft(h), expected = retainedBindingValues(h);
       const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
         route: 2, fields: [], selected: 0, hasSettingsParent: true };
       await h.receive(state);
@@ -8543,7 +8703,7 @@ for (const fault of ["empty-early-ms", "duplicate-binding"]) {
       assert.ok(publication, "unfinished values must reach the editable retained menu");
       assert.deepEqual(retainedToken(publication), retainedToken(state));
       assert.deepEqual(Array.from(publication.fields), expected);
-      assert.equal(publication.fields.length, 16);
+      assert.equal(publication.fields.length, 34);
       assert.deepEqual(completeSettingsDraft(h), original);
       assert.equal(game.terminations, 0);
     } finally { await h.close(); }
@@ -8556,7 +8716,7 @@ for (const fault of ["empty-early-ms", "duplicate-binding"]) {
     try {
       await h.preview(); const game = h.workers[0];
       const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
-        route: 2, fields: retainedSettingsValues(h), selected: 14, hasSettingsParent: true };
+        route: 2, fields: retainedBindingValues(h), selected: 33, hasSettingsParent: true };
       await h.receive(state);
       if (fault === "empty-early-ms") h.get("judge-early").value = "";
       else h.get("binding-11").value = h.get("binding-12").value;
@@ -8577,7 +8737,7 @@ for (const fault of ["empty-early-ms", "duplicate-binding"]) {
       await h.receive(result);
       await h.receive({ kind: "settings-profile-loaded", id: request.id,
         admittedToken: retainedToken(pending), resultToken: retainedToken(result), settings: candidate });
-      assert.deepEqual(retainedSettingsValues(h), profileMenuValues(candidate));
+      assert.deepEqual(retainedBindingValues(h), profileMenuValues(candidate));
       for (const [lane, code] of candidate.bindings) assert.equal(h.get(`binding-${lane.toString(16)}`).value, code);
       assert.equal(h.get("settings-load").disabled, false);
       assert.equal(game.terminations, 0);
@@ -8590,7 +8750,7 @@ test("retained profile repair: admitted bad receipt rebuilds the bounded origina
   try {
     await h.preview(); const game = h.workers[0];
     const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
-      route: 2, fields: retainedSettingsValues(h), selected: 14, hasSettingsParent: true };
+      route: 2, fields: retainedBindingValues(h), selected: 33, hasSettingsParent: true };
     await h.receive(state);
     h.get("judge-early").value = "";
     h.get("binding-11").value = h.get("binding-12").value;
@@ -8603,7 +8763,7 @@ test("retained profile repair: admitted bad receipt rebuilds the bounded origina
     // raw restoration draft while the uncertain owner is being retired.
     h.get("judge-early").value = "75"; h.get("binding-11").value = "KeyQ";
     const result = { ...pending, revision: 8n, pending: false, previousToken: retainedToken(pending),
-      fields: profileMenuValues(profileWithPolicy()).map((value, index) => index === 0 ? "51" : value) };
+      fields: profileMenuValues(profileWithPolicy()).map((value, index) => index === 33 ? "KeyQ" : value) };
     await h.receive(result);
     assert.ok(game.last("dispose"));
     assert.equal(h.workers.length, 1);

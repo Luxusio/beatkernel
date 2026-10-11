@@ -1,5 +1,5 @@
 // Deferred: node --experimental-vm-modules --test app/web/*.test.mjs
-// Loads the actual Worker and helper sources; no generated WASM or browser.
+// Loads actual Worker/helpers and current generated WASM menu owners; no browser.
 import assert from "node:assert/strict";
 import { File as NodeFile } from "node:buffer";
 import { MessageChannel as NodeMessageChannel } from "node:worker_threads";
@@ -960,18 +960,25 @@ function validSettingsProfileText() {
 // ordered-index mapping cannot make both the implementation and test agree.
 const retainedPolicyId = "beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1";
 const completeSettingsDraft = () => [...settingsMenuDraft(), retainedPolicyId, "defexrank-first", "groove"];
-const importedSettingsFields = () => ["50", "50", "0", "interactive", "20", "48000", "256", "64", "256", "2048", "256", "3", "9", retainedPolicyId, "defexrank-first", "groove"];
+const bindingCodes = () => ["KeyZ", "KeyS", "KeyX", "KeyD", "KeyC", "ShiftLeft", "Space", "KeyF", "KeyV",
+  "KeyN", "KeyJ", "KeyM", "KeyK", "Comma", "ShiftRight", "Slash", "KeyL", "Period"];
+const bindingSettingsDraft = () => [...completeSettingsDraft(), ...bindingCodes()];
+const importedBindingCodes = () => ["KeyA", "KeyS", "KeyX", "KeyD", "KeyC", "ShiftLeft", "Space", "KeyF", "KeyV",
+  "KeyN", "KeyJ", "KeyM", "KeyK", "Comma", "ShiftRight", "Slash", "KeyL", ""];
+const importedSettingsFields = () => ["50", "50", "0", "interactive", "20", "48000", "256", "64", "256", "2048", "256", "3", "9", retainedPolicyId, "defexrank-first", "groove", ...importedBindingCodes()];
 function retainedProfile() {
   const dto = JSON.parse(validSettingsProfileText());
   dto.bindings.sort((a, b) => a[0] - b[0]);
+  dto.bindings[0][1] = "KeyA";
+  dto.bindings[17][1] = "";
   Object.assign(dto.timing, { presetId: retainedPolicyId, rankPrecedence: "defexrank-first", gauge: "groove" });
   dto.section = { startSeconds: "3", endSeconds: "9" };
   return dto;
 }
-async function retainedSettingsWorker(child = false) {
+async function retainedSettingsWorker(child = false, bindings = true) {
   const h = await readyWorker({ actualMenu: true });
   await h.send({ kind: "menu-open", fields: ["chart.bms"] });
-  await h.send({ kind: "menu-navigate", ...acquiredMenuToken(h.of("menu-state").at(-1)), route: 2, fields: completeSettingsDraft() });
+  await h.send({ kind: "menu-navigate", ...acquiredMenuToken(h.of("menu-state").at(-1)), route: 2, fields: bindings ? bindingSettingsDraft() : completeSettingsDraft() });
   const parent = h.of("menu-state").at(-1);
   if (child) await h.send({ kind: "menu-navigate", ...acquiredMenuToken(parent), route: 3, fields: ["1.000000001", "2.000000002"] });
   return { h, parent, initial: h.of("menu-state").at(-1) };
@@ -987,7 +994,7 @@ function assertProfileTransition(state, previous, id, pending) {
 }
 
 test("retained policy complete Apply publishes sixteen exact strings and rejects late policy atomically", async () => {
-  const { h } = await retainedSettingsWorker();
+  const { h } = await retainedSettingsWorker(false, false);
   try {
     for (const [index, invalid] of [[13, "unknown-preset"], [14, "rank-last"], [15, "unknown-gauge"]]) {
       await h.send({ kind: "menu-edit", ...acquiredMenuToken(h.of("menu-state").at(-1)), index, value: invalid });
@@ -1006,7 +1013,7 @@ test("retained policy complete Apply publishes sixteen exact strings and rejects
 });
 
 test("retained policy native-only actions explicitly refuse without consuming action identity", async () => {
-  const { h, initial } = await retainedSettingsWorker();
+  const { h, initial } = await retainedSettingsWorker(false, false);
   try {
     for (const control of [12n, 15n]) {
       const errors = h.of("menu-error").length;
@@ -1021,7 +1028,7 @@ test("retained policy native-only actions explicitly refuse without consuming ac
 });
 
 test("retained policy partial and unknown Apply counts refuse while thirteen fields retain omission", async () => {
-  const { h } = await retainedSettingsWorker();
+  const { h } = await retainedSettingsWorker(false, false);
   try {
     for (const count of [14, 15, 17]) {
       const fields = [...completeSettingsDraft(), "extra"].slice(0, count);
@@ -1037,6 +1044,96 @@ test("retained policy partial and unknown Apply counts refuse while thirteen fie
     assert.equal(h.of("menu-effect").at(-1).fields.length, 13, "legacy omission never fabricates policy strings");
   } finally { await h.send({ kind: "dispose" }); }
 });
+
+test("retained binding Apply publishes literal 34 fields and refuses invalid final row without consuming its action", async () => {
+  const { h } = await retainedSettingsWorker();
+  try {
+    assert.equal(h.of("menu-state").at(-1).fields.length, 34);
+    await h.send({ kind: "menu-edit", ...acquiredMenuToken(h.of("menu-state").at(-1)), index: 16, value: "KeyA" });
+    assert.equal(h.of("menu-effect").length, 0, "editing a code alone never admits bindings");
+    for (const invalid of ["Escape", "UnsupportedPhysicalCode", "KeyA"]) {
+      await h.send({ kind: "menu-edit", ...acquiredMenuToken(h.of("menu-state").at(-1)), index: 33, value: invalid });
+      const before = h.of("menu-state").at(-1), errors = h.of("menu-error").length;
+      const publications = h.renderPort.posts.length;
+      await h.send({ kind: "menu-action", ...acquiredMenuToken(before), actionId: 1n, control: 10n });
+      assert.equal(h.of("menu-error").length, errors + 1);
+      assert.equal(h.of("menu-effect").length, 0, "last binding refusal admits no scalar, policy or key effect");
+      assert.deepEqual(h.of("menu-state").at(-1), before, "invalid row33 preserves exact owner, token, selection and draft");
+      assert.equal(h.renderPort.posts.length, publications, "refusal cannot publish a partially accepted menu");
+      assert.match(h.of("menu-error").at(-1).message, /binding|code|key/i);
+    }
+    await h.send({ kind: "menu-edit", ...acquiredMenuToken(h.of("menu-state").at(-1)), index: 33, value: "" });
+    const repaired = h.of("menu-state").at(-1);
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(repaired), actionId: 1n, control: 10n });
+    const effect = h.of("menu-effect").at(-1);
+    assert.equal(h.of("menu-effect").length, 1, "same semantic action ID succeeds after repairing the final row");
+    assert.equal(effect.fields.length, 34);
+    assert.deepEqual(Array.from(effect.fields), [...completeSettingsDraft(), ...importedBindingCodes()]);
+    assert.equal(effect.fields[16], "KeyA"); assert.equal(effect.fields[33], "");
+    assert.equal(effect.control, 10n); assert.equal(effect.effect, 1n);
+    assert.deepEqual(acquiredMenuToken(effect), acquiredMenuToken(h.of("menu-state").at(-1)));
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(h.of("menu-state").at(-1)), actionId: 1n, control: 10n });
+    assert.equal(h.of("menu-effect").length, 1, "successful Apply consumes the action once");
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("retained binding Apply refuses partial shapes and stale full draft before a legacy retry", async () => {
+  const { h, initial } = await retainedSettingsWorker();
+  try {
+    for (const count of [17, 18, 32, 33, 35]) {
+      const fields = [...bindingSettingsDraft(), "extra"].slice(0, count);
+      await h.send({ kind: "menu-fields", ...acquiredMenuToken(h.of("menu-state").at(-1)), fields });
+      const before = h.of("menu-state").at(-1), errors = h.of("menu-error").length;
+      await h.send({ kind: "menu-action", ...acquiredMenuToken(before), actionId: 1n, control: 10n });
+      assert.equal(h.of("menu-error").length, errors + 1);
+      assert.equal(h.of("menu-effect").length, 0); assert.deepEqual(h.of("menu-state").at(-1), before);
+    }
+    await h.send({ kind: "menu-fields", ...acquiredMenuToken(h.of("menu-state").at(-1)), fields: bindingSettingsDraft() });
+    const current = h.of("menu-state").at(-1);
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(initial), actionId: 1n, control: 10n });
+    assert.equal(h.of("menu-effect").length, 0); assert.deepEqual(h.of("menu-state").at(-1), current);
+    await h.send({ kind: "menu-fields", ...acquiredMenuToken(current), fields: completeSettingsDraft() });
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(h.of("menu-state").at(-1)), actionId: 1n, control: 10n });
+    assert.deepEqual(Array.from(h.of("menu-effect").at(-1).fields), completeSettingsDraft());
+    assert.equal(h.of("menu-effect").at(-1).fields.length, 16, "legacy scalar Apply cannot fabricate or replace keyboard rows");
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+for (const [route, returnControl] of [[3, 71n], [5, 30n], [6, 21n]]) {
+  test(`retained full profile in child route${route} preserves parent row33 and imported bindings on return`, async () => {
+    const { h, parent } = await retainedSettingsWorker();
+    try {
+      await h.send({ kind: "menu-action", ...acquiredMenuToken(parent), actionId: 1n, control: 1033n });
+      const selected = h.of("menu-state").at(-1); assert.equal(selected.selected, 33);
+      const childFields = route === 3 ? ["1.000000001", "2.000000002"]
+        : acquiredMenuFields([acquiredSource(1, "keyboard"), acquiredSource(41)]);
+      await h.send({ kind: "menu-navigate", ...acquiredMenuToken(selected), route, fields: childFields });
+      const t0 = h.of("menu-state").at(-1), dto = retainedProfile(), id = 151;
+      await h.send({ kind: "settings-profile-load", id, menuToken: acquiredMenuToken(t0), settings: dto,
+        file: selectedFile("bindings.json", JSON.stringify(dto)).file });
+      const t1 = h.of("menu-state").at(-1); assertProfileTransition(t1, t0, id, true);
+      assert.deepEqual(Array.from(t1.fields), Array.from(t0.fields));
+      await h.send({ kind: "settings-profile-admit", id, menuToken: acquiredMenuToken(t1) });
+      const t2 = h.of("menu-state").at(-1); assertProfileTransition(t2, t1, id, false);
+      assert.equal(t2.route, route); assert.equal(t2.screen, t0.screen); assert.equal(t2.selected, t0.selected);
+      assert.deepEqual(structuredClone(t2.roster), structuredClone(t0.roster));
+      assert.deepEqual(Array.from(t2.fields), route === 3 ? ["3", "9"] : Array.from(t0.fields));
+      const expected = importedSettingsFields();
+      if (route === 3) {
+        await h.send({ kind: "menu-edit", ...acquiredMenuToken(t2), index: 0, value: "4" });
+        expected[11] = "4";
+      }
+      await h.send({ kind: "menu-action", ...acquiredMenuToken(h.of("menu-state").at(-1)), actionId: 2n, control: returnControl });
+      const returned = h.of("menu-state").at(-1);
+      assert.equal(returned.route, 2); assert.equal(returned.screen, parent.screen); assert.equal(returned.selected, 33);
+      assert.deepEqual(Array.from(returned.fields), expected, "child return preserves every imported binding and policy row");
+      await h.send({ kind: "menu-action", ...acquiredMenuToken(returned), actionId: 3n, control: 10n });
+      assert.deepEqual(Array.from(h.of("menu-effect").at(-1).fields), expected);
+      assert.equal(h.of("settings-profile-loaded").length, 1);
+      assert.equal(h.of("menu-error").length, 0);
+    } finally { await h.send({ kind: "dispose" }); }
+  });
+}
 
 test("retained profile candidate survives read finally and strict T1 admission commits parent and Practice once", async () => {
   const { h, parent, initial: t0 } = await retainedSettingsWorker(true);
@@ -1101,7 +1198,7 @@ test("retained profile held read cancellation accepts original T0 or current T1 
       }
       await h.send({ kind: "settings-profile-cancel", id, menuToken: acquiredMenuToken(useOriginal ? t0 : t1) });
       const idle = h.of("menu-state").at(-1); assertProfileTransition(idle, t1, id, false);
-      assert.deepEqual(Array.from(idle.fields), completeSettingsDraft());
+      assert.deepEqual(Array.from(idle.fields), bindingSettingsDraft());
       let retryReads = 0;
       await h.send({ kind: "settings-profile-load", id: 82, menuToken: acquiredMenuToken(idle), settings: dto,
         file: selectedFile("retry.json", JSON.stringify(dto), () => { retryReads++; return Promise.resolve(new TextEncoder().encode(JSON.stringify(dto)).buffer); }).file });
@@ -1182,9 +1279,40 @@ test("retained profile stale request acquires no bytes and malformed late policy
     assert.equal(h.of("settings-profile-candidate").length, 0); assert.equal(h.of("settings-profile-loaded").length, 0);
     assert.equal(h.of("settings-profile-error").at(-1).id, 97);
     const idle = h.of("menu-state").at(-1);
-    assert.equal(idle.pending, false); assert.deepEqual(Array.from(idle.fields), completeSettingsDraft());
+    assert.equal(idle.pending, false); assert.deepEqual(Array.from(idle.fields), bindingSettingsDraft());
     await h.send({ kind: "menu-action", ...acquiredMenuToken(idle), control: 10n, actionId: 1n });
     assert.equal(h.of("menu-effect").length, 1);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
+test("retained full profile malformed final binding and failed read restore all original 34 rows", async () => {
+  const { h } = await retainedSettingsWorker();
+  try {
+    for (const [id, code] of [[161, "Escape"], [162, "UnknownKey"], [163, "KeyA"]]) {
+      const t0 = h.of("menu-state").at(-1), dto = retainedProfile();
+      dto.bindings[17][1] = code;
+      await h.send({ kind: "settings-profile-load", id, menuToken: acquiredMenuToken(t0), settings: retainedProfile(),
+        file: selectedFile("invalid-last-binding.json", JSON.stringify(dto)).file });
+      const idle = h.of("menu-state").at(-1);
+      assert.equal(idle.pending, false); assert.equal(idle.screen, t0.screen);
+      assert.deepEqual(Array.from(idle.fields), bindingSettingsDraft());
+      assert.equal(h.of("settings-profile-error").at(-1).id, id);
+      assert.equal(h.of("settings-profile-candidate").length, 0);
+      assert.equal(h.of("settings-profile-loaded").length, 0);
+    }
+    const t0 = h.of("menu-state").at(-1), read = deferred(), dto = retainedProfile(), id = 164;
+    await h.send({ kind: "settings-profile-load", id, menuToken: acquiredMenuToken(t0), settings: dto,
+      file: selectedFile("failed-read.json", JSON.stringify(dto), () => read.promise).file });
+    const t1 = h.of("menu-state").at(-1); assertProfileTransition(t1, t0, id, true);
+    read.reject(Error("original binding profile read failure")); await h.flushTasks();
+    const idle = h.of("menu-state").at(-1); assertProfileTransition(idle, t1, id, false);
+    assert.deepEqual(Array.from(idle.fields), bindingSettingsDraft());
+    assert.equal(h.of("settings-profile-error").at(-1).id, id);
+    assert.match(h.of("settings-profile-error").at(-1).message, /original binding profile read failure/);
+    await h.send({ kind: "settings-profile-admit", id, menuToken: acquiredMenuToken(t1) });
+    assert.equal(h.of("settings-profile-loaded").length, 0); assert.deepEqual(h.of("menu-state").at(-1), idle);
+    await h.send({ kind: "menu-action", ...acquiredMenuToken(idle), actionId: 1n, control: 10n });
+    assert.deepEqual(Array.from(h.of("menu-effect").at(-1).fields), bindingSettingsDraft());
   } finally { await h.send({ kind: "dispose" }); }
 });
 
@@ -1196,7 +1324,7 @@ test("retained profile save publishes exact pending and Idle receipts before ful
     const states = h.messages.slice(start).filter(x => x.kind === "menu-state");
     assert.equal(states.length, 2); const [t1, t2] = states;
     assertProfileTransition(t1, t0, id, true); assertProfileTransition(t2, t1, id, false);
-    for (const state of states) assert.deepEqual(Array.from(state.fields), completeSettingsDraft());
+    for (const state of states) assert.deepEqual(Array.from(state.fields), bindingSettingsDraft());
     const saved = h.of("settings-profile-saved").at(-1);
     assert.equal(saved.id, id); assert.deepEqual(acquiredMenuToken(saved.resultToken), acquiredMenuToken(t2));
     assert.deepEqual(JSON.parse(new TextDecoder().decode(saved.bytes)), dto);
@@ -1253,7 +1381,7 @@ test("retained profile legacy full load restores the exact default policy triple
     assert.deepEqual(structuredClone(h.of("settings-profile-candidate").at(-1).settings), dto);
     await h.send({ kind: "settings-profile-admit", id: 131, menuToken: acquiredMenuToken(t1) });
     const t2 = h.of("menu-state").at(-1);
-    assert.deepEqual(Array.from(t2.fields), ["50", "50", "0", "interactive", "20", "48000", "256", "64", "256", "2048", "256", "0", "", "", "rank-first", "beatkernel"]);
+    assert.deepEqual(Array.from(t2.fields), ["50", "50", "0", "interactive", "20", "48000", "256", "64", "256", "2048", "256", "0", "", "", "rank-first", "beatkernel", ...bindingCodes()]);
     assert.deepEqual(structuredClone(h.of("settings-profile-loaded").at(-1).settings), dto);
     await h.send({ kind: "menu-action", ...acquiredMenuToken(t2), actionId: 1n, control: 10n });
     assert.deepEqual(Array.from(h.of("menu-effect").at(-1).fields), Array.from(t2.fields));
