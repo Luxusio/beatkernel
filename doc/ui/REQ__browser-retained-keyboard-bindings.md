@@ -1,6 +1,10 @@
 # Retained browser keyboard bindings
 
-Status: required behavior; implementation and independent acceptance pending.
+Status: implemented with independent CLI and functional browser evidence;
+strict browser acceptance remains unfinished because the audio-WASM request
+records `net::ERR_ABORTED`. See the
+[acceptance record](../changes/2026-10-11-browser-retained-keyboard-bindings.md).
+This status does not waive any verification requirement below.
 
 The Worker-owned Settings screen exposes the existing eighteen keyboard lanes
 after the sixteen scalar/policy fields. Indices 16–33 identify lanes

@@ -89,7 +89,7 @@ Full profile import/export
 continues to require its kind/version/exact schema and all eighteen keyboard
 lanes; a menu draft must neither fabricate a binding map nor weaken that check.
 
-The complete Settings draft keeps indices 0–12 unchanged and appends numerical
+The scalar/policy portion keeps indices 0–12 unchanged and appends numerical
 timing preset, rank precedence and gauge at indices 13–15. Apply checks the whole
 draft before any acquisition mirror changes. Legacy thirteen-field Apply leaves
 existing policy untouched. Loading an old full profile without policy restores
@@ -127,8 +127,8 @@ correction use existing pending/error surfaces and keep values readable.
 The original acquisition form may contain unfinished invalid timing or duplicate
 keyboard choices. Initial Settings publication must preserve those bounded raw
 strings as editable fields, without requiring valid timing or unique bindings.
-Apply still requires scalar/policy validation; incoming full profiles also
-require all eighteen validated bindings.
+Apply still requires scalar/policy validation; a complete thirty-four-field
+Apply and incoming full profiles also require all eighteen validated bindings.
 A valid full profile must repair that form without requiring
 the old draft to pass profile validation. Preserve its complete bounded strings
 for drift checks and uncertain-result restoration; strictly validate all values
