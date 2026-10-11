@@ -1,180 +1,116 @@
 # 실제 리플레이 owner의 고정 배속 연결
 
-상태: 개발 검사 완료 후 독립 review의 결함 1건 수정 중. 기준 HEAD 5ed217c.
-이 작업은 공통 StepReplay, native replay CLI/pause와 browser replay setup에
-동일한 고정 유리수 배속을 전달하고, 실제 출력 presentation을 원본 곡 시간으로
-변환한다. 요구 계약은 [실시간 배속](../kernel/REQ__realtime-replay-speed.md)이다.
+공통 StepReplay, native `play_replay_bms --speed NUM/DEN`, browser replay UI에
+세션 시작 시 선택하는 고정 양수 유리수 배속을 연결했다. 동일한 배속이 실제
+planner/Mixer read-head와 출력 presentation→원본 곡 시간 변환에 적용된다.
+음높이도 바뀌며, 원본 녹화·판정·hash는 유지한다. 기본값은1/1이다.
+요구 계약은 [실시간 배속](../kernel/REQ__realtime-replay-speed.md),
+[리플레이 오디오](../kernel/REQ__bms-replay-audio.md)다.
 
-계획 독립 검토에서 native finite cap-before-narrow와 quantized/zero output
-종료 근거를 보완했다. 배속 숫자 모델, browser 숫자 검증, native finite
-frontier는 각각 독립 구현·테스트 작성자 쌍으로 작성했다.
+구현 커밋은 `3b4f5ea`, 계약·개발 근거는 `da11de4`, converted pause 수정은
+`fc2376a`다. 현재 `fc2376a`에 대해 독립 DEEP code/security review,
+qa-cli, qa-browser와 scoped ux-browser의 실제 final이 모두 PASS다.
+최종 문서 critic과 Harness verify/close는 이 문서 작성 시 아직 실행 전이며
+그 결과를 위 PASS와 혼동하지 않는다. 전체 player Goal은 미완료다.
 
-첫 묶음 개발 검사: format 이후 공통 ReplaySpeed 8개, 실제 native finite
-frontier 6개, 기존 offline CLI parser 3개와 기존 offline planner/renderer/
-CLI 회귀 33개, 기존 finite completion 2개가 통과했다. Rust 총 52개다.
-browser model은 기존 항목 포함 44개, 기존 Worker/host 소비자는 522개가
-통과했다. 첫 소비자 실행은
-Node VM 모듈 flag가 빠져 시작하지 못했고, `--experimental-vm-modules`를
-적용한 후 통과했다. 실패 원본도 보관했다. 첫 Rust 실행 도중 root의
-format 정리가 있었으므로 최종 format 이후 위 50개를 반복하고 기존 finite
-2개를 실행했다. 이는 독립 QA나 전체 완료 판정이 아니다.
+## 구현과 정수 경계 수정
 
-로컬 원본 로그: `target/wf/realtime-replay-speed-development-12c90/`.
-공통/native pause/CLI와 실제 browser 재생 연결 및 독립 review/QA는 남아 있다.
+ReplaySpeed는 checked i128로 `start + trunc((elapsed-preroll)*N/D)`를
+계산한다. 검증된 finite end만 narrowing 전에 cap할 수 있다. Preroll과
+승인된 pause gap은 출력 시간이다. 기존 constructor는 NORMAL을 유지하고,
+명시적인 immutable-rate BgmFeeder 경로만 SetRate를 허용한다. 원래 command
+순서·Stop credit·producer/ACK retirement를 재사용한다.
 
-두 번째 묶음의 첫 실제 실행은 full-span pause fixture의 동일 source/host
-관측을 NativePause가 거절했다. fixture를 진행된 두 clock 관측으로 바로잡았고,
-권한 검증이나 기대값은 유지했다. 반복 실행에서 pause 13개가 통과했지만
-StepReplay는 12개 중 10개가 실제 BgmFeeder의 SetRate 거절로 실패했다.
-기존 feeder의 검증을 유지하는 명시적 immutable-rate opt-in을 AC011로
-추가하고 StepReplay를 연결하는 중이다. 실패 로그는 그대로 보관한다.
-이후 실제 feeder 8개와 기존 feeder 9개, pause 13개가 통과했고, StepReplay의
-남은 한 fixture는 80-frame 요청이 자체 64-frame 한도를 넘었다. 실제
-40+40-frame callback과 5초/10초 presentation으로 바로잡고 기존 기대값을
-유지했다. 최종 재검사는 공유 재생 12개를 포함한 42개 모두 통과했다.
-기존 step 19개, pause 4개, Stop feeder 3개도 통과했다. 앞선 실패 원본과
-수정은 보관하며 source/test freeze 이후의 최종 재검사 결과를 사용한다.
+Quantized/zero output fence에서도 정확한 consumed/applied와 feeder retirement,
+실제 source presentation 또는 original converted target crossing이 확보됐을
+때만 남은 원본 record를 validated end까지 진행한다. 새 clock/owner/가짜
+records_finished나 host-clock 대체는 없다.
 
-현재까지 서로 다른 개발 테스트 범위는 Rust 120개, Node 566개다.
-이는 독립 review/QA나 전체 player 완료를 의미하지 않는다. 다음 묶음은
-native replay CLI 및 실제 BrowserReplay WASM 생성자 연결이다.
+첫 독립 code review는 converted NativePause가 gap을 ZERO 기준으로 먼저
+좁히는 결함을 발견해 FAIL했다. sibling presentation-origin에도 같은 문제가
+있었다. 독립 작성한 세 회귀가 기존 소스에서 실제 실패한 뒤 `fc2376a`에서
+MIN/MAX anchor를 이용해 duration과 startup shift를 wide로 합치고 마지막
+값만 좁히도록 수정했다. 기존 TargetTime의 단일 floor와 domain/startup/order
+검증은 유지한다. 실제 수세기 PCM을 실행했다는 뜻은 아니다.
 
-UI 변경 전 baseline screenshot은 위 로컬 증거 폴더의 `baseline-ui.png`에
-보관했다. MCP 기본 브라우저는 COOP/COEP 격리를 확인했으나 WebGPU adapter가
-없었고 favicon 404가 있었다. 이는 기존 UI layout 관측이며 재생 PASS가 아니다.
-실제 재생 QA에는 기존 Puppeteer/Chromium 가상 GPU 경로와 새 WASM을 사용한다.
-baseline 전용 localhost server는 종료했고 해당 탭은 about:blank로 복원했다.
+## 독립 실행 근거
 
-Native 연결 개발 검사: 기존·신규 binary fixture 33개와 실제 CLI 4개가
-통과했다. 별도로 opt-in ALSA null factory/recovery 진단 1개도 실제 실행해
-통과했다. 이는 실제 native 소프트웨어 경로이며 물리·음향 검증은 아니다.
-첫 native 컴파일은 direct `src/bin` fixture가 별도 binary로 발견되어
-실패했다. fixture를 `src/bin/play_replay_bms/speed_fixtures.rs`로 옮기고
-부모 cfg(test) 경로와 상대 setup 경로를 고쳤다. 테스트 기대값은 유지했다.
+CLI QA 원본은 `target/wf/qa-cli-realtime-12c90-1/`이다.
 
-원래 workspace edition은 2021이다. root의 초기 scoped formatter 호출은
-2024를 지정했으므로 Rust 파일을 2021 기준으로 다시 정리한 뒤 native
-최종 검사를 실행했다. 현재 main/browser-audio WASM을 별도로 새로 생성하며,
-실제 preparation-export 검사와 Worker/host/UI 연결은 남아 있다.
+- 신규 Rust6 suite54 PASS, 기존 pause100 PASS, native binary33 PASS.
+  ignored null factory diagnostic1개도 명시적으로 실행해 PASS했다.
+- 기존 offline audio/planner/renderer/actual CLI33, parser3, step19,
+  finite completion2, strict feeder3, output Stop3와 추가 BGM26 PASS.
+  필터가 겹치므로 독립 테스트 총수로 더하지 않는다.
+- Node model44/Worker280/host277/실제 current WASM11: 총612 PASS.
+- 실제 native CLI help·invalid·reduced·max 및 네 배속 null 출력은 총9경로로
+  확인했다. 정상 exit0, zero/duplicate exit1,6/4→3/2 정규화 및 동일 원본
+  judge hash `0x7d4034e9845b3301`, normal1/nonnormal2 command consumed/applied,
+  xruns/suspends/failures0과 complete converter recovery를 확인했다.
+  `--seconds`는 wall cutoff이고 null은 presentation이 없으므로 자연종료
+  증거로 사용하지 않는다. QA가 처음 `--seconds 0.05`를 잘못 입력한 거절
+  원본도 보존했다. 제품의 정수 seconds 계약은 바꾸지 않았다.
 
-두 WASM 패키지를 각각 release 빌드하고 현재 bindgen을 생성했다. 실제
-preparation-export 첫 실행은 11개 중 9개 통과, 2개 실패였다. 빈 녹화
-로그에서는 기존 planner가 BGM을 제외하므로 무음과 빈 명령이 올바른
-결과였다. 소리·기본 배속 비교 fixture에 실제 BrowserAudio 출력 관측으로
-승인된 1µs Advance를 녹화하고, 기존 literal PCM·시간·종료·판정 기대값을
-유지했다. 빈 로그 검사는 별도로 유지했다. 동일한 실제 WASM의 재검사는
-11개 모두 통과했다. 제품의 기록 범위 정책은 바꾸지 않았다.
-원본 실패와 재검사는 `preparation-wasm-1.log`, `preparation-wasm-2.log`에
-보관한다. Worker 배속 연결과 독립 테스트 작성은 다음 구현 단계이며,
-UI와 독립 review/QA, 필수 qa-browser PASS는 아직 완료하지 않았다.
+Browser QA는 actual production UI→Worker/WASM→AudioWorklet/WASM→renderer를
+직접 실행한 `interactive-browser`다. 최종 증거와 AC별 transcript:
+`target/wf/realtime-replay-speed-browser/qa-browser-2/`.
+1/2·1·2·3/2에서 실제 PCM/pitch, ±2ns 원본 곡 시간, genuine finite marker,
+자연종료, mid-song draw, Stop/retry와 원본 record identity를 확인했다.
+44.1kHz endpoint는180810/92610/48510/63210 frame이다. 실제 녹화3596 bytes,
+Miss2, SHA256 `5ea80dccddebbb3a566909be1b24633ba34627aeb59b21a9d7d7ca0a82219cbb`는
+유지됐다. 필수8그룹 PASS, console/page/network0, unmet[]다.
 
-현재 native replay binary의 Windows GNU·macOS 대상 Rust 타입 검사도
-각각 exit 0으로 끝났다. 명령은 `target/toolchain/xcheck.sh windows|macos
--p beatkernel-bms-runtime --no-default-features --bin play_replay_bms`이며
-로그는 `native-windows-1.log`, `native-macos-1.log`에 보관한다. 기존 app
-library 경고 13개와 해당 binary의 `output_rate` 미사용 경고가 남아 있다.
-이 스크립트는 C/C++ stub을 사용하므로 링크·장치 실행·물리 재생을 증명하지
-않는다. native 개발 테스트 38개와 앞선 120개를 합한 Rust 검사 범위는
-158개이며, 별도로 실제 WASM 11개가 통과했다.
+첫 독립 browser 실행은 기능7그룹을 통과했지만 initialization audio WASM의
+`ERR_ABORTED`1건으로 exit1이었다. 같은 source/package SHA와 strict oracle로
+한 번만 반복했을 때 재현되지 않아 transience로 기록한다. 원본
+`qa-browser-1/`은 보존했고 원인·영구 해결을 추정하거나 network 검사를
+완화하지 않았다. 반복 재현 시 initiator/timing 조사가 필요하다.
 
-Worker 배속 전달·실제 owner identity·finite endpoint 검증을 연결했다.
-독립 작성한 9개 신규 검사와 기존 Worker 검사를 실행한
-`node --experimental-vm-modules --test app/web/play-worker.test.mjs
-app/web/worker.test.mjs`는 총 280개 통과, 실패 0이었다.
-실제 새 WASM을 로드한 Worker 검사도 네 배속의 정규화한 owner·준비 응답과
-원본 녹화 bytes·PCM sample export를 확인했다. UI 연결과 실제 브라우저의
-Worker→Worklet 재생 검증은 여전히 남아 있으며 독립 QA PASS가 아니다.
+독립 UX 증거는 `target/wf/ux-browser-realtime-12c90-1/run-1/`이다.
+잘못된 draft5개는 오디오 생성 없이 focus/editability를 유지했고,
+0006/0004→3/2 키보드 시작·Space Stop과390/768/1200px 배치를 확인했다.
+실제 네 배속 재생도 PASS, console/network0이다. 상세 오류가 focused field
+viewport 밖에 있을 수 있어 inline error는 비차단 polish 후속 항목이다.
+모든 owned Chromium/server와 Cargo 실행 핸들은 종료됐다.
 
-UI 배속 필드·세션 snapshot·응답 대조를 연결한 뒤 실제 host 소스의
-`node --experimental-vm-modules --test app/web/play-host.test.mjs` 검사는
-277개 통과, 실패 0이었다. 신규 27개는 잘못된 배속의 오디오 시작 전 거절,
-필드 포커스, 네 배속의 finite grid, immutable pending setup, 잘못된·누락된
-owner identity, live 영향 없음과 stop/retry를 검사한다. 로그는
-`replay-host-1.log`이다. 실제 브라우저 재생 runner는 작성 중이므로 AC008을
-완료로 승격하지 않는다. 독립 review와 필수 qa-browser/qa-cli는 남아 있다.
+수정 후 coordinator도 Windows/macOS native binary typing, desktop/WebTransport
+check, 두 WASM release build/bindgen과 actual exports11 PASS를 확인했다.
+로그는 `target/wf/realtime-replay-speed-development-12c90/`의
+`native-windows-2.log`, `native-macos-2.log`, `desktop-consumers-3.log`,
+`browser-wasm-build-2.log`, `audio-wasm-build-2.log`, `preparation-wasm-3.log`다.
+이것은 독립 QA와 별개이며 foreign C/C++ stub은 Rust typing만 증명한다.
+기존 compiler 경고가 남아 있어 strict lint 완료를 주장하지 않는다.
 
-추가 desktop·WebTransport all-targets 타입 검사의 첫 실행은 240초 제한으로
-exit 124였다. 타입 오류는 확인되지 않았으나 통과로 취급하지 않는다.
-로그 `desktop-consumers-1.log`를 보관하고, 해당 handle의 종료를 확인한 뒤
-생성된 cache로 같은 검사를 다시 실행한다.
-두 번째 동일 검사는 exit 0으로 끝났다(`desktop-consumers-2.log`). 기존
-library·binary·example·fixture 경고는 남아 있으며 strict lint 통과를 주장하지
-않는다. 모든 target의 타입 검사이며 전체 테스트 실행과는 구분한다.
+## 보존한 실패와 재현 경로
 
-첫 실제 Chromium 재생 probe는 graphics surface 준비 이전에 실패했다.
-`target/wf/realtime-replay-speed-browser/development-1/`에 실패 screenshot과
-source hash·미충족 요구를 보관했다. console/network 오류는 없었으나 UI는
-스타일이 적용되지 않았다. 로컬 probe server의 CSS MIME 누락을 조사하며,
-실제 브라우저 재생 성공이나 독립 QA PASS로 취급하지 않는다. 해당 probe의
-owned Chromium과 server는 정상 cleanup 후 종료했다.
-probe server의 CSS MIME를 `text/css`로 바로잡고 실제 draw receipt와 canvas
-extent를 기다린 두 번째 실행에서는 실제 finite 2초 live capture가 통과했다.
-녹화는 3443 bytes, Miss 2개, SHA256
-`595642885619c4aed458f2db79d19ed98b04bbc5b204276a074a04c3e46baa79`다.
-첫 1/2 리플레이의 progress 대조에서 -6535000ns 차이가 나 전체 실행은
-exit 1이었다. 원본 raw timestamp와 실제 채택된 presentation point의
-대조를 조사한다. Worker는 반복·회귀 estimate를 채택하지 않으므로 모든
-render 응답이 새 point를 채택했다는 가정은 검증 근거가 아니다.
-`development-2/evidence.json`에는 원본 메시지·출력 report·실패 화면을
-보관한다. cleanup 중 audio WASM request의 ERR_ABORTED도 기록했으며,
-실제 브라우저 전체 통과나 독립 QA PASS를 주장하지 않는다.
-조사 결과 render121의 raw performanceTime 5137.655ms는 응답 관측
-5136.665ms보다 미래였다. 기존 presentationPair가 이 estimate를 거절하여
-render120의 곡 시간 284563090ns를 유지한 것이 확인됐다. fixture는 이미
-초기화된 실제 BrowserReplay의 observe_output 인자와 결과를 관측해,
-채택된 point 또는 동일 owner의 보존된 point에 원래 ±2ns 기대값을 적용한다.
-반복·미래 estimate를 채택하도록 제품 정책을 바꾸지 않았고, 최소 두 개의
-실제 progressing point 조건도 유지했다. 이 새 검사도 재실행 전에는
-통과로 기록하지 않는다.
-세 번째 실제 실행에서는 1/2 replay의 실제 accepted-point 시간 대조,
-finite Worklet report와 PCM/pitch 검사가 통과했으나 visible progress 검사에서
-exit 1이었다. probe가 재생 시간이 아닌 disabled preview seek draft 필드
-`#position`을 읽은 것이 확인됐다. 실제 렌더러의 곡 시간·draw ACK·화면을
-대조하도록 probe를 수정한다. 메인 스레드에 매 프레임 DOM 시간 갱신을
-추가하지 않는다. 해당 실행의 console/network 오류는 모두 0이었다.
-원본 `development-3/evidence.json`과 screenshot은 보관하며 모든 네 배속과
-stop/retry·최종 독립 QA는 아직 완료되지 않았다.
+개발 첫 실행들의 VM flag 누락, Cargo autobin fixture 배치, empty-record PCM
+가정, callback budget 초과, formatter edition 지정,240초 check timeout은
+원본 로그와 함께 보존했다. 실제 browser development-1/2/3은 probe server
+CSS MIME, 거절된 future association, disabled preview seek draft를 progress로
+읽은 검사 오류로 실패했다. probe를 실제 CSS MIME·채택된 point/보존된 point·
+renderer draw ACK로 수정했고 제품 권한/기대값은 완화하지 않았다.
+development-4 actual PASS는 개발 증거이며 최종 독립 QA를 대신하지 않는다.
 
-네 번째 실제 Chromium 실행은 exit 0, 미충족 조건 0이었다. 현재 production
-WASM→Worker→AudioWorklet 및 renderer에서 1/2·1·2·3/2 배속의 PCM/pitch,
-엄격한 ±2ns 원본 곡 시간, 실제 finite consumed/applied frame marker,
-draw ACK·재생 화면, natural completion, 사용자 stop/retry를 확인했다.
-2초 원본의 44.1kHz 출력 endpoint는 각각 180810/92610/48510/63210 frame,
-실제 progressing point는 각각 263/140/72/87개, mid-song draw는
-150/75/38/49개였다. 원본 녹화 3358 bytes의 SHA256
-`859082076d2ed97c7efb0131dcbfe476e755876fc73d59adbf11256a0e511728`가
-유지됐고 console/page/network 오류는 0이었다.
-`target/wf/realtime-replay-speed-browser/development-4/evidence.json`과
-각 배속의 mid-play·종료 screenshot에 원본 관측과 source hash를 보관한다.
-해당 owned browser/server는 종료했다. 이는 coordinator 개발 증거이며,
-필수 독립 qa-browser·qa-cli와 code/security review PASS를 대체하지 않는다.
+실제 browser 재현 명령은 기존 Puppeteer-core/Chromium을 사용한다:
 
-da11de4에 대한 첫 독립 DEEP code review는 FIX_NOW 1건으로 FAIL,
-security review는 PASS였다. converted NativePause가 cumulative TargetTime을
-ZERO 기준으로 i64에 먼저 좁혀, 음수 output origin이 허용하는 유효한
-full-span pause gap을 거절하는 결함이다. 공통 `playback_pause.rs`를 AC003
-수정 범위에 추가하고, 실제 TargetTime의 단일 floor를 유지하며 duration을
-wide로 복원한 뒤 공급된 anchor에서 빼고 마지막 값만 좁힌다. 독립 작성한
-controlled converted-target 회귀를 먼저 기존 source에서 실패 확인한 뒤
-수정한다. 실제 수세기 길이의 PCM 실행·하드웨어 검증을 주장하지 않는다.
-수정 후 새로운 독립 review와 필수 QA를 통과하기 전에는 close하지 않는다.
-추가한 두 converted gap 회귀는 기존 source에서 각각 실제 실패했다
-(`converted-gap-red-1.log`, exit 101). 직접 호출하는 presentation-origin
-계산에도 같은 중간 narrowing이 있어, 공급된 곡 anchor와 유효한 startup
-shift의 상쇄를 마지막에 합치도록 수정 범위를 명시했다. 별도 세 번째
-회귀도 기존 source에서 실제 실패했다(`converted-origin-red-1.log`,
-exit 101). 모두 동일한 `target pause duration overflow`를 재현했으며
-기존 13개 회귀 기대값은 바꾸지 않았다.
-수정은 공통 NativePause의 두 target 분기에 한정됐다. 새 public API·상태·
-시계 없이 기존 TargetTime과 after-pause anchor를 재사용한다. 수정 후
-전체 `replay_pause_speed`는 16개 통과, 실패 0이었다
-(`converted-gap-green-1.log`). 기존 NativePause 소비자 회귀와 native/foreign/
-WASM 확인, 두 번째 독립 review와 필수 QA는 아직 진행해야 한다.
-기존 public/native/interval/converted/rebind/live/local/practice/replay pause
-소비자를 포함한 `cargo test ... --lib pause`도 100개 통과, 실패 0이었다
-(`native-pause-regressions-1.log`). 수정 후 Windows·macOS 타입 검사와
-desktop 소비자 check, 실제 두 WASM 패키지 재생성·검사를 다시 수행한다.
+```sh
+PUPPETEER_MODULE=target/wf/record-score-ui-qa-browser/node_modules/puppeteer-core \
+CHROMIUM=/usr/bin/chromium \
+REPLAY_SPEED_OUT=target/wf/realtime-replay-speed-browser/fresh-run \
+REPLAY_SPEED_PORT=8167 \
+timeout --signal=TERM --kill-after=10 240 node app/web/replay-speed.browser.mjs
+```
+
+Fresh ignored output와 비어 있는 port를 사용한다. Runner는 소유한 HTTPS
+server/Chromium만 정리하며 strict console/network 실패를 그대로 보고한다.
+
+## Known ceiling
 
 Known ceiling: 고정 양수 pitch-changing 리플레이 범위다. runtime/live/
 retained/reverse와 물리 출력 검증은 원래 전체 Goal에 남는다. WBS는
 91/193,47.15%,102 미완료이고05.13을 완료로 승격하지 않는다.
+Known ceiling: ALSA null은 실제 native 소프트웨어 startup/명령/회수만
+확인한다. presentation 없는 wall cutoff 실행은 자연종료·음향 alignment
+증거가 아니다. foreign typing은 실제 Windows/macOS SDK 링크·장치 실행이 아니다.
+Known ceiling: 실제 Chromium의 소프트웨어 GPU/audio 실행은 물리 장치의
+음향·입력 지연이나 세계 최고 성능을 증명하지 않는다.

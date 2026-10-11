@@ -78,7 +78,9 @@ therefore reproduces selected song-time sounds, not original physical timing or
 past dropped audio. BGM and PCM use the supplied prepared audio setup; the logical
 judge fingerprint does not authenticate them. The
 [native replay player](REQ__bms-native-replay.md) connects this plan to existing
-output backends; actual native replay execution evidence remains pending.
+output backends. Fixed-speed native null startup and owner tests are recorded
+in the [current execution evidence](../changes/2026-10-12-realtime-replay-speed.md);
+clock-capable physical native replay remains unproven.
 
 Native Replay Watch pause keeps these planned command timestamps on the original
 playback grid. Mixer silence advances only physical frames; rolling admission
@@ -89,8 +91,9 @@ is added to the recording, and original live wall-pause history is not reproduce
 Assets are preloaded and
 the finite command plan is allocated off-thread; source/log limits do not bound
 all process memory. Executed development regressions provide the scoped evidence
-described above. Actual native hardware execution, formal review and ordered
-independent QA remain unproven; existing examples are not completion evidence.
+described above. The fixed-speed integration below has independent review and
+CLI/browser QA evidence. Actual native hardware execution and acoustic
+acceptance remain unproven; existing examples are not completion evidence.
 
 
 ## Explicit finite section planning
@@ -108,13 +111,15 @@ The stepped owner requires actual render and presentation evidence at the fence,
 finished records, complete command acknowledgements/feeder retirement and
 actual consumed/applied counts equal to the admitted plan. Commands queued after
 the retained fence cannot count as executed; accounting mismatch fails. This
-is a finite fence rather than an idle-voice drain. Native/offline callers remain
-strict until explicitly integrated; runtime acceptance is still pending.
+is a finite fence rather than an idle-voice drain. Legacy unlimited APIs remain
+strict; finite and selected-rate opt-in callers are explicitly integrated as
+described below. That software acceptance does not prove physical native
+presentation or acoustic alignment.
 
 ## Real-time fixed replay speed integration
 
 The [real-time replay speed contract](REQ__realtime-replay-speed.md) defines
-the ongoing common/native/browser integration. Selected positive speed affects
+the fixed positive-speed common/native/browser integration. Selected positive speed affects
 both actual planner/Mixer readheads and genuine presentation-to-original-song
 mapping. Preroll and acknowledged pause gaps remain output durations. A finite
 original end caps wide song time before narrowing; it cannot hide an uncapped
@@ -128,5 +133,8 @@ records up to that original end. This adds no advance beyond the validated
 original end, fabricated record completion or host-clock substitute. The
 records-independent `FiniteReplayCompletion::output_finished` exposes that
 existing output authority to native integration; final completion still
-requires actual finished records. Full real-time integration and independent
-runtime acceptance remain pending.
+requires actual finished records. The selected fixed positive replay speed has
+independent code/security/CLI/browser acceptance described in the
+[execution evidence](../changes/2026-10-12-realtime-replay-speed.md). Native null
+startup does not prove natural completion or acoustic timing. Live speed,
+runtime switching, retained practice and physical-platform acceptance remain open.

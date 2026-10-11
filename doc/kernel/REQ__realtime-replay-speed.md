@@ -1,6 +1,7 @@
 # 실시간 리플레이의 고정 유리수 배속
 
-상태: 구현·검증 진행 중. 전체 플레이어 완료를 의미하지 않는다.
+상태: 고정 양수 리플레이 배속 구현 및 독립 code/security/CLI/browser/UX 검증 완료.
+최종 문서 확인·Harness close와 전체 플레이어 완료는 별도다.
 원래 [배속 요구](../../plan.md)의 고정 양수 pitch-changing 부분을 실제
 공통·브라우저·네이티브 리플레이에 연결한다. [오프라인 배속](REQ__replay-render-playback-speed.md)을 재사용한다.
 
@@ -101,4 +102,6 @@ mock 요청 테스트만으로 실제 재생 완료를 주장하지 않는다.
 Known ceiling: live 배속, 실행 중 배속 변경, retained practice·역재생·pitch
 보존 DSP 및 물리 장치의 음향·성능 검증은 이 고정 배속 child의 완료 범위 밖이다.
 원래 전체 Goal과 WBS05.13/05.14 및 조건부 DSP 요구에 그대로 남는다.
-현재 이 문서는 요구 계약이며 테스트·리뷰·QA PASS를 주장하지 않는다.
+실제 검증 범위·명령·첫 실패와 재검사·환경 한계는
+[변경 근거](../changes/2026-10-12-realtime-replay-speed.md)에 기록한다.
+네이티브 null startup은 자연 종료나 음향 정확도의 증거가 아니다.
