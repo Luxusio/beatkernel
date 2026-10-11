@@ -172,7 +172,11 @@ function queueMenuControl(control) {
 }
 function menuFieldsFor(route) {
   if (route === 1) return Array.from(ui.chart.options ?? [], option => option.value).filter(Boolean);
-  if (route === 2) return settingsMenuFields(captureSettingsDraft());
+  if (route === 2) {
+    const draft = captureSettingsDraft();
+    return Object.freeze([...settingsFields.map(([group, name]) => draft[group][name]),
+      ...timingPolicyFields.map(([name, , initial]) => draft.timing[name] ?? initial)]);
+  }
   if (route === 3) return [ui["live-start"].value, ui["live-end"].value];
   if (route === 4) return Array.from(ui.records.options ?? [], option => option.value).filter(Boolean);
   if (route === 7) return ["auto", "fifo", "960", "720"];
