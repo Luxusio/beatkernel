@@ -119,7 +119,7 @@ pub struct ReplayAudioPlan {
 
 // Divide first so representable inverse mappings never depend on an overflowing
 // intermediate product. Signed division quantizes once, toward zero nanoseconds.
-fn output_elapsed(
+pub(crate) fn output_elapsed(
     song: i128,
     start: Timestamp,
     preroll: Duration,
@@ -150,7 +150,7 @@ fn output_elapsed(
     Ok(elapsed)
 }
 
-fn output_time(
+pub(crate) fn output_time(
     song: i128,
     start: Timestamp,
     origin: ClockPoint,

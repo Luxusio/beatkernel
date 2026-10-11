@@ -93,6 +93,17 @@ impl Rate {
     pub(super) fn scale_wide(self, nanos: i128) -> i128 {
         nanos * i128::from(self.numerator) / i128::from(self.denominator)
     }
+
+    // Exact controls accept i128 elapsed values, beyond the host timestamp
+    // span. Divide the whole part first; the remainder product fits i128.
+    pub(super) fn checked_scale_wide(self, nanos: i128) -> Option<i128> {
+        let denominator = i128::from(self.denominator);
+        let numerator = i128::from(self.numerator);
+        let remainder = (nanos % denominator) * numerator / denominator;
+        (nanos / denominator)
+            .checked_mul(numerator)
+            .and_then(|whole| whole.checked_add(remainder))
+    }
 }
 
 fn gcd(mut left: u64, mut right: u64) -> u64 {

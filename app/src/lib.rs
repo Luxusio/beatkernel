@@ -197,6 +197,7 @@ pub mod judgment_policy;
 #[cfg(test)]
 mod judgment_policy_fixtures;
 pub mod live_pause;
+pub mod live_speed;
 #[cfg(test)]
 mod local_fence_fixtures;
 #[cfg(test)]

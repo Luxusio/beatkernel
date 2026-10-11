@@ -1,0 +1,168 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  playbackSpeedFromFraction,
+  playbackOutputFromMetadata,
+  replaySpeedFromFraction,
+  replayOutputFromMetadata,
+} from "./play-model.mjs";
+
+const I64_MAX = 9223372036854775807n;
+const U64_MAX = 18446744073709551615n;
+
+test("general playback speed defaults to a fresh immutable normal snapshot", () => {
+  const first = playbackSpeedFromFraction();
+  assert.deepEqual(first, { numerator: 1n, denominator: 1n, fraction: "1/1" });
+  assert.ok(Object.isFrozen(first));
+  assert.notEqual(first, playbackSpeedFromFraction());
+  assert.throws(() => { first.numerator = 2n; }, TypeError);
+  assert.equal(first.numerator, 1n);
+});
+
+test("live fractions normalize all four selected rates without changing caller text", () => {
+  for (const [input, numerator, denominator, fraction] of [
+    ["00002/00004", 1n, 2n, "1/2"],
+    ["24/24", 1n, 1n, "1/1"],
+    ["18/9", 2n, 1n, "2/1"],
+    ["21/14", 3n, 2n, "3/2"],
+  ]) {
+    const selected = playbackSpeedFromFraction(input);
+    assert.deepEqual(selected, { numerator, denominator, fraction });
+    assert.ok(Object.isFrozen(selected));
+    assert.equal(typeof selected.numerator, "bigint");
+    assert.equal(typeof selected.denominator, "bigint");
+  }
+});
+
+test("general parser admits exact integer bounds and the forty-character boundary", () => {
+  assert.deepEqual(playbackSpeedFromFraction("9223372036854775807/18446744073709551615"), {
+    numerator: I64_MAX, denominator: U64_MAX,
+    fraction: "9223372036854775807/18446744073709551615",
+  });
+  assert.deepEqual(playbackSpeedFromFraction("9223372036854775806/18446744073709551612"), {
+    numerator: 1n, denominator: 2n, fraction: "1/2",
+  });
+  assert.equal(playbackSpeedFromFraction("0".repeat(37) + "1/1").fraction, "1/1");
+  assert.throws(() => playbackSpeedFromFraction("0".repeat(38) + "1/1"), Error);
+});
+
+test("live speed rejects malformed, signed, non-ASCII, zero and oversized components", () => {
+  for (const value of [
+    "", "1", "1/", "/1", "1/2/3", "1.0/2", "1e2/1", "1 /2", " 1/2", "1/2 ",
+    "1/2\n", "+1/2", "-1/2", "1/-2", "1/+2", "０１/２", "١/٢", "0/1", "1/0",
+    "000/1", "1/000", "9223372036854775808/1", "1/18446744073709551616",
+    null, false, 1, 1n, {}, ["1/1"],
+  ]) assert.throws(() => playbackSpeedFromFraction(value), Error, String(value));
+});
+
+test("live finite endpoints use output preroll and literal four-rate frame grids", () => {
+  const start = 2000000000n;
+  const end = 2004000000n;
+  for (const [fraction, frame] of [["1/2", 11n], ["1/1", 7n], ["2/1", 5n], ["3/2", 6n]]) {
+    const speed = playbackSpeedFromFraction(fraction);
+    const endpoint = playbackOutputFromMetadata(start, end, frame, 1000, speed, 3000000n);
+    assert.deepEqual(endpoint, { endNs: end, endFrame: frame }, fraction);
+    assert.ok(Object.isFrozen(endpoint));
+    assert.throws(() => playbackOutputFromMetadata(start, end, frame - 1n, 1000, speed, 3000000n), Error);
+    assert.throws(() => playbackOutputFromMetadata(start, end, frame + 1n, 1000, speed, 3000000n), Error);
+  }
+});
+
+test("three-halves maps to whole inverse nanoseconds before physical frame ceiling", () => {
+  const speed = playbackSpeedFromFraction("3/2");
+  assert.deepEqual(playbackOutputFromMetadata(0n, 4000000n, 5666666n, 1000000000, speed, 3000000n),
+    { endNs: 4000000n, endFrame: 5666666n });
+  assert.throws(() => playbackOutputFromMetadata(0n, 4000000n, 5666667n, 1000000000, speed, 3000000n), Error);
+  assert.deepEqual(playbackOutputFromMetadata(0n, 4000000n, 6n, 1000, speed, 3000000n),
+    { endNs: 4000000n, endFrame: 6n });
+});
+
+test("positive sub-nanosecond inverse spans retain their genuine zero output fence", () => {
+  const double = playbackSpeedFromFraction("2/1");
+  assert.deepEqual(playbackOutputFromMetadata(0n, 1n, 0n, 48000, double, 0n), { endNs: 1n, endFrame: 0n });
+  assert.throws(() => playbackOutputFromMetadata(0n, 1n, 1n, 48000, double, 0n), Error);
+  assert.throws(() => playbackOutputFromMetadata(0n, 1n, 0n, 48000, double), Error);
+  assert.deepEqual(playbackOutputFromMetadata(0n, 3n, 1n, 1000000000, double, 0n), { endNs: 3n, endFrame: 1n });
+  assert.throws(() => playbackOutputFromMetadata(0n, 0n, 0n, 48000, double, 0n), Error);
+});
+
+test("maximum fraction components stay exact instead of passing through Number", () => {
+  const nearHalf = playbackSpeedFromFraction("9223372036854775807/18446744073709551615");
+  assert.deepEqual(playbackOutputFromMetadata(0n, 1n, 2n, 1000000000, nearHalf, 0n), { endNs: 1n, endFrame: 2n });
+  const fastest = playbackSpeedFromFraction("9223372036854775807/1");
+  assert.deepEqual(playbackOutputFromMetadata(0n, 1n, 0n, 1000000000, fastest, 0n), { endNs: 1n, endFrame: 0n });
+  assert.throws(() => playbackOutputFromMetadata(0n, 1n, U64_MAX, 1000000000,
+    playbackSpeedFromFraction("1/18446744073709551615"), 0n), Error);
+});
+
+test("original-song maximum start is independent of output duration", () => {
+  assert.deepEqual(playbackOutputFromMetadata(I64_MAX - 4n, I64_MAX, 5n, 1000000000,
+    playbackSpeedFromFraction("2/1"), 3n), { endNs: I64_MAX, endFrame: 5n });
+  assert.deepEqual(playbackOutputFromMetadata(I64_MAX, undefined, undefined, 1),
+    { endNs: undefined, endFrame: undefined });
+});
+
+test("output mapped duration and final physical grid must both fit signed nanoseconds", () => {
+  const half = playbackSpeedFromFraction("1/2");
+  assert.equal(playbackOutputFromMetadata(0n, 4611686018427387903n, 9223372036854775806n,
+    1000000000, half, 0n).endFrame, 9223372036854775806n);
+  assert.throws(() => playbackOutputFromMetadata(0n, 4611686018427387904n, 9223372036854775808n,
+    1000000000, half, 0n), Error);
+  assert.equal(playbackOutputFromMetadata(0n, I64_MAX, I64_MAX, 1000000000, undefined, 0n).endFrame, I64_MAX);
+  assert.throws(() => playbackOutputFromMetadata(0n, I64_MAX, I64_MAX + 1n, 1000000000, undefined, 1n), Error);
+  assert.equal(playbackOutputFromMetadata(0n, 9223372036000000000n, 9223372036n, 1, undefined, 0n).endFrame, 9223372036n);
+  assert.throws(() => playbackOutputFromMetadata(0n, 9223372036000000001n, 9223372037n, 1, undefined, 0n), Error);
+});
+
+test("general output requires a normalized model snapshot rather than a mode string", () => {
+  const speed = playbackSpeedFromFraction("3/2");
+  for (const bad of [
+    "3/2", null, [], {}, { ...speed, numerator: 3 }, { ...speed, denominator: 0n },
+    { numerator: 6n, denominator: 4n, fraction: "6/4" },
+    { ...speed, fraction: "6/4" }, { ...speed, fraction: "2/1" },
+    { ...speed, mode: "live" }, { ...speed, [Symbol("extra")]: true },
+  ]) {
+    assert.throws(() => playbackOutputFromMetadata(0n, undefined, undefined, 48000, bad), Error);
+    assert.throws(() => playbackOutputFromMetadata(0n, 4000000n, 6n, 1000, bad, 3000000n), Error);
+  }
+});
+
+test("general output rejects invalid metadata, sample Hz and output preroll before adoption", () => {
+  const speed = playbackSpeedFromFraction("3/2");
+  for (const hz of [0, -1, 1.5, NaN, Infinity, 4294967296, 48000n, "48000"]) {
+    assert.throws(() => playbackOutputFromMetadata(0n, undefined, undefined, hz, speed), Error);
+  }
+  for (const start of [-1n, I64_MAX + 1n, 0, "0", null]) {
+    assert.throws(() => playbackOutputFromMetadata(start, undefined, undefined, 48000, speed), Error);
+  }
+  for (const preroll of [-1n, I64_MAX + 1n, 0, "0", null]) {
+    assert.throws(() => playbackOutputFromMetadata(0n, undefined, undefined, 48000, speed, preroll), Error);
+  }
+  for (const [end, frame] of [
+    [undefined, 6n], [4000000n, undefined], [0n, 6n], [-1n, 6n],
+    [I64_MAX + 1n, 6n], [4000000, 6n], [4000000n, 6],
+    [4000000n, -1n], [4000000n, U64_MAX + 1n],
+  ]) assert.throws(() => playbackOutputFromMetadata(0n, end, frame, 1000, speed, 3000000n), Error);
+  assert.deepEqual(speed, { numerator: 3n, denominator: 2n, fraction: "3/2" });
+});
+
+test("unlimited live output keeps a fresh frozen endpoint while validating speed and preroll", () => {
+  const speed = playbackSpeedFromFraction("3/2");
+  const endpoint = playbackOutputFromMetadata(0n, undefined, undefined, 48000, speed, 0n);
+  assert.deepEqual(endpoint, { endNs: undefined, endFrame: undefined });
+  assert.ok(Object.isFrozen(endpoint));
+  assert.notEqual(endpoint, playbackOutputFromMetadata(0n, undefined, undefined, 48000, speed, 0n));
+  assert.throws(() => { endpoint.endFrame = 1n; }, TypeError);
+});
+
+test("general four-argument normal output and original replay API retain literal compatibility", () => {
+  const expected = { endNs: 3000000000n, endFrame: 31n };
+  assert.deepEqual(playbackOutputFromMetadata(0n, 3000000000n, 31n, 10), expected);
+  assert.deepEqual(replayOutputFromMetadata(0n, 3000000000n, 31n, 10), expected);
+  assert.deepEqual(playbackOutputFromMetadata(0n, 3000000000n, 31n, 10,
+    playbackSpeedFromFraction("8/8")), expected);
+  assert.throws(() => playbackOutputFromMetadata(0n, 3000000000n, 16n, 10), Error);
+  assert.deepEqual(replaySpeedFromFraction("21/14"), { numerator: 3n, denominator: 2n, fraction: "3/2" });
+  assert.deepEqual(replayOutputFromMetadata(0n, 4000000n, 6n, 1000,
+    replaySpeedFromFraction("3/2"), 3000000n), { endNs: 4000000n, endFrame: 6n });
+});

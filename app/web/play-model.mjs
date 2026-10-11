@@ -112,6 +112,12 @@ export function replayOutputFromMetadata(startNs, endNs, endFrame, rate, speed =
   return Object.freeze({ endNs, endFrame });
 }
 
+// Cold live and replay setup share the same positive fraction and output grid.
+export {
+  replaySpeedFromFraction as playbackSpeedFromFraction,
+  replayOutputFromMetadata as playbackOutputFromMetadata,
+};
+
 // Decimal user settings use integer arithmetic, independently of host clocks.
 export function parseTimingMilliseconds(value) {
   if (typeof value !== "string" || value.length > 21) throw new Error("Timing must be decimal milliseconds, at most 21 characters.");
