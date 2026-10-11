@@ -4,6 +4,13 @@
 `python3 tools/wbs_status.py`가 말단 작업의 완료·검증 대기·구현 중·장비/정책 대기를
 집계한다. 아래 60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-11 현재 연결 근거: Records의 genuine preview/history 및 retained Own/Other
+경쟁 선택은 WBS 11.05/E42의 독립 실제 browser·UX·CLI 검증과 원래 기준 감사를
+마쳤다. 전체 WBS는 91/193(47.15%)다. 관련 기능은 BK-032/BK-038/BK-039이며,
+아래 과거 survey 상태를 전체 기능 완료 판정으로 바꾸지 않는다.
+[현재 변경 및 검증 범위](../changes/2026-10-11-records-retained-actions.md)를 따른다.
+물리 동기화·전체 UI·출시 및 Harness close는 별도다.
+
 2026-10-08 재개 주의: 아래는 이전 revision의 기능 인벤토리이며 현재
 완료율/TODO 집계가 아니다. 전용 native input collector는 새 구현과
 독립 검증을 마쳤다(REQ__native-input-collector.md, closed task). 실제

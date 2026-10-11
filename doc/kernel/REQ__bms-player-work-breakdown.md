@@ -133,6 +133,17 @@ owned browser/display/server/profile/cache cleanup을 확인했다.
 `target/wf/bms-timing-resume-20261010/REPORT.md`를 따른다. 실제 장치/물리 성능·
 전체 원본 엔진 호환·Harness close 및 전체 player 완료는 별도다.
 
+E42: `de8ee17`/browser WASM `2fbf27ac…`의 실제 retained Records 연결은
+독립 DEEP code review, CLI Rust 2,391 PASS/6 기존 ignored 및 Node 931 PASS,
+실제 browser QA와 UX PASS를 확인했다. Genuine 완료 기록 두 개의 accepted prefix와
+저장 comparison/history, Own/Other의 비영 selected count, duplicate refusal,
+preview 없는 exact-kind Remove, unrelated preservation, Clear, exact Settings Back,
+keyboard/empty catalog 및 save/delete/Scan의 literal selection 보존을 증명했다.
+원래 11.05 기준의 독립 사실 감사도 승격을 권고했다.
+[변경 및 검증 기록](../changes/2026-10-11-records-retained-actions.md)을 따른다.
+QA1의 keyboard FAIL과 수정 뒤 QA2 PASS를 함께 보존한다. 모든 owned GUI 자원은
+종료·회수했다. 물리 장치/성능, 전체 UI 및 receipt-backed Harness close는 별도다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -349,7 +360,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [ ] **BK-WBS-11.02** Gameplay Worker가 준비·판정·capture·network owner를 담당한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=현재 실제 bridge·stalled renderer 관찰.
 - [ ] **BK-WBS-11.03** Renderer Worker/OffscreenCanvas가 GPU와 local retained views를 소유한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=실제 current WASM renderer·Scene/메뉴 수명.
 - [ ] **BK-WBS-11.04** 모든 메뉴의 business owner·상태 packet·semantic action을 실제 Renderer view에 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=Selection/Settings/Practice/Display/Records/Players/Devices/Results.
-- [ ] **BK-WBS-11.05** 실제 Records preview·own/other opponent·history를 read-only packet으로 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=AC024 모델을 사용한 actual browser navigation.
+- [x] **BK-WBS-11.05** 실제 Records preview·own/other opponent·history를 read-only packet으로 연결한다. — 상태=D(검증완료); 선행=-; 근거=E42; AC024 모델과 actual retained browser navigation의 독립 감사 완료.
 - [ ] **BK-WBS-11.06** bounded packet·generation/screen/revision 토큰이 stale/hostile action을 원자적으로 거절한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=실제 generated WASM + Worker/RenderClient.
 - [ ] **BK-WBS-11.07** Window에 렌더/준비/대규모 model 갱신을 되돌리지 않고 입력·필수 gesture bridge만 둔다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=main thread CPU trace 및 source audit.
 - [ ] **BK-WBS-11.08** AudioWorklet이 실제 callback·output clock·buffer·finite drain을 처리한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=실제 browser audio; mock clock만으로 완료하지 않음.
@@ -514,6 +525,11 @@ Native collector termination 절에 있다.
 상세 behavior/architecture/라이선스는 연결된 기존 REQ/GUIDE/ADR이 계속 소유한다.
 
 ## 변경 이력
+
+- 2026-10-11: genuine Records preview/history와 retained Own/Other controls의
+  실제 연결을 독립 code review·CLI/browser QA·UX 및 원래 기준 감사로 확인해
+  E42를 추가하고 11.05를 D로 갱신했다. 완료90→91, 활성193 유지.
+  physical/전체 UI/출시 및 Harness attestation은 남은 기준에서 유지한다.
 
 - 2026-10-10: 기존 판정 프리셋 code review/CLI96과 현재 실제 browser의
   남은 history/replay/seek/retry/local 검증 PASS를 대조해08.07을 D로 갱신했다.
