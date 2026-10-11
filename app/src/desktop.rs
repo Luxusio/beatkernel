@@ -5354,7 +5354,13 @@ impl Desktop {
                 }
                 _ => {}
             }
-            if let Ok(Some(reply)) = game.viewer.take_output_reply() {
+            // Retain the channel's reply until the suspended draft can accept it.
+            let output_reply = if self.navigator.phase() != ScreenPhase::Suspended {
+                game.viewer.take_output_reply()
+            } else {
+                Ok(None)
+            };
+            if let Ok(Some(reply)) = output_reply {
                 if self.navigator.route() == ScreenRoute::LiveAudio {
                     if let Some(draft) = &mut self.live_audio {
                         if self.navigator.accepts(draft.id()) && draft.request == Some(reply.id) {

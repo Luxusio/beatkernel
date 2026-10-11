@@ -369,6 +369,11 @@ fn live_audio_real_channel_draw_pending_replies_suspend_and_fresh_identity() {
             app.hits.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             [ControlId(91)]
         );
+        let editor = app.live_audio.as_ref().unwrap().editor.clone();
+        let message = app.live_audio.as_ref().unwrap().message.clone();
+        app.navigator.suspend();
+        app.synchronize_panel_lifecycles();
+        assert_eq!(permit.phase(), PanelPhase::Suspended);
         publisher
             .reply_output(&OutputReply {
                 id: request.id,
@@ -379,9 +384,26 @@ fn live_audio_real_channel_draw_pending_replies_suspend_and_fresh_identity() {
                 },
             })
             .unwrap();
+        for _ in 0..2 {
+            app.collect_game();
+            let draft = app.live_audio.as_ref().unwrap();
+            assert_eq!(draft.id(), child);
+            assert_eq!(app.live_audio_view.as_ref().unwrap().id(), child);
+            assert_eq!(permit.phase(), PanelPhase::Suspended);
+            assert_eq!(draft.request, Some(request.id));
+            assert_eq!(draft.editor, editor);
+            assert_eq!(draft.values.native_args(), values);
+            assert_eq!(draft.message, message);
+            assert!(app.game.as_ref().unwrap().viewer.output_pending());
+        }
+        app.navigator.resume();
+        app.synchronize_panel_lifecycles();
+        assert!(permit.is_active());
         app.collect_game();
         assert_eq!(app.live_audio.as_ref().unwrap().id(), child);
+        assert_eq!(app.live_audio_view.as_ref().unwrap().id(), child);
         assert_eq!(app.live_audio.as_ref().unwrap().request, None);
+        assert!(!app.game.as_ref().unwrap().viewer.output_pending());
         assert_eq!(
             app.live_audio.as_ref().unwrap().values.native_args(),
             if accepted {
@@ -390,6 +412,27 @@ fn live_audio_real_channel_draw_pending_replies_suspend_and_fresh_identity() {
                 values
             }
         );
+        assert_eq!(
+            app.live_audio.as_ref().unwrap().message.as_deref(),
+            Some(if accepted {
+                "Output settings applied. Playback remains paused."
+            } else {
+                "live owner refused"
+            })
+        );
+        if !accepted {
+            assert_eq!(app.live_audio.as_ref().unwrap().editor, editor);
+        }
+        let delivered_editor = app.live_audio.as_ref().unwrap().editor.clone();
+        let delivered_values = app.live_audio.as_ref().unwrap().values.native_args();
+        let delivered_message = app.live_audio.as_ref().unwrap().message.clone();
+        app.collect_game();
+        let draft = app.live_audio.as_ref().unwrap();
+        assert_eq!(draft.id(), child);
+        assert_eq!(draft.request, None);
+        assert_eq!(draft.editor, delivered_editor);
+        assert_eq!(draft.values.native_args(), delivered_values);
+        assert_eq!(draft.message, delivered_message);
         assert_eq!(app.options.native, native);
         assert_eq!(app.game.as_ref().unwrap().launch.args(), launch);
     }
