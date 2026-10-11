@@ -7,7 +7,7 @@ SoundBinding hit-stage selection. Misses remain silent; normal prepared BMS
 bindings sound Instant and HoldHead, while any additional stage needs an explicit
 binding. The logical judge runs the stored operations, not synthetic autoplay.
 
-Judge results carry effective time. Audio removes the stored profile offset once
+Judge results carry effective time. Legacy audio removes the stored profile offset once
 to recover operation song time, then maps output origin + explicit nonnegative
 preroll + song time with checked wide arithmetic. A command before output origin
 or outside representable time fails rather than clamps. Background Play commands
@@ -44,6 +44,31 @@ Existing output paths are never overwritten. Render/write failure may leave a
 partial newly created file. The renderer does not flush; the CLI flushes its sink.
 Preroll defaults to three seconds and can be set to any nonnegative i64 duration.
 Replay, block, command and voice limits are explicit.
+
+## Explicit pitch-changing output speed
+
+The opt-in rate-aware planner/renderer entry points use a positive core `Rate`;
+existing entry points retain normal1x delegation. Their original song-to-output
+delta is inverse-scaled with checked rational arithmetic, then added to output
+origin and unscaled output preroll. Nanoseconds truncate toward zero before the
+existing upward frame rounding. Recording operations, original timestamps,
+profile/section identity and logical judge results/hash remain unchanged.
+Device sample Hz and requested output seconds remain separate from speed.
+
+Non-normal plans put one actual SetRate at output origin before equal-time sound
+commands. It changes Mixer sample readheads, counts as an ordinary queue admission,
+and grants no Stop allowance or extra capacity. The section-aware exclusive fence
+also applies to that control; a section quantized to zero output frames contains
+no commands. Default/native consumers and the strict offline finite-metadata
+refusal retain their existing admission contracts. CLI speed is explicit
+`--speed NUM/DEN`, defaults1/1, normalizes positive checked decimal components
+and rejects malformed values before file access.
+
+The [scoped speed contract](REQ__replay-render-playback-speed.md) owns exact
+API/rounding/queue/error semantics and planned verification. Implementation and
+independent acceptance are tracked there; this section does not claim those
+checks have passed. No native/browser real-time rate control or pitch-preserving
+DSP is implied by offline output speed.
 
 Known ceiling: capture records logical judge operations, not original native
 output scheduling points, PCM or failed audio admissions. This reconstruction
