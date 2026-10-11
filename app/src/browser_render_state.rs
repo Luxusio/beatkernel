@@ -591,9 +591,11 @@ pub const MAX_RENDER_REGISTRATION_BYTES: usize = 128
     + beatkernel::chart::MAX_SOURCE_ITEMS * RENDER_NOTE_RECORD_BYTES
     + crate::image_assets::MAX_IMAGE_BANK_BYTES as usize
     + MAX_RENDER_IMAGE_METADATA_BYTES;
-pub const MAX_RENDER_GPU_NOTE_BYTES: usize = MAX_RENDER_VISIBLE
-    * (crate::player_chart::MAX_VISIBLE_NOTES * 3 + crate::player_chart::MAX_VISIBLE_MINES)
-    * 32;
+/// Source-derived storage ceiling for four retained note buffers, including
+/// geometric-growth slack. This is an estimate, not an allocation or admission
+/// policy: each field starts at 32 bytes and uses its actual device limit.
+pub const MAX_RENDER_GPU_NOTE_BYTES: usize =
+    MAX_RENDER_VISIBLE * beatkernel::chart::MAX_SOURCE_ITEMS * 3 * 32;
 
 pub fn visual_registration_bytes(
     chart: &PlayerChartTransfer,
@@ -668,14 +670,79 @@ pub fn visual_registration_bytes(
         .checked_add(diagnostics)
         .ok_or_else(|| "visual registration byte count overflow".into())
 }
-/// Conservative peak includes six encoded representations plus the positive
+/// Requested storage for the four visible fields, independent of the current
+/// chart's note count. Scene caches, shared query scratch and Renderer upload
+/// keys survive clear and registration, so older charts can have larger extents.
+///
+/// Each cache has current and staged note/mine metadata. The two shared scratch
+/// vectors can independently retain a full-source maximum from different charts.
+/// A failed candidate can leave Renderer holding geometry A and the cache holding
+/// geometry B. Building C temporarily adds both its Vec and its copied Arc: four
+/// distinct payloads, with three Arc allocation headers. Scene/cache/Renderer
+/// clones of the same Arc do not add payloads. Applying that busy-slot bound to
+/// all four slots is deliberately conservative; staging is actually sequential.
+/// Current and replacement GPU capacities each use the global source ceiling,
+/// which includes growth slack even when the current chart is small.
+pub(crate) fn peak_playfield_storage_bytes() -> Result<u64, String> {
+    use crate::playfield_gpu::{NoteInstance, PlayfieldCache, PlayfieldFrame};
+    use std::mem::size_of;
+
+    let source =
+        crate::presentation_budget::source_extent(beatkernel::chart::MAX_SOURCE_ITEMS, 0, 0, 0)
+            .map_err(str::to_string)?;
+    let geometry = crate::presentation_budget::instance_extent(source.max_instances, 32)
+        .map_err(str::to_string)?
+        .bytes;
+    let items = source.total_items as u64;
+    // Notes and mines share admission; use the larger metadata record rather
+    // than granting both independent full-source allocations in one cache.
+    let record = size_of::<(crate::player_chart::PlayerNote, bool)>()
+        .max(size_of::<crate::player_chart::PlayerMine>()) as u64;
+    let metadata = items
+        .checked_mul(record)
+        .and_then(|bytes| bytes.checked_mul(2))
+        .and_then(|bytes| bytes.checked_add(size_of::<PlayfieldCache>() as u64))
+        .and_then(|bytes| bytes.checked_add(2 * size_of::<Vec<usize>>() as u64));
+    let scratch = items
+        .checked_mul(size_of::<usize>() as u64)
+        .and_then(|bytes| bytes.checked_mul(2))
+        .and_then(|bytes| bytes.checked_add(2 * size_of::<Vec<usize>>() as u64));
+    let geometry = geometry.checked_mul(4).and_then(|bytes| {
+        bytes.checked_add(
+            (3 * 2 * size_of::<usize>()
+                + size_of::<Vec<NoteInstance>>()
+                + size_of::<PlayfieldFrame>()
+                + size_of::<Option<Arc<[NoteInstance]>>>()) as u64,
+        )
+    });
+    let gpu = (MAX_RENDER_GPU_NOTE_BYTES as u64).checked_mul(2);
+    let recent = (MAX_RENDER_RECENT as u64)
+        .checked_mul(size_of::<JudgeEvent>() as u64)
+        .and_then(|bytes| bytes.checked_add(size_of::<Vec<JudgeEvent>>() as u64))
+        .and_then(|bytes| bytes.checked_mul(MAX_RENDER_VISIBLE as u64));
+    metadata
+        .and_then(|bytes| bytes.checked_add(geometry?))
+        .and_then(|bytes| bytes.checked_mul(MAX_RENDER_VISIBLE as u64))
+        .and_then(|bytes| bytes.checked_add(scratch?))
+        .and_then(|bytes| bytes.checked_add(gpu?))
+        .and_then(|bytes| bytes.checked_add(recent?))
+        .ok_or_else(|| "visual playfield storage byte count overflow".into())
+}
+
+/// Conservative model includes six encoded representations plus the positive
 /// decoded record expansion for three owned Rust charts. Images count exact
 /// RGBA bytes separately;1024/reference covers the three resource tables,
 /// four BTreeMaps, vectors, Strings, Arc headers and allocation padding per bank.
 /// Receiver note indexes need at most4*n*i64 tree entries+n*(ObjectId,usize).
 /// Additional timeline staging assumes every remaining source item is BGA or
 /// opacity data, at its actual Rust size. Surface/depth attachments remain
-/// separately extent/device-bound by Renderer.
+/// separately extent/device-bound by Renderer. Cold copies/indexes describe the
+/// supplied registration; overlapping replacement registrations must include
+/// their older cold storage separately. Retained playfield storage instead uses
+/// source maxima because its lifetime crosses registrations. This estimates
+/// requested payload/layout storage, not resident RAM: allocator rounding,
+/// driver/queue retention, surfaces, static UI caches and non-visual ownership
+/// are separate. It does not create a runtime aggregate-memory admission policy.
 pub fn peak_visual_transport_bytes(
     cold_bytes: usize,
     note_count: usize,
@@ -705,24 +772,29 @@ pub fn peak_visual_transport_bytes(
     .map(|(decoded, encoded)| decoded.saturating_sub(encoded))
     .max()
     .unwrap_or(0) as u64;
-    let note_index = note_count as u64
-        * (4 * std::mem::size_of::<i64>() + std::mem::size_of::<(ObjectId, usize)>()) as u64;
+    let note_index = (note_count as u64).checked_mul(
+        (4 * std::mem::size_of::<i64>() + std::mem::size_of::<(ObjectId, usize)>()) as u64,
+    );
     let timeline_record = std::mem::size_of::<beatkernel_bms::ScheduledBga>()
         .max(std::mem::size_of::<beatkernel_bms::ScheduledBgaOpacity>())
         as u64;
-    let timeline_staging = (source_items - note_count as u64) * timeline_record;
-    let cpu_metadata = 3 * source_items * expansion
-        + 3 * (note_index + timeline_staging)
-        + 3 * crate::image_assets::MAX_IMAGE_REFERENCES as u64 * 1024;
+    let timeline_staging = source_items
+        .checked_sub(note_count as u64)
+        .and_then(|items| items.checked_mul(timeline_record));
+    let cpu_metadata = source_items
+        .checked_mul(expansion)
+        .and_then(|bytes| bytes.checked_add(note_index?))
+        .and_then(|bytes| bytes.checked_add(timeline_staging?))
+        .and_then(|bytes| {
+            bytes.checked_add(crate::image_assets::MAX_IMAGE_REFERENCES as u64 * 1024)
+        })
+        .and_then(|bytes| bytes.checked_mul(3));
+    let playfields = peak_playfield_storage_bytes()?;
     (cold_bytes as u64)
         .checked_mul(6)
-        .and_then(|bytes| {
-            bytes.checked_add(
-                cpu_metadata
-                    + progress
-                    + 2 * MAX_RENDER_GPU_NOTE_BYTES as u64
-                    + 2 * crate::image_assets::MAX_IMAGE_BANK_BYTES,
-            )
-        })
+        .and_then(|bytes| bytes.checked_add(cpu_metadata?))
+        .and_then(|bytes| bytes.checked_add(progress))
+        .and_then(|bytes| bytes.checked_add(playfields))
+        .and_then(|bytes| bytes.checked_add(2 * crate::image_assets::MAX_IMAGE_BANK_BYTES))
         .ok_or_else(|| "visual peak byte count overflow".into())
 }

@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use crate::playfield_gpu::{NoteInstance, MAX_NOTE_INSTANCES, MAX_PLAYFIELDS};
+use crate::playfield_gpu::NoteInstance;
+use crate::presentation_budget::{initial_buffer_bytes, upload_plans, MAX_PLAYFIELDS};
 use crate::scene::{Rectangle, Scene, MAX_RECTANGLES};
 use crate::texture::{RgbaImage, TextureId, MAX_TEXTURES, MAX_TEXTURE_BYTES};
 
@@ -108,6 +109,7 @@ fn validate_texture_update(
 
 struct NoteLayer {
     instances: wgpu::Buffer,
+    buffer_bytes: u64,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     uploaded: Option<Arc<[NoteInstance]>>,
@@ -336,11 +338,15 @@ impl Renderer {
             multiview: None,
             cache: None,
         });
+        let note_buffer_bytes = initial_buffer_bytes(
+            std::mem::size_of::<NoteInstance>(),
+            device.limits().max_buffer_size,
+        )?;
         let note_layers = (0..MAX_PLAYFIELDS)
             .map(|_| {
                 let instances = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("BeatKernel retained note buffer"),
-                    size: (MAX_NOTE_INSTANCES * std::mem::size_of::<NoteInstance>()) as u64,
+                    size: note_buffer_bytes,
                     usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
@@ -360,6 +366,7 @@ impl Renderer {
                 });
                 NoteLayer {
                     instances,
+                    buffer_bytes: note_buffer_bytes,
                     uniform,
                     bind_group,
                     uploaded: None,
@@ -665,6 +672,22 @@ impl Renderer {
             .ok_or("renderer presentation counter exhausted")?;
         self.check_failure()?;
         scene.status()?;
+        let fields = scene.playfields();
+        if fields.len() > MAX_PLAYFIELDS {
+            return Err("presentation exceeds displayed playfield capacity".into());
+        }
+        let mut counts = [0; MAX_PLAYFIELDS];
+        for (slot, field) in fields.iter().enumerate() {
+            counts[slot] = field.instances.len();
+        }
+        let retained_bytes = std::array::from_fn(|slot| self.note_layers[slot].buffer_bytes);
+        // Reject the entire candidate before acquisition, writes or upload-key changes.
+        let plans = upload_plans(
+            &counts[..fields.len()],
+            &retained_bytes,
+            std::mem::size_of::<NoteInstance>(),
+            self.device.limits().max_buffer_size,
+        )?;
         for batch in scene.batches() {
             if !self.textures.contains_key(&batch.texture) {
                 return Err(format!(
@@ -696,6 +719,31 @@ impl Renderer {
             Err(error) => return Err(format!("graphics surface acquisition failed: {error}")),
         };
         let suboptimal = frame.suboptimal;
+        // Keep the current layers intact until every needed replacement has been
+        // created and the existing device-error channel has been checked. Driver
+        // and global allocation failure cannot universally be recovered here.
+        let mut replacements: [Option<wgpu::Buffer>; MAX_PLAYFIELDS] =
+            std::array::from_fn(|_| None);
+        for (slot, plan) in plans.iter().enumerate() {
+            if let Some(plan) = plan.filter(|plan| plan.replace_buffer) {
+                replacements[slot] = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("BeatKernel retained note buffer"),
+                    size: plan.buffer_bytes,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+        }
+        self.check_failure()?;
+        for (slot, replacement) in replacements.into_iter().enumerate() {
+            if let Some(instances) = replacement {
+                let layer = &mut self.note_layers[slot];
+                layer.instances = instances;
+                layer.buffer_bytes = plans[slot].unwrap().buffer_bytes;
+                // A fresh buffer needs data even when the geometry Arc is unchanged.
+                layer.uploaded = None;
+            }
+        }
         let dimensions = scene.dimensions();
         let translation = scene.ui_translation().offset();
         self.queue.write_buffer(
@@ -738,7 +786,7 @@ impl Renderer {
             }
             self.uploaded_geometry = Some((Arc::clone(identity), epoch));
         }
-        for (field, layer) in scene.playfields().iter().zip(&mut self.note_layers) {
+        for (field, layer) in fields.iter().zip(&mut self.note_layers) {
             if !layer
                 .uploaded
                 .as_ref()
@@ -803,7 +851,7 @@ impl Renderer {
                     pass.set_pipeline(&self.note_pipeline);
                     pass.set_vertex_buffer(0, layer.instances.slice(..));
                     pass.set_bind_group(0, &layer.bind_group, &[]);
-                    pass.draw(0..6, 0..scene.playfields()[slot].instances.len() as u32);
+                    pass.draw(0..6, 0..plans[slot].unwrap().draw_count);
                 } else {
                     let texture = &self.textures[&batch.texture];
                     pass.set_pipeline(&self.pipeline);

@@ -72,15 +72,17 @@ fn frame(
     probe_index: usize,
     now: i64,
 ) -> PlayfieldFrame {
-    cache.frame_indexed_with_progress(
-        notes,
-        &[0, 1 + probe_index * 2, 2 + probe_index * 2],
-        2,
-        bounds(),
-        Timestamp::from_nanos(now),
-        LOOKAHEAD,
-        None,
-    )
+    cache
+        .frame_indexed_with_progress(
+            notes,
+            &[0, 1 + probe_index * 2, 2 + probe_index * 2],
+            2,
+            bounds(),
+            Timestamp::from_nanos(now),
+            LOOKAHEAD,
+            None,
+        )
+        .unwrap()
 }
 
 fn assert_local_geometry(frame: &PlayfieldFrame, notes: &[PlayerNote], index: usize, now: i64) {

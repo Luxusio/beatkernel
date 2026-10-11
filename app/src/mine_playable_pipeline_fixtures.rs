@@ -1,20 +1,20 @@
 //! Deferred mine owners beginning at the actual injected preparation boundary.
 use crate::{
-    AssetDecoder, ChannelPolicy, PreparedBms,
     asset_paths::AssetPathPolicy,
     asset_source::AssetSource,
-    prepare_from_source,
-    step_gameplay::{StepGameplay, StepLocalGameplay, StepGameplayConfig},
-    local_players::{PlayerId, ResolvedInputPlan},
-    mine_audio_consumers_fixtures::{recorded, Action, replay_limits},
-    replay_audio::{plan_audio, plan_section_audio},
-    offline::{render_offline, OfflineOptions},
     competition::{Competition, OpponentKind},
+    local_players::{PlayerId, ResolvedInputPlan},
+    mine_audio_consumers_fixtures::{recorded, replay_limits, Action},
+    offline::{render_offline, OfflineOptions},
+    prepare_from_source,
+    replay_audio::{plan_audio, plan_section_audio},
+    step_gameplay::{StepGameplay, StepGameplayConfig, StepLocalGameplay},
+    AssetDecoder, ChannelPolicy, PreparedBms,
 };
 use beatkernel::{
     audio::{
-        AudioFormat, AudioLimits, AudioCommand, Mixer, MixerConfig, PcmLimits, PcmSample,
-        SampleBank, CommandProducer, SampleId, command_queue,
+        command_queue, AudioCommand, AudioFormat, AudioLimits, CommandProducer, Mixer, MixerConfig,
+        PcmLimits, PcmSample, SampleBank, SampleId,
     },
     input::{
         Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
@@ -324,8 +324,8 @@ fn actual_loaded_local_players_have_independent_occupancy_damage_and_disjoint_mi
     }
 }
 #[test]
-fn admitted_capture_replay_and_saved_competition_share_hazards_hash_and_reject_changed_damage_before_io()
- {
+fn admitted_capture_replay_and_saved_competition_share_hazards_hash_and_reject_changed_damage_before_io(
+) {
     let text = "#BPM 60\n#WAV00 blast.pcm\n#000D1:0101\n";
     let assets = Assets::default();
     let prepared = load(text, &assets);
@@ -398,11 +398,9 @@ fn admitted_capture_replay_and_saved_competition_share_hazards_hash_and_reject_c
         Some((&actual.file, replay_limits())),
     )
     .unwrap_err();
-    assert!(
-        error
-            .downcast_ref::<crate::replay_playback::PlaybackError>()
-            .is_some()
-    );
+    assert!(error
+        .downcast_ref::<crate::replay_playback::PlaybackError>()
+        .is_some());
     assert!(changed.names.borrow().is_empty());
     assert!(changed.reads.borrow().is_empty());
     assert!(changed.decoded.borrow().is_empty());
@@ -445,16 +443,14 @@ fn actual_loaded_finite_practice_retains_original_marker_time_identity_and_zero_
         actual.reports[1].hazard_events[0].at.as_nanos(),
         2_000_000_000
     );
-    assert!(
-        plan_audio(
-            &selected,
-            actual.file.clone(),
-            replay_limits(),
-            point(2, 1_000_000_000),
-            Duration::ZERO
-        )
-        .is_err()
-    );
+    assert!(plan_audio(
+        &selected,
+        actual.file.clone(),
+        replay_limits(),
+        point(2, 1_000_000_000),
+        Duration::ZERO
+    )
+    .is_err());
     let plan = plan_section_audio(
         &selected,
         actual.file,
@@ -482,11 +478,9 @@ fn source_only_mine_prevents_completion_until_actual_hazard_and_output_frontier_
     game.advance_to(point(1, 0), &Domains, point(2, 0)).unwrap();
     let (_producer, mut output) = mixer(bank, 0);
     let first = output.render(&mut [0.; 1]).unwrap();
-    assert!(
-        !game
-            .observe_completion(Some(first), Some(point(2, 100_000_000)))
-            .unwrap()
-    );
+    assert!(!game
+        .observe_completion(Some(first), Some(point(2, 100_000_000)))
+        .unwrap());
     assert!(game.completed_result().is_none());
     game.advance_to(point(1, 2_000_000_000), &Domains, point(2, 2_000_000_000))
         .unwrap();
@@ -540,7 +534,7 @@ fn actual_loaded_offline_note_and_mine_render_shared_gain_pcm_without_treating_d
 #[test]
 fn actual_loader_mine_only_chart_reaches_retained_render_packets_without_normal_note_progress() {
     use crate::{
-        player_chart::PlayerChart, note_progress::NoteProgress, playfield_gpu::PlayfieldCache,
+        note_progress::NoteProgress, player_chart::PlayerChart, playfield_gpu::PlayfieldCache,
         ui::interaction::Bounds,
     };
     use std::sync::Arc;
@@ -563,36 +557,38 @@ fn actual_loader_mine_only_chart_reaches_retained_render_packets_without_normal_
         height: 515,
     };
     let mut cache = PlayfieldCache::default();
-    let first = cache.frame_indexed_with_mines_and_progress(
-        &chart.notes,
-        &[],
-        chart.mines(),
-        &indices,
-        chart.lanes.len(),
-        bounds,
-        Timestamp::ZERO,
-        4_000_000_000,
-        None,
-    );
+    let first = cache
+        .frame_indexed_with_mines_and_progress(
+            &chart.notes,
+            &[],
+            chart.mines(),
+            &indices,
+            chart.lanes.len(),
+            bounds,
+            Timestamp::ZERO,
+            4_000_000_000,
+            None,
+        )
+        .unwrap();
     assert_eq!(first.instances.len(), 2);
-    assert!(
-        first
-            .instances
-            .iter()
-            .all(|instance| instance.appearance[0] == 2.)
-    );
+    assert!(first
+        .instances
+        .iter()
+        .all(|instance| instance.appearance[0] == 2.));
     assert_ne!(first.instances[0].appearance, first.instances[1].appearance);
-    let same = cache.frame_indexed_with_mines_and_progress(
-        &chart.notes,
-        &[],
-        chart.mines(),
-        &indices,
-        chart.lanes.len(),
-        bounds,
-        Timestamp::ZERO,
-        4_000_000_000,
-        None,
-    );
+    let same = cache
+        .frame_indexed_with_mines_and_progress(
+            &chart.notes,
+            &[],
+            chart.mines(),
+            &indices,
+            chart.lanes.len(),
+            bounds,
+            Timestamp::ZERO,
+            4_000_000_000,
+            None,
+        )
+        .unwrap();
     assert!(Arc::ptr_eq(&first.instances, &same.instances));
     assert_eq!(assets.decoded.borrow().len(), 1);
 }

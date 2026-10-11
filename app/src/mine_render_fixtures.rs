@@ -2,10 +2,10 @@
 //! and Scene composition; they do not execute a GPU or grant source admission.
 use crate::{
     note_progress::NoteProgress,
-    player_chart::{MAX_VISIBLE_MINES, PlayerChart, PlayerMine},
+    player_chart::{PlayerChart, PlayerMine},
 };
 use beatkernel::{chart::ObjectId, time::Timestamp};
-use beatkernel_bms::{BmsChart, MineDamage, parse};
+use beatkernel_bms::{parse, BmsChart, MineDamage};
 use std::sync::Arc;
 
 fn ts(ns: i64) -> Timestamp {
@@ -90,7 +90,6 @@ fn prepared_mines_keep_full_identity_sorted_ties_and_never_become_note_progress(
 
 #[test]
 fn inclusive_wide_windows_match_a_linear_oracle_and_keep_bounded_reusable_scratch() {
-    assert_eq!(MAX_VISIBLE_MINES, 2048);
     let chart = model("#BPM 60\n#000D1:01020304\n#000D2:ZZ000000");
     assert_eq!(
         chart
@@ -170,17 +169,13 @@ fn inclusive_wide_windows_match_a_linear_oracle_and_keep_bounded_reusable_scratc
         .visible_mine_indices_checked(ts(0), i64::MAX, 0, &mut scratch)
         .unwrap();
     assert_eq!(scratch, (0..2048).collect::<Vec<_>>());
+    let dense = model(&format!("#BPM 60\n#000D1:{}", "1E".repeat(2049)));
+    dense
+        .visible_mine_indices_checked(ts(0), i64::MAX, 0, &mut scratch)
+        .unwrap();
+    assert_eq!(scratch, (0..2049).collect::<Vec<_>>());
     let pointer = scratch.as_ptr();
     let capacity = scratch.capacity();
-    let dense = model(&format!("#BPM 60\n#000D1:{}", "1E".repeat(2049)));
-    assert!(
-        dense
-            .visible_mine_indices_checked(ts(0), i64::MAX, 0, &mut scratch)
-            .is_err()
-    );
-    assert!(scratch.is_empty());
-    assert_eq!(scratch.as_ptr(), pointer);
-    assert_eq!(scratch.capacity(), capacity);
     for now in [0, 1_000_000_000, 4_000_000_000, 0] {
         at_limit
             .visible_mine_indices_checked(ts(now), i64::MAX, 0, &mut scratch)
@@ -212,7 +207,7 @@ mod rendering {
         local_players::PlayerId,
         native_judge::NativeJudgeConfig,
         player::LocalPlayerSnapshot,
-        playfield_gpu::{MAX_NOTE_INSTANCES, PlayfieldCache},
+        playfield_gpu::PlayfieldCache,
         scene::Scene,
         ui::{interaction::Bounds, organisms},
     };
@@ -259,26 +254,30 @@ mod rendering {
         let chart = Arc::new(project(&source));
         let mut cache = PlayfieldCache::default();
         let mut ordinary_cache = PlayfieldCache::default();
-        let baseline = ordinary_cache.frame_indexed_with_progress(
-            &chart.notes,
-            &[0, 1],
-            2,
-            bounds(),
-            ts(0),
-            1_000_000_000,
-            None,
-        );
-        let first = cache.frame_indexed_with_mines_and_progress(
-            &chart.notes,
-            &[0, 1],
-            chart.mines(),
-            &[0, 1],
-            2,
-            bounds(),
-            ts(0),
-            1_000_000_000,
-            None,
-        );
+        let baseline = ordinary_cache
+            .frame_indexed_with_progress(
+                &chart.notes,
+                &[0, 1],
+                2,
+                bounds(),
+                ts(0),
+                1_000_000_000,
+                None,
+            )
+            .unwrap();
+        let first = cache
+            .frame_indexed_with_mines_and_progress(
+                &chart.notes,
+                &[0, 1],
+                chart.mines(),
+                &[0, 1],
+                2,
+                bounds(),
+                ts(0),
+                1_000_000_000,
+                None,
+            )
+            .unwrap();
         assert_eq!(first.instances.len(), 6);
         for (actual, old) in first.instances[..4].iter().zip(baseline.instances.iter()) {
             assert_eq!(actual.geometry, old.geometry);
@@ -295,32 +294,36 @@ mod rendering {
             appearance(2.0, [216, 107, 255])
         );
         assert_eq!((first.top, first.bottom, first.drift), (110.0, 625.0, 0.0));
-        let next = cache.frame_indexed_with_mines_and_progress(
-            &chart.notes,
-            &[0, 1],
-            chart.mines(),
-            &[0, 1],
-            2,
-            bounds(),
-            ts(100_000_000),
-            1_000_000_000,
-            None,
-        );
+        let next = cache
+            .frame_indexed_with_mines_and_progress(
+                &chart.notes,
+                &[0, 1],
+                chart.mines(),
+                &[0, 1],
+                2,
+                bounds(),
+                ts(100_000_000),
+                1_000_000_000,
+                None,
+            )
+            .unwrap();
         assert!(Arc::ptr_eq(&first.instances, &next.instances));
         assert_eq!(next.drift, 50.0);
         let mut changed = chart.mines().to_vec();
         changed[0].damage = MineDamage::from_raw(51).unwrap();
-        let damage = cache.frame_indexed_with_mines_and_progress(
-            &chart.notes,
-            &[0, 1],
-            &changed,
-            &[0, 1],
-            2,
-            bounds(),
-            ts(100_000_000),
-            1_000_000_000,
-            None,
-        );
+        let damage = cache
+            .frame_indexed_with_mines_and_progress(
+                &chart.notes,
+                &[0, 1],
+                &changed,
+                &[0, 1],
+                2,
+                bounds(),
+                ts(100_000_000),
+                1_000_000_000,
+                None,
+            )
+            .unwrap();
         assert!(
             !Arc::ptr_eq(&next.instances, &damage.instances),
             "metadata changes invalidate even the same nonfatal color"
@@ -330,80 +333,90 @@ mod rendering {
             first.instances[4].appearance
         );
         changed[0].damage = MineDamage::from_raw(1295).unwrap();
-        let fatal = cache.frame_indexed_with_mines_and_progress(
-            &chart.notes,
-            &[0, 1],
-            &changed,
-            &[0, 1],
-            2,
-            bounds(),
-            ts(100_000_000),
-            1_000_000_000,
-            None,
-        );
+        let fatal = cache
+            .frame_indexed_with_mines_and_progress(
+                &chart.notes,
+                &[0, 1],
+                &changed,
+                &[0, 1],
+                2,
+                bounds(),
+                ts(100_000_000),
+                1_000_000_000,
+                None,
+            )
+            .unwrap();
         assert!(!Arc::ptr_eq(&damage.instances, &fatal.instances));
         assert_eq!(
             fatal.instances[4].appearance,
             appearance(2.0, [216, 107, 255])
         );
-        let rewind = cache.frame_indexed_with_mines_and_progress(
-            &chart.notes,
-            &[0, 1],
-            &changed,
-            &[0, 1],
-            2,
-            bounds(),
-            ts(0),
-            1_000_000_000,
-            None,
-        );
+        let rewind = cache
+            .frame_indexed_with_mines_and_progress(
+                &chart.notes,
+                &[0, 1],
+                &changed,
+                &[0, 1],
+                2,
+                bounds(),
+                ts(0),
+                1_000_000_000,
+                None,
+            )
+            .unwrap();
         assert!(!Arc::ptr_eq(&fatal.instances, &rewind.instances));
-        let resized = cache.frame_indexed_with_mines_and_progress(
-            &chart.notes,
-            &[0, 1],
-            &changed,
-            &[0, 1],
-            2,
-            Bounds {
-                width: 320,
-                ..bounds()
-            },
-            ts(0),
-            1_000_000_000,
-            None,
-        );
+        let resized = cache
+            .frame_indexed_with_mines_and_progress(
+                &chart.notes,
+                &[0, 1],
+                &changed,
+                &[0, 1],
+                2,
+                Bounds {
+                    width: 320,
+                    ..bounds()
+                },
+                ts(0),
+                1_000_000_000,
+                None,
+            )
+            .unwrap();
         assert!(!Arc::ptr_eq(&rewind.instances, &resized.instances));
         assert_eq!(resized.instances[4].geometry, [83.0, 154.0, 485.0, 485.0]);
-        let membership = cache.frame_indexed_with_mines_and_progress(
-            &chart.notes,
-            &[0, 1],
-            &changed,
-            &[1],
-            2,
-            Bounds {
-                width: 320,
-                ..bounds()
-            },
-            ts(0),
-            1_000_000_000,
-            None,
-        );
+        let membership = cache
+            .frame_indexed_with_mines_and_progress(
+                &chart.notes,
+                &[0, 1],
+                &changed,
+                &[1],
+                2,
+                Bounds {
+                    width: 320,
+                    ..bounds()
+                },
+                ts(0),
+                1_000_000_000,
+                None,
+            )
+            .unwrap();
         assert_eq!(membership.instances.len(), 5);
         assert!(!Arc::ptr_eq(&resized.instances, &membership.instances));
-        let horizon = cache.frame_indexed_with_mines_and_progress(
-            &chart.notes,
-            &[0, 1],
-            &changed,
-            &[1],
-            2,
-            Bounds {
-                width: 320,
-                ..bounds()
-            },
-            ts(0),
-            2_000_000_000,
-            None,
-        );
+        let horizon = cache
+            .frame_indexed_with_mines_and_progress(
+                &chart.notes,
+                &[0, 1],
+                &changed,
+                &[1],
+                2,
+                Bounds {
+                    width: 320,
+                    ..bounds()
+                },
+                ts(0),
+                2_000_000_000,
+                None,
+            )
+            .unwrap();
         assert!(!Arc::ptr_eq(&membership.instances, &horizon.instances));
 
         let mut progress = NoteProgress::new(Arc::clone(&chart)).unwrap();
@@ -433,17 +446,19 @@ mod rendering {
             progress.state(0),
             Some(crate::note_progress::NoteState::Holding)
         );
-        let holding = cache.frame_indexed_with_mines_and_progress(
-            &chart.notes,
-            &[0, 1],
-            chart.mines(),
-            &[0, 1],
-            2,
-            bounds(),
-            ts(0),
-            1_000_000_000,
-            Some(&progress),
-        );
+        let holding = cache
+            .frame_indexed_with_mines_and_progress(
+                &chart.notes,
+                &[0, 1],
+                chart.mines(),
+                &[0, 1],
+                2,
+                bounds(),
+                ts(0),
+                1_000_000_000,
+                Some(&progress),
+            )
+            .unwrap();
         assert_eq!(holding.instances.len(), 5);
         assert_eq!(holding.instances[0].appearance[0], 0.0);
         assert_eq!(holding.instances[1].appearance[0], 1.0);
@@ -458,30 +473,34 @@ mod rendering {
         let mut distant = chart.mines().to_vec();
         distant[0].at = ts(720_000_250_000_000);
         distant[1].at = ts(720_000_750_000_000);
-        let long = cache.frame_indexed_with_mines_and_progress(
-            &[],
-            &[],
-            &distant,
-            &[0, 1],
-            2,
-            bounds(),
-            ts(720_000_000_000_000),
-            1_000_000_000,
-            None,
-        );
+        let long = cache
+            .frame_indexed_with_mines_and_progress(
+                &[],
+                &[],
+                &distant,
+                &[0, 1],
+                2,
+                bounds(),
+                ts(720_000_000_000_000),
+                1_000_000_000,
+                None,
+            )
+            .unwrap();
         assert_eq!(long.instances[0].geometry, first.instances[4].geometry);
         assert_eq!(long.instances[1].geometry, first.instances[5].geometry);
-        let later = cache.frame_indexed_with_mines_and_progress(
-            &[],
-            &[],
-            &distant,
-            &[0, 1],
-            2,
-            bounds(),
-            ts(720_000_100_000_000),
-            1_000_000_000,
-            None,
-        );
+        let later = cache
+            .frame_indexed_with_mines_and_progress(
+                &[],
+                &[],
+                &distant,
+                &[0, 1],
+                2,
+                bounds(),
+                ts(720_000_100_000_000),
+                1_000_000_000,
+                None,
+            )
+            .unwrap();
         assert!(Arc::ptr_eq(&long.instances, &later.instances));
         assert_eq!(later.drift, 50.0);
     }
@@ -606,34 +625,44 @@ mod rendering {
     }
 
     #[test]
-    fn scene_rejects_dense_or_invalid_lanes_before_batch_and_cache_changes_and_keeps_legacy_geometry()
-     {
-        assert_eq!(MAX_NOTE_INSTANCES, 8192);
+    fn scene_accepts_dense_rejects_invalid_lanes_and_keeps_legacy_geometry() {
         let good = model("#BPM 60\n#000D1:1E");
         let mut scene = Scene::new(960, 720);
         scene
             .playfield(&good, ts(0), 1_000_000_000, bounds())
             .unwrap();
-        let prior = Arc::clone(&scene.playfields()[0].instances);
         let dense = model(&format!("#BPM 60\n#000D1:{}", "1E".repeat(2049)));
         let mut invalid = good.clone();
         invalid.lanes.clear();
-        for rejected in [&dense, &invalid] {
+        scene.clear();
+        scene.playfield(&dense, ts(0), i64::MAX, bounds()).unwrap();
+        assert_eq!(scene.playfields()[0].instances.len(), 2049);
+        scene.clear();
+        scene
+            .playfield(&good, ts(0), 1_000_000_000, bounds())
+            .unwrap();
+        let prior = Arc::clone(&scene.playfields()[0].instances);
+        for rejected in [&invalid] {
             scene.clear();
             scene.rect(1, 2, 3, 4, 0x010203);
             let batches = scene.batches().len();
             let rectangles = scene.rectangles().len();
-            assert!(
-                scene
-                    .playfield(rejected, ts(0), i64::MAX, bounds())
-                    .is_err()
-            );
+            assert!(scene
+                .playfield(rejected, ts(0), i64::MAX, bounds())
+                .is_err());
             assert!(scene.playfields().is_empty());
             assert_eq!(scene.batches().len(), batches);
             assert_eq!(scene.rectangles().len(), rectangles);
+            assert!(scene.status().is_err());
+            assert!(scene
+                .playfield(&good, ts(0), 1_000_000_000, bounds())
+                .is_err());
+            assert!(scene.playfields().is_empty());
+            scene.clear();
             scene
                 .playfield(&good, ts(0), 1_000_000_000, bounds())
                 .unwrap();
+            assert!(scene.status().is_ok());
             assert!(Arc::ptr_eq(&prior, &scene.playfields()[0].instances));
         }
         let maximum = model(&format!(
@@ -653,26 +682,26 @@ mod rendering {
                 .count(),
             2048
         );
-        assert!(
-            scene.playfields()[0].instances[6144..]
-                .iter()
-                .all(|n| n.appearance == appearance(2.0, [239, 99, 114]))
-        );
+        assert!(scene.playfields()[0].instances[6144..]
+            .iter()
+            .all(|n| n.appearance == appearance(2.0, [239, 99, 114])));
         let plain = model("#BPM 120\n#WAV01 tone\n#LNTYPE 1\n#00051:0101");
         scene.clear();
         scene
             .playfield(&plain, ts(0), 1_000_000_000, bounds())
             .unwrap();
         let mut legacy = PlayfieldCache::default();
-        let reference = legacy.frame_indexed_with_progress(
-            &plain.notes,
-            &[0],
-            1,
-            bounds(),
-            ts(0),
-            1_000_000_000,
-            None,
-        );
+        let reference = legacy
+            .frame_indexed_with_progress(
+                &plain.notes,
+                &[0],
+                1,
+                bounds(),
+                ts(0),
+                1_000_000_000,
+                None,
+            )
+            .unwrap();
         for (actual, expected) in scene.playfields()[0]
             .instances
             .iter()

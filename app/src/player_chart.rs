@@ -11,12 +11,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Maximum number of notes returned for one desktop frame.
-pub const MAX_VISIBLE_NOTES: usize = 2048;
-
-/// Maximum number of original mine markers returned for one frame.
-pub const MAX_VISIBLE_MINES: usize = 2048;
-
 /// A note from the actual compiled gameplay chart.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlayerNote {
@@ -124,16 +118,13 @@ impl PlayerChart {
     /// Checks registration before constructing the existing receiver-local indexes.
     pub fn import_visual(data: PlayerChartTransfer) -> Result<Self, PlayerChartError> {
         let invalid = |reason: &str| PlayerChartError(reason.into());
-        [
+        crate::presentation_budget::source_extent(
             data.notes.len(),
             data.mines.len(),
             data.bga.len(),
             data.opacity.len(),
-        ]
-        .into_iter()
-        .try_fold(0usize, |total, count| total.checked_add(count))
-        .filter(|total| *total <= beatkernel::chart::MAX_SOURCE_ITEMS)
-        .ok_or_else(|| invalid("visual chart source item capacity exceeded"))?;
+        )
+        .map_err(invalid)?;
         // Account for all supplied owned metadata before allocating indexes.
         data.title
             .len()
@@ -295,6 +286,16 @@ impl PlayerChart {
                 .compile_mines()
                 .map_err(|error| PlayerChartError(error.to_string()))?
         };
+        let bga = crate::bga::BgaTimeline::from_chart(source).map_err(PlayerChartError)?;
+        let opacity =
+            crate::bga_opacity::BgaOpacityTimeline::from_chart(source).map_err(PlayerChartError)?;
+        crate::presentation_budget::source_extent(
+            chart.objects().len(),
+            mines.len(),
+            bga.len(),
+            opacity.len(),
+        )
+        .map_err(|reason| PlayerChartError(reason.into()))?;
         let mut by_id = BTreeMap::new();
         for note in &source.notes {
             if by_id.insert(note.object, note.lane.channel()).is_some() {
@@ -382,9 +383,8 @@ impl PlayerChart {
             endpoint_tree,
             tree_leaves,
             object_index,
-            bga: crate::bga::BgaTimeline::from_chart(source).map_err(PlayerChartError)?,
-            opacity: crate::bga_opacity::BgaOpacityTimeline::from_chart(source)
-                .map_err(PlayerChartError)?,
+            bga,
+            opacity,
         })
     }
 
@@ -408,6 +408,24 @@ impl PlayerChart {
         &self.mines
     }
 
+    /// Validates the current combined source count and the prepared index extent.
+    /// Same-length changes to note identity/time still require re-preparation.
+    pub(crate) fn presentation_extent(
+        &self,
+    ) -> Result<crate::presentation_budget::SourceExtent, String> {
+        let extent = crate::presentation_budget::source_extent(
+            self.notes.len(),
+            self.mines.len(),
+            self.bga.len(),
+            self.opacity.len(),
+        )
+        .map_err(str::to_string)?;
+        if self.notes.len() != self.object_index.len() {
+            return Err("presentation notes differ from prepared index extent".into());
+        }
+        Ok(extent)
+    }
+
     /// Queries an inclusive mine window using binary searches and reusable
     /// bounded scratch. Empty or negative windows allocate no backing storage;
     /// every call clears output, including failures.
@@ -419,6 +437,7 @@ impl PlayerChart {
         output: &mut Vec<usize>,
     ) -> Result<(), String> {
         output.clear();
+        self.presentation_extent()?;
         if lookahead_ns < 0 || behind_ns < 0 || self.mines.is_empty() {
             return Ok(());
         }
@@ -430,22 +449,13 @@ impl PlayerChart {
         let end = self
             .mines
             .partition_point(|mine| i128::from(mine.at.as_nanos()) <= upper);
-        let count = (end - begin).min(MAX_VISIBLE_MINES + 1);
-        if count == 0 {
-            return Ok(());
-        }
-        if output.capacity() < MAX_VISIBLE_MINES + 1 {
+        let count = end - begin;
+        if output.capacity() < count {
             output
-                .try_reserve_exact(MAX_VISIBLE_MINES + 1)
+                .try_reserve_exact(count)
                 .map_err(|_| "mine visibility allocation failed".to_string())?;
         }
-        output.extend(begin..begin + count);
-        if output.len() > MAX_VISIBLE_MINES {
-            output.clear();
-            return Err(format!(
-                "playfield exceeds {MAX_VISIBLE_MINES} visible mines"
-            ));
-        }
+        output.extend(begin..end);
         Ok(())
     }
 
@@ -476,25 +486,31 @@ impl PlayerChart {
         behind_ns: i64,
         max: usize,
     ) -> Vec<&PlayerNote> {
-        self.visible_notes_inner(now, lookahead_ns, behind_ns, max.min(MAX_VISIBLE_NOTES))
+        self.visible_notes_inner(now, lookahead_ns, behind_ns, max)
     }
 
-    /// Presentation admission checks one extra overlap instead of silently
-    /// truncating dense charts. Gameplay judging is independent of this budget.
+    /// Returns every admitted overlap with fallible result storage allocation.
+    /// Gameplay judging is independent of this presentation admission.
     pub fn visible_notes_checked(
         &self,
         now: Timestamp,
         lookahead_ns: i64,
         behind_ns: i64,
     ) -> Result<Vec<&PlayerNote>, String> {
-        let notes = self.visible_notes_inner(now, lookahead_ns, behind_ns, MAX_VISIBLE_NOTES + 1);
-        if notes.len() > MAX_VISIBLE_NOTES {
-            Err(format!(
-                "playfield exceeds {MAX_VISIBLE_NOTES} visible notes"
-            ))
-        } else {
-            Ok(notes)
-        }
+        self.presentation_extent()?;
+        let Some((lower, end)) = self.visible_bounds(now, lookahead_ns, behind_ns) else {
+            return Ok(Vec::new());
+        };
+        let count = self.visible_count(lower, end, usize::MAX, None);
+        let mut notes = Vec::new();
+        notes
+            .try_reserve_exact(count)
+            .map_err(|_| "playfield visibility allocation failed".to_string())?;
+        self.visit_visible(lower, end, usize::MAX, None, |index| {
+            notes.push(&self.notes[index]);
+            true
+        });
+        Ok(notes)
     }
 
     /// Writes ordered chart-local indices into reusable bounded scratch storage.
@@ -511,7 +527,7 @@ impl PlayerChart {
         self.visible_note_indices_with_progress_checked(now, lookahead_ns, behind_ns, None, output)
     }
 
-    /// Filters authoritative completed objects before the visible-note budget.
+    /// Filters authoritative completed objects before reserving visible results.
     /// Foreign progress is rejected; output is cleared on every rejection.
     pub fn visible_note_indices_with_progress_checked(
         &self,
@@ -522,34 +538,41 @@ impl PlayerChart {
         output: &mut Vec<usize>,
     ) -> Result<(), String> {
         output.clear();
+        self.presentation_extent()?;
         if progress.is_some_and(|state| !state.matches_chart(self)) {
             return Err("note progress belongs to another prepared chart".into());
         }
         let Some((lower, end)) = self.visible_bounds(now, lookahead_ns, behind_ns) else {
             return Ok(());
         };
-        let capacity = if end == 0 { 0 } else { MAX_VISIBLE_NOTES + 1 };
-        if output.capacity() < capacity {
+        // Count using the same endpoint/completion pruning as the filling pass.
+        // This reserves actual results, rather than the chart or source maximum.
+        let count = self.visible_count(lower, end, usize::MAX, progress);
+        if output.capacity() < count {
             output
-                .try_reserve_exact(capacity)
+                .try_reserve_exact(count)
                 .map_err(|_| "playfield visibility allocation failed".to_string())?;
         }
-        self.visit_visible(lower, end, MAX_VISIBLE_NOTES + 1, progress, |index| {
-            if progress.is_some_and(|state| {
-                state.state(index) == Some(crate::note_progress::NoteState::Completed)
-            }) {
-                return false;
-            }
+        self.visit_visible(lower, end, usize::MAX, progress, |index| {
             output.push(index);
             true
         });
-        if output.len() > MAX_VISIBLE_NOTES {
-            output.clear();
-            return Err(format!(
-                "playfield exceeds {MAX_VISIBLE_NOTES} visible notes"
-            ));
-        }
         Ok(())
+    }
+
+    fn visible_count(
+        &self,
+        lower: i128,
+        end: usize,
+        max: usize,
+        progress: Option<&crate::note_progress::NoteProgress>,
+    ) -> usize {
+        let mut count = 0;
+        self.visit_visible(lower, end, max, progress, |_| {
+            count += 1;
+            true
+        });
+        count
     }
 
     fn visible_bounds(
@@ -576,13 +599,14 @@ impl PlayerChart {
         behind_ns: i64,
         max: usize,
     ) -> Vec<&PlayerNote> {
-        if max == 0 {
+        if max == 0 || self.presentation_extent().is_err() {
             return Vec::new();
         }
         let Some((lower, end)) = self.visible_bounds(now, lookahead_ns, behind_ns) else {
             return Vec::new();
         };
-        let mut visible = Vec::with_capacity(max.min(end));
+        let count = self.visible_count(lower, end, max, None);
+        let mut visible = Vec::with_capacity(count);
         self.visit_visible(lower, end, max, None, |index| {
             visible.push(&self.notes[index]);
             true
@@ -1045,13 +1069,13 @@ mod tests {
     }
 
     #[test]
-    fn completed_filter_precedes_budget_and_foreign_progress_clears_output() {
+    fn dense_completed_filter_and_foreign_progress_clears_output() {
         use crate::note_progress::NoteProgress;
         use beatkernel::judge::{JudgeEvent, JudgeGrade, JudgeOutcome, JudgeStage};
         use beatkernel::time::Duration;
         use std::sync::Arc;
         let chart = Arc::new(indexed_model(
-            (0..MAX_VISIBLE_NOTES + 2)
+            (0..2050)
                 .map(|index| PlayerNote {
                     object: ObjectId(index as u64 + 1),
                     lane_index: 0,
@@ -1062,16 +1086,16 @@ mod tests {
         ));
         let mut progress = NoteProgress::new(chart.clone()).unwrap();
         let mut output = vec![99];
-        assert!(chart
+        chart
             .visible_note_indices_with_progress_checked(
                 Timestamp::ZERO,
                 0,
                 0,
                 Some(&progress),
-                &mut output
+                &mut output,
             )
-            .is_err());
-        assert!(output.is_empty());
+            .unwrap();
+        assert_eq!(output, (0..2050).collect::<Vec<_>>());
         let event = |index: usize| JudgeEvent {
             object: chart.notes[index].object,
             stage: JudgeStage::Instant,
@@ -1092,7 +1116,7 @@ mod tests {
                 &mut output,
             )
             .unwrap();
-        assert_eq!(output, (2..MAX_VISIBLE_NOTES + 2).collect::<Vec<_>>());
+        assert_eq!(output, (2..2050).collect::<Vec<_>>());
         let pointer = output.as_ptr();
         let capacity = output.capacity();
         chart
@@ -1226,46 +1250,180 @@ mod tests {
     }
 
     #[test]
-    fn indexed_budget_is_exact_and_overflow_clears_without_losing_storage() {
-        let dense = |count| {
-            indexed_model(
-                (0..count)
-                    .map(|index| PlayerNote {
-                        object: ObjectId(index as u64 + 1),
-                        lane_index: 0,
-                        start: Timestamp::ZERO,
-                        end: None,
-                    })
-                    .collect(),
-            )
-        };
-        let exact = dense(MAX_VISIBLE_NOTES);
-        let overflow = dense(MAX_VISIBLE_NOTES + 1);
+    fn dense_taps_and_holds_match_ordered_oracles_and_reuse_storage() {
+        let count = 6145;
+        let chart = indexed_model(
+            (0..count)
+                .map(|index| PlayerNote {
+                    object: ObjectId(index as u64 + 1),
+                    lane_index: 0,
+                    start: Timestamp::from_nanos(index as i64),
+                    end: (index % 2 == 0).then_some(Timestamp::from_nanos(20_000)),
+                })
+                .collect(),
+        );
         let mut output = vec![usize::MAX];
-        exact
-            .visible_note_indices_checked(Timestamp::ZERO, 0, 0, &mut output)
+        chart
+            .visible_note_indices_checked(Timestamp::ZERO, 20_000, 0, &mut output)
             .unwrap();
-        assert_eq!(output.len(), MAX_VISIBLE_NOTES);
-        assert!(overflow
-            .visible_note_indices_checked(Timestamp::ZERO, 0, 0, &mut output)
-            .is_err());
-        assert!(output.is_empty());
+        assert_eq!(output, (0..count).collect::<Vec<_>>());
+        assert_eq!(
+            chart
+                .visible_notes(Timestamp::ZERO, 20_000, 0, usize::MAX)
+                .len(),
+            count
+        );
+        assert_eq!(
+            chart.visible_notes(Timestamp::ZERO, 20_000, 0, 2050).len(),
+            2050
+        );
         let pointer = output.as_ptr();
         let capacity = output.capacity();
-        exact
-            .visible_note_indices_checked(Timestamp::ZERO, 0, 0, &mut output)
-            .unwrap();
-        assert_eq!(output.as_ptr(), pointer);
-        assert_eq!(output.capacity(), capacity);
-        assert!(overflow
-            .visible_notes_checked(Timestamp::ZERO, 0, 0)
-            .is_err());
-        assert_eq!(
-            overflow
-                .visible_notes(Timestamp::ZERO, 0, 0, usize::MAX)
-                .len(),
-            MAX_VISIBLE_NOTES
+        for now in [0, 3_000, 10_000, 20_000, 20_001] {
+            let expected: Vec<_> = chart
+                .notes
+                .iter()
+                .enumerate()
+                .filter(|(_, note)| {
+                    note.start.as_nanos() <= now && note.end.unwrap_or(note.start).as_nanos() >= now
+                })
+                .map(|(index, _)| index)
+                .collect();
+            chart
+                .visible_note_indices_checked(Timestamp::from_nanos(now), 0, 0, &mut output)
+                .unwrap();
+            assert_eq!(output, expected);
+            let references = chart
+                .visible_notes_checked(Timestamp::from_nanos(now), 0, 0)
+                .unwrap();
+            assert_eq!(
+                references
+                    .iter()
+                    .map(|note| note.object)
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|&index| chart.notes[index].object)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(output.as_ptr(), pointer);
+            assert_eq!(output.capacity(), capacity);
+        }
+    }
+
+    #[test]
+    fn explicit_max_query_reserves_only_actual_overlaps() {
+        let chart = indexed_model(
+            (0..4097)
+                .map(|index| PlayerNote {
+                    object: ObjectId(index as u64 + 1),
+                    lane_index: 0,
+                    start: Timestamp::from_nanos(index as i64),
+                    end: (index == 0).then_some(Timestamp::from_nanos(20_000)),
+                })
+                .collect(),
         );
+        let visible = chart.visible_notes(Timestamp::from_nanos(10_000), 0, 0, usize::MAX);
+        assert_eq!(
+            visible.iter().map(|note| note.object).collect::<Vec<_>>(),
+            vec![ObjectId(1)]
+        );
+        assert_eq!(visible.capacity(), 1);
+        assert_eq!(
+            chart
+                .visible_notes(Timestamp::ZERO, 20_000, 0, 1)
+                .capacity(),
+            1
+        );
+        assert_eq!(
+            chart
+                .visible_notes(Timestamp::from_nanos(30_000), 0, 0, usize::MAX)
+                .capacity(),
+            0
+        );
+    }
+
+    #[test]
+    fn changed_prepared_extent_rejects_all_checked_queries_and_clears_output() {
+        let original = indexed_model(vec![PlayerNote {
+            object: ObjectId(1),
+            lane_index: 0,
+            start: Timestamp::ZERO,
+            end: None,
+        }]);
+        for expanded in [false, true] {
+            let mut chart = original.clone();
+            if expanded {
+                chart.notes.push(chart.notes[0].clone());
+            } else {
+                chart.notes.clear();
+            }
+            let mut output = vec![99];
+            assert!(chart
+                .visible_note_indices_checked(Timestamp::ZERO, i64::MAX, i64::MAX, &mut output)
+                .is_err());
+            assert!(output.is_empty());
+            output.push(99);
+            assert!(chart
+                .visible_mine_indices_checked(Timestamp::ZERO, 0, 0, &mut output)
+                .is_err());
+            assert!(output.is_empty());
+            assert!(chart.visible_notes_checked(Timestamp::ZERO, 0, 0).is_err());
+            assert!(chart
+                .visible_notes(Timestamp::ZERO, i64::MAX, i64::MAX, usize::MAX)
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn dense_mine_queries_are_ordered_inclusive_and_reuse_result_storage() {
+        let mut chart = indexed_model(Vec::new());
+        chart.mines = (0..4097)
+            .map(|index| PlayerMine {
+                ordinal: index as u64,
+                lane_index: 0,
+                at: Timestamp::from_nanos(index as i64),
+                damage: beatkernel_bms::MineDamage::from_raw(1).unwrap(),
+            })
+            .collect();
+        let mut output = Vec::new();
+        chart
+            .visible_mine_indices_checked(Timestamp::ZERO, 4096, 0, &mut output)
+            .unwrap();
+        assert_eq!(output, (0..4097).collect::<Vec<_>>());
+        let pointer = output.as_ptr();
+        let capacity = output.capacity();
+        for (now, ahead, behind) in [
+            (2048, 2048, 2048),
+            (2048, 2, 2),
+            (4096, 0, 0),
+            (-1, 0, 0),
+            (0, -1, 0),
+        ] {
+            let expected: Vec<_> = chart
+                .mines
+                .iter()
+                .enumerate()
+                .filter(|(_, mine)| {
+                    ahead >= 0
+                        && behind >= 0
+                        && mine.at.as_nanos() >= now - behind
+                        && mine.at.as_nanos() <= now + ahead
+                })
+                .map(|(index, _)| index)
+                .collect();
+            chart
+                .visible_mine_indices_checked(
+                    Timestamp::from_nanos(now),
+                    ahead,
+                    behind,
+                    &mut output,
+                )
+                .unwrap();
+            assert_eq!(output, expected);
+            assert_eq!(output.as_ptr(), pointer);
+            assert_eq!(output.capacity(), capacity);
+        }
     }
     use beatkernel_bms::{parse, ParseOptions};
 
@@ -1321,7 +1479,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_windows_and_frame_cap() {
+    fn wide_windows_and_explicit_caller_max() {
         let chart = model("#BPM 60\n#WAV01 tap.wav\n#00011:0101\n");
         assert_eq!(
             chart
@@ -1345,11 +1503,15 @@ mod tests {
             dense
                 .visible_notes(Timestamp::ZERO, i64::MAX, 0, usize::MAX)
                 .len(),
-            MAX_VISIBLE_NOTES
+            2400
         );
-        assert!(dense
-            .visible_notes_checked(Timestamp::ZERO, i64::MAX, 0)
-            .is_err());
+        assert_eq!(
+            dense
+                .visible_notes_checked(Timestamp::ZERO, i64::MAX, 0)
+                .unwrap()
+                .len(),
+            2400
+        );
         assert_eq!(
             chart
                 .visible_notes_checked(Timestamp::ZERO, i64::MAX, 0)

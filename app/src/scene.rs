@@ -863,62 +863,73 @@ impl Scene {
         bounds: crate::ui::interaction::Bounds,
         progress: Option<&crate::note_progress::NoteProgress>,
     ) -> Result<(), String> {
-        if lookahead <= 0 {
-            return Err("playfield lookahead must be positive".into());
+        self.status()?;
+        let candidate: Result<(), String> = (|| {
+            chart.presentation_extent()?;
+            if lookahead <= 0 {
+                return Err("playfield lookahead must be positive".into());
+            }
+            let slot = self.playfields.len();
+            if slot >= MAX_PLAYFIELDS {
+                return Err(format!(
+                    "scene exceeds {MAX_PLAYFIELDS} displayed playfields"
+                ));
+            }
+            chart.visible_note_indices_with_progress_checked(
+                now,
+                lookahead,
+                150_000_000,
+                progress,
+                &mut self.visible_note_indices,
+            )?;
+            chart.visible_mine_indices_checked(
+                now,
+                lookahead,
+                150_000_000,
+                &mut self.visible_mine_indices,
+            )?;
+            if self
+                .visible_note_indices
+                .iter()
+                .any(|&index| chart.notes[index].lane_index >= chart.lanes.len())
+            {
+                return Err("playfield note references an unavailable lane".into());
+            }
+            if self
+                .visible_mine_indices
+                .iter()
+                .any(|&index| chart.mines()[index].lane_index >= chart.lanes.len())
+            {
+                return Err("playfield mine references an unavailable lane".into());
+            }
+            self.batches
+                .try_reserve(1)
+                .map_err(|_| "playfield batch allocation failed")?;
+            let frame = self.playfield_caches[slot].frame_indexed_with_mines_and_progress(
+                &chart.notes,
+                &self.visible_note_indices,
+                chart.mines(),
+                &self.visible_mine_indices,
+                chart.lanes.len(),
+                bounds,
+                now,
+                lookahead,
+                progress,
+            )?;
+            self.playfields.push(frame);
+            self.batches.push(DrawBatch {
+                texture: TextureId::WHITE,
+                first: self.rectangles.len() as u32,
+                count: 0,
+                playfield: Some(slot),
+                component: 0,
+            });
+            Ok(())
+        })();
+        if let Err(error) = &candidate {
+            self.reject(error.clone());
         }
-        let slot = self.playfields.len();
-        if slot == MAX_PLAYFIELDS {
-            return Err(format!(
-                "scene exceeds {MAX_PLAYFIELDS} displayed playfields"
-            ));
-        }
-        chart.visible_note_indices_with_progress_checked(
-            now,
-            lookahead,
-            150_000_000,
-            progress,
-            &mut self.visible_note_indices,
-        )?;
-        chart.visible_mine_indices_checked(
-            now,
-            lookahead,
-            150_000_000,
-            &mut self.visible_mine_indices,
-        )?;
-        if self
-            .visible_note_indices
-            .iter()
-            .any(|&index| chart.notes[index].lane_index >= chart.lanes.len())
-        {
-            return Err("playfield note references an unavailable lane".into());
-        }
-        if self
-            .visible_mine_indices
-            .iter()
-            .any(|&index| chart.mines()[index].lane_index >= chart.lanes.len())
-        {
-            return Err("playfield mine references an unavailable lane".into());
-        }
-        let frame = self.playfield_caches[slot].frame_indexed_with_mines_and_progress(
-            &chart.notes,
-            &self.visible_note_indices,
-            chart.mines(),
-            &self.visible_mine_indices,
-            chart.lanes.len(),
-            bounds,
-            now,
-            lookahead,
-            progress,
-        );
-        self.playfields.push(frame);
-        self.batches.push(DrawBatch {
-            texture: TextureId::WHITE,
-            first: self.rectangles.len() as u32,
-            count: 0,
-            playfield: Some(slot),
-            component: 0,
-        });
-        Ok(())
+        candidate
     }
 
     /// Clips to the logical viewport. Capacity exhaustion is sticky until clear,
@@ -1804,7 +1815,7 @@ mod tests {
 
     #[test]
     fn one_lazy_scratch_serves_growing_membership_four_slots_seek_and_rejection() {
-        use crate::player_chart::{PlayerChart, MAX_VISIBLE_NOTES};
+        use crate::player_chart::PlayerChart;
         use beatkernel::time::Timestamp;
         use std::sync::Arc;
         let model = |text: &str| {
@@ -1826,9 +1837,9 @@ mod tests {
             .unwrap();
         assert_eq!(scene.visible_note_indices, vec![0]);
         let first = Arc::clone(&scene.playfields[0].instances);
-        let pointer = scene.visible_note_indices.as_ptr();
         let capacity = scene.visible_note_indices.capacity();
-        assert!(capacity >= MAX_VISIBLE_NOTES + 1);
+        assert!(capacity >= scene.visible_note_indices.len());
+        assert!(capacity < 2048);
         scene.clear();
         scene
             .playfield(
@@ -1839,8 +1850,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(scene.visible_note_indices, vec![0, 1]);
-        assert_eq!(scene.visible_note_indices.as_ptr(), pointer);
-        assert_eq!(scene.visible_note_indices.capacity(), capacity);
+        assert!(scene.visible_note_indices.capacity() >= 2);
+        let pointer = scene.visible_note_indices.as_ptr();
+        let capacity = scene.visible_note_indices.capacity();
         assert!(!Arc::ptr_eq(&first, &scene.playfields[0].instances));
         for _ in 1..MAX_PLAYFIELDS {
             scene
@@ -1902,17 +1914,32 @@ mod tests {
             .is_err());
         assert_eq!(scene.playfields.len(), admitted);
         assert_eq!(scene.batches.len(), batches);
-        let dense = model(&format!(
-            "#BPM 60\n#WAV01 head.wav\n#00011:{}",
-            "01".repeat(MAX_VISIBLE_NOTES + 1)
-        ));
+        assert!(scene.status().is_err());
         assert!(scene
-            .playfield(&dense, Timestamp::ZERO, i64::MAX, bounds)
+            .playfield(&chart, Timestamp::ZERO, 750_000_000, bounds)
             .is_err());
-        assert!(scene.visible_note_indices.is_empty());
         assert_eq!(scene.playfields.len(), admitted);
         assert_eq!(scene.batches.len(), batches);
-        assert_eq!(scene.visible_note_indices.as_ptr(), pointer);
-        assert_eq!(scene.visible_note_indices.capacity(), capacity);
+        scene.clear();
+        let dense = model(&format!(
+            "#BPM 60\n#WAV01 head.wav\n#00011:{}",
+            "01".repeat(2049)
+        ));
+        scene
+            .playfield(&dense, Timestamp::ZERO, i64::MAX, bounds)
+            .unwrap();
+        assert_eq!(scene.visible_note_indices.len(), 2049);
+        assert_eq!(scene.playfields[0].instances.len(), 2049);
+        let dense_pointer = scene.visible_note_indices.as_ptr();
+        let dense_capacity = scene.visible_note_indices.capacity();
+        assert!(dense_capacity >= 2049);
+        assert!(dense_capacity > capacity);
+        scene.clear();
+        scene
+            .playfield(&dense, Timestamp::ZERO, i64::MAX, bounds)
+            .unwrap();
+        assert_eq!(scene.visible_note_indices.as_ptr(), dense_pointer);
+        assert_eq!(scene.visible_note_indices.capacity(), dense_capacity);
+        assert!(scene.status().is_ok());
     }
 }

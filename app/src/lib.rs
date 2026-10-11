@@ -429,6 +429,7 @@ mod player_network_fault_schedule_fixtures;
 mod player_ui_fault_schedule_fixtures;
 #[cfg(feature = "graphics")]
 mod playfield_gpu;
+pub(crate) mod presentation_budget;
 /// Shared playfield partitions for rendering and projected physical touch routing.
 pub mod playfield_layout;
 #[cfg(test)]
