@@ -8529,6 +8529,28 @@ test("retained profile: Save adopts exact pending and final receipts without loa
 });
 
 for (const fault of ["empty-early-ms", "duplicate-binding"]) {
+  test(`retained Settings initial publication keeps an editable ${fault} acquisition draft`, async () => {
+    const h = await harness();
+    try {
+      await h.preview(); const game = h.workers[0];
+      if (fault === "empty-early-ms") h.get("judge-early").value = "";
+      else h.get("binding-11").value = h.get("binding-12").value;
+      const original = completeSettingsDraft(h), expected = retainedSettingsValues(h);
+      const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+        route: 2, fields: [], selected: 0, hasSettingsParent: true };
+      await h.receive(state);
+      const publication = game.last("menu-fields");
+      assert.ok(publication, "unfinished values must reach the editable retained menu");
+      assert.deepEqual(retainedToken(publication), retainedToken(state));
+      assert.deepEqual(Array.from(publication.fields), expected);
+      assert.equal(publication.fields.length, 16);
+      assert.deepEqual(completeSettingsDraft(h), original);
+      assert.equal(game.terminations, 0);
+    } finally { await h.close(); }
+  });
+}
+
+for (const fault of ["empty-early-ms", "duplicate-binding"]) {
   test(`retained profile repair: valid import replaces an original ${fault} acquisition draft`, async () => {
     const h = await harness();
     try {

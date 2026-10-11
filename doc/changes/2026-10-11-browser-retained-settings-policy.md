@@ -24,9 +24,13 @@ Development verification, before independent review and QA:
 
 - Settings mapping: 12 Node tests passed; keyboard intent: 18 passed.
 - Shared Rust menus: 45 tests passed; Settings views: 14 passed.
-- Window host: all 205 tests passed; Worker: all 85 passed using genuine WASM.
+- Window host: 205 tests passed before review; Worker: all 85 passed using genuine WASM.
   Tests include failed/disposed owners, invalid post-admission menu state,
   profile repair and restoration of an unfinished original form.
+  Independent code review also reproduced an initial Settings entry regression:
+  unfinished timing or duplicate keys prevented draft publication. Initial
+  publication now uses the existing bounded raw-field order; Apply/profile
+  validation stays strict. Two initial-entry regressions failed before the fix.
 - Browser release build and generated bindings passed. WASM SHA256:
   `7a386e90245be7f00c50aa9b1b96d82f6cbe621ce479a17aa5b5ad835ac1bd5a`.
 - Actual Chromium completed seven production flows: trusted policy editing,

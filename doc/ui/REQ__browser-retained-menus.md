@@ -122,7 +122,10 @@ uncertain committed owner. Invalid files, stale tokens and pre-admission draft
 changes preserve the previous accepted configuration. Loading, refusal and
 correction use existing pending/error surfaces and keep values readable.
 The original acquisition form may contain unfinished invalid timing or duplicate
-keyboard choices. A valid full profile must repair that form without requiring
+keyboard choices. Initial Settings publication must preserve those bounded raw
+strings as editable fields, without requiring valid timing or unique bindings.
+Apply and incoming profiles still require their complete semantic validation.
+A valid full profile must repair that form without requiring
 the old draft to pass profile validation. Preserve its complete bounded strings
 for drift checks and uncertain-result restoration; strictly validate all values
 and eighteen bindings of the incoming profile before admission.
