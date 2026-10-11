@@ -40,8 +40,18 @@ async function catalogWorker(options = {}) {
   await h.send({ kind: "init", canvas: { transferred: true } });
   assert.equal(h.of("ready").length, 1);
   await h.send({ kind: "import", id: 1, files: [selectedFile("song/chart.bms")] });
+  assert.equal(h.of("import-error").length, 0);
+  assert.equal(h.of("catalog").length, 1);
+  assert.deepEqual(h.of("catalog")[0].charts, ["song/chart.bms"]);
+  assert.equal(h.libraries[0].declarations.get("song/chart.bms"), 8);
+  assert.deepEqual(h.libraries[0].files, [], "catalog admission does not hydrate chart bytes");
   await h.send({ kind: "accept-library", id: 1 });
   await h.send({ kind: "select", id: 2, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0" });
+  assert.equal(h.of("selection-error").length, 0);
+  assert.equal(h.of("selected").length, 1);
+  assert.equal(h.of("selected")[0].libraryId, 1);
+  assert.equal(h.of("selected")[0].path, "song/chart.bms");
+  assertPreparationReleased(h, 0);
   await h.send({ kind: "resize", width: 640, height: 480 });
   return h;
 }
@@ -49,7 +59,11 @@ async function catalogWorker(options = {}) {
 async function started(options = {}) {
   const h = await catalogWorker(options);
   await h.send(options.startRequest ?? startRequest(options.recordReplay === undefined ? {} : { recordReplay: options.recordReplay }));
+  assert.equal(h.of("play-error").length, 0);
+  assert.ok(h.of("play-reply").at(-1), "preparation must publish a correlated reply");
+  assert.equal(h.of("play-reply").at(-1).error, undefined);
   assert.equal(h.of("play-reply").at(-1).result.kind, "prepared");
+  assertPreparationReleased(h, 1);
   return withPlayRpc(h);
 }
 
@@ -80,7 +94,12 @@ const multiplayer = () => ({ url: "https://example.test:4433/competition", host:
 async function preparedNetwork(options = {}) {
   const h = await started({ ...options, allowNetworkClock: true,
     startRequest: options.startRequest ?? startRequest({ multiplayer: multiplayer() }) });
-  while ((await h.rpc("play-sample")).result.kind !== "samples-end") {}
+  for (;;) {
+    const reply = await h.rpc("play-sample");
+    assert.equal(reply.error, undefined, "sample preparation must succeed before network readiness");
+    assert.ok(reply.result, "sample RPC must provide its actual transferable sample or exhaustion");
+    if (reply.result.kind === "samples-end") break;
+  }
   for (;;) {
     const value = (await h.rpc("play-commands")).result;
     if (value === null) break;
@@ -318,8 +337,40 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-async function flushJobs() {
+const preparationTasks = [];
+const preparationDeliveries = new Set();
+async function flushMicrotasks() {
   for (let index = 0; index < 32; index++) await Promise.resolve();
+}
+async function flushJobs() {
+  await flushMicrotasks();
+  while (preparationTasks.length || preparationDeliveries.size) {
+    if (preparationTasks.length) {
+      const deliver = preparationTasks.shift();
+      const delivery = new Promise(resolve => setImmediate(resolve)).then(async () => {
+        deliver();
+        // A delivery drains continuations, without waiting for its own reservation.
+        await flushMicrotasks();
+      });
+      preparationDeliveries.add(delivery);
+      delivery.then(() => preparationDeliveries.delete(delivery), () => preparationDeliveries.delete(delivery));
+    }
+    await Promise.all([...preparationDeliveries]);
+    await flushMicrotasks();
+  }
+}
+
+function assertPreparationReleased(h, index) {
+  const job = h.preparationJobs[index], channel = h.preparationChannels[index];
+  assert.ok(job, "successful preparation must begin an owned incremental job");
+  assert.ok(job.advances >= 2, "preparation must cross a queued task before readiness");
+  assert.equal(job.stage, "ready");
+  assert.equal(job.takes, 1);
+  assert.equal(job.cancels, 1);
+  assert.equal(job.frees, 1);
+  assert.equal(channel.delivered, job.advances);
+  assert.equal(channel.port1.closes, 1);
+  assert.equal(channel.port2.closes, 1);
 }
 
 function selectedFile(path, acquire) {
@@ -348,6 +399,21 @@ async function workerHarness(options = {}) {
   const trace = [];
   const completedOwners = [];
   const messages = [];
+  const preparationChannels = [], preparationJobs = [];
+  class PreparationMessageChannel {
+    constructor() {
+      const state = { delivered: 0 };
+      const port = () => ({ onmessage: null, closes: 0, start() {}, close() { assert.equal(++this.closes, 1); } });
+      this.port1 = state.port1 = port(); this.port2 = state.port2 = port();
+      this.port2.postMessage = data => {
+        assert.equal(this.port2.closes, 0);
+        preparationTasks.push(() => {
+          if (this.port1.onmessage) { state.delivered++; this.port1.onmessage({ data }); }
+        });
+      };
+      preparationChannels.push(state);
+    }
+  }
 
   // Genuine queued port and real RenderClient; only the WASM encoder/GPU edge
   // is mocked. The map records immutable exporter snapshots for assertions.
@@ -501,12 +567,70 @@ async function workerHarness(options = {}) {
   }
   class BrowserLibrary {
     files = [];
+    declarations = new Map();
     preparations = [];
     replayPreparations = [];
+    policyPreparations = [];
     frees = 0;
     constructor(...limits) { this.limits = limits; libraries.push(this); }
-    add_file(path) { this.files.push(path); }
-    chart_paths() { return this.files.filter(path => /\.bms$/i.test(path)); }
+    declare_file(path, length) {
+      assert.equal(this.frees, 0);
+      assert.ok(!this.declarations.has(path));
+      assert.ok(Number.isSafeInteger(length) && length >= 0);
+      this.declarations.set(path, length);
+    }
+    add_file(path, bytes) {
+      assert.equal(this.frees, 0);
+      assert.ok(bytes instanceof Uint8Array);
+      assert.equal(bytes.byteLength, this.declarations.get(path));
+      assert.ok(!this.files.includes(path), "hydrate each declared file once");
+      this.files.push(path);
+    }
+    chart_paths() { return [...this.declarations.keys()].filter(path => /\.(bms|bme|bml|pms)$/i.test(path)); }
+    preparationJob(method, args, replay = false) {
+      assert.equal(this.frees, 0);
+      const [path] = args;
+      assert.ok(this.files.includes(path), "begin requires acquired chart bytes");
+      const references = replay ? options.replayReferences?.[path] ?? []
+        : typeof options.references === "function" ? options.references(path, args[3]) : options.references?.[path] ?? [];
+      let prepared = null;
+      const job = {
+        method, path, stage: "resolve", completed_assets: 0, total_assets: references.length,
+        parse_count: 1, compile_count: 1, read_count: 0, decode_count: 0, shared_asset_count: 0,
+        advances: 0, takes: 0, cancels: 0, frees: 0,
+        pending_asset_path: () => {
+          assert.equal(job.frees, 0); assert.equal(job.cancels, 0);
+          return references.find(resource => !this.files.includes(resource));
+        },
+        advance: library => {
+          assert.equal(library, this); assert.equal(job.frees, 0); assert.equal(job.cancels, 0);
+          assert.equal(job.takes, 0); assert.equal(prepared, null);
+          job.advances++;
+          if (references.some(resource => !this.files.includes(resource))) return false;
+          if (job.advances === 1) { job.stage = "admit"; return false; }
+          if (options.preparationAdvanceError) throw new Error(options.preparationAdvanceError);
+          prepared = this[method](...args);
+          job.stage = "ready"; job.completed_assets = references.length;
+          job.read_count = job.decode_count = references.length;
+          return true;
+        },
+        take_prepared: library => {
+          assert.equal(library, this); assert.equal(job.frees, 0); assert.equal(job.cancels, 0);
+          assert.equal(++job.takes, 1); assert.ok(prepared);
+          const result = prepared; prepared = null; return result;
+        },
+        cancel() {
+          assert.equal(job.frees, 0); assert.equal(++job.cancels, 1);
+          if (prepared) { prepared.free(); prepared = null; }
+        },
+        free() { assert.equal(job.cancels, 1); assert.equal(++job.frees, 1); },
+      };
+      preparationJobs.push(job); return job;
+    }
+    begin_prepare_chart(...args) { return this.preparationJob("prepare_chart", args); }
+    begin_prepare_chart_at(...args) { return this.preparationJob("prepare_chart_at", args); }
+    begin_prepare_chart_with_policy_at(...args) { return this.preparationJob("prepare_chart_with_policy_at", args); }
+    begin_prepare_replay_chart(...args) { return this.preparationJob("prepare_replay_chart", args, true); }
     prepare_chart(path, ...args) {
       assert.equal(this.frees, 0);
       assert.ok(this.files.includes(path));
@@ -529,6 +653,16 @@ async function workerHarness(options = {}) {
       if (options.prepareReplayError) throw new Error(options.prepareReplayError);
       const prepared = makePrepared(path);
       if (Object.hasOwn(options, "replayStart")) prepared.start_ns = options.replayStart;
+      return prepared;
+    }
+    prepare_chart_with_policy_at(path, rate, channels, seed, startNs, ...fields) {
+      assert.equal(this.frees, 0);
+      assert.ok(this.files.includes(path));
+      this.policyPreparations.push({ path, args: [rate, channels, seed, startNs, ...fields] });
+      if (options.preparePolicyError) throw new Error(options.preparePolicyError);
+      const prepared = makePrepared(path);
+      prepared.start_ns = startNs;
+      prepared.timingPolicy = { presetId: fields[3], rankPrecedence: fields[4], gauge: fields[5], offsetNs: fields[6] };
       return prepared;
     }
     free() { assert.equal(++this.frees, 1); }
@@ -686,7 +820,7 @@ async function workerHarness(options = {}) {
         { id: 18446744073709551615n, rate: 96000, pcm: new Float32Array([1, -1]) },
       ]).map(value => ({
         ...value, channels: 2, takes: 0, frees: 0,
-        take_pcm() {
+        take_pcm_array() {
           assert.equal(++this.takes, 1);
           if (options.takeError) throw new Error(options.takeError);
           return this.pcm;
@@ -1341,6 +1475,7 @@ async function workerHarness(options = {}) {
     addEventListener(name, callback) { assert.equal(name, "message"); receive = callback; },
   };
   const context = createContext({
+    MessageChannel: PreparationMessageChannel,
     self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
     performance: { timeOrigin: 10000, now() {
       return networkNow;
@@ -1409,6 +1544,7 @@ async function workerHarness(options = {}) {
   });
   await worker.evaluate();
   return {
+    preparationChannels, preparationJobs,
     renderPort, visualExports, visualAcks, trace, completedOwners, messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
     roomSessions, roomChannels, roomWrappers, roomResults,
     setNetworkNow(value) { assert.ok(value >= networkNow); networkNow = value; },

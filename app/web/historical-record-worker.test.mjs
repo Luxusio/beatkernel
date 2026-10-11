@@ -40,8 +40,21 @@ async function catalogWorker(options = {}) {
   await h.send({ kind: "init", canvas: { transferred: true } });
   assert.equal(h.of("ready").length, 1);
   await h.send({ kind: "import", id: 1, files: [selectedFile("song/chart.bms")] });
+  assert.equal(h.of("import-error").length, 0, "historical setup requires successful import");
+  assert.deepEqual(h.of("catalog").at(-1), { kind: "catalog", id: 1, charts: ["song/chart.bms"] });
+  assert.equal(h.libraries[0].files.length, 0, "catalog declaration does not hydrate chart bytes");
   await h.send({ kind: "accept-library", id: 1 });
+  assert.equal(h.libraries[0].frees, 0, "accepted library remains owned for selection");
   await h.send({ kind: "select", id: 2, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0" });
+  assert.equal(h.of("selection-error").length, 0, "historical setup requires successful preparation");
+  const selected = h.of("selected").at(-1);
+  assert.ok(selected, "accepted library must produce a selected preview");
+  assert.deepEqual([selected.id, selected.libraryId, selected.path], [2, 1, "song/chart.bms"]);
+  assert.equal(h.preparedOwners.length, 1);
+  assert.equal(h.preparedOwners[0].frees, 0);
+  const preparation = h.preparationJobs[0];
+  assert.deepEqual([preparation.advances, preparation.takes, preparation.cancels, preparation.frees], [2, 1, 1, 1]);
+  assert.deepEqual(h.preparationChannels.map(channel => [channel.delivered, channel.port1.closes, channel.port2.closes]), [[2, 1, 1]]);
   await h.send({ kind: "resize", width: 640, height: 480 });
   return h;
 }
@@ -49,7 +62,10 @@ async function catalogWorker(options = {}) {
 async function started(options = {}) {
   const h = await catalogWorker(options);
   await h.send(options.startRequest ?? startRequest(options.recordReplay === undefined ? {} : { recordReplay: options.recordReplay }));
-  assert.equal(h.of("play-reply").at(-1).result.kind, "prepared");
+  const prepared = h.of("play-reply").at(-1);
+  assert.ok(prepared, "historical Results setup requires a preparation reply");
+  assert.equal(prepared.error, undefined, "historical Results setup requires successful gameplay preparation");
+  assert.equal(prepared.result.kind, "prepared");
   return withPlayRpc(h);
 }
 
@@ -470,8 +486,32 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-async function flushJobs() {
+const preparationTasks = [];
+const preparationDeliveries = new Set();
+async function flushMicrotasks() {
   for (let index = 0; index < 32; index++) await Promise.resolve();
+}
+async function flushJobs() {
+  await flushMicrotasks();
+  while (preparationTasks.length || preparationDeliveries.size) {
+    // Deliver a queued MessageChannel task on a host macrotask, independently
+    // of Promise continuations and the controlled render/room ACK boundaries.
+    if (preparationTasks.length) {
+      const deliver = preparationTasks.shift();
+      const delivery = new Promise(resolve => setImmediate(resolve)).then(async () => {
+        deliver();
+        // Delivery itself drains only continuations, never recursively waits
+        // for the shared delivery set containing its own promise.
+        await flushMicrotasks();
+      });
+      preparationDeliveries.add(delivery);
+      // Keep rejection visible to every waiting flusher and remove the exact
+      // reservation on either outcome without creating an unhandled finally.
+      delivery.then(() => preparationDeliveries.delete(delivery), () => preparationDeliveries.delete(delivery));
+    }
+    await Promise.all([...preparationDeliveries]);
+    await flushMicrotasks();
+  }
 }
 
 function selectedFile(path, acquire) {
@@ -501,6 +541,22 @@ async function workerHarness(options = {}) {
   const trace = [];
   const completedOwners = [];
   const messages = [];
+  const preparationChannels = [], preparationJobs = [];
+  class PreparationMessageChannel {
+    constructor() {
+      const state = { delivered: 0 };
+      const port = () => ({ onmessage: null, closes: 0, start() {}, close() { assert.equal(++this.closes, 1); } });
+      this.port1 = state.port1 = port(); this.port2 = state.port2 = port();
+      this.port2.postMessage = data => {
+        assert.equal(this.port2.closes, 0);
+        const deliver = () => {
+          if (this.port1.onmessage) { state.delivered++; this.port1.onmessage({ data }); }
+        };
+        preparationTasks.push(deliver);
+      };
+      preparationChannels.push(state);
+    }
+  }
 
   // Genuine queued port and real RenderClient; only the WASM encoder/GPU edge
   // is mocked. The map records immutable exporter snapshots for assertions.
@@ -670,12 +726,70 @@ async function workerHarness(options = {}) {
   }
   class BrowserLibrary {
     files = [];
+    declarations = new Map();
     preparations = [];
     replayPreparations = [];
+    policyPreparations = [];
     frees = 0;
     constructor(...limits) { this.limits = limits; libraries.push(this); }
-    add_file(path) { this.files.push(path); }
-    chart_paths() { return this.files.filter(path => /\.bms$/i.test(path)); }
+    declare_file(path, length) {
+      assert.equal(this.frees, 0);
+      assert.ok(!this.declarations.has(path));
+      assert.ok(Number.isSafeInteger(length) && length >= 0);
+      this.declarations.set(path, length);
+    }
+    add_file(path, bytes) {
+      assert.equal(this.frees, 0);
+      assert.ok(bytes instanceof Uint8Array);
+      assert.equal(bytes.byteLength, this.declarations.get(path));
+      assert.ok(!this.files.includes(path), "hydrate each declared file once");
+      this.files.push(path);
+    }
+    chart_paths() { return [...this.declarations.keys()].filter(path => /\.(bms|bme|bml|pms)$/i.test(path)); }
+    preparationJob(method, args, replay = false) {
+      assert.equal(this.frees, 0);
+      const [path] = args;
+      assert.ok(this.files.includes(path), "begin requires acquired chart bytes");
+      const references = replay ? options.replayReferences?.[path] ?? []
+        : typeof options.references === "function" ? options.references(path, args[3]) : options.references?.[path] ?? [];
+      let prepared = null;
+      const job = {
+        method, path, stage: "resolve", completed_assets: 0, total_assets: references.length,
+        parse_count: 1, compile_count: 1, read_count: 0, decode_count: 0, shared_asset_count: 0,
+        advances: 0, takes: 0, cancels: 0, frees: 0,
+        pending_asset_path: () => {
+          assert.equal(job.frees, 0); assert.equal(job.cancels, 0);
+          return references.find(resource => !this.files.includes(resource));
+        },
+        advance: library => {
+          assert.equal(library, this); assert.equal(job.frees, 0); assert.equal(job.cancels, 0);
+          assert.equal(job.takes, 0); assert.equal(prepared, null);
+          job.advances++;
+          if (references.some(resource => !this.files.includes(resource))) return false;
+          if (job.advances === 1) { job.stage = "admit"; return false; }
+          if (options.preparationAdvanceError) throw new Error(options.preparationAdvanceError);
+          prepared = this[method](...args);
+          job.stage = "ready"; job.completed_assets = references.length;
+          job.read_count = job.decode_count = references.length;
+          return true;
+        },
+        take_prepared: library => {
+          assert.equal(library, this); assert.equal(job.frees, 0); assert.equal(job.cancels, 0);
+          assert.equal(++job.takes, 1); assert.ok(prepared);
+          const result = prepared; prepared = null; return result;
+        },
+        cancel() {
+          assert.equal(job.frees, 0); assert.equal(++job.cancels, 1);
+          if (prepared) { prepared.free(); prepared = null; }
+        },
+        free() { assert.equal(job.cancels, 1); assert.equal(++job.frees, 1); },
+      };
+      preparationJobs.push(job); return job;
+    }
+    begin_prepare_chart(...args) { return this.preparationJob("prepare_chart", args); }
+    begin_prepare_chart_at(...args) { return this.preparationJob("prepare_chart_at", args); }
+    begin_prepare_chart_with_policy_at(...args) { return this.preparationJob("prepare_chart_with_policy_at", args); }
+    begin_prepare_replay_chart(...args) { return this.preparationJob("prepare_replay_chart", args, true); }
     prepare_chart(path, ...args) {
       assert.equal(this.frees, 0);
       assert.ok(this.files.includes(path));
@@ -698,6 +812,17 @@ async function workerHarness(options = {}) {
       if (options.prepareReplayError) throw new Error(options.prepareReplayError);
       const prepared = makePrepared(path);
       if (Object.hasOwn(options, "replayStart")) prepared.start_ns = options.replayStart;
+      return prepared;
+    }
+    prepare_chart_with_policy_at(path, rate, channels, seed, startNs, ...fields) {
+      assert.equal(this.frees, 0);
+      assert.ok(this.files.includes(path));
+      const args = [rate, channels, seed, startNs, ...fields];
+      this.policyPreparations.push({ path, args });
+      if (options.preparePolicyError) throw new Error(options.preparePolicyError);
+      const prepared = makePrepared(path);
+      prepared.start_ns = startNs;
+      prepared.timingPolicy = { presetId: fields[3], rankPrecedence: fields[4], gauge: fields[5], offsetNs: fields[6] };
       return prepared;
     }
     free() { assert.equal(++this.frees, 1); }
@@ -1487,7 +1612,7 @@ async function workerHarness(options = {}) {
     addEventListener(name, callback) { assert.equal(name, "message"); receive = callback; },
   };
   const context = createContext({
-    self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
+    MessageChannel: PreparationMessageChannel, self, structuredClone, DataView, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
     performance: { timeOrigin: 10000, now() {
       return networkNow;
     } },
@@ -1556,6 +1681,7 @@ async function workerHarness(options = {}) {
   });
   await worker.evaluate();
   return {
+    preparationChannels, preparationJobs,
     renderPort, visualExports, visualAcks, historicalOwners, trace, completedOwners, messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
     roomSessions, roomChannels, roomWrappers, roomResults,
     setNetworkNow(value) { assert.ok(value >= networkNow); networkNow = value; },
