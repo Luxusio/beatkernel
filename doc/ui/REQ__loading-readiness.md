@@ -71,6 +71,15 @@ General narrow-screen layout and physical device performance remain separate
 requirements.
 
 Loading reports consume observed trials through `tools/loading_report.py`.
+Dense-chart preparation is a separate workload from large encoded audio. Its
+deterministic 20,000/100,000-note charts share a small WAV, stay inside parser
+object and physical-line limits, and require actual prepared note/sample counts.
+Each variant/density has at least five fresh cold process/library/cache owners
+and a warm retry on that same library. Reports separate actual readiness from
+request-correlated submitted frames and retain unavailable historical metrics.
+Natural trusted input is classified by its observed time relative to readiness;
+an event after readiness cannot prove input acquisition during preparation.
+The dense-only measurement does not require or replace genuine replay measurements.
 Before/after groups use the same workload, environment, fixture and configuration
 hashes, with at least five trials per group and explicit artifact provenance.
 Cold trials use distinct process/library/cache owners; warm trials identify the

@@ -11,7 +11,11 @@ import { spawn } from "node:child_process";
 import { cpus, platform, release } from "node:os";
 
 const root = process.cwd();
+const mode = process.env.LOADING_LATENCY_MODE ?? "full";
+assert(["full", "dense"].includes(mode), "LOADING_LATENCY_MODE must be full or dense");
+const denseOnly = mode === "dense";
 const captureOnly = process.env.LOADING_LATENCY_CAPTURE_ONLY === "1";
+assert(!denseOnly || !captureOnly, "dense measurement cannot capture a frozen replay");
 const out = resolve(process.env.LOADING_LATENCY_OUT ?? "target/wf/player-loading-latency/browser-latency");
 const baseline = resolve(process.env.LOADING_LATENCY_BASELINE ?? "target/wf/player-loading-latency/baseline-e421b59");
 const trials = Number(process.env.LOADING_LATENCY_TRIALS ?? 5);
@@ -45,7 +49,7 @@ function replayEnvelope(bytes) {
   return { inputs, advances, records: Number(count), horizon_ns: String(horizon) };
 }
 let frozenReplay = null, frozenReplaySummary = null;
-if (!captureOnly) {
+if (!captureOnly && !denseOnly) {
   assert(process.env.LOADING_LATENCY_REPLAY_FILE, "full paired measurement requires a previously validated genuine replay file");
   assert.match(process.env.LOADING_LATENCY_REPLAY_SHA256 ?? "", /^[a-f0-9]{64}$/);
   frozenReplay = await readFile(resolve(process.env.LOADING_LATENCY_REPLAY_FILE));
@@ -169,16 +173,23 @@ function wav(frames, polarity = 1) {
   for (let i = 0; i < frames; i++) bytes.writeInt16LE(polarity * Math.round(Math.sin(i * Math.PI * 880 / 48000) * 1200), 44 + i * 2);
   return bytes;
 }
-const config = { trials, viewport: { width: 1200, height: 1000 }, largeEncodedBytes: 8 * 1024 * 1024 + 44,
+const config = denseOnly ? { mode, trials, viewport: { width: 1200, height: 1000 }, noteCounts: [20000, 100000],
+  objectsPerRow: 10000, smallEncodedBytes: 44 + 9600 * 2, rate: 48000, channels: 2, seed: "0", heldInput: "KeyZ",
+  gate: "none; natural chart preparation", renderer: "software Vulkan SwiftShader", browser: "/usr/bin/chromium", display: "owned Xvfb 1400x1200x24",
+  clock: "Window performance.now; Worker phase durations use only local differences", request: "actual production Worker postMessage",
+  presentation: "actual RenderClient render-geometry ACK after RendererWorker draw; visible canvas required",
+  input: "trusted CDP keyboard event after select request; observed pending or after ready, no physical device/OS latency",
+  warmth: "same actual accepted BrowserLibrary/cache and chart, output rate fixed" }
+  : { trials, viewport: { width: 1200, height: 1000 }, largeEncodedBytes: 8 * 1024 * 1024 + 44,
   rate: 48000, channels: 2, seed: "0", sectionStart: "0.25", sectionEnd: "1.5", heldInput: "KeyZ", gate: "external File acquisition before real arrayBuffer",
   renderer: "software Vulkan SwiftShader", browser: "/usr/bin/chromium", display: "owned Xvfb 1400x1200x24",
   clock: "Window performance.now; Worker phase durations use only local differences", request: "actual production Worker postMessage",
   presentation: "actual RenderClient render-geometry ACK after RendererWorker draw; visible canvas required",
   input: "trusted CDP keyboard event acquisition; excludes physical device/OS latency", warmth: "same actual accepted BrowserLibrary/cache, output rate fixed" };
-config.sectionCapture = { downAfterFrontierNs: "350000000", upAfterFrontierNs: "600000000", deadlineMs: 10000,
+if (!denseOnly) config.sectionCapture = { downAfterFrontierNs: "350000000", upAfterFrontierNs: "600000000", deadlineMs: 10000,
   completion: "natural finite section completion with admitted input drain and genuine owner proof", replay: "one externally frozen genuine file shared by all paired trials" };
 const configHash = sha(JSON.stringify(config));
-const fixtures = {
+const fixtures = denseOnly ? {} : {
   "bootstrap/short.bms": Buffer.from("#TITLE Benchmark bootstrap\n#BPM 120\n#RANK 2\n#WAV01 short.wav\n#00011:01010000\n"),
   "bootstrap/short.wav": wav(9600),
   "original/large.bms": Buffer.from("#TITLE Benchmark large\n#BPM 120\n#RANK 2\n#WAV01 large.wav\n#WAV02 large.wav\n#00011:01020000\n"),
@@ -187,6 +198,18 @@ const fixtures = {
   "replacement/large.bms": Buffer.from("#TITLE Benchmark changed content\n#BPM 121\n#RANK 2\n#WAV01 large.wav\n#WAV02 large.wav\n#00011:01020000\n"),
   "replacement/large.wav": wav(4 * 1024 * 1024, -1),
 };
+if (denseOnly) {
+  for (const count of config.noteCounts) {
+    const rows = [];
+    for (let measure = 0; measure < count / config.objectsPerRow; measure++) {
+      const row = `#${String(measure).padStart(3, "0")}11:${"01".repeat(config.objectsPerRow)}`;
+      assert(Buffer.byteLength(row) < 64 * 1024, "legal bounded physical BMS row");
+      rows.push(row);
+    }
+    fixtures[`dense-${count}/dense-${count}.bms`] = Buffer.from(`#TITLE Benchmark dense ${count}\n#BPM 120\n#RANK 2\n#WAV01 small.wav\n${rows.join("\n")}\n`);
+    fixtures[`dense-${count}/small.wav`] = wav(9600);
+  }
+}
 if (frozenReplay) fixtures["frozen-replay.bkr"] = frozenReplay;
 const fixtureManifest = {};
 for (const [name, bytes] of Object.entries(fixtures)) {
@@ -220,16 +243,17 @@ const artifactManifest = variant => Object.fromEntries([
   ["/" + variant + "/worker.js", sha(workerWrapper)], ["/" + variant + "/latency-file-probe.mjs", sha(fileProbe)],
   ["/" + variant + "/", artifacts[variant].get("index.html").sha256],
 ]);
-const records = { schema_version: 1, workload_id: "production-browser-loading-paired", path: "browser",
+const records = { schema_version: 1, workload_id: denseOnly ? "production-browser-dense-loading-paired" : "production-browser-loading-paired", path: "browser",
   environment: { platform: platform(), kernel: release(), cpu: cpus()[0]?.model, logical_cpus: cpus().length, node: process.version,
     config, fixture_manifest: fixtureManifest, baseline_manifest_sha256: sha(await readFile(resolve(baseline, "manifest.json"))),
     ceilings: ["Software Chromium/SwiftShader/Xvfb only; no physical audio/input or world-fastest claim.",
       "Render geometry ACK proves submitted usable geometry, not physical monitor scanout.",
       "Warm preparation still exports independent JS PCM for actual consumers; Rust copy/retained-byte counters absent from public Worker remain unavailable.",
-      "External read gates are identical diagnostic controls; held-duration and Puppeteer/observer overhead belong to both measured workloads.",
+      denseOnly ? "Natural preparation has no read gate; input may arrive after ready and is labelled from actual event order. Puppeteer/observer overhead remains."
+        : "External read gates are identical diagnostic controls; held-duration and Puppeteer/observer overhead belong to both measured workloads.",
       "Baseline has no preparation phase/job counters; unavailable historical work is never inferred from current counters."] },
   fixture_sha256: fixtureHash, config_sha256: configHash, groups: [] };
-const detail = { status: "RUNNING", mode: captureOnly ? "capture-only prerequisite" : "paired comparison", fixtureManifest, config,
+const detail = { status: "RUNNING", mode: denseOnly ? "dense paired comparison" : captureOnly ? "capture-only prerequisite" : "paired comparison", fixtureManifest, config,
   frozenReplay: frozenReplay ? { sha256: sha(frozenReplay), ...frozenReplaySummary } : null, trials: [], cleanup: {}, errors: [] };
 const gates = new Map(), pendingResponses = new Set(), loaded = new Map();
 const headers = { "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp", "Cache-Control": "no-store" };
@@ -387,9 +411,14 @@ async function runProcess(puppeteer, base, variant, index, scenario) {
       const reads = relevant.filter(message => message.kind === "latency-observation" && message.observation === "read-end");
       const exports = relevant.filter(message => message.kind === "latency-observation" && message.observation === "pcm-export");
       const current = progress.findLast(message => message.stage === "ready") ?? progress.at(-1);
+      const count = key => current ? current[key] + queries.reduce((sum, query) => sum + (query[key] ?? 0), 0) : null;
       if (variant === "after" && ["warm_preview", "warm_retry", "section", "replay"].includes(scenarioName)) {
         assert(current, "actual current stage counters required"); assert.equal(current.decodes, 0, "identical warm original must not repeat codec work");
         assert.equal(current.parses, 0); assert.equal(current.compiles, 0);
+      }
+      if (denseOnly && variant === "after" && temperature === "warm") {
+        assert(current, "actual current dense warm stage counters required");
+        assert.equal(current.decodes, 0); assert.equal(count("parses"), 0); assert.equal(count("compiles"), 0);
       }
       if (variant === "after" && scenarioName === "library_content_replacement") {
         assert(current && current.decodes > 0, "changed actual content in a new library must decode its own original");
@@ -409,7 +438,6 @@ async function runProcess(puppeteer, base, variant, index, scenario) {
       if (extras.pending) events.push(event("first_pending_frame", extras.pending.geometry.at, start, correlation, "genuine resized prior frame while File read held"));
       if (extras.releasedAt !== undefined) events.push(event("held_work_released", extras.releasedAt, start, correlation, "external real File acquisition gate release"));
       events.sort((a, b) => a.at_ms - b.at_ms);
-      const count = key => current ? current[key] + queries.reduce((sum, query) => sum + (query[key] ?? 0), 0) : null;
       const trial = { trial_id: correlation, process_id: processId, library_id: library.library, cache_owner_id: library.cache,
         reused_owner_id: temperature === "warm" ? library.cache : null, correlation_id: correlation, events,
         loaded_artifacts: { ...trialDetail.loaded }, phases_ms: { dependency_query: queries.length ? queries.reduce((sum, item) => sum + item.durationMs, 0) : null,
@@ -419,17 +447,41 @@ async function runProcess(puppeteer, base, variant, index, scenario) {
         counters: { file_reads: reads.length, acquired_encoded_bytes: reads.reduce((sum, item) => sum + item.bytes, 0), parses: count("parses"), compiles: count("compiles"),
           codec_decodes: current?.decodes ?? null, canonical_asset_reads: current?.reads ?? null, shared_assets: current?.sharedAssets ?? null,
           pcm_exports: exports.length, js_pcm_export_bytes: exports.reduce((sum, item) => sum + item.bytes, 0), rust_pcm_payload_copies: null, rust_retained_bytes: null },
-        input_latency_ms: extras.pending ? [extras.pending.input.at - extras.pending.input.eventAt] : [],
+        input_latency_ms: extras.naturalInput ? [extras.naturalInput.input.at - extras.naturalInput.input.eventAt]
+          : extras.pending ? [extras.pending.input.at - extras.pending.input.eventAt] : [],
         redraw_latency_ms: extras.pending ? [extras.pending.geometry.at - extras.pending.resizeAt] : [] };
       assert(trial.events[0].name === "request" && trial.events[0].at_ms === 0);
       groupFor(variant, scenarioName, temperature).trials.push(trial);
       trialDetail.operations.push({ scenario: scenarioName, operation, ready, geometry, ...extras, progress, queries, reads, exports, observedStatus: observed.status });
-      await page.screenshot({ path: resolve(out, owner + "-" + scenarioName + ".png"), fullPage: true });
+      await page.screenshot({ path: resolve(out, owner + "-" + scenarioName + (denseOnly ? "-" + temperature : "") + ".png"), fullPage: true });
       await checkpoint();
     };
     const bootstrap = ["bootstrap/short.bms", "bootstrap/short.wav"];
     const original = ["original/large.bms", "original/large.wav", "original/unrelated-hung.bin"];
-    if (scenario === "catalog") {
+    if (denseOnly) {
+      const noteCount = Number(scenario.slice("dense-".length));
+      assert(config.noteCounts.includes(noteCount));
+      const chart = `dense-${noteCount}.bms`;
+      const library = await upload([`${scenario}/${chart}`, `${scenario}/small.wav`]);
+      for (const temperature of ["cold", "warm"]) {
+        const operation = await select(chart);
+        assert.equal(operation.request.libraryId, library.request.id, "cold and warm select the same accepted library");
+        await page.evaluate(() => document.activeElement?.blur());
+        const beforeInput = await cursor();
+        await page.keyboard.press(config.heldInput);
+        await page.waitForFunction(n => __latency.inputs.slice(n).some(input => input.trusted && input.code === "KeyZ" && input.kind === "keydown"), {}, beforeInput.inputs);
+        const input = (await snapshot()).inputs.slice(beforeInput.inputs).find(input => input.trusted && input.code === "KeyZ" && input.kind === "keydown");
+        const ready = await selected(operation), geometry = await firstGeometry(operation.before, "preview", operation.request.id);
+        assert.equal(ready.notes, noteCount); assert.equal(ready.samples, 1);
+        assert.equal(ready.path, chart); assert.equal(ready.libraryId, library.request.id);
+        assert(input.at > operation.request.at && input.at >= input.eventAt, "natural trusted input follows actual select request");
+        assert.equal(gate.responses.size, 0, "dense work has no held File acquisition");
+        const naturalInput = { input, requestAt: operation.request.at, readyAt: ready.at,
+          timing: input.at < ready.at ? "during-preparation" : input.at === ready.at ? "at-ready" : "after-ready",
+          noteCount, samples: ready.samples, chartPath: chart, requestId: operation.request.id, libraryId: ready.libraryId };
+        await finishRecord(scenario, temperature, library, operation, ready, geometry, { naturalInput });
+      }
+    } else if (scenario === "catalog") {
       const library = await upload(original);
       assert.equal((await snapshot()).messages.filter(message => message.kind === "latency-observation" && message.observation === "read-begin").length, 0);
       const beforeMenu = await cursor(); await page.click("#menu-open");
@@ -600,11 +652,11 @@ try {
   } else {
     // Interleave before/after under unchanged software configuration; each cold
     // group gets its own processes, libraries and caches, not relabelled warm runs.
-    for (let index = 0; index < trials; index++) for (const scenario of ["catalog", "selected_large", "replacement"]) {
+    for (let index = 0; index < trials; index++) for (const scenario of denseOnly ? ["dense-20000", "dense-100000"] : ["catalog", "selected_large", "replacement"]) {
       for (const variant of index % 2 ? ["after", "before"] : ["before", "after"]) await runProcess(puppeteer, base, variant, index, scenario);
     }
     for (const group of records.groups) assert.equal(group.trials.length, trials, group.scenario + " paired samples");
-    assert.equal(records.groups.length, 14, "all seven scenarios for both variants are required");
+    assert.equal(records.groups.length, denseOnly ? 8 : 14, denseOnly ? "both dense cold/warm workloads for both variants required" : "all seven scenarios for both variants are required");
     detail.status = "PASS"; await checkpoint();
     console.log(JSON.stringify({ status: detail.status, trials: records.groups.map(group => ({ variant: group.variant, scenario: group.scenario, count: group.trials.length })), output: resolve(out, "trials.json") }));
   }
