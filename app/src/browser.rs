@@ -280,7 +280,9 @@ impl BrowserMenuOwner {
                 },
                 index as usize,
             )
-            .map_err(js_error)
+            .map_err(js_error)?;
+        self.retire_unselected_record_preview();
+        Ok(())
     }
     pub fn navigate(&mut self, screen: u64, revision: u64, route: u32) -> Result<(), JsValue> {
         self.inner
@@ -362,7 +364,9 @@ impl BrowserMenuOwner {
                 },
                 values,
             )
-            .map_err(js_error)
+            .map_err(js_error)?;
+        self.retire_unselected_record_preview();
+        Ok(())
     }
     pub fn suspend(&mut self) {
         self.inner.suspend();
@@ -372,6 +376,23 @@ impl BrowserMenuOwner {
     }
     pub fn dispose(&mut self) {
         self.inner.dispose();
+    }
+}
+
+impl BrowserMenuOwner {
+    fn retire_unselected_record_preview(&mut self) {
+        if self.record_preview.as_ref().is_some_and(|value| {
+            self.inner.route() != crate::screen_lifecycle::ScreenRoute::Records
+                || self
+                    .inner
+                    .fields()
+                    .get(self.inner.selected())
+                    .map(String::as_str)
+                    != value.path.to_str()
+        }) {
+            self.record_preview = None;
+            self.record_archive = None;
+        }
     }
 }
 

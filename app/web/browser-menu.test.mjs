@@ -223,3 +223,119 @@ test("actual WASM navigation stages typed fields before token draft action or sc
     for (const value of [owner, reference]) { value.dispose(); value.free(); }
   }
 });
+
+// Reproducible genuine prefix: checked-in BMS/WAV construction and the actual
+// public capture ABI, with no temporary browser evidence or fabricated archive.
+function genuineMenuRecording(bindings) {
+  const library = new bindings.BrowserLibrary(8, 1024 * 1024, 2 * 1024 * 1024, 64);
+  let game;
+  try {
+    const encode = text => new TextEncoder().encode(text);
+    const chartPath = "pack/preview.bms";
+    const chart = encode("#TITLE Genuine menu preview\n#BPM 120\n#WAV01 key.wav\n#00111:01\n");
+    const wave = new Uint8Array(48), view = new DataView(wave.buffer);
+    wave.set(encode("RIFF")); view.setUint32(4, 40, true); wave.set(encode("WAVEfmt "), 8);
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, 24000, true); view.setUint32(28, 48000, true);
+    view.setUint16(32, 2, true); view.setUint16(34, 16, true); wave.set(encode("data"), 36);
+    view.setUint32(40, 4, true); view.setInt16(44, 8192, true); view.setInt16(46, -4096, true);
+    for (const [path, bytes] of [[chartPath, chart], ["pack/key.wav", wave]]) {
+      library.declare_file(path, bytes.byteLength); library.add_file(path, bytes);
+    }
+    const prepared = library.prepare_chart(chartPath, 24000, 2, 7n, 1024, 4096, 8);
+    game = new bindings.BrowserGame(prepared, 0n, 100000000n, 50000000n, 50000000n, 0n,
+      Uint32Array.from([0x11, 4]));
+    game.configure_capture(1024 * 1024, 1024);
+    assert.equal(game.completed_archive(), undefined, "a captured prefix carries no invented completion");
+    game.stop();
+    const replay = game.take_replay();
+    assert.ok(replay instanceof Uint8Array && replay.byteLength > 0);
+    assert.equal(game.take_replay(), undefined, "genuine capture has one export owner");
+    return { library, chartPath, replay, close() { library.free(); } };
+  } catch (error) { library.free(); throw error; }
+  finally { game?.free(); }
+}
+function recordsAbiOwner(bindings) {
+  const owner = new bindings.BrowserMenuOwner((1n << 64n) - 1n);
+  let token = preflightMenuPacket(owner.snapshot());
+  owner.navigate_with_fields(token.screen, token.revision, 2, ["original settings"]);
+  token = preflightMenuPacket(owner.snapshot());
+  owner.navigate_with_fields(token.screen, token.revision, 4, ["records/one.bkr", "records/two.bkr"]);
+  return owner;
+}
+function acquireGenuineMenuPreview(owner, recording) {
+  const token = preflightMenuPacket(owner.snapshot());
+  owner.preview_record(token.screen, token.revision, recording.library, recording.chartPath,
+    "records/one.bkr", recording.replay, undefined, undefined);
+  const packet = owner.record_snapshot();
+  assert.ok(packet instanceof Uint8Array && packet.byteLength > 32);
+  assert.deepEqual(Array.from(packet.slice(0, 4)), [66, 75, 82, 80]);
+  assert.equal(new DataView(packet.buffer, packet.byteOffset, packet.byteLength).getBigUint64(20, true), owner.revision);
+  return packet;
+}
+
+test("actual WASM Records preview retires after another selection and returning requires fresh genuine acquisition", async () => {
+  const bindings = await realMenuBindings(), recording = genuineMenuRecording(bindings);
+  let owner;
+  try {
+    owner = recordsAbiOwner(bindings);
+    const original = acquireGenuineMenuPreview(owner, recording);
+    assert.equal(owner.selected_value(), "records/one.bkr");
+    let token = preflightMenuPacket(owner.snapshot());
+    owner.select(token.screen, token.revision, 1);
+    assert.equal(owner.selected_value(), "records/two.bkr");
+    assert.equal(owner.record_snapshot(), undefined);
+    token = preflightMenuPacket(owner.snapshot());
+    owner.select(token.screen, token.revision, 0);
+    assert.equal(owner.selected_value(), "records/one.bkr");
+    assert.equal(owner.record_snapshot(), undefined, "returning does not revive a retired preview");
+    const refreshed = acquireGenuineMenuPreview(owner, recording);
+    assert.deepEqual(refreshed.slice(28), original.slice(28), "fresh acquisition reproduces the same genuine read-only prefix body");
+  } finally { owner?.dispose(); owner?.free(); recording.close(); }
+});
+
+test("actual WASM Records catalog preserves same-key previews but deletion and reinsertion cannot revive them", async () => {
+  const bindings = await realMenuBindings(), recording = genuineMenuRecording(bindings);
+  let owner;
+  try {
+    owner = recordsAbiOwner(bindings);
+    const original = acquireGenuineMenuPreview(owner, recording);
+    let token = preflightMenuPacket(owner.snapshot());
+    const unchanged = owner.snapshot();
+    owner.select(token.screen, token.revision, 0);
+    owner.set_fields(token.screen, token.revision, ["records/one.bkr", "records/two.bkr"]);
+    assert.deepEqual(owner.snapshot(), unchanged);
+    assert.deepEqual(owner.record_snapshot(), original);
+    const stale = token;
+    owner.set_fields(token.screen, token.revision, ["records/new.bkr", "records/one.bkr", "records/two.bkr"]);
+    assert.equal(owner.selected, 1);
+    assert.equal(owner.selected_value(), "records/one.bkr");
+    assert.deepEqual(owner.record_snapshot().slice(28), original.slice(28));
+    token = preflightMenuPacket(owner.snapshot());
+    owner.set_fields(token.screen, token.revision, ["records/two.bkr", "records/new.bkr", "records/one.bkr"]);
+    assert.equal(owner.selected, 2);
+    assert.equal(owner.selected_value(), "records/one.bkr");
+    assert.deepEqual(owner.record_snapshot().slice(28), original.slice(28));
+    token = preflightMenuPacket(owner.snapshot());
+    const accepted = owner.snapshot(), preview = owner.record_snapshot();
+    for (const reject of [
+      () => owner.select(stale.screen, stale.revision, 0),
+      () => owner.set_fields(stale.screen, stale.revision, ["records/one.bkr"]),
+      () => owner.select(token.screen, token.revision, 99),
+      () => owner.set_fields(token.screen, token.revision, ["x".repeat(4097)]),
+    ]) {
+      assert.throws(reject);
+      assert.deepEqual(owner.snapshot(), accepted);
+      assert.deepEqual(owner.record_snapshot(), preview, "refusal must not retire an accepted preview");
+    }
+    owner.set_fields(token.screen, token.revision, ["records/two.bkr", "records/new.bkr"]);
+    assert.equal(owner.selected, 1);
+    assert.equal(owner.selected_value(), "records/new.bkr");
+    assert.equal(owner.record_snapshot(), undefined);
+    token = preflightMenuPacket(owner.snapshot());
+    owner.set_fields(token.screen, token.revision, ["records/one.bkr"]);
+    assert.equal(owner.selected_value(), "records/one.bkr");
+    assert.equal(owner.record_snapshot(), undefined, "catalog reinsertion does not reattach an old preview");
+    assert.deepEqual(acquireGenuineMenuPreview(owner, recording).slice(28), original.slice(28));
+  } finally { owner?.dispose(); owner?.free(); recording.close(); }
+});
