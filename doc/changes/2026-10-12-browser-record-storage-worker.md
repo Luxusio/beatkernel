@@ -1,8 +1,9 @@
 # Browser record storage Worker migration
 
-Status: implementation candidate under review remediation; fresh independent
-review and full QA are pending. This task is not complete and does not promote
-a WBS item.
+Status: implemented with independent code/security review and full Node tests
+passing. Available actual Chromium storage probes pass; the full browser lens
+is BLOCKED_ENV for an unavailable eligible trusted WebTransport endpoint. This
+task is not complete and does not promote a WBS item.
 
 The selected [ownership contract](../runtime/REQ__browser-record-storage.md)
 moves existing record-store operations and replay/archive binary work into the
@@ -123,6 +124,46 @@ trusted WebTransport remains environment-blocked without an eligible endpoint;
 the actual strict entrypoint exited one before launch for missing app URL, and
 existing raw unknown-root evidence is preserved. Render local DeveloperMode
 bootstrap is explicitly development-only, with no trusted QUIC acceptance claim.
+
+## Final available verification
+
+Independent DEEP code review passed after the public touch-control fixture
+correction at `1cf6edf`. Fresh full Chromium render verification then passed
+**20/20 checks**, exit zero. Both original local members `[1,2]` retained exact
+replay bytes and their identical whole-roster archive through save/load and
+historical presentation. Worker native transaction completion and Window
+database/body/construction counters of zero were observed. Retained captures
+survived Worker termination/reopening, and selected replay remained usable
+after deletion. Evidence:
+`target/wf/record-storage-qa-browser-render-12b87-2/evidence.json`; raw log:
+`/tmp/record-storage-qa-browser-render-12b87-2.log`.
+
+The independent browser lens returned **BLOCKED_ENV**, despite the available
+local checks passing: strict WebTransport play still lacks an eligible
+system-root endpoint and `WEBTRANSPORT_PLAY_APP_URL`. Existing preflight
+evidence reports `QUIC_TLS_CERTIFICATE_UNKNOWN` and
+`ERR_CERT_AUTHORITY_INVALID`. Local DeveloperMode room completion does not
+substitute for that requirement. The task remains unfinished; no close or
+global WBS promotion is justified. Its full serial Node result remains valid
+for unchanged product/test sources after the test-only touch-control change.
+
+The render main NetLog ends truncated and is preserved untouched. Complete
+peer NetLogs contain teardown/QUIC cancellations, so render PASS is not a
+blanket strict-network assertion. The unchanged settings evidence separately
+passes its strict request gates, including HTTP 200, Puppeteer completion and
+Worker CDP loading completion, with zero page/console/network errors. Preserve
+the earlier audio-abort failure; one successful run does not diagnose or
+permanently repair it. Evidence artifacts are ignored local outputs, not
+committed verification receipts.
+
+Independent scoped browser UX also passed actual save/history/delete/replay,
+cancel/reopen retention, keyboard activation and disabled-control focus order.
+Desktop 1200x1000 and mobile-width 390x844 screenshots were inspected; mobile
+record controls had no horizontal overflow and showed visible keyboard focus.
+Evidence: `target/wf/record-storage-ux-browser-12b87-1/`. This is scoped UX,
+not a full QA PASS. The supplemental resize inspection reported software
+WebGPU device loss while retaining preview and usable records; hardware GPU
+behavior is unproven. Existing long settings-page placement remains UX backlog.
 
 ## Known ceiling
 

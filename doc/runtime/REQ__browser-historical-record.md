@@ -1,11 +1,14 @@
 # Browser loaded historical result presentation
 
-Ownership update, implementation candidate; independent acceptance pending:
+Ownership update, implemented with available independent checks passing:
 [record storage](REQ__browser-record-storage.md) moves IndexedDB and immutable
 File/Blob preparation into the existing gameplay Worker. Window requests
 records using correlated bounded metadata and retain immutable handles;
 historical/menu archive reads stay in Worker. Scoped Node development checks
-pass; actual browser clone/lifetime and independent verification are pending.
+pass, alongside the full independent Node suite and actual Chromium
+clone/lifetime and original-member history checks. Full acceptance remains
+blocked by the unavailable strict trusted WebTransport endpoint; see the
+record-storage contract and its linked verification history.
 Original member association, candidate acceptance
 and preservation of prior valid presentation remain required.
 

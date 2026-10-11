@@ -4,8 +4,10 @@ Historical implementation checkpoint. Its execution deferral below is not an
 active development rule. The selected
 [record-storage Worker migration](../runtime/REQ__browser-record-storage.md)
 retains these storage/capture semantics. Worker/Window source and scoped Node
-checks are integrated; production probes and fresh independent verification
-remain pending.
+checks are integrated. Independent code/security review, full Node tests and
+available actual Chromium storage probes pass. Full browser acceptance remains
+environment-blocked by the missing eligible trusted WebTransport endpoint;
+the linked contract records current evidence ceilings.
 
 The browser host offers explicit save, metadata refresh, saved-replay selection
 and selected-record deletion. RecordsStore uses same-origin IndexedDB with

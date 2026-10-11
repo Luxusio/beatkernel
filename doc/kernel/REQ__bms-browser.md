@@ -1352,7 +1352,10 @@ The selected [record-storage ownership migration](../runtime/REQ__browser-record
 moves the existing database operations and binary copies into the gameplay
 Worker, with immutable File/Blob handles retained by Window for explicit
 selection, save retry and download. Worker/Window source and scoped Node checks
-are integrated; production probes and independent acceptance remain pending.
+are integrated; independent code/security review, full Node tests and available
+actual Chromium storage probes pass. Full browser acceptance remains blocked
+by the missing eligible trusted WebTransport endpoint; see the linked
+ownership contract for current verification scope and limitations.
 The requirements below retain their original recording semantics.
 
 The browser shall offer explicit Save last recording, Refresh saved records,

@@ -1,9 +1,12 @@
 # Browser record storage ownership
 
-Status: Worker/Window implementation candidate, with scoped Node development
-checks passing. Production probe integration and independent review/QA remain
-pending. This does not complete the player or fix the recurring browser
-audio-WASM cancellation.
+Status: implemented with independent code/security review and 1096/1096 Node
+tests passing. Actual Chromium storage/settings journeys and the fresh full
+render probe (20/20 checks) pass. Full browser acceptance remains environment
+blocked by the missing eligible system-root WebTransport endpoint. This does
+not complete the player or prove permanent repair of recurring browser
+audio-WASM cancellation. Detailed run history and evidence ceilings are in
+`doc/changes/2026-10-12-browser-record-storage-worker.md`.
 
 The existing gameplay Worker owns same-origin IndexedDB record opening,
 metadata listing, loading, saving and deletion. It also owns all replay/archive
