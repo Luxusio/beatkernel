@@ -123,3 +123,38 @@ isolation, bounded coalescing, submitted touch geometry and joined stop.
 Actual browser interaction/screenshots, stale actions, Back/cancel, resize and
 editor/lifecycle tests prove menu parity. Existing chart-render probes alone
 cannot prove these menu workflows or performance/physical input guarantees.
+
+## Actual Records selection and relative opponents
+
+Records must connect the selected genuine recording's accepted prefix, timing
+and optional historical/comparison values to its read-only retained surface.
+Add Own and Add Other require a valid preview of that selected record and
+available capacity. Their accepted entry retains the exact stored source key,
+original File handle and explicit kind; the selected Own/Other counters and
+painted action gates reflect the same canonical Worker selection.
+
+The browser keeps source keys unique. Repeating Own or adding the same key as
+Other refuses atomically and preserves the prior selection; this does not
+change the native draft's separate duplicate-path policy. Existing eight-entry
+and64MiB bounds remain. Selection metadata must not eagerly acquire file bytes.
+
+Remove Own and Remove Other need exact selected-key membership of that kind,
+even after changing rows has invalidated the current preview. Removal does not
+delete or reopen the stored recording and preserves unrelated selected records.
+Absent/wrong-kind removal is unavailable. Clear removes selected opponents only.
+Back/reopen preserves the canonical opponent draft and the original Settings
+parent; later valid actions must not restore a removed entry accidentally.
+
+Scan after an actual catalog change must make current stored rows available in
+the retained screen while preserving the literal selection if it still exists.
+Asynchronous acquisition/publication uses the existing current-menu token,
+selected-path and replacement fences; a stale result cannot revive a retired
+screen or replace the accepted prefix.
+
+Verify with ordinary trusted canvas/keyboard actions52/53/54/60/61, at least two
+genuine stored recordings, nonzero selected counters and actual history pixels
+correlated with Worker state. Changing rows then returning without Preview proves
+membership-based removal. A prior DOM opponent chooser journey alone cannot
+prove this retained connection. Protocol/codec/quota fixtures separately prove
+hostile/stale/late/boundary branches; GUI success is not physical latency,
+screen-reader completeness or whole-player acceptance.

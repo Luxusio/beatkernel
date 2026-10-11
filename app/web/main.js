@@ -3691,11 +3691,11 @@ function closeRecords() {
   recordsStore = null;
   previous?.close();
 }
-function recordCurrent(operation) {
-  const token = operation.menuTicket ? menuToken() : null;
+function recordCurrent(operation, expectedMenuTicket = operation.menuTicket) {
+  const token = expectedMenuTicket ? menuToken() : null;
   return recordsOperation === operation && operation.owner === owner && !operation.controller.signal.aborted
-    && (!operation.menuTicket || token && token.menuGeneration === operation.menuTicket.menuGeneration
-      && token.screen === operation.menuTicket.screen && token.revision === operation.menuTicket.revision);
+    && (!expectedMenuTicket || token && token.menuGeneration === expectedMenuTicket.menuGeneration
+      && token.screen === expectedMenuTicket.screen && token.revision === expectedMenuTicket.revision);
 }
 async function openRecords(operation) {
   if (recordsStore && !recordsStore.closed) return recordsStore;
@@ -3723,6 +3723,8 @@ async function recordAction(action, menuTicket = null) {
   if (action === "save" && captured === null) return;
   const id = Number(ui.records.value);
   if ((action === "use" || action === "delete" || action === "opponent") && (!Number.isSafeInteger(id) || id < 1)) return;
+  const catalogTicket = menuState?.route === 4 ? menuToken() : null;
+  const catalogWorker = worker;
   const operation = { owner, controller: new AbortController(), menuTicket };
   recordsOperation = operation;
   controls();
@@ -3777,6 +3779,9 @@ async function recordAction(action, menuTicket = null) {
       if (!recordCurrent(operation)) return;
       showRecords(entries);
       status(`${committed}${entries.length} saved record(s).`);
+      if (catalogTicket && worker === catalogWorker && menuState?.route === 4 && recordCurrent(operation, catalogTicket)) {
+        worker.postMessage({ kind: "menu-fields", ...catalogTicket, fields: menuFieldsFor(4) });
+      }
     }
   } catch (error) {
     if (recordCurrent(operation)) status(`${committed}Record library failed: ${String(error.message).slice(0, 4096)} Current replay and download remain available.`, true);

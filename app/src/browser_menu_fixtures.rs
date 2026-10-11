@@ -1832,3 +1832,284 @@ fn nested_device_destination_failure_keeps_original_players_and_four_entry_backs
         .is_err());
     assert_eq!(menu.snapshot(), pristine.snapshot());
 }
+
+#[test]
+fn records_catalog_prepend_and_reorder_keep_literal_selection_and_genuine_preview() {
+    let mut menu = records_menu();
+    menu.set_fields(
+        token(&menu),
+        ["records/alpha.bkr", "records/曲.bkr", "records/omega.bkr"]
+            .map(str::to_owned)
+            .to_vec(),
+    )
+    .unwrap();
+    menu.select(token(&menu), 1).unwrap();
+    let record = prefix_only();
+    assert_eq!(record.path.to_str(), Some("records/曲.bkr"));
+    let mut presentation =
+        crate::browser_menu::BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+    presentation
+        .set_record_preview(token(&menu), record.clone())
+        .unwrap();
+    menu_label(&render_menu(&mut presentation), "PREFIX EX 2");
+    assert_eq!(presentation.hit((310.0, 625.0), [960, 720]), 52);
+    let old = token(&menu);
+    menu.set_fields(
+        old,
+        [
+            "records/new.bkr",
+            "records/alpha.bkr",
+            "records/曲.bkr",
+            "records/omega.bkr",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(menu.selected(), 2);
+    assert_eq!(menu.fields()[2], "records/曲.bkr");
+    assert_eq!(token(&menu).screen, old.screen);
+    assert_eq!(token(&menu).revision, old.revision + 1);
+    presentation.apply(menu.snapshot()).unwrap();
+    let prepended = render_menu(&mut presentation);
+    menu_label(&prepended, "PREFIX EX 2");
+    assert_eq!(presentation.hit((310.0, 625.0), [960, 720]), 52);
+    assert!(presentation
+        .set_record_preview(old, record.clone())
+        .is_err());
+    assert_eq!(
+        menu_packet(&render_menu(&mut presentation)),
+        menu_packet(&prepended)
+    );
+    let before_reorder = token(&menu);
+    menu.set_fields(
+        before_reorder,
+        [
+            "records/omega.bkr",
+            "records/曲.bkr",
+            "records/new.bkr",
+            "records/alpha.bkr",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(menu.selected(), 1);
+    assert_eq!(menu.fields()[1], "records/曲.bkr");
+    assert_eq!(token(&menu).revision, before_reorder.revision + 1);
+    presentation.apply(menu.snapshot()).unwrap();
+    menu_label(&render_menu(&mut presentation), "PREFIX EX 2");
+    assert_eq!(presentation.hit((310.0, 625.0), [960, 720]), 52);
+    // Reading and carrying the preview never changes its accepted prefix proof.
+    assert_eq!(record.score.hits, 1);
+    assert_eq!(record.score.timing.sum, 2);
+    assert_eq!(record.historical, None);
+    presentation
+        .set_record_preview(token(&menu), record)
+        .unwrap();
+}
+
+#[test]
+fn records_catalog_unchanged_and_duplicate_same_position_keep_revision_selection_and_preview() {
+    let mut menu = records_menu();
+    menu.set_fields(
+        token(&menu),
+        [
+            "records/alpha.bkr",
+            "records/曲.bkr",
+            "records/曲.bkr",
+            "records/omega.bkr",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    )
+    .unwrap();
+    menu.select(token(&menu), 2).unwrap();
+    let mut presentation =
+        crate::browser_menu::BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+    presentation
+        .set_record_preview(token(&menu), prefix_only())
+        .unwrap();
+    let original_scene = render_menu(&mut presentation);
+    let original = menu.snapshot();
+    menu.set_fields(original.token, original.fields.clone())
+        .unwrap();
+    assert_eq!(menu.snapshot(), original);
+    presentation.apply(menu.snapshot()).unwrap();
+    assert_eq!(
+        menu_packet(&render_menu(&mut presentation)),
+        menu_packet(&original_scene)
+    );
+    menu.set_fields(
+        token(&menu),
+        [
+            "records/new.bkr",
+            "records/曲.bkr",
+            "records/曲.bkr",
+            "records/omega.bkr",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        menu.selected(),
+        2,
+        "the unchanged literal occurrence remains selected"
+    );
+    assert_eq!(menu.fields()[2], "records/曲.bkr");
+    assert_eq!(token(&menu).revision, original.token.revision + 1);
+    presentation.apply(menu.snapshot()).unwrap();
+    menu_label(&render_menu(&mut presentation), "PREFIX EX 2");
+    assert_eq!(presentation.hit((310.0, 625.0), [960, 720]), 52);
+}
+
+#[test]
+fn records_catalog_deleted_selection_and_empty_rows_normalize_and_retire_foreign_preview() {
+    let mut menu = records_menu();
+    menu.set_fields(
+        token(&menu),
+        ["records/alpha.bkr", "records/曲.bkr", "records/omega.bkr"]
+            .map(str::to_owned)
+            .to_vec(),
+    )
+    .unwrap();
+    menu.select(token(&menu), 1).unwrap();
+    let record = prefix_only();
+    let mut presentation =
+        crate::browser_menu::BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+    presentation
+        .set_record_preview(token(&menu), record.clone())
+        .unwrap();
+    render_menu(&mut presentation);
+    assert_eq!(presentation.hit((310.0, 625.0), [960, 720]), 52);
+    menu.set_fields(
+        token(&menu),
+        ["records/alpha.bkr", "records/omega.bkr"]
+            .map(str::to_owned)
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(menu.selected(), 1);
+    assert_eq!(menu.fields()[1], "records/omega.bkr");
+    presentation.apply(menu.snapshot()).unwrap();
+    let removed = render_menu(&mut presentation);
+    assert_eq!(presentation.hit((310.0, 625.0), [960, 720]), 0);
+    assert!(presentation
+        .set_record_preview(token(&menu), record.clone())
+        .is_err());
+    assert_eq!(
+        menu_packet(&render_menu(&mut presentation)),
+        menu_packet(&removed)
+    );
+    menu.set_fields(token(&menu), vec![]).unwrap();
+    assert_eq!(menu.selected(), 0);
+    assert!(menu.fields().is_empty());
+    presentation.apply(menu.snapshot()).unwrap();
+    render_menu(&mut presentation);
+    assert_eq!(presentation.hit((175.0, 625.0), [960, 720]), 0);
+    assert_eq!(presentation.hit((310.0, 625.0), [960, 720]), 0);
+    let empty = menu.snapshot();
+    menu.set_fields(empty.token, vec![]).unwrap();
+    assert_eq!(menu.snapshot(), empty);
+    menu.set_fields(token(&menu), vec![String::new(), "records/曲.bkr".into()])
+        .unwrap();
+    assert_eq!(menu.selected(), 0);
+    menu.set_fields(
+        token(&menu),
+        vec![
+            "records/new.bkr".into(),
+            String::new(),
+            "records/曲.bkr".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        menu.selected(),
+        0,
+        "an empty old field has no literal record identity"
+    );
+    assert_eq!(menu.fields()[0], "records/new.bkr");
+}
+
+#[test]
+fn records_catalog_stale_and_invalid_replacements_are_atomic_and_other_routes_keep_index_semantics()
+{
+    let mut menu = records_menu();
+    menu.set_fields(
+        token(&menu),
+        ["records/alpha.bkr", "records/曲.bkr", "records/omega.bkr"]
+            .map(str::to_owned)
+            .to_vec(),
+    )
+    .unwrap();
+    menu.select(token(&menu), 1).unwrap();
+    let mut presentation =
+        crate::browser_menu::BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+    presentation
+        .set_record_preview(token(&menu), prefix_only())
+        .unwrap();
+    let scene = render_menu(&mut presentation);
+    let stale = token(&menu);
+    menu.touch(stale).unwrap();
+    presentation.apply(menu.snapshot()).unwrap();
+    let accepted = menu.snapshot();
+    for bad in [
+        stale,
+        MenuToken {
+            generation: 1,
+            ..accepted.token
+        },
+        MenuToken {
+            screen: ScreenInstanceId(u64::MAX),
+            ..accepted.token
+        },
+        MenuToken {
+            revision: accepted.token.revision + 1,
+            ..accepted.token
+        },
+    ] {
+        assert!(menu
+            .set_fields(bad, vec!["records/new.bkr".into(), "records/曲.bkr".into()])
+            .is_err());
+        assert_eq!(menu.snapshot(), accepted);
+    }
+    for bad in [
+        vec!["x".repeat(4097)],
+        vec![String::new(); MAX_MENU_FIELDS + 1],
+    ] {
+        assert!(menu.set_fields(accepted.token, bad).is_err());
+        assert_eq!(menu.snapshot(), accepted);
+    }
+    presentation.apply(menu.snapshot()).unwrap();
+    assert_eq!(
+        menu_packet(&render_menu(&mut presentation)),
+        menu_packet(&scene)
+    );
+    assert_eq!(presentation.hit((310.0, 625.0), [960, 720]), 52);
+    let mut selection = BrowserMenu::new(131).unwrap();
+    selection
+        .set_fields(
+            token(&selection),
+            ["alpha.bms", "beta.bms", "omega.bms"]
+                .map(str::to_owned)
+                .to_vec(),
+        )
+        .unwrap();
+    selection.select(token(&selection), 1).unwrap();
+    selection
+        .set_fields(
+            token(&selection),
+            ["new.bms", "alpha.bms", "beta.bms", "omega.bms"]
+                .map(str::to_owned)
+                .to_vec(),
+        )
+        .unwrap();
+    assert_eq!(selection.selected(), 1);
+    assert_eq!(selection.fields()[1], "alpha.bms");
+    selection
+        .set_fields(token(&selection), vec!["remaining.bms".into()])
+        .unwrap();
+    assert_eq!(selection.selected(), 0);
+    assert_eq!(selection.fields()[0], "remaining.bms");
+}

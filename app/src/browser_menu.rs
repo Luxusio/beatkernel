@@ -221,7 +221,19 @@ impl BrowserMenu {
         } else {
             menu_selection_count(self.navigator.route(), &values)?
         };
-        let selected = draft.2.min(selection_count.saturating_sub(1));
+        let mut selected = draft.2.min(selection_count.saturating_sub(1));
+        if self.navigator.route() == ScreenRoute::Records {
+            if let Some(value) = draft.1.get(draft.2).filter(|value| !value.is_empty()) {
+                selected = if values.get(draft.2) == Some(value) {
+                    draft.2
+                } else {
+                    values
+                        .iter()
+                        .position(|next| next == value)
+                        .unwrap_or(selected)
+                };
+            }
+        }
         let changed = draft.1 != values || draft.2 != selected;
         if changed {
             let draft = self
@@ -1694,3 +1706,7 @@ fn decode_local_fields(
     }
     Ok((members, sources, can_assign, can_refresh))
 }
+
+#[cfg(test)]
+#[path = "browser_menu_catalog_guard_fixtures.rs"]
+mod catalog_guard_fixtures;

@@ -7844,3 +7844,156 @@ test("presentation feedback: stored history can wait and recover before preparin
   assert.equal(h.opens.length, 0);
   await h.close();
 });
+
+test("Records catalog publication: actual Scan effect publishes exact current metadata once without reading replays", async () => {
+  const h = await harness({ recordsList: [savedRecord({ id: 42 }), savedRecord({ id: 41 })] });
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 4, fields: ["41"], selected: 0 };
+    await h.receive(state);
+    const publications = game.messages("menu-fields").length;
+    await h.receive({ ...state, kind: "menu-effect", effect: 100050n, control: 50n });
+    assert.equal(h.recordCalls.filter(call => call.method === "list").length, 1);
+    assert.equal(h.recordCalls.filter(call => call.method === "load").length, 0);
+    assert.equal(game.messages("menu-fields").length, publications + 1);
+    assert.deepEqual(game.last("menu-fields"), { kind: "menu-fields", menuGeneration: 77n,
+      screen: 3n, revision: 6n, fields: ["42", "41"] });
+    assert.deepEqual(h.get("records").children.map(row => row.value), ["42", "41"]);
+    assert.match(h.get("status").textContent, /2 saved record\(s\)/);
+    await h.receive({ ...state, revision: 7n, fields: ["42", "41"], selected: 1 });
+    assert.equal(game.messages("menu-fields").length, publications + 1, "the catalog ACK cannot publish the same completion twice");
+  } finally { await h.close(); }
+});
+
+test("Records catalog publication: DOM refresh save and delete publish each completed current catalog once", async () => {
+  const h = await harness({ recordsList: [savedRecord({ id: 41 })] });
+  try {
+    await h.preview(); h.get("record").checked = true;
+    const session = await h.launch(); h.click("stop"); await flush();
+    const captured = Uint8Array.from([7, 8, 9, 255]);
+    await h.receive(finalScore(session.id, { replay: captured, replayComplete: false, replayError: null }));
+    assert.equal(h.get("records-save").disabled, false);
+    const game = h.workers[0];
+    h.click("menu-open"); await flush();
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 4, fields: ["41"], selected: 0 };
+    await h.receive(state);
+    let publications = game.messages("menu-fields").length;
+    for (const [action, ids] of [["refresh", [41]], ["save", [42, 41]], ["delete", [42]]]) {
+      h.faults.recordsList = ids.map(id => savedRecord({ id }));
+      if (action === "delete") h.get("records").value = "41";
+      const lists = h.recordCalls.filter(call => call.method === "list").length;
+      h.click(`records-${action}`); await flush();
+      assert.equal(h.recordCalls.filter(call => call.method === "list").length, lists + 1);
+      assert.equal(game.messages("menu-fields").length, ++publications);
+      assert.deepEqual(game.last("menu-fields"), { kind: "menu-fields", menuGeneration: 77n,
+        screen: 3n, revision: 6n, fields: ids.map(String) });
+    }
+    assert.equal(h.recordCalls.filter(call => call.method === "load").length, 0);
+    assert.deepEqual(h.recordCalls.find(call => call.method === "save").value.bytes, captured);
+    assert.equal(h.recordCalls.find(call => call.method === "remove").id, 41);
+    assert.match(h.get("status").textContent, /Selected record deleted.*1 saved record/);
+    assert.equal(h.get("records-save").disabled, false, "deleting storage preserves the separately captured replay");
+  } finally { await h.close(); }
+});
+
+test("Records catalog publication: delayed Scan cancels while DOM refresh retains global metadata across changed menu tickets", async () => {
+  for (const scan of [false, true]) for (const change of ["navigation", "revision", "replacement"]) {
+    const gate = deferred();
+    const h = await harness({ recordsListGate: gate, recordsList: [savedRecord({ id: 42 }), savedRecord({ id: 41 })] });
+    try {
+      await h.preview(); const game = h.workers[0];
+      const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+        route: 4, fields: ["41"], selected: 0 };
+      await h.receive(state);
+      if (scan) await h.receive({ ...state, kind: "menu-effect", effect: 100050n, control: 50n });
+      else { h.click("records-refresh"); await flush(); }
+      assert.equal(h.recordCalls.filter(call => call.method === "list").length, 1);
+      const current = change === "navigation" ? { ...state, screen: 4n, revision: 7n, route: 2, fields: ["retained settings"] }
+        : change === "revision" ? { ...state, revision: 7n }
+        : { ...state, menuGeneration: 78n, screen: 4n, revision: 1n };
+      await h.receive(current);
+      const publications = game.messages("menu-fields").length;
+      const previousRows = h.get("records").children.map(row => row.value);
+      const previousStatus = h.get("status").textContent;
+      gate.resolve(); await flush();
+      assert.equal(game.messages("menu-fields").length, publications, `${change} fences the captured Records ticket`);
+      if (scan) {
+        // Scan is a menu-ticket-owned transaction. Its stale list cannot update
+        // either surface; DOM-only refresh keeps the separate Window contract.
+        assert.deepEqual(h.get("records").children.map(row => row.value), previousRows);
+        assert.equal(h.get("status").textContent, previousStatus);
+      } else {
+        assert.deepEqual(h.get("records").children.map(row => row.value), ["42", "41"], "committed store metadata remains globally usable");
+        assert.match(h.get("status").textContent, /2 saved record\(s\)/);
+      }
+      assert.equal(h.get("records-refresh").disabled, false);
+      assert.equal(h.recordCalls.filter(call => call.method === "load").length, 0);
+    } finally { await h.close(); }
+  }
+});
+
+test("Records catalog publication: replaced Window owner rejects late catalog and a fresh owner can refresh normally", async () => {
+  const gate = deferred();
+  const h = await harness({ recordsListGate: gate, recordsList: [savedRecord({ id: 41 })] });
+  try {
+    await h.preview(); const old = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 4, fields: ["41"], selected: 0 };
+    await h.receive(state); h.click("records-refresh"); await flush();
+    const oldPublications = old.messages("menu-fields").length;
+    h.window.emit("pagehide"); await flush();
+    h.window.emit("pageshow", { persisted: true }); await h.preview();
+    const fresh = h.workers.at(-1); assert.notEqual(fresh, old);
+    await h.receive({ ...state, menuGeneration: 78n, fields: ["fresh-owner"] });
+    const publications = fresh.messages("menu-fields").length;
+    gate.resolve(); await flush();
+    assert.equal(old.messages("menu-fields").length, oldPublications);
+    assert.equal(fresh.messages("menu-fields").length, publications);
+    assert.equal(h.recordOwners[0].closed, true);
+    delete h.faults.recordsListGate; h.faults.recordsList = [savedRecord({ id: 42 })];
+    h.click("records-refresh"); await flush();
+    assert.equal(fresh.messages("menu-fields").length, publications + 1);
+    assert.deepEqual(fresh.last("menu-fields").fields, ["42"]);
+    assert.equal(h.recordCalls.filter(call => call.method === "load").length, 0);
+  } finally { await h.close(); }
+});
+
+test("Records catalog publication: failed list does not publish and retry uses current Records identity", async () => {
+  const h = await harness({ recordsListError: new Error("metadata list refused"), recordsList: [savedRecord()] });
+  try {
+    await h.preview(); const game = h.workers[0];
+    const state = { kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 4, fields: ["41"], selected: 0 };
+    await h.receive(state);
+    const publications = game.messages("menu-fields").length;
+    await h.receive({ ...state, kind: "menu-effect", effect: 100050n, control: 50n });
+    assert.equal(game.messages("menu-fields").length, publications);
+    assert.match(h.get("status").textContent, /metadata list refused/);
+    delete h.faults.recordsListError;
+    await h.receive({ ...state, revision: 7n });
+    h.click("records-refresh"); await flush();
+    assert.equal(game.messages("menu-fields").length, publications + 1);
+    assert.equal(game.last("menu-fields").revision, 7n);
+    assert.deepEqual(game.last("menu-fields").fields, ["41"]);
+  } finally { await h.close(); }
+});
+
+test("Records catalog publication: off-route metadata remains DOM-only and save still requires captured bytes", async () => {
+  const h = await harness({ recordsList: [savedRecord()] });
+  try {
+    await h.preview(); const game = h.workers[0];
+    await h.receive({ kind: "menu-state", menuGeneration: 77n, screen: 3n, revision: 6n,
+      route: 2, fields: ["retained settings"], selected: 0 });
+    const publications = game.messages("menu-fields").length;
+    assert.equal(h.get("records-save").disabled, true);
+    h.click("records-save"); await flush();
+    assert.equal(h.recordCalls.length, 0);
+    h.click("records-refresh"); await flush();
+    assert.equal(game.messages("menu-fields").length, publications);
+    assert.equal(h.get("records").value, "41");
+    assert.equal(h.recordCalls.filter(call => call.method === "load" || call.method === "save").length, 0);
+    assert.equal(h.get("records-refresh").disabled, false);
+  } finally { await h.close(); }
+});
