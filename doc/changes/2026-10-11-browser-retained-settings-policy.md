@@ -81,6 +81,17 @@ retains the known versioned terminal diagnostic fields (origin, actual/expected
 frames, start and successful arm) instead of dropping those original facts.
 Syntax checking passed; this
 diagnostic addition awaits independent review and runtime verification.
+The diagnostic addition passed independent static review; a subsequent actual
+committed run again completed all seven flows but failed the network criterion.
+An otherwise identical, one-trial diagnostic copy explicitly serving the owned
+static bytes with exact Content-Length passed every strict criterion, with normal
+CDP/Puppeteer request completion. The probe server now declares that exact length;
+this framing remediation awaits independent review and committed runtime QA.
+The counterfactual supports the framing hypothesis, not a proven Chromium root
+cause or a claimed remedy for the earlier separate status-6 failure. Evidence:
+`target/wf/settings-policy-qa-browser-12a58-2/` and
+`target/wf/settings-policy-content-length-12a58-1/` (ignored, original bytes/hash
+and variant diff retained). No continuity guard or success assertion changed.
 This child is not verified complete.
 
 ## Known ceiling

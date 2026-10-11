@@ -180,7 +180,7 @@ try {
         : pathname === "/app/web/settings-policy-observer.js" ? Buffer.from(`(${rendererObservation.toString()})();`)
           : pathname === "/app/web/settings-policy-actual-renderer.js" ? sources["renderer-worker.js"] : sources[name] ?? await readFile(file);
       if (audioRequest) networkRecord("server-audio-body", { url: request.url, byteLength: bytes.byteLength, sha256: sha(bytes) });
-      response.writeHead(200, { "Content-Type": ({ ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".css": "text/css" })[extname(file)] ?? "application/octet-stream",
+      response.writeHead(200, { "Content-Length": String(bytes.byteLength), "Content-Type": ({ ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".css": "text/css" })[extname(file)] ?? "application/octet-stream",
         "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp", "Cache-Control": "no-store" }); response.end(bytes);
     } catch { response.writeHead(404); response.end(); }
   });
