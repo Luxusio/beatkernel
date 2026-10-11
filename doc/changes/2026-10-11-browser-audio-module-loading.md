@@ -1,10 +1,12 @@
 # Browser audio module preparation ownership
 
-Status: implementation reviewed and actual browser checks pass; full Node
-verification remains unfinished after test-environment remediation.
+Status: scoped implementation and independent code/security and full CLI checks
+passed. Earlier browser/UX runs passed, but the latest strict browser run failed
+on audio-WASM cancellation. AC-003 remains unfinished; the full player Goal
+remains active and this task cannot close.
 
-Audio package preparation is being moved from Window into the existing
-business Worker. Window will receive only a correlated compiled Module, while
+Audio package preparation now runs in the existing business Worker. Window
+receives only a correlated compiled Module, while
 file import and chart preview remain available independently of optional audio
 setup. The [preparation requirement](../runtime/REQ__browser-audio-module-loading.md)
 defines the 64 MiB binary ceiling, ten-second deadline, physical single-flight
@@ -64,8 +66,54 @@ changed. Sixteen focused loading/ownership/gesture tests pass after remediation;
 the earlier four failures and successful correction are respectively recorded
 in `audio-setup-fixture-remediation-development-12b49.log` and
 `audio-setup-fixture-remediation-fixed-development-12b49.log` under `target/wf/`.
-Fresh independent review and complete-suite rerun are still required. No new
-WBS item is promoted or task closed.
+Fresh independent deep formal code review passed at `ac1479e`. The full serial
+Node rerun then completed **1,051 tests / 1,051 passed / zero failed**, exit zero,
+with no cancellation, skipped tests or todo. This establishes the previously
+unverified remainder of the gesture fixture file, as well as loading-state,
+Worker setup, deferred room-fatal and Window ownership tests. Evidence:
+`target/wf/audio-setup-qa-cli-12b49-2/node-full.log`. Command:
+
+```bash
+source target/toolchain/env.sh
+node --experimental-vm-modules --test --test-concurrency=1 app/web/*.test.mjs
+```
+
+The product/probe sources are unchanged between implementation `a4e56ad` and
+fixture correction `ac1479e`; independent review and CLI QA checked all recorded
+browser source/generated hashes against current files. Existing generated WASM
+was used without a Rust source change or unnecessary rebuild. The main package
+SHA-256 is `ab1732c2308c34815c06e8c6bc6d83839835f1d347425962122010427b9fff47`;
+the 62,096-byte audio package is
+`dde5198fb9779d4f1f8c5927ca446f929ea1fcdab8c8ca1a15ebaf46f35453b8`.
+Syntax checks and `git diff --check` passed. No new WBS item is promoted:
+91/193 remains the broad software-completion inventory.
+
+These logs and browser JSON are local ignored artifacts under `target/wf/`;
+they are not shipped by these commits. Reproduction requires the pinned Node
+environment and actual generated WASM. The production browser probe uses
+`CHROMIUM=/usr/bin/chromium`, an installed Puppeteer module via
+`PUPPETEER_MODULE`, the main package hash via `EXPECTED_WASM_SHA256`, and a
+unique `SETTINGS_POLICY_OUT`, then `node app/web/settings-policy.browser.mjs`.
+The fixture constructor/scheduler/received-clone rule is captured in the
+[fixture guide](../verification/GUIDE__browser-worker-preparation-fixtures.md).
+No narrative PASS substitutes for Harness completion receipts.
+
+On 2026-10-12 a fresh third production browser QA run at the same product source
+completed all twelve public journeys, then exited one: the strict assertion
+`actual Worker audio request must complete in CDP` failed. Both Puppeteer and
+the independently attached Worker CDP session recorded HTTP 200 followed by
+`net::ERR_ABORTED`; no matching Worker `loadingFinished` existed. Application
+observations still recorded full 62,096-byte consumption, reader release without
+cancel, successful compilation and matching genuine Module publication, and
+Window preparation remained zero. Those successes do not override the strict
+network failure. Page and console errors were zero; both network error records
+remain preserved. Original evidence and log:
+`target/wf/audio-setup-qa-browser-12b49-3/evidence.json` and
+`target/wf/audio-setup-qa-browser-12b49-3.log`. Cleanup recorded Chrome/Xvfb exit
+zero, closed HTTPS, removed owned directories and the two already-removed CDP
+session detach diagnostics. The earlier two PASS results remain historical
+evidence; they do not establish current complete browser acceptance. AC-003 is
+unfinished pending diagnosis and correction without weakening its assertions.
 
 ## Known ceiling
 

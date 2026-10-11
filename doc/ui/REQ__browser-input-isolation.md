@@ -7,8 +7,11 @@ Audio package fetch, body accumulation/copy and compilation must run in the
 existing business Worker, with a correlated Module-only Window handoff.
 [Audio module preparation](../runtime/REQ__browser-audio-module-loading.md)
 defines independent preview readiness, limits, timeout and retirement. This
-requirement is pending implementation and verification; no latency superiority
-or cancellation fix follows from the ownership change alone.
+ownership correction is implemented and passed independent Node checks. Two
+production browser runs passed, but the latest strict run failed on audio-WASM
+cancellation; browser acceptance remains unfinished, as recorded in
+[the change evidence](../changes/2026-10-11-browser-audio-module-loading.md).
+No latency superiority or cancellation fix follows from ownership alone.
 
 Keyboard, HID, touch and pointer callbacks capture their original samples and
 send already acquired input. Their dispatch path must not synchronously query

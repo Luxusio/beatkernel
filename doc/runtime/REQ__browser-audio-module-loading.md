@@ -1,8 +1,11 @@
 # Browser audio module preparation
 
-Status: selected implementation contract; implementation and independent QA
-pending. This does not complete the BMS player or diagnose the recurring
-Chromium audio-WASM cancellation.
+Status: implemented; independent code/security review and full Node QA passed.
+Two strict production browser runs passed, but the latest third run failed
+on the recurring audio-WASM cancellation. Actual browser acceptance remains
+unfinished. This does not complete the BMS player or diagnose that cancellation.
+Verification details and limitations are recorded in
+[the change evidence](../changes/2026-10-11-browser-audio-module-loading.md).
 
 The existing business Worker owns audio WASM fetch, bounded body storage,
 byte copying and compilation. Window requests preparation and receives only a

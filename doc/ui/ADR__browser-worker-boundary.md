@@ -10,11 +10,15 @@ audio-authority acceptance remain unestablished.
 Window owns browser-required input acquisition, permission gestures, DOM
 configuration and acquisition geometry. The gameplay Worker owns Runtime,
 judging, gauge, recording/replay operations, competition and audio authority.
-The selected next ownership correction moves audio package fetch, bounded
+The implemented audio ownership correction moves audio package fetch, bounded
 byte storage/copy and compilation into that existing gameplay Worker, with
 only a correlated compiled Module returned to Window. Reuse avoids a new
 loader Worker and lifecycle; setup may temporarily compete with preview work.
-Implementation and actual verification remain pending. The
+Independent code/security and full Node checks passed. Two strict browser runs
+passed, but the latest run failed on audio-WASM cancellation, leaving browser
+acceptance unfinished;
+[the change evidence](../changes/2026-10-11-browser-audio-module-loading.md)
+records the actual results and remaining limits. The
 [audio preparation contract](../runtime/REQ__browser-audio-module-loading.md)
 governs optional errors and independent preview readiness.
 The rendering Worker owns OffscreenCanvas, Scene construction, GPU
