@@ -471,7 +471,19 @@ async function runProcess(puppeteer, base, variant, index, scenario) {
         await page.keyboard.press(config.heldInput);
         await page.waitForFunction(n => __latency.inputs.slice(n).some(input => input.trusted && input.code === "KeyZ" && input.kind === "keydown"), {}, beforeInput.inputs);
         const input = (await snapshot()).inputs.slice(beforeInput.inputs).find(input => input.trusted && input.code === "KeyZ" && input.kind === "keydown");
-        const ready = await selected(operation), geometry = await firstGeometry(operation.before, "preview", operation.request.id);
+        const ready = await selected(operation);
+        let geometry;
+        try {
+          geometry = await firstGeometry(operation.before, "preview", operation.request.id);
+        } catch (error) {
+          try {
+            trialDetail.failedSnapshot = await snapshot();
+            await page.screenshot({ path: resolve(out, `${owner}-${scenario}-${temperature}-${operation.request.id}-failure.png`), fullPage: true });
+          } catch (diagnosticError) {
+            trialDetail.diagnosticError = String(diagnosticError);
+          }
+          throw error;
+        }
         assert.equal(ready.notes, noteCount); assert.equal(ready.samples, 1);
         assert.equal(ready.path, chart); assert.equal(ready.libraryId, library.request.id);
         assert(input.at > operation.request.at && input.at >= input.eventAt, "natural trusted input follows actual select request");
