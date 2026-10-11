@@ -163,8 +163,8 @@ function capturedInputs(bytes) {
     assert.equal(p(4).toString(), "BKPI"); assert.equal(p(2).readUInt16LE(), 1); assert.equal(p(1)[0], 0, "fixture input is a real button");
     const source = p(8).readBigUInt64LE(), timestampNs = p(8).readBigInt64LE(), domain = p(4).readUInt32LE(), sequence = p(8).readBigUInt64LE();
     option(() => { p(4); option(() => p(4)); option(() => p(12)); }); option(() => p(12));
-    assert.equal(p(1)[0], 0, "physical keyboard HID control"); assert.equal(p(2).readUInt16LE(), 7);
-    const key = p(2).readUInt16LE(), state = p(1)[0]; assert(state === 0 || state === 1); assert.equal(cursor, physical.length);
+    assert.equal(p(1)[0], 1, "browser keyboard native control"); assert.equal(p(4).readUInt32LE(), 0x574b4559);
+    const key = p(4).readUInt32LE(), state = p(1)[0]; assert(state === 0 || state === 1); assert.equal(cursor, physical.length);
     inputs.push({ lane, key, down: state === 0, source, timestampNs, domain, sequence, songNs });
   }
   assert.equal(position, bytes.length); assert(advances > 0 && horizon > 3000000000n && horizon < 10000000000n);
