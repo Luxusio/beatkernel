@@ -13,7 +13,7 @@ import { AudioSampleClient } from "./audio-sample-client.mjs";
 import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, gamepadSetupFromProfile, GamepadAdapter } from "./gamepad-profile.mjs";
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
 import { LocalRoster } from "./local-play-host.mjs";
-import { encodeBrowserSettings, decodeBrowserSettings, settingsMenuFields, settingsMenuSnapshot } from "./settings-profile.mjs";
+import { encodeBrowserSettings, decodeBrowserSettings, settingsMenuProfileFields, settingsMenuProfileSnapshot, settingsMenuSnapshot } from "./settings-profile.mjs";
 import { snapshotPointerSetup } from "./pointer-profile.mjs";
 const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserHistoricalRecord } = runtime;
 let ready = null;
@@ -106,7 +106,7 @@ function settingsProfileDecision(request) {
   const admittedToken = operation.menuToken;
   operation.phase = "admitted";
   try {
-    const fields = settingsMenuFields(operation.candidate);
+    const fields = settingsMenuProfileFields(operation.candidate);
     operation.owner.replace_settings_fields(admittedToken.screen, admittedToken.revision, fields);
     operation.menuToken = menuToken();
     const settings = operation.candidate;
@@ -897,7 +897,9 @@ function handleMenu(request) {
         }
         if (route === 2 && [12n, 15n].includes(control)) throw new Error("This Settings control is unavailable in the browser.");
         if (route === 2 && control === 10n) {
-          settingsMenuSnapshot(menuOwner.fields());
+          const fields = menuOwner.fields();
+          if (fields.length === 34) settingsMenuProfileSnapshot(fields);
+          else settingsMenuSnapshot(fields);
         }
         if (route === 7 && control === 40n) {
           const fields = menuOwner.fields();

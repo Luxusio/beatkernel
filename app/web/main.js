@@ -10,7 +10,7 @@ import { GamepadInputOwner } from "./gamepad-input.mjs";
 import { PointerInputOwner } from "./pointer-input.mjs";
 import { LocalRoster, validateLocalPrepared, localReplayReceipt } from "./local-play-host.mjs";
 import { snapshotHidDevices } from "./hid-profile.mjs";
-import { snapshotBrowserSettings, settingsMenuFields, settingsMenuSnapshot } from "./settings-profile.mjs";
+import { snapshotBrowserSettings, settingsMenuProfileFields, settingsMenuProfileSnapshot, settingsMenuSnapshot } from "./settings-profile.mjs";
 import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
 import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, timingPolicyFromFields, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
 
@@ -126,6 +126,9 @@ function menuToken() {
   return !menuRetired && menuState && menuState.owner === owner && menuState.worker === worker && !activePlay && !shuttingDown
     ? { menuGeneration: menuState.menuGeneration, screen: menuState.screen, revision: menuState.revision } : null;
 }
+function settingsDraftOwned() {
+  return menuToken() !== null && (menuState.route === 2 || menuState.hasSettingsParent === true);
+}
 function menuEditorIdentity() {
   const token = menuToken();
   return token ? { ...token, owner, worker, route: menuState.route, index: menuState.selected } : null;
@@ -174,8 +177,11 @@ function menuFieldsFor(route) {
   if (route === 1) return Array.from(ui.chart.options ?? [], option => option.value).filter(Boolean);
   if (route === 2) {
     const draft = captureSettingsDraft();
+    const bindings = new Map(draft.bindings);
     return Object.freeze([...settingsFields.map(([group, name]) => draft[group][name]),
-      ...timingPolicyFields.map(([name, , initial]) => draft.timing[name] ?? initial)]);
+      ...timingPolicyFields.map(([name, , initial]) => draft.timing[name] ?? initial),
+      ...[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29].map(lane => bindings.get(lane))]);
   }
   if (route === 3) return [ui["live-start"].value, ui["live-end"].value];
   if (route === 4) return Array.from(ui.records.options ?? [], option => option.value).filter(Boolean);
@@ -283,6 +289,7 @@ function receiveMenu(data) {
         if (changed) { opponents.clear(); for (const entry of accepted) opponents.add(entry); showOpponentSelection(); }
       } catch (error) { status(error.message, true); return; }
     }
+    const ownedSettingsDraft = settingsDraftOwned();
     menuState = Object.freeze({ ...data, fields: Object.freeze([...data.fields]), owner, worker });
     if (!unchangedToken) presentationStatus.invalidate(true);
     const sourcesPending = menuSourcesPending;
@@ -291,7 +298,7 @@ function receiveMenu(data) {
       menuSourcesPending = null;
       if (!sameMenuSourceFields(data.fields, sourcesPending.latest)) sendAcquiredMenuSources(menuToken(), sourcesPending.latest);
     }
-    if (rosterChanged || sourcesPending) {
+    if (rosterChanged || sourcesPending || ownedSettingsDraft !== settingsDraftOwned()) {
       refreshLocalRosterStatus();
       controls();
     }
@@ -332,7 +339,11 @@ function receiveMenu(data) {
     else if (data.effect === 2n) { ui["settings-load"].focus(); status("Choose a settings file using the browser file picker."); }
     else if (data.effect === 3n) ui["settings-save"].click();
     else if (data.effect === 1n && data.route === 2) {
-      try { mirrorSettings(settingsMenuSnapshot(data.fields), false); }
+      try {
+        const fullProfile = data.fields?.length === 34;
+        const settings = fullProfile ? settingsMenuProfileSnapshot(data.fields) : settingsMenuSnapshot(data.fields);
+        mirrorSettings(settings, fullProfile);
+      }
       catch (error) { status(String(error?.message ?? error).slice(0, 4096), true); }
     }
     else if (data.effect === 1n && data.route === 7) {
@@ -422,7 +433,7 @@ function sameSettingsToken(left, right) {
 function sameSettingsResultFields(operation, fields) {
   const original = operation.originalMenu;
   const expected = operation.kind === "settings-profile-save" || !operation.candidate || ![2, 3].includes(original.route)
-    ? original.fields : original.route === 2 ? settingsMenuFields(operation.candidate)
+    ? original.fields : original.route === 2 ? settingsMenuProfileFields(operation.candidate)
       : [operation.candidate.section.startSeconds, operation.candidate.section.endSeconds];
   return fields.length === expected.length && expected.every((value, index) => fields[index] === value);
 }
@@ -1215,14 +1226,15 @@ function controls() {
     || activePlay.pageChanging || activePlay.rpc !== null
     : recordsDisabled || localRoster.players.length === 1;
   ui["captured-replay"].disabled = playing || busy || capturedReplays.length === 0;
-  ui["bindings-reset"].disabled = recordsDisabled;
+  const bindingsLocked = recordsDisabled || settingsDraftOwned();
+  ui["bindings-reset"].disabled = bindingsLocked;
   ui["touch-input"].disabled = inputLocked;
   ui["pointer-input"].disabled = inputLocked || typeof window.PointerEvent !== "function";
   for (const [, , field] of pointerFields) field.disabled = inputLocked || !ui["pointer-input"].checked || typeof window.PointerEvent !== "function";
   for (const id of ["hid-input", "hid-authorize", "hid-profile"]) ui[id].disabled = inputLocked || !hidCapable();
   ui["gamepad-profile"].disabled = inputLocked || typeof globalThis.navigator?.getGamepads !== "function";
   ui["gamepad-profile-clear"].disabled = inputLocked || selectedGamepadProfile === null;
-  for (const [, field] of bindingFields) field.disabled = recordsDisabled;
+  for (const [, field] of bindingFields) field.disabled = bindingsLocked;
   for (const field of [ui["judge-early"], ui["judge-late"], ui["judge-offset"], ui["live-start"], ui["live-end"]]) field.disabled = recordsDisabled;
   for (const [, id] of timingPolicyFields) ui[id].disabled = recordsDisabled;
   ui["output-latency"].disabled = ui["output-rate"].disabled = recordsDisabled;
@@ -1839,7 +1851,7 @@ ui["gamepad-profile-clear"].addEventListener("click", () => {
 });
 ui.stop.addEventListener("click", () => { void stopPlay("Playback stopped."); });
 ui["bindings-reset"].addEventListener("click", () => {
-  if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (settingsOperation || settingsDraftOwned() || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   for (let index = 0; index < bindingFields.length; index++) bindingFields[index][1].value = KEY_BINDINGS[index][1];
   status("Keyboard bindings reset to defaults.");
 });
