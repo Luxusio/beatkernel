@@ -1052,12 +1052,15 @@ impl BrowserMenuPresentation {
                 model.fields.get(model.selected).map(String::as_str) != preview.path.to_str()
             })
         {
-            self.record_preview = None;
-            self.record_details = false;
-            self.record_page = 0;
+            self.clear_record_preview();
         }
         self.model = model;
         Ok(())
+    }
+    pub(crate) fn clear_record_preview(&mut self) {
+        self.record_preview = None;
+        self.record_details = false;
+        self.record_page = 0;
     }
     pub(crate) fn set_record_preview(
         &mut self,

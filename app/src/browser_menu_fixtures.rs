@@ -2113,3 +2113,124 @@ fn records_catalog_stale_and_invalid_replacements_are_atomic_and_other_routes_ke
     assert_eq!(selection.selected(), 0);
     assert_eq!(selection.fields()[0], "remaining.bms");
 }
+
+fn assert_menu_label_absent(scene: &crate::scene::Scene, value: &str) {
+    let expected: Vec<_> = value.chars().map(crate::font::glyph_uv).collect();
+    let actual: Vec<_> = scene.rectangles().iter().map(|rect| rect.uv).collect();
+    assert!(
+        !actual
+            .windows(expected.len())
+            .any(|window| window == expected),
+        "retired menu label still painted: {value}"
+    );
+}
+
+#[test]
+fn full_snapshot_without_preview_retires_skipped_selection_history_but_keeps_exact_membership_removal(
+) {
+    for (own, other, remove_own, remove_other) in [(1, 0, 60, 0), (0, 1, 0, 61)] {
+        let mut menu = records_menu();
+        menu.set_fields(
+            token(&menu),
+            vec!["records/曲.bkr".into(), "records/other.bkr".into()],
+        )
+        .unwrap();
+        let record = genuine_record();
+        assert_eq!(record.path.to_str(), Some("records/曲.bkr"));
+        assert_eq!(
+            record.historical.unwrap().0,
+            crate::local_players::PlayerId(u32::MAX)
+        );
+        let mut presentation =
+            crate::browser_menu::BrowserMenuPresentation::new(menu.snapshot()).unwrap();
+        presentation
+            .set_record_preview(token(&menu), record.clone())
+            .unwrap();
+        presentation.set_opponents(2, own, other).unwrap();
+        let catalog = render_menu(&mut presentation);
+        menu_label(&catalog, "PREFIX EX 2");
+        menu_label(&catalog, "HISTORICAL PLAYER 4294967295");
+        assert_eq!(presentation.hit((310.0, 625.0), [960, 720]), 52);
+        assert_eq!(presentation.hit((450.0, 625.0), [960, 720]), 53);
+        assert_eq!(presentation.hit((310.0, 580.0), [960, 720]), 66);
+        assert_eq!(presentation.hit((760.0, 580.0), [960, 720]), 59);
+        presentation.set_record_details(true, 1).unwrap();
+        let historical = render_menu(&mut presentation);
+        menu_label(&historical, "SAVED REPLAY OPERATION PREFIX");
+        assert_eq!(presentation.hit((755.0, 621.0), [960, 720]), 66);
+        // The business owner visits B and returns to A. The renderer receives
+        // only the latest A model; partial same-key apply remains preserving.
+        menu.select(token(&menu), 1).unwrap();
+        menu.select(token(&menu), 0).unwrap();
+        let latest = menu.snapshot();
+        presentation.apply(latest.clone()).unwrap();
+        assert!(presentation.record_details());
+        assert_eq!(presentation.record_page(), 1);
+        assert_eq!(
+            menu_packet(&render_menu(&mut presentation)),
+            menu_packet(&historical)
+        );
+        // A full packet carrying the current genuine preview also preserves
+        // the existing same-key historical page rather than resetting it.
+        presentation
+            .set_record_preview(latest.token, record.clone())
+            .unwrap();
+        assert!(presentation.record_details());
+        assert_eq!(presentation.record_page(), 1);
+        assert_eq!(
+            menu_packet(&render_menu(&mut presentation)),
+            menu_packet(&historical)
+        );
+
+        // Explicit absence in an admitted full packet is authoritative even
+        // when the skipped intermediate model hides the identity transition.
+        presentation.clear_record_preview();
+        assert!(!presentation.record_details());
+        assert_eq!(presentation.record_page(), 0);
+        assert!(presentation.set_record_details(true, 0).is_err());
+        let cleared = render_menu(&mut presentation);
+        menu_label(&cleared, "PREVIEW A COMPATIBLE RECORD BEFORE WATCH / ADD");
+        assert_menu_label_absent(&cleared, "PREFIX EX 2");
+        assert_menu_label_absent(&cleared, "HISTORICAL PLAYER 4294967295");
+        assert_menu_label_absent(&cleared, "SAVED REPLAY OPERATION PREFIX");
+        for point in [
+            (310.0, 625.0),
+            (450.0, 625.0),
+            (310.0, 580.0),
+            (760.0, 580.0),
+        ] {
+            assert_eq!(presentation.hit(point, [960, 720]), 0);
+        }
+        assert_eq!(presentation.hit((450.0, 580.0), [960, 720]), remove_own);
+        assert_eq!(presentation.hit((600.0, 580.0), [960, 720]), remove_other);
+        menu_label(
+            &cleared,
+            if own == 1 {
+                "SELECTED OWN 1 / OTHER 0"
+            } else {
+                "SELECTED OWN 0 / OTHER 1"
+            },
+        );
+        assert_eq!(presentation.model, latest);
+        presentation.clear_record_preview();
+        assert_eq!(
+            menu_packet(&render_menu(&mut presentation)),
+            menu_packet(&cleared)
+        );
+
+        presentation
+            .set_record_preview(token(&menu), record.clone())
+            .unwrap();
+        let refreshed = render_menu(&mut presentation);
+        menu_label(&refreshed, "PREFIX EX 2");
+        menu_label(&refreshed, "HISTORICAL PLAYER 4294967295");
+        assert_eq!(presentation.hit((310.0, 625.0), [960, 720]), 52);
+        assert_eq!(presentation.hit((450.0, 625.0), [960, 720]), 53);
+        assert_eq!(presentation.hit((310.0, 580.0), [960, 720]), 66);
+        assert_eq!(presentation.hit((760.0, 580.0), [960, 720]), 59);
+        assert_eq!(presentation.hit((450.0, 580.0), [960, 720]), remove_own);
+        assert_eq!(presentation.hit((600.0, 580.0), [960, 720]), remove_other);
+        presentation.set_record_details(true, 0).unwrap();
+        menu_label(&render_menu(&mut presentation), "STORED HITS 1 MISSES 0");
+    }
+}

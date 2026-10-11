@@ -1252,10 +1252,12 @@ impl BrowserView {
             self.menu =
                 Some(crate::browser_menu::BrowserMenuPresentation::new(model).map_err(js_error)?);
         }
+        let menu = self.menu.as_mut().unwrap();
         if let Some(record) = record {
-            let menu = self.menu.as_mut().unwrap();
             menu.set_record_preview(menu.model.token, record)
                 .map_err(js_error)?;
+        } else {
+            menu.clear_record_preview();
         }
         self.canvas.dispose_results_motion();
         Ok(revision)

@@ -133,6 +133,13 @@ available capacity. Their accepted entry retains the exact stored source key,
 original File handle and explicit kind; the selected Own/Other counters and
 painted action gates reflect the same canonical Worker selection.
 
+An admitted complete menu snapshot without a preview must remove the previous
+prefix/history display and disable Add, even if its selected key matches the
+previously painted record. Intermediate screen updates may be omitted; the
+latest complete state remains authoritative. Membership-based Remove stays
+available. Partial presentation updates and complete same-key updates carrying
+a valid preview preserve their existing details state.
+
 The browser keeps source keys unique. Repeating Own or adding the same key as
 Other refuses atomically and preserves the prior selection; this does not
 change the native draft's separate duplicate-path policy. Existing eight-entry
