@@ -510,7 +510,7 @@ async function harness(faults = {}) {
   }
   for (const id of ["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek",
     "title", "details", "status", "viewport", "play", "stop", "record", "export", "keys", "canvas", "prepare-form", "seek-form",
-    "replay-file", "replay-play", "replay-name", "replay-speed", "records", "records-refresh", "records-save", "records-use", "records-delete",
+    "replay-file", "replay-play", "replay-name", "replay-speed", "replay-speed-hint", "live-speed", "live-speed-control", "live-speed-hint", "replay-speed-control", "records", "records-refresh", "records-save", "records-use", "records-delete",
     "multiplayer", "multiplayer-mode", "multiplayer-url", "multiplayer-role", "multiplayer-status",
     "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page",
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
@@ -529,6 +529,7 @@ async function harness(faults = {}) {
   elements.get("seed").value = "7";
   // Match the production HTML default; the new field is not an empty draft.
   elements.get("replay-speed").value = "1/1";
+  elements.get("live-speed").value = "1/1";
   elements.get("multiplayer-role").value = "join";
   elements.get("multiplayer-mode").value = "peer";
   elements.get("opponents-kind").value = "own";
@@ -956,6 +957,7 @@ async function harness(faults = {}) {
       : Array.from({ length: start.localPlanWords.length / 4 }, (_, index) =>
         BigInt(start.localPlanWords[index * 4 + 2]) | BigInt(start.localPlanWords[index * 4 + 3]) << 32n);
     await reply(start, { kind: "prepared", title: "Actual runtime", artist: "Runtime artist",
+      ...(start.mode !== "replay" ? { liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n } : {}),
       notes: 6, samples: sampleCount, lanes: [0x11], opponentCount: start.opponents?.length ?? 0,
       startNs: start.mode === "replay" ? faults.replayStart ?? 0n : start.startNs ?? 0n,
       ...(start.hidProfileFile ? { hidSources: faults.hidAdmittedSources ?? start.hidDevices.map(device => device.source),
@@ -2330,7 +2332,7 @@ test("local preparation refuses stale or contradictory ownership before PCM and 
     await localCount(h, 2); h.click("local-discover"); await flush();
     localAssign(h, 1, 1n); localAssign(h, 2, 2n); h.get("record").checked = true;
     const start = await h.begin(), worker = h.workers[0];
-    await h.reply(start, { kind: "prepared", title: "Contradictory local preparation", samples: 1, lanes: [0x11],
+    await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Contradictory local preparation", samples: 1, lanes: [0x11],
       startNs: 0n, opponentCount: 0, localPlayers: [1, 2], localPage: 0,
       recordLimits: { bytes: 33554432, records: 500000 }, ...changed });
     assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(h.audio.samples.length, 0);
@@ -3120,7 +3122,7 @@ test("Gamepad source admission, disconnection, reentrant cancellation and failed
   for (const sources of [undefined, [], [3], [99n], [3n, 3n]]) {
     const h = await harness({ gamepads: [nativeGamepad()] }); await h.preview();
     const start = await h.begin(), worker = h.workers[0];
-    await h.reply(start, { kind: "prepared", title: "Bad Gamepad source receipt", samples: 1, lanes: [0x11],
+    await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Bad Gamepad source receipt", samples: 1, lanes: [0x11],
       startNs: 0n, opponentCount: 0, ...(sources === undefined ? {} : { gamepadSources: sources }) });
     assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(h.audio.samples.length, 0);
     assert.equal(worker.last("play-stop").playId, start.playId);
@@ -3238,7 +3240,7 @@ test("custom Gamepad admission refuses missing source proof before PCM and joins
     const h = await harness({ gamepads: [custom(0)] }); await h.preview();
     const selected = selectedGamepadProfile(); chooseGamepadProfile(h, selected.file);
     const start = await h.begin(), worker = h.workers[0];
-    await h.reply(start, { kind: "prepared", title: "Invalid custom source proof", samples: 1, lanes: [0x11],
+    await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Invalid custom source proof", samples: 1, lanes: [0x11],
       startNs: 0n, opponentCount: 0, ...(sources === undefined ? {} : { gamepadSources: sources }) });
     assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(h.audio.samples.length, 0);
     assert.equal(worker.last("play-stop").playId, start.playId);
@@ -3255,7 +3257,7 @@ test("custom Gamepad admission refuses missing source proof before PCM and joins
   assert.equal(pending.gamepadProfileFile, selected.file, "a refused profile remains selected for an explicit retry");
   first.connected = false; h.window.emit("gamepaddisconnected", { gamepad: first }); await flush();
   assert.equal(worker.last("play-stop").playId, pending.playId, "a nonstandard candidate still owns preparation before matching returns");
-  await h.reply(pending, { kind: "prepared", inputMode: "physical", startNs: 0n, samples: 1, lanes: [0x11], gamepadSources: [3n] });
+  await h.reply(pending, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, inputMode: "physical", startNs: 0n, samples: 1, lanes: [0x11], gamepadSources: [3n] });
   assert.equal(worker.messages("play-samples-upload").length, 0, "late preparation cannot resurrect the cancelled owner");
   await h.receive(finalScore(pending.playId));
   const nextPad = custom(0), nextIgnored = custom(1); h.faults.gamepads = [nextPad, nextIgnored];
@@ -3472,7 +3474,7 @@ test("pointer admission, whole-batch queue limits and capture cleanup refuse saf
     devices => [{ ...devices[0], pointerType: "pen" }, devices[1]], devices => [{ ...devices[0], source: 3 }, devices[1]]]) {
     const h = await harness({ pointerSupported: true }); await h.preview(); enablePointers(h);
     const start = await h.begin(), worker = h.workers[0], pointerDevices = mutate(start.pointerSetup.devices);
-    await h.reply(start, { kind: "prepared", title: "untrusted pointer ownership", samples: 0, lanes: [0x11], startNs: 0n,
+    await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "untrusted pointer ownership", samples: 0, lanes: [0x11], startNs: 0n,
       opponentCount: 0, ...(pointerDevices === undefined ? {} : { pointerDevices }) });
     assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(worker.last("play-stop").playId, start.playId);
     await h.receive(finalScore(start.playId)); assert.equal(h.audio.stopStarts, 1); await h.close();
@@ -3683,7 +3685,7 @@ test("HID source receipts precede PCM and matched disconnect or failed cleanup f
     { hidSources: [3], hidSourceCount: 1 }, { hidSources: [3n], hidSourceCount: 2 }, {}]) {
     const h = await harness({ hidSupported: true }); await h.preview(); chooseControllerProfile(h, selectedControllerProfile().file);
     const start = await h.begin(), worker = h.workers[0];
-    await h.reply(start, { kind: "prepared", title: "Bad sources", samples: 1, lanes: [0x11], startNs: 0n, opponentCount: 0, ...metadata });
+    await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Bad sources", samples: 1, lanes: [0x11], startNs: 0n, opponentCount: 0, ...metadata });
     assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(h.audio.samples.length, 0);
     assert.equal(worker.last("play-stop").playId, start.playId);
     await h.receive(finalScore(start.playId)); assert.ok(h.hidDevices.every(device => device.closes === 1)); await h.close();
@@ -4025,7 +4027,7 @@ test("finite replay admission and finish failures clean up without transferring 
     await h.preview();
     chooseRecording(h, [selectedRecording().file]);
     const start = await h.begin(fields.mode), worker = h.workers[0];
-    await h.reply(start, { kind: "prepared", title: "Invalid endpoint", notes: 1, samples: 1,
+    await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Invalid endpoint", notes: 1, samples: 1,
       lanes: [0x11], opponentCount: 0, startNs: 0n, ...fields });
     assert.equal(worker.messages("play-samples-upload").length, 0);
     assert.equal(h.audio.samples.length, 0);
@@ -4717,7 +4719,7 @@ test("touch capability and preparation refusals precede PCM while bounded captur
   for (const inputMode of [undefined, "physical", "legacy", null]) {
     const start = await h.begin();
     assert.equal(start.inputMode, "physical-contact");
-    await h.reply(start, { kind: "prepared", startNs: 0n, opponentCount: 0,
+    await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, startNs: 0n, opponentCount: 0,
       title: "Wrong route", notes: 1, samples: 1, lanes: [0x11], inputMode }, false);
     assert.equal(worker.messages("play-samples-upload").length, 0);
     assert.equal(h.audio.samples.length, 0);
@@ -4799,7 +4801,7 @@ test("missing or changed physical-route metadata refuses all sample acquisition 
   for (const inputMode of [undefined, null, "legacy", "Physical", 1]) {
     const start = await h.begin();
     assert.equal(start.inputMode, "physical");
-    await h.reply(start, { kind: "prepared", title: "Unadmitted route", notes: 1, samples: 1,
+    await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Unadmitted route", notes: 1, samples: 1,
       lanes: [0x11], opponentCount: 0, startNs: 0n, ...(inputMode === undefined ? {} : { inputMode }) }, false);
     assert.equal(worker.messages("play-samples-upload").length, 0);
     assert.equal(h.audio.samples.length, 0);
@@ -4958,7 +4960,7 @@ test("pending Worker preparation cancels without inventing score and ignores lat
   await h.receive(finalScore(start.playId, { songNs: null, hits: null, misses: null, combo: null }));
   assert.equal(h.get("play").disabled, false);
   assert.doesNotMatch(h.get("status").textContent, /Hits|Misses|Combo|null/);
-  await h.reply(start, { kind: "prepared", title: "stale prepared title", artist: "stale", notes: 2, samples: 1, lanes: [0x11] });
+  await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "stale prepared title", artist: "stale", notes: 2, samples: 1, lanes: [0x11] });
   assert.equal(h.get("title").textContent, saved.title);
   assert.equal(h.get("position").value, saved.position);
   assert.equal(h.workers[0].messages("play-samples-upload").length, 0);
@@ -5780,7 +5782,7 @@ test("opponent preparation mismatches stop setup while malformed or failed live 
   const mismatch = await harness(); await mismatch.preview();
   selectOpponent(mismatch, selectedRecording());
   const start = await mismatch.begin();
-  await mismatch.reply(start, { kind: "prepared", title: "Mismatch", artist: "Fixture", notes: 1,
+  await mismatch.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Mismatch", artist: "Fixture", notes: 1,
     samples: 0, lanes: [0x11], opponentCount: 0 });
   assert.equal(mismatch.audio.arms.length, 0);
   assert.equal(mismatch.workers[0].messages("play-activate").length, 0);
@@ -5841,7 +5843,7 @@ test("actual Main snapshots explicit timing policy before audio open and replay 
   const request = h.workers[0].last("play-start");
   assert.deepEqual(request.timingPolicy, { presetId: BMS_TIMING_PRESET_ID, rankPrecedence: "defexrank-first", gauge: "hard" });
   assert.equal(request.timing.offsetNs, -37n);
-  await h.reply(request, { kind: "prepared", title: "Selected", artist: "Fixture", notes: 1, samples: 0,
+  await h.reply(request, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Selected", artist: "Fixture", notes: 1, samples: 0,
     lanes: [0x11], startNs: 0n, opponentCount: 0, inputMode: "physical" });
   await h.close();
 
@@ -5983,7 +5985,7 @@ test("finite live controls capture one pre-gesture section and join input, outpu
   let actualEnd = 1000000001n, actualFrame = 4411n;
   const reads = { end: 0, frame: 0 };
   worker.emit("message", { data: { kind: "play-reply", playId: start.playId, rpcId: start.rpcId, result: {
-    kind: "prepared", inputMode: "physical", title: "Finite live section", notes: 1, samples: 1, lanes: [0x11], opponentCount: 0, startNs: 1000000000n,
+    kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, inputMode: "physical", title: "Finite live section", notes: 1, samples: 1, lanes: [0x11], opponentCount: 0, startNs: 1000000000n,
     get endNs() { assert.equal(++reads.end, 1); return actualEnd; },
     get endFrame() { assert.equal(++reads.frame, 1); return actualFrame; },
   } } });
@@ -6053,7 +6055,7 @@ test("invalid or mismatched live ends preserve drafts for retry and manual prefi
   endField.value = "2";
   for (const endpoint of [{}, { endNs: 2000000001n, endFrame: 52801n }, { endNs: 2000000000n, endFrame: 52801n }]) {
     const start = await h.begin();
-    await h.reply(start, { kind: "prepared", title: "Wrong finite metadata", samples: 1, notes: 1,
+    await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Wrong finite metadata", samples: 1, notes: 1,
       lanes: [0x11], opponentCount: 0, startNs: 1000000000n, ...endpoint });
     assert.equal(worker.messages("play-samples-upload").length, 0);
     assert.deepEqual(h.audio.finishArgs, []);
@@ -6066,7 +6068,7 @@ test("invalid or mismatched live ends preserve drafts for retry and manual prefi
   h.get("record").checked = true;
   const start = await h.begin();
   assert.equal(start.endNs, 2000000000n);
-  await h.reply(start, { kind: "prepared", title: "Retried finite section", samples: 0, notes: 1,
+  await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Retried finite section", samples: 0, notes: 1,
     lanes: [0x11], opponentCount: 0, startNs: 1000000000n, endNs: 2000000000n, endFrame: 52800n });
   await h.admitSamples(worker.last("play-samples-upload"), 0);
   await h.reply(worker.last("play-samples-upload"), { kind: "samples-uploaded", count: 0, bytes: 0 });
@@ -6165,7 +6167,7 @@ test("section draft and preparation errors stay recoverable while replay uses on
   draft.value = "2.000000001";
   for (const startNs of [undefined, 0n, "2000000001"]) {
     const start = await h.begin();
-    await h.reply(start, { kind: "prepared", title: "Wrong section", notes: 1, samples: 1,
+    await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Wrong section", notes: 1, samples: 1,
       lanes: [0x11], opponentCount: 0, ...(startNs === undefined ? {} : { startNs }) });
     assert.equal(worker.messages("play-samples-upload").length, 0);
     assert.deepEqual(h.audio.arms, []);
@@ -6429,7 +6431,7 @@ test("missing actual lane coverage refuses setup and replay ignores invalid live
   first.value = ""; first.emit("change");
   const start = await h.begin();
   const worker = h.workers[0];
-  await h.reply(start, { kind: "prepared", title: "Actual lane", notes: 1, samples: 1,
+  await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Actual lane", notes: 1, samples: 1,
     lanes: [0x11], opponentCount: 0, startNs: 0n });
   assert.equal(worker.messages("play-samples-upload").length, 0);
   assert.deepEqual(h.audio.arms, []);
@@ -6928,7 +6930,7 @@ test("automatic cohort metadata refusal and failed prefixes release for retry wi
     { recordLimits: { bytes: 67108863, records: 1000000 } }]) {
     const h = await harness(); await h.preview(); h.get("record").checked = true; chooseMultiplayer(h);
     const start = await h.begin(), worker = h.workers[0];
-    await h.reply(start, { kind: "prepared", title: "Contradictory automatic metadata", samples: 1, lanes: [0x11],
+    await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Contradictory automatic metadata", samples: 1, lanes: [0x11],
       startNs: 0n, opponentCount: 0, localPlayers: [1], localPage: 0,
       recordLimits: { bytes: 67108864, records: 1000000 }, ...changed });
     assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(worker.messages("play-network-ready").length, 0);
@@ -7021,7 +7023,7 @@ test("local network launch still requires owned distinct sources and exact prepa
   const h = await harness({ touchSupported: true }); await h.preview(); await discoverLocalPeers(h);
   chooseMultiplayer(h, false);
   const start = await h.begin(), worker = h.workers[0];
-  await h.reply(start, { kind: "prepared", title: "Wrong group", samples: 1, lanes: [0x11],
+  await h.reply(start, { kind: "prepared", liveSpeed: "1/1", liveSpeedNumerator: 1n, liveSpeedDenominator: 1n, title: "Wrong group", samples: 1, lanes: [0x11],
     startNs: 0n, opponentCount: 0, localPlayers: [2, 1], localPage: 0 });
   assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(h.audio.samples.length, 0);
   assert.equal(worker.messages("play-network-ready").length, 0); assert.deepEqual(h.audio.arms, []);

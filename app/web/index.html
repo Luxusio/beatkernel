@@ -56,6 +56,10 @@
       <div class="replay-controls"><label>Live start (seconds) <input id="live-start" type="text" inputmode="decimal" value="0" maxlength="20" disabled></label>
         <label>Live end (seconds, optional) <input id="live-end" type="text" inputmode="decimal" value="" maxlength="20" disabled></label></div>
       <p class="hint">Live play uses these original song positions with a short preroll. Leave the end blank to play through the song. Earlier notes and holds already in progress are excluded; overlapping music resumes from its original sound. Replay uses its recorded section.</p>
+      <div id="live-speed-control">
+        <div class="replay-controls"><label for="live-speed">Live speed (NUM/DEN) <input id="live-speed" type="text" value="1/1" maxlength="40" aria-describedby="live-speed-hint" disabled></label></div>
+        <p id="live-speed-hint" class="hint">Live play only. A positive fraction such as 1/2, 1/1, 2/1 or 3/2 changes playback speed and pitch for all local players. Fixed until this session ends.</p>
+      </div>
       <div class="replay-controls"><label>Early window (ms) <input id="judge-early" type="text" inputmode="decimal" value="50" maxlength="21" disabled></label>
         <label>Late window (ms) <input id="judge-late" type="text" inputmode="decimal" value="50" maxlength="21" disabled></label>
         <label>Input offset (ms) <input id="judge-offset" type="text" inputmode="decimal" value="0" maxlength="21" disabled></label></div>
@@ -120,7 +124,7 @@
       <ul id="local-results" class="opponent-list" aria-label="Local player final results"></ul>
       <p class="hint">Recording is optional. Interrupted plays export a replay prefix. The last captured record stays here until it is replaced or you close the page.</p>
       <div class="replay-controls"><label>Local replay <input id="replay-file" type="file" accept=".bkr" disabled></label>
-        <label for="replay-speed">Replay speed (NUM/DEN) <input id="replay-speed" type="text" value="1/1" maxlength="40" aria-describedby="replay-speed-hint" disabled></label>
+        <label id="replay-speed-control" for="replay-speed">Replay speed (NUM/DEN) <input id="replay-speed" type="text" value="1/1" maxlength="40" aria-describedby="replay-speed-hint" disabled></label>
         <button id="replay-play" type="button" disabled>Play replay</button></div>
       <p id="replay-speed-hint" class="hint">Replay only. A positive fraction such as 1/2, 1/1, 2/1 or 3/2 changes playback speed and pitch. Fixed until this session ends.</p>
       <p id="replay-name" class="hint">Choose a recording and prepare its matching chart. Replay uses the recorded seed and section.</p>
