@@ -4,19 +4,22 @@ use beatkernel::{
     input::CodecLimits,
     replay::codec::ReplayCodecLimits,
     time::{ClockDomainId, ClockPair, ClockPoint, Duration, Timestamp},
+    transport::Rate,
 };
 #[cfg(test)]
 use beatkernel_bms_runtime::replay_audio::completed_render_cursor;
 use beatkernel_bms_runtime::{
     bgm::{BgmConfig, BgmFeeder},
     completion::ReplayCompletion,
+    finite_replay_completion::FiniteReplayCompletion,
     native_chart::prepare_original_for_section_replay,
     native_start::HostStartWindow,
     playback_pause::{PauseIntervalObservation, PausePhase},
     player,
-    replay_audio::{completed_render_cursor_for_feeder, plan_section_audio},
+    replay_audio::{completed_render_cursor_for_feeder, plan_section_audio_with_rate},
     replay_pause::ReplayPause,
     replay_playback::read_replay,
+    replay_speed::ReplaySpeed,
     replay_visual::ReplayVisual,
     ChannelPolicy,
 };
@@ -90,6 +93,7 @@ struct Options {
     replay: PathBuf,
     device: String,
     seconds: Option<u64>,
+    speed: ReplaySpeed,
     channel_policy: ChannelPolicy,
     format: AudioFormat,
     output_rate: Option<u32>,
@@ -132,6 +136,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
         (None, None, None, None, None, None);
     let (mut buffer, mut period) = (None, None);
     let mut output_rate = None;
+    let mut speed = ReplaySpeed::new(Rate::NORMAL)?;
     let mut exclusive = false;
     let mut shared = SharedPeriodPolicy::EnginePeriod;
     let mut mode_set = false;
@@ -241,6 +246,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
                     _ => return Err("channel policy must be exact or mono-stereo".into()),
                 };
             }
+            "--speed" => speed = value.parse()?,
             "--rate" => rate = Some(value.parse::<u32>()?),
             "--output-rate" => output_rate = Some(positive_u32(value)?),
             "--channels" => channels = Some(value.parse::<u16>()?),
@@ -434,6 +440,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
         replay: replay.ok_or("--replay PATH is required")?,
         device,
         seconds,
+        speed,
         channel_policy,
         format,
         output_rate,
@@ -657,17 +664,46 @@ fn output_position(position: u64, frequency: u64) -> Result<ClockPoint> {
     })
 }
 
+#[cfg(test)]
 fn presentation_song(point: ClockPoint, start: Timestamp, preroll: Duration) -> Result<Timestamp> {
+    presentation_song_with_rate(point, start, preroll, Rate::NORMAL, None)
+}
+
+fn presentation_song_with_rate(
+    point: ClockPoint,
+    start: Timestamp,
+    preroll: Duration,
+    rate: Rate,
+    end: Option<Timestamp>,
+) -> Result<Timestamp> {
     if point.domain != OUTPUT || point.timestamp.as_nanos() < 0 {
         return Err("native presentation differs from zero-origin output domain".into());
     }
-    let song = i128::from(start.as_nanos())
-        .checked_add(i128::from(point.timestamp.as_nanos()))
-        .and_then(|value| value.checked_sub(i128::from(preroll.as_nanos())))
-        .ok_or("replay presentation song arithmetic overflow")?;
-    Ok(Timestamp::from_nanos(i64::try_from(song).map_err(
-        |_| "replay presentation song exceeds timestamp range",
-    )?))
+    Ok(ReplaySpeed::new(rate)?.song_at_elapsed(
+        start,
+        preroll,
+        i128::from(point.timestamp.as_nanos()),
+        end,
+    )?)
+}
+
+fn finite_frontier_song(
+    phase: PausePhase,
+    completion: Option<&FiniteReplayCompletion>,
+    feeder: &BgmFeeder,
+    end: Option<Timestamp>,
+) -> Result<Option<Timestamp>> {
+    match (completion, end) {
+        (None, None) => Ok(None),
+        (Some(completion), Some(end)) => {
+            if phase == PausePhase::Running && completion.output_finished(feeder)? {
+                Ok(Some(end))
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Err("finite replay output owner and original song end differ".into()),
+    }
 }
 
 #[cfg(test)]
@@ -985,7 +1021,9 @@ mod native {
             if let Some(output) = self.owner.current() {
                 println!(
                     "ALSA target applied={:?}; independent native counters={:?}; recovered complete converter={}; source report does not prove native/acoustic output",
-                    output.stream().configuration(), output.stream().snapshot(), self.recovered.is_some()
+                    output.stream().configuration(),
+                    output.stream().snapshot(),
+                    self.recovered.is_some()
                 );
             }
         }
@@ -1180,28 +1218,30 @@ fn run(options: Options) -> Result<()> {
         &visual,
     )?;
     let mut completion = ReplayCompletion::new(OUTPUT, options.format.sample_rate());
-    let plan = plan_section_audio(&prepared, file, limits, origin, options.preroll)?;
+    let plan = plan_section_audio_with_rate(
+        &prepared,
+        file,
+        limits,
+        origin,
+        options.preroll,
+        options.speed.rate(),
+    )?;
     let playback_end_frame = plan.playback_end_frame;
     let mut finite_completion = playback_end_frame
-        .map(|end| {
-            beatkernel_bms_runtime::finite_replay_completion::FiniteReplayCompletion::new(
-                origin,
-                options.format.sample_rate(),
-                end,
-            )
-        })
+        .map(|end| FiniteReplayCompletion::new(origin, options.format.sample_rate(), end))
         .transpose()?;
     println!(
-        "reconstructed logical replay: results={} hits={} recorded_until={:?} final_judge_hash={:#018x}; no live acquisition or original physical timing reproduction",
+        "reconstructed logical replay: results={} hits={} recorded_until={:?} final_judge_hash={:#018x}; speed={} (pitch-changing); no live acquisition or original physical timing reproduction",
         plan.judge_events.len(),
         plan.judge_events
             .iter()
             .filter(|event| matches!(event.outcome, beatkernel::judge::JudgeOutcome::Hit { .. }))
             .count(),
         plan.recorded_until,
-        plan.final_judge_hash
+        plan.final_judge_hash,
+        options.speed
     );
-    let mut feeder = BgmFeeder::from_output_commands(
+    let mut feeder = BgmFeeder::from_output_commands_with_rate(
         plan.commands,
         BgmConfig {
             output_origin: origin,
@@ -1210,6 +1250,7 @@ fn run(options: Options) -> Result<()> {
             lookahead: options.lookahead,
             max_pending: options.capacity,
         },
+        options.speed.rate(),
     )?;
     let (mut producer, consumer) = command_queue(options.capacity)?;
     if let Err(error) = feeder.feed(0, options.capacity, |command| producer.try_push(command)) {
@@ -1240,13 +1281,17 @@ fn run(options: Options) -> Result<()> {
     if player::cancelled() {
         return Ok(());
     }
-    let mut pause = ReplayPause::new(
+    let mut pause = ReplayPause::new_with_rate(
         origin,
         HOST,
         options.format.sample_rate(),
         visual.start(),
         options.preroll,
+        options.speed.rate(),
     )?;
+    if let Some(end) = visual.end() {
+        pause = pause.with_song_end(end)?;
+    }
     if let Some(end) = playback_end_frame {
         pause = pause.with_playback_end_frame(end)?;
     }
@@ -1410,23 +1455,44 @@ fn run(options: Options) -> Result<()> {
                         feeder.feed(cursor, 256, |command| producer.try_push(command))?;
                     }
                 }
-                if let Some(point) = presented {
-                    let song = if pause_available || target_identity.is_some() {
+                // Quantization may map the genuine output fence just short of
+                // the original end. Advance those records only after the real
+                // core, feeder and source/target output owner prove completion.
+                let frontier_song = finite_frontier_song(
+                    pause.phase(),
+                    finite_completion.as_ref(),
+                    &feeder,
+                    visual.end(),
+                )?;
+                // The output owner retains its genuine frontier, including when
+                // --seconds keeps polling after a quantized finite endpoint.
+                let song = if let Some(end) = frontier_song {
+                    Some(end)
+                } else if let Some(point) = presented {
+                    if pause_available || target_identity.is_some() {
                         pause.presentation_song(point)?
                     } else {
-                        Some(presentation_song(point, visual.start(), options.preroll)?)
-                    };
-                    if let Some(song) = song {
-                        let song = visual.end().map_or(song, |end| song.min(end));
-                        let events = visual.advance_to(song)?;
-                        player::publish_replay_prefix_with_gauge(
-                            song,
-                            &events,
-                            visual.pressed_lanes(),
-                            *visual.mine_damage(),
-                            visual.gauge(),
-                        )?;
+                        Some(presentation_song_with_rate(
+                            point,
+                            visual.start(),
+                            options.preroll,
+                            options.speed.rate(),
+                            visual.end(),
+                        )?)
                     }
+                } else {
+                    None
+                };
+                if let Some(song) = song {
+                    let song = visual.end().map_or(song, |end| song.min(end));
+                    let events = visual.advance_to(song)?;
+                    player::publish_replay_prefix_with_gauge(
+                        song,
+                        &events,
+                        visual.pressed_lanes(),
+                        *visual.mine_damage(),
+                        visual.gauge(),
+                    )?;
                 }
             }
             if deadline.is_none() {
@@ -1522,10 +1588,14 @@ fn main() -> Result<()> {
 #[path = "play_replay_bms/target_fixtures.rs"]
 mod target_fixtures;
 
+#[cfg(test)]
+#[path = "play_replay_bms/speed_fixtures.rs"]
+mod speed_fixtures;
+
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!(
-            "play_replay_bms --chart PATH --replay PATH --device ID --rate HZ --channels N [--output-rate HZ --seconds N --channel-policy exact|mono-stereo --backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels and --asio-system-clock multimedia plus --asio-timer-error-ns, --asio-drift-error-ns, --asio-latency-error-ns assessments; optional --asio-anchor-age-ns defaults1000000000. Rejects mode/shared-policy/period; buffer defaults driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 output rate/channels; no endpoint/mode fallback. Channel policy defaults exact; mono-stereo explicitly duplicates mono assets into stereo.\nLinux requires explicit buffer/period; --output-rate selects the ALSA target rate while --rate remains the immutable source PCM rate. The target rate defaults to the source rate; other backends reject --output-rate. macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nOmit seconds to finish the actual recorded prefix and drain admitted PCM through native presentation. Seconds is an optional wall cutoff after Start including preroll and can truncate the prefix/tail. Presentation missing/degraded stays unavailable; cancellation remains available. ASIO queues actual rendered-block presentation observations until fresh QPC reaches their assessed upper host interval, then advances visual/natural drain. Prepared frames/raw sample position do not establish audible progress. ASIO replay pause uses original assessed intervals and exact frozen playback frames; physical accuracy unmeasured. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence."
+            "play_replay_bms --chart PATH --replay PATH --device ID --rate HZ --channels N [--speed NUM/DEN --output-rate HZ --seconds N --channel-policy exact|mono-stereo --backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels and --asio-system-clock multimedia plus --asio-timer-error-ns, --asio-drift-error-ns, --asio-latency-error-ns assessments; optional --asio-anchor-age-ns defaults1000000000. Rejects mode/shared-policy/period; buffer defaults driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 output rate/channels; no endpoint/mode fallback. Channel policy defaults exact; mono-stereo explicitly duplicates mono assets into stereo.\nLinux requires explicit buffer/period; --output-rate selects the ALSA target rate while --rate remains the immutable source PCM rate. The target rate defaults to the source rate; other backends reject --output-rate. macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nReplay speed defaults1/1, accepts positive unsigned ASCII NUM/DEN with numerator<=i64MAX and denominator<=u64MAX, and normalizes the fraction. Speed changes pitch and original-song progress; --rate/--output-rate remain PCM/device Hz.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nOmit seconds to finish the actual recorded prefix and drain admitted PCM through native presentation. Seconds is an optional wall cutoff after Start including preroll and can truncate the prefix/tail. Presentation missing/degraded stays unavailable; cancellation remains available. ASIO queues actual rendered-block presentation observations until fresh QPC reaches their assessed upper host interval, then advances visual/natural drain. Prepared frames/raw sample position do not establish audible progress. ASIO replay pause uses original assessed intervals and exact frozen playback frames; physical accuracy unmeasured. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence."
         );
         return Ok(());
     }

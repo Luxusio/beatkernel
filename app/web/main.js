@@ -12,11 +12,11 @@ import { LocalRoster, validateLocalPrepared, localReplayReceipt } from "./local-
 import { snapshotHidDevices } from "./hid-profile.mjs";
 import { snapshotBrowserSettings, settingsMenuProfileFields, settingsMenuProfileSnapshot, settingsMenuSnapshot } from "./settings-profile.mjs";
 import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
-import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, timingPolicyFromFields, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
+import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, timingPolicyFromFields, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replaySpeedFromFraction, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
 const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status", "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear"].map(id => [id, byId(id)]));
-for (const id of ["local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay"]) ui[id] = byId(id);
+for (const id of ["local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay", "replay-speed"]) ui[id] = byId(id);
 for (const id of ["multiplayer-mode", "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page"]) ui[id] = byId(id);
 for (const id of ["judge-preset", "judge-precedence", "judge-gauge", "settings-save", "settings-load", "settings-status"]) ui[id] = byId(id);
 for (const id of ["pointer-input", "pointer-bindings"]) ui[id] = byId(id);
@@ -1224,6 +1224,7 @@ function controls() {
     ? scores.scoreFailed ? "Room scores unavailable." : `Room ${playing ? "scores" : "results"} ${scores.scorePage + 1} / ${scores.scorePages}` : "";
   ui.export.disabled = playing || busy || lastReplay === null;
   ui["replay-file"].disabled = !initialized || importing || preparing || playing || busy;
+  ui["replay-speed"].disabled = ui["replay-file"].disabled;
   ui["replay-play"].disabled = ui.play.disabled || selectedReplay === null;
   const recordsDisabled = !initialized || importing || preparing || playing || busy;
   const inputLocked = recordsDisabled || localSetup !== null;
@@ -2170,6 +2171,11 @@ async function changeLocalPage() {
 async function play(mode = "live") {
   if (settingsOperation || !initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localDiscovery || localCleanup) return;
   if (mode === "replay" && selectedReplay === null) return;
+  let replaySpeed;
+  if (mode === "replay") {
+    try { replaySpeed = replaySpeedFromFraction(ui["replay-speed"].value); }
+    catch (error) { ui["replay-speed"].focus(); status(String(error.message).slice(0, 4096), true); return; }
+  }
   clearHistoricalRecord();
   if (mode === "live" && localRoster.players.length === 1) {
     try { validateOpponentTargets(opponents.snapshot()); }
@@ -2218,6 +2224,7 @@ async function play(mode = "live") {
     recordReplay: mode === "live" && ui.record.checked === true, replay: null, replayError: null,
     completedArchive: null, archiveError: null, naturalFinishRequested: false,
     replayFile: mode === "replay" ? selectedReplay : null,
+    replaySpeed,
     opponentSelection: mode === "live" && opponents.size ? opponents.snapshot() : null,
     opponentCount: mode === "live" ? opponents.size : 0, opponentsFailed: false, opponentError: null,
     chartPath: ui.chart.value,
@@ -2230,7 +2237,7 @@ async function play(mode = "live") {
   cancelMenuComposition(); menuEditPending = null; menuSourcesPending = null;
   activePlay = session;
   controls();
-  status(mode === "replay" ? "Preparing recorded replay and audio…" : "Preparing playable chart and audio…");
+  status(mode === "replay" ? `Preparing recorded replay at ${session.replaySpeed.fraction} speed and audio…` : "Preparing playable chart and audio…");
   try {
     if (session.localPlan?.automatic === true && session.opponentSelection) {
       session.opponentSelection = Object.freeze(session.opponentSelection.map(entry =>
@@ -2330,7 +2337,7 @@ async function play(mode = "live") {
     if (session.localSources && !session.requestHid) session.hidSources = new Set();
     if (session.localSources && !session.requestGamepad) session.gamepadSources = new Set();
     session.workerStarted = true;
-    const source = mode === "replay" ? { mode, replayFile: session.replayFile }
+    const source = mode === "replay" ? { mode, replayFile: session.replayFile, replaySpeed: session.replaySpeed.fraction }
       : { mode, inputMode: session.inputMode, seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing, startNs: session.startNs,
         ...(session.timingPolicy === null ? {} : { timingPolicy: session.timingPolicy }),
         ...(session.requestedEndNs === undefined ? {} : { endNs: session.requestedEndNs }),
@@ -2423,7 +2430,16 @@ async function play(mode = "live") {
     validateStart(preparedStart);
     if (mode === "live" && preparedStart !== session.startNs) throw new Error("Prepared live section start changed.");
     if (mode === "replay") session.startNs = preparedStart;
-    const output = replayOutputFromMetadata(preparedStart, prepared.endNs, prepared.endFrame, session.audio.sampleRate);
+    if (mode === "replay") {
+      const speed = session.replaySpeed;
+      const legacyNormal = speed.fraction === "1/1" && prepared.replaySpeed === undefined
+        && prepared.replaySpeedNumerator === undefined && prepared.replaySpeedDenominator === undefined;
+      if (!legacyNormal && (prepared.replaySpeed !== speed.fraction
+        || prepared.replaySpeedNumerator !== speed.numerator || prepared.replaySpeedDenominator !== speed.denominator)) {
+        throw new Error("Prepared replay speed differs from the selected session speed.");
+      }
+    }
+    const output = replayOutputFromMetadata(preparedStart, prepared.endNs, prepared.endFrame, session.audio.sampleRate, session.replaySpeed);
     if (mode === "live" && output.endNs !== session.requestedEndNs) throw new Error("Prepared live section end changed.");
     session.endNs = output.endNs;
     session.endFrame = output.endFrame;
@@ -2435,6 +2451,7 @@ async function play(mode = "live") {
     ui.title.textContent = prepared.title || ui.chart.value;
     ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output · start ${seconds(preparedStart.toString())} s`
       + (session.endNs === undefined ? "" : ` · ${mode === "replay" ? "recorded end" : "end"} ${seconds(session.endNs.toString())} s`)
+      + (mode === "replay" ? ` · replay speed ${session.replaySpeed.fraction} (pitch changes)` : "")
       + (session.localPlan ? ` · ${session.localPlan.players.length} local players` : "");
     if (session.localPlan || session.hidOwner !== null || session.gamepadSources?.size > 0 || session.pointerSources?.size > 0) {
       bindingsFor(prepared.lanes); // Validate actual lane shape; Worker proved combined coverage.
@@ -2550,7 +2567,7 @@ async function play(mode = "live") {
     ui.rate.value = String(session.audio.sampleRate);
     controls();
     ui.stop.focus();
-    status(mode === "replay" ? "Playing recorded replay. Stop ends this session."
+    status(mode === "replay" ? `Playing recorded replay at ${session.replaySpeed.fraction} speed (pitch changes). Stop ends this session.`
       : session.timingPolicy ? `Playing with SEVENKEYS numerical windows v1 (8320241d), ${session.timingPolicy.rankPrecedence}, ${session.timingPolicy.gauge} gauge and BeatKernel Hold v1. Stop ends this session.`
         : "Playing. Stop ends this session; leaving the page stops playback.");
     session.timer = setInterval(() => {

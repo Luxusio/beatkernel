@@ -155,6 +155,48 @@ impl FiniteReplayCompletion {
         }
         self.observe_source(records_finished, feeder, rendered, presented)
     }
+    /// Whether adopted output evidence has finished, independently of replay records.
+    ///
+    /// The feeder must be the same retained producer used for observations. This
+    /// query does not adopt evidence or substitute render completion for actual
+    /// source presentation or the original converted target crossing.
+    pub fn output_finished(&self, feeder: &BgmFeeder) -> Result<bool, CompletionError> {
+        if feeder.config().sample_rate != self.rate || feeder.config().output_origin != self.origin
+        {
+            return Err(CompletionError(
+                "finite replay source or creation identity differs",
+            ));
+        }
+        let Some(report) = self.last_render else {
+            return Ok(false);
+        };
+        completed_render_cursor_for_feeder(&report, feeder)
+            .map_err(|_| CompletionError("finite replay core execution failed"))?;
+        let Some(marker) = report.playback_end_physical_frame else {
+            return Ok(false);
+        };
+        let feed = feeder.report();
+        if feed.remaining != 0 {
+            return Ok(false);
+        }
+        let admitted = u64::try_from(feed.total_admitted)
+            .map_err(|_| CompletionError("finite replay admission count overflow"))?;
+        if report.counters.commands_consumed != admitted
+            || report.counters.commands_applied != admitted
+        {
+            return Err(CompletionError(
+                "finite replay endpoint omitted or added planned execution",
+            ));
+        }
+        if feed.outstanding != 0 {
+            return Ok(false);
+        }
+        if let Some(target) = &self.target {
+            return Ok(target.crossed);
+        }
+        let endpoint = self.point(marker)?;
+        Ok(self.last_presented.is_some_and(|point| point >= endpoint))
+    }
     fn observe_source(
         &mut self,
         records_finished: bool,

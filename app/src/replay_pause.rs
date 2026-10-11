@@ -4,10 +4,12 @@
 use crate::{
     native_start::HostStartWindow,
     playback_pause::{NativePause, PauseError, PauseIntervalObservation, PausePhase},
+    replay_speed::ReplaySpeed,
 };
 use beatkernel::{
     audio::RenderReport,
     time::{ClockDomainId, ClockPair, ClockPoint, Duration, Timestamp},
+    transport::Rate,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,7 +31,11 @@ pub struct ReplayPause {
     native: NativePause,
     origin: ClockPoint,
     rate: u32,
-    base: Timestamp,
+    start: Timestamp,
+    preroll: Duration,
+    speed: ReplaySpeed,
+    song_end: Option<Timestamp>,
+    setup_locked: bool,
     minimum_presentation: Option<ClockPoint>,
 }
 impl ReplayPause {
@@ -40,19 +46,46 @@ impl ReplayPause {
         start: Timestamp,
         preroll: Duration,
     ) -> Result<Self, PauseError> {
+        Self::new_with_rate(origin, host, rate, start, preroll, Rate::NORMAL)
+    }
+    /// Selects immutable pitch-changing speed on the recorded song grid.
+    pub fn new_with_rate(
+        origin: ClockPoint,
+        host: ClockDomainId,
+        rate: u32,
+        start: Timestamp,
+        preroll: Duration,
+        playback_rate: Rate,
+    ) -> Result<Self, PauseError> {
         if preroll.as_nanos() < 0 {
             return Err(PauseError("replay pause preroll must be nonnegative"));
         }
-        let base = start.checked_sub(preroll).ok_or(PauseError(
-            "recorded start minus preroll overflows song time",
-        ))?;
+        let speed = ReplaySpeed::new(playback_rate)
+            .map_err(|_| PauseError("replay pause speed must be positive"))?;
+        speed
+            .song_at_elapsed(start, preroll, 0, None)
+            .map_err(|_| PauseError("recorded start minus scaled preroll overflows song time"))?;
         Ok(Self {
             native: NativePause::new(origin, host, rate)?,
             origin,
             rate,
-            base,
+            start,
+            preroll,
+            speed,
+            song_end: None,
+            setup_locked: false,
             minimum_presentation: None,
         })
+    }
+    /// Caps original song time before narrowing, configured before observation.
+    pub fn with_song_end(mut self, end: Timestamp) -> Result<Self, PauseError> {
+        if self.setup_locked || self.song_end.is_some() || end < self.start {
+            return Err(PauseError(
+                "replay song end requires a cold owner and end at or after start",
+            ));
+        }
+        self.song_end = Some(end);
+        Ok(self)
     }
     /// Same immutable setup opt-in as live playback; recorded song mapping stays unchanged.
     pub fn with_playback_end_frame(mut self, end: u64) -> Result<Self, PauseError> {
@@ -93,6 +126,7 @@ impl ReplayPause {
         }
         let mut next = self.clone();
         let accepted = next.native.request_in_epoch(epoch, paused, pair)?;
+        next.setup_locked = true;
         *self = next;
         Ok(accepted)
     }
@@ -121,6 +155,7 @@ impl ReplayPause {
         if mapped.is_some_and(|boundary| !boundary.paused) {
             next.minimum_presentation = Some(next.native.resumed_presentation_point()?);
         }
+        next.setup_locked = true;
         *self = next;
         Ok(mapped)
     }
@@ -133,7 +168,9 @@ impl ReplayPause {
                 "target replay pause requires typed observations",
             ));
         }
-        self.native.request(paused, reference)
+        let accepted = self.native.request(paused, reference)?;
+        self.setup_locked = true;
+        Ok(accepted)
     }
     pub fn request_interval(
         &mut self,
@@ -145,15 +182,15 @@ impl ReplayPause {
                 "target replay pause requires typed observations",
             ));
         }
-        self.native.request_interval(paused, reference)
+        let accepted = self.native.request_interval(paused, reference)?;
+        self.setup_locked = true;
+        Ok(accepted)
     }
     fn boundary_song(&self, playback_frame: u64) -> Result<Timestamp, PauseError> {
         let offset = i128::from(playback_frame) * 1_000_000_000 / i128::from(self.rate);
-        let song = i128::from(self.base.as_nanos())
-            .checked_add(offset)
-            .and_then(|value| i64::try_from(value).ok())
-            .ok_or(PauseError("replay pause boundary song time overflow"))?;
-        Ok(Timestamp::from_nanos(song))
+        self.speed
+            .song_at_elapsed(self.start, self.preroll, offset, self.song_end)
+            .map_err(|_| PauseError("replay pause boundary song time overflow"))
     }
     pub fn observe_interval(
         &mut self,
@@ -185,6 +222,7 @@ impl ReplayPause {
         };
         self.native = native;
         self.minimum_presentation = minimum;
+        self.setup_locked = true;
         Ok(mapped)
     }
     pub fn last_render_report(&self) -> Option<RenderReport> {
@@ -221,6 +259,7 @@ impl ReplayPause {
         };
         self.native = native;
         self.minimum_presentation = minimum;
+        self.setup_locked = true;
         Ok(mapped)
     }
     /// Native physical presentation advances visual song time only while the
@@ -238,14 +277,19 @@ impl ReplayPause {
         {
             return Ok(None);
         }
-        let base = self.native.song_origin_after_pause(self.base)?;
+        // Anchor above zero so the existing native mapping can retain a pause
+        // gap spanning the full signed timestamp range before wide subtraction.
+        let gap_anchor = Timestamp::from_nanos(i64::MAX);
+        let shifted_anchor = self.native.song_origin_after_pause(gap_anchor)?;
         let physical =
             i128::from(source.timestamp.as_nanos()) - i128::from(self.origin.timestamp.as_nanos());
-        let song = i128::from(base.as_nanos())
-            .checked_add(physical)
-            .and_then(|value| i64::try_from(value).ok())
-            .ok_or(PauseError("replay presentation song time overflow"))?;
-        Ok(Some(Timestamp::from_nanos(song)))
+        let elapsed =
+            physical + i128::from(shifted_anchor.as_nanos()) - i128::from(gap_anchor.as_nanos());
+        let song = self
+            .speed
+            .song_at_elapsed(self.start, self.preroll, elapsed, self.song_end)
+            .map_err(|_| PauseError("replay presentation song time overflow"))?;
+        Ok(Some(song))
     }
 }
 

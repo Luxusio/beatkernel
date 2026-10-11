@@ -3,10 +3,11 @@ use std::{collections::VecDeque, sync::Arc};
 
 use crate::{
     browser::BrowserPrepared,
-    browser_game::{BrowserSample, OUTPUT, encode_batch},
+    browser_game::{encode_batch, BrowserSample, OUTPUT},
     image_assets::ImageAssets,
     note_progress::NoteProgress,
     player_chart::PlayerChart,
+    replay_speed::ReplaySpeed,
     step_replay::{StepReplay, StepReplayConfig, StepReplayError},
     worklet_audio::decode_section_output,
 };
@@ -14,6 +15,7 @@ use beatkernel::{
     audio::{PcmSample, SampleId},
     judge::JudgeEvent,
     time::{ClockPoint, Duration, Timestamp},
+    transport::Rate,
 };
 use wasm_bindgen::prelude::*;
 
@@ -43,10 +45,12 @@ pub struct BrowserReplay {
     output_start: Option<u64>,
     output_context: Option<u64>,
 }
-#[wasm_bindgen]
 impl BrowserReplay {
-    #[wasm_bindgen(constructor)]
-    pub fn new(mut prepared: BrowserPrepared, preroll_ns: i64) -> Result<Self, JsValue> {
+    fn from_prepared(
+        mut prepared: BrowserPrepared,
+        preroll_ns: i64,
+        rate: Rate,
+    ) -> Result<Self, JsValue> {
         let file = prepared
             .replay
             .take()
@@ -54,7 +58,7 @@ impl BrowserReplay {
         let limits = crate::competition_live::replay_limits().map_err(error)?;
         let chart = Arc::new(prepared.chart);
         let progress = NoteProgress::new(chart.clone()).map_err(error)?;
-        let (replay, bank) = StepReplay::new(
+        let (replay, bank) = StepReplay::new_with_rate(
             prepared.prepared,
             file,
             limits,
@@ -64,6 +68,7 @@ impl BrowserReplay {
                 lookahead: Duration::from_nanos(500_000_000),
                 max_pending: 4096,
             },
+            rate,
         )
         .map_err(error)?;
         Ok(Self {
@@ -79,6 +84,23 @@ impl BrowserReplay {
             output_start: None,
             output_context: None,
         })
+    }
+}
+#[wasm_bindgen]
+impl BrowserReplay {
+    #[wasm_bindgen(constructor)]
+    pub fn new(prepared: BrowserPrepared, preroll_ns: i64) -> Result<Self, JsValue> {
+        Self::from_prepared(prepared, preroll_ns, Rate::NORMAL)
+    }
+    /// Consumes the original replay with a strictly validated positive fraction.
+    /// Text preserves component bounds before any WASM integer conversion.
+    pub fn new_with_speed(
+        prepared: BrowserPrepared,
+        preroll_ns: i64,
+        fraction: &str,
+    ) -> Result<Self, JsValue> {
+        let speed: ReplaySpeed = fraction.parse().map_err(error)?;
+        Self::from_prepared(prepared, preroll_ns, speed.rate())
     }
     pub fn sample_count(&self) -> usize {
         self.samples.len()
@@ -168,6 +190,14 @@ impl BrowserReplay {
         self.replay.song_time().as_nanos()
     }
     #[wasm_bindgen(getter)]
+    pub fn speed_numerator(&self) -> i64 {
+        self.replay.playback_rate().numerator()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn speed_denominator(&self) -> u64 {
+        self.replay.playback_rate().denominator()
+    }
+    #[wasm_bindgen(getter)]
     pub fn recorded_until_ns(&self) -> Option<i64> {
         self.replay.recorded_until().map(|time| time.as_nanos())
     }
@@ -203,30 +233,70 @@ impl BrowserReplay {
 
 #[wasm_bindgen]
 impl BrowserReplay {
-    pub fn visual_registration(&mut self, generation: u64, content: u64, max_packet_bytes: u32, max_diagnostic_bytes: u32) -> Result<Vec<u8>, JsValue> {
+    pub fn visual_registration(
+        &mut self,
+        generation: u64,
+        content: u64,
+        max_packet_bytes: u32,
+        max_diagnostic_bytes: u32,
+    ) -> Result<Vec<u8>, JsValue> {
         let roster = vec![crate::local_players::PlayerId(1)];
-        let bytes = crate::browser::render::registration(&self.chart, &self.images, &roster, generation, content, max_packet_bytes, max_diagnostic_bytes).map_err(error)?;
-        self.render_producer.register(generation, content, &self.chart, &roster).map_err(error)?;
+        let bytes = crate::browser::render::registration(
+            &self.chart,
+            &self.images,
+            &roster,
+            generation,
+            content,
+            max_packet_bytes,
+            max_diagnostic_bytes,
+        )
+        .map_err(error)?;
+        self.render_producer
+            .register(generation, content, &self.chart, &roster)
+            .map_err(error)?;
         self.render_packet_budget = max_packet_bytes;
         self.render_diagnostic_budget = max_diagnostic_bytes;
         Ok(bytes)
     }
     pub fn acknowledge_visual(&mut self, generation: u64, content: u64, sequence: u64) -> bool {
-        self.render_producer.acknowledge(generation, content, sequence)
+        self.render_producer
+            .acknowledge(generation, content, sequence)
     }
 }
 #[wasm_bindgen]
 impl BrowserReplay {
     pub fn visual_frame(&mut self, sequence: u64, page: u32) -> Result<Vec<u8>, JsValue> {
-        use crate::browser_render_state::{RenderMemberScalars, RenderScore, RenderGauge, RenderJudgeEvent};
+        use crate::browser_render_state::{
+            RenderGauge, RenderJudgeEvent, RenderMemberScalars, RenderScore,
+        };
         let scalars = RenderMemberScalars {
-            song_ns: self.replay.song_time().as_nanos(), pressed: self.replay.pressed_lanes(),
-            recent: self.recent.iter().map(RenderJudgeEvent::from_event).collect(),
+            song_ns: self.replay.song_time().as_nanos(),
+            pressed: self.replay.pressed_lanes(),
+            recent: self
+                .recent
+                .iter()
+                .map(RenderJudgeEvent::from_event)
+                .collect(),
             score: Some(RenderScore::from_summary(self.replay.score())),
             gauge: Some(RenderGauge::from_gauge(self.replay.gauge())),
             ..RenderMemberScalars::default()
         };
-        let frame = self.render_producer.frame(sequence, page, &[(crate::local_players::PlayerId(1), scalars, &self.progress)], None, false).map_err(error)?;
-        self.render_producer.encode_frame(frame, self.render_packet_budget, self.render_diagnostic_budget).map_err(error)
+        let frame = self
+            .render_producer
+            .frame(
+                sequence,
+                page,
+                &[(crate::local_players::PlayerId(1), scalars, &self.progress)],
+                None,
+                false,
+            )
+            .map_err(error)?;
+        self.render_producer
+            .encode_frame(
+                frame,
+                self.render_packet_budget,
+                self.render_diagnostic_budget,
+            )
+            .map_err(error)
     }
 }

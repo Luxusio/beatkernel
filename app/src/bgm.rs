@@ -2,6 +2,7 @@
 use beatkernel::{
     audio::{AudioCommand, AudioLimits, CommandPushError},
     time::{ClockPoint, Duration},
+    transport::Rate,
 };
 use std::{error::Error, fmt};
 
@@ -96,7 +97,7 @@ pub struct BgmFeeder {
 impl BgmFeeder {
     /// Maps song-time Play commands once and preserves original equal-time order.
     pub fn new(commands: Vec<AudioCommand>, config: BgmConfig) -> Result<Self, BgmFeedError> {
-        Self::prepare(commands, config, false)
+        Self::prepare(commands, config, false, None)
     }
 
     /// Retains output-time Play/Stop commands without adding origin or preroll again.
@@ -112,13 +113,48 @@ impl BgmFeeder {
                 "already mapped output commands require zero additional preroll",
             ));
         }
-        Self::prepare(commands, config, true)
+        Self::prepare(commands, config, true, None)
+    }
+
+    /// Retains an output plan with one explicitly selected immutable replay rate.
+    ///
+    /// Normal speed preserves the Play/Stop-only output contract. A non-normal,
+    /// nonempty plan must begin with its sole matching SetRate at output origin.
+    /// Empty plans are allowed for zero-frame fences. The control command uses
+    /// ordinary admission credit and retirement, without granting Stop credit.
+    pub fn from_output_commands_with_rate(
+        commands: Vec<AudioCommand>,
+        config: BgmConfig,
+        rate: Rate,
+    ) -> Result<Self, BgmFeedError> {
+        if rate.numerator() <= 0 {
+            return Err(BgmFeedError::InvalidConfiguration(
+                "replay playback rate must be positive",
+            ));
+        }
+        if rate == Rate::NORMAL {
+            return Self::from_output_commands(commands, config);
+        }
+        if config.preroll != Duration::ZERO {
+            return Err(BgmFeedError::InvalidConfiguration(
+                "already mapped output commands require zero additional preroll",
+            ));
+        }
+        if let Some(&command) = commands.first() {
+            if !matches!(command, AudioCommand::SetRate { at, rate: selected }
+                if at == config.output_origin.timestamp && selected == rate)
+            {
+                return Err(BgmFeedError::InvalidCommand(command));
+            }
+        }
+        Self::prepare(commands, config, true, Some(rate))
     }
 
     fn prepare(
         commands: Vec<AudioCommand>,
         config: BgmConfig,
         output_commands: bool,
+        replay_rate: Option<Rate>,
     ) -> Result<Self, BgmFeedError> {
         if config.sample_rate == 0
             || config.lookahead.as_nanos() <= 0
@@ -139,6 +175,11 @@ impl BgmFeeder {
             let at = match &mut command {
                 AudioCommand::Play { at, gain, .. } if gain.is_finite() => at,
                 AudioCommand::Stop { at, .. } if output_commands => at,
+                AudioCommand::SetRate { at, rate }
+                    if ordinal == 0 && replay_rate == Some(*rate) =>
+                {
+                    at
+                }
                 _ => return Err(BgmFeedError::InvalidCommand(original)),
             };
             let elapsed = if output_commands {

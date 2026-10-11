@@ -64,6 +64,115 @@ function chooseRecording(h, files) {
   h.get("replay-file").files = files;
   h.get("replay-file").emit("change");
 }
+
+function speedPrepared(fraction, numerator, denominator, endFrame, fields = {}) {
+  return { kind: "prepared", mode: "replay", title: "Actual speed owner", artist: "Fixture",
+    notes: 1, samples: 0, lanes: [0x11], opponentCount: 0, startNs: 0n,
+    recordedUntilNs: 2000000000n, endNs: 2000000000n, endFrame,
+    replaySpeed: fraction, replaySpeedNumerator: numerator, replaySpeedDenominator: denominator, ...fields };
+}
+
+for (const invalid of ["", "2", "0/1", "1/0", "-1/2", "1.5/1", " 1/1", "1/1 ",
+  "1/1/1", "9223372036854775808/1", "1/18446744073709551616", "0".repeat(40) + "1/1"]) {
+  test(`replay speed: malformed ${JSON.stringify(invalid)} refuses before AudioHost opening`, async () => {
+    const h = await harness();
+    try {
+      await h.preview(); chooseRecording(h, [selectedRecording().file]);
+      h.get("replay-speed").value = invalid;
+      assert.equal(await h.begin("replay"), undefined);
+      assert.equal(h.opens.length, 0); assert.equal(h.workers[0].messages("play-start").length, 0);
+      assert.equal(h.get("status").dataset.error, "true");
+      assert.equal(h.get("replay-speed").focuses, 1);
+    } finally { await h.close(); }
+  });
+}
+
+// Literal endpoints at the fixture's actual 48000 Hz, including the unchanged
+// 100 ms physical preroll. No model function computes the expected answer.
+for (const [draft, fraction, numerator, denominator, endFrame] of [
+  ["01/02", "1/2", 1n, 2n, 196800n], ["2/2", "1/1", 1n, 1n, 100800n],
+  ["4/2", "2/1", 2n, 1n, 52800n], ["003/002", "3/2", 3n, 2n, 68800n],
+]) {
+  test(`replay speed: ${draft} snapshots normalized identity and literal finite fence through stop and retry`, async () => {
+    const h = await harness();
+    try {
+      await h.preview(); const selected = selectedRecording(); chooseRecording(h, [selected.file]);
+      h.get("replay-speed").value = draft;
+      const start = await h.begin("replay"), worker = h.workers[0];
+      assert.equal(start.replaySpeed, fraction); assert.equal(start.mode, "replay");
+      assert.equal(h.get("replay-speed").disabled, true);
+      h.get("replay-speed").value = "9/1"; // Programmatic draft cannot replace the snapshot.
+      await h.reply(start, speedPrepared(fraction, numerator, denominator, endFrame));
+      const samples = worker.last("play-samples-upload"); assert.ok(samples);
+      await h.admitSamples(samples, 0); await h.reply(samples, { kind: "samples-uploaded", count: 0, bytes: 0 });
+      assert.deepEqual(h.audio.finishArgs, [[endFrame]]);
+      await h.reply(worker.last("play-audio"), null); await h.reply(worker.last("play-activate"), null);
+      assert.equal(h.audio.arms.length, 1); assert.match(h.get("status").textContent, new RegExp(fraction));
+      assert.match(h.get("details").textContent, new RegExp(fraction));
+      h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+      assert.equal(h.get("replay-speed").disabled, false); assert.equal(selected.reads, 0);
+      h.get("replay-speed").value = "1/1";
+      const retry = await h.launch(0, "replay"); assert.ok(retry.id > start.playId);
+      assert.equal(retry.start.replaySpeed, "1/1");
+      assert.deepEqual(h.audio.finishArgs, [[]], "default unlimited retry retains the original payload");
+      h.click("stop"); await flush(); await h.receive(finalScore(retry.id));
+    } finally { await h.close(); }
+  });
+}
+
+for (const fault of ["missing", "partial", "wrong-fraction", "unnormalized", "wrong-numerator", "wrong-denominator", "number-component", "wrong-grid"]) {
+  test(`replay speed: ${fault} owner metadata cannot admit samples or arm nonnormal replay`, async () => {
+    const h = await harness();
+    try {
+      await h.preview(); chooseRecording(h, [selectedRecording().file]); h.get("replay-speed").value = "3/2";
+      const start = await h.begin("replay"), worker = h.workers[0];
+      const metadata = speedPrepared("3/2", 3n, 2n, 68800n);
+      if (fault === "missing") for (const key of ["replaySpeed", "replaySpeedNumerator", "replaySpeedDenominator"]) delete metadata[key];
+      if (fault === "partial") delete metadata.replaySpeedDenominator;
+      if (fault === "wrong-fraction") metadata.replaySpeed = "2/1";
+      if (fault === "unnormalized") metadata.replaySpeed = "6/4";
+      if (fault === "wrong-numerator") metadata.replaySpeedNumerator = 2n;
+      if (fault === "wrong-denominator") metadata.replaySpeedDenominator = 3n;
+      if (fault === "number-component") metadata.replaySpeedNumerator = 3;
+      if (fault === "wrong-grid") metadata.endFrame = 100800n;
+      await h.reply(start, metadata);
+      assert.equal(worker.messages("play-samples-upload").length, 0);
+      assert.deepEqual(h.audio.arms, []); assert.deepEqual(h.audio.finishArgs, []);
+      assert.equal(h.audio.stopStarts, 1); assert.equal(worker.last("play-stop").playId, start.playId);
+      await h.receive(finalScore(start.playId)); assert.equal(h.get("status").dataset.error, "true");
+      assert.equal(h.get("replay-play").disabled, false);
+    } finally { await h.close(); }
+  });
+}
+
+test("replay speed: a held audio opening snapshots the draft and stale preparation cannot replace the retry", async () => {
+  const opening = deferred(), h = await harness({ openGate: opening });
+  try {
+    await h.preview(); chooseRecording(h, [selectedRecording().file]); h.get("replay-speed").value = "4/2";
+    h.click("replay-play"); await flush(); assert.equal(h.opens.length, 1);
+    h.get("replay-speed").value = "1/2";
+    opening.resolve(h.audio); await flush();
+    const worker = h.workers[0], old = worker.last("play-start"); assert.equal(old.replaySpeed, "2/1");
+    h.click("stop"); await flush(); await h.receive(finalScore(old.playId));
+    delete h.faults.openGate;
+    const retry = await h.begin("replay"); assert.equal(retry.replaySpeed, "1/2");
+    await h.reply(old, speedPrepared("2/1", 2n, 1n, 52800n));
+    assert.equal(worker.messages("play-samples-upload").length, 0);
+    await h.reply(retry, speedPrepared("1/2", 1n, 2n, 196800n));
+    assert.equal(worker.last("play-samples-upload").playId, retry.playId);
+  } finally { opening.resolve(h.audio); await h.close(); }
+});
+
+test("replay speed: invalid replay draft has no live speed side effect and live playback locks the field", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); h.get("replay-speed").value = "invalid";
+    const live = await h.launch(); assert.equal(Object.hasOwn(live.start, "replaySpeed"), false);
+    assert.equal(h.get("replay-speed").disabled, true);
+    h.click("stop"); await flush(); await h.receive(finalScore(live.id));
+    assert.equal(h.get("replay-speed").disabled, false);
+  } finally { await h.close(); }
+});
 function selectedControllerProfile(size = 128) {
   const file = new File(["{\"version\":1}"], "controller-profile.json");
   Object.defineProperty(file, "size", { value: size });
@@ -401,7 +510,7 @@ async function harness(faults = {}) {
   }
   for (const id of ["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek",
     "title", "details", "status", "viewport", "play", "stop", "record", "export", "keys", "canvas", "prepare-form", "seek-form",
-    "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete",
+    "replay-file", "replay-play", "replay-name", "replay-speed", "records", "records-refresh", "records-save", "records-use", "records-delete",
     "multiplayer", "multiplayer-mode", "multiplayer-url", "multiplayer-role", "multiplayer-status",
     "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page",
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
@@ -418,6 +527,8 @@ async function harness(faults = {}) {
   elements.get("folder").webkitdirectory = true;
   elements.get("rate").value = "44100";
   elements.get("seed").value = "7";
+  // Match the production HTML default; the new field is not an empty draft.
+  elements.get("replay-speed").value = "1/1";
   elements.get("multiplayer-role").value = "join";
   elements.get("multiplayer-mode").value = "peer";
   elements.get("opponents-kind").value = "own";

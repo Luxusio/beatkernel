@@ -60,18 +60,53 @@ export function sectionFromSeconds(startValue, endValue) {
   return Object.freeze({ startNs, endNs });
 }
 
-export function replayOutputFromMetadata(startNs, endNs, endFrame, rate) {
+export function replaySpeedFromFraction(value = "1/1") {
+  if (typeof value !== "string" || value.length > 40) throw new Error("Replay speed requires NUM/DEN with at most 40 characters.");
+  const match = /^([0-9]+)\/([0-9]+)$/.exec(value);
+  if (!match || match[0] !== value) throw new Error("Replay speed requires positive ASCII integer NUM/DEN without spaces or signs.");
+  let numerator = BigInt(match[1]);
+  let denominator = BigInt(match[2]);
+  if (numerator < 1n || numerator > I64_MAX || denominator < 1n || denominator > U64_MAX) {
+    throw new Error("Replay speed numerator must fit positive signed 64-bit and denominator positive unsigned 64-bit integers.");
+  }
+  let a = numerator;
+  let b = denominator;
+  while (b !== 0n) [a, b] = [b, a % b];
+  numerator /= a;
+  denominator /= a;
+  return Object.freeze({ numerator, denominator, fraction: `${numerator}/${denominator}` });
+}
+
+function replaySpeedSnapshot(speed) {
+  if (speed === undefined) return replaySpeedFromFraction();
+  if (!speed || typeof speed !== "object" || Array.isArray(speed)
+    || Reflect.ownKeys(speed).length !== 3
+    || Reflect.ownKeys(speed).some(key => !["numerator", "denominator", "fraction"].includes(key))) {
+    throw new Error("Replay output requires an exact replay speed snapshot.");
+  }
+  const normalized = replaySpeedFromFraction(speed.fraction);
+  if (speed.numerator !== normalized.numerator || speed.denominator !== normalized.denominator
+    || speed.fraction !== normalized.fraction) throw new Error("Replay output speed must match its normalized fraction.");
+  return normalized;
+}
+
+export function replayOutputFromMetadata(startNs, endNs, endFrame, rate, speed = undefined, preroll = 100000000n) {
   if (typeof startNs !== "bigint") throw new Error("Replay output requires its actual original-song start.");
   validateStart(startNs);
   if (!Number.isInteger(rate) || rate < 1 || rate > 0xffffffff) throw new Error("Replay output requires a positive unsigned 32-bit sample rate.");
+  const selectedSpeed = replaySpeedSnapshot(speed);
+  if (typeof preroll !== "bigint" || preroll < 0n || preroll > I64_MAX) throw new Error("Replay output preroll must be nonnegative signed 64-bit nanoseconds.");
   if (endNs === undefined && endFrame === undefined) return Object.freeze({ endNs: undefined, endFrame: undefined });
   if (typeof endNs !== "bigint" || endNs <= startNs || endNs > I64_MAX
-    || typeof endFrame !== "bigint" || endFrame <= 0n || endFrame > U64_MAX) {
+    || typeof endFrame !== "bigint" || endFrame < 0n || endFrame > U64_MAX) {
     throw new Error("Finite replay requires paired original-song end and output-frame metadata.");
   }
   const sampleRate = BigInt(rate);
-  const expected = ((endNs - startNs + 100000000n) * sampleRate + 999999999n) / 1000000000n;
-  if (endFrame !== expected || (endFrame * 1000000000n + sampleRate - 1n) / sampleRate > I64_MAX) {
+  // Match the planner's whole-nanosecond inverse mapping before frame rounding.
+  const outputNanos = preroll + (endNs - startNs) * selectedSpeed.denominator / selectedSpeed.numerator;
+  const expected = (outputNanos * sampleRate + 999999999n) / 1000000000n;
+  if (outputNanos > I64_MAX || endFrame !== expected
+    || (endFrame * 1000000000n + sampleRate - 1n) / sampleRate > I64_MAX) {
     throw new Error("Finite replay endpoint differs from its output grid or exceeds signed nanoseconds.");
   }
   return Object.freeze({ endNs, endFrame });

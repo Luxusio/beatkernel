@@ -228,6 +228,7 @@ async function workerHarness(options = {}) {
   const views = [];
   const games = [];
   const replays = [];
+  const replaySpeedConstructions = [];
   const sectionConstructions = [];
   const physicalConstructions = [];
   const contactConstructions = [];
@@ -942,6 +943,13 @@ async function workerHarness(options = {}) {
   if (options.missingLocalPeerDisable) BrowserLocalGame.prototype.disable_peer_hud = undefined;
   if (options.missingRoomHudMethod) BrowserLocalGame.prototype[options.missingRoomHudMethod] = undefined;
   class BrowserReplay extends BrowserGame {
+    static new_with_speed(prepared, preroll, fraction) {
+      replaySpeedConstructions.push({ prepared, preroll, fraction });
+      const owner = new BrowserReplay(prepared, preroll);
+      const [numerator, denominator] = fraction.split("/").map(BigInt);
+      owner.selectedSpeed = { numerator, denominator };
+      return owner;
+    }
     constructor(prepared, ...args) {
       super(prepared, ...args);
       assert.equal(games.pop(), this);
@@ -951,6 +959,14 @@ async function workerHarness(options = {}) {
     get end_ns() {
       this.live(); this.endpointReads.end++;
       return options.replayEndGetter ? options.replayEndGetter(this) : options.replayEnd;
+    }
+    get speed_numerator() {
+      this.live();
+      return Object.hasOwn(options, "replaySpeedNumerator") ? options.replaySpeedNumerator : this.selectedSpeed?.numerator ?? 1n;
+    }
+    get speed_denominator() {
+      this.live();
+      return Object.hasOwn(options, "replaySpeedDenominator") ? options.replaySpeedDenominator : this.selectedSpeed?.denominator ?? 1n;
     }
     get playback_end_frame() {
       this.live(); this.endpointReads.frame++;
@@ -971,6 +987,9 @@ async function workerHarness(options = {}) {
     take_replay() { assert.fail("replay playback must not re-export its input bytes"); }
     competition_identity() { assert.fail("replay playback must stay local"); }
   }
+  if (options.missingReplaySpeedConstructor) BrowserReplay.new_with_speed = undefined;
+  if (options.missingReplaySpeedNumerator) delete BrowserReplay.prototype.speed_numerator;
+  if (options.missingReplaySpeedDenominator) delete BrowserReplay.prototype.speed_denominator;
   class BrowserMultiplayer {
     static new_group(identity, players, host, preroll) {
       assert.ok(players instanceof Uint32Array);
@@ -1292,7 +1311,7 @@ async function workerHarness(options = {}) {
       await new Promise(resolve => setImmediate(resolve));
       deliver(); await flushMicrotasks();
     },
-    completedOwners, renderPort, visualExports, visualAcks, messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
+    completedOwners, renderPort, visualExports, visualAcks, messages, transfers, libraries, preparedOwners, views, games, replays, replaySpeedConstructions, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
     roomSessions, roomChannels, roomWrappers, roomResults,
     // Existing cadence fixtures specify elapsed control time from their initial
     // 1000ms reading; a future scheduled activation first waits for that target.
@@ -6316,6 +6335,129 @@ test("Rust replay refusal and invalid completion never publish successful replay
     assert.equal(h.of("play-render-done").length, 0);
     assertReleased(h);
   }
+});
+
+test("replay speed normalizes the consuming WASM call and finite output grid at all four selected rates", async () => {
+  const startNs = 604800000000001n, endNs = startNs + 1500000000n;
+  for (const [input, fraction, numerator, denominator, endFrame] of [
+    ["02/04", "1/2", 1n, 2n, 148800n],
+    ["2/2", "1/1", 1n, 1n, 76800n],
+    ["4/2", "2/1", 2n, 1n, 40800n],
+    ["6/4", "3/2", 3n, 2n, 52800n],
+  ]) {
+    const selected = replayFile();
+    const h = await started({ replayStart: startNs, replayEnd: endNs, replayEndFrame: endFrame,
+      startRequest: replayRequest(selected.file, { replaySpeed: input }) });
+    const result = h.of("play-reply")[0].result;
+    assert.equal(result.replaySpeed, fraction);
+    assert.equal(result.replaySpeedNumerator, numerator);
+    assert.equal(result.replaySpeedDenominator, denominator);
+    assert.equal(result.startNs, startNs); assert.equal(result.endNs, endNs); assert.equal(result.endFrame, endFrame);
+    assert.equal(h.replaySpeedConstructions.length, 1);
+    assert.equal(h.replaySpeedConstructions[0].fraction, fraction);
+    assert.equal(h.replaySpeedConstructions[0].preroll, 100000000n);
+    assert.deepEqual(h.libraries[0].replayPreparations[0].bytes, selected.bytes);
+    assert.equal(selected.reads, 1); assert.equal(h.games.length, 0);
+    await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+  }
+});
+
+test("replay speed refuses malformed fractions and nonnormal live requests before replay reads and preparation", async () => {
+  for (const replaySpeed of [null, "", "0/1", "1/0", "-1/2", "+1/2", "1.5/1", "1/2/3", "１/2",
+    "9223372036854775808/1", "1/18446744073709551616", "0".repeat(40) + "1/1", 2, { fraction: "2/1" }]) {
+    const h = await catalogWorker(), selected = replayFile();
+    const before = h.preparationJobs.length;
+    await h.send(replayRequest(selected.file, { replaySpeed }));
+    assert.equal(selected.reads, 0); assert.equal(h.preparationJobs.length, before);
+    assert.equal(h.libraries[0].replayPreparations.length, 0); assert.equal(h.replays.length, 0);
+    assert.equal(h.of("play-error").length, 1);
+  }
+  const h = await catalogWorker();
+  const before = h.preparationJobs.length;
+  await h.send(startRequest({ replaySpeed: "2/1" }));
+  assert.equal(h.preparationJobs.length, before); assert.equal(h.games.length, 0);
+  assert.equal(h.of("play-error").length, 1);
+});
+
+test("unsupported nonnormal replay speed never silently invokes the legacy normal constructor", async () => {
+  const h = await catalogWorker({ missingReplaySpeedConstructor: true }), selected = replayFile();
+  const before = h.preparationJobs.length;
+  await h.send(replayRequest(selected.file, { replaySpeed: "3/2" }));
+  assert.equal(selected.reads, 0); assert.equal(h.preparationJobs.length, before);
+  assert.equal(h.replays.length, 0); assert.equal(h.replaySpeedConstructions.length, 0);
+  assert.equal(h.of("play-error").length, 1);
+});
+
+test("only normalized normal replay retains legacy constructor and absent speed getter compatibility", async () => {
+  for (const replaySpeed of [undefined, "2/2"]) {
+    const h = await started({ missingReplaySpeedConstructor: true, missingReplaySpeedNumerator: true,
+      missingReplaySpeedDenominator: true, startRequest: replayRequest(replayFile().file, { replaySpeed }) });
+    const result = h.of("play-reply")[0].result;
+    assert.equal(result.replaySpeed, "1/1"); assert.equal(result.replaySpeedNumerator, 1n);
+    assert.equal(result.replaySpeedDenominator, 1n); assert.equal(h.replaySpeedConstructions.length, 0);
+    assert.deepEqual(h.replays[0].args, [100000000n]);
+    await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+  }
+});
+
+test("replay actual speed identity rejects missing partial numeric and mismatched owners before sample export", async () => {
+  for (const options of [
+    { missingReplaySpeedNumerator: true, missingReplaySpeedDenominator: true },
+    { missingReplaySpeedNumerator: true }, { missingReplaySpeedDenominator: true },
+    { replaySpeedNumerator: 2 }, { replaySpeedDenominator: 1 },
+    { replaySpeedNumerator: 1n }, { replaySpeedDenominator: 2n },
+  ]) {
+    const h = await catalogWorker(options);
+    await h.send(replayRequest(replayFile().file, { replaySpeed: "2/1" }));
+    assert.equal(h.replays.length, 1); assert.equal(h.of("play-error").length, 1);
+    assert.equal(h.of("play-reply").filter(reply => reply.result?.kind === "prepared").length, 0);
+    assert.equal(h.replays[0].calls.filter(row => ["sample", "commands", "output"].includes(row[0])).length, 0);
+    assertReleased(h);
+  }
+});
+
+test("replay finite grid refuses a normal-speed fence for a nonnormal owner and accepts a quantized zero fence", async () => {
+  const wrong = await catalogWorker({ replayStart: 0n, replayEnd: 1500000000n, replayEndFrame: 76800n });
+  await wrong.send(replayRequest(replayFile().file, { replaySpeed: "2/1" }));
+  assert.equal(wrong.of("play-error").length, 1); assertReleased(wrong);
+  const zero = await started({ replayStart: 0n, replayEnd: 1n, replayEndFrame: 4800n,
+    startRequest: replayRequest(replayFile().file, { replaySpeed: "2/1" }) });
+  assert.equal(zero.of("play-reply")[0].result.endFrame, 4800n);
+  await zero.send({ kind: "play-stop", playId: 7 }); assertReleased(zero);
+});
+
+test("replay speed is snapshotted before a held read and a cancelled speed request cannot affect the next live owner", async () => {
+  const gate = deferred(), selected = replayFile(() => gate.promise), h = await catalogWorker();
+  const request = replayRequest(selected.file, { replaySpeed: "6/4" });
+  await h.send(request); assert.equal(selected.reads, 1);
+  request.replaySpeed = "1/2"; gate.resolve(selected.bytes.slice().buffer); await flushJobs();
+  assert.equal(h.replaySpeedConstructions[0].fraction, "3/2");
+  assert.equal(h.of("play-reply")[0].result.replaySpeed, "3/2");
+  await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+  const lateGate = deferred(), late = replayFile(() => lateGate.promise), next = await catalogWorker();
+  await next.send(replayRequest(late.file, { replaySpeed: "2/1" }));
+  await next.send({ kind: "play-stop", playId: 7 });
+  await next.send(startRequest({ playId: 8 }));
+  lateGate.resolve(late.bytes.slice().buffer); await flushJobs();
+  assert.equal(next.replays.length, 0); assert.equal(next.replaySpeedConstructions.length, 0);
+  assert.equal(next.games.length, 1); assert.equal(next.games[0].frees, 0);
+  await next.send({ kind: "play-stop", playId: 8 }); assertReleased(next);
+});
+
+test("replay speed forwards original SetRate control credits and ignores stale command ACK generations", async () => {
+  const original = { sequence: 101n, commands: [
+    { kind: 2, voice: 0n, sample: 0n, at: 0n, gain: 0, value: 3n, denominator: 2n }, command(9n),
+  ] };
+  const h = await started({ batches: [original, null], startRequest: replayRequest(replayFile().file, { replaySpeed: "3/2" }) });
+  const port = commandPort(), rpc = await attachCommands(h, port);
+  assert.equal(port.posts.length, 1); assert.deepEqual(port.posts[0].commands, original.commands);
+  await port.acknowledge({ generation: 8 });
+  assert.equal(h.replays[0].calls.filter(row => row[0] === "ack").length, 0);
+  assert.equal(h.of("play-reply").some(reply => reply.rpcId === rpc), false);
+  await port.acknowledge();
+  assert.deepEqual(h.replays[0].calls.filter(row => row[0] === "ack").at(-1), ["ack", 101n, 2, true]);
+  assert.equal(h.of("play-reply").find(reply => reply.rpcId === rpc).result.kind, "audio-ready");
+  await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
 });
 
 test("replay reads once through canonical preparation and shares original PCM, ACK and output owners without live calls", async () => {

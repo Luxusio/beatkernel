@@ -8,12 +8,114 @@ import {
   parseTimingMilliseconds, timingFromMilliseconds, validateTiming,
   BMS_TIMING_PRESET_ID, timingPolicyFromFields, validateTimingPolicy,
   ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, startFromSeconds, validateStart, validateEnd, sectionFromSeconds,
-  audioOutputFromFields, audioLimitsFromFields, replayOutputFromMetadata,
+  audioOutputFromFields, audioLimitsFromFields, replayOutputFromMetadata, replaySpeedFromFraction,
   presentationAvailability, presentationOutputAvailability, audioClockExpired,
 } from "./play-model.mjs";
 
 const U64_MAX = 18446744073709551615n;
 const I64_MAX = 9223372036854775807n;
+
+test("replay speed fractions normalize exact positive components into frozen session snapshots", () => {
+  for (const [text, numerator, denominator, fraction] of [
+    ["1/2", 1n, 2n, "1/2"], ["1/1", 1n, 1n, "1/1"],
+    ["2/1", 2n, 1n, "2/1"], ["3/2", 3n, 2n, "3/2"],
+    ["00006/00004", 3n, 2n, "3/2"], ["9223372036854775807/9223372036854775807", 1n, 1n, "1/1"],
+    ["9223372036854775807/18446744073709551615", I64_MAX, U64_MAX,
+      "9223372036854775807/18446744073709551615"],
+    ["9007199254740993/1", 9007199254740993n, 1n, "9007199254740993/1"],
+    ["1/18446744073709551615", 1n, U64_MAX, "1/18446744073709551615"],
+  ]) {
+    const speed = replaySpeedFromFraction(text);
+    assert.deepEqual(speed, { numerator, denominator, fraction }, text);
+    assert.ok(Object.isFrozen(speed));
+    assert.throws(() => { speed.numerator = 99n; }, TypeError);
+    assert.equal(speed.numerator, numerator);
+  }
+  assert.deepEqual(replaySpeedFromFraction(), { numerator: 1n, denominator: 1n, fraction: "1/1" });
+  assert.notEqual(replaySpeedFromFraction(), replaySpeedFromFraction(), "each session owns a fresh snapshot");
+  assert.equal(replaySpeedFromFraction("0".repeat(37) + "1/1").fraction, "1/1", "40-character input remains admitted");
+});
+
+test("replay speed refuses malformed, non-string, oversized and out-of-range input before normalization", () => {
+  for (const value of [null, false, 1, 1n, {}, [], new String("1/1"), "", "1", "/1", "1/",
+    "1/1/1", "1//1", "1/1,2/1", "0/1", "1/0", "00/01", "01/00",
+    "-1/1", "1/-1", "+1/1", "1/+1", "1.0/1", "1/1.0", "1e0/1", "0x1/1",
+    " 1/1", "1/1 ", "1 /1", "1/ 1", "1/1\n", "1/1\r", "1/1\u0000",
+    "１/1", "1/２", "١/1", "1／1", "9223372036854775808/1", "1/18446744073709551616",
+    "18446744073709551614/2", "2/36893488147419103230", "0".repeat(38) + "1/1"]) {
+    assert.throws(() => replaySpeedFromFraction(value), String(value));
+  }
+});
+
+test("replay finite metadata matches literal output fences at half, normal, double and three-halves speed", () => {
+  // A three-second original section and 100 ms output preroll at 10 Hz.
+  for (const [fraction, frame] of [["1/2", 61n], ["1/1", 31n], ["2/1", 16n], ["3/2", 21n]]) {
+    const speed = replaySpeedFromFraction(fraction);
+    const endpoint = replayOutputFromMetadata(5000000000n, 8000000000n, frame, 10, speed);
+    assert.deepEqual(endpoint, { endNs: 8000000000n, endFrame: frame }, fraction);
+    assert.ok(Object.isFrozen(endpoint));
+    for (const wrong of [frame - 1n, frame + 1n]) {
+      assert.throws(() => replayOutputFromMetadata(5000000000n, 8000000000n, wrong, 10, speed), fraction);
+    }
+  }
+  assert.deepEqual(replayOutputFromMetadata(0n, 3000000000n, 31n, 10),
+    replayOutputFromMetadata(0n, 3000000000n, 31n, 10, replaySpeedFromFraction("1/1")));
+  assert.throws(() => replayOutputFromMetadata(0n, 3000000000n, 16n, 10), "an absent speed keeps the existing 1x fence");
+});
+
+test("explicit output preroll is added after inverse speed and fractional nanoseconds truncate before frame ceiling", () => {
+  for (const [fraction, frame] of [["1/2", 25n], ["1/1", 16n], ["2/1", 11n], ["3/2", 13n]]) {
+    assert.deepEqual(replayOutputFromMetadata(100n, 109n, frame, 1000000000,
+      replaySpeedFromFraction(fraction), 7n), { endNs: 109n, endFrame: frame }, fraction);
+  }
+  const doubled = replaySpeedFromFraction("2/1");
+  assert.deepEqual(replayOutputFromMetadata(0n, 1n, 0n, 48000, doubled, 0n), { endNs: 1n, endFrame: 0n });
+  assert.throws(() => replayOutputFromMetadata(0n, 1n, 1n, 48000, doubled, 0n), "zero quantization is not clamped to one frame");
+  assert.throws(() => replayOutputFromMetadata(0n, 1n, 0n, 48000, doubled), "default output preroll forbids this zero fence");
+  assert.throws(() => replayOutputFromMetadata(0n, 1n, 0n, 48000, undefined, 0n), "normal speed retains one original nanosecond");
+  assert.deepEqual(replayOutputFromMetadata(0n, 3n, 1n, 1000000000, doubled, 0n), { endNs: 3n, endFrame: 1n });
+  assert.throws(() => replayOutputFromMetadata(0n, 3n, 2n, 1000000000, doubled, 0n), "ceil of inverse nanoseconds is incorrect");
+  assert.equal(replayOutputFromMetadata(0n, 666666667n, 1n, 3, doubled, 0n).endFrame, 1n);
+  assert.equal(replayOutputFromMetadata(0n, 666666668n, 2n, 3, doubled, 0n).endFrame, 2n);
+  assert.throws(() => replayOutputFromMetadata(0n, 666666668n, 1n, 3, doubled, 0n), "one inverse nanosecond crosses the 3 Hz ceiling");
+});
+
+test("maximal exact rate components and original-song starts avoid Number precision and signed output overflow", () => {
+  const almostHalf = replaySpeedFromFraction("9223372036854775807/18446744073709551615");
+  assert.deepEqual(replayOutputFromMetadata(0n, 1n, 2n, 1000000000, almostHalf, 0n), { endNs: 1n, endFrame: 2n });
+  const fastest = replaySpeedFromFraction("9223372036854775807/1");
+  assert.equal(replayOutputFromMetadata(0n, 1n, 0n, 1000000000, fastest, 0n).endFrame, 0n);
+  assert.equal(replayOutputFromMetadata(I64_MAX - 3n, I64_MAX, 1n, 1000000000,
+    replaySpeedFromFraction("2/1"), 0n).endFrame, 1n, "original start is not an output timestamp");
+  const half = replaySpeedFromFraction("1/2");
+  assert.equal(replayOutputFromMetadata(0n, 4611686018427387903n, 9223372036854775806n,
+    1000000000, half, 0n).endFrame, 9223372036854775806n);
+  assert.throws(() => replayOutputFromMetadata(0n, 4611686018427387904n, 9223372036854775808n,
+    1000000000, half, 0n), "u64 frames cannot authorize out-of-range signed output time");
+  assert.equal(replayOutputFromMetadata(0n, I64_MAX, I64_MAX, 1000000000, undefined, 0n).endFrame, I64_MAX);
+  assert.throws(() => replayOutputFromMetadata(0n, I64_MAX, I64_MAX + 1n, 1000000000, undefined, 1n), "explicit preroll overflows");
+  assert.equal(replayOutputFromMetadata(0n, 9223372036000000000n, 9223372036n, 1, undefined, 0n).endFrame, 9223372036n);
+  assert.throws(() => replayOutputFromMetadata(0n, 9223372036000000001n, 9223372037n, 1, undefined, 0n),
+    "frame rounding can exceed signed presentation bounds even when inverse nanoseconds fit");
+});
+
+test("replay metadata validates speed snapshots and preroll even for unlimited sections", () => {
+  const normal = replaySpeedFromFraction("1/1");
+  for (const speed of [null, "1/1", 1, [], {}, { ...normal, numerator: 0n }, { ...normal, denominator: 0n },
+    { ...normal, numerator: 1 }, { ...normal, denominator: "1" }, { ...normal, numerator: I64_MAX + 1n },
+    { ...normal, denominator: U64_MAX + 1n }, { ...normal, fraction: "2/1" },
+    { numerator: 2n, denominator: 2n, fraction: "2/2" }, { ...normal, extra: true }]) {
+    assert.throws(() => replayOutputFromMetadata(0n, undefined, undefined, 48000, speed), "unlimited malformed speed");
+    assert.throws(() => replayOutputFromMetadata(0n, 1n, 4801n, 48000, speed), "finite malformed speed");
+  }
+  for (const preroll of [null, 0, "0", false, -1n, I64_MAX + 1n]) {
+    assert.throws(() => replayOutputFromMetadata(0n, undefined, undefined, 48000, normal, preroll));
+    assert.throws(() => replayOutputFromMetadata(0n, 1n, 1n, 1000000000, normal, preroll));
+  }
+  const unlimited = replayOutputFromMetadata(0n, undefined, undefined, 48000, replaySpeedFromFraction("3/2"), 0n);
+  assert.deepEqual(unlimited, { endNs: undefined, endFrame: undefined });
+  assert.ok(Object.isFrozen(unlimited));
+});
 
 test("explicit numerical selection snapshots immutable strings and absent selection retains legacy admission", () => {
   assert.equal(validateTimingPolicy(), null);

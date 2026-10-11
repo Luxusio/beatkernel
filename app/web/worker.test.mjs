@@ -913,6 +913,41 @@ test("actual replay preparation validates a genuine captured SectionSetup and us
   await h.send({ kind: "play-stop", playId: 1, rpcId: 2 }); await h.send({ kind: "dispose" });
 });
 
+test("actual Worker replay speed uses fresh WASM owners for each rate without changing captured replay bytes", async () => {
+  const capture = await realPreparationWorker(), runtime = capture.runtime;
+  const owner = new runtime.BrowserLibrary(8, 1024 * 1024, 2 * 1024 * 1024, 64);
+  owner.add_file("chart.bms", new TextEncoder().encode(REAL_PREPARATION_CHART)); owner.add_file("key.wav", preparationWave());
+  let bytes;
+  try {
+    const prepared = owner.prepare_chart("chart.bms", 24000, 2, 3n, 1024, 4096, 8);
+    const game = runtime.BrowserGame.new_physical(prepared, 0n, 100000000n, 50000000n, 50000000n, 0n,
+      keyboardBindingWords(new Uint32Array([0x11, 4])), undefined, 4096, 1024);
+    try { game.configure_capture(1024 * 1024, 1024); game.stop(); bytes = game.take_replay(); }
+    finally { game.free(); }
+  } finally { owner.free(); }
+  assert(bytes.byteLength > 0);
+  const original = bytes.slice();
+  await capture.send({ kind: "dispose" });
+  for (const [fraction, numerator, denominator] of [["1/2", 1n, 2n], ["1/1", 1n, 1n], ["2/1", 2n, 1n], ["6/4", 3n, 2n]]) {
+    const h = await realPreparationWorker(); await admitPreparationFiles(h);
+    const file = new FileType([bytes], "actual-speed.bkr");
+    await h.send({ kind: "play-start", mode: "replay", playId: 1, rpcId: 1, libraryId: 1, path: "chart.bms", rate: 24000,
+      replaySpeed: fraction, replayFile: file, windowOriginNs: 0n });
+    await h.settle(() => h.of("play-reply").length > 0 || h.of("play-error").length > 0);
+    assert.deepEqual(h.of("play-error"), []);
+    const metadata = h.of("play-reply").at(-1).result;
+    assert.equal(metadata.kind, "prepared"); assert.equal(metadata.replaySpeed, `${numerator}/${denominator}`);
+    assert.equal(metadata.replaySpeedNumerator, numerator); assert.equal(metadata.replaySpeedDenominator, denominator);
+    assert.equal(h.jobs[0].method, "begin_prepare_replay_chart"); assert.equal(h.jobs[0].frees, 1);
+    assert.deepEqual(bytes, original); assert.deepEqual(new Uint8Array(await file.arrayBuffer()), original);
+    await h.send({ kind: "play-sample", playId: 1, rpcId: 2 });
+    const sample = h.of("play-reply").at(-1).result;
+    assert.equal(sample.kind, "sample"); assert.equal(sample.rate, 24000);
+    assert(sample.pcm instanceof Float32Array); assert(sample.pcm.length > 0);
+    await h.send({ kind: "play-stop", playId: 1, rpcId: 3 }); await h.send({ kind: "dispose" });
+  }
+});
+
 test("actual play start and Stop fence the prior preview and pending play jobs before late hydration", async () => {
   const h = await realPreparationWorker(), held = deferred(); let readStarted = false;
   await admitPreparationFiles(h, [], () => { readStarted = true; return held.promise; });

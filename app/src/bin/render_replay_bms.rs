@@ -7,8 +7,8 @@ use beatkernel::{
     transport::Rate,
 };
 use beatkernel_bms_runtime::{
-    ChannelPolicy, load_prepared_for_replay, offline::OfflineOptions, replay_playback::read_replay,
-    replay_render::render_replay_with_rate,
+    load_prepared_for_replay, offline::OfflineOptions, replay_playback::read_replay,
+    replay_render::render_replay_with_rate, replay_speed::ReplaySpeed, ChannelPolicy,
 };
 use std::{collections::HashSet, error::Error, fs::File, io::Write, path::PathBuf};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -33,21 +33,7 @@ fn positive_usize(value: &str) -> Result<usize> {
     Ok(count)
 }
 fn positive_playback_rate(value: &str) -> Result<Rate> {
-    let (numerator, denominator) = value
-        .split_once('/')
-        .ok_or("speed must be NUM/DEN with positive unsigned ASCII decimal components")?;
-    if [numerator, denominator]
-        .into_iter()
-        .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
-    {
-        return Err("speed must be NUM/DEN with positive unsigned ASCII decimal components".into());
-    }
-    let numerator: i64 = numerator.parse()?;
-    let denominator: u64 = denominator.parse()?;
-    if numerator == 0 || denominator == 0 {
-        return Err("speed numerator and denominator must be positive".into());
-    }
-    Ok(Rate::new(numerator, denominator)?)
+    Ok(value.parse::<ReplaySpeed>()?.rate())
 }
 fn parse(args: &[String]) -> Result<Options> {
     let (mut chart, mut replay, mut output) = (None, None, None);
