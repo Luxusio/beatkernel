@@ -526,6 +526,24 @@ fn execute(options: Options, fault: Option<Fault>) -> NativeGameplayResult<Evide
     let end_frame = options.hours as u64 * HOUR;
     let end_song = Timestamp::from_nanos(end_frame as i64 * MS);
     let compiled = chart.compile()?;
+    if compiled.bgm.len() != options.hours {
+        return Err("compiled BGM cue count differs from the pinned hourly source".into());
+    }
+    let mut bgm_commands = Vec::with_capacity(compiled.bgm.len());
+    for (hour, cue) in compiled.bgm.iter().enumerate() {
+        let expected_at = Timestamp::from_nanos((hour as i64 * HOUR as i64 + 1_800_000) * MS);
+        if cue.sample != SampleId(2) || cue.at != expected_at {
+            return Err(
+                "compiled BGM sample, order or timing differs from the pinned hourly source".into(),
+            );
+        }
+        bgm_commands.push(AudioCommand::Play {
+            voice: VoiceId(1000 + hour as u64),
+            sample: cue.sample,
+            at: cue.at,
+            gain: 1.0,
+        });
+    }
     let judge = JudgeEngine::new(compiled.chart, chart.rules(), policy.judge().clone())?;
     let capture = LiveReplayCapture::new_with_policy(
         &judge,
@@ -580,7 +598,6 @@ fn execute(options: Options, fault: Option<Fault>) -> NativeGameplayResult<Evide
     let shared = Rc::new(RefCell::new(Shared::default()));
     let mut expected = Vec::new();
     let mut edges = Vec::new();
-    let mut bgm_commands = Vec::new();
     for hour in 0..options.hours {
         let start = hour as u64 * HOUR;
         let head = start + 900_000;
@@ -592,12 +609,6 @@ fn execute(options: Options, fault: Option<Fault>) -> NativeGameplayResult<Evide
         }
         let bgm_at = start + 1_800_000;
         expected.push((bgm_at, 0.125));
-        bgm_commands.push(AudioCommand::Play {
-            voice: VoiceId(1000 + hour as u64),
-            sample: SampleId(2),
-            at: Timestamp::from_nanos(bgm_at as i64 * MS),
-            gain: 1.0,
-        });
     }
     expected.sort_by_key(|event| event.0);
     let mut device = Device {

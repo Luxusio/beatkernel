@@ -5,8 +5,11 @@ The first compilation and two subsequent focused executions exposed adapter
 setup defects; the corrected focused suite now passes6/6. Optimized complete
 20h/week executions now pass. Independent security review passed; the first
 DEEP code review found one missing serialized replay decode boundary, now
-corrected and reverified. Fresh code review, QA and final document review remain
-pending; full player Goal and original WBS13.05 are unfinished.
+corrected and reverified. The second DEEP code review verified that actual BGM
+commands also need to consume compiled source cues; that correction is complete
+and reverified.
+Fresh code review, QA and final document review remain pending; full player Goal
+and original WBS13.05 are unfinished.
 
 The [contract](../kernel/REQ__long-duration-player-traversal.md) requires actual
 production audio-authoritative playback from song zero through every output
@@ -80,6 +83,25 @@ and completed all frames. `decoded-cli-results.json` and `decoded-*.stdout`/
 stderr retain those original executions. Both week outputs were byte-identical,
 and20h/week facts also matched the corresponding earlier outputs. No recording
 format, timestamp, expected PCM or test oracle changed.
+
+Discovery cycle2 returned no correctness candidates and one contract/test
+candidate. Formal review2 verified the remaining compiled BGM connection as a
+medium missing boundary: actual BGM commands and expected PCM were derived
+from the same hourly literals, leaving `compiled.bgm` unused by long playback.
+Actual commands must instead retain each original compiled cue's sample/time;
+the complete compiled schedule must match independent hourly expectations while
+the streaming PCM oracle stays separate. Review2 is FAIL. Discovery's two-cycle
+budget is exhausted; after correction a fresh formal full-scope reviewer will
+verify both remediations without further hunters.
+
+Actual BGM commands now use every compiled cue's original sample and timestamp;
+all hourly cue metadata is checked against separate literal expectations before
+playback. The independent test also pins `SampleId(2)` for each compiled cue.
+`fixed-bgm-test.log` passed6/6 in1.58s; `fixed-bgm-build.log` completed in12.93s.
+Actual20h/week/repeated-week executions passed and matched the earlier expected
+stdout byte for byte. Original outputs, exact argv and exits are retained as
+`compiled-bgm-*.stdout`/stderr and `compiled-bgm-cli-results.json`. Neither PCM
+expectations nor the original input/timing/hold-tail workload policy changed.
 
 ## Known ceiling
 

@@ -187,6 +187,7 @@ fn check_whole_player(hours: usize, block_frames: usize) -> workload::Report {
         );
     }
     for (hour, bgm) in compiled.bgm.iter().enumerate() {
+        assert_eq!(bgm.sample, beatkernel::audio::SampleId(2));
         assert_eq!(
             bgm.at,
             Timestamp::from_nanos((hour as i64 * 3600 + 1800) * 1_000_000_000)
