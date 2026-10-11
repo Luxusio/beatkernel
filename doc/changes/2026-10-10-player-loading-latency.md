@@ -839,6 +839,72 @@ unchanged. The earlier QA3 95/95 match refers to the pre-correction source.
 Current runtime equivalence therefore retains the prior actual browser GUI
 scope, without claiming that the changed fixture has its former hash.
 
+After full formal review and documentation review passed, the fixture change
+was committed as `aab0906`. Independent CLI QA4 then executed all nine Node
+suites: 454 tests passed, zero failed/cancelled/skipped/todo, command exit 0
+in 131.35s. Evidence:
+`target/wf/player-loading-latency/qa-cli-final-4/node-web.log` and
+`node-web.exit`. QA4 independently confirmed that only the JS fixture and
+documentation differ from the QA3 Rust source, and recomputed its 4,028 Rust
+passes, 39 ignores and sole Records filter. The real generated-WASM Worker
+suite is included in this Node run. Linux/Windows/macOS type checks remain
+separate pending stages; no full task completion is claimed yet.
+
+QA4 Linux all-target `cargo check` subsequently exited 0 after 13m14s,
+with `desktop,webtransport` enabled and default features disabled. Warnings
+are preserved in `qa-cli-final-4/linux-all-target.log`; they are not errors.
+This is type-check evidence, distinct from the actual Rust tests and GUI
+execution above. Windows/macOS checks and the final CLI verdict remain pending.
+
+QA4 Windows all-target xcheck then exited 0 after 7m02s, using the same
+`desktop,webtransport` configuration without default features. Its warnings
+remain in `qa-cli-final-4/windows-all-target.log`. This is foreign-platform
+type checking on the current host with C/C++ stubs; it does not establish
+Windows execution, physical output/input behavior or ASIO SDK-enabled build
+acceptance. macOS
+and final CLI acceptance remain pending.
+
+QA4 macOS all-target xcheck subsequently exited 0 after 13m23s. Warnings,
+including the `block 0.1.6` future-incompatibility notice, are retained in
+`qa-cli-final-4/macos-all-target.log`. This remains Rust type-check evidence
+with the existing foreign-check stubs, not macOS execution or native device
+acceptance. All three planned platform type checks have now passed.
+
+QA4's broad `cargo fmt --all -- --check` subsequently exited 1 with formatting
+diffs. This is a real failed check, not a passing final gate. The independent
+QA lens is comparing the reported hunks with the preserved `e421b59` source
+and the task diff to distinguish earlier formatting from regressions; the
+planned scoped formatting result and final CLI verdict remain pending.
+Separately executed `git diff --check` and `python3 tools/wbs_status.py` both
+exited 0. WBS remains 90/193 verified (46.63%), with no promotion from these
+type checks or test-fixture changes. The broad formatting log and exit status
+are retained in `qa-cli-final-4/format.log` and `format.exit`.
+
+The independent CLI QA4 final verdict was FAIL: actual archived/current
+formatter comparison found one task-owned module-ordering defect in
+`app/src/lib.rs`. All reported current formatting edits in the five other
+task-changed files matched exact baseline edits. The detailed classification
+is retained in `qa-cli-final-4/format-hunk-classification.json`. The preparation
+module declaration and its documentation were subsequently moved together
+to their sorted position; no module contents, attributes or public API changed.
+Fresh independent review and scoped post-fix verification are required before
+this correction can be accepted. Earlier full-repository formatting failure
+and the Records zero-viewport repair obligation remain open.
+The retained native/browser artifact hashes and platform check logs describe
+their pre-reorder source provenance. They are not rebuilt-artifact hashes for
+the reordered declaration. Exact byte comparison confirms that removing the
+single declaration/comment block makes the before/after library files
+identical (`module-order-equivalence.json`); whether that is sufficient to
+retain behavioral evidence is part of independent review and post-fix QA.
+
+The fresh full-scope independent formal review8 returned PASS with no findings
+at DEEP depth, discovery budget exhausted. It independently reproduced exact
+block-removal equivalence and found no textual macro-scope constructs or
+attributes that make this module declaration order significant. It accepted
+retention of prior behavioral/type-check/GUI evidence for this declaration-only
+move, preserving its actual pre-reorder artifact provenance. This review does
+not establish post-fix formatting PASS, receipt attestation or task closure.
+
 Known ceiling: native GUI QA2 uses the existing live `:99` current-display
 transport. Its attempted new Xvfb startup failed because the display listener
 already existed; no ownership of that server or server cleanup is claimed.

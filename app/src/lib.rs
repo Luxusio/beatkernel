@@ -11,8 +11,6 @@ pub mod browser_library_assets;
 #[cfg(test)]
 mod asset_source_fixtures;
 mod audio_assets;
-/// Owned cooperative chart preparation and bounded immutable original reuse.
-pub mod preparation;
 /// Shared finite audio-output authority and original acquired-input correspondence.
 pub mod audio_authority;
 /// Prepared original-song image selections shared by live and replay presentation.
@@ -446,6 +444,8 @@ pub mod practice_playback;
 pub mod practice_session;
 #[cfg(test)]
 mod gapless_practice_native_fixtures;
+/// Owned cooperative chart preparation and bounded immutable original reuse.
+pub mod preparation;
 /// Portable display configuration shared by CLI, graphical drafts and profiles.
 pub mod presentation_settings;
 #[cfg(test)]
