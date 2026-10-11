@@ -13,7 +13,7 @@ import { AudioSampleClient } from "./audio-sample-client.mjs";
 import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, gamepadSetupFromProfile, GamepadAdapter } from "./gamepad-profile.mjs";
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
 import { LocalRoster } from "./local-play-host.mjs";
-import { encodeBrowserSettings, decodeBrowserSettings, snapshotBrowserSettingsScalars } from "./settings-profile.mjs";
+import { encodeBrowserSettings, decodeBrowserSettings, settingsMenuFields, settingsMenuSnapshot } from "./settings-profile.mjs";
 import { snapshotPointerSetup } from "./pointer-profile.mjs";
 const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserHistoricalRecord } = runtime;
 let ready = null;
@@ -70,6 +70,59 @@ const NO_OPPONENTS = Object.freeze([]);
 
 function report(kind, fields = {}, transfer = []) { self.postMessage({ kind, ...fields }, transfer); }
 function message(error) { return String(error?.message ?? error).slice(0, 4096); }
+function menuToken() {
+  return { menuGeneration, screen: menuOwner.screen, revision: menuOwner.revision };
+}
+function sameMenuToken(left, right) {
+  return left != null && right != null
+    && unsignedIdentity(left.menuGeneration) && unsignedIdentity(left.screen) && unsignedIdentity(left.revision)
+    && left.menuGeneration === right.menuGeneration && left.screen === right.screen && left.revision === right.revision;
+}
+function currentSettingsOperation(operation) {
+  return settingsOperation === operation && !failed && !disposed
+    && (!operation.owner || menuVisible && menuOwner === operation.owner && sameMenuToken(operation.menuToken, menuToken()));
+}
+function finishSettingsPending(operation, error = null) {
+  const previousToken = operation.menuToken;
+  operation.owner.set_operation_status(previousToken.screen, previousToken.revision, false, error);
+  operation.menuToken = menuToken();
+  reportMenu({ settingsOperationId: operation.id, previousToken });
+  publishVisual();
+}
+function settingsProfileDecision(request) {
+  const operation = settingsOperation;
+  if (!operation || request.id !== operation.id || !operation.owner || !currentSettingsOperation(operation)) return;
+  if (request.kind === "settings-profile-cancel") {
+    if (operation.phase === "admitted" || operation.retired
+      || !sameMenuToken(request.menuToken, operation.menuToken) && !sameMenuToken(request.menuToken, operation.originalToken)) return;
+    operation.retired = true;
+    operation.candidate = null;
+    finishSettingsPending(operation);
+    // The single unabortable read keeps its capacity until its finally settles.
+    if (operation.phase !== "reading") settingsOperation = null;
+    return;
+  }
+  if (operation.phase !== "candidate" || operation.retired || !sameMenuToken(request.menuToken, operation.menuToken)) return;
+  const admittedToken = operation.menuToken;
+  operation.phase = "admitted";
+  try {
+    const fields = settingsMenuFields(operation.candidate);
+    operation.owner.replace_settings_fields(admittedToken.screen, admittedToken.revision, fields);
+    operation.menuToken = menuToken();
+    const settings = operation.candidate;
+    reportMenu({ settingsOperationId: operation.id, previousToken: admittedToken });
+    report("settings-profile-loaded", { id: operation.id, admittedToken, resultToken: operation.menuToken, settings });
+    publishVisual();
+  } catch (error) {
+    if (currentSettingsOperation(operation)) {
+      finishSettingsPending(operation, message(error));
+      report("settings-profile-error", { id: operation.id, resultToken: operation.menuToken, message: message(error) });
+    }
+  } finally {
+    operation.candidate = null;
+    if (settingsOperation === operation) settingsOperation = null;
+  }
+}
 async function settingsProfile(request) {
   const id = request.id;
   if (!identity(id)) {
@@ -82,8 +135,16 @@ async function settingsProfile(request) {
     report("settings-profile-error", { id, message: "Wait for an initialized idle Worker before processing settings." });
     return;
   }
-  let savedBytes = null;
+  let savedBytes = null, owner = null, originalToken = null;
   try {
+    if (request.menuToken != null) {
+      if (!menuVisible || !menuOwner || !menuOwner.has_settings_parent || !sameMenuToken(request.menuToken, menuToken()))
+        throw new Error("Settings processing requires the exact retained Settings owner.");
+      owner = menuOwner;
+      originalToken = menuToken();
+    } else if (menuVisible && menuOwner?.has_settings_parent) {
+      throw new Error("Retained Settings processing requires its current menu token.");
+    }
     if (request.kind === "settings-profile-save") savedBytes = encodeBrowserSettings(request.settings);
     else {
       if (typeof File !== "function" || !(request.file instanceof File)) throw new Error("Choose an actual settings file.");
@@ -91,24 +152,41 @@ async function settingsProfile(request) {
         throw new Error("Choose one nonempty settings file no larger than 16 KiB.");
     }
   } catch (error) { report("settings-profile-error", { id, message: message(error) }); return; }
-  const operation = { id };
+  const operation = { id, owner, originalToken, menuToken: originalToken, phase: "reading", retired: false, candidate: null };
   discardHistoricalCandidate();
   ++selectionEpoch;
   releasePreparation();
   settingsOperation = operation;
   try {
+    if (owner) {
+      owner.set_operation_status(originalToken.screen, originalToken.revision, true, undefined);
+      operation.menuToken = menuToken();
+      reportMenu({ settingsOperationId: id, previousToken: originalToken });
+      publishVisual();
+    }
     if (request.kind === "settings-profile-save") {
-      const bytes = savedBytes;
-      if (!failed && settingsOperation === operation) report("settings-profile-saved", { id, bytes }, [bytes.buffer]);
+      if (currentSettingsOperation(operation)) {
+        if (owner) finishSettingsPending(operation);
+        report("settings-profile-saved", { id, bytes: savedBytes, ...(owner ? { resultToken: operation.menuToken } : {}) }, [savedBytes.buffer]);
+      }
     } else {
       const settings = await decodeBrowserSettings(request.file);
-      if (!failed && settingsOperation === operation) report("settings-profile-loaded", { id, settings });
+      if (!operation.retired && currentSettingsOperation(operation)) {
+        if (owner) {
+          operation.candidate = settings;
+          operation.phase = "candidate";
+          report("settings-profile-candidate", { id, menuToken: operation.menuToken, settings });
+        } else report("settings-profile-loaded", { id, settings });
+      }
     }
   } catch (error) {
-    if (!failed && settingsOperation === operation) report("settings-profile-error", { id, message: message(error) });
+    if (!operation.retired && currentSettingsOperation(operation)) {
+      if (owner && owner.pending) finishSettingsPending(operation, message(error));
+      report("settings-profile-error", { id, ...(owner ? { resultToken: operation.menuToken } : {}), message: message(error) });
+    }
   } finally {
-    // An obsolete Window deadline never releases an unabortable File read.
-    if (settingsOperation === operation) settingsOperation = null;
+    // Candidate/admitted operations retain their bounded DTO; held reads join even after cancellation.
+    if (settingsOperation === operation && operation.phase !== "candidate" && operation.phase !== "admitted") settingsOperation = null;
   }
 }
 function completedResultsMetadata(results) {
@@ -424,6 +502,11 @@ function fatal(error) {
     return;
   }
   failed = true;
+  if (settingsOperation) {
+    settingsOperation.retired = true;
+    settingsOperation.candidate = null;
+    if (settingsOperation.phase !== "reading") settingsOperation = null;
+  }
   discardRoomResults();
   cancelRoomFinalization();
   fenceVisual();
@@ -607,7 +690,7 @@ function publishVisual() {
   })
     .finally(() => { if (visualPump === pump) { visualPump = null; if (pump.dirty) publishVisual(); } });
 }
-function reportMenu() {
+function reportMenu(receipt = {}) {
   if (visual?.mode === "menu") {
     for (const entry of [...visual.motionRequests, ...(visual.motionActive ? [visual.motionActive] : [])]) {
       try { validateMenuMotionTicket(visual, entry); }
@@ -617,6 +700,7 @@ function reportMenu() {
   if (!menuOwner || !menuVisible) return;
   report("menu-state", { menuGeneration, screen: menuOwner.screen, revision: menuOwner.revision,
     route: menuOwner.route, selected: menuOwner.selected, fields: menuOwner.fields(),
+    hasSettingsParent: menuOwner.has_settings_parent === true, pending: menuOwner.pending === true, ...receipt,
     ...(menuRoster ? { roster: menuRoster.exportState() } : {}), ...(menuOpponents ? { opponents: menuOpponents.snapshot() } : {}) });
 }
 function menuOpponentState() {
@@ -811,14 +895,9 @@ function handleMenu(request) {
           });
           lastMenuAction = request.actionId; reportMenu(); publishVisual(); return;
         }
+        if (route === 2 && [12n, 15n].includes(control)) throw new Error("This Settings control is unavailable in the browser.");
         if (route === 2 && control === 10n) {
-          const fields = menuOwner.fields();
-          if (fields.length !== 13) throw new Error("Browser settings draft has an invalid field count.");
-          snapshotBrowserSettingsScalars({
-            timing: { earlyMs: fields[0], lateMs: fields[1], offsetMs: fields[2] },
-            output: { latency: fields[3], latencyMs: fields[4], rate: fields[5] },
-            capacities: { queueCapacity: fields[6], maxVoices: fields[7], pendingCapacity: fields[8], maxFrames: fields[9], maxCommandsPerRender: fields[10] },
-            section: { startSeconds: fields[11], endSeconds: fields[12] } });
+          settingsMenuSnapshot(menuOwner.fields());
         }
         if (route === 7 && control === 40n) {
           const fields = menuOwner.fields();
@@ -3440,6 +3519,7 @@ self.addEventListener("message", event => {
     retireLibrary(stagedLibrary); stagedLibrary = null;
     retireLibrary(libraryContext); libraryContext = null;
     ++importGeneration; pendingImport = null;
+    if (settingsOperation) { settingsOperation.retired = true; settingsOperation.candidate = null; }
     settingsOperation = null;
     report("disposed");
     return;
@@ -3473,6 +3553,9 @@ self.addEventListener("message", event => {
   if (request.kind === "historical-record-accept") { acceptHistoricalRecord(request); return; }
   if (request.kind === "select-cancel") { cancelSelection(request); return; }
   if (request.kind === "historical-record-present") { void presentHistoricalRecord(request); return; }
+  if (request.kind === "settings-profile-admit" || request.kind === "settings-profile-cancel") {
+    settingsProfileDecision(request); return;
+  }
   if (request.kind === "settings-profile-save" || request.kind === "settings-profile-load") {
     void settingsProfile(request).catch(() => { /* An unavailable response port leaves Window's bounded deadline authoritative. */ });
     return;

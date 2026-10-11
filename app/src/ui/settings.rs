@@ -316,6 +316,7 @@ pub struct SettingsView {
     message: RwSignal<Option<String>>,
     error: RwSignal<Option<String>>,
     pending: RwSignal<bool>,
+    native_controls_enabled: RwSignal<bool>,
     hovered: RwSignal<Option<ControlId>>,
     armed: RwSignal<Option<ControlId>>,
     nodes: RetainedNodes,
@@ -356,6 +357,7 @@ impl SettingsView {
             message: scope.create_rw_signal(None),
             error: scope.create_rw_signal(None),
             pending: scope.create_rw_signal(false),
+            native_controls_enabled: scope.create_rw_signal(true),
             hovered: scope.create_rw_signal(None),
             armed: scope.create_rw_signal(None),
             nodes,
@@ -531,12 +533,14 @@ impl SettingsView {
         let focused = view.profile_focused;
         let pending = view.pending;
         let input_font = view.input_font;
+        let native_controls_enabled = view.native_controls_enabled;
         let memo = scope.create_memo(move |_| {
             (
                 profile.get(),
                 focused.get(),
                 pending.get(),
                 input_font.get(),
+                native_controls_enabled.get(),
             )
         });
         let profile_label = view
@@ -558,14 +562,40 @@ impl SettingsView {
             memo,
             &view.layout,
             &[profile_label, profile_editor],
-            move |(profile, focused, pending, font), id, geometry, scene, hits| {
+            move |(profile, focused, pending, font, enabled), id, geometry, scene, hits| {
                 if id == profile_label {
-                    paint_text(scene, geometry.bounds, "PROFILE PATH", LABEL);
+                    paint_text(
+                        scene,
+                        geometry.bounds,
+                        "PROFILE PATH",
+                        if *enabled { LABEL } else { HELP },
+                    );
                     return;
                 }
                 let bounds = geometry.bounds;
-                text_field_with_font(scene, profile, bounds, *focused, font.as_ref());
-                if !*pending {
+                if *enabled {
+                    text_field_with_font(scene, profile, bounds, *focused, font.as_ref());
+                } else {
+                    rect(
+                        scene,
+                        bounds.x,
+                        bounds.y,
+                        bounds.width,
+                        bounds.height,
+                        0x181f29,
+                    );
+                    paint_text(
+                        scene,
+                        Bounds {
+                            x: bounds.x + 8,
+                            y: bounds.y + 12,
+                            ..bounds
+                        },
+                        "UNAVAILABLE IN BROWSER; USE LOAD / SAVE",
+                        HELP,
+                    );
+                }
+                if !*pending && *enabled {
                     hits.push((ControlId(15), bounds));
                 }
             },
@@ -672,6 +702,13 @@ impl SettingsView {
             self.input_font.set(font);
         }
     }
+    /// Native controls remain enabled by default; browser owners explicitly
+    /// disable actions whose acquisition bridge is unavailable.
+    pub fn set_native_controls_enabled(&self, enabled: bool) {
+        if self.native_controls_enabled.get_untracked() != enabled {
+            self.native_controls_enabled.set(enabled);
+        }
+    }
     /// Preflight shape validation precedes every signal write. Borrowed equality
     /// avoids cloning entire field vectors or unchanged editor/status values.
     pub fn update(&self, frame: SettingsFrame<'_>) -> Result<(), String> {
@@ -748,22 +785,50 @@ impl SettingsView {
         let hovered = self.hovered;
         let armed = self.armed;
         let pending = self.pending;
+        let native_controls_enabled = self.native_controls_enabled;
         let memo = self.scope.create_memo(move |_| {
-            if pending.get() {
-                (false, false, true)
-            } else {
-                (hovered.get() == Some(id), armed.get() == Some(id), false)
-            }
+            let disabled = id == ControlId(12) && !native_controls_enabled.get();
+            let blocked = pending.get() || disabled;
+            (
+                !blocked && hovered.get() == Some(id),
+                !blocked && armed.get() == Some(id),
+                blocked,
+                disabled,
+            )
         });
         self.nodes.bind_layout(
             self.scope,
             memo,
             &self.layout,
             &[node_id],
-            move |&(hovered, armed, pending), _, geometry, scene, hits| {
+            move |&(hovered, armed, blocked, disabled), _, geometry, scene, hits| {
                 let bounds = geometry.bounds;
-                button(scene, bounds, label, hovered, armed);
-                if !pending {
+                if disabled {
+                    rect(
+                        scene,
+                        bounds.x,
+                        bounds.y,
+                        bounds.width,
+                        bounds.height,
+                        0x181f29,
+                    );
+                    paint_text(
+                        scene,
+                        Bounds {
+                            x: bounds.x + 8,
+                            y: bounds.y + 8,
+                            ..bounds
+                        },
+                        label,
+                        TextStyle {
+                            scale: 2,
+                            color: 0x68778b,
+                        },
+                    );
+                } else {
+                    button(scene, bounds, label, hovered, armed);
+                }
+                if !blocked {
                     hits.push((id, bounds));
                 }
             },
@@ -1048,6 +1113,41 @@ mod fixtures {
             hits[16..].iter().map(|(id, _)| id.0).collect::<Vec<_>>(),
             vec![10, 11, 12, 13, 14]
         );
+    }
+    #[test]
+    fn browser_capabilities_remove_native_hits_and_hover_without_changing_native_defaults() {
+        let view = SettingsView::new(ScreenInstanceId(9), 960, 720).unwrap();
+        let fields = fields(16);
+        let editor = LineEditor::new("0:04", 4096).unwrap();
+        let profile = LineEditor::new("native.bkp", 4096).unwrap();
+        let mut update = frame(&fields, &editor, &profile);
+        update.hovered = Some(ControlId(12));
+        update.armed = Some(ControlId(12));
+        update.profile_focused = true;
+        view.update(update).unwrap();
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(hits.iter().any(|(id, _)| *id == ControlId(12)));
+        assert!(hits.iter().any(|(id, _)| *id == ControlId(15)));
+        view.set_native_controls_enabled(false);
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(!hits.iter().any(|(id, _)| matches!(id.0, 12 | 15)));
+        assert_eq!(view.node_for_control(ControlId(12)).unwrap(), None);
+        assert_eq!(view.node_for_control(ControlId(15)).unwrap(), None);
+        assert_eq!(view.hit((410.0, 630.0)), None);
+        assert_eq!(view.hit((400.0, 570.0)), None);
+        assert!(hits.iter().any(|(id, _)| *id == ControlId(13)));
+        assert!(hits.iter().any(|(id, _)| *id == ControlId(14)));
+        let before = paints(&view);
+        let mut update = frame(&fields, &editor, &profile);
+        update.profile_focused = true;
+        view.update(update).unwrap();
+        assert_eq!(paints(&view), before);
+        view.set_native_controls_enabled(true);
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(hits.iter().any(|(id, _)| *id == ControlId(12)));
+        assert!(hits.iter().any(|(id, _)| *id == ControlId(15)));
     }
     #[test]
     fn compose_restores_geometry_without_effects_and_drop_releases_subscriptions() {

@@ -1,4 +1,4 @@
-import { catalogKeyboardSelection, recordsKeyboardControl } from "./menu-keyboard.mjs";
+import { catalogKeyboardSelection, recordsKeyboardControl, settingsKeyboardControl } from "./menu-keyboard.mjs";
 import { snapshotMenuMotion } from "./render-protocol.mjs";
 import { validateCompletedResults, validateCompletedArchive } from "./completed-results-model.mjs";
 import { snapshotFiles, nanoseconds, seconds, validateHistoricalGradeSnapshot, HistoricalGradePager } from "./host_model.mjs";
@@ -10,7 +10,7 @@ import { GamepadInputOwner } from "./gamepad-input.mjs";
 import { PointerInputOwner } from "./pointer-input.mjs";
 import { LocalRoster, validateLocalPrepared, localReplayReceipt } from "./local-play-host.mjs";
 import { snapshotHidDevices } from "./hid-profile.mjs";
-import { snapshotBrowserSettings } from "./settings-profile.mjs";
+import { snapshotBrowserSettings, settingsMenuFields, settingsMenuSnapshot } from "./settings-profile.mjs";
 import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
 import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, timingPolicyFromFields, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
 
@@ -55,7 +55,7 @@ function cancelMenuMotions(reason = "Menu motion owner retired.") {
 export async function requestMenuMotion(control, transforms, durationMs, easing = 0) {
   const motion = snapshotMenuMotion(control, transforms, durationMs, easing);
   const token = menuToken(), geometry = menuGeometry;
-  if (!token || !geometry || geometry.owner !== owner || geometry.worker !== worker
+  if (settingsOperation || !token || !geometry || geometry.owner !== owner || geometry.worker !== worker
     || geometry.menuGeneration !== token.menuGeneration || geometry.screen !== token.screen || geometry.revision !== token.revision)
     throw new Error("Menu motion requires current submitted menu geometry.");
   if (menuMotionPending.size >= 64) throw new Error("Menu motion request capacity exhausted.");
@@ -145,14 +145,14 @@ function sendMenuEdit(token, index, value) {
   worker.postMessage({ kind: "menu-edit", ...token, index, value });
 }
 function sendPendingMenuControl() {
-  if (menuEditPending || menuComposition || !menuEditControl) return;
+  if (settingsOperation || menuEditPending || menuComposition || !menuEditControl) return;
   const queued = menuEditControl; menuEditControl = null;
   if (!sameMenuEditor(queued) || menuActionId === 18446744073709551615n) return;
   worker.postMessage({ kind: "menu-action", ...menuToken(), actionId: ++menuActionId, control: queued.control });
 }
 function commitMenuEditor(value) {
   const token = menuToken();
-  if (!token || ![2, 3, 7].includes(menuState.route)) return false;
+  if (settingsOperation || !token || ![2, 3, 7].includes(menuState.route)) return false;
   if (typeof value !== "string" || value.length > 4096) {
     menuEditControl = null; status("Menu field exceeds its input limit.", true); return false;
   }
@@ -166,13 +166,13 @@ function commitMenuEditor(value) {
 }
 function queueMenuControl(control) {
   const identity = menuEditorIdentity();
-  if (!identity || menuActionId === 18446744073709551615n) return;
+  if (settingsOperation || !identity || menuActionId === 18446744073709551615n) return;
   menuEditControl = { ...identity, control };
   sendPendingMenuControl();
 }
 function menuFieldsFor(route) {
   if (route === 1) return Array.from(ui.chart.options ?? [], option => option.value).filter(Boolean);
-  if (route === 2) return settingsFields.map(([, , id]) => ui[id].value);
+  if (route === 2) return settingsMenuFields(captureSettingsDraft());
   if (route === 3) return [ui["live-start"].value, ui["live-end"].value];
   if (route === 4) return Array.from(ui.records.options ?? [], option => option.value).filter(Boolean);
   if (route === 7) return ["auto", "fifo", "960", "720"];
@@ -217,6 +217,38 @@ function receiveMenu(data) {
     if (data.menuGeneration <= retiredMenuGeneration) return;
     if (menuState?.owner === owner && (data.menuGeneration < menuState.menuGeneration
       || data.menuGeneration === menuState.menuGeneration && data.revision < menuState.revision)) return;
+    const operation = settingsOperation;
+    if (operation?.menuToken && settingsCurrent(operation)) {
+      const nextToken = { menuGeneration: data.menuGeneration, screen: data.screen, revision: data.revision };
+      const original = operation.originalMenu;
+      const samePosition = original.route === data.route && original.screen === data.screen
+        && original.menuGeneration === data.menuGeneration && original.selected === data.selected;
+      const receipt = data.settingsOperationId === operation.id
+        && sameSettingsToken(data.previousToken, operation.menuToken)
+        && nextToken.revision === operation.menuToken.revision + 1n && samePosition;
+      let unchangedDraft = false;
+      try { unchangedDraft = sameSettingsDraft(operation.draft, captureSettingsDraft()); }
+      catch { /* A malformed acquisition draft cannot be admitted. */ }
+      if (operation.phase === "acquiring" && receipt && data.pending === true
+        && original.fields.length === data.fields.length && original.fields.every((value, index) => value === data.fields[index])
+        && unchangedDraft) {
+        operation.menuToken = Object.freeze(nextToken);
+        operation.phase = "pending";
+      } else if ((operation.phase === "admitted" || operation.phase === "pending")
+        && receipt && data.pending === false && unchangedDraft
+        && sameSettingsResultFields(operation, data.fields)) {
+        operation.resultToken = Object.freeze(nextToken);
+      } else if (!sameSettingsToken(nextToken, menuToken())) {
+        if (operation.phase === "admitted") retireSettingsOwner(operation, "Settings menu acknowledgement changed unexpectedly.");
+        else {
+          // A valid pending receipt still supplies the retirement token if local
+          // acquisition values drifted before it arrived.
+          if (operation.phase === "acquiring" && receipt && data.pending === true) operation.menuToken = Object.freeze(nextToken);
+          cancelSettings("Settings menu changed before admission; nothing was applied.");
+        }
+        return;
+      }
+    }
     if (recordsOperation?.menuTicket && (recordsOperation.menuTicket.menuGeneration !== data.menuGeneration
       || recordsOperation.menuTicket.screen !== data.screen || recordsOperation.menuTicket.revision !== data.revision)) {
       recordsOperation.controller.abort(); recordsOperation = null;
@@ -264,6 +296,7 @@ function receiveMenu(data) {
     if (menuEditControl && !sameMenuEditor(menuEditControl)) menuEditControl = null;
     const editor = byId("menu-editor");
     editor.hidden = ![2, 3, 7].includes(data.route);
+    editor.disabled = settingsOperation !== null;
     const pending = menuEditPending;
     const sameEditor = pending && pending.owner === owner && pending.worker === worker && pending.menuGeneration === data.menuGeneration
       && pending.screen === data.screen && pending.index === data.selected && pending.route === data.route;
@@ -275,10 +308,11 @@ function receiveMenu(data) {
       if (!composing && pending.latest !== pending.sent) sendMenuEdit(menuToken(), pending.index, pending.latest);
       else if (!composing) sendPendingMenuControl();
     }
-    if (data.fields.length === 0 && data.route !== 1 && !unchangedToken) {
+    if (!settingsOperation && data.fields.length === 0 && data.route !== 1 && !unchangedToken) {
       worker.postMessage({ kind: "menu-fields", ...menuToken(), fields: menuFieldsFor(data.route) });
     } else if ([5, 9].includes(data.route) && !unchangedToken) publishAcquiredMenuSources();
   } else if (data.kind === "menu-focus") {
+    if (settingsOperation) return;
     const token = menuToken();
     if (!token || token.menuGeneration !== data.menuGeneration || token.screen !== data.screen || data.revision < token.revision) return;
     if (!Number.isInteger(data.index) || data.index < 0 || data.index > 0xffffffff || typeof data.value !== "string" || data.value.length > 4096) return;
@@ -287,12 +321,16 @@ function receiveMenu(data) {
     if (!sameMenuEditor(menuComposition)) editor.value = data.value;
     editor.focus();
   } else if (data.kind === "menu-effect") {
+    if (settingsOperation) return;
     const token = menuToken();
     if (!token || token.menuGeneration !== data.menuGeneration || token.screen !== data.screen || token.revision !== data.revision) return;
     if (data.effect === 4n) { ui.play.focus(); status("Press Play to authorize audio in the browser gesture."); }
     else if (data.effect === 2n) { ui["settings-load"].focus(); status("Choose a settings file using the browser file picker."); }
     else if (data.effect === 3n) ui["settings-save"].click();
-    else if (data.effect === 1n && data.route === 2) settingsFields.forEach(([, , id], index) => { ui[id].value = data.fields[index]; });
+    else if (data.effect === 1n && data.route === 2) {
+      try { mirrorSettings(settingsMenuSnapshot(data.fields), false); }
+      catch (error) { status(String(error?.message ?? error).slice(0, 4096), true); }
+    }
     else if (data.effect === 1n && data.route === 7) {
       ui.viewport.style.width = `${data.fields[2]}px`; ui.viewport.style.height = `${data.fields[3]}px`;
     }
@@ -312,7 +350,7 @@ function receiveMenu(data) {
 function menuClick(event, target) {
   if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
   const token = menuToken(), geometry = menuGeometry;
-  if (!token || target !== canvas || !geometry || geometry.owner !== owner || geometry.worker !== worker
+  if (settingsOperation || !token || target !== canvas || !geometry || geometry.owner !== owner || geometry.worker !== worker
     || geometry.menuGeneration !== token.menuGeneration || geometry.screen !== token.screen || geometry.revision !== token.revision) return;
   const box = target.getBoundingClientRect();
   if (box.width <= 0 || box.height <= 0) return;
@@ -373,16 +411,56 @@ function revokeSettingsURL() {
   if (settingsURL !== null) URL.revokeObjectURL(settingsURL);
   settingsURL = null;
 }
+function sameSettingsToken(left, right) {
+  return left && right && left.menuGeneration === right.menuGeneration
+    && left.screen === right.screen && left.revision === right.revision;
+}
+function sameSettingsResultFields(operation, fields) {
+  const original = operation.originalMenu;
+  const expected = operation.kind === "settings-profile-save" || !operation.candidate || ![2, 3].includes(original.route)
+    ? original.fields : original.route === 2 ? settingsMenuFields(operation.candidate)
+      : [operation.candidate.section.startSeconds, operation.candidate.section.endSeconds];
+  return fields.length === expected.length && expected.every((value, index) => fields[index] === value);
+}
+function mirrorSettings(settings, fullProfile) {
+  // The complete packet has been validated before any acquisition mirror setter.
+  const bindings = fullProfile ? new Map(settings.bindings) : null;
+  for (const [group, name, id] of settingsFields) ui[id].value = settings[group][name];
+  for (const [name, id, initial] of timingPolicyFields) {
+    if (fullProfile || Object.hasOwn(settings.timing, name)) ui[id].value = settings.timing[name] ?? initial;
+  }
+  if (bindings) for (const [lane, field] of bindingFields) field.value = bindings.get(lane);
+}
 function cancelSettings(reason) {
   const operation = settingsOperation;
   if (!operation) return;
+  // Once admitted, only joined owner retirement can resolve an uncertain result.
+  if (operation.phase === "admitted" && !shuttingDown) { retireSettingsOwner(operation, reason); return; }
+  if (operation.menuToken && operation.phase !== "admitted" && operation.worker === worker && !shuttingDown) {
+    try { operation.worker.postMessage({ kind: "settings-profile-cancel", id: operation.id, menuToken: operation.menuToken }); }
+    catch { retireSettingsOwner(operation, "Settings cancellation could not reach its owner."); return; }
+  }
   settingsOperation = null;
   clearTimeout(operation.timer);
   settingsStatus(reason, true);
   controls();
 }
+function retireSettingsOwner(operation, reason) {
+  if (!settingsCurrent(operation) || operation.phase === "retiring") return;
+  operation.phase = "retiring";
+  clearTimeout(operation.timer);
+  const message = `${reason} The uncertain settings owner is being retired; the original settings draft will be restored.`;
+  settingsStatus(message, true);
+  // start() joins stop()'s source, playback and Worker disposal before rebuilding.
+  const restarted = start(), resetRequest = startRequest;
+  if (operation.acceptedDraft) mirrorSettings(operation.acceptedDraft, true);
+  void restarted.then(() => {
+    if (resetRequest === startRequest && worker && worker !== operation.worker && !shuttingDown)
+      settingsStatus(`${reason} The owner was reset from the original settings draft; choose chart files again.`, true);
+  });
+}
 function requestSettings(kind, file = null) {
-  if (settingsOperation || !settingsIdle()) return;
+  if (settingsOperation || !settingsIdle() || menuEditPending || menuComposition || menuEditControl) return;
   const generation = owner, target = worker;
   let operation = null;
   try {
@@ -391,57 +469,81 @@ function requestSettings(kind, file = null) {
       || file.size < 1 || file.size > 16384)) throw new Error("Choose one nonempty settings file no larger than 16 KiB.");
     if (generation !== owner || target !== worker || settingsOperation || !settingsIdle()) return;
     if (!Number.isSafeInteger(serial + 1)) throw new Error("Settings request identity exhausted.");
-    operation = { id: ++serial, owner, worker, kind, draft, timer: null };
+    const token = menuState?.hasSettingsParent === true || menuState?.route === 2 ? menuToken() : null;
+    operation = { id: ++serial, owner, worker, kind, draft, timer: null, phase: "acquiring",
+      menuToken: token, originalMenu: token ? menuState : null, candidate: null, resultToken: null };
     settingsOperation = operation;
     operation.timer = setTimeout(() => {
-      if (settingsOperation === operation) cancelSettings("Settings request timed out; the previous draft is retained.");
+      if (settingsOperation === operation && ["acquiring", "pending"].includes(operation.phase))
+        cancelSettings("Settings request timed out; the previous draft is retained.");
     }, 10000);
     controls();
     settingsStatus(kind === "settings-profile-save" ? "Saving settings…" : "Loading settings…");
     operation.worker.postMessage(kind === "settings-profile-save"
-      ? { kind, id: operation.id, settings: draft } : { kind, id: operation.id, file });
+      ? { kind, id: operation.id, settings: draft, menuToken: token }
+      : { kind, id: operation.id, file, settings: draft, menuToken: token });
   } catch (error) {
     if (generation !== owner || target !== worker) return;
     if (operation && settingsOperation !== operation) return;
-    if (operation) { settingsOperation = null; clearTimeout(operation.timer); }
-    settingsStatus(String(error?.message ?? error).slice(0, 4096), true);
-    controls();
+    if (operation) cancelSettings(String(error?.message ?? error).slice(0, 4096));
+    else { settingsStatus(String(error?.message ?? error).slice(0, 4096), true); controls(); }
   }
 }
 function receiveSettings(data) {
   const operation = settingsOperation;
   if (!operation || data.id !== operation.id || !settingsCurrent(operation)) return;
-  let link = null;
+  let link = null, retain = false;
   try {
     const draft = captureSettingsDraft();
-    if (!settingsCurrent(operation) || !settingsIdle() || !sameSettingsDraft(operation.draft, draft)) throw new Error("Settings draft or ownership changed; nothing was applied.");
+    if (!settingsIdle() || !sameSettingsDraft(operation.draft, draft)) throw new Error("Settings draft or ownership changed; nothing was applied.");
     if (data.kind === "settings-profile-error") {
       if (typeof data.message !== "string" || !data.message.length || data.message.length > 4096) throw new Error("Invalid settings error response.");
       throw new Error(data.message);
     }
+    if (operation.kind === "settings-profile-load" && data.kind === "settings-profile-candidate") {
+      if (operation.phase !== "pending" || !sameSettingsToken(data.menuToken, operation.menuToken)
+        || !sameSettingsToken(menuToken(), operation.menuToken) || menuEditPending || menuComposition || menuEditControl) {
+        throw new Error("Settings candidate does not match the pending menu owner.");
+      }
+      const candidate = snapshotBrowserSettings(data.settings);
+      if (!settingsCurrent(operation) || !sameSettingsDraft(operation.draft, captureSettingsDraft())) throw new Error("Settings draft changed before admission.");
+      operation.acceptedDraft = operation.draft;
+      operation.candidate = candidate;
+      // Admission commits intent; the acquisition deadline cannot cancel it later.
+      clearTimeout(operation.timer);
+      operation.phase = "admitted";
+      retain = true;
+      operation.timer = setTimeout(() => {
+        if (settingsCurrent(operation)) retireSettingsOwner(operation, "Settings admission acknowledgement timed out.");
+      }, 10000);
+      operation.worker.postMessage({ kind: "settings-profile-admit", id: operation.id, menuToken: operation.menuToken });
+      return;
+    }
     if (operation.kind === "settings-profile-load" && data.kind === "settings-profile-loaded") {
-      const settings = snapshotBrowserSettings(data.settings);
-      const bindings = new Map(settings.bindings);
-      const currentDraft = captureSettingsDraft();
-      if (!settingsCurrent(operation) || !settingsIdle() || !sameSettingsDraft(operation.draft, currentDraft)) throw new Error("Settings draft or ownership changed; nothing was applied.");
-      // All values and the unchanged owner/draft are checked before native DOM setters.
-      for (const [group, name, id] of settingsFields) ui[id].value = settings[group][name];
-      for (const [name, id, initial] of timingPolicyFields) ui[id].value = settings.timing[name] ?? initial;
-      for (const [lane, field] of bindingFields) field.value = bindings.get(lane);
+      let settings;
+      if (operation.menuToken) {
+        if (operation.phase !== "admitted" || !operation.candidate || !operation.resultToken
+          || !sameSettingsToken(data.admittedToken, operation.menuToken)
+          || !sameSettingsToken(data.resultToken, operation.resultToken)
+          || !sameSettingsToken(menuToken(), operation.resultToken)) throw new Error("Invalid settings admission acknowledgement.");
+        settings = operation.candidate;
+      } else settings = snapshotBrowserSettings(data.settings);
+      if (!settingsCurrent(operation) || !settingsIdle() || !sameSettingsDraft(operation.draft, captureSettingsDraft()))
+        throw new Error("Settings draft or ownership changed before publication.");
+      mirrorSettings(settings, true);
     } else if (operation.kind === "settings-profile-save" && data.kind === "settings-profile-saved") {
+      if (operation.menuToken && (!operation.resultToken || !sameSettingsToken(data.resultToken, operation.resultToken)
+        || !sameSettingsToken(menuToken(), operation.resultToken))) throw new Error("Invalid settings download menu acknowledgement.");
       const bytes = data.bytes;
       if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer) || bytes.buffer.resizable
         || bytes.byteOffset !== 0 || bytes.byteLength < 1 || bytes.byteLength > 16384 || bytes.byteLength !== bytes.buffer.byteLength) {
         throw new Error("Invalid settings download bytes.");
       }
-      const currentDraft = captureSettingsDraft();
-      if (!settingsCurrent(operation) || !settingsIdle() || !sameSettingsDraft(operation.draft, currentDraft)) throw new Error("Settings draft or ownership changed; nothing was downloaded.");
+      if (!settingsCurrent(operation) || !settingsIdle() || !sameSettingsDraft(operation.draft, captureSettingsDraft()))
+        throw new Error("Settings draft or ownership changed; nothing was downloaded.");
       revokeSettingsURL();
       const url = URL.createObjectURL(new Blob([bytes], { type: "application/json" }));
-      if (settingsOperation !== operation || operation.owner !== owner || operation.worker !== worker) {
-        URL.revokeObjectURL(url);
-        return;
-      }
+      if (!settingsCurrent(operation)) { URL.revokeObjectURL(url); return; }
       settingsURL = url;
       settingsURLTimer = setTimeout(() => { if (settingsURL === url) revokeSettingsURL(); }, 60000);
       link = document.createElement("a");
@@ -450,15 +552,16 @@ function receiveSettings(data) {
       document.body.appendChild(link);
       link.click();
     } else throw new Error("Unexpected settings response.");
-    if (settingsOperation === operation) settingsStatus(operation.kind === "settings-profile-save" ? "Settings downloaded." : "Settings loaded. The complete draft was replaced.");
+    if (settingsCurrent(operation)) settingsStatus(operation.kind === "settings-profile-save" ? "Settings downloaded." : "Settings loaded. The complete draft was replaced.");
   } catch (error) {
-    if (settingsOperation === operation) {
-      if (operation.kind === "settings-profile-save") revokeSettingsURL();
-      settingsStatus(String(error?.message ?? error).slice(0, 4096), true);
+    if (settingsCurrent(operation)) {
+      const message = String(error?.message ?? error).slice(0, 4096);
+      if (operation.phase === "admitted") { retain = true; retireSettingsOwner(operation, message); }
+      else { if (operation.kind === "settings-profile-save") revokeSettingsURL(); cancelSettings(message); }
     }
   } finally {
     link?.remove();
-    if (settingsOperation === operation) {
+    if (!retain && settingsCurrent(operation)) {
       clearTimeout(operation.timer);
       settingsOperation = null;
       controls();
@@ -607,7 +710,7 @@ function sendAcquiredMenuSources(token, fields) {
 }
 function publishAcquiredMenuSources() {
   const token = menuToken();
-  if (!token || ![5, 9].includes(menuState.route)) return;
+  if (settingsOperation || !token || ![5, 9].includes(menuState.route)) return;
   const fields = menuFieldsFor(menuState.route);
   if (menuSourcesCurrent(menuSourcesPending)) { menuSourcesPending.latest = fields; return; }
   menuSourcesPending = null;
@@ -1062,6 +1165,7 @@ function controls() {
   const playing = activePlay !== null;
   ui["prepare-cancel"].hidden = !preparing;
   ui["prepare-cancel"].disabled = !preparing || preparationTicket === null;
+  byId("menu-editor").disabled = settingsOperation !== null;
   const busy = settingsOperation !== null || recordsOperation !== null || hidPermission !== null || hidOwnershipFailed || localCleanup !== null || localDiscovery !== null;
   ui["settings-save"].disabled = ui["settings-load"].disabled = settingsOperation !== null || !settingsIdle();
   ui.folder.disabled = !initialized || preparing || playing || busy || !("webkitdirectory" in ui.folder);
@@ -1570,7 +1674,7 @@ ui.play.addEventListener("click", () => { void play("live"); });
 ui["replay-play"].addEventListener("click", () => { void play("replay"); });
 ui["settings-save"].addEventListener("click", () => requestSettings("settings-profile-save"));
 byId("menu-open").addEventListener("click", () => {
-  if (!initialized || activePlay || shuttingDown || importing || preparing || !worker) return;
+  if (settingsOperation || !initialized || activePlay || shuttingDown || importing || preparing || !worker) return;
   cancelMenuComposition(); menuEditPending = null; menuSourcesPending = null;
   menuRetired = false;
   worker.postMessage({ kind: "menu-open", fields: menuFieldsFor(1), roster: localRoster.exportState(), opponents: opponents.snapshot() });
@@ -1584,7 +1688,7 @@ byId("menu-back").addEventListener("click", () => {
 });
 byId("menu-editor").addEventListener("compositionstart", () => {
   const identity = menuEditorIdentity();
-  if (!identity || ![2, 3, 7].includes(identity.route)) return;
+  if (settingsOperation || !identity || ![2, 3, 7].includes(identity.route)) return;
   menuEditControl = null;
   menuComposition = identity;
 });
@@ -1608,7 +1712,7 @@ byId("menu-editor").addEventListener("input", event => {
 });
 byId("menu-editor").addEventListener("keydown", event => {
   const token = menuToken();
-  if (!token || event.isComposing || menuActionId === 18446744073709551615n) return;
+  if (settingsOperation || !token || event.isComposing || menuActionId === 18446744073709551615n) return;
   const control = event.code === "Enter" ? ({ 2: 10n, 3: 71n, 7: 40n }[menuState.route])
     : event.code === "Escape" ? ({ 2: 11n, 3: 72n, 7: 41n }[menuState.route]) : null;
   if (!control || menuComposition && event.code !== "Escape") return;
@@ -2431,7 +2535,7 @@ function key(event, down) {
     const keyboardState = { route: state?.route, selected: state?.selected,
       count: state?.fields.length, available: token !== null && !importing && !settingsOperation, playing: false };
     const index = catalogKeyboardSelection(event, keyboardState);
-    const control = recordsKeyboardControl(event, keyboardState);
+    const control = recordsKeyboardControl(event, keyboardState) ?? settingsKeyboardControl(event, keyboardState);
     if ((index !== null || control !== null) && menuActionId < 0xffffffffffffffffn) {
       const current = menuToken();
       if (worker === targetWorker && owner === targetOwner && current && current.menuGeneration === token.menuGeneration

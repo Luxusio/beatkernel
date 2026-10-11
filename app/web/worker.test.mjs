@@ -1335,6 +1335,16 @@ test("actual Worker rejects stale and malformed acquired inventories without pub
   } finally { await worker.send({ kind: "dispose" }); }
 });
 
+function assertProfileTransition(state, previous, id, pending) {
+  assert.equal(state.settingsOperationId, id);
+  assert.deepEqual(acquiredMenuToken(state.previousToken), acquiredMenuToken(previous));
+  assert.equal(state.screen, previous.screen);
+  assert.equal(state.menuGeneration, previous.menuGeneration);
+  assert.equal(state.revision, previous.revision + 1n);
+  assert.equal(state.pending, pending);
+  assert.equal(state.hasSettingsParent, true);
+}
+
 test("actual Worker keeps roster and fields when genuine owner admission or pending operation refuses inventory refresh", async () => {
   let fault = null;
   const { worker } = await acquiredPlayersWorker({ menuAdmissionFault(method, owner, args) {
@@ -1367,21 +1377,42 @@ test("actual Worker keeps roster and fields when genuine owner admission or pend
     const read = deferred();
     const profile = validSettingsProfileText();
     const profileFile = selectedFile("pending.json", profile, () => read.promise).file;
-    await worker.send({ kind: "settings-profile-load", id: 1, file: profileFile });
+    await worker.send({ kind: "settings-profile-load", id: 1, menuToken: acquiredMenuToken(accepted), file: profileFile });
     assert.equal(worker.of("settings-profile-loaded").length, 0);
+    const pending = worker.of("menu-state").at(-1);
+    assertProfileTransition(pending, accepted, 1, true);
+    assert.deepEqual(Array.from(pending.fields), Array.from(accepted.fields));
+    assert.deepEqual(structuredClone(pending.roster), structuredClone(accepted.roster));
+    const pendingPublications = worker.renderPort.posts.filter(post => post.kind === "menu").length;
+    assert.equal(pendingPublications, publications + 1, "typed pending state publishes exactly once");
     const errors = worker.of("menu-error").length;
-    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(accepted), fields: acquiredMenuFields([]) });
+    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(pending), fields: acquiredMenuFields([]) });
     assert.equal(worker.of("menu-error").length, errors + 1);
-    assert.deepEqual(worker.of("menu-state").at(-1), accepted);
-    assert.equal(worker.renderPort.posts.filter(post => post.kind === "menu").length, publications);
-    await worker.send({ kind: "menu-action", ...acquiredMenuToken(accepted), actionId: 1n, control: 35n });
+    assert.deepEqual(worker.of("menu-state").at(-1), pending);
+    assert.equal(worker.renderPort.posts.filter(post => post.kind === "menu").length, pendingPublications);
+    await worker.send({ kind: "menu-action", ...acquiredMenuToken(pending), actionId: 1n, control: 35n });
     assert.equal(worker.of("menu-error").length, errors + 2);
-    assert.deepEqual(worker.of("menu-state").at(-1), accepted);
+    assert.deepEqual(worker.of("menu-state").at(-1), pending);
+    assert.equal(worker.renderPort.posts.filter(post => post.kind === "menu").length, pendingPublications);
     read.resolve(new TextEncoder().encode(profile).buffer);
     await flushJobs();
+    const candidate = worker.of("settings-profile-candidate").at(-1);
+    assert.equal(candidate.id, 1);
+    assert.deepEqual(acquiredMenuToken(candidate.menuToken), acquiredMenuToken(pending));
+    assert.equal(worker.of("settings-profile-loaded").length, 0);
+    assert.deepEqual(worker.of("menu-state").at(-1), pending);
+    assert.equal(worker.renderPort.posts.filter(post => post.kind === "menu").length, pendingPublications);
+    await worker.send({ kind: "settings-profile-admit", id: 1, menuToken: acquiredMenuToken(pending) });
+    const committedProfile = worker.of("menu-state").at(-1);
+    assertProfileTransition(committedProfile, pending, 1, false);
+    assert.deepEqual(Array.from(committedProfile.fields), Array.from(accepted.fields));
+    assert.deepEqual(structuredClone(committedProfile.roster), structuredClone(accepted.roster));
+    assert.equal(worker.renderPort.posts.filter(post => post.kind === "menu").length, pendingPublications + 1);
     assert.equal(worker.of("settings-profile-loaded").length, 1);
+    assert.deepEqual(acquiredMenuToken(worker.of("settings-profile-loaded")[0].admittedToken), acquiredMenuToken(pending));
+    assert.deepEqual(acquiredMenuToken(worker.of("settings-profile-loaded")[0].resultToken), acquiredMenuToken(committedProfile));
     assert.equal(worker.of("settings-profile-error").length, 0);
-    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(accepted), fields: acquiredMenuFields([]) });
+    await worker.send({ kind: "menu-fields", ...acquiredMenuToken(committedProfile), fields: acquiredMenuFields([]) });
     const released = worker.of("menu-state").at(-1);
     assert.deepEqual(Array.from(released.roster.assignments), []);
     assert.deepEqual(Array.from(released.roster.players), [7, 11]);

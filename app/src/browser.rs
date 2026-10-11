@@ -133,6 +133,58 @@ impl BrowserMenuOwner {
     pub fn fields(&self) -> Vec<String> {
         self.inner.fields().to_vec()
     }
+    #[wasm_bindgen(getter)]
+    pub fn has_settings_parent(&self) -> bool {
+        self.inner.has_settings_parent()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn pending(&self) -> bool {
+        self.inner.pending()
+    }
+    pub fn set_operation_status(
+        &mut self,
+        screen: u64,
+        revision: u64,
+        pending: bool,
+        error: Option<String>,
+    ) -> Result<(), JsValue> {
+        use crate::browser_menu::MenuOperationStatus;
+        if pending && error.is_some() {
+            return Err(js_error("pending settings operation cannot also fail"));
+        }
+        let status = if pending {
+            MenuOperationStatus::Pending
+        } else {
+            error.map_or(MenuOperationStatus::Idle, MenuOperationStatus::Failed)
+        };
+        self.inner
+            .set_operation_status(
+                crate::browser_menu::MenuToken {
+                    generation: self.generation,
+                    screen: crate::screen_lifecycle::ScreenInstanceId(screen),
+                    revision,
+                },
+                status,
+            )
+            .map_err(js_error)
+    }
+    pub fn replace_settings_fields(
+        &mut self,
+        screen: u64,
+        revision: u64,
+        values: Vec<String>,
+    ) -> Result<(), JsValue> {
+        self.inner
+            .replace_settings_fields(
+                crate::browser_menu::MenuToken {
+                    generation: self.generation,
+                    screen: crate::screen_lifecycle::ScreenInstanceId(screen),
+                    revision,
+                },
+                values,
+            )
+            .map_err(js_error)
+    }
     pub fn selected_value(&self) -> Option<String> {
         self.inner.fields().get(self.inner.selected()).cloned()
     }

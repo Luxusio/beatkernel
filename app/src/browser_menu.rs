@@ -18,6 +18,12 @@ pub struct MenuSnapshot {
     pub pending: bool,
     pub error: Option<String>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MenuOperationStatus {
+    Idle,
+    Pending,
+    Failed(String),
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuEffect {
     None,
@@ -41,6 +47,115 @@ pub struct BrowserMenu {
 impl BrowserMenu {
     pub fn touch(&mut self, token: MenuToken) -> Result<(), String> {
         self.admit(token)?;
+        if self.pending {
+            return Err("menu source refresh waits for pending operation".into());
+        }
+        self.revision += 1;
+        Ok(())
+    }
+    /// Cold operation publication; the caller correlates its operation ID externally.
+    pub fn set_operation_status(
+        &mut self,
+        token: MenuToken,
+        status: MenuOperationStatus,
+    ) -> Result<(), String> {
+        self.admit(token)?;
+        let (pending, error) = match status {
+            MenuOperationStatus::Idle => (false, None),
+            MenuOperationStatus::Pending => (true, None),
+            MenuOperationStatus::Failed(error) => {
+                if error.is_empty() {
+                    return Err("menu operation error must be nonempty".into());
+                }
+                validate_fields(std::slice::from_ref(&error))?;
+                (false, Some(error))
+            }
+        };
+        let mut model = self.snapshot();
+        model.pending = pending;
+        model.error = error.clone();
+        validate_snapshot(&model)?;
+        self.pending = pending;
+        self.error = error;
+        self.revision += 1;
+        Ok(())
+    }
+    pub fn has_settings_parent(&self) -> bool {
+        self.navigator
+            .stack()
+            .iter()
+            .any(|entry| entry.route == ScreenRoute::Settings)
+    }
+    pub fn pending(&self) -> bool {
+        self.pending
+    }
+    /// Commit the validated profile to the retained ancestor and Practice child
+    /// together, preserving all navigator identities, selection and action admission.
+    pub fn replace_settings_fields(
+        &mut self,
+        token: MenuToken,
+        values: Vec<String>,
+    ) -> Result<(), String> {
+        self.admit(token)?;
+        if values.len() != 16 {
+            return Err("profile settings replacement requires sixteen fields".into());
+        }
+        validate_fields(&values)?;
+        let parent = self
+            .navigator
+            .stack()
+            .iter()
+            .find(|entry| entry.route == ScreenRoute::Settings)
+            .ok_or("retained Settings ancestor unavailable")?
+            .id;
+        let parent_index = self
+            .drafts
+            .iter()
+            .position(|draft| draft.0 == parent)
+            .ok_or("retained Settings draft unavailable")?;
+        if self.drafts[parent_index].2 >= values.len() {
+            return Err("replacement cannot preserve Settings selection".into());
+        }
+        let mut practices = Vec::new();
+        for entry in self
+            .navigator
+            .stack()
+            .iter()
+            .filter(|entry| entry.route == ScreenRoute::Practice)
+        {
+            let index = self
+                .drafts
+                .iter()
+                .position(|draft| draft.0 == entry.id)
+                .ok_or("retained Practice draft unavailable")?;
+            if self.drafts[index].2 >= 2 {
+                return Err("replacement cannot preserve Practice selection".into());
+            }
+            practices.push(index);
+        }
+        if !practices.is_empty() {
+            let start = crate::practice::PracticeStart::parse(&values[11])?;
+            let end = if values[12].is_empty() {
+                None
+            } else {
+                Some(crate::practice::PracticeStart::parse(&values[12])?)
+            };
+            if end.is_some_and(|end| end.nanoseconds() <= start.nanoseconds()) {
+                return Err("practice end must follow start".into());
+            }
+            validate_fields(&[values[11].clone(), values[12].clone()])?;
+        }
+        let practices = practices
+            .into_iter()
+            .map(|index| (index, vec![values[11].clone(), values[12].clone()]))
+            .collect::<Vec<_>>();
+        // Every validation and replacement allocation precedes these writes.
+        for (index, section) in practices {
+            self.drafts[index].1 = section;
+        }
+        self.drafts[parent_index].1 = values;
+        self.pending = false;
+        self.error = None;
         self.revision += 1;
         Ok(())
     }
@@ -128,11 +243,12 @@ impl BrowserMenu {
         self.drafts.retain(|draft| next.retains(draft.0));
         if let Some(id) = screen {
             if !self.drafts.iter().any(|draft| draft.0 == id) {
-                let values = if route == ScreenRoute::Practice && self.fields().len() == 13 {
-                    vec![self.fields()[11].clone(), self.fields()[12].clone()]
-                } else {
-                    Vec::new()
-                };
+                let values =
+                    if route == ScreenRoute::Practice && matches!(self.fields().len(), 13 | 16) {
+                        vec![self.fields()[11].clone(), self.fields()[12].clone()]
+                    } else {
+                        Vec::new()
+                    };
                 self.drafts.push((id, values, 0));
             }
         }
@@ -325,7 +441,7 @@ impl BrowserMenu {
                 | (Practice, 72)
                 | (Display, 41)
                 | (Records, 55)
-                | (Players, 31)
+                | (Players, 30 | 31)
                 | (Devices { .. }, 21)
                 | (Results { .. }, 4)
         ) {
@@ -361,8 +477,10 @@ impl BrowserMenu {
                         .iter_mut()
                         .find(|draft| draft.0 == parent)
                         .ok_or("practice settings draft unavailable")?;
-                    if draft.1.len() != 13 {
-                        return Err("browser settings draft requires thirteen fields".into());
+                    if !matches!(draft.1.len(), 13 | 16) {
+                        return Err(
+                            "browser settings draft requires thirteen or sixteen fields".into()
+                        );
                     }
                     draft.1[11] = seconds_text(start.nanoseconds());
                     draft.1[12] =
@@ -1173,7 +1291,7 @@ impl BrowserMenuPresentation {
                 });
             }
             MenuView::Settings(view) => {
-                const LABELS: [&str; 14] = [
+                const LABELS: [&str; 16] = [
                     "EARLY WINDOW (MS)",
                     "LATE WINDOW (MS)",
                     "INPUT OFFSET (MS)",
@@ -1187,21 +1305,29 @@ impl BrowserMenuPresentation {
                     "COMMANDS PER RENDER",
                     "SECTION START (SECONDS)",
                     "SECTION END (SECONDS)",
-                    "KEYBOARD BINDINGS",
+                    "TIMING PRESET",
+                    "RANK PRECEDENCE",
+                    "GAUGE",
                 ];
                 let fields: Vec<_> = model.fields.iter().enumerate().map(|(index, value)| crate::settings::SettingsField {
                     flag: "", label: LABELS.get(index).copied().unwrap_or("BROWSER SETTING"),
-                    hint: "Browser capabilities apply. Native drivers and callback buffer size are unavailable.", value: value.clone() }).collect();
+                    hint: match index {
+                        13 => "Empty = legacy; preset: beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1",
+                        14 => "rank-first or defexrank-first",
+                        15 => "beatkernel, assist-easy, easy, groove, hard, ex-hard, hazard; BMS gauges require a preset",
+                        _ => "Browser capabilities apply. Native drivers and callback buffer size are unavailable.",
+                    }, value: value.clone() }).collect();
                 let selected = model.selected.min(fields.len().saturating_sub(1));
                 let editor = editor(selected)?;
                 let profile = LineEditor::new("browser-settings", 4096)?;
+                view.set_native_controls_enabled(false);
                 view.update(crate::ui::settings::SettingsFrame {
                     fields: &fields,
                     selected,
                     editor: &editor,
                     profile: &profile,
                     profile_focused: false,
-                    message: None,
+                    message: model.pending.then_some("SETTINGS OPERATION PENDING"),
                     error,
                     pending: model.pending,
                     hovered: None,
@@ -1334,6 +1460,9 @@ impl BrowserMenuPresentation {
             self.motions[index] = owner;
         } else {
             view.compose(scene, &mut self.hits, model.token.screen, &animated)?;
+        }
+        if model.pending {
+            self.hits.clear();
         }
         self.pending_hits.clear();
         self.pending_hits

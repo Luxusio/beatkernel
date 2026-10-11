@@ -19,7 +19,7 @@ function strings(value, limits) {
   return Object.freeze(result);
 }
 
-// The retained Settings menu owns these thirteen scalar strings. Keyboard
+// The retained Settings menu owns scalar strings and optional timing policy. Keyboard
 // bindings remain with the actual Window input owner and full profile codec.
 export function snapshotBrowserSettingsScalars(value) {
   object(value, ["timing", "output", "capacities", "section"]);
@@ -38,6 +38,35 @@ export function snapshotBrowserSettingsScalars(value) {
   audioLimitsFromFields(capacities);
   sectionFromSeconds(section.startSeconds, section.endSeconds);
   return Object.freeze({ timing, output, capacities, section });
+}
+
+export function settingsMenuFields(value) {
+  const isProfile = value && typeof value === "object"
+    && ["kind", "version", "bindings"].some(name => Object.hasOwn(value, name));
+  const { timing, output, capacities, section } = isProfile
+    ? snapshotBrowserSettings(value) : snapshotBrowserSettingsScalars(value);
+  return Object.freeze([
+    timing.earlyMs, timing.lateMs, timing.offsetMs,
+    output.latency, output.latencyMs, output.rate,
+    capacities.queueCapacity, capacities.maxVoices, capacities.pendingCapacity,
+    capacities.maxFrames, capacities.maxCommandsPerRender,
+    section.startSeconds, section.endSeconds,
+    timing.presetId ?? "", timing.rankPrecedence ?? "rank-first", timing.gauge ?? "beatkernel",
+  ]);
+}
+
+export function settingsMenuSnapshot(fields) {
+  if (!Array.isArray(fields) || ![13, 16].includes(fields.length)) {
+    throw new Error("Browser settings draft requires thirteen or sixteen fields.");
+  }
+  return snapshotBrowserSettingsScalars({
+    timing: { earlyMs: fields[0], lateMs: fields[1], offsetMs: fields[2],
+      ...(fields.length === 16 ? { presetId: fields[13], rankPrecedence: fields[14], gauge: fields[15] } : {}) },
+    output: { latency: fields[3], latencyMs: fields[4], rate: fields[5] },
+    capacities: { queueCapacity: fields[6], maxVoices: fields[7], pendingCapacity: fields[8],
+      maxFrames: fields[9], maxCommandsPerRender: fields[10] },
+    section: { startSeconds: fields[11], endSeconds: fields[12] },
+  });
 }
 
 // Shared bounded DTO validation; only the Worker calls the file/JSON helpers.
