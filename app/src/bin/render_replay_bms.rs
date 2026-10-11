@@ -4,10 +4,11 @@ use beatkernel::{
     input::CodecLimits,
     replay::codec::ReplayCodecLimits,
     time::Duration,
+    transport::Rate,
 };
 use beatkernel_bms_runtime::{
     ChannelPolicy, load_prepared_for_replay, offline::OfflineOptions, replay_playback::read_replay,
-    replay_render::render_replay,
+    replay_render::render_replay_with_rate,
 };
 use std::{collections::HashSet, error::Error, fs::File, io::Write, path::PathBuf};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -20,6 +21,7 @@ struct Options {
     format: AudioFormat,
     render: OfflineOptions,
     preroll: Duration,
+    playback_rate: Rate,
     max_records: usize,
     max_bytes: usize,
 }
@@ -30,10 +32,28 @@ fn positive_usize(value: &str) -> Result<usize> {
     }
     Ok(count)
 }
+fn positive_playback_rate(value: &str) -> Result<Rate> {
+    let (numerator, denominator) = value
+        .split_once('/')
+        .ok_or("speed must be NUM/DEN with positive unsigned ASCII decimal components")?;
+    if [numerator, denominator]
+        .into_iter()
+        .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err("speed must be NUM/DEN with positive unsigned ASCII decimal components".into());
+    }
+    let numerator: i64 = numerator.parse()?;
+    let denominator: u64 = denominator.parse()?;
+    if numerator == 0 || denominator == 0 {
+        return Err("speed numerator and denominator must be positive".into());
+    }
+    Ok(Rate::new(numerator, denominator)?)
+}
 fn parse(args: &[String]) -> Result<Options> {
     let (mut chart, mut replay, mut output) = (None, None, None);
     let (mut seconds, mut rate) = (None, None);
     let mut channels = 2u16;
+    let mut playback_rate = Rate::NORMAL;
     let mut preroll = 3_000_000_000i64;
     let mut block_frames = 4096usize;
     let mut command_capacity = 65536usize;
@@ -67,6 +87,7 @@ fn parse(args: &[String]) -> Result<Options> {
                 seconds = Some(count);
             }
             "--rate" => rate = Some(value.parse::<u32>()?),
+            "--speed" => playback_rate = positive_playback_rate(value)?,
             "--channels" => channels = value.parse()?,
             "--preroll-ns" => {
                 preroll = value.parse()?;
@@ -112,6 +133,7 @@ fn parse(args: &[String]) -> Result<Options> {
             max_voices: voices,
         },
         preroll: Duration::from_nanos(preroll),
+        playback_rate,
         max_records,
         max_bytes,
     })
@@ -140,12 +162,13 @@ fn run(options: Options) -> Result<()> {
         eprintln!("BMS warning line {}: {}", warning.line, warning.message);
     }
     let mut output = File::create_new(&options.output)?;
-    let report = render_replay(
+    let report = render_replay_with_rate(
         prepared,
         file,
         limits,
         options.render,
         options.preroll,
+        options.playback_rate,
         &mut output,
     )?;
     println!(
@@ -154,10 +177,12 @@ fn run(options: Options) -> Result<()> {
     );
     output.flush()?;
     println!(
-        "logical replay sounds rendered to new raw interleaved f32le {:?}: frames={} format={:?} commands_admitted={} full_replay_results={} full_replay_hits={} recorded_until={:?} final_judge_hash={:#018x}; no native playback or original dropped-audio reproduction",
+        "logical replay sounds rendered to new raw interleaved f32le {:?}: frames={} format={:?} speed={}/{} (pitch-changing) commands_admitted={} full_replay_results={} full_replay_hits={} recorded_until={:?} final_judge_hash={:#018x}; no native playback or original dropped-audio reproduction",
         options.output,
         report.frames,
         report.format,
+        options.playback_rate.numerator(),
+        options.playback_rate.denominator(),
         report.commands_admitted,
         report.judge_results,
         report.hits,
@@ -174,7 +199,7 @@ fn main() -> Result<()> {
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!(
-            "render_replay_bms --chart PATH --replay PATH --output NEW_PATH --seconds N --rate HZ [--channels N --preroll-ns N --block-frames N --command-capacity N --voices N --max-records N --max-bytes N]\nDefaults: channels 2 (Exact asset layout), preroll 3000000000ns, block frames 4096, command capacity 65536, voices 4096, max records 1000000, max bytes 67108864.\nSeconds is a positive finite checked output duration including preroll; rate is nonzero. Preroll is nonnegative i64 nanoseconds; capacities are positive checked integers within core limits.\nLoads bounded WAV assets and matching logical replay, writes new raw interleaved f32le without overwriting. Failures may leave a partial new file.\nJudge counts/hash describe the full replay; admitted sounds and PCM are cut off by the requested extent. No native playback, physical timing, or past dropped-audio reproduction."
+            "render_replay_bms --chart PATH --replay PATH --output NEW_PATH --seconds N --rate HZ [--speed NUM/DEN --channels N --preroll-ns N --block-frames N --command-capacity N --voices N --max-records N --max-bytes N]\nDefaults: speed 1/1 (pitch-changing), channels 2 (Exact asset layout), preroll 3000000000ns, block frames 4096, command capacity 65536, voices 4096, max records 1000000, max bytes 67108864.\nSpeed is a positive rational NUM/DEN, reduced for output; unsigned ASCII decimal numerator 1..9223372036854775807 and denominator 1..18446744073709551615. Speed changes pitch and song/sample playback together.\nSeconds is a positive finite checked output duration including unscaled preroll; rate is nonzero device sample Hz, independent of speed. Preroll is nonnegative i64 nanoseconds; capacities are positive checked integers within core limits.\nLoads bounded WAV assets and matching logical replay, writes new raw interleaved f32le without overwriting. Failures may leave an empty or partial new file.\nJudge counts/hash describe the full replay; admitted sounds and PCM are cut off by the requested extent. No native playback, physical timing, or past dropped-audio reproduction."
         );
         return Ok(());
     }

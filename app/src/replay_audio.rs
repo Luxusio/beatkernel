@@ -23,6 +23,7 @@ use beatkernel::{
     },
     runtime::GameplaySoundStop,
     time::{ClockPoint, Duration, Timestamp},
+    transport::Rate,
 };
 use std::{collections::BTreeMap, error::Error};
 
@@ -104,7 +105,7 @@ fn completed_render_cursor_with_admitted_stops(
 pub struct ReplayAudioPlan {
     /// Immutable relative scheduling endpoint, including preroll; None is unlimited.
     pub playback_end_frame: Option<u64>,
-    /// Stable chronological output-domain Play and gameplay-failure Stop commands.
+    /// Stable chronological output-domain rate, Play and gameplay-failure Stop commands.
     pub commands: Vec<AudioCommand>,
     /// Actual full-log judge results with original input provenance.
     pub judge_events: Vec<JudgeEvent>,
@@ -116,19 +117,50 @@ pub struct ReplayAudioPlan {
     pub output_origin: ClockPoint,
 }
 
-fn output_time(
+// Divide first so representable inverse mappings never depend on an overflowing
+// intermediate product. Signed division quantizes once, toward zero nanoseconds.
+fn output_elapsed(
     song: i128,
     start: Timestamp,
-    origin: ClockPoint,
     preroll: Duration,
-) -> Result<Timestamp, ReplayAudioError> {
-    let elapsed = song - i128::from(start.as_nanos()) + i128::from(preroll.as_nanos());
+    rate: Rate,
+) -> Result<i128, ReplayAudioError> {
+    let delta = song
+        .checked_sub(i128::from(start.as_nanos()))
+        .ok_or(ReplayAudioError::Overflow)?;
+    let numerator = i128::from(rate.numerator());
+    let denominator = i128::from(rate.denominator());
+    let scaled = (delta / numerator)
+        .checked_mul(denominator)
+        .and_then(|whole| {
+            (delta % numerator)
+                .checked_mul(denominator)
+                .map(|remainder| remainder / numerator)
+                .and_then(|fraction| whole.checked_add(fraction))
+        })
+        .ok_or(ReplayAudioError::Overflow)?;
+    let elapsed = scaled
+        .checked_add(i128::from(preroll.as_nanos()))
+        .ok_or(ReplayAudioError::Overflow)?;
     if elapsed < 0 {
         return Err(ReplayAudioError::InvalidConfiguration(
             "sound precedes output origin; increase explicit preroll",
         ));
     }
-    let at = i128::from(origin.timestamp.as_nanos()) + elapsed;
+    Ok(elapsed)
+}
+
+fn output_time(
+    song: i128,
+    start: Timestamp,
+    origin: ClockPoint,
+    preroll: Duration,
+    rate: Rate,
+) -> Result<Timestamp, ReplayAudioError> {
+    let elapsed = output_elapsed(song, start, preroll, rate)?;
+    let at = i128::from(origin.timestamp.as_nanos())
+        .checked_add(elapsed)
+        .ok_or(ReplayAudioError::Overflow)?;
     Ok(Timestamp::from_nanos(
         i64::try_from(at).map_err(|_| ReplayAudioError::Overflow)?,
     ))
@@ -143,6 +175,38 @@ pub(crate) fn section_end_frame(
     let start = PracticeStart::from_nanoseconds(start.as_nanos())?;
     let end = PracticeStart::from_nanoseconds(end.as_nanos())?;
     PracticeLoop::new(start, end)?.playback_end_frame(start, preroll, sample_rate)
+}
+
+fn section_end_frame_with_rate(
+    start: Timestamp,
+    end: Timestamp,
+    output_origin: ClockPoint,
+    preroll: Duration,
+    sample_rate: u32,
+    rate: Rate,
+) -> Result<u64, Box<dyn Error>> {
+    if rate == Rate::NORMAL {
+        return Ok(section_end_frame(start, end, preroll, sample_rate)?);
+    }
+    let section_start = PracticeStart::from_nanoseconds(start.as_nanos())?;
+    let section_end = PracticeStart::from_nanoseconds(end.as_nanos())?;
+    PracticeLoop::new(section_start, section_end)?;
+    if sample_rate == 0 {
+        return Err(ReplayAudioError::InvalidConfiguration("zero output sample rate").into());
+    }
+    let at = output_time(
+        i128::from(end.as_nanos()),
+        start,
+        output_origin,
+        preroll,
+        rate,
+    )?;
+    let nanos = i128::from(at.as_nanos()) - i128::from(output_origin.timestamp.as_nanos());
+    let scaled = nanos
+        .checked_mul(i128::from(sample_rate))
+        .ok_or(ReplayAudioError::Overflow)?;
+    let frames = scaled / 1_000_000_000 + i128::from(scaled % 1_000_000_000 != 0);
+    Ok(u64::try_from(frames).map_err(|_| ReplayAudioError::Overflow)?)
 }
 
 pub(crate) fn before_endpoint(
@@ -176,7 +240,7 @@ pub fn plan_audio(
     output_origin: ClockPoint,
     preroll: Duration,
 ) -> Result<ReplayAudioPlan, Box<dyn Error>> {
-    plan_with_section(prepared, file, limits, output_origin, preroll, false)
+    plan_audio_with_rate(prepared, file, limits, output_origin, preroll, Rate::NORMAL)
 }
 
 /// Plan finite or unlimited section audio, excluding every command whose rounded
@@ -188,7 +252,35 @@ pub fn plan_section_audio(
     output_origin: ClockPoint,
     preroll: Duration,
 ) -> Result<ReplayAudioPlan, Box<dyn Error>> {
-    plan_with_section(prepared, file, limits, output_origin, preroll, true)
+    plan_section_audio_with_rate(prepared, file, limits, output_origin, preroll, Rate::NORMAL)
+}
+
+/// Plans forward pitch-changing replay audio at a positive rational song rate.
+/// Preroll is an unscaled output duration. Timing quantizes toward zero whole
+/// nanoseconds before output-frame rounding; original replay and judging stay exact.
+/// A non-normal rate adds one origin SetRate before equal-time sound commands.
+pub fn plan_audio_with_rate(
+    prepared: &PreparedBms,
+    file: ReplayFile,
+    limits: ReplayCodecLimits,
+    output_origin: ClockPoint,
+    preroll: Duration,
+    rate: Rate,
+) -> Result<ReplayAudioPlan, Box<dyn Error>> {
+    plan_with_section(prepared, file, limits, output_origin, preroll, rate, false)
+}
+
+/// Rate-aware section planning with the same exclusive quantized endpoint.
+/// A zero-frame section fence excludes all commands, including origin SetRate.
+pub fn plan_section_audio_with_rate(
+    prepared: &PreparedBms,
+    file: ReplayFile,
+    limits: ReplayCodecLimits,
+    output_origin: ClockPoint,
+    preroll: Duration,
+    rate: Rate,
+) -> Result<ReplayAudioPlan, Box<dyn Error>> {
+    plan_with_section(prepared, file, limits, output_origin, preroll, rate, true)
 }
 
 fn plan_with_section(
@@ -197,8 +289,14 @@ fn plan_with_section(
     limits: ReplayCodecLimits,
     output_origin: ClockPoint,
     preroll: Duration,
+    rate: Rate,
     allow_finite: bool,
 ) -> Result<ReplayAudioPlan, Box<dyn Error>> {
+    if rate.numerator() <= 0 {
+        return Err(
+            ReplayAudioError::InvalidConfiguration("playback rate must be positive").into(),
+        );
+    }
     if preroll.as_nanos() < 0 {
         return Err(ReplayAudioError::InvalidConfiguration("negative preroll").into());
     }
@@ -270,7 +368,9 @@ fn plan_with_section(
     let sample_rate = prepared.bank.format().sample_rate();
     let end = setup
         .end
-        .map(|end| section_end_frame(start, end, preroll, sample_rate))
+        .map(|end| {
+            section_end_frame_with_rate(start, end, output_origin, preroll, sample_rate, rate)
+        })
         .transpose()?;
     if session.engine().chart() != &prepared.compiled.chart {
         return Err(ReplayAudioError::InvalidConfiguration(
@@ -316,7 +416,13 @@ fn plan_with_section(
         if recorded_until.is_none_or(|end| song > end) {
             continue;
         }
-        let at = output_time(i128::from(song.as_nanos()), start, output_origin, preroll)?;
+        let at = output_time(
+            i128::from(song.as_nanos()),
+            start,
+            output_origin,
+            preroll,
+            rate,
+        )?;
         if !before_endpoint(at, output_origin, sample_rate, end)? {
             continue;
         }
@@ -399,7 +505,7 @@ fn plan_with_section(
                     continue;
                 };
                 let song = i128::from(event.at.as_nanos()) - i128::from(offset);
-                let at = output_time(song, start, output_origin, preroll)?;
+                let at = output_time(song, start, output_origin, preroll, rate)?;
                 if !before_endpoint(at, output_origin, sample_rate, end)? {
                     continue;
                 }
@@ -439,6 +545,7 @@ fn plan_with_section(
                     start,
                     output_origin,
                     preroll,
+                    rate,
                 )?;
                 if !before_endpoint(at, output_origin, sample_rate, end)? {
                     continue;
@@ -474,6 +581,7 @@ fn plan_with_section(
                     start,
                     output_origin,
                     preroll,
+                    rate,
                 )?;
                 // Success here means off-thread planning only. The owner must
                 // still feed these commands and observe actual output evidence.
@@ -504,7 +612,7 @@ fn plan_with_section(
                 continue;
             };
             let song = i128::from(event.at.as_nanos()) - i128::from(offset);
-            let at = output_time(song, start, output_origin, preroll)?;
+            let at = output_time(song, start, output_origin, preroll, rate)?;
             if !before_endpoint(at, output_origin, sample_rate, end)? {
                 continue;
             }
@@ -552,6 +660,7 @@ fn plan_with_section(
                     start,
                     output_origin,
                     preroll,
+                    rate,
                 )?;
                 if !before_endpoint(at, output_origin, sample_rate, end)? {
                     continue;
@@ -574,10 +683,22 @@ fn plan_with_section(
         }
     }
     scheduled.sort_unstable_by_key(|&(at, is_hit, ordinal, _)| (at, is_hit, ordinal));
+    let include_rate = rate != Rate::NORMAL
+        && before_endpoint(output_origin.timestamp, output_origin, sample_rate, end)?;
+    let command_count = scheduled
+        .len()
+        .checked_add(usize::from(include_rate))
+        .ok_or(ReplayAudioError::Overflow)?;
     let mut commands = Vec::new();
     commands
-        .try_reserve_exact(scheduled.len())
+        .try_reserve_exact(command_count)
         .map_err(|_| ReplayAudioError::AllocationFailed)?;
+    if include_rate {
+        commands.push(AudioCommand::SetRate {
+            rate,
+            at: output_origin.timestamp,
+        });
+    }
     commands.extend(scheduled.into_iter().map(|(_, _, _, command)| command));
     let mut judge_events = Vec::new();
     judge_events

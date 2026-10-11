@@ -4,13 +4,14 @@ use crate::{
     offline::{
         OfflineError, OfflineOptions, OfflineReport, OwnedStopEvidence, render_block_with_stops,
     },
-    replay_audio::plan_audio,
+    replay_audio::plan_audio_with_rate,
 };
 use beatkernel::{
     audio::{AudioFormat, AudioLimits, Mixer, MixerConfig, RenderReport, command_queue},
     judge::JudgeOutcome,
     replay::codec::{ReplayCodecLimits, ReplayFile},
     time::{ClockDomainId, ClockPoint, Duration, Timestamp},
+    transport::Rate,
 };
 use beatkernel_platform::audio::{DeviceFormat, SampleEncoding};
 use std::{error::Error, io::Write};
@@ -71,6 +72,34 @@ pub fn render_replay(
     preroll: Duration,
     output: &mut dyn Write,
 ) -> Result<ReplayRenderReport, Box<dyn Error>> {
+    render_replay_with_rate(
+        prepared,
+        file,
+        limits,
+        options,
+        preroll,
+        Rate::NORMAL,
+        output,
+    )
+}
+
+/// Renders forward pitch-changing replay audio at a positive rational song rate.
+///
+/// Device sample Hz and requested frames remain output properties. Preroll is
+/// an unscaled output duration; the shared planner scales original song times
+/// and queues one origin SetRate for non-normal speed. That actual Mixer control
+/// counts as an admitted command and uses the caller's unchanged queue capacity.
+/// Logical replay evidence and the legacy finite-metadata refusal are unchanged.
+/// Zero frames validates the plan but admits, writes and flushes nothing.
+pub fn render_replay_with_rate(
+    prepared: PreparedBms,
+    file: ReplayFile,
+    limits: ReplayCodecLimits,
+    options: OfflineOptions,
+    preroll: Duration,
+    playback_rate: Rate,
+    output: &mut dyn Write,
+) -> Result<ReplayRenderReport, Box<dyn Error>> {
     let prepared = crate::section_start::prepare_replay(
         prepared,
         &file,
@@ -118,7 +147,7 @@ pub fn render_replay(
         domain: ClockDomainId(0x424d53),
         timestamp: Timestamp::ZERO,
     };
-    let plan = plan_audio(&prepared, file, limits, origin, preroll)?;
+    let plan = plan_audio_with_rate(&prepared, file, limits, origin, preroll, playback_rate)?;
     // Check every target before the first write, including commands excluded by
     // the caller's output cutoff. Reuse the immutable plan rather than copying it.
     let mut previous = None;
