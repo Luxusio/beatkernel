@@ -3,8 +3,10 @@
 Status: workload and independent tests have reached coordinator verification.
 The first compilation and two subsequent focused executions exposed adapter
 setup defects; the corrected focused suite now passes6/6. Optimized complete
-20h/week executions now pass. Independent code review, QA and final document
-review remain pending; full player Goal and original WBS13.05 are unfinished.
+20h/week executions now pass. Independent security review passed; the first
+DEEP code review found one missing serialized replay decode boundary, now
+corrected and reverified. Fresh code review, QA and final document review remain
+pending; full player Goal and original WBS13.05 are unfinished.
 
 The [contract](../kernel/REQ__long-duration-player-traversal.md) requires actual
 production audio-authoritative playback from song zero through every output
@@ -61,6 +63,23 @@ Exact argv/exit/time and original stdout/stderr are retained in `cli-results.jso
 and named artifacts in the same directory. The default and week observations
 took approximately0.93s and7.09s respectively on this host; these are virtual
 correctness execution times, not standard-rate player or hardware performance.
+
+Independent discovery cycle1 returned one correctness candidate and no contract/
+test candidates. Formal code review verified the candidate as a medium missing
+behavior: the CLI reconstructed the original in-memory `ReplayFile` instead of
+decoding its encoded capture bytes. Small independent tests already exercised
+decode separately, but full-horizon CLI acceptance requires its own actual
+encode/decode/reconstruction path. The correction uses existing `decode_replay`
+with the same bounded limits and reconstructs its returned file. Review1 is
+FAIL, not acceptance; its earlier whole-horizon observations are preserved.
+
+After that correction, `fixed-decode-test.log` passed6/6 in1.63s and
+`fixed-decode-build.log` completed the optimized build in12.87s. The actual
+20h,168h and repeated168h commands each passed through capture byte decoding
+and completed all frames. `decoded-cli-results.json` and `decoded-*.stdout`/
+stderr retain those original executions. Both week outputs were byte-identical,
+and20h/week facts also matched the corresponding earlier outputs. No recording
+format, timestamp, expected PCM or test oracle changed.
 
 ## Known ceiling
 

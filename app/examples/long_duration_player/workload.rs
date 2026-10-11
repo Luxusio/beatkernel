@@ -32,7 +32,7 @@ use beatkernel::{
     judge::{JudgeEngine, JudgeEvent, JudgeOutcome, JudgeStage},
     replay::{
         ReplayOperation, ReplayRecord,
-        codec::{ReplayCodecLimits, ReplayFile},
+        codec::{ReplayCodecLimits, ReplayFile, decode_replay},
     },
     runtime::{RuntimeProcessingClock, RuntimeReport, SoundBinding},
     telemetry::InputDeliveryTelemetry,
@@ -779,8 +779,8 @@ pub fn run(options: Options) -> NativeGameplayResult<Report> {
     let completed = e.outcome?;
     let d = e.device;
     let s = e.shared.borrow();
-    let file = ReplayFile::new(e.capture.header().clone(), e.capture.records().to_vec());
     let bytes = e.capture.into_bytes()?;
+    let file = decode_replay(&bytes, limits())?;
     let restored = app::replay_playback::reconstruct_section(&e.source, file.clone(), limits())?;
     let mut inputs = 0;
     let mut advances = 0;
