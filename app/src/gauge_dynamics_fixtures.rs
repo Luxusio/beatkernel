@@ -27,6 +27,58 @@ fn miss() -> JudgeEvent {
 }
 
 #[test]
+fn staged_dynamic_candidate_matches_public_observe_without_mutating_owner() {
+    let dynamics = GaugeDynamics {
+        minimum_alive: 0,
+        failure_below: 2_000_000,
+        damage_reduction_below: 32_000_000,
+    };
+    for initial in [32_000_000, 31_999_999, 3_000_000] {
+        let profile = GaugeProfile::new(
+            initial,
+            80_000_000,
+            i64::MAX,
+            -10_000_000,
+            true,
+            vec![GradeDelta {
+                grade: JudgeGrade(u32::MAX),
+                delta: -10_000_000,
+            }],
+        )
+        .unwrap()
+        .with_dynamics(dynamics)
+        .unwrap();
+        let mut owner = BmsGauge::new(profile);
+        let before = owner.clone();
+        let events = [hit(u32::MAX), miss(), hit(1)];
+        let candidate = owner.stage_observation(&events, &[]).unwrap();
+        assert_eq!(owner, before);
+        let mut public = before.clone();
+        public.observe(&events, &[]).unwrap();
+        owner.commit_observation(candidate);
+        assert_eq!(owner, public);
+        assert_eq!(owner.profile().dynamics(), dynamics);
+        if initial == 3_000_000 {
+            assert_eq!(
+                candidate,
+                GaugeSnapshot {
+                    level_units: 0,
+                    failure: Some(GaugeFailure::Depleted)
+                }
+            );
+        } else {
+            assert_eq!(
+                candidate,
+                GaugeSnapshot {
+                    level_units: MAX_GAUGE_UNITS,
+                    failure: None
+                }
+            );
+        }
+    }
+}
+
+#[test]
 fn resolved_adapter_judgments_match_runtime_dynamics_for_every_variant() {
     for kind in BmsGaugeKind::ALL {
         let rules =
@@ -114,40 +166,34 @@ fn reduction_is_strict_and_wide_deltas_never_overflow_or_recover_failure() {
 #[test]
 fn invalid_dynamics_and_duplicate_opaque_grade_maps_refuse_during_setup() {
     let profile = GaugeProfile::default();
-    assert!(
-        profile
-            .clone()
-            .with_dynamics(GaugeDynamics {
-                minimum_alive: MAX_GAUGE_UNITS + 1,
-                ..GaugeDynamics::default()
-            })
-            .is_err()
-    );
-    assert!(
-        profile
-            .with_dynamics(GaugeDynamics {
-                failure_below: 1,
-                ..GaugeDynamics::default()
-            })
-            .is_err()
-    );
+    assert!(profile
+        .clone()
+        .with_dynamics(GaugeDynamics {
+            minimum_alive: MAX_GAUGE_UNITS + 1,
+            ..GaugeDynamics::default()
+        })
+        .is_err());
+    assert!(profile
+        .with_dynamics(GaugeDynamics {
+            failure_below: 1,
+            ..GaugeDynamics::default()
+        })
+        .is_err());
     let rules = BmsGaugeRules::lr2(
         BmsGaugeKind::Groove,
         BmsTotal::from_units(300_000_000).unwrap(),
         1000,
     )
     .unwrap();
-    assert!(
-        GaugeProfile::from_bms_rules(
-            rules,
-            BmsJudgment::PGreat,
-            &[
-                (JudgeGrade(1), BmsJudgment::Good),
-                (JudgeGrade(1), BmsJudgment::Bad)
-            ]
-        )
-        .is_err()
-    );
+    assert!(GaugeProfile::from_bms_rules(
+        rules,
+        BmsJudgment::PGreat,
+        &[
+            (JudgeGrade(1), BmsJudgment::Good),
+            (JudgeGrade(1), BmsJudgment::Bad)
+        ]
+    )
+    .is_err());
 }
 
 #[test]
@@ -174,11 +220,9 @@ fn mine_damage_remains_raw_and_invalid_hazards_are_atomic_under_dynamic_profile(
         input: None,
     };
     let before = *gauge.snapshot();
-    assert!(
-        gauge
-            .observe(&[hit(1)], &[HazardEvent { value: 0, ..hazard }])
-            .is_err()
-    );
+    assert!(gauge
+        .observe(&[hit(1)], &[HazardEvent { value: 0, ..hazard }])
+        .is_err());
     assert_eq!(*gauge.snapshot(), before);
     gauge.observe(&[], &[hazard]).unwrap();
     assert_eq!(gauge.snapshot().level_units, 10_000_000);

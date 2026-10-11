@@ -255,6 +255,17 @@ impl BmsGauge {
         events: &[JudgeEvent],
         hazards: &[HazardEvent],
     ) -> Result<(), GaugeError> {
+        let next = self.stage_observation(events, hazards)?;
+        self.commit_observation(next);
+        Ok(())
+    }
+
+    /// Calculates a report candidate without copying or changing its policy.
+    pub(crate) fn stage_observation(
+        &self,
+        events: &[JudgeEvent],
+        hazards: &[HazardEvent],
+    ) -> Result<GaugeSnapshot, GaugeError> {
         for hazard in hazards {
             if !(1..=1295).contains(&hazard.value) {
                 return Err(GaugeError::InvalidDamage {
@@ -293,8 +304,12 @@ impl BmsGauge {
                 self.apply_delta(&mut next, -(i128::from(hazard.value) * 500_000));
             }
         }
-        self.snapshot = next;
-        Ok(())
+        Ok(next)
+    }
+
+    /// Commits a candidate staged under this gauge's unchanged policy/state.
+    pub(crate) fn commit_observation(&mut self, snapshot: GaugeSnapshot) {
+        self.snapshot = snapshot;
     }
 
     fn apply_delta(&self, snapshot: &mut GaugeSnapshot, delta: i128) {

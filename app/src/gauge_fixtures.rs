@@ -1,7 +1,6 @@
 //! Deferred fixed-point gauge policy and actual committed-owner observations.
 //! Typed preparation does not bypass the playable mine-file admission guard.
 use crate::{
-    PreparedBms,
     gauge::{
         BmsGauge, GaugeError, GaugeFailure, GaugeProfile, GaugeSnapshot, GradeDelta,
         GAUGE_UNITS_PER_PERCENT, MAX_GAUGE_GRADES, MAX_GAUGE_UNITS,
@@ -11,6 +10,7 @@ use crate::{
     replay_visual::ReplayVisual,
     step_gameplay::{StepGameplay, StepGameplayConfig, StepGameplayError, StepLocalGameplay},
     step_replay::{StepReplay, StepReplayConfig},
+    PreparedBms,
 };
 use beatkernel::{
     audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId},
@@ -24,11 +24,11 @@ use beatkernel::{
         HazardEvent, HazardId, HazardOutcome, JudgeEvent, JudgeGrade, JudgeOutcome, JudgeStage,
         MissReason,
     },
-    replay::codec::{ReplayCodecLimits, decode_replay},
+    replay::codec::{decode_replay, ReplayCodecLimits},
     runtime::SoundBinding,
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
 };
-use beatkernel_bms::{BmsChart, BmsInputMode, parse};
+use beatkernel_bms::{parse, BmsChart, BmsInputMode};
 
 fn ts(ns: i64) -> Timestamp {
     Timestamp::from_nanos(ns)
@@ -68,6 +68,74 @@ fn hazard(value: u64, outcome: HazardOutcome) -> HazardEvent {
         outcome,
         input: None,
     }
+}
+
+#[test]
+fn staged_observation_retains_policy_and_state_until_explicit_commit() {
+    let profile = GaugeProfile::new(
+        20_000_000,
+        80_000_000,
+        17,
+        -6_000_000,
+        false,
+        vec![
+            GradeDelta {
+                grade: JudgeGrade(u32::MAX),
+                delta: 3_000_000,
+            },
+            GradeDelta {
+                grade: JudgeGrade(0),
+                delta: 1_000_000,
+            },
+        ],
+    )
+    .unwrap();
+    let mut staged = BmsGauge::new(profile);
+    let before = staged.clone();
+    let events = [
+        hit(u32::MAX, JudgeStage::HoldHead),
+        hit(77, JudgeStage::HoldTail),
+        miss(JudgeStage::Instant),
+    ];
+    let hazards = [
+        hazard(2, HazardOutcome::Triggered),
+        hazard(1295, HazardOutcome::Avoided),
+    ];
+    let candidate = staged.stage_observation(&events, &hazards).unwrap();
+    assert_eq!(staged, before);
+    assert_eq!(candidate, snapshot(16_000_017, None));
+    let mut public = before.clone();
+    public.observe(&events, &hazards).unwrap();
+    staged.commit_observation(candidate);
+    assert_eq!(staged, public);
+    assert_eq!(staged.profile(), before.profile());
+    for value in [0, 1296, u64::MAX] {
+        let before = staged.clone();
+        assert_eq!(
+            staged.stage_observation(
+                &events,
+                &[
+                    hazard(1, HazardOutcome::Triggered),
+                    hazard(value, HazardOutcome::Avoided)
+                ]
+            ),
+            Err(GaugeError::InvalidDamage { value })
+        );
+        assert_eq!(staged, before);
+    }
+    staged
+        .observe(&[], &[hazard(1295, HazardOutcome::Triggered)])
+        .unwrap();
+    let failed = staged.clone();
+    assert_eq!(
+        staged.stage_observation(&events, &[hazard(0, HazardOutcome::Triggered)]),
+        Err(GaugeError::InvalidDamage { value: 0 })
+    );
+    assert_eq!(staged, failed);
+    assert_eq!(
+        staged.stage_observation(&events, &hazards).unwrap(),
+        *failed.snapshot()
+    );
 }
 
 #[test]

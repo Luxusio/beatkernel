@@ -4,7 +4,7 @@ use crate::{
     gameplay::output::domain::control::{
         OutputCapability, OutputControls, OutputReply, OutputRequest,
     },
-    gauge::{BmsGauge, GaugeFailure, GaugeProfile},
+    gauge::{BmsGauge, GaugeFailure, GaugeProfile, GaugeSnapshot},
     judgment_policy::{BmsJudgmentPolicy, BmsScoreSummary},
     local_players::PlayerId,
     local_runtime::PlayerReport,
@@ -2141,6 +2141,7 @@ fn publish_solo(
         } else {
             (&mut current.snapshot.players[0], &mut current.pressed[0])
         };
+        let mut replacement_gauge = None;
         let gauge = if let Some(gauge) = replay_gauge {
             validate_replay_gauge(
                 Some(&member.gauge),
@@ -2151,13 +2152,16 @@ fn publish_solo(
                     .as_ref()
                     .unwrap_or(&GaugeProfile::default()),
             )?;
-            Some(gauge.clone())
+            // Preserve accepted policy replacement from a fresh live session.
+            // Registered replay observations normally share the member policy.
+            if member.gauge.profile() != gauge.profile() {
+                replacement_gauge = Some(gauge.clone());
+            }
+            Some(*gauge.snapshot())
         } else if events.is_empty() && hazards.is_empty() {
             None
         } else {
-            let mut gauge = member.gauge.clone();
-            gauge.observe(events, hazards)?;
-            Some(gauge)
+            Some(member.gauge.stage_observation(events, hazards)?)
         };
         let score = if events.is_empty() {
             None
@@ -2187,8 +2191,7 @@ fn publish_solo(
         let prepared = pressed.keys.prepare(inputs)?;
         if gauge
             .as_ref()
-            .unwrap_or(&member.gauge)
-            .snapshot()
+            .unwrap_or(member.gauge.snapshot())
             .failure
             .is_some()
         {
@@ -2208,8 +2211,10 @@ fn publish_solo(
         }
         member.bms_score = bms_score;
         member.mine_damage = mine_damage;
-        if let Some(gauge) = gauge {
-            member.gauge = gauge;
+        if let Some(replacement) = replacement_gauge {
+            member.gauge = replacement;
+        } else if let Some(gauge) = gauge {
+            member.gauge.commit_observation(gauge);
         }
         member.update_results(song, events);
         if let Some((member, pressed)) = fresh {
@@ -2262,7 +2267,7 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
         // any mutation of any member in this batch.
         let mut changed_scores = Vec::new();
         let mut changed_mines: [Option<MineDamageSummary>; 64] = [None; 64];
-        let mut changed_gauges: [Option<BmsGauge>; 64] = std::array::from_fn(|_| None);
+        let mut changed_gauges: [Option<GaugeSnapshot>; 64] = [None; 64];
         for report in reports {
             if report.report.judge_events.is_empty() && report.report.hazard_events.is_empty() {
                 continue;
@@ -2273,9 +2278,11 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
                 .iter()
                 .position(|member| member.player == report.player)
                 .expect("validated registered player");
-            let mut gauge = current.snapshot.players[index].gauge.clone();
-            gauge.observe(&report.report.judge_events, &report.report.hazard_events)?;
-            changed_gauges[index] = Some(gauge);
+            changed_gauges[index] = Some(
+                current.snapshot.players[index]
+                    .gauge
+                    .stage_observation(&report.report.judge_events, &report.report.hazard_events)?,
+            );
             if !report.report.judge_events.is_empty() {
                 let mut score = current.snapshot.players[index].score.clone();
                 score.observe(&report.report.judge_events)?;
@@ -2311,8 +2318,7 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
         for (index, mask) in changed_pressed {
             if changed_gauges[index]
                 .as_ref()
-                .unwrap_or(&current.snapshot.players[index].gauge)
-                .snapshot()
+                .unwrap_or(current.snapshot.players[index].gauge.snapshot())
                 .failure
                 .is_none()
             {
@@ -2336,7 +2342,7 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
                 member.mine_damage = summary;
             }
             if let Some(gauge) = changed_gauges[index].take() {
-                member.gauge = gauge;
+                member.gauge.commit_observation(gauge);
             }
             if member.gauge.snapshot().failure.is_some() {
                 current.pressed[index].keys.clear();
@@ -2435,7 +2441,7 @@ impl PlayerSnapshot {
             self.mine_damage = member.mine_damage;
             self.gauge.clone_from(&member.gauge);
             self.last_judge = member.last_judge;
-            self.recent_results = member.recent_results.clone();
+            self.recent_results.clone_from(&member.recent_results);
         } else {
             self.note_progress = None;
             self.pressed_lanes = 0;
@@ -2515,6 +2521,10 @@ impl Session {
 #[cfg(test)]
 #[path = "gauge_pressed_native_fixtures.rs"]
 mod gauge_pressed_fixtures;
+
+#[cfg(test)]
+#[path = "player_snapshot_allocation_fixtures.rs"]
+mod snapshot_allocation_fixtures;
 
 #[cfg(test)]
 #[path = "player_preparation_fixtures.rs"]
