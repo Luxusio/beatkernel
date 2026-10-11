@@ -41,6 +41,9 @@ No replay schema migration or relaxed compatibility comparison is required.
   alone is insufficient evidence of completion.
 - Existing finite/contact network identity regressions remain unchanged.
 
-Implementation and independent acceptance are pending in
-`TASK__player-record-worker-regressions`. This requirement does not establish
+Implemented in `7fb6a5a`, with fixture coverage in `1282130`. Independent code,
+CLI and interactive browser acceptance passed for
+`TASK__player-record-worker-regressions`, including finite Own and Other
+completion, persistence, mismatch recovery and replay. Task closure remains
+subject to Harness-owned attestation. This requirement does not establish
 whole-player completion or physical audio/input acceptance.

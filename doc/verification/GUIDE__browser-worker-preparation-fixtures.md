@@ -18,6 +18,12 @@ numeric helpers and renderer/room ownership boundaries remain under test.
 5. Take the prepared owner once. Preserve cancellation, job/library cleanup
    and existing no-resurrection/late-transfer assertions.
 
+A real incremental job can report the same pending asset path across processing
+stages after its bytes have been supplied. Reuse acquired bytes while advancing
+the job; do not require pending paths to be unique. At Ready, assert each
+required asset was hydrated exactly once. This keeps genuine binding tests
+aligned with production without weakening the declaration or length checks.
+
 `app/web/play-worker.test.mjs` supplies the existing queued-task pattern.
 Its flush tracks both queued tasks and a set of reserved delivery promises.
 Concurrent flushers must join deliveries already removed from the queue;

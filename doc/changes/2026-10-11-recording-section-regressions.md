@@ -18,9 +18,10 @@ setup preconditions and one-shot job cleanup. Original assertions remain;
 completed-results also updates its fake sample to `take_pcm_array()` after
 the first focused run exposed that next obsolete seam.
 
-## Development evidence so far
+## Development and independent acceptance evidence
 
 Base: `b65e749`; previous production source: `073a449`.
+Implemented source: `7fb6a5a`; final regression fixtures: `1282130`.
 Logs: `target/wf/player-record-worker-regressions/` (ignored local evidence).
 
 | Check | Observed result |
@@ -37,12 +38,20 @@ Logs: `target/wf/player-record-worker-regressions/` (ignored local evidence).
 | Actual WASM test with fresh updated browser bindings | 9 passed, 0 failed, no skipped/cancelled |
 | Fresh browser and browser-audio release builds / bindgen | both exit 0 |
 | Changed Rust formatting / diff whitespace | no new format debt in edited regions; diff check exit 0 |
+| Independent DEEP code review and two discovery hunters | PASS; no actionable findings |
+| Independent app library, desktop/webtransport features | 2,384 passed, 0 failed, 6 existing ignored; 2,390 total |
+| Independent full Node suite, concurrency 4 | 913 passed, 0 failed/skipped/cancelled |
+| Independent focused Node suite | 44 passed: genuine WASM 9, historical 22, results 9, archive 4 |
+| Independent genuine baseline bindings | 4 open passed, 5 finite failed with `IncompatibleSetup` |
+| Independent shared no-default check / reproduced WASM bindings | exit 0; both package hashes reproduced |
+| Interactive browser QA | PASS; finite original / Own / Other completed and saved, mismatch recovery and replay checked |
+| Independent interactive browser UX | scoped PASS; ordinary Own/Other/replay and keyboard/navigation checked |
 
 Historical has 22 passing tests and archive has 4 from the focused run. The
 remaining original nine completed-results tests passed after updating the
 sample fake. Local fixture repair supplies actual exact-device lane bindings;
-it does not weaken the game's membership/setup validation. The full fresh Node
-suite, independent review and interactive browser acceptance are pending.
+it does not weaken the game's membership/setup validation. Full fresh Node,
+independent review and interactive browser acceptance have now passed.
 
 Actual preparation may retain a pending asset name across processing stages.
 The new binding fixture now follows production's acquired-file reuse and
@@ -60,11 +69,31 @@ prefix and all original Worker test names/order remain preserved.
 
 ## Known ceiling
 
-Development fixture passes are not independent acceptance or physical device
-evidence. Actual finite recording/save/own comparison must complete in the
-browser; prefix capture alone cannot prove completion. Previous native evdev
-acceptance remains unfinished separately. No whole-player performance claim,
-task close or WBS promotion is made; WBS remains 90/193 (46.63%).
+Browser QA decoded three genuine saved `.bkr`/`.bkra` pairs with start 0 and
+end 1,000,000,000ns. Own and Other comparisons completed and persisted with
+their History metadata. A 1.5-second mismatch preserved the selected opponent;
+correcting it to 1 second allowed completion. Final console, page and HTTP
+errors were zero; the expected typed mismatch occurred once. Evidence is under
+`qa-browser-1/acceptance-audit.json` and `transcript.md`. Initial BigInt export,
+diagnostic field and scratch decoder mistakes remain in the original logs;
+they were corrected against the same live ordinary-UI session. Owned browser,
+server, Xvfb and UX drivers finished; temporary profile/cache were removed.
+
+UX evidence under `ux-browser-1/` includes the initial field-selection driver
+mistake and the corrected ordinary keyboard journeys. Existing backlog remains:
+small/clipped bitmap labels, dense forms, generic mismatch guidance and 390px
+horizontal overflow to 429px from existing select controls. These were not
+changed by the recording repair. No whole-player performance or physical
+audio/input claim is made. Native evdev acceptance remains unfinished.
+
+Review and QA finals are substantive PASS; Harness closure additionally needs
+ordered hook-owned completion receipts and has not yet been established. No
+WBS promotion is made; WBS remains 90/193 (46.63%). Test scopes differ from the
+previous cleanup task's all-target suite, so the Rust totals are not comparable.
+
+The Worker preparation GUIDE captures the confirmed queued delivery and
+repeated pending-path lessons. Browser evidence-driver improvements, old format
+debt and visual backlog remain deferred; no unrelated source changes were made.
 
 Durable contracts:
 [saved section compatibility](../runtime/REQ__saved-record-section-compatibility.md)
