@@ -190,3 +190,33 @@ including the complete before/after report meter and private atomicity;
 all-five owner development fixtures passed; independent formal review and actual
 CLI/browser/desktop QA remain required. No
 world-fastest, whole-player zero-allocation or WBS promotion is claimed.
+
+Independent final DEEP code review and documentation review passed at `f8fc87d`
+(production source `073a449`). Fresh CLI QA executed the complete app suite
+without the old Records exclusion: 41 targets, 3,187 passed, zero failed,
+38 environment-dependent ignored tests and zero filters. The fresh allocation
+meters passed seven tests and 48 named observations. Twelve actual CLI paths
+passed on rebuilt binary `be0a6591ebf97116b0296660313711d261d1b0ce257ef0cd91171f857c9cade0`;
+Linux and Windows all-target typing subsequently passed with exit0. macOS
+typing and complete CLI lens acceptance remain pending; foreign stub checks
+establish Rust typing, not native linking or execution.
+
+After that suite passed, the task resource clause was amended to allow one
+exclusive compiler and one exclusive GUI lease. Native functional GUI checks
+used a hash-verified frozen binary while metadata-only checks ran; GUI lenses
+never overlap and these observations establish no latency ranking.
+
+Independent desktop QA returned BLOCKED_ENV with successful actual X11 checks
+for Settings, Players, Devices and Records. Records detail pixels matched after
+800x600 -> 1x1 -> 960x720 restoration; hidden page changes, retained parents and
+fresh reopening were exercised. The actual LiveAudio entry requires native
+input initialization, but this host has no `/dev/input`, `/dev/uinput` or sysfs
+uinput device; `/dev/null` genuinely refuses the evdev ioctl. No mock driver was
+substituted. Connected six-test success/refusal coverage remains distinct from
+this missing shipped-GUI acceptance. Both owned applications exited through
+product controls with exit0 and left no owned windows/processes.
+
+Known ceiling: actual LiveAudio GUI acceptance requires an accessible real or
+virtual evdev device; this environment cannot currently supply one. Complete
+browser QA and remaining typing still proceed. Full task and player completion
+remain unproven; the four successful native panels do not replace that gap.
