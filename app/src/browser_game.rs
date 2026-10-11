@@ -503,7 +503,7 @@ impl BrowserGame {
         let limits = crate::competition_live::replay_limits().map_err(error)?;
         let header = self
             .game
-            .competition_header(limits, self.chart_seed)
+            .recording_header(limits, self.chart_seed)
             .map_err(error)?;
         let kind = if own {
             OpponentKind::Own

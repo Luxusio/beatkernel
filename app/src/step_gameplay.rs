@@ -1068,12 +1068,30 @@ impl StepGameplay {
         }
     }
 
-    /// Actual pristine setup for replay comparisons, without enabling capture.
-    /// Retains the same immutable original-song section start used by capture.
+    /// Normalized pristine network setup, without enabling capture.
+    /// Retains the original-song start; the finite end belongs to the identity envelope.
     pub fn competition_header(
         &self,
         limits: ReplayCodecLimits,
         chart_seed: u64,
+    ) -> Result<ReplayHeader, StepGameplayError> {
+        self.setup_header(limits, chart_seed, None)
+    }
+
+    /// Capture-exact pristine metadata for saved comparisons, without enabling capture.
+    pub(crate) fn recording_header(
+        &self,
+        limits: ReplayCodecLimits,
+        chart_seed: u64,
+    ) -> Result<ReplayHeader, StepGameplayError> {
+        self.setup_header(limits, chart_seed, self.end)
+    }
+
+    fn setup_header(
+        &self,
+        limits: ReplayCodecLimits,
+        chart_seed: u64,
+        end: Option<Timestamp>,
     ) -> Result<ReplayHeader, StepGameplayError> {
         self.ensure_solo()?;
         self.ensure_usable()?;
@@ -1089,7 +1107,7 @@ impl StepGameplay {
                 limits,
                 self.start,
                 chart_seed,
-                None,
+                end,
                 self.input_mode,
                 self.input_sound_identity,
                 policy,
@@ -1101,7 +1119,7 @@ impl StepGameplay {
                 limits,
                 self.start,
                 chart_seed,
-                None,
+                end,
                 self.input_mode,
                 self.input_sound_identity,
                 self.gauge.profile(),
@@ -2524,11 +2542,32 @@ impl StepLocalGameplay {
         Ok(())
     }
 
+    /// Normalized pristine network setup, with the finite end in the identity envelope.
     pub fn competition_header(
         &self,
         player: PlayerId,
         limits: ReplayCodecLimits,
         chart_seed: u64,
+    ) -> Result<ReplayHeader, StepLocalGameplayError> {
+        self.setup_header(player, limits, chart_seed, None)
+    }
+
+    /// Capture-exact member metadata for saved comparisons, without enabling capture.
+    pub(crate) fn recording_header(
+        &self,
+        player: PlayerId,
+        limits: ReplayCodecLimits,
+        chart_seed: u64,
+    ) -> Result<ReplayHeader, StepLocalGameplayError> {
+        self.setup_header(player, limits, chart_seed, self.control.end)
+    }
+
+    fn setup_header(
+        &self,
+        player: PlayerId,
+        limits: ReplayCodecLimits,
+        chart_seed: u64,
+        end: Option<Timestamp>,
     ) -> Result<ReplayHeader, StepLocalGameplayError> {
         self.control.ensure_usable()?;
         self.member_index(player)?;
@@ -2545,7 +2584,7 @@ impl StepLocalGameplay {
                 limits,
                 self.control.start,
                 chart_seed,
-                None,
+                end,
                 self.control.input_mode,
                 self.control.input_sound_identity,
                 policy,
@@ -2557,7 +2596,7 @@ impl StepLocalGameplay {
                 limits,
                 self.control.start,
                 chart_seed,
-                None,
+                end,
                 self.control.input_mode,
                 self.control.input_sound_identity,
                 self.members[self.member_index(player)?].gauge.profile(),
