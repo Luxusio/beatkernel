@@ -10,15 +10,15 @@ p { line-height: 1.6; }
 .eyebrow { color: #77c5f4; font-size: .75rem; letter-spacing: .18em; margin: 0; }
 .controls, .preview { background: #18212d; border: 1px solid #304053; border-radius: 10px; padding: 20px; margin-top: 16px; }
 form, .files { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; }
-label { display: flex; flex-direction: column; gap: 6px; font-size: .9rem; min-width: 0; }
+label { display: flex; flex-direction: column; gap: 6px; font-size: .9rem; min-width: 0; max-width: 100%; }
 .chart { flex: 1 1 280px; }
 .replay-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
-.replay-controls label { flex-direction: row; align-items: center; }
+.replay-controls label { flex-direction: row; align-items: center; flex-wrap: wrap; }
 .binding-editor { margin-top: 16px; }
 .binding-editor summary { cursor: pointer; }
-#bindings { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 16px 0; }
-#local-sources { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 16px; }
-input, select, button { font: inherit; padding: 10px; border: 1px solid #63758c; border-radius: 5px; background: #111923; color: inherit; max-width: 100%; }
+#bindings { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 12px; margin: 16px 0; }
+#local-sources { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; margin-top: 16px; }
+input, select, button { font: inherit; padding: 10px; border: 1px solid #63758c; border-radius: 5px; background: #111923; color: inherit; min-width: 0; max-width: 100%; }
 input[type="file"] { width: 290px; }
 input[type="number"] { width: 140px; }
 button { background: #28567c; cursor: pointer; }
