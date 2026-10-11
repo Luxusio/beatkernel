@@ -32,11 +32,19 @@
   source/converted target/interval pause의 실제 acknowledgement, 분수 위상,
   원자적 거절, 실제 AudioAuthority token, 기존 Settings 행 순서와 profile
   v1/v2 기본 바이트 호환성을 확인했다.
+- 기록 배속 계약 테스트 13개가 통과했다. NORMAL 바이트 보존, 잘못된
+  envelope 거절과 전체 header 예산, 실제 Runtime 입력·판정·gauge·hash·
+  provenance의 기록/복원, 별도 replay 출력 배속 및 native catalog 조건
+  비교를 검사했다. 원본 로그: `live-recording-4.log` (같은 증거 폴더).
+  앞선 실행의 test fixture 정수 타입, WAV 정의와 두 탭 사이 release 오류는
+  각각 고쳤으며 `live-recording-1.log`부터 `live-recording-3.log`에 보존했다.
+  파서나 판정 검증을 완화하지 않았다. source-speed 추가 이후의 전체 app
+  회귀와 실제 플레이 소비자·독립 QA는 아직 남아 있다.
 - 최초 전체 core 검사 `core-full-1.log`는 컴파일 중 240초 제한으로 종료됐다
   (exit 124). 제한을 600초로 늘린 후 같은 source를 재검사했고
   `core-full-2.log`에서 62개 suite의 531개 테스트가 모두 통과했다
   (exit 0, failed 0, ignored 0, doctest 포함).
-- 기록의 원래 플레이 배속, 실제 native/browser 소비자 연결과 독립
+- 실제 native/browser 소비자 연결과 독립
   review·QA는 아직 진행 중이다. 새 cold API의 통과는 아직 실제 앱에서
   배속을 선택하고 플레이하는 전체 경로의 완료를 의미하지 않는다.
 

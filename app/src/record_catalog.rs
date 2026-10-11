@@ -129,7 +129,8 @@ impl RecordPreview {
         if setup.chart_seed != expected.chart_seed {
             return Err("saved record chart seed differs from the current draft".into());
         }
-        if setup.timing != expected.timing
+        if setup.source_speed != expected.source_speed
+            || setup.timing != expected.timing
             || setup.judgments != expected.judgments
             || setup.gauge != expected.gauge
             || setup.profile != expected.profile
@@ -402,6 +403,7 @@ fn draft_section(
         Some(end)
     };
     Ok(RecordedSetup {
+        source_speed: settings.playback_speed()?,
         timing,
         judgments,
         profile,

@@ -47,6 +47,7 @@ pub(crate) fn record_with_archive() -> (RecordPreview, ResultArchive) {
     )
     .unwrap();
     let setup = RecordedSetup {
+        source_speed: crate::replay_speed::ReplaySpeed::new(Rate::NORMAL).unwrap(),
         timing: None,
         judgments: Some(
             BmsJudgmentPolicy::new(&[GradeClass {

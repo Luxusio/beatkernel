@@ -19,6 +19,7 @@ mod native_storage;
 /// Capture, serialization or exclusive output creation failure.
 #[derive(Debug)]
 pub enum CaptureError {
+    SourceSpeed(crate::replay_speed_policy::PolicyError),
     TimingPolicy(crate::replay_timing_policy::PolicyError),
     JudgmentPolicy(crate::replay_judgment_policy::PolicyError),
     InvalidPolicy(&'static str),
@@ -54,6 +55,7 @@ impl From<std::io::Error> for CaptureError {
 impl std::fmt::Display for CaptureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SourceSpeed(error) => write!(f, "{error}"),
             Self::TimingPolicy(error) => write!(f, "{error}"),
             Self::JudgmentPolicy(error) => write!(f, "{error}"),
             Self::InvalidPolicy(error) => write!(f, "BMS replay policy: {error}"),
@@ -161,6 +163,35 @@ pub fn setup_play_policy_header(
     input_sounds: Option<InputSoundIdentity>,
     policy: &crate::play_policy::ResolvedPlayPolicy,
 ) -> Result<ReplayHeader, CaptureError> {
+    setup_play_policy_header_with_speed(
+        judge,
+        domain,
+        limits,
+        start,
+        chart_seed,
+        end,
+        input_mode,
+        input_sounds,
+        policy,
+        crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+            .expect("positive normal rate"),
+    )
+}
+
+/// Canonical complete setup including normalized original-play speed identity.
+#[allow(clippy::too_many_arguments)]
+pub fn setup_play_policy_header_with_speed(
+    judge: &JudgeEngine,
+    domain: ClockDomainId,
+    limits: ReplayCodecLimits,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    input_mode: BmsInputMode,
+    input_sounds: Option<InputSoundIdentity>,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    source_speed: crate::replay_speed::ReplaySpeed,
+) -> Result<ReplayHeader, CaptureError> {
     if judge.profile() != policy.judge() {
         return Err(CaptureError::InvalidPolicy("judge profile differs"));
     }
@@ -180,7 +211,9 @@ pub fn setup_play_policy_header(
     )?;
     let header = crate::replay_judgment_policy::wrap_header(header, policy.judgments(), limits)
         .map_err(CaptureError::JudgmentPolicy)?;
-    wrap_timing_header(header, policy.timing(), input_mode, limits)
+    let header = wrap_timing_header(header, policy.timing(), input_mode, limits)?;
+    crate::replay_speed_policy::wrap_header(header, source_speed, limits)
+        .map_err(CaptureError::SourceSpeed)
 }
 
 /// The staged numerical policy uses its own explicit interaction schema.
@@ -488,7 +521,7 @@ impl LiveReplayCapture {
         input_sounds: Option<InputSoundIdentity>,
         policy: &crate::play_policy::ResolvedPlayPolicy,
     ) -> Result<Self, CaptureError> {
-        let header = setup_play_policy_header(
+        Self::new_with_policy_and_speed(
             judge,
             domain,
             limits,
@@ -498,6 +531,36 @@ impl LiveReplayCapture {
             input_mode,
             input_sounds,
             policy,
+            crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+                .expect("positive normal rate"),
+        )
+    }
+
+    /// Records original-song operations and the source-play speed independently.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_policy_and_speed(
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        limits: ReplayCodecLimits,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        input_sounds: Option<InputSoundIdentity>,
+        policy: &crate::play_policy::ResolvedPlayPolicy,
+        source_speed: crate::replay_speed::ReplaySpeed,
+    ) -> Result<Self, CaptureError> {
+        let header = setup_play_policy_header_with_speed(
+            judge,
+            domain,
+            limits,
+            start,
+            chart_seed,
+            end,
+            input_mode,
+            input_sounds,
+            policy,
+            source_speed,
         )?;
         let header_bytes =
             encode_replay(&ReplayFile::new(header.clone(), Vec::new()), limits)?.len();

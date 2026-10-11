@@ -488,6 +488,7 @@ pub mod replay_playback;
 pub mod replay_render;
 /// Positive fixed replay speed and checked original-song presentation mapping.
 pub mod replay_speed;
+pub mod replay_speed_policy;
 #[cfg(test)]
 mod replay_render_owned_stop_fixtures;
 /// Incremental presentation of validated recorded judging operations.

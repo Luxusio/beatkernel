@@ -20,6 +20,7 @@ use std::io::{ErrorKind, Read};
 /// Invalid replay metadata, compatibility, bounded data or logical reconstruction.
 #[derive(Debug)]
 pub enum PlaybackError {
+    SourceSpeed(crate::replay_speed_policy::PolicyError),
     GaugePolicy(crate::replay_gauge_policy::PolicyError),
     /// The recorded original-song section could not be selected.
     Section(Box<dyn std::error::Error>),
@@ -121,6 +122,8 @@ pub fn read_replay(
 /// Explicit recorded setup retaining section bounds and input interaction mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedSetup {
+    /// Normalized original-play condition; replay output speed is independent.
+    pub source_speed: crate::replay_speed::ReplaySpeed,
     pub timing: Option<crate::play_policy::ResolvedTimingPolicy>,
     pub judgments: Option<crate::judgment_policy::BmsJudgmentPolicy>,
     pub profile: JudgeProfile,
@@ -168,6 +171,13 @@ fn decode_recorded_setup(
     options: &[u8],
     allow_extended: bool,
 ) -> Result<RecordedSetup, PlaybackError> {
+    let (options, source_speed) =
+        crate::replay_speed_policy::split_options(options).map_err(PlaybackError::SourceSpeed)?;
+    if !allow_extended && source_speed.rate() != beatkernel::transport::Rate::NORMAL {
+        return Err(PlaybackError::Metadata(
+            "source speed replay requires a policy-aware consumer",
+        ));
+    }
     let (options, timing) = crate::replay_timing_policy::split_options(options)
         .map_err(|_| PlaybackError::Metadata("invalid timing policy"))?;
     if !allow_extended && timing.is_some() {
@@ -359,6 +369,7 @@ fn decode_recorded_setup(
         }
     }
     Ok(RecordedSetup {
+        source_speed,
         timing,
         profile,
         judgments,
@@ -445,6 +456,7 @@ fn validate_recorded_setup(
         return Err(PlaybackError::IdentityMismatch("BMS rule seed"));
     }
     let RecordedSetup {
+        source_speed,
         timing,
         judgments,
         profile,
@@ -517,6 +529,8 @@ fn validate_recorded_setup(
         .map_err(|_| PlaybackError::Metadata("invalid judgment header"))?;
     let expected =
         crate::replay_capture::wrap_timing_header(expected, timing.as_ref(), input_mode, limits)?;
+    let expected = crate::replay_speed_policy::wrap_header(expected, source_speed, limits)
+        .map_err(PlaybackError::SourceSpeed)?;
     if expected != file.header {
         return Err(PlaybackError::IdentityMismatch(
             "compiled judge setup/profile",
