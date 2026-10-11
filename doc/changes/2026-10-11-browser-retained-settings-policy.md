@@ -65,8 +65,20 @@ for that diagnostic. The scoped UX judgment passed, with long preset-ID clipping
 and editor focus-release ergonomics recorded as follow-up improvements.
 The independent browser QA reassessed both supplemental failures and returned
 FAIL for AC-005's strict zero-network-errors criterion. The original passing
-record is retained, but does not establish a stable final PASS. Chromium NetLog
-capture is the next investigation; this child is not verified complete.
+record is retained, but does not establish a stable final PASS.
+One NetLog execution is retained in
+`target/wf/settings-policy-netlog-12a58-1/evidence.json` and
+`target/wf/settings-policy-netlog-launch-12a58-1/chromium-netlog.json`.
+Its native network request recorded normal complete body reads and no network
+error, while CDP reported cancellation near completion. No cancellation caller
+was established. That execution also returned a separate audio processor
+terminal status 6 during real playback, with incomplete replay and no completed
+Results. Its relationship to the fetch diagnostic is unproven; browser shutdown
+required termination after a close timeout. The runner now also preserves the
+business Worker's bounded records on failure, where the original failure path
+only preserved Window and renderer observations. Syntax checking passed; this
+diagnostic addition awaits independent review and runtime verification.
+This child is not verified complete.
 
 ## Known ceiling
 

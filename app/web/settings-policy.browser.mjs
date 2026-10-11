@@ -375,6 +375,7 @@ try {
     try { evidence.window = await bounded(page.evaluate(() => __settingsProbe), 3000, "failure observation"); await page.screenshot({ path: resolve(out, "failure.png"), fullPage: true }); } catch (e) { evidence.observationError = String(e); }
   }
   if (renderer) try { evidence.renderer = await bounded(renderer.evaluate(() => __settingsRenderer), 3000, "failure renderer"); } catch (e) { evidence.rendererObservationError = String(e); }
+  if (business) try { evidence.business = await bounded(business.evaluate(() => __settingsRenderer), 3000, "failure business"); } catch (e) { evidence.businessObservationError = String(e); }
 } finally {
   networkRecord("cleanup-start", { status: evidence.status });
   if (browser) await bounded(browser.close(), 6000, "browser close").catch(e => { evidence.cleanup.browserCloseError = String(e); });
