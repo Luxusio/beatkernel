@@ -226,12 +226,18 @@ fn zero_endpoint_is_at_armed_physical_frame_without_positive_playback_ack() {
     producer.try_push(play()).unwrap();
     let unarmed = mixer.render(&mut [99.0; 2]).unwrap();
     assert_eq!(unarmed.playback_end_physical_frame, None);
+    assert_eq!(unarmed.counters.commands_consumed, 0);
+    assert_eq!(unarmed.counters.commands_applied, 0);
+    assert_eq!(unarmed.counters.commands_expired, 0);
     producer.schedule_start_at(4).unwrap();
     let mut output = [99.0; 5];
     let report = mixer.render(&mut output).unwrap();
     assert_eq!(output, [0.0; 5]);
     assert_eq!(report.playback_end_physical_frame, Some(4));
-    assert_eq!(report.counters.commands_consumed, 0);
+    assert_eq!(report.counters.commands_consumed, 1);
+    assert_eq!(report.counters.commands_applied, 0);
+    assert_eq!(report.counters.commands_expired, 1);
+    assert_eq!(report.playback_frames, 0);
     assert_eq!(producer.applied_start_frame(), None);
 }
 #[test]

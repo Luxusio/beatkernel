@@ -84,7 +84,7 @@ fn rig_end(limits: AudioLimits, end: Option<u64>) -> (CommandProducer, Mixer) {
 }
 
 #[test]
-fn immutable_fence_prefix_silent_suffix_and_frozen_queue_remain_rt_safe() {
+fn immutable_fence_prefix_silent_suffix_and_terminal_settlement_remain_rt_safe() {
     let (mut producer, mut mixer) = rig_end(AudioLimits::new(4, 1, 4, 8, 4).unwrap(), Some(3));
     producer.try_push(play(1, 0)).unwrap();
     producer.try_push(play(1, 3_000_000)).unwrap();
@@ -109,11 +109,14 @@ fn immutable_fence_prefix_silent_suffix_and_frozen_queue_remain_rt_safe() {
     producer.request_pause(false);
     let frozen = render(&mut mixer, &mut crossing);
     assert_eq!(crossing, [0.0; 4]);
-    assert_eq!(
-        frozen.counters.commands_consumed,
-        report.counters.commands_consumed
-    );
-    assert_eq!(frozen.pending_commands, 1);
+    assert_eq!(frozen.counters.commands_consumed, 3);
+    assert_eq!(frozen.counters.commands_applied, 1);
+    assert_eq!(frozen.counters.commands_expired, 2);
+    assert_eq!(frozen.pending_commands, 0);
+    assert_eq!(frozen.active_voices, report.active_voices);
+    assert_eq!(frozen.song_position, report.song_position);
+    assert_eq!(frozen.playback_frames, 0);
+    assert!(frozen.paused);
     assert_eq!(frozen.playback_end_physical_frame, Some(5));
     assert_eq!(render(&mut mixer, &mut []).playback_frames, 0);
     let mut invalid = [99.0; 9];
@@ -131,7 +134,10 @@ fn immutable_fence_prefix_silent_suffix_and_frozen_queue_remain_rt_safe() {
     assert_eq!(one, [0.0]);
     assert!(report.paused);
     assert_eq!(report.playback_end_physical_frame, Some(0));
-    assert_eq!(report.counters.commands_consumed, 0);
+    assert_eq!(report.counters.commands_consumed, 1);
+    assert_eq!(report.counters.commands_applied, 0);
+    assert_eq!(report.counters.commands_expired, 1);
+    assert_eq!(report.pending_commands, 0);
 }
 fn play(voice: u64, at: i64) -> AudioCommand {
     AudioCommand::Play {

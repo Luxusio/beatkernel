@@ -152,6 +152,39 @@ gameplay seal 6개, 새 terminal settlement 10개로 총 51개 테스트가 통�
 별도 연결 작업 중이다. 이 집중 테스트는 브라우저 실행이나 독립 QA 증거를
 대체하지 않는다. 이전 경합 재현 로그는 수정 전 결함 증거로 유지한다.
 
+보고서 연결 후보에 대한 `terminal-wire-node-2.log`는 603개, 원래 배속
+선택·cold phase 회귀의 `terminal-cold-phase-node-1.log`는 70개가 실제
+exit0으로 통과했다. 기존 scalar 인덱스를 유지한 새 보고서와 구버전 provider,
+길이·backing 오류 거절을 검사한다. 첫 `terminal-wire-node-1.log` 실행은
+Node VM 모듈 활성화 옵션이 빠져 테스트 8개 파일을 로드하지 못했다.
+기존 명령의 `--experimental-vm-modules`로 바로잡고 원본 실패 로그를 유지했다.
+이 검사는 mock 경계와 JS 계약 증거이며 새 WASM 실제 실행은 아직 남아 있다.
+
+`core-full-4.log`의 전체 코어 시도는 exit101이다. 기존
+`audio_rt_alloc` 테스트가 종료 후 큐 소비 수를 2로 고정해 실제 3과 달랐다.
+해당 fixture의 기대값을 실제 consumed=3/applied=1/expired=2/pending=0과
+zero-end consumed=1/applied=0/expired=1로 수정했고, allocation·PCM·고정 상태
+검사는 유지했다. 이 수정의 재실행은 아직 남아 있으며 전체 코어 PASS를
+주장하지 않는다. `terminal-app-1.log`의 Rust 통합 검사는 진행 중이다.
+
+후속 `core-full-5.log`는 allocation fixture 7개를 통과했지만 기존
+start-gate zero endpoint 소비 기대값에서 실패했다. 실제 시작 ACK가 없다는
+조건은 유지하고 consumed=1/applied=0/expired=1로 수정했다.
+최종 `core-full-6.log` 전체 검사는 exit0, 64개 suite에서 547개 통과,
+실패·ignored 0이다. `terminal-native-telemetry-1.log`도 실제 publication과
+39-field roundtrip 및 동시 tuple 일관성 검사 9개가 exit0으로 통과했다.
+
+`terminal-app-1.log`는 새 테스트의 PCM byte capacity 오류로 실패했다.
+8개 f32 샘플에 필요한 정확한 32바이트로 fixture를 수정한 뒤
+`terminal-app-2.log`는 전체 대상 실행을 마쳤다. finite frontier 7개,
+public settlement 2개, cohort 15개, 실제 CLI 9개, native preparation 9개가
+통과했지만 솔로·Step의 새 fixture 3개는 실패했다. 솔로 경합을 첫 실제
+입력 발행까지 유지하고, stopped/fenced 이후 capture export를 수행하도록
+수정 중이다. 공개 Step은 endpoint 이후 command target을 admission 전에
+필터링하므로 가짜 pending ACK를 만들지 않는다. 실제 pending 감소의 보존
+관계는 실제 Mixer 보고서를 사용하는 공유 validator 테스트로 검증한다.
+앱 전체 PASS나 실제 브라우저 PASS는 아직 주장하지 않는다.
+
 ## 남은 범위
 
 이 문서는 개발 중간 증거다. 현재 태스크의 독립 code/security review와
