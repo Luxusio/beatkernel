@@ -48,7 +48,7 @@ fn rig_end(
 }
 
 #[test]
-fn immutable_end_straddles_pcm_and_retains_commands_voices_and_song_anchor() {
+fn immutable_end_straddles_pcm_then_expires_commands_without_changing_voices_or_song_anchor() {
     let (mut producer, mut mixer) = rig_end(
         AudioFormat::new(1000, 1).unwrap(),
         1000,
@@ -90,13 +90,14 @@ fn immutable_end_straddles_pcm_and_retains_commands_voices_and_song_anchor() {
     assert!(frozen.paused);
     assert_eq!(
         frozen.counters.commands_consumed,
-        report.counters.commands_consumed
+        report.counters.commands_consumed + 1
     );
+    assert_eq!(frozen.counters.commands_expired, 4);
     assert_eq!(
         frozen.counters.commands_applied,
         report.counters.commands_applied
     );
-    assert_eq!(frozen.pending_commands, 3);
+    assert_eq!(frozen.pending_commands, 0);
     assert_eq!(frozen.active_voices, 1);
     assert_eq!(frozen.playback_end_physical_frame, Some(3));
     assert_eq!(mixer.rate(), Rate::NORMAL);
@@ -160,7 +161,9 @@ fn zero_endpoint_and_invalid_empty_renders_do_not_adopt_or_consume() {
     assert!(end.paused);
     assert_eq!(end.playback_end_physical_frame, Some(0));
     assert_eq!(end.playback_frames, 0);
-    assert_eq!(end.counters.commands_consumed, 0);
+    assert_eq!(end.counters.commands_consumed, 1);
+    assert_eq!(end.counters.commands_expired, 1);
+    assert_eq!(end.counters.commands_applied, 0);
     assert_eq!(
         (mixer.frame_cursor(), mixer.playback_frame_cursor()),
         (2, 0)
@@ -297,6 +300,8 @@ fn endpoint_marker_retains_all_manual_pause_gaps_even_after_short_resume_and_coa
         (11, 5, 0)
     );
     assert_eq!(latest.playback_end_physical_frame, Some(9));
+    assert_eq!(latest.pending_commands, 0);
+    assert_eq!(latest.counters.commands_expired, 1);
     assert_eq!(
         latest.counters.commands_consumed,
         end.counters.commands_consumed

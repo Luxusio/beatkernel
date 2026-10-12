@@ -24,6 +24,10 @@ overflow나 검증되지 않은 end를 숨길 수 없다.
 Worker 직접 요청도 파일 읽기·준비 작업 전에 같은 공통 수치 계약을 검사한다.
 네이티브는 장치 조회·open 이전에 공통 `LiveSpeedSetup`으로 검사한다.
 양수 분수의 허용 범위를 임의로 줄이지 않고 실제 start/preroll 조합을 판단한다.
+명시적 finite end의 역배속 출력 시간이 native zero-origin timestamp 범위를
+넘는 경우도 파일·장치 open 이전에 거절한다. 알려진 sample Hz는 실제 grid로
+검사하고, Windows의 backend 협상 전에는 공통 1ns grid로 확정적인 overflow를
+먼저 검사한 뒤 실제 협상 Hz의 rounding을 별도로 검사한다.
 
 물리 입력은 기존 InputMerger/AudioAuthority로 원래 논리 오디오 좌표에
 정규화한 후 하나의 Runtime Transport에서 원곡 시간으로 변환한다.
@@ -103,6 +107,33 @@ section 설정이 일치하는지 확인하고 모든 member에 같은 조건을
 선택한 nonnormal 배속은 실제 policy capture의 전체 조건을 비교 기준으로
 사용하여 동일 배속·section·정책의 실제 자기 기록을 받을 수 있어야 한다.
 새 배속 envelope를 과거 header에만 덧붙여 실제 생성 기록과 달라지게 하지 않는다.
+
+## 유한 출력 이후의 실제 명령 정산
+
+출력 보고서를 읽은 직후 마지막 callback이 실행되어, 그 다음 원곡 입력이
+유효한 소리 명령을 발행하는 순서도 포용한다. 실제 유한 endpoint 이후의
+비어 있지 않은 callback은 기존 pending과 이번 큐 snapshot을 하나의
+`max_commands_per_render` 예산 안에서 소비한다. 유효하지만 재생할 출력이
+없는 명령은 `commands_expired`로 기록하고 `commands_applied`로 세지 않는다.
+일반 pause·startup·empty render·unlimited 출력에는 적용하지 않는다.
+잘못된 gain/sample/rate/time는 기존 오류 카운터로 보고하며 만료로 숨기지 않는다.
+callback은 기다리거나 할당하거나 producer의 새 명령을 끝없이 따라가지 않는다.
+
+PCM은 무음, playback cursor·endpoint·voice·rate·song 상태는 고정한다.
+완료는 실제 consumed=admitted와 checked applied+expired=admitted를 요구하며
+presentation·입력 drain·BGM credit 조건도 유지한다. 포화·overflow는 증거가 아니다.
+이 정산을 관찰하기 전에는 출력 callback을 중단하지 않는다.
+실제 endpoint 이후 보고서는 consumed·expired의 단조 증가와 pending 감소만
+허용하고 `Δexpired = Δconsumed + 이전 pending − 현재 pending`을 검증한다.
+원곡 입력·판정·gauge·capture와 raw `audio_at`은 유지한다.
+
+`AudioCounters`에는 명시적 `commands_expired` 필드가 추가된다. 전체 필드를
+직접 쓰는 Rust struct literal은 이 필드를 추가하거나 `..Default::default()`를
+사용한다. Native telemetry는 기존 38개 scalar 인덱스 뒤에 이 값을 붙인다.
+Browser output report는 기존 인덱스 0–27을 유지하고 expired를 28에 붙인
+29개 u64 / 58개 u32 / 232바이트다. 실제 BrowserAudio의 `report_fields=29`를
+Worklet이 확인하며, 이전 provider·56-word 보고서·다른 버전의 bindings/WASM은
+거절한다. 관련 자산은 함께 재생성·배포하고 padding이나 기본값으로 호환을 꾸미지 않는다.
 
 ## 끝·UI·오류
 

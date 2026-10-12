@@ -331,6 +331,9 @@ impl Mixer {
         self.paused = pause_requested || active_extent == 0;
         if self.paused {
             self.mark_playback_end(active_start);
+            if self.playback_end_physical_frame.is_some() {
+                self.settle_ended_commands();
+            }
             output.fill(0.0);
             self.frame_cursor = end;
             self.consumer.publish_physical_frontier(end);
@@ -763,13 +766,76 @@ impl Mixer {
         }
     }
 
-    fn play(&mut self, id: VoiceId, sample_id: SampleId, gain: f32) {
+    fn settle_ended_commands(&mut self) {
+        let mut remaining = self.config.limits().max_commands_per_render();
+        // Execution order is no longer observable: none of these commands may
+        // change the frozen playback state. Pop avoids shifting a pending prefix.
+        while remaining != 0 {
+            let Some(pending) = self.pending.pop() else {
+                break;
+            };
+            remaining -= 1;
+            self.expire(pending.command);
+        }
+        // One snapshot only; publication concurrent with this render belongs to
+        // a later callback and cannot extend the callback's bounded work.
+        let available = self.consumer.available_up_to(remaining);
+        for _ in 0..available {
+            let Ok((command, _)) = self.consumer.try_pop_scoped() else {
+                break;
+            };
+            increment(&mut self.counters.commands_consumed);
+            self.expire(command);
+        }
+    }
+
+    fn expire(&mut self, command: AudioCommand) {
+        if self.target_frame(command.at()).is_none() {
+            increment(&mut self.counters.invalid_times);
+            return;
+        }
+        let valid = match command {
+            AudioCommand::Play { sample, gain, .. } => self.play_head(sample, gain).is_some(),
+            AudioCommand::SetRate { rate, .. } => self.validate_rate(rate),
+            AudioCommand::Stop { .. } | AudioCommand::Seek { .. } => true,
+        };
+        if valid {
+            increment(&mut self.counters.commands_expired);
+        }
+    }
+
+    // Some(None) is a valid empty asset; None is a rejected command.
+    fn play_head(&mut self, sample_id: SampleId, gain: f32) -> Option<Option<Head>> {
         if !gain.is_finite() {
             increment(&mut self.counters.invalid_gains);
-            return;
+            return None;
         }
         let Some(sample) = self.bank.get(sample_id) else {
             increment(&mut self.counters.unknown_samples);
+            return None;
+        };
+        if sample.frames() == 0 {
+            return Some(None);
+        }
+        let initial_frame = if self.rate.numerator() < 0 {
+            sample.frames() - 1
+        } else {
+            0
+        };
+        let Some(head) = Head::new(
+            initial_frame,
+            sample.format().sample_rate(),
+            self.config.format().sample_rate(),
+            self.rate,
+        ) else {
+            increment(&mut self.counters.invalid_rates);
+            return None;
+        };
+        Some(Some(head))
+    }
+
+    fn play(&mut self, id: VoiceId, sample_id: SampleId, gain: f32) {
+        let Some(head) = self.play_head(sample_id, gain) else {
             return;
         };
         let reserved = self
@@ -785,25 +851,11 @@ impl Mixer {
             .map(|(index, _)| index);
         // A valid empty asset replaces an existing voice with silence and needs
         // no free slot of its own. No storage ownership is released here.
-        if sample.frames() == 0 {
+        let Some(head) = head else {
             if let Some(index) = existing {
                 self.voices[index] = None;
             }
             increment(&mut self.counters.commands_applied);
-            return;
-        }
-        let initial_frame = if self.rate.numerator() < 0 {
-            sample.frames() - 1
-        } else {
-            0
-        };
-        let Some(head) = Head::new(
-            initial_frame,
-            sample.format().sample_rate(),
-            self.config.format().sample_rate(),
-            self.rate,
-        ) else {
-            increment(&mut self.counters.invalid_rates);
             return;
         };
         let Some(index) = existing.or_else(|| {
@@ -826,7 +878,7 @@ impl Mixer {
         increment(&mut self.counters.commands_applied);
     }
 
-    fn set_rate(&mut self, rate: Rate) {
+    fn validate_rate(&mut self, rate: Rate) -> bool {
         let output_rate = self.config.format().sample_rate();
         // Preflight every voice before changing any voice or global rate.
         for voice in self.voices.iter().flatten() {
@@ -837,9 +889,17 @@ impl Mixer {
                 .is_none()
             {
                 increment(&mut self.counters.invalid_rates);
-                return;
+                return false;
             }
         }
+        true
+    }
+
+    fn set_rate(&mut self, rate: Rate) {
+        if !self.validate_rate(rate) {
+            return;
+        }
+        let output_rate = self.config.format().sample_rate();
         for voice in self.voices.iter_mut().flatten() {
             let sample = self.bank.get(voice.sample).expect("owned voice asset");
             voice.head = voice

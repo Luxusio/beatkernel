@@ -235,7 +235,8 @@ impl MixerConfig {
     }
     /// Sets an exclusive immutable endpoint on the absolute playback frame
     /// grid. Frames at/after it stay silent even after a queue resume request.
-    /// Repetition requires a fresh mixer; zero prevents command consumption.
+    /// Repetition requires a fresh mixer. After the endpoint, nonempty renders
+    /// settle valid unexecuted commands as expired without producing sound.
     pub const fn with_playback_end_frame(mut self, end: u64) -> Self {
         self.playback_end_frame = Some(end);
         self
@@ -315,6 +316,8 @@ pub struct AudioCounters {
     pub commands_consumed: u64,
     /// Commands successfully executed.
     pub commands_applied: u64,
+    /// Valid unexecuted commands removed after the immutable playback endpoint.
+    pub commands_expired: u64,
     /// Commands executed after their scheduled frame.
     pub late_commands: u64,
     /// Commands rejected because pending storage was full.
@@ -331,6 +334,23 @@ pub struct AudioCounters {
     pub invalid_rates: u64,
     /// Commands whose target frame or other time arithmetic was unrepresentable.
     pub invalid_times: u64,
+}
+
+impl AudioCounters {
+    /// Actual executions plus finite-end expirations, when their count is exact.
+    /// Saturated counters cannot prove that every admitted command settled.
+    pub const fn settled_commands(self) -> Option<u64> {
+        if self.commands_consumed == u64::MAX
+            || self.commands_applied == u64::MAX
+            || self.commands_expired == u64::MAX
+        {
+            return None;
+        }
+        match self.commands_applied.checked_add(self.commands_expired) {
+            Some(count) if count != u64::MAX => Some(count),
+            _ => None,
+        }
+    }
 }
 
 /// Fixed render outcome; constructing/returning it requires no allocation.

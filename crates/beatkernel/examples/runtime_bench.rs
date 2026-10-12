@@ -340,6 +340,7 @@ fn audio_delta(after: AudioCounters, before: AudioCounters) -> AudioCounters {
         rendered_frames: difference(after.rendered_frames, before.rendered_frames),
         commands_consumed: difference(after.commands_consumed, before.commands_consumed),
         commands_applied: difference(after.commands_applied, before.commands_applied),
+        commands_expired: difference(after.commands_expired, before.commands_expired),
         late_commands: difference(after.late_commands, before.late_commands),
         pending_full: difference(after.pending_full, before.pending_full),
         voice_full: difference(after.voice_full, before.voice_full),

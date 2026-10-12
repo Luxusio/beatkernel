@@ -138,6 +138,20 @@
   현재 Linux/Windows/macOS 실행 파일의 소비 경로는 구현 중이며,
   최신 WASM 재생성·실제 브라우저 실행·독립 review/QA는 아직 남아 있다.
 
+## 유한 종료 명령 정산 개발 증거
+
+`terminal-core-1.log`의 실제 명령은 exit0으로 종료했다. 기존 Mixer 35개,
+gameplay seal 6개, 새 terminal settlement 10개로 총 51개 테스트가 통과했다.
+이전 보고서 조회 뒤 마지막 callback이 끝나고 원본 Runtime 입력이 소리를
+발행하는 경합을 실제 consumer로 검사한다. 후속 nonempty silent callback이
+명령을 실제 소비하고 `commands_expired`로 기록하며, `commands_applied`를
+증가시키지 않는다. 원본 판정·provenance·raw audio timestamp와 종료 상태는
+유지된다. pending과 queue는 하나의 callback 예산을 공유한다.
+
+새 공개 counter의 전체 literal과 native/browser report 전달, 실제 완료 조건은
+별도 연결 작업 중이다. 이 집중 테스트는 브라우저 실행이나 독립 QA 증거를
+대체하지 않는다. 이전 경합 재현 로그는 수정 전 결함 증거로 유지한다.
+
 ## 남은 범위
 
 이 문서는 개발 중간 증거다. 현재 태스크의 독립 code/security review와
