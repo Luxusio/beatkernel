@@ -9,6 +9,7 @@ use crate::{
         prepare_live_audio_transport, prepare_live_transport, update_live_audio_pause,
         update_live_pause, validate_pre_pause_input, AudioLivePauseBoundary, LivePauseBoundary,
     },
+    live_speed::LiveSpeedSetup,
     local_input::InputMerger,
     local_runtime::SoloRuntime,
     native_audio::{finite_terminal_output_ready, validate_stop_evidence, NativeStopBarrier},
@@ -221,18 +222,25 @@ fn watermark(
         timestamp: Timestamp::from_nanos(i64::try_from(at)?),
     }))
 }
-fn schedule<D: crate::gameplay_presentation::GameplayDevice, S, P>(
+fn schedule<D: crate::gameplay_presentation::GameplayDevice, S, P: PumpTiming<D>>(
     device: &mut D,
-    session: &GameplaySession<'_, S, P>,
+    session: &mut GameplaySession<'_, S, P>,
     config: NativeGameplayConfig,
 ) -> NativeGameplayResult<ClockPoint> {
     if config.logical_schedule {
-        Ok(session.pause.scheduling_point(
-            device
-                .render_report()?
-                .or_else(|| session.pause.last_render_report())
-                .ok_or("mixer playback boundary unavailable for scheduling")?,
-        )?)
+        let report = device
+            .render_report()?
+            .or_else(|| session.pause.last_render_report())
+            .ok_or("mixer playback boundary unavailable for scheduling")?;
+        let at = session.pause.scheduling_point(report)?;
+        if P::AUDIO && session.end.is_some()
+            && report.frames != 0 && report.playback_end_physical_frame.is_some()
+        {
+            // The callback can reach the immutable endpoint between pump
+            // observation and scheduling. Use this same validated receipt.
+            session.runtime.seal_gameplay_audio();
+        }
+        Ok(at)
     } else {
         device.fallback_schedule(config.sample_rate)
     }
@@ -322,7 +330,7 @@ fn process<
     D: crate::gameplay_presentation::GameplayDevice,
     S: SoloCompetitionPort,
     H: NativeGameplayHost,
-    P,
+    P: PumpTiming<D>,
 >(
     device: &mut D,
     session: &mut GameplaySession<'_, S, P>,
@@ -573,7 +581,7 @@ pub fn run_gameplay_audio_with_practice_and_ports<
     }
 
     let session = audio.session;
-    let mut timing = AudioTiming(session.discipline, config.section_start);
+    let mut timing = AudioTiming(session.discipline, config.section_start, None);
     let session = GameplaySession {
         runtime: session.runtime,
         gauge: session.gauge,
@@ -648,6 +656,21 @@ fn run_gameplay_timed<
     host_port: &mut H,
     mut practice: Option<RetainedSoloPractice<'_, R>>,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    let speed = session.discipline.live_speed();
+    if speed.is_none()
+        && session
+            .runtime
+            .transport_mut()
+            .preroll_setup()
+            .is_some_and(|setup| setup.positive_rate != beatkernel::transport::Rate::NORMAL)
+    {
+        return Err("nonnormal live speed requires the explicit original-audio speed owner".into());
+    }
+    if speed.is_some() && (!T::AUDIO || practice.is_some()) {
+        return Err(
+            "selected live speed requires an original-audio owner without retained practice".into(),
+        );
+    }
     if practice.is_some() && !T::AUDIO {
         return Err("retained practice requires original audio authority".into());
     }
@@ -688,11 +711,32 @@ fn run_gameplay_timed<
             || session.runtime.transport_mut().anchor().host_time
                 != epoch.logical_output(config.playback_origin)?.timestamp
             || session.runtime.transport_mut().anchor().song_time != config.song_origin
-            || session.runtime.transport_mut().anchor().rate != beatkernel::transport::Rate::NORMAL
+            || session.runtime.transport_mut().anchor().rate
+                != speed.map_or(beatkernel::transport::Rate::NORMAL, |setup| {
+                    setup.speed().rate()
+                })
             || session.runtime.poisoned()
             || session.runtime.gameplay_fence().is_some()
         {
             return Err("audio gameplay requires the actual pristine logical/raw Runtime domains and origin".into());
+        }
+        if let Some(speed) = speed {
+            if session.runtime.song_end() != speed.end()
+                || session.end.is_some() != speed.end().is_some()
+                || session.pause.epoch() != epoch.id
+                || session.pause.host_domain() != epoch.host_domain
+                || session.pause.phase() != PausePhase::Running
+            {
+                return Err(
+                    "selected live speed requires matching original end and pristine pause epoch"
+                        .into(),
+                );
+            }
+            crate::native_policy_admission::validate_transport_with_speed(
+                session.runtime.transport_mut(),
+                epoch.logical_output(config.playback_origin)?.timestamp,
+                speed,
+            )?;
         }
         if merger.as_ref().expect("audio merger").source_capacity() != 4096 {
             return Err("audio solo requires the bounded dynamic actual-source merger".into());
@@ -711,19 +755,31 @@ fn run_gameplay_timed<
         return Err("invalid native gameplay clocks/rate/lag".into());
     }
     let mut pending = VecDeque::new();
-    if custom_policy {
+    if custom_policy || speed.is_some() {
         if session.runtime.poisoned() || session.runtime.gameplay_fence().is_some() {
             return Err("nondefault native runtime is poisoned or already fenced".into());
         }
         crate::native_policy_admission::validate_initial(session.runtime.judge(), session.gauge)?;
-        crate::native_policy_admission::validate_capture_in_domain(
-            session.runtime.judge(),
-            session.gauge.profile(),
-            session.capture.as_ref(),
-            &config,
-            logical_domain,
-            section_start,
-        )?;
+        if let Some(speed) = speed {
+            crate::native_policy_admission::validate_capture_in_domain_with_speed(
+                session.runtime.judge(),
+                session.gauge.profile(),
+                session.capture.as_ref(),
+                &config,
+                logical_domain,
+                section_start,
+                speed,
+            )?;
+        } else {
+            crate::native_policy_admission::validate_capture_in_domain(
+                session.runtime.judge(),
+                session.gauge.profile(),
+                session.capture.as_ref(),
+                &config,
+                logical_domain,
+                section_start,
+            )?;
+        }
         if let Some(competition) = session
             .competition
             .as_ref()
@@ -732,14 +788,26 @@ fn run_gameplay_timed<
             let header = competition
                 .expected_policy_header()
                 .ok_or("nondefault native competition has no policy identity")?;
-            crate::native_policy_admission::validate_header_in_domain(
-                session.runtime.judge(),
-                session.gauge.profile(),
-                header,
-                &config,
-                logical_domain,
-                section_start,
-            )?;
+            if let Some(speed) = speed {
+                crate::native_policy_admission::validate_header_in_domain_with_speed(
+                    session.runtime.judge(),
+                    session.gauge.profile(),
+                    header,
+                    &config,
+                    logical_domain,
+                    section_start,
+                    speed,
+                )?;
+            } else {
+                crate::native_policy_admission::validate_header_in_domain(
+                    session.runtime.judge(),
+                    session.gauge.profile(),
+                    header,
+                    &config,
+                    logical_domain,
+                    section_start,
+                )?;
+            }
             if session
                 .capture
                 .as_ref()
@@ -754,7 +822,7 @@ fn run_gameplay_timed<
     }
     let mut deadline =
         NativePumpDeadline::new(control, config.seconds, "native gameplay deadline overflow")?;
-    if !custom_policy {
+    if !custom_policy && speed.is_none() {
         pending.try_reserve_exact(4096)?;
     }
     let mut last_acquired = config.origin;
@@ -771,6 +839,7 @@ fn run_gameplay_timed<
     let mut pause_committed = false;
     let mut end_boundary = None;
     let mut end_rendered = false;
+    let mut live_terminal = false;
     let mut pause_announced = false;
     let mut stop_evidence = OwnedStopEvidence::default();
     let mut stop_barrier = NativeStopBarrier::default();
@@ -788,6 +857,17 @@ fn run_gameplay_timed<
         };
         let rendered = device.render_report()?;
         validate_stop_evidence(rendered, &stop_evidence)?;
+        if T::AUDIO && session.end.is_some() {
+            if let Some(report) = rendered.filter(|report| {
+                report.frames != 0 && report.playback_end_physical_frame.is_some()
+            }) {
+                // This validates the immutable finite source grid and marker,
+                // including startup and pause gaps. It grants no native target
+                // crossing or command ACK; those completion gates remain below.
+                session.pause.scheduling_point(report)?;
+                session.runtime.seal_gameplay_audio();
+            }
+        }
         if let Some(end) = session.end.as_mut() {
             end_rendered |=
                 rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
@@ -819,14 +899,25 @@ fn run_gameplay_timed<
             let pause = staged_pause.as_mut().unwrap_or(&mut *session.pause);
             let mut staged_audio_boundary = None;
             let update = if T::AUDIO {
-                let update = update_live_audio_pause(
-                    pause,
-                    evidence,
-                    rendered,
-                    desired,
-                    pause_song_origin,
-                    config.sample_rate,
-                )?;
+                let update = if let Some(speed) = speed {
+                    crate::live_pause::update_live_audio_pause_with_speed(
+                        pause,
+                        evidence,
+                        rendered,
+                        desired,
+                        speed,
+                        config.sample_rate,
+                    )?
+                } else {
+                    update_live_audio_pause(
+                        pause,
+                        evidence,
+                        rendered,
+                        desired,
+                        pause_song_origin,
+                        config.sample_rate,
+                    )?
+                };
                 if let Some(boundary) = update.boundary {
                     staged_audio_boundary = Some(boundary);
                 }
@@ -1180,7 +1271,7 @@ fn run_gameplay_timed<
                     let at = boundary.at;
                     if cut.is_some_and(|cut| cut.timestamp >= at.timestamp) {
                         chronology(at, last_operation)?;
-                        let audio_at = schedule(device, &session, config)?;
+                        let audio_at = schedule(device, &mut session, config)?;
                         let report = session.runtime.advance_to(at, &ExplicitDomains, audio_at)?;
                         last_song = report.song_time;
                         publish_with_host(&mut session, report, &mut stop_evidence, host_port)?;
@@ -1253,7 +1344,7 @@ fn run_gameplay_timed<
                 .transpose()?
                 .flatten()
             {
-                let audio_at = schedule(device, &session, config)?;
+                let audio_at = schedule(device, &mut session, config)?;
                 let report = session.runtime.advance_to(at, &ExplicitDomains, audio_at)?;
                 last_song = report.song_time;
                 last_operation = at;
@@ -1281,7 +1372,70 @@ fn run_gameplay_timed<
                 && i128::from(cut.timestamp.as_nanos()) - i128::from(config.advance_lag.as_nanos())
                     >= i128::from(last_operation.timestamp.as_nanos())
         });
+        if let Some(speed) = speed.filter(|_| !live_terminal) {
+            if let (Some(end), Some(boundary)) = (speed.end(), end_boundary) {
+                if speed.playback_end_frame(config.sample_rate)? != Some(boundary.playback_frame) {
+                    return Err(
+                        "selected live speed differs from actual finite playback endpoint".into(),
+                    );
+                }
+                let authority = session
+                    .discipline
+                    .audio()
+                    .expect("selected audio timing")
+                    .authority();
+                let input_drained = authority
+                    .acquired_prefix()
+                    .is_some_and(|prefix| authority.closed_host_prefix() == Some(prefix));
+                if stops_rendered
+                    && acquired_ready
+                    && input_drained
+                    && pending.is_empty()
+                    && merger.as_ref().is_some_and(|merger| merger.pending() == 0)
+                    && audio_boundary.is_none()
+                    && resume_boundary.is_none()
+                    && finite_frontier_ready(
+                        true,
+                        Some(boundary),
+                        last_operation,
+                        batch.backlog,
+                        false,
+                    )
+                    && finite_terminal_output_ready(
+                        session.bgm.report(),
+                        rendered,
+                        session.runtime.admitted_audio_commands(),
+                    )
+                {
+                    // This is the last real committed operation, or the actual
+                    // cold logical origin for a genuine zero-frame endpoint.
+                    let frontier = authority
+                        .committed_operation()
+                        .unwrap_or(authority.epoch().logical_output(config.playback_origin)?);
+                    session
+                        .runtime
+                        .transport_mut()
+                        .seek(frontier.timestamp, end)?;
+                    let audio_at = schedule(device, &mut session, config)?;
+                    let report =
+                        session
+                            .runtime
+                            .advance_to(frontier, &ExplicitDomains, audio_at)?;
+                    last_song = report.song_time;
+                    publish_with_host(&mut session, report, &mut stop_evidence, host_port)?;
+                    live_terminal = true;
+                }
+            }
+        }
         if practice.is_none()
+            && (speed.is_none()
+                || config.end_song.is_none()
+                || (live_terminal
+                    && finite_terminal_output_ready(
+                        session.bgm.report(),
+                        rendered,
+                        session.runtime.admitted_audio_commands(),
+                    )))
             && stops_rendered
             && acquired_ready
             && finite_done_with_terminal(
@@ -2187,12 +2341,22 @@ fn service_audio_solo<
                     )?
             };
             if let Some(prepared) = prepared {
-                let transport = prepare_live_audio_transport(
-                    session.runtime.transport_mut(),
-                    boundary,
-                    &prepared,
-                    *last_song,
-                )?;
+                let transport = if session.discipline.live_speed().is_some() {
+                    crate::live_pause::prepare_live_audio_transport_with_speed(
+                        session.runtime.transport_mut(),
+                        boundary,
+                        &prepared,
+                        *last_song,
+                        config.sample_rate,
+                    )?
+                } else {
+                    prepare_live_audio_transport(
+                        session.runtime.transport_mut(),
+                        boundary,
+                        &prepared,
+                        *last_song,
+                    )?
+                };
                 let audio_at = schedule(device, session, *config)?;
                 *session.runtime.transport_mut() = transport;
                 let report =
@@ -2267,6 +2431,9 @@ fn service_audio_solo<
             }
         }
         if end_boundary.is_none() && !host.cancelled() {
+            if session.discipline.live_speed().is_some() && device.output_replacement_pending() {
+                return Err("selected live speed cannot replace a retained output epoch".into());
+            }
             session.discipline.publish(
                 device,
                 crate::gameplay_presentation::GameplayPauseControl::solo(session.runtime),
@@ -2342,11 +2509,48 @@ pub fn run_gameplay_audio_with_result_and_ports<
     control: &mut C,
     host: &mut H,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
-    crate::native_policy_admission::validate_audio_config(&config)?;
+    run_gameplay_audio_with_result_and_ports_impl(device, audio, config, control, host, None)
+}
+
+/// Runs one original-audio solo owner using the exact selected cold speed setup.
+pub fn run_gameplay_audio_with_result_and_ports_with_speed<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+>(
+    device: &mut D,
+    audio: AudioGameplaySession<'_, S>,
+    config: AudioGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    speed: LiveSpeedSetup,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    run_gameplay_audio_with_result_and_ports_impl(device, audio, config, control, host, Some(speed))
+}
+
+fn run_gameplay_audio_with_result_and_ports_impl<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+>(
+    device: &mut D,
+    audio: AudioGameplaySession<'_, S>,
+    config: AudioGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    speed: Option<LiveSpeedSetup>,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    if let Some(speed) = speed {
+        crate::native_policy_admission::validate_audio_config_with_speed(&config, speed)?;
+    } else {
+        crate::native_policy_admission::validate_audio_config(&config)?;
+    }
     let section_start = config.section_start;
     let config = config.gameplay;
     let session = audio.session;
-    let mut timing = AudioTiming(session.discipline, section_start);
+    let mut timing = AudioTiming(session.discipline, section_start, speed);
     let session = GameplaySession {
         runtime: session.runtime,
         gauge: session.gauge,
@@ -2377,14 +2581,66 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports<
     S: SoloCompetitionPort,
 >(
     device: &mut D,
-    mut audio: AudioGameplaySession<'_, S>,
+    audio: AudioGameplaySession<'_, S>,
     config: AudioGameplayConfig,
     control: &mut C,
     host: &mut H,
     score: &mut crate::competition::ScoreSummary,
     policy: &crate::play_policy::ResolvedPlayPolicy,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
-    crate::native_policy_admission::validate_audio_config(&config)?;
+    run_gameplay_audio_with_policy_and_result_and_score_and_ports_impl(
+        device, audio, config, control, host, score, policy, None,
+    )
+}
+
+/// Runs selected-policy solo gameplay with source-speed identity and original timing.
+pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports_with_speed<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+>(
+    device: &mut D,
+    audio: AudioGameplaySession<'_, S>,
+    config: AudioGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    score: &mut crate::competition::ScoreSummary,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    speed: LiveSpeedSetup,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    run_gameplay_audio_with_policy_and_result_and_score_and_ports_impl(
+        device,
+        audio,
+        config,
+        control,
+        host,
+        score,
+        policy,
+        Some(speed),
+    )
+}
+
+fn run_gameplay_audio_with_policy_and_result_and_score_and_ports_impl<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+>(
+    device: &mut D,
+    mut audio: AudioGameplaySession<'_, S>,
+    config: AudioGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    score: &mut crate::competition::ScoreSummary,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    speed: Option<LiveSpeedSetup>,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    if let Some(speed) = speed {
+        crate::native_policy_admission::validate_audio_config_with_speed(&config, speed)?;
+    } else {
+        crate::native_policy_admission::validate_audio_config(&config)?;
+    }
     let section_start = config.section_start;
     let config = config.gameplay;
     if score != &crate::competition::ScoreSummary::default() {
@@ -2399,10 +2655,31 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports<
         || session.runtime.transport_mut().anchor().host_time
             != epoch.logical_output(config.playback_origin)?.timestamp
         || session.runtime.transport_mut().anchor().song_time != config.song_origin
-        || session.runtime.transport_mut().anchor().rate != beatkernel::transport::Rate::NORMAL
+        || session.runtime.transport_mut().anchor().rate
+            != speed.map_or(beatkernel::transport::Rate::NORMAL, |setup| {
+                setup.speed().rate()
+            })
         || audio.merger.source_capacity() != 4096
     {
         return Err("selected audio Runtime domains, anchor or acquisition bound differ".into());
+    }
+    if let Some(speed) = speed {
+        if session.runtime.song_end() != speed.end()
+            || session.end.is_some() != speed.end().is_some()
+            || session.pause.epoch() != epoch.id
+            || session.pause.host_domain() != epoch.host_domain
+            || session.pause.phase() != PausePhase::Running
+        {
+            return Err(
+                "selected live speed requires matching original end and pristine pause epoch"
+                    .into(),
+            );
+        }
+        crate::native_policy_admission::validate_transport_with_speed(
+            session.runtime.transport_mut(),
+            epoch.logical_output(config.playback_origin)?.timestamp,
+            speed,
+        )?;
     }
     let rows = [(crate::local_players::PlayerId(1), policy)];
     crate::native_gameplay_host::validate_play_policy_members(&rows)?;
@@ -2416,16 +2693,30 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports<
                 .ok_or("selected audio competition has no policy identity")
         })
         .transpose()?;
-    crate::native_policy_admission::validate_selected_in_domain(
-        session.runtime.judge(),
-        session.gauge,
-        policy,
-        session.capture.as_ref(),
-        header,
-        &config,
-        epoch.logical_origin.domain,
-        Some(section_start),
-    )?;
+    if let Some(speed) = speed {
+        crate::native_policy_admission::validate_selected_in_domain_with_speed(
+            session.runtime.judge(),
+            session.gauge,
+            policy,
+            session.capture.as_ref(),
+            header,
+            &config,
+            epoch.logical_origin.domain,
+            Some(section_start),
+            speed,
+        )?;
+    } else {
+        crate::native_policy_admission::validate_selected_in_domain(
+            session.runtime.judge(),
+            session.gauge,
+            policy,
+            session.capture.as_ref(),
+            header,
+            &config,
+            epoch.logical_origin.domain,
+            Some(section_start),
+        )?;
+    }
     if session.runtime.poisoned() || session.runtime.gameplay_fence().is_some() {
         return Err("selected audio Runtime is poisoned or fenced".into());
     }
@@ -2437,7 +2728,7 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports<
         policies: &rows,
     };
     let mut observer = crate::native_gameplay_host::NativeScoreHost::new(&mut resolved, score);
-    run_gameplay_audio_with_result_and_ports(
+    run_gameplay_audio_with_result_and_ports_impl(
         device,
         audio,
         AudioGameplayConfig {
@@ -2446,6 +2737,7 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports<
         },
         control,
         &mut observer,
+        speed,
     )
 }
 

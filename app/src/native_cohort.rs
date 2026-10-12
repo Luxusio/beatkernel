@@ -17,9 +17,11 @@ use crate::{
     gameplay_presentation::{AudioTiming, LegacyTiming, PumpTiming},
     gauge::{BmsGauge, GaugeProfile},
     live_pause::{
-        prepare_live_audio_transport, prepare_live_transport, update_live_audio_pause,
+        prepare_live_audio_transport, prepare_live_audio_transport_with_speed,
+        prepare_live_transport, update_live_audio_pause, update_live_audio_pause_with_speed,
         update_live_pause, validate_pre_pause_input, AudioLivePauseBoundary, LivePauseBoundary,
     },
+    live_speed::LiveSpeedSetup,
     local_input::InputMerger,
     local_players::PlayerId,
     local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup},
@@ -84,16 +86,25 @@ fn point(event: &PhysicalInputEvent) -> ClockPoint {
 }
 fn schedule<D: crate::gameplay_presentation::GameplayDevice, S, G, P>(
     device: &mut D,
-    session: &CohortSession<'_, S, G, P>,
+    session: &mut CohortSession<'_, S, G, P>,
     config: NativeGameplayConfig,
 ) -> NativeGameplayResult<ClockPoint> {
     if config.logical_schedule {
-        Ok(session.pause.scheduling_point(
-            device
-                .render_report()?
-                .or_else(|| session.pause.last_render_report())
-                .ok_or("cohort playback boundary unavailable")?,
-        )?)
+        let report = device
+            .render_report()?
+            .or_else(|| session.pause.last_render_report())
+            .ok_or("cohort playback boundary unavailable")?;
+        let at = session.pause.scheduling_point(report)?;
+        if config.end_song.is_some()
+            && session.end.is_some()
+            && report.frames > 0
+            && report.playback_end_physical_frame.is_some()
+        {
+            // This validated immutable source endpoint seals future member
+            // sounds; native/converted presentation still owns completion.
+            session.group.seal_gameplay_audio();
+        }
+        Ok(at)
     } else {
         device.fallback_schedule(config.sample_rate)
     }
@@ -746,7 +757,7 @@ pub fn run_cohort_audio_practice_with_results_and_ports<
     {
         return Err("retained cohort section endpoints differ".into());
     }
-    let mut timing = AudioTiming(session.discipline, config.section_start);
+    let mut timing = AudioTiming(session.discipline, config.section_start, None);
     let states = session.states;
     let result = run_cohort_timed(
         device,
@@ -953,6 +964,15 @@ fn run_cohort_timed<
     host_port: &mut H,
     mut practice: Option<(&mut crate::practice_playback::PracticePlayback, &mut R)>,
 ) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    let speed = session.discipline.live_speed();
+    if speed.is_some() && practice.is_some() {
+        return Err("selected speed does not support retained cohort practice".into());
+    }
+    if speed.is_none()
+        && session.group.transport().anchor().rate != beatkernel::transport::Rate::NORMAL
+    {
+        return Err("legacy cohort requires NORMAL speed; use explicit audio speed setup".into());
+    }
     if practice.is_some() && (!T::AUDIO || session.network.is_some()) {
         return Err("retained cohort practice requires local audio-authoritative playback".into());
     }
@@ -976,12 +996,13 @@ fn run_cohort_timed<
         .audio()
         .map(|presentation| presentation.authority().epoch())
     {
-        validate_audio_cohort_start(&mut session, &config, epoch)?;
+        validate_audio_cohort_start(&mut session, &config, epoch, speed)?;
     }
-    let custom_policy = session
-        .states
-        .iter()
-        .any(|state| state.gauge.profile() != &GaugeProfile::default());
+    let custom_policy = speed.is_some()
+        || session
+            .states
+            .iter()
+            .any(|state| state.gauge.profile() != &GaugeProfile::default());
     if !(2..=64).contains(&session.states.len())
         || config.origin.domain == config.stream_origin.domain
         || config.stream_origin.domain != config.playback_origin.domain
@@ -1013,10 +1034,11 @@ fn run_cohort_timed<
         {
             return Err("nondefault cohort requires the exact usable group roster".into());
         }
-        if session
-            .network
-            .as_ref()
-            .is_some_and(|network| !network.policy_agnostic())
+        if speed.is_none()
+            && session
+                .network
+                .as_ref()
+                .is_some_and(|network| !network.policy_agnostic())
         {
             return Err(
                 "nondefault cohort networking requires policy-aware member identities".into(),
@@ -1034,14 +1056,57 @@ fn run_cohort_timed<
                 .member_judge(state.player)
                 .expect("roster checked");
             crate::native_policy_admission::validate_initial(judge, &state.gauge)?;
-            crate::native_policy_admission::validate_capture_in_domain(
-                judge,
-                state.gauge.profile(),
-                state.capture.as_ref(),
-                &config,
-                logical_domain,
-                section_start,
-            )?;
+            if let Some((speed, network)) = speed.zip(
+                session
+                    .network
+                    .as_ref()
+                    .filter(|port| !port.policy_agnostic()),
+            ) {
+                let header = network
+                    .expected_policy_header(state.player)
+                    .ok_or("selected shared competition lacks member policy identity")?;
+                crate::native_policy_admission::validate_header_in_domain_with_speed(
+                    judge,
+                    state.gauge.profile(),
+                    header,
+                    &config,
+                    logical_domain,
+                    section_start,
+                    speed,
+                )?;
+                if state
+                    .capture
+                    .as_ref()
+                    .is_some_and(|capture| capture.header() != header)
+                    || state
+                        .competition
+                        .as_ref()
+                        .filter(|port| !port.policy_agnostic())
+                        .is_some_and(|port| port.expected_policy_header() != Some(header))
+                {
+                    return Err("shared and individual member policy identities differ".into());
+                }
+            }
+            if let Some(speed) = speed {
+                crate::native_policy_admission::validate_capture_in_domain_with_speed(
+                    judge,
+                    state.gauge.profile(),
+                    state.capture.as_ref(),
+                    &config,
+                    logical_domain,
+                    section_start,
+                    speed,
+                )?;
+            } else {
+                crate::native_policy_admission::validate_capture_in_domain(
+                    judge,
+                    state.gauge.profile(),
+                    state.capture.as_ref(),
+                    &config,
+                    logical_domain,
+                    section_start,
+                )?;
+            }
             if let Some(competition) = state
                 .competition
                 .as_ref()
@@ -1050,14 +1115,26 @@ fn run_cohort_timed<
                 let header = competition
                     .expected_policy_header()
                     .ok_or("nondefault member competition has no policy identity")?;
-                crate::native_policy_admission::validate_header_in_domain(
-                    judge,
-                    state.gauge.profile(),
-                    header,
-                    &config,
-                    logical_domain,
-                    section_start,
-                )?;
+                if let Some(speed) = speed {
+                    crate::native_policy_admission::validate_header_in_domain_with_speed(
+                        judge,
+                        state.gauge.profile(),
+                        header,
+                        &config,
+                        logical_domain,
+                        section_start,
+                        speed,
+                    )?;
+                } else {
+                    crate::native_policy_admission::validate_header_in_domain(
+                        judge,
+                        state.gauge.profile(),
+                        header,
+                        &config,
+                        logical_domain,
+                        section_start,
+                    )?;
+                }
                 if state
                     .capture
                     .as_ref()
@@ -1111,8 +1188,16 @@ fn run_cohort_timed<
     } else {
         None
     };
+    if T::AUDIO && config.end_song.is_some() && session.end.is_some()
+        && initial_rendered.is_some_and(|report| report.frames > 0
+            && report.playback_end_physical_frame.is_some())
+    {
+        session.pause.scheduling_point(initial_rendered.expect("rendered endpoint"))?;
+        session.group.seal_gameplay_audio();
+    }
     let mut committed = None;
     let mut keyboard = PauseKeyboard::new();
+    let mut live_terminal = false;
     let mut paused_boundary: Option<LivePauseBoundary> = None;
     let mut audio_boundary: Option<AudioLivePauseBoundary> = None;
     let mut resume_boundary = None;
@@ -1138,6 +1223,13 @@ fn run_cohort_timed<
                 rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
             if let Some(boundary) = session.discipline.end(device, end, rendered)? {
                 end_boundary = Some(boundary);
+            }
+            if let Some(report) = rendered.filter(|report| T::AUDIO && config.end_song.is_some()
+                && report.frames > 0 && report.playback_end_physical_frame.is_some()) {
+                // Validate the source grid even when the target/native crossing
+                // lags this render. Delayed originals still judge and capture.
+                session.pause.scheduling_point(report)?;
+                session.group.seal_gameplay_audio();
             }
         }
         if let Some(reference) =
@@ -1165,14 +1257,25 @@ fn run_cohort_timed<
             let pause = staged_pause.as_mut().unwrap_or(&mut *session.pause);
             let mut staged_audio_boundary = None;
             let update = if T::AUDIO {
-                let update = update_live_audio_pause(
-                    pause,
-                    evidence,
-                    rendered,
-                    desired,
-                    pause_song_origin,
-                    config.sample_rate,
-                )?;
+                let update = if let Some(speed) = speed {
+                    update_live_audio_pause_with_speed(
+                        pause,
+                        evidence,
+                        rendered,
+                        desired,
+                        speed,
+                        config.sample_rate,
+                    )?
+                } else {
+                    update_live_audio_pause(
+                        pause,
+                        evidence,
+                        rendered,
+                        desired,
+                        pause_song_origin,
+                        config.sample_rate,
+                    )?
+                };
                 if let Some(boundary) = update.boundary {
                     staged_audio_boundary = Some(boundary);
                 }
@@ -1627,7 +1730,78 @@ fn run_cohort_timed<
                 && i128::from(cut.timestamp.as_nanos()) - i128::from(lag)
                     >= i128::from(committed.timestamp.as_nanos())
         });
+        // The capped song position is not output completion. Close a quantized
+        // endpoint only after actual native presentation, complete command/ACK
+        // retirement and the entire acquired member prefix have been committed.
+        if let (Some(speed), Some(boundary)) = (speed, end_boundary) {
+            if speed.playback_end_frame(config.sample_rate)? != Some(boundary.playback_frame) {
+                return Err(
+                    "selected cohort speed differs from actual finite playback endpoint".into(),
+                );
+            }
+        }
+        let speed_terminal_ready = speed.is_some()
+            && practice.is_none()
+            && stops_rendered
+            && acquired_ready
+            && !batch.backlog
+            && session.merger.pending() == 0
+            && session.discipline.audio().is_some_and(|presentation| {
+                let authority = presentation.authority();
+                authority
+                    .acquired_prefix()
+                    .zip(authority.closed_host_prefix())
+                    .is_some_and(|(acquired, closed)| {
+                        acquired.domain == closed.domain && closed.timestamp >= acquired.timestamp
+                    })
+            })
+            && audio_boundary.is_none()
+            && resume_boundary.is_none()
+            && end_boundary.zip(committed).is_some_and(|(end, prefix)| {
+                end.host.domain == prefix.domain && prefix.timestamp >= end.host.timestamp
+            })
+            && finite_terminal_output_ready(
+                session.bgm.report(),
+                rendered,
+                session.group.admitted_audio_commands(),
+            );
+        if speed_terminal_ready && !live_terminal {
+            if let Some(end) = config.end_song {
+                let operation = session
+                    .discipline
+                    .audio()
+                    .expect("selected audio timing")
+                    .authority()
+                    .committed_operation()
+                    .unwrap_or(
+                        session
+                            .discipline
+                            .audio()
+                            .expect("selected audio timing")
+                            .authority()
+                            .epoch()
+                            .logical_output(config.playback_origin)?,
+                    );
+                session
+                    .group
+                    .transport_mut()
+                    .seek(operation.timestamp, end)?;
+                let audio_at = schedule(device, &mut session, config)?;
+                let result = session
+                    .group
+                    .advance_to(operation, &ExplicitDomains, audio_at);
+                observe_audio_group_result(
+                    result,
+                    &mut session,
+                    |_, _| {},
+                    &mut stop_evidence,
+                    host_port,
+                )?;
+                live_terminal = true;
+            }
+        }
         if practice.is_none()
+            && (speed.is_none() || (speed_terminal_ready && live_terminal))
             && stops_rendered
             && acquired_ready
             && finite_cohort_done_with_terminal(
@@ -2228,7 +2402,24 @@ fn validate_audio_cohort_start<S: SoloCompetitionPort, G: GroupCompetitionPort, 
     session: &mut CohortSession<'_, S, G, P>,
     config: &NativeGameplayConfig,
     epoch: crate::audio_authority::AudioAuthorityEpoch,
+    speed: Option<LiveSpeedSetup>,
 ) -> NativeGameplayResult<()> {
+    if let Some(speed) = speed {
+        crate::native_policy_admission::validate_transport_with_speed(
+            session.group.transport(),
+            epoch.logical_output(config.playback_origin)?.timestamp,
+            speed,
+        )?;
+        if session.group.song_end() != speed.end()
+            || session.pause.epoch() != epoch.id
+            || session.pause.host_domain() != epoch.host_domain
+            || session.pause.phase() != PausePhase::Running
+        {
+            return Err(
+                "selected cohort requires the original endpoint and pristine pause epoch".into(),
+            );
+        }
+    }
     if session.group.clock_domains()
         != Some((epoch.logical_origin.domain, epoch.stream_origin.domain))
         || epoch.host_domain != config.origin.domain
@@ -2236,7 +2427,8 @@ fn validate_audio_cohort_start<S: SoloCompetitionPort, G: GroupCompetitionPort, 
         || session.group.transport_mut().anchor().host_time
             != epoch.logical_output(config.playback_origin)?.timestamp
         || session.group.transport_mut().anchor().song_time != config.song_origin
-        || session.group.transport_mut().anchor().rate != beatkernel::transport::Rate::NORMAL
+        || (speed.is_none()
+            && session.group.transport_mut().anchor().rate != beatkernel::transport::Rate::NORMAL)
         || session.group.poisoned()
         || session
             .states
@@ -2446,12 +2638,22 @@ fn service_audio_cohort<
                     .map(|state| state.last_song)
                     .max()
                     .ok_or("audio cohort has no member prefix")?;
-                let transport = prepare_live_audio_transport(
-                    session.group.transport_mut(),
-                    boundary,
-                    &prepared,
-                    last_song,
-                )?;
+                let transport = if session.discipline.live_speed().is_some() {
+                    prepare_live_audio_transport_with_speed(
+                        session.group.transport_mut(),
+                        boundary,
+                        &prepared,
+                        last_song,
+                        config.sample_rate,
+                    )?
+                } else {
+                    prepare_live_audio_transport(
+                        session.group.transport_mut(),
+                        boundary,
+                        &prepared,
+                        last_song,
+                    )?
+                };
                 let audio_at = schedule(device, session, *config)?;
                 *session.group.transport_mut() = transport;
                 let result =
@@ -2545,6 +2747,9 @@ fn service_audio_cohort<
             }
         }
         if end_boundary.is_none() && !host.cancelled() {
+            if session.discipline.live_speed().is_some() && device.output_replacement_pending() {
+                return Err("selected cohort speed cannot replace a retained output epoch".into());
+            }
             session.discipline.publish(
                 device,
                 crate::gameplay_presentation::GameplayPauseControl::cohort(session.group),
@@ -2627,10 +2832,49 @@ pub fn run_cohort_audio_with_results_and_ports<
     control: &mut C,
     host: &mut H,
 ) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
-    crate::native_policy_admission::validate_audio_config(&config)?;
+    run_cohort_audio_inner(device, session, config, control, host, None)
+}
+
+/// Runs one actual audio-authoritative cohort with an immutable original-song speed.
+pub fn run_cohort_audio_with_ports_and_speed<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+>(
+    device: &mut D,
+    session: AudioCohortSession<'_, S, G>,
+    config: AudioGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    speed: LiveSpeedSetup,
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    run_cohort_audio_inner(device, session, config, control, host, Some(speed))
+}
+
+fn run_cohort_audio_inner<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+>(
+    device: &mut D,
+    session: AudioCohortSession<'_, S, G>,
+    config: AudioGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    speed: Option<LiveSpeedSetup>,
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    if let Some(speed) = speed {
+        crate::native_policy_admission::validate_audio_config_with_speed(&config, speed)?;
+    } else {
+        crate::native_policy_admission::validate_audio_config(&config)?;
+    }
     let section_start = config.section_start;
     let config = config.gameplay;
-    let mut timing = AudioTiming(session.discipline, section_start);
+    let mut timing = AudioTiming(session.discipline, section_start, speed);
     run_cohort_timed(
         device,
         CohortSession {
@@ -2663,17 +2907,66 @@ pub fn run_cohort_audio_with_policies_and_results_and_ports<
     G: GroupCompetitionPort,
 >(
     device: &mut D,
-    mut session: AudioCohortSession<'_, S, G>,
+    session: AudioCohortSession<'_, S, G>,
     config: AudioGameplayConfig,
     control: &mut C,
     host: &mut H,
     policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
 ) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
-    crate::native_policy_admission::validate_audio_config(&config)?;
+    run_cohort_audio_policies_inner(device, session, config, control, host, policies, None)
+}
+
+/// Admits every member's canonical selected policy and source speed before native effects.
+pub fn run_cohort_audio_with_ports_and_policies_and_speed<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+>(
+    device: &mut D,
+    session: AudioCohortSession<'_, S, G>,
+    config: AudioGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    speed: LiveSpeedSetup,
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    run_cohort_audio_policies_inner(
+        device,
+        session,
+        config,
+        control,
+        host,
+        policies,
+        Some(speed),
+    )
+}
+
+fn run_cohort_audio_policies_inner<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+>(
+    device: &mut D,
+    mut session: AudioCohortSession<'_, S, G>,
+    config: AudioGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    speed: Option<LiveSpeedSetup>,
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    if let Some(speed) = speed {
+        crate::native_policy_admission::validate_audio_config_with_speed(&config, speed)?;
+    } else {
+        crate::native_policy_admission::validate_audio_config(&config)?;
+    }
     let section_start = config.section_start;
     let config = config.gameplay;
     let epoch = session.discipline.authority().epoch();
-    validate_audio_cohort_start(&mut session, &config, epoch)?;
+    validate_audio_cohort_start(&mut session, &config, epoch, speed)?;
     crate::native_gameplay_host::validate_play_policy_members(policies)?;
     crate::native_policy_admission::validate_config(&config)?;
     if !(2..=64).contains(&session.states.len())
@@ -2693,6 +2986,7 @@ pub fn run_cohort_audio_with_policies_and_results_and_ports<
         .iter()
         .any(|(_, policy)| policy.gauge() != &GaugeProfile::default());
     if custom
+        && speed.is_none()
         && session
             .network
             .as_ref()
@@ -2717,22 +3011,59 @@ pub fn run_cohort_audio_with_policies_and_results_and_ports<
                     .ok_or("selected audio competition lacks identity")
             })
             .transpose()?;
-        crate::native_policy_admission::validate_selected_in_domain(
-            judge,
-            &state.gauge,
-            policy,
-            state.capture.as_ref(),
-            header,
-            &config,
-            epoch.logical_origin.domain,
-            Some(section_start),
-        )?;
+        if let Some(speed) = speed {
+            if let Some(network) = session
+                .network
+                .as_ref()
+                .filter(|port| !port.policy_agnostic())
+            {
+                let shared_header = network
+                    .expected_policy_header(state.player)
+                    .ok_or("selected shared competition lacks member policy identity")?;
+                crate::native_policy_admission::validate_selected_in_domain_with_speed(
+                    judge,
+                    &state.gauge,
+                    policy,
+                    state.capture.as_ref(),
+                    Some(shared_header),
+                    &config,
+                    epoch.logical_origin.domain,
+                    Some(section_start),
+                    speed,
+                )?;
+                if header.is_some_and(|header| header != shared_header) {
+                    return Err("shared and individual member policy identities differ".into());
+                }
+            }
+            crate::native_policy_admission::validate_selected_in_domain_with_speed(
+                judge,
+                &state.gauge,
+                policy,
+                state.capture.as_ref(),
+                header,
+                &config,
+                epoch.logical_origin.domain,
+                Some(section_start),
+                speed,
+            )?;
+        } else {
+            crate::native_policy_admission::validate_selected_in_domain(
+                judge,
+                &state.gauge,
+                policy,
+                state.capture.as_ref(),
+                header,
+                &config,
+                epoch.logical_origin.domain,
+                Some(section_start),
+            )?;
+        }
     }
     if !custom {
         host.prepare_play_policies(policies)?;
     }
     let mut resolved = crate::native_gameplay_bridge::ResolvedGameplayHost { host, policies };
-    run_cohort_audio_with_results_and_ports(
+    run_cohort_audio_inner(
         device,
         session,
         AudioGameplayConfig {
@@ -2741,6 +3072,7 @@ pub fn run_cohort_audio_with_policies_and_results_and_ports<
         },
         control,
         &mut resolved,
+        speed,
     )
 }
 
@@ -2765,7 +3097,7 @@ pub fn run_cohort_audio_practice_with_policies_and_results_and_ports<
     let section_start = config.section_start;
     let config = config.gameplay;
     let epoch = session.discipline.authority().epoch();
-    validate_audio_cohort_start(&mut session, &config, epoch)?;
+    validate_audio_cohort_start(&mut session, &config, epoch, None)?;
     crate::native_gameplay_host::validate_play_policy_members(policies)?;
     crate::native_policy_admission::validate_config(&config)?;
     if !(2..=64).contains(&session.states.len())
