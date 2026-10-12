@@ -207,7 +207,10 @@ native --speed와 기존 Settings 필드 및 browser live 배속 필드는 NUM/D
 1/1 기본값과 pitch 변화 의미를 표시한다. 잘못된 값은 파일·장치·오디오
 시작 전에 거절하고 UI에서 focus를 유지한다. Preparing/Playing은 선택 snapshot을
 잠그고 실제 owner의 정규화한 identity와 대조한다. Stop/retry는 기존 once
-cleanup과 stale generation fencing을 따른다. 브라우저 live/replay 배속 draft는
+cleanup과 stale generation fencing을 따른다. live 재생 중에는 replay 배속
+label과 hint를 실제 레이아웃에서도 숨기고, replay 재생 중에는 live 배속
+control을 숨긴다. hidden 속성뿐 아니라 실제 표시 크기와 화면으로 검증한다.
+브라우저 live/replay 배속 draft는
 구분하며 per-frame DOM이나 VDOM을 도입하지 않는다. native profile은 기존
 flag-pair 형식을 사용하고 empty/default 바이트는 유지한다.
 

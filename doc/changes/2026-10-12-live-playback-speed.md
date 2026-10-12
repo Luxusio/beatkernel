@@ -351,3 +351,22 @@ exit0이며 실제 reader가 64410 bytes를 전부 소비하고 done을 받은 �
 실제 compile과 reader release가 완료된 원본 관측을 저장했다. 이번
 실행에는 network 오류가 없었고 live 재생 중 replay label의 실제 크기는
 0이었다. 이 성공은 앞선 ERR_ABORTED의 원인이 해결됐다는 뜻이 아니다.
+
+네이티브 실행 파일도 현재 소스로 다시 빌드했다. 독립 qa-desktop가
+요청한 실제 Xvfb 창에서 F2, 속도 필드 이동, 0/1 오류와 caret 유지,
+6/4 적용·재진입, 3/2 적용·재진입 및 960/1280 창 변경을 실행했다.
+`native-settings-c1/evidence.json`의 HEAD는 2ce281d이고 binary SHA와
+원본 xdotool 명령·exit, X11 window4194306을 기록한다. 원본 PNG를
+독립 판독한 desktop 렌즈는 이 기능 범위의 성공을 확인했지만, 역할이
+요구하는 등록된 x11-mcp 서버가 없어 전체 판정은 BLOCKED_ENV였다.
+실제 GUI 증거로 필수 환경 gate를 통과했다고 주장하지 않는다.
+첫 실행 wrapper의 display cleanup 순서 오류는 수정했고 두 번째 실행은
+exit0, Xvfb0 및 임시 디렉터리 제거를 확인했다. 물리 플레이는 미검증이다.
+
+`cli-direct-c1`에는 실제 배포 실행 파일의 help 3개 exit0, unknown mode와
+잘못된 분수·출력 timestamp overflow의 명확한 exit1을 보존했다.
+정확한 채보·바인딩·ALSA null 설정의 6/4는 실제 canonical3/2 안내를
+출력했고, 8/8은 NORMAL 안내 경로였다. 두 실행 모두 실제 /missing
+evdev 입력 초기화에서 거절됐으므로 native 플레이 성공이 아니다.
+수정본 commit은 2ce281d이며 새 독립 DEEP 코드 리뷰가 PASS를 반환했다.
+전체 필수 QA 완료, WBS 승격 및 태스크 close는 아직 하지 않았다.
