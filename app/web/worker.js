@@ -2,7 +2,7 @@ import { RenderClient, validateRenderLimits, unsignedIdentity, snapshotMenuMotio
 import { validateCompletedResults, resultRequest } from "./completed-results-model.mjs";
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot, normalizedPath } from "./host_model.mjs";
-import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateTimingPolicy, validateStart, validateEnd, replaySpeedFromFraction, playbackSpeedFromFraction, playbackOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, presentationOutputAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
+import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateTimingPolicy, validateStart, validateEnd, validateLiveColdPhase, replaySpeedFromFraction, playbackSpeedFromFraction, playbackOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, presentationAvailability, presentationOutputAvailability, audioClockExpired, renderedCursor, reportWord } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { BrowserRoomOwner, ROOM_SESSION_METHODS } from "./room-owner.mjs";
 import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
@@ -2713,7 +2713,7 @@ async function preparePlay(state, request) {
     }
     const timing = state.mode === "live" ? validateTiming(request.timing) : null;
     const timingPolicy = state.mode === "live" ? validateTimingPolicy(request.timingPolicy) : null;
-    const requestedStart = state.mode === "live" ? validateStart(request.startNs) : null;
+    const requestedStart = state.mode === "live" ? state.requestedStartNs : null;
     const requestedEnd = state.mode === "live" ? validateEnd(requestedStart, request.endNs) : undefined;
     const speedConstructor = state.localPlan || state.physicalInput && !state.touchInput ? "new_physical_and_speed"
       : state.touchInput ? "new_physical_contact_and_speed"
@@ -3647,6 +3647,29 @@ function handlePlay(request) {
   }
   if (request.kind === "play-start" && play === null) {
     if (request.playId <= lastPlayId) return;
+    let mode;
+    let replaySpeed;
+    let liveSpeed;
+    let requestedStartNs = null;
+    try {
+      if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
+      mode = request.mode ?? "live";
+      replaySpeed = replaySpeedFromFraction(request.replaySpeed);
+      liveSpeed = playbackSpeedFromFraction(request.liveSpeed);
+      if (mode === "replay" && liveSpeed.numerator !== liveSpeed.denominator) {
+        throw new Error("Live speed cannot change replay playback.");
+      }
+      if (mode === "live") {
+        requestedStartNs = validateStart(request.startNs);
+        validateLiveColdPhase(requestedStartNs, liveSpeed);
+      }
+    } catch (error) {
+      lastPlayId = request.playId;
+      const text = message(error);
+      if (identity(request.rpcId)) report("play-reply", { playId: request.playId, rpcId: request.rpcId, error: text });
+      report("play-error", { playId: request.playId, message: text, released: true });
+      return;
+    }
     discardRoomResults();
     const priorRoom = cancelRoomFinalization();
     const state = {
@@ -3661,7 +3684,7 @@ function handlePlay(request) {
       lastHost: null, acquiredPrefix: null, lastSequence: null, sourceOrder: new Map(), preOriginInputs: 0,
       recordReplay: false, completed: false,
       localPlan: null, localPage: 0, touchPlayer: null, recordLimits: null,
-      mode: "live", physicalInput: false, touchInput: false, touchWidth: null, touchHeight: null,
+      mode, replaySpeed, liveSpeed, requestedStartNs, physicalInput: false, touchInput: false, touchWidth: null, touchHeight: null,
       hidSources: null, gamepadAdapter: null, pointerSources: null,
       rate: null, network: null, room: null, samplesEnded: false, commandsDrained: false,
       prepared: false, opponentCount: 0, opponentsFailed: false, opponentError: null, lastOpponents: null,
@@ -3670,18 +3693,6 @@ function handlePlay(request) {
     releasePreparation();
     play = state; // Reserve before the ready await so stop cannot race a late owner.
     lastPlayId = state.id;
-    try {
-      if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
-      state.mode = request.mode ?? "live";
-      state.replaySpeed = replaySpeedFromFraction(request.replaySpeed);
-      state.liveSpeed = playbackSpeedFromFraction(request.liveSpeed);
-      if (state.mode === "replay" && state.liveSpeed.numerator !== state.liveSpeed.denominator) {
-        throw new Error("Live speed cannot change replay playback.");
-      }
-    } catch (error) {
-      failPlay(state, error, request);
-      return;
-    }
     void (async () => {
       if (priorRoom) {
         const cleanupError = await priorRoom;

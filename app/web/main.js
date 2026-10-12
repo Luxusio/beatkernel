@@ -12,7 +12,7 @@ import { LocalRoster, validateLocalPrepared, localReplayReceipt } from "./local-
 import { snapshotHidDevices } from "./hid-profile.mjs";
 import { snapshotBrowserSettings, settingsMenuProfileFields, settingsMenuProfileSnapshot, settingsMenuSnapshot } from "./settings-profile.mjs";
 import { SavedOpponentSelection, opponentLabel, validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
-import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, timingPolicyFromFields, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replaySpeedFromFraction, playbackSpeedFromFraction, playbackOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
+import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, timingPolicyFromFields, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, validateLiveColdPhase, replaySpeedFromFraction, playbackSpeedFromFraction, playbackOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
 const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status", "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear"].map(id => [id, byId(id)]));
@@ -2177,12 +2177,17 @@ async function play(mode = "live") {
   if (mode === "replay" && selectedReplay === null) return;
   let replaySpeed;
   let liveSpeed;
+  let section = null;
   if (mode === "replay") {
     try { replaySpeed = replaySpeedFromFraction(ui["replay-speed"].value); }
     catch (error) { ui["replay-speed"].focus(); status(String(error.message).slice(0, 4096), true); return; }
   } else {
     try { liveSpeed = playbackSpeedFromFraction(ui["live-speed"].value); }
     catch (error) { ui["live-speed"].focus(); status(`Live speed: ${String(error.message).replace(/^Replay speed /, "")}`.slice(0, 4096), true); return; }
+    try { section = sectionFromSeconds(ui["live-start"].value, ui["live-end"].value); }
+    catch (error) { status(String(error.message).slice(0, 4096), true); return; }
+    try { validateLiveColdPhase(section.startNs, liveSpeed); }
+    catch (error) { ui["live-speed"].focus(); status(String(error.message).slice(0, 4096), true); return; }
   }
   clearHistoricalRecord();
   if (mode === "live" && localRoster.players.length === 1) {
@@ -2284,7 +2289,6 @@ async function play(mode = "live") {
     session.commandBatchLimit = Math.min(256, session.audioLimits.queueCapacity);
     session.timing = mode === "live" ? timingFromMilliseconds(ui["judge-early"].value, ui["judge-late"].value, ui["judge-offset"].value) : null;
     session.timingPolicy = mode === "live" ? timingPolicyFromFields(ui["judge-preset"].value, ui["judge-precedence"].value, ui["judge-gauge"].value) : null;
-    const section = mode === "live" ? sectionFromSeconds(ui["live-start"].value, ui["live-end"].value) : null;
     session.startNs = section?.startNs ?? null;
     session.requestedEndNs = section?.endNs;
     session.bindingSelection = mode === "live" ? snapshotBindings(bindingFields.map(([lane, field]) => [lane, field.value])) : null;

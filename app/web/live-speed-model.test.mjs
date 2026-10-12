@@ -5,10 +5,61 @@ import {
   playbackOutputFromMetadata,
   replaySpeedFromFraction,
   replayOutputFromMetadata,
+  validateLiveColdPhase,
 } from "./play-model.mjs";
 
 const I64_MAX = 9223372036854775807n;
 const U64_MAX = 18446744073709551615n;
+
+test("cold live admission checks the whole signed preroll at a nonzero original start", () => {
+  for (const [fraction, expected] of [["1/2", 9n], ["1/1", 7n], ["2/1", 4n], ["3/2", 6n]]) {
+    const speed = playbackSpeedFromFraction(fraction);
+    assert.equal(validateLiveColdPhase(10n, speed, 3n), expected, fraction);
+    assert.deepEqual(speed, playbackSpeedFromFraction(fraction));
+  }
+  assert.equal(validateLiveColdPhase(10n, playbackSpeedFromFraction("1/2"), 1n), 10n,
+    "negative half nanosecond truncates toward zero before adding the original start");
+  assert.equal(validateLiveColdPhase(604800000000001n, playbackSpeedFromFraction("3/2"), 3n),
+    604799999999997n);
+  assert.equal(validateLiveColdPhase(2000000000n), 1900000000n);
+});
+
+test("cold live phase admits exact signed minimum and refuses the next unrepresentable value", () => {
+  assert.equal(validateLiveColdPhase(0n, playbackSpeedFromFraction("4611686018427387904/1"), 2n),
+    -9223372036854775808n);
+  assert.throws(() => validateLiveColdPhase(0n, playbackSpeedFromFraction("4611686018427387905/1"), 2n), Error);
+  const max = playbackSpeedFromFraction("9223372036854775807/1");
+  assert.equal(validateLiveColdPhase(I64_MAX - 1n, max, 2n), -9223372036854775808n);
+  assert.throws(() => validateLiveColdPhase(I64_MAX - 2n, max, 2n), Error);
+  assert.equal(validateLiveColdPhase(0n, max, 1n), -9223372036854775807n);
+  assert.equal(validateLiveColdPhase(I64_MAX, max, 0n), I64_MAX);
+  assert.throws(() => validateLiveColdPhase(0n, max), Error,
+    "valid fraction syntax cannot authorize an unrepresentable fixed-preroll phase");
+});
+
+test("cold admission retains full-width ratios and validates selected start instead of banning large rates", () => {
+  assert.equal(validateLiveColdPhase(0n, playbackSpeedFromFraction("9223372036854775807/18446744073709551615")), -49999999n);
+  assert.equal(validateLiveColdPhase(0n, playbackSpeedFromFraction("1/18446744073709551615")), 0n);
+  assert.equal(validateLiveColdPhase(0n, playbackSpeedFromFraction("92233720368/1")), -9223372036800000000n);
+  assert.throws(() => validateLiveColdPhase(0n, playbackSpeedFromFraction("92233720369/1")), Error);
+  assert.equal(validateLiveColdPhase(100000000n, playbackSpeedFromFraction("92233720369/1")), -9223372036800000000n);
+});
+
+test("cold admission rejects nonexact setup inputs without mutating a normalized snapshot", () => {
+  const selected = playbackSpeedFromFraction("3/2");
+  for (const start of [-1n, I64_MAX + 1n, 0, "0", null]) {
+    assert.throws(() => validateLiveColdPhase(start, selected), Error);
+  }
+  for (const preroll of [-1n, I64_MAX + 1n, 0, "0", null]) {
+    assert.throws(() => validateLiveColdPhase(0n, selected, preroll), Error);
+  }
+  for (const speed of ["3/2", null, {}, { ...selected, numerator: 3 },
+    { numerator: 6n, denominator: 4n, fraction: "6/4" }, { ...selected, fraction: "2/1" }]) {
+    assert.throws(() => validateLiveColdPhase(0n, speed), Error);
+  }
+  assert.deepEqual(selected, { numerator: 3n, denominator: 2n, fraction: "3/2" });
+  assert.ok(Object.isFrozen(selected));
+});
 
 test("general playback speed defaults to a fresh immutable normal snapshot", () => {
   const first = playbackSpeedFromFraction();

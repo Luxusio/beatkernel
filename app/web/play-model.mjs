@@ -90,6 +90,20 @@ function replaySpeedSnapshot(speed) {
   return normalized;
 }
 
+export function validateLiveColdPhase(startNs, speed = undefined, preroll = 100000000n) {
+  startNs = validateStart(startNs);
+  const selectedSpeed = replaySpeedSnapshot(speed);
+  if (typeof preroll !== "bigint" || preroll < 0n || preroll > I64_MAX) {
+    throw new Error("Live output preroll must be nonnegative signed 64-bit nanoseconds.");
+  }
+  // BigInt division truncates the complete signed preroll phase toward zero.
+  const initialSong = startNs + (-preroll * selectedSpeed.numerator / selectedSpeed.denominator);
+  if (initialSong < I64_MIN || initialSong > I64_MAX) {
+    throw new Error("Live speed places the initial song before signed 64-bit nanoseconds; choose a slower speed or a later section start.");
+  }
+  return initialSong;
+}
+
 export function replayOutputFromMetadata(startNs, endNs, endFrame, rate, speed = undefined, preroll = 100000000n) {
   if (typeof startNs !== "bigint") throw new Error("Replay output requires its actual original-song start.");
   validateStart(startNs);

@@ -96,6 +96,68 @@ const grid = [
   ["6/4", "3/2", 3n, 2n, 52800n],
 ];
 
+test("MAX/1 cold phase refuses before actual chart acquisition and preparation without allocating an owner", async () => {
+  let reads = 0;
+  const h = await catalog({}, selectedFile("song/chart.bms", () => { reads++; throw new Error("unexpected cold chart acquisition"); }));
+  await h.send(request({ liveSpeed: "9223372036854775807/1", startNs: 0n, recordReplay: true }));
+  assert.equal(reads, 0);
+  assert.equal(h.libraries[0].files.length, 0);
+  assert.equal(h.libraries[0].preparations.length, 0);
+  assert.equal(h.libraries[0].policyPreparations.length, 0);
+  assert.equal(h.preparedOwners.length, 0);
+  assert.equal(h.games.length + h.locals.length + h.replays.length, 0);
+  assert.equal(h.liveSpeedConstructions.length, 0);
+  assert.equal(prepared(h), undefined);
+  const failure = h.of("play-error").at(-1); assert.ok(failure);
+  assert.equal(failure.playId, 7); assert.equal(failure.released, true);
+  assert.match(failure.message, /preroll|phase|signed|represent/i);
+});
+
+test("Worker cold phase uses the selected original start and a refusal leaves the same library retryable", async () => {
+  let reads = 0;
+  const bytes = new TextEncoder().encode("#BPM 120");
+  const h = await catalog({}, selectedFile("song/chart.bms", () => { reads++; return Promise.resolve(bytes.slice().buffer); }));
+  await h.send(request({ liveSpeed: "92233720369/1", startNs: 0n }));
+  assert.equal(reads, 0); assert.equal(h.games.length, 0); assert.equal(prepared(h), undefined);
+  await h.send(request({ playId: 8, rpcId: 9, liveSpeed: "92233720369/1", startNs: 100000000n }));
+  assert.equal(reads, 1); assert.equal(h.games.length, 1);
+  assert.equal(prepared(h)?.startNs, 100000000n);
+  assert.equal(prepared(h)?.liveSpeed, "92233720369/1");
+  assert.equal(h.liveSpeedConstructions[0].fraction, "92233720369/1");
+  await stop(h, 8);
+});
+
+test("representable near-boundary cold setup snapshots speed and start before held chart acquisition", async () => {
+  const gate = deferred(), h = await catalog({}, selectedFile("song/chart.bms", () => gate.promise));
+  const draft = request({ liveSpeed: "92233720369/1", startNs: 100000000n });
+  await h.send(draft);
+  draft.liveSpeed = "9223372036854775807/1"; draft.startNs = 0n;
+  gate.resolve(new TextEncoder().encode("#BPM 120").buffer); await flushJobs();
+  assert.equal(prepared(h)?.liveSpeed, "92233720369/1");
+  assert.equal(prepared(h)?.startNs, 100000000n);
+  assert.equal(h.games.length, 1); assert.equal(h.of("play-error").length, 0);
+  await stop(h);
+});
+
+test("Worker normal live setup recovers after cold underflow and independent replay still uses its own speed", async () => {
+  const live = await catalog();
+  await live.send(request({ liveSpeed: "9223372036854775807/1" }));
+  assert.equal(live.games.length, 0);
+  await live.send(request({ playId: 8, rpcId: 2, liveSpeed: "2/2" }));
+  assert.equal(prepared(live)?.liveSpeed, "1/1");
+  assert.equal(live.liveSpeedConstructions.length, 0); await stop(live, 8);
+
+  const replay = await catalog();
+  const FileType = selectedFile("record.bkr").file.constructor;
+  const replayFile = new FileType([Uint8Array.from([66, 75, 82, 0, 255, 1])], "record.bkr");
+  await replay.send(request({ mode: "replay", replayFile, replaySpeed: "4/2" }));
+  const response = prepared(replay); assert.ok(response);
+  assert.equal(response.mode, "replay"); assert.equal(response.replaySpeed, "2/1");
+  assert.equal(replay.games.length, 0); assert.equal(replay.replays.length, 1);
+  assert.equal(replay.replaySpeedConstructions[0].fraction, "2/1");
+  await stop(replay);
+});
+
 test("live Worker publishes canonical four-rate identity and literal original-section output fences", async () => {
   const startNs = 604800000000001n, endNs = startNs + 1500000000n;
   for (const [liveSpeed, fraction, numerator, denominator, endFrame] of grid) {

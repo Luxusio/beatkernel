@@ -46,6 +46,61 @@ async function stop(h, start) {
   h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
 }
 
+test("valid MAX/1 syntax with unrepresentable live preroll refuses before AudioContext and Worker preparation", async () => {
+  const h = await harness();
+  try {
+    await h.preview();
+    let reads = 0;
+    for (const file of h.get("files").files) file.arrayBuffer = () => { reads++; throw new Error("cold refusal must not acquire files"); };
+    h.get("live-speed").value = "9223372036854775807/1";
+    h.get("live-start").value = "0";
+    const worker = h.workers[0], posts = worker.posts.length;
+    assert.equal(await h.begin(), undefined);
+    assert.equal(h.opens.length, 0); assert.equal(reads, 0);
+    assert.equal(worker.messages("play-start").length, 0);
+    assert.equal(worker.posts.length, posts, "refusal precedes Worker setup or history ownership effects");
+    assert.equal(h.get("status").dataset.error, "true");
+    assert.match(h.get("status").textContent, /preroll|phase|signed|represent/i);
+    assert.equal(h.get("live-speed").focuses, 1);
+    assert.equal(h.get("live-speed").disabled, false);
+    h.get("live-speed").value = "1/1";
+    const retry = await h.launch(); assert.equal(retry.start.liveSpeed, "1/1");
+    await stop(h, retry.start);
+  } finally { await h.close(); }
+});
+
+test("fixed preroll validates actual original start and freezes it across the AudioHost await", async () => {
+  const gate = deferred(), h = await harness({ openGate: gate });
+  try {
+    await h.preview(); h.get("live-speed").value = "92233720369/1";
+    h.get("live-start").value = "0";
+    assert.equal(await h.begin(), undefined); assert.equal(h.opens.length, 0);
+    h.get("live-start").value = "0.1";
+    h.click("play"); await flush();
+    assert.equal(h.opens.length, 1, "a representable phase is admitted despite the huge numerator");
+    h.get("live-start").value = "0"; h.get("live-speed").value = "9223372036854775807/1";
+    gate.resolve(h.audio); await flush();
+    const start = h.workers[0].last("play-start"); assert.ok(start);
+    assert.equal(start.startNs, 100000000n); assert.equal(start.liveSpeed, "92233720369/1");
+    await admit(h, start, prepared(start.liveSpeed, 92233720369n, 1n, undefined,
+      { startNs: 100000000n, endNs: undefined, endFrame: undefined }));
+    assert.deepEqual(h.audio.finishArgs, [[]]); await stop(h, start);
+  } finally { gate.resolve(h.audio); await h.close(); }
+});
+
+test("an underflowing live draft leaves independent replay selection available", async () => {
+  const h = await harness();
+  try {
+    await h.preview(); h.get("live-speed").value = "9223372036854775807/1";
+    h.get("replay-speed").value = "4/2";
+    chooseRecording(h, [selectedRecording().file]);
+    const start = await h.begin("replay"); assert.ok(start);
+    assert.equal(start.replaySpeed, "2/1"); assert.equal(Object.hasOwn(start, "liveSpeed"), false);
+    assert.equal(h.opens.length, 1); assert.equal(h.get("live-speed").focuses, 0);
+    await stop(h, start);
+  } finally { await h.close(); }
+});
+
 test("live speed markup exposes labelled bounded default and separate pitch hints", async () => {
   const html = await readFile(new URL("./index.html", import.meta.url), "utf8");
   assert.match(html, /<label\b[^>]*for="live-speed"[^>]*>\s*Live speed \(NUM\/DEN\)/);
