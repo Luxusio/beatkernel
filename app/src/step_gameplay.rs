@@ -343,6 +343,13 @@ impl RuntimeOwner {
         }
     }
 
+    fn seal_gameplay_audio(&mut self) {
+        match self {
+            Self::Solo(runtime) => runtime.seal_gameplay_audio(),
+            Self::Local { group, .. } => group.seal_gameplay_audio(),
+        }
+    }
+
     fn enqueue_audio(&mut self, command: AudioCommand) -> Result<(), CommandPushError> {
         match self {
             Self::Solo(runtime) => runtime.enqueue_audio(command),
@@ -2173,6 +2180,7 @@ impl StepGameplay {
         numeric_terminal: bool,
     ) -> Result<bool, StepGameplayError> {
         let normalized = self.validate_completion_evidence(rendered, presented)?;
+        self.seal_finite_gameplay_audio(rendered);
         let actual = rendered
             .filter(|report| report.frames != 0)
             .or(self.last_render);
@@ -2250,6 +2258,7 @@ impl StepGameplay {
         presented: Option<ClockPoint>,
     ) -> Result<(), StepGameplayError> {
         let normalized = self.validate_completion_evidence(rendered, presented)?;
+        self.seal_finite_gameplay_audio(rendered);
         if let Some(report) = rendered.filter(|report| report.frames != 0) {
             self.last_render = Some(report);
         }
@@ -2257,6 +2266,19 @@ impl StepGameplay {
             self.last_presented = Some(point.timestamp);
         }
         Ok(())
+    }
+
+    /// A validated immutable output endpoint closes sound admission immediately,
+    /// while delayed original inputs may still update judge, gauge and capture.
+    /// Completion independently retains all ACK, credit and presentation guards.
+    fn seal_finite_gameplay_audio(&mut self, rendered: Option<RenderReport>) {
+        if self.playback_end_frame.is_some_and(|end| {
+            rendered.is_some_and(|report| {
+                report.frames != 0 && report.playback_end_physical_frame == Some(end)
+            })
+        }) {
+            self.runtime.seal_gameplay_audio();
+        }
     }
 
     /// Binding preflight before a report is allowed to advance BGM admission.
