@@ -722,6 +722,28 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score<
         policy,
     )
 }
+/// Runs selected native policy and fixed speed with actual accepted-score observation.
+pub fn run_gameplay_audio_with_policy_and_result_and_score_and_speed<
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
+>(
+    device: &mut D,
+    session: NativeAudioGameplaySession<'_>,
+    config: crate::native_gameplay::AudioGameplayConfig,
+    score: &mut crate::competition::ScoreSummary,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    speed: crate::live_speed::LiveSpeedSetup,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    crate::native_gameplay::run_gameplay_audio_with_policy_and_result_and_score_and_ports_with_speed(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+        score,
+        policy,
+        speed,
+    )
+}
 /// Runs the native cohort with original member identity and one output authority.
 pub fn run_cohort_audio_with_results<D: GameplayDevice<Presentation = PresentationDiscipline>>(
     device: &mut D,
@@ -752,6 +774,27 @@ pub fn run_cohort_audio_with_policies_and_results<
         &mut SystemControl,
         &mut PlayerGameplayHost,
         policies,
+    )
+}
+
+/// Runs selected member policies and fixed speed on the native audio-authoritative cohort.
+pub fn run_cohort_audio_with_policies_and_results_and_speed<
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
+>(
+    device: &mut D,
+    session: NativeAudioCohortSession<'_>,
+    config: crate::native_gameplay::AudioGameplayConfig,
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    speed: crate::live_speed::LiveSpeedSetup,
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    crate::native_cohort::run_cohort_audio_with_ports_and_policies_and_speed(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+        policies,
+        speed,
     )
 }
 

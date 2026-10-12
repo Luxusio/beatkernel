@@ -40,6 +40,7 @@ use std::{collections::VecDeque, error::Error, fmt, time::Duration as WallDurati
 
 pub use crate::native_gameplay_bridge::{
     run_gameplay, run_gameplay_audio_with_policy_and_result_and_score,
+    run_gameplay_audio_with_policy_and_result_and_score_and_speed,
     run_gameplay_audio_with_practice_and_result_and_score, run_gameplay_audio_with_result,
     run_gameplay_with_control, run_gameplay_with_policy_and_result_and_score,
     run_gameplay_with_result, run_gameplay_with_result_and_score, NativeAudioGameplaySession,

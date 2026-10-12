@@ -73,6 +73,7 @@ pub fn prepare_cohort(
         config,
         config.host,
         None,
+        None,
     )
 }
 pub fn prepare_cohort_with_policy(
@@ -95,6 +96,7 @@ pub fn prepare_cohort_with_policy(
         config,
         config.host,
         Some(policy),
+        None,
     )
 }
 /// Prepares audio-authoritative cohort identities on the normalized logical domain.
@@ -121,6 +123,37 @@ pub fn prepare_audio_cohort_with_policy(
         config,
         logical_domain,
         Some(policy),
+        None,
+    )
+}
+
+/// Selected fixed-speed identities and original song phase are prepared cold.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_audio_cohort_with_policy_and_speed(
+    prepared: &PreparedBms,
+    assignments: &[(PlayerId, DeviceId)],
+    competition: &CompetitionOptions,
+    config: &CohortPreparation<'_>,
+    logical_domain: ClockDomainId,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    setup: crate::live_speed::LiveSpeedSetup,
+) -> NativeGameplayResult<PreparedCohort> {
+    if setup.start() != config.start
+        || setup.preroll().as_nanos() != config.preroll
+        || setup.end() != config.end
+    {
+        return Err("selected speed setup differs from cohort configuration".into());
+    }
+    if policy.judge().max_early().as_nanos() != config.early
+        || policy.judge().max_late().as_nanos() != config.late
+        || policy.judge().input_offset().as_nanos() != config.offset
+        || logical_domain == config.host
+        || logical_domain == config.output
+    {
+        return Err("audio cohort policy or clock configuration differs".into());
+    }
+    prepare_cohort_inner(
+        prepared, assignments, competition, config, logical_domain, Some(policy), Some(setup),
     )
 }
 
@@ -131,6 +164,7 @@ fn prepare_cohort_inner(
     config: &CohortPreparation<'_>,
     logical_domain: ClockDomainId,
     policy: Option<&crate::play_policy::ResolvedPlayPolicy>,
+    setup: Option<crate::live_speed::LiveSpeedSetup>,
 ) -> NativeGameplayResult<PreparedCohort> {
     admit_cohort(assignments.len(), false)?;
     if config.host == config.output
@@ -140,9 +174,14 @@ fn prepare_cohort_inner(
     {
         return Err("invalid cohort clock/section configuration".into());
     }
-    let song_origin = Timestamp::from_nanos(i64::try_from(
-        i128::from(config.start.as_nanos()) - i128::from(config.preroll),
-    )?);
+    let song_origin = match setup {
+        Some(setup) => setup.song_origin(),
+        None => Timestamp::from_nanos(i64::try_from(
+            i128::from(config.start.as_nanos()) - i128::from(config.preroll),
+        )?),
+    };
+    let source_speed = setup.map_or(crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+                .expect("positive normal rate"), |setup| setup.speed());
     let mut players = BTreeSet::new();
     let mut devices = BTreeSet::new();
     for &(player, device) in assignments {
@@ -224,7 +263,7 @@ fn prepare_cohort_inner(
             .map(|path| replay_path(path, player))
             .transpose()?;
         let capture = match policy {
-            Some(policy) => crate::native_judge::prepare_section_capture_for_policy(
+            Some(policy) => crate::native_judge::prepare_section_capture_for_policy_with_speed(
                 &prepared.source,
                 &member.judge,
                 policy,
@@ -233,6 +272,7 @@ fn prepare_cohort_inner(
                 config.chart_seed,
                 config.end,
                 limits,
+                source_speed,
             )?,
             None => prepare_section_capture_for_source(
                 &prepared.source,
@@ -264,9 +304,12 @@ fn prepare_cohort_inner(
     }
     let mut saved_options = competition.clone();
     saved_options.network = None;
+    if setup.is_some() {
+        saved_options.preroll_ns = config.preroll;
+    }
     for (state, member) in states.iter_mut().zip(&configs) {
         state.competition = match policy {
-            Some(policy) => LiveCompetition::prepare_member_section_with_policy(
+            Some(policy) => LiveCompetition::prepare_member_section_with_policy_and_speed(
                 state.player,
                 &saved_options,
                 &prepared.source,
@@ -276,6 +319,7 @@ fn prepare_cohort_inner(
                 config.start,
                 config.chart_seed,
                 config.end,
+                source_speed,
             )?,
             None => LiveCompetition::prepare_for_at_with_chart_seed(
                 state.player,
@@ -294,7 +338,7 @@ fn prepare_cohort_inner(
                 let mut policies = Vec::new();
                 policies.try_reserve_exact(configs.len())?;
                 policies.extend(configs.iter().map(|member| (member.player, policy)));
-                NativeGroupCompetition::prepare_with_policies(
+                NativeGroupCompetition::prepare_with_policies_and_speed(
                     competition,
                     &prepared.source,
                     &configs,
@@ -304,6 +348,7 @@ fn prepare_cohort_inner(
                     config.chart_seed,
                     config.end,
                     config.preroll,
+                    source_speed,
                 )?
             }
             None => NativeGroupCompetition::prepare(

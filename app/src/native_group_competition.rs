@@ -96,9 +96,28 @@ impl NativeGroupCompetition {
         end: Option<Timestamp>,
         preroll: i64,
     ) -> Result<Option<Self>> {
+        Self::prepare_with_policies_and_speed(
+            options, source, members, policies, domain, start, chart_seed, end, preroll, crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+                .expect("positive normal rate"),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_policies_and_speed(
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        members: &[MemberConfig],
+        policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+        domain: ClockDomainId,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+        preroll: i64,
+        source_speed: crate::replay_speed::ReplaySpeed,
+    ) -> Result<Option<Self>> {
         let players = member_roster(members, start, end, preroll)?;
-        let (identity, headers) = selected_setup(
-            options, source, members, policies, domain, start, chart_seed, end, preroll,
+        let (identity, headers) = selected_setup_with_speed(
+            options, source, members, policies, domain, start, chart_seed, end, preroll, source_speed,
         )?;
         if options.network.is_none() {
             return Ok(None);
@@ -557,6 +576,25 @@ fn selected_setup(
     end: Option<Timestamp>,
     preroll: i64,
 ) -> Result<(Vec<u8>, Vec<(PlayerId, beatkernel::replay::ReplayHeader)>)> {
+    selected_setup_with_speed(
+        options, source, members, policies, domain, start, chart_seed, end, preroll, crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+                .expect("positive normal rate"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn selected_setup_with_speed(
+    options: &CompetitionOptions,
+    source: &BmsChart,
+    members: &[MemberConfig],
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    domain: ClockDomainId,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    preroll: i64,
+    source_speed: crate::replay_speed::ReplaySpeed,
+) -> Result<(Vec<u8>, Vec<(PlayerId, beatkernel::replay::ReplayHeader)>)> {
     let players = member_roster(members, start, end, preroll)?;
     if !players
         .iter()
@@ -565,12 +603,15 @@ fn selected_setup(
     {
         return Err("selected group policies differ from the original ordered roster".into());
     }
+    crate::live_speed::LiveSpeedSetup::new(
+        start, beatkernel::time::Duration::from_nanos(preroll), source_speed, end,
+    )?;
     options.start_policy.validate()?;
     let mut headers = Vec::new();
     headers.try_reserve_exact(players.len())?;
     let mut identity = None;
     for (member, (_, policy)) in members.iter().zip(policies) {
-        let header = crate::native_judge::prepare_policy_header(
+        let header = crate::native_judge::prepare_policy_header_with_speed(
             source,
             &member.judge,
             policy,
@@ -578,8 +619,9 @@ fn selected_setup(
             start,
             chart_seed,
             end,
+            source_speed,
         )?;
-        let current = crate::native_judge::prepare_policy_competition_identity(
+        let current = crate::native_judge::prepare_policy_competition_identity_with_speed(
             source,
             &member.judge,
             policy,
@@ -587,6 +629,7 @@ fn selected_setup(
             start,
             chart_seed,
             end,
+            source_speed,
         )?;
         if identity
             .as_ref()

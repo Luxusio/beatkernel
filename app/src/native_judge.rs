@@ -165,13 +165,28 @@ pub fn prepare_policy_header(
     chart_seed: u64,
     end: Option<Timestamp>,
 ) -> NativeGameplayResult<beatkernel::replay::ReplayHeader> {
+    prepare_policy_header_with_speed(source, judge, policy, domain, start, chart_seed, end, crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+                .expect("positive normal rate"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_policy_header_with_speed(
+    source: &BmsChart,
+    judge: &JudgeEngine,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    domain: ClockDomainId,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    source_speed: crate::replay_speed::ReplaySpeed,
+) -> NativeGameplayResult<beatkernel::replay::ReplayHeader> {
     if judge.effective_song_time().is_some() || judge.profile() != policy.judge() {
         return Err("selected competition requires a pristine matching judge".into());
     }
     validate_source_timing(source, policy)?;
     policy.validate_timing(judge, BmsInputMode::ButtonOnly)?;
     let limits = crate::competition_live::replay_limits()?;
-    let header = crate::replay_capture::setup_play_policy_header(
+    let header = crate::replay_capture::setup_play_policy_header_with_speed(
         judge,
         domain,
         limits,
@@ -181,6 +196,7 @@ pub fn prepare_policy_header(
         BmsInputMode::ButtonOnly,
         InputSoundIdentity::from_source(source)?,
         policy,
+        source_speed,
     )?;
     let file = beatkernel::replay::codec::ReplayFile::new(header, Vec::new());
     crate::replay_playback::validate_section_setup(source, &file, limits)?;
@@ -198,7 +214,22 @@ pub fn prepare_policy_competition_identity(
     chart_seed: u64,
     end: Option<Timestamp>,
 ) -> NativeGameplayResult<Vec<u8>> {
-    let header = prepare_policy_header(source, judge, policy, domain, start, chart_seed, None)?;
+    prepare_policy_competition_identity_with_speed(source, judge, policy, domain, start, chart_seed, end, crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+                .expect("positive normal rate"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_policy_competition_identity_with_speed(
+    source: &BmsChart,
+    judge: &JudgeEngine,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    domain: ClockDomainId,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    source_speed: crate::replay_speed::ReplaySpeed,
+) -> NativeGameplayResult<Vec<u8>> {
+    let header = prepare_policy_header_with_speed(source, judge, policy, domain, start, chart_seed, None, source_speed)?;
     Ok(crate::multiplayer::competition_identity_for_section(
         &header,
         env!("CARGO_PKG_VERSION"),
@@ -292,6 +323,22 @@ pub fn prepare_section_capture_for_policy(
     end: Option<Timestamp>,
     limits: Option<ReplayCodecLimits>,
 ) -> NativeGameplayResult<Option<LiveReplayCapture>> {
+    prepare_section_capture_for_policy_with_speed(source, judge, policy, domain, start, chart_seed, end, limits, crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+                .expect("positive normal rate"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_section_capture_for_policy_with_speed(
+    source: &BmsChart,
+    judge: &JudgeEngine,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    domain: ClockDomainId,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    limits: Option<ReplayCodecLimits>,
+    source_speed: crate::replay_speed::ReplaySpeed,
+) -> NativeGameplayResult<Option<LiveReplayCapture>> {
     if judge.effective_song_time().is_some() || judge.profile() != policy.judge() {
         return Err("native policy capture requires a pristine matching judge profile".into());
     }
@@ -301,7 +348,7 @@ pub fn prepare_section_capture_for_policy(
         return Ok(None);
     };
     let identity = InputSoundIdentity::from_source(source)?;
-    Ok(Some(LiveReplayCapture::new_with_policy(
+    Ok(Some(LiveReplayCapture::new_with_policy_and_speed(
         judge,
         domain,
         limits,
@@ -311,6 +358,7 @@ pub fn prepare_section_capture_for_policy(
         BmsInputMode::ButtonOnly,
         identity,
         policy,
+        source_speed,
     )?))
 }
 

@@ -3,6 +3,7 @@
 use crate::native_gameplay::NativeGameplayDevice;
 pub use crate::native_gameplay_bridge::{
     finite_cohort_done, member_progress, run_cohort, run_cohort_audio_with_policies_and_results,
+    run_cohort_audio_with_policies_and_results_and_speed,
     run_cohort_audio_with_practice_and_policies_and_results, run_cohort_audio_with_results,
     run_cohort_with_control, run_cohort_with_policies_and_results, run_cohort_with_results,
     NativeAudioCohortSession, NativeCohortSession, PlayerState,
