@@ -12,7 +12,7 @@ use crate::{
     live_speed::LiveSpeedSetup,
     local_input::InputMerger,
     local_runtime::SoloRuntime,
-    native_audio::{finite_terminal_output_ready, validate_stop_evidence, NativeStopBarrier},
+    native_audio::{finite_terminal_output_ready, NativeRenderEvidence, NativeStopBarrier},
     native_audio_presentation::NativeAudioPresentation,
     native_end::{EndBoundary, NativeEnd},
     native_gameplay_host::{NativeGameplayDiagnostic, NativeGameplayHost, PauseState},
@@ -227,11 +227,16 @@ fn schedule<D: crate::gameplay_presentation::GameplayDevice, S, P: PumpTiming<D>
     device: &mut D,
     session: &mut GameplaySession<'_, S, P>,
     config: NativeGameplayConfig,
+    render_evidence: &mut NativeRenderEvidence,
+    stops: &OwnedStopEvidence,
 ) -> NativeGameplayResult<ClockPoint> {
     if config.logical_schedule {
-        let report = device
+        let rendered = device
             .render_report()?
-            .or_else(|| session.pause.last_render_report())
+            .or_else(|| render_evidence.latest())
+            .or_else(|| session.pause.last_render_report());
+        let report = render_evidence
+            .validate(rendered, stops)?
             .ok_or("mixer playback boundary unavailable for scheduling")?;
         let at = session.pause.scheduling_point(report)?;
         if P::AUDIO
@@ -341,8 +346,9 @@ fn process<
     event: PhysicalInputEvent,
     evidence: &mut OwnedStopEvidence,
     host_port: &mut H,
+    render_evidence: &mut NativeRenderEvidence,
 ) -> NativeGameplayResult<Timestamp> {
-    let at = schedule(device, session, config)?;
+    let at = schedule(device, session, config, render_evidence, evidence)?;
     let report = session.runtime.process_input(event, &ExplicitDomains, at)?;
     let song = report.song_time;
     publish_with_host(session, report, evidence, host_port)?;
@@ -845,6 +851,7 @@ fn run_gameplay_timed<
     let mut live_terminal = false;
     let mut pause_announced = false;
     let mut stop_evidence = OwnedStopEvidence::default();
+    let mut render_evidence = NativeRenderEvidence::default();
     let mut stop_barrier = NativeStopBarrier::default();
     while !host_port.cancelled() && deadline.active(control)? {
         host_port.retry_pause_publication();
@@ -858,8 +865,7 @@ fn run_gameplay_timed<
         } else {
             None
         };
-        let rendered = device.render_report()?;
-        validate_stop_evidence(rendered, &stop_evidence)?;
+        let rendered = render_evidence.validate(device.render_report()?, &stop_evidence)?;
         if T::AUDIO && session.end.is_some() {
             if let Some(report) = rendered
                 .filter(|report| report.frames != 0 && report.playback_end_physical_frame.is_some())
@@ -1004,7 +1010,8 @@ fn run_gameplay_timed<
             }
         }
         if practice.is_none() {
-            crate::native_audio::feed_rendered(session.bgm, device.render_report()?, |command| {
+            let rendered = render_evidence.validate(device.render_report()?, &stop_evidence)?;
+            crate::native_audio::feed_rendered(session.bgm, rendered, |command| {
                 session.runtime.enqueue_audio(command)
             })?;
         }
@@ -1133,6 +1140,7 @@ fn run_gameplay_timed<
                         &mut stop_evidence,
                         host_port,
                         owner,
+                        &mut render_evidence,
                     )? {
                         PracticeService::Waiting => {
                             waiting = true;
@@ -1173,7 +1181,9 @@ fn run_gameplay_timed<
                     continue;
                 }
                 if session.pause.phase() == PausePhase::Running {
-                    if let Some(report) = device.render_report()? {
+                    if let Some(report) =
+                        render_evidence.validate(device.render_report()?, &stop_evidence)?
+                    {
                         owner.playback.service_request(
                             host_port,
                             report
@@ -1204,6 +1214,7 @@ fn run_gameplay_timed<
                 host_port,
                 None,
                 practice_end,
+                &mut render_evidence,
             )?;
             if (session.pause.phase() == PausePhase::Paused && !end_rendered)
                 || audio_boundary.is_some()
@@ -1237,6 +1248,7 @@ fn run_gameplay_timed<
                         event,
                         &mut stop_evidence,
                         host_port,
+                        &mut render_evidence,
                     )?;
                 }
                 last_operation = at;
@@ -1266,6 +1278,7 @@ fn run_gameplay_timed<
                     event,
                     &mut stop_evidence,
                     host_port,
+                    &mut render_evidence,
                 )?;
                 last_operation = host;
             }
@@ -1274,7 +1287,13 @@ fn run_gameplay_timed<
                     let at = boundary.at;
                     if cut.is_some_and(|cut| cut.timestamp >= at.timestamp) {
                         chronology(at, last_operation)?;
-                        let audio_at = schedule(device, &mut session, config)?;
+                        let audio_at = schedule(
+                            device,
+                            &mut session,
+                            config,
+                            &mut render_evidence,
+                            &stop_evidence,
+                        )?;
                         let report = session.runtime.advance_to(at, &ExplicitDomains, audio_at)?;
                         last_song = report.song_time;
                         publish_with_host(&mut session, report, &mut stop_evidence, host_port)?;
@@ -1347,7 +1366,13 @@ fn run_gameplay_timed<
                 .transpose()?
                 .flatten()
             {
-                let audio_at = schedule(device, &mut session, config)?;
+                let audio_at = schedule(
+                    device,
+                    &mut session,
+                    config,
+                    &mut render_evidence,
+                    &stop_evidence,
+                )?;
                 let report = session.runtime.advance_to(at, &ExplicitDomains, audio_at)?;
                 last_song = report.song_time;
                 last_operation = at;
@@ -1361,8 +1386,7 @@ fn run_gameplay_timed<
         }
         // Read after this iteration's admissions. A pre-admission idle block
         // cannot establish that newly queued Stops reached the mixer.
-        let rendered = device.render_report()?;
-        validate_stop_evidence(rendered, &stop_evidence)?;
+        let rendered = render_evidence.validate(device.render_report()?, &stop_evidence)?;
         let numeric_terminal = session.gauge.snapshot().failure.is_some()
             && session.runtime.gameplay_fence().is_some();
         let stops_rendered = if config.end_song.is_some() {
@@ -1419,7 +1443,13 @@ fn run_gameplay_timed<
                         .runtime
                         .transport_mut()
                         .seek(frontier.timestamp, end)?;
-                    let audio_at = schedule(device, &mut session, config)?;
+                    let audio_at = schedule(
+                        device,
+                        &mut session,
+                        config,
+                        &mut render_evidence,
+                        &stop_evidence,
+                    )?;
                     let report =
                         session
                             .runtime
@@ -2055,6 +2085,7 @@ fn service_practice_solo<
     stops: &mut OwnedStopEvidence,
     host: &mut H,
     owner: &mut RetainedSoloPractice<'_, R>,
+    render_evidence: &mut NativeRenderEvidence,
 ) -> NativeGameplayResult<PracticeService> {
     use beatkernel::audio::{CommandScope, PracticeBoundaryKind};
     let Some(boundary) = owner
@@ -2082,6 +2113,7 @@ fn service_practice_solo<
         host,
         Some(boundary.host()),
         None,
+        render_evidence,
     )?;
     if backlog
         || !session
@@ -2149,7 +2181,7 @@ fn service_practice_solo<
     // A genuine control occurrence advances the retired attempt to the cut.
     // Started is bootstrap evidence for the already installed initial state.
     if receipt.kind != PracticeBoundaryKind::Started {
-        let audio_at = schedule(device, session, *config)?;
+        let audio_at = schedule(device, session, *config, render_evidence, stops)?;
         let report = session
             .runtime
             .advance_to(boundary.output(), &ExplicitDomains, audio_at)?;
@@ -2233,6 +2265,7 @@ fn service_audio_solo<
     host: &mut H,
     practice_cut: Option<ClockPoint>,
     practice_end: Option<Timestamp>,
+    render_evidence: &mut NativeRenderEvidence,
 ) -> NativeGameplayResult<()> {
     let Some(prefix) = session
         .discipline
@@ -2307,7 +2340,7 @@ fn service_audio_solo<
             merger.pop_ready(prefix)?;
             continue;
         }
-        let audio_at = schedule(device, session, *config)?;
+        let audio_at = schedule(device, session, *config, render_evidence, stops)?;
         if audio_at.domain != config.stream_origin.domain {
             return Err("native audio scheduling domain differs".into());
         }
@@ -2377,7 +2410,7 @@ fn service_audio_solo<
                         *last_song,
                     )?
                 };
-                let audio_at = schedule(device, session, *config)?;
+                let audio_at = schedule(device, session, *config, render_evidence, stops)?;
                 *session.runtime.transport_mut() = transport;
                 let report =
                     session
@@ -2492,7 +2525,7 @@ fn service_audio_solo<
                     return Ok(());
                 }
             }
-            let audio_at = schedule(device, session, *config)?;
+            let audio_at = schedule(device, session, *config, render_evidence, stops)?;
             Some(
                 session
                     .runtime

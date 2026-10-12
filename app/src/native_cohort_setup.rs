@@ -153,7 +153,13 @@ pub fn prepare_audio_cohort_with_policy_and_speed(
         return Err("audio cohort policy or clock configuration differs".into());
     }
     prepare_cohort_inner(
-        prepared, assignments, competition, config, logical_domain, Some(policy), Some(setup),
+        prepared,
+        assignments,
+        competition,
+        config,
+        logical_domain,
+        Some(policy),
+        Some(setup),
     )
 }
 
@@ -180,8 +186,11 @@ fn prepare_cohort_inner(
             i128::from(config.start.as_nanos()) - i128::from(config.preroll),
         )?),
     };
-    let source_speed = setup.map_or(crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
-                .expect("positive normal rate"), |setup| setup.speed());
+    let source_speed = setup.map_or(
+        crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+            .expect("positive normal rate"),
+        |setup| setup.speed(),
+    );
     let mut players = BTreeSet::new();
     let mut devices = BTreeSet::new();
     for &(player, device) in assignments {

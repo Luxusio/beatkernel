@@ -82,6 +82,146 @@ fn setup(fraction: &str, end: Option<i64>) -> LiveSpeedSetup {
     .unwrap()
 }
 
+#[derive(Clone, Copy, Debug)]
+enum TerminalMutation {
+    Duplicate,
+    ReclassifyExpiry,
+    CountersDecrease,
+    SettledOverflow,
+    SettledExceedsConsumed,
+    ConsumedWithoutExpiry,
+    ExpiryWithoutConsumed,
+    PendingIncrease,
+    SongDrift,
+    VoiceDrift,
+    AppliedIncrease,
+    LateIncrease,
+    PausedLost,
+    MarkerLost,
+}
+const TERMINAL_MUTATIONS: [TerminalMutation; 13] = [
+    TerminalMutation::ReclassifyExpiry,
+    TerminalMutation::CountersDecrease,
+    TerminalMutation::SettledOverflow,
+    TerminalMutation::SettledExceedsConsumed,
+    TerminalMutation::ConsumedWithoutExpiry,
+    TerminalMutation::ExpiryWithoutConsumed,
+    TerminalMutation::PendingIncrease,
+    TerminalMutation::SongDrift,
+    TerminalMutation::VoiceDrift,
+    TerminalMutation::AppliedIncrease,
+    TerminalMutation::LateIncrease,
+    TerminalMutation::PausedLost,
+    TerminalMutation::MarkerLost,
+];
+
+/// This script alters only a later owner-facing read. Its first marker is an
+/// untouched report from this fixture's actual Mixer, including real expiry.
+/// The returned-read trace distinguishes owner publication from race_reports.
+struct TerminalScript {
+    mutation: TerminalMutation,
+    gaps: bool,
+    marker: Option<RenderReport>,
+    stage: usize,
+    reads: Vec<Option<RenderReport>>,
+    owner_marker_seen: bool,
+}
+impl TerminalScript {
+    fn new(mutation: TerminalMutation, gaps: bool) -> Self {
+        Self {
+            mutation,
+            gaps,
+            marker: None,
+            stage: 0,
+            reads: vec![],
+            owner_marker_seen: false,
+        }
+    }
+    fn incomplete(&self) -> bool {
+        self.marker.is_some() && self.stage < if self.gaps { 4 } else { 2 }
+    }
+    fn read(&mut self, actual: Option<RenderReport>) -> Option<RenderReport> {
+        if self.marker.is_none() {
+            if let Some(report) = actual.filter(|r| {
+                r.playback_end_physical_frame.is_some() && r.counters.commands_expired == 1
+            }) {
+                assert_eq!(report.counters.commands_consumed, 2);
+                assert_eq!(report.counters.commands_applied, 1);
+                assert_eq!(report.pending_commands, 0);
+                self.marker = Some(report);
+                self.stage = 1;
+                self.reads.push(Some(report));
+                return Some(report);
+            }
+            return actual;
+        }
+        let marker = self.marker.unwrap();
+        let value = if self.gaps && self.stage == 1 {
+            None
+        } else if self.gaps && self.stage == 2 {
+            Some(marker)
+        } else if self.stage == if self.gaps { 3 } else { 1 } {
+            let mut forged = marker;
+            match self.mutation {
+                TerminalMutation::Duplicate => {}
+                TerminalMutation::ReclassifyExpiry => {
+                    forged.counters.commands_applied = 2;
+                    forged.counters.commands_expired = 0;
+                }
+                TerminalMutation::CountersDecrease => {
+                    forged.counters.commands_consumed = 1;
+                    forged.counters.commands_expired = 0;
+                }
+                TerminalMutation::SettledOverflow => {
+                    forged.counters.commands_applied = u64::MAX;
+                    forged.counters.commands_consumed = u64::MAX;
+                }
+                TerminalMutation::SettledExceedsConsumed => forged.counters.commands_expired = 2,
+                TerminalMutation::ConsumedWithoutExpiry => forged.counters.commands_consumed = 3,
+                TerminalMutation::ExpiryWithoutConsumed => {
+                    forged.counters.commands_applied = 0;
+                    forged.counters.commands_expired = 2;
+                }
+                TerminalMutation::PendingIncrease => forged.pending_commands = 1,
+                TerminalMutation::SongDrift => forged.song_position = ts(1),
+                TerminalMutation::VoiceDrift => forged.active_voices += 1,
+                TerminalMutation::AppliedIncrease => {
+                    forged.counters.commands_applied = 2;
+                    forged.counters.commands_consumed = 3;
+                }
+                TerminalMutation::LateIncrease => forged.counters.late_commands += 1,
+                TerminalMutation::PausedLost => forged.paused = false,
+                TerminalMutation::MarkerLost => forged.playback_end_physical_frame = None,
+            }
+            Some(forged)
+        } else {
+            actual
+        };
+        self.stage += 1;
+        self.reads.push(value);
+        value
+    }
+    fn assert_delivered(&self) {
+        assert!(
+            self.owner_marker_seen,
+            "native owner forwarded original marker to its end authority before forgery"
+        );
+        let marker = self
+            .marker
+            .expect("original settled Mixer marker delivered to owner");
+        assert_eq!(self.reads[0], Some(marker));
+        let forged_index = if self.gaps { 3 } else { 1 };
+        if self.gaps {
+            assert_eq!(self.reads[1], None);
+            assert_eq!(self.reads[2], Some(marker));
+        }
+        assert!(
+            self.reads.len() > forged_index,
+            "later native query must receive the test report"
+        );
+    }
+}
+
 struct Device {
     mixer: Mixer,
     basis: OutputFrameBasis,
@@ -101,6 +241,7 @@ struct Device {
     race_reports: Vec<RenderReport>,
     race_input_published: Rc<Cell<bool>>,
     shifted_origin: bool,
+    terminal_script: Option<TerminalScript>,
 }
 impl GameplayDevice for Device {
     type Presentation = PresentationEstimator;
@@ -185,7 +326,11 @@ impl GameplayDevice for Device {
                 return Ok(Some(*prior));
             }
         }
-        Ok(if self.no_report { None } else { self.report })
+        let actual = if self.no_report { None } else { self.report };
+        Ok(match self.terminal_script.as_mut() {
+            Some(script) => script.read(actual),
+            None => actual,
+        })
     }
     fn host_now(&self) -> NativeGameplayResult<ClockPoint> {
         Ok(host(
@@ -224,7 +369,12 @@ impl GameplayDevice for Device {
             }));
         }
         Ok(InputBatch {
-            completed_through: (!self.no_prefix).then_some(self.host_now()?),
+            completed_through: (!self.no_prefix
+                && !self
+                    .terminal_script
+                    .as_ref()
+                    .is_some_and(TerminalScript::incomplete))
+            .then_some(self.host_now()?),
             backlog: self.blocks == 3,
             closed: false,
         })
@@ -254,6 +404,11 @@ impl GameplayDevice for Device {
         owner: &NativeAudioPresentation,
         report: Option<RenderReport>,
     ) -> NativeGameplayResult<Option<EndBoundary>> {
+        if let Some(script) = self.terminal_script.as_mut() {
+            if script.marker.is_some() && report == script.marker {
+                script.owner_marker_seen = true;
+            }
+        }
         if let Some(pair) = self.creation_pair.take() {
             end.prime(None, pair)?;
         }
@@ -519,6 +674,7 @@ impl Fixture {
                 race_reports: vec![],
                 race_input_published: race_input_published.clone(),
                 shifted_origin: false,
+                terminal_script: None,
             },
             runtime,
             gauge: BmsGauge::new(policy.gauge().try_copy().unwrap()),
@@ -766,6 +922,62 @@ fn actual_solo_stale_schedule_publishes_after_final_callback_and_waits_for_expir
     let mut gauge = BmsGauge::new(f.policy.gauge().try_copy().unwrap());
     gauge.observe(replay.results(), &[]).unwrap();
     assert_eq!(gauge, f.gauge);
+}
+
+#[test]
+fn native_solo_rejects_impossible_progression_after_owner_observes_real_terminal_marker() {
+    for gaps in [false, true] {
+        for mutation in TERMINAL_MUTATIONS {
+            let mut f = Fixture::new("2/1", Some(30_000_000));
+            f.device.terminal_race = true;
+            f.device.terminal_script = Some(TerminalScript::new(mutation, gaps));
+            let result = f.run(false, true);
+            f.device
+                .terminal_script
+                .as_ref()
+                .unwrap()
+                .assert_delivered();
+            assert!(result.is_err(), "{mutation:?}, intervening None/duplicate={gaps}: native owner accepted impossible terminal evidence");
+            // These remain real owner commands and original runtime input facts.
+            assert_eq!(f.device.report.unwrap().counters.commands_consumed, 2);
+            assert_eq!(f.device.report.unwrap().counters.commands_applied, 1);
+            assert_eq!(f.device.report.unwrap().counters.commands_expired, 1);
+            let down = f
+                .host
+                .reports
+                .iter()
+                .find(|r| r.input.as_ref().is_some_and(|i| i.meta().sequence == 0))
+                .unwrap();
+            assert_eq!(down.audio_at, raw(15_000_000));
+            assert_eq!(down.song_time, ts(19_999_998));
+            assert_eq!(
+                down.input.as_ref().unwrap().meta().original_clock_point,
+                Some(host(10_000_000))
+            );
+            assert_eq!(down.judge_events.len(), 1);
+            assert!(f.device.pcm.iter().all(|v| *v == 0.0));
+        }
+    }
+}
+
+#[test]
+fn native_solo_accepts_real_terminal_expiry_duplicates_and_unavailable_intermediate_read() {
+    let mut f = Fixture::new("2/1", Some(30_000_000));
+    f.device.terminal_race = true;
+    f.device.terminal_script = Some(TerminalScript::new(TerminalMutation::Duplicate, true));
+    assert!(f.run(false, true).unwrap().is_some());
+    f.device
+        .terminal_script
+        .as_ref()
+        .unwrap()
+        .assert_delivered();
+    assert_eq!(
+        f.device.report.unwrap().counters.settled_commands(),
+        Some(2)
+    );
+    assert_eq!(f.host.published, 1);
+    assert_eq!(f.merger.pending(), 0);
+    assert!(f.device.pcm.iter().all(|v| *v == 0.0));
 }
 
 #[test]

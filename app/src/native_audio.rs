@@ -65,6 +65,36 @@ pub(crate) fn validate_stop_evidence(
     Ok(())
 }
 
+/// Retains validated owner observations across every read, including absent
+/// snapshots. A real finite marker permits only the shared expiry progression.
+#[derive(Default)]
+pub(crate) struct NativeRenderEvidence {
+    previous: Option<RenderReport>,
+}
+impl NativeRenderEvidence {
+    pub(crate) fn latest(&self) -> Option<RenderReport> {
+        self.previous
+    }
+
+    pub(crate) fn validate(
+        &mut self,
+        rendered: Option<RenderReport>,
+        stops: &OwnedStopEvidence,
+    ) -> NativeGameplayResult<Option<RenderReport>> {
+        validate_stop_evidence(rendered, stops)?;
+        if let Some(report) = rendered {
+            if self.previous.is_some_and(|previous| {
+                previous.playback_end_physical_frame.is_some()
+                    && !crate::step_gameplay::finite_settlement_progression(previous, report)
+            }) {
+                return Err("native mixer state changed after the finite endpoint".into());
+            }
+            self.previous = Some(report);
+        }
+        Ok(rendered)
+    }
+}
+
 /// Finite output is sealed by the real immutable endpoint. Retained BGM voices
 /// cannot play again, but every queued command must actually have settled.
 /// NativeEnd's endpoint/presentation proof remains a separate required guard.

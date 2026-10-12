@@ -254,6 +254,7 @@ async function terminal(id) {
 async function snapshot(name) {
   await worker.evaluate(async () => { const deadline = performance.now() + 5000; while (__liveSpeedWorker.pending) { if (performance.now() > deadline) throw Error("Capture observation deadline"); await new Promise(done => setTimeout(done, 10)); } });
   const result = { name, window: await page.evaluate(() => __liveSpeedWindow), worker: await worker.evaluate(() => __liveSpeedWorker), renderer: await renderer.evaluate(() => __liveSpeedRenderer) };
+  assert.deepEqual(result.window.audioTerminals, [], "Actual Worklet terminal failures must fail acceptance, including during cleanup");
   assert.deepEqual(result.worker.errors, []); assert.deepEqual(result.renderer.errors, []);
   evidence.cases.push(result); await page.screenshot({ path: resolve(out, `${name}.png`), fullPage: true }); return result;
 }
@@ -422,6 +423,7 @@ async function run() {
   evidence.stage = "responsive";
   for (const width of [390, 768, 1200]) { await page.setViewport({ width, height: 1000, hasTouch: true }); await sleep(150); await page.screenshot({ path: resolve(out, `viewport-${width}.png`), fullPage: true }); assert.ok(await page.$eval("#live-speed", x => x.getBoundingClientRect().width > 0)); }
   check("responsive", [390, 768, 1200]); await sleep(100);
+  assert.deepEqual(await page.evaluate(() => __liveSpeedWindow.audioTerminals), [], "Final acceptance requires no actual Worklet terminal failure");
   assert.deepEqual(evidence.console.filter(x => ["error", "pageerror"].includes(x.type)), []); assert.deepEqual(evidence.network, []); check("clean-console-network", "No exclusions, including ERR_ABORTED");
 }
 try { await run(); }

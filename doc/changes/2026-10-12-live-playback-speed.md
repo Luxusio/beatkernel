@@ -278,6 +278,29 @@ qa-browser의 완료 증거를 대체하지 않는다.
 
 ## 남은 범위
 
+`f335be2`의 독립 보안 리뷰는 PASS였고, 독립 DEEP 코드 리뷰는 FIX_NOW
+두 건으로 FAIL이었다. 실제 terminal 진단이 있어도 browser runner가 성공할
+수 있는 경로와 native owner의 누적 postmarker 검증 누락을 수정 중이다.
+공통 native owner guard는 이전 실제 보고서를 보존하고 기존
+`finite_settlement_progression`을 재사용하며, scheduling/feed/초기/최종
+조회에도 적용한다. callback에는 새 작업을 넣지 않는다.
+
+새 native 테스트는 4개 함수의 81개 경우를 구성한다. 첫 컴파일은 cohort의
+잘못된 timestamp 함수명으로 실패했고, 수정 후 실행은 솔로 19개·CLI 9개·
+preparation 9개와 기존 cohort 16개가 통과했다. 새 cohort 두 함수는
+실패했다. 거절 직후 capture가 완전한 입력 drain이 아니라 실제 처리된
+prefix인 점과, 늦은 queue 발행 경합의 pre-seal Play를 기존 late-after-seal
+검사와 구분하도록 fixture oracle을 수정했다. 원본 marker가 먼저 owner에
+전달되고 이후에만 malformed report를 주입하는 증거와 원본 PCM/counter/
+provenance 검사는 유지한다. 수정 후 cohort 18개와 native practice wrapper
+회귀 4개가 모두 exit0으로 통과했다. 따라서 현재 솔로 19개·cohort 18개·
+CLI 9개·preparation 9개 및 practice wrapper 4개가 통과한 상태다.
+새 main/audio WASM과 bindings도 모두 재생성했고 실제 exports 30개가
+통과했다. 실제 `development-11` 브라우저 실행은 강화한 terminal 검사까지
+포함해 14개 흐름 모두 exit0이며, 모든 snapshot의 audioTerminals는 비어
+있고 console/network 및 unmet도 비어 있다. 앞선 간헐적인 status6 오류가
+원인까지 해결됐다는 의미는 아니다. 수정본 DEEP 리뷰와 독립 QA는 남아 있다.
+
 이 문서는 개발 중간 증거다. 현재 태스크의 독립 code/security review와
 CLI/browser/desktop QA가 완료됐다는 주장이 아니다. 고정 실시간 배속의
 전체 연결, 실행 중 배속 변경, retained practice/seek/loop 배속, 역재생과

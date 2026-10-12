@@ -505,8 +505,16 @@ impl LiveCompetition {
         preroll_ns: i64,
     ) -> Result<Option<Self>> {
         Self::prepare_native_section_with_policy_and_speed(
-            options, source, judge, policy, domain, start, chart_seed, end,
-            preroll_ns, crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+            options,
+            source,
+            judge,
+            policy,
+            domain,
+            start,
+            chart_seed,
+            end,
+            preroll_ns,
+            crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
                 .expect("positive normal rate"),
         )
     }
@@ -529,8 +537,16 @@ impl LiveCompetition {
         let mut native_options = options.clone();
         native_options.preroll_ns = preroll_ns;
         Self::prepare_member_section_with_policy_and_speed(
-            PlayerId(1), &native_options, source, judge, policy, domain, start,
-            chart_seed, end, source_speed,
+            PlayerId(1),
+            &native_options,
+            source,
+            judge,
+            policy,
+            domain,
+            start,
+            chart_seed,
+            end,
+            source_speed,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -546,7 +562,15 @@ impl LiveCompetition {
         end: Option<Timestamp>,
     ) -> Result<Option<Self>> {
         Self::prepare_member_section_with_policy_and_speed(
-            player, options, source, judge, policy, domain, start, chart_seed, end,
+            player,
+            options,
+            source,
+            judge,
+            policy,
+            domain,
+            start,
+            chart_seed,
+            end,
             crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
                 .expect("positive normal rate"),
         )
@@ -565,7 +589,14 @@ impl LiveCompetition {
         source_speed: crate::replay_speed::ReplaySpeed,
     ) -> Result<Option<Self>> {
         let header = crate::native_judge::prepare_policy_header_with_speed(
-            source, judge, policy, domain, start, chart_seed, end, source_speed,
+            source,
+            judge,
+            policy,
+            domain,
+            start,
+            chart_seed,
+            end,
+            source_speed,
         )?;
         // Only NORMAL keeps the historical builtin saved-record schema.
         // New nonnormal records compare the actual complete capture policy.
@@ -573,8 +604,17 @@ impl LiveCompetition {
             || policy.selection() != crate::play_policy::GaugeSelection::BeatKernel)
             .then_some(policy);
         Self::prepare_member_section_inner(
-            player, options, source, judge, domain, start, chart_seed, end,
-            comparison_policy, source_speed, Some(header),
+            player,
+            options,
+            source,
+            judge,
+            domain,
+            start,
+            chart_seed,
+            end,
+            comparison_policy,
+            source_speed,
+            Some(header),
         )
     }
     fn prepare_member_section(
@@ -588,9 +628,18 @@ impl LiveCompetition {
         end: Option<Timestamp>,
     ) -> Result<Option<Self>> {
         Self::prepare_member_section_inner(
-            player, options, source, judge, domain, start, chart_seed, end, None,
+            player,
+            options,
+            source,
+            judge,
+            domain,
+            start,
+            chart_seed,
+            end,
+            None,
             crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
-                .expect("positive normal rate"), None,
+                .expect("positive normal rate"),
+            None,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -617,7 +666,10 @@ impl LiveCompetition {
             return Err("competition player ID must be nonzero".into());
         }
         crate::live_speed::LiveSpeedSetup::new(
-            start, beatkernel::time::Duration::from_nanos(options.preroll_ns), source_speed, end,
+            start,
+            beatkernel::time::Duration::from_nanos(options.preroll_ns),
+            source_speed,
+            end,
         )?;
         if options.ghosts.is_empty() && options.network.is_none() {
             return Ok(None);
@@ -626,7 +678,14 @@ impl LiveCompetition {
         let input_sounds = InputSoundIdentity::from_source(source)?;
         let header = match policy {
             Some(policy) => crate::native_judge::prepare_policy_header_with_speed(
-                source, judge, policy, domain, start, chart_seed, end, source_speed,
+                source,
+                judge,
+                policy,
+                domain,
+                start,
+                chart_seed,
+                end,
+                source_speed,
             )?,
             None => LiveReplayCapture::new_with_input_sounds(
                 judge,
@@ -688,7 +747,11 @@ impl LiveCompetition {
             None => None,
         };
         let mut owner = Self::from_prepared_with_policy_header(
-            player, competition, network, options.setup_timeout, admitted_policy_header,
+            player,
+            competition,
+            network,
+            options.setup_timeout,
+            admitted_policy_header,
         )?;
         owner.practice_options = Some(options.clone());
         Ok(Some(owner))

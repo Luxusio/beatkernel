@@ -97,7 +97,16 @@ impl NativeGroupCompetition {
         preroll: i64,
     ) -> Result<Option<Self>> {
         Self::prepare_with_policies_and_speed(
-            options, source, members, policies, domain, start, chart_seed, end, preroll, crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+            options,
+            source,
+            members,
+            policies,
+            domain,
+            start,
+            chart_seed,
+            end,
+            preroll,
+            crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
                 .expect("positive normal rate"),
         )
     }
@@ -117,7 +126,16 @@ impl NativeGroupCompetition {
     ) -> Result<Option<Self>> {
         let players = member_roster(members, start, end, preroll)?;
         let (identity, headers) = selected_setup_with_speed(
-            options, source, members, policies, domain, start, chart_seed, end, preroll, source_speed,
+            options,
+            source,
+            members,
+            policies,
+            domain,
+            start,
+            chart_seed,
+            end,
+            preroll,
+            source_speed,
         )?;
         if options.network.is_none() {
             return Ok(None);
@@ -577,8 +595,17 @@ fn selected_setup(
     preroll: i64,
 ) -> Result<(Vec<u8>, Vec<(PlayerId, beatkernel::replay::ReplayHeader)>)> {
     selected_setup_with_speed(
-        options, source, members, policies, domain, start, chart_seed, end, preroll, crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
-                .expect("positive normal rate"),
+        options,
+        source,
+        members,
+        policies,
+        domain,
+        start,
+        chart_seed,
+        end,
+        preroll,
+        crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+            .expect("positive normal rate"),
     )
 }
 
@@ -604,7 +631,10 @@ fn selected_setup_with_speed(
         return Err("selected group policies differ from the original ordered roster".into());
     }
     crate::live_speed::LiveSpeedSetup::new(
-        start, beatkernel::time::Duration::from_nanos(preroll), source_speed, end,
+        start,
+        beatkernel::time::Duration::from_nanos(preroll),
+        source_speed,
+        end,
     )?;
     options.start_policy.validate()?;
     let mut headers = Vec::new();

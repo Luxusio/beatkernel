@@ -1,13 +1,13 @@
 //! Actual native entry-point parsing and cold validation. Foreign binaries only
 //! exercise their parsers on this host; no physical input/audio claim is made.
+#[cfg(target_os = "linux")]
+use std::{fs, path::PathBuf};
 use std::{
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
-#[cfg(target_os = "linux")]
-use std::{fs, path::PathBuf};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 

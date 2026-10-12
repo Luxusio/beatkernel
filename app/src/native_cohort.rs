@@ -28,7 +28,7 @@ use crate::{
     local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup},
     multiplayer::Progress,
     multiplayer_group::{validate_members, MemberProgress},
-    native_audio::{finite_terminal_output_ready, validate_stop_evidence, NativeStopBarrier},
+    native_audio::{finite_terminal_output_ready, NativeRenderEvidence, NativeStopBarrier},
     native_end::NativeEnd,
     native_gameplay::{
         AudioGameplayConfig, NativeGameplayConfig, NativeGameplayResult, MAX_PENDING_INPUT_EVENTS,
@@ -89,11 +89,16 @@ fn schedule<D: crate::gameplay_presentation::GameplayDevice, S, G, P>(
     device: &mut D,
     session: &mut CohortSession<'_, S, G, P>,
     config: NativeGameplayConfig,
+    render_evidence: &mut NativeRenderEvidence,
+    stops: &OwnedStopEvidence,
 ) -> NativeGameplayResult<ClockPoint> {
     if config.logical_schedule {
-        let report = device
+        let rendered = device
             .render_report()?
-            .or_else(|| session.pause.last_render_report())
+            .or_else(|| render_evidence.latest())
+            .or_else(|| session.pause.last_render_report());
+        let report = render_evidence
+            .validate(rendered, stops)?
             .ok_or("cohort playback boundary unavailable")?;
         let at = session.pause.scheduling_point(report)?;
         if config.end_song.is_some()
@@ -140,6 +145,7 @@ fn process_with_stops<D: NativeGameplayDevice>(
         event,
         evidence,
         &mut crate::native_gameplay_bridge::PlayerGameplayHost,
+        &mut NativeRenderEvidence::default(),
     )
 }
 fn process_with_host<
@@ -155,8 +161,9 @@ fn process_with_host<
     event: PhysicalInputEvent,
     evidence: &mut OwnedStopEvidence,
     host_port: &mut H,
+    render_evidence: &mut NativeRenderEvidence,
 ) -> NativeGameplayResult<()> {
-    let at = schedule(device, session, config)?;
+    let at = schedule(device, session, config, render_evidence, evidence)?;
     match session.group.process_input(event, &ExplicitDomains, at) {
         Ok(InputResult::Processed(mut reports)) => observe_reports_with_competition(
             &mut reports,
@@ -199,8 +206,9 @@ fn advance<
     at: ClockPoint,
     evidence: &mut OwnedStopEvidence,
     host_port: &mut H,
+    render_evidence: &mut NativeRenderEvidence,
 ) -> NativeGameplayResult<()> {
-    let audio_at = schedule(device, session, config)?;
+    let audio_at = schedule(device, session, config, render_evidence, evidence)?;
     match session.group.advance_to(at, &ExplicitDomains, audio_at) {
         Ok(mut reports) => observe_reports_with_competition(
             &mut reports,
@@ -241,9 +249,18 @@ fn reconcile<
     at: ClockPoint,
     evidence: &mut OwnedStopEvidence,
     host_port: &mut H,
+    render_evidence: &mut NativeRenderEvidence,
 ) -> NativeGameplayResult<()> {
     for event in keyboard.resume(at)? {
-        process_with_host(device, session, config, event, evidence, host_port)?;
+        process_with_host(
+            device,
+            session,
+            config,
+            event,
+            evidence,
+            host_port,
+            render_evidence,
+        )?;
     }
     Ok(())
 }
@@ -808,6 +825,7 @@ fn commit_cohort_practice<
     now: ClockPoint,
     stop_evidence: &mut OwnedStopEvidence,
     host: &mut H,
+    render_evidence: &mut NativeRenderEvidence,
 ) -> NativeGameplayResult<()> {
     use beatkernel::{
         audio::{CommandScope, PracticeBoundaryKind},
@@ -887,7 +905,7 @@ fn commit_cohort_practice<
         }
         // Commit the old attempt's final logical prefix at this shared cut.
         // New input at exactly the cut remains queued for the fresh attempt.
-        let audio_at = schedule(device, session, *config)?;
+        let audio_at = schedule(device, session, *config, render_evidence, stop_evidence)?;
         let result = session
             .group
             .advance_to(boundary.output(), &ExplicitDomains, audio_at);
@@ -929,7 +947,7 @@ fn commit_cohort_practice<
         *session.end = None;
     } else if prepared.receipt.kind == PracticeBoundaryKind::Ended {
         // Advance all members exactly to the native-qualified terminal output.
-        let audio_at = schedule(device, session, *config)?;
+        let audio_at = schedule(device, session, *config, render_evidence, stop_evidence)?;
         let result = session
             .group
             .advance_to(boundary.output(), &ExplicitDomains, audio_at);
@@ -1164,6 +1182,7 @@ fn run_cohort_timed<
     }
     let mut last_host: Option<ClockPoint> = None;
     let mut stop_evidence = OwnedStopEvidence::default();
+    let mut render_evidence = NativeRenderEvidence::default();
     let mut stop_barrier = NativeStopBarrier::default();
     // Preserve the calibrated lower bracket before the next native observation
     // can cross a short endpoint. Adapters supply their original evidence source.
@@ -1180,8 +1199,7 @@ fn run_cohort_timed<
         owner.advertise(host_port)?;
     }
     let mut pause_song_origin = config.song_origin;
-    let initial_rendered = device.render_report()?;
-    validate_stop_evidence(initial_rendered, &stop_evidence)?;
+    let initial_rendered = render_evidence.validate(device.render_report()?, &stop_evidence)?;
     let mut end_rendered =
         initial_rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
     let mut end_boundary = if let Some(end) = session.end.as_mut() {
@@ -1221,8 +1239,7 @@ fn run_cohort_timed<
         } else {
             None
         };
-        let rendered = device.render_report()?;
-        validate_stop_evidence(rendered, &stop_evidence)?;
+        let rendered = render_evidence.validate(device.render_report()?, &stop_evidence)?;
         if let Some(end) = session.end.as_mut() {
             end_rendered |=
                 rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
@@ -1379,7 +1396,8 @@ fn run_cohort_timed<
                 }
             }
         }
-        crate::native_audio::feed_rendered(session.bgm, device.render_report()?, |command| {
+        let rendered = render_evidence.validate(device.render_report()?, &stop_evidence)?;
+        crate::native_audio::feed_rendered(session.bgm, rendered, |command| {
             session.group.enqueue_audio(command)
         })?;
         // Acquire/admit during acknowledgement waits as well; otherwise native
@@ -1514,6 +1532,7 @@ fn run_cohort_timed<
                 host_port,
                 practice_boundary.map(|boundary| boundary.host()),
                 practice_end,
+                &mut render_evidence,
             )?;
             if let Some(boundary) = practice_boundary {
                 if !session
@@ -1536,6 +1555,7 @@ fn run_cohort_timed<
                     now,
                     &mut stop_evidence,
                     host_port,
+                    &mut render_evidence,
                 )?;
                 committed = Some(boundary.host());
                 if matches!(
@@ -1596,6 +1616,7 @@ fn run_cohort_timed<
                                 event,
                                 &mut stop_evidence,
                                 host_port,
+                                &mut render_evidence,
                             )?;
                         }
                     }
@@ -1606,6 +1627,7 @@ fn run_cohort_timed<
                         at,
                         &mut stop_evidence,
                         host_port,
+                        &mut render_evidence,
                     )?;
                     session.merger.commit(at)?;
                     committed = Some(at);
@@ -1678,6 +1700,7 @@ fn run_cohort_timed<
                             at,
                             &mut stop_evidence,
                             host_port,
+                            &mut render_evidence,
                         )?;
                         resume_boundary = None;
                         host_port.publish_pause(PauseState::Running);
@@ -1695,6 +1718,7 @@ fn run_cohort_timed<
                             event,
                             &mut stop_evidence,
                             host_port,
+                            &mut render_evidence,
                         )?;
                     }
                 }
@@ -1707,6 +1731,7 @@ fn run_cohort_timed<
                         at,
                         &mut stop_evidence,
                         host_port,
+                        &mut render_evidence,
                     )?;
                     host_port.publish_pause(PauseState::Running);
                 }
@@ -1722,13 +1747,13 @@ fn run_cohort_timed<
                     frontier,
                     &mut stop_evidence,
                     host_port,
+                    &mut render_evidence,
                 )?;
                 session.merger.commit(frontier)?;
                 committed = Some(frontier);
             }
         }
-        let rendered = device.render_report()?;
-        validate_stop_evidence(rendered, &stop_evidence)?;
+        let rendered = render_evidence.validate(device.render_report()?, &stop_evidence)?;
         let stops_rendered = if config.end_song.is_some() {
             stop_barrier.observe(&stop_evidence, rendered)?
         } else {
@@ -1795,7 +1820,13 @@ fn run_cohort_timed<
                     .group
                     .transport_mut()
                     .seek(operation.timestamp, end)?;
-                let audio_at = schedule(device, &mut session, config)?;
+                let audio_at = schedule(
+                    device,
+                    &mut session,
+                    config,
+                    &mut render_evidence,
+                    &stop_evidence,
+                )?;
                 let result = session
                     .group
                     .advance_to(operation, &ExplicitDomains, audio_at);
@@ -2517,6 +2548,7 @@ fn service_audio_cohort<
     host: &mut H,
     practice_cut: Option<ClockPoint>,
     practice_end: Option<Timestamp>,
+    render_evidence: &mut NativeRenderEvidence,
 ) -> NativeGameplayResult<()> {
     let Some(prefix) = session
         .discipline
@@ -2598,7 +2630,7 @@ fn service_audio_cohort<
             session.merger.pop_ready(prefix)?;
             continue;
         }
-        let audio_at = schedule(device, session, *config)?;
+        let audio_at = schedule(device, session, *config, render_evidence, stops)?;
         if audio_at.domain != config.stream_origin.domain {
             return Err("cohort audio scheduling domain differs".into());
         }
@@ -2681,7 +2713,7 @@ fn service_audio_cohort<
                         last_song,
                     )?
                 };
-                let audio_at = schedule(device, session, *config)?;
+                let audio_at = schedule(device, session, *config, render_evidence, stops)?;
                 *session.group.transport_mut() = transport;
                 let result =
                     session
@@ -2815,7 +2847,7 @@ fn service_audio_cohort<
                     return Ok(());
                 }
             }
-            let audio_at = schedule(device, session, *config)?;
+            let audio_at = schedule(device, session, *config, render_evidence, stops)?;
             let result = session.group.advance_to(output, &ExplicitDomains, audio_at);
             observe_audio_group_result(
                 result,

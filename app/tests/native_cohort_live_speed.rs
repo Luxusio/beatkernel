@@ -169,6 +169,146 @@ impl NativeGameplayHost for Host {
         Ok(())
     }
 }
+#[derive(Clone, Copy, Debug)]
+enum TerminalMutation {
+    Duplicate,
+    ReclassifyExpiry,
+    CountersDecrease,
+    SettledOverflow,
+    SettledExceedsConsumed,
+    ConsumedWithoutExpiry,
+    ExpiryWithoutConsumed,
+    PendingIncrease,
+    SongDrift,
+    VoiceDrift,
+    AppliedIncrease,
+    LateIncrease,
+    PausedLost,
+    MarkerLost,
+}
+const TERMINAL_MUTATIONS: [TerminalMutation; 13] = [
+    TerminalMutation::ReclassifyExpiry,
+    TerminalMutation::CountersDecrease,
+    TerminalMutation::SettledOverflow,
+    TerminalMutation::SettledExceedsConsumed,
+    TerminalMutation::ConsumedWithoutExpiry,
+    TerminalMutation::ExpiryWithoutConsumed,
+    TerminalMutation::PendingIncrease,
+    TerminalMutation::SongDrift,
+    TerminalMutation::VoiceDrift,
+    TerminalMutation::AppliedIncrease,
+    TerminalMutation::LateIncrease,
+    TerminalMutation::PausedLost,
+    TerminalMutation::MarkerLost,
+];
+
+/// This script alters only a later owner-facing read. Its first marker is an
+/// untouched report from this fixture's actual Mixer, including real expiry.
+/// The returned-read trace distinguishes owner publication from race_reports.
+struct TerminalScript {
+    mutation: TerminalMutation,
+    gaps: bool,
+    marker: Option<RenderReport>,
+    stage: usize,
+    reads: Vec<Option<RenderReport>>,
+    owner_marker_seen: bool,
+}
+impl TerminalScript {
+    fn new(mutation: TerminalMutation, gaps: bool) -> Self {
+        Self {
+            mutation,
+            gaps,
+            marker: None,
+            stage: 0,
+            reads: vec![],
+            owner_marker_seen: false,
+        }
+    }
+    fn incomplete(&self) -> bool {
+        self.marker.is_some() && self.stage < if self.gaps { 4 } else { 2 }
+    }
+    fn read(&mut self, actual: Option<RenderReport>) -> Option<RenderReport> {
+        if self.marker.is_none() {
+            if let Some(report) = actual.filter(|r| {
+                r.playback_end_physical_frame.is_some() && r.counters.commands_expired == 1
+            }) {
+                assert_eq!(report.counters.commands_consumed, 2);
+                assert_eq!(report.counters.commands_applied, 1);
+                assert_eq!(report.pending_commands, 0);
+                self.marker = Some(report);
+                self.stage = 1;
+                self.reads.push(Some(report));
+                return Some(report);
+            }
+            return actual;
+        }
+        let marker = self.marker.unwrap();
+        let value = if self.gaps && self.stage == 1 {
+            None
+        } else if self.gaps && self.stage == 2 {
+            Some(marker)
+        } else if self.stage == if self.gaps { 3 } else { 1 } {
+            let mut forged = marker;
+            match self.mutation {
+                TerminalMutation::Duplicate => {}
+                TerminalMutation::ReclassifyExpiry => {
+                    forged.counters.commands_applied = 2;
+                    forged.counters.commands_expired = 0;
+                }
+                TerminalMutation::CountersDecrease => {
+                    forged.counters.commands_consumed = 1;
+                    forged.counters.commands_expired = 0;
+                }
+                TerminalMutation::SettledOverflow => {
+                    forged.counters.commands_applied = u64::MAX;
+                    forged.counters.commands_consumed = u64::MAX;
+                }
+                TerminalMutation::SettledExceedsConsumed => forged.counters.commands_expired = 2,
+                TerminalMutation::ConsumedWithoutExpiry => forged.counters.commands_consumed = 3,
+                TerminalMutation::ExpiryWithoutConsumed => {
+                    forged.counters.commands_applied = 0;
+                    forged.counters.commands_expired = 2;
+                }
+                TerminalMutation::PendingIncrease => forged.pending_commands = 1,
+                TerminalMutation::SongDrift => forged.song_position = Timestamp::from_nanos(1),
+                TerminalMutation::VoiceDrift => forged.active_voices += 1,
+                TerminalMutation::AppliedIncrease => {
+                    forged.counters.commands_applied = 2;
+                    forged.counters.commands_consumed = 3;
+                }
+                TerminalMutation::LateIncrease => forged.counters.late_commands += 1,
+                TerminalMutation::PausedLost => forged.paused = false,
+                TerminalMutation::MarkerLost => forged.playback_end_physical_frame = None,
+            }
+            Some(forged)
+        } else {
+            actual
+        };
+        self.stage += 1;
+        self.reads.push(value);
+        value
+    }
+    fn assert_delivered(&self) {
+        assert!(
+            self.owner_marker_seen,
+            "native owner forwarded original marker to its end authority before forgery"
+        );
+        let marker = self
+            .marker
+            .expect("original settled Mixer marker delivered to owner");
+        assert_eq!(self.reads[0], Some(marker));
+        let forged_index = if self.gaps { 3 } else { 1 };
+        if self.gaps {
+            assert_eq!(self.reads[1], None);
+            assert_eq!(self.reads[2], Some(marker));
+        }
+        assert!(
+            self.reads.len() > forged_index,
+            "later native query must receive the test report"
+        );
+    }
+}
+
 struct Device {
     mixer: Mixer,
     basis: beatkernel::audio::OutputFrameBasis,
@@ -192,6 +332,7 @@ struct Device {
     race_armed: bool,
     race_reports: Vec<RenderReport>,
     shifted_origin: bool,
+    terminal_script: Option<TerminalScript>,
 }
 impl GameplayDevice for Device {
     type Presentation = PresentationEstimator;
@@ -262,7 +403,10 @@ impl GameplayDevice for Device {
             self.report = Some(crossing);
             return Ok(Some(prior));
         }
-        Ok(self.report)
+        Ok(match self.terminal_script.as_mut() {
+            Some(script) => script.read(self.report),
+            None => self.report,
+        })
     }
     fn audio_pause_observation(
         &mut self,
@@ -357,7 +501,12 @@ impl GameplayDevice for Device {
             }
         }
         Ok(InputBatch {
-            completed_through: if self.missing_cut {
+            completed_through: if self.missing_cut
+                || self
+                    .terminal_script
+                    .as_ref()
+                    .is_some_and(TerminalScript::incomplete)
+            {
                 None
             } else if let Some((through_step, cut_ns)) =
                 self.prefix_cap.filter(|(step, _)| self.step <= *step)
@@ -379,6 +528,11 @@ impl GameplayDevice for Device {
         presentation: &NativeAudioPresentation,
         rendered: Option<RenderReport>,
     ) -> NativeGameplayResult<Option<EndBoundary>> {
+        if let Some(script) = self.terminal_script.as_mut() {
+            if script.marker.is_some() && rendered == script.marker {
+                script.owner_marker_seen = true;
+            }
+        }
         match presentation.latest_record() {
             Some(record) => Ok(end.observe(rendered, record.pair())?),
             None => Ok(None),
@@ -632,6 +786,7 @@ impl Fixture {
                 race_armed: false,
                 race_reports: vec![],
                 shifted_origin: false,
+                terminal_script: None,
             },
             group,
             states,
@@ -1455,6 +1610,16 @@ fn assert_original_late_member_prefix(
     states: &[GameplayPlayerState<SoloObserver>],
     host_port: &Host,
 ) {
+    assert_original_member_prefix(source, group, states, host_port, false);
+}
+
+fn assert_original_member_prefix(
+    source: &beatkernel_bms::BmsChart,
+    group: &RuntimeGroup,
+    states: &[GameplayPlayerState<SoloObserver>],
+    host_port: &Host,
+    late_queue_race: bool,
+) {
     assert!(group.gameplay_audio_sealed());
     assert_eq!(host_port.ends, [Timestamp::from_nanos(16_000_000)]);
     for (member, state) in states.iter().enumerate() {
@@ -1514,14 +1679,32 @@ fn assert_original_late_member_prefix(
             capture.records().last().unwrap().song_time,
             Timestamp::from_nanos(16_000_000)
         );
-        assert!(
-            host_port
-                .reports
-                .iter()
-                .filter(|(id, r)| *id == state.player && r.input.is_some())
-                .all(|(_, report)| report.audio_commands.is_empty()),
-            "late original judge input cannot enqueue sound into closed output"
+        if !late_queue_race {
+            assert!(
+                host_port
+                    .reports
+                    .iter()
+                    .filter(|(id, r)| *id == state.player && r.input.is_some())
+                    .all(|(_, report)| report.audio_commands.is_empty()),
+                "late original judge input cannot enqueue sound into closed output"
+            );
+        }
+    }
+    if late_queue_race {
+        let sounds: Vec<_> = host_port
+            .reports
+            .iter()
+            .filter(|(_, report)| !report.audio_commands.is_empty())
+            .collect();
+        assert_eq!(
+            sounds.len(),
+            1,
+            "one genuine pre-seal input command reaches the late queue"
         );
+        assert_eq!(sounds[0].1.audio_at, raw(10_000_000));
+        assert!(sounds[0].1.audio_commands.iter().any(
+            |command| matches!(command, AudioCommand::Play { at, .. } if *at == raw(10_000_000).timestamp)
+        ));
     }
 }
 
@@ -1650,6 +1833,103 @@ fn actual_two_and_four_member_stale_schedule_waits_for_late_published_command_ex
             gauge.observe(replay.results(), &[]).unwrap();
             assert_eq!(gauge, state.gauge);
         }
+    }
+}
+
+#[test]
+fn native_cohort_rejects_impossible_progression_after_owner_observes_real_terminal_marker() {
+    for members in [2, 4] {
+        for gaps in [false, true] {
+            for mutation in TERMINAL_MUTATIONS {
+                let mut f = Fixture::new(members, "2/1", 3_000_000, Some(16_000_000), None);
+                f.device.block_frames = 5;
+                f.device.delayed_inputs = Some((2, 9_000_000, 9_500_000));
+                f.device.terminal_race = true;
+                f.device.terminal_script = Some(TerminalScript::new(mutation, gaps));
+                let result = f.run();
+                f.device
+                    .terminal_script
+                    .as_ref()
+                    .unwrap()
+                    .assert_delivered();
+                assert!(result.is_err(), "{members} members, {mutation:?}, intervening None/duplicate={gaps}: native owner accepted impossible terminal evidence");
+                let actual = f.device.report.unwrap();
+                assert_eq!(actual.counters.commands_consumed, 2);
+                assert_eq!(actual.counters.commands_applied, 1);
+                assert_eq!(actual.counters.commands_expired, 1);
+                let sound_reports: Vec<_> = f
+                    .host
+                    .reports
+                    .iter()
+                    .filter(|(_, r)| !r.audio_commands.is_empty())
+                    .collect();
+                assert_eq!(sound_reports.len(), 1);
+                assert_eq!(sound_reports[0].1.audio_at, raw(10_000_000));
+                for (member, state) in f.states.iter().enumerate() {
+                    let inputs: Vec<_> = state
+                        .capture
+                        .as_ref()
+                        .unwrap()
+                        .records()
+                        .iter()
+                        .filter_map(|r| match &r.operation {
+                            ReplayOperation::Input(i) => Some(i),
+                            _ => None,
+                        })
+                        .collect();
+                    // Refusal can interrupt the acquired prefix. Every captured
+                    // input must match an actually published owner report;
+                    // completion, unlike this error path, drains both inputs.
+                    let published: Vec<_> = f
+                        .host
+                        .reports
+                        .iter()
+                        .filter(|(id, report)| *id == state.player && report.input.is_some())
+                        .map(|(_, report)| report.input.as_ref().unwrap())
+                        .collect();
+                    assert_eq!(inputs.len(), published.len());
+                    assert!(inputs.len() <= 2);
+                    for (index, (input, original)) in inputs.iter().zip(published).enumerate() {
+                        let meta = input.physical.meta();
+                        let original_ns = if index == 0 { 9_000_000 } else { 9_500_000 };
+                        assert_eq!(meta, original.meta());
+                        assert_eq!(meta.original_clock_point, Some(host(original_ns)));
+                        assert_eq!(meta.source, DeviceId(101 + member as u64));
+                        assert_eq!(meta.sequence, index as u64);
+                        assert_eq!(meta.timestamp, logical(original_ns).timestamp);
+                    }
+                }
+                assert!(f
+                    .host
+                    .reports
+                    .iter()
+                    .any(|(_, report)| report.input.is_some()));
+                assert!(f.device.pcm.iter().all(|v| *v == 0.0));
+            }
+        }
+    }
+}
+
+#[test]
+fn native_cohort_accepts_real_terminal_expiry_duplicates_and_unavailable_intermediate_read() {
+    for members in [2, 4] {
+        let mut f = Fixture::new(members, "2/1", 3_000_000, Some(16_000_000), None);
+        f.device.block_frames = 5;
+        f.device.delayed_inputs = Some((2, 9_000_000, 9_500_000));
+        f.device.terminal_race = true;
+        f.device.terminal_script = Some(TerminalScript::new(TerminalMutation::Duplicate, true));
+        assert_eq!(f.run().unwrap().unwrap().len(), members);
+        f.device
+            .terminal_script
+            .as_ref()
+            .unwrap()
+            .assert_delivered();
+        assert_eq!(
+            f.device.report.unwrap().counters.settled_commands(),
+            Some(2)
+        );
+        assert_original_member_prefix(&f.source, &f.group, &f.states, &f.host, true);
+        assert!(f.device.pcm.iter().all(|v| *v == 0.0));
     }
 }
 
