@@ -99,6 +99,10 @@ identity에 전달한 뒤 외부 파일·endpoint를 획득한다. 공통 native
 `prepare_audio_cohort_with_policy_and_speed`는 불변 `LiveSpeedSetup`과 실제
 section 설정이 일치하는지 확인하고 모든 member에 같은 조건을 전달한다.
 기존 함수는 NORMAL의 기존 비교·기록·네트워크 바이트를 유지한다.
+기본 BeatKernel 정책의 역사적인 NORMAL 비교 경로도 보존한다. 명시적으로
+선택한 nonnormal 배속은 실제 policy capture의 전체 조건을 비교 기준으로
+사용하여 동일 배속·section·정책의 실제 자기 기록을 받을 수 있어야 한다.
+새 배속 envelope를 과거 header에만 덧붙여 실제 생성 기록과 달라지게 하지 않는다.
 
 ## 끝·UI·오류
 

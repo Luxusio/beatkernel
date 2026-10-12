@@ -127,6 +127,17 @@
   applied=0이다. raw 시각이 endpoint보다 앞이므로 단순 timestamp 필터도
   해결이 아니다. 진단 성공은 결함 재현 증거이며 수정 PASS가 아니다.
 
+- `preparation-owners-3.log`에서 common Step 17개, native solo 15개,
+  native cohort 14개, 새 native 준비 9개, 총 55개가 통과했다.
+  Step 연결·정확한 capture oracle 커밋은 `21615e5`, native 준비·얇은
+  bridge 연결과 실제 saved-record 조건 테스트 커밋은 `76fb546`이다.
+  새 배속의 saved 비교는 실제 public capture 바이트를 사용하며 동일 조건을
+  받고 배속·finite section 차이는 거절한다. NORMAL의 역사적인 비교 바이트는
+  유지한다. 앞선 두 compile 실패(없는 ReplaySpeed 상수와 fixture ID 타입)는
+  `preparation-owners-1.log`/`preparation-owners-2.log`에 보존했다.
+  현재 Linux/Windows/macOS 실행 파일의 소비 경로는 구현 중이며,
+  최신 WASM 재생성·실제 브라우저 실행·독립 review/QA는 아직 남아 있다.
+
 ## 남은 범위
 
 이 문서는 개발 중간 증거다. 현재 태스크의 독립 code/security review와
