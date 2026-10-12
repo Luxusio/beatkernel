@@ -185,6 +185,79 @@ public settlement 2개, cohort 15개, 실제 CLI 9개, native preparation 9개�
 관계는 실제 Mixer 보고서를 사용하는 공유 validator 테스트로 검증한다.
 앱 전체 PASS나 실제 브라우저 PASS는 아직 주장하지 않는다.
 
+`terminal-browser-output-1.log`는 잘못된 Rust module filter 때문에 0개를
+실행했으므로 검증 근거로 세지 않는다. 실제 module인 `worklet_audio::`로
+수정한 `terminal-browser-output-2.log`는 actual Worklet→58-word decode,
+terminal expiry, unavailable·marker·grid 거절을 포함한 6개가 exit0으로
+통과했다. main/audio WASM 재빌드와 bindings 재생성은 진행 중이다.
+솔로·Step 외부 fixture와 실제 pending의 공유 validator fixture는 수정 후
+동결됐으며, 그 수정의 실행 결과는 아직 남아 있다.
+
+## 시작 시점 입력 분류의 개발 증거
+
+후속 `terminal-app-3.log`는 7개 대상에서 77개 통과, 실패·ignored 0으로
+종료했다. `terminal-internal-pending-1.log`의 공유 완료 validator 검사도
+실제 Mixer pending 감소를 포함해 3개 통과했다. 수정 전 시도 로그는 유지한다.
+이 결과는 전체 앱 테스트나 물리 출력 검증을 뜻하지 않는다.
+
+`terminal-browser-export-3.log`의 이전 실제 WASM 검사 28개는 통과했지만,
+실제 Chromium 개발 실행 `development-1`에서는 시작 직후 `BeforeOrigin`
+오류가 발생했다. HOST 기준 시작 이후 입력이라도 실제 audio observation
+pair로 매핑하면 logical origin 이전일 수 있었다. 공통 AudioAuthority에서
+원본 입력의 검증된 매핑 결과로 이를 분류하고, 판정·소리·capture 없이
+입력 chronology만 전진하도록 수정했다. 브라우저 touch의 위치 투영과
+native 키 소유권 처리보다 먼저 같은 분류를 적용한다.
+
+`audio-origin-app-1.log`는 실제 Rust 검사 4개 대상에서 60개 통과했다.
+빌드 시간은 2분 10초, 테스트 실행 시간 합계는 약 0.38초였다.
+`audio-origin-worker-1.log`는 174개 중 173개 통과했으며, 남은 local fixture가
+touch를 포함한 계획에 `physical` 모드를 지정한 오류를 수정했다.
+새 main/audio WASM과 bindings 재생성은 모두 exit0으로 끝났다.
+그 결과로 실행한 `audio-origin-export-1.log`는 30개 중 28개 통과했고,
+새 capture 검사 2개의 byte-offset 기대값 실패는 원본 형식과 대조 중이다.
+`audio-origin-worker-2.log`의 집중 Worker 검사 19개는 exit0으로 통과했다.
+새 WASM 테스트의 원본 keyboard metadata 오프셋과 local 2·4명별 lane
+바인딩 fixture를 원본 계약에 맞춘 `audio-origin-export-3.log`는 30개 전부
+통과했다. negative touch가 contact 소유권이나 다음 입력의 투영에 영향을
+주지 않는 실제 owner 검사도 포함한다.
+
+Chromium `development-2`에서는 실제 시작 오류 없이 section 완료·판정·PCM·
+원본 capture 검사를 통과했지만 renderer 진행 검사에서 실패했다.
+dynamic packet은 등록된 mode를 상속하므로 자체 `mode` 필드가 없는데
+runner가 그 필드를 읽어 실제 drawn 프레임을 전부 제외한 오류였다.
+동일 generation/content/sequence의 실제 drawn receipt에서 live mode를
+확인하도록 검사만 수정했다. 원본 song timestamp 일치와 서로 다른 진행
+프레임 2개 이상 조건은 유지한다. `development-3`에서 1/2 배속은 실제
+keyboard 판정 1회, capture 입력 108개, 실제 drawn 프레임 185개와 PCM
+440 Hz 검사까지 통과했다. 다음 1/1 배속에서는 section과 capture는
+완료됐지만 fixture note가 hit 0/miss 1이어서 실패했다. 원본 capture의
+마지막 입력은 song 380.391ms여서 500ms 노트의 450–550ms 판정 구간에
+입력 자체가 없었다. runner가 `Playing` 표시 후 벽시계만으로 입력 기간을
+끝낸 문제로, 실제 관측된 같은 playId의 song 진행이 750ms에 이를 때까지
+원래 CDP Down/Up을 보내도록 수정했다. 별도의 최대 대기시간·마지막 KeyUp·
+원본 판정 범위·hit 요구는 유지하고 실제 capture의 노트 구간 coverage
+검사를 추가했다. `development-4`에서는 네 배속의 실제 판정·capture·PCM·
+drawn 검사와 저장 기록 및 1ns section 완료까지 통과했다. 다음 saved replay
+검사에서는 observer가 문자열 playId를 저장하고 숫자와 strict 비교해
+실제로 존재하는 원본 bytes를 찾지 못했다. 같은 문자열 표현으로 비교하도록
+수정했고 원본 SHA-256 일치 조건은 유지한다. `development-5`에서는
+다른 배속으로 실제 saved replay 재생과 원본 hash 일치, 같은 배속 opponent
+허용·다른 배속 거절까지 통과했다. local 전환에서는 runner가 Stop 버튼의
+비활성화만 보고 closing을 idle로 판단해 roster 변경을 너무 일찍 보냈다.
+실제 idle controls의 재활성화와 roster 생성·Discover 활성화를 기다리도록
+runner를 수정했다. `development-6`은 첫 1/2 배속에서 실제 AudioWorklet
+terminal status 6 (context chronology)으로 실패했다. console/network 오류는
+없었으며 마지막 원본 output reports와 terminal 진단을 조사 중이다.
+앞선 source/hash 증거와 실패 시도를 유지하고 전체 브라우저 PASS를 주장하지
+않는다. 이 실제 출력 오류는 runner 기대값을 완화해 통과시키지 않는다.
+`audio-origin-app-windows-1.log`와 `audio-origin-app-macos-1.log`의
+앱 `--all-targets --features webtransport` Rust 타입 검사는 둘 다 exit0으로
+끝났다. Windows 1분 47초, macOS 1분 28초였으며, xcheck의 외부 C/C++
+stub 경로이므로 실제 OS 실행·링크·물리 장치 증거로 세지 않는다.
+오디오 보고서 연결은 `bdcf447`에 커밋했다.
+원본 입력 분류와 finite 완료 연결은 `30fef2c`, native 실행 파일 연결은
+`3a107da`에 커밋했다. 후속 CLI 집중 검사도 실제 9개 통과, 실패 0이다.
+
 ## 남은 범위
 
 이 문서는 개발 중간 증거다. 현재 태스크의 독립 code/security review와

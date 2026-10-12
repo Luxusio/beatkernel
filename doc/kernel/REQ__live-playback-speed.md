@@ -127,6 +127,27 @@ presentation·입력 drain·BGM credit 조건도 유지한다. 포화·overflow�
 허용하고 `Δexpired = Δconsumed + 이전 pending − 현재 pending`을 검증한다.
 원곡 입력·판정·gauge·capture와 raw `audio_at`은 유지한다.
 
+공개 Step의 cold command admission은 immutable endpoint 이상으로 예약된
+target을 거절한다. 이 경로에서 만들 수 없는 terminal pending을 가짜 ACK로
+검증하지 않는다. 실제 늦은 queue 발행은 Step·native owner에서 검사하고,
+독립 producer가 만든 실제 pending의 감소는 같은 공유 보고서 검증기에서
+검사한다. 유한 replay의 `output_finished()` 조회도 실제 정산 전에는 기다리며
+정산 이후에도 원래 source/converted target presentation을 요구한다.
+
+예상 HOST 시작점 뒤에서 수집한 입력도 실제 오디오 관측으로 매핑하면
+logical audio origin 이전일 수 있다. 기존 시작 전 입력 폐기 정책을 이
+경우에도 명시적으로 적용한다. frozen input descriptor의 실제 매핑을 기준으로
+판별하고, Runtime·practice 위치·키 상태에 전달하기 전에 큐에서 소비한다.
+브라우저 touch 위치·page routing 계산보다 먼저 분류하여 버린 입력의 위치나
+source routing이 다음 정상 입력에 적용되지 않게 한다.
+별도 discard commit은 원본 입력 chronology와 revision만 갱신하며 실제
+operation·presentation·song·판정·capture·오디오 명령을 만들지 않는다.
+origin과 같은 입력 및 이후 입력은 정상 처리하고 preroll의 음수 song time은
+허용한다. 입력을 0으로 clamp하거나 HOST 시계로 재생을 진행하지 않는다.
+정상 input commit은 시작 전 descriptor를 거절하고, stale·domain·원본 순서·
+허용된 extrapolation 검사는 그대로 유지한다. Step·native solo/cohort가 같은
+분류를 사용하며 브라우저는 실제 폐기 수를 기존 수집 단계 폐기 수와 합산한다.
+
 `AudioCounters`에는 명시적 `commands_expired` 필드가 추가된다. 전체 필드를
 직접 쓰는 Rust struct literal은 이 필드를 추가하거나 `..Default::default()`를
 사용한다. Native telemetry는 기존 38개 scalar 인덱스 뒤에 이 값을 붙인다.
