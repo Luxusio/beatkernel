@@ -90,6 +90,43 @@
   Worker 테스트의 generated-owner/browser 포트는 mock이고 실제 WASM 증거는
   별도의 위 16개 export 테스트다. UI와 실제 qa-browser는 아직 남아 있다.
 
+- UI의 불변 live 배속 draft와 response identity 검사는 `host-2.log`에서
+  새 테스트와 기존 host 회귀를 합쳐 309개 모두 통과했다. 이 테스트는
+  실제 화면·Worklet 실행을 대신하지 않는다. UI와 fixture 커밋은 `d369067`이다.
+- 공통 Runtime의 finite gameplay audio seal은 `ac4bf97`에 기록했다.
+  `finite-audio-core-5.log`의 6개와 `finite-audio-app-1.log`의 3개 테스트가
+  통과했다. 출력 종료 뒤 유효 입력의 원곡 판정·기록·mine/gauge는 유지하고
+  소비 불가능한 새 gameplay 소리만 막으며, 기존 명령 credit을 지우지 않는다.
+  수정 후 `core-full-3.log`에서 63개 suite, 총 537개 테스트가 통과했다
+  (failed 0, ignored 0, doctest 포함). 네이티브와 Step의 seal 연결은
+  추가됐으나 현재 재검증 중이다. 실제 callback 경합까지 해결됐다는 증거는 아니다.
+- `seal-owners-3.log`에서 native solo 15개와 cohort 14개가 모두 통과했다.
+  구현·테스트는 `bcbea26`에 기록했다. Step은 17개 중 15개 통과·2개 실패였고,
+  새 fixture가 입력 frontier Advance와 별도의 terminal Advance 중 하나를
+  기대 기록 목록에서 빠뜨린 문제를 확인했다. 정확한 6개 연산 순서·provenance와
+  반복 완료 조회의 무추가 기록 조건으로 수정 후 재검사한다.
+- 소스 조사로 finite 종료 직전 scheduling report 조회와 실제 command publication
+  사이의 callback 경합이 아직 닫히지 않았음을 확인했다. 현재 순차 테스트 통과는
+  이 경합의 완료 보증이 아니다. 실제 queue/Mixer interleaving 재현과 명령의
+  정직한 종료 정산 설계·검증이 남아 있으며 ACK/applied를 가산해 숨기지 않는다.
+- 브라우저는 유효 분수 MAX/1도 100ms preroll에서 초기 곡 시각이 범위를
+  벗어나는 경우 오디오 생성 전에 거절하도록 공통 cold-phase 검사를 추가했다.
+  `cold-phase-1.log`는 502개 중 501개 통과·1개 실패였다. 새 무제한 host
+  fixture에서 함수 기본 endFrame이 유한 값으로 남던 문제를 명시적 undefined로
+  고쳤으며 재검사 중이다. 실제 브라우저 QA 완료를 뜻하지 않는다.
+- `cold-phase-2.log`에서 host·Worker 기존 회귀와 새 cold phase 테스트를
+  합친 502개가 모두 통과했다. 수정과 테스트 커밋은 `f150f75`다.
+  Step 재검사 `seal-step-4.log`는 16개 통과·1개 실패이며, 새 local fixture가
+  명시적인 fail/export 뒤에 commands를 조회하던 순서 오류를 확인했다.
+  command 검사는 fail 이전으로 이동하고 실제 Mixer counter·pending 조건을
+  유지했다. 최종 재검사는 공통 native 준비 함수의 소스 동결 이후 수행한다.
+- `terminal-publication-probe-2.log`는 실제 최신 core rlib와 Runtime·Mixer로
+  종료 경합을 재현했다. 10frame 보고서 조회 뒤 실제 11frame endpoint를
+  통과하고, 원곡 6ms의 유효 입력이 이전 raw 10ms에 소리를 발행하는 순서다.
+  Runtime admitted=1이지만 실제 무음 callback 3회 뒤에도 Mixer consumed=0,
+  applied=0이다. raw 시각이 endpoint보다 앞이므로 단순 timestamp 필터도
+  해결이 아니다. 진단 성공은 결함 재현 증거이며 수정 PASS가 아니다.
+
 ## 남은 범위
 
 이 문서는 개발 중간 증거다. 현재 태스크의 독립 code/security review와

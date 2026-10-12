@@ -17,6 +17,14 @@ P=1ns,N/D=1/2,E=2ns일 때 결과는 S이고 S+1ns가 아니다.
 검증된 finite end는 양수 초과를 narrowing 전에 제한할 수 있지만 음수
 overflow나 검증되지 않은 end를 숨길 수 없다.
 
+분수 자체가 유효해도 cold 초기 곡 시각
+`S + trunc(-P*N/D)`가 signed 64-bit 범위를 벗어나면 시작을 거절한다.
+브라우저 Window는 실제 section start snapshot으로 오디오·입력 소유자를
+만들기 전에 검사하며 speed 필드에 focus와 복구 가능한 오류를 표시한다.
+Worker 직접 요청도 파일 읽기·준비 작업 전에 같은 공통 수치 계약을 검사한다.
+네이티브는 장치 조회·open 이전에 공통 `LiveSpeedSetup`으로 검사한다.
+양수 분수의 허용 범위를 임의로 줄이지 않고 실제 start/preroll 조합을 판단한다.
+
 물리 입력은 기존 InputMerger/AudioAuthority로 원래 논리 오디오 좌표에
 정규화한 후 하나의 Runtime Transport에서 원곡 시간으로 변환한다.
 원본 acquisition timestamp, source sequence와 original_clock_point를 유지한다.
@@ -80,6 +88,17 @@ source speed를 받으며 기존 생성자들은 NORMAL 바이트를 유지한�
 출력 배속은 기록 당시 조건과 별개다. 경쟁·saved opponent는 기존 canonical
 setup 비교에 실제 source speed를 포함하여 동일 조건만 비교한다.
 native record catalog는 현재 선택한 실제 배속을 사용한다.
+
+네이티브 준비 함수도 실제 배속을 header·capture·saved comparison·네트워크
+identity에 전달한 뒤 외부 파일·endpoint를 획득한다. 공통 native_judge의
+`prepare_policy_header_with_speed`, `prepare_policy_competition_identity_with_speed`,
+`prepare_section_capture_for_policy_with_speed`는 기존 인자 뒤에 `ReplaySpeed`를
+받는다. 경쟁의 `prepare_native_section_with_policy_and_speed`와
+`prepare_member_section_with_policy_and_speed`, group의
+`prepare_with_policies_and_speed`도 같은 선택을 받는다. Cohort의
+`prepare_audio_cohort_with_policy_and_speed`는 불변 `LiveSpeedSetup`과 실제
+section 설정이 일치하는지 확인하고 모든 member에 같은 조건을 전달한다.
+기존 함수는 NORMAL의 기존 비교·기록·네트워크 바이트를 유지한다.
 
 ## 끝·UI·오류
 
