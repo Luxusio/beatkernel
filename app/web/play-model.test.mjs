@@ -446,7 +446,7 @@ function setWord(words, index, value) {
   words[index * 2 + 1] = Number(value >> 32n);
 }
 function report(start = 9007199254740993n, available = true) {
-  const words = new Uint32Array(56);
+  const words = new Uint32Array(58);
   setWord(words, 0, BigInt(available));
   setWord(words, 2, 257n);
   setWord(words, 3, 9007199254741999n);
@@ -510,13 +510,13 @@ test("start projection uses the Window bracket and splits long context seconds b
 });
 
 test("report words preserve unsigned high bits and an armed unavailable report carries no cursor", () => {
-  const words = new Uint32Array(56);
+  const words = new Uint32Array(58);
   setWord(words, 0, U64_MAX);
   setWord(words, 27, 0x8000000000000000n);
   assert.equal(reportWord(words, 0), U64_MAX);
   assert.equal(reportWord(words, 27), 0x8000000000000000n);
-  for (const index of [-1, 28, 0.5, NaN]) assert.throws(() => reportWord(words, index));
-  for (const invalid of [new Uint32Array(55), new Int32Array(56), Array(56).fill(0), null]) {
+  for (const index of [-1, 29, 0.5, NaN]) assert.throws(() => reportWord(words, index));
+  for (const invalid of [new Uint32Array(55), new Int32Array(58), Array(58).fill(0), null]) {
     assert.throws(() => reportWord(invalid, 0));
   }
   const start = 9007199254740993n;
@@ -527,7 +527,7 @@ test("report words preserve unsigned high bits and an armed unavailable report c
 });
 
 // Independent ABI oracle: app/src/browser_audio.rs::report_word maps these
-// logical u64 words onto the low/high pairs in the 56-element report buffer.
+// logical u64 words onto the low/high pairs in the 58-element report buffer.
 const REJECTED_AUDIO_COUNTERS = [
   [16, "pending_full"],
   [17, "voice_full"],

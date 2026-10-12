@@ -328,7 +328,7 @@ test("poll and commands share one pending sequence while actual reports retain a
   assert.equal((await watch(() => client.poll()).promise).error.code, "busy");
   assert.equal((await watch(() => client.commands([command()])).promise).error.code, "busy");
   assert.equal(h.port.messages.length, 1); assert.equal(h.timers.size, 1);
-  const unavailable = { available: false, words: new Uint32Array(56) };
+  const unavailable = { available: false, words: new Uint32Array(58) };
   // Armed context metadata is not rendered evidence. The transport preserves it
   // without deriving availability, a cursor or a synthetic command admission.
   unavailable.words[50] = 1; unavailable.words[53] = 0x80000000;
@@ -349,13 +349,13 @@ test("poll and commands share one pending sequence while actual reports retain a
 
   const completed = watch(() => client.poll());
   assert.deepEqual(h.port.messages.at(-1), { kind: "poll", generation: 17, sequence: 3 });
-  const words = new Uint32Array(56);
+  const words = new Uint32Array(58);
   words.set([1, 0, 0xffffffff, 0x80000000, 0xffffffff, 0xffffffff, 1, 0x00200000]);
   words[54] = 0x89abcdef; words[55] = 0xfedcba98;
   h.reply({ report: { available: true, words } });
   const actual = (await completed.promise).value;
   assert.equal(actual.available, true); assert.deepEqual(Array.from(actual.words), Array.from(words));
-  assert.equal(actual.words.byteOffset, 0); assert.equal(actual.words.buffer.byteLength, 224);
+  assert.equal(actual.words.byteOffset, 0); assert.equal(actual.words.buffer.byteLength, 232);
   const next = watch(() => client.commands([command({ kind: 3 })]));
   assert.equal(h.port.messages.at(-1).sequence, 4); h.reply();
   assert.equal((await next.promise).value.admitted, 1);
@@ -365,18 +365,19 @@ test("poll and commands share one pending sequence while actual reports retain a
 });
 
 test("poll shape, operation and lifecycle failures permanently fence both operations without inventing evidence", async () => {
-  const valid = () => ({ available: false, words: new Uint32Array(56) });
-  const detached = new Uint32Array(56);
+  const valid = () => ({ available: false, words: new Uint32Array(58) });
+  const detached = new Uint32Array(58);
   structuredClone(detached.buffer, { transfer: [detached.buffer] });
-  const resizable = new ArrayBuffer(224, { maxByteLength: 448 });
+  const resizable = new ArrayBuffer(232, { maxByteLength: 464 });
   assert.equal(resizable.resizable, true, "this deferred boundary fixture requires resizable ArrayBuffer support");
-  const invalidReports = [null, {}, { available: false, words: Array(56).fill(0) },
-    { available: false, words: new Uint8Array(224) },
+  const invalidReports = [null, {}, { available: false, words: Array(58).fill(0) },
+    { available: false, words: new Uint8Array(232) },
     { available: false, words: new Uint32Array(55) }, { available: false, words: new Uint32Array(57) },
-    { available: false, words: new Uint32Array(new ArrayBuffer(228), 4, 56) },
-    { available: false, words: new Uint32Array(new ArrayBuffer(228), 0, 56) },
-    { available: false, words: new Uint32Array(new SharedArrayBuffer(224)) },
-    { available: false, words: new Uint32Array(resizable, 0, 56) },
+    { available: false, words: new Uint32Array(56) }, { available: false, words: new Uint32Array(59) },
+    { available: false, words: new Uint32Array(new ArrayBuffer(236), 4, 58) },
+    { available: false, words: new Uint32Array(new ArrayBuffer(236), 0, 58) },
+    { available: false, words: new Uint32Array(new SharedArrayBuffer(232)) },
+    { available: false, words: new Uint32Array(resizable, 0, 58) },
     { available: false, words: detached }, { ...valid(), available: 0 }, { ...valid(), available: true }];
   for (const [index, value] of [[0, 2], [1, 1]]) {
     const report = valid(); report.words[index] = value; invalidReports.push(report);

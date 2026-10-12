@@ -12,10 +12,10 @@ function validReport(report) {
   const words = report?.words;
   if (typeof report?.available !== "boolean" || !(words instanceof Uint32Array)
     || !(words.buffer instanceof ArrayBuffer) || words.buffer.resizable === true
-    || words.buffer.byteLength !== 224 || words.byteOffset !== 0
-    || words.byteLength !== 224 || words.length !== 56) return false;
+    || words.buffer.byteLength !== 232 || words.byteOffset !== 0
+    || words.byteLength !== 232 || words.length !== 58) return false;
   // A detached or invalid backing must never become output evidence.
-  try { new Uint32Array(words.buffer, 0, 56); } catch { return false; }
+  try { new Uint32Array(words.buffer, 0, 58); } catch { return false; }
   return (words[0] === 0 || words[0] === 1) && words[1] === 0
     && report.available === (words[0] === 1);
 }

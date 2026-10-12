@@ -7,13 +7,13 @@ use beatkernel::{
     time::Timestamp,
 };
 
-fn put(words: &mut [u32; 56], field: usize, value: u64) {
+fn put(words: &mut [u32; 58], field: usize, value: u64) {
     words[field * 2] = value as u32;
     words[field * 2 + 1] = (value >> 32) as u32;
 }
 
-fn rendered(start: u64, cursor: u64, frames: u64) -> [u32; 56] {
-    let mut words = [0; 56];
+fn rendered(start: u64, cursor: u64, frames: u64) -> [u32; 58] {
+    let mut words = [0; 58];
     for (field, value) in [
         (0, 1),
         (1, cursor),
@@ -59,8 +59,8 @@ fn finite_worklet(end: u64, start: u64, current: u64) -> WorkletAudio {
 
 // Encode actual owner evidence in the documented BrowserAudio::report_word ABI.
 // No callback counts are used to invent playback, endpoint or counter values.
-fn actual_words(audio: &WorkletAudio) -> [u32; 56] {
-    let mut words = [0; 56];
+fn actual_words(audio: &WorkletAudio) -> [u32; 58] {
+    let mut words = [0; 58];
     for (field, value) in [
         (23, u64::from(audio.context_frame().is_some())),
         (24, audio.context_frame().unwrap_or(0)),
@@ -100,6 +100,7 @@ fn actual_words(audio: &WorkletAudio) -> [u32; 56] {
         for (field, value) in fields.into_iter().enumerate() {
             put(&mut words, field, value);
         }
+        put(&mut words, 28, c.commands_expired);
     }
     words
 }
@@ -194,12 +195,10 @@ fn finite_decoder_requires_configured_marker_original_grid_and_checked_absolute_
     assert!(decode_section_output(&overflow, Some(3)).is_err());
     let unavailable = finite_worklet(0, u64::MAX, u64::MAX);
     let words = actual_words(&unavailable);
-    assert!(
-        decode_section_output(&words, Some(0))
-            .unwrap()
-            .report
-            .is_none()
-    );
+    assert!(decode_section_output(&words, Some(0))
+        .unwrap()
+        .report
+        .is_none());
     assert!(
         decode_section_output(&words, Some(1)).is_err(),
         "configured end overflow rejects even absent render evidence"
@@ -238,7 +237,7 @@ fn exact_wide_fields_partial_blocks_and_unavailable_evidence_are_preserved() {
         assert!(!report.paused && !report.producer_disconnected);
         assert_eq!(report.playback_end_physical_frame, None);
     }
-    let mut absent = [0; 56];
+    let mut absent = [0; 58];
     put(&mut absent, 25, 1);
     put(&mut absent, 26, u64::MAX);
     assert_eq!(decode_output(&absent).unwrap().context, None);
@@ -306,7 +305,7 @@ fn flags_modes_capacities_and_context_must_describe_one_normal_output_grid() {
 
 #[test]
 fn unavailable_reports_cannot_smuggle_render_data_and_extent_additions_are_checked() {
-    let mut absent = [0; 56];
+    let mut absent = [0; 58];
     put(&mut absent, 25, 1);
     put(&mut absent, 26, 100);
     for field in 1..=22 {
@@ -332,4 +331,57 @@ fn unavailable_reports_cannot_smuggle_render_data_and_extent_additions_are_check
     let mut absolute_overflow = rendered(0, 0, 1);
     put(&mut absolute_overflow, 26, u64::MAX);
     assert!(decode_output(&absolute_overflow).is_err());
+}
+
+#[test]
+fn terminal_expiry_roundtrips_actual_silent_callback_without_claiming_application() {
+    let mut audio = finite_worklet(3, 100, 100);
+    audio.render(100, 4).unwrap();
+    let before = audio.report().unwrap();
+    audio
+        .enqueue(AudioCommand::SetRate {
+            at: Timestamp::from_nanos(3_000_000),
+            rate: beatkernel::transport::Rate::new(3, 2).unwrap(),
+        })
+        .unwrap();
+    audio.render(104, 2).unwrap();
+    let actual = audio.report().unwrap();
+    assert_eq!(
+        actual.counters.commands_consumed,
+        before.counters.commands_consumed + 1
+    );
+    assert_eq!(
+        actual.counters.commands_applied,
+        before.counters.commands_applied
+    );
+    assert_eq!(actual.counters.commands_expired, 1);
+    assert_eq!(actual.playback_start_frame, 3);
+    assert_eq!(actual.playback_frames, 0);
+    assert_eq!(actual.song_position, before.song_position);
+    assert_eq!(actual.active_voices, before.active_voices);
+    let words = actual_words(&audio);
+    assert_eq!(words.len(), 58);
+    assert_eq!((words[56], words[57]), (1, 0));
+    assert_eq!(
+        decode_section_output(&words, Some(3)).unwrap().report,
+        Some(actual)
+    );
+    assert!(decode_output(&words).is_err());
+    assert!(decode_section_output(&words[..56], Some(3)).is_err());
+    for (field, value) in [(5, 0), (6, 0), (13, 1), (14, u64::MAX), (28, u64::MAX)] {
+        let mut forged = words;
+        put(&mut forged, field, value);
+        assert!(
+            decode_section_output(&forged, Some(3)).is_err(),
+            "field {field}={value}"
+        );
+    }
+    let unavailable = actual_words(&finite_worklet(0, 100, 100));
+    let mut forged = unavailable;
+    put(&mut forged, 28, 1);
+    assert!(decode_section_output(&forged, Some(0)).is_err());
+    let mut unlimited = rendered(100, 0, 1);
+    put(&mut unlimited, 13, 1);
+    put(&mut unlimited, 28, 1);
+    assert!(decode_output(&unlimited).is_err());
 }

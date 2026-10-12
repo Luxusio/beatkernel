@@ -13,7 +13,7 @@ const U64_MAX = 18446744073709551615n;
 const I64_MIN = -9223372036854775808n;
 const I64_MAX = 9223372036854775807n;
 const WORD = 4294967296;
-const REPORT_FIELDS = 28;
+const REPORT_FIELDS = 29;
 const INVALID = 100;
 const SEQUENCE = 101;
 const GENERATION = 102;
@@ -117,6 +117,7 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
         audio.queueCapacity, audio.maxVoices, audio.pendingCapacity,
         audio.maxFrames, audio.maxCommandsPerRender);
       if (this.owner.status() !== 0) throw new Error("Audio processor allocation or configuration failed.");
+      if (this.owner.report_fields !== REPORT_FIELDS) throw new Error("Incompatible audio processor report format.");
       this.port.onmessage = event => this.control(event.data);
       this.port.postMessage({ kind: "ready", generation: this.generation, sampleRate, channels: this.channels });
     } catch (error) {

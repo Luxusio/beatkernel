@@ -285,7 +285,7 @@ function command(overrides = {}) {
     gain: -0.5, value: I64_MAX, denominator: 0n, ...overrides };
 }
 function report(available = false) {
-  const words = new Uint32Array(56);
+  const words = new Uint32Array(58);
   words[0] = Number(available);
   return { available, words };
 }
@@ -814,7 +814,7 @@ test("successful setup transfers exact PCM ownership and preserves command width
   await acknowledged(h, () => owner.sample(sample({ id: 2n, rate: 96000, pcm: new Float32Array([1, -1]) })));
   const unavailable = await acknowledged(h, () => owner.poll());
   assert.equal(unavailable.available, false);
-  assert.deepEqual(Array.from(unavailable.words), Array(56).fill(0));
+  assert.deepEqual(Array.from(unavailable.words), Array(58).fill(0));
   await acknowledged(h, () => owner.finish());
   assert.equal(owner.state, "allocated");
   const frame = 9007199254741999n;
@@ -1143,12 +1143,22 @@ test("stale generations are ignored while malformed correlation or report eviden
   highFlag.words[1] = 1;
   const nonBooleanFlag = report();
   nonBooleanFlag.words[0] = 2;
+  const detached = new Uint32Array(58);
+  structuredClone(detached.buffer, { transfer: [detached.buffer] });
+  const resizable = new ArrayBuffer(232, { maxByteLength: 464 });
   for (const fields of [
     { sequence: 2 }, { operation: "finish" }, { status: "0" }, { admitted: 1 },
     { kind: "unknown" }, { report: null },
     { report: { available: false, words: new Uint32Array(55) } },
-    { report: { available: false, words: new Int32Array(56) } },
-    { report: { available: true, words: new Uint32Array(56) } },
+    { report: { available: false, words: new Uint32Array(56) } },
+    { report: { available: false, words: new Uint32Array(59) } },
+    { report: { available: false, words: new Uint32Array(new ArrayBuffer(236), 0, 58) } },
+    { report: { available: false, words: new Uint32Array(new ArrayBuffer(236), 4, 58) } },
+    { report: { available: false, words: new Uint32Array(new SharedArrayBuffer(232)) } },
+    { report: { available: false, words: new Uint32Array(resizable, 0, 58) } },
+    { report: { available: false, words: detached } },
+    { report: { available: false, words: new Int32Array(58) } },
+    { report: { available: true, words: new Uint32Array(58) } },
     { report: highFlag }, { report: nonBooleanFlag },
   ]) {
     const invalid = await harness();

@@ -7,9 +7,9 @@ mod output_fixtures;
 use beatkernel::audio::AudioCounters;
 use beatkernel::{
     audio::{
-        AudioCommand, AudioError, AudioFormat, AudioLimits, CommandProducer, CommandPushError,
-        Mixer, MixerConfig, PcmLimits, PcmSample, QueuePushError, RenderReport, SampleBank,
-        SampleId, command_queue,
+        command_queue, AudioCommand, AudioError, AudioFormat, AudioLimits, CommandProducer,
+        CommandPushError, Mixer, MixerConfig, PcmLimits, PcmSample, QueuePushError, RenderReport,
+        SampleBank, SampleId,
     },
     time::{ClockDomainId, Timestamp},
 };
@@ -259,10 +259,10 @@ pub(crate) fn decode_section_output(
     words: &[u32],
     expected_end: Option<u64>,
 ) -> Result<OutputEvidence, &'static str> {
-    if words.len() != 56 {
-        return Err("browser output report requires exactly 56 words");
+    if words.len() != 58 {
+        return Err("browser output report requires exactly 58 words");
     }
-    let mut values = [0u64; 28];
+    let mut values = [0u64; 29];
     for (value, pair) in values.iter_mut().zip(words.chunks_exact(2)) {
         *value = u64::from(pair[0]) | (u64::from(pair[1]) << 32);
     }
@@ -287,6 +287,7 @@ pub(crate) fn decode_section_output(
     let context = (values[23] == 1).then_some(values[24]);
     if values[0] == 0 {
         if values[1..23].iter().any(|&value| value != 0)
+            || values[28] != 0
             || context.is_some_and(|cursor| cursor > start)
         {
             return Err("browser unavailable output report contains render evidence");
@@ -332,6 +333,15 @@ pub(crate) fn decode_section_output(
     if context != Some(absolute_end) {
         return Err("browser output context cursor differs from its relative mixer grid");
     }
+    if values[14]
+        .checked_add(values[28])
+        .is_none_or(|settled| settled > values[13])
+    {
+        return Err("browser output settled commands exceed consumption");
+    }
+    if values[28] != 0 && (!paused || marker.is_none()) {
+        return Err("browser output expiry requires actual finite playback end");
+    }
     let report = RenderReport {
         start_frame: values[1],
         frames: values[2] as usize,
@@ -347,6 +357,7 @@ pub(crate) fn decode_section_output(
             rendered_frames: values[12],
             commands_consumed: values[13],
             commands_applied: values[14],
+            commands_expired: values[28],
             late_commands: values[15],
             pending_full: values[16],
             voice_full: values[17],

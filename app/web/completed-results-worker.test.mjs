@@ -399,7 +399,7 @@ function selectedFile(path, acquire) {
 }
 
 function renderReport({ available = true, cursor = 9007199254742999n, frames = 257n, start = START } = {}) {
-  const words = new Uint32Array(56);
+  const words = new Uint32Array(58);
   const put = (index, value) => {
     words[index * 2] = Number(value & 0xffffffffn);
     words[index * 2 + 1] = Number(value >> 32n);

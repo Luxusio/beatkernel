@@ -1,5 +1,7 @@
 //! Numeric separate-instance AudioWorklet binding; setup owns all allocations.
-use crate::worklet_audio::{WorkletAudio, WorkletAudioBuilder, WorkletAudioConfig, WorkletAudioError};
+use crate::worklet_audio::{
+    WorkletAudio, WorkletAudioBuilder, WorkletAudioConfig, WorkletAudioError,
+};
 use beatkernel::{
     audio::{
         AudioCommand, AudioError, AudioFormat, AudioLimits, PcmLimits, QueuePushError, SampleId,
@@ -222,11 +224,15 @@ impl BrowserAudio {
     pub fn memory() -> JsValue {
         wasm_bindgen::memory()
     }
+    #[wasm_bindgen(getter)]
+    pub fn report_fields(&self) -> u32 {
+        29
+    }
     /// Fields 0 available; 1 start; 2 frames; 3 playback start; 4 playback frames;
     /// 5 paused; 6 endpoint present; 7 endpoint; 8 voices; 9 pending; 10 song;
-    /// 11 disconnected; 12..22 actual counters in RenderReport declaration order;
+    /// 11 disconnected; 12..22 actual counters in their original wire order;
     /// 23 context next present; 24 context next; 25 start present; 26 absolute start;
-    /// 27 terminal. Signed song time is exposed as its two's-complement u64 bits.
+    /// 27 terminal; 28 commands expired. Signed song time is exposed as its two's-complement u64 bits.
     pub fn report_word(&self, index: u32, high: bool) -> u32 {
         let Some(audio) = &self.audio else {
             return 0;
@@ -264,6 +270,7 @@ impl BrowserAudio {
                     20 => r.counters.invalid_gains,
                     21 => r.counters.invalid_rates,
                     22 => r.counters.invalid_times,
+                    28 => r.counters.commands_expired,
                     _ => 0,
                 },
             },

@@ -105,7 +105,10 @@ function configuration(options) {
 
 function validReport(report) {
   return report !== null && typeof report === "object"
-    && report.words instanceof Uint32Array && report.words.length === 56
+    && report.words instanceof Uint32Array && report.words.length === 58
+    && report.words.buffer instanceof ArrayBuffer && report.words.buffer.resizable !== true
+    && report.words.buffer.byteLength === 232 && report.words.byteOffset === 0
+    && report.words.byteLength === 232
     && report.words[0] <= 1 && report.words[1] === 0
     && typeof report.available === "boolean" && report.available === (report.words[0] === 1);
 }

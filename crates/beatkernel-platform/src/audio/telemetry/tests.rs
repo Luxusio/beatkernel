@@ -2,8 +2,8 @@ use super::*;
 use crate::audio::AudioClockReadingQuality;
 use std::{
     sync::{
-        Arc, Barrier,
         atomic::{AtomicBool, Ordering},
+        Arc, Barrier,
     },
     thread,
     time::{Duration as WallDuration, Instant},
@@ -57,6 +57,7 @@ fn snapshot() -> AudioStreamSnapshot {
                 invalid_gains: 8,
                 invalid_rates: 9,
                 invalid_times: 10,
+                commands_expired: (1u64 << 63) + 11,
             },
         }),
     }
@@ -150,7 +151,8 @@ fn production_publication_preserves_literal_scalar_widths_signed_times_and_all_c
             0,
             1,
             1,
-            u64::MAX
+            u64::MAX,
+            (1u64 << 63) + 11
         ]
     );
 }

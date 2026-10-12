@@ -66,9 +66,10 @@ async function harness(faults = {}) {
       this.calls = { samples: [], finish: 0, finishAt: [], arm: [], enqueue: [], render: [], reports: [], metadata: 0 };
       this.frees = 0;
       this.pcm = new Float32Array(0);
-      this.words = new Uint32Array(56);
+      this.words = new Uint32Array(58);
       owners.push(this);
     }
+    get report_fields() { return Object.hasOwn(faults, "reportFields") ? faults.reportFields : 29; }
     status() { return faults.status ?? 0; }
     insert_sample(...args) { this.calls.samples.push(args); return faults.sampleStatus ?? 0; }
     finish() { this.calls.finish++; return faults.finishStatus ?? 0; }
@@ -181,6 +182,24 @@ function notices(processor, kind) { return processor.port.messages.filter(messag
 function assertSilent(output) {
   for (const bus of output) for (const channel of bus) assert.ok(channel.every(value => value === 0));
 }
+
+test("old or missing audio WASM report declarations refuse before arming and release ownership exactly once", async () => {
+  for (const reportFields of [undefined, 28, 30, "29", null]) {
+    const faults = { reportFields }, h = await harness(faults);
+    assert.throws(() => h.create(), /Incompatible audio processor report format/);
+    const old = h.owners[0];
+    assert.equal(old.frees, 1);
+    assert.equal(old.calls.arm.length, 0);
+    assert.equal(old.calls.finish, 0);
+    assert.equal(old.calls.reports.length, 0, "a wider JS buffer cannot disguise an old owner");
+    faults.reportFields = 29;
+    const replacement = h.create();
+    h.send(replacement, "finish", 1);
+    h.send(replacement, "stop", 2);
+    assert.equal(old.frees, 1);
+    assert.equal(h.owners[1].frees, 1);
+  }
+});
 
 test("dedicated samples use shared insertion with independent sequence and exact EOS totals while host finish and free remain authoritative", async () => {
   const h = await harness(), processor = h.create({ pcmLimits: { maxSamples: 3 } }), owner = h.owners[0];
@@ -330,7 +349,7 @@ test("dedicated command ownership uses the actual shared enqueue path and indepe
   assert.deepEqual(owner.calls.enqueue, [first, ...values].map(value => [value.kind, value.voice, value.sample,
     value.at, value.gain, value.value, value.denominator]));
   const poll = h.send(processor, "poll", 4); assert.equal(poll.sequence, 4); assert.equal(poll.report.available, false);
-  assert.equal(owner.calls.reports.length, 56);
+  assert.equal(owner.calls.reports.length, 58);
   assert.equal(h.send(processor, "arm", 5, { frame: 9007199254740993n }).status, 0);
   port.send({ kind: "commands", generation: 17, sequence: 2, commands: [command({ kind: 3 })] });
   assert.equal(port.messages.at(-1).admitted, 1);
@@ -409,12 +428,12 @@ test("host and direct polling read the same actual report words outside process 
   assert.equal(empty.operation, "poll"); assert.equal(empty.sequence, 1);
   assert.equal(empty.status, 0); assert.equal(empty.admitted, 0); assert.equal(empty.error, null);
   assert.equal(empty.report.available, false);
-  assert.deepEqual(Array.from(empty.report.words), Array(56).fill(0));
+  assert.deepEqual(Array.from(empty.report.words), Array(58).fill(0));
   const hostEmpty = h.send(processor, "poll", 3);
   assert.deepEqual(Array.from(hostEmpty.report.words), Array.from(empty.report.words));
   assert.equal(hostEmpty.sequence, 3); assert.equal(owner.calls.render.length, 0);
-  assert.equal(owner.calls.reports.length, 112);
-  assert.equal(empty.report.words.byteOffset, 0); assert.equal(empty.report.words.buffer.byteLength, 224);
+  assert.equal(owner.calls.reports.length, 116);
+  assert.equal(empty.report.words.byteOffset, 0); assert.equal(empty.report.words.buffer.byteLength, 232);
   const values = [command(), command({ kind: 1 })];
   port.send({ kind: "commands", generation: 17, sequence: 2, commands: values });
   assert.equal(port.messages.at(-1).admitted, 2); assert.equal(port.messages.at(-1).report, null);
@@ -435,9 +454,9 @@ test("host and direct polling read the same actual report words outside process 
   assert.equal(direct.admitted, 0); assert.equal(direct.report.available, true);
   assert.deepEqual(Array.from(direct.report.words), Array.from(owner.words));
   assert.deepEqual(Array.from(host.report.words), Array.from(direct.report.words));
-  assert.equal(owner.calls.reports.length, readCount + 112);
-  assert.deepEqual(owner.calls.reports.slice(readCount, readCount + 56),
-    Array.from({ length: 28 }, (_, index) => [[index, false], [index, true]]).flat());
+  assert.equal(owner.calls.reports.length, readCount + 116);
+  assert.deepEqual(owner.calls.reports.slice(readCount, readCount + 58),
+    Array.from({ length: 29 }, (_, index) => [[index, false], [index, true]]).flat());
   const retained = direct.report.words.slice();
   owner.words[2] = 17;
   port.send({ kind: "commands", generation: 17, sequence: 4, commands: [command({ kind: 3 })] });
@@ -690,7 +709,7 @@ test("setup stays silent and unavailable; fixed view copies varied planar blocks
   assert.equal(owner.calls.render.length, 0);
   const initial = h.send(processor, "poll", 1);
   assert.equal(initial.report.available, false);
-  assert.equal(initial.report.words.length, 56);
+  assert.equal(initial.report.words.length, 58);
   assert.ok(initial.report.words.every(value => value === 0));
   assert.equal(h.send(processor, "finish", 2).status, 0);
   const metadataReads = owner.calls.metadata;
@@ -729,7 +748,7 @@ test("setup stays silent and unavailable; fixed view copies varied planar blocks
   const polled = h.send(processor, "poll", 5);
   assert.equal(polled.report.available, true);
   assert.deepEqual(Array.from(polled.report.words), Array.from(owner.words));
-  assert.equal(owner.calls.reports.length - reportsBefore, 56);
+  assert.equal(owner.calls.reports.length - reportsBefore, 58);
   h.send(processor, "stop", 6);
 });
 

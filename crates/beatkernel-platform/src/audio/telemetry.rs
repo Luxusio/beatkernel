@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) struct Telemetry {
     version: AtomicU64,
     pub(crate) status: AtomicU64,
-    values: [AtomicU64; 38],
+    values: [AtomicU64; 39],
 }
 
 /// Observes one running deadline interval; Ready/prefill is not an interval.
@@ -106,8 +106,8 @@ fn decode_status(value: u64) -> AudioStreamStatus {
     }
 }
 
-fn encode_snapshot(snapshot: AudioStreamSnapshot) -> [u64; 38] {
-    let mut values = [0u64; 38];
+fn encode_snapshot(snapshot: AudioStreamSnapshot) -> [u64; 39] {
+    let mut values = [0u64; 39];
     let counters = snapshot.counters;
     values[..7].copy_from_slice(&[
         status_code(snapshot.status),
@@ -172,11 +172,12 @@ fn encode_snapshot(snapshot: AudioStreamSnapshot) -> [u64; 38] {
             values[36] = 1;
             values[37] = frame;
         }
+        values[38] = counters.commands_expired;
     }
     values
 }
 
-fn decode_snapshot(values: [u64; 38]) -> AudioStreamSnapshot {
+fn decode_snapshot(values: [u64; 39]) -> AudioStreamSnapshot {
     AudioStreamSnapshot {
         telemetry_available: true,
         status: decode_status(values[0]),
@@ -224,6 +225,7 @@ fn decode_snapshot(values: [u64; 38]) -> AudioStreamSnapshot {
                 rendered_frames: values[22],
                 commands_consumed: values[23],
                 commands_applied: values[24],
+                commands_expired: values[38],
                 late_commands: values[25],
                 pending_full: values[26],
                 voice_full: values[27],

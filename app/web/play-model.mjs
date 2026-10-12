@@ -340,7 +340,10 @@ export function audioClockExpired(nowNs, armedHostNs, lastProgressHostNs, latenc
     : nowNs - lastProgressHostNs >= 1000000000n;
 }
 export function reportWord(words, index) {
-  if (!(words instanceof Uint32Array) || words.length !== 56 || !Number.isInteger(index) || index < 0 || index >= 28) throw new Error("Invalid audio report words.");
+  if (!(words instanceof Uint32Array) || !(words.buffer instanceof ArrayBuffer)
+    || words.buffer.resizable === true || words.buffer.byteLength !== 232
+    || words.byteOffset !== 0 || words.byteLength !== 232 || words.length !== 58
+    || !Number.isInteger(index) || index < 0 || index >= 29) throw new Error("Invalid audio report words.");
   return BigInt(words[index * 2]) | BigInt(words[index * 2 + 1]) << 32n;
 }
 export function renderedCursor(report, start) {
@@ -351,7 +354,14 @@ export function renderedCursor(report, start) {
   }
   if (report.available !== (reportWord(words, 0) === 1n) || reportWord(words, 27) !== 0n) throw new Error("Audio report is terminal or inconsistent.");
   if (reportWord(words, 25) !== 1n || reportWord(words, 26) !== start) throw new Error("Audio report has a different armed start.");
-  if (!report.available) return null;
+  const expired = reportWord(words, 28);
+  if (!report.available) {
+    if (expired !== 0n) throw new Error("Unavailable audio report contains command expiry.");
+    return null;
+  }
+  const settled = reportWord(words, 14) + expired;
+  if (settled > U64_MAX || settled > reportWord(words, 13)) throw new Error("Audio settled commands exceed consumption.");
+  if (expired !== 0n && (reportWord(words, 5) !== 1n || reportWord(words, 6) !== 1n)) throw new Error("Audio command expiry requires actual finite playback end.");
   if (reportWord(words, 4) > reportWord(words, 2)) throw new Error("Invalid audio playback extent.");
   for (let index = 16; index <= 22; index++) {
     if (reportWord(words, index) !== 0n) {
