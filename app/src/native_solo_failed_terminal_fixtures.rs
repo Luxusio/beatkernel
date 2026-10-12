@@ -474,24 +474,15 @@ fn native_solo_stop_evidence_is_new_admission_only_and_finite_boundary_guards_re
         }),
         admitted
     ));
-    // An endpoint freezes the consumer, not the producer. A new real accepted
-    // Stop is stranded even though the Mixer's pending heap remains empty.
+    // A finite endpoint freezes playback, while a later real callback must
+    // consume and expire newly admitted Stops without executing them.
     f.runtime
         .enqueue_audio(AudioCommand::Stop {
             voice: VoiceId(u64::MAX),
             at: Timestamp::from_nanos(80_000_000),
         })
         .unwrap();
-    let stranded = f.device.mixer.render(&mut [0.0]).unwrap();
     assert_eq!(f.runtime.admitted_audio_commands(), 6);
-    assert_eq!(
-        (
-            stranded.counters.commands_consumed,
-            stranded.counters.commands_applied,
-            stranded.pending_commands
-        ),
-        (5, 5, 0)
-    );
     assert!(!finite_done_with_terminal(
         config,
         Some(boundary),
@@ -501,7 +492,44 @@ fn native_solo_stop_evidence_is_new_admission_only_and_finite_boundary_guards_re
         false,
         true,
         bgm,
-        Some(stranded),
+        Some(rendered),
+        f.runtime.admitted_audio_commands()
+    ));
+    let mut terminal_pcm = [f32::NAN];
+    let settled = f.device.mixer.render(&mut terminal_pcm).unwrap();
+    assert_eq!(terminal_pcm, [0.0]);
+    assert_eq!(
+        (
+            settled.counters.commands_consumed,
+            settled.counters.commands_applied,
+            settled.counters.commands_expired,
+            settled.pending_commands
+        ),
+        (6, 5, 1, 0)
+    );
+    assert_eq!(settled.counters.settled_commands(), Some(6));
+    let mut expected_counters = rendered.counters;
+    expected_counters.rendered_frames += 1;
+    expected_counters.commands_consumed += 1;
+    expected_counters.commands_expired += 1;
+    assert_eq!(settled.counters, expected_counters);
+    assert_eq!(settled.song_position, rendered.song_position);
+    assert_eq!(settled.active_voices, rendered.active_voices);
+    assert_eq!(
+        settled.playback_end_physical_frame,
+        rendered.playback_end_physical_frame
+    );
+    assert!(settled.paused);
+    assert!(finite_done_with_terminal(
+        config,
+        Some(boundary),
+        boundary.host,
+        frozen,
+        false,
+        false,
+        true,
+        bgm,
+        Some(settled),
         f.runtime.admitted_audio_commands()
     ));
 }

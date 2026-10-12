@@ -1,10 +1,10 @@
 //! Deferred actual shared-step runtime, original PCM, capture and replay fixtures.
 use crate::{
-    ChannelPolicy, PreparedBms, WavDecoder, prepare_from_source,
     asset_paths::AssetPathPolicy,
     asset_source::MemoryFiles,
     local_players::{PlayerId, ResolvedInputPlan},
     local_runtime::{InputResult, PlayerReport},
+    prepare_from_source,
     replay_capture::CaptureError,
     replay_playback::{decode_section_setup, reconstruct_section},
     section_start::{prepare_at, prepare_section_replay},
@@ -13,11 +13,12 @@ use crate::{
         StepLocalGameplayError,
     },
     step_replay::{StepReplay, StepReplayConfig},
+    ChannelPolicy, PreparedBms, WavDecoder,
 };
 use beatkernel::{
     audio::{
-        AudioCommand, AudioFormat, AudioLimits, CommandProducer, Mixer, MixerConfig, PcmLimits,
-        RenderReport, SampleBank, SampleId, command_queue,
+        command_queue, AudioCommand, AudioFormat, AudioLimits, CommandProducer, Mixer, MixerConfig,
+        PcmLimits, RenderReport, SampleBank, SampleId,
     },
     input::{
         BackendId, Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, ContactId, DeviceId,
@@ -26,8 +27,8 @@ use beatkernel::{
     },
     judge::JudgeOutcome,
     replay::{
+        codec::{decode_replay, encode_replay, ReplayCodecError, ReplayCodecLimits},
         ReplayOperation,
-        codec::{ReplayCodecError, ReplayCodecLimits, decode_replay, encode_replay},
     },
     runtime::RuntimeReport,
     time::{
@@ -701,7 +702,7 @@ fn member_contact_sections_capture_original_provenance_and_replay_the_same_share
 }
 
 #[test]
-fn finite_shared_completion_requires_every_member_logical_end_and_genuine_execution_receipts() {
+fn finite_shared_completion_requires_every_member_logical_end_and_genuine_settlement_receipts() {
     let chosen = StepGameplayConfig {
         preroll: Duration::from_nanos(100_000_000),
         ..config()
@@ -789,12 +790,25 @@ fn finite_shared_completion_requires_every_member_logical_end_and_genuine_execut
         owner.acknowledge(batch.sequence, 2, true).unwrap();
         assert!(owner.take_commands(32).unwrap().is_none());
         if late_admission {
-            assert!(
-                matches!(owner.observe_completion(None, None), Err(StepLocalGameplayError::Control(
-                StepGameplayError::Completion { rendered: Some(actual), .. })) if actual == marker)
-            );
-            assert!(owner.failed());
+            assert!(!owner.observe_completion(None, None).unwrap());
+            assert_eq!(marker.counters.commands_consumed, 0);
             assert_eq!(marker.counters.commands_applied, 0);
+            assert_eq!(marker.counters.commands_expired, 0);
+            let (silence, settled) = render(&mut output_mixer, 1);
+            assert_eq!(silence, [0.0]);
+            assert_eq!(
+                settled.playback_end_physical_frame,
+                marker.playback_end_physical_frame
+            );
+            assert_eq!(settled.song_position, marker.song_position);
+            assert_eq!(settled.active_voices, marker.active_voices);
+            assert_eq!(settled.pending_commands, 0);
+            assert_eq!(settled.counters.commands_consumed, 2);
+            assert_eq!(settled.counters.commands_applied, 0);
+            assert_eq!(settled.counters.commands_expired, 2);
+            assert_eq!(settled.counters.settled_commands(), Some(2));
+            assert!(owner.observe_completion(Some(settled), None).unwrap());
+            assert!(!owner.failed());
         } else {
             assert!(
                 marker.active_voices > 0,

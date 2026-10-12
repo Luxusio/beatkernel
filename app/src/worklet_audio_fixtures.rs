@@ -289,7 +289,9 @@ fn finite_worklet_cutoff_is_relative_to_mixer_zero_and_independent_of_callback_p
         audio.arm(base + 3, base).unwrap();
         let mut current = base;
         let mut pcm = Vec::new();
+        let mut post_endpoint_callback = false;
         for frames in parts {
+            post_endpoint_callback |= current >= base + 6;
             audio.render(current, frames).unwrap();
             pcm.extend_from_slice(&audio.output()[..frames]);
             current += frames as u64;
@@ -303,6 +305,27 @@ fn finite_worklet_cutoff_is_relative_to_mixer_zero_and_independent_of_callback_p
             pcm,
             [0.0, 0.0, 0.0, 0.25, 0.5, 0.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         );
+        let first_ended = audio.report().unwrap();
+        assert_eq!(
+            (
+                first_ended.counters.commands_consumed,
+                first_ended.counters.commands_applied,
+                first_ended.counters.commands_expired,
+                first_ended.pending_commands
+            ),
+            (
+                2,
+                1,
+                u64::from(post_endpoint_callback),
+                usize::from(!post_endpoint_callback)
+            )
+        );
+        // A callback crossing the exclusive endpoint can retain its Stop until
+        // the next actual nonempty callback. All partitions settle the same
+        // command without executing it once that callback really occurs.
+        audio.render(current, 1).unwrap();
+        current += 1;
+        assert_eq!(audio.output()[0], 0.0);
         let ended = audio.report().unwrap();
         assert!(ended.paused);
         assert_eq!(ended.playback_end_physical_frame, Some(3));
@@ -310,18 +333,20 @@ fn finite_worklet_cutoff_is_relative_to_mixer_zero_and_independent_of_callback_p
             audio.start_frame().unwrap() + ended.playback_end_physical_frame.unwrap(),
             base + 6
         );
-        assert_eq!(ended.counters.rendered_frames, 9);
+        assert_eq!(ended.counters.rendered_frames, 10);
         assert_eq!(
             (
                 ended.counters.commands_consumed,
-                ended.counters.commands_applied
+                ended.counters.commands_applied,
+                ended.counters.commands_expired
             ),
-            (2, 1)
+            (2, 1, 1)
         );
+        assert_eq!(ended.counters.settled_commands(), Some(2));
         assert_eq!(
             (ended.active_voices, ended.pending_commands),
-            (1, 1),
-            "the endpoint command is retained, not applied at an exclusive fence"
+            (1, 0),
+            "the endpoint Stop expires without execution or changing the retained voice"
         );
         audio.enqueue(rejected).unwrap();
         audio.enqueue(play(1, 3, 4_000_000)).unwrap();
@@ -334,22 +359,34 @@ fn finite_worklet_cutoff_is_relative_to_mixer_zero_and_independent_of_callback_p
                 frozen.playback_start_frame,
                 frozen.playback_frames
             ),
-            (9, 3, 0)
+            (10, 3, 0)
         );
         assert_eq!(frozen.playback_end_physical_frame, Some(3));
         assert_eq!(
-            frozen.counters.commands_consumed,
-            ended.counters.commands_consumed
+            (
+                frozen.counters.commands_consumed,
+                frozen.counters.commands_applied,
+                frozen.counters.commands_expired,
+                frozen.pending_commands
+            ),
+            (4, 1, 3, 0)
         );
+        assert_eq!(frozen.counters.settled_commands(), Some(4));
+        assert!(frozen.paused);
+        assert_eq!(frozen.song_position, ended.song_position);
+        assert_eq!(frozen.active_voices, ended.active_voices);
+        assert_eq!(frozen.counters.unknown_stops, ended.counters.unknown_stops);
         assert_eq!(
             frozen.counters.commands_applied,
             ended.counters.commands_applied
         );
+        audio.enqueue(play(1, 4, 5_000_000)).unwrap();
+        audio.enqueue(play(1, 5, 6_000_000)).unwrap();
         assert_eq!(
-            audio.enqueue(play(1, 4, 5_000_000)).unwrap_err().reason,
+            audio.enqueue(play(1, 6, 7_000_000)).unwrap_err().reason,
             QueuePushError::Full
         );
-        assert_eq!(audio.context_frame(), Some(base + 15));
+        assert_eq!(audio.context_frame(), Some(base + 16));
         assert!(!audio.failed());
     }
 }
@@ -374,14 +411,46 @@ fn zero_endpoint_and_checked_absolute_end_keep_queue_and_arm_ownership_without_c
         (
             ended.playback_end_physical_frame,
             ended.playback_frames,
-            ended.counters.commands_consumed
+            ended.counters.commands_consumed,
+            ended.counters.commands_applied,
+            ended.counters.commands_expired,
+            ended.pending_commands
         ),
-        (Some(0), 0, 0)
+        (Some(0), 0, 1, 0, 1, 0)
     );
+    assert_eq!(ended.counters.settled_commands(), Some(1));
+    assert_eq!(ended.active_voices, 0);
+    zero.enqueue(play(1, 2, 0)).unwrap();
     assert_eq!(
-        zero.enqueue(play(1, 2, 0)).unwrap_err().reason,
+        zero.enqueue(play(1, 3, 0)).unwrap_err().reason,
         QueuePushError::Full
     );
+    zero.render(6, 0).unwrap();
+    assert_eq!(zero.report(), Some(ended));
+    assert_eq!(zero.context_frame(), Some(6));
+    assert_eq!(
+        zero.enqueue(play(1, 3, 0)).unwrap_err().reason,
+        QueuePushError::Full,
+        "an empty callback cannot consume the newly admitted command"
+    );
+    zero.render(6, 1).unwrap();
+    let settled = zero.report().unwrap();
+    assert_eq!(zero.output()[0], 0.0);
+    assert_eq!(
+        (
+            settled.counters.commands_consumed,
+            settled.counters.commands_applied,
+            settled.counters.commands_expired,
+            settled.pending_commands,
+            settled.active_voices
+        ),
+        (2, 0, 2, 0, 0)
+    );
+    assert_eq!(settled.counters.settled_commands(), Some(2));
+    assert_eq!(settled.song_position, ended.song_position);
+    assert_eq!(settled.playback_end_physical_frame, Some(0));
+    assert!(settled.paused);
+    zero.enqueue(play(1, 3, 0)).unwrap();
     assert_eq!(zero.playback_end_frame(), Some(0));
 
     let mut builder = WorkletAudioBuilder::new(config(1000, 1, 8, 1)).unwrap();

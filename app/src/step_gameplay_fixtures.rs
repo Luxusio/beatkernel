@@ -1,6 +1,5 @@
 //! Actual portable preparation, gameplay, command queues and Mixer; no native I/O.
 use crate::{
-    ChannelPolicy, PreparedBms, WavDecoder,
     asset_paths::AssetPathPolicy,
     asset_source::MemoryFiles,
     bgm::BgmFeedError,
@@ -9,14 +8,15 @@ use crate::{
     replay_capture::CaptureError,
     replay_playback::{decode_chart_setup, reconstruct},
     step_gameplay::{
-        StepGameplay, StepGameplayConfig, StepGameplayError, validate_output_evidence,
-        validate_section_output_evidence,
+        validate_output_evidence, validate_section_output_evidence, StepGameplay,
+        StepGameplayConfig, StepGameplayError,
     },
+    ChannelPolicy, PreparedBms, WavDecoder,
 };
 use beatkernel::{
     audio::{
-        AudioCommand, AudioFormat, AudioLimits, CommandProducer, Mixer, MixerConfig, PcmLimits,
-        PcmSample, QueuePushError, SampleBank, SampleId, VoiceId, command_queue,
+        command_queue, AudioCommand, AudioFormat, AudioLimits, CommandProducer, Mixer, MixerConfig,
+        PcmLimits, PcmSample, QueuePushError, SampleBank, SampleId, VoiceId,
     },
     input::{
         BackendId, Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId,
@@ -26,8 +26,8 @@ use beatkernel::{
     interaction::InteractionState,
     judge::{JudgeGrade, JudgeOutcome, JudgeStage, MissReason},
     replay::{
+        codec::{decode_replay, encode_replay, ReplayCodecError, ReplayCodecLimits},
         ReplayOperation,
-        codec::{ReplayCodecError, ReplayCodecLimits, decode_replay, encode_replay},
     },
     runtime::RuntimeError,
     time::{
@@ -1279,6 +1279,20 @@ fn configured_finite_evidence_preserves_real_mixer_boundaries_frozen_queues_and_
             for frames in parts {
                 let mut block = vec![0.0; frames];
                 let report = mixer.render(&mut block).unwrap();
+                // The crossing callback freezes playback; only a subsequent
+                // nonempty callback retires its pending endpoint Stop.
+                let expired = if end == 0 {
+                    2
+                } else if report.start_frame >= end {
+                    1
+                } else {
+                    0
+                };
+                assert_eq!(report.counters.commands_consumed, 2);
+                assert_eq!(report.counters.commands_applied, if end == 0 { 0 } else { 1 });
+                assert_eq!(report.counters.commands_expired, expired);
+                assert_eq!(report.pending_commands, usize::from(end != 0 && report.start_frame < end));
+                assert_eq!(report.counters.settled_commands(), Some(if end == 0 { 2 } else { 1 + expired }));
                 total += frames as i64;
                 pcm.extend(block);
                 let presented = point(22, 100 + total * 1_000_000);
@@ -1347,6 +1361,17 @@ fn configured_finite_evidence_preserves_real_mixer_boundaries_frozen_queues_and_
             );
             let previous = last_render.unwrap();
             assert_eq!(previous.playback_end_physical_frame, Some(end));
+            assert_eq!(previous.counters.commands_consumed, 2);
+            assert_eq!(
+                previous.counters.commands_applied,
+                if end == 0 { 0 } else { 1 }
+            );
+            assert_eq!(
+                previous.counters.commands_expired,
+                if end == 0 { 2 } else { u64::from(previous.start_frame >= end) }
+            );
+            assert_eq!(previous.pending_commands, usize::from(end != 0 && previous.start_frame < end));
+            assert_eq!(previous.counters.settled_commands(), Some(2 - previous.pending_commands as u64));
             producer
                 .try_push(AudioCommand::Play {
                     voice: VoiceId(2),
@@ -1355,11 +1380,26 @@ fn configured_finite_evidence_preserves_real_mixer_boundaries_frozen_queues_and_
                     gain: 1.0,
                 })
                 .unwrap();
-            let later = mixer.render(&mut [0.0; 2]).unwrap();
+            let mut silence = [1.0; 2];
+            let later = mixer.render(&mut silence).unwrap();
+            assert_eq!(silence, [0.0; 2]);
             assert_eq!(
                 later.counters.commands_consumed,
-                previous.counters.commands_consumed
+                previous.counters.commands_consumed + 1
             );
+            assert_eq!(
+                later.counters.commands_applied,
+                previous.counters.commands_applied
+            );
+            assert_eq!(
+                later.counters.commands_expired,
+                previous.counters.commands_expired + previous.pending_commands as u64 + 1
+            );
+            assert_eq!(later.counters.settled_commands(), Some(3));
+            assert_eq!(later.pending_commands, 0);
+            assert_eq!(later.song_position, previous.song_position);
+            assert_eq!(later.active_voices, previous.active_voices);
+            assert_eq!(later.playback_end_physical_frame, Some(end));
             assert_eq!(
                 validate_section_output_evidence(
                     origin,
@@ -1400,19 +1440,25 @@ fn finite_evidence_refuses_marker_clock_history_and_frozen_state_corruption_with
     let frozen = mixer.render(&mut [0.0; 2]).unwrap();
     let presented = Some(point(22, 6_000_100));
     let last_presented = Some(Timestamp::from_nanos(4_000_000));
-    assert!(
-        validate_section_output_evidence(
-            origin,
-            1000,
-            Some(before),
-            None,
-            Some(reached),
-            None,
-            Some(3)
-        )
-        .is_ok()
-    );
-    for case in 0..17 {
+    assert!(validate_section_output_evidence(
+        origin,
+        1000,
+        Some(before),
+        None,
+        Some(reached),
+        None,
+        Some(3)
+    )
+    .is_ok());
+    assert_eq!(reached.counters.commands_consumed, 2);
+    assert_eq!(reached.counters.commands_applied, 1);
+    assert_eq!(reached.counters.commands_expired, 0);
+    assert_eq!(reached.pending_commands, 1);
+    assert_eq!(frozen.counters.commands_consumed, 2);
+    assert_eq!(frozen.counters.commands_applied, 1);
+    assert_eq!(frozen.counters.commands_expired, 1);
+    assert_eq!(frozen.pending_commands, 0);
+    for case in 0..19 {
         let mut invalid = frozen;
         match case {
             0 => {
@@ -1426,7 +1472,7 @@ fn finite_evidence_refuses_marker_clock_history_and_frozen_state_corruption_with
             5 => invalid.playback_end_physical_frame = Some(4),
             6 => invalid.song_position = Timestamp::from_nanos(1),
             7 => invalid.active_voices = 0,
-            8 => invalid.pending_commands = 0,
+            8 => invalid.pending_commands += 1,
             9 => invalid.counters.commands_consumed += 1,
             10 => invalid.counters.commands_applied += 1,
             11 => invalid.counters.late_commands += 1,
@@ -1435,6 +1481,8 @@ fn finite_evidence_refuses_marker_clock_history_and_frozen_state_corruption_with
             14 => invalid.producer_disconnected = true,
             15 => invalid.frames = 0,
             16 => invalid.active_voices = AudioLimits::MAX_VOICES + 1,
+            17 => invalid.counters.commands_expired -= 1,
+            18 => invalid.counters.commands_expired = u64::MAX,
             _ => unreachable!(),
         }
         assert!(
@@ -1453,59 +1501,51 @@ fn finite_evidence_refuses_marker_clock_history_and_frozen_state_corruption_with
     }
     let mut changed_duplicate = reached;
     changed_duplicate.song_position = Timestamp::from_nanos(1);
-    assert!(
-        validate_section_output_evidence(
+    assert!(validate_section_output_evidence(
+        origin,
+        1000,
+        Some(reached),
+        last_presented,
+        Some(changed_duplicate),
+        presented,
+        Some(3)
+    )
+    .is_err());
+    let mut manual_pause = before;
+    manual_pause.paused = true;
+    assert!(validate_section_output_evidence(
+        origin,
+        1000,
+        None,
+        None,
+        Some(manual_pause),
+        None,
+        Some(3)
+    )
+    .is_err());
+    let mut regressed = reached;
+    regressed.counters.commands_consumed -= 1;
+    assert!(validate_section_output_evidence(
+        origin,
+        1000,
+        Some(before),
+        None,
+        Some(regressed),
+        None,
+        Some(3)
+    )
+    .is_err());
+    for bad in [point(11, 6_000_100), point(22, 99), point(22, 4_000_099)] {
+        assert!(validate_section_output_evidence(
             origin,
             1000,
             Some(reached),
             last_presented,
-            Some(changed_duplicate),
-            presented,
+            Some(frozen),
+            Some(bad),
             Some(3)
         )
-        .is_err()
-    );
-    let mut manual_pause = before;
-    manual_pause.paused = true;
-    assert!(
-        validate_section_output_evidence(
-            origin,
-            1000,
-            None,
-            None,
-            Some(manual_pause),
-            None,
-            Some(3)
-        )
-        .is_err()
-    );
-    let mut regressed = reached;
-    regressed.counters.commands_consumed -= 1;
-    assert!(
-        validate_section_output_evidence(
-            origin,
-            1000,
-            Some(before),
-            None,
-            Some(regressed),
-            None,
-            Some(3)
-        )
-        .is_err()
-    );
-    for bad in [point(11, 6_000_100), point(22, 99), point(22, 4_000_099)] {
-        assert!(
-            validate_section_output_evidence(
-                origin,
-                1000,
-                Some(reached),
-                last_presented,
-                Some(frozen),
-                Some(bad),
-                Some(3)
-            )
-            .is_err()
-        );
+        .is_err());
     }
     for (origin, rate, end) in [
         (origin, 0, 3),

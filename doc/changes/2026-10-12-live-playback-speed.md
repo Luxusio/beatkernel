@@ -306,3 +306,48 @@ CLI/browser/desktop QA가 완료됐다는 주장이 아니다. 고정 실시간 
 전체 연결, 실행 중 배속 변경, retained practice/seek/loop 배속, 역재생과
 물리 장치 검증은 각각 남은 범위에 따라 계속 구현·검증한다.
 WBS는 91/193 (47.15%)를 유지하며 전체 BMS player Goal은 미완료다.
+
+## 독립 QA 첫 실행과 후속 수정
+
+`1cb59a7`의 독립 DEEP 코드 리뷰와 보안 리뷰는 모두 PASS였다. 이후
+qa-cli가 선택한 전체 앱 lib 검사를 단일 실행자가 새로 실행한 결과는
+`qa-cli-lib-c1.log`에 보존되어 있다: exit101, 2419 통과, 10 실패,
+6 ignored, 필터 없음. 전체 Node 검사는 `qa-cli-node-c1.log`에서 exit0,
+1238 통과였다. qa-cli는 전체 회귀 실패를 근거로 FAIL을 반환했다.
+
+기존 finite fixture들은 종료 후 명령을 영구히 남기는 옛 계약을 기대하고
+있었다. 실제 nonempty callback이 consumed와 expired를 올리고 applied,
+song, voice 및 marker를 유지하는 새 계약으로 수정 중이다. endpoint를
+넘어가는 callback의 pending과 다음 callback의 실제 만료를 구분한다.
+부분 ACK·잘못된 보고서 fencing·원본 provenance는 유지하며, 더 이상
+변조가 아닌 pending=0 대신 pending 증가와 expiry 감소·포화를 검사한다.
+첫 수정 후 전체 실행 `remediation-lib-c1.log`는 2427 통과, 2 실패였다.
+남은 두 경우는 crossing callback과 후속 callback의 expiry 시점을
+구분하도록 고친 뒤 `remediation-lib-c2.log` 전체 재검사는 exit0,
+2429 통과, 0 실패, 6 ignored였다. 실제 테스트 실행은 5.26초였다.
+
+qa-browser가 요청한 새 production runner 실행은
+`target/wf/live-speed-browser/qa-browser-12d03-c1/evidence.json`에 있으며
+14개 흐름 모두 통과했다. 그러나 추가 실제 키보드/UI 검사
+`qa-browser-ui-12d03-c1/evidence.json`는 exit1이었다. live 재생 중
+replay speed label에 hidden이 있어도 label의 display:flex 규칙 때문에
+표시되는 결함과 audio WASM 요청의 ERR_ABORTED를 발견했고, 독립
+qa-browser는 FAIL을 반환했다. replay label의 hidden에만 display:none을
+적용하는 수정이 들어갔다. 속성만 확인하지 않고 실제 화면의 표시와
+레이아웃으로 후속 검증한다.
+
+ERR_ABORTED는 아직 해결되지 않았다. 이번 기록에는 정확한 요청 시점이
+없으므로 early Stop이 미완료 fetch를 취소했다고 단정할 수 없다.
+실제 Worker는 전체 body 소비와 compile 이후에만 module-ready를 보내고,
+정상 Stop에는 이 fetch controller를 취소하는 경로가 없다. 이전
+audio-module-loading 및 retained-settings-policy 기록에도 body 완료와
+CDP 오류가 엇갈린 증거가 있다. 오류를 제외하거나 정상 실행으로 덮지
+않으며, 후속 진단과 실제 desktop QA 및 수정본 독립 review/QA가 남아 있다.
+
+후속 개발 진단 `diagnostic-browser-ui-12d03-c2`는 exit0이었으나 fetch
+계측 범위를 충분히 확인하지 못했다. c3은 관측 코드의 초기화 순서 오류로
+실행 실패했으므로 제품 검증 근거로 세지 않는다. 이를 바로잡은 c4는
+exit0이며 실제 reader가 64410 bytes를 전부 소비하고 done을 받은 후,
+실제 compile과 reader release가 완료된 원본 관측을 저장했다. 이번
+실행에는 network 오류가 없었고 live 재생 중 replay label의 실제 크기는
+0이었다. 이 성공은 앞선 ERR_ABORTED의 원인이 해결됐다는 뜻이 아니다.

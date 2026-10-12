@@ -1,6 +1,5 @@
 //! Actual portable live owner, section PCM, core input reports and finite output.
 use crate::{
-    ChannelPolicy, PreparedBms, WavDecoder,
     asset_paths::AssetPathPolicy,
     asset_source::MemoryFiles,
     bgm::BgmFeedError,
@@ -9,11 +8,12 @@ use crate::{
     section_start::{prepare_at, prepare_section_replay},
     step_gameplay::{StepGameplay, StepGameplayConfig, StepGameplayError},
     step_replay::{StepReplay, StepReplayConfig},
+    ChannelPolicy, PreparedBms, WavDecoder,
 };
 use beatkernel::{
     audio::{
-        AudioCommand, AudioFormat, AudioLimits, CommandProducer, Mixer, MixerConfig, PcmLimits,
-        RenderReport, SampleBank, SampleId, command_queue,
+        command_queue, AudioCommand, AudioFormat, AudioLimits, CommandProducer, Mixer, MixerConfig,
+        PcmLimits, RenderReport, SampleBank, SampleId,
     },
     input::{
         BackendId, Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId,
@@ -23,8 +23,8 @@ use beatkernel::{
     interaction::InteractionState,
     judge::JudgeOutcome,
     replay::{
+        codec::{decode_replay, encode_replay, ReplayCodecLimits, ReplayFile},
         ReplayOperation,
-        codec::{ReplayCodecLimits, ReplayFile, decode_replay, encode_replay},
     },
     time::{
         AffineClockMapper, ClockDomainId, ClockInterval, ClockPair, ClockPoint, Duration, Timestamp,
@@ -613,7 +613,8 @@ fn completion_waits_for_logical_end_presentation_ack_bgm_credits_and_every_filte
 }
 
 #[test]
-fn failed_admission_and_invalid_execution_evidence_fence_without_erasing_committed_judgments() {
+fn failed_admission_and_invalid_execution_fence_but_actual_late_expiry_preserves_committed_judgments(
+) {
     let chosen = config();
     for late_ack in [false, true] {
         let (mut owner, bank) = game(WITH_MUSIC, 8, 0, chosen, 0, 1_000_000_000);
@@ -637,11 +638,31 @@ fn failed_admission_and_invalid_execution_evidence_fence_without_erasing_committ
                 .acknowledge(batch.sequence, batch.commands.len(), true)
                 .unwrap();
             owner.feed_audio(12, 16).unwrap();
-            let (_, frozen) = render(&mut output_mixer, 1);
-            assert_eq!(frozen.counters.commands_consumed, 0);
-            assert!(
-                matches!(owner.observe_completion(Some(frozen), None), Err(StepGameplayError::Completion { rendered: Some(actual), .. }) if actual == frozen)
+            assert!(!owner.observe_completion(None, None).unwrap());
+            let (silence, frozen) = render(&mut output_mixer, 1);
+            assert_eq!(silence, [0.0]);
+            assert_eq!(
+                frozen.playback_end_physical_frame,
+                marker.playback_end_physical_frame
             );
+            assert_eq!(frozen.song_position, marker.song_position);
+            assert_eq!(frozen.active_voices, marker.active_voices);
+            assert_eq!(frozen.pending_commands, 0);
+            assert_eq!(
+                frozen.counters.commands_consumed,
+                batch.commands.len() as u64
+            );
+            assert_eq!(frozen.counters.commands_applied, 0);
+            assert_eq!(
+                frozen.counters.commands_expired,
+                batch.commands.len() as u64
+            );
+            assert_eq!(
+                frozen.counters.settled_commands(),
+                Some(batch.commands.len() as u64)
+            );
+            assert!(owner.observe_completion(Some(frozen), None).unwrap());
+            assert!(!owner.failed());
         } else {
             producer.try_push(batch.commands[0]).unwrap();
             assert!(
@@ -651,7 +672,9 @@ fn failed_admission_and_invalid_execution_evidence_fence_without_erasing_committ
             assert_eq!(report.counters.commands_applied, 1);
         }
         assert_eq!(owner.score().hits, 1);
-        fenced(&mut owner);
+        if !late_ack {
+            fenced(&mut owner);
+        }
         let file = recording(&mut owner);
         let rebuilt =
             reconstruct_section(&prepared(WITH_MUSIC, 8, 0).source, file, limits()).unwrap();

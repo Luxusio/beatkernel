@@ -1,6 +1,5 @@
 //! Actual section PCM, captured operations, command receipts and Mixer evidence.
 use crate::{
-    ChannelPolicy, PreparedBms, WavDecoder,
     asset_paths::AssetPathPolicy,
     asset_source::MemoryFiles,
     bgm::BgmFeedError,
@@ -13,18 +12,19 @@ use crate::{
     section_start::{prepare_at, prepare_replay, prepare_section_replay},
     step_gameplay::StepGameplayError,
     step_replay::{StepReplay, StepReplayConfig, StepReplayError},
+    ChannelPolicy, PreparedBms, WavDecoder,
 };
 use beatkernel::{
     audio::{
-        AudioCommand, AudioFormat, AudioLimits, CommandProducer, Mixer, MixerConfig, PcmLimits,
-        RenderReport, SampleBank, SampleId, command_queue,
+        command_queue, AudioCommand, AudioFormat, AudioLimits, CommandProducer, Mixer, MixerConfig,
+        PcmLimits, RenderReport, SampleBank, SampleId,
     },
     input::{
         Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId, DeviceSelector,
         EventMeta, GameControlId, PhysicalControlId, PhysicalInputEvent,
     },
     judge::{JudgeEngine, JudgeEvent, JudgeGrade, JudgeOutcome, JudgeProfile, JudgeWindow},
-    replay::codec::{ReplayCodecLimits, ReplayFile, decode_replay, encode_replay},
+    replay::codec::{decode_replay, encode_replay, ReplayCodecLimits, ReplayFile},
     runtime::{Runtime, RuntimeProcessingClock},
     time::{
         AffineClockMapper, ClockDomainId, ClockInterval, ClockPair, ClockPoint, Duration, Timestamp,
@@ -639,7 +639,7 @@ fn explicit_section_consumers_preserve_unlimited_plans_and_legacy_consumers_refu
 }
 
 #[test]
-fn missing_execution_late_cues_and_partial_remote_admission_preserve_the_actual_prefix_and_fence() {
+fn late_cues_and_partial_admission_fence_but_actual_late_expiry_preserves_replay_prefix() {
     let chosen = config();
     let captured = capture(
         PREFIX,
@@ -700,15 +700,32 @@ fn missing_execution_late_cues_and_partial_remote_admission_preserve_the_actual_
         .acknowledge(batch.sequence, batch.commands.len(), true)
         .unwrap();
     assert!(owner.take_commands(8).unwrap().is_none());
-    let (_, frozen) = render(&mut output, 1);
-    assert_eq!(frozen.counters.commands_consumed, 0);
-    assert_eq!(frozen.counters.commands_applied, 0);
-    assert!(
-        matches!(owner.observe_output(Some(frozen), None), Err(StepReplayError::Output { rendered: Some(actual), .. }) if actual == frozen),
-        "queue ACK after the immutable fence cannot prove commands were ever rendered"
+    assert!(!owner.observe_output(None, None).unwrap());
+    let (silence, frozen) = render(&mut output, 1);
+    assert_eq!(silence, [0.0]);
+    assert_eq!(
+        frozen.playback_end_physical_frame,
+        marker.playback_end_physical_frame
     );
+    assert_eq!(frozen.song_position, marker.song_position);
+    assert_eq!(frozen.active_voices, marker.active_voices);
+    assert_eq!(frozen.pending_commands, 0);
+    assert_eq!(
+        frozen.counters.commands_consumed,
+        batch.commands.len() as u64
+    );
+    assert_eq!(frozen.counters.commands_applied, 0);
+    assert_eq!(
+        frozen.counters.commands_expired,
+        batch.commands.len() as u64
+    );
+    assert_eq!(
+        frozen.counters.settled_commands(),
+        Some(batch.commands.len() as u64)
+    );
+    assert!(owner.observe_output(Some(frozen), None).unwrap());
     assert_eq!(owner.score(), &captured.score);
-    fenced(&mut owner);
+    assert!(!owner.failed());
 }
 
 #[test]

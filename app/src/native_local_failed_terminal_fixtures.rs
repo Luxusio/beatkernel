@@ -1,7 +1,7 @@
 // Deferred native cohort pump and admitted Stop evidence; portable output only.
 use super::*;
+use crate::native_gameplay::{retain_input, InputBatch};
 use crate::{gauge::GaugeFailure, offline::OwnedStopEvidence};
-use crate::native_gameplay::{InputBatch, retain_input};
 const PLAYERS: [PlayerId; 3] = [PlayerId(7), PlayerId(101), PlayerId(u32::MAX)];
 const SOURCES: [u64; 3] = [u64::MAX - 2, u64::MAX - 1, u64::MAX];
 const TEXT: &str = "#BPM 3000\n#WAV01 head.wav\n#00011:01000100\n#000D1:00ZZ0001\n";
@@ -507,16 +507,7 @@ fn native_local_partial_stop_reports_keep_exact_evidence_and_finite_completion_r
             at: Timestamp::from_nanos(80_000_000),
         })
         .unwrap();
-    let stranded = finite.device.mixer.render(&mut [0.0]).unwrap();
     assert_eq!(finite.group.admitted_audio_commands(), 8);
-    assert_eq!(
-        (
-            stranded.counters.commands_consumed,
-            stranded.counters.commands_applied,
-            stranded.pending_commands
-        ),
-        (7, 7, 0)
-    );
     assert!(!finite_cohort_done_with_terminal(
         Some(80_000_000),
         Some(boundary.host),
@@ -526,6 +517,42 @@ fn native_local_partial_stop_reports_keep_exact_evidence_and_finite_completion_r
         false,
         false,
         bgm,
-        Some(stranded)
+        Some(raw)
+    ));
+    let mut terminal_pcm = [f32::NAN];
+    let settled = finite.device.mixer.render(&mut terminal_pcm).unwrap();
+    assert_eq!(terminal_pcm, [0.0]);
+    assert_eq!(
+        (
+            settled.counters.commands_consumed,
+            settled.counters.commands_applied,
+            settled.counters.commands_expired,
+            settled.pending_commands
+        ),
+        (8, 7, 1, 0)
+    );
+    assert_eq!(settled.counters.settled_commands(), Some(8));
+    let mut expected_counters = raw.counters;
+    expected_counters.rendered_frames += 1;
+    expected_counters.commands_consumed += 1;
+    expected_counters.commands_expired += 1;
+    assert_eq!(settled.counters, expected_counters);
+    assert_eq!(settled.song_position, raw.song_position);
+    assert_eq!(settled.active_voices, raw.active_voices);
+    assert_eq!(
+        settled.playback_end_physical_frame,
+        raw.playback_end_physical_frame
+    );
+    assert!(settled.paused);
+    assert!(finite_cohort_done_with_terminal(
+        Some(80_000_000),
+        Some(boundary.host),
+        Some(boundary.host),
+        &finite.states,
+        &finite.group,
+        false,
+        false,
+        bgm,
+        Some(settled)
     ));
 }

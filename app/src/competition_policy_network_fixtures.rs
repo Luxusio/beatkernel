@@ -252,7 +252,7 @@ fn selected_solo_policy_mismatch_precedes_network_setup() {
     };
     assert_eq!(
         error.to_string(),
-        "policy-aware competition requires a pristine matching judge"
+        "selected competition requires a pristine matching judge"
     );
     assert!(judge.effective_song_time().is_none());
 }
