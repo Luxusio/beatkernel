@@ -258,6 +258,24 @@ stub 경로이므로 실제 OS 실행·링크·물리 장치 증거로 세지 �
 원본 입력 분류와 finite 완료 연결은 `30fef2c`, native 실행 파일 연결은
 `3a107da`에 커밋했다. 후속 CLI 집중 검사도 실제 9개 통과, 실패 0이다.
 
+후속 `development-7`에서는 context chronology 오류가 재현되지 않았고
+종료 진단 목록도 비어 있었다. 한 번의 성공으로 앞선 실제 오류가 해결됐다고
+판단하지 않는다. Worklet이 이미 제공하는 terminal 진단을 읽기 전용으로
+수집하도록 runner를 보강했다. local discovery는 접힌 Local players
+details를 먼저 실제 summary 클릭으로 펼치도록 바로잡았다.
+`development-8`은 local section 완료까지 도달했지만 원본 local 입력
+acquisition 검사에서 실패했다. 입력을 시작 표시 직후 보내는 대신 실제
+관측 song 200ms 이후 보낸 `development-9`에서는 local keyboard acquisition은
+통과했고 touch acquisition은 실패했다. touch를 보내기 전에 실제 canvas를
+viewport에 스크롤하고, 실제 접촉 좌표가 viewport 내부인지 확인하는
+`development-10`은 exit0으로 완료했다. cold refusal, 네 배속의 실제 원본
+입력·판정·PCM·capture·drawn, saved-record, 1ns interval 완료, 다른 배속의
+saved replay 원본 hash 보존, opponent 허용·거절, keyboard/touch local capture,
+Stop/retry, 390/768/1200px 화면 및 strict console/network까지 14개 검사가
+모두 통과했고 unmet은 비어 있다. 이는 coordinator 개발 검증이며 독립
+qa-browser의 완료 증거를 대체하지 않는다.
+판정·provenance·실제 touch capture 조건은 완화하지 않는다.
+
 ## 남은 범위
 
 이 문서는 개발 중간 증거다. 현재 태스크의 독립 code/security review와
