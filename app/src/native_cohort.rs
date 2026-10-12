@@ -1189,11 +1189,15 @@ fn run_cohort_timed<
     } else {
         None
     };
-    if T::AUDIO && config.end_song.is_some() && session.end.is_some()
-        && initial_rendered.is_some_and(|report| report.frames > 0
-            && report.playback_end_physical_frame.is_some())
+    if T::AUDIO
+        && config.end_song.is_some()
+        && session.end.is_some()
+        && initial_rendered
+            .is_some_and(|report| report.frames > 0 && report.playback_end_physical_frame.is_some())
     {
-        session.pause.scheduling_point(initial_rendered.expect("rendered endpoint"))?;
+        session
+            .pause
+            .scheduling_point(initial_rendered.expect("rendered endpoint"))?;
         session.group.seal_gameplay_audio();
     }
     let mut committed = None;
@@ -1225,8 +1229,12 @@ fn run_cohort_timed<
             if let Some(boundary) = session.discipline.end(device, end, rendered)? {
                 end_boundary = Some(boundary);
             }
-            if let Some(report) = rendered.filter(|report| T::AUDIO && config.end_song.is_some()
-                && report.frames > 0 && report.playback_end_physical_frame.is_some()) {
+            if let Some(report) = rendered.filter(|report| {
+                T::AUDIO
+                    && config.end_song.is_some()
+                    && report.frames > 0
+                    && report.playback_end_physical_frame.is_some()
+            }) {
                 // Validate the source grid even when the target/native crossing
                 // lags this render. Delayed originals still judge and capture.
                 session.pause.scheduling_point(report)?;
@@ -2554,6 +2562,24 @@ fn service_audio_cohort<
         else {
             break;
         };
+        if prepared.is_before_origin() {
+            let count = session
+                .pre_origin_inputs
+                .checked_add(1)
+                .ok_or("cohort pre-origin input counter overflow")?;
+            session
+                .discipline
+                .audio_mut()
+                .expect("audio timing")
+                .authority_mut()
+                .commit_discarded_input(prepared)?;
+            session
+                .merger
+                .pop_ready(prefix)?
+                .expect("prepared pre-origin input");
+            *session.pre_origin_inputs = count;
+            continue;
+        }
         // The render block can end exactly on the next pass boundary before
         // the audio owner emits its next-block receipt. Keep equal/later input
         // queued until that actual receipt authorizes the new attempt. Once

@@ -81,6 +81,201 @@ fn authority() -> AudioAuthority {
     )
     .unwrap()
 }
+
+fn shifted_authority() -> AudioAuthority {
+    AudioAuthority::new(
+        AudioAuthorityConfig {
+            history_capacity: 16,
+            max_observation_age: Duration::from_nanos(30_000_000_000),
+            input_extrapolation: ExtrapolationPolicy::Bounded {
+                before: Duration::from_nanos(20_000_000),
+                after: Duration::ZERO,
+            },
+            max_input_ahead: Duration::ZERO,
+        },
+        AudioAuthorityEpoch {
+            id: 1,
+            stream_origin: raw(0),
+            logical_origin: logical(0),
+            host_domain: host(0).domain,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn audio_origin_discard_drains_then_exact_origin_preroll_and_postorigin_hit_keep_original_evidence()
+{
+    for s in [speed(1, 1), speed(2, 1)] {
+        let (mut game, _) = StepGameplay::new_audio_section_with_speed(
+            notes(),
+            config(3_000_000),
+            bindings(None),
+            Timestamp::ZERO,
+            None,
+            BmsInputMode::ButtonOnly,
+            shifted_authority(),
+            s,
+        )
+        .unwrap();
+        game.configure_capture(fixture::limits(), 0).unwrap();
+        game.activate_audio().unwrap();
+        for (source, target) in [(0, 10_000_000), (12_000_000, 22_000_000)] {
+            game.observe_audio_output(
+                1,
+                ClockPair {
+                    source: raw(source),
+                    target: host(target),
+                },
+            )
+            .unwrap();
+        }
+        game.record_audio_prefix(host(22_000_000)).unwrap();
+        let mut merger = InputMerger::new(host(0).domain, host(0), vec![DeviceId(9)], 16).unwrap();
+        let hit = if s == speed(1, 1) {
+            14_000_000
+        } else {
+            13_500_000
+        };
+        for (seq, elapsed, key, state) in [
+            (0, 9_000_000, 7, ButtonState::Down),
+            (1, 9_500_000, 7, ButtonState::Up),
+            (2, 10_000_000, 8, ButtonState::Up),
+            (3, hit, 7, ButtonState::Down),
+        ] {
+            merger
+                .admit(input(elapsed, 9, key, seq, state), host(22_000_000))
+                .unwrap();
+        }
+        let exact = game
+            .process_next_audio_input(&mut merger, host(22_000_000), raw(25_000_000), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(game.pre_origin_inputs(), 2);
+        assert_eq!(
+            exact.song_time.as_nanos(),
+            -3_000_000 * s.rate().numerator()
+        );
+        assert_eq!(
+            exact.input.as_ref().unwrap().meta().original_clock_point,
+            Some(host(10_000_000))
+        );
+        assert_eq!(exact.input.as_ref().unwrap().meta().sequence, 2);
+        assert!(exact.judge_events.is_empty());
+        let accepted = game
+            .process_next_audio_input(&mut merger, host(22_000_000), raw(25_000_000), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted.song_time.as_nanos(), 1_000_000);
+        assert_eq!(accepted.audio_at, raw(25_000_000));
+        assert_eq!(
+            accepted.input.as_ref().unwrap().meta().original_clock_point,
+            Some(host(hit))
+        );
+        assert_eq!(accepted.input.as_ref().unwrap().meta().sequence, 3);
+        assert_eq!(
+            accepted.judge_events.len(),
+            1,
+            "discarded Down must not leave a held key"
+        );
+        assert_eq!(game.score().hits, 1);
+        assert_eq!(merger.pending(), 0);
+        assert_eq!(game.pre_origin_inputs(), 2);
+        game.fail();
+        let bytes = game.take_replay().unwrap().unwrap();
+        let file = decode_replay(&bytes, fixture::limits()).unwrap();
+        let inputs: Vec<_> = file
+            .records
+            .iter()
+            .filter_map(|r| match &r.operation {
+                ReplayOperation::Input(saved) => Some(saved.physical.meta().sequence),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inputs, vec![2, 3], "discarded inputs never enter capture");
+    }
+}
+
+#[test]
+fn two_and_four_local_members_drain_negative_origin_inputs_before_routing_valid_member() {
+    for count in [2usize, 4] {
+        let members: Vec<_> = (1..=count)
+            .map(|id| (PlayerId(id as u32), Some(DeviceId(id as u64))))
+            .collect();
+        let maps = members
+            .iter()
+            .map(|(_, device)| bindings(*device))
+            .collect();
+        let (mut game, _) = StepLocalGameplay::new_audio_section_with_speed(
+            notes(),
+            config(3_000_000),
+            ResolvedInputPlan::new(members).unwrap(),
+            maps,
+            Timestamp::ZERO,
+            None,
+            BmsInputMode::ButtonOnly,
+            shifted_authority(),
+            speed(2, 1),
+        )
+        .unwrap();
+        game.activate_audio().unwrap();
+        for (source, target) in [(0, 10_000_000), (12_000_000, 22_000_000)] {
+            game.observe_audio_output(
+                1,
+                ClockPair {
+                    source: raw(source),
+                    target: host(target),
+                },
+            )
+            .unwrap();
+        }
+        game.record_audio_prefix(host(22_000_000)).unwrap();
+        let devices = (1..=count).map(|id| DeviceId(id as u64)).collect();
+        let mut merger = InputMerger::new(host(0).domain, host(0), devices, 16).unwrap();
+        for id in 1..=count {
+            merger
+                .admit(
+                    input(9_000_000, id as u64, 7, 0, ButtonState::Down),
+                    host(22_000_000),
+                )
+                .unwrap();
+        }
+        merger
+            .admit(
+                input(13_500_000, count as u64, 7, 1, ButtonState::Down),
+                host(22_000_000),
+            )
+            .unwrap();
+        let Some(InputResult::Processed(reports)) = game
+            .process_next_audio_input(&mut merger, host(22_000_000), raw(25_000_000), None)
+            .unwrap()
+        else {
+            panic!("valid member input must follow discarded prefix in same call")
+        };
+        assert_eq!(game.pre_origin_inputs(), count as u64);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].player, PlayerId(count as u32));
+        assert_eq!(reports[0].report.song_time.as_nanos(), 1_000_000);
+        assert_eq!(reports[0].report.audio_at, raw(25_000_000));
+        assert_eq!(
+            reports[0]
+                .report
+                .input
+                .as_ref()
+                .unwrap()
+                .meta()
+                .original_clock_point,
+            Some(host(13_500_000))
+        );
+        assert_eq!(merger.pending(), 0);
+        for id in 1..=count {
+            assert_eq!(
+                game.score(PlayerId(id as u32)).unwrap().hits,
+                u64::from(id == count)
+            );
+        }
+    }
+}
 fn bindings(device: Option<DeviceId>) -> BindingMap {
     BindingMap::from_bindings(
         [0x11u32, 0x12]
@@ -785,16 +980,21 @@ fn legacy_activation_retains_selected_rate_and_exact_preroll_instead_of_resettin
 }
 
 #[test]
-fn delayed_pre_end_input_after_unaligned_source_marker_keeps_judgment_capture_and_mine_without_new_audio() {
+fn delayed_pre_end_input_after_unaligned_source_marker_keeps_judgment_capture_and_mine_without_new_audio(
+) {
     let chart = "#BPM 60000\n#WAV00 blast.wav\n#WAV01 key.wav\n#00011:00010000\n#00012:00000001\n#000D1:00010000\n";
-    for (n, d, first, second, endpoint) in [(1, 2, 5_000_000, 9_000_000, 11),
-        (1, 1, 4_000_000, 6_000_000, 7), (2, 1, 3_500_000, 4_500_000, 5),
-        (3, 2, 3_666_667, 5_000_000, 6)] {
+    for (n, d, first, second, endpoint) in [
+        (1, 2, 5_000_000, 9_000_000, 11),
+        (1, 1, 4_000_000, 6_000_000, 7),
+        (2, 1, 3_500_000, 4_500_000, 5),
+        (3, 2, 3_666_667, 5_000_000, 6),
+    ] {
         let p = fixture::prepared(chart, 1000, &[(0, &[0.5, -0.5]), (1, &[0.25])]);
         let source = p.source.clone();
         let c = config(3_000_000);
         let (mut game, bank) = solo(p, c, Some(4_000_000), speed(n, d));
-        game.configure_capture(fixture::limits(), 0).unwrap(); game.activate_audio().unwrap();
+        game.configure_capture(fixture::limits(), 0).unwrap();
+        game.activate_audio().unwrap();
         let (mut producer, mut mixer) = output(bank, c, Some(endpoint));
         let prefix = deliver(&mut game, &mut producer);
         // A normal callback overshoots every endpoint; source playback has really ended.
@@ -808,27 +1008,46 @@ fn delayed_pre_end_input_after_unaligned_source_marker_keeps_judgment_capture_an
         observe_pair(&mut game, acquired);
         game.record_audio_prefix(host(acquired)).unwrap();
         let mut merger = InputMerger::new(host(0).domain, host(0), vec![DeviceId(9)], 16).unwrap();
-        for (sequence, elapsed, key, state) in [(0, first, 7, ButtonState::Down),
-            (1, first + 1, 7, ButtonState::Up), (2, second, 8, ButtonState::Down),
-            (3, second + 1, 8, ButtonState::Up)] {
-            merger.admit(input(elapsed, 9, key, sequence, state), host(acquired)).unwrap();
-            let report = game.process_next_audio_input(&mut merger, host(acquired), raw(13_000_000), None).unwrap().unwrap();
+        for (sequence, elapsed, key, state) in [
+            (0, first, 7, ButtonState::Down),
+            (1, first + 1, 7, ButtonState::Up),
+            (2, second, 8, ButtonState::Down),
+            (3, second + 1, 8, ButtonState::Up),
+        ] {
+            merger
+                .admit(input(elapsed, 9, key, sequence, state), host(acquired))
+                .unwrap();
+            let report = game
+                .process_next_audio_input(&mut merger, host(acquired), raw(13_000_000), None)
+                .unwrap()
+                .unwrap();
             assert_eq!(report.audio_at, raw(13_000_000));
-            assert_eq!(report.input.as_ref().unwrap().meta().original_clock_point, Some(host(elapsed)));
-            assert!(report.audio_commands.is_empty()); assert!(report.audio_failures.is_empty());
+            assert_eq!(
+                report.input.as_ref().unwrap().meta().original_clock_point,
+                Some(host(elapsed))
+            );
+            assert!(report.audio_commands.is_empty());
+            assert!(report.audio_failures.is_empty());
             if sequence == 0 {
                 assert_eq!(report.song_time.as_nanos(), 1_000_000);
                 assert_eq!(report.hazard_events.len(), 1);
                 assert_eq!(report.hazard_events[0].at.as_nanos(), 1_000_000);
-                assert_eq!(report.hazard_events[0].outcome, beatkernel::judge::HazardOutcome::Triggered);
+                assert_eq!(
+                    report.hazard_events[0].outcome,
+                    beatkernel::judge::HazardOutcome::Triggered
+                );
             }
         }
-        assert_eq!(game.score().hits, 2); assert_eq!(game.score().misses, 0);
+        assert_eq!(game.score().hits, 2);
+        assert_eq!(game.score().misses, 0);
         assert_eq!(game.mine_damage().half_percent_damage, 1);
         assert_eq!(game.gauge().snapshot().level_units, 21_500_000);
         assert!(deliver(&mut game, &mut producer).is_empty());
         assert!(!game.observe_completion(None, Some(raw(acquired))).unwrap());
-        let final_report = game.advance_audio_frontier(&mut merger, host(acquired), raw(13_000_000)).unwrap().unwrap();
+        let final_report = game
+            .advance_audio_frontier(&mut merger, host(acquired), raw(13_000_000))
+            .unwrap()
+            .unwrap();
         assert_eq!(final_report.song_time.as_nanos(), 4_000_000);
         assert!(final_report.audio_commands.is_empty());
         assert!(deliver(&mut game, &mut producer).is_empty());
@@ -840,23 +1059,39 @@ fn delayed_pre_end_input_after_unaligned_source_marker_keeps_judgment_capture_an
         game.fail();
         let bytes = game.take_replay().unwrap().unwrap();
         let file = decode_replay(&bytes, fixture::limits()).unwrap();
-        let first_up_song = match (n, d) { (1, 2) => 1_000_000, (1, 1) => 1_000_001, _ => 1_000_002 };
-        let second_up_song = match (n, d) { (1, 2) => 3_000_000, (2, 1) => 3_000_002, _ => 3_000_001 };
-        let expected = [(1_000_000, Some((first, ButtonState::Down))),
+        let first_up_song = match (n, d) {
+            (1, 2) => 1_000_000,
+            (1, 1) => 1_000_001,
+            _ => 1_000_002,
+        };
+        let second_up_song = match (n, d) {
+            (1, 2) => 3_000_000,
+            (2, 1) => 3_000_002,
+            _ => 3_000_001,
+        };
+        let expected = [
+            (1_000_000, Some((first, ButtonState::Down))),
             (first_up_song, Some((first + 1, ButtonState::Up))),
             (3_000_000, Some((second, ButtonState::Down))),
             (second_up_song, Some((second + 1, ButtonState::Up))),
-            (4_000_000, None), (4_000_000, None)];
+            (4_000_000, None),
+            (4_000_000, None),
+        ];
         assert_eq!(file.records.len(), expected.len());
         for (ordinal, (record, (song, physical))) in file.records.iter().zip(expected).enumerate() {
             assert_eq!(record.ordinal, ordinal as u64);
             assert_eq!(record.song_time.as_nanos(), song);
             match (&record.operation, physical) {
                 (ReplayOperation::Input(saved), Some((elapsed, state))) => {
-                    assert_eq!(saved.physical.meta().original_clock_point, Some(host(elapsed)));
+                    assert_eq!(
+                        saved.physical.meta().original_clock_point,
+                        Some(host(elapsed))
+                    );
                     assert_eq!(saved.physical.meta().source, DeviceId(9));
                     assert_eq!(saved.physical.meta().sequence, ordinal as u64);
-                    let PhysicalInputEvent::Button(button) = &saved.physical else { panic!("expected original button"); };
+                    let PhysicalInputEvent::Button(button) = &saved.physical else {
+                        panic!("expected original button");
+                    };
                     assert_eq!(button.state, state);
                 }
                 (ReplayOperation::Advance, None) => {}
@@ -864,10 +1099,17 @@ fn delayed_pre_end_input_after_unaligned_source_marker_keeps_judgment_capture_an
             }
         }
         let mut replay = reconstruct_section(&source, file, fixture::limits()).unwrap();
-        replay.seek_cursor(6).unwrap(); assert_eq!(replay.engine().stable_hash().unwrap(), hash);
+        replay.seek_cursor(6).unwrap();
+        assert_eq!(replay.engine().stable_hash().unwrap(), hash);
         let after = mixer.render(&mut [0.0; 1]).unwrap();
-        assert_eq!(after.counters.commands_consumed, marker.counters.commands_consumed);
-        assert_eq!(after.counters.commands_applied, marker.counters.commands_applied);
+        assert_eq!(
+            after.counters.commands_consumed,
+            marker.counters.commands_consumed
+        );
+        assert_eq!(
+            after.counters.commands_applied,
+            marker.counters.commands_applied
+        );
         assert_eq!(after.pending_commands, 0);
     }
 }
@@ -875,11 +1117,18 @@ fn delayed_pre_end_input_after_unaligned_source_marker_keeps_judgment_capture_an
 #[test]
 fn delayed_local_pre_end_events_after_source_seal_preserve_all_members_and_exact_prior_credits() {
     for count in [2, 4] {
-        for (n, d, first, second, endpoint) in [(1, 2, 5_000_000, 9_000_000, 11),
-            (1, 1, 4_000_000, 6_000_000, 7), (2, 1, 3_500_000, 4_500_000, 5),
-            (3, 2, 3_666_667, 5_000_000, 6)] {
-            let c = config(3_000_000); let (mut game, bank) = local(count, c, Some(4_000_000), speed(n, d));
-            for id in 1..=count { game.configure_capture(PlayerId(id as u32), fixture::limits(), 0).unwrap(); }
+        for (n, d, first, second, endpoint) in [
+            (1, 2, 5_000_000, 9_000_000, 11),
+            (1, 1, 4_000_000, 6_000_000, 7),
+            (2, 1, 3_500_000, 4_500_000, 5),
+            (3, 2, 3_666_667, 5_000_000, 6),
+        ] {
+            let c = config(3_000_000);
+            let (mut game, bank) = local(count, c, Some(4_000_000), speed(n, d));
+            for id in 1..=count {
+                game.configure_capture(PlayerId(id as u32), fixture::limits(), 0)
+                    .unwrap();
+            }
             game.activate_audio().unwrap();
             let (mut producer, mut mixer) = output(bank, c, Some(endpoint));
             let prefix = deliver_local(&mut game, &mut producer);
@@ -887,36 +1136,77 @@ fn delayed_local_pre_end_events_after_source_seal_preserve_all_members_and_exact
             game.admit_output_evidence(Some(marker), None).unwrap();
             assert_eq!(marker.counters.commands_applied as usize, prefix.len());
             let acquired = endpoint as i64 * 1_000_000;
-            for elapsed in [0, acquired] { game.observe_audio_output(1, ClockPair { source: raw(elapsed), target: host(elapsed) }).unwrap(); }
+            for elapsed in [0, acquired] {
+                game.observe_audio_output(
+                    1,
+                    ClockPair {
+                        source: raw(elapsed),
+                        target: host(elapsed),
+                    },
+                )
+                .unwrap();
+            }
             game.record_audio_prefix(host(acquired)).unwrap();
-            let mut merger = InputMerger::new(host(0).domain, host(0), (1..=count).map(|id| DeviceId(id as u64)).collect(), 64).unwrap();
+            let mut merger = InputMerger::new(
+                host(0).domain,
+                host(0),
+                (1..=count).map(|id| DeviceId(id as u64)).collect(),
+                64,
+            )
+            .unwrap();
             // Admit the complete late-acquired prefix before processing, preserving global chronological order.
             for id in 1..=count {
-                for (sequence, elapsed, key, state) in [(0, first, 7, ButtonState::Down),
-                    (1, first + 1, 7, ButtonState::Up), (2, second, 8, ButtonState::Down),
-                    (3, second + 1, 8, ButtonState::Up)] {
-                    merger.admit(input(elapsed, id as u64, key, sequence, state), host(acquired)).unwrap();
+                for (sequence, elapsed, key, state) in [
+                    (0, first, 7, ButtonState::Down),
+                    (1, first + 1, 7, ButtonState::Up),
+                    (2, second, 8, ButtonState::Down),
+                    (3, second + 1, 8, ButtonState::Up),
+                ] {
+                    merger
+                        .admit(
+                            input(elapsed, id as u64, key, sequence, state),
+                            host(acquired),
+                        )
+                        .unwrap();
                 }
             }
             for _ in 0..count * 4 {
-                let Some(InputResult::Processed(reports)) = game.process_next_audio_input(&mut merger, host(acquired), raw(13_000_000), None).unwrap() else { panic!("late member input missing"); };
+                let Some(InputResult::Processed(reports)) = game
+                    .process_next_audio_input(&mut merger, host(acquired), raw(13_000_000), None)
+                    .unwrap()
+                else {
+                    panic!("late member input missing");
+                };
                 assert_eq!(reports.len(), 1);
                 assert!(reports[0].report.audio_commands.is_empty());
                 assert!(reports[0].report.audio_failures.is_empty());
                 assert_eq!(reports[0].report.audio_at, raw(13_000_000));
-                assert_eq!(reports[0].report.input.as_ref().unwrap().meta().source.0, u64::from(reports[0].player.0));
+                assert_eq!(
+                    reports[0].report.input.as_ref().unwrap().meta().source.0,
+                    u64::from(reports[0].player.0)
+                );
             }
             assert!(deliver_local(&mut game, &mut producer).is_empty());
             assert!(!game.observe_completion(None, Some(raw(acquired))).unwrap());
-            let reports = game.advance_audio_frontier(&mut merger, host(acquired), raw(13_000_000)).unwrap().unwrap();
+            let reports = game
+                .advance_audio_frontier(&mut merger, host(acquired), raw(13_000_000))
+                .unwrap()
+                .unwrap();
             assert_eq!(reports.len(), count);
-            assert!(reports.iter().all(|r| r.report.song_time.as_nanos() == 4_000_000 && r.report.audio_commands.is_empty()));
+            assert!(reports
+                .iter()
+                .all(|r| r.report.song_time.as_nanos() == 4_000_000
+                    && r.report.audio_commands.is_empty()));
             assert!(game.observe_completion(None, Some(raw(acquired))).unwrap());
             let mut hashes = Vec::new();
             for id in 1..=count {
                 let player = PlayerId(id as u32);
-                assert_eq!(game.score(player).unwrap().hits, 2); assert_eq!(game.score(player).unwrap().misses, 0);
-                assert_eq!(game.gauge(player).unwrap().snapshot().level_units, 22_000_000);
+                assert_eq!(game.score(player).unwrap().hits, 2);
+                assert_eq!(game.score(player).unwrap().misses, 0);
+                assert_eq!(
+                    game.gauge(player).unwrap().snapshot().level_units,
+                    22_000_000
+                );
                 assert!(game.completed_result(player).unwrap().is_some());
                 hashes.push(game.judge(player).unwrap().stable_hash().unwrap());
             }
@@ -928,35 +1218,61 @@ fn delayed_local_pre_end_events_after_source_seal_preserve_all_members_and_exact
             for id in 1..=count {
                 let bytes = game.take_replay(PlayerId(id as u32)).unwrap().unwrap();
                 let file = decode_replay(&bytes, fixture::limits()).unwrap();
-                let first_up_song = match (n, d) { (1, 2) => 1_000_000, (1, 1) => 1_000_001, _ => 1_000_002 };
-                let second_up_song = match (n, d) { (1, 2) => 3_000_000, (2, 1) => 3_000_002, _ => 3_000_001 };
-                let expected = [(1_000_000, Some((first, ButtonState::Down))),
+                let first_up_song = match (n, d) {
+                    (1, 2) => 1_000_000,
+                    (1, 1) => 1_000_001,
+                    _ => 1_000_002,
+                };
+                let second_up_song = match (n, d) {
+                    (1, 2) => 3_000_000,
+                    (2, 1) => 3_000_002,
+                    _ => 3_000_001,
+                };
+                let expected = [
+                    (1_000_000, Some((first, ButtonState::Down))),
                     (first_up_song, Some((first + 1, ButtonState::Up))),
                     (3_000_000, Some((second, ButtonState::Down))),
                     (second_up_song, Some((second + 1, ButtonState::Up))),
-                    (4_000_000, None), (4_000_000, None)];
+                    (4_000_000, None),
+                    (4_000_000, None),
+                ];
                 assert_eq!(file.records.len(), expected.len());
-                for (ordinal, (record, (song, physical))) in file.records.iter().zip(expected).enumerate() {
+                for (ordinal, (record, (song, physical))) in
+                    file.records.iter().zip(expected).enumerate()
+                {
                     assert_eq!(record.ordinal, ordinal as u64);
                     assert_eq!(record.song_time.as_nanos(), song);
                     match (&record.operation, physical) {
                         (ReplayOperation::Input(saved), Some((elapsed, state))) => {
-                            assert_eq!(saved.physical.meta().original_clock_point, Some(host(elapsed)));
+                            assert_eq!(
+                                saved.physical.meta().original_clock_point,
+                                Some(host(elapsed))
+                            );
                             assert_eq!(saved.physical.meta().source, DeviceId(id as u64));
                             assert_eq!(saved.physical.meta().sequence, ordinal as u64);
-                            let PhysicalInputEvent::Button(button) = &saved.physical else { panic!("expected original member button"); };
+                            let PhysicalInputEvent::Button(button) = &saved.physical else {
+                                panic!("expected original member button");
+                            };
                             assert_eq!(button.state, state);
                         }
                         (ReplayOperation::Advance, None) => {}
                         _ => panic!("unexpected member captured operation at ordinal {ordinal}"),
                     }
                 }
-                let mut replay = reconstruct_section(&notes().source, file, fixture::limits()).unwrap();
-                replay.seek_cursor(6).unwrap(); assert_eq!(replay.engine().stable_hash().unwrap(), hashes[id - 1]);
+                let mut replay =
+                    reconstruct_section(&notes().source, file, fixture::limits()).unwrap();
+                replay.seek_cursor(6).unwrap();
+                assert_eq!(replay.engine().stable_hash().unwrap(), hashes[id - 1]);
             }
             let after = mixer.render(&mut [0.0; 1]).unwrap();
-            assert_eq!(after.counters.commands_applied, marker.counters.commands_applied);
-            assert_eq!(after.counters.commands_consumed, marker.counters.commands_consumed);
+            assert_eq!(
+                after.counters.commands_applied,
+                marker.counters.commands_applied
+            );
+            assert_eq!(
+                after.counters.commands_consumed,
+                marker.counters.commands_consumed
+            );
             assert_eq!(after.pending_commands, 0);
         }
     }
@@ -972,12 +1288,24 @@ fn genuine_pre_endpoint_render_keeps_sound_admission_and_wrong_grid_report_canno
     let early = mixer.render(&mut [0.0; 1]).unwrap();
     assert_eq!(early.playback_end_physical_frame, None);
     game.admit_output_evidence(Some(early), None).unwrap();
-    observe_pair(&mut game, 4_000_000); game.record_audio_prefix(host(4_000_000)).unwrap();
+    observe_pair(&mut game, 4_000_000);
+    game.record_audio_prefix(host(4_000_000)).unwrap();
     let mut merger = InputMerger::new(host(0).domain, host(0), vec![DeviceId(9)], 16).unwrap();
-    merger.admit(input(3_500_000, 9, 7, 0, ButtonState::Down), host(4_000_000)).unwrap();
-    let hit = game.process_next_audio_input(&mut merger, host(4_000_000), raw(4_000_000), None).unwrap().unwrap();
+    merger
+        .admit(
+            input(3_500_000, 9, 7, 0, ButtonState::Down),
+            host(4_000_000),
+        )
+        .unwrap();
+    let hit = game
+        .process_next_audio_input(&mut merger, host(4_000_000), raw(4_000_000), None)
+        .unwrap()
+        .unwrap();
     assert_eq!(hit.song_time.as_nanos(), 1_000_000);
-    assert!(hit.audio_commands.iter().any(|c| matches!(c, AudioCommand::Play { at, .. } if *at == raw(4_000_000).timestamp)));
+    assert!(hit
+        .audio_commands
+        .iter()
+        .any(|c| matches!(c, AudioCommand::Play { at, .. } if *at == raw(4_000_000).timestamp)));
     assert!(!game.observe_completion(None, Some(raw(1_000_000))).unwrap());
 
     // A genuine report from a different immutable grid remains invalid evidence.
@@ -986,8 +1314,140 @@ fn genuine_pre_endpoint_render_keeps_sound_admission_and_wrong_grid_report_canno
     let (_producer, mut wrong_mixer) = output(bank, c, Some(4));
     let wrong_marker = wrong_mixer.render(&mut [0.0; 13]).unwrap();
     assert_eq!(wrong_marker.playback_end_physical_frame, Some(4));
-    assert!(rejected.admit_output_evidence(Some(wrong_marker), Some(raw(5_000_000))).is_err());
+    assert!(rejected
+        .admit_output_evidence(Some(wrong_marker), Some(raw(5_000_000)))
+        .is_err());
     assert!(rejected.completed_result().is_none());
-    assert_eq!(rejected.score().hits, 0); assert_eq!(rejected.score().misses, 0);
+    assert_eq!(rejected.score().hits, 0);
+    assert_eq!(rejected.score().misses, 0);
     assert!(rejected.observe_completion(None, None).is_err());
+}
+
+fn terminal_step_fixture() -> (
+    StepGameplay,
+    CommandProducer,
+    Mixer,
+    beatkernel::audio::RenderReport,
+) {
+    let c = config(3_000_000);
+    let (mut game, bank) = solo(notes(), c, Some(4_000_000), speed(2, 1));
+    game.configure_capture(fixture::limits(), 0).unwrap();
+    game.activate_audio().unwrap();
+    let (mut producer, mut mixer) = output(bank, c, Some(5));
+    deliver(&mut game, &mut producer);
+    let prior = mixer.render(&mut [0.0; 4]).unwrap();
+    game.admit_output_evidence(Some(prior), None).unwrap();
+    observe_pair(&mut game, 5_000_000);
+    game.record_audio_prefix(host(5_000_000)).unwrap();
+    let mut merger = InputMerger::new(host(0).domain, host(0), vec![DeviceId(9)], 16).unwrap();
+    merger
+        .admit(
+            input(3_500_000, 9, 7, 0, ButtonState::Down),
+            host(5_000_000),
+        )
+        .unwrap();
+    // Stale report was observed before the real terminal callback. The input
+    // publisher deliberately runs after that callback in the queue-race case.
+    let marker = mixer.render(&mut [0.0; 9]).unwrap();
+    let scheduling = raw(4_000_000);
+    let hit = game
+        .process_next_audio_input(&mut merger, host(5_000_000), scheduling, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(hit.song_time.as_nanos(), 1_000_000);
+    assert_eq!(hit.audio_at, scheduling);
+    assert_eq!(
+        hit.input.as_ref().unwrap().meta().original_clock_point,
+        Some(host(3_500_000))
+    );
+    assert_eq!(hit.judge_events.len(), 1);
+    assert!(hit
+        .audio_commands
+        .iter()
+        .any(|c| matches!(c, AudioCommand::Play { at, .. } if *at == scheduling.timestamp)));
+    assert_eq!(deliver(&mut game, &mut producer).len(), 1);
+    assert_eq!(marker.playback_end_physical_frame, Some(5));
+    assert_eq!(marker.pending_commands, 0);
+    assert!(!game
+        .observe_completion(Some(marker), Some(raw(5_000_000)))
+        .unwrap());
+    game.advance_audio_frontier(&mut merger, host(5_000_000), raw(13_000_000))
+        .unwrap();
+    assert!(deliver(&mut game, &mut producer).is_empty());
+    assert!(!game.observe_completion(None, Some(raw(5_000_000))).unwrap());
+    assert!(game.completed_result().is_none());
+    (game, producer, mixer, marker)
+}
+
+#[test]
+fn real_step_terminal_queue_retirement_preserves_original_replay() {
+    {
+        let (mut game, _producer, mut mixer, marker) = terminal_step_fixture();
+        let mut silence = [1.0; 1];
+        let settled = mixer.render(&mut silence).unwrap();
+        assert_eq!(silence, [0.0]);
+        assert_eq!(settled.counters.commands_consumed, 2);
+        assert_eq!(settled.counters.commands_applied, 1);
+        assert_eq!(settled.counters.commands_expired, 1);
+        assert_eq!(settled.pending_commands, 0);
+        assert_eq!(settled.song_position, marker.song_position);
+        assert_eq!(settled.active_voices, marker.active_voices);
+        assert!(game
+            .observe_completion(Some(settled), Some(raw(5_000_000)))
+            .unwrap());
+        assert_eq!(game.score().hits, 1);
+        assert_eq!(game.score().misses, 1);
+        let hash = game.judge().stable_hash().unwrap();
+        game.fail();
+        let bytes = game.take_replay().unwrap().unwrap();
+        let file = decode_replay(&bytes, fixture::limits()).unwrap();
+        assert_eq!(encode_replay(&file, fixture::limits()).unwrap(), bytes);
+        let saved = file
+            .records
+            .iter()
+            .find_map(|r| match &r.operation {
+                ReplayOperation::Input(i) => Some((r, i)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(saved.0.song_time.as_nanos(), 1_000_000);
+        assert_eq!(
+            saved.1.physical.meta().original_clock_point,
+            Some(host(3_500_000))
+        );
+        let rebuilt = reconstruct_section(&notes().source, file, fixture::limits()).unwrap();
+        assert_eq!(rebuilt.engine().stable_hash().unwrap(), hash);
+        let mut gauge = beatkernel_bms_runtime::gauge::BmsGauge::default();
+        gauge.observe(rebuilt.results(), &[]).unwrap();
+        assert_eq!(&gauge, game.gauge());
+    }
+}
+
+#[test]
+fn step_rejects_forged_terminal_retirement_and_changes_to_frozen_state() {
+    for case in 0..9 {
+        let (mut game, _producer, mut mixer, _) = terminal_step_fixture();
+        let mut forged = mixer.render(&mut [0.0; 1]).unwrap();
+        match case {
+            0 => forged.counters.commands_expired = 0,
+            1 => {
+                forged.counters.commands_consumed += 1;
+                forged.counters.commands_expired += 1;
+            }
+            2 => forged.counters.commands_applied += 1,
+            3 => forged.playback_end_physical_frame = None,
+            4 => forged.paused = false,
+            5 => forged.song_position = Timestamp::from_nanos(forged.song_position.as_nanos() + 1),
+            6 => forged.active_voices += 1,
+            7 => forged.counters.commands_consumed = u64::MAX,
+            8 => forged.counters.commands_expired = u64::MAX,
+            _ => unreachable!(),
+        }
+        assert!(
+            game.observe_completion(Some(forged), Some(raw(5_000_000)))
+                .is_err(),
+            "case {case}"
+        );
+        assert!(game.completed_result().is_none());
+    }
 }

@@ -181,14 +181,21 @@ impl FiniteReplayCompletion {
         }
         let admitted = u64::try_from(feed.total_admitted)
             .map_err(|_| CompletionError("finite replay admission count overflow"))?;
-        if report.counters.commands_consumed != admitted
-            || report.counters.commands_applied != admitted
+        if report.counters.commands_consumed > admitted
+            || report
+                .counters
+                .settled_commands()
+                .is_none_or(|settled| settled > admitted)
         {
             return Err(CompletionError(
                 "finite replay endpoint omitted or added planned execution",
             ));
         }
-        if feed.outstanding != 0 {
+        if feed.outstanding != 0
+            || report.pending_commands != 0
+            || report.counters.commands_consumed != admitted
+            || report.counters.settled_commands() != Some(admitted)
+        {
             return Ok(false);
         }
         if let Some(target) = &self.target {
@@ -285,12 +292,7 @@ impl FiniteReplayCompletion {
                     ));
                 }
                 if old.playback_end_physical_frame.is_some()
-                    && (report.playback_end_physical_frame != old.playback_end_physical_frame
-                        || report.song_position != old.song_position
-                        || report.active_voices != old.active_voices
-                        || report.pending_commands != old.pending_commands
-                        || counter_values(report.counters)[1..]
-                            != counter_values(old.counters)[1..])
+                    && !crate::step_gameplay::finite_settlement_progression(old, report)
                 {
                     return Err(CompletionError(
                         "finite replay state changed after endpoint",
@@ -307,19 +309,26 @@ impl FiniteReplayCompletion {
             }
         }
         let feed = feeder.report();
-        let ready = feed.remaining == 0 && feed.outstanding == 0;
+        let mut ready = feed.remaining == 0 && feed.outstanding == 0;
         let marker = report.and_then(|report| report.playback_end_physical_frame);
         if feed.remaining == 0 && marker.is_some() {
             let report = report.expect("marker belongs to report");
             let admitted = u64::try_from(feed.total_admitted)
                 .map_err(|_| CompletionError("finite replay admission count overflow"))?;
-            if report.counters.commands_consumed != admitted
-                || report.counters.commands_applied != admitted
+            if report.counters.commands_consumed > admitted
+                || report
+                    .counters
+                    .settled_commands()
+                    .is_none_or(|settled| settled > admitted)
             {
                 return Err(CompletionError(
                     "finite replay endpoint omitted or added planned execution",
                 ));
             }
+            ready = ready
+                && report.pending_commands == 0
+                && report.counters.commands_consumed == admitted
+                && report.counters.settled_commands() == Some(admitted);
         }
         let physical_presented = presented
             .map(|point| point.timestamp)

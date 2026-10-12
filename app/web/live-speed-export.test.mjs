@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createContext, SourceTextModule, runInContext } from "node:vm";
 import { pathToFileURL } from "node:url";
-import { keyboardBindingWords, encodeKeyboardEvent } from "./physical-input.mjs";
+import { keyboardBindingWords, encodeKeyboardEvent, encodeTouchEvent, touchBindingWords } from "./physical-input.mjs";
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
 
 async function packageInstance(environment, directory) {
@@ -27,9 +27,14 @@ const main = await packageInstance("BEATKERNEL_PREPARATION_PACKAGE", "./pkg/");
 const audioBindings = await packageInstance("BEATKERNEL_AUDIO_PACKAGE", "./audio-pkg/");
 const { BrowserLibrary, BrowserGame, BrowserLocalGame, BrowserReplay } = main;
 const { BrowserAudio } = audioBindings;
+assert.equal(typeof Object.getOwnPropertyDescriptor(BrowserAudio.prototype, "report_fields")?.get,
+  "function", "fresh audio WASM must declare its own report format");
 for (const name of ["new_and_speed", "new_section_and_speed", "new_physical_and_speed", "new_physical_contact_and_speed"])
   assert.equal(typeof BrowserGame[name], "function", `fresh solo export ${name} required`);
 assert.equal(typeof BrowserLocalGame.new_physical_and_speed, "function", "fresh local export required");
+for (const owner of [BrowserGame, BrowserLocalGame])
+  assert.equal(typeof Object.getOwnPropertyDescriptor(owner.prototype, "pre_origin_inputs")?.get,
+    "function", "fresh main WASM must export the actual audio-origin discard counter");
 
 const encode = text => new TextEncoder().encode(text);
 const CHART = "#BPM 120\n#RANK 2\n#WAV01 key.wav\n#00001:01\n#00011:01\n";
@@ -100,8 +105,9 @@ function audioFor(game, hz = 24000) {
   } catch (error) { audio.free(); throw error; }
 }
 function words(audio) {
-  const result = new Uint32Array(56);
-  for (let i = 0; i < 28; i++) { result[2 * i] = audio.report_word(i, false); result[2 * i + 1] = audio.report_word(i, true); }
+  assert.equal(audio.report_fields, 29, "actual current audio WASM report declaration");
+  const result = new Uint32Array(58);
+  for (let i = 0; i < 29; i++) { result[2 * i] = audio.report_word(i, false); result[2 * i + 1] = audio.report_word(i, true); }
   return result;
 }
 function drain(game, audio, commands) {
@@ -121,12 +127,132 @@ function render(audio, frame, frames) {
   assert.equal(audio.render(frame, 0, frames), 0);
   return Array.from(new Float32Array(BrowserAudio.memory().buffer, audio.output_ptr(), frames * 2));
 }
+
+test("actual current audio WASM appends terminal expiry without applying or reopening playback", () => {
+  const audio = new BrowserAudio(1000, 1, 1024, 4096, 1, 4, 1, 4, 8, 4);
+  try {
+    assert.equal(audio.report_fields, 29);
+    assert.equal(audio.status(), 0);
+    assert.equal(audio.finish_at(1n), 0);
+    assert.equal(audio.arm(100n, 100n), 0);
+    assert.equal(audio.render(100, 0, 2), 0);
+    const before = words(audio);
+    assert.equal(before[12], 1, "actual endpoint marker");
+    assert.equal(before[56], 0);
+    assert.equal(audio.enqueue(2, 0n, 0n, 1000000n, 1, 3n, 2n), 0);
+    assert.equal(audio.render(102, 0, 2), 0);
+    const after = words(audio);
+    assert.equal(after[26], 1, "consumed");
+    assert.equal(after[28], 0, "never applied");
+    assert.equal(after[56], 1, "appended actual expiry");
+    assert.equal(after[57], 0);
+    assert.deepEqual(Array.from(before.slice(6, 10)), [0, 0, 1, 0], "crossing block starts at zero and plays exactly one frame");
+    assert.deepEqual(Array.from(after.slice(6, 10)), [1, 0, 0, 0], "terminal silent block starts at endpoint and plays no frames");
+    assert.equal(before[6] + before[8], 1, "crossing playback cursor is endpoint");
+    assert.equal(after[6] + after[8], 1, "silent playback cursor stays at endpoint");
+    for (const field of [5, 6, 7, 8, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22])
+      assert.deepEqual(after.slice(field * 2, field * 2 + 2), before.slice(field * 2, field * 2 + 2), `frozen field ${field}`);
+    assert.deepEqual(Array.from(new Float32Array(BrowserAudio.memory().buffer, audio.output_ptr(), 2)), [0, 0]);
+  } finally { audio.free(); }
+});
 function present(game, audio, ns) {
   game.admit_output(words(audio), ns);
   game.observe_presentation(ns, ns); game.close_input_prefix(ns);
   return game.service_audio(ns, ns);
 }
 function capture(game, isLocal) { if (isLocal) game.configure_capture(7, 1024 * 1024, 1024); else game.configure_capture(1024 * 1024, 1024); }
+
+test("real WASM consumes original failed-browser observation pair without BeforeOrigin or discarded capture", () => {
+  for (const count of [1, 2, 4]) {
+    const owner = library();
+    let game;
+    if (count === 1) game = solo(prepare(owner), "3/2", { variant: "physical" });
+    else {
+      const plan = snapshotLocalPlan(Uint32Array.from(Array.from({ length: count }, (_, i) => [7 + i, 1, i + 1, 0]).flat()));
+      const memberPhysical = Uint32Array.from(Array.from({ length: count }, (_, i) =>
+        [0x11, 1, i + 1, 0, 1, 0x574b4559, 4]).flat());
+      const bindings = localBindingWords(plan, memberPhysical, [0x11], false);
+      game = BrowserLocalGame.new_physical_and_speed(prepare(owner), 0n, 100000000n,
+        50000000n, 50000000n, 0n, plan.words, bindings.words, 50000000n, false, 4096, 1024, "3/2");
+    }
+    try {
+      capture(game, count !== 1);
+      game.activate(1717990000n);
+      game.observe_presentation(9816157n, 1760030000n);
+      game.observe_presentation(22571157n, 1772805000n);
+      game.queue_input_blob(encodeKeyboardEvent({ hostNs: 1719645000n, key: 4, down: true, sequence: 21n }), 1772805000n);
+      game.queue_input_blob(encodeKeyboardEvent({ hostNs: 1772805000n, key: 4, down: true, sequence: 25n }), 1772805000n);
+      game.close_input_prefix(1772805000n);
+      assert.equal(game.service_audio(1772805000n, 30000000n), 1, "negative original input is consumed without a Runtime report");
+      assert.equal(game.pending_inputs(), 0);
+      assert.equal(game.pre_origin_inputs, 1n);
+      assert.equal(typeof game.pre_origin_inputs, "bigint");
+      assert.equal(game.service_audio(1772805000n, 30000000n), 0);
+      assert.equal(game.pre_origin_inputs, 1n, "repeated service cannot count the same input again");
+      game.stop();
+      const bytes = count === 1 ? game.take_replay() : game.take_replay(7);
+      assert.ok(bytes);
+      const saved = recorded(bytes).records.filter(row => row.kind === 0);
+      assert.equal(saved.length, 1, "negative Down never mutates held state or enters replay");
+      assert.equal(saved[0].song, -116143264n, "original output 22571157 minus preroll is multiplied once with signed truncation");
+      const view = new DataView(saved[0].physical.buffer, saved[0].physical.byteOffset, saved[0].physical.byteLength);
+      // Physical codec's original-clock fields are preserved by the Rust capture.
+      assert.equal(view.getBigUint64(27, true), 25n);
+      assert.equal(view.getUint16(4, true), 1);
+      assert.equal(view.getUint8(35), 1, "encoded keyboard retains native metadata");
+      assert.equal(view.getUint32(36, true), 0x574b4559);
+      assert.equal(view.getUint8(58), 1, "original HOST point follows the complete native metadata");
+      assert.equal(view.getUint32(59, true), 0x57494e);
+      assert.equal(view.getBigInt64(63, true), 1772805000n);
+      assert.equal(view.getBigInt64(50, true), 1772805000n, "native acquisition time remains raw HOST");
+    } finally { game.free(); owner.free(); }
+  }
+});
+
+test("real contact owner discards negative touch before contact ownership and never lends its projection to accepted input", () => {
+  const owner = library(24000, "#BPM 60000\n#WAV01 key.wav\n#00011:00010000\n");
+  const touchWords = touchBindingWords([0x11]);
+  const physical = Uint32Array.from([...PHYSICAL, ...touchWords]);
+  const game = BrowserGame.new_physical_contact_and_speed(prepare(owner), 0n, 100000000n,
+    50000000n, 50000000n, 0n, physical, 50000000n, 4096, 1024, "1/1");
+  const event = (hostNs, sequence, x) => ({ kind: "touch", hostNs, sequence,
+    contact: 7n, phase: 0, code: 0, x, y: 50, pressure: null, width: 100, height: 100 });
+  try {
+    game.configure_touch_regions(touchWords, Float32Array.from([0, 0, 480, 720]), 8);
+    capture(game, false); game.activate(0n);
+    game.observe_presentation(0n, 10000000n);
+    game.observe_presentation(104000000n, 114000000n);
+    // The first sample would acquire the lane at projected x=240. The next
+    // genuine Down uses the same physical contact at x=720 outside that lane.
+    game.queue_input_blob_on_surface(encodeTouchEvent(event(9000000n, 1n, 25)), 100, 100, 960, 720, 114000000n);
+    game.queue_input_blob_on_surface(encodeTouchEvent(event(111000000n, 2n, 75)), 100, 100, 960, 720, 114000000n);
+    game.close_input_prefix(111000000n);
+    assert.equal(game.service_audio(114000000n, 105000000n), 1);
+    assert.equal(game.pre_origin_inputs, 1n);
+    assert.equal(game.pending_inputs(), 0);
+    assert.equal(game.hits, 0n, "accepted outside touch cannot borrow discarded inside coordinates");
+    assert.equal(gauge(game).pressed, 0, "discarded contact cannot acquire or retain a lane");
+    game.queue_input_blob(encodeKeyboardEvent({ hostNs: 112000000n, key: 4, down: true, sequence: 3n }), 114000000n);
+    game.close_input_prefix(114000000n);
+    assert.equal(game.service_audio(114000000n, 106000000n), 1);
+    assert.equal(game.hits, 1n, "genuine keyboard Down remains independent of discarded touch state");
+    game.stop();
+    const saved = recorded(game.take_replay()).records.filter(row => row.kind === 0);
+    assert.ok(saved.every(row => new DataView(row.physical.buffer, row.physical.byteOffset,
+      row.physical.byteLength).getBigUint64(27, true) !== 1n));
+    const keyboard = saved.find(row => new DataView(row.physical.buffer, row.physical.byteOffset,
+      row.physical.byteLength).getBigUint64(27, true) === 3n);
+    assert.ok(keyboard);
+    assert.equal(keyboard.song, 2000000n);
+    const view = new DataView(keyboard.physical.buffer, keyboard.physical.byteOffset, keyboard.physical.length);
+    assert.equal(view.getUint16(4, true), 1);
+    assert.equal(view.getUint8(35), 1);
+    assert.equal(view.getUint8(58), 1);
+    assert.equal(view.getUint32(59, true), 0x57494e);
+    assert.equal(view.getBigInt64(63, true), 112000000n, "accepted original HOST provenance remains exact");
+    assert.equal(view.getBigInt64(50, true), 112000000n, "native acquisition timestamp remains exact too");
+  } finally { game.free(); owner.free(); }
+});
 function takeReplay(game, isLocal) { return isLocal ? game.take_replay(7) : game.take_replay(); }
 function score(game, isLocal) { return isLocal ? [game.hits(7), game.misses(7), game.combo(7), game.max_combo(7)] : [game.hits, game.misses, game.combo, game.max_combo]; }
 

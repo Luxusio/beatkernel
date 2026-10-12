@@ -29,10 +29,12 @@ impl std::fmt::Display for NativeStopEvidenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "native unknown Stops {} exceed admitted {} or applied commands {}",
+            "native mixer evidence differs: unknown Stops {}, admitted Stops {}, consumed {}, applied {}, expired {}",
             self.report.counters.unknown_stops,
             self.admitted_stops,
+            self.report.counters.commands_consumed,
             self.report.counters.commands_applied,
+            self.report.counters.commands_expired,
         )
     }
 }
@@ -47,6 +49,12 @@ pub(crate) fn validate_stop_evidence(
     if let Some(report) = rendered {
         if !evidence.permits_unknown_stops(report.counters.unknown_stops)
             || report.counters.unknown_stops > report.counters.commands_applied
+            || report
+                .counters
+                .settled_commands()
+                .is_none_or(|settled| settled > report.counters.commands_consumed)
+            || (report.counters.commands_expired != 0
+                && (!report.paused || report.playback_end_physical_frame.is_none()))
         {
             return Err(Box::new(NativeStopEvidenceError {
                 report,
@@ -58,7 +66,7 @@ pub(crate) fn validate_stop_evidence(
 }
 
 /// Finite output is sealed by the real immutable endpoint. Retained BGM voices
-/// cannot play again, but every queued command must actually have been applied.
+/// cannot play again, but every queued command must actually have settled.
 /// NativeEnd's endpoint/presentation proof remains a separate required guard.
 pub(crate) fn finite_terminal_output_ready(
     bgm: BgmFeedReport,
@@ -73,7 +81,7 @@ pub(crate) fn finite_terminal_output_ready(
                 && report.playback_end_physical_frame.is_some()
                 && report.pending_commands == 0
                 && report.counters.commands_consumed == admitted_commands
-                && report.counters.commands_applied == admitted_commands
+                && report.counters.settled_commands() == Some(admitted_commands)
         })
 }
 

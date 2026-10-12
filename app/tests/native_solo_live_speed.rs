@@ -15,7 +15,7 @@ use beatkernel::{
     telemetry::InputDeliveryTelemetry,
     time::{
         presentation::PresentationEstimator, ClockDomainId, ClockPair, ClockPoint, Duration,
-        Timestamp,
+        ExtrapolationPolicy, Timestamp,
     },
     transport::Transport,
 };
@@ -96,6 +96,11 @@ struct Device {
     interval: bool,
     creation_pair: Option<ClockPair>,
     pcm: Vec<f32>,
+    terminal_race: bool,
+    race_armed: bool,
+    race_reports: Vec<RenderReport>,
+    race_input_published: Rc<Cell<bool>>,
+    shifted_origin: bool,
 }
 impl GameplayDevice for Device {
     type Presentation = PresentationEstimator;
@@ -106,7 +111,7 @@ impl GameplayDevice for Device {
         if self.blocks == 0 && !self.no_presentation && !self.interval {
             let pair = ClockPair {
                 source: raw(0),
-                target: host(0),
+                target: host(if self.shifted_origin { 10_000_000 } else { 0 }),
             };
             owner.admit(NativeAudioSnapshot {
                 epoch: 0,
@@ -149,7 +154,10 @@ impl GameplayDevice for Device {
             } else {
                 OriginalNativePresentationEvidence::SuppliedPair(ClockPair {
                     source: raw(self.blocks as i64 * 5_000_000),
-                    target: host(self.blocks as i64 * 5_000_000),
+                    target: host(
+                        self.blocks as i64 * 5_000_000
+                            + if self.shifted_origin { 10_000_000 } else { 0 },
+                    ),
                 })
             };
             owner.admit(NativeAudioSnapshot {
@@ -161,15 +169,42 @@ impl GameplayDevice for Device {
         Ok(())
     }
     fn render_report(&mut self) -> NativeGameplayResult<Option<RenderReport>> {
+        if self.race_armed {
+            self.race_armed = false;
+            let prior = self.report.expect("actual prior callback");
+            self.race_reports.push(prior);
+            let mut pcm = [0.0; 5];
+            let crossing = self.mixer.render(&mut pcm)?;
+            self.pcm.extend(pcm);
+            self.race_reports.push(crossing);
+            self.report = Some(crossing);
+            return Ok(Some(prior));
+        }
+        if self.terminal_race && !self.race_input_published.get() {
+            if let Some(prior) = self.race_reports.first() {
+                return Ok(Some(*prior));
+            }
+        }
         Ok(if self.no_report { None } else { self.report })
     }
     fn host_now(&self) -> NativeGameplayResult<ClockPoint> {
-        Ok(host(self.blocks as i64 * 5_000_000))
+        Ok(host(
+            self.blocks as i64 * 5_000_000 + if self.shifted_origin { 10_000_000 } else { 0 },
+        ))
     }
     fn acquire(
         &mut self,
         events: &mut VecDeque<PhysicalInputEvent>,
     ) -> NativeGameplayResult<InputBatch> {
+        if self.shifted_origin && self.blocks == 2 {
+            for (sequence, state) in [(90, ButtonState::Down), (91, ButtonState::Up)] {
+                events.push_back(PhysicalInputEvent::Button(ButtonEvent {
+                    meta: EventMeta::new(DeviceId(8), host(9_000_000), sequence),
+                    control: PhysicalControlId::keyboard(7),
+                    state,
+                }));
+            }
+        }
         if self.exercise_pause && self.blocks == 5 {
             self.desired_pause.set(true);
         }
@@ -177,6 +212,7 @@ impl GameplayDevice for Device {
             self.desired_pause.set(false);
         }
         if self.blocks == 3 || self.blocks == 4 {
+            self.race_armed = self.terminal_race && self.blocks == 3;
             events.push_back(PhysicalInputEvent::Button(ButtonEvent {
                 meta: EventMeta::new(DeviceId(9), host(10_000_000), (self.blocks - 3) as u64),
                 control: PhysicalControlId::keyboard(7),
@@ -188,7 +224,7 @@ impl GameplayDevice for Device {
             }));
         }
         Ok(InputBatch {
-            completed_through: (!self.no_prefix).then_some(host(self.blocks as i64 * 5_000_000)),
+            completed_through: (!self.no_prefix).then_some(self.host_now()?),
             backlog: self.blocks == 3,
             closed: false,
         })
@@ -275,6 +311,7 @@ struct Host {
     reports: Vec<RuntimeReport>,
     published: usize,
     pauses: Vec<PauseState>,
+    race_input_published: Rc<Cell<bool>>,
 }
 impl NativeGameplayHost for Host {
     fn cancelled(&self) -> bool {
@@ -291,6 +328,9 @@ impl NativeGameplayHost for Host {
         self.published += 1;
     }
     fn publish_report(&mut self, report: &RuntimeReport) -> NativeGameplayResult<()> {
+        if report.input.is_some() {
+            self.race_input_published.set(true);
+        }
         self.reports.push(report.clone());
         Ok(())
     }
@@ -442,6 +482,7 @@ impl Fixture {
         };
         let cancelled = Rc::new(Cell::new(false));
         let desired_pause = Rc::new(Cell::new(false));
+        let race_input_published = Rc::new(Cell::new(false));
         Self {
             selected,
             config: AudioGameplayConfig {
@@ -473,6 +514,11 @@ impl Fixture {
                 interval: false,
                 creation_pair: None,
                 pcm: vec![],
+                terminal_race: false,
+                race_armed: false,
+                race_reports: vec![],
+                race_input_published: race_input_published.clone(),
+                shifted_origin: false,
             },
             runtime,
             gauge: BmsGauge::new(policy.gauge().try_copy().unwrap()),
@@ -492,6 +538,7 @@ impl Fixture {
                 reports: vec![],
                 published: 0,
                 pauses: vec![],
+                race_input_published,
             },
             control: Control::default(),
             policy,
@@ -600,6 +647,125 @@ fn four_rates_keep_original_input_and_raw_output_coordinates_in_the_actual_solo_
         assert_eq!(recorded.source_speed, f.selected.speed());
         assert!(f.capture.as_ref().unwrap().records().len() >= 2);
     }
+}
+
+#[test]
+fn actual_native_solo_discards_negative_audio_origin_before_runtime_and_keeps_exact_origin_input() {
+    for fraction in ["1/1", "3/2"] {
+        let mut f = Fixture::new(fraction, None);
+        let mut ac = AudioAuthorityConfig::default();
+        ac.input_extrapolation = ExtrapolationPolicy::Bounded {
+            before: Duration::from_nanos(20_000_000),
+            after: Duration::ZERO,
+        };
+        f.presentation = NativeAudioPresentation::new(
+            AudioAuthority::new(
+                ac,
+                AudioAuthorityEpoch {
+                    id: 0,
+                    stream_origin: raw(0),
+                    logical_origin: logical(0),
+                    host_domain: ClockDomainId(1),
+                },
+            )
+            .unwrap(),
+            NativePresentationValidator::new(0, raw(0), ClockDomainId(1)),
+        )
+        .unwrap();
+        f.device.shifted_origin = true;
+        f.config.gameplay.advance_lag = Duration::from_nanos(100_000_000);
+        assert!(f.run(false, true).unwrap().is_none());
+        assert_eq!(f.pre, 2);
+        assert_eq!(f.merger.pending(), 0);
+        let inputs: Vec<_> = f
+            .host
+            .reports
+            .iter()
+            .filter(|r| r.input.is_some())
+            .collect();
+        assert_eq!(inputs.len(), 2);
+        for report in inputs {
+            let meta = report.input.as_ref().unwrap().meta();
+            assert_eq!(meta.source, DeviceId(9));
+            assert_eq!(meta.original_clock_point, Some(host(10_000_000)));
+            assert_eq!(report.song_time, f.selected.song_origin());
+            assert_eq!(report.audio_at.domain, ClockDomainId(2));
+        }
+        let capture = f.capture.as_ref().unwrap();
+        assert_eq!(
+            capture
+                .records()
+                .iter()
+                .filter(|r| matches!(r.operation, beatkernel::replay::ReplayOperation::Input(_)))
+                .count(),
+            2
+        );
+    }
+}
+
+#[test]
+fn actual_solo_stale_schedule_publishes_after_final_callback_and_waits_for_expiry() {
+    let mut f = Fixture::new("2/1", Some(30_000_000));
+    f.device.terminal_race = true;
+    assert!(f.run(false, true).unwrap().is_some());
+    let prior = f.device.race_reports[0];
+    let crossing = f.device.race_reports[1];
+    assert_eq!(prior.playback_end_physical_frame, None);
+    assert_eq!(
+        prior.playback_start_frame + prior.playback_frames as u64,
+        15
+    );
+    assert_eq!(crossing.playback_end_physical_frame, Some(16));
+    assert_eq!(crossing.counters.commands_consumed, 1);
+    assert_eq!(crossing.counters.commands_applied, 1);
+    assert_eq!(crossing.counters.commands_expired, 0);
+    let down = f
+        .host
+        .reports
+        .iter()
+        .find(|r| r.input.as_ref().is_some_and(|i| i.meta().sequence == 0))
+        .unwrap();
+    assert_eq!(down.audio_at, raw(15_000_000));
+    assert_eq!(down.song_time, ts(19_999_998));
+    assert_eq!(
+        down.input.as_ref().unwrap().meta().original_clock_point,
+        Some(host(10_000_000))
+    );
+    assert_eq!(down.judge_events.len(), 1);
+    assert!(down.audio_commands.iter().any(|c| matches!(c, beatkernel::audio::AudioCommand::Play { at, .. } if *at == raw(15_000_000).timestamp)));
+    let terminal = f.device.report.unwrap();
+    assert!(terminal.start_frame >= crossing.counters.rendered_frames);
+    assert_eq!(terminal.counters.commands_consumed, 2);
+    assert_eq!(terminal.counters.commands_applied, 1);
+    assert_eq!(terminal.counters.commands_expired, 1);
+    assert_eq!(terminal.counters.settled_commands(), Some(2));
+    assert_eq!(terminal.pending_commands, 0);
+    assert_eq!(terminal.song_position, crossing.song_position);
+    assert_eq!(terminal.active_voices, crossing.active_voices);
+    assert!(f.device.pcm.iter().all(|v| *v == 0.0));
+    assert_eq!(f.host.published, 1);
+    let source = beatkernel_bms::parse(
+        "#BPM 120\n#WAV01 note.wav\n#00011:01\n#00112:01\n",
+        Default::default(),
+    )
+    .unwrap();
+    let capture = f.capture.as_ref().unwrap();
+    let replay = beatkernel_bms_runtime::replay_playback::reconstruct_section(
+        &source,
+        beatkernel::replay::codec::ReplayFile::new(
+            capture.header().clone(),
+            capture.records().to_vec(),
+        ),
+        ReplayCodecLimits::new(65536, 128, 4096, CodecLimits::new(4096, 1024).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        replay.engine().stable_hash().unwrap(),
+        f.runtime.judge().stable_hash().unwrap()
+    );
+    let mut gauge = BmsGauge::new(f.policy.gauge().try_copy().unwrap());
+    gauge.observe(replay.results(), &[]).unwrap();
+    assert_eq!(gauge, f.gauge);
 }
 
 #[test]
@@ -717,7 +883,9 @@ fn real_finite_mixer_and_native_crossing_close_original_end_at_four_rates() {
             rendered.counters.commands_applied,
             rendered.counters.commands_consumed
         );
-        if fraction == "2/1" { assert_delayed_original_input_after_real_seal(&f); }
+        if fraction == "2/1" {
+            assert_delayed_original_input_after_real_seal(&f);
+        }
     }
 }
 
@@ -773,7 +941,9 @@ fn original_asio_brackets_keep_four_rates_out_of_legacy_correction_and_complete(
             *f.presentation.latest_record().unwrap().evidence(),
             OriginalNativePresentationEvidence::Asio { .. }
         ));
-        if fraction == "2/1" { assert_delayed_original_input_after_real_seal(&f); }
+        if fraction == "2/1" {
+            assert_delayed_original_input_after_real_seal(&f);
+        }
     }
 }
 
@@ -782,17 +952,44 @@ fn assert_delayed_original_input_after_real_seal(f: &Fixture) {
     // The original Down at 10ms is transferred after the 5-frame block has
     // physically crossed the 11-frame endpoint. Its judge/capture remains valid;
     // a new sound cannot be admitted to output that actually sealed already.
-    let down = f.host.reports.iter().find(|report| report.input.as_ref().is_some_and(|input| input.meta().sequence == 0)).expect("original delayed Down was processed");
+    let down = f
+        .host
+        .reports
+        .iter()
+        .find(|report| {
+            report
+                .input
+                .as_ref()
+                .is_some_and(|input| input.meta().sequence == 0)
+        })
+        .expect("original delayed Down was processed");
     assert_eq!(down.song_time, ts(19_999_998));
-    assert_eq!(down.input.as_ref().unwrap().meta().original_clock_point, Some(host(10_000_000)));
-    assert!(down.judge_events.iter().any(|event| matches!(event.outcome, JudgeOutcome::Hit { .. })));
-    assert!(down.audio_at.timestamp >= raw(11_000_000).timestamp, "raw actual output frontier must not be retimed to hide sealing");
-    assert!(down.audio_commands.iter().all(|command| !matches!(command, AudioCommand::Play { .. })));
+    assert_eq!(
+        down.input.as_ref().unwrap().meta().original_clock_point,
+        Some(host(10_000_000))
+    );
+    assert!(down
+        .judge_events
+        .iter()
+        .any(|event| matches!(event.outcome, JudgeOutcome::Hit { .. })));
+    assert!(
+        down.audio_at.timestamp >= raw(11_000_000).timestamp,
+        "raw actual output frontier must not be retimed to hide sealing"
+    );
+    assert!(down
+        .audio_commands
+        .iter()
+        .all(|command| !matches!(command, AudioCommand::Play { .. })));
     assert!(down.audio_failures.is_empty());
     let recorded = f.capture.as_ref().unwrap().records().iter().find(|record| matches!(&record.operation, ReplayOperation::Input(input) if input.physical.meta().sequence == 0)).expect("delayed original Down is retained in the canonical capture");
     assert_eq!(recorded.song_time, ts(19_999_998));
-    let ReplayOperation::Input(bound) = &recorded.operation else { unreachable!() };
-    assert_eq!(bound.physical.meta().original_clock_point, Some(host(10_000_000)));
+    let ReplayOperation::Input(bound) = &recorded.operation else {
+        unreachable!()
+    };
+    assert_eq!(
+        bound.physical.meta().original_clock_point,
+        Some(host(10_000_000))
+    );
     let rendered = f.device.report.unwrap();
     assert_eq!(rendered.playback_end_physical_frame, Some(11));
     assert_eq!(rendered.pending_commands, 0);

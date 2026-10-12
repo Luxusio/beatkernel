@@ -68,6 +68,52 @@ fn play() -> AudioCommand {
 }
 
 #[test]
+fn finite_selected_replay_waits_for_actual_late_queue_retirement_and_source_presentation() {
+    let (mut producer, mut mixer, mut feeder) = rig(1000, 1, vec![play()]);
+    let mut completion = FiniteReplayCompletion::new(point(0), 1000, 1).unwrap();
+    let marker = mixer.render(&mut [0.0; 2]).unwrap();
+    // Planning/queue publication races the actual final callback, without
+    // rewriting original replay targets or manufacturing consumer receipts.
+    feeder.feed(0, 8, |c| producer.try_push(c)).unwrap();
+    feeder.retire_completed(1).unwrap();
+    assert!(!completion
+        .observe(true, &feeder, Some(marker), Some(point(1_000_000)))
+        .unwrap());
+    assert!(!completion.output_finished(&feeder).unwrap());
+    let mut pcm = [1.0; 1];
+    let settled = mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.0]);
+    assert_eq!(settled.counters.commands_consumed, 1);
+    assert_eq!(settled.counters.commands_applied, 0);
+    assert_eq!(settled.counters.commands_expired, 1);
+    assert_eq!(settled.song_position, marker.song_position);
+    assert_eq!(settled.active_voices, marker.active_voices);
+    let mut unpresented = FiniteReplayCompletion::new(point(0), 1000, 1).unwrap();
+    assert!(!unpresented
+        .observe(true, &feeder, Some(marker), None)
+        .unwrap());
+    assert!(!unpresented
+        .observe(true, &feeder, Some(settled), None)
+        .unwrap());
+    assert!(
+        !unpresented.output_finished(&feeder).unwrap(),
+        "actual expiry and source render completion still require presentation"
+    );
+    assert!(!unpresented
+        .observe(true, &feeder, None, Some(point(999_999)))
+        .unwrap());
+    assert!(!unpresented.output_finished(&feeder).unwrap());
+    assert!(unpresented
+        .observe(true, &feeder, None, Some(point(1_000_000)))
+        .unwrap());
+    assert!(unpresented.output_finished(&feeder).unwrap());
+    assert!(completion
+        .observe(true, &feeder, Some(settled), Some(point(1_000_000)))
+        .unwrap());
+    assert!(completion.output_finished(&feeder).unwrap());
+}
+
+#[test]
 fn genuine_fractional_fence_finishes_output_without_finishing_original_records() {
     let (mut producer, mut mixer, mut feeder) = rig(3, 1, vec![play()]);
     feeder

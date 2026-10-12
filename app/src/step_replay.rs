@@ -373,8 +373,11 @@ impl StepReplay {
                         presented,
                     )
                 })?;
-                if report.counters.commands_consumed != admitted
-                    || report.counters.commands_applied != admitted
+                if report.counters.commands_consumed > admitted
+                    || report
+                        .counters
+                        .settled_commands()
+                        .is_none_or(|settled| settled > admitted)
                 {
                     return Err(self.output_failure(
                         CompletionError(
@@ -384,7 +387,9 @@ impl StepReplay {
                         presented,
                     ));
                 }
-                true
+                report.pending_commands == 0
+                    && report.counters.commands_consumed == admitted
+                    && report.counters.settled_commands() == Some(admitted)
             } else {
                 false
             }

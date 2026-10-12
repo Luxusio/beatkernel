@@ -184,8 +184,9 @@ function speedAudio(replay, maxFrames = 128) {
   } catch (error) { audio.free(); throw error; }
 }
 function actualAudioWords(audio) {
-  const words = new Uint32Array(56);
-  for (let field = 0; field < 28; field++) {
+  assert.equal(audio.report_fields, 29, "actual current audio WASM report declaration");
+  const words = new Uint32Array(58);
+  for (let field = 0; field < 29; field++) {
     words[field * 2] = audio.report_word(field, false);
     words[field * 2 + 1] = audio.report_word(field, true);
   }

@@ -2,8 +2,8 @@ use super::*;
 use crate::bgm::{BgmConfig, BgmFeeder};
 use beatkernel::{
     audio::{
-        AudioCommand, AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample,
-        SampleBank, SampleId, VoiceId, command_queue,
+        command_queue, AudioCommand, AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits,
+        PcmSample, SampleBank, SampleId, VoiceId,
     },
     time::{ClockDomainId, Duration},
 };
@@ -61,57 +61,43 @@ fn actual_pause_shifted_endpoint_waits_for_native_marker_and_freezes_unfinished_
     let (mut producer, mut mixer, mut feeder) = setup(10, 3);
     let mut completion = FiniteReplayCompletion::new(point(0), 10, 3).unwrap();
     let first = mixer.render(&mut [0.0; 2]).unwrap();
-    assert!(
-        !completion
-            .observe(true, &feeder, Some(first), Some(point(100_000_000)))
-            .unwrap()
-    );
+    assert!(!completion
+        .observe(true, &feeder, Some(first), Some(point(100_000_000)))
+        .unwrap());
     producer.request_pause(true);
     let paused = mixer.render(&mut [0.0; 3]).unwrap();
     assert!(paused.paused);
     assert_eq!(paused.playback_end_physical_frame, None);
-    assert!(
-        !completion
-            .observe(true, &feeder, Some(paused), Some(point(500_000_000)))
-            .unwrap()
-    );
+    assert!(!completion
+        .observe(true, &feeder, Some(paused), Some(point(500_000_000)))
+        .unwrap());
     producer.request_pause(false);
     let mut pcm = [-1.0; 2];
     let terminal = mixer.render(&mut pcm).unwrap();
     assert_eq!(pcm, [0.25, 0.0]);
     assert_eq!(terminal.playback_end_physical_frame, Some(6));
     assert_eq!(terminal.active_voices, 1);
-    assert!(
-        !completion
-            .observe(false, &feeder, Some(terminal), Some(point(599_999_999)))
-            .unwrap()
-    );
+    assert!(!completion
+        .observe(false, &feeder, Some(terminal), Some(point(599_999_999)))
+        .unwrap());
     assert_eq!(feeder.report().outstanding, 1);
     feeder
         .retire_completed(terminal.playback_start_frame + terminal.playback_frames as u64)
         .unwrap();
     assert_eq!(feeder.report().outstanding, 0);
-    assert!(
-        !completion
-            .observe(true, &feeder, Some(terminal), Some(point(599_999_999)))
-            .unwrap()
-    );
-    assert!(
-        !completion
-            .observe(false, &feeder, None, Some(point(600_000_000)))
-            .unwrap()
-    );
-    assert!(
-        completion
-            .observe(true, &feeder, None, Some(point(600_000_000)))
-            .unwrap()
-    );
+    assert!(!completion
+        .observe(true, &feeder, Some(terminal), Some(point(599_999_999)))
+        .unwrap());
+    assert!(!completion
+        .observe(false, &feeder, None, Some(point(600_000_000)))
+        .unwrap());
+    assert!(completion
+        .observe(true, &feeder, None, Some(point(600_000_000)))
+        .unwrap());
     let silence = mixer.render(&mut [0.0; 3]).unwrap();
-    assert!(
-        completion
-            .observe(true, &feeder, Some(silence), Some(point(600_000_000)))
-            .unwrap()
-    );
+    assert!(completion
+        .observe(true, &feeder, Some(silence), Some(point(600_000_000)))
+        .unwrap());
     let before = completion.clone();
     for bad in [
         RenderReport {
@@ -135,33 +121,113 @@ fn actual_pause_shifted_endpoint_waits_for_native_marker_and_freezes_unfinished_
             ..silence
         },
     ] {
-        assert!(
-            completion
-                .observe(true, &feeder, Some(bad), Some(point(600_000_000)))
-                .is_err()
-        );
+        assert!(completion
+            .observe(true, &feeder, Some(bad), Some(point(600_000_000)))
+            .is_err());
         assert_eq!(completion, before);
     }
-    assert!(
-        completion
-            .observe(true, &feeder, None, Some(point(599_999_999)))
-            .is_err()
-    );
+    assert!(completion
+        .observe(true, &feeder, None, Some(point(599_999_999)))
+        .is_err());
     assert_eq!(completion, before);
-    assert!(
-        completion
-            .observe(
-                true,
-                &feeder,
+    assert!(completion
+        .observe(
+            true,
+            &feeder,
+            None,
+            Some(ClockPoint {
+                domain: ClockDomainId(99),
+                timestamp: Timestamp::ZERO
+            })
+        )
+        .is_err());
+    assert_eq!(completion, before);
+}
+
+#[test]
+fn real_pending_terminal_expiry_obeys_shared_output_conservation_without_fabricated_ack() {
+    let (mut producer, mut mixer, _feeder) = setup(1000, 3);
+    // This independent direct producer owns a real future command. Public
+    // cold Step batches filter such targets; this is report-validator evidence,
+    // not a claim that Step acknowledged a command outside its endpoint.
+    producer
+        .try_push(AudioCommand::Play {
+            voice: VoiceId(2),
+            sample: SampleId(1),
+            at: Timestamp::from_nanos(8_000_000),
+            gain: 1.0,
+        })
+        .unwrap();
+    let marker = mixer.render(&mut [0.0; 5]).unwrap();
+    assert_eq!(marker.playback_end_physical_frame, Some(3));
+    assert_eq!(marker.pending_commands, 1);
+    assert_eq!(marker.counters.commands_consumed, 2);
+    assert_eq!(marker.counters.commands_applied, 1);
+    assert_eq!(marker.counters.commands_expired, 0);
+    let stops = crate::offline::OwnedStopEvidence::default();
+    crate::step_gameplay::validate_section_output_evidence_with_stops(
+        point(0),
+        1000,
+        None,
+        None,
+        Some(marker),
+        None,
+        Some(3),
+        &stops,
+    )
+    .unwrap();
+    let mut pcm = [1.0; 1];
+    let settled = mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.0]);
+    assert_eq!(settled.pending_commands, 0);
+    assert_eq!(settled.counters.commands_consumed, 2);
+    assert_eq!(settled.counters.commands_applied, 1);
+    assert_eq!(settled.counters.commands_expired, 1);
+    assert_eq!(settled.song_position, marker.song_position);
+    assert_eq!(settled.active_voices, marker.active_voices);
+    assert!(crate::step_gameplay::finite_settlement_progression(
+        marker, settled
+    ));
+    crate::step_gameplay::validate_section_output_evidence_with_stops(
+        point(0),
+        1000,
+        Some(marker),
+        None,
+        Some(settled),
+        None,
+        Some(3),
+        &stops,
+    )
+    .unwrap();
+    for case in 0..9 {
+        let mut forged = settled;
+        match case {
+            0 => forged.counters.commands_expired = 0,
+            1 => forged.counters.commands_consumed += 1,
+            2 => forged.pending_commands = 2,
+            3 => forged.counters.commands_applied += 1,
+            4 => forged.counters.late_commands += 1,
+            5 => forged.playback_end_physical_frame = None,
+            6 => forged.song_position = Timestamp::from_nanos(forged.song_position.as_nanos() + 1),
+            7 => forged.active_voices += 1,
+            8 => forged.counters.commands_expired = u64::MAX,
+            _ => unreachable!(),
+        }
+        assert!(
+            crate::step_gameplay::validate_section_output_evidence_with_stops(
+                point(0),
+                1000,
+                Some(marker),
                 None,
-                Some(ClockPoint {
-                    domain: ClockDomainId(99),
-                    timestamp: Timestamp::ZERO
-                })
+                Some(forged),
+                None,
+                Some(3),
+                &stops,
             )
-            .is_err()
-    );
-    assert_eq!(completion, before);
+            .is_err(),
+            "case {case}"
+        );
+    }
 }
 #[test]
 fn fractional_endpoint_requires_exact_admission_render_and_presentation_evidence() {
@@ -177,21 +243,15 @@ fn fractional_endpoint_requires_exact_admission_render_and_presentation_evidence
     feeder
         .retire_completed(terminal.playback_start_frame + terminal.playback_frames as u64)
         .unwrap();
-    assert!(
-        !completion
-            .observe(true, &feeder, Some(terminal), Some(point(333_333_333)))
-            .unwrap()
-    );
-    assert!(
-        completion
-            .observe(true, &feeder, None, Some(point(333_333_334)))
-            .unwrap()
-    );
-    assert!(
-        completion
-            .observe(true, &feeder, None, Some(point(666_666_668)))
-            .is_err()
-    );
+    assert!(!completion
+        .observe(true, &feeder, Some(terminal), Some(point(333_333_333)))
+        .unwrap());
+    assert!(completion
+        .observe(true, &feeder, None, Some(point(333_333_334)))
+        .unwrap());
+    assert!(completion
+        .observe(true, &feeder, None, Some(point(666_666_668)))
+        .is_err());
     assert!(FiniteReplayCompletion::new(point(0), 0, 1).is_err());
     assert!(FiniteReplayCompletion::new(point(i64::MAX), 3, 1).is_err());
     assert!(FiniteReplayCompletion::new(point(0), 1, u64::MAX).is_err());

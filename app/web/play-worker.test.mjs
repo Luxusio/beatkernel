@@ -77,7 +77,7 @@ function selectedFile(path, acquire) {
 }
 
 function renderReport({ available = true, cursor = 9007199254742999n, frames = 257n, start = START } = {}) {
-  const words = new Uint32Array(56);
+  const words = new Uint32Array(58);
   const put = (index, value) => {
     words[index * 2] = Number(value & 0xffffffffn);
     words[index * 2 + 1] = Number(value >> 32n);
@@ -658,6 +658,11 @@ async function workerHarness(options = {}) {
       this.live(); this.calls.push(["close", host]);
       assert.ok(this.closedPrefix === null || host >= this.closedPrefix);
       this.closedPrefix = host;
+    }
+    get pre_origin_inputs() {
+      this.live();
+      if (options.throwPreOriginInputs) throw new Error("actual owner counter unavailable");
+      return Object.hasOwn(options, "preOriginInputs") ? options.preOriginInputs : 0n;
     }
     pending_inputs() { this.live(); return this.pendingInput.length; }
     service_audio(now, audio) {

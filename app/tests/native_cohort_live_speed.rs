@@ -188,6 +188,10 @@ struct Device {
     delayed_inputs: Option<(usize, i64, i64)>,
     prefix_cap: Option<(usize, i64)>,
     renders: Vec<RenderReport>,
+    terminal_race: bool,
+    race_armed: bool,
+    race_reports: Vec<RenderReport>,
+    shifted_origin: bool,
 }
 impl GameplayDevice for Device {
     type Presentation = PresentationEstimator;
@@ -219,7 +223,11 @@ impl GameplayDevice for Device {
         if !self.missing_observation {
             // First pair precedes every possible finite fence. Later pairs
             // report the prior callback frame, independently of render-ahead.
-            let frame = if self.stationary { 0 } else { self.step * self.block_frames - 1 };
+            let frame = if self.stationary {
+                0
+            } else {
+                self.step * self.block_frames - 1
+            };
             presentation.admit(NativeAudioSnapshot {
                 epoch: 0,
                 basis: self.basis,
@@ -235,13 +243,25 @@ impl GameplayDevice for Device {
                     }
                 } else { OriginalNativePresentationEvidence::SuppliedPair(ClockPair {
                     source: raw(frame as i64 * 1_000_000),
-                    target: host(frame as i64 * 1_000_000),
+                    target: host(frame as i64 * 1_000_000 + if self.shifted_origin {10_000_000} else {0}),
                 }) },
             })?;
         }
         Ok(())
     }
     fn render_report(&mut self) -> NativeGameplayResult<Option<RenderReport>> {
+        if self.race_armed {
+            self.race_armed = false;
+            let prior = self.report.expect("actual prior callback");
+            self.race_reports.push(prior);
+            let mut pcm = vec![0.0; self.block_frames];
+            let crossing = self.mixer.render(&mut pcm)?;
+            self.pcm.extend(pcm);
+            self.renders.push(crossing);
+            self.race_reports.push(crossing);
+            self.report = Some(crossing);
+            return Ok(Some(prior));
+        }
         Ok(self.report)
     }
     fn audio_pause_observation(
@@ -275,19 +295,35 @@ impl GameplayDevice for Device {
         }
     }
     fn host_now(&self) -> NativeGameplayResult<ClockPoint> {
-        Ok(host((self.step * self.block_frames) as i64 * 1_000_000))
+        Ok(host(
+            (self.step * self.block_frames) as i64 * 1_000_000
+                + if self.shifted_origin { 10_000_000 } else { 0 },
+        ))
     }
     fn acquire(
         &mut self,
         events: &mut VecDeque<PhysicalInputEvent>,
     ) -> NativeGameplayResult<InputBatch> {
+        if self.shifted_origin && self.step == 2 {
+            for member in (0..self.members).rev() {
+                events.push_back(PhysicalInputEvent::Button(ButtonEvent {
+                    meta: EventMeta::new(DeviceId(101 + member as u64), host(9_000_000), 0),
+                    control: PhysicalControlId::keyboard(7),
+                    state: ButtonState::Down,
+                }));
+            }
+        }
         if let Some((delivery_step, down_ns, up_ns)) = self.delayed_inputs {
             if self.step == delivery_step {
+                self.race_armed = self.terminal_race;
                 for member in (0..self.members).rev() {
-                    for (sequence, ns, state) in [(0, down_ns, ButtonState::Down), (1, up_ns, ButtonState::Up)] {
+                    for (sequence, ns, state) in
+                        [(0, down_ns, ButtonState::Down), (1, up_ns, ButtonState::Up)]
+                    {
                         events.push_back(PhysicalInputEvent::Button(ButtonEvent {
                             meta: EventMeta::new(DeviceId(101 + member as u64), host(ns), sequence),
-                            control: PhysicalControlId::keyboard(7), state,
+                            control: PhysicalControlId::keyboard(7),
+                            state,
                         }));
                     }
                 }
@@ -309,7 +345,7 @@ impl GameplayDevice for Device {
                     meta: EventMeta::new(
                         DeviceId(101 + member as u64),
                         self.host_now()?,
-                        u64::from(!down),
+                        u64::from(!down) + u64::from(self.shifted_origin),
                     ),
                     control: PhysicalControlId::keyboard(7),
                     state: if down {
@@ -323,9 +359,13 @@ impl GameplayDevice for Device {
         Ok(InputBatch {
             completed_through: if self.missing_cut {
                 None
-            } else if let Some((through_step, cut_ns)) = self.prefix_cap.filter(|(step, _)| self.step <= *step) {
+            } else if let Some((through_step, cut_ns)) =
+                self.prefix_cap.filter(|(step, _)| self.step <= *step)
+            {
                 let _ = through_step;
-                Some(host(cut_ns.min((self.step * self.block_frames) as i64 * 1_000_000)))
+                Some(host(
+                    cut_ns.min((self.step * self.block_frames) as i64 * 1_000_000),
+                ))
             } else {
                 Some(self.host_now()?)
             },
@@ -588,6 +628,10 @@ impl Fixture {
                 delayed_inputs: None,
                 prefix_cap: None,
                 renders: vec![],
+                terminal_race: false,
+                race_armed: false,
+                race_reports: vec![],
+                shifted_origin: false,
             },
             group,
             states,
@@ -743,6 +787,70 @@ fn all_four_speeds_preserve_original_member_judgments_provenance_and_raw_keysoun
                 == (0..members)
                     .map(|i| PlayerId(i as u32 + 7))
                     .collect::<Vec<_>>()));
+        }
+    }
+}
+
+#[test]
+fn actual_native_two_and_four_member_pumps_discard_negative_origin_before_key_state() {
+    for count in [2, 4] {
+        let mut f = Fixture::new(count, "3/2", 3_000_000, None, Some(11));
+        f.presentation = NativeAudioPresentation::new(
+            AudioAuthority::new(
+                AudioAuthorityConfig {
+                    history_capacity: 128,
+                    max_observation_age: Duration::from_nanos(1_000_000_000),
+                    input_extrapolation: ExtrapolationPolicy::Bounded {
+                        before: Duration::from_nanos(20_000_000),
+                        after: Duration::ZERO,
+                    },
+                    max_input_ahead: Duration::ZERO,
+                },
+                AudioAuthorityEpoch {
+                    id: 0,
+                    stream_origin: raw(0),
+                    logical_origin: logical(0),
+                    host_domain: ClockDomainId(1),
+                },
+            )
+            .unwrap(),
+            NativePresentationValidator::new(0, raw(0), ClockDomainId(1)),
+        )
+        .unwrap();
+        f.device.shifted_origin = true;
+        assert!(f.run().unwrap().is_none());
+        assert_eq!(f.pre, count as u64);
+        assert_eq!(f.merger.pending(), 0);
+        let inputs: Vec<_> = f
+            .host
+            .reports
+            .iter()
+            .filter(|(_, r)| r.input.is_some())
+            .collect();
+        assert_eq!(inputs.len(), count * 2);
+        for (_, report) in inputs {
+            let meta = report.input.as_ref().unwrap().meta();
+            assert!(meta.sequence == 1 || meta.sequence == 2);
+            assert!(meta.original_clock_point.unwrap().timestamp >= host(21_000_000).timestamp);
+            assert_eq!(report.audio_at.domain, ClockDomainId(2));
+        }
+        for state in &f.states {
+            assert_eq!(
+                state.score.hits, 1,
+                "discarded Down cannot block the first genuine Down"
+            );
+            let inputs: Vec<_> = state
+                .capture
+                .as_ref()
+                .unwrap()
+                .records()
+                .iter()
+                .filter_map(|r| match &r.operation {
+                    ReplayOperation::Input(saved) => Some(saved.physical.meta().sequence),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(inputs, vec![1, 2]);
         }
     }
 }
@@ -1034,7 +1142,8 @@ struct TargetDevice {
 }
 impl TargetDevice {
     fn pair(&self) -> ClockPair {
-        let played = self.step.saturating_sub(self.presentation_delay_steps) as u64 * self.target_frames as u64;
+        let played = self.step.saturating_sub(self.presentation_delay_steps) as u64
+            * self.target_frames as u64;
         ClockPair {
             source: self.basis.point_at_stream_frame(played).unwrap(),
             target: host(played as i64 * 500_000),
@@ -1079,7 +1188,9 @@ impl GameplayDevice for TargetDevice {
             self.output.render_pending(self.target_frames)?;
         }
         self.output.admit(self.target_frames)?;
-        if let Some(report) = self.output.last_real_source_report() { self.rendered.push(report); }
+        if let Some(report) = self.output.last_real_source_report() {
+            self.rendered.push(report);
+        }
         let pair = self.pair();
         let facts = self.output.boundaries();
         if let Some(boundary) = facts.pause {
@@ -1160,18 +1271,23 @@ impl GameplayDevice for TargetDevice {
         &mut self,
         events: &mut VecDeque<PhysicalInputEvent>,
     ) -> NativeGameplayResult<InputBatch> {
-        if self.pause_flow { match self.step {
-            4 | 14 => self.desired_pause.set(true),
-            9 | 19 => self.desired_pause.set(false),
-            _ => {}
-        } }
+        if self.pause_flow {
+            match self.step {
+                4 | 14 => self.desired_pause.set(true),
+                9 | 19 => self.desired_pause.set(false),
+                _ => {}
+            }
+        }
         if let Some((delivery_step, down_ns, up_ns)) = self.delayed_inputs {
             if self.step == delivery_step {
                 for member in (0..self.members).rev() {
-                    for (sequence, ns, state) in [(0, down_ns, ButtonState::Down), (1, up_ns, ButtonState::Up)] {
+                    for (sequence, ns, state) in
+                        [(0, down_ns, ButtonState::Down), (1, up_ns, ButtonState::Up)]
+                    {
                         events.push_back(PhysicalInputEvent::Button(ButtonEvent {
                             meta: EventMeta::new(DeviceId(101 + member as u64), host(ns), sequence),
-                            control: PhysicalControlId::keyboard(7), state,
+                            control: PhysicalControlId::keyboard(7),
+                            state,
                         }));
                     }
                 }
@@ -1189,8 +1305,13 @@ impl GameplayDevice for TargetDevice {
         _: &NativeAudioPresentation,
         _: Option<RenderReport>,
     ) -> NativeGameplayResult<Option<EndBoundary>> {
-        Ok(end.observe_target(0, self.basis, self.output.boundaries(),
-            self.output.last_real_source_report(), self.pair())?)
+        Ok(end.observe_target(
+            0,
+            self.basis,
+            self.output.boundaries(),
+            self.output.last_real_source_report(),
+            self.pair(),
+        )?)
     }
     fn observe_end(
         &mut self,
@@ -1342,11 +1463,19 @@ fn assert_original_late_member_prefix(
         assert_eq!(state.last_song, Timestamp::from_nanos(16_000_000));
         assert_eq!(state.competition.as_ref().unwrap().completed, 1);
         let capture = state.capture.as_ref().unwrap();
-        let inputs: Vec<_> = capture.records().iter().filter_map(|record| match &record.operation {
-            ReplayOperation::Input(input) => Some((record, input)), _ => None,
-        }).collect();
+        let inputs: Vec<_> = capture
+            .records()
+            .iter()
+            .filter_map(|record| match &record.operation {
+                ReplayOperation::Input(input) => Some((record, input)),
+                _ => None,
+            })
+            .collect();
         assert_eq!(inputs.len(), 2);
-        for (index, (original_ns, song_ns)) in [(9_000_000, 12_000_000), (9_500_000, 13_000_000)].into_iter().enumerate() {
+        for (index, (original_ns, song_ns)) in [(9_000_000, 12_000_000), (9_500_000, 13_000_000)]
+            .into_iter()
+            .enumerate()
+        {
             assert_eq!(inputs[index].0.song_time, Timestamp::from_nanos(song_ns));
             let meta = inputs[index].1.physical.meta();
             assert_eq!(meta.source, DeviceId(101 + member as u64));
@@ -1354,18 +1483,45 @@ fn assert_original_late_member_prefix(
             assert_eq!(meta.original_clock_point, Some(host(original_ns)));
             assert_eq!(meta.timestamp, logical(original_ns).timestamp);
         }
-        let reconstructed = reconstruct_section(source, beatkernel::replay::codec::ReplayFile::new(
-            capture.header().clone(), capture.records().to_vec()), limits()).unwrap();
-        assert_eq!(reconstructed.engine().stable_hash().unwrap(), group.member_judge(state.player).unwrap().stable_hash().unwrap());
-        let actual_events: Vec<_> = host_port.reports.iter().filter(|(id, _)| *id == state.player)
-            .flat_map(|(_, report)| report.judge_events.iter().copied()).collect();
+        let reconstructed = reconstruct_section(
+            source,
+            beatkernel::replay::codec::ReplayFile::new(
+                capture.header().clone(),
+                capture.records().to_vec(),
+            ),
+            limits(),
+        )
+        .unwrap();
+        assert_eq!(
+            reconstructed.engine().stable_hash().unwrap(),
+            group
+                .member_judge(state.player)
+                .unwrap()
+                .stable_hash()
+                .unwrap()
+        );
+        let actual_events: Vec<_> = host_port
+            .reports
+            .iter()
+            .filter(|(id, _)| *id == state.player)
+            .flat_map(|(_, report)| report.judge_events.iter().copied())
+            .collect();
         assert_eq!(reconstructed.results(), actual_events);
         let mut rebuilt_gauge = BmsGauge::default();
         rebuilt_gauge.observe(reconstructed.results(), &[]).unwrap();
         assert_eq!(rebuilt_gauge, state.gauge);
-        assert_eq!(capture.records().last().unwrap().song_time, Timestamp::from_nanos(16_000_000));
-        assert!(host_port.reports.iter().filter(|(id, r)| *id == state.player && r.input.is_some())
-            .all(|(_, report)| report.audio_commands.is_empty()), "late original judge input cannot enqueue sound into closed output");
+        assert_eq!(
+            capture.records().last().unwrap().song_time,
+            Timestamp::from_nanos(16_000_000)
+        );
+        assert!(
+            host_port
+                .reports
+                .iter()
+                .filter(|(id, r)| *id == state.player && r.input.is_some())
+                .all(|(_, report)| report.audio_commands.is_empty()),
+            "late original judge input cannot enqueue sound into closed output"
+        );
     }
 }
 
@@ -1378,17 +1534,122 @@ fn unaligned_five_frame_source_callback_closes_pcm_but_preserves_late_original_c
         // The collector has not drained the 9ms events during the first two
         // blocks. Its explicit cut stops at 8ms, instead of inventing coverage.
         f.device.prefix_cap = Some((2, 8_000_000));
-        let completed = f.run().unwrap().expect("actual source crossing must close every member");
+        let completed = f
+            .run()
+            .unwrap()
+            .expect("actual source crossing must close every member");
         assert_eq!(completed.len(), members);
         assert_eq!(f.network.completed, 1);
         assert_original_late_member_prefix(&f.source, &f.group, &f.states, &f.host);
-        let crossing = f.device.renders.iter().find(|r| r.playback_end_physical_frame == Some(11)).unwrap();
+        let crossing = f
+            .device
+            .renders
+            .iter()
+            .find(|r| r.playback_end_physical_frame == Some(11))
+            .unwrap();
         assert_eq!((crossing.start_frame, crossing.frames), (10, 5));
         assert_eq!(crossing.playback_frames, 1);
         assert!(crossing.paused);
-        assert!(f.device.renders.iter().all(|r| r.counters.commands_applied == 1 && r.counters.commands_consumed == 1 && r.pending_commands == 0));
+        assert!(f
+            .device
+            .renders
+            .iter()
+            .all(|r| r.counters.commands_applied == 1
+                && r.counters.commands_consumed == 1
+                && r.pending_commands == 0));
         assert!(f.device.pcm.iter().all(|sample| *sample == 0.0));
         assert_eq!(f.merger.pending(), 0);
+    }
+}
+
+#[test]
+fn actual_two_and_four_member_stale_schedule_waits_for_late_published_command_expiry() {
+    for members in [2, 4] {
+        let mut f = Fixture::new(members, "2/1", 3_000_000, Some(16_000_000), None);
+        f.device.block_frames = 5;
+        f.device.delayed_inputs = Some((2, 9_000_000, 9_500_000));
+        f.device.terminal_race = true;
+        let completed = f
+            .run()
+            .unwrap()
+            .expect("real silent callback settles terminal queue");
+        assert_eq!(completed.len(), members);
+        let prior = f.device.race_reports[0];
+        let crossing = f.device.race_reports[1];
+        assert_eq!(prior.playback_end_physical_frame, None);
+        assert_eq!(
+            prior.playback_start_frame + prior.playback_frames as u64,
+            10
+        );
+        assert_eq!(crossing.playback_end_physical_frame, Some(11));
+        assert_eq!(crossing.counters.commands_consumed, 1);
+        assert_eq!(crossing.counters.commands_expired, 0);
+        let sound_reports: Vec<_> = f
+            .host
+            .reports
+            .iter()
+            .filter(|(_, r)| !r.audio_commands.is_empty())
+            .collect();
+        assert_eq!(sound_reports.len(), 1);
+        assert_eq!(sound_reports[0].1.audio_at, raw(10_000_000));
+        assert!(sound_reports[0].1.audio_commands.iter().any(
+            |c| matches!(c, AudioCommand::Play { at, .. } if *at == raw(10_000_000).timestamp)
+        ));
+        let terminal = f.device.report.unwrap();
+        assert!(terminal.start_frame >= crossing.counters.rendered_frames);
+        assert_eq!(terminal.counters.commands_consumed, 2);
+        assert_eq!(terminal.counters.commands_applied, 1);
+        assert_eq!(terminal.counters.commands_expired, 1);
+        assert_eq!(terminal.pending_commands, 0);
+        assert_eq!(terminal.song_position, crossing.song_position);
+        assert_eq!(terminal.active_voices, crossing.active_voices);
+        assert!(f.device.pcm.iter().all(|v| *v == 0.0));
+        assert_eq!(f.network.completed, 1);
+        assert_eq!(f.host.ends, [Timestamp::from_nanos(16_000_000)]);
+        for (member, state) in f.states.iter().enumerate() {
+            assert_eq!(state.score.hits, 1);
+            assert_eq!(state.score.misses, 0);
+            let capture = state.capture.as_ref().unwrap();
+            let inputs: Vec<_> = capture
+                .records()
+                .iter()
+                .filter_map(|r| match &r.operation {
+                    ReplayOperation::Input(i) => Some((r, i)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(inputs.len(), 2);
+            assert_eq!(inputs[0].0.song_time, Timestamp::from_nanos(12_000_000));
+            assert_eq!(
+                inputs[0].1.physical.meta().original_clock_point,
+                Some(host(9_000_000))
+            );
+            assert_eq!(
+                inputs[0].1.physical.meta().source,
+                DeviceId(101 + member as u64)
+            );
+            assert_eq!(inputs[0].1.physical.meta().sequence, 0);
+            let replay = reconstruct_section(
+                &f.source,
+                beatkernel::replay::codec::ReplayFile::new(
+                    capture.header().clone(),
+                    capture.records().to_vec(),
+                ),
+                limits(),
+            )
+            .unwrap();
+            assert_eq!(
+                replay.engine().stable_hash().unwrap(),
+                f.group
+                    .member_judge(state.player)
+                    .unwrap()
+                    .stable_hash()
+                    .unwrap()
+            );
+            let mut gauge = BmsGauge::default();
+            gauge.observe(replay.results(), &[]).unwrap();
+            assert_eq!(gauge, state.gauge);
+        }
     }
 }
 
@@ -1398,37 +1659,102 @@ fn converted_target_marker_preserves_late_member_input_before_actual_target_end_
         let mut f = Fixture::new(members, "2/1", 3_000_000, Some(16_000_000), None);
         let output = beatkernel_platform::audio::ConvertedNativeOutputState::new(
             f.device.mixer,
-            beatkernel_platform::audio::DeviceFormat::new(2000, 1,
-                beatkernel_platform::audio::SampleEncoding::Float32, None).unwrap(),
+            beatkernel_platform::audio::DeviceFormat::new(
+                2000,
+                1,
+                beatkernel_platform::audio::SampleEncoding::Float32,
+                None,
+            )
+            .unwrap(),
             beatkernel::audio::ChannelMatrix::default_mix(1, 1).unwrap(),
-            beatkernel::audio::ResampleQuality::Linear, 16,
-        ).unwrap_or_else(|_| panic!("valid independent finite converted output"));
+            beatkernel::audio::ResampleQuality::Linear,
+            16,
+        )
+        .unwrap_or_else(|_| panic!("valid independent finite converted output"));
         let basis = output.target_frame_basis();
-        f.presentation = beatkernel_bms_runtime::native_audio_startup::new_target_audio_presentation(
-            0, basis, ClockDomainId(1), logical(0), AudioAuthorityConfig {
-                history_capacity: 128, max_observation_age: Duration::from_nanos(1_000_000_000),
-                input_extrapolation: ExtrapolationPolicy::Forbid, max_input_ahead: Duration::ZERO,
-            }).unwrap();
-        f.pause = NativePause::new(raw(0), ClockDomainId(1), 1000).unwrap()
-            .with_playback_end_frame(11).unwrap().with_target_basis(0, basis).unwrap();
-        f.end = Some(NativeEnd::new(raw(0), ClockDomainId(1), 1000, 11).unwrap().with_target_basis(0, basis).unwrap());
-        let mut target = TargetDevice { output, basis, step: 0, held: false,
-            cancel: f.host.cancel.clone(), desired_pause: f.host.desired_pause.clone(),
-            early_pause: 0, early_resume: 0, holds: vec![], target_frames: 10,
-            presentation_delay_steps: 1, pause_flow: false, members,
-            delayed_inputs: Some((3, 9_000_000, 9_500_000)), rendered: vec![] };
-        let completed = run_cohort_audio_with_ports_and_speed(&mut target, AudioCohortSession {
-            group: &mut f.group, network: Some(&mut f.network), states: &mut f.states,
-            merger: &mut f.merger, bgm: &mut f.bgm, discipline: &mut f.presentation,
-            pause: &mut f.pause, end: &mut f.end, delivery: &mut f.delivery, pre_origin_inputs: &mut f.pre,
-        }, f.config, &mut f.control, &mut f.host, f.setup).unwrap().expect("genuine native target crossing");
+        f.presentation =
+            beatkernel_bms_runtime::native_audio_startup::new_target_audio_presentation(
+                0,
+                basis,
+                ClockDomainId(1),
+                logical(0),
+                AudioAuthorityConfig {
+                    history_capacity: 128,
+                    max_observation_age: Duration::from_nanos(1_000_000_000),
+                    input_extrapolation: ExtrapolationPolicy::Forbid,
+                    max_input_ahead: Duration::ZERO,
+                },
+            )
+            .unwrap();
+        f.pause = NativePause::new(raw(0), ClockDomainId(1), 1000)
+            .unwrap()
+            .with_playback_end_frame(11)
+            .unwrap()
+            .with_target_basis(0, basis)
+            .unwrap();
+        f.end = Some(
+            NativeEnd::new(raw(0), ClockDomainId(1), 1000, 11)
+                .unwrap()
+                .with_target_basis(0, basis)
+                .unwrap(),
+        );
+        let mut target = TargetDevice {
+            output,
+            basis,
+            step: 0,
+            held: false,
+            cancel: f.host.cancel.clone(),
+            desired_pause: f.host.desired_pause.clone(),
+            early_pause: 0,
+            early_resume: 0,
+            holds: vec![],
+            target_frames: 10,
+            presentation_delay_steps: 1,
+            pause_flow: false,
+            members,
+            delayed_inputs: Some((3, 9_000_000, 9_500_000)),
+            rendered: vec![],
+        };
+        let completed = run_cohort_audio_with_ports_and_speed(
+            &mut target,
+            AudioCohortSession {
+                group: &mut f.group,
+                network: Some(&mut f.network),
+                states: &mut f.states,
+                merger: &mut f.merger,
+                bgm: &mut f.bgm,
+                discipline: &mut f.presentation,
+                pause: &mut f.pause,
+                end: &mut f.end,
+                delivery: &mut f.delivery,
+                pre_origin_inputs: &mut f.pre,
+            },
+            f.config,
+            &mut f.control,
+            &mut f.host,
+            f.setup,
+        )
+        .unwrap()
+        .expect("genuine native target crossing");
         assert_eq!(completed.len(), members);
         assert_original_late_member_prefix(&f.source, &f.group, &f.states, &f.host);
-        assert!(target.rendered.iter().any(|r| r.playback_end_physical_frame == Some(11)));
-        assert!(target.rendered.iter().all(|r| r.counters.commands_consumed == 1 && r.counters.commands_applied == 1 && r.pending_commands == 0));
+        assert!(target
+            .rendered
+            .iter()
+            .any(|r| r.playback_end_physical_frame == Some(11)));
+        assert!(target
+            .rendered
+            .iter()
+            .all(|r| r.counters.commands_consumed == 1
+                && r.counters.commands_applied == 1
+                && r.pending_commands == 0));
         let end = target.output.boundaries().end.unwrap();
-        assert!(target.pair().source.timestamp >= end.target_time.point(basis.origin()).unwrap().timestamp,
-            "source closure does not itself authorize converted target completion");
-        assert_eq!(f.network.completed, 1); assert_eq!(f.merger.pending(), 0);
+        assert!(
+            target.pair().source.timestamp
+                >= end.target_time.point(basis.origin()).unwrap().timestamp,
+            "source closure does not itself authorize converted target completion"
+        );
+        assert_eq!(f.network.completed, 1);
+        assert_eq!(f.merger.pending(), 0);
     }
 }

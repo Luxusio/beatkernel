@@ -1109,6 +1109,10 @@ impl BrowserGame {
             .as_ref()
             .map_or(0, |queue| queue.pending() as u32)
     }
+    #[wasm_bindgen(getter)]
+    pub fn pre_origin_inputs(&self) -> u64 {
+        self.game.pre_origin_inputs()
+    }
     pub fn service_audio(&mut self, now_host_ns: i64, audio_ns: i64) -> Result<u32, JsValue> {
         if now_host_ns < 0 || audio_ns < 0 {
             return Err(error(

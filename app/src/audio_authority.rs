@@ -114,6 +114,10 @@ impl PreparedInput {
     pub const fn epoch(&self) -> u64 {
         self.state.epoch.id
     }
+    /// The original input maps before this epoch's playable logical timeline.
+    pub fn is_before_origin(&self) -> bool {
+        self.output.timestamp < self.state.epoch.logical_origin.timestamp
+    }
 }
 
 /// Actual observed presentation joined to the entire drained acquired HOST prefix.
@@ -473,9 +477,10 @@ impl AudioAuthority {
         {
             return Ok(None);
         }
-        if self
-            .operation
-            .is_some_and(|last| output.timestamp < last.timestamp)
+        if output.timestamp >= self.epoch.logical_origin.timestamp
+            && self
+                .operation
+                .is_some_and(|last| output.timestamp < last.timestamp)
         {
             return Err(AudioAuthorityError::OperationRegression);
         }
@@ -491,6 +496,9 @@ impl AudioAuthority {
 
     /// Commit the actual Runtime operation once; post-report observer faults do not undo it.
     pub fn commit_input(&mut self, prepared: PreparedInput) -> Result<(), AudioAuthorityError> {
+        if prepared.is_before_origin() {
+            return Err(AudioAuthorityError::OperationRegression);
+        }
         if prepared.state != self.state()
             || self.prepare_input(prepared.original, prepared.now)? != Some(prepared)
         {
@@ -499,6 +507,23 @@ impl AudioAuthority {
         let revision = self.next_revision()?;
         self.input_host = Some(prepared.original);
         self.operation = Some(prepared.output);
+        self.revision = revision;
+        Ok(())
+    }
+
+    /// Retire an original pre-origin input without granting an operation or presentation.
+    pub fn commit_discarded_input(
+        &mut self,
+        prepared: PreparedInput,
+    ) -> Result<(), AudioAuthorityError> {
+        if !prepared.is_before_origin()
+            || prepared.state != self.state()
+            || self.prepare_input(prepared.original, prepared.now)? != Some(prepared)
+        {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        let revision = self.next_revision()?;
+        self.input_host = Some(prepared.original);
         self.revision = revision;
         Ok(())
     }

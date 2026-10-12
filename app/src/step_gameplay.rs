@@ -406,6 +406,7 @@ pub struct StepGameplay {
     preroll: Duration,
     live_speed: Option<LiveSpeedSetup>,
     last_operation: Option<ClockPoint>,
+    pre_origin_inputs: u64,
     live_terminal: bool,
     activated: bool,
     started: bool,
@@ -1255,6 +1256,7 @@ impl StepGameplay {
             preroll: config.preroll,
             live_speed,
             last_operation: None,
+            pre_origin_inputs: 0,
             live_terminal: false,
             activated: false,
             started: false,
@@ -1546,6 +1548,41 @@ impl StepGameplay {
         self.authority.as_ref()
     }
 
+    pub fn pre_origin_inputs(&self) -> u64 {
+        self.pre_origin_inputs
+    }
+
+    /// Drain original pre-origin inputs, returning the next playable frozen descriptor.
+    pub fn discard_pre_origin_audio_inputs(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<PreparedInput>, StepGameplayError> {
+        loop {
+            let Some(prepared) = self.prepare_audio_input(merger, now, audio_at, None)? else {
+                return Ok(None);
+            };
+            if !prepared.is_before_origin() {
+                return Ok(Some(prepared));
+            }
+            let count = self
+                .pre_origin_inputs
+                .checked_add(1)
+                .ok_or(AudioAuthorityError::Overflow)?;
+            let authority = self.authority.as_mut().expect("audio mode checked");
+            let prefix = authority
+                .acquired_prefix()
+                .expect("prepared input has acquired prefix");
+            authority.commit_discarded_input(prepared)?;
+            merger
+                .pop_ready(prefix)
+                .map_err(AudioAuthorityError::from)?
+                .expect("private preparation inspected this earliest input");
+            self.pre_origin_inputs = count;
+        }
+    }
+
     pub fn observe_audio_output(
         &mut self,
         epoch: u64,
@@ -1576,9 +1613,26 @@ impl StepGameplay {
         position: Option<Position2>,
     ) -> Result<Option<RuntimeReport>, StepGameplayError> {
         self.ensure_solo()?;
-        let Some(prepared) = self.prepare_audio_input(merger, now, audio_at, position)? else {
+        self.validate_audio_operation(now, audio_at, position)?;
+        let before = self.pre_origin_inputs;
+        let Some(prepared) = self.discard_pre_origin_audio_inputs(merger, now, audio_at)? else {
             return Ok(None);
         };
+        let position = if before != self.pre_origin_inputs {
+            match self
+                .authority
+                .as_ref()
+                .and_then(AudioAuthority::acquired_prefix)
+            {
+                Some(prefix) => merger
+                    .peek_ready_position(prefix)
+                    .map_err(AudioAuthorityError::from)?,
+                None => None,
+            }
+        } else {
+            position
+        };
+        self.validate_audio_operation(now, audio_at, position)?;
         let prefix = self
             .authority
             .as_ref()
@@ -2141,7 +2195,7 @@ impl StepGameplay {
             || !self.last_render.is_some_and(|report| {
                 report.playback_end_physical_frame == Some(frame)
                     && report.counters.commands_consumed == self.acknowledged_commands
-                    && report.counters.commands_applied == self.acknowledged_commands
+                    && report.counters.settled_commands() == Some(self.acknowledged_commands)
                     && report.pending_commands == 0
             })
             || !self
@@ -2192,14 +2246,16 @@ impl StepGameplay {
         if let (Some(end), Some(report)) = (self.playback_end_frame, actual) {
             if commands_resolved
                 && report.playback_end_physical_frame == Some(end)
-                && (report.counters.commands_consumed != self.acknowledged_commands
-                    || report.counters.commands_applied != self.acknowledged_commands
-                    || report.pending_commands != 0)
+                && (report.counters.commands_consumed > self.acknowledged_commands
+                    || report
+                        .counters
+                        .settled_commands()
+                        .is_none_or(|settled| settled > self.acknowledged_commands))
             {
                 self.failed = true;
                 return Err(StepGameplayError::Completion {
                     error: CompletionError(
-                        "finite output did not execute the exact acknowledged command total",
+                        "finite output exceeded or lost exact acknowledged command evidence",
                     ),
                     rendered: Some(report),
                     presented,
@@ -2219,7 +2275,12 @@ impl StepGameplay {
                 / i128::from(self.sample_rate);
             return Ok(members_ready
                 && commands_resolved
-                && actual.is_some_and(|report| report.playback_end_physical_frame == Some(frame))
+                && actual.is_some_and(|report| {
+                    report.playback_end_physical_frame == Some(frame)
+                        && report.pending_commands == 0
+                        && report.counters.commands_consumed == self.acknowledged_commands
+                        && report.counters.settled_commands() == Some(self.acknowledged_commands)
+                })
                 && (self.song == end || numeric_terminal)
                 && self
                     .last_presented
@@ -3315,6 +3376,19 @@ impl StepLocalGameplay {
     pub fn audio_authority(&self) -> Option<&AudioAuthority> {
         self.control.audio_authority()
     }
+    pub fn pre_origin_inputs(&self) -> u64 {
+        self.control.pre_origin_inputs()
+    }
+    pub fn discard_pre_origin_audio_inputs(
+        &mut self,
+        merger: &mut InputMerger,
+        now: ClockPoint,
+        audio_at: ClockPoint,
+    ) -> Result<Option<PreparedInput>, StepLocalGameplayError> {
+        self.control
+            .discard_pre_origin_audio_inputs(merger, now, audio_at)
+            .map_err(Into::into)
+    }
     pub fn observe_audio_output(
         &mut self,
         epoch: u64,
@@ -3337,12 +3411,28 @@ impl StepLocalGameplay {
         audio_at: ClockPoint,
         position: Option<Position2>,
     ) -> Result<Option<InputResult>, StepLocalGameplayError> {
-        let Some(prepared) = self
-            .control
-            .prepare_audio_input(merger, now, audio_at, position)?
-        else {
+        self.control
+            .validate_audio_operation(now, audio_at, position)?;
+        let before = self.pre_origin_inputs();
+        let Some(prepared) = self.discard_pre_origin_audio_inputs(merger, now, audio_at)? else {
             return Ok(None);
         };
+        let position = if before != self.pre_origin_inputs() {
+            match self
+                .audio_authority()
+                .and_then(AudioAuthority::acquired_prefix)
+            {
+                Some(prefix) => merger
+                    .peek_ready_position(prefix)
+                    .map_err(AudioAuthorityError::from)
+                    .map_err(StepGameplayError::from)?,
+                None => None,
+            }
+        } else {
+            position
+        };
+        self.control
+            .validate_audio_operation(now, audio_at, position)?;
         let prefix = self
             .control
             .authority
@@ -3983,7 +4073,11 @@ pub(crate) fn validate_section_output_evidence_with_stops(
         .ok_or(CompletionError("completion render clock overflow"))?;
     let counters = report.counters;
     if counters.rendered_frames != end
-        || counters.commands_applied > counters.commands_consumed
+        || counters
+            .settled_commands()
+            .is_none_or(|settled| settled > counters.commands_consumed)
+        || (counters.commands_expired != 0
+            && (!report.paused || report.playback_end_physical_frame.is_none()))
         || counters.late_commands > counters.commands_consumed
         || !stops.permits_unknown_stops(counters.unknown_stops)
         || counters.unknown_stops > counters.commands_applied
@@ -4023,11 +4117,7 @@ pub(crate) fn validate_section_output_evidence_with_stops(
         }
         if expected_end.is_some()
             && previous.playback_end_physical_frame.is_some()
-            && (report.playback_end_physical_frame != previous.playback_end_physical_frame
-                || report.song_position != previous.song_position
-                || report.active_voices != previous.active_voices
-                || report.pending_commands != previous.pending_commands
-                || counter_values(counters)[1..] != counter_values(previous.counters)[1..])
+            && !finite_settlement_progression(previous, report)
         {
             return Err(CompletionError(
                 "completion state changed after the finite endpoint",
@@ -4037,7 +4127,7 @@ pub(crate) fn validate_section_output_evidence_with_stops(
     Ok(normalized)
 }
 
-pub(crate) fn counter_values(counters: AudioCounters) -> [u64; 11] {
+pub(crate) fn counter_values(counters: AudioCounters) -> [u64; 12] {
     [
         counters.rendered_frames,
         counters.commands_consumed,
@@ -4050,7 +4140,39 @@ pub(crate) fn counter_values(counters: AudioCounters) -> [u64; 11] {
         counters.invalid_gains,
         counters.invalid_rates,
         counters.invalid_times,
+        counters.commands_expired,
     ]
+}
+
+/// After an observed endpoint, only actual consumption and expiry can retire
+/// pending debt; execution and frozen playback state cannot change.
+pub(crate) fn finite_settlement_progression(previous: RenderReport, report: RenderReport) -> bool {
+    let Some(retired_pending) = previous
+        .pending_commands
+        .checked_sub(report.pending_commands)
+        .and_then(|pending| u64::try_from(pending).ok())
+    else {
+        return false;
+    };
+    let Some(consumed) = report
+        .counters
+        .commands_consumed
+        .checked_sub(previous.counters.commands_consumed)
+    else {
+        return false;
+    };
+    let Some(expired) = report
+        .counters
+        .commands_expired
+        .checked_sub(previous.counters.commands_expired)
+    else {
+        return false;
+    };
+    report.playback_end_physical_frame == previous.playback_end_physical_frame
+        && report.song_position == previous.song_position
+        && report.active_voices == previous.active_voices
+        && counter_values(report.counters)[2..11] == counter_values(previous.counters)[2..11]
+        && consumed.checked_add(retired_pending) == Some(expired)
 }
 
 /// Bounded fallible copies are cold archive work, never part of input/report processing.

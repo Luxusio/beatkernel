@@ -321,6 +321,42 @@ test("physical input remains original acquisition bytes and raw audio commands r
   assert.equal(h.games[0].frees, 1);
 });
 
+test("live statistics sum actual audio-origin BigInt discards with original HOST discards exactly once", async () => {
+  for (const localPlayers of [false, true]) {
+    const h = await catalog({ preOriginInputs: 3n });
+    await h.send(request({ liveSpeed: "3/2", ...(localPlayers ? {
+      inputMode: "physical-contact", localPlanWords: new Uint32Array([99, 1, 1, 0, 7, 1, 2, 0]),
+    } : {}) }));
+    assert.ok(prepared(h));
+    await rpc(h, "play-activate", { hostNs: ORIGIN, startFrame: START });
+    await h.send({ kind: "play-step", playId: 7, tickId: 1,
+      events: [{ hostNs: ORIGIN - 1n, key: 2, down: true, sequence: 1n }],
+      watermark: ORIGIN + 1n, nowNs: ORIGIN + 1n, audioNs: 1n });
+    assert.equal(h.of("play-step-done").at(-1).preOriginInputs, 4);
+    await h.send({ kind: "play-step", playId: 7, tickId: 2, events: [],
+      watermark: ORIGIN + 2n, nowNs: ORIGIN + 2n, audioNs: 2n });
+    assert.equal(h.of("play-step-done").at(-1).preOriginInputs, 4, "getter is a total, not a delta");
+    await stop(h);
+  }
+});
+
+test("unavailable malformed or unsafe actual discard totals remain unknown instead of fabricated zero", async () => {
+  for (const options of [{ preOriginInputs: undefined }, { preOriginInputs: 2 },
+    { preOriginInputs: -1n }, { preOriginInputs: 18446744073709551616n },
+    { preOriginInputs: BigInt(Number.MAX_SAFE_INTEGER) }, { throwPreOriginInputs: true }]) {
+    const h = await catalog(options);
+    await h.send(request());
+    assert.ok(prepared(h));
+    await rpc(h, "play-activate", { hostNs: ORIGIN, startFrame: START });
+    await h.send({ kind: "play-step", playId: 7, tickId: 1,
+      events: [{ hostNs: ORIGIN - 1n, key: 2, down: true, sequence: 1n }],
+      watermark: ORIGIN + 1n, nowNs: ORIGIN + 1n, audioNs: 1n });
+    assert.equal(h.of("play-step-done").at(-1).preOriginInputs, null);
+    assert.equal(h.of("play-error").length, 0, "presentation counter uncertainty does not cancel play");
+    await stop(h);
+  }
+});
+
 test("local members share one selected speed owner while capture remains independent per member", async () => {
   const h = await catalog();
   await h.send(request({ liveSpeed: "6/4", inputMode: "physical-contact", recordReplay: true,

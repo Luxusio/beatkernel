@@ -1504,7 +1504,18 @@ function hostTime(value) { return typeof value === "bigint" && value >= 0n && va
 function signed(value) { return typeof value === "bigint" && value >= -I64_MAX - 1n && value <= I64_MAX; }
 
 function statistics(state) {
-  const result = { songNs: null, hits: null, misses: null, combo: null, maxCombo: null, preOriginInputs: state.preOriginInputs };
+  let preOriginInputs = state.preOriginInputs;
+  if (state.mode === "live") {
+    preOriginInputs = null;
+    try {
+      const actual = state.game?.pre_origin_inputs;
+      if (unsigned(actual)) {
+        const combined = BigInt(state.preOriginInputs) + actual;
+        if (combined <= BigInt(Number.MAX_SAFE_INTEGER)) preOriginInputs = Number(combined);
+      }
+    } catch {}
+  }
+  const result = { songNs: null, hits: null, misses: null, combo: null, maxCombo: null, preOriginInputs };
   if (state.localPlan) {
     result.primaryPlayer = state.localPlan.members[0].player;
     result.localScores = state.localPlan.members.map(({ player }) => {

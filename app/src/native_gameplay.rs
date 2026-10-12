@@ -234,8 +234,10 @@ fn schedule<D: crate::gameplay_presentation::GameplayDevice, S, P: PumpTiming<D>
             .or_else(|| session.pause.last_render_report())
             .ok_or("mixer playback boundary unavailable for scheduling")?;
         let at = session.pause.scheduling_point(report)?;
-        if P::AUDIO && session.end.is_some()
-            && report.frames != 0 && report.playback_end_physical_frame.is_some()
+        if P::AUDIO
+            && session.end.is_some()
+            && report.frames != 0
+            && report.playback_end_physical_frame.is_some()
         {
             // The callback can reach the immutable endpoint between pump
             // observation and scheduling. Use this same validated receipt.
@@ -859,9 +861,9 @@ fn run_gameplay_timed<
         let rendered = device.render_report()?;
         validate_stop_evidence(rendered, &stop_evidence)?;
         if T::AUDIO && session.end.is_some() {
-            if let Some(report) = rendered.filter(|report| {
-                report.frames != 0 && report.playback_end_physical_frame.is_some()
-            }) {
+            if let Some(report) = rendered
+                .filter(|report| report.frames != 0 && report.playback_end_physical_frame.is_some())
+            {
                 // This validates the immutable finite source grid and marker,
                 // including startup and pause gaps. It grants no native target
                 // crossing or command ACK; those completion gates remain below.
@@ -2271,6 +2273,23 @@ fn service_audio_solo<
         else {
             break;
         };
+        if prepared.is_before_origin() {
+            let count = session
+                .pre_origin_inputs
+                .checked_add(1)
+                .ok_or("native pre-origin input counter overflow")?;
+            session
+                .discipline
+                .audio_mut()
+                .expect("audio timing")
+                .authority_mut()
+                .commit_discarded_input(prepared)?;
+            merger
+                .pop_ready(prefix)?
+                .expect("prepared pre-origin input");
+            *session.pre_origin_inputs = count;
+            continue;
+        }
         // Rendering [start, end) can stop exactly at the pass endpoint
         // before the next block publishes its genuine boundary receipt.
         // Preserve equal/later original inputs until that receipt arrives.

@@ -1,7 +1,6 @@
 //! Song-time audio planning from actual reconstructed BMS judge results.
 
 use crate::{
-    PreparedBms,
     bgm::BgmFeeder,
     gauge::BmsGauge,
     input_sounds::InputSoundPlan,
@@ -13,13 +12,14 @@ use crate::{
         decode_section_setup, reconstruct, reconstruct_section, validate_section_setup,
         validate_setup,
     },
+    PreparedBms,
 };
 use beatkernel::{
     audio::{AudioCommand, RenderReport, SampleId},
     judge::{JudgeEvent, JudgeOutcome},
     replay::{
-        ReplayOperation,
         codec::{ReplayCodecLimits, ReplayFile},
+        ReplayOperation,
     },
     runtime::GameplaySoundStop,
     time::{ClockPoint, Duration, Timestamp},
@@ -83,6 +83,11 @@ fn completed_render_cursor_with_admitted_stops(
 ) -> Result<u64, ReplayAudioError> {
     let counters = report.counters;
     if counters.late_commands != 0
+        || counters
+            .settled_commands()
+            .is_none_or(|settled| settled > counters.commands_consumed)
+        || (counters.commands_expired != 0
+            && (!report.paused || report.playback_end_physical_frame.is_none()))
         || counters.pending_full != 0
         || counters.voice_full != 0
         || counters.unknown_samples != 0
