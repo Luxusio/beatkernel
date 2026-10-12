@@ -76,6 +76,7 @@ struct Options {
     #[cfg_attr(not(feature = "asio-sdk"), allow(dead_code))]
     asio_anchor_age: u64,
     chart: PathBuf,
+    live_speed: beatkernel_bms_runtime::live_speed::LiveSpeedSetup,
     record_replay: Option<PathBuf>,
     replay_max_records: usize,
     replay_max_bytes: usize,
@@ -187,27 +188,13 @@ fn local_assignment(
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 impl Options {
     fn playback_end(&self, sample_rate: u32) -> Result<Option<u64>> {
-        use beatkernel_bms_runtime::{practice::PracticeStart, practice_loop::PracticeLoop};
-        self.end_ns
-            .map(|end| {
-                let start = PracticeStart::from_nanoseconds(self.start_ns)?;
-                Ok(
-                    PracticeLoop::new(start, PracticeStart::from_nanoseconds(end)?)?
-                        .playback_end_frame(
-                            start,
-                            Duration::from_nanos(self.preroll),
-                            sample_rate,
-                        )?,
-                )
-            })
-            .transpose()
+        Ok(self.live_speed.playback_end_frame(sample_rate)?)
     }
     fn song_origin(&self) -> Result<beatkernel::time::Timestamp> {
-        Ok(beatkernel::time::Timestamp::from_nanos(
-            self.start_ns
-                .checked_sub(self.preroll)
-                .ok_or("section start minus preroll overflows song time")?,
-        ))
+        Ok(self.live_speed.song_origin())
+    }
+    fn selected_speed(&self) -> bool {
+        self.live_speed.speed().rate() != beatkernel::transport::Rate::NORMAL
     }
 }
 fn parse(args: &[String]) -> Result<Options> {
@@ -242,6 +229,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut period = PeriodRequest::DeviceDefault;
     let mut shared = SharedPeriodPolicy::EnginePeriod;
     let mut seen = HashSet::new();
+    let mut speed = beatkernel_bms_runtime::settings::parse_playback_speed("1/1")?;
     let mut record_replay = None;
     let mut replay_max_records = 1_000_000usize;
     let mut replay_max_bytes = 64 * 1024 * 1024usize;
@@ -252,6 +240,12 @@ fn parse(args: &[String]) -> Result<Options> {
             return Err(format!("duplicate option {flag}").into());
         }
         match flag.as_str() {
+            "--speed" => {
+                if value.is_empty() {
+                    return Err("speed must be a nonempty positive NUM/DEN fraction".into());
+                }
+                speed = beatkernel_bms_runtime::settings::parse_playback_speed(value)?;
+            }
             "--local-player" => {
                 if local_players.len() == beatkernel_bms_runtime::local_players::MAX_LOCAL_PLAYERS {
                     return Err("local player count exceeds 64".into());
@@ -530,7 +524,19 @@ fn parse(args: &[String]) -> Result<Options> {
         timing_preset.as_deref(),
         rank_precedence.as_deref(),
     )?;
+    let live_speed = beatkernel_bms_runtime::live_speed::LiveSpeedSetup::new(
+        beatkernel::time::Timestamp::from_nanos(start_ns),
+        beatkernel::time::Duration::from_nanos(preroll),
+        speed,
+        end_ns.map(beatkernel::time::Timestamp::from_nanos),
+    )?;
+    if speed.rate() != beatkernel::transport::Rate::NORMAL {
+        // The negotiated grid is unknown until native setup. A nanosecond grid
+        // rejects an unrepresentable finite duration before any device opens.
+        live_speed.playback_end_frame(1_000_000_000)?;
+    }
     Ok(Options {
+        live_speed,
         keyboard_path,
         local_players,
         advance_lag,
@@ -708,6 +714,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let (competition_options, args) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
+        println!("--speed NUM/DEN: positive fixed playback speed, default 1/1; pitch changes with speed. --rate HZ selects physical sample rate where available, --seconds N is a diagnostic wall cutoff. Nonnormal speed uses cold one-shot play; retained practice/restart/seek/loop and runtime rate changes unavailable.");
         println!(
             "Local play: repeat --local-player ID:EXACT_INTERFACE_PATH for 2..64 distinct keyboards, without --keyboard-path. Stable positive u32 IDs are preserved in GUI scores and .p<ID>.bkr replay files. --advance-lag-ns 0..1000000000 (default 2000000) controls the common input frontier. Network local groups share one connection and start agreement; saved ghosts remain per-player. Native commands compose the graphical player's actual runtime."
         );
@@ -717,6 +724,10 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let options = parse(&args)?;
+    if options.selected_speed() {
+        let rate = options.live_speed.speed().rate();
+        println!("live playback speed={}/{}; pitch changes; cold one-shot play; retained practice/restart/seek/loop and runtime rate changes unavailable", rate.numerator(), rate.denominator());
+    }
     #[cfg(target_os = "windows")]
     {
         native::run(
@@ -743,12 +754,11 @@ mod native {
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
     use beatkernel_bms_runtime::native_audio::{
-        prepare_audio, prepare_input_sounds, prepare_mine_sounds, NativeAudioConfig,
-        PreparedNativeAudio,
+        prepare_input_sounds, prepare_mine_sounds, NativeAudioConfig, PreparedNativeAudio,
     };
     use beatkernel_bms_runtime::{
         native_chart::{prepare_chart_with_policy, NativeChartConfig},
-        native_judge::{capture_limits, prepare_section_capture_for_policy, NativeJudgeConfig},
+        native_judge::{capture_limits, NativeJudgeConfig},
         ChannelPolicy,
     };
     use beatkernel_bms_runtime::{
@@ -1322,6 +1332,7 @@ mod native {
         competition_options: beatkernel_bms_runtime::competition_live::CompetitionOptions,
         launch: beatkernel_bms_runtime::session_launch::SessionLaunch,
     ) -> Result<()> {
+        let selected_speed = options.selected_speed();
         if !options.local_players.is_empty() {
             return super::local_native::run(options, competition_options, launch);
         }
@@ -1340,7 +1351,7 @@ mod native {
             domain: OUTPUT,
             timestamp: Timestamp::ZERO,
         };
-        let retained = competition_options.network.is_none();
+        let retained = competition_options.network.is_none() && !selected_speed;
         let song_origin = options.song_origin()?;
         let playback_end = if retained {
             None
@@ -1486,7 +1497,7 @@ mod native {
                 .transpose()?;
         }
         let mut competition =
-            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_native_section_with_policy(
+            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_native_section_with_policy_and_speed(
                 &competition_options,
                 &initial_source,
                 &judge,
@@ -1496,6 +1507,7 @@ mod native {
                 options.chart_seed,
                 options.end_ns.map(Timestamp::from_nanos),
                 options.preroll,
+                options.live_speed.speed(),
             )?;
         const LIVE_SLACK: usize = beatkernel_bms_runtime::native_audio::LIVE_COMMAND_RESERVE;
         let capacity = AudioLimits::MAX_COMMANDS;
@@ -1589,7 +1601,12 @@ mod native {
             (prepared_audio.audio, Some(practice))
         } else {
             (
-                prepare_audio(prepared.bank, prepared.bgm_commands, audio_config)?,
+                beatkernel_bms_runtime::native_audio::prepare_audio_with_speed(
+                    prepared.bank,
+                    prepared.bgm_commands,
+                    audio_config,
+                    options.live_speed.speed(),
+                )?,
                 None,
             )
         };
@@ -1627,7 +1644,7 @@ mod native {
             "section start={}ns preroll={}ns; output zero maps to song={:?}; short startup pairs do not establish long-run clock stability",
             options.start_ns,
             options.preroll,
-            options.song_origin()?
+            song_origin
         );
         if options.preroll == 0 {
             println!(
@@ -1640,7 +1657,7 @@ mod native {
         let mut score = beatkernel_bms_runtime::competition::ScoreSummary::default();
         let outcome =
             (|| -> Result<Option<beatkernel_bms_runtime::play_result::CompletedPlayResult>> {
-                capture = prepare_section_capture_for_policy(
+                capture = beatkernel_bms_runtime::native_judge::prepare_section_capture_for_policy_with_speed(
                     &initial_source,
                     &judge,
                     &policy,
@@ -1653,6 +1670,7 @@ mod native {
                         options.replay_max_bytes,
                         options.replay_max_records,
                     )?,
+                    options.live_speed.speed(),
                 )?;
                 let start_basis = super::owned_output::basis(&output)?;
                 let creation_epoch = output.last_issued_epoch();
@@ -1746,11 +1764,15 @@ mod native {
                     None => seed.host_for_output(playback_origin, before)?,
                 };
                 let logical_origin = presentation.logical_output(playback_origin)?;
-                let transport = beatkernel::transport::Transport::new(
-                    logical_origin.timestamp,
-                    options.song_origin()?,
-                    Rate::NORMAL,
-                );
+                let transport = if selected_speed {
+                    options.live_speed.transport(logical_origin.timestamp)?
+                } else {
+                    beatkernel::transport::Transport::new(
+                        logical_origin.timestamp,
+                        song_origin,
+                        Rate::NORMAL,
+                    )
+                };
                 println!(
                     "audio-authoritative logical anchor={:?}; original associations={:?}; HOST acquisition={host_origin:?}; physical accuracy Unknown",
                     transport.anchor(),
@@ -1814,7 +1836,7 @@ mod native {
                             origin: host_origin,
                             stream_origin: output_origin,
                             playback_origin,
-                            song_origin: options.song_origin()?,
+                            song_origin: song_origin,
                             sample_rate: pcm.sample_rate(),
                             end_song: options.end_ns.map(Timestamp::from_nanos),
                             advance_lag: beatkernel::time::Duration::from_nanos(
@@ -1833,13 +1855,24 @@ mod native {
                         beatkernel_bms_runtime::native_gameplay::run_gameplay_audio_with_practice_and_result_and_score(
                             &mut device, session, config, &mut score, &policy, practice, &mut recording)
                     } else {
-                        run_gameplay_audio_with_policy_and_result_and_score(
-                            &mut device,
-                            session,
-                            config,
-                            &mut score,
-                            &policy,
-                        )
+                        if selected_speed {
+                            beatkernel_bms_runtime::native_gameplay::run_gameplay_audio_with_policy_and_result_and_score_and_speed(
+                                &mut device,
+                                session,
+                                config,
+                                &mut score,
+                                &policy,
+                                options.live_speed,
+                            )
+                        } else {
+                            run_gameplay_audio_with_policy_and_result_and_score(
+                                &mut device,
+                                session,
+                                config,
+                                &mut score,
+                                &policy,
+                            )
+                        }
                     }
                 };
                 println!(

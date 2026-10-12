@@ -15,7 +15,7 @@ use beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::{
 };
 #[cfg(test)]
 use beatkernel_bms_runtime::local_players::PlayerId;
-use beatkernel_bms_runtime::native_audio::{prepare_audio, NativeAudioConfig, PreparedNativeAudio};
+use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio};
 use beatkernel_bms_runtime::native_cohort_setup::{
     activate_audio_cohort_with_sounds, admit_cohort as admit_mode, finish_cohort,
     finish_cohort_network, finish_cohort_with_results_and_network,
@@ -209,11 +209,12 @@ pub(super) fn run(
     competition_options: CompetitionOptions,
     launch: beatkernel_bms_runtime::session_launch::SessionLaunch,
 ) -> Result<()> {
+    let selected_speed = options.selected_speed();
     admit_mode(
         options.local_players.len(),
         competition_options.network.is_some(),
     )?;
-    let retained_practice = competition_options.network.is_none();
+    let retained_practice = competition_options.network.is_none() && !selected_speed;
     let playback_end = if retained_practice {
         None
     } else {
@@ -367,28 +368,54 @@ pub(super) fn run(
         mut states,
         mut save_paths,
         reserved,
-    } = prepare_audio_cohort_with_policy(
-        &prepared,
-        &assignments,
-        &competition_options,
-        &CohortPreparation {
-            host: HOST,
-            output: OUTPUT,
-            early: policy.judge().max_early().as_nanos(),
-            late: policy.judge().max_late().as_nanos(),
-            offset: policy.judge().input_offset().as_nanos(),
-            preroll: options.preroll,
-            start: Timestamp::from_nanos(options.start_ns),
-            end: options.end_ns.map(Timestamp::from_nanos),
-            chart_seed: options.chart_seed,
-            bindings: &options.bindings,
-            record_replay: options.record_replay.as_deref(),
-            replay_max_bytes: options.replay_max_bytes,
-            replay_max_records: options.replay_max_records,
-        },
-        LOGICAL,
-        &policy,
-    )?;
+    } = if selected_speed {
+        beatkernel_bms_runtime::native_cohort_setup::prepare_audio_cohort_with_policy_and_speed(
+            &prepared,
+            &assignments,
+            &competition_options,
+            &CohortPreparation {
+                host: HOST,
+                output: OUTPUT,
+                early: policy.judge().max_early().as_nanos(),
+                late: policy.judge().max_late().as_nanos(),
+                offset: policy.judge().input_offset().as_nanos(),
+                preroll: options.preroll,
+                start: Timestamp::from_nanos(options.start_ns),
+                end: options.end_ns.map(Timestamp::from_nanos),
+                chart_seed: options.chart_seed,
+                bindings: &options.bindings,
+                record_replay: options.record_replay.as_deref(),
+                replay_max_bytes: options.replay_max_bytes,
+                replay_max_records: options.replay_max_records,
+            },
+            LOGICAL,
+            &policy,
+            options.live_speed,
+        )
+    } else {
+        prepare_audio_cohort_with_policy(
+            &prepared,
+            &assignments,
+            &competition_options,
+            &CohortPreparation {
+                host: HOST,
+                output: OUTPUT,
+                early: policy.judge().max_early().as_nanos(),
+                late: policy.judge().max_late().as_nanos(),
+                offset: policy.judge().input_offset().as_nanos(),
+                preroll: options.preroll,
+                start: Timestamp::from_nanos(options.start_ns),
+                end: options.end_ns.map(Timestamp::from_nanos),
+                chart_seed: options.chart_seed,
+                bindings: &options.bindings,
+                record_replay: options.record_replay.as_deref(),
+                replay_max_bytes: options.replay_max_bytes,
+                replay_max_records: options.replay_max_records,
+            },
+            LOGICAL,
+            &policy,
+        )
+    }?;
     if let Some((source, chart, sounds)) = original_source {
         for (state, member) in states.iter_mut().zip(&configs) {
             state.completion = completion_template
@@ -539,7 +566,12 @@ pub(super) fn run(
             (prepared_audio.audio, Some(practice))
         } else {
             (
-                prepare_audio(prepared.bank, prepared.bgm_commands, audio_config)?,
+                beatkernel_bms_runtime::native_audio::prepare_audio_with_speed(
+                    prepared.bank,
+                    prepared.bgm_commands,
+                    audio_config,
+                    options.live_speed.speed(),
+                )?,
                 None,
             )
         };
@@ -663,7 +695,11 @@ pub(super) fn run(
             host_origin,
             OUTPUT,
             logical_origin,
-            Transport::new(logical_origin.timestamp, song_origin, Rate::NORMAL),
+            if selected_speed {
+                options.live_speed.transport(logical_origin.timestamp)?
+            } else {
+                Transport::new(logical_origin.timestamp, song_origin, Rate::NORMAL)
+            },
             producer,
             options.end_ns.map(Timestamp::from_nanos),
             input_sounds,
@@ -716,7 +752,22 @@ pub(super) fn run(
                 beatkernel_bms_runtime::native_cohort::run_cohort_audio_with_practice_and_policies_and_results(
                     &mut device, session, config, &selected_policies, practice, &mut recording)
             } else {
-                run_cohort_audio_with_policies_and_results(&mut device, session, config, &selected_policies)
+                if selected_speed {
+                    beatkernel_bms_runtime::native_cohort::run_cohort_audio_with_policies_and_results_and_speed(
+                        &mut device,
+                        session,
+                        config,
+                        &selected_policies,
+                        options.live_speed,
+                    )
+                } else {
+                    run_cohort_audio_with_policies_and_results(
+                        &mut device,
+                        session,
+                        config,
+                        &selected_policies,
+                    )
+                }
             }
         };
         for state in &states {
