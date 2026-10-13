@@ -20,7 +20,7 @@ const out = resolve(process.env.LIVE_SPEED_OUT ?? resolve(root, "target/wf/live-
 const port = Number(process.env.LIVE_SPEED_PORT ?? 8148);
 assert.ok(Number.isInteger(port) && port >= 1024 && port <= 65535);
 assert.ok(relative(root, out).startsWith(`target${sep}wf${sep}`));
-const required = ["cold-refusal", "1/2", "1/1", "2/1", "3/2", "saved-record", "quantized-end", "independent-replay", "opponent-match", "opponent-refusal", "touch-local", "stop-retry", "responsive", "clean-console-network"];
+const required = ["cold-refusal", "1/2", "1/1", "2/1", "3/2", "saved-record", "quantized-end", "independent-replay", "opponent-match", "opponent-refusal", "nonzero-section", "seek-restart", "touch-local", "stop-retry", "responsive", "clean-console-network"];
 const evidence = { kind: "development-production-live-speed", required, checks: [], cases: [], console: [], network: [], ceilings: [
   "Chromium software output/GPU proves software execution, not acoustic latency or physical devices.",
   "The actual UI always supplies 100 ms preroll and end > start; zero output frames cannot be selected here. Actual zero-grid owner/Mixer coverage is separate. This runner selects a genuine 1 ns interval instead.",
@@ -176,14 +176,22 @@ async function observeWorker() {
 }
 
 function observeRenderer() {
-  const probe = globalThis.__liveSpeedRenderer = { frames: [], receipts: [], errors: [] };
+  const probe = globalThis.__liveSpeedRenderer = { frames: [], previews: [], receipts: [], errors: [] };
   const seen = new WeakSet(), start = MessagePort.prototype.start, post = MessagePort.prototype.postMessage;
   MessagePort.prototype.start = function() {
     if (!seen.has(this)) { seen.add(this); this.addEventListener("message", event => {
       const bytes = event.data?.packet; if (!(bytes instanceof Uint8Array)) return;
       try {
-        if (probe.frames.length >= 50000 || bytes.byteLength < 40) throw Error("Renderer extent ceiling");
+        if (probe.frames.length >= 50000 || probe.previews.length >= 5000 || bytes.byteLength < 40) throw Error("Renderer extent ceiling");
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), kind = view.getUint16(6, true);
+        // Public BKRV PREVIEW carries its original-song point at byte40.
+        // Observe it separately from gameplay frames; a reply alone does not
+        // establish that the selected preview was genuinely drawn.
+        if (kind === 3) {
+          if (bytes.byteLength !== 56 || view.getBigUint64(32, true) !== 16n) throw Error("Actual preview extent missing");
+          probe.previews.push({ generation: String(view.getBigUint64(8, true)), content: String(view.getBigUint64(16, true)), sequence: String(view.getBigUint64(24, true)), songNs: String(view.getBigInt64(40, true)) });
+          return;
+        }
         if (kind !== 2) return;
         if (bytes.byteLength < 69 || view.getUint32(53, true) < 1) throw Error("Actual visual frame missing member");
         probe.frames.push({ mode: event.data.mode, generation: String(view.getBigUint64(8, true)), content: String(view.getBigUint64(16, true)), sequence: String(view.getBigUint64(24, true)), songNs: String(view.getBigInt64(61, true)) });
@@ -233,6 +241,25 @@ function decodeRecord(bytes) {
   }
   assert.equal(p, b.length); return { fields, records };
 }
+function captureSection(decoded) {
+  // This fixture selects button-only finite playback at3/2 with the default
+  // gauge. Read the original public setup bytes independently of prepared
+  // metadata; no replay owner or re-encoding supplies this timing oracle.
+  const speedPrefix = Buffer.from("bms-speed-setup/v1:"), outer = decoded.fields[3];
+  assert.deepEqual(outer.subarray(0, speedPrefix.length), speedPrefix);
+  assert.ok(outer.length >= speedPrefix.length + 20);
+  const innerLength = outer.readUInt32LE(speedPrefix.length);
+  assert.equal(outer.length, speedPrefix.length + 20 + innerLength);
+  assert.equal(outer.readBigInt64LE(speedPrefix.length + 4), 3n);
+  assert.equal(outer.readBigUInt64LE(speedPrefix.length + 12), 2n);
+  const options = outer.subarray(speedPrefix.length + 20), prefix = Buffer.from("bms-judge-profile/v4:");
+  assert.deepEqual(options.subarray(0, prefix.length), prefix);
+  assert.ok(options.length >= prefix.length + 40);
+  const seed = options.readBigUInt64LE(prefix.length), startNs = options.readBigInt64LE(prefix.length + 8), endNs = options.readBigInt64LE(prefix.length + 16);
+  const windows = options.readBigUInt64LE(prefix.length + 32);
+  assert.ok(windows <= 128n); assert.equal(options.length, prefix.length + 40 + Number(windows) * 20);
+  return { seed, startNs, endNs };
+}
 const word = (words, index) => BigInt(words[index * 2]) | BigInt(words[index * 2 + 1]) << 32n;
 async function field(id, value) { await page.$eval(`#${id}`, (element, value) => { element.value = value; element.dispatchEvent(new Event("input", { bubbles: true })); element.dispatchEvent(new Event("change", { bubbles: true })); }, value); }
 async function toggle(id, checked) { if (await page.$eval(`#${id}`, x => x.checked) !== checked) await page.click(`#${id}`); }
@@ -260,11 +287,11 @@ async function snapshot(name) {
 }
 function session(result, id) { return result.window.messages.filter(x => x.data.playId === id); }
 function metadata(messages) { const x = messages.find(x => x.direction === "received" && x.data.kind === "play-reply" && x.data.result?.kind === "prepared")?.data.result; assert.ok(x); return x; }
-function assertCompletion(result, request, reportOffset, endNs, n, d) {
+function assertCompletion(result, request, reportOffset, endNs, n, d, startNs = 0n) {
   const messages = session(result, request.playId); assert.ok(!messages.some(x => x.data.kind === "play-error"), json(messages));
   const meta = metadata(messages), rate = BigInt(request.rate);
-  const duration = 100000000n + endNs * d / n, frame = (duration * rate + 999999999n) / 1000000000n;
-  assert.equal(meta.endNs, String(endNs)); assert.equal(meta.endFrame, String(frame));
+  const duration = 100000000n + (endNs - startNs) * d / n, frame = (duration * rate + 999999999n) / 1000000000n;
+  assert.equal(meta.startNs, String(startNs)); assert.equal(meta.endNs, String(endNs)); assert.equal(meta.endFrame, String(frame));
   const stopped = messages.find(x => x.direction === "received" && x.data.kind === "play-stopped")?.data;
   assert.ok(stopped); assert.equal(stopped.songNs, String(endNs));
   assert.ok(messages.some(x => x.data.kind === "play-render-done" && x.data.completed && x.data.pendingInputs === 0 && !x.data.commandsPending), "Natural completion requires real drained input and commands");
@@ -273,11 +300,62 @@ function assertCompletion(result, request, reportOffset, endNs, n, d) {
     && word(words, 24) >= BigInt(activation.startFrame) + frame && word(words, 13) === word(words, 14) && word(words, 13) > 0n), "Actual Worklet endpoint/counters required");
   return { messages, meta, stopped, frame };
 }
+async function acquireKeyboardUntil(id, songNs) {
+  const deadline = Date.now() + 12000;
+  let covered = false;
+  try {
+    while (Date.now() < deadline) {
+      await page.keyboard.down("z"); await sleep(8); await page.keyboard.up("z"); await sleep(12);
+      covered = await page.evaluate(({ id, songNs }) => {
+        const observation = __liveSpeedWindow.messages.findLast(x => x.direction === "received"
+          && x.data.playId === id && x.data.kind === "play-render-done");
+        return observation?.data.songNs != null && BigInt(observation.data.songNs) >= BigInt(songNs);
+      }, { id, songNs: String(songNs) });
+      if (covered) break;
+    }
+  } finally { await page.keyboard.up("z"); }
+  assert.ok(covered, "Genuine section progress must cover the keyboard interval before its deadline");
+}
+async function actualSection(name) {
+  const contextIndex = await page.evaluate(() => __liveSpeedWindow.contexts.length);
+  const reportOffset = await worker.evaluate(() => __liveSpeedWorker.reports.length);
+  const frameOffset = await renderer.evaluate(() => __liveSpeedRenderer.frames.length);
+  const receiptOffset = await renderer.evaluate(() => __liveSpeedRenderer.receipts.length);
+  const request = await start();
+  assert.equal(request.liveSpeed, "3/2"); assert.equal(request.startNs, "250000000"); assert.equal(request.endNs, "2000000000");
+  await page.waitForFunction(() => document.querySelector("#status").textContent.startsWith("Playing"), { timeout: 30000 });
+  await acquireKeyboardUntil(request.playId, 750000000n);
+  await terminal(request.playId);
+  const result = await snapshot(name), completion = assertCompletion(result, request, reportOffset, 2000000000n, 3n, 2n, 250000000n);
+  assert.equal(result.window.contexts.length, contextIndex + 1, "Each section owns a fresh actual Worklet context");
+  assert.equal(completion.meta.liveSpeed, "3/2"); assert.ok(BigInt(completion.stopped.hits) > 0n);
+  const captured = result.worker.captures.find(x => x.playId === request.playId && x.bytes);
+  assert.ok(captured?.complete, "Actual natural section completion must produce a complete capture");
+  const decoded = decodeRecord(captured.bytes), capturemeta = captureSection(decoded), inputs = decoded.records.filter(x => x.input);
+  assert.equal(capturemeta.startNs, 250000000n); assert.equal(capturemeta.endNs, 2000000000n); assert.equal(capturemeta.seed, BigInt(request.seed));
+  assert.ok(inputs.length >= 2); assert.ok(inputs.some(x => x.songNs >= 450000000n && x.songNs <= 550000000n));
+  const acquired = completion.messages.filter(x => x.direction === "sent" && x.data.kind === "play-step").flatMap(x => x.data.events);
+  for (const record of inputs) {
+    const expected = 250000000n + (record.input.normalizedNs - 100000000n) * 3n / 2n;
+    assert.ok(record.songNs - expected >= -2n && record.songNs - expected <= 2n, `Original section captured timing mismatch ${record.songNs - expected} ns`);
+    assert.equal(record.input.variant, 0); assert.equal(record.input.source, 1n);
+    assert.ok(acquired.some(x => String(x.sequence) === String(record.input.sequence) && String(x.hostNs) === String(record.input.originalNs)), "Section capture preserves actual Window keyboard provenance");
+  }
+  assert.ok(result.window.pcm.some(x => x.index === contextIndex && Math.abs(x.frequency - 1320) <= 50), "Actual nonzero-section PCM must retain3/2 pitch");
+  const progress = completion.messages.filter(x => x.data.kind === "play-render-done" && x.data.songNs !== null && BigInt(x.data.songNs) > 350000000n && BigInt(x.data.songNs) < 1800000000n);
+  const receipts = result.renderer.receipts.slice(receiptOffset);
+  const drawn = result.renderer.frames.slice(frameOffset).filter(x => progress.some(y => y.data.songNs === x.songNs)
+    && receipts.some(y => y.mode === "live" && y.generation === x.generation && y.content === x.content && y.sequence === x.sequence));
+  assert.ok(new Set(drawn.map(x => x.songNs)).size >= 2, "This actual section must draw advancing original-song positions");
+  const bytes = Buffer.from(captured.bytes), sha256 = sha(bytes);
+  await writeFile(resolve(out, `${name}.bkr`), bytes);
+  return { request, result, contextIndex, sha256, frame: String(completion.frame), inputs: inputs.length, hits: completion.stopped.hits, drawn: drawn.length };
+}
 
 async function run() {
   const spki = await serve(), require = createRequire(import.meta.url);
   const puppeteer = process.env.PUPPETEER_MODULE ? require(resolve(process.env.PUPPETEER_MODULE)) : (await import("puppeteer-core")).default;
-  evidence.sources = Object.fromEntries(await Promise.all(["main.js", "index.html", "worker.js", "renderer-worker.js", "audio-worklet.js", "play-model.mjs", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm", "audio-pkg/beatkernel_bms_runtime.js", "audio-pkg/beatkernel_bms_runtime_bg.wasm"].map(async name => [name, sha(await readFile(resolve(root, "app/web", name)))])));
+  evidence.sources = Object.fromEntries(await Promise.all(["main.js", "index.html", "worker.js", "renderer-worker.js", "audio-host.mjs", "audio-worklet.js", "native-audio-clock.mjs", "worklet-native-frame-probe.mjs", "play-model.mjs", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm", "audio-pkg/beatkernel_bms_runtime.js", "audio-pkg/beatkernel_bms_runtime_bg.wasm"].map(async name => [name, sha(await readFile(resolve(root, "app/web", name)))])));
   browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage", "--enable-unsafe-webgpu", "--use-angle=swiftshader", "--enable-features=Vulkan", "--use-vulkan=swiftshader", "--ignore-certificate-errors", `--ignore-certificate-errors-spki-list=${spki}`, "--autoplay-policy=no-user-gesture-required"] });
   evidence.ownedBrowserPid = browser.process().pid; console.log(`Owned Chromium ${evidence.ownedBrowserPid}; evidence ${out}`);
   page = await browser.newPage(); const installations = [];
@@ -384,6 +462,51 @@ async function run() {
   evidence.stage = "opponent-refusal"; await field("live-speed", "2/1"); const refused = await start(); await terminal(refused.playId);
   const refusal = session(await snapshot("opponent-refusal"), refused.playId); assert.ok(refusal.some(x => x.data.kind === "play-error")); assert.ok(!refusal.some(x => x.data.kind === "play-activate"));
   check("opponent-refusal", "Different source conditions refuse before activation"); await page.click("#opponents-clear");
+  evidence.stage = "nonzero-section";
+  await field("live-start", "0.25"); await field("live-end", "2"); await field("live-speed", "3/2");
+  const section = await actualSection("nonzero-section");
+  check("nonzero-section", { playId: section.request.playId, startNs: "250000000", endNs: "2000000000", frame: section.frame, inputs: section.inputs, hits: section.hits, drawn: section.drawn, sha256: section.sha256 });
+  evidence.stage = "seek-restart";
+  const seekOffset = await page.evaluate(() => __liveSpeedWindow.messages.length);
+  const previewOffset = await renderer.evaluate(() => __liveSpeedRenderer.previews.length);
+  const previewReceiptOffset = await renderer.evaluate(() => __liveSpeedRenderer.receipts.length);
+  const selectedId = await page.evaluate(() => __liveSpeedWindow.messages.findLast(x => x.direction === "received" && x.data.kind === "selected")?.data.id);
+  assert.ok(Number.isSafeInteger(selectedId) && selectedId > 0);
+  await page.waitForFunction(() => !document.querySelector("#position").disabled && !document.querySelector("#seek").disabled, { timeout: 15000 });
+  await field("position", "1.25"); await page.click("#seek");
+  await page.waitForFunction(({ offset, selectedId }) => {
+    const messages = __liveSpeedWindow.messages.slice(offset), request = messages.find(x => x.direction === "sent" && x.data.kind === "seek")?.data;
+    return request?.selectedId === selectedId && messages.some(x => x.direction === "received" && x.data.kind === "position"
+      && x.data.id === request.id && x.data.selectedId === selectedId && x.data.ns === "1250000000");
+  }, { timeout: 15000 }, { offset: seekOffset, selectedId });
+  const seekMessages = await page.evaluate(offset => __liveSpeedWindow.messages.slice(offset), seekOffset);
+  const seekRequest = seekMessages.find(x => x.direction === "sent" && x.data.kind === "seek")?.data;
+  assert.ok(seekRequest); assert.equal(seekRequest.selectedId, selectedId); assert.equal(seekRequest.ns, "1250000000");
+  assert.ok(!seekMessages.some(x => x.direction === "received" && x.data.kind === "seek-error" && x.data.id === seekRequest.id));
+  const previewDraw = await renderer.evaluate(async ({ previewOffset, receiptOffset }) => {
+    const deadline = performance.now() + 10000;
+    while (performance.now() < deadline) {
+      const probe = __liveSpeedRenderer, receipt = probe.previews.slice(previewOffset).find(frame => frame.songNs === "1250000000"
+        && probe.receipts.slice(receiptOffset).some(draw => draw.mode === "preview" && draw.generation === frame.generation && draw.content === frame.content && draw.sequence === frame.sequence));
+      if (receipt) return receipt;
+      await new Promise(done => setTimeout(done, 10));
+    }
+    throw Error("Actual sought preview draw deadline");
+  }, { previewOffset, receiptOffset: previewReceiptOffset });
+  await page.waitForFunction(({ selectedId, generation, content }) => __liveSpeedWindow.messages.some(x => x.direction === "received"
+    && x.data.kind === "drawn" && x.data.selectedId === selectedId && x.data.mode === "preview"
+    && String(x.data.generation) === generation && String(x.data.content) === content), { timeout: 10000 }, { selectedId, ...previewDraw });
+  assert.equal(await page.$eval("#position", x => x.value), "1.25");
+  await snapshot("seek-preview");
+  // Preview seeking is a separate operation. Restart the explicit selected
+  // section, rather than silently using the preview position as its origin.
+  assert.equal(await page.$eval("#live-start", x => x.value), "0.25");
+  assert.equal(await page.$eval("#live-end", x => x.value), "2");
+  const restart = await actualSection("seek-restart");
+  assert.ok(restart.request.playId > section.request.playId); assert.ok(restart.contextIndex > section.contextIndex);
+  assert.equal(restart.frame, section.frame); assert.equal(sha(await readFile(resolve(out, "nonzero-section.bkr"))), section.sha256);
+  check("seek-restart", { selectedId, seekId: seekRequest.id, previewNs: previewDraw.songNs, previewDraw, firstPlayId: section.request.playId, restartedPlayId: restart.request.playId, frame: restart.frame, inputs: restart.inputs, firstContext: section.contextIndex, restartedContext: restart.contextIndex, sha256: restart.sha256 });
+  await field("live-start", "0");
   evidence.stage = "touch-local";
   if (!await page.$eval("#local-count", element => element.closest("details").open)) {
     await page.click("details.binding-editor:has(#local-count) > summary");

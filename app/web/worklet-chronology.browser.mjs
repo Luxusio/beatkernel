@@ -10,6 +10,8 @@
  * WORKLET_NATIVE_PHASE_PROBE=1 streams three finite native ramp periods in the
  * same fixture; modulo agreement does not admit an absolute production clock.
  * WORKLET_NATIVE_JOINT_PHASE_PROBE=1 measures three fixed coprime native lanes.
+ * WORKLET_NATIVE_CLOCK_PRODUCT=1 runs actual armed playback past two native
+ * refill revisions at44.1/48k, independently of diagnostic/required-cold modes.
  * No dependency installs or external services. The owned HTTPS test response
  * wraps registerProcessor; repository production bytes and native clocks stay
  * unchanged. A deliberately omitted native callback is fault injection, not
@@ -32,8 +34,10 @@ const requireCold = process.env.WORKLET_CHRONOLOGY_REQUIRE_COLD === "1";
 const nativeProbe = process.env.WORKLET_NATIVE_FRAME_PROBE === "1";
 const phaseProbe = process.env.WORKLET_NATIVE_PHASE_PROBE === "1";
 const jointProbe = process.env.WORKLET_NATIVE_JOINT_PHASE_PROBE === "1";
+const productProbe = process.env.WORKLET_NATIVE_CLOCK_PRODUCT === "1";
 const phaseFixture = phaseProbe || jointProbe;
-const nativeFixture = nativeProbe || phaseFixture;
+const nativeFixture = nativeProbe || phaseFixture || productProbe;
+const productCases = [44100, 48000].map(rate => ({ name: `product-${rate}`, rate, productProbe: true }));
 const coldCases = requireCold ? ["cold-1", "cold-2", "cold-3"] : ["normal"];
 const nativeCases = [
   ...[44100, 48000].flatMap(rate => [1, 17, 63, 127].map(offset => ({ name: `native-${rate}-${offset}`, rate, offset }))),
@@ -50,82 +54,286 @@ const jointCases = [
     .map(operation => ({ name: `joint-${operation}`, rate: 48000, offset: 17, phaseProbe: true, jointProbe: true, operation })),
 ];
 const evidence = { kind: "development-worklet-chronology-browser", checks: [], scenarios: [],
-  mode: jointProbe ? "native-phase0-joint-modulo" : phaseProbe ? "native-phase0-modulo" : nativeProbe ? "native-phase0-marker" : requireCold ? "required-healthy-cold" : "historical-diagnostic",
-  ceiling: nativeFixture ? [
+  mode: productProbe ? "native-clock-product" : jointProbe ? "native-phase0-joint-modulo" : phaseProbe ? "native-phase0-modulo" : nativeProbe ? "native-phase0-marker" : requireCold ? "required-healthy-cold" : "historical-diagnostic",
+  ceiling: productProbe ? ["Measured original native-clock product callbacks and two refill boundaries at44.1/48k; physical acoustics, other browser engines and aged contexts remain unproved.",
+    "Fixture observers allocate retained diagnostic snapshots; their cost is not a production callback performance claim."] : nativeFixture ? [
     "Two native marker edges establish only their measured callback interval; future graph-pull gaps and generic counter continuity remain unproved.",
-    "Reused generated WASM is artifact-specific phase0 evidence, not a fresh Rust rebuild or a repair of the prior strict browser chronology failure.",
+    "Generated WASM/source fingerprints identify this artifact; phase0 diagnostics alone do not prove actual armed playback or the full player.",
     "AudioParam fill/scan and private diagnostic messaging are sustained test overhead, not a startup-only or zero-cost production claim.",
     ...(phaseProbe ? ["A single repeating phase cannot distinguish nP-frame gaps; checked samples and conditioned endpoint corroboration establish only this measured interval."] : []),
     ...(jointProbe ? ["Joint residues identify only Number-safe modulo candidates; native samples alone cannot certify epoch, age or future chronology beyond the finite measured interval."] : []),
   ] : ["Measured cold-context acceptance only; no universal browser scheduling, high-frame performance, gameplay completion, replay-prefix or acoustic-output claim."], cleanup: {} };
-const required = jointProbe ? [...jointCases.map(x => x.name), "joint-fresh-context", "web-server-boundary"]
+const required = productProbe ? [...productCases.map(x => x.name), "product-fresh-context", "web-server-boundary"] : jointProbe ? [...jointCases.map(x => x.name), "joint-fresh-context", "web-server-boundary"]
   : phaseProbe ? [...phaseCases.map(x => x.name), "phase-fresh-context", "web-server-boundary"]
   : nativeProbe ? [...nativeCases.map(x => x.name), "fresh-context", "web-server-boundary"]
   : [...(requireCold ? coldCases : ["diagnostic-cold-observation"]), "native-gap", "late-arm", "sample-control"];
 evidence.required = required;
 let browser, server;
 
-// This bootstrap is served only by the owned test server. Every call delegated
-// to Production uses the untouched actual AudioWorkletGlobalScope currentFrame.
+// Served only by this owned test server. Original native parameters and the
+// real numeric WASM methods remain the production inputs; globals are observed.
 const bootstrap = `
+import { nativeJointOffset } from './worklet-native-frame-probe.mjs';
+const chronologyNames = ['__beatkernel_clock_0', '__beatkernel_clock_1', '__beatkernel_clock_2'];
 const actualRegister = globalThis.registerProcessor.bind(globalThis);
 globalThis.registerProcessor = (name, Production) => actualRegister(name, class extends Production {
   constructor(options) {
     super(options);
     this.probe = { successful: [], skipped: null, armedAt: null,
-      firstUnarmedGap: null, armSnapshot: null, firstMixer: null };
+      firstUnarmedGap: null, armSnapshot: null, firstMixer: null, nativeOrigin: null };
     this.previousUnarmedEnd = null;
     this.mixerProbeAttempts = 0;
+    this.observedNativeFrame = null;
+    const nativeStart = this.owner.native_clock_start.bind(this.owner);
+    this.owner.native_clock_start = (...args) => {
+      const status = nativeStart(...args);
+      if (status === 0) this.probe.nativeOrigin = args[0] + args[1] * 4294967296;
+      return status;
+    };
+    const nativeFrame = this.owner.native_frame.bind(this.owner);
+    this.owner.native_frame = (...args) => {
+      const frame = nativeFrame(...args);
+      this.observedNativeFrame = frame;
+      return frame;
+    };
+    const arm = this.owner.arm_words.bind(this.owner);
+    this.owner.arm_words = (...args) => {
+      const status = arm(...args);
+      if (status === 0) {
+        const nativeFrame = args[2] + args[3] * 4294967296;
+        this.probe.armedAt = nativeFrame;
+        this.probe.armSnapshot = { currentFrame: nativeFrame, rawGlobalFrame: currentFrame,
+          reportAvailable: this.owner.report_word(0, false),
+          expectedPresent: this.owner.report_word(23, false),
+          expectedLow: this.owner.report_word(24, false), expectedHigh: this.owner.report_word(24, true),
+          startPresent: this.owner.report_word(25, false),
+          startLow: this.owner.report_word(26, false), startHigh: this.owner.report_word(26, true) };
+      }
+      return status;
+    };
     const post = this.port.postMessage.bind(this.port);
     this.port.postMessage = (message, transfer) => post({ ...message, chronologyProbe: this.probe }, transfer);
   }
   control(message) {
     if (message?.kind === '__chronology-skip-one') { this.skipRequested = true; return; }
-    const result = super.control(message);
-    if (message?.kind === 'arm' && !this.failed && this.phase === 2) {
-      this.probe.armedAt = currentFrame;
-      this.probe.armSnapshot = { currentFrame, reportAvailable: this.owner.report_word(0, false),
-        expectedPresent: this.owner.report_word(23, false),
-        expectedLow: this.owner.report_word(24, false), expectedHigh: this.owner.report_word(24, true),
-        startPresent: this.owner.report_word(25, false),
-        startLow: this.owner.report_word(26, false), startHigh: this.owner.report_word(26, true) };
-    }
-    return result;
+    return super.control(message);
   }
-  process(inputs, outputs) {
+  process(inputs, outputs, parameters) {
+    const frames = outputs[0][0].length;
     if (this.skipRequested && !this.probe.skipped && this.phase === 2 && !this.failed
       && this.probe.successful.filter(x => x.phase === 2).length >= 4) {
-      this.probe.skipped = { currentFrame, blockFrames: outputs[0][0].length };
+      const offset = nativeJointOffset(...chronologyNames.map(name => parameters[name][0]));
+      this.probe.skipped = { currentFrame: offset === null ? null : this.probe.nativeOrigin + offset,
+        rawGlobalFrame: currentFrame, blockFrames: frames, fault: 'omitted-production-callback' };
       this.silence(outputs);
       return true;
     }
     const phase = this.phase;
-    const frame = currentFrame;
-    const frames = outputs[0][0].length;
-    if (phase === 1 && frames > 0 && this.previousUnarmedEnd !== null
-      && frame > this.previousUnarmedEnd && this.probe.firstUnarmedGap === null) {
-      this.probe.firstUnarmedGap = { previousEnd: this.previousUnarmedEnd, currentFrame: frame,
-        blockFrames: frames, reportAvailableBefore: this.owner.report_word(0, false), accepted: false };
-    }
-    const result = super.process(inputs, outputs);
-    if (result && phase > 0 && !this.failed) {
+    this.observedNativeFrame = null;
+    const result = super.process(inputs, outputs, parameters);
+    const frame = this.observedNativeFrame;
+    if (result && phase > 0 && !this.failed && Number.isSafeInteger(frame) && frame >= 0) {
       if (phase === 1 && frames > 0) {
-        this.previousUnarmedEnd = frame + frames;
-        if (this.probe.firstUnarmedGap?.currentFrame === frame) {
-          this.probe.firstUnarmedGap.accepted = true;
-          this.probe.firstUnarmedGap.reportAvailableAfter = this.owner.report_word(0, false);
+        if (this.previousUnarmedEnd !== null && frame > this.previousUnarmedEnd && this.probe.firstUnarmedGap === null) {
+          this.probe.firstUnarmedGap = { previousEnd: this.previousUnarmedEnd, currentFrame: frame,
+            rawGlobalFrame: currentFrame, blockFrames: frames, reportAvailableBefore: 0,
+            accepted: true, reportAvailableAfter: this.owner.report_word(0, false) };
         }
+        this.previousUnarmedEnd = frame + frames;
       }
-      if (phase === 2 && this.probe.firstMixer === null && this.mixerProbeAttempts++ < 2048
+      if (this.phase === 2 && this.probe.firstMixer === null && this.mixerProbeAttempts++ < 2048
         && this.owner.report_word(0, false) === 1) {
-        this.probe.firstMixer = { currentFrame: frame, blockFrames: frames,
+        this.probe.firstMixer = { currentFrame: frame, rawGlobalFrame: currentFrame, blockFrames: frames,
           startLow: this.owner.report_word(1, false), startHigh: this.owner.report_word(1, true),
           frames: this.owner.report_word(2, false),
           renderedLow: this.owner.report_word(12, false), renderedHigh: this.owner.report_word(12, true) };
       }
-      this.probe.successful.push({ currentFrame: frame, blockFrames: frames, phase });
+      this.probe.successful.push({ currentFrame: frame, rawGlobalFrame: currentFrame, blockFrames: frames, phase: this.phase });
       if (this.probe.successful.length > 32) this.probe.successful.shift();
     }
+    return result;
+  }
+});
+`;
+
+// Long product observations use a separate transferred test port. The original
+// native arrays and the actual BrowserAudio methods always reach Production.
+const productBootstrap = `
+import { nativePhase as productNativePhase, phaseIdeal as productPhaseIdeal } from './worklet-native-frame-probe.mjs';
+const productPeriods = [1048576, 1048575, 1048573];
+const productNames = ['__beatkernel_clock_0', '__beatkernel_clock_1', '__beatkernel_clock_2'];
+const actualRegister = globalThis.registerProcessor.bind(globalThis);
+globalThis.registerProcessor = (name, Production) => actualRegister(name, class extends Production {
+  constructor(options) {
+    super(options);
+    this.productPort = null;
+    this.productRetired = false;
+    this.productDone = false;
+    this.productFrame = null;
+    this.productOrigin = null;
+    this.productHorizons = null;
+    this.productTransactions = [];
+    this.productReceipts = [];
+    this.productBeforeRefill = false;
+    this.productAfterRefill = false;
+    this.productArm = false;
+    this.productStats = { callbacks: 0, validatedCallbacks: 0, armedCallbacks: 0,
+      checkedSamples: 0, nonzeroPCMCallbacks: 0, maxError: 0, minFrames: null, maxFrames: 0,
+      firstNativeFrame: null, lastNativeEnd: null, failed: false, resultTrue: true, reportConserved: true };
+    const frame = this.owner.native_frame.bind(this.owner);
+    this.owner.native_frame = (...args) => { const value = frame(...args); this.productFrame = value; return value; };
+    const start = this.owner.native_clock_start.bind(this.owner);
+    this.owner.native_clock_start = (...args) => {
+      const status = start(...args);
+      if (status === 0) {
+        this.productOrigin = args[0] + args[1] * 4294967296;
+        this.productHorizons = [args[2] + args[3] * 4294967296,
+          args[4] + args[5] * 4294967296, args[6] + args[7] * 4294967296];
+      }
+      return status;
+    };
+    const arm = this.owner.arm_words.bind(this.owner);
+    this.owner.arm_words = (...args) => { const status = arm(...args); if (status === 0) this.productArm = true; return status; };
+    const post = this.port.postMessage.bind(this.port);
+    this.port.postMessage = (message, transfer) => {
+      if (message.kind === 'clock-refill') this.productBeforeRefill = true;
+      if (message.kind === 'clock-committed' && message.revision > 0) {
+        const transaction = this.productTransactions.find(x => x.revision === message.revision);
+        if (transaction) transaction.ackObserved = message.status === 0;
+      }
+      return post(message, transfer);
+    };
+  }
+  productSummary(reason) {
+    this.productPort?.postMessage({ kind: 'product-summary', generation: this.generation,
+      reason, origin: this.productOrigin, stats: this.productStats,
+      transactions: this.productTransactions, receipts: this.productReceipts });
+  }
+  control(message) {
+    if (message?.kind === '__product-attach') {
+      if (message.generation !== this.generation || this.productPort !== null || this.productRetired
+        || !message.port || typeof message.port.postMessage !== 'function') {
+        message.port?.close(); return;
+      }
+      this.productPort = message.port;
+      this.productPort.onmessage = event => {
+        if (event.data?.generation !== this.generation) return;
+        if (event.data.kind === 'retire') {
+          this.productSummary('retired');
+          this.productRetired = true;
+          this.productPort.postMessage({ kind: 'product-retired', generation: this.generation });
+          this.productPort.close();
+        }
+      };
+      this.productPort.start();
+      this.productPort.postMessage({ kind: 'product-attached', generation: this.generation });
+      return;
+    }
+    let transaction = null;
+    if (message?.kind === 'clock-commit' && message.revision > 0 && this.productHorizons) {
+      transaction = { revision: message.revision, origin: message.origin,
+        from: [...this.productHorizons], to: [message.h0, message.h1, message.h2],
+        accepted: false, ackObserved: false, oldPrefixCheckedSamples: 0,
+        postCommitCallbacks: 0, crossings: [] };
+      this.productTransactions.push(transaction);
+      if (this.productTransactions.length > 8) throw Error('Product transaction observation bound exceeded');
+    }
+    const result = super.control(message);
+    if (transaction && !this.failed) {
+      transaction.accepted = true;
+      this.productHorizons = [...transaction.to];
+      this.productAfterRefill = true;
+    }
+    return result;
+  }
+  productReceipt(reason, frame, frames, parameters, pcmNonzero) {
+    if (this.productReceipts.length >= 32) throw Error('Product receipt observation bound exceeded');
+    const owner = this.owner;
+    this.productReceipts.push({ reason, ordinal: this.productStats.callbacks, frame, frames,
+      phase: this.phase, rawGlobalFrame: currentFrame,
+      markerValues: Array.from(parameters.__beatkernel_clock_marker),
+      laneValues: productNames.map(name => Array.from(parameters[name])),
+      expectedLow: owner.report_word(24, false), expectedHigh: owner.report_word(24, true),
+      startLow: owner.report_word(26, false), startHigh: owner.report_word(26, true),
+      reportAvailable: owner.report_word(0, false), mixerStartLow: owner.report_word(1, false),
+      mixerStartHigh: owner.report_word(1, true), mixerFrames: owner.report_word(2, false), pcmNonzero });
+    return this.productReceipts.length - 1;
+  }
+  process(inputs, outputs, parameters) {
+    if (this.productRetired || this.productDone) return super.process(inputs, outputs, parameters);
+    const stats = this.productStats;
+    if (++stats.callbacks > 65536) {
+      stats.failed = true;
+      this.productSummary('callback-limit');
+      this.productDone = true;
+      return super.process(inputs, outputs, parameters);
+    }
+    this.productFrame = null;
+    const result = super.process(inputs, outputs, parameters);
+    stats.resultTrue &&= result === true;
+    stats.failed ||= this.failed;
+    const frame = this.productFrame, frames = outputs[0]?.[0]?.length ?? 0;
+    if (Number.isSafeInteger(frame) && frame >= 0 && frames > 0 && !this.failed) {
+      stats.validatedCallbacks++;
+      stats.firstNativeFrame ??= frame;
+      stats.lastNativeEnd = frame + frames;
+      stats.minFrames = stats.minFrames === null ? frames : Math.min(stats.minFrames, frames);
+      stats.maxFrames = Math.max(stats.maxFrames, frames);
+      const firstIndex = Math.max(0, this.productOrigin - frame);
+      for (let lane = 0; lane < 3; lane++) {
+        const values = parameters[productNames[lane]], period = productPeriods[lane];
+        if (!(values instanceof Float32Array) || values.length !== frames) throw Error('Product original native lane shape');
+        for (let index = firstIndex; index < frames; index++) {
+          const absolute = frame + index, ideal = productPhaseIdeal(absolute, this.productOrigin, sampleRate, period);
+          const error = ideal === null ? Infinity : Math.abs(values[index] - ideal);
+          if (productNativePhase(values[index], period) !== (absolute - this.productOrigin) % period || !(error < 0.25)) {
+            stats.failed = true;
+            this.productSummary('native-evidence');
+            this.productDone = true;
+            return result;
+          }
+          stats.checkedSamples++;
+          stats.maxError = Math.max(stats.maxError, error);
+        }
+      }
+      const pcmNonzero = outputs.some(bus => bus.some(channel => channel.some(value => value !== 0)));
+      if (this.phase === 2) {
+        stats.armedCallbacks++;
+        if (pcmNonzero) stats.nonzeroPCMCallbacks++;
+        if (this.owner.report_word(0, false) === 1) {
+          const end = this.owner.report_word(24, false) + this.owner.report_word(24, true) * 4294967296;
+          const start = this.owner.report_word(26, false) + this.owner.report_word(26, true) * 4294967296;
+          const mixerStart = this.owner.report_word(1, false) + this.owner.report_word(1, true) * 4294967296;
+          const mixerFrames = this.owner.report_word(2, false);
+          stats.reportConserved &&= end === frame + frames && end - start === mixerStart + mixerFrames;
+        }
+      }
+      let receiptIndex = null;
+      const keep = reason => { if (receiptIndex === null) receiptIndex = this.productReceipt(reason, frame, frames, parameters, pcmNonzero); return receiptIndex; };
+      if (stats.validatedCallbacks === 1) keep('origin');
+      if (this.productArm) { keep('callback-arm'); this.productArm = false; }
+      if (this.productBeforeRefill) { keep('before-refill'); this.productBeforeRefill = false; }
+      if (this.productAfterRefill) { keep('after-refill'); this.productAfterRefill = false; }
+      for (const transaction of this.productTransactions) {
+        if (!transaction.accepted) continue;
+        transaction.postCommitCallbacks++;
+        transaction.oldPrefixCheckedSamples += 3 * Math.max(0, Math.min(frame + frames, Math.min(...transaction.from)) - Math.max(frame, this.productOrigin));
+        for (let lane = 0; lane < 3; lane++) {
+          const horizon = transaction.from[lane];
+          if (frame <= horizon && horizon < frame + frames && !transaction.crossings.some(x => x.lane === lane)) {
+            transaction.crossings.push({ lane, horizon, ordinal: stats.callbacks, frame,
+              index: horizon - frame, receiptIndex: keep('old-horizon') });
+          }
+        }
+      }
+      const firstTwo = this.productTransactions.filter(x => x.accepted && x.ackObserved).slice(0, 2);
+      if (firstTwo.length === 2 && firstTwo.every(x => x.crossings.length === 3) && this.phase === 2) {
+        keep('complete');
+        this.productSummary('two-refills-crossed');
+        this.productDone = true;
+      }
+    }
+    if (this.failed && !this.productDone) { this.productSummary('production-failure'); this.productDone = true; }
     return result;
   }
 });
@@ -134,7 +342,7 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
 // Test-only native automation and private observations. Production protocol,
 // sequence, PCM, clocks and render arguments are always delegated unchanged.
 const nativeBootstrap = `
-import { markerFrame, advanceFrame, nativePhase, phaseIdeal, phaseEvidence, nativeJointOffset } from './worklet-native-frame-probe.mjs';
+import { markerFrame as probeMarkerFrame, advanceFrame as probeAdvanceFrame, nativePhase as probeNativePhase, phaseIdeal as probePhaseIdeal, phaseEvidence as probePhaseEvidence, nativeJointOffset as probeNativeJointOffset } from './worklet-native-frame-probe.mjs';
 const phaseMode = ${phaseProbe || jointProbe};
 const jointMode = ${jointProbe};
 const jointPeriods = [1048576, 1048575, 1048573];
@@ -195,14 +403,14 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
           session.failureSample = { lane, parameterLength: values?.length ?? null, actualFrames: frames };
           return 'joint-shape';
         }
-        const checked = phaseEvidence(values.subarray(first - frame, last - frame), last - first,
+        const checked = probePhaseEvidence(values.subarray(first - frame, last - frame), last - first,
           first, session.startFrame, sampleRate, state.horizonFrame, state.period);
         if (checked === null) {
           session.failureSample = { lane, parameterLength: values.length, actualFrames: frames };
           for (let index = first - frame; index < last - frame; index++) {
             const sampleFrame = frame + index, value = values[index];
-            const ideal = phaseIdeal(sampleFrame, session.startFrame, sampleRate, state.period);
-            const phase = nativePhase(value, state.period), expectedPhase = (sampleFrame - session.startFrame) % state.period;
+            const ideal = probePhaseIdeal(sampleFrame, session.startFrame, sampleRate, state.period);
+            const phase = probeNativePhase(value, state.period), expectedPhase = (sampleFrame - session.startFrame) % state.period;
             const error = ideal === null ? null : Math.abs(value - ideal);
             if (phase !== expectedPhase || ideal === null || !(error < 0.25)) {
               session.failureSample = { lane, index, frame: sampleFrame, value, ideal, phase, expectedPhase, error };
@@ -231,8 +439,8 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
     let joint = null;
     if (first < last) {
       const firstIndex = first - frame, lastIndex = last - frame - 1;
-      const firstOffset = nativeJointOffset(arrays[0][firstIndex], arrays[1][firstIndex], arrays[2][firstIndex]);
-      const lastOffset = nativeJointOffset(arrays[0][lastIndex], arrays[1][lastIndex], arrays[2][lastIndex]);
+      const firstOffset = probeNativeJointOffset(arrays[0][firstIndex], arrays[1][firstIndex], arrays[2][firstIndex]);
+      const lastOffset = probeNativeJointOffset(arrays[0][lastIndex], arrays[1][lastIndex], arrays[2][lastIndex]);
       joint = { firstIndex, lastIndex, firstOffset, lastOffset };
       if (firstOffset !== first - session.startFrame || lastOffset !== last - session.startFrame - 1) {
         session.failureSample = { ...joint, expectedFirst: first - session.startFrame,
@@ -260,7 +468,7 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
         if (!held) { session.failureSample = { lane, index, horizonFrame: state.horizonFrame }; return 'joint-hold'; }
         state.holdFrames += end - Math.max(frame, state.horizonFrame);
         if (!state.horizonRefused) {
-          state.horizonRefused = phaseEvidence(values, frames, frame, session.startFrame,
+          state.horizonRefused = probePhaseEvidence(values, frames, frame, session.startFrame,
             sampleRate, state.horizonFrame, state.period) === null;
           horizons.push({ lane, frame: state.horizonFrame, index, ordinal: this.nativeOrdinal,
             refused: state.horizonRefused, holdFrames: state.holdFrames });
@@ -314,7 +522,7 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
             && Number.isSafeInteger(request.startFrame) && request.startFrame > 0
             && [0, 1, 2].every(lane => request.periods[lane] === jointPeriods[lane]
               && Number.isSafeInteger(request.horizonFrames[lane])
-              && request.horizonFrames[lane] === advanceFrame(request.startFrame, 3 * jointPeriods[lane])
+              && request.horizonFrames[lane] === probeAdvanceFrame(request.startFrame, 3 * jointPeriods[lane])
               && typeof request.futureEligible[lane] === 'boolean')
             && request.jointHorizonFrame === request.horizonFrames[2];
           const reason = this.nativeAnchor === null ? 'origin' : this.nativeSession !== null ? 'phase-active'
@@ -378,7 +586,7 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
     const frames = outputs[0]?.[0]?.length ?? 0;
     const values = parameters.__native_marker;
     const targetFrame = this.nativeWatch?.targetFrame ?? null;
-    const candidate = targetFrame === null ? null : markerFrame(values, frames, targetFrame);
+    const candidate = targetFrame === null ? null : probeMarkerFrame(values, frames, targetFrame);
     let edge = 0;
     while (edge < values.length && values[edge] === 0) edge++;
     const zeroPCM = outputs.every(bus => bus.every(channel => channel.every(value => value === 0)));
@@ -417,7 +625,7 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
       const session = this.nativeSession;
       if (session && !session.done) {
         const frame = this.nativeCursor;
-        const end = advanceFrame(frame, frames);
+        const end = probeAdvanceFrame(frame, frames);
         let failure = end === null || frames < 1 ? 'extent' : null;
         if (session.joint) {
           if (!failure) failure = this.checkJointPhase(frames, values, end);
@@ -425,15 +633,15 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
         const first = Math.max(frame, session.startFrame), last = Math.min(end, session.horizonFrame);
         if (!failure && first < last) {
           const checked = phaseValues.length === frames
-            ? phaseEvidence(phaseValues.subarray(first - frame, last - frame), last - first, first,
+            ? probePhaseEvidence(phaseValues.subarray(first - frame, last - frame), last - first, first,
               session.startFrame, sampleRate, session.horizonFrame, session.period) : null;
           if (checked === null) {
             failure = 'phase-evidence';
             session.failureSample = { parameterLength: phaseValues.length, actualFrames: frames };
             if (phaseValues.length === frames) for (let index = first - frame; index < last - frame; index++) {
               const sampleFrame = frame + index, value = phaseValues[index];
-              const ideal = phaseIdeal(sampleFrame, session.startFrame, sampleRate, session.period);
-              const phase = nativePhase(value, session.period), expectedPhase = (sampleFrame - session.startFrame) % session.period;
+              const ideal = probePhaseIdeal(sampleFrame, session.startFrame, sampleRate, session.period);
+              const phase = probeNativePhase(value, session.period), expectedPhase = (sampleFrame - session.startFrame) % session.period;
               const error = ideal === null ? null : Math.abs(value - ideal);
               if (phase !== expectedPhase || ideal === null || !(error < 0.25)) {
                 session.failureSample = { index, frame: sampleFrame, value, ideal, phase, expectedPhase, error };
@@ -469,7 +677,7 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
           else {
             session.holdFrames += end - Math.max(frame, session.horizonFrame);
             if (!session.horizonRefused) {
-              session.horizonRefused = phaseEvidence(phaseValues, frames, frame, session.startFrame,
+              session.horizonRefused = probePhaseEvidence(phaseValues, frames, frame, session.startFrame,
                 sampleRate, session.horizonFrame, session.period) === null;
               this.phaseSnapshot('horizon', frames, values, phaseValues, { holdIndex, refused: session.horizonRefused });
               if (!session.horizonRefused) failure = 'horizon-admission';
@@ -528,7 +736,7 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
       if (this.nativeOrdinal % 4096 === 0) this.nativeReply({ kind: 'phase-progress', id: this.nativeId,
         ordinal: this.nativeOrdinal, checkedSamples: session?.checkedSamples ?? 0 });
       if (this.nativeCursor !== null) {
-        this.nativeCursor = advanceFrame(this.nativeCursor, frames);
+        this.nativeCursor = probeAdvanceFrame(this.nativeCursor, frames);
         if (this.nativeCursor === null) this.retireNative('extent-overflow');
       }
       return result;
@@ -557,7 +765,14 @@ async function serve() {
   const spki = createHash("sha256").update(certificate.publicKey.export({ type: "spki", format: "der" })).digest("base64");
   const production = await readFile(resolve(root, "app/web/audio-worklet.js"), "utf8");
   const wasm = await readFile(resolve(root, "app/web/audio-pkg/beatkernel_bms_runtime_bg.wasm"));
-  evidence.source = { workletSha256: createHash("sha256").update(production).digest("hex"), wasmSha256: createHash("sha256").update(wasm).digest("hex") };
+  const hostSource = await readFile(resolve(root, "app/web/audio-host.mjs"));
+  const nativeHelper = await readFile(resolve(root, "app/web/native-audio-clock.mjs"));
+  const numericHelper = await readFile(resolve(root, "app/web/worklet-native-frame-probe.mjs"));
+  evidence.source = { workletSha256: createHash("sha256").update(production).digest("hex"),
+    hostSha256: createHash("sha256").update(hostSource).digest("hex"),
+    nativeHelperSha256: createHash("sha256").update(nativeHelper).digest("hex"),
+    numericHelperSha256: createHash("sha256").update(numericHelper).digest("hex"),
+    wasmSha256: createHash("sha256").update(wasm).digest("hex") };
   const webRoot = nativeFixture ? await realpath(resolve(root, "app/web")) : null;
   server = createServer({ cert: await readFile(cert), key: await readFile(key) }, async (request, response) => {
     try {
@@ -572,7 +787,7 @@ async function serve() {
         if (resolved === ".." || resolved.startsWith(`..${sep}`)) throw Error("Outside resolved web fixture");
       }
       const body = pathname === "/__chronology.html" ? "<!doctype html><title>Worklet chronology evidence</title>"
-        : pathname === "/app/web/audio-worklet.js" ? (nativeFixture ? nativeBootstrap : bootstrap) + production : await readFile(path);
+        : pathname === "/app/web/audio-worklet.js" ? (productProbe ? productBootstrap : nativeFixture ? nativeBootstrap : bootstrap) + production : await readFile(path);
       response.writeHead(200, { "Content-Type": pathname.endsWith(".html") ? "text/html" : extname(path) === ".wasm" ? "application/wasm" : "text/javascript",
         "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp", "Cache-Control": "no-store" });
       response.end(body);
@@ -620,10 +835,8 @@ async function runCase(name) {
           try { await samples.sample({ id: 1n, rate: host.sampleRate, channels: 2, pcm: new Float32Array([NaN, 0]) }); }
           catch (error) { caught = error; }
         } else {
-          // Targeted diagnostic fixtures wait in ordinary native phase0; no
-          // native chronology has begun. The cold normal lane stays unchanged.
-          // A previous cold run observed real current0 ->1664 / expected128,
-          // status6 before arming. That failure is retained, never waived.
+          // Fault scenarios wait in ordinary production setup after the native
+          // clock certificate. They never inject or rewrite production parameters.
           if (name === "native-gap" || name === "late-arm") {
             await wait(() => host.currentFrame >= BigInt(Math.floor(host.sampleRate / 5)));
           }
@@ -665,7 +878,7 @@ async function runCase(name) {
           legacyDiagnostics: readAudioFailureDiagnostics({ kind: "terminal", generation: 1, status: 6 }),
           contexts: contexts.map(x => x.state) };
       } catch (error) {
-        if (name === "normal" && error.status === 6) {
+        if (name === "normal" && host && commands && error.status === 6) {
           await wait(() => host.state === "failed" && commands?.failure !== null);
           let first, again;
           try { await host.poll(); } catch (failure) { first = failure; }
@@ -683,6 +896,300 @@ async function runCase(name) {
     }, { name, requireCold });
     return { ...result, consoleMessages, pageErrors };
   } finally { await page.close(); }
+}
+
+async function runProductCase(spec, generation) {
+  const caseStarted = performance.now();
+  const consoleMessages = [], pageErrors = [];
+  let page, result, controllerTimer, controllerExpired = false, deadlineError;
+  const closeProductPage = async ownedPage => {
+    let timer;
+    try {
+      await Promise.race([ownedPage.close(), new Promise((_, no) => {
+        timer = setTimeout(() => no(Error("Owned product page close deadline exceeded")), 3000);
+      })]);
+    } finally { clearTimeout(timer); }
+  };
+  const controllerDeadline = new Promise((_, no) => {
+    controllerTimer = setTimeout(() => {
+      controllerExpired = true;
+      deadlineError = Error("Native clock product case180s controller watchdog exceeded");
+      deadlineError.cleanup = { pageAcquisitionTimedOut: page === undefined,
+        latePageReceived: false, pageClosed: false, pageError: null };
+      no(deadlineError);
+    }, 180000);
+  });
+  try {
+    const acquisition = browser.newPage().then(ownedPage => {
+      if (controllerExpired) {
+        deadlineError.cleanup.latePageReceived = true;
+        closeProductPage(ownedPage).then(() => { deadlineError.cleanup.pageClosed = true; },
+          error => { deadlineError.cleanup.pageError = String(error); });
+      }
+      return ownedPage;
+    });
+    page = await Promise.race([acquisition, controllerDeadline]);
+    page.on("console", message => { if (consoleMessages.length < 32) consoleMessages.push({ type: message.type(), text: message.text().slice(0, 2000) }); });
+    page.on("pageerror", error => { if (pageErrors.length < 16) pageErrors.push(String(error).slice(0, 2000)); });
+    await Promise.race([page.goto(`https://127.0.0.1:${port}/__chronology.html`,
+      { timeout: Math.max(1, 180000 - (performance.now() - caseStarted)) }), controllerDeadline]);
+    const evaluation = page.evaluate(async ({ spec, generation, caseBudgetMs }) => {
+      const result = { ...spec, generation, hostMessages: [], sentMessages: [], events: [], cleanup: {} };
+      const contexts = [], nodes = [], ports = [];
+      const Context = AudioContext, Node = AudioWorkletNode;
+      const names = ["__beatkernel_clock_marker", "__beatkernel_clock_0", "__beatkernel_clock_1", "__beatkernel_clock_2"];
+      const period = 1048576;
+      let host, caseTimer, caseExpired = false, privatePort, observerRetired = false;
+      const wait = async (predicate, timeoutMs = 5000, cleanup = false) => {
+        const deadline = performance.now() + timeoutMs;
+        while (!predicate()) {
+          if (!cleanup && caseExpired) throw Error("Native clock product case deadline exceeded");
+          if (performance.now() >= deadline) throw Error("Native clock product delivery deadline exceeded");
+          if (!cleanup && host?.state === "failed") throw Error("Actual product Host failed: "
+            + JSON.stringify(result.hostMessages.findLast(message => message.kind === "terminal") ?? null));
+          await new Promise(yes => setTimeout(yes, 5));
+        }
+      };
+      globalThis.AudioContext = class extends Context { constructor(options) { super(options); contexts.push(this); } };
+      globalThis.AudioWorkletNode = class extends Node {
+        constructor(...args) {
+          super(...args); nodes.push(this);
+          const post = this.port.postMessage.bind(this.port);
+          this.port.postMessage = (message, transfer) => {
+            if (message.kind.startsWith("clock-")) {
+              if (result.sentMessages.length >= 32) throw Error("Product sent clock message bound exceeded");
+              result.sentMessages.push({ ...message, sentContextTime: contexts[0].currentTime });
+            }
+            return post(message, transfer);
+          };
+          this.port.addEventListener("message", event => {
+            if (event.data.kind !== "ack" || event.data.operation !== "poll") {
+              if (result.hostMessages.length >= 64) throw Error("Product Host observation bound exceeded");
+              result.hostMessages.push(event.data);
+            }
+          });
+          for (const name of names) {
+            const parameter = this.parameters.get(name);
+            if (!parameter) throw Error("Missing actual product native parameter");
+            for (const method of ["setValueAtTime", "linearRampToValueAtTime", "cancelScheduledValues", "cancelAndHoldAtTime"]) {
+              if (typeof parameter[method] !== "function") continue;
+              const actual = parameter[method].bind(parameter);
+              parameter[method] = (...values) => {
+                if (result.events.length >= 128) throw Error("Product native event observation bound exceeded");
+                const beforeContextTime = contexts[0].currentTime;
+                const returned = actual(...values);
+                result.events.push({ parameter: name, method, value: values[0], time: values[1],
+                  beforeContextTime, afterContextTime: contexts[0].currentTime });
+                return returned;
+              };
+            }
+          }
+        }
+      };
+      caseTimer = setTimeout(() => { caseExpired = true; }, caseBudgetMs);
+      try {
+        const { AudioHost } = await import("/app/web/audio-host.mjs");
+        const module = await WebAssembly.compile(await (await fetch("/app/web/audio-pkg/beatkernel_bms_runtime_bg.wasm")).arrayBuffer());
+        if (caseExpired) throw Error("Native clock product case deadline exceeded");
+        host = await AudioHost.open({ module, generation, channels: 2, timeoutMs: 12000,
+          contextOptions: { latencyHint: "interactive", sampleRate: spec.rate },
+          pcmLimits: { maxAssetBytes: 67108864, maxTotalBytes: 67108864, maxSamples: 1 },
+          audioLimits: { queueCapacity: 32, maxVoices: 8, pendingCapacity: 32, maxFrames: 128, maxCommandsPerRender: 32 } });
+        result.sampleRate = host.sampleRate;
+        result.beforeReport = await host.poll();
+        const channel = new MessageChannel(); ports.push(channel.port1, channel.port2); privatePort = channel.port1;
+        let attached = false;
+        privatePort.onmessage = event => {
+          if (event.data.generation !== generation) throw Error("Product observer generation mismatch");
+          if (event.data.kind === "product-attached") attached = true;
+          if (event.data.kind === "product-summary") result.summary ??= event.data;
+          if (event.data.kind === "product-retired") observerRetired = true;
+        };
+        privatePort.start();
+        nodes[0].port.postMessage({ kind: "__product-attach", generation, port: channel.port2 }, [channel.port2]);
+        await wait(() => attached);
+        // This bounded, generated test asset is actually imported and played by
+        // the real Rust Mixer. Its five periods cannot end before the two old
+        // horizon sets (3P and4P) have been traversed.
+        const assetFrames = 5 * period + 2 * host.sampleRate;
+        result.assetFrames = assetFrames;
+        const pcm = new Float32Array(assetFrames * 2);
+        for (let frame = 0; frame < assetFrames; frame++) {
+          const value = Math.fround(0.05 * Math.sin(2 * Math.PI * 220 * frame / host.sampleRate));
+          pcm[2 * frame] = value; pcm[2 * frame + 1] = value;
+        }
+        await host.sample({ id: 1n, rate: host.sampleRate, channels: 2, pcm });
+        await host.finish(BigInt(assetFrames));
+        await host.commands([{ kind: 0, voice: 1n, sample: 1n, at: 0n, gain: 1, value: 0n, denominator: 1n }]);
+        await host.arm(host.currentFrame + BigInt(Math.ceil(host.sampleRate / 10)));
+        result.armedAtContextTime = contexts[0].currentTime;
+        await wait(() => result.summary !== undefined, Math.max(1, caseBudgetMs));
+        result.report = await host.poll();
+        result.report = { available: result.report.available, words: Array.from(result.report.words) };
+        result.hostState = host.state;
+      } catch (error) {
+        result.unexpected = { message: String(error), code: error.code, status: error.status, diagnostics: error.diagnostics };
+      } finally {
+        clearTimeout(caseTimer);
+        try {
+          if (privatePort) {
+            privatePort.postMessage({ kind: "retire", generation });
+            await wait(() => observerRetired, 3000, true);
+          }
+        } catch (error) { result.cleanup.observerError = String(error); }
+        try { if (host) await host.stop(); } catch (error) { result.cleanup.error = String(error); }
+        for (const port of ports) { port.onmessage = null; port.close(); }
+        result.cleanup.contextsConstructed = contexts.length;
+        result.cleanup.nodesConstructed = nodes.length;
+        result.cleanup.contexts = contexts.map(context => context.state);
+        result.cleanup.contextsClosed = contexts.length === 1 && contexts.every(context => context.state === "closed");
+        result.cleanup.ownedPortEndpointsClosed = ports.length;
+        result.cleanup.observerRetired = observerRetired;
+      }
+      return result;
+    }, { spec, generation, caseBudgetMs: Math.max(1, 180000 - (performance.now() - caseStarted)) });
+    result = await Promise.race([evaluation, controllerDeadline]);
+    return { ...result, consoleMessages, pageErrors };
+  } finally {
+    clearTimeout(controllerTimer);
+    if (page) {
+      try {
+        await closeProductPage(page);
+        if (result) result.cleanup.pageClosed = true;
+        if (deadlineError) deadlineError.cleanup.pageClosed = true;
+      } catch (error) {
+        if (result) result.cleanup.pageError = String(error);
+        else if (deadlineError) deadlineError.cleanup.pageError = String(error);
+        else throw error;
+      }
+    }
+  }
+}
+
+function verifyProduct(result) {
+  assert.equal(result.pageErrors.length, 0, "Unexpected product browser page error");
+  assert(!result.unexpected, JSON.stringify(result.unexpected));
+  assert(!result.cleanup.error && !result.cleanup.pageError && !result.cleanup.observerError, JSON.stringify(result.cleanup));
+  assert(result.cleanup.pageClosed && result.cleanup.contextsClosed && result.cleanup.observerRetired);
+  assert.equal(result.cleanup.contextsConstructed, 1); assert.equal(result.cleanup.nodesConstructed, 1);
+  assert.equal(result.cleanup.ownedPortEndpointsClosed, 2);
+  assert.equal(result.sampleRate, result.rate); assert.equal(result.hostState, "armed");
+  assert.equal(result.beforeReport.available, false); assert.equal(result.report.available, true);
+  assert(!result.hostMessages.some(message => message.kind === "terminal"));
+  const ready = result.hostMessages.find(message => message.kind === "clock-ready");
+  assert(ready && ready.revision === 0, "Actual native readiness missing");
+  const summary = result.summary, periods = [1048576, 1048575, 1048573];
+  assert(summary && summary.reason === "two-refills-crossed" && summary.generation === result.generation);
+  assert.equal(summary.origin, ready.origin);
+  const initialCommit = result.sentMessages.find(message => message.kind === "clock-commit" && message.revision === 0);
+  assert(initialCommit && initialCommit.origin === summary.origin && initialCommit.futureEligible === true);
+  assert.equal(initialCommit.h0 - summary.origin, 3 * periods[0]);
+  assert.equal(initialCommit.h1 - summary.origin, 3 * periods[1]);
+  assert.equal(initialCommit.h2 - summary.origin, 3 * periods[2]);
+  const originTime = (summary.origin - 0.25) / result.sampleRate;
+  for (let lane = 0; lane < 3; lane++) {
+    const initialEvents = result.events.filter(event => event.parameter === `__beatkernel_clock_${lane}`
+      && event.time <= (summary.origin + 3 * periods[lane] - 0.25) / result.sampleRate);
+    assert.equal(initialEvents.length, 7, "Initial lane program was rewritten or incomplete");
+    assert.deepEqual(initialEvents.map(event => [event.method, event.value]), [["setValueAtTime", 1],
+      ...Array.from({ length: 3 }, () => [["linearRampToValueAtTime", periods[lane] + 1], ["setValueAtTime", 1]]).flat()]);
+    assert(initialEvents.every(event => event.beforeContextTime < originTime && event.afterContextTime < originTime));
+  }
+  const stats = summary.stats;
+  assert(stats.callbacks > 0 && stats.callbacks <= 65536);
+  assert(stats.validatedCallbacks > 0 && stats.validatedCallbacks <= stats.callbacks);
+  assert(stats.armedCallbacks > 0 && stats.nonzeroPCMCallbacks > 0 && stats.checkedSamples > 0);
+  assert(stats.resultTrue && stats.reportConserved && !stats.failed && stats.maxError < 0.25);
+  assert(stats.minFrames > 0 && stats.maxFrames <= 128);
+  assert(summary.receipts.length > 0 && summary.receipts.length <= 32);
+  const transactions = summary.transactions.filter(transaction => transaction.accepted && transaction.ackObserved).slice(0, 2);
+  assert.equal(transactions.length, 2, "Two whole committed refills missing");
+  for (let ordinal = 0; ordinal < 2; ordinal++) {
+    const transaction = transactions[ordinal];
+    assert.equal(transaction.revision, ordinal + 1); assert.equal(transaction.origin, summary.origin);
+    assert(transaction.oldPrefixCheckedSamples > 0 && transaction.postCommitCallbacks > 0, "Committed refill never checked unchanged old prefix");
+    assert.equal(transaction.crossings.length, 3, "Refill was committed without crossing all own OLD horizons");
+    const request = result.hostMessages.find(message => message.kind === "clock-refill" && message.revision === transaction.revision);
+    const commit = result.sentMessages.find(message => message.kind === "clock-commit" && message.revision === transaction.revision);
+    const ack = result.hostMessages.find(message => message.kind === "clock-committed" && message.revision === transaction.revision);
+    assert(request && commit && ack?.status === 0, "Refill request/whole commit/ACK correlation missing");
+    assert.deepEqual(transaction.from, [request.from0, request.from1, request.from2]);
+    assert.deepEqual(transaction.to, [commit.h0, commit.h1, commit.h2]);
+    for (let lane = 0; lane < 3; lane++) {
+      const oldHorizon = transaction.from[lane], endpoint = transaction.to[lane];
+      assert.equal(endpoint, oldHorizon + periods[lane]);
+      if (ordinal === 1) assert.equal(oldHorizon, transactions[0].to[lane]);
+      const crossing = transaction.crossings.find(value => value.lane === lane);
+      assert(crossing && crossing.horizon === oldHorizon);
+      const receipt = summary.receipts[crossing.receiptIndex];
+      assert(receipt && crossing.ordinal === receipt.ordinal && crossing.frame === receipt.frame);
+      assert.equal(receipt.phase, 2, "OLD horizon crossing occurred outside armed product playback");
+      assert.equal(receipt.reportAvailable, 1, "OLD horizon crossing has no actual Rust Mixer report");
+      assert.equal(receipt.pcmNonzero, true, "OLD horizon crossing did not play the actual test asset");
+      assert.equal(crossing.index, oldHorizon - receipt.frame);
+      assert(crossing.index >= 0 && crossing.index < receipt.frames);
+      assert.equal(nativeJointOffset(...receipt.laneValues.map(values => values[crossing.index])), oldHorizon - summary.origin);
+      assert(stats.lastNativeEnd > oldHorizon, "Metadata refilled but native OLD boundary never traversed");
+      const time = (endpoint - 0.25) / result.sampleRate;
+      const events = result.events.filter(event => event.parameter === `__beatkernel_clock_${lane}` && event.time === time);
+      assert.equal(events.length, 2, "New endpoint must append one ramp and one reset");
+      assert.deepEqual(events.map(event => [event.method, event.value]), [["linearRampToValueAtTime", periods[lane] + 1], ["setValueAtTime", 1]]);
+      const earliestOldTime = (Math.min(...transaction.from) - 0.25) / result.sampleRate;
+      assert(events.every(event => event.beforeContextTime < earliestOldTime && event.afterContextTime < earliestOldTime), "Native refill missed OLD horizon deadline");
+    }
+  }
+  assert(result.assetFrames > stats.lastNativeEnd - summary.origin, "Short asset ended before rolling proof");
+  assert(result.events.every(event => ["setValueAtTime", "linearRampToValueAtTime"].includes(event.method)), "Native history was cancelled or rewritten");
+  const markerEvents = result.events.filter(event => event.parameter === "__beatkernel_clock_marker");
+  assert.equal(markerEvents.length, 1); assert.equal(markerEvents[0].method, "setValueAtTime"); assert.equal(markerEvents[0].value, 1);
+  assert.equal(markerEvents[0].time, (summary.origin - 0.25) / result.sampleRate);
+  assert(markerEvents[0].beforeContextTime < originTime && markerEvents[0].afterContextTime < originTime);
+  const originReceipt = summary.receipts.find(receipt => receipt.reason === "origin");
+  assert(originReceipt && summary.origin - originReceipt.frame > 0
+    && summary.origin - originReceipt.frame < originReceipt.frames, "No original interior first-event certificate");
+  const armReceipt = summary.receipts.find(receipt => receipt.reason === "callback-arm");
+  assert(armReceipt && armReceipt.phase === 2, "Actual callback-time arm_words not observed");
+  const armedStart = pair(armReceipt.startLow, armReceipt.startHigh);
+  for (const receipt of summary.receipts) {
+    assert(Number.isSafeInteger(receipt.frame) && receipt.frame >= 0 && receipt.frames > 0);
+    assert.equal(receipt.laneValues.length, 3);
+    const firstIndex = Math.max(0, summary.origin - receipt.frame);
+    if (firstIndex > 0) {
+      assert.equal(receipt.markerValues.length, receipt.frames);
+      assert(receipt.markerValues.every((value, index) => value === (index < firstIndex ? 0 : 1)), "Original marker edge and native phases disagree");
+    } else {
+      assert(receipt.markerValues.length === 1 || receipt.markerValues.length === receipt.frames);
+      assert(receipt.markerValues.every(value => value === 1), "Authenticated marker changed or malformed");
+    }
+    if (receipt.phase === 2) assert.equal(pair(receipt.startLow, receipt.startHigh), armedStart, "Product origin changed after arm");
+    for (let lane = 0; lane < 3; lane++) {
+      const values = receipt.laneValues[lane], period = periods[lane];
+      assert.equal(values.length, receipt.frames, "Receipt did not preserve original full native lane");
+      for (let index = 0; index < receipt.frames; index++) {
+        if (index < firstIndex) { assert.equal(values[index], 0); continue; }
+        const frame = receipt.frame + index, expectedPhase = (frame - summary.origin) % period;
+        const cycleStart = frame - expectedPhase;
+        const startTime = (cycleStart - 0.25) / result.sampleRate, endTime = (cycleStart + period - 0.25) / result.sampleRate;
+        const ideal = 1 + period * (frame / result.sampleRate - startTime) / (endTime - startTime);
+        assert.equal(Math.round(values[index]) - 1 === period ? 0 : Math.round(values[index]) - 1, expectedPhase);
+        assert(Math.abs(values[index] - ideal) < 0.25, "Original native receipt failed represented event-time ideal");
+      }
+    }
+    if (receipt.reportAvailable === 1) {
+      assert.equal(pair(receipt.expectedLow, receipt.expectedHigh), BigInt(receipt.frame + receipt.frames));
+      assert.equal(pair(receipt.expectedLow, receipt.expectedHigh) - pair(receipt.startLow, receipt.startHigh),
+        pair(receipt.mixerStartLow, receipt.mixerStartHigh) + BigInt(receipt.mixerFrames));
+    }
+  }
+  assert(summary.receipts.some(receipt => receipt.pcmNonzero && receipt.phase === 2), "Real Mixer PCM missing");
+  const words = result.report.words;
+  assert.equal(pair(words[52], words[53]), armedStart);
+  assert(pair(words[48], words[49]) > BigInt(Math.max(...transactions[1].from)), "Final actual report never traversed OLD horizon set");
+  assert.equal(pair(words[48], words[49]) - pair(words[52], words[53]), pair(words[2], words[3]) + pair(words[4], words[5]));
+  evidence.checks.push({ id: result.name, passed: true, callbacks: stats.callbacks,
+    checkedSamples: stats.checkedSamples, maxError: stats.maxError, refills: transactions.length,
+    crossedOldHorizons: transactions.flatMap(transaction => transaction.crossings.map(crossing => crossing.horizon)),
+    retainedReceipts: summary.receipts.length, nativeEnd: stats.lastNativeEnd });
 }
 
 async function runNativeCase(spec, generation) {
@@ -1181,7 +1688,7 @@ function verifyPhase(result) {
   assert.equal(result.beforeReport.available, false);
   if (result.afterReport) assert.equal(result.afterReport.available, false);
   assert.equal(result.sampleRate, result.rate);
-  assert(result.hostMessages.every(x => ["ready", "ack", "terminal"].includes(x.kind)));
+  assert(result.hostMessages.every(x => ["ready", "ack", "terminal", "clock-probe", "clock-reserved", "clock-committed", "clock-ready", "clock-refill"].includes(x.kind)));
   assert(result.messages.length <= 128);
   const summary = result.summary;
   assert(summary, "No bounded Worklet phase summary");
@@ -1457,7 +1964,7 @@ function verifyNative(result) {
   assert.equal(result.prerequisites.valueWrites, 0);
   assert.equal(result.beforeReport.available, false);
   if (result.afterReport) assert.equal(result.afterReport.available, false);
-  assert(result.hostMessages.every(x => ["ready", "ack", "terminal"].includes(x.kind)), "Private reply corrupted the production Host protocol");
+  assert(result.hostMessages.every(x => ["ready", "ack", "terminal", "clock-probe", "clock-reserved", "clock-committed", "clock-ready", "clock-refill"].includes(x.kind)), "Private reply corrupted the production Host protocol");
   const callbacks = result.messages.filter(x => x.kind === "callback");
   assert(callbacks.length > 0 && callbacks.length <= 1024);
   for (const callback of callbacks) {
@@ -1564,10 +2071,10 @@ function verify(result, id = result.name) {
         assert(probe, "No actual first Mixer callback snapshot");
         assert.equal(probe.skipped, null, "Cold lane injected an omitted callback");
         const arm = probe.armSnapshot;
-        assert(arm, "No actual post-control arm snapshot");
+        assert(arm, "No actual callback-time arm_words snapshot");
         assert.equal(arm.reportAvailable, 0, "Arm fabricated a Mixer report");
         assert.equal(arm.expectedPresent, 1); assert.equal(arm.startPresent, 1);
-        assert.equal(pair(arm.expectedLow, arm.expectedHigh), BigInt(arm.currentFrame), "Arm did not adopt exact actual currentFrame");
+        assert.equal(pair(arm.expectedLow, arm.expectedHigh), BigInt(arm.currentFrame), "Arm did not adopt exact numeric native callback base");
         assert.equal(arm.currentFrame, probe.armedAt);
         const start = pair(arm.startLow, arm.startHigh);
         const first = probe.firstMixer;
@@ -1622,7 +2129,7 @@ function verify(result, id = result.name) {
       const ackIndex = result.messages.findIndex(x => x.kind === "ack" && x.status !== 0);
       assert(ackIndex >= 0); assert(ackIndex < result.messages.indexOf(terminal), "Failure ACK did not precede terminal");
       assert.equal(d.origin, result.name === "late-arm" ? 1 : 0);
-      assert.equal(d.blockFramesPresent, 0);
+      assert.equal(d.blockFramesPresent, result.name === "late-arm" ? 1 : 0);
       assert.equal(d.successfulArmFramePresent, 0);
     }
   }
@@ -1630,21 +2137,23 @@ function verify(result, id = result.name) {
 }
 
 try {
+  assert(!(productProbe && (nativeProbe || phaseProbe || jointProbe || requireCold)), "WORKLET_NATIVE_CLOCK_PRODUCT conflicts with diagnostics/required-cold modes");
   assert(!(phaseProbe && (nativeProbe || requireCold)), "WORKLET_NATIVE_PHASE_PROBE conflicts with the marker/required-cold modes");
   assert(!(jointProbe && (nativeProbe || phaseProbe || requireCold)), "WORKLET_NATIVE_JOINT_PHASE_PROBE conflicts with the marker/single-phase/required-cold modes");
   const spki = await serve();
   const require = createRequire(import.meta.url);
   const puppeteer = require(process.env.PUPPETEER_MODULE ?? "puppeteer-core");
   browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
-    ...(phaseFixture ? { protocolTimeout: 150000 } : nativeProbe ? { protocolTimeout: 30000 } : {}),
+    ...(productProbe ? { protocolTimeout: 210000 } : phaseFixture ? { protocolTimeout: 150000 } : nativeProbe ? { protocolTimeout: 30000 } : {}),
     args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required", `--ignore-certificate-errors-spki-list=${spki}`] });
   if (nativeFixture) {
     evidence.browser = { version: await browser.version(), ownedPid: browser.process()?.pid ?? null };
-    const cases = jointProbe ? jointCases : phaseProbe ? phaseCases : nativeCases;
+    const cases = productProbe ? productCases : jointProbe ? jointCases : phaseProbe ? phaseCases : nativeCases;
     for (let index = 0; index < cases.length; index++) {
-      const result = await runNativeCase(cases[index], index + (jointProbe ? 211 : phaseProbe ? 111 : 11));
+      const result = productProbe ? await runProductCase(cases[index], index + 311)
+        : await runNativeCase(cases[index], index + (jointProbe ? 211 : phaseProbe ? 111 : 11));
       evidence.scenarios.push(result);
-      try { if (phaseFixture) verifyPhase(result); else verifyNative(result); }
+      try { if (productProbe) verifyProduct(result); else if (phaseFixture) verifyPhase(result); else verifyNative(result); }
       catch (error) { evidence.checks.push({ id: result.name, passed: false, detail: String(error),
         ...(phaseFixture ? { callbacks: result.summary?.stats?.callbacks ?? 0,
           checkedSamples: result.summary?.session?.checkedSamples ?? 0,
@@ -1658,7 +2167,12 @@ try {
             firstCRT: result.summary?.session?.firstCRT ?? null,
             lastCRT: result.summary?.session?.lastCRT ?? null } : {}) } : {}) }); process.exitCode = 1; }
     }
-    if (phaseFixture) {
+    if (productProbe) {
+      const fresh = evidence.scenarios;
+      evidence.checks.push({ id: "product-fresh-context", passed: fresh.length === 2
+        && new Set(fresh.map(result => result.generation)).size === 2
+        && fresh.every(result => result.cleanup.contextsClosed && result.summary?.reason === "two-refills-crossed") });
+    } else if (phaseFixture) {
       const fresh = evidence.scenarios.filter(x => x.operation === "stream");
       const passed = fresh.length === 2 && new Set(fresh.map(x => x.generation)).size === 2
         && fresh.every(x => x.firstAdmission?.eligible && x.prerequisites.previousOrigin === false && x.cleanup.contextsClosed);

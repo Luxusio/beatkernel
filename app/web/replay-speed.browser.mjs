@@ -21,13 +21,18 @@ const port = Number(process.env.REPLAY_SPEED_PORT ?? 8147);
 assert.ok(Number.isInteger(port) && port >= 1024 && port <= 65535);
 assert.ok(relative(root, out).startsWith(`target${sep}wf${sep}`), "Evidence must remain in ignored target/wf");
 const evidence = { kind: "development-browser-replay-speed", checks: [], cases: [], console: [], network: [],
-  required: ["genuine-capture", "1/2", "1/1", "2/1", "3/2", "stop-retry", "immutable-record", "clean-console-network"],
+  required: ["genuine-capture", "1/2", "1/1", "2/1", "3/2", "stop-retry", "nonzero-section", "section-restart", "immutable-record", "clean-console-network"],
   ceiling: ["Chromium software GPU/audio execution is not physical-device or acoustic timing proof."] };
 let server, browser, page;
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 const delay = ms => new Promise(done => setTimeout(done, ms));
 const json = value => JSON.stringify(value, (_, x) => typeof x === "bigint" ? String(x) : x, 2);
 const check = (id, detail) => evidence.checks.push({ id, passed: true, detail });
+async function bounded(promise, ms, label) {
+  let timer;
+  try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error(`${label} deadline`)), ms); })]); }
+  finally { clearTimeout(timer); }
+}
 
 function fixtureWav() {
   const hz = 48000, frames = hz * 3, bytes = Buffer.alloc(44 + frames * 2);
@@ -68,7 +73,8 @@ async function serve() {
 // Observations run before main.js. Both subclasses retain the original native
 // constructors, messages, transfer lists, contexts and ports.
 function observeWindow() {
-  const probe = globalThis.__replaySpeedProbe = { messages: [], pcm: [], contexts: [], statuses: [] };
+  const probe = globalThis.__replaySpeedProbe = { messages: [], pcm: [], contexts: [], audioContexts: [], statuses: [],
+    replayFiles: [], fileErrors: [], audioTerminals: [] };
   const safe = value => JSON.parse(JSON.stringify(value, (_, x) => typeof x === "bigint" ? String(x)
     : x instanceof File ? { file: true, name: x.name, size: x.size }
       : x instanceof Blob ? { blob: true, size: x.size }
@@ -85,15 +91,38 @@ function observeWindow() {
     postMessage(value, transfer) {
       if (probe.messages.length >= 20000) throw Error("Window message observation ceiling");
       probe.messages.push({ direction: "sent", url: this.probeURL, at: performance.now(), data: safe(value) });
+      if (value?.kind === "play-start" && value.replayFile instanceof File) {
+        const observed = { playId: String(value.playId), bytes: null }; probe.replayFiles.push(observed);
+        value.replayFile.arrayBuffer().then(bytes => {
+          if (bytes.byteLength > 1048576) throw Error("Replay file observation ceiling");
+          observed.bytes = Array.from(new Uint8Array(bytes));
+        }).catch(error => probe.fileErrors.push(String(error)));
+      }
       return super.postMessage(value, transfer);
     }
   };
   const ActualNode = AudioWorkletNode;
+  const ActualContext = AudioContext, contextIds = new WeakMap();
+  globalThis.AudioContext = class extends ActualContext {
+    constructor(...args) {
+      super(...args);
+      const index = probe.audioContexts.length;
+      contextIds.set(this, index);
+      const observed = { sampleRate: this.sampleRate, state: this.state, states: [this.state] };
+      probe.audioContexts.push(observed);
+      this.addEventListener("statechange", () => { observed.state = this.state; observed.states.push(this.state); });
+    }
+  };
   globalThis.AudioWorkletNode = class extends ActualNode {
     constructor(context, name, options) {
       super(context, name, options);
       const index = probe.contexts.length;
-      probe.contexts.push({ name, sampleRate: context.sampleRate });
+      probe.contexts.push({ name, sampleRate: context.sampleRate, audioContext: contextIds.get(context) });
+      this.port.addEventListener("message", event => {
+        if (event.data?.kind !== "terminal") return;
+        if (probe.audioTerminals.length >= 128) throw Error("Audio terminal observation ceiling");
+        probe.audioTerminals.push({ index, diagnostics: safe(event.data) });
+      });
       // Passive real-output tap. It neither feeds the game nor changes the
       // original destination. Real process() output alone supplies these PCM.
       const analyser = context.createAnalyser(); analyser.fftSize = 2048; this.connect(analyser);
@@ -226,6 +255,8 @@ async function currentStart() {
 async function snapshot(name, worker, renderer) {
   const window = await page.evaluate(() => ({ ...__replaySpeedProbe, status: document.querySelector("#status").textContent,
     position: document.querySelector("#position").value, speedDisabled: document.querySelector("#replay-speed").disabled }));
+  assert.deepEqual(window.fileErrors, []);
+  assert.deepEqual(window.audioTerminals, [], "Actual Worklet terminal failures must fail acceptance");
   const actualWorker = await worker.evaluate(() => __replaySpeedWorker);
   assert.deepEqual(actualWorker.errors, []);
   const actualRenderer = renderer ? await renderer.evaluate(() => __replaySpeedRenderer) : null;
@@ -236,11 +267,148 @@ async function snapshot(name, worker, renderer) {
 }
 function word(words, index) { return BigInt(words[index * 2]) | BigInt(words[index * 2 + 1]) << 32n; }
 
+// Independent bounded metadata reader for this genuine button-only finite
+// capture. It reads the public envelope and nested section options unchanged;
+// the actual production replay owner still validates every policy and record.
+function capturedSection(bytes) {
+  const b = Buffer.from(bytes); let position = 0;
+  const take = n => {
+    assert.ok(Number.isSafeInteger(n) && n >= 0 && position + n <= b.length, "Captured replay extent");
+    return b.subarray(position, position += n);
+  };
+  const u64 = () => take(8).readBigUInt64LE(), i64 = () => take(8).readBigInt64LE();
+  const blob = () => { const n = u64(); assert.ok(n <= 1048576n); return take(Number(n)); };
+  assert.equal(take(8).toString(), "BKREPLAY"); assert.equal(take(4).readUInt32LE(), 1);
+  const version = take(4).readUInt32LE(), domain = take(4).readUInt32LE(), seed = u64();
+  const runtime = blob().toString(), chart = blob(), rules = blob(); let options = blob();
+  const calibration = take(1)[0]; assert.ok(calibration <= 1); if (calibration) blob();
+  const count = u64(); assert.ok(count > 0n && count <= 100000n);
+  const records = [];
+  for (let i = 0n; i < count; i++) {
+    const ordinal = u64(), songNs = i64(), kind = take(1)[0]; assert.ok(kind <= 1);
+    if (!kind) { take(4); blob(); }
+    assert.equal(ordinal, i);
+    if (records.length) assert.ok(songNs >= records.at(-1).songNs);
+    records.push({ ordinal, songNs, kind });
+  }
+  assert.equal(position, b.length);
+  const wrappers = [];
+  for (const [prefix, fixed] of [["bms-speed-setup/v1:", 20], ["bms-timing-setup/v1:", 4],
+    ["bms-judgment-setup/v1:", 4], ["bms-gauge-setup/v1:", 4]]) {
+    if (options.subarray(0, prefix.length).toString() !== prefix) continue;
+    const body = options.subarray(prefix.length);
+    assert.ok(body.length >= fixed);
+    const length = body.readUInt32LE(); assert.ok(length > 0 && fixed + length <= body.length);
+    wrappers.push(prefix); options = body.subarray(fixed, fixed + length);
+  }
+  const prefix = "bms-judge-profile/v4:";
+  assert.equal(options.subarray(0, prefix.length).toString(), prefix);
+  const profile = options.subarray(prefix.length); assert.ok(profile.length >= 40);
+  const chartSeed = profile.readBigUInt64LE(), startNs = profile.readBigInt64LE(8), endNs = profile.readBigInt64LE(16);
+  assert.ok(startNs >= 0n && endNs > startNs);
+  const windows = profile.readBigUInt64LE(32); assert.ok(windows > 0n && windows <= 100000n);
+  assert.equal(profile.length, 40 + Number(windows) * 20);
+  assert.ok(records.every(record => record.songNs <= endNs));
+  assert.equal(records.at(-1).songNs, endNs, "Completed original capture retains exact selected end");
+  return { version, domain, seed, runtime, chart: chart.toString("hex"), rules: rules.toString(),
+    wrappers, chartSeed, startNs, endNs, records };
+}
+
+function assertNaturalEnd(result, start, reportOffset, sectionStart, sectionEnd, numerator, denominator, captureTerminal) {
+  const messages = result.window.messages.filter(x => x.data.playId === start.playId);
+  assert.ok(!messages.some(x => x.data.kind === "play-error"), json(messages));
+  const metadata = messages.find(x => x.direction === "received" && x.data.kind === "play-reply"
+    && x.data.result?.kind === "prepared")?.data.result;
+  assert.ok(metadata); assert.equal(metadata.startNs, String(sectionStart)); assert.equal(metadata.endNs, String(sectionEnd));
+  const rate = BigInt(start.rate), duration = 100000000n + (sectionEnd - sectionStart) * denominator / numerator;
+  const endFrame = (duration * rate + 999999999n) / 1000000000n;
+  assert.equal(metadata.endFrame, String(endFrame));
+  const terminal = messages.find(x => x.direction === "received" && x.data.kind === "play-stopped")?.data;
+  assert.ok(terminal); assert.equal(terminal.songNs, String(sectionEnd));
+  if (captureTerminal) {
+    assert.equal(terminal.hits, captureTerminal.hits); assert.equal(terminal.misses, captureTerminal.misses);
+  }
+  assert.ok(messages.some(x => x.direction === "received" && x.data.kind === "play-render-done" && x.data.completed),
+    "Natural completion must come from the actual output owner");
+  assert.ok(!messages.some(x => x.direction === "sent" && x.data.kind === "play-stop" && x.data.completed === false),
+    "Section acceptance cannot use an interrupted user stop");
+  const activation = messages.find(x => x.direction === "sent" && x.data.kind === "play-activate")?.data;
+  assert.ok(activation); const startFrame = BigInt(activation.startFrame);
+  const reports = result.worker.reports.slice(reportOffset).map(x => x.words);
+  const available = reports.filter(words => word(words, 0) === 1n);
+  assert.ok(available.length >= 2, "Original actual output reports required");
+  for (const words of available) {
+    assert.equal(word(words, 25), 1n); assert.equal(word(words, 26), startFrame);
+    assert.equal(word(words, 23), 1n);
+    assert.equal(word(words, 24), startFrame + word(words, 1) + word(words, 2),
+      "Actual context endpoint must retain its original relative render association");
+    assert.equal(word(words, 27), 0n);
+  }
+  assert.ok(available.some(words => word(words, 6) === 1n && word(words, 7) === endFrame
+    && word(words, 24) >= startFrame + endFrame && word(words, 13) === word(words, 14) && word(words, 13) > 0n),
+    "Actual Worklet end fence must consume and apply the original commands");
+  return { messages, metadata, terminal, rate, startFrame, endFrame, reports };
+}
+
+function assertSectionReplay(result, start, reportOffset, contextIndex, section, captureTerminal, originalHash) {
+  const fraction = "3/2", numerator = 3n, denominator = 2n;
+  const end = assertNaturalEnd(result, start, reportOffset, section.startNs, section.endNs, numerator, denominator, captureTerminal);
+  assert.equal(start.mode, "replay"); assert.equal(start.replaySpeed, fraction);
+  assert.equal(end.metadata.replaySpeed, fraction);
+  assert.equal(end.metadata.replaySpeedNumerator, String(numerator));
+  assert.equal(end.metadata.replaySpeedDenominator, String(denominator));
+  const file = result.window.replayFiles.find(x => x.playId === String(start.playId));
+  assert.ok(file?.bytes); assert.equal(sha(Buffer.from(file.bytes)), originalHash, "Replay launches exact immutable captured bytes");
+  assert.equal(result.window.contexts.length, contextIndex + 1, "Each section replay opens exactly one fresh actual Worklet");
+  const context = result.window.contexts[contextIndex]; assert.ok(Number.isInteger(context.audioContext));
+  assert.equal(result.window.audioContexts[context.audioContext].state, "closed", "Naturally completed replay closes its owned context");
+  const progress = end.messages.filter(x => x.direction === "received" && x.data.kind === "play-render-done"
+    && x.data.songNs !== null && BigInt(x.data.songNs) > 500000000n && BigInt(x.data.songNs) < 1500000000n);
+  assert.ok(progress.length >= 2);
+  let matched = 0, retained = 0;
+  for (const response of progress) {
+    const request = end.messages.find(x => x.direction === "sent" && x.data.kind === "play-render"
+      && x.data.renderId === response.data.renderId)?.data;
+    assert.ok(request);
+    const render = result.worker.renders.find(x => x.playId === start.playId && x.renderId === response.data.renderId);
+    assert.ok(render);
+    const actual = result.worker.observations[render.observation]; assert.equal(actual.songNs, response.data.songNs);
+    const accepted = actual.point !== null ? actual
+      : result.worker.observations.slice(0, render.observation).findLast(x => x.owner === actual.owner && x.point !== null);
+    assert.ok(accepted, "Unavailable presentation retains an earlier association on the same actual owner");
+    if (actual.point !== null) {
+      assert.ok(request.timestamp?.contextTime);
+      const seconds = request.timestamp.contextTime, whole = Math.floor(seconds);
+      const contextNs = BigInt(whole) * 1000000000n + BigInt(Math.floor((seconds - whole) * 1000000000));
+      const outputStartNs = (end.startFrame * 1000000000n + end.rate - 1n) / end.rate;
+      assert.equal(BigInt(actual.point), contextNs - outputStartNs); matched++;
+    } else retained++;
+    const expectedSong = section.startNs + (BigInt(accepted.point) - 100000000n) * numerator / denominator;
+    const difference = BigInt(response.data.songNs) - expectedSong;
+    assert.ok(difference >= -2n && difference <= 2n, `Original nonzero section position mismatch: ${difference} ns`);
+  }
+  assert.ok(matched >= 2, "Section progress must use actual presentation, not a wall clock");
+  const pcm = result.window.pcm.filter(x => x.index === contextIndex);
+  assert.ok(pcm.length >= 2 && pcm.some(x => Math.abs(x.frequency - 1320) <= 50), "Real section PCM has selected replay speed");
+  const cold = result.renderer.packets.findLast(x => x.kind === 1 && x.mode === "replay"); assert.ok(cold);
+  const drawn = result.renderer.packets.filter(x => x.kind === 2 && x.generation === cold.generation && x.content === cold.content
+    && x.songNs !== null && BigInt(x.songNs) > 500000000n && BigInt(x.songNs) < 1500000000n
+    && result.renderer.receipts.some(receipt => receipt.kind === "drawn" && receipt.mode === "replay"
+      && receipt.generation === x.generation && receipt.content === x.content && receipt.sequence === x.sequence));
+  assert.ok(new Set(drawn.map(x => x.songNs)).size >= 2, "Actual renderer must draw advancing original section positions");
+  for (const frame of drawn) assert.ok(progress.some(response => response.data.songNs === frame.songNs));
+  assert.equal(result.window.speedDisabled, false);
+  return { playId: start.playId, contextIndex, audioContext: context.audioContext, startFrame: String(end.startFrame),
+    endFrame: String(end.endFrame), startNs: String(section.startNs), endNs: String(section.endNs), sha256: originalHash,
+    actualReportCount: end.reports.length, originalSongProgress: matched, retainedOriginalProgress: retained,
+    drawnOriginalSongFrames: drawn.length, pcmAcquisitions: pcm.length };
+}
+
 async function run() {
   const spki = await serve();
   const require = createRequire(import.meta.url);
   const puppeteer = process.env.PUPPETEER_MODULE ? require(resolve(process.env.PUPPETEER_MODULE)) : (await import("puppeteer-core")).default;
-  evidence.sources = Object.fromEntries(await Promise.all(["main.js", "index.html", "worker.js", "renderer-worker.js", "audio-worklet.js", "play-model.mjs", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm", "audio-pkg/beatkernel_bms_runtime.js", "audio-pkg/beatkernel_bms_runtime_bg.wasm"].map(async file => [file, sha(await readFile(resolve(root, "app/web", file)))])));
+  evidence.sources = Object.fromEntries(await Promise.all(["main.js", "index.html", "worker.js", "renderer-worker.js", "audio-host.mjs", "audio-worklet.js", "native-audio-clock.mjs", "worklet-native-frame-probe.mjs", "play-model.mjs", "pkg/beatkernel_bms_runtime.js", "pkg/beatkernel_bms_runtime_bg.wasm", "audio-pkg/beatkernel_bms_runtime.js", "audio-pkg/beatkernel_bms_runtime_bg.wasm"].map(async file => [file, sha(await readFile(resolve(root, "app/web", file)))])));
   browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
     args: ["--no-sandbox", "--disable-dev-shm-usage", "--enable-unsafe-webgpu", "--use-angle=swiftshader", "--enable-features=Vulkan", "--use-vulkan=swiftshader", "--ignore-certificate-errors", `--ignore-certificate-errors-spki-list=${spki}`, "--autoplay-policy=no-user-gesture-required"] });
   evidence.ownedBrowserPid = browser.process().pid;
@@ -407,10 +575,80 @@ async function run() {
   assert.ok(final.window.messages.some(x => x.data.playId === retry.playId && x.data.kind === "play-render-done" && x.data.completed));
   const stopRequest = final.window.messages.find(x => x.direction === "sent" && x.data.playId === stopped.playId && x.data.kind === "play-stop");
   assert.equal(stopRequest?.data.completed, false); check("stop-retry", { stopped: stopped.playId, retry: retry.playId });
+  // Capture the original nonzero section through normal UI playback before
+  // loading those exact File bytes. No synthetic record or playback cursor is
+  // inserted. Replaying twice must reconstruct two independent native owners.
+  evidence.stage = "nonzero-section-capture";
+  await setField("live-start", "0.25"); await setField("live-end", "2"); await setField("live-speed", "1/1");
+  const captureContext = await page.evaluate(() => __replaySpeedProbe.contexts.length);
+  const captureReportOffset = await worker.evaluate(() => __replaySpeedWorker.reports.length);
+  const beforeCapture = (await currentStart()).playId;
+  await page.click("#play");
+  await page.waitForFunction(previous => __replaySpeedProbe.messages.some(x => x.direction === "sent" && x.data.kind === "play-start"
+    && x.data.mode === "live" && BigInt(x.data.playId) > BigInt(previous)), { timeout: 30000 }, beforeCapture);
+  const sectionLive = await currentStart(); assert.equal(sectionLive.startNs, "250000000");
+  await waitTerminal(sectionLive.playId);
+  await worker.evaluate(async () => {
+    const deadline = performance.now() + 5000;
+    while (__replaySpeedWorker.pending) {
+      if (performance.now() >= deadline) throw Error("Section capture acquisition deadline");
+      await new Promise(done => setTimeout(done, 10));
+    }
+  });
+  const sectionCapture = await snapshot("nonzero-section-capture", worker, renderer);
+  const sectionEnd = assertNaturalEnd(sectionCapture, sectionLive, captureReportOffset, 250000000n, 2000000000n, 1n, 1n);
+  assert.ok(sectionEnd.terminal.replayComplete);
+  assert.ok(Number(sectionEnd.terminal.misses) > 0, "Genuine nonempty section capture");
+  assert.ok(sectionCapture.window.pcm.some(x => x.index === captureContext && Math.abs(x.frequency - 880) <= 50),
+    "Original nonzero capture plays its actual selected music suffix");
+  const sectionCaptured = sectionCapture.worker.captures.find(x => x.playId === sectionLive.playId && x.complete);
+  assert.ok(sectionCaptured?.bytes?.length > 0);
+  const sectionBytes = Buffer.from(sectionCaptured.bytes), sectionHash = sha(sectionBytes), sectionFile = resolve(out, "genuine-section-record.bkr");
+  const section = capturedSection(sectionBytes);
+  assert.equal(section.startNs, 250000000n); assert.equal(section.endNs, 2000000000n);
+  assert.equal(section.chartSeed, BigInt(sectionLive.seed));
+  evidence.sectionCapture = { playId: sectionLive.playId, sha256: sectionHash, bytes: sectionBytes.length,
+    metadata: section, terminal: sectionEnd.terminal };
+  await writeFile(sectionFile, sectionBytes);
+  await (await page.$("#replay-file")).uploadFile(sectionFile);
+  await setField("live-start", "0");
+  let firstSection;
+  for (const name of ["nonzero-section", "section-restart"]) {
+    evidence.stage = name; await setField("replay-speed", "3/2");
+    const contextIndex = await page.evaluate(() => __replaySpeedProbe.contexts.length);
+    const reportOffset = await worker.evaluate(() => __replaySpeedWorker.reports.length);
+    const previous = (await currentStart()).playId;
+    await page.click("#replay-play");
+    await page.waitForFunction(previous => __replaySpeedProbe.messages.some(x => x.direction === "sent" && x.data.kind === "play-start"
+      && x.data.mode === "replay" && BigInt(x.data.playId) > BigInt(previous)), { timeout: 30000 }, previous);
+    const start = await currentStart();
+    await page.waitForFunction(id => __replaySpeedProbe.messages.some(x => x.direction === "received" && x.data.playId === id
+      && x.data.kind === "play-render-done" && x.data.songNs !== null
+      && BigInt(x.data.songNs) >= 500000000n && BigInt(x.data.songNs) < 1500000000n), { timeout: 15000 }, start.playId);
+    await (await page.$("#canvas")).screenshot({ path: resolve(out, `${name}-playing-canvas.png`) });
+    await waitTerminal(start.playId);
+    await page.waitForFunction(id => __replaySpeedProbe.replayFiles.some(x => x.playId === String(id) && x.bytes !== null), { timeout: 5000 }, start.playId);
+    await page.waitForFunction(index => {
+      const owner = __replaySpeedProbe.contexts[index];
+      return owner && __replaySpeedProbe.audioContexts[owner.audioContext]?.state === "closed";
+    }, { timeout: 5000 }, contextIndex);
+    const result = await snapshot(name, worker, renderer);
+    const detail = assertSectionReplay(result, start, reportOffset, contextIndex, section, sectionEnd.terminal, sectionHash);
+    if (firstSection) {
+      assert.notEqual(detail.playId, firstSection.playId); assert.notEqual(detail.audioContext, firstSection.audioContext);
+      assert.equal(detail.endFrame, firstSection.endFrame, "Fresh owners preserve the identical selected section output grid");
+    } else firstSection = detail;
+    assert.deepEqual(Buffer.from(result.worker.captures.find(x => x.playId === sectionLive.playId && x.complete)?.bytes ?? []), sectionBytes);
+    assert.equal(sha(await readFile(sectionFile)), sectionHash);
+    check(name, detail);
+  }
   const retained = await worker.evaluate(() => __replaySpeedWorker.captures.find(x => x.complete)?.bytes);
   assert.deepEqual(Buffer.from(retained), original); assert.equal(sha(await readFile(replayFile)), originalHash);
-  check("immutable-record", { bytes: original.length, sha256: originalHash });
+  check("immutable-record", { bytes: original.length, sha256: originalHash,
+    sectionBytes: sectionBytes.length, sectionSha256: sectionHash });
   await delay(100);
+  assert.deepEqual(await page.evaluate(() => __replaySpeedProbe.audioTerminals), [], "Final acceptance requires no actual Worklet terminal");
+  assert.deepEqual(await page.evaluate(() => __replaySpeedProbe.fileErrors), []);
   assert.deepEqual(evidence.console.filter(x => ["error", "pageerror"].includes(x.type)), []);
   assert.deepEqual(evidence.network, []); check("clean-console-network", "No page/console errors, failed requests or HTTP errors");
 }
@@ -435,10 +673,26 @@ finally {
       }
       await page.screenshot({ path: resolve(out, "failure.png"), fullPage: true }).catch(error => { evidence.failureScreenshotError = String(error); });
     }
-    await page.close().catch(error => { evidence.cleanupError = String(error); process.exitCode = 1; });
+    await bounded(page.close(), 10000, "Owned page cleanup").catch(error => { evidence.cleanupError = String(error); process.exitCode = 1; });
   }
-  if (browser) await browser.close().catch(error => { evidence.cleanupError = String(error); process.exitCode = 1; });
-  if (server) { server.closeAllConnections(); await new Promise(done => server.close(done)); }
+  if (browser) await bounded(browser.close(), 10000, "Owned Chromium cleanup").catch(error => {
+    evidence.cleanupError = String(error); process.exitCode = 1;
+    const owned = browser.process(); if (owned && owned.exitCode === null) owned.kill("SIGKILL");
+  });
+  if (server) {
+    server.closeAllConnections();
+    await bounded(new Promise(done => server.close(done)), 5000, "Owned HTTPS cleanup")
+      .catch(error => { evidence.cleanupError = String(error); process.exitCode = 1; });
+  }
+  const owned = browser?.process(); let browserAlive = false;
+  if (owned?.pid) {
+    try { process.kill(owned.pid, 0); browserAlive = true; }
+    catch (error) { if (error.code !== "ESRCH") { evidence.cleanupError = String(error); process.exitCode = 1; } }
+  }
+  evidence.cleanup = { pageClosed: page?.isClosed() ?? true, ownedBrowserPid: owned?.pid ?? null,
+    browserAlive, browserExitCode: owned?.exitCode ?? null, browserSignal: owned?.signalCode ?? null,
+    serverListening: server?.listening ?? false };
+  if (!evidence.cleanup.pageClosed || browserAlive || evidence.cleanup.serverListening) process.exitCode = 1;
   const passed = new Set(evidence.checks.filter(x => x.passed).map(x => x.id));
   evidence.unmet = evidence.required.filter(id => !passed.has(id));
   if (evidence.unmet.length) process.exitCode = 1;

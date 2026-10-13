@@ -1,6 +1,6 @@
 # Browser native frame diagnostic
 
-This opt-in diagnostic compares native a-rate parameter edges with actual callback extents while the production processor remains in setup phase0. It adds no product clock and does not resolve the earlier strict browser chronology FAIL.
+The historical opt-in experiments below compare native a-rate parameter edges with actual callback extents in setup phase0. Those experiments did not establish a product clock or resolve the earlier strict chronology failure. The separate production integration and its current verification procedure are described under **Production native context clock** below.
 
 ## Run
 
@@ -113,7 +113,7 @@ One phase cannot distinguish a missing interval of nP frames, even with a full
 sample scan. A finite closing endpoint can expose a contradiction in the
 measured interval, but cannot establish every future callback. Arithmetic
 vectors at twenty hours or one week are not aged native-context measurements.
-These diagnostic results do not adopt a product clock, fix the strict playback
+These historical diagnostic results did not adopt a product clock, fix the strict playback
 failure, or prove performance, physical output, gameplay or a fresh Rust build.
 
 See [finite phase evidence](../changes/2026-10-14-browser-native-phase-decoding.md)
@@ -179,5 +179,74 @@ records: fresh QA observed summary/final counts 27/28 and 31/32, both within
 the unchanged cap. Use the actual mode, run and observation stage for counts.
 
 See [joint phase evidence](../changes/2026-10-14-browser-native-joint-phase-proof.md)
-for author and independent review/QA results. Product chronology, rolling
-horizons, actual gameplay and the full player Goal remain pending.
+for the historical author and independent review/QA results. Product chronology,
+rolling horizons and gameplay were pending at that experiment's completion.
+The full player Goal remains open; current integration evidence follows below.
+
+## Production native context clock
+
+The [product requirement](REQ__browser-native-context-clock.md) specifies the
+fresh marker, three original native phase arrays, scalar Rust reconstruction,
+second-callback readiness, callback-time arm and atomic rolling horizons.
+The Host schedules native automation; the Worklet validates every original
+sample before publishing readiness, arm ACK or PCM. Published `currentFrame`
+and callback counters remain observations rather than clock authority. Live
+and replay use the existing strict Rust renderer and unchanged report29.
+
+Generate matching audio and UI artifacts from the current source before running
+the product probes. With this checkout's cached toolchain, native dependencies
+also require the cached CC/AR wrappers; sourcing env.sh alone is insufficient.
+Do not run mise or manually edit generated glue.
+
+```bash
+source target/toolchain/env.sh
+export CC="$PWD/target/toolchain/host-cc.sh"
+export AR="$PWD/target/toolchain/host/usr/bin/x86_64-linux-gnu-ar"
+cargo test -p beatkernel-bms-runtime --no-default-features --lib browser_native_clock --locked
+cargo build -p beatkernel-bms-runtime --lib --no-default-features --features browser-audio --target wasm32-unknown-unknown --release --locked
+env LD_LIBRARY_PATH="$PWD/target/toolchain/host/usr/lib/x86_64-linux-gnu" target/toolchain/wasm-bindgen-cli/bin/wasm-bindgen --target web --out-dir app/web/audio-pkg target/wasm32-unknown-unknown/release/beatkernel_bms_runtime.wasm
+cargo build -p beatkernel-bms-runtime --lib --no-default-features --features browser --target wasm32-unknown-unknown --release --locked
+env LD_LIBRARY_PATH="$PWD/target/toolchain/host/usr/lib/x86_64-linux-gnu" target/toolchain/wasm-bindgen-cli/bin/wasm-bindgen --target web --out-dir app/web/pkg target/wasm32-unknown-unknown/release/beatkernel_bms_runtime.wasm
+```
+
+Generate audio-pkg before building the UI variant: both variants use the same
+target cdylib path. Existing outputs can belong to another checkout owner; in
+that case use the existing authorized account for the generator, without
+changing ownership or permissions across the repository.
+
+Run the strict cold and long product modes separately with new evidence
+directories and available owned ports. These example suffixes are placeholders
+for a new run; do not overwrite an earlier proof.
+
+```bash
+export PUPPETEER_MODULE="$PWD/target/wf/record-score-ui-qa-browser/node_modules/puppeteer-core"
+export CHROMIUM=/usr/bin/chromium
+WORKLET_CHRONOLOGY_REQUIRE_COLD=1 WORKLET_CHRONOLOGY_PORT=8165 WORKLET_CHRONOLOGY_OUT="$PWD/target/wf/browser-native-clock-product/cold-new-run" node app/web/worklet-chronology.browser.mjs
+WORKLET_NATIVE_CLOCK_PRODUCT=1 WORKLET_CHRONOLOGY_PORT=8165 WORKLET_CHRONOLOGY_OUT="$PWD/target/wf/browser-native-clock-product/long-new-run" node app/web/worklet-chronology.browser.mjs
+LIVE_SPEED_PORT=8167 LIVE_SPEED_OUT="$PWD/target/wf/browser-native-clock-product/live-new-run" node app/web/live-speed.browser.mjs
+REPLAY_SPEED_PORT=8168 REPLAY_SPEED_OUT="$PWD/target/wf/browser-native-clock-product/replay-new-run" node app/web/replay-speed.browser.mjs
+node --experimental-vm-modules --test app/web/native-audio-clock.test.mjs app/web/browser-native-audio.test.mjs app/web/audio-host.test.mjs app/web/audio-worklet.test.mjs app/web/worklet-chronology.test.mjs app/web/worklet-native-frame-probe.test.mjs
+```
+
+The long mode requires actual armed PCM and native callbacks crossing every
+OLD own horizon for two accepted whole refill transactions. It alone uses a
+180-second total case deadline, 210-second CDP timeout, 65,536 callbacks and
+32 retained receipts; older diagnostic bounds remain unchanged. Bootstrap
+observers use distinct import names because their bytes and the complete
+production module are served as one module. Controller tests compile that
+actual served combination for cold/product/marker/single/joint modes.
+
+The live probe preserves its 14 existing checks and adds nonzero-section and
+seek-restart. The replay probe preserves eight checks and adds nonzero-section
+and section-restart, uploading the genuine captured record unchanged. Each
+checks real PCM/reports, natural end, rendering, context replacement and input
+or replay provenance. Await final process exit, inspect screenshots and verify
+owned PID/listener cleanup; a closed listener can still leave TCP TIME_WAIT,
+so a reusable-bind check must use SO_REUSEADDR like Node's server.
+
+Native parameter fills and three full scans remain sustained callback work.
+No universal zero-cost, acoustic timing, other-engine, aged-context or full
+player completion claim follows from these probes. See [current product
+evidence](../changes/2026-10-14-browser-native-clock-product.md) for author and
+independent verification status, exact generated fingerprints and remaining
+limits.
