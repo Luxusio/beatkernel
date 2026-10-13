@@ -40,6 +40,8 @@ pub(crate) mod browser_video;
 /// Numeric bindings for the separate AudioWorklet WASM owner.
 #[cfg(all(target_arch = "wasm32", feature = "browser-audio"))]
 pub mod browser_audio;
+/// Pure exact frame admission for independently validated native browser lanes.
+pub mod browser_native_clock;
 #[cfg(test)]
 mod browser_audio_authority_fixtures;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
