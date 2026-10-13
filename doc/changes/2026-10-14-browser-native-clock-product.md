@@ -183,11 +183,103 @@ touch capture, nonzero section, drawn seek, fresh-context restart and immutable
 replay remained required. Owned live/replay PIDs2486971/2491955 were absent;
 reusable8167/8168 binds passed. These are fresh author results, not independent
 QA. Final DEEP review and fresh CLI/browser/documentation gates remain pending.
+
+The fresh full-scope independent DEEP reviewer at601d9d2e returned actual PASS,
+FIX_NOW=0/INVESTIGATE=0/OPTIONAL=0, after both bounded discovery cycles. It
+independently reopened all18 paths and nine ACs, verified the three original
+fixes, and ran212 helper/WASM/Worklet/controller checks plus82 Host checks.
+Its hash inspection matched final cold/live/replay author evidence and marked
+the earlier long Host hash as insufficient for final long assurance. Fresh
+independent qa-cli and qa-browser have now started; actual QA finals and runtime
+attestation remain pending. No source files changed after that review.
+
+The fresh independent qa-browser returned actual PASS after seven current-source
+runs: cold6 plus3 supplemental observations; rolling4; live16; replay10;
+marker19; single11; joint11. All77 required checks passed and all seven processes
+exited0. Final rolling results were32780/32777 callbacks,12583104 checked
+samples per rate, two whole ACKed refills crossing all six OLD own horizons,
+seven retained original receipts and native end4197632/4196992 at44.1/48kHz.
+Maximum represented-ideal error remained below0.062500001. Final UI source/WASM
+hashes matched and both UI flows retained zero console/network failures.
+Original native diagnostic bounds and refusals were preserved; rawglobal frame
+discrepancies stayed observations rather than authority.
+
+Actual screenshots of seek, touch/local, replay canvas, restart and responsive
+390/768/1200 widths were visually inspected. Chrome MCP's separate default
+browser had no suitable graphics adapter and disabled initialization controls;
+its original screenshot is retained. The installed Puppeteer/Chromium software
+GPU path completed the actual interactive UI tier. Native fixtures also retain
+seven generic resource404 console messages with URLs unrecorded; no JavaScript
+page errors were observed. No failure exclusion was added to the strict UI
+network/console checks, and this task does not claim every browser configuration
+or diagnostic console is clean.
+
+Fresh evidence is `target/wf/browser-native-clock-product/qa-browser-final-13686/`
+with cold/long/live/replay and manual/marker/single/joint subdirectories. Every
+recorded owned Node/Chromium/crashpad PID was absent; no8175–8178 LISTEN entries
+remained and all four reusable binds passed. Only the owned MCP tab was closed;
+the original blank tab was preserved. The browser role returned actual
+interactive-browser PASS after the formal code-review PASS; runtime receipt
+attestation is a separate gate and remains pending.
+
+The fresh independent qa-cli then returned actual PASS at the same frozen
+runtime HEAD. Its actual commands passed345 Node checks (Host82, Worklet53,
+WASM22, helper39, controller98, existing probe51),28 pure clock Rust checks
+and21 existing WorkletAudio checks. Audio-WASM Clippy, UI-WASM cargo check,
+source syntax, scoped diff checks and all21 literal runtime/glue/WASM
+fingerprints passed. Its deepest command tier was test-suite: no public CLI
+command changed, and actual WASM/library happy/invalid/edge paths were executed.
+It independently inspected the separate browser JSON and genuine immutable
+records for complementary native/UI evidence. CLI evidence is
+`target/wf/browser-native-clock-product/qa-cli-final-13686/`.
+
+The actual three-file formatter command was rustfmt --check --edition 2021
+--style-edition 2024 --config skip_children=true. Whole lib.rs module sorting
+also failed on the original base and was not represented as a passing whole
+workspace format check. Clippy reported non-denied warnings including new
+scalar-ABI argument counts and a pure-clock style suggestion; no warning-free
+or all-warnings-pre-existing claim is made. Deferred maintenance signals are
+the legacy manifest/browser-runner mismatch, canonical formatter style,
+MCP graphics/export configuration and native resource404 URL retention.
+No speculative repair or verification weakening was performed. Parent
+reflection classifies the missing VM-module flag as already-handled: the
+committed GUIDE records the confirmed command (learning: captured; applied
+artifact: GUIDE__browser-native-frame-diagnostic.md). Pending runbook capture
+was attempted but refused by the existing UID1001/mode0600 candidate file; no
+ownership, permission or candidate content was changed. Promoting a duplicate
+global recipe is rejected for this child. The legacy manifest/browser-runner
+mismatch is confirmed but global repair is rejected as outside this child.
+Canonical formatter policy needs a separate repository decision; the actual
+passing scoped command is recorded here. MCP GPU/export limitations are
+confirmed for this environment and already-handled by actual interactive
+Puppeteer verification; global configuration repair is rejected for this
+child. Native404 URL attribution needs a runtime check and is retained as an
+evidence ceiling; no source fix is inferred from unidentified404 messages.
+
+Ordered substantive results are now full code-review PASS followed by both
+fresh QA PASS. Independent documentation review found two documentation-only
+inaccuracies: the REQ overgeneralized phase diagnostic bounds to marker mode,
+and the formatter command omitted spaces between flags and arguments. Both
+were corrected; the same independent documentation lens returned actual PASS
+after focused reinspection retaining its prior full review. No runtime or test
+file changed after601d9d2e. After those ordered actual finals, one fresh task_verify(run_commands=false)
+returned runtime PENDING: no RECEIPTS.jsonl exists and no review/QA receipt of
+any kind was recorded for this run. The actual finals are NON-ATTESTING; no
+receipt was written or invented. No lens or task_verify was repeated solely
+to acquire a receipt. task_blocked recorded BLOCKED_ENV with the runtime
+required empty-stream reason and resumption condition; the Harness Goal child
+was mirrored blocked while the full player Goal remains active. task_close
+was not called. This is an attestation failure rather than a substantive
+review or QA failure. Final guarded note freshness checked all18 changed
+paths and invalidated0 notes; forbidden HANDOFF and mise paths were excluded
+from reads.
 The Harness task is TASK__browser-native-clock-product, run
 01a13686-2986-79f1-a971-6cc00056d10a. Update this section with actual ordered
 finals and runtime attestation outcome before closure.
 
-## Limits and full player scope
+## Known ceiling and full player scope
+
+Known ceiling: 초기 N=1/index0 인증은 거부 — 추가 네이티브 인증 증거가 확보되면 확장.
 
 These runs measure Chromium153.0.8010.12,44.1/48kHz and native128-frame
 extents. Pure one-frame/variable-extent/20-hour/week vectors are arithmetic or

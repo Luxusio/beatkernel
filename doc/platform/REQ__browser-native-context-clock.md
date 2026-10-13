@@ -162,8 +162,9 @@ records and rendering, with current Host/helper/Worklet/WASM fingerprints.
 
 Long native mode WORKLET_NATIVE_CLOCK_PRODUCT=1 is exclusive with diagnostics
 and REQUIRE_COLD. It alone uses180s total per-case budget,210s CDP deadline,
-65,536 callback cap and32 retained receipts. Existing diagnostics retain
-their120s/32,768/150s bounds and3s owned page-close. All probes own their
+65,536 callback cap and32 retained receipts. Existing single/joint phase
+diagnostics retain their120s/32,768/150s bounds and3s owned page-close. Marker
+mode retains1,024 callbacks,30s CDP deadline and ordinary page.close(). All probes own their
 resources and prove PID/listener/bind cleanup; scheduling two refills without
 traversing their old native horizons is insufficient.
 
