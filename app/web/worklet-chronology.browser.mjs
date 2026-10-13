@@ -7,6 +7,8 @@
  * the default remains the historical diagnostic-only acceptance mode.
  * WORKLET_NATIVE_FRAME_PROBE=1 instead measures independently scheduled native
  * AudioParam edges in untouched production phase0; it does not prove playback.
+ * WORKLET_NATIVE_PHASE_PROBE=1 streams three finite native ramp periods in the
+ * same fixture; modulo agreement does not admit an absolute production clock.
  * No dependency installs or external services. The owned HTTPS test response
  * wraps registerProcessor; repository production bytes and native clocks stay
  * unchanged. A deliberately omitted native callback is fault injection, not
@@ -20,26 +22,35 @@ import { X509Certificate, createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { resolve, dirname, extname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { advanceFrame, markerFrame } from "./worklet-native-frame-probe.mjs";
+import { advanceFrame, markerFrame, phaseEvidence } from "./worklet-native-frame-probe.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const out = resolve(process.env.WORKLET_CHRONOLOGY_OUT ?? resolve(root, "target/wf/worklet-chronology-browser-development"));
 const port = Number(process.env.WORKLET_CHRONOLOGY_PORT ?? 8121);
 const requireCold = process.env.WORKLET_CHRONOLOGY_REQUIRE_COLD === "1";
 const nativeProbe = process.env.WORKLET_NATIVE_FRAME_PROBE === "1";
+const phaseProbe = process.env.WORKLET_NATIVE_PHASE_PROBE === "1";
+const nativeFixture = nativeProbe || phaseProbe;
 const coldCases = requireCold ? ["cold-1", "cold-2", "cold-3"] : ["normal"];
 const nativeCases = [
   ...[44100, 48000].flatMap(rate => [1, 17, 63, 127].map(offset => ({ name: `native-${rate}-${offset}`, rate, offset }))),
   ...["constant", "index0", "late-first", "reset-before-late", "identities", "timeout", "stop", "suspend", "callback-limit"].map(name => ({ name, rate: 48000, offset: 17 })),
 ];
+const phaseCases = [
+  ...[44100, 48000].map(rate => ({ name: `phase-${rate}`, rate, offset: 17, phaseProbe: true, operation: "stream" })),
+  ...["constant", "late", "identities", "timeout", "stop", "suspend", "callback-limit"]
+    .map(operation => ({ name: `phase-${operation}`, rate: 48000, offset: 17, phaseProbe: true, operation })),
+];
 const evidence = { kind: "development-worklet-chronology-browser", checks: [], scenarios: [],
-  mode: nativeProbe ? "native-phase0-marker" : requireCold ? "required-healthy-cold" : "historical-diagnostic",
-  ceiling: nativeProbe ? [
+  mode: phaseProbe ? "native-phase0-modulo" : nativeProbe ? "native-phase0-marker" : requireCold ? "required-healthy-cold" : "historical-diagnostic",
+  ceiling: nativeFixture ? [
     "Two native marker edges establish only their measured callback interval; future graph-pull gaps and generic counter continuity remain unproved.",
     "Reused generated WASM is artifact-specific phase0 evidence, not a fresh Rust rebuild or a repair of the prior strict browser chronology failure.",
     "AudioParam fill/scan and private diagnostic messaging are sustained test overhead, not a startup-only or zero-cost production claim.",
+    ...(phaseProbe ? ["A single repeating phase cannot distinguish nP-frame gaps; checked samples and conditioned endpoint corroboration establish only this measured interval."] : []),
   ] : ["Measured cold-context acceptance only; no universal browser scheduling, high-frame performance, gameplay completion, replay-prefix or acoustic-output claim."], cleanup: {} };
-const required = nativeProbe ? [...nativeCases.map(x => x.name), "fresh-context", "web-server-boundary"]
+const required = phaseProbe ? [...phaseCases.map(x => x.name), "phase-fresh-context", "web-server-boundary"]
+  : nativeProbe ? [...nativeCases.map(x => x.name), "fresh-context", "web-server-boundary"]
   : [...(requireCold ? coldCases : ["diagnostic-cold-observation"]), "native-gap", "late-arm", "sample-control"];
 evidence.required = required;
 let browser, server;
@@ -113,12 +124,14 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
 // Test-only native automation and private observations. Production protocol,
 // sequence, PCM, clocks and render arguments are always delegated unchanged.
 const nativeBootstrap = `
-import { markerFrame } from './worklet-native-frame-probe.mjs';
+import { markerFrame, advanceFrame, nativePhase, phaseIdeal, phaseEvidence } from './worklet-native-frame-probe.mjs';
+const phaseMode = ${phaseProbe};
 const actualRegister = globalThis.registerProcessor.bind(globalThis);
 globalThis.registerProcessor = (name, Production) => actualRegister(name, class extends Production {
   static get parameterDescriptors() {
     return [...(Production.parameterDescriptors ?? []),
-      { name: '__native_marker', defaultValue: 0, minValue: 0, maxValue: 1, automationRate: 'a-rate' }];
+      { name: '__native_marker', defaultValue: 0, minValue: 0, maxValue: 1, automationRate: 'a-rate' },
+      ...(phaseMode ? [{ name: '__native_phase', defaultValue: 0, minValue: 0, maxValue: 1048577, automationRate: 'a-rate' }] : [])];
   }
   constructor(options) {
     super(options);
@@ -128,13 +141,36 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
     this.nativeId = 0;
     this.nativeOrdinal = 0;
     this.nativeWatch = null;
+    if (phaseMode) {
+      this.nativeAnchor = null;
+      this.nativeCursor = null;
+      this.nativeSession = null;
+      this.nativeRawSnapshots = 0;
+      this.nativeStats = { callbacks: 0, observedFrames: 0, minFrames: null, maxFrames: 0,
+        phase0: true, zeroPCM: true, reportUnavailable: true, resultTrue: true,
+        rawFrameDiscrepancies: 0, firstRawDiscrepancies: [], fullPhaseArrays: 0, singlePhaseArrays: 0, otherPhaseArrays: 0 };
+    }
   }
   nativeReply(message) { this.nativePort?.postMessage({ generation: this.generation, ...message }); }
+  phaseSummary(reason) {
+    this.nativeReply({ kind: 'phase-summary', id: this.nativeId, reason, ordinal: this.nativeOrdinal,
+      anchor: this.nativeAnchor, cursor: this.nativeCursor, rawSnapshots: this.nativeRawSnapshots,
+      stats: this.nativeStats, session: this.nativeSession });
+  }
+  phaseSnapshot(reason, frames, marker, values, fields = {}) {
+    if (++this.nativeRawSnapshots > 32) { this.retireNative('snapshot-limit'); return; }
+    this.nativeReply({ kind: 'phase-snapshot', id: this.nativeId, reason, ordinal: this.nativeOrdinal,
+      rawGlobalFrame: currentFrame, actualFrames: frames, nativeBase: this.nativeCursor,
+      markerLength: marker.length, markerValues: Array.from(marker),
+      parameterLength: values.length, values: Array.from(values), ...fields });
+  }
   retireNative(reason) {
     if (!this.nativePort) return;
+    if (phaseMode && !this.nativeSession?.done) this.phaseSummary(reason);
     this.nativeReply({ kind: 'retired', reason, id: this.nativeId,
-      pendingInvalidated: this.nativeWatch !== null, ordinal: this.nativeOrdinal });
+      pendingInvalidated: this.nativeWatch !== null || (phaseMode && this.nativeSession !== null), ordinal: this.nativeOrdinal });
     this.nativeWatch = null;
+    if (phaseMode) this.nativeSession = null;
     this.nativeRetired = true;
     this.nativePort.onmessage = null;
     this.nativePort.close();
@@ -162,13 +198,34 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
         if (reason) { this.nativeReply({ kind: 'refused', id: request?.id, reason }); return; }
         this.nativeId = request.id;
         if (request.kind === 'retire') { this.retireNative(request.reason); return; }
+        if (phaseMode && request.kind === 'phase-start') {
+          const reason = this.nativeAnchor === null ? 'origin' : this.nativeSession !== null ? 'phase-active'
+            : request.period !== 1048576 || !Number.isSafeInteger(request.startFrame)
+              || request.startFrame <= this.nativeCursor || !Number.isSafeInteger(request.horizonFrame)
+              || request.horizonFrame - request.startFrame !== 3 * request.period ? 'phase-range' : null;
+          if (reason) { this.nativeReply({ kind: 'refused', id: request.id, reason }); return; }
+          this.nativeSession = { startFrame: request.startFrame, horizonFrame: request.horizonFrame, period: request.period,
+            checkedSamples: 0, checkedCallbacks: 0, maxError: 0, resets: [], horizonRefused: false,
+            holdFrames: 0, closingReset: null, closing: null, done: false, failure: null };
+          this.nativeReply({ kind: 'accepted', id: request.id, operation: request.kind,
+            phase: this.phase, reportAvailable: this.owner.report_word(0, false), ordinal: this.nativeOrdinal,
+            nativeCursor: this.nativeCursor });
+          return;
+        }
         if (request.kind === 'watch' && (!Number.isSafeInteger(request.targetFrame) || request.targetFrame <= 0)) {
           this.nativeReply({ kind: 'refused', id: request.id, reason: 'target' }); return;
         }
         if (request.kind !== 'watch' && request.kind !== 'inspect') {
           this.nativeReply({ kind: 'refused', id: request.id, reason: 'operation' }); return;
         }
-        if (request.kind === 'watch') this.nativeWatch = { id: request.id, targetFrame: request.targetFrame };
+        if (phaseMode && request.kind === 'watch' && request.closing
+          && (!Number.isSafeInteger(request.resetFrame) || request.resetFrame <= this.nativeCursor
+            || request.resetFrame >= request.targetFrame || request.futureEligible !== true || this.nativeSession === null)) {
+          this.nativeReply({ kind: 'refused', id: request.id, reason: 'closing-prerequisite' }); return;
+        }
+        if (request.kind === 'watch') this.nativeWatch = { id: request.id, targetFrame: request.targetFrame,
+          ...(phaseMode ? { initial: request.initial === true, closing: request.closing === true,
+            resetFrame: request.resetFrame, futureEligible: request.futureEligible === true, startedOrdinal: this.nativeOrdinal } : {}) };
         this.nativeReply({ kind: 'accepted', id: request.id, operation: request.kind,
           phase: this.phase, reportAvailable: this.owner.report_word(0, false), ordinal: this.nativeOrdinal });
       };
@@ -182,7 +239,7 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
   process(inputs, outputs, parameters) {
     const result = super.process(inputs, outputs, parameters);
     if (!this.nativePort) return result;
-    if (++this.nativeOrdinal > 1024) { this.retireNative('callback-limit'); return result; }
+    if (++this.nativeOrdinal > (phaseMode ? 32768 : 1024)) { this.retireNative('callback-limit'); return result; }
     const frames = outputs[0]?.[0]?.length ?? 0;
     const values = parameters.__native_marker;
     const targetFrame = this.nativeWatch?.targetFrame ?? null;
@@ -190,6 +247,137 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
     let edge = 0;
     while (edge < values.length && values[edge] === 0) edge++;
     const zeroPCM = outputs.every(bus => bus.every(channel => channel.every(value => value === 0)));
+    if (phaseMode) {
+      const phaseValues = parameters.__native_phase;
+      const stats = this.nativeStats;
+      stats.callbacks++;
+      stats.observedFrames += frames;
+      stats.minFrames = stats.minFrames === null ? frames : Math.min(stats.minFrames, frames);
+      stats.maxFrames = Math.max(stats.maxFrames, frames);
+      stats.phase0 &&= this.phase === 0;
+      stats.zeroPCM &&= zeroPCM;
+      stats.reportUnavailable &&= this.owner.report_word(0, false) === 0;
+      stats.resultTrue &&= result === true;
+      if (phaseValues.length === frames) stats.fullPhaseArrays++;
+      else if (phaseValues.length === 1) stats.singlePhaseArrays++;
+      else stats.otherPhaseArrays++;
+      if (this.nativeAnchor === null && this.nativeWatch?.initial && candidate !== null) {
+        this.nativeAnchor = { base: candidate, ordinal: this.nativeOrdinal, targetFrame, edge,
+          actualFrames: frames, values: Array.from(values) };
+        this.nativeCursor = candidate;
+      }
+      if (this.nativeCursor !== null && currentFrame !== this.nativeCursor) {
+        stats.rawFrameDiscrepancies++;
+        if (stats.firstRawDiscrepancies.length < 8) stats.firstRawDiscrepancies.push({ ordinal: this.nativeOrdinal,
+          rawGlobalFrame: currentFrame, nativeBase: this.nativeCursor, actualFrames: frames });
+      }
+      const session = this.nativeSession;
+      if (session && !session.done) {
+        const frame = this.nativeCursor;
+        const end = advanceFrame(frame, frames);
+        let failure = end === null || frames < 1 ? 'extent' : null;
+        const first = Math.max(frame, session.startFrame), last = Math.min(end, session.horizonFrame);
+        if (!failure && first < last) {
+          const checked = phaseValues.length === frames
+            ? phaseEvidence(phaseValues.subarray(first - frame, last - frame), last - first, first,
+              session.startFrame, sampleRate, session.horizonFrame, session.period) : null;
+          if (checked === null) {
+            failure = 'phase-evidence';
+            session.failureSample = { parameterLength: phaseValues.length, actualFrames: frames };
+            if (phaseValues.length === frames) for (let index = first - frame; index < last - frame; index++) {
+              const sampleFrame = frame + index, value = phaseValues[index];
+              const ideal = phaseIdeal(sampleFrame, session.startFrame, sampleRate, session.period);
+              const phase = nativePhase(value, session.period), expectedPhase = (sampleFrame - session.startFrame) % session.period;
+              const error = ideal === null ? null : Math.abs(value - ideal);
+              if (phase !== expectedPhase || ideal === null || !(error < 0.25)) {
+                session.failureSample = { index, frame: sampleFrame, value, ideal, phase, expectedPhase, error };
+                break;
+              }
+            }
+          }
+          else {
+            session.checkedSamples += checked.checkedSamples;
+            session.checkedCallbacks++;
+            session.maxError = Math.max(session.maxError, checked.maxError);
+            for (let cycle = 1; cycle < 3; cycle++) {
+              const resetFrame = session.startFrame + cycle * session.period;
+              if (first <= resetFrame && resetFrame < last) {
+                const reset = { frame: resetFrame, index: resetFrame - frame, ordinal: this.nativeOrdinal,
+                  interior: frame < resetFrame && resetFrame < end };
+                session.resets.push(reset);
+                this.phaseSnapshot('reset', frames, values, phaseValues, { reset });
+              }
+            }
+            if (session.checkedCallbacks === 1) {
+              this.phaseSnapshot('phase-onset', frames, values, phaseValues, { activeIndex: first - frame, firstActive: first });
+              this.nativeReply({ kind: 'phase-progress', id: this.nativeId,
+                ordinal: this.nativeOrdinal, checkedSamples: session.checkedSamples });
+            }
+          }
+        }
+        if (!failure && end > session.horizonFrame) {
+          const holdIndex = Math.max(0, session.horizonFrame - frame);
+          const held = phaseValues.length === 1 ? phaseValues[0] === 1
+            : phaseValues.length === frames && phaseValues.subarray(holdIndex).every(value => value === 1);
+          if (!held) failure = 'horizon-hold';
+          else {
+            session.holdFrames += end - Math.max(frame, session.horizonFrame);
+            if (!session.horizonRefused) {
+              session.horizonRefused = phaseEvidence(phaseValues, frames, frame, session.startFrame,
+                sampleRate, session.horizonFrame, session.period) === null;
+              this.phaseSnapshot('horizon', frames, values, phaseValues, { holdIndex, refused: session.horizonRefused });
+              if (!session.horizonRefused) failure = 'horizon-admission';
+            }
+          }
+        }
+        if (!failure && this.nativeWatch?.closing) {
+          if (session.closingReset === null) {
+            const zeroIndex = values.length === 1 ? (values[0] === 0 ? 0 : -1)
+              : values.findIndex((value, index) => value === 0 && frame + index >= this.nativeWatch.resetFrame);
+            if (zeroIndex >= 0 && frame + zeroIndex >= this.nativeWatch.resetFrame) {
+              session.closingReset = { ordinal: this.nativeOrdinal, nativeBase: frame, index: zeroIndex,
+                resetFrame: this.nativeWatch.resetFrame };
+              this.phaseSnapshot('closing-reset', frames, values, phaseValues, { reset: session.closingReset });
+            }
+          }
+          if (candidate !== null) {
+            session.closing = { ordinal: this.nativeOrdinal, targetFrame, candidate, expectedBase: frame,
+              intervalCallbacks: this.nativeOrdinal - this.nativeAnchor.ordinal,
+              intervalFrames: frame - this.nativeAnchor.base,
+              futureEligible: this.nativeWatch.futureEligible, resetObserved: session.closingReset !== null };
+            this.phaseSnapshot('closing-marker', frames, values, phaseValues, { closing: session.closing });
+            if (!session.closing.futureEligible || !session.closing.resetObserved || candidate !== frame) failure = 'closing-marker';
+          }
+        }
+        if (failure) {
+          session.failure = { reason: failure, ordinal: this.nativeOrdinal, frame,
+            checkedSamples: session.checkedSamples, maxError: session.maxError };
+          this.phaseSnapshot('first-failure', frames, values, phaseValues, { failure: session.failure });
+          this.retireNative('phase-failure');
+          return result;
+        }
+        if (session.closing !== null && session.holdFrames > 0) {
+          session.done = true;
+          this.phaseSummary('phase-complete');
+        }
+      }
+      if (this.nativeOrdinal <= 8 || this.nativeOrdinal <= (this.nativeWatch?.startedOrdinal ?? -8) + 8 || candidate !== null) {
+        if (++this.nativeRawSnapshots > 32) { this.retireNative('snapshot-limit'); return result; }
+        this.nativeReply({ kind: 'callback', id: this.nativeWatch?.id ?? this.nativeId,
+          ordinal: this.nativeOrdinal, rawGlobalFrame: currentFrame, actualFrames: frames,
+          parameterLength: values.length, edge, spatialCandidate: candidate,
+          shape: values.every(value => value === 0) ? 'zero' : values.every(value => value === 1) ? 'one' : 'varying',
+          values: Array.from(values), phaseParameterLength: phaseValues.length, phaseValues: Array.from(phaseValues),
+          nativeBase: this.nativeCursor, phase: this.phase, result, zeroPCM, reportAvailable: this.owner.report_word(0, false) });
+      }
+      if (this.nativeOrdinal % 4096 === 0) this.nativeReply({ kind: 'phase-progress', id: this.nativeId,
+        ordinal: this.nativeOrdinal, checkedSamples: session?.checkedSamples ?? 0 });
+      if (this.nativeCursor !== null) {
+        this.nativeCursor = advanceFrame(this.nativeCursor, frames);
+        if (this.nativeCursor === null) this.retireNative('extent-overflow');
+      }
+      return result;
+    }
     this.nativeReply({ kind: 'callback', id: this.nativeWatch?.id ?? this.nativeId,
       ordinal: this.nativeOrdinal, rawGlobalFrame: currentFrame, actualFrames: frames,
       parameterLength: values.length, edge, spatialCandidate: candidate,
@@ -215,21 +403,21 @@ async function serve() {
   const production = await readFile(resolve(root, "app/web/audio-worklet.js"), "utf8");
   const wasm = await readFile(resolve(root, "app/web/audio-pkg/beatkernel_bms_runtime_bg.wasm"));
   evidence.source = { workletSha256: createHash("sha256").update(production).digest("hex"), wasmSha256: createHash("sha256").update(wasm).digest("hex") };
-  const webRoot = nativeProbe ? await realpath(resolve(root, "app/web")) : null;
+  const webRoot = nativeFixture ? await realpath(resolve(root, "app/web")) : null;
   server = createServer({ cert: await readFile(cert), key: await readFile(key) }, async (request, response) => {
     try {
       const pathname = new URL(request.url, "https://localhost").pathname;
       const path = resolve(root, `.${decodeURIComponent(pathname)}`);
       const within = relative(root, path);
       if (within === ".." || within.startsWith(`..${sep}`)) throw Error("Outside repository");
-      if (nativeProbe && pathname !== "/__chronology.html") {
+      if (nativeFixture && pathname !== "/__chronology.html") {
         const lexical = relative(resolve(root, "app/web"), path);
         if (lexical === ".." || lexical.startsWith(`..${sep}`)) throw Error("Outside web fixture");
         const resolved = relative(webRoot, await realpath(path));
         if (resolved === ".." || resolved.startsWith(`..${sep}`)) throw Error("Outside resolved web fixture");
       }
       const body = pathname === "/__chronology.html" ? "<!doctype html><title>Worklet chronology evidence</title>"
-        : pathname === "/app/web/audio-worklet.js" ? (nativeProbe ? nativeBootstrap : bootstrap) + production : await readFile(path);
+        : pathname === "/app/web/audio-worklet.js" ? (nativeFixture ? nativeBootstrap : bootstrap) + production : await readFile(path);
       response.writeHead(200, { "Content-Type": pathname.endsWith(".html") ? "text/html" : extname(path) === ".wasm" ? "application/wasm" : "text/javascript",
         "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp", "Cache-Control": "no-store" });
       response.end(body);
@@ -343,16 +531,16 @@ async function runCase(name) {
 }
 
 async function runNativeCase(spec, generation) {
+  const caseStarted = performance.now();
   const page = await browser.newPage();
   const consoleMessages = [], pageErrors = [];
+  let result;
   page.on("console", message => { if (consoleMessages.length < 32) consoleMessages.push({ type: message.type(), text: message.text().slice(0, 2000) }); });
   page.on("pageerror", error => { if (pageErrors.length < 16) pageErrors.push(String(error).slice(0, 2000)); });
   try {
-    await page.goto(`https://127.0.0.1:${port}/__chronology.html`);
-    const result = await page.evaluate(async ({ spec, generation }) => {
-      const { AudioHost } = await import("/app/web/audio-host.mjs");
-      const { markerTime, advanceFrame } = await import("/app/web/worklet-native-frame-probe.mjs");
-      const module = await WebAssembly.compile(await (await fetch("/app/web/audio-pkg/beatkernel_bms_runtime_bg.wasm")).arrayBuffer());
+    await page.goto(`https://127.0.0.1:${port}/__chronology.html`, ...(spec.phaseProbe ? [{ timeout: Math.max(1, 120000 - (performance.now() - caseStarted)) }] : []));
+    result = await page.evaluate(async ({ spec, generation, caseBudgetMs }) => {
+      let AudioHost, markerTime, advanceFrame, module;
       const contexts = [], nodes = [], hostMessages = [], messages = [], ports = [], events = [], timestamps = [], stateEvents = [];
       const Context = AudioContext, Node = AudioWorkletNode;
       globalThis.AudioContext = class extends Context {
@@ -374,9 +562,11 @@ async function runNativeCase(spec, generation) {
       const result = { ...spec, generation, messages, events, timestamps, stateEvents, hostMessages, cleanup: {},
         prerequisites: { freshContext: true, previousOrigin: false, valueWrites: 0, nativeDefault: null } };
       let host, privatePort, id = 1, observationRetired = false, ticks = 0;
-      const wait = async (predicate, timeoutMs = 5000, workload = false) => {
+      let caseTimer, caseExpired = false;
+      const wait = async (predicate, timeoutMs = 5000, workload = false, cleanup = false) => {
         const deadline = performance.now() + timeoutMs;
         while (!predicate()) {
+          if (spec.phaseProbe && caseExpired && !cleanup) throw Error("Native phase case deadline exceeded");
           if (performance.now() >= deadline) throw Error("Native probe deadline exceeded");
           if (workload) {
             const before = performance.now();
@@ -401,10 +591,10 @@ async function runNativeCase(spec, generation) {
         const channel = new MessageChannel(), replies = [];
         ports.push(channel.port1, channel.port2);
         channel.port1.onmessage = event => {
-          if (replies.length >= 1100) throw Error("Private probe reply bound exceeded");
+          if (replies.length >= (spec.phaseProbe ? 128 : 1100)) throw Error("Private probe reply bound exceeded");
           replies.push(event.data);
           if (channel.port1 === privatePort) {
-            if (messages.length >= 1100) throw Error("Native snapshot bound exceeded");
+            if (messages.length >= (spec.phaseProbe ? 128 : 1100)) throw Error("Native snapshot bound exceeded");
             messages.push(event.data);
             if (event.data.kind === "retired") observationRetired = true;
           }
@@ -414,22 +604,30 @@ async function runNativeCase(spec, generation) {
         await wait(() => replies.some(x => x.kind === "attached" || x.kind === "refused"));
         return { channel, replies };
       };
-      const request = async (kind, fields = {}) => {
+      const request = async (kind, fields = {}, cleanup = false) => {
         const requestId = ++id;
         privatePort.postMessage({ kind, generation, id: requestId, ...fields });
-        await wait(() => messages.some(x => x.id === requestId && x.kind !== "callback"));
+        await wait(() => messages.some(x => x.id === requestId && (spec.phaseProbe
+          ? ["accepted", "refused", "retired"].includes(x.kind) : x.kind !== "callback")), cleanup ? 3000 : 5000, false, cleanup);
         return requestId;
       };
-      const watch = targetFrame => request("watch", { targetFrame });
+      const watch = (targetFrame, fields = {}) => request("watch", { targetFrame, ...fields });
       const set = (value, targetFrame) => {
+        if (spec.phaseProbe && caseExpired) throw Error("Native phase case deadline exceeded");
         const time = markerTime(targetFrame, host.sampleRate);
         if (time === null) throw Error("Ambiguous scheduled marker time");
         const before = contexts[0].currentTime;
         nodes[0].parameters.get("__native_marker").setValueAtTime(value, time);
-        events.push({ value, targetFrame, time, beforeContextTime: before, afterContextTime: contexts[0].currentTime });
+        events.push({ value, targetFrame, time, beforeContextTime: before, afterContextTime: contexts[0].currentTime,
+          ...(spec.phaseProbe ? { parameter: "__native_marker", method: "setValueAtTime" } : {}) });
         return time;
       };
       try {
+        const operation = (async () => {
+        ({ AudioHost } = await import("/app/web/audio-host.mjs"));
+        ({ markerTime, advanceFrame } = await import("/app/web/worklet-native-frame-probe.mjs"));
+        module = await WebAssembly.compile(await (await fetch("/app/web/audio-pkg/beatkernel_bms_runtime_bg.wasm")).arrayBuffer());
+        if (spec.phaseProbe && caseExpired) throw Error("Native phase case deadline exceeded");
         host = await AudioHost.open({ module, generation, channels: 2, timeoutMs: 5000,
           contextOptions: { latencyHint: "interactive", sampleRate: spec.rate },
           pcmLimits: { maxAssetBytes: 65536, maxTotalBytes: 131072, maxSamples: 4 },
@@ -437,6 +635,7 @@ async function runNativeCase(spec, generation) {
         result.sampleRate = host.sampleRate;
         result.beforeReport = await host.poll();
         result.prerequisites.nativeDefault = nodes[0].parameters.get("__native_marker").defaultValue;
+        if (spec.phaseProbe) result.prerequisites.phaseDefault = nodes[0].parameters.get("__native_phase").defaultValue;
         const connected = await attach(generation, id);
         privatePort = connected.channel.port1;
         messages.push(...connected.replies);
@@ -449,7 +648,125 @@ async function runNativeCase(spec, generation) {
           return (Math.ceil(controlFrame / quantum) + Math.ceil(host.sampleRate * 0.2 / quantum)) * quantum + offset;
         };
         const positive = spec.name.startsWith("native-");
-        if (positive) {
+        if (spec.phaseProbe) {
+          const period = 2 ** 20;
+          const phaseSet = (method, value, targetFrame) => {
+            if (caseExpired) throw Error("Native phase case deadline exceeded");
+            const time = markerTime(targetFrame, host.sampleRate);
+            if (time === null) throw Error("Ambiguous native phase event time");
+            const before = contexts[0].currentTime;
+            nodes[0].parameters.get("__native_phase")[method](value, time);
+            events.push({ parameter: "__native_phase", method, value, targetFrame, time,
+              beforeContextTime: before, afterContextTime: contexts[0].currentTime });
+            return time;
+          };
+          const openPhase = async () => {
+            if (spec.offset >= quantum) throw Error("Native phase requires an actual interior marker");
+            const firstTarget = futureTarget(spec.offset);
+            const firstId = await watch(firstTarget, { initial: true });
+            result.firstTarget = firstTarget;
+            result.firstTime = set(1, firstTarget);
+            await wait(() => messages.some(x => x.kind === "callback" && x.id === firstId && x.spatialCandidate !== null), 5000, true);
+            result.first = messages.find(x => x.kind === "callback" && x.id === firstId && x.spatialCandidate !== null);
+            result.firstAdmission = { eventCount: events.length, previousEvents: false,
+              eligible: events.length === 1 && events[0].value === 1 && result.prerequisites.nativeDefault === 0 };
+            if (!result.firstAdmission.eligible) throw Error("Native phase opening marker has a contaminated timeline");
+            const startFrame = futureTarget(spec.offset), horizonFrame = startFrame + 3 * period;
+            result.phaseSchedule = { period, periods: 3, startFrame, horizonFrame };
+            const startId = await request("phase-start", result.phaseSchedule);
+            const admitted = messages.find(x => x.id === startId && x.kind !== "callback");
+            if (admitted.kind !== "accepted") throw Error("Native phase start refused: " + admitted.reason);
+            phaseSet("setValueAtTime", 1, startFrame);
+            for (let cycle = 1; cycle <= 3; cycle++) {
+              const target = startFrame + cycle * period;
+              phaseSet("linearRampToValueAtTime", period + 1, target);
+              phaseSet("setValueAtTime", 1, target);
+            }
+            const phaseEvents = events.filter(x => x.parameter === "__native_phase");
+            result.phaseSchedule.futureEligible = phaseEvents.every(x => x.beforeContextTime < x.time && x.afterContextTime < x.time);
+            if (!result.phaseSchedule.futureEligible) throw Error("Native phase schedule was already late");
+          };
+          if (spec.operation === "stream" || ["timeout", "stop", "suspend"].includes(spec.operation)) {
+            await openPhase();
+            if (spec.operation === "stream") {
+              const resetFrame = result.phaseSchedule.horizonFrame - 2 * quantum;
+              const targetFrame = result.phaseSchedule.horizonFrame + 2 * quantum;
+              const resetTime = markerTime(resetFrame, host.sampleRate), onsetTime = markerTime(targetFrame, host.sampleRate);
+              const before = contexts[0].currentTime;
+              if (resetTime === null || onsetTime === null || before >= resetTime || before >= onsetTime) throw Error("Closing marker is not future eligible");
+              await watch(targetFrame, { closing: true, resetFrame, futureEligible: true });
+              result.resetTime = set(0, resetFrame);
+              result.secondTime = set(1, targetFrame);
+              result.secondTarget = targetFrame;
+              const closingEvents = events.filter(x => x.parameter === "__native_marker").slice(1);
+              result.closingAdmission = { resetFrame, targetFrame, eventCount: closingEvents.length,
+                futureEligible: closingEvents.length === 2 && closingEvents.every(x => x.beforeContextTime < x.time && x.afterContextTime < x.time) };
+              if (!result.closingAdmission.futureEligible) throw Error("Closing reset/onset submission was late");
+              await wait(() => messages.some(x => x.kind === "phase-summary"), 120000, true);
+              result.summary = messages.findLast(x => x.kind === "phase-summary");
+              if (result.summary.reason !== "phase-complete") throw Error("Native phase failed: " + JSON.stringify(result.summary.session?.failure ?? result.summary.reason));
+            } else {
+              await wait(() => messages.some(x => x.kind === "phase-progress" && x.checkedSamples > 0)
+                || messages.some(x => x.kind === "phase-summary"), 5000, true);
+              if (messages.some(x => x.kind === "phase-summary")) throw Error("Native phase retired before active retirement exercise");
+              if (spec.operation === "timeout") {
+                try { await wait(() => messages.some(x => x.kind === "phase-summary" && x.reason === "phase-complete"), 40); }
+                catch (error) { result.timeout = String(error); }
+                if (!result.timeout) throw Error("Finite phase completed before the intended timeout");
+                await request("retire", { reason: "timeout" });
+                const rejected = await attach(generation, id + 1);
+                result.retiredAttachment = rejected.replies[0];
+                rejected.channel.port1.close(); rejected.channel.port2.close();
+              } else if (spec.operation === "stop") {
+                await bounded(host.stop(), "phase stop");
+                await wait(() => observationRetired);
+              } else {
+                await request("retire", { reason: "suspend" });
+                await bounded(contexts[0].suspend(), "phase suspend", 5000);
+                await wait(() => stateEvents.some(event => event.state === "suspended") && host.state === "failed");
+                result.suspendedState = stateEvents.findLast(event => event.state === "suspended").state;
+                try { await host.poll(); }
+                catch (error) { result.suspendFailure = { code: error.code, operation: error.operation, message: String(error) }; }
+              }
+              result.summary = messages.findLast(x => x.kind === "phase-summary");
+            }
+          } else if (spec.operation === "identities") {
+            const stale = await attach(generation - 1, id + 1), repeated = await attach(generation, id), duplicate = await attach(generation, id + 1);
+            result.rejectedAttachments = [stale.replies[0], repeated.replies[0], duplicate.replies[0]];
+            for (const rejected of [stale, repeated, duplicate]) { rejected.channel.port1.close(); rejected.channel.port2.close(); }
+            privatePort.postMessage({ kind: "inspect", generation: generation - 1, id: id + 1 });
+            privatePort.postMessage({ kind: "inspect", generation, id });
+            await wait(() => messages.filter(x => x.kind === "refused").length === 2);
+            await request("watch", { targetFrame: -1 });
+            await request("unknown");
+            await request("phase-start", { startFrame: 1, horizonFrame: 1 + 3 * period, period });
+            await watch(futureTarget(spec.offset), { closing: true, resetFrame: 1, futureEligible: true });
+            await request("inspect");
+            result.retainedIdentity = id;
+            result.certifiedOrigin = null;
+          } else if (spec.operation === "late") {
+            await wait(() => contexts[0].currentTime > 0.05);
+            const target = Math.max(1, Math.floor((contexts[0].currentTime - 0.025) * host.sampleRate));
+            const watched = await watch(target, { initial: false });
+            result.negativeTarget = target;
+            result.negativeTime = set(1, target);
+            phaseSet("setValueAtTime", 1, target);
+            phaseSet("linearRampToValueAtTime", period + 1, target + period);
+            const refusedId = await request("phase-start", { startFrame: target, horizonFrame: target + 3 * period, period });
+            result.lateRefusal = messages.find(x => x.id === refusedId && x.kind === "refused");
+            result.firstAdmission = { eventCount: events.length, previousEvents: false, eligible: false };
+            await wait(() => messages.some(x => x.kind === "callback" && x.id === watched && x.shape === "one"));
+            result.certifiedOrigin = null;
+            result.rawSpatialCandidates = messages.filter(x => x.kind === "callback" && x.id === watched && x.spatialCandidate !== null);
+          } else {
+            const watched = await watch(futureTarget(spec.offset), { initial: false });
+            if (spec.operation === "constant") {
+              await wait(() => messages.filter(x => x.kind === "callback" && x.id === watched).length >= 8);
+              result.constantCallbacks = messages.filter(x => x.kind === "callback" && x.id === watched);
+            } else if (spec.operation === "callback-limit") await wait(() => observationRetired, 120000);
+            result.certifiedOrigin = null;
+          }
+        } else if (positive) {
           if (spec.offset >= quantum) throw Error("Requested interior offset exceeds measured callback shape");
           const firstTarget = futureTarget(spec.offset);
           const firstId = await watch(firstTarget);
@@ -538,9 +855,40 @@ async function runNativeCase(spec, generation) {
         }
         result.hostState = host.state;
         if (host.state === "setup") result.afterReport = await host.poll();
+        })();
+        if (spec.phaseProbe) {
+          await Promise.race([operation, new Promise((_, no) => {
+            caseTimer = setTimeout(() => { caseExpired = true; no(Error("Native phase case120s watchdog exceeded")); }, caseBudgetMs);
+          })]);
+        } else await operation;
       } catch (error) {
         result.unexpected = { message: String(error), stack: error.stack };
       } finally {
+        clearTimeout(caseTimer);
+        if (spec.phaseProbe) {
+          const errors = [];
+          const attempt = async (operation, action, timeoutMs) => {
+            try { await bounded(action(), operation, timeoutMs); }
+            catch (error) { errors.push({ operation, error: String(error) }); }
+          };
+          if (privatePort && !observationRetired) await attempt("private retirement", () => request("retire", { reason: "case-complete" }, true), 3000);
+          if (host) await attempt("owned Host stop", () => host.stop(), 8000);
+          for (const context of contexts) if (context.state !== "closed") await attempt("owned context close", () => context.close(), 3000);
+          for (const ownedPort of ports) {
+            try { ownedPort.onmessage = null; ownedPort.close(); }
+            catch (error) { errors.push({ operation: "owned port close", error: String(error) }); }
+          }
+          result.cleanup.errors = errors;
+          if (errors.length) result.cleanup.error = JSON.stringify(errors);
+          result.cleanup.contextsConstructed = contexts.length;
+          result.cleanup.nodesConstructed = nodes.length;
+          result.cleanup.contexts = contexts.map(context => context.state);
+          result.cleanup.contextsClosed = contexts.every(context => context.state === "closed");
+          result.cleanup.ownedPortEndpointsClosed = ports.length;
+          result.cleanup.observationRetired = observationRetired;
+          result.cleanup.pendingInvalidated = messages.findLast(x => x.kind === "retired")?.pendingInvalidated ?? false;
+          result.summary ??= messages.findLast(x => x.kind === "phase-summary");
+        } else {
         try {
           if (privatePort && !observationRetired) await request("retire", { reason: "case-complete" });
           if (host) await bounded(host.stop(), "owned Host cleanup");
@@ -553,11 +901,161 @@ async function runNativeCase(spec, generation) {
         result.cleanup.ownedPortEndpointsClosed = ports.length;
         result.cleanup.observationRetired = observationRetired;
         result.cleanup.pendingInvalidated = messages.findLast(x => x.kind === "retired")?.pendingInvalidated ?? false;
+        }
       }
       return result;
-    }, { spec, generation });
+    }, { spec, generation, caseBudgetMs: spec.phaseProbe ? Math.max(1, 120000 - (performance.now() - caseStarted)) : null });
     return { ...result, consoleMessages, pageErrors };
-  } finally { await page.close(); }
+  } finally {
+    if (spec.phaseProbe) {
+      let timer;
+      try {
+        await Promise.race([page.close(), new Promise((_, no) => { timer = setTimeout(() => no(Error("Owned phase page close deadline exceeded")), 3000); })]);
+        if (result) result.cleanup.pageClosed = true;
+      } catch (error) { if (result) result.cleanup.pageError = String(error); else throw error; }
+      finally { clearTimeout(timer); }
+    } else await page.close();
+  }
+}
+
+function verifyPhase(result) {
+  assert.equal(result.pageErrors.length, 0, "Unexpected phase probe page error");
+  assert(!result.unexpected, JSON.stringify(result.unexpected));
+  assert(!result.cleanup.error, result.cleanup.error);
+  assert(!result.cleanup.pageError, result.cleanup.pageError);
+  assert(result.cleanup.pageClosed && result.cleanup.contextsClosed && result.cleanup.observationRetired,
+    "Owned phase page/context/observer did not close");
+  assert.equal(result.cleanup.contextsConstructed, 1);
+  assert.equal(result.cleanup.nodesConstructed, 1);
+  assert(result.cleanup.ownedPortEndpointsClosed >= 2);
+  assert.equal(result.prerequisites.nativeDefault, 0);
+  assert.equal(result.prerequisites.phaseDefault, 0);
+  assert.equal(result.prerequisites.valueWrites, 0);
+  assert.equal(result.beforeReport.available, false);
+  if (result.afterReport) assert.equal(result.afterReport.available, false);
+  assert.equal(result.sampleRate, result.rate);
+  assert(result.hostMessages.every(x => ["ready", "ack", "terminal"].includes(x.kind)));
+  assert(result.messages.length <= 128);
+  const summary = result.summary;
+  assert(summary, "No bounded Worklet phase summary");
+  assert(summary.rawSnapshots > 0 && summary.rawSnapshots <= 32);
+  const stats = summary.stats;
+  assert(stats.callbacks > 0 && stats.callbacks <= 32768);
+  assert(stats.phase0 && stats.zeroPCM && stats.reportUnavailable && stats.resultTrue,
+    "Phase observer changed production phase0 behavior");
+  assert(stats.minFrames > 0 && stats.maxFrames <= 128);
+  assert.equal(stats.fullPhaseArrays + stats.singlePhaseArrays + stats.otherPhaseArrays, stats.callbacks);
+  assert(stats.firstRawDiscrepancies.length <= 8);
+  const callbacks = result.messages.filter(x => x.kind === "callback");
+  assert(callbacks.length > 0 && callbacks.length <= 32);
+  for (const callback of callbacks) {
+    assert.equal(callback.generation, result.generation);
+    assert.equal(callback.phase, 0);
+    assert.equal(callback.zeroPCM, true);
+    assert.equal(callback.result, true);
+    assert.equal(callback.reportAvailable, 0);
+  }
+  const session = summary.session;
+  if (result.operation === "stream" || ["timeout", "stop", "suspend"].includes(result.operation)) {
+    assert(result.firstAdmission.eligible && result.firstAdmission.eventCount === 1);
+    assert.equal(result.first.edge, result.offset);
+    assert.equal(markerFrame(new Float32Array(result.first.values), result.first.actualFrames, result.firstTarget), result.first.spatialCandidate);
+    assert.equal(summary.anchor.base, result.first.spatialCandidate);
+    assert.equal(summary.anchor.ordinal, result.first.ordinal);
+    assert.equal(result.phaseSchedule.period, 2 ** 20);
+    assert.equal(result.phaseSchedule.periods, 3);
+    assert.equal(result.phaseSchedule.horizonFrame - result.phaseSchedule.startFrame, 3 * 2 ** 20);
+    assert(result.phaseSchedule.futureEligible);
+    assert(session && session.checkedSamples > 0 && session.failure === null,
+      "No valid active phase samples: " + JSON.stringify(session?.failureSample ?? session?.failure));
+    assert(session.maxError < 0.25);
+    if (result.operation === "stream") {
+      assert.equal(summary.reason, "phase-complete");
+      assert(session.done && session.horizonRefused && session.holdFrames > 0);
+      assert.equal(session.checkedSamples, 3 * 2 ** 20, "The finite three-period interval lost or duplicated actual samples");
+      assert.equal(session.resets.length, 2);
+      assert(session.resets.every(x => x.interior), "No actual interior reset evidence");
+      assert(result.closingAdmission.futureEligible && result.closingAdmission.eventCount === 2);
+      assert(session.closingReset !== null && session.closing.futureEligible && session.closing.resetObserved);
+      assert.equal(session.closing.candidate, session.closing.expectedBase, "Closing contradiction must fail without rebasing");
+      assert.equal(session.closing.intervalCallbacks, session.closing.ordinal - summary.anchor.ordinal);
+      assert.equal(session.closing.intervalFrames, session.closing.expectedBase - summary.anchor.base);
+      const snapshots = result.messages.filter(x => x.kind === "phase-snapshot");
+      const onset = snapshots.find(x => x.reason === "phase-onset");
+      assert(onset && onset.activeIndex > 0 && onset.activeIndex < onset.actualFrames, "No actual interior phase onset");
+      assert.equal(onset.parameterLength, onset.actualFrames);
+      assert.equal(onset.firstActive, session.startFrame);
+      assert(onset.values.slice(0, onset.activeIndex).every(value => value === 0), "Fresh phase parameter lost its default0 prefix");
+      const onsetEvidence = phaseEvidence(new Float32Array(onset.values).subarray(onset.activeIndex),
+        onset.actualFrames - onset.activeIndex, session.startFrame, session.startFrame, result.sampleRate,
+        session.horizonFrame, session.period);
+      assert(onsetEvidence && onsetEvidence.firstPhase === 0 && onsetEvidence.maxError < 0.25,
+        "Independent actual native onset recomputation failed");
+      assert.equal(snapshots.filter(x => x.reason === "reset").length, 2);
+      for (const snapshot of snapshots.filter(x => x.reason === "reset")) {
+        assert.equal(snapshot.parameterLength, snapshot.actualFrames);
+        const first = Math.max(snapshot.nativeBase, session.startFrame);
+        const last = Math.min(snapshot.nativeBase + snapshot.actualFrames, session.horizonFrame);
+        assert(phaseEvidence(new Float32Array(snapshot.values).subarray(first - snapshot.nativeBase, last - snapshot.nativeBase),
+          last - first, first, session.startFrame, result.sampleRate, session.horizonFrame, session.period),
+        "Independent reset snapshot recomputation failed");
+      }
+      const closing = snapshots.find(x => x.reason === "closing-marker");
+      assert(closing);
+      assert.equal(markerFrame(new Float32Array(closing.markerValues), closing.actualFrames, result.secondTarget), session.closing.candidate);
+      const horizon = snapshots.find(x => x.reason === "horizon");
+      assert(horizon && horizon.refused);
+      assert.equal(phaseEvidence(new Float32Array(horizon.values), horizon.actualFrames, horizon.nativeBase,
+        session.startFrame, result.sampleRate, session.horizonFrame, session.period), null);
+    } else {
+      assert(session.checkedSamples < 3 * 2 ** 20 && !session.done);
+      assert(result.cleanup.pendingInvalidated);
+      const retired = result.messages.find(x => x.kind === "retired");
+      assert.equal(retired.reason, result.operation === "stop" ? "production-stop" : result.operation);
+      if (result.operation === "timeout") {
+        assert(result.timeout);
+        assert.equal(result.retiredAttachment.reason, "retired");
+        assert(result.retiredAttachment.rejectedPortClosed);
+      }
+      if (result.operation === "suspend") {
+        assert.equal(result.suspendedState, "suspended");
+        assert.equal(result.hostState, "failed");
+        assert.equal(result.suspendFailure?.code, "state");
+        assert.equal(result.suspendFailure?.operation, "context");
+      }
+    }
+  } else {
+    assert.equal(result.certifiedOrigin, null);
+    assert.equal(summary.anchor, null);
+    if (result.operation === "constant") {
+      assert(result.constantCallbacks.length >= 8);
+      for (const callback of result.constantCallbacks) {
+        assert(callback.phaseValues.every(value => value === 0));
+        assert.equal(phaseEvidence(new Float32Array(callback.phaseValues), callback.actualFrames, 1, 1,
+          result.sampleRate, 1 + 3 * 2 ** 20, 2 ** 20), null);
+      }
+    } else if (result.operation === "late") {
+      assert.equal(result.firstAdmission.eligible, false);
+      assert.equal(result.lateRefusal.reason, "origin");
+      assert(result.events.filter(x => x.targetFrame === result.negativeTarget).every(x => x.time < x.beforeContextTime));
+    } else if (result.operation === "identities") {
+      assert.deepEqual(result.rejectedAttachments.map(x => x.reason), ["generation", "identity", "duplicate"]);
+      assert(result.rejectedAttachments.every(x => x.rejectedPortClosed));
+      assert.deepEqual(result.messages.filter(x => x.kind === "refused").map(x => x.reason),
+        ["generation", "identity", "target", "operation", "origin", "closing-prerequisite"]);
+      assert(result.messages.some(x => x.kind === "accepted" && x.operation === "inspect" && x.id === result.retainedIdentity));
+    } else if (result.operation === "callback-limit") {
+      assert.equal(stats.callbacks, 32768);
+      assert.equal(summary.ordinal, 32769);
+      assert.equal(result.messages.find(x => x.kind === "retired").reason, "callback-limit");
+      assert(result.cleanup.pendingInvalidated);
+    }
+  }
+  evidence.checks.push({ id: result.name, passed: true, callbacks: stats.callbacks,
+    checkedSamples: session?.checkedSamples ?? 0, maxError: session?.maxError ?? null,
+    resets: session?.resets.length ?? 0, horizonRefused: session?.horizonRefused ?? false,
+    closingCorroborated: Boolean(session?.closing && session.closing.candidate === session.closing.expectedBase),
+    rawFrameDiscrepancies: stats.rawFrameDiscrepancies, rawSnapshots: summary.rawSnapshots });
 }
 
 function verifyNative(result) {
@@ -745,24 +1243,38 @@ function verify(result, id = result.name) {
 }
 
 try {
+  assert(!(phaseProbe && (nativeProbe || requireCold)), "WORKLET_NATIVE_PHASE_PROBE conflicts with the marker/required-cold modes");
   const spki = await serve();
   const require = createRequire(import.meta.url);
   const puppeteer = require(process.env.PUPPETEER_MODULE ?? "puppeteer-core");
   browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
-    ...(nativeProbe ? { protocolTimeout: 30000 } : {}),
+    ...(phaseProbe ? { protocolTimeout: 150000 } : nativeProbe ? { protocolTimeout: 30000 } : {}),
     args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required", `--ignore-certificate-errors-spki-list=${spki}`] });
-  if (nativeProbe) {
+  if (nativeFixture) {
     evidence.browser = { version: await browser.version(), ownedPid: browser.process()?.pid ?? null };
-    for (let index = 0; index < nativeCases.length; index++) {
-      const result = await runNativeCase(nativeCases[index], index + 11);
+    const cases = phaseProbe ? phaseCases : nativeCases;
+    for (let index = 0; index < cases.length; index++) {
+      const result = await runNativeCase(cases[index], index + (phaseProbe ? 111 : 11));
       evidence.scenarios.push(result);
-      try { verifyNative(result); }
-      catch (error) { evidence.checks.push({ id: result.name, passed: false, detail: String(error) }); process.exitCode = 1; }
+      try { if (phaseProbe) verifyPhase(result); else verifyNative(result); }
+      catch (error) { evidence.checks.push({ id: result.name, passed: false, detail: String(error),
+        ...(phaseProbe ? { callbacks: result.summary?.stats?.callbacks ?? 0,
+          checkedSamples: result.summary?.session?.checkedSamples ?? 0,
+          maxError: result.summary?.session?.maxError ?? null,
+          failure: result.summary?.session?.failure ?? null,
+          failureSample: result.summary?.session?.failureSample ?? null } : {}) }); process.exitCode = 1; }
     }
+    if (phaseProbe) {
+      const fresh = evidence.scenarios.filter(x => x.operation === "stream");
+      const passed = fresh.length === 2 && new Set(fresh.map(x => x.generation)).size === 2
+        && fresh.every(x => x.firstAdmission?.eligible && x.prerequisites.previousOrigin === false && x.cleanup.contextsClosed);
+      evidence.checks.push({ id: "phase-fresh-context", passed });
+    } else {
     const fresh = evidence.scenarios.filter(x => x.name.startsWith("native-"));
     const freshPassed = fresh.length === 8 && new Set(fresh.map(x => x.generation)).size === 8
       && fresh.every(x => x.firstAdmission?.eligible && x.prerequisites.previousOrigin === false && x.cleanup.contextsClosed);
     evidence.checks.push({ id: "fresh-context", passed: freshPassed });
+    }
     const boundary = await browser.newPage();
     try {
       await boundary.goto(`https://127.0.0.1:${port}/__chronology.html`);
@@ -784,7 +1296,7 @@ try {
 } catch (error) { evidence.fatal = { message: String(error), stack: error.stack }; process.exitCode = 1; }
 finally {
   try { if (browser) { await browser.close(); evidence.cleanup.browserClosed = true;
-    if (nativeProbe) evidence.cleanup.ownedBrowserExitCode = browser.process()?.exitCode ?? null; } }
+    if (nativeFixture) evidence.cleanup.ownedBrowserExitCode = browser.process()?.exitCode ?? null; } }
   catch (error) { evidence.cleanup.browserError = String(error); process.exitCode = 1; }
   try { if (server) { server.closeAllConnections(); await new Promise(yes => server.close(yes)); evidence.cleanup.serverClosed = true; } }
   catch (error) { evidence.cleanup.serverError = String(error); process.exitCode = 1; }
