@@ -1,5 +1,6 @@
 // Diagnostic helpers only; these do not supply a production audio clock.
 const frameInteger = value => Number.isSafeInteger(value) && value >= 0;
+const phasePeriod = value => Number.isSafeInteger(value) && value >= 2 && value <= 2 ** 20;
 
 /** Choose a time whose represented sample position has the unambiguous ceil T. */
 export function markerTime(targetFrame, sampleRate) {
@@ -35,4 +36,54 @@ export function advanceFrame(frame, actualFrames) {
   if (!frameInteger(frame) || !frameInteger(actualFrames)) return null;
   const next = frame + actualFrames;
   return frameInteger(next) ? next : null;
+}
+
+/** Decode a modulo candidate only; whole-period gaps remain indistinguishable. */
+export function nativePhase(value, period) {
+  if (!Number.isFinite(value) || !phasePeriod(period)
+    || value - Math.floor(value) === 0.5) return null;
+  const code = Math.round(value) - 1;
+  if (code < 0 || code > period) return null;
+  return code === period ? 0 : code;
+}
+
+/** Double ideal for the represented quarter-early native ramp event times. */
+export function phaseIdeal(frame, startFrame, sampleRate, period) {
+  if (!frameInteger(frame) || !frameInteger(startFrame) || startFrame === 0
+    || !frameInteger(sampleRate) || sampleRate === 0 || !phasePeriod(period)
+    || frame < startFrame) return null;
+  const cycleStart = frame - ((frame - startFrame) % period);
+  const cycleEnd = advanceFrame(cycleStart, period);
+  if (cycleEnd === null) return null;
+  const startTime = markerTime(cycleStart, sampleRate);
+  const endTime = markerTime(cycleEnd, sampleRate);
+  if (startTime === null || endTime === null || endTime <= startTime) return null;
+  const ideal = 1 + period * (frame / sampleRate - startTime) / (endTime - startTime);
+  return Number.isFinite(ideal) ? ideal : null;
+}
+
+/** Check every actual sample without changing the input or admitting a clock. */
+export function phaseEvidence(values, actualFrames, frame, startFrame, sampleRate, horizonFrame, period) {
+  if (!(values instanceof Float32Array) || !frameInteger(actualFrames) || actualFrames === 0
+    || values.length !== actualFrames || !frameInteger(frame)
+    || !frameInteger(startFrame) || startFrame === 0
+    || !frameInteger(sampleRate) || sampleRate === 0 || !frameInteger(horizonFrame)
+    || !phasePeriod(period) || frame < startFrame || horizonFrame <= startFrame
+    || (horizonFrame - startFrame) % period !== 0) return null;
+  const endFrame = advanceFrame(frame, actualFrames);
+  if (endFrame === null || endFrame > horizonFrame
+    || markerTime(horizonFrame, sampleRate) === null) return null;
+  let maxError = 0, firstPhase = null, lastPhase = null;
+  for (let index = 0; index < actualFrames; index += 1) {
+    const sampleFrame = frame + index;
+    const phase = nativePhase(values[index], period);
+    const ideal = phaseIdeal(sampleFrame, startFrame, sampleRate, period);
+    if (phase === null || phase !== (sampleFrame - startFrame) % period || ideal === null) return null;
+    const error = Math.abs(values[index] - ideal);
+    if (!(error < 0.25)) return null;
+    maxError = Math.max(maxError, error);
+    if (index === 0) firstPhase = phase;
+    lastPhase = phase;
+  }
+  return { checkedSamples: actualFrames, maxError, firstPhase, lastPhase };
 }
