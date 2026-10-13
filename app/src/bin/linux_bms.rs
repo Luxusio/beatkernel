@@ -23,6 +23,7 @@ struct Options {
     local_players: Vec<beatkernel_bms_runtime::local_players::PlayerId>,
     alsa: String,
     format: AudioFormat,
+    encoding: beatkernel_bms_runtime::settings::OutputEncoding,
     period: u32,
     buffer: u32,
     seconds: Option<u64>,
@@ -66,6 +67,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut keys = HashSet::new();
     let mut seen = HashSet::new();
     let mut speed = beatkernel_bms_runtime::settings::parse_playback_speed("1/1")?;
+    let mut encoding = beatkernel_bms_runtime::settings::OutputEncoding::Float32;
     let mut record_replay = None;
     let mut replay_max_records = 1_000_000usize;
     let mut replay_max_bytes = 64 * 1024 * 1024usize;
@@ -159,6 +161,7 @@ fn parse(args: &[String]) -> Result<Options> {
             "--alsa" if !value.is_empty() => alsa = Some(value.clone()),
             "--rate" => rate = Some(value.parse::<u32>()?),
             "--channels" => channels = Some(value.parse::<u16>()?),
+            "--encoding" => encoding = value.parse()?,
             "--period-frames" => period = Some(value.parse::<u32>()?),
             "--buffer-frames" => buffer = Some(value.parse::<u32>()?),
             "--seconds" => {
@@ -277,6 +280,7 @@ fn parse(args: &[String]) -> Result<Options> {
         local_players,
         alsa: alsa.ok_or("explicit --alsa required")?,
         format,
+        encoding,
         period,
         buffer,
         seconds,
@@ -473,7 +477,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!("--speed NUM/DEN: positive fixed playback speed, default 1/1; pitch changes with speed. --rate HZ selects physical sample rate where available, --seconds N is a diagnostic wall cutoff. Local native playback supports fixed-speed retained practice/restart/seek/loop; runtime rate changes and network selected-speed play remain unavailable.");
         println!(
-            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --timing-preset PRESET_ID --rank-precedence rank-first|defexrank-first --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nTiming preset: optional beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1 requires explicit rank precedence and original RANK or supported positive integer DEFEXRANK; gauges remain independently selected. Uses numerical hit windows with BeatKernel Hold v1, not full source LN/CN/HCN semantics. Gauge timing without preset: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Saved ghosts must match the chosen policy. Multiplayer peers must match the chosen gauge and judgment policy.\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and supports solo or local-cohort network peers with the same section endpoint; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; local groups use one shared QUIC/WebTransport connection and committed native start. Native float32 ALSA, no fallback. Physical timing Unknown."
+            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --encoding float32|pcm16|pcm24|pcm32 --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --gauge beatkernel|assist-easy|easy|groove|hard|ex-hard|hazard --timing-preset PRESET_ID --rank-precedence rank-first|defexrank-first --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nTiming preset: optional beatoraja-sevenkeys/8320241d8481e0826c703878c3eba01cd81ca3e4/v1 requires explicit rank precedence and original RANK or supported positive integer DEFEXRANK; gauges remain independently selected. Uses numerical hit windows with BeatKernel Hold v1, not full source LN/CN/HCN semantics. Gauge timing without preset: existing early/late window gives one PGREAT hit class and POOR misses with input offset; full LR2 judgment windows are not provided. Saved ghosts must match the chosen policy. Multiplayer peers must match the chosen gauge and judgment policy.\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: encoding float32, gauge beatkernel, chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and supports solo or local-cohort network peers with the same section endpoint; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; local groups use one shared QUIC/WebTransport connection and committed native start. Native ALSA encoding follows --encoding, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
@@ -539,7 +543,7 @@ mod native {
     use beatkernel_platform::{
         audio::{
             presentation::discipline::{DisciplineConfig, PresentationDiscipline},
-            DeviceFormat, SampleEncoding,
+            DeviceFormat,
         },
         linux::{
             alsa_presentation_pair_with_basis, AlsaRequest, AlsaStatus, AlsaStream, MonotonicClock,
@@ -550,6 +554,24 @@ mod native {
     pub(super) const OUTPUT: ClockDomainId = ClockDomainId(2);
     pub(super) const LOGICAL: ClockDomainId = ClockDomainId(3);
     const DEVICE: DeviceId = DeviceId(1);
+
+    pub(super) fn output_request(options: &Options) -> Result<AlsaRequest> {
+        Ok(AlsaRequest {
+            device: options.alsa.clone(),
+            format: DeviceFormat::new(
+                options.format.sample_rate(),
+                options.format.channels(),
+                beatkernel_bms_runtime::gameplay::output::adapters::encoding::native_encoding(
+                    options.encoding,
+                ),
+                None,
+            )?,
+            buffer_frames: options.buffer,
+            period_frames: options.period,
+            allow_size_rounding: false,
+            monotonic_domain: HOST,
+        })
+    }
 
     pub(super) fn output_origin() -> ClockPoint {
         ClockPoint {
@@ -1618,19 +1640,7 @@ mod native {
             mixer,
         } = audio;
         let mut bgm = BgmSession(bgm);
-        let request = AlsaRequest {
-            device: options.alsa,
-            format: DeviceFormat::new(
-                options.format.sample_rate(),
-                options.format.channels(),
-                SampleEncoding::Float32,
-                None,
-            )?,
-            buffer_frames: options.buffer,
-            period_frames: options.period,
-            allow_size_rounding: false,
-            monotonic_domain: HOST,
-        };
+        let request = output_request(&options)?;
         let (owner, source_identity) = if retained {
             let capacity = coordinate_history_capacity(options.buffer, options.period)?;
             let (owner, identity) = open_coordinate_target_output(request, mixer, capacity)?;
@@ -2921,3 +2931,7 @@ mod target_solo_fixtures;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "linux_bms/coordinate_solo_fixtures.rs"]
 mod coordinate_solo_fixtures;
+
+#[cfg(test)]
+#[path = "linux_bms/output_encoding_fixtures.rs"]
+mod output_encoding_fixtures;

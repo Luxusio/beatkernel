@@ -2,8 +2,8 @@
 use super::native::{
     audio_timing_config, coordinate_history_capacity, coordinate_initial_query,
     coordinate_initial_transport, observe_target_output, open_coordinate_target_output,
-    open_target_output, output_origin, startup_input, startup_render, target_audio_timing_config,
-    TargetStartupDevice, HOST, LOGICAL, OUTPUT,
+    open_target_output, output_origin, output_request, startup_input, startup_render,
+    target_audio_timing_config, TargetStartupDevice, HOST, LOGICAL, OUTPUT,
 };
 use super::*;
 #[cfg(test)]
@@ -48,12 +48,14 @@ use beatkernel_bms_runtime::{
         NativeGameplayConfig, NativeGameplayResult,
     },
 };
+#[cfg(test)]
 use beatkernel_platform::{
-    audio::{
-        presentation::discipline::{DisciplineConfig, PresentationDiscipline},
-        DeviceFormat, SampleEncoding,
-    },
-    linux::{AlsaRequest, MonotonicClock},
+    audio::{DeviceFormat, SampleEncoding},
+    linux::AlsaRequest,
+};
+use beatkernel_platform::{
+    audio::presentation::discipline::{DisciplineConfig, PresentationDiscipline},
+    linux::MonotonicClock,
 };
 
 use beatkernel_bms_runtime::native_start::{start_target_committed, NativeStartConfig};
@@ -850,19 +852,7 @@ pub(super) fn run(
         mixer,
     } = audio;
     let mut bgm = BgmSession(bgm);
-    let request = AlsaRequest {
-        device: options.alsa.clone(),
-        format: DeviceFormat::new(
-            options.format.sample_rate(),
-            options.format.channels(),
-            SampleEncoding::Float32,
-            None,
-        )?,
-        buffer_frames: options.buffer,
-        period_frames: options.period,
-        allow_size_rounding: false,
-        monotonic_domain: HOST,
-    };
+    let request = output_request(&options)?;
     let (owner, coordinate_identity) = if retained {
         let (owner, identity) = open_coordinate_target_output(
             request,

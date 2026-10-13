@@ -12,6 +12,7 @@ use beatkernel_bms_runtime::{
     bgm::{BgmConfig, BgmFeeder},
     completion::ReplayCompletion,
     finite_replay_completion::FiniteReplayCompletion,
+    gameplay::output::adapters::encoding::native_encoding,
     native_chart::prepare_original_for_section_replay,
     native_start::HostStartWindow,
     playback_pause::{PauseIntervalObservation, PausePhase},
@@ -21,9 +22,12 @@ use beatkernel_bms_runtime::{
     replay_playback::read_replay,
     replay_speed::ReplaySpeed,
     replay_visual::ReplayVisual,
+    settings::OutputEncoding,
     ChannelPolicy,
 };
-use beatkernel_platform::audio::{DeviceFormat, SampleEncoding, SharedPeriodPolicy};
+#[cfg(any(target_os = "windows", test))]
+use beatkernel_platform::audio::SampleEncoding;
+use beatkernel_platform::audio::{DeviceFormat, SharedPeriodPolicy};
 use std::{
     collections::HashSet,
     error::Error,
@@ -97,6 +101,8 @@ struct Options {
     channel_policy: ChannelPolicy,
     format: AudioFormat,
     output_rate: Option<u32>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    encoding: OutputEncoding,
     buffer: Option<u32>,
     #[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
     period: Option<u32>,
@@ -136,6 +142,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
         (None, None, None, None, None, None);
     let (mut buffer, mut period) = (None, None);
     let mut output_rate = None;
+    let mut encoding = OutputEncoding::default();
     let mut speed = ReplaySpeed::new(Rate::NORMAL)?;
     let mut exclusive = false;
     let mut shared = SharedPeriodPolicy::EnginePeriod;
@@ -249,6 +256,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
             "--speed" => speed = value.parse()?,
             "--rate" => rate = Some(value.parse::<u32>()?),
             "--output-rate" => output_rate = Some(positive_u32(value)?),
+            "--encoding" => encoding = value.parse()?,
             "--channels" => channels = Some(value.parse::<u16>()?),
             "--buffer-frames" => buffer = Some(positive_u32(value)?),
             "--period-frames" => period = Some(positive_u32(value)?),
@@ -296,6 +304,9 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
     }
     if output_rate.is_some() && backend != Backend::Linux {
         return Err("--output-rate applies only to Linux ALSA".into());
+    }
+    if seen.contains("--encoding") && (backend != Backend::Linux || host != Backend::Linux) {
+        return Err("--encoding applies only to Linux ALSA".into());
     }
     if backend != Backend::Asio
         && (output_channels.is_some() || seen.iter().any(|flag| flag.starts_with("--asio-")))
@@ -391,7 +402,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
     DeviceFormat::new(
         output_rate.unwrap_or(format.sample_rate()),
         format.channels(),
-        SampleEncoding::Float32,
+        native_encoding(encoding),
         None,
     )?;
     AudioLimits::new(
@@ -444,6 +455,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
         channel_policy,
         format,
         output_rate,
+        encoding,
         buffer,
         period,
         exclusive,
@@ -1061,23 +1073,26 @@ mod native {
             recovered: None,
         })
     }
-    pub(super) fn open(options: &Options, mixer: Mixer) -> Result<Box<dyn NativeOutput>> {
-        let request = AlsaRequest {
+    pub(super) fn output_request(options: &Options) -> Result<AlsaRequest> {
+        Ok(AlsaRequest {
             device: options.device.clone(),
             format: DeviceFormat::new(
                 options.output_rate.unwrap_or(options.format.sample_rate()),
                 options.format.channels(),
-                SampleEncoding::Float32,
+                native_encoding(options.encoding),
                 None,
             )?,
             buffer_frames: options.buffer.ok_or("ALSA buffer required")?,
             period_frames: options.period.ok_or("ALSA period required")?,
             allow_size_rounding: false,
             monotonic_domain: HOST,
-        };
-        let stream = open_target_output(request, mixer)?;
+        })
+    }
+    pub(super) fn open(options: &Options, mixer: Mixer) -> Result<Box<dyn NativeOutput>> {
+        let stream = open_target_output(output_request(options)?, mixer)?;
         println!(
-            "ALSA requested/applied exact target float32 output={:?}",
+            "ALSA requested encoding={}; applied exact target output={:?}",
+            options.encoding.as_str(),
             stream
                 .owner
                 .current()
@@ -1592,10 +1607,14 @@ mod target_fixtures;
 #[path = "play_replay_bms/speed_fixtures.rs"]
 mod speed_fixtures;
 
+#[cfg(test)]
+#[path = "play_replay_bms/output_encoding_fixtures.rs"]
+mod output_encoding_fixtures;
+
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!(
-            "play_replay_bms --chart PATH --replay PATH --device ID --rate HZ --channels N [--speed NUM/DEN --output-rate HZ --seconds N --channel-policy exact|mono-stereo --backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels and --asio-system-clock multimedia plus --asio-timer-error-ns, --asio-drift-error-ns, --asio-latency-error-ns assessments; optional --asio-anchor-age-ns defaults1000000000. Rejects mode/shared-policy/period; buffer defaults driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 output rate/channels; no endpoint/mode fallback. Channel policy defaults exact; mono-stereo explicitly duplicates mono assets into stereo.\nLinux requires explicit buffer/period; --output-rate selects the ALSA target rate while --rate remains the immutable source PCM rate. The target rate defaults to the source rate; other backends reject --output-rate. macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nReplay speed defaults1/1, accepts positive unsigned ASCII NUM/DEN with numerator<=i64MAX and denominator<=u64MAX, and normalizes the fraction. Speed changes pitch and original-song progress; --rate/--output-rate remain PCM/device Hz.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nOmit seconds to finish the actual recorded prefix and drain admitted PCM through native presentation. Seconds is an optional wall cutoff after Start including preroll and can truncate the prefix/tail. Presentation missing/degraded stays unavailable; cancellation remains available. ASIO queues actual rendered-block presentation observations until fresh QPC reaches their assessed upper host interval, then advances visual/natural drain. Prepared frames/raw sample position do not establish audible progress. ASIO replay pause uses original assessed intervals and exact frozen playback frames; physical accuracy unmeasured. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence."
+            "play_replay_bms --chart PATH --replay PATH --device ID --rate HZ --channels N [--speed NUM/DEN --output-rate HZ --encoding float32|pcm16|pcm24|pcm32 --seconds N --channel-policy exact|mono-stereo --backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels and --asio-system-clock multimedia plus --asio-timer-error-ns, --asio-drift-error-ns, --asio-latency-error-ns assessments; optional --asio-anchor-age-ns defaults1000000000. Rejects mode/shared-policy/period; buffer defaults driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact output rate/channels; no endpoint/mode fallback. Channel policy defaults exact; mono-stereo explicitly duplicates mono assets into stereo.\nLinux requires explicit buffer/period; --output-rate selects the ALSA target rate while --rate remains the immutable source PCM rate. The target rate defaults to the source rate. --encoding selects ALSA float32 or full-width signed pcm16/pcm24/pcm32, default float32; other backends reject explicit --output-rate and --encoding, including float32. Output encoding does not change source PCM or recorded replay data. macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nReplay speed defaults1/1, accepts positive unsigned ASCII NUM/DEN with numerator<=i64MAX and denominator<=u64MAX, and normalizes the fraction. Speed changes pitch and original-song progress; --rate/--output-rate remain PCM/device Hz.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nOmit seconds to finish the actual recorded prefix and drain admitted PCM through native presentation. Seconds is an optional wall cutoff after Start including preroll and can truncate the prefix/tail. Presentation missing/degraded stays unavailable; cancellation remains available. ASIO queues actual rendered-block presentation observations until fresh QPC reaches their assessed upper host interval, then advances visual/natural drain. Prepared frames/raw sample position do not establish audible progress. ASIO replay pause uses original assessed intervals and exact frozen playback frames; physical accuracy unmeasured. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence."
         );
         return Ok(());
     }
