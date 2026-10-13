@@ -47,6 +47,24 @@ export function nativePhase(value, period) {
   return code === period ? 0 : code;
 }
 
+/**
+ * Recover a diagnostic modulo offset in the Number-safe domain only.
+ * Full-modulus aliases remain; samples alone do not certify an epoch or age.
+ */
+export function nativeJointOffset(value0, value1, value2) {
+  const phase0 = nativePhase(value0, 1048576);
+  const phase1 = nativePhase(value1, 1048575);
+  const phase2 = nativePhase(value2, 1048573);
+  if (phase0 === null || phase1 === null || phase2 === null) return null;
+  const r0 = BigInt(phase0);
+  const t1 = (BigInt(phase1) - r0 + 1048575n) % 1048575n;
+  const x01 = r0 + 1048576n * t1;
+  const remainder2 = ((BigInt(phase2) - x01) % 1048573n + 1048573n) % 1048573n;
+  const t2 = remainder2 * 873811n % 1048573n;
+  const offset = x01 + 1048576n * 1048575n * t2;
+  return offset <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(offset) : null;
+}
+
 /** Double ideal for the represented quarter-early native ramp event times. */
 export function phaseIdeal(frame, startFrame, sampleRate, period) {
   if (!frameInteger(frame) || !frameInteger(startFrame) || startFrame === 0

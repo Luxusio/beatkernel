@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   markerTime, markerFrame, advanceFrame, nativePhase, phaseIdeal, phaseEvidence,
+  nativeJointOffset,
 } from "./worklet-native-frame-probe.mjs";
 
 const rates = [44100, 48000];
@@ -526,4 +527,239 @@ test("one repeating phase is mathematically indistinguishable after a whole-peri
   }
   unchangedEvidence(values, frames, frame + 1, startFrame, 1,
     horizonFrame, period, null);
+});
+
+// Synthetic residue arithmetic does not prove native precision, epoch or age.
+// This oracle uses the general CRT sum and Euclidean inverses, independently of
+// the helper's fixed-period reconstruction. No exported decoder supplies it.
+const jointPeriods = [1048576n, 1048575n, 1048573n];
+const jointModulus = jointPeriods.reduce((product, period) => product * period, 1n);
+const maximumSafeOffset = BigInt(Number.MAX_SAFE_INTEGER);
+
+function positiveMod(value, modulus) {
+  return ((value % modulus) + modulus) % modulus;
+}
+
+function euclideanInverse(value, modulus) {
+  let remainder = modulus;
+  let nextRemainder = positiveMod(value, modulus);
+  let coefficient = 0n;
+  let nextCoefficient = 1n;
+  while (nextRemainder !== 0n) {
+    const quotient = remainder / nextRemainder;
+    [remainder, nextRemainder] = [nextRemainder, remainder - quotient * nextRemainder];
+    [coefficient, nextCoefficient] = [nextCoefficient, coefficient - quotient * nextCoefficient];
+  }
+  assert.equal(remainder, 1n, "the oracle requires coprime periods");
+  return positiveMod(coefficient, modulus);
+}
+
+function exactJointOracle(residues) {
+  let sum = 0n;
+  for (let index = 0; index < jointPeriods.length; index++) {
+    const period = jointPeriods[index];
+    const complementaryProduct = jointModulus / period;
+    sum += residues[index] * complementaryProduct
+      * euclideanInverse(complementaryProduct, period);
+  }
+  return positiveMod(sum, jointModulus);
+}
+
+function jointResidues(offset) {
+  return jointPeriods.map(period => BigInt(offset) % period);
+}
+
+function jointValues(residues) {
+  return residues.map(residue => Number(residue) + 1.25);
+}
+
+function assertJointResidues(residues) {
+  const exact = exactJointOracle(residues);
+  const expected = exact <= maximumSafeOffset ? Number(exact) : null;
+  const actual = nativeJointOffset(...jointValues(residues));
+  assert.equal(actual, expected, `residues ${residues.join(",")}, exact offset ${exact}`);
+  if (actual !== null) {
+    assert.ok(Number.isSafeInteger(actual) && actual >= 0);
+    for (let index = 0; index < jointPeriods.length; index++) {
+      assert.equal(BigInt(actual) % jointPeriods[index], residues[index],
+        `returned offset satisfies lane ${index}`);
+    }
+  }
+  return actual;
+}
+
+function assertKnownJointOffset(offset) {
+  const residues = jointResidues(offset);
+  assert.equal(exactJointOracle(residues), BigInt(offset), "known offset independently reconstructed");
+  assert.equal(assertJointResidues(residues), Number(offset));
+}
+
+test("nativeJointOffset reconstructs zero, first and each lane's maximum residue", () => {
+  for (const offset of [0n, 1n, ...jointPeriods.map(period => period - 1n)]) {
+    assertKnownJointOffset(offset);
+  }
+  const largestResidues = jointPeriods.map(period => period - 1n);
+  assert.equal(exactJointOracle(largestResidues), jointModulus - 1n);
+  assert.equal(assertJointResidues(largestResidues), null,
+    "individually valid maximum residues can jointly exceed the certified domain");
+});
+
+test("nativeJointOffset agrees with a general exact CRT oracle and every congruence", () => {
+  const residueChoices = jointPeriods.map(period => [0n, 1n, period / 2n, period - 1n]);
+  for (const r0 of residueChoices[0]) {
+    for (const r1 of residueChoices[1]) {
+      for (const r2 of residueChoices[2]) assertJointResidues([r0, r1, r2]);
+    }
+  }
+  let seed = 712367n;
+  for (let vector = 0; vector < 64; vector++) {
+    const residues = jointPeriods.map(period => {
+      seed = (seed * 1664525n + 1013904223n) % (2n ** 32n);
+      return seed % period;
+    });
+    assertJointResidues(residues);
+  }
+});
+
+test("nativeJointOffset carries through mixed lane cycles and the P0P1 boundary", () => {
+  const pairProduct = jointPeriods[0] * jointPeriods[1];
+  const offsets = new Set();
+  for (const period of jointPeriods) {
+    for (const cycles of [1n, 2n, 7n, 31n]) {
+      for (const delta of [-1n, 0n, 1n]) offsets.add(period * cycles + delta);
+    }
+  }
+  for (const cycles of [1n, 2n, 17n, 8192n]) {
+    for (const delta of [-1n, 0n, 1n]) offsets.add(pairProduct * cycles + delta);
+  }
+  offsets.add(pairProduct * 17n + jointPeriods[0] * 123n + jointPeriods[2] * 29n + 91n);
+  for (const offset of offsets) assertKnownJointOffset(offset);
+});
+
+test("nativeJointOffset distinguishes offsets that alias in the first period", () => {
+  for (const offset of [0n, 17n, jointPeriods[0] - 1n]) {
+    const firstValues = jointValues(jointResidues(offset));
+    assertKnownJointOffset(offset);
+    for (const skippedCycles of [1n, 2n, 7n, 8170n]) {
+      const alternativeOffset = offset + skippedCycles * jointPeriods[0];
+      const alternativeValues = jointValues(jointResidues(alternativeOffset));
+      assert.equal(alternativeValues[0], firstValues[0], "the first native scalar still aliases");
+      assert.notEqual(alternativeValues[1], firstValues[1]);
+      assert.notEqual(alternativeValues[2], firstValues[2]);
+      assertKnownJointOffset(alternativeOffset);
+      assert.notEqual(nativeJointOffset(...alternativeValues), nativeJointOffset(...firstValues));
+    }
+  }
+});
+
+for (const sampleRate of rates) {
+  test(`nativeJointOffset twenty-hour/week offsets are arithmetic vectors at ${sampleRate}Hz`, () => {
+    for (const seconds of [20n * 3600n, 7n * 24n * 3600n]) {
+      const offset = seconds * BigInt(sampleRate);
+      for (const delta of [0n, 1n, jointPeriods[0] - 1n, ...jointPeriods]) {
+        assertKnownJointOffset(offset + delta);
+      }
+    }
+  });
+}
+
+test("nativeJointOffset returns MAX_SAFE_INTEGER exactly and refuses the first unsafe offset", () => {
+  for (const distance of [0n, 1n, ...jointPeriods, jointPeriods[0] * jointPeriods[1]]) {
+    assertKnownJointOffset(maximumSafeOffset - distance);
+  }
+  const firstUnsafe = maximumSafeOffset + 1n;
+  assert.equal(exactJointOracle(jointResidues(firstUnsafe)), firstUnsafe);
+  for (const offset of [firstUnsafe, firstUnsafe + 1n,
+    firstUnsafe + jointPeriods[0], jointModulus - 1n]) {
+    assert.equal(assertJointResidues(jointResidues(offset)), null, `unsafe exact offset ${offset}`);
+  }
+});
+
+test("nativeJointOffset rejects nonfinite and nonnumber values in every argument position", () => {
+  const noCoercion = { valueOf() { throw new Error("a scalar must not be coerced"); } };
+  for (let index = 0; index < jointPeriods.length; index++) {
+    for (const value of [...invalidSamples, Symbol("phase"), () => 1.25,
+      new Number(1.25), noCoercion]) {
+      const values = [1.25, 1.25, 1.25];
+      values[index] = value;
+      assert.equal(nativeJointOffset(...values), null, `invalid scalar at lane ${index}`);
+    }
+  }
+  assert.equal(nativeJointOffset(), null);
+  assert.equal(nativeJointOffset(1.25), null);
+  assert.equal(nativeJointOffset(1.25, 1.25), null);
+});
+
+test("nativeJointOffset rejects exact half ties and out-of-range values in every lane", () => {
+  for (let index = 0; index < jointPeriods.length; index++) {
+    const period = Number(jointPeriods[index]);
+    for (const value of [0.5, 1.5, 17.5, period - 0.5, period + 0.5, period + 1.5,
+      -Infinity, -1, -0, 0, 0.25, period + 1.75, period + 2, Number.MAX_VALUE]) {
+      const values = [1.25, 1.25, 1.25];
+      values[index] = value;
+      assert.equal(nativeJointOffset(...values), null, `invalid ${value} at lane ${index}`);
+    }
+  }
+});
+
+test("nativeJointOffset preserves zero and nonzero offsets when terminal codes wrap", () => {
+  for (const terminalFraction of [1, 1.25]) {
+    for (let mask = 0; mask < 8; mask++) {
+      const values = jointPeriods.map((period, index) =>
+        mask & (1 << index) ? Number(period) + terminalFraction : 1.25);
+      assert.equal(nativeJointOffset(...values), 0, `terminal mask ${mask}`);
+    }
+    for (let index = 0; index < jointPeriods.length; index++) {
+      const offset = jointPeriods[index] * 7n;
+      const values = jointValues(jointResidues(offset));
+      assert.equal(values[index], 1.25);
+      values[index] = Number(jointPeriods[index]) + terminalFraction;
+      assert.equal(nativeJointOffset(...values), Number(offset), `terminal lane ${index}`);
+    }
+  }
+  assert.equal(nativeJointOffset(0.75, 0.75, 0.75), 0,
+    "accepted scalar decoding is a modulo candidate, not full native-ramp validation");
+  for (const offset of [1n, 17n, jointPeriods[0] - 1n]) {
+    const residues = jointResidues(offset);
+    for (const fractionalCode of [0.75, 1, 1.25]) {
+      assert.equal(nativeJointOffset(...residues.map(residue => Number(residue) + fractionalCode)),
+        Number(offset));
+    }
+  }
+});
+
+test("nativeJointOffset consumes scalars without changing arrays or neighboring storage", () => {
+  const offset = jointPeriods[0] * jointPeriods[1] + 17n;
+  const storage = Float32Array.from([99, ...jointValues(jointResidues(offset)), 88]);
+  const before = storage.slice();
+  const values = storage.subarray(1, 4);
+  assert.equal(nativeJointOffset(...values), Number(offset));
+  assert.deepEqual(storage, before);
+  assert.equal(nativeJointOffset(values), null, "an array is not the three-scalar interface");
+  for (let index = 0; index < jointPeriods.length; index++) {
+    for (const container of [Object.freeze([1.25]), new Float32Array([1.25]),
+      new Float64Array([1.25]), values.subarray(index, index + 1)]) {
+      const beforeContainer = Array.from(container);
+      const argumentsByLane = [1.25, 1.25, 1.25];
+      argumentsByLane[index] = container;
+      assert.equal(nativeJointOffset(...argumentsByLane), null, `container at lane ${index}`);
+      assert.deepEqual(Array.from(container), beforeContainer);
+    }
+  }
+  assert.deepEqual(storage, before, "success and refusal preserve the view and its neighbors");
+});
+
+test("full-modulus aliases remain indistinguishable outside the certified joint domain", () => {
+  assert.ok(jointModulus > maximumSafeOffset);
+  for (const offset of [0n, 1n, 17n, jointPeriods[0] * jointPeriods[1] + 29n,
+    maximumSafeOffset]) {
+    const outsideDomain = offset + jointModulus;
+    assert.ok(outsideDomain > maximumSafeOffset);
+    const residues = jointResidues(offset);
+    assert.deepEqual(jointResidues(outsideDomain), residues);
+    assert.deepEqual(jointValues(jointResidues(outsideDomain)), jointValues(residues));
+    assert.equal(exactJointOracle(residues), offset);
+    assert.equal(nativeJointOffset(...jointValues(jointResidues(outsideDomain))), Number(offset),
+      "identical residues cannot establish the absolute epoch or native context age");
+  }
 });
