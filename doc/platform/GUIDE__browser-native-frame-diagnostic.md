@@ -255,6 +255,20 @@ or replay provenance. Await final process exit, inspect screenshots and verify
 owned PID/listener cleanup; a closed listener can still leave TCP TIME_WAIT,
 so a reusable-bind check must use SO_REUSEADDR like Node's server.
 
+The genuine live/replay fixture servers serve only the static audio WASM with
+Cache-Control:no-cache, recording an actual200 response with that header and
+fromCache=false/fromServiceWorker=false in each fresh browser. Other resources
+retain no-store and all request-failure/console assertions remain strict. The
+same source/WASM hashes and unchanged bounded production stream reader are
+required. This controlled environment selects Chromium's buffered native
+response path; it does not establish universal no-store network reporting.
+Preserved native EOF diagnostics received/compiled matching bytes with no
+AbortSignal yet sometimes reported ERR_ABORTED under no-store, including exact
+Content-Length. no-cache requires revalidation before reuse and is a different
+cache policy ([HTTP contract](https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.2.4),
+[pinned native consumer selection](https://raw.githubusercontent.com/chromium/chromium/971a7443b0c9b0a9b2860529b33331b76077ec62/third_party/blink/renderer/core/fetch/fetch_manager.cc)).
+No-cache receipt metadata is fixture provenance, not a product clock source.
+
 Native parameter fills and three full scans remain sustained callback work.
 No universal zero-cost, acoustic timing, other-engine, aged-context or full
 player completion claim follows from these probes. See [current product

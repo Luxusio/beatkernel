@@ -152,6 +152,37 @@ reported requestfinished for the same bytes. Owned browser/server closure and
 reusable8173 bind passed. This disproves Content-Length alone as the remedy;
 it identifies a native consumer/report distinction without weakening clean
 network acceptance or replacing the production64MiB streaming limit.
+
+The cache follow-up `native-fetch-eof-cache-ac008-13686-01` also exited0,
+collecting matching original native getReader outcomes for no-store/no-cache/
+max-age=0/no cache header. All four requests finished, including no-store:
+the failure is conditional, not a guaranteed no-store outcome. A fresh full
+paused Host run, `author-replay-paused-13686`, then passed nine gameplay checks
+with no startup expiry but retained the same initialization ERR_ABORTED.
+
+The genuine live/replay fixture now selects no-cache only for its static audio
+WASM. Fresh browsers must observe actual200/no-cache/fromCache=false/
+fromServiceWorker=false; all other resources remain no-store and clean-network
+assertions stay unfiltered. This explicitly selects the
+[pinned Chromium buffered consumer](https://raw.githubusercontent.com/chromium/chromium/971a7443b0c9b0a9b2860529b33331b76077ec62/third_party/blink/renderer/core/fetch/fetch_manager.cc),
+while [HTTP no-cache](https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.2.4)
+requires validation before reuse. Production streaming/64MiB refusal, original
+bytes, native clock, input and PCM are unchanged. Earlier no-store failures
+remain failures; stable native no-store reporting is a full-Goal engine and
+deployment proof ceiling. Current fixture author/independent acceptance is
+pending. This is an explicit test-environment refinement rather than a claimed
+production fetch fix or a network-failure exclusion.
+
+With final source writers stopped, actual
+`author-cold-paused-13686` passed all three cold contexts and labeled negatives.
+`author-live-paused-eof-13686` passed16 checks and
+`author-replay-paused-eof-13686` passed10, each exiting0. Both genuine UI runs
+recorded exactly one actual200/no-cache response with fromCache=false and
+fromServiceWorker=false, no request failures or console errors. Actual keyboard/
+touch capture, nonzero section, drawn seek, fresh-context restart and immutable
+replay remained required. Owned live/replay PIDs2486971/2491955 were absent;
+reusable8167/8168 binds passed. These are fresh author results, not independent
+QA. Final DEEP review and fresh CLI/browser/documentation gates remain pending.
 The Harness task is TASK__browser-native-clock-product, run
 01a13686-2986-79f1-a971-6cc00056d10a. Update this section with actual ordered
 finals and runtime attestation outcome before closure.

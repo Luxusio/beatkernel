@@ -18,10 +18,13 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const out = resolve(process.env.LIVE_SPEED_OUT ?? resolve(root, "target/wf/live-speed-browser/development-1"));
 const port = Number(process.env.LIVE_SPEED_PORT ?? 8148);
+const audioWasmFile = resolve(root, "app/web/audio-pkg/beatkernel_bms_runtime_bg.wasm");
+const audioWasmURL = `https://127.0.0.1:${port}/app/web/audio-pkg/beatkernel_bms_runtime_bg.wasm`;
 assert.ok(Number.isInteger(port) && port >= 1024 && port <= 65535);
 assert.ok(relative(root, out).startsWith(`target${sep}wf${sep}`));
 const required = ["cold-refusal", "1/2", "1/1", "2/1", "3/2", "saved-record", "quantized-end", "independent-replay", "opponent-match", "opponent-refusal", "nonzero-section", "seek-restart", "touch-local", "stop-retry", "responsive", "clean-console-network"];
-const evidence = { kind: "development-production-live-speed", required, checks: [], cases: [], console: [], network: [], ceilings: [
+const evidence = { kind: "development-production-live-speed", required, checks: [], cases: [], console: [], network: [],
+  audioWasmResponses: [], audioWasmResponseOverflow: false, ceilings: [
   "Chromium software output/GPU proves software execution, not acoustic latency or physical devices.",
   "The actual UI always supplies 100 ms preroll and end > start; zero output frames cannot be selected here. Actual zero-grid owner/Mixer coverage is separate. This runner selects a genuine 1 ns interval instead.",
   "CDP supplies actual browser keyboard/touch events, not physical hardware timing; local coverage uses distinct keyboard/touch aggregates only.",
@@ -64,7 +67,8 @@ async function serve() {
       assert.ok(path !== ".." && !path.startsWith(`..${sep}`));
       if ((await stat(file)).isDirectory()) file = resolve(file, "index.html");
       response.writeHead(200, { "Content-Type": ({ ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".html": "text/html", ".css": "text/css" })[extname(file)] ?? "application/octet-stream",
-        "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp", "Cache-Control": "no-store" });
+        "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp",
+        "Cache-Control": file === audioWasmFile ? "no-cache" : "no-store" });
       response.end(await readFile(file));
     } catch (error) { evidence.network.push({ url: request.url, serverError: String(error) }); response.writeHead(404); response.end(); }
   });
@@ -363,7 +367,15 @@ async function run() {
   page.on("pageerror", error => evidence.console.push({ type: "pageerror", text: String(error) }));
   page.on("console", message => evidence.console.push({ type: message.type(), text: message.text() }));
   page.on("requestfailed", request => evidence.network.push({ stage: evidence.stage, url: request.url(), failure: request.failure() }));
-  page.on("response", response => { if (response.status() >= 400) evidence.network.push({ url: response.url(), status: response.status() }); });
+  page.on("response", response => {
+    if (response.status() >= 400) evidence.network.push({ url: response.url(), status: response.status() });
+    if (response.url() === audioWasmURL) {
+      if (evidence.audioWasmResponses.length >= 4) { evidence.audioWasmResponseOverflow = true; return; }
+      evidence.audioWasmResponses.push({ url: response.url(), at: Date.now(), status: response.status(),
+        cacheControl: response.headers()["cache-control"] ?? null, fromCache: response.fromCache(),
+        fromServiceWorker: response.fromServiceWorker(), resourceType: response.request().resourceType() });
+    }
+  });
   await page.setViewport({ width: 1200, height: 1000, hasTouch: true }); await page.evaluateOnNewDocument(observeWindow);
   evidence.stage = "initialization";
   await page.goto(`https://127.0.0.1:${port}/app/web/`, { waitUntil: "networkidle0", timeout: 60000 });
@@ -547,6 +559,11 @@ async function run() {
   for (const width of [390, 768, 1200]) { await page.setViewport({ width, height: 1000, hasTouch: true }); await sleep(150); await page.screenshot({ path: resolve(out, `viewport-${width}.png`), fullPage: true }); assert.ok(await page.$eval("#live-speed", x => x.getBoundingClientRect().width > 0)); }
   check("responsive", [390, 768, 1200]); await sleep(100);
   assert.deepEqual(await page.evaluate(() => __liveSpeedWindow.audioTerminals), [], "Final acceptance requires no actual Worklet terminal failure");
+  assert.equal(evidence.audioWasmResponseOverflow, false);
+  assert.equal(evidence.audioWasmResponses.length, 1, "One actual fresh Worker audio WASM response required");
+  const [audioWasmResponse] = evidence.audioWasmResponses;
+  assert.equal(audioWasmResponse.status, 200); assert.equal(audioWasmResponse.cacheControl, "no-cache");
+  assert.equal(audioWasmResponse.fromCache, false); assert.equal(audioWasmResponse.fromServiceWorker, false);
   assert.deepEqual(evidence.console.filter(x => ["error", "pageerror"].includes(x.type)), []); assert.deepEqual(evidence.network, []); check("clean-console-network", "No exclusions, including ERR_ABORTED");
 }
 try { await run(); }

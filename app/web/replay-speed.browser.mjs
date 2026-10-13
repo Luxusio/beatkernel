@@ -18,9 +18,12 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const out = resolve(process.env.REPLAY_SPEED_OUT ?? resolve(root, "target/wf/realtime-replay-speed-browser/development-1"));
 const port = Number(process.env.REPLAY_SPEED_PORT ?? 8147);
+const audioWasmFile = resolve(root, "app/web/audio-pkg/beatkernel_bms_runtime_bg.wasm");
+const audioWasmURL = `https://127.0.0.1:${port}/app/web/audio-pkg/beatkernel_bms_runtime_bg.wasm`;
 assert.ok(Number.isInteger(port) && port >= 1024 && port <= 65535);
 assert.ok(relative(root, out).startsWith(`target${sep}wf${sep}`), "Evidence must remain in ignored target/wf");
 const evidence = { kind: "development-browser-replay-speed", checks: [], cases: [], console: [], network: [],
+  audioWasmResponses: [], audioWasmResponseOverflow: false,
   required: ["genuine-capture", "1/2", "1/1", "2/1", "3/2", "stop-retry", "nonzero-section", "section-restart", "immutable-record", "clean-console-network"],
   ceiling: ["Chromium software GPU/audio execution is not physical-device or acoustic timing proof."] };
 let server, browser, page;
@@ -62,7 +65,8 @@ async function serve() {
       if (path === ".." || path.startsWith(`..${sep}`)) throw Error("Outside repository");
       if ((await stat(file)).isDirectory()) file = resolve(file, "index.html");
       response.writeHead(200, { "Content-Type": ({ ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".html": "text/html", ".css": "text/css" })[extname(file)] ?? "application/octet-stream",
-        "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp", "Cache-Control": "no-store" });
+        "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp",
+        "Cache-Control": file === audioWasmFile ? "no-cache" : "no-store" });
       response.end(await readFile(file));
     } catch (error) { evidence.network.push({ serverError: String(error), url: request.url }); response.writeHead(404); response.end(); }
   });
@@ -497,7 +501,15 @@ async function run() {
   page.on("pageerror", error => evidence.console.push({ type: "pageerror", text: String(error) }));
   page.on("console", message => evidence.console.push({ type: message.type(), text: message.text() }));
   page.on("requestfailed", request => evidence.network.push({ stage: evidence.stage, at: Date.now(), url: request.url(), failure: request.failure() }));
-  page.on("response", response => { if (response.status() >= 400) evidence.network.push({ url: response.url(), status: response.status() }); });
+  page.on("response", response => {
+    if (response.status() >= 400) evidence.network.push({ url: response.url(), status: response.status() });
+    if (response.url() === audioWasmURL) {
+      if (evidence.audioWasmResponses.length >= 4) { evidence.audioWasmResponseOverflow = true; return; }
+      evidence.audioWasmResponses.push({ url: response.url(), at: Date.now(), status: response.status(),
+        cacheControl: response.headers()["cache-control"] ?? null, fromCache: response.fromCache(),
+        fromServiceWorker: response.fromServiceWorker(), resourceType: response.request().resourceType() });
+    }
+  });
   await page.setViewport({ width: 1200, height: 1000 }); await page.evaluateOnNewDocument(observeWindow);
   evidence.stage = "initialization";
   await page.goto(`https://127.0.0.1:${port}/app/web/`, { waitUntil: "networkidle0", timeout: 60000 });
@@ -723,6 +735,11 @@ async function run() {
   await delay(100);
   assert.deepEqual(await page.evaluate(() => __replaySpeedProbe.audioTerminals), [], "Final acceptance requires no actual Worklet terminal");
   assert.deepEqual(await page.evaluate(() => __replaySpeedProbe.fileErrors), []);
+  assert.equal(evidence.audioWasmResponseOverflow, false);
+  assert.equal(evidence.audioWasmResponses.length, 1, "One actual fresh Worker audio WASM response required");
+  const [audioWasmResponse] = evidence.audioWasmResponses;
+  assert.equal(audioWasmResponse.status, 200); assert.equal(audioWasmResponse.cacheControl, "no-cache");
+  assert.equal(audioWasmResponse.fromCache, false); assert.equal(audioWasmResponse.fromServiceWorker, false);
   assert.deepEqual(evidence.console.filter(x => ["error", "pageerror"].includes(x.type)), []);
   assert.deepEqual(evidence.network, []); check("clean-console-network", "No page/console errors, failed requests or HTTP errors");
 }
