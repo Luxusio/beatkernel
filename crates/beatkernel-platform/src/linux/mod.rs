@@ -15,6 +15,9 @@ pub use alsa::{
     AlsaStream, AlsaTimingSnapshot, AlsaConvertedPlaybackSnapshot, ConvertedPhaseSnapshot,
     ConvertedPlaybackPhaseSnapshot,
 };
+pub use alsa::{
+    ConvertedRetirementPolicy, ConvertedRetirementStatus, ConvertedRetirementTicket,
+};
 pub use input::{
     evdev_keyboard_devices, EvdevDevice, EvdevItem, EvdevKeyboardDevice, EvdevSnapshot,
     HidrawDevice, LinuxInputCounters,

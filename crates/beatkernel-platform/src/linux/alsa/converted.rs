@@ -36,6 +36,12 @@ struct ConvertedPump<'a> {
 }
 impl PumpOutput for ConvertedPump<'_> {
     type Report = ConvertedRenderReport;
+    fn conditional_retirement(
+        &self,
+        control: &super::converted_conditional_retirement::ConditionalRetirement,
+    ) -> PumpAction {
+        control.worker_decision(self.state)
+    }
     fn before_pending(&mut self) -> Result<(), AudioError> {
         let Some(request) = self.telemetry.retirement_request() else {
             return Ok(());
@@ -195,7 +201,12 @@ impl ConvertedAlsaStream {
                 ))
             }
         };
-        let shared = Arc::new(Shared::with_converted_history(&telemetry));
+        let shared = Arc::new(Shared {
+            converted_source: Some(
+                super::converted_conditional_retirement::ConvertedSourceFacts::from_state(&state),
+            ),
+            ..Shared::with_converted_history(&telemetry)
+        });
         let worker_shared = Arc::clone(&shared);
         let worker_telemetry = Arc::clone(&telemetry);
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -338,6 +349,74 @@ impl ConvertedAlsaStream {
         }
         self.telemetry.set_held(held);
         Ok(())
+    }
+    /// Validates a replacement's immutable source and requested target facts cold.
+    /// This does not prove that the live worker's pending suffix is compatible.
+    pub fn validate_conditional_replacement(
+        &self,
+        request: &AlsaRequest,
+        matrix: &ChannelMatrix,
+    ) -> Result<(), LinuxError> {
+        self.shared
+            .converted_source
+            .ok_or(LinuxError::InvalidLifecycle)?
+            .validate(request, matrix)
+    }
+    fn require_conditional_live(&self) -> Result<(), LinuxError> {
+        if self.shared.stop.load(Ordering::Acquire)
+            || self.shared.status.load(Ordering::Acquire) != 1
+            || self.worker.as_ref().is_none_or(JoinHandle::is_finished)
+        {
+            return Err(LinuxError::InvalidLifecycle);
+        }
+        Ok(())
+    }
+    fn require_conditional_response(&self, nonce: u64) -> Result<(), LinuxError> {
+        if self.shared.conditional_retirement.status(nonce)?
+            != ConvertedRetirementStatus::Authorized
+        {
+            if let Err(error) = self.require_conditional_live() {
+                // Authorization can win between the first status read and stop.
+                if self.shared.conditional_retirement.status(nonce)?
+                    != ConvertedRetirementStatus::Authorized
+                {
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Queues one policy for the sole worker's actual pending-state decision.
+    /// Busy or unconsumed terminal responses return None without replacing them.
+    pub fn submit_conditional_retirement(
+        &mut self,
+        policy: ConvertedRetirementPolicy,
+    ) -> Result<Option<ConvertedRetirementTicket>, LinuxError> {
+        self.require_conditional_live()?;
+        self.shared
+            .conditional_retirement
+            .submit(policy)
+            .map(|nonce| nonce.map(|nonce| ConvertedRetirementTicket::new(&self.shared, nonce)))
+    }
+    /// Consumes matching live refusal/cancellation; authorization stays terminal.
+    /// Authorization grants no completed native drop/join or recovered owner.
+    pub fn poll_conditional_retirement(
+        &mut self,
+        ticket: &ConvertedRetirementTicket,
+    ) -> Result<ConvertedRetirementStatus, LinuxError> {
+        let nonce = ticket.nonce_for(&self.shared)?;
+        self.require_conditional_response(nonce)?;
+        self.shared.conditional_retirement.poll(nonce)
+    }
+    /// Cancels only while this same request is still pending; never undoes authorization.
+    /// The cancellation response remains queued until a matching poll consumes it.
+    pub fn cancel_conditional_retirement(
+        &mut self,
+        ticket: &ConvertedRetirementTicket,
+    ) -> Result<ConvertedRetirementStatus, LinuxError> {
+        let nonce = ticket.nonce_for(&self.shared)?;
+        self.require_conditional_response(nonce)?;
+        self.shared.conditional_retirement.cancel(nonce)
     }
     /// Queues caller-qualified mathematical history pins on this live stream.
     /// A returned revision is not a native pause ACK or a retirement receipt.

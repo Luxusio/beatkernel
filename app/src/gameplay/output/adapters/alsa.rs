@@ -738,6 +738,78 @@ impl TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState>
     }
 }
 
+impl
+    crate::gameplay::output::ports::ConditionalTargetRetirementNativeOutputBackend<
+        ConvertedNativeOutputState,
+    > for ConvertedAlsaReplacementBackend
+{
+    type Ticket = beatkernel_platform::linux::ConvertedRetirementTicket;
+    fn submit_target_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        request: &Self::Request,
+    ) -> Result<Option<Self::Ticket>, Self::Error> {
+        if request.native.monotonic_domain
+            != output.stream.configuration().requested.monotonic_domain
+        {
+            return Err(AlsaReplacementError::Linux(
+                LinuxError::InvalidConfiguration(
+                    "converted replacement must retain the original native HOST domain",
+                ),
+            ));
+        }
+        let matrix = request.matrix.as_ref().unwrap_or(&output.matrix);
+        output
+            .stream
+            .validate_conditional_replacement(&request.native, matrix)
+            .map_err(AlsaReplacementError::Linux)?;
+        let policy = beatkernel_platform::linux::ConvertedRetirementPolicy::for_interpretation(
+            output.stream.configuration().format,
+            &output.matrix,
+            request.native.format,
+            matrix,
+        );
+        output
+            .stream
+            .submit_conditional_retirement(policy)
+            .map_err(AlsaReplacementError::Linux)
+    }
+    fn poll_target_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        ticket: &Self::Ticket,
+    ) -> Result<crate::gameplay::output::ports::TargetRetirementStatus, Self::Error> {
+        output
+            .stream
+            .poll_conditional_retirement(ticket)
+            .map(target_retirement_status)
+            .map_err(AlsaReplacementError::Linux)
+    }
+    fn cancel_target_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        ticket: &Self::Ticket,
+    ) -> Result<crate::gameplay::output::ports::TargetRetirementStatus, Self::Error> {
+        output
+            .stream
+            .cancel_conditional_retirement(ticket)
+            .map(target_retirement_status)
+            .map_err(AlsaReplacementError::Linux)
+    }
+}
+fn target_retirement_status(
+    status: beatkernel_platform::linux::ConvertedRetirementStatus,
+) -> crate::gameplay::output::ports::TargetRetirementStatus {
+    use crate::gameplay::output::ports::TargetRetirementStatus as Status;
+    use beatkernel_platform::linux::ConvertedRetirementStatus as Native;
+    match status {
+        Native::Pending => Status::Pending,
+        Native::Refused => Status::Refused,
+        Native::Cancelled => Status::Cancelled,
+        Native::Authorized => Status::Authorized,
+    }
+}
+
 impl TargetHistoryRetirementNativeOutputBackend<ConvertedNativeOutputState>
     for ConvertedAlsaReplacementBackend
 {

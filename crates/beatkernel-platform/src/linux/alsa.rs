@@ -3,10 +3,14 @@
 
 use crate::audio::cadence;
 mod converted;
+mod converted_conditional_retirement;
 mod converted_telemetry;
 mod timing;
 pub use cadence::{RenderCadence as AlsaRenderCadence, RenderCadenceError as AlsaCadenceError};
 pub use converted::{AlsaConvertedPlaybackSnapshot, ConvertedAlsaStream};
+pub use converted_conditional_retirement::{
+    ConvertedRetirementPolicy, ConvertedRetirementStatus, ConvertedRetirementTicket,
+};
 pub use converted_telemetry::{ConvertedPhaseSnapshot, ConvertedPlaybackPhaseSnapshot};
 use timing::TimingShared;
 pub use timing::{AlsaNativeTimestamp, AlsaTimingSnapshot};
@@ -385,6 +389,8 @@ struct Shared {
     render_telemetry: Telemetry,
     source_basis: Option<OutputFrameBasis>,
     converted_phase_enabled: bool,
+    conditional_retirement: converted_conditional_retirement::ConditionalRetirement,
+    converted_source: Option<converted_conditional_retirement::ConvertedSourceFacts>,
     cadence: cadence::Capture,
 }
 impl Shared {
@@ -406,6 +412,8 @@ impl Shared {
             render_telemetry: Telemetry::new(),
             source_basis: None,
             converted_phase_enabled: false,
+            conditional_retirement: converted_conditional_retirement::ConditionalRetirement::new(),
+            converted_source: None,
             cadence: cadence::Capture::new(),
         }
     }
@@ -999,8 +1007,19 @@ impl PumpReport for beatkernel::audio::ConvertedRenderReport {
         )
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PumpAction {
+    Continue,
+    Retire,
+}
 trait PumpOutput {
     type Report: PumpReport;
+    fn conditional_retirement(
+        &self,
+        _: &converted_conditional_retirement::ConditionalRetirement,
+    ) -> PumpAction {
+        PumpAction::Continue
+    }
     fn before_pending(&mut self) -> Result<(), AudioError> {
         Ok(())
     }
@@ -1088,6 +1107,10 @@ where
         Ordering::Relaxed
     });
     while !shared.stop.load(Ordering::Acquire) {
+        if state.conditional_retirement(&shared.conditional_retirement) == PumpAction::Retire {
+            shared.stop.store(true, Ordering::Release);
+            break;
+        }
         let mut update = opted.then(|| shared.timing.update());
         state.before_pending().map_err(LinuxError::Mixer)?;
         if state.pending_frames() == 0 {
@@ -1315,6 +1338,27 @@ struct NativeTimespec {
     nanoseconds: c_long,
 }
 
+fn native_format_name(encoding: SampleEncoding) -> Result<&'static std::ffi::CStr, LinuxError> {
+    match encoding {
+        SampleEncoding::Float32 => Ok(c"FLOAT_LE"),
+        SampleEncoding::Pcm {
+            container_bits: 16,
+            valid_bits: 16,
+        } => Ok(c"S16_LE"),
+        SampleEncoding::Pcm {
+            container_bits: 24,
+            valid_bits: 24,
+        } => Ok(c"S24_3LE"),
+        SampleEncoding::Pcm {
+            container_bits: 32,
+            valid_bits: 32,
+        } => Ok(c"S32_LE"),
+        _ => Err(LinuxError::InvalidConfiguration(
+            "ALSA backend requires all container bits valid",
+        )),
+    }
+}
+
 struct NativePcm {
     handle: Handle,
     native_status: Handle,
@@ -1417,26 +1461,7 @@ impl NativePcm {
         request: &AlsaRequest,
         params: Handle,
     ) -> Result<(u32, u32), LinuxError> {
-        let format_name = match request.format.encoding() {
-            SampleEncoding::Float32 => c"FLOAT_LE",
-            SampleEncoding::Pcm {
-                container_bits: 16,
-                valid_bits: 16,
-            } => c"S16_LE",
-            SampleEncoding::Pcm {
-                container_bits: 24,
-                valid_bits: 24,
-            } => c"S24_3LE",
-            SampleEncoding::Pcm {
-                container_bits: 32,
-                valid_bits: 32,
-            } => c"S32_LE",
-            _ => {
-                return Err(LinuxError::InvalidConfiguration(
-                    "ALSA backend requires all container bits valid",
-                ));
-            }
-        };
+        let format_name = native_format_name(request.format.encoding())?;
         let mut period = Frames::from(request.period_frames);
         let mut buffer = Frames::from(request.buffer_frames);
         let mut direction = 0;

@@ -77,6 +77,25 @@ Compatible pending held PCM retains its complete suffix and interpretation.
 Incompatible interpretation changes with nonempty pending output refuse cold.
 Recovery transfers the whole converter/Mixer state, never only the Mixer.
 
+The sole native converted worker decides conditional retirement against its
+actual pending state before generating or submitting another block. Reading an
+empty pending snapshot on another thread does not authorize retirement. The
+cold caller selects whether an identical format/matrix may retain a held
+suffix or a changed interpretation requires an empty suffix. A refusal leaves
+the same live output and epoch in place; no creation identity is consumed.
+Cancellation cannot restore an output after retirement authorization wins.
+Authorized termination uses the existing native drop/join and complete-owner
+recovery. The bounded native control slot adds no callback allocation or lock.
+
+Opaque tickets retain the original native allocation weakly and use checked
+nonces; another stream or a later request cannot accept an old ticket. Busy and
+unconsumed responses cannot be overwritten. Matching cancellation and worker
+authorization share one atomic decision. Authorization forbids another render
+or write, while native drop/join and owner recovery may still be pending.
+The refusal itself never discards or reinterprets PCM; subsequent ordinary
+admission may advance that original suffix. A conditional wait retains the
+live clock until actual authorization, distinct from an already retired output.
+
 Both common pumps collect/drain original paused physical key levels and poll
 replacement even while old output is suspended. HOST orders bookkeeping and
 never substitutes for audio progress. Pending replacement/practice transition

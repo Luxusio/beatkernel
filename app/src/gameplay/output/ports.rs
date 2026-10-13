@@ -283,6 +283,38 @@ pub trait TargetPlaybackNativeOutputBackend<O>:
     ) -> Result<Option<NativeTargetPlaybackQuery<Self::NativeEvidence>>, Self::Error>;
 }
 
+/// The worker's conditional decision, separate from completed native retirement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetRetirementStatus {
+    Pending,
+    Refused,
+    Cancelled,
+    Authorized,
+}
+
+/// Static live-output retirement permission with an output-bound opaque ticket.
+/// Implementations must not substitute an unconditional native stop.
+pub trait ConditionalTargetRetirementNativeOutputBackend<O>:
+    TargetPlaybackNativeOutputBackend<O>
+{
+    type Ticket;
+    fn submit_target_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        request: &Self::Request,
+    ) -> Result<Option<Self::Ticket>, Self::Error>;
+    fn poll_target_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        ticket: &Self::Ticket,
+    ) -> Result<TargetRetirementStatus, Self::Error>;
+    fn cancel_target_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        ticket: &Self::Ticket,
+    ) -> Result<TargetRetirementStatus, Self::Error>;
+}
+
 /// Queues mathematical history retirement on the current statically owned output.
 /// A returned revision does not acknowledge native playback or completed retirement.
 pub trait TargetHistoryRetirementNativeOutputBackend<O>:
