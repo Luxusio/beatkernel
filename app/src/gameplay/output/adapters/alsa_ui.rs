@@ -9,11 +9,14 @@ use crate::{
     gameplay::output::application::requests::GameplayOutputUi,
     gameplay::output::domain::control::{OutputCapability, OutputRequest},
     gameplay::output::{
-        adapters::remix::RemixedOutputBackend,
+        adapters::{
+            encoding::{encoding_choice, native_encoding},
+            remix::RemixedOutputBackend,
+        },
         domain::remix::{matrix_text, select_matrix, RemixedOutputRequest},
     },
     gameplay_presentation::{GameplayAudioOutputContext, GameplayOutputContext},
-    settings::{NativeSettings, SettingsHost},
+    settings::{NativeSettings, OutputEncoding, SettingsHost},
 };
 use beatkernel::{
     audio::{AudioLimits, ChannelMatrix, TargetFrameBasis},
@@ -39,6 +42,15 @@ pub fn request_for_args(current: &AlsaRequest, args: &[String]) -> Result<AlsaRe
             "--alsa" => request.device = field.value.clone(),
             "--period-frames" => request.period_frames = parse_frames(&field.value)?,
             "--buffer-frames" => request.buffer_frames = parse_frames(&field.value)?,
+            "--encoding" => {
+                request.format = DeviceFormat::new(
+                    request.format.sample_rate(),
+                    request.format.channels(),
+                    native_encoding(field.value.parse::<OutputEncoding>()?),
+                    request.format.channel_mask(),
+                )
+                .map_err(|error| error.to_string())?;
+            }
             "--output-matrix" => {
                 return Err("channel matrices require typed output requests".into());
             }
@@ -104,7 +116,7 @@ pub fn converted_request_for_args(
     native.format = DeviceFormat::new(
         rate,
         channels,
-        current.format.encoding(),
+        native.format.encoding(),
         current.format.channel_mask(),
     )
     .map_err(|error| error.to_string())?;
@@ -146,7 +158,7 @@ pub fn remixed_request_for_args(
     native.format = DeviceFormat::new(
         current.format.sample_rate(),
         channels,
-        current.format.encoding(),
+        native.format.encoding(),
         current.format.channel_mask(),
     )
     .map_err(|e| e.to_string())?;
@@ -179,6 +191,8 @@ pub fn capability(applied: &AlsaAppliedConfig) -> Result<OutputCapability, Strin
             applied.buffer_frames.to_string(),
             "--period-frames".into(),
             applied.period_frames.to_string(),
+            "--encoding".into(),
+            encoding_choice(applied.format.encoding())?.as_str().into(),
         ],
     };
     cap.validate()?;
@@ -277,6 +291,9 @@ impl ConvertedAlsaOutputUi {
 #[cfg(test)]
 #[path = "alsa_target_ui_fixtures.rs"]
 mod target_ui_fixtures;
+#[cfg(test)]
+#[path = "alsa_ui_encoding_fixtures.rs"]
+mod encoding_fixtures;
 pub struct NativeAlsaOutputUi {
     bridge: GameplayOutputUi<PlayerOutputUi>,
 }
