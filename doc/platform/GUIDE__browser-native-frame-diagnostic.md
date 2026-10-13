@@ -172,8 +172,11 @@ and grants no joint session. Both preserve native arrays before retirement.
 Identity/range refusal, active timeout/stop/suspend and the actual callback cap
 remain bounded. Joint mode reuses the shared 120s controller, 150s CDP,
 32,768-callback and 128-reply bounds, independent 3s owned-page close and
-32-record cap. Positive author runs summarized 13 records before the final raw
-callback, retaining 14. Each counter belongs to its recorded stage.
+32-record cap. Positive author and fresh independent QA joint runs summarized
+13 records before the final raw callback, retaining 14. Each counter belongs
+to its recorded stage. Single-phase regressions can retain additional warmup
+records: fresh QA observed summary/final counts 27/28 and 31/32, both within
+the unchanged cap. Use the actual mode, run and observation stage for counts.
 
 See [joint phase evidence](../changes/2026-10-14-browser-native-joint-phase-proof.md)
 for author and independent review/QA results. Product chronology, rolling
