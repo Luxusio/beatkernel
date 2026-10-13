@@ -5,6 +5,8 @@
  * Optional WORKLET_CHRONOLOGY_OUT, WORKLET_CHRONOLOGY_PORT, TLS_CERT, TLS_KEY.
  * WORKLET_CHRONOLOGY_REQUIRE_COLD=1 requires three fresh, healthy cold contexts;
  * the default remains the historical diagnostic-only acceptance mode.
+ * WORKLET_NATIVE_FRAME_PROBE=1 instead measures independently scheduled native
+ * AudioParam edges in untouched production phase0; it does not prove playback.
  * No dependency installs or external services. The owned HTTPS test response
  * wraps registerProcessor; repository production bytes and native clocks stay
  * unchanged. A deliberately omitted native callback is fault injection, not
@@ -12,22 +14,33 @@
  */
 import assert from "node:assert/strict";
 import { createServer } from "node:https";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, realpath } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { X509Certificate, createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { resolve, dirname, extname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { advanceFrame, markerFrame } from "./worklet-native-frame-probe.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const out = resolve(process.env.WORKLET_CHRONOLOGY_OUT ?? resolve(root, "target/wf/worklet-chronology-browser-development"));
 const port = Number(process.env.WORKLET_CHRONOLOGY_PORT ?? 8121);
 const requireCold = process.env.WORKLET_CHRONOLOGY_REQUIRE_COLD === "1";
+const nativeProbe = process.env.WORKLET_NATIVE_FRAME_PROBE === "1";
 const coldCases = requireCold ? ["cold-1", "cold-2", "cold-3"] : ["normal"];
+const nativeCases = [
+  ...[44100, 48000].flatMap(rate => [1, 17, 63, 127].map(offset => ({ name: `native-${rate}-${offset}`, rate, offset }))),
+  ...["constant", "index0", "late-first", "reset-before-late", "identities", "timeout", "stop", "suspend", "callback-limit"].map(name => ({ name, rate: 48000, offset: 17 })),
+];
 const evidence = { kind: "development-worklet-chronology-browser", checks: [], scenarios: [],
-  mode: requireCold ? "required-healthy-cold" : "historical-diagnostic",
-  ceiling: ["Measured cold-context acceptance only; no universal browser scheduling, high-frame performance, gameplay completion, replay-prefix or acoustic-output claim."], cleanup: {} };
-const required = [...(requireCold ? coldCases : ["diagnostic-cold-observation"]), "native-gap", "late-arm", "sample-control"];
+  mode: nativeProbe ? "native-phase0-marker" : requireCold ? "required-healthy-cold" : "historical-diagnostic",
+  ceiling: nativeProbe ? [
+    "Two native marker edges establish only their measured callback interval; future graph-pull gaps and generic counter continuity remain unproved.",
+    "Reused generated WASM is artifact-specific phase0 evidence, not a fresh Rust rebuild or a repair of the prior strict browser chronology failure.",
+    "AudioParam fill/scan and private diagnostic messaging are sustained test overhead, not a startup-only or zero-cost production claim.",
+  ] : ["Measured cold-context acceptance only; no universal browser scheduling, high-frame performance, gameplay completion, replay-prefix or acoustic-output claim."], cleanup: {} };
+const required = nativeProbe ? [...nativeCases.map(x => x.name), "fresh-context", "web-server-boundary"]
+  : [...(requireCold ? coldCases : ["diagnostic-cold-observation"]), "native-gap", "late-arm", "sample-control"];
 evidence.required = required;
 let browser, server;
 
@@ -97,6 +110,97 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
 });
 `;
 
+// Test-only native automation and private observations. Production protocol,
+// sequence, PCM, clocks and render arguments are always delegated unchanged.
+const nativeBootstrap = `
+import { markerFrame } from './worklet-native-frame-probe.mjs';
+const actualRegister = globalThis.registerProcessor.bind(globalThis);
+globalThis.registerProcessor = (name, Production) => actualRegister(name, class extends Production {
+  static get parameterDescriptors() {
+    return [...(Production.parameterDescriptors ?? []),
+      { name: '__native_marker', defaultValue: 0, minValue: 0, maxValue: 1, automationRate: 'a-rate' }];
+  }
+  constructor(options) {
+    super(options);
+    this.nativePort = null;
+    this.nativeAttached = false;
+    this.nativeRetired = false;
+    this.nativeId = 0;
+    this.nativeOrdinal = 0;
+    this.nativeWatch = null;
+  }
+  nativeReply(message) { this.nativePort?.postMessage({ generation: this.generation, ...message }); }
+  retireNative(reason) {
+    if (!this.nativePort) return;
+    this.nativeReply({ kind: 'retired', reason, id: this.nativeId,
+      pendingInvalidated: this.nativeWatch !== null, ordinal: this.nativeOrdinal });
+    this.nativeWatch = null;
+    this.nativeRetired = true;
+    this.nativePort.onmessage = null;
+    this.nativePort.close();
+    this.nativePort = null;
+  }
+  control(message) {
+    if (message?.kind === '__native-attach') {
+      const port = message.port;
+      const reason = message.generation !== this.generation ? 'generation'
+        : !Number.isSafeInteger(message.id) || message.id <= this.nativeId ? 'identity'
+        : this.nativeRetired ? 'retired' : this.nativeAttached ? 'duplicate' : null;
+      if (reason) {
+        try { port?.postMessage({ kind: 'refused', generation: this.generation,
+          id: message.id, reason, rejectedPortClosed: true }); }
+        finally { port?.close(); }
+        return;
+      }
+      this.nativeAttached = true;
+      this.nativeId = message.id;
+      this.nativePort = port;
+      port.onmessage = event => {
+        const request = event.data;
+        const reason = request?.generation !== this.generation ? 'generation'
+          : !Number.isSafeInteger(request.id) || request.id <= this.nativeId ? 'identity' : null;
+        if (reason) { this.nativeReply({ kind: 'refused', id: request?.id, reason }); return; }
+        this.nativeId = request.id;
+        if (request.kind === 'retire') { this.retireNative(request.reason); return; }
+        if (request.kind === 'watch' && (!Number.isSafeInteger(request.targetFrame) || request.targetFrame <= 0)) {
+          this.nativeReply({ kind: 'refused', id: request.id, reason: 'target' }); return;
+        }
+        if (request.kind !== 'watch' && request.kind !== 'inspect') {
+          this.nativeReply({ kind: 'refused', id: request.id, reason: 'operation' }); return;
+        }
+        if (request.kind === 'watch') this.nativeWatch = { id: request.id, targetFrame: request.targetFrame };
+        this.nativeReply({ kind: 'accepted', id: request.id, operation: request.kind,
+          phase: this.phase, reportAvailable: this.owner.report_word(0, false), ordinal: this.nativeOrdinal });
+      };
+      port.start();
+      this.nativeReply({ kind: 'attached', id: message.id, phase: this.phase, defaultValue: 0 });
+      return;
+    }
+    if (message?.kind === 'stop') this.retireNative('production-stop');
+    return super.control(message);
+  }
+  process(inputs, outputs, parameters) {
+    const result = super.process(inputs, outputs, parameters);
+    if (!this.nativePort) return result;
+    if (++this.nativeOrdinal > 1024) { this.retireNative('callback-limit'); return result; }
+    const frames = outputs[0]?.[0]?.length ?? 0;
+    const values = parameters.__native_marker;
+    const targetFrame = this.nativeWatch?.targetFrame ?? null;
+    const candidate = targetFrame === null ? null : markerFrame(values, frames, targetFrame);
+    let edge = 0;
+    while (edge < values.length && values[edge] === 0) edge++;
+    const zeroPCM = outputs.every(bus => bus.every(channel => channel.every(value => value === 0)));
+    this.nativeReply({ kind: 'callback', id: this.nativeWatch?.id ?? this.nativeId,
+      ordinal: this.nativeOrdinal, rawGlobalFrame: currentFrame, actualFrames: frames,
+      parameterLength: values.length, edge, spatialCandidate: candidate,
+      shape: values.every(value => value === 0) ? 'zero' : values.every(value => value === 1) ? 'one' : 'varying',
+      values: values.length > 1 && values.length <= 4096 ? Array.from(values) : null,
+      phase: this.phase, result, zeroPCM, reportAvailable: this.owner.report_word(0, false) });
+    return result;
+  }
+});
+`;
+
 async function serve() {
   await mkdir(out, { recursive: true });
   const cert = process.env.TLS_CERT ?? resolve(out, "cert.pem");
@@ -111,14 +215,21 @@ async function serve() {
   const production = await readFile(resolve(root, "app/web/audio-worklet.js"), "utf8");
   const wasm = await readFile(resolve(root, "app/web/audio-pkg/beatkernel_bms_runtime_bg.wasm"));
   evidence.source = { workletSha256: createHash("sha256").update(production).digest("hex"), wasmSha256: createHash("sha256").update(wasm).digest("hex") };
+  const webRoot = nativeProbe ? await realpath(resolve(root, "app/web")) : null;
   server = createServer({ cert: await readFile(cert), key: await readFile(key) }, async (request, response) => {
     try {
       const pathname = new URL(request.url, "https://localhost").pathname;
       const path = resolve(root, `.${decodeURIComponent(pathname)}`);
       const within = relative(root, path);
       if (within === ".." || within.startsWith(`..${sep}`)) throw Error("Outside repository");
+      if (nativeProbe && pathname !== "/__chronology.html") {
+        const lexical = relative(resolve(root, "app/web"), path);
+        if (lexical === ".." || lexical.startsWith(`..${sep}`)) throw Error("Outside web fixture");
+        const resolved = relative(webRoot, await realpath(path));
+        if (resolved === ".." || resolved.startsWith(`..${sep}`)) throw Error("Outside resolved web fixture");
+      }
       const body = pathname === "/__chronology.html" ? "<!doctype html><title>Worklet chronology evidence</title>"
-        : pathname === "/app/web/audio-worklet.js" ? bootstrap + production : await readFile(path);
+        : pathname === "/app/web/audio-worklet.js" ? (nativeProbe ? nativeBootstrap : bootstrap) + production : await readFile(path);
       response.writeHead(200, { "Content-Type": pathname.endsWith(".html") ? "text/html" : extname(path) === ".wasm" ? "application/wasm" : "text/javascript",
         "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp", "Cache-Control": "no-store" });
       response.end(body);
@@ -229,6 +340,299 @@ async function runCase(name) {
     }, { name, requireCold });
     return { ...result, consoleMessages, pageErrors };
   } finally { await page.close(); }
+}
+
+async function runNativeCase(spec, generation) {
+  const page = await browser.newPage();
+  const consoleMessages = [], pageErrors = [];
+  page.on("console", message => { if (consoleMessages.length < 32) consoleMessages.push({ type: message.type(), text: message.text().slice(0, 2000) }); });
+  page.on("pageerror", error => { if (pageErrors.length < 16) pageErrors.push(String(error).slice(0, 2000)); });
+  try {
+    await page.goto(`https://127.0.0.1:${port}/__chronology.html`);
+    const result = await page.evaluate(async ({ spec, generation }) => {
+      const { AudioHost } = await import("/app/web/audio-host.mjs");
+      const { markerTime, advanceFrame } = await import("/app/web/worklet-native-frame-probe.mjs");
+      const module = await WebAssembly.compile(await (await fetch("/app/web/audio-pkg/beatkernel_bms_runtime_bg.wasm")).arrayBuffer());
+      const contexts = [], nodes = [], hostMessages = [], messages = [], ports = [], events = [], timestamps = [], stateEvents = [];
+      const Context = AudioContext, Node = AudioWorkletNode;
+      globalThis.AudioContext = class extends Context {
+        constructor(options) {
+          super(options); contexts.push(this);
+          // Register before AudioHost assigns its terminal state handler. The
+          // actual suspended event remains evidence even if Host closes next.
+          this.addEventListener("statechange", () => {
+            if (stateEvents.length < 16) stateEvents.push({ state: this.state, contextTime: this.currentTime });
+          });
+        }
+      };
+      globalThis.AudioWorkletNode = class extends Node {
+        constructor(...args) {
+          super(...args); nodes.push(this);
+          this.port.addEventListener("message", event => { if (hostMessages.length < 64) hostMessages.push(event.data); });
+        }
+      };
+      const result = { ...spec, generation, messages, events, timestamps, stateEvents, hostMessages, cleanup: {},
+        prerequisites: { freshContext: true, previousOrigin: false, valueWrites: 0, nativeDefault: null } };
+      let host, privatePort, id = 1, observationRetired = false, ticks = 0;
+      const wait = async (predicate, timeoutMs = 5000, workload = false) => {
+        const deadline = performance.now() + timeoutMs;
+        while (!predicate()) {
+          if (performance.now() >= deadline) throw Error("Native probe deadline exceeded");
+          if (workload) {
+            const before = performance.now();
+            for (let count = 0; count < 200; count++) {
+              const timestamp = contexts[0].getOutputTimestamp();
+              if (count === 0 && timestamps.length < 32) timestamps.push(timestamp);
+            }
+            while (performance.now() - before < 2) Math.sqrt(++ticks);
+          }
+          await new Promise(yes => setTimeout(yes, 5));
+        }
+      };
+      const bounded = async (promise, operation, timeoutMs = 12000) => {
+        let timer;
+        try {
+          return await Promise.race([promise, new Promise((_, no) => {
+            timer = setTimeout(() => no(Error("Native " + operation + " deadline exceeded")), timeoutMs);
+          })]);
+        } finally { clearTimeout(timer); }
+      };
+      const attach = async (attachGeneration, attachId) => {
+        const channel = new MessageChannel(), replies = [];
+        ports.push(channel.port1, channel.port2);
+        channel.port1.onmessage = event => {
+          if (replies.length >= 1100) throw Error("Private probe reply bound exceeded");
+          replies.push(event.data);
+          if (channel.port1 === privatePort) {
+            if (messages.length >= 1100) throw Error("Native snapshot bound exceeded");
+            messages.push(event.data);
+            if (event.data.kind === "retired") observationRetired = true;
+          }
+        };
+        channel.port1.start();
+        nodes[0].port.postMessage({ kind: "__native-attach", generation: attachGeneration, id: attachId, port: channel.port2 }, [channel.port2]);
+        await wait(() => replies.some(x => x.kind === "attached" || x.kind === "refused"));
+        return { channel, replies };
+      };
+      const request = async (kind, fields = {}) => {
+        const requestId = ++id;
+        privatePort.postMessage({ kind, generation, id: requestId, ...fields });
+        await wait(() => messages.some(x => x.id === requestId && x.kind !== "callback"));
+        return requestId;
+      };
+      const watch = targetFrame => request("watch", { targetFrame });
+      const set = (value, targetFrame) => {
+        const time = markerTime(targetFrame, host.sampleRate);
+        if (time === null) throw Error("Ambiguous scheduled marker time");
+        const before = contexts[0].currentTime;
+        nodes[0].parameters.get("__native_marker").setValueAtTime(value, time);
+        events.push({ value, targetFrame, time, beforeContextTime: before, afterContextTime: contexts[0].currentTime });
+        return time;
+      };
+      try {
+        host = await AudioHost.open({ module, generation, channels: 2, timeoutMs: 5000,
+          contextOptions: { latencyHint: "interactive", sampleRate: spec.rate },
+          pcmLimits: { maxAssetBytes: 65536, maxTotalBytes: 131072, maxSamples: 4 },
+          audioLimits: { queueCapacity: 32, maxVoices: 8, pendingCapacity: 32, maxFrames: 128, maxCommandsPerRender: 32 } });
+        result.sampleRate = host.sampleRate;
+        result.beforeReport = await host.poll();
+        result.prerequisites.nativeDefault = nodes[0].parameters.get("__native_marker").defaultValue;
+        const connected = await attach(generation, id);
+        privatePort = connected.channel.port1;
+        messages.push(...connected.replies);
+        await wait(() => messages.some(x => x.kind === "callback"));
+        const initial = messages.find(x => x.kind === "callback");
+        const quantum = initial.actualFrames;
+        if (!Number.isSafeInteger(quantum) || quantum < 1) throw Error("No actual native callback extent");
+        const futureTarget = offset => {
+          const controlFrame = Math.ceil(contexts[0].currentTime * host.sampleRate);
+          return (Math.ceil(controlFrame / quantum) + Math.ceil(host.sampleRate * 0.2 / quantum)) * quantum + offset;
+        };
+        const positive = spec.name.startsWith("native-");
+        if (positive) {
+          if (spec.offset >= quantum) throw Error("Requested interior offset exceeds measured callback shape");
+          const firstTarget = futureTarget(spec.offset);
+          const firstId = await watch(firstTarget);
+          result.firstTarget = firstTarget;
+          result.firstTime = set(1, firstTarget); // Exactly the first and only event on the fresh default0 parameter.
+          await wait(() => messages.some(x => x.kind === "callback" && x.id === firstId && x.spatialCandidate !== null), 5000, true);
+          const first = messages.find(x => x.kind === "callback" && x.id === firstId && x.spatialCandidate !== null);
+          result.first = first;
+          result.firstAdmission = { eventCount: events.length, previousEvents: false,
+            eligible: events.length === 1 && events[0].value === 1 && result.prerequisites.nativeDefault === 0 };
+          if (!result.firstAdmission.eligible) throw Error("First native onset has a contaminated timeline");
+          const secondTarget = futureTarget(spec.offset);
+          const secondId = await watch(secondTarget);
+          result.secondTarget = secondTarget;
+          result.resetTime = set(0, secondTarget - 2 * quantum);
+          result.secondTime = set(1, secondTarget);
+          if (result.resetTime <= contexts[0].currentTime) throw Error("Second marker reset did not remain future scheduled");
+          await wait(() => messages.some(x => x.kind === "callback" && x.id === secondId && x.spatialCandidate !== null), 5000, true);
+          const second = messages.find(x => x.kind === "callback" && x.id === secondId && x.spatialCandidate !== null);
+          result.second = second;
+          const interval = messages.filter(x => x.kind === "callback" && x.ordinal >= first.ordinal && x.ordinal < second.ordinal);
+          let expected = first.spatialCandidate;
+          for (const callback of interval) {
+            expected = advanceFrame(expected, callback.actualFrames);
+            if (expected === null) throw Error("Observed native extent overflowed");
+          }
+          result.expectedSecondBase = expected;
+          result.intervalOrdinals = interval.map(x => x.ordinal);
+          if (second.spatialCandidate !== expected) throw Error("Second independent native basis contradicts actual callback extents; no rebase allowed");
+        } else if (spec.name === "identities") {
+          const stale = await attach(generation - 1, id + 1);
+          const repeated = await attach(generation, id);
+          const duplicate = await attach(generation, id + 1);
+          result.rejectedAttachments = [stale.replies[0], repeated.replies[0], duplicate.replies[0]];
+          stale.channel.port1.close(); stale.channel.port2.close();
+          repeated.channel.port1.close(); repeated.channel.port2.close();
+          duplicate.channel.port1.close(); duplicate.channel.port2.close();
+          privatePort.postMessage({ kind: "inspect", generation: generation - 1, id: id + 1 });
+          privatePort.postMessage({ kind: "inspect", generation, id });
+          await wait(() => messages.filter(x => x.kind === "refused").length === 2);
+          await request("watch", { targetFrame: -1 });
+          await request("unknown");
+          await request("inspect");
+          result.retainedIdentity = id;
+        } else if (spec.name === "index0" || spec.name === "late-first" || spec.name === "reset-before-late") {
+          let target = futureTarget(0);
+          if (spec.name !== "index0") {
+            await wait(() => contexts[0].currentTime > 0.05);
+            target = Math.max(1, Math.floor((contexts[0].currentTime - 0.025) * host.sampleRate));
+          }
+          if (spec.name === "reset-before-late") set(0, 1);
+          result.negativeTarget = target;
+          const watched = await watch(target);
+          result.negativeTime = set(1, target);
+          result.firstAdmission = { eventCount: events.length, previousEvents: events.length !== 1, eligible: false };
+          await wait(() => messages.some(x => x.kind === "callback" && x.id === watched && x.shape === "one"));
+          result.certifiedOrigin = null;
+          result.rawSpatialCandidates = messages.filter(x => x.kind === "callback" && x.id === watched && x.spatialCandidate !== null);
+        } else {
+          const watched = await watch(futureTarget(spec.offset));
+          if (spec.name === "constant") {
+            await wait(() => messages.filter(x => x.kind === "callback" && x.id === watched).length >= 8);
+          } else if (spec.name === "timeout") {
+            try { await wait(() => messages.some(x => x.kind === "callback" && x.id === watched && x.spatialCandidate !== null), 40); }
+            catch (error) { result.timeout = String(error); }
+            if (!result.timeout) throw Error("Constant native parameter fabricated an onset before timeout");
+            await request("retire", { reason: "timeout" });
+            const rejected = await attach(generation, id + 1);
+            result.retiredAttachment = rejected.replies[0];
+            rejected.channel.port1.close(); rejected.channel.port2.close();
+          } else if (spec.name === "stop") {
+            await bounded(host.stop(), "stop");
+            await wait(() => observationRetired);
+          } else if (spec.name === "suspend") {
+            await request("retire", { reason: "suspend" });
+            await bounded(contexts[0].suspend(), "suspend", 5000);
+            await wait(() => stateEvents.some(event => event.state === "suspended") && host.state === "failed");
+            result.suspendedState = stateEvents.findLast(event => event.state === "suspended").state;
+            try { await host.poll(); }
+            catch (error) { result.suspendFailure = { code: error.code, operation: error.operation, message: String(error) }; }
+            await bounded(host.stop(), "suspended Host cleanup");
+          } else if (spec.name === "callback-limit") {
+            await wait(() => observationRetired);
+          }
+          result.certifiedOrigin = null;
+        }
+        result.hostState = host.state;
+        if (host.state === "setup") result.afterReport = await host.poll();
+      } catch (error) {
+        result.unexpected = { message: String(error), stack: error.stack };
+      } finally {
+        try {
+          if (privatePort && !observationRetired) await request("retire", { reason: "case-complete" });
+          if (host) await bounded(host.stop(), "owned Host cleanup");
+          result.cleanup.contextsConstructed = contexts.length;
+          result.cleanup.nodesConstructed = nodes.length;
+          result.cleanup.contexts = contexts.map(context => context.state);
+          result.cleanup.contextsClosed = contexts.every(context => context.state === "closed");
+        } catch (error) { result.cleanup.error = String(error); }
+        for (const ownedPort of ports) { ownedPort.onmessage = null; ownedPort.close(); }
+        result.cleanup.ownedPortEndpointsClosed = ports.length;
+        result.cleanup.observationRetired = observationRetired;
+        result.cleanup.pendingInvalidated = messages.findLast(x => x.kind === "retired")?.pendingInvalidated ?? false;
+      }
+      return result;
+    }, { spec, generation });
+    return { ...result, consoleMessages, pageErrors };
+  } finally { await page.close(); }
+}
+
+function verifyNative(result) {
+  assert.equal(result.pageErrors.length, 0, "Unexpected native probe page error");
+  assert(!result.unexpected, JSON.stringify(result.unexpected));
+  assert(!result.cleanup.error, result.cleanup.error);
+  assert(result.cleanup.contextsClosed && result.cleanup.observationRetired, "Owned native observer/context did not retire");
+  assert.equal(result.cleanup.contextsConstructed, 1);
+  assert.equal(result.cleanup.nodesConstructed, 1);
+  assert(result.cleanup.ownedPortEndpointsClosed >= 2);
+  assert.equal(result.prerequisites.nativeDefault, 0);
+  assert.equal(result.prerequisites.valueWrites, 0);
+  assert.equal(result.beforeReport.available, false);
+  if (result.afterReport) assert.equal(result.afterReport.available, false);
+  assert(result.hostMessages.every(x => ["ready", "ack", "terminal"].includes(x.kind)), "Private reply corrupted the production Host protocol");
+  const callbacks = result.messages.filter(x => x.kind === "callback");
+  assert(callbacks.length > 0 && callbacks.length <= 1024);
+  for (const callback of callbacks) {
+    assert.equal(callback.generation, result.generation);
+    assert.equal(callback.phase, 0);
+    assert.equal(callback.zeroPCM, true);
+    assert.equal(callback.result, true);
+    assert.equal(callback.reportAvailable, 0);
+    assert(Number.isSafeInteger(callback.actualFrames) && callback.actualFrames > 0);
+  }
+  if (result.name.startsWith("native-")) {
+    assert(result.firstAdmission.eligible && result.firstAdmission.eventCount === 1);
+    assert.equal(result.events[0].value, 1);
+    assert.equal(result.events[0].targetFrame, result.firstTarget);
+    assert.equal(result.first.edge, result.offset);
+    assert.equal(result.second.edge, result.offset);
+    assert(result.timestamps.length > 0, "Output timestamp workload was not exercised");
+    for (const [marker, target] of [[result.first, result.firstTarget], [result.second, result.secondTarget]]) {
+      assert.equal(marker.parameterLength, marker.actualFrames);
+      assert.equal(markerFrame(new Float32Array(marker.values), marker.actualFrames, target), marker.spatialCandidate);
+    }
+    const interval = callbacks.filter(x => x.ordinal >= result.first.ordinal && x.ordinal < result.second.ordinal);
+    assert.equal(interval.length, result.second.ordinal - result.first.ordinal);
+    let cursor = result.first.spatialCandidate;
+    for (let index = 0; index < interval.length; index++) {
+      assert.equal(interval[index].ordinal, result.first.ordinal + index, "An actual callback observation was omitted");
+      cursor = advanceFrame(cursor, interval[index].actualFrames);
+      assert.notEqual(cursor, null);
+    }
+    assert.equal(cursor, result.second.spatialCandidate, "Independent native marker contradiction must fail without rebasing");
+    assert.equal(result.expectedSecondBase, cursor);
+  } else if (result.name === "identities") {
+    assert.deepEqual(result.rejectedAttachments.map(x => x.reason), ["generation", "identity", "duplicate"]);
+    assert(result.rejectedAttachments.every(x => x.rejectedPortClosed));
+    assert.deepEqual(result.messages.filter(x => x.kind === "refused").map(x => x.reason), ["generation", "identity", "target", "operation"]);
+    assert(result.messages.some(x => x.kind === "accepted" && x.operation === "inspect" && x.id === result.retainedIdentity));
+  } else {
+    assert.equal(result.certifiedOrigin, null);
+    if (result.name === "constant" || result.name === "timeout") assert(callbacks.every(x => x.spatialCandidate === null && x.shape === "zero"));
+    if (result.name === "index0" || result.name === "late-first") assert.equal(result.rawSpatialCandidates.length, 0, "Fresh boundary/late event unexpectedly yielded an interior anchor");
+    if (result.name === "reset-before-late") assert.equal(result.firstAdmission.previousEvents, true);
+    if (["timeout", "stop", "suspend", "callback-limit"].includes(result.name)) {
+      assert.equal(result.cleanup.pendingInvalidated, true);
+      const retired = result.messages.find(x => x.kind === "retired");
+      assert.equal(retired.reason, result.name === "stop" ? "production-stop" : result.name);
+      if (result.name === "callback-limit") assert.equal(callbacks.length, 1024);
+    }
+    if (result.name === "suspend") {
+      assert.equal(result.suspendedState, "suspended");
+      assert(result.stateEvents.some(event => event.state === "suspended"));
+      assert.equal(result.hostState, "failed");
+      assert.equal(result.suspendFailure?.code, "state");
+      assert.equal(result.suspendFailure?.operation, "context");
+    }
+    if (result.name === "timeout") {
+      assert.equal(result.retiredAttachment.reason, "retired");
+      assert(result.retiredAttachment.rejectedPortClosed);
+    }
+  }
+  evidence.checks.push({ id: result.name, passed: true });
 }
 
 const pair = (low, high) => BigInt(low) | BigInt(high) << 32n;
@@ -345,17 +749,42 @@ try {
   const require = createRequire(import.meta.url);
   const puppeteer = require(process.env.PUPPETEER_MODULE ?? "puppeteer-core");
   browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
+    ...(nativeProbe ? { protocolTimeout: 30000 } : {}),
     args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required", `--ignore-certificate-errors-spki-list=${spki}`] });
-  for (const id of [...coldCases, "native-gap", "late-arm", "sample-control"]) {
-    const name = coldCases.includes(id) ? "normal" : id;
-    const result = await runCase(name); evidence.scenarios.push({ ...result, id });
-    try { verify(result, id); }
-    catch (error) { evidence.checks.push({ id: name === "normal" && !requireCold ? "diagnostic-cold-observation" : id, passed: false, detail: String(error) }); process.exitCode = 1; }
+  if (nativeProbe) {
+    evidence.browser = { version: await browser.version(), ownedPid: browser.process()?.pid ?? null };
+    for (let index = 0; index < nativeCases.length; index++) {
+      const result = await runNativeCase(nativeCases[index], index + 11);
+      evidence.scenarios.push(result);
+      try { verifyNative(result); }
+      catch (error) { evidence.checks.push({ id: result.name, passed: false, detail: String(error) }); process.exitCode = 1; }
+    }
+    const fresh = evidence.scenarios.filter(x => x.name.startsWith("native-"));
+    const freshPassed = fresh.length === 8 && new Set(fresh.map(x => x.generation)).size === 8
+      && fresh.every(x => x.firstAdmission?.eligible && x.prerequisites.previousOrigin === false && x.cleanup.contextsClosed);
+    evidence.checks.push({ id: "fresh-context", passed: freshPassed });
+    const boundary = await browser.newPage();
+    try {
+      await boundary.goto(`https://127.0.0.1:${port}/__chronology.html`);
+      evidence.serverBoundary = await boundary.evaluate(async () => {
+        const paths = ["/CONTRACTS.md", "/doc/changes/2026-10-13-browser-native-frame-diagnostic.md", "/app/web/../../CONTRACTS.md"];
+        return Promise.all(paths.map(async path => ({ path, status: (await fetch(path)).status })));
+      });
+      evidence.checks.push({ id: "web-server-boundary", passed: evidence.serverBoundary.every(x => x.status === 404) });
+    } finally { await boundary.close(); }
+  } else {
+    for (const id of [...coldCases, "native-gap", "late-arm", "sample-control"]) {
+      const name = coldCases.includes(id) ? "normal" : id;
+      const result = await runCase(name); evidence.scenarios.push({ ...result, id });
+      try { verify(result, id); }
+      catch (error) { evidence.checks.push({ id: name === "normal" && !requireCold ? "diagnostic-cold-observation" : id, passed: false, detail: String(error) }); process.exitCode = 1; }
+    }
   }
   if (required.some(id => !evidence.checks.some(x => x.id === id && x.passed))) process.exitCode = 1;
 } catch (error) { evidence.fatal = { message: String(error), stack: error.stack }; process.exitCode = 1; }
 finally {
-  try { if (browser) { await browser.close(); evidence.cleanup.browserClosed = true; } }
+  try { if (browser) { await browser.close(); evidence.cleanup.browserClosed = true;
+    if (nativeProbe) evidence.cleanup.ownedBrowserExitCode = browser.process()?.exitCode ?? null; } }
   catch (error) { evidence.cleanup.browserError = String(error); process.exitCode = 1; }
   try { if (server) { server.closeAllConnections(); await new Promise(yes => server.close(yes)); evidence.cleanup.serverClosed = true; } }
   catch (error) { evidence.cleanup.serverError = String(error); process.exitCode = 1; }
