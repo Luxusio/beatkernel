@@ -47,6 +47,12 @@ equal the new Target frame-zero point. Old prepared control/practice tokens
 become stale. Changed state/pin/input or failed capability validation prevents
 publication.
 
+The pin is captured at original setup. Mixer.output_frame_basis() describes
+its next physical frame and advances with rendering; it cannot reconstruct the
+original creation pin. Recovered-owner association checks immutable source
+configuration/initial history and a nonregressed cursor against the retained
+pin rather than substituting the current next-frame basis.
+
 Synchronous commit publishes native authority/history, pause binding, raw
 native configuration, current output and prevalidated applied capability.
 Retain acquired/closed/input HOST prefixes, operation, presentation and both

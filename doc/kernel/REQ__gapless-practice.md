@@ -128,6 +128,16 @@ Pin the original mixer source-frame basis even with a target-rate converter;
 source frame indices are not native target frame indices. A native epoch change
 invalidates prepared boundary tokens and requires explicit basis admission.
 
+For acknowledged paused Target output replacement, retain the original Mixer
+creation basis and admit its association with the complete recovered converter
+and new native Target basis. The new native stream frame zero need not equal
+the original source frame-zero point. Preserve exact accumulated TargetTime,
+both coordinate watermarks and the existing program/attempt/input/capture
+owners; do not rebuild them or re-quantize them to the new rate. Candidate
+native history, pause binding and applied output capability publish together.
+The detailed control and verification contract is
+[retained practice output replacement](../runtime/REQ__retained-practice-output-replacement.md).
+
 ## Real-time and failure rules
 
 Cold preparation validates program/sample/region/gain/capacity and checked frame

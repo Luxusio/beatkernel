@@ -20,6 +20,10 @@ use beatkernel_platform::audio::presentation::validation::{
     NativePresentationValidator, OriginalNativePresentationEvidence, PreparedNativePresentation,
 };
 
+#[path = "native_audio_presentation_coordinate_epoch.rs"]
+mod coordinate_epoch;
+pub use coordinate_epoch::PreparedCoordinateTargetNativeAudioEpoch;
+
 /// One caller-supplied native observation on its actual creation epoch and frame basis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeAudioSnapshot {
@@ -548,9 +552,15 @@ impl NativeAudioPresentation {
         self.practice_mixer_basis.is_some()
     }
 
+    /// Original retained Mixer creation grid, rather than its next render frame.
+    pub const fn practice_mixer_basis(&self) -> Option<OutputFrameBasis> {
+        self.practice_mixer_basis
+    }
+
     /// Pin the retained Mixer's actual creation grid before practice admission.
     /// A target-rate converter does not change this original source-frame grid.
-    /// Epoch replacement revokes this binding and requires explicit rebinding.
+    /// Scalar epoch replacement revokes this binding; coordinate Target
+    /// replacement preserves it through an explicit recovered-owner association.
     pub fn pin_practice_mixer_basis(
         &mut self,
         basis: OutputFrameBasis,
