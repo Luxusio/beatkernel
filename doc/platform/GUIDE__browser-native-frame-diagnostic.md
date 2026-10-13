@@ -52,4 +52,3 @@ A source-possible lifecycle counterexample remains: when embedding policy restri
 Real observations apply only to measured rates, extents, contexts and generated WASM bytes. They do not prove cross-browser chronology, future callback continuity, presentation/acoustic timing, successful gameplay, replay/input integrity or high-load performance. Production chronology checks, report coordinates and ownership remain unchanged.
 
 See [recorded change evidence](../changes/2026-10-13-browser-native-frame-diagnostic.md) for actual results and independent review/QA status.
-
