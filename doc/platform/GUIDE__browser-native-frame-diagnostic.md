@@ -52,3 +52,58 @@ A source-possible lifecycle counterexample remains: when embedding policy restri
 Real observations apply only to measured rates, extents, contexts and generated WASM bytes. They do not prove cross-browser chronology, future callback continuity, presentation/acoustic timing, successful gameplay, replay/input integrity or high-load performance. Production chronology checks, report coordinates and ownership remain unchanged.
 
 See [recorded change evidence](../changes/2026-10-13-browser-native-frame-diagnostic.md) for actual results and independent review/QA status.
+
+## Native modulo-phase experiment
+
+The separate `WORKLET_NATIVE_PHASE_PROBE=1` mode measures finite native ramp
+samples using the same owned runner and production phase0. It rejects conflicts
+with the marker probe or strict cold mode. Run it with a new owned output directory:
+
+```bash
+PUPPETEER_MODULE="$PWD/target/wf/record-score-ui-qa-browser/node_modules/puppeteer-core" \\
+CHROMIUM=/usr/bin/chromium WORKLET_NATIVE_PHASE_PROBE=1 \\
+WORKLET_CHRONOLOGY_OUT="$PWD/target/wf/browser-native-phase-decoding/local" \\
+WORKLET_CHRONOLOGY_PORT=8161 \\
+node app/web/worklet-chronology.browser.mjs
+```
+
+A fresh first binary marker anchors the Worklet-side cursor. Page message
+delivery time never supplies or rebases that origin. The phase parameter starts
+at default 0, then has a first set to 1 and linear ramps to P+1, with
+P=2^20. At each interior reset the prior ramp endpoint is registered before
+the set back to 1 and the next ramp.
+
+Quarter-early event times do not produce exact integer ramp samples. For a
+cycle beginning at A and ending at A+P, let t0=(A-0.25)/F and
+t1=(A+P-0.25)/F. The double ideal is
+`1 + P * (frame/F - t0) / (t1-t0)`; its first sample is approximately 1.25.
+The pinned native implementation uses Float32 intermediates, so every measured
+sample must decode to the expected modulo phase and differ from its ideal by
+strictly less than 0.25. Exact halfway values, invalid shapes, unsafe event
+boundaries and contradictory samples refuse.
+[Native ramp source](https://raw.githubusercontent.com/chromium/chromium/971a7443b0c9b0a9b2860529b33331b76077ec62/third_party/blink/renderer/modules/webaudio/audio_param_handler.cc).
+
+Three periods contain 3,145,728 samples, requiring about 71.33 seconds at
+44.1 kHz or 65.54 seconds at 48 kHz. Only the phase session uses a fixed
+32,768-callback cap, a 120-second case watchdog and a 150-second CDP timeout.
+The marker probe retains its original bounds. Validation streams inside the
+Worklet and saves bounded aggregates and at most 32 raw opening/reset/horizon/failure
+snapshots; it does not send or retain every callback.
+
+Active boundary slices are views into the original arrays. Their lengths
+determine checked sample counts, while the original output extent alone
+advances the cursor. A closing binary reset/set sequence is endpoint
+corroboration rather than fresh-origin authentication: both events must remain
+future at submission, native zero reset must be observed, and the endpoint must
+agree with all observed extents without rebasing. The final same-time reset
+makes the finite horizon hold 1; those samples are refused as chronology evidence.
+
+One phase cannot distinguish a missing interval of nP frames, even with a full
+sample scan. A finite closing endpoint can expose a contradiction in the
+measured interval, but cannot establish every future callback. Arithmetic
+vectors at twenty hours or one week are not aged native-context measurements.
+These diagnostic results do not adopt a product clock, fix the strict playback
+failure, or prove performance, physical output, gameplay or a fresh Rust build.
+
+See [finite phase evidence](../changes/2026-10-14-browser-native-phase-decoding.md)
+for measured results and independent verification status.
