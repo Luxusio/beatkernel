@@ -62,7 +62,7 @@ added.
   second base20864. This is a real raw-clock discrepancy within a measured
   interval. It does not trace the lock collision or solve future callback gaps.
 - Mechanical source comparison against a7f0d743 confirmed the legacy bootstrap,
-  runCase and verify bodies are identical. Independent review/QA remain pending.
+  runCase and verify bodies are identical.
 
 Logs: target/wf/browser-native-frame-diagnostic/author/. Native author evidence
 is retained under author-native-c1/evidence.json and author-native-c2/evidence.json.
@@ -103,11 +103,67 @@ Known ceiling: 재사용 WASM의 phase0만 실행한다 — 실제 Rust 재빌�
 
 Known ceiling: suspend는 실제 Host terminal·닫힘을 검증하며 같은 Context 재개를 요구하지 않는다 — 제품의 suspend/resume 정책을 변경할 때 별도 검증해야 한다
 
+## Independent review and QA
+
+Formal code review completed PASS with0 findings at b30bfc60. Review depth was
+DEEP with both correctness and contract/test hunters; both returned empty
+candidate arrays. The reviewer independently checked the complete five-path
+scope, native scheduling semantics, actual evidence, default acceptance and
+cleanup. A surplus GUIDE EOF blank was removed before the final clean diff
+check; it changed no source or evidence content.
+
+The later independent qa-cli and qa-browser finals both returned PASS:
+
+- CLI executed85 focused tests and3329 independent direct helper assertions,
+  including BigInt origins, long durations, precision/overflow/invalid-input
+  refusal and input conservation. Syntax and complete base-to-HEAD diff checks
+  passed. It independently recalculated the fresh browser artifact rather than
+  starting a competing browser.
+- Browser executed19/19 checks across17 actual graph cases. Independent raw
+  validation passed310 assertions over2451 actual callbacks. All eight marker
+  pairs agreed, measured extents were128, production remained phase0 with zero
+  PCM and unavailable reports, and expected negative/lifecycle cases passed.
+- Same-page capture recorded18 screenshots at800×600, DOM and network state.
+  Browser depth was render-only-browser because no product UI changed; native
+  parameter/port/stop/suspend interactions were executed. Page errors were0;
+  four expected404 console messages came from deliberate server-boundary
+  requests and the fixture's absent favicon.
+- This fresh run independently recorded native-44100-17, generation12:
+  first base11136/ordinal77, second base20480/ordinal150. The73 actual128-frame
+  callbacks agreed with both edges. Ordinal91 reported rawGlobalFrame12800
+  while the independently based cursor was12928. This corroborates raw-clock
+  discrepancy in another measured interval, not the exact cause of the old
+  strict gameplay failure.
+- All owned contexts/pages/browser/server closed; browser exit0, PID803710
+  absent and8162 local rebind succeeded then closed. Actual kernel LISTEN was
+  absent and HTTPS returned EOF. This environment's bare connect_ex also
+  succeeds on unused control ports, so it was rejected as a leak oracle.
+
+Browser artifacts/transcript/raw checks and18PNG captures:
+target/wf/browser-native-frame-diagnostic/qa-browser-b30/.
+CLI commands/logs/recalculation:
+target/wf/browser-native-frame-diagnostic/qa-cli-b30/.
+Both validate the same production Worklet/WASM hashes stated above.
+
+Failed QA tooling attempts remain in those directories: the first capture
+preload tried assigning a read-only Puppeteer ESM namespace before any browser
+started; the corrected QA require wrapper captured actual pages. Auxiliary
+raw validators also corrected absent-field/field-name assumptions and the bare
+TCP-connect oracle. These are preserved QA-tool errors, not hidden product
+failures; tracked source changed0 during QA.
+
+Reusable learning: When checking owned listener cleanup, verify normal close,
+owned PID disappearance and actual kernel listener absence; use a closed local
+rebind or protocol response to distinguish a transport proxy from the owned
+server. Bare TCP-connect success alone is insufficient in this environment.
+This rule is captured here; manifest browser-support cleanup and repeating-ramp
+clock research remain separate parent work, not extra changes in this task.
+
 ## Remaining work
 
-Independent code review must precede qa-cli and actual qa-browser. Hook-owned
-ordered receipts are still required for task_close; narrative results cannot
-substitute. The full BMS-player Goal stays active. Original browser FAIL,
+Independent code review actually preceded both QA runs. Final post-QA document
+review and hook-owned ordered receipt verification remain; narrative results
+cannot authorize task_close. The full BMS-player Goal stays active. Original browser FAIL,
 per-callback native authority, lifecycle correctness, physical/presentation
 timing, replay/input integrity and platform-device acceptance remain parent
 obligations.
