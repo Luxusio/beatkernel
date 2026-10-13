@@ -117,3 +117,91 @@ pub fn observe_asio_with_basis(
         })
         .map_err(ReplacementObservationError::Discipline)
 }
+
+/// Qualifies generated Source facts from one original WASAPI publication.
+/// Submission remains a delivery bound, not audible presentation or a pause ACK.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn qualify_wasapi_source_packet(
+    epoch: u64,
+    basis: OutputFrameBasis,
+    identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    query: beatkernel::audio::InterpolatedTargetTime,
+    snapshot: beatkernel_platform::audio::SourcePlaybackSnapshot,
+) -> Result<
+    crate::gameplay::output::ports::NativeSourcePlaybackQuery<AudioStreamSnapshot>,
+    crate::gameplay::output::ports::SourcePlaybackPacketError,
+> {
+    use crate::gameplay::output::ports::{
+        NativeSourcePlaybackQuery, SourcePlaybackFacts, SourcePlaybackPacketError,
+    };
+    if snapshot.revision == 0 {
+        return Err(SourcePlaybackPacketError::InvalidRevision);
+    }
+    if !snapshot.snapshot.telemetry_available {
+        return Err(SourcePlaybackPacketError::MissingNativeEvidence);
+    }
+    let submitted_source_end = basis
+        .start_physical_frame()
+        .checked_add(snapshot.snapshot.counters.submitted_frames)
+        .ok_or(SourcePlaybackPacketError::Overflow)?;
+    NativeSourcePlaybackQuery::new(
+        epoch,
+        basis,
+        identity,
+        query,
+        SourcePlaybackFacts {
+            playback: snapshot.playback,
+            pulled_source_end: snapshot.pulled_source_end,
+            submitted_source_end,
+            render: snapshot.snapshot.render,
+            revision: snapshot.revision,
+        },
+        Some(snapshot.snapshot),
+    )
+}
+
+/// Requires the complete original candidate to match the compound Source read.
+/// A changed publication waits; corrupt provenance or packet headers refuse.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn qualify_wasapi_source_observation_packet(
+    candidate: crate::native_output_coordinate::CoordinateNativeAudioSnapshot,
+    identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    packet: crate::gameplay::output::ports::NativeSourcePlaybackQuery<AudioStreamSnapshot>,
+) -> Result<
+    Option<crate::gameplay::output::ports::NativePlaybackObservation<AudioStreamSnapshot>>,
+    crate::gameplay::output::ports::SourcePlaybackPacketError,
+> {
+    use crate::gameplay::output::ports::{
+        NativePlaybackObservation, SourcePlaybackPacketError as Error,
+    };
+    let original = candidate.snapshot();
+    if packet.epoch() != original.epoch {
+        return Err(Error::EpochMismatch);
+    }
+    if packet.basis() != original.basis || packet.identity() != identity {
+        return Err(Error::BasisMismatch);
+    }
+    let beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::Wasapi {
+        snapshot: native, basis,
+    } = original.evidence else {
+        return Err(Error::CoordinateMismatch);
+    };
+    if basis != Some(original.basis) {
+        return Err(Error::BasisMismatch);
+    }
+    let query = candidate.source_query().map_err(|_| Error::Overflow)?;
+    if !packet.query().compare_interpolated_time(query).is_eq() {
+        return Err(Error::CoordinateMismatch);
+    }
+    if packet.native_evidence().is_none() {
+        return Err(Error::MissingNativeEvidence);
+    }
+    if packet.native_evidence() != Some(&native) {
+        return Ok(None);
+    }
+    NativePlaybackObservation::new(candidate, packet).map(Some)
+}
+
+#[cfg(test)]
+#[path = "wasapi_source_packet_fixtures.rs"]
+mod wasapi_source_packet_fixtures;

@@ -5213,16 +5213,31 @@ impl Desktop {
         if !game.retry_available() || (from_bookmark && !game.practice_restart_available()) {
             return;
         }
-        if from_bookmark && game.viewer.retained_practice_owner() {
-            let target = beatkernel::time::Timestamp::from_nanos(
-                game.practice_bookmark
-                    .expect("bookmark admission")
-                    .nanoseconds(),
-            );
-            self.failure = game
-                .request_retained_practice(
-                    beatkernel_bms_runtime::practice_control::PracticeAction::Scrub { target },
-                )
+        if !game.joined && game.viewer.retained_practice_owner() {
+            let target = if from_bookmark {
+                Ok(game.practice_bookmark.expect("bookmark admission"))
+            } else {
+                // Retained attempts may override the current start. F5 always
+                // returns to the immutable invocation, on the same audio owner.
+                game.launch
+                    .original_args()
+                    .chunks_exact(2)
+                    .find(|pair| pair[0] == "--start-ns")
+                    .map_or(Ok(0), |pair| {
+                        pair[1]
+                            .parse::<i64>()
+                            .map_err(|error| format!("pinned retry start: {error}"))
+                    })
+                    .and_then(PracticeStart::from_nanoseconds)
+            };
+            self.failure = target
+                .and_then(|target| {
+                    game.request_retained_practice(
+                        beatkernel_bms_runtime::practice_control::PracticeAction::Scrub {
+                            target: beatkernel::time::Timestamp::from_nanos(target.nanoseconds()),
+                        },
+                    )
+                })
                 .err();
             self.gesture.cancel();
             self.invalidate_hits();

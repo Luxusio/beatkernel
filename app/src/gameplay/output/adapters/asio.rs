@@ -1,9 +1,9 @@
 //! Trusted same-thread ASIO acquisition and original interval evidence.
 use crate::{
-    gameplay::output::ports::OutputReplacementBackend,
     gameplay::output::adapters::observation::{
-        observe_asio_with_basis, asio_pause_observation, ReplacementObservationError,
+        asio_pause_observation, observe_asio_with_basis, ReplacementObservationError,
     },
+    gameplay::output::ports::OutputReplacementBackend,
     live_pause::LivePauseObservation,
 };
 use beatkernel::{
@@ -13,22 +13,24 @@ use beatkernel::{
 use beatkernel_platform::{
     audio::{
         asio::{
-            AsioBufferRequest, AsioPresentationObservation, AsioPresentationError,
+            AsioBufferRequest, AsioPresentationError, AsioPresentationObservation,
             MultimediaClockAnchor,
         },
         presentation::discipline::PresentationDiscipline,
     },
     windows::{
-        clock::QpcClock,
         asio::{
             control::TrustedAsioOpener,
-            stream::{AsioStream, AsioStreamError, AsioStreamPhase, AsioPrepareFailure},
+            stream::{AsioPrepareFailure, AsioStream, AsioStreamError, AsioStreamPhase},
         },
+        clock::QpcClock,
     },
 };
 #[derive(Debug)]
 pub enum AsioReplacementError {
+    Coordinate(crate::native_output_coordinate::NativeOutputCoordinateError),
     Native(AsioStreamError),
+    Playback(crate::gameplay::output::ports::SourcePlaybackPacketError),
     Host(std::io::Error),
     Presentation(AsioPresentationError),
     Observation(ReplacementObservationError),
@@ -37,7 +39,9 @@ pub enum AsioReplacementError {
 impl std::fmt::Display for AsioReplacementError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Coordinate(error) => error.fmt(f),
             Self::Native(e) => e.fmt(f),
+            Self::Playback(e) => e.fmt(f),
             Self::Host(e) => e.fmt(f),
             Self::Presentation(e) => e.fmt(f),
             Self::Observation(e) => e.fmt(f),
@@ -48,7 +52,9 @@ impl std::fmt::Display for AsioReplacementError {
 impl std::error::Error for AsioReplacementError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Coordinate(error) => Some(error),
             Self::Native(e) => Some(e),
+            Self::Playback(e) => Some(e),
             Self::Host(e) => Some(e),
             Self::Presentation(e) => Some(e),
             Self::Observation(e) => Some(e),
@@ -342,3 +348,253 @@ impl crate::gameplay::output::ports::OriginalNativeOutputBackend for AsioReplace
         }))
     }
 }
+
+impl crate::gameplay::output::ports::OriginalCoordinateNativeOutputBackend
+    for AsioReplacementBackend
+{
+    fn observe_native_coordinate(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<crate::native_output_coordinate::CoordinateNativeAudioSnapshot>, Self::Error>
+    {
+        use crate::gameplay::output::ports::OriginalNativeOutputBackend;
+        use crate::native_output_coordinate::{
+            CoordinateNativeAudioSnapshot, NativeOutputCoordinate, NativeOutputCoordinateError,
+        };
+        self.observe_native(output)?.map(|snapshot| {
+            let beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::Asio { observation, .. } = snapshot.evidence
+            else { return Err(AsioReplacementError::Coordinate(NativeOutputCoordinateError::UnsupportedEvidence)); };
+            let frame = observation.render.start_frame.checked_sub(snapshot.basis.start_physical_frame())
+                .ok_or(AsioReplacementError::Coordinate(NativeOutputCoordinateError::FrameBeforeBasis))?;
+            CoordinateNativeAudioSnapshot::new(snapshot, NativeOutputCoordinate::StreamFrame { frame })
+                .map_err(AsioReplacementError::Coordinate)
+        }).transpose()
+    }
+}
+
+use crate::gameplay::output::ports::{
+    NativePlaybackObservation, NativeSourcePlaybackQuery, SourcePlaybackFacts,
+    SourcePlaybackIdentity, SourcePlaybackNativeOutputBackend, SourcePlaybackPacketError,
+};
+use crate::native_output_coordinate::CoordinateNativeAudioSnapshot;
+use beatkernel::audio::InterpolatedTargetTime;
+use beatkernel_platform::windows::asio::stream::{AsioBufferObservation, AsioPlaybackPhaseSnapshot};
+
+/// Software planar-write bounds, with the original coherent callback retained.
+/// Cached diagnostics in this view grant no fresh native presentation permission.
+pub(crate) fn qualify_asio_source_packet(
+    epoch: u64,
+    basis: OutputFrameBasis,
+    identity: SourcePlaybackIdentity,
+    query: InterpolatedTargetTime,
+    view: AsioPlaybackPhaseSnapshot,
+) -> Result<NativeSourcePlaybackQuery<AsioPlaybackPhaseSnapshot>, SourcePlaybackPacketError> {
+    if view.revision == 0 || view.revision & 1 != 0 {
+        return Err(SourcePlaybackPacketError::InvalidRevision);
+    }
+    if !view.snapshot.telemetry_available {
+        return Err(SourcePlaybackPacketError::InvalidPrefix);
+    }
+    if view
+        .snapshot
+        .buffer_observation
+        .is_some_and(|callback| view.snapshot.render != Some(callback.render))
+    {
+        return Err(SourcePlaybackPacketError::InvalidReport);
+    }
+    let prepared_end = basis
+        .start_physical_frame()
+        .checked_add(view.snapshot.prepared_frames)
+        .ok_or(SourcePlaybackPacketError::Overflow)?;
+    NativeSourcePlaybackQuery::new(
+        epoch,
+        basis,
+        identity,
+        query,
+        SourcePlaybackFacts {
+            playback: view.playback,
+            pulled_source_end: view.pulled_source_end,
+            submitted_source_end: prepared_end,
+            render: view.snapshot.render,
+            revision: view.revision,
+        },
+        Some(view),
+    )
+}
+
+/// A changed successful callback publication waits for another bounded read.
+/// Neither generated source history nor cached diagnostics authenticate HOST.
+/// This performs only mathematical qualification of the supplied pair. The caller
+/// must first acquire a genuine original SDK/clock observation through its native
+/// observation path; this function grants no native presentation permission and
+/// does not change clock anchors.
+pub fn qualify_asio_source_observation_packet(
+    candidate: CoordinateNativeAudioSnapshot,
+    expected_callback: AsioBufferObservation,
+    packet: NativeSourcePlaybackQuery<AsioPlaybackPhaseSnapshot>,
+) -> Result<Option<NativePlaybackObservation<AsioPlaybackPhaseSnapshot>>, SourcePlaybackPacketError>
+{
+    let view = packet
+        .native_evidence()
+        .ok_or(SourcePlaybackPacketError::MissingNativeEvidence)?;
+    let beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::Asio {
+        observation, basis,
+    } = candidate.snapshot().evidence else {
+        return Err(SourcePlaybackPacketError::CoordinateMismatch);
+    };
+    if candidate.snapshot().epoch != packet.epoch() {
+        return Err(SourcePlaybackPacketError::EpochMismatch);
+    }
+    if candidate.snapshot().basis != packet.basis()
+        || basis != Some(packet.basis())
+        || observation.sample_rate != packet.basis().sample_rate()
+        || observation.output_origin != packet.basis().origin()
+    {
+        return Err(SourcePlaybackPacketError::BasisMismatch);
+    }
+    if view.snapshot.buffer_observation != Some(expected_callback)
+        || view.snapshot.render != Some(observation.render)
+        || expected_callback.render != observation.render
+    {
+        return Ok(None);
+    }
+    NativePlaybackObservation::new(candidate, packet).map(Some)
+}
+
+impl AsioReplacementBackend {
+    /// Reads the existing coherent Source publication from a borrowed stream.
+    /// This immutable route makes no SDK calls and grants no native presentation
+    /// permission; its diagnostics are the stream's cached diagnostics.
+    pub fn source_playback_for_stream(
+        stream: &AsioStream,
+        epoch: u64,
+        query: &InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativeSourcePlaybackQuery<AsioPlaybackPhaseSnapshot>>, AsioReplacementError>
+    {
+        let basis = stream.frame_basis();
+        if basis.sample_rate() != identity.hz()
+            || identity.initial_physical() > basis.start_physical_frame()
+        {
+            return Err(AsioReplacementError::Playback(
+                SourcePlaybackPacketError::BasisMismatch,
+            ));
+        }
+        stream
+            .source_playback_view_at(
+                query,
+                identity.hz(),
+                identity.initial_physical(),
+                identity.initial_playback(),
+            )
+            .map(|view| {
+                qualify_asio_source_packet(epoch, basis, identity, *query, view)
+                    .map_err(AsioReplacementError::Playback)
+            })
+            .transpose()
+    }
+}
+
+impl SourcePlaybackNativeOutputBackend for AsioReplacementBackend {
+    type NativeEvidence = AsioPlaybackPhaseSnapshot;
+    fn source_playback_at(
+        &self,
+        output: &Self::Output,
+        query: &InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativeSourcePlaybackQuery<Self::NativeEvidence>>, Self::Error> {
+        Self::source_playback_for_stream(&output.stream, output.epoch, query, identity)
+    }
+    fn observe_native_playback(
+        &mut self,
+        output: &mut Self::Output,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativePlaybackObservation<Self::NativeEvidence>>, Self::Error> {
+        use crate::gameplay::output::ports::OriginalCoordinateNativeOutputBackend;
+        let basis = output.stream.frame_basis();
+        if basis.sample_rate() != identity.hz()
+            || identity.initial_physical() > basis.start_physical_frame()
+        {
+            return Err(AsioReplacementError::Playback(
+                SourcePlaybackPacketError::BasisMismatch,
+            ));
+        }
+        for _ in 0..3 {
+            // Fresh SDK diagnostics and the copied original callback are acquired
+            // through the existing owning-thread native path, never this view.
+            let before = output
+                .stream
+                .snapshot()
+                .map_err(AsioReplacementError::Native)?;
+            if before.native.faults.0 != 0 || before.native.render_error != 0 {
+                return Err(AsioReplacementError::Native(
+                    AsioStreamError::ReopenRequired(before.native),
+                ));
+            }
+            match before.phase {
+                AsioStreamPhase::Ready => return Ok(None),
+                AsioStreamPhase::Running => {}
+                phase => return Err(AsioReplacementError::Status(phase)),
+            }
+            let Some(callback) = before.buffer_observation else {
+                continue;
+            };
+            let Some(candidate) = self.observe_native_coordinate(output)? else {
+                continue;
+            };
+            let query = candidate
+                .source_query()
+                .map_err(AsioReplacementError::Coordinate)?;
+            let Some(packet) = self.source_playback_at(output, &query, identity)? else {
+                continue;
+            };
+            if let Some(observation) =
+                qualify_asio_source_observation_packet(candidate, callback, packet)
+                    .map_err(AsioReplacementError::Playback)?
+            {
+                return Ok(Some(observation));
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl crate::gameplay::output::ports::SourceHistoryRetirementNativeOutputBackend
+    for AsioReplacementBackend
+{
+    fn request_source_history_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        expected_epoch: u64,
+        expected_basis: OutputFrameBasis,
+        identity: SourcePlaybackIdentity,
+        source_pin: u64,
+    ) -> Result<Option<u64>, Self::Error> {
+        if output.epoch != expected_epoch {
+            return Err(AsioReplacementError::Playback(
+                SourcePlaybackPacketError::EpochMismatch,
+            ));
+        }
+        if output.stream.frame_basis() != expected_basis {
+            return Err(AsioReplacementError::Playback(
+                SourcePlaybackPacketError::BasisMismatch,
+            ));
+        }
+        output
+            .stream
+            .request_source_history_retirement(
+                expected_basis,
+                (
+                    identity.hz(),
+                    identity.initial_physical(),
+                    identity.initial_playback(),
+                ),
+                source_pin,
+            )
+            .map_err(AsioReplacementError::Native)
+    }
+}
+
+#[cfg(test)]
+#[path = "asio_source_packet_fixtures.rs"]
+mod source_packet_fixtures;

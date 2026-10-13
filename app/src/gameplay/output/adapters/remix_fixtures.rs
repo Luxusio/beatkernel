@@ -380,8 +380,10 @@ fn actual_alsa_adapter_routes_matrix_and_recovers_original_source() {
         assert!(std::time::Instant::now() < deadline);
         std::thread::yield_now();
     }
-    assert!(backend.render_report(&native).unwrap().is_some());
     backend.retire(&mut native).unwrap();
+    // Null output can publish continuously. Join its sole writer before
+    // requiring the bounded telemetry read to retain the successful report.
+    assert!(backend.render_report(&native).unwrap().is_some());
     let original = native.take_stopped_mixer().unwrap().unwrap();
     assert_eq!(original.mixer().config().format().channels(), 1);
     assert_eq!(original.output_frame_basis().origin(), before.origin());

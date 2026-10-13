@@ -1,16 +1,23 @@
 //! Original native evidence admitted into one audio-authoritative gameplay owner.
 use crate::{
-    audio_authority::{AudioAuthority, AudioAuthorityEpoch, PreparedPrimedCorrelation},
+    audio_authority::{
+        AudioAuthority, AudioAuthorityCoordinateBasis, AudioAuthorityEpoch,
+        PreparedPrimedCorrelation,
+    },
     local_input::InputMerger,
     native_gameplay::NativeGameplayResult,
+    native_output_coordinate::{
+        CoordinateNativeAudioSnapshot, CoordinateTargetNativeAudioSnapshot, NativeOutputCoordinate,
+    },
 };
 use beatkernel::audio::{
-    OutputFrameBasis, PracticeReceipt, ProjectedPracticeReceipt, TargetFrameBasis,
+    InterpolatedTargetTime, OutputFrameBasis, PracticeReceipt, ProjectedPracticeReceipt,
+    TargetFrameBasis, TargetTime,
 };
-use beatkernel::time::ClockPoint;
+use beatkernel::time::{presentation::ObservationAdmission, ClockPoint};
 use beatkernel_platform::audio::presentation::validation::{
-    NativeObservationAdmission, NativePresentationRecord, NativePresentationValidator,
-    OriginalNativePresentationEvidence, PreparedNativePresentation,
+    NativeFrameBasis, NativeObservationAdmission, NativePresentationRecord,
+    NativePresentationValidator, OriginalNativePresentationEvidence, PreparedNativePresentation,
 };
 
 /// One caller-supplied native observation on its actual creation epoch and frame basis.
@@ -105,6 +112,7 @@ pub struct NativeAudioPresentation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedPracticeBoundary {
     epoch: AudioAuthorityEpoch,
+    coordinate_basis: Option<AudioAuthorityCoordinateBasis>,
     mixer_basis: OutputFrameBasis,
     receipt: PracticeReceipt,
     projected: Option<ProjectedPracticeReceipt>,
@@ -130,6 +138,31 @@ impl PreparedPracticeBoundary {
     }
     pub const fn host(&self) -> ClockPoint {
         self.host
+    }
+    /// Original exact cut in the native descriptor's Source or Target duration.
+    pub fn coordinate_query(&self) -> NativeGameplayResult<Option<InterpolatedTargetTime>> {
+        Self::query_for(self.coordinate_basis, self.receipt, self.projected)
+    }
+
+    fn query_for(
+        coordinate_basis: Option<AudioAuthorityCoordinateBasis>,
+        receipt: PracticeReceipt,
+        projected: Option<ProjectedPracticeReceipt>,
+    ) -> NativeGameplayResult<Option<InterpolatedTargetTime>> {
+        let time = match coordinate_basis {
+            Some(AudioAuthorityCoordinateBasis::SourceFrame(basis))
+            | Some(AudioAuthorityCoordinateBasis::SourceCounter { basis, .. }) => {
+                TargetTime::from_frames(receipt.physical_frame, basis.sample_rate())?
+            }
+            Some(AudioAuthorityCoordinateBasis::TargetFrame(_)) => {
+                projected
+                    .ok_or("coordinate practice boundary lacks its original projection")?
+                    .boundary
+                    .target_time
+            }
+            None => return Ok(None),
+        };
+        Ok(Some(InterpolatedTargetTime::new(time, 0, 0, 1, 0, 1)?))
     }
 }
 impl NativeAudioPresentation {
@@ -165,6 +198,9 @@ impl NativeAudioPresentation {
         snapshot: NativeAudioSnapshot,
     ) -> NativeGameplayResult<NativeObservationAdmission> {
         self.validate_identity()?;
+        if self.authority.coordinate_basis().is_some() {
+            return Err("scalar native admission cannot replace original coordinate mode".into());
+        }
         if self.target_basis.is_some() {
             return Err("legacy snapshot cannot replace target creation basis".into());
         }
@@ -178,13 +214,134 @@ impl NativeAudioPresentation {
         }
         let prepared = prepare_native_snapshot(&self.validator, snapshot)?;
         if let Some(pair) = prepared.correlation_pair() {
-            self.authority.observe(snapshot.epoch, pair)?;
+            let retained = self.authority.observe(snapshot.epoch, pair)?;
+            if matches!(
+                prepared.evidence(),
+                OriginalNativePresentationEvidence::Asio { .. }
+            ) && retained != ObservationAdmission::Retained
+            {
+                return Err("ASIO progress was not retained by its scalar authority".into());
+            }
         }
         // Both owners are private and exclusively borrowed; authority admission
         // cannot change the validator state bound by this exact native token.
         let admission = self.validator.commit(prepared)?;
         if admission == NativeObservationAdmission::Progress {
             self.basis = Some(snapshot.basis);
+        }
+        Ok(admission)
+    }
+
+    /// Admit original native units into the same correlation and evidence owners.
+    /// Descriptor checks precede duplicate and coarse-HOST classifications.
+    pub fn admit_coordinate(
+        &mut self,
+        coordinate_snapshot: CoordinateNativeAudioSnapshot,
+    ) -> NativeGameplayResult<NativeObservationAdmission> {
+        self.validate_identity()?;
+        let snapshot = coordinate_snapshot.snapshot();
+        let coordinate = coordinate_snapshot.coordinate();
+        let basis = match (self.authority.coordinate_basis(), coordinate) {
+            (
+                Some(AudioAuthorityCoordinateBasis::SourceFrame(basis)),
+                NativeOutputCoordinate::StreamFrame { .. },
+            ) => basis,
+            (
+                Some(AudioAuthorityCoordinateBasis::SourceCounter { basis, frequency }),
+                NativeOutputCoordinate::Counter {
+                    frequency: actual, ..
+                },
+            ) if frequency == actual => basis,
+            _ => {
+                return Err(
+                    "native coordinate differs from its immutable authority descriptor".into(),
+                )
+            }
+        };
+        if self.target_basis.is_some()
+            || snapshot.epoch != self.authority.epoch().id
+            || snapshot.basis != basis
+            || basis.point_at_stream_frame(0)? != self.validator.output_origin()
+            || self.basis.is_some_and(|pinned| pinned != basis)
+        {
+            return Err("native coordinate differs from its source creation epoch/basis".into());
+        }
+        self.validate_coordinate_history()?;
+        let prepared = match (snapshot.evidence, coordinate) {
+            (
+                OriginalNativePresentationEvidence::SuppliedPair(pair),
+                NativeOutputCoordinate::StreamFrame { frame },
+            ) => self.validator.prepare_frame_pair(
+                snapshot.epoch,
+                pair,
+                NativeFrameBasis::Source(basis),
+                frame,
+            )?,
+            _ => prepare_native_snapshot(&self.validator, snapshot)?,
+        };
+        if let Some(pair) = prepared.correlation_pair() {
+            if self
+                .authority
+                .observe_coordinate(snapshot.epoch, pair, coordinate)?
+                != ObservationAdmission::Retained
+            {
+                return Err("native coordinate progress was not retained by its authority".into());
+            }
+        }
+        let admission = self.validator.commit(prepared)?;
+        if admission == NativeObservationAdmission::Progress {
+            self.basis = Some(basis);
+        }
+        Ok(admission)
+    }
+
+    /// Admits original target frames into the same native and authority owners.
+    /// This is time evidence only; it does not qualify converted playback spans.
+    pub fn admit_target_coordinate(
+        &mut self,
+        coordinate_snapshot: CoordinateTargetNativeAudioSnapshot,
+    ) -> NativeGameplayResult<NativeObservationAdmission> {
+        self.validate_identity()?;
+        let snapshot = coordinate_snapshot.snapshot();
+        let NativeOutputCoordinate::StreamFrame { frame } = coordinate_snapshot.coordinate() else {
+            return Err("target admission requires original stream frames".into());
+        };
+        let Some(AudioAuthorityCoordinateBasis::TargetFrame(basis)) =
+            self.authority.coordinate_basis()
+        else {
+            return Err("target admission requires its immutable target descriptor".into());
+        };
+        if self.basis.is_some()
+            || snapshot.epoch != self.authority.epoch().id
+            || snapshot.basis != basis
+            || basis.point_at_stream_frame(0)? != self.validator.output_origin()
+            || self.target_basis.is_some_and(|pinned| pinned != basis)
+        {
+            return Err("target coordinate differs from its creation epoch/basis".into());
+        }
+        self.validate_coordinate_history()?;
+        let OriginalNativePresentationEvidence::SuppliedPair(pair) = snapshot.evidence else {
+            return Err("target frame admission requires original supplied frame evidence".into());
+        };
+        let prepared = self.validator.prepare_frame_pair(
+            snapshot.epoch,
+            pair,
+            NativeFrameBasis::Target(basis),
+            frame,
+        )?;
+        if let Some(pair) = prepared.correlation_pair() {
+            if self.authority.observe_coordinate(
+                snapshot.epoch,
+                pair,
+                coordinate_snapshot.coordinate(),
+            )? != ObservationAdmission::Retained
+            {
+                return Err("target coordinate progress was not retained by its authority".into());
+            }
+        }
+        let admission = self.validator.commit(prepared)?;
+        if admission == NativeObservationAdmission::Progress {
+            self.target_basis = Some(basis);
         }
         Ok(admission)
     }
@@ -279,6 +436,9 @@ impl NativeAudioPresentation {
         snapshot: TargetNativeAudioSnapshot,
     ) -> NativeGameplayResult<NativeObservationAdmission> {
         self.validate_identity()?;
+        if self.authority.coordinate_basis().is_some() {
+            return Err("scalar target admission cannot replace original coordinate mode".into());
+        }
         if self.basis.is_some()
             || snapshot.epoch != self.authority.epoch().id
             || self
@@ -461,6 +621,8 @@ impl NativeAudioPresentation {
         } else if let Some(native) = self.basis {
             let relative = receipt.physical_frame - native.start_physical_frame();
             if projected.target_rate != native.sample_rate()
+                || projected.boundary.target_time
+                    != TargetTime::from_frames(receipt.physical_frame, native.sample_rate())?
                 || raw != native.point_at_stream_frame(relative)?
                 || projected.target_frame != receipt.physical_frame
             {
@@ -505,16 +667,65 @@ impl NativeAudioPresentation {
         raw: ClockPoint,
         now: ClockPoint,
     ) -> NativeGameplayResult<Option<PreparedPracticeBoundary>> {
-        let Some(host) = self.authority.presented_boundary_host(raw, now)? else {
-            return Ok(None);
+        let coordinate_basis = self.authority.coordinate_basis();
+        let (host, logical) = match coordinate_basis {
+            Some(AudioAuthorityCoordinateBasis::SourceFrame(source_basis))
+            | Some(AudioAuthorityCoordinateBasis::SourceCounter {
+                basis: source_basis,
+                ..
+            }) => {
+                self.validate_coordinate_seed()?;
+                if self.basis != Some(source_basis) || basis != source_basis {
+                    return Err(
+                        "practice Source descriptor differs from original native mixer basis"
+                            .into(),
+                    );
+                }
+                let query =
+                    PreparedPracticeBoundary::query_for(coordinate_basis, receipt, projected)?
+                        .ok_or("coordinate practice lacks its original Source descriptor")?;
+                let Some(host) = self
+                    .authority
+                    .presented_coordinate_boundary_host(&query, now)?
+                else {
+                    return Ok(None);
+                };
+                (host, self.authority.epoch().logical_output(raw)?)
+            }
+            Some(AudioAuthorityCoordinateBasis::TargetFrame(target_basis)) => {
+                self.validate_coordinate_seed()?;
+                if self.target_basis != Some(target_basis) {
+                    return Err(
+                        "practice Target descriptor differs from original native basis".into(),
+                    );
+                }
+                let projected = projected
+                    .ok_or("coordinate practice requires an actual projected Target boundary")?;
+                let query =
+                    InterpolatedTargetTime::new(projected.boundary.target_time, 0, 0, 1, 0, 1)?;
+                let Some(host) = self
+                    .authority
+                    .presented_coordinate_boundary_host(&query, now)?
+                else {
+                    return Ok(None);
+                };
+                (host, self.authority.epoch().logical_output(raw)?)
+            }
+            None => {
+                let Some(host) = self.authority.presented_boundary_host(raw, now)? else {
+                    return Ok(None);
+                };
+                (host, self.authority.checked_logical_output(raw)?)
+            }
         };
         Ok(Some(PreparedPracticeBoundary {
             epoch: self.authority.epoch(),
+            coordinate_basis,
             mixer_basis: basis,
             receipt,
             projected,
             raw,
-            logical: self.authority.checked_logical_output(raw)?,
+            logical,
             host,
         }))
     }
@@ -528,6 +739,18 @@ impl NativeAudioPresentation {
         merger: &InputMerger,
     ) -> NativeGameplayResult<bool> {
         self.validate_practice_boundary(prepared, now)?;
+        if let Some(query) = prepared.coordinate_query()? {
+            return Ok(self
+                .authority
+                .prepare_coordinate_resume_control_cutoff(
+                    prepared.epoch.id,
+                    query,
+                    prepared.host,
+                    now,
+                    merger,
+                )?
+                .is_some());
+        }
         Ok(self
             .authority
             .prepare_resume_control_cutoff(
@@ -549,6 +772,21 @@ impl NativeAudioPresentation {
         merger: &InputMerger,
     ) -> NativeGameplayResult<()> {
         self.validate_practice_boundary(&prepared, now)?;
+        if let Some(query) = prepared.coordinate_query()? {
+            let cutoff = self
+                .authority
+                .prepare_coordinate_resume_control_cutoff(
+                    prepared.epoch.id,
+                    query,
+                    prepared.host,
+                    now,
+                    merger,
+                )?
+                .ok_or("practice boundary awaits acquired prefix or pre-cut input drain")?;
+            self.authority
+                .commit_coordinate_control_cutoff(cutoff, now, merger)?;
+            return Ok(());
+        }
         let cutoff = self
             .authority
             .prepare_resume_control_cutoff(
@@ -570,6 +808,7 @@ impl NativeAudioPresentation {
     ) -> NativeGameplayResult<()> {
         if self.authority.epoch() != prepared.epoch
             || self.practice_mixer_basis != Some(prepared.mixer_basis)
+            || self.authority.coordinate_basis() != prepared.coordinate_basis
         {
             return Err("practice boundary belongs to a retired output epoch/basis".into());
         }
@@ -627,7 +866,109 @@ impl NativeAudioPresentation {
         }
         Ok(())
     }
+
+    pub(crate) fn validate_coordinate_seed(&self) -> NativeGameplayResult<()> {
+        self.validate_identity()?;
+        match self.authority.coordinate_basis() {
+            Some(AudioAuthorityCoordinateBasis::SourceFrame(basis))
+            | Some(AudioAuthorityCoordinateBasis::SourceCounter { basis, .. }) => {
+                if self.target_basis.is_some() || self.basis.is_some_and(|pinned| pinned != basis) {
+                    return Err(
+                        "coordinate seed source descriptor differs from its native pin".into(),
+                    );
+                }
+            }
+            Some(AudioAuthorityCoordinateBasis::TargetFrame(basis)) => {
+                if self.basis.is_some() || self.target_basis.is_some_and(|pinned| pinned != basis) {
+                    return Err(
+                        "coordinate seed target descriptor differs from its native pin".into(),
+                    );
+                }
+            }
+            None => {
+                return Err("coordinate startup requires an original coordinate descriptor".into())
+            }
+        }
+        self.validate_coordinate_history()
+    }
+
+    fn validate_coordinate_history(&self) -> NativeGameplayResult<()> {
+        let native = self.validator.latest_record();
+        let authority = self.authority.latest_coordinate_observation();
+        match (native, authority) {
+            (None, None) if self.authority.history_len() == 0 => Ok(()),
+            (Some(record), Some(observation)) if record.pair() == observation.pair() => {
+                let coordinate = match *record.evidence() {
+                    OriginalNativePresentationEvidence::Wasapi { snapshot, .. } => {
+                        let clock = snapshot.clock.ok_or("accepted native counter is missing")?;
+                        NativeOutputCoordinate::Counter {
+                            position: clock.position,
+                            frequency: clock.frequency,
+                        }
+                    }
+                    OriginalNativePresentationEvidence::Asio { observation, basis } => {
+                        let basis = basis.ok_or("accepted ASIO creation basis is missing")?;
+                        NativeOutputCoordinate::StreamFrame {
+                            frame: observation
+                                .render
+                                .start_frame
+                                .checked_sub(basis.start_physical_frame())
+                                .ok_or("accepted ASIO block precedes its creation basis")?,
+                        }
+                    }
+                    OriginalNativePresentationEvidence::SuppliedPair(_) => {
+                        let (frame_basis, frame) = self
+                            .validator
+                            .latest_frame_position()
+                            .ok_or("accepted native relation has no original frame metadata")?;
+                        let expected = match self.authority.coordinate_basis() {
+                            Some(AudioAuthorityCoordinateBasis::SourceFrame(basis)) => {
+                                if self.basis != Some(basis) || self.target_basis.is_some() {
+                                    return Err("accepted native source frame basis differs".into());
+                                }
+                                NativeFrameBasis::Source(basis)
+                            }
+                            Some(AudioAuthorityCoordinateBasis::TargetFrame(basis)) => {
+                                if self.target_basis != Some(basis) || self.basis.is_some() {
+                                    return Err("accepted native target frame basis differs".into());
+                                }
+                                NativeFrameBasis::Target(basis)
+                            }
+                            _ => {
+                                return Err("accepted frame metadata has no frame descriptor".into())
+                            }
+                        };
+                        if frame_basis != expected {
+                            return Err(
+                                "accepted native frame metadata differs from its basis".into()
+                            );
+                        }
+                        NativeOutputCoordinate::StreamFrame { frame }
+                    }
+                };
+                if observation.coordinate() != Some(coordinate) {
+                    return Err(
+                        "native presentation and authority original coordinates diverged".into(),
+                    );
+                }
+                Ok(())
+            }
+            _ => Err("native presentation and authority retained histories diverged".into()),
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "native_audio_presentation_coordinate_fixtures.rs"]
+mod coordinate_fixtures;
+
+#[cfg(test)]
+#[path = "native_audio_presentation_asio_coordinate_fixtures.rs"]
+mod asio_coordinate_fixtures;
+
+#[cfg(test)]
+#[path = "native_audio_practice_target_coordinate_fixtures.rs"]
+mod practice_target_coordinate_fixtures;
 
 pub(crate) fn prepare_native_snapshot(
     validator: &NativePresentationValidator,
@@ -1040,3 +1381,11 @@ mod practice_boundary_tests {
             .is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "native_audio_presentation_target_coordinate_fixtures.rs"]
+mod target_coordinate_fixtures;
+
+#[cfg(test)]
+#[path = "native_audio_practice_source_coordinate_fixtures.rs"]
+mod practice_source_coordinate_fixtures;

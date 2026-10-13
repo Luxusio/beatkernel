@@ -274,6 +274,48 @@ pub struct GameplayAudioOutputContext<'a> {
 
 pub trait GameplayDevice {
     type Presentation: GameplayPresentationPort;
+    /// Queue mathematical retention pins using the current original presentation binding.
+    /// Unsupported adapters perform no observation and grant no completion or pause ACK.
+    fn request_history_retirement(
+        &mut self,
+        _: &crate::native_audio_presentation::NativeAudioPresentation,
+        _: &beatkernel::audio::InterpolatedTargetTime,
+        _: crate::gameplay::output::ports::SourcePlaybackIdentity,
+        _: Option<u64>,
+    ) -> NativeGameplayResult<Option<u64>> {
+        Ok(None)
+    }
+    /// Read-only generated mapping. Unsupported adapters provide no fallback clock.
+    fn playback_mapping_at(
+        &self,
+        _: &crate::native_audio_presentation::NativeAudioPresentation,
+        _: &beatkernel::audio::InterpolatedTargetTime,
+        _: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> NativeGameplayResult<Option<crate::native_playback_phase::NativePlaybackMapping>> {
+        Err("device does not support exact playback mapping".into())
+    }
+    /// One compound acquisition for original source control staging; no scalar fallback.
+    fn observe_coordinate_control(
+        &mut self,
+        _: &mut crate::native_audio_presentation::NativeAudioPresentation,
+        _: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> NativeGameplayResult<Option<crate::native_coordinate_control::CoordinateControlFacts>>
+    {
+        Err("device does not support original coordinate control facts".into())
+    }
+    /// One compound Source or Target acquisition using the original presentation binding.
+    fn observe_coordinate_playback_control(
+        &mut self,
+        presentation: &mut crate::native_audio_presentation::NativeAudioPresentation,
+        identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> NativeGameplayResult<
+        Option<crate::native_coordinate_control::CoordinatePlaybackControlFacts>,
+    > {
+        self.observe_coordinate_control(presentation, identity)
+            .map(|facts| {
+                facts.map(crate::native_coordinate_control::CoordinatePlaybackControlFacts::Source)
+            })
+    }
     /// No published output clock while a held replacement waits for native evidence.
     fn output_clock_suspended(&self) -> bool {
         false
@@ -384,10 +426,46 @@ mod presentation_resume_port_fixtures;
 #[path = "presentation_output_rebind_fixtures.rs"]
 mod presentation_output_rebind_fixtures;
 
+#[cfg(test)]
+#[path = "coordinate_playback_device_fixtures.rs"]
+mod coordinate_playback_device_fixtures;
+
+#[cfg(test)]
+#[path = "history_retirement_dispatch_fixtures.rs"]
+mod history_retirement_dispatch_fixtures;
+
 /// Static pump timing dispatch; audio ownership never implements the legacy correction port.
 pub(crate) trait PumpTiming<D: GameplayDevice> {
     const AUDIO: bool;
     fn observe(&mut self, device: &mut D) -> NativeGameplayResult<()>;
+    /// Legacy timing owners do not request coordinate history retirement.
+    fn retire_coordinate_history(
+        &mut self,
+        _: &mut D,
+        _: &[Option<beatkernel::audio::InterpolatedTargetTime>],
+        _: Option<u64>,
+    ) -> NativeGameplayResult<Option<u64>> {
+        Ok(None)
+    }
+    /// Later coordinate control pumps acquire through the same bound presentation.
+    fn coordinate_control(
+        &mut self,
+        _: &mut D,
+    ) -> NativeGameplayResult<Option<crate::native_coordinate_control::CoordinateControlFacts>>
+    {
+        Err("timing does not support original coordinate control facts".into())
+    }
+    /// Retain legacy Source dispatch unless the timing owner supports both coordinate bases.
+    fn coordinate_playback_control(
+        &mut self,
+        device: &mut D,
+    ) -> NativeGameplayResult<
+        Option<crate::native_coordinate_control::CoordinatePlaybackControlFacts>,
+    > {
+        self.coordinate_control(device).map(|facts| {
+            facts.map(crate::native_coordinate_control::CoordinatePlaybackControlFacts::Source)
+        })
+    }
     fn latest_pair(&self) -> Option<ClockPair>;
     fn validate_host(&self, point: ClockPoint) -> NativeGameplayResult<()>;
     fn correction(
@@ -398,6 +476,11 @@ pub(crate) trait PumpTiming<D: GameplayDevice> {
     fn quality(&self) -> ClockMappingQuality;
     fn logical_domain(&self, config: NativeGameplayConfig) -> ClockDomainId;
     fn live_speed(&self) -> Option<crate::live_speed::LiveSpeedSetup> {
+        None
+    }
+    fn source_playback_identity(
+        &self,
+    ) -> Option<crate::gameplay::output::ports::SourcePlaybackIdentity> {
         None
     }
     fn section_start(&self) -> Option<Timestamp> {
@@ -447,6 +530,7 @@ pub(crate) struct AudioTiming<'a>(
     pub &'a mut crate::native_audio_presentation::NativeAudioPresentation,
     pub Timestamp,
     pub Option<crate::live_speed::LiveSpeedSetup>,
+    pub Option<crate::gameplay::output::ports::SourcePlaybackIdentity>,
 );
 impl<D: GameplayDevice> PumpTiming<D> for LegacyTiming<'_, D::Presentation> {
     const AUDIO: bool = false;
@@ -532,6 +616,54 @@ impl<D: GameplayDevice> PumpTiming<D> for AudioTiming<'_> {
     fn observe(&mut self, device: &mut D) -> NativeGameplayResult<()> {
         device.observe_audio(self.0)
     }
+    fn retire_coordinate_history(
+        &mut self,
+        device: &mut D,
+        additional_queries: &[Option<beatkernel::audio::InterpolatedTargetTime>],
+        source_minimum: Option<u64>,
+    ) -> NativeGameplayResult<Option<u64>> {
+        let Some(identity) = self.3 else {
+            return Ok(None);
+        };
+        if !matches!(
+            self.0.authority().coordinate_basis(),
+            Some(
+                crate::audio_authority::AudioAuthorityCoordinateBasis::TargetFrame(_)
+                    | crate::audio_authority::AudioAuthorityCoordinateBasis::SourceFrame(_)
+                    | crate::audio_authority::AudioAuthorityCoordinateBasis::SourceCounter { .. }
+            )
+        ) {
+            return Ok(None);
+        }
+        let mut minimum = self.0.authority().future_input_retention_query()?;
+        for query in additional_queries.iter().flatten() {
+            if query.compare_interpolated_time(minimum).is_lt() {
+                minimum = *query;
+            }
+        }
+        device.request_history_retirement(self.0, &minimum, identity, source_minimum)
+    }
+    fn coordinate_control(
+        &mut self,
+        device: &mut D,
+    ) -> NativeGameplayResult<Option<crate::native_coordinate_control::CoordinateControlFacts>>
+    {
+        let identity = self
+            .3
+            .ok_or("coordinate control requires original source history binding")?;
+        device.observe_coordinate_control(self.0, identity)
+    }
+    fn coordinate_playback_control(
+        &mut self,
+        device: &mut D,
+    ) -> NativeGameplayResult<
+        Option<crate::native_coordinate_control::CoordinatePlaybackControlFacts>,
+    > {
+        let identity = self
+            .3
+            .ok_or("coordinate control requires original source history binding")?;
+        device.observe_coordinate_playback_control(self.0, identity)
+    }
     fn latest_pair(&self) -> Option<ClockPair> {
         self.0.authority().latest_observation()
     }
@@ -556,6 +688,11 @@ impl<D: GameplayDevice> PumpTiming<D> for AudioTiming<'_> {
     }
     fn live_speed(&self) -> Option<crate::live_speed::LiveSpeedSetup> {
         self.2
+    }
+    fn source_playback_identity(
+        &self,
+    ) -> Option<crate::gameplay::output::ports::SourcePlaybackIdentity> {
+        self.3
     }
     fn section_start(&self) -> Option<Timestamp> {
         Some(self.1)

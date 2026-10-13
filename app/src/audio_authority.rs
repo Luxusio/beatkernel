@@ -1,9 +1,12 @@
 //! Finite audio-output authority and original HOST input correspondence.
 //! InputMerger owns acquired payloads; this owner reads no clock or device.
 use crate::local_input::{InputMerger, MergeError};
+use crate::native_output_coordinate::NativeOutputCoordinate;
+use beatkernel::audio::{InterpolatedTargetTime, OutputFrameBasis, TargetFrameBasis, TargetTime};
 use beatkernel::time::{
     presentation::ObservationAdmission, AffineClockMapper, CalibrationError, ClockDomainId,
-    ClockInterval, ClockPair, ClockPoint, Duration, ExtrapolationPolicy, Timestamp,
+    ClockInterval, ClockMapper, ClockMappingQuality, ClockPair, ClockPoint, Duration,
+    ExtrapolationPolicy, Timestamp,
 };
 use std::{collections::VecDeque, fmt};
 
@@ -35,9 +38,133 @@ pub struct AudioAuthorityEpoch {
     pub host_domain: ClockDomainId,
 }
 impl AudioAuthorityEpoch {
-    /// Checked coordinate on this epoch's logical timeline.
-    pub(crate) fn logical_output(self, raw: ClockPoint) -> Result<ClockPoint, AudioAuthorityError> {
+    /// Checked mathematical projection onto this epoch's logical timeline.
+    ///
+    /// This conversion does not acquire native evidence, prove submission, admit
+    /// an observation or acknowledge playback control, and mutates no authority.
+    /// Callers must separately qualify the original native coordinate and HOST
+    /// before using this projection for playback.
+    pub fn logical_output(self, raw: ClockPoint) -> Result<ClockPoint, AudioAuthorityError> {
         AudioAuthority::logical_in_epoch(self, raw)
+    }
+}
+
+/// Immutable original-coordinate descriptor. This validates mathematical consistency
+/// only; it grants no native evidence, submission, epoch admission or pause ACK.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioAuthorityCoordinateBasis {
+    SourceFrame(OutputFrameBasis),
+    SourceCounter {
+        basis: OutputFrameBasis,
+        frequency: u64,
+    },
+    TargetFrame(TargetFrameBasis),
+}
+impl AudioAuthorityCoordinateBasis {
+    fn descriptor(self) -> Result<(TargetTime, u64, ClockPoint), AudioAuthorityError> {
+        match self {
+            Self::SourceFrame(basis) => Ok((
+                TargetTime::from_frames(basis.start_physical_frame(), basis.sample_rate())
+                    .map_err(|_| AudioAuthorityError::Overflow)?,
+                u64::from(basis.sample_rate()),
+                basis.origin(),
+            )),
+            Self::SourceCounter { basis, frequency } => Ok((
+                TargetTime::from_frames(basis.start_physical_frame(), basis.sample_rate())
+                    .map_err(|_| AudioAuthorityError::Overflow)?,
+                frequency,
+                basis.origin(),
+            )),
+            Self::TargetFrame(basis) => Ok((
+                basis.start_time(),
+                u64::from(basis.sample_rate()),
+                basis.origin(),
+            )),
+        }
+    }
+    fn query(
+        self,
+        observation: AudioAuthorityObservation,
+    ) -> Result<InterpolatedTargetTime, AudioAuthorityError> {
+        let (base, frequency, _) = self.descriptor()?;
+        let units = CoordinateInputMapper::units(observation)?;
+        InterpolatedTargetTime::new(base, units, units, frequency, 0, 1)
+            .map_err(|_| AudioAuthorityError::Overflow)
+    }
+    pub(crate) fn interpolate(
+        self,
+        left: AudioAuthorityObservation,
+        right: AudioAuthorityObservation,
+        host: ClockPoint,
+    ) -> Result<InterpolatedTargetTime, AudioAuthorityError> {
+        if host.domain != left.pair.target.domain || host.domain != right.pair.target.domain {
+            return Err(AudioAuthorityError::DomainMismatch);
+        }
+        let left_units = CoordinateInputMapper::units(left)?;
+        let right_units = CoordinateInputMapper::units(right)?;
+        if right_units <= left_units || right.pair.target.timestamp <= left.pair.target.timestamp {
+            return Err(AudioAuthorityError::ObservationRegression);
+        }
+        let (base, frequency, _) = self.descriptor()?;
+        let host_span = u64::try_from(delta(
+            right.pair.target.timestamp,
+            left.pair.target.timestamp,
+        ))
+        .map_err(|_| AudioAuthorityError::Overflow)?;
+        InterpolatedTargetTime::new(
+            base,
+            left_units,
+            right_units,
+            frequency,
+            delta(host.timestamp, left.pair.target.timestamp),
+            host_span,
+        )
+        .map_err(|_| AudioAuthorityError::Overflow)
+    }
+    fn point(self, coordinate: NativeOutputCoordinate) -> Result<ClockPoint, AudioAuthorityError> {
+        match (self, coordinate) {
+            (Self::SourceFrame(basis), NativeOutputCoordinate::StreamFrame { frame }) => basis
+                .point_at_stream_frame(frame)
+                .map_err(|_| AudioAuthorityError::Overflow),
+            (Self::TargetFrame(basis), NativeOutputCoordinate::StreamFrame { frame }) => basis
+                .point_at_stream_frame(frame)
+                .map_err(|_| AudioAuthorityError::Overflow),
+            (
+                Self::SourceCounter { basis, frequency },
+                NativeOutputCoordinate::Counter {
+                    position,
+                    frequency: actual,
+                },
+            ) if frequency > 0 && actual == frequency => basis
+                .point_at_native_counter(position, frequency)
+                .map_err(|_| AudioAuthorityError::Overflow),
+            _ => Err(AudioAuthorityError::CoordinateMismatch),
+        }
+    }
+    pub(crate) fn origin(self) -> Result<ClockPoint, AudioAuthorityError> {
+        self.point(match self {
+            Self::SourceCounter { frequency, .. } => NativeOutputCoordinate::Counter {
+                position: 0,
+                frequency,
+            },
+            _ => NativeOutputCoordinate::StreamFrame { frame: 0 },
+        })
+    }
+}
+
+/// One original pair and its optional native units, retained in the same queue.
+/// Metadata alone does not prove a native observation or generated source range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioAuthorityObservation {
+    pair: ClockPair,
+    coordinate: Option<NativeOutputCoordinate>,
+}
+impl AudioAuthorityObservation {
+    pub const fn pair(self) -> ClockPair {
+        self.pair
+    }
+    pub const fn coordinate(self) -> Option<NativeOutputCoordinate> {
+        self.coordinate
     }
 }
 
@@ -56,6 +183,9 @@ pub enum AudioAuthorityError {
     StalePreparation,
     Overflow,
     AllocationFailed,
+    CoordinateModeMismatch,
+    CoordinateMismatch,
+    CoordinateMappingUnavailable,
     Calibration(CalibrationError),
     Merge(MergeError),
 }
@@ -76,20 +206,33 @@ impl From<MergeError> for AudioAuthorityError {
     }
 }
 
+/// Snapshot equality compares mathematical duration, independent of its assembly.
+#[derive(Clone, Copy, Debug)]
+struct ExactCoordinate(InterpolatedTargetTime);
+impl PartialEq for ExactCoordinate {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.compare_interpolated_time(other.0) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for ExactCoordinate {}
+
 /// Exact semantic state relevant to preparing and committing one operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PreparationState {
     revision: u64,
     config: AudioAuthorityConfig,
     epoch: AudioAuthorityEpoch,
-    first: Option<ClockPair>,
-    latest: Option<ClockPair>,
+    first: Option<AudioAuthorityObservation>,
+    latest: Option<AudioAuthorityObservation>,
+    coordinate_basis: Option<AudioAuthorityCoordinateBasis>,
     history_len: usize,
     acquired: Option<ClockPoint>,
     closed: Option<ClockPoint>,
     input_host: Option<ClockPoint>,
     operation: Option<ClockPoint>,
     presentation: Option<ClockPoint>,
+    coordinate_operation: Option<ExactCoordinate>,
+    coordinate_presentation: Option<ExactCoordinate>,
 }
 
 /// Frozen mapping for one original acquired input. The caller retains its payload.
@@ -117,6 +260,207 @@ impl PreparedInput {
     /// The original input maps before this epoch's playable logical timeline.
     pub fn is_before_origin(&self) -> bool {
         self.output.timestamp < self.state.epoch.logical_origin.timestamp
+    }
+}
+
+/// Frozen mathematical HOST mapping in original native units. Its unknown quality
+/// grants no native observation, generated/submitted range or gameplay permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoordinateInputMapper {
+    basis: AudioAuthorityCoordinateBasis,
+    epoch: AudioAuthorityEpoch,
+    left: AudioAuthorityObservation,
+    right: AudioAuthorityObservation,
+    latest: AudioAuthorityObservation,
+    validity: ClockInterval,
+    extrapolation: ExtrapolationPolicy,
+    max_input_ahead: Duration,
+}
+impl CoordinateInputMapper {
+    fn units(observation: AudioAuthorityObservation) -> Result<u64, AudioAuthorityError> {
+        match observation.coordinate {
+            Some(NativeOutputCoordinate::Counter { position, .. }) => Ok(position),
+            Some(NativeOutputCoordinate::StreamFrame { frame }) => Ok(frame),
+            None => Err(AudioAuthorityError::CoordinateMismatch),
+        }
+    }
+    fn descriptor(&self) -> Result<(TargetTime, u64, ClockPoint), AudioAuthorityError> {
+        self.basis.descriptor()
+    }
+    fn query_at(
+        &self,
+        original: ClockPoint,
+    ) -> Result<Option<InterpolatedTargetTime>, AudioAuthorityError> {
+        if original.domain != self.epoch.host_domain {
+            return Err(AudioAuthorityError::DomainMismatch);
+        }
+        if original.timestamp < self.validity.start || original.timestamp > self.validity.end {
+            return Ok(None);
+        }
+        let (base, frequency, _) = self.descriptor()?;
+        let query = self.basis.interpolate(self.left, self.right, original)?;
+        if original.timestamp > self.latest.pair.target.timestamp
+            && query
+                .compare_native_time_with_offset(
+                    base,
+                    Self::units(self.latest)?,
+                    frequency,
+                    self.max_input_ahead.as_nanos(),
+                )
+                .map_err(|_| AudioAuthorityError::Overflow)?
+                == std::cmp::Ordering::Greater
+        {
+            return Ok(None);
+        }
+        Ok(Some(query))
+    }
+    fn raw_at(&self, query: InterpolatedTargetTime) -> Result<ClockPoint, AudioAuthorityError> {
+        query
+            .point(self.descriptor()?.2)
+            .map_err(|_| AudioAuthorityError::Overflow)
+    }
+}
+impl ClockMapper for CoordinateInputMapper {
+    fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+        if to != self.epoch.logical_origin.domain {
+            return None;
+        }
+        let query = self.query_at(from).ok()??;
+        AudioAuthority::logical_in_epoch(self.epoch, self.raw_at(query).ok()?)
+            .ok()
+            .map(|point| point.timestamp)
+    }
+    fn quality(&self) -> ClockMappingQuality {
+        ClockMappingQuality::Unknown
+    }
+}
+
+/// Read-only preparation of an acquired original input. This token freezes exact
+/// mathematical correspondence, not native qualification or a gameplay commit.
+#[derive(Clone, Copy, Debug)]
+pub struct PreparedCoordinateInput {
+    state: PreparationState,
+    original: ClockPoint,
+    now: ClockPoint,
+    raw_output: ClockPoint,
+    output: ClockPoint,
+    query: InterpolatedTargetTime,
+    mapper: CoordinateInputMapper,
+    before_origin: bool,
+}
+impl PreparedCoordinateInput {
+    pub const fn original(&self) -> ClockPoint {
+        self.original
+    }
+    pub const fn epoch(&self) -> u64 {
+        self.state.epoch.id
+    }
+    pub const fn raw_output(&self) -> ClockPoint {
+        self.raw_output
+    }
+    pub const fn output(&self) -> ClockPoint {
+        self.output
+    }
+    pub const fn mapper(&self) -> &CoordinateInputMapper {
+        &self.mapper
+    }
+    pub fn is_before_origin(&self) -> bool {
+        self.before_origin
+    }
+    pub const fn query(&self) -> InterpolatedTargetTime {
+        self.query
+    }
+}
+
+/// Original observed coordinate covered by an entirely drained acquired prefix.
+/// The exact query retains presentation precision beside its rounded output.
+#[derive(Clone, Copy, Debug)]
+pub struct PreparedCoordinateFrontier {
+    state: PreparationState,
+    now: ClockPoint,
+    host: ClockPoint,
+    observation: AudioAuthorityObservation,
+    query: InterpolatedTargetTime,
+    output: ClockPoint,
+    advance: Option<ClockPoint>,
+}
+impl PreparedCoordinateFrontier {
+    pub const fn host(&self) -> ClockPoint {
+        self.host
+    }
+    pub const fn observed_host(&self) -> ClockPoint {
+        self.observation.pair.target
+    }
+    pub const fn observation(&self) -> AudioAuthorityObservation {
+        self.observation
+    }
+    pub const fn query(&self) -> InterpolatedTargetTime {
+        self.query
+    }
+    pub const fn output(&self) -> ClockPoint {
+        self.output
+    }
+    pub const fn advance(&self) -> Option<ClockPoint> {
+        self.advance
+    }
+    pub const fn epoch(&self) -> u64 {
+        self.state.epoch.id
+    }
+}
+
+/// Mathematical native control cut; this token does not acknowledge a producer.
+#[derive(Clone, Copy, Debug)]
+pub struct PreparedCoordinateControlCutoff {
+    state: PreparationState,
+    epoch: u64,
+    query: InterpolatedTargetTime,
+    raw_output: ClockPoint,
+    host_cutoff: ClockPoint,
+    now: ClockPoint,
+    output: ClockPoint,
+    resume: bool,
+}
+impl PreparedCoordinateControlCutoff {
+    pub const fn is_resume(&self) -> bool {
+        self.resume
+    }
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub const fn host(&self) -> ClockPoint {
+        self.host_cutoff
+    }
+    pub const fn output(&self) -> ClockPoint {
+        self.output
+    }
+    pub const fn raw_output(&self) -> ClockPoint {
+        self.raw_output
+    }
+    pub const fn query(&self) -> InterpolatedTargetTime {
+        self.query
+    }
+}
+
+/// Actual coordinate presentation/prefix closure with no Runtime operation grant.
+#[derive(Clone, Copy, Debug)]
+pub struct PreparedCoordinateHeldFrontier {
+    frontier: PreparedCoordinateFrontier,
+}
+impl PreparedCoordinateHeldFrontier {
+    pub const fn host(&self) -> ClockPoint {
+        self.frontier.host()
+    }
+    pub const fn observed_host(&self) -> ClockPoint {
+        self.frontier.observed_host()
+    }
+    pub const fn output(&self) -> ClockPoint {
+        self.frontier.output()
+    }
+    pub const fn query(&self) -> InterpolatedTargetTime {
+        self.frontier.query()
+    }
+    pub const fn epoch(&self) -> u64 {
+        self.frontier.epoch()
     }
 }
 
@@ -227,18 +571,37 @@ pub struct PreparedPrimedCorrelation {
 pub struct AudioAuthority {
     config: AudioAuthorityConfig,
     epoch: AudioAuthorityEpoch,
-    history: VecDeque<ClockPair>,
+    history: VecDeque<AudioAuthorityObservation>,
+    coordinate_basis: Option<AudioAuthorityCoordinateBasis>,
     revision: u64,
     acquired: Option<ClockPoint>,
     closed: Option<ClockPoint>,
     input_host: Option<ClockPoint>,
     operation: Option<ClockPoint>,
     presentation: Option<ClockPoint>,
+    coordinate_operation: Option<InterpolatedTargetTime>,
+    coordinate_presentation: Option<InterpolatedTargetTime>,
 }
 impl AudioAuthority {
     pub fn new(
         config: AudioAuthorityConfig,
         epoch: AudioAuthorityEpoch,
+    ) -> Result<Self, AudioAuthorityError> {
+        Self::new_inner(config, epoch, None)
+    }
+    /// Cold opt-in preserves the original basis, including any fractional start.
+    /// Mapping operations remain unavailable until an exact coordinate mapper exists.
+    pub fn new_with_coordinates(
+        config: AudioAuthorityConfig,
+        epoch: AudioAuthorityEpoch,
+        basis: AudioAuthorityCoordinateBasis,
+    ) -> Result<Self, AudioAuthorityError> {
+        Self::new_inner(config, epoch, Some(basis))
+    }
+    fn new_inner(
+        config: AudioAuthorityConfig,
+        epoch: AudioAuthorityEpoch,
+        coordinate_basis: Option<AudioAuthorityCoordinateBasis>,
     ) -> Result<Self, AudioAuthorityError> {
         let negative_extrapolation = matches!(config.input_extrapolation,
             ExtrapolationPolicy::Bounded { before, after } if before < Duration::ZERO || after < Duration::ZERO);
@@ -250,6 +613,21 @@ impl AudioAuthority {
             return Err(AudioAuthorityError::InvalidConfig);
         }
         validate_epoch_domains(epoch)?;
+        if let Some(basis) = coordinate_basis {
+            if matches!(
+                basis,
+                AudioAuthorityCoordinateBasis::SourceCounter { frequency: 0, .. }
+            ) {
+                return Err(AudioAuthorityError::InvalidConfig);
+            }
+            let origin = basis.origin()?;
+            if origin.domain != epoch.stream_origin.domain {
+                return Err(AudioAuthorityError::DomainMismatch);
+            }
+            if origin != epoch.stream_origin {
+                return Err(AudioAuthorityError::CoordinateMismatch);
+            }
+        }
         let mut history = VecDeque::new();
         history
             .try_reserve_exact(config.history_capacity)
@@ -258,12 +636,15 @@ impl AudioAuthority {
             config,
             epoch,
             history,
+            coordinate_basis,
             revision: 0,
             acquired: None,
             closed: None,
             input_host: None,
             operation: None,
             presentation: None,
+            coordinate_operation: None,
+            coordinate_presentation: None,
         })
     }
     pub const fn config(&self) -> AudioAuthorityConfig {
@@ -273,7 +654,46 @@ impl AudioAuthority {
         self.epoch
     }
     pub fn latest_observation(&self) -> Option<ClockPair> {
-        self.history.back().copied()
+        self.history.back().map(|entry| entry.pair)
+    }
+    pub const fn coordinate_basis(&self) -> Option<AudioAuthorityCoordinateBasis> {
+        self.coordinate_basis
+    }
+    pub fn latest_coordinate_observation(&self) -> Option<AudioAuthorityObservation> {
+        self.history
+            .back()
+            .copied()
+            .filter(|entry| entry.coordinate.is_some())
+    }
+    /// Conservative exact lower bound for future legal input correspondence.
+    /// This grants no retirement or native permission: outstanding controls,
+    /// practice receipts and other consumers require their own retained pins.
+    pub fn future_input_retention_query(
+        &self,
+    ) -> Result<InterpolatedTargetTime, AudioAuthorityError> {
+        let basis = self
+            .coordinate_basis
+            .ok_or(AudioAuthorityError::CoordinateModeMismatch)?;
+        if let Some(closed) = self.closed {
+            if let Some(observation) = self
+                .history
+                .iter()
+                .rev()
+                .find(|entry| entry.pair.target.timestamp <= closed.timestamp)
+            {
+                return basis.query(*observation);
+            }
+        }
+        if self.config.input_extrapolation == ExtrapolationPolicy::Forbid {
+            if let Some(first) = self.history.front() {
+                return basis.query(*first);
+            }
+        }
+        // Before-first extrapolation keeps the immutable creation bound, even
+        // when the configured before allowance is zero.
+        let (base, frequency, _) = basis.descriptor()?;
+        InterpolatedTargetTime::new(base, 0, 0, frequency, 0, 1)
+            .map_err(|_| AudioAuthorityError::Overflow)
     }
     pub const fn acquired_prefix(&self) -> Option<ClockPoint> {
         self.acquired
@@ -290,6 +710,12 @@ impl AudioAuthority {
     pub const fn committed_presentation(&self) -> Option<ClockPoint> {
         self.presentation
     }
+    pub const fn committed_coordinate_operation(&self) -> Option<InterpolatedTargetTime> {
+        self.coordinate_operation
+    }
+    pub const fn committed_coordinate_presentation(&self) -> Option<InterpolatedTargetTime> {
+        self.coordinate_presentation
+    }
     pub fn history_len(&self) -> usize {
         self.history.len()
     }
@@ -300,6 +726,9 @@ impl AudioAuthority {
         epoch: u64,
         pair: ClockPair,
     ) -> Result<ObservationAdmission, AudioAuthorityError> {
+        if self.coordinate_basis.is_some() {
+            return Err(AudioAuthorityError::CoordinateModeMismatch);
+        }
         if epoch != self.epoch.id {
             return Err(AudioAuthorityError::WrongEpoch);
         }
@@ -342,7 +771,7 @@ impl AudioAuthority {
         if retire
             && !self
                 .closed
-                .is_some_and(|closed| self.history[1].target.timestamp <= closed.timestamp)
+                .is_some_and(|closed| self.history[1].pair.target.timestamp <= closed.timestamp)
         {
             return Err(AudioAuthorityError::HistoryCapacity);
         }
@@ -350,7 +779,89 @@ impl AudioAuthority {
         if retire {
             self.history.pop_front();
         }
-        self.history.push_back(pair);
+        self.history.push_back(AudioAuthorityObservation {
+            pair,
+            coordinate: None,
+        });
+        self.revision = revision;
+        Ok(ObservationAdmission::Retained)
+    }
+
+    /// Retains consistent original native units beside the unchanged raw pair.
+    /// Progress in native units can share a rounded nanosecond with the last pair.
+    /// This does not authorize presentation or validate native acquisition evidence.
+    pub fn observe_coordinate(
+        &mut self,
+        epoch: u64,
+        pair: ClockPair,
+        coordinate: NativeOutputCoordinate,
+    ) -> Result<ObservationAdmission, AudioAuthorityError> {
+        let basis = self
+            .coordinate_basis
+            .ok_or(AudioAuthorityError::CoordinateModeMismatch)?;
+        if epoch != self.epoch.id {
+            return Err(AudioAuthorityError::WrongEpoch);
+        }
+        if pair.source.domain != self.epoch.stream_origin.domain
+            || pair.target.domain != self.epoch.host_domain
+        {
+            return Err(AudioAuthorityError::DomainMismatch);
+        }
+        if basis.point(coordinate)? != pair.source {
+            return Err(AudioAuthorityError::CoordinateMismatch);
+        }
+        self.logical(pair.source)?;
+        let query = basis.query(AudioAuthorityObservation {
+            pair,
+            coordinate: Some(coordinate),
+        })?;
+        if self
+            .coordinate_presentation
+            .is_some_and(|last| query.compare_interpolated_time(last) == std::cmp::Ordering::Less)
+        {
+            return Err(AudioAuthorityError::ObservationRegression);
+        }
+        if let Some(previous) = self.history.back() {
+            // Kind and frequency were checked against the immutable descriptor.
+            let position = |coordinate| match coordinate {
+                NativeOutputCoordinate::Counter { position, .. } => position,
+                NativeOutputCoordinate::StreamFrame { frame } => frame,
+            };
+            let previous_coordinate = previous
+                .coordinate
+                .ok_or(AudioAuthorityError::CoordinateModeMismatch)?;
+            let current = position(coordinate);
+            let old = position(previous_coordinate);
+            if current < old
+                || pair.source.timestamp < previous.pair.source.timestamp
+                || pair.target.timestamp < previous.pair.target.timestamp
+            {
+                return Err(AudioAuthorityError::ObservationRegression);
+            }
+            if current == old {
+                return Ok(ObservationAdmission::Unchanged);
+            }
+            if pair.target.timestamp == previous.pair.target.timestamp {
+                return Err(AudioAuthorityError::ObservationRegression);
+            }
+            // No Affine mapper is created here: its rounded endpoints may be equal.
+        }
+        let retire = self.history.len() == self.config.history_capacity;
+        if retire
+            && !self
+                .closed
+                .is_some_and(|closed| self.history[1].pair.target.timestamp <= closed.timestamp)
+        {
+            return Err(AudioAuthorityError::HistoryCapacity);
+        }
+        let revision = self.next_revision()?;
+        if retire {
+            self.history.pop_front();
+        }
+        self.history.push_back(AudioAuthorityObservation {
+            pair,
+            coordinate: Some(coordinate),
+        });
         self.revision = revision;
         Ok(ObservationAdmission::Retained)
     }
@@ -382,6 +893,7 @@ impl AudioAuthority {
         original: ClockPoint,
         now: ClockPoint,
     ) -> Result<Option<PreparedInput>, AudioAuthorityError> {
+        self.require_scalar_mapping()?;
         self.validate_host(original)?;
         self.validate_host(now)?;
         if self
@@ -405,8 +917,12 @@ impl AudioAuthority {
         {
             return Ok(None);
         }
-        let first = self.history[0];
-        let latest = *self.history.back().expect("two real anchors were checked");
+        let first = self.history[0].pair;
+        let latest = self
+            .history
+            .back()
+            .expect("two real anchors were checked")
+            .pair;
         let (left, right, validity, extrapolation) = if original.timestamp < first.target.timestamp
         {
             let ExtrapolationPolicy::Bounded { before, .. } = self.config.input_extrapolation
@@ -419,10 +935,10 @@ impl AudioAuthority {
             }
             (
                 first,
-                self.history[1],
+                self.history[1].pair,
                 ClockInterval {
                     start,
-                    end: self.history[1].target.timestamp,
+                    end: self.history[1].pair.target.timestamp,
                 },
                 ExtrapolationPolicy::Bounded {
                     before,
@@ -437,7 +953,7 @@ impl AudioAuthority {
             if original.timestamp > end {
                 return Ok(None);
             }
-            let left = self.history[self.history.len() - 2];
+            let left = self.history[self.history.len() - 2].pair;
             (
                 left,
                 latest,
@@ -452,10 +968,10 @@ impl AudioAuthority {
             )
         } else {
             let index = (0..self.history.len() - 1)
-                .find(|&index| original.timestamp <= self.history[index + 1].target.timestamp)
+                .find(|&index| original.timestamp <= self.history[index + 1].pair.target.timestamp)
                 .expect("point lies within retained real anchors");
-            let left = self.history[index];
-            let right = self.history[index + 1];
+            let left = self.history[index].pair;
+            let right = self.history[index + 1].pair;
             (
                 left,
                 right,
@@ -492,6 +1008,540 @@ impl AudioAuthority {
             output,
             mapper,
         }))
+    }
+
+    /// Prepare exact mathematical correspondence for an acquired original input.
+    /// This does not consume input or grant native/playback qualification.
+    pub fn prepare_coordinate_input(
+        &self,
+        original: ClockPoint,
+        now: ClockPoint,
+    ) -> Result<Option<PreparedCoordinateInput>, AudioAuthorityError> {
+        let basis = self
+            .coordinate_basis
+            .ok_or(AudioAuthorityError::CoordinateModeMismatch)?;
+        self.validate_host(original)?;
+        self.validate_host(now)?;
+        if self
+            .closed
+            .is_some_and(|closed| original.timestamp <= closed.timestamp)
+            || self
+                .input_host
+                .is_some_and(|last| original.timestamp < last.timestamp)
+        {
+            return Err(AudioAuthorityError::OperationRegression);
+        }
+        if original.timestamp > now.timestamp
+            || self
+                .acquired
+                .is_some_and(|prefix| prefix.timestamp > now.timestamp)
+            || self
+                .acquired
+                .is_none_or(|prefix| original.timestamp > prefix.timestamp)
+            || self.history.len() < 2
+            || !self.fresh(now)?
+        {
+            return Ok(None);
+        }
+        let first = self.history[0];
+        let latest = *self.history.back().expect("two real anchors were checked");
+        let (left, right, validity, extrapolation) = if original.timestamp
+            < first.pair.target.timestamp
+        {
+            let ExtrapolationPolicy::Bounded { before, .. } = self.config.input_extrapolation
+            else {
+                return Err(AudioAuthorityError::HistoryExpired);
+            };
+            let start = add(first.pair.target.timestamp, -i128::from(before.as_nanos()))?;
+            if original.timestamp < start {
+                return Err(AudioAuthorityError::HistoryExpired);
+            }
+            (
+                first,
+                self.history[1],
+                ClockInterval {
+                    start,
+                    end: self.history[1].pair.target.timestamp,
+                },
+                ExtrapolationPolicy::Bounded {
+                    before,
+                    after: Duration::ZERO,
+                },
+            )
+        } else if original.timestamp > latest.pair.target.timestamp {
+            let ExtrapolationPolicy::Bounded { after, .. } = self.config.input_extrapolation else {
+                return Ok(None);
+            };
+            let end = add(latest.pair.target.timestamp, i128::from(after.as_nanos()))?;
+            if original.timestamp > end {
+                return Ok(None);
+            }
+            let left = self.history[self.history.len() - 2];
+            (
+                left,
+                latest,
+                ClockInterval {
+                    start: left.pair.target.timestamp,
+                    end,
+                },
+                ExtrapolationPolicy::Bounded {
+                    before: Duration::ZERO,
+                    after,
+                },
+            )
+        } else {
+            let index = (0..self.history.len() - 1)
+                .find(|&index| original.timestamp <= self.history[index + 1].pair.target.timestamp)
+                .expect("point lies within retained real anchors");
+            let left = self.history[index];
+            let right = self.history[index + 1];
+            (
+                left,
+                right,
+                ClockInterval {
+                    start: left.pair.target.timestamp,
+                    end: right.pair.target.timestamp,
+                },
+                ExtrapolationPolicy::Forbid,
+            )
+        };
+        let mapper = CoordinateInputMapper {
+            basis,
+            epoch: self.epoch,
+            left,
+            right,
+            latest,
+            validity,
+            extrapolation,
+            max_input_ahead: self.config.max_input_ahead,
+        };
+        let Some(query) = mapper.query_at(original)? else {
+            return Ok(None);
+        };
+        let raw_output = mapper.raw_at(query)?;
+        let output = self.logical(raw_output)?;
+        let before_origin =
+            query.compare_target_time(basis.descriptor()?.0) == std::cmp::Ordering::Less;
+        if !before_origin
+            && self.coordinate_operation.is_some_and(|last| {
+                query.compare_interpolated_time(last) == std::cmp::Ordering::Less
+            })
+        {
+            return Err(AudioAuthorityError::OperationRegression);
+        }
+        self.next_revision()?;
+        Ok(Some(PreparedCoordinateInput {
+            state: self.state(),
+            original,
+            now,
+            raw_output,
+            output,
+            query,
+            mapper,
+            before_origin,
+        }))
+    }
+
+    /// Recheck current acquisition/freshness without consuming or modifying input.
+    /// A later validation instant is allowed while the same correspondence remains valid.
+    pub fn validate_coordinate_input(
+        &self,
+        prepared: &PreparedCoordinateInput,
+        now: ClockPoint,
+    ) -> Result<(), AudioAuthorityError> {
+        self.validate_host(now)?;
+        if prepared.state != self.state() || now.timestamp < prepared.now.timestamp {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        let Some(current) = self.prepare_coordinate_input(prepared.original, now)? else {
+            return Err(AudioAuthorityError::StalePreparation);
+        };
+        if current.original != prepared.original
+            || current.mapper != prepared.mapper
+            || current.raw_output != prepared.raw_output
+            || current.output != prepared.output
+            || current.before_origin != prepared.before_origin
+            || current.query.compare_interpolated_time(prepared.query) != std::cmp::Ordering::Equal
+        {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        Ok(())
+    }
+
+    /// Commit after the caller's real phase-aware Runtime operation.
+    pub fn commit_coordinate_input(
+        &mut self,
+        prepared: PreparedCoordinateInput,
+        now: ClockPoint,
+    ) -> Result<(), AudioAuthorityError> {
+        if prepared.is_before_origin() {
+            return Err(AudioAuthorityError::OperationRegression);
+        }
+        self.validate_coordinate_input(&prepared, now)?;
+        let revision = self.next_revision()?;
+        self.input_host = Some(prepared.original);
+        self.operation = Some(prepared.output);
+        self.coordinate_operation = Some(prepared.query);
+        self.revision = revision;
+        Ok(())
+    }
+
+    /// Retire pre-origin input without granting gameplay or presentation progress.
+    pub fn commit_discarded_coordinate_input(
+        &mut self,
+        prepared: PreparedCoordinateInput,
+        now: ClockPoint,
+    ) -> Result<(), AudioAuthorityError> {
+        if !prepared.is_before_origin() {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        self.validate_coordinate_input(&prepared, now)?;
+        let revision = self.next_revision()?;
+        self.input_host = Some(prepared.original);
+        self.revision = revision;
+        Ok(())
+    }
+
+    /// Only retained original presentation covered by a drained prefix advances.
+    /// HOST now is used for freshness and never extrapolated into presentation.
+    pub fn prepare_coordinate_frontier(
+        &self,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<Option<PreparedCoordinateFrontier>, AudioAuthorityError> {
+        let basis = self
+            .coordinate_basis
+            .ok_or(AudioAuthorityError::CoordinateModeMismatch)?;
+        self.validate_host(now)?;
+        let Some(host) = self.acquired else {
+            return Ok(None);
+        };
+        if merger.peek_ready(host)?.is_some()
+            || host.timestamp > now.timestamp
+            || self.history.len() < 2
+            || !self.fresh(now)?
+        {
+            return Ok(None);
+        }
+        let Some(observation) = self
+            .history
+            .iter()
+            .rev()
+            .copied()
+            .find(|entry| entry.pair.target.timestamp <= host.timestamp)
+        else {
+            return Ok(None);
+        };
+        if !self.pair_is_fresh(observation.pair, now) {
+            return Ok(None);
+        }
+        let query = basis.query(observation)?;
+        if query.compare_target_time(basis.descriptor()?.0) == std::cmp::Ordering::Less {
+            return Ok(None);
+        }
+        let output = self.logical(observation.pair.source)?;
+        if self
+            .coordinate_presentation
+            .is_some_and(|last| query.compare_interpolated_time(last) == std::cmp::Ordering::Less)
+        {
+            return Err(AudioAuthorityError::ObservationRegression);
+        }
+        if self.closed == Some(host)
+            && self.coordinate_presentation.is_some_and(|last| {
+                query.compare_interpolated_time(last) == std::cmp::Ordering::Equal
+            })
+        {
+            return Ok(None);
+        }
+        let advance = self
+            .coordinate_operation
+            .is_none_or(|last| query.compare_interpolated_time(last) == std::cmp::Ordering::Greater)
+            .then_some(output);
+        self.next_revision()?;
+        Ok(Some(PreparedCoordinateFrontier {
+            state: self.state(),
+            now,
+            host,
+            observation,
+            query,
+            output,
+            advance,
+        }))
+    }
+
+    pub fn commit_coordinate_frontier(
+        &mut self,
+        prepared: PreparedCoordinateFrontier,
+        now: ClockPoint,
+        merger: &mut InputMerger,
+    ) -> Result<(), AudioAuthorityError> {
+        self.commit_coordinate_frontier_inner(prepared, now, merger, true)
+    }
+
+    fn commit_coordinate_frontier_inner(
+        &mut self,
+        prepared: PreparedCoordinateFrontier,
+        now: ClockPoint,
+        merger: &mut InputMerger,
+        advance_operation: bool,
+    ) -> Result<(), AudioAuthorityError> {
+        self.validate_host(now)?;
+        if prepared.state != self.state() || now.timestamp < prepared.now.timestamp {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        let Some(current) = self.prepare_coordinate_frontier(now, merger)? else {
+            return Err(AudioAuthorityError::StalePreparation);
+        };
+        if current.host != prepared.host
+            || current.observation != prepared.observation
+            || current.output != prepared.output
+            || current.advance != prepared.advance
+            || current.query.compare_interpolated_time(prepared.query) != std::cmp::Ordering::Equal
+        {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        let revision = self.next_revision()?;
+        merger.commit(prepared.host)?;
+        self.closed = Some(prepared.host);
+        self.presentation = Some(prepared.output);
+        self.coordinate_presentation = Some(prepared.query);
+        if let Some(output) = prepared.advance.filter(|_| advance_operation) {
+            self.operation = Some(output);
+            self.coordinate_operation = Some(prepared.query);
+        }
+        self.revision = revision;
+        Ok(())
+    }
+
+    /// Locate the first integer HOST at or beyond a cut in original native units.
+    /// Both enclosing associations must already be retained; no extrapolation.
+    pub fn presented_coordinate_boundary_host(
+        &self,
+        query: &InterpolatedTargetTime,
+        now: ClockPoint,
+    ) -> Result<Option<ClockPoint>, AudioAuthorityError> {
+        let basis = self
+            .coordinate_basis
+            .ok_or(AudioAuthorityError::CoordinateModeMismatch)?;
+        self.validate_host(now)?;
+        if query.compare_target_time(basis.descriptor()?.0) == std::cmp::Ordering::Less {
+            return Err(AudioAuthorityError::ObservationRegression);
+        }
+        let Some(first) = self.history.front().copied() else {
+            return Ok(None);
+        };
+        if query.compare_interpolated_time(basis.query(first)?) == std::cmp::Ordering::Less {
+            return Err(AudioAuthorityError::HistoryExpired);
+        }
+        if self.history.len() < 2 || !self.fresh(now)? {
+            return Ok(None);
+        }
+        let mut enclosing = None;
+        for index in 0..self.history.len() - 1 {
+            let right = self.history[index + 1];
+            if query.compare_interpolated_time(basis.query(right)?) != std::cmp::Ordering::Greater {
+                enclosing = Some((self.history[index], right));
+                break;
+            }
+        }
+        let Some((left, right)) = enclosing else {
+            return Ok(None);
+        };
+        if !self.pair_is_fresh(right.pair, now) {
+            return Ok(None);
+        }
+        let mapper = CoordinateInputMapper {
+            basis,
+            epoch: self.epoch,
+            left,
+            right,
+            latest: right,
+            validity: ClockInterval {
+                start: left.pair.target.timestamp,
+                end: right.pair.target.timestamp,
+            },
+            extrapolation: ExtrapolationPolicy::Forbid,
+            max_input_ahead: Duration::ZERO,
+        };
+        let mut lower = 0u64;
+        let mut upper = u64::try_from(delta(
+            right.pair.target.timestamp,
+            left.pair.target.timestamp,
+        ))
+        .map_err(|_| AudioAuthorityError::Overflow)?;
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2;
+            let host = ClockPoint {
+                domain: self.epoch.host_domain,
+                timestamp: add(left.pair.target.timestamp, i128::from(middle))?,
+            };
+            let at = mapper
+                .query_at(host)?
+                .ok_or(AudioAuthorityError::CoordinateMappingUnavailable)?;
+            if at.compare_interpolated_time(*query) == std::cmp::Ordering::Less {
+                lower = middle + 1;
+            } else {
+                upper = middle;
+            }
+        }
+        Ok(Some(ClockPoint {
+            domain: self.epoch.host_domain,
+            timestamp: add(left.pair.target.timestamp, i128::from(lower))?,
+        }))
+    }
+
+    pub fn prepare_coordinate_control_cutoff(
+        &self,
+        epoch: u64,
+        query: InterpolatedTargetTime,
+        host_cutoff: ClockPoint,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<Option<PreparedCoordinateControlCutoff>, AudioAuthorityError> {
+        self.prepare_coordinate_control_inner(epoch, query, host_cutoff, now, merger, false)
+    }
+
+    pub fn prepare_coordinate_resume_control_cutoff(
+        &self,
+        epoch: u64,
+        query: InterpolatedTargetTime,
+        host_cutoff: ClockPoint,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<Option<PreparedCoordinateControlCutoff>, AudioAuthorityError> {
+        self.prepare_coordinate_control_inner(epoch, query, host_cutoff, now, merger, true)
+    }
+
+    fn prepare_coordinate_control_inner(
+        &self,
+        epoch: u64,
+        query: InterpolatedTargetTime,
+        host_cutoff: ClockPoint,
+        now: ClockPoint,
+        merger: &InputMerger,
+        resume: bool,
+    ) -> Result<Option<PreparedCoordinateControlCutoff>, AudioAuthorityError> {
+        let basis = self
+            .coordinate_basis
+            .ok_or(AudioAuthorityError::CoordinateModeMismatch)?;
+        if epoch != self.epoch.id {
+            return Err(AudioAuthorityError::WrongEpoch);
+        }
+        self.validate_host(host_cutoff)?;
+        self.validate_host(now)?;
+        let raw_output = query
+            .point(basis.descriptor()?.2)
+            .map_err(|_| AudioAuthorityError::Overflow)?;
+        let output = self.logical(raw_output)?;
+        if query.compare_target_time(basis.descriptor()?.0) == std::cmp::Ordering::Less {
+            return Err(AudioAuthorityError::ObservationRegression);
+        }
+        if self
+            .coordinate_operation
+            .is_some_and(|last| query.compare_interpolated_time(last) == std::cmp::Ordering::Less)
+            || self
+                .operation
+                .is_some_and(|last| output.timestamp < last.timestamp)
+            || self
+                .input_host
+                .is_some_and(|last| host_cutoff.timestamp < last.timestamp)
+        {
+            return Err(AudioAuthorityError::OperationRegression);
+        }
+        let Some(prefix) = self.acquired else {
+            return Ok(None);
+        };
+        if prefix.timestamp > now.timestamp || host_cutoff.timestamp > prefix.timestamp {
+            return Ok(None);
+        }
+        let Some(qualified) = self.presented_coordinate_boundary_host(&query, now)? else {
+            return Ok(None);
+        };
+        if qualified != host_cutoff {
+            return Err(AudioAuthorityError::CoordinateMismatch);
+        }
+        if merger.peek_ready(prefix)?.is_some_and(|event| {
+            event.meta().timestamp < host_cutoff.timestamp
+                || (!resume && event.meta().timestamp == host_cutoff.timestamp)
+        }) {
+            return Ok(None);
+        }
+        self.next_revision()?;
+        Ok(Some(PreparedCoordinateControlCutoff {
+            state: self.state(),
+            epoch,
+            query,
+            raw_output,
+            host_cutoff,
+            now,
+            output,
+            resume,
+        }))
+    }
+
+    pub fn validate_coordinate_control_cutoff(
+        &self,
+        prepared: &PreparedCoordinateControlCutoff,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<(), AudioAuthorityError> {
+        self.validate_host(now)?;
+        if prepared.state != self.state() || now.timestamp < prepared.now.timestamp {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        let Some(current) = self.prepare_coordinate_control_inner(
+            prepared.epoch,
+            prepared.query,
+            prepared.host_cutoff,
+            now,
+            merger,
+            prepared.resume,
+        )?
+        else {
+            return Err(AudioAuthorityError::StalePreparation);
+        };
+        if current.raw_output != prepared.raw_output
+            || current.output != prepared.output
+            || current.query.compare_interpolated_time(prepared.query) != std::cmp::Ordering::Equal
+        {
+            return Err(AudioAuthorityError::StalePreparation);
+        }
+        Ok(())
+    }
+
+    /// Commit only the caller's actual accepted phase control operation.
+    pub fn commit_coordinate_control_cutoff(
+        &mut self,
+        prepared: PreparedCoordinateControlCutoff,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<(), AudioAuthorityError> {
+        self.validate_coordinate_control_cutoff(&prepared, now, merger)?;
+        let revision = self.next_revision()?;
+        self.operation = Some(prepared.output);
+        self.coordinate_operation = Some(prepared.query);
+        self.revision = revision;
+        Ok(())
+    }
+
+    pub fn prepare_coordinate_held_frontier(
+        &self,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<Option<PreparedCoordinateHeldFrontier>, AudioAuthorityError> {
+        Ok(self
+            .prepare_coordinate_frontier(now, merger)?
+            .map(|frontier| PreparedCoordinateHeldFrontier { frontier }))
+    }
+
+    /// Held presentation closes the prefix without changing either operation watermark.
+    pub fn commit_coordinate_held_frontier(
+        &mut self,
+        prepared: PreparedCoordinateHeldFrontier,
+        now: ClockPoint,
+        merger: &mut InputMerger,
+    ) -> Result<(), AudioAuthorityError> {
+        self.commit_coordinate_frontier_inner(prepared.frontier, now, merger, false)
     }
 
     /// Commit the actual Runtime operation once; post-report observer faults do not undo it.
@@ -534,6 +1584,7 @@ impl AudioAuthority {
         now: ClockPoint,
         merger: &InputMerger,
     ) -> Result<Option<PreparedFrontier>, AudioAuthorityError> {
+        self.require_scalar_mapping()?;
         self.validate_host(now)?;
         let Some(host) = self.acquired else {
             return Ok(None);
@@ -549,6 +1600,7 @@ impl AudioAuthority {
             .history
             .iter()
             .rev()
+            .map(|entry| &entry.pair)
             .find(|pair| pair.target.timestamp <= host.timestamp)
         else {
             return Ok(None);
@@ -626,6 +1678,7 @@ impl AudioAuthority {
         raw: ClockPoint,
         now: ClockPoint,
     ) -> Result<Option<ClockPoint>, AudioAuthorityError> {
+        self.require_scalar_mapping()?;
         self.validate_host(now)?;
         self.logical(raw)?;
         if raw.timestamp < self.epoch.stream_origin.timestamp {
@@ -634,19 +1687,19 @@ impl AudioAuthority {
         let Some(first) = self.history.front() else {
             return Ok(None);
         };
-        if raw.timestamp < first.source.timestamp {
+        if raw.timestamp < first.pair.source.timestamp {
             return Err(AudioAuthorityError::HistoryExpired);
         }
         if self.history.len() < 2 || !self.fresh(now)? {
             return Ok(None);
         }
         let Some(index) = (0..self.history.len() - 1)
-            .find(|&i| raw.timestamp <= self.history[i + 1].source.timestamp)
+            .find(|&i| raw.timestamp <= self.history[i + 1].pair.source.timestamp)
         else {
             return Ok(None);
         };
-        let left = self.history[index];
-        let right = self.history[index + 1];
+        let left = self.history[index].pair;
+        let right = self.history[index + 1].pair;
         // Associations captured after `now` cannot authorize this operation.
         if right.target.timestamp > now.timestamp {
             return Ok(None);
@@ -694,6 +1747,7 @@ impl AudioAuthority {
         merger: &InputMerger,
         resume: bool,
     ) -> Result<Option<PreparedControlCutoff>, AudioAuthorityError> {
+        self.require_scalar_mapping()?;
         if epoch != self.epoch.id {
             return Err(AudioAuthorityError::WrongEpoch);
         }
@@ -809,6 +1863,7 @@ impl AudioAuthority {
         next: AudioAuthorityEpoch,
         merger: &InputMerger,
     ) -> Result<PreparedEpoch, AudioAuthorityError> {
+        self.require_scalar_mapping()?;
         validate_epoch_domains(next)?;
         if next.id <= self.epoch.id {
             return Err(AudioAuthorityError::WrongEpoch);
@@ -916,6 +1971,7 @@ impl AudioAuthority {
         now: ClockPoint,
         merger: &InputMerger,
     ) -> Result<(), AudioAuthorityError> {
+        self.require_scalar_mapping()?;
         let epoch = match prepared.stage {
             PrimedCorrelationStage::Epoch(staged) => {
                 if staged.state != self.state()
@@ -1004,7 +2060,11 @@ impl AudioAuthority {
             self.epoch = staged.next;
         }
         self.history.clear();
-        self.history.extend(prepared.pairs);
+        self.history
+            .extend(prepared.pairs.map(|pair| AudioAuthorityObservation {
+                pair,
+                coordinate: None,
+            }));
         self.revision = revision;
         Ok(())
     }
@@ -1014,13 +2074,16 @@ impl AudioAuthority {
             config: self.config,
             epoch: self.epoch,
             first: self.history.front().copied(),
-            latest: self.latest_observation(),
+            latest: self.history.back().copied(),
+            coordinate_basis: self.coordinate_basis,
             history_len: self.history.len(),
             acquired: self.acquired,
             closed: self.closed,
             input_host: self.input_host,
             operation: self.operation,
             presentation: self.presentation,
+            coordinate_operation: self.coordinate_operation.map(ExactCoordinate),
+            coordinate_presentation: self.coordinate_presentation.map(ExactCoordinate),
         }
     }
     fn next_revision(&self) -> Result<u64, AudioAuthorityError> {
@@ -1042,7 +2105,15 @@ impl AudioAuthority {
         &self,
         raw: ClockPoint,
     ) -> Result<ClockPoint, AudioAuthorityError> {
+        self.require_scalar_mapping()?;
         self.logical(raw)
+    }
+    fn require_scalar_mapping(&self) -> Result<(), AudioAuthorityError> {
+        if self.coordinate_basis.is_some() {
+            Err(AudioAuthorityError::CoordinateMappingUnavailable)
+        } else {
+            Ok(())
+        }
     }
     fn logical_in_epoch(
         epoch: AudioAuthorityEpoch,
@@ -1094,7 +2165,7 @@ impl AudioAuthority {
             .history
             .iter()
             .rev()
-            .any(|pair| self.pair_is_fresh(*pair, now)))
+            .any(|entry| self.pair_is_fresh(entry.pair, now)))
     }
     /// Read-only availability from retained, already due native associations.
     pub(crate) fn has_fresh_observation(
@@ -1250,3 +2321,23 @@ mod practice_cut_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "audio_authority_coordinate_fixtures.rs"]
+mod audio_authority_coordinate_fixtures;
+
+#[cfg(test)]
+#[path = "audio_authority_coordinate_input_fixtures.rs"]
+mod audio_authority_coordinate_input_fixtures;
+
+#[cfg(test)]
+#[path = "audio_authority_coordinate_commit_fixtures.rs"]
+mod audio_authority_coordinate_commit_fixtures;
+
+#[cfg(test)]
+#[path = "audio_authority_coordinate_control_fixtures.rs"]
+mod audio_authority_coordinate_control_fixtures;
+
+#[cfg(test)]
+#[path = "audio_authority_retention_fixtures.rs"]
+mod audio_authority_retention_fixtures;

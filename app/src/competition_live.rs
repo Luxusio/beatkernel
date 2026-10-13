@@ -823,7 +823,7 @@ impl LiveCompetition {
         {
             return Err("practice competition requires a pristine matching judge".into());
         }
-        let header = crate::native_judge::prepare_policy_header(
+        let header = crate::native_judge::prepare_policy_header_with_speed(
             &attempt.source,
             &attempt.judge,
             policy,
@@ -831,27 +831,29 @@ impl LiveCompetition {
             attempt.config.start,
             attempt.config.chart_seed,
             attempt.config.end,
+            attempt.speed(),
         )?;
         // Builtin saved records retain the legacy comparison schema, exactly
         // as initial prepare_member_section_with_policy does. The admitted
         // native policy header is separate; do not relax replay compatibility.
-        let comparison_header =
-            if policy.selection() == crate::play_policy::GaugeSelection::BeatKernel {
-                LiveReplayCapture::new_with_input_sounds(
-                    &attempt.judge,
-                    attempt.config.domain,
-                    replay_limits()?,
-                    attempt.config.start,
-                    attempt.config.chart_seed,
-                    None,
-                    BmsInputMode::ButtonOnly,
-                    InputSoundIdentity::from_source(&attempt.source)?,
-                )?
-                .header()
-                .clone()
-            } else {
-                header.clone()
-            };
+        let comparison_header = if attempt.speed().rate() == beatkernel::transport::Rate::NORMAL
+            && policy.selection() == crate::play_policy::GaugeSelection::BeatKernel
+        {
+            LiveReplayCapture::new_with_input_sounds(
+                &attempt.judge,
+                attempt.config.domain,
+                replay_limits()?,
+                attempt.config.start,
+                attempt.config.chart_seed,
+                None,
+                BmsInputMode::ButtonOnly,
+                InputSoundIdentity::from_source(&attempt.source)?,
+            )?
+            .header()
+            .clone()
+        } else {
+            header.clone()
+        };
         let mut competition = Competition::new(comparison_header, 8)?;
         options.load_opponents(&attempt.source, &mut competition, replay_limits()?)?;
         Ok(Self {

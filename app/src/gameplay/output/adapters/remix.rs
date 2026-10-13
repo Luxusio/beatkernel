@@ -107,3 +107,78 @@ where
         self.inner.observe_native(output)
     }
 }
+
+impl<B, O: SoftwareOutputState>
+    crate::gameplay::output::ports::OriginalCoordinateNativeOutputBackend<O>
+    for RemixedOutputBackend<B>
+where
+    B: OutputChannelRemixBackend<O>
+        + crate::gameplay::output::ports::OriginalCoordinateNativeOutputBackend<O>,
+{
+    fn observe_native_coordinate(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<crate::native_output_coordinate::CoordinateNativeAudioSnapshot>, Self::Error>
+    {
+        self.inner.observe_native_coordinate(output)
+    }
+}
+
+impl<B, O: SoftwareOutputState> crate::gameplay::output::ports::SourcePlaybackNativeOutputBackend<O>
+    for RemixedOutputBackend<B>
+where
+    B: OutputChannelRemixBackend<O>
+        + crate::gameplay::output::ports::SourcePlaybackNativeOutputBackend<O>,
+{
+    type NativeEvidence = B::NativeEvidence;
+    fn observe_native_playback(
+        &mut self,
+        output: &mut Self::Output,
+        identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> Result<
+        Option<crate::gameplay::output::ports::NativePlaybackObservation<Self::NativeEvidence>>,
+        Self::Error,
+    > {
+        self.inner.observe_native_playback(output, identity)
+    }
+    fn source_playback_at(
+        &self,
+        output: &Self::Output,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> Result<
+        Option<crate::gameplay::output::ports::NativeSourcePlaybackQuery<Self::NativeEvidence>>,
+        Self::Error,
+    > {
+        self.inner.source_playback_at(output, query, identity)
+    }
+}
+
+#[cfg(test)]
+#[path = "remix_source_playback_fixtures.rs"]
+mod remix_source_playback_fixtures;
+
+impl<B, O: SoftwareOutputState>
+    crate::gameplay::output::ports::SourceHistoryRetirementNativeOutputBackend<O>
+    for RemixedOutputBackend<B>
+where
+    B: OutputChannelRemixBackend<O>
+        + crate::gameplay::output::ports::SourceHistoryRetirementNativeOutputBackend<O>,
+{
+    fn request_source_history_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        expected_epoch: u64,
+        expected_basis: OutputFrameBasis,
+        identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+        source_pin: u64,
+    ) -> Result<Option<u64>, Self::Error> {
+        self.inner.request_source_history_retirement(
+            output,
+            expected_epoch,
+            expected_basis,
+            identity,
+            source_pin,
+        )
+    }
+}

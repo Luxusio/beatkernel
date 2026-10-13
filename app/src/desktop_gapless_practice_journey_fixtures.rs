@@ -316,8 +316,8 @@ impl PracticeRecordingPort for Recordings {
 }
 
 #[test]
-fn desktop_gapless_practice_actual_worker_pump_retains_factory_converter_across_loop_disable_scrub()
-{
+fn desktop_gapless_practice_actual_worker_pump_retains_factory_converter_across_loop_disable_scrub_f5(
+) {
     let trace = Arc::new(Mutex::new(Trace::default()));
     let owner_trace = Arc::clone(&trace);
     let (proceed, owner_proceed) = mpsc::sync_channel(1);
@@ -715,17 +715,59 @@ fn desktop_gapless_practice_actual_worker_pump_retains_factory_converter_across_
     assert!(app.failure.is_none(), "{:?}", app.failure);
     assert_eq!(trace.lock().unwrap().opens, 1);
     let attempt = app.game.as_ref().unwrap().launch.attempt();
+    let worker = app
+        .game
+        .as_ref()
+        .unwrap()
+        .worker
+        .as_ref()
+        .unwrap()
+        .thread()
+        .id();
     app.key(KeyCode::F5, false);
+    let request = app
+        .game
+        .as_ref()
+        .unwrap()
+        .viewer
+        .pending_practice_request()
+        .unwrap()
+        .unwrap();
+    assert!(request.id > scrub_id);
     assert_eq!(
-        app.game
-            .as_ref()
-            .unwrap()
-            .prepared_retry
-            .as_ref()
-            .unwrap()
-            .attempt(),
-        attempt + 1
+        request.action,
+        beatkernel_bms_runtime::practice_control::PracticeAction::Scrub {
+            target: Timestamp::ZERO,
+        }
     );
+    let game = app.game.as_ref().unwrap();
+    assert_eq!(game.launch.attempt(), attempt);
+    assert!(!game.cancelling && !game.joined && game.prepared_retry.is_none());
+    // The existing worker qualifies and applies this request through its real
+    // converter/Mixer/gameplay pump; this test supplies no practice reply.
+    for _ in 0..12 {
+        tick(&mut app);
+        if !app.game.as_ref().unwrap().viewer.practice_pending() {
+            break;
+        }
+    }
+    let game = app.game.as_ref().unwrap();
+    assert!(!game.viewer.practice_pending());
+    assert_eq!(game.launch.attempt(), attempt + 1);
+    assert_eq!(game.launch.original_args(), launch.original_args());
+    assert_eq!(game.worker.as_ref().unwrap().thread().id(), worker);
+    assert!(!game.cancelling && !game.joined && game.prepared_retry.is_none());
+    assert!(!game.loop_enabled);
+    let final_generation = game
+        .viewer
+        .practice_capability()
+        .unwrap()
+        .unwrap()
+        .generation;
+    assert!(app.failure.is_none(), "{:?}", app.failure);
+    assert_eq!(trace.lock().unwrap().opens, 1);
+    // Explicit cancellation exercises the original cleanup and final recording.
+    app.game.as_mut().unwrap().cancel();
     app.occluded = true;
     proceed.send(()).unwrap();
     assert_eq!(done.recv_timeout(WAIT).unwrap(), Ok(()));
@@ -760,6 +802,8 @@ fn desktop_gapless_practice_actual_worker_pump_retains_factory_converter_across_
     }
     assert_eq!(trace.paths.len(), trace.captures.len());
     assert!(trace.captures.len() >= 4);
+    assert_eq!(trace.captures.len(), (attempt + 2) as usize);
+    assert_eq!(trace.final_generation, final_generation);
     assert!(trace
         .captures
         .iter()

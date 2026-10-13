@@ -39,7 +39,8 @@ use beatkernel_platform::audio::presentation::discipline::PresentationDiscipline
 use std::{collections::VecDeque, error::Error, fmt, time::Duration as WallDuration};
 
 pub use crate::native_gameplay_bridge::{
-    run_gameplay, run_gameplay_audio_with_policy_and_result_and_score,
+    run_gameplay, run_gameplay_audio_coordinate_with_practice_and_result_and_score,
+    run_gameplay_audio_with_policy_and_result_and_score,
     run_gameplay_audio_with_policy_and_result_and_score_and_speed,
     run_gameplay_audio_with_practice_and_result_and_score, run_gameplay_audio_with_result,
     run_gameplay_with_control, run_gameplay_with_policy_and_result_and_score,
@@ -91,6 +92,13 @@ pub struct NativeGameplayConfig {
 pub struct AudioGameplayConfig {
     pub gameplay: NativeGameplayConfig,
     pub section_start: Timestamp,
+}
+/// Explicit source-history binding for original-coordinate audio gameplay.
+/// Identity binding does not itself qualify a native observation.
+#[derive(Clone, Copy, Debug)]
+pub struct CoordinateGameplayConfig {
+    pub audio: AudioGameplayConfig,
+    pub source_history: crate::gameplay::output::ports::SourcePlaybackIdentity,
 }
 /// Borrowed gameplay state with an explicitly selected competition observer.
 pub struct GameplaySession<'a, S, P> {
@@ -582,7 +590,69 @@ pub fn run_gameplay_audio_with_practice_and_ports<
     practice: &mut crate::practice_playback::PracticePlayback,
     recording: &mut R,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
-    crate::native_policy_admission::validate_audio_config(&config)?;
+    run_gameplay_audio_with_practice_and_ports_impl(
+        device, audio, config, control, host, practice, recording, None,
+    )
+}
+
+/// Retained practice using its explicit original source history and cold setup.
+pub fn run_gameplay_audio_coordinate_with_practice_and_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    R: crate::practice_playback::PracticeRecordingPort,
+>(
+    device: &mut D,
+    audio: AudioGameplaySession<'_, S>,
+    config: CoordinateGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    practice: &mut crate::practice_playback::PracticePlayback,
+    recording: &mut R,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    run_gameplay_audio_with_practice_and_ports_impl(
+        device,
+        audio,
+        config.audio,
+        control,
+        host,
+        practice,
+        recording,
+        Some(config.source_history),
+    )
+}
+
+fn run_gameplay_audio_with_practice_and_ports_impl<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    R: crate::practice_playback::PracticeRecordingPort,
+>(
+    device: &mut D,
+    audio: AudioGameplaySession<'_, S>,
+    config: AudioGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    practice: &mut crate::practice_playback::PracticePlayback,
+    recording: &mut R,
+    history: Option<crate::gameplay::output::ports::SourcePlaybackIdentity>,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    let speed = history.and_then(|_| practice.initial_setup());
+    if let Some(source_history) = history {
+        crate::native_policy_admission::validate_audio_coordinate_start(
+            &CoordinateGameplayConfig {
+                audio: config,
+                source_history,
+            },
+            audio.session.discipline,
+            audio.session.runtime.transport_mut(),
+            speed,
+        )?;
+    } else {
+        crate::native_policy_admission::validate_audio_config(&config)?;
+    }
     if audio.session.runtime.song_end() != config.gameplay.end_song
         || config.gameplay.end_song != practice.section_end()
     {
@@ -590,7 +660,7 @@ pub fn run_gameplay_audio_with_practice_and_ports<
     }
 
     let session = audio.session;
-    let mut timing = AudioTiming(session.discipline, config.section_start, None);
+    let mut timing = AudioTiming(session.discipline, config.section_start, speed, history);
     let session = GameplaySession {
         runtime: session.runtime,
         gauge: session.gauge,
@@ -649,6 +719,15 @@ fn archive_practice_capture<S, T, R: crate::practice_playback::PracticeRecording
     Ok(())
 }
 
+#[derive(Default)]
+struct SoloCoordinateControls {
+    pause: Option<crate::playback_pause::PreparedCoordinatePauseAdoption>,
+    end: Option<crate::native_end::PreparedCoordinateEnd>,
+    pause_host: Option<ClockPoint>,
+    end_host: Option<ClockPoint>,
+    end_committed: bool,
+}
+
 fn run_gameplay_timed<
     D: crate::gameplay_presentation::GameplayDevice,
     C: NativePumpControl,
@@ -666,6 +745,27 @@ fn run_gameplay_timed<
     mut practice: Option<RetainedSoloPractice<'_, R>>,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
     let speed = session.discipline.live_speed();
+    let source_history = session.discipline.source_playback_identity();
+    if let Some(source_history) = source_history {
+        crate::native_policy_admission::validate_audio_coordinate_start(
+            &CoordinateGameplayConfig {
+                audio: AudioGameplayConfig {
+                    gameplay: config,
+                    section_start: session
+                        .discipline
+                        .section_start()
+                        .ok_or("coordinate gameplay lacks section start")?,
+                },
+                source_history,
+            },
+            session
+                .discipline
+                .audio()
+                .ok_or("coordinate gameplay lacks audio authority")?,
+            session.runtime.transport_mut(),
+            speed,
+        )?;
+    }
     if speed.is_none()
         && session
             .runtime
@@ -675,7 +775,7 @@ fn run_gameplay_timed<
     {
         return Err("nonnormal live speed requires the explicit original-audio speed owner".into());
     }
-    if speed.is_some() && (!T::AUDIO || practice.is_some()) {
+    if speed.is_some() && (!T::AUDIO || (practice.is_some() && source_history.is_none())) {
         return Err(
             "selected live speed requires an original-audio owner without retained practice".into(),
         );
@@ -729,9 +829,10 @@ fn run_gameplay_timed<
         {
             return Err("audio gameplay requires the actual pristine logical/raw Runtime domains and origin".into());
         }
-        if let Some(speed) = speed {
-            if session.runtime.song_end() != speed.end()
-                || session.end.is_some() != speed.end().is_some()
+        if speed.is_some() || source_history.is_some() {
+            let end = speed.map_or(config.end_song, |setup| setup.end());
+            if session.runtime.song_end() != end
+                || (practice.is_none() && session.end.is_some() != end.is_some())
                 || session.pause.epoch() != epoch.id
                 || session.pause.host_domain() != epoch.host_domain
                 || session.pause.phase() != PausePhase::Running
@@ -741,16 +842,47 @@ fn run_gameplay_timed<
                         .into(),
                 );
             }
-            crate::native_policy_admission::validate_transport_with_speed(
-                session.runtime.transport_mut(),
-                epoch.logical_output(config.playback_origin)?.timestamp,
-                speed,
-            )?;
+        }
+        if let Some(speed) = speed {
+            if source_history.is_none() {
+                crate::native_policy_admission::validate_transport_with_speed(
+                    session.runtime.transport_mut(),
+                    epoch.logical_output(config.playback_origin)?.timestamp,
+                    speed,
+                )?;
+            }
         }
         if merger.as_ref().expect("audio merger").source_capacity() != 4096 {
             return Err("audio solo requires the bounded dynamic actual-source merger".into());
         }
     }
+    let mut coordinate_controls = SoloCoordinateControls::default();
+    let coordinate_control_required =
+        source_history.is_some() && (config.pause_supported || session.end.is_some());
+    let coordinate_bindings =
+        if let Some(identity) = source_history.filter(|_| coordinate_control_required) {
+            let authority = session
+                .discipline
+                .audio()
+                .expect("audio timing")
+                .authority();
+            let basis = authority
+                .coordinate_basis()
+                .ok_or("coordinate control lacks descriptor")?;
+            let epoch = authority.epoch().id;
+            let pause = session
+                .pause
+                .clone()
+                .with_coordinate_binding(epoch, basis, identity)?;
+            let end = session
+                .end
+                .clone()
+                .map(|end| end.with_coordinates(epoch, basis, identity))
+                .transpose()?;
+            Some((pause, end))
+        } else {
+            None
+        };
     let logical_domain = session.discipline.logical_domain(config);
     let section_start = session.discipline.section_start();
     let custom_policy = session.gauge.profile() != &GaugeProfile::default();
@@ -825,15 +957,20 @@ fn run_gameplay_timed<
                 return Err("native capture and competition policy identities differ".into());
             }
         }
-        pending.try_reserve_exact(4096)?;
+    }
+    pending.try_reserve_exact(4096)?;
+    // All cold configuration, capture and competition checks above are read-only.
+    // Install the checked owners together immediately before the first host effect.
+    if let Some((pause, end)) = coordinate_bindings {
+        *session.pause = pause;
+        *session.end = end;
+    }
+    if custom_policy || speed.is_some() {
         host_port
             .prepare_policies(&[(crate::local_players::PlayerId(1), session.gauge.profile())])?;
     }
     let mut deadline =
         NativePumpDeadline::new(control, config.seconds, "native gameplay deadline overflow")?;
-    if !custom_policy && speed.is_none() {
-        pending.try_reserve_exact(4096)?;
-    }
     let mut last_acquired = config.origin;
     let mut completed_through = None;
     let mut last_operation = config.origin;
@@ -855,7 +992,18 @@ fn run_gameplay_timed<
     let mut stop_barrier = NativeStopBarrier::default();
     while !host_port.cancelled() && deadline.active(control)? {
         host_port.retry_pause_publication();
-        session.discipline.observe(device)?;
+        let control_facts = if coordinate_control_required {
+            session.discipline.coordinate_playback_control(device)?
+        } else {
+            session.discipline.observe(device)?;
+            None
+        };
+        if let Some(facts) = control_facts.as_ref() {
+            facts.validate(
+                session.discipline.audio().expect("audio timing"),
+                source_history.expect("coordinate identity"),
+            )?;
+        }
         let reference = session.discipline.latest_pair();
         if !T::AUDIO && reference.is_none() {
             return Err("gameplay requires native clock relation".into());
@@ -865,7 +1013,14 @@ fn run_gameplay_timed<
         } else {
             None
         };
-        let rendered = render_evidence.validate(device.render_report()?, &stop_evidence)?;
+        let rendered = render_evidence.validate(
+            if coordinate_control_required {
+                control_facts.as_ref().and_then(|facts| facts.report())
+            } else {
+                device.render_report()?
+            },
+            &stop_evidence,
+        )?;
         if T::AUDIO && session.end.is_some() {
             if let Some(report) = rendered
                 .filter(|report| report.frames != 0 && report.playback_end_physical_frame.is_some())
@@ -877,14 +1032,171 @@ fn run_gameplay_timed<
                 session.runtime.seal_gameplay_audio();
             }
         }
-        if let Some(end) = session.end.as_mut() {
-            end_rendered |=
-                rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
-            if let Some(boundary) = session.discipline.end(device, end, rendered)? {
-                end_boundary = Some(boundary);
+        if source_history.is_none() {
+            if let Some(end) = session.end.as_mut() {
+                end_rendered |=
+                    rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
+                if let Some(boundary) = session.discipline.end(device, end, rendered)? {
+                    end_boundary = Some(boundary);
+                }
             }
         }
-        if (config.logical_schedule || config.pause_supported) && reference.is_some() {
+        if source_history.is_some() {
+            if let Some(facts) = control_facts {
+                let audio = session.discipline.audio().expect("audio timing");
+                if let Some(end) = session
+                    .end
+                    .as_mut()
+                    .filter(|_| !coordinate_controls.end_committed)
+                {
+                    let stage_end = |end: &NativeEnd| {
+                        match facts {
+                        crate::native_coordinate_control::CoordinatePlaybackControlFacts::Source(_) => {
+                            end.stage_coordinate_source(
+                                facts.epoch(),
+                                facts.basis(),
+                                facts.identity(),
+                                rendered,
+                                facts.pair(),
+                            )
+                        }
+                        crate::native_coordinate_control::CoordinatePlaybackControlFacts::Target(target) => {
+                            end.stage_coordinate_target(
+                                facts.epoch(),
+                                facts.basis(),
+                                facts.identity(),
+                                target.target().boundaries,
+                                rendered,
+                                facts.pair(),
+                            )
+                        }
+                    }
+                    };
+                    let staged = stage_end(end)?;
+                    end.commit_coordinate_observation(staged)?;
+                    let staged = stage_end(end)?;
+                    end_rendered |= staged.query().is_some();
+                    coordinate_controls.end = Some(staged);
+                }
+                if config.pause_supported && !pause_announced {
+                    pause_announced = true;
+                    host_port.publish_pause(PauseState::Running);
+                }
+                if config.pause_supported
+                    && !end_rendered
+                    && (session.pause.phase() == PausePhase::Running || pause_committed)
+                    && coordinate_controls.pause.is_none()
+                {
+                    let desired = host_port.pause_requested();
+                    if !desired && device.output_replacement_pending() {
+                        return Err(
+                            "coordinate output replacement requires qualified fresh history".into(),
+                        );
+                    }
+                    if session
+                        .pause
+                        .request_coordinate(desired, audio.authority())?
+                    {
+                        session.runtime.request_audio_pause(desired);
+                        if !desired
+                            && matches!(
+                                facts.basis(),
+                                crate::audio_authority::AudioAuthorityCoordinateBasis::TargetFrame(
+                                    _
+                                )
+                            )
+                        {
+                            device.set_audio_held(false)?;
+                        }
+                        host_port.publish_pause(if desired {
+                            PauseState::Pausing
+                        } else {
+                            PauseState::Resuming
+                        });
+                    }
+                }
+                if coordinate_controls.pause.is_none() {
+                    coordinate_controls.pause = session
+                        .pause
+                        .prepare_coordinate_adoption(rendered, facts.target_boundaries())?;
+                }
+            }
+            let authority = session
+                .discipline
+                .audio()
+                .expect("audio timing")
+                .authority();
+            let now = pause_now.expect("audio HOST");
+            coordinate_controls.pause_host = coordinate_controls
+                .pause
+                .as_ref()
+                .map(|staged| {
+                    authority.presented_coordinate_boundary_host(&staged.exact_cut(), now)
+                })
+                .transpose()?
+                .flatten();
+            coordinate_controls.end_host = coordinate_controls
+                .end
+                .as_ref()
+                .and_then(|staged| staged.query())
+                .map(|query| authority.presented_coordinate_boundary_host(&query, now))
+                .transpose()?
+                .flatten();
+        }
+        if source_history.is_some()
+            && session.discipline.audio().is_some_and(|audio| {
+                matches!(
+                    audio.authority().coordinate_basis(),
+                    Some(
+                        crate::audio_authority::AudioAuthorityCoordinateBasis::TargetFrame(_)
+                            | crate::audio_authority::AudioAuthorityCoordinateBasis::SourceFrame(_)
+                            | crate::audio_authority::AudioAuthorityCoordinateBasis::SourceCounter { .. }
+                    )
+                )
+            })
+        {
+            let (queued_source, queued_target, held_source, held_target) = if let Some(owner) =
+                practice.as_mut()
+            {
+                // Capture queue pins before transferring its first receipt
+                // into the app owner. The later service peek is idempotent.
+                let (queued_source, queued_target) = owner.playback.queued_history_retention_pins();
+                owner.playback.peek_receipt()?;
+                let held = owner.playback.history_retention_pins();
+                (
+                    queued_source,
+                    queued_target,
+                    held.map(|pins| pins.0),
+                    held.map(|pins| pins.1),
+                )
+            } else {
+                (None, None, None, None)
+            };
+            let source_minimum = match (queued_source, held_source) {
+                (Some(queued), Some(held)) => Some(queued.min(held)),
+                (queued, held) => queued.or(held),
+            };
+            let queries = [
+                session.pause.pending_coordinate_retention_query()?,
+                coordinate_controls
+                    .pause
+                    .as_ref()
+                    .map(|staged| staged.exact_cut()),
+                coordinate_controls
+                    .end
+                    .as_ref()
+                    .and_then(|staged| staged.query()),
+                queued_target,
+                held_target,
+            ];
+            session
+                .discipline
+                .retire_coordinate_history(device, &queries, source_minimum)?;
+        }
+        if source_history.is_none()
+            && (config.logical_schedule || config.pause_supported)
+            && reference.is_some()
+        {
             let desired = (config.pause_supported
                 && !end_rendered
                 && (session.pause.phase() == PausePhase::Running || pause_committed)
@@ -1107,7 +1419,8 @@ fn run_gameplay_timed<
                     .record_acquired_prefix(prefix)?;
             }
         }
-        if (config.logical_schedule || config.pause_supported)
+        if source_history.is_none()
+            && (config.logical_schedule || config.pause_supported)
             && (session.pause.last_render_report().is_none()
                 || matches!(
                     session.pause.phase(),
@@ -1215,6 +1528,9 @@ fn run_gameplay_timed<
                 None,
                 practice_end,
                 &mut render_evidence,
+                Some(&mut coordinate_controls),
+                &mut end_boundary,
+                &mut live_terminal,
             )?;
             if (session.pause.phase() == PausePhase::Paused && !end_rendered)
                 || audio_boundary.is_some()
@@ -1399,7 +1715,7 @@ fn run_gameplay_timed<
                 && i128::from(cut.timestamp.as_nanos()) - i128::from(config.advance_lag.as_nanos())
                     >= i128::from(last_operation.timestamp.as_nanos())
         });
-        if let Some(speed) = speed.filter(|_| !live_terminal) {
+        if let Some(speed) = speed.filter(|_| !live_terminal && source_history.is_none()) {
             if let (Some(end), Some(boundary)) = (speed.end(), end_boundary) {
                 if speed.playback_end_frame(config.sample_rate)? != Some(boundary.playback_frame) {
                     return Err(
@@ -1434,6 +1750,12 @@ fn run_gameplay_timed<
                         session.runtime.admitted_audio_commands(),
                     )
                 {
+                    if source_history.is_some() {
+                        return Err(
+                            "coordinate finite completion requires an exact native end control"
+                                .into(),
+                        );
+                    }
                     // This is the last real committed operation, or the actual
                     // cold logical origin for a genuine zero-frame endpoint.
                     let frontier = authority
@@ -2094,6 +2416,47 @@ fn service_practice_solo<
     else {
         return Ok(PracticeService::Waiting);
     };
+    let coordinate = if let Some(query) = boundary.coordinate_query()? {
+        let identity = session
+            .discipline
+            .source_playback_identity()
+            .ok_or("coordinate practice lacks original source identity")?;
+        let Some(mapping) = device.playback_mapping_at(
+            session.discipline.audio().expect("audio timing"),
+            &query,
+            identity,
+        )?
+        else {
+            return Ok(PracticeService::Waiting);
+        };
+        let basis = session
+            .runtime
+            .transport_mut()
+            .output_phase_basis()
+            .ok_or("coordinate practice lacks output phase")?;
+        if basis.source_hz() != identity.hz() {
+            return Err("coordinate practice source grid differs from output phase".into());
+        }
+        let phase = if boundary.receipt().kind != PracticeBoundaryKind::Started {
+            let phase = mapping.phase(
+                session.discipline.audio().expect("audio timing"),
+                identity,
+                &query,
+                basis,
+                boundary.output(),
+            )?;
+            session
+                .runtime
+                .transport_mut()
+                .position_at_output_phase(phase)?;
+            Some(phase)
+        } else {
+            None
+        };
+        Some((basis, phase, mapping, identity, query))
+    } else {
+        None
+    };
     service_audio_solo(
         device,
         session,
@@ -2114,6 +2477,9 @@ fn service_practice_solo<
         Some(boundary.host()),
         None,
         render_evidence,
+        None,
+        &mut None,
+        &mut false,
     )?;
     if backlog
         || !session
@@ -2133,6 +2499,51 @@ fn service_practice_solo<
         receipt.kind,
         PracticeBoundaryKind::Requested | PracticeBoundaryKind::Looped
     );
+    let fresh_transport = if fresh {
+        if let Some((old, _, mapping, identity, query)) = coordinate {
+            if prepared.attempts.len() != 1 {
+                return Err("practice payload differs from solo cohort".into());
+            }
+            let attempt = &prepared.attempts[0].1;
+            if receipt.generation == 0 || receipt.generation <= session.runtime.audio_scope().0 {
+                return Err("practice audio scope must advance explicitly".into());
+            }
+            let current = session.runtime.transport_mut();
+            if receipt.generation <= old.generation()
+                || receipt.playback_frame < old.active_origin_frame()
+                || boundary.output().timestamp < current.anchor().host_time
+                || attempt.speed().rate() != current.anchor().rate
+                || attempt.config.start != receipt.applied_song_time
+            {
+                return Err("practice attempt differs from retained output phase".into());
+            }
+            let basis = beatkernel::transport::OutputPhaseBasis::new(
+                old.domain(),
+                old.owner(),
+                receipt.generation,
+                receipt.playback_frame,
+                old.source_hz(),
+            )?;
+            let transport = attempt.transport_at_output_phase(basis, boundary.output())?;
+            let phase = mapping.phase(
+                session.discipline.audio().expect("audio timing"),
+                identity,
+                &query,
+                basis,
+                boundary.output(),
+            )?;
+            transport.position_at_output_phase(phase)?;
+            Some(transport)
+        } else {
+            Some(beatkernel::transport::Transport::new(
+                boundary.output().timestamp,
+                receipt.applied_song_time,
+                beatkernel::transport::Rate::NORMAL,
+            ))
+        }
+    } else {
+        None
+    };
     let competition = if fresh {
         let attempt = &prepared
             .attempts
@@ -2182,9 +2593,18 @@ fn service_practice_solo<
     // Started is bootstrap evidence for the already installed initial state.
     if receipt.kind != PracticeBoundaryKind::Started {
         let audio_at = schedule(device, session, *config, render_evidence, stops)?;
-        let report = session
-            .runtime
-            .advance_to(boundary.output(), &ExplicitDomains, audio_at)?;
+        let report = if let Some((_, phase, _, _, _)) = coordinate {
+            session.runtime.advance_to_output_phase(
+                boundary.output(),
+                &ExplicitDomains,
+                audio_at,
+                phase.expect("nonbootstrap practice phase"),
+            )?
+        } else {
+            session
+                .runtime
+                .advance_to(boundary.output(), &ExplicitDomains, audio_at)?
+        };
         *last_song = report.song_time;
         *last_host_operation = boundary.host();
         publish_with_host(session, report, stops, host)?;
@@ -2195,17 +2615,22 @@ fn service_practice_solo<
         }
         archive_practice_capture(session, owner)?;
         let (_, attempt) = prepared.attempts.pop().expect("prepared solo attempt");
-        let transport = beatkernel::transport::Transport::new(
-            boundary.output().timestamp,
-            receipt.applied_song_time,
-            beatkernel::transport::Rate::NORMAL,
-        );
-        session.runtime.replace_practice_state(
-            attempt.judge,
-            transport,
-            attempt.config.end,
-            CommandScope(receipt.generation),
-        )?;
+        let transport = fresh_transport.expect("prepared fresh transport");
+        if coordinate.is_some() {
+            session.runtime.replace_practice_state_with_output_phase(
+                attempt.judge,
+                transport,
+                attempt.config.end,
+                CommandScope(receipt.generation),
+            )?;
+        } else {
+            session.runtime.replace_practice_state(
+                attempt.judge,
+                transport,
+                attempt.config.end,
+                CommandScope(receipt.generation),
+            )?;
+        }
         *session.gauge = attempt.gauge;
         *session.capture = attempt.capture;
         *session.competition = competition;
@@ -2241,6 +2666,316 @@ fn service_practice_solo<
     })
 }
 
+/// Maps only keyboard reconciliation at the already qualified original control cut.
+struct CoordinateControlMapper(crate::audio_authority::PreparedCoordinateControlCutoff);
+impl ClockMapper for CoordinateControlMapper {
+    fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+        (from == self.0.host() && to == self.0.output().domain).then_some(self.0.output().timestamp)
+    }
+    fn quality(&self) -> ClockMappingQuality {
+        ClockMappingQuality::Unknown
+    }
+}
+
+fn service_coordinate_solo_control<
+    D: crate::gameplay_presentation::GameplayDevice,
+    S: SoloCompetitionPort,
+    H: NativeGameplayHost,
+    T: PumpTiming<D>,
+>(
+    device: &mut D,
+    session: &mut GameplaySession<'_, S, T>,
+    config: &NativeGameplayConfig,
+    merger: &mut InputMerger,
+    now: ClockPoint,
+    backlog: bool,
+    keyboard: &mut PauseKeyboard,
+    paused: &mut Option<LivePauseBoundary>,
+    pause_committed: &mut bool,
+    last_song: &mut Timestamp,
+    last_host: &mut ClockPoint,
+    controls: &mut SoloCoordinateControls,
+    end_boundary: &mut Option<EndBoundary>,
+    terminal: &mut bool,
+    stops: &mut OwnedStopEvidence,
+    host: &mut H,
+    render_evidence: &mut NativeRenderEvidence,
+) -> NativeGameplayResult<()> {
+    if !backlog {
+        if let (Some(adoption), Some(at)) = (controls.pause.as_ref(), controls.pause_host) {
+            let authority = session
+                .discipline
+                .audio()
+                .expect("audio timing")
+                .authority();
+            let prepared = if adoption.paused() {
+                authority.prepare_coordinate_control_cutoff(
+                    adoption.epoch(),
+                    adoption.exact_cut(),
+                    at,
+                    now,
+                    merger,
+                )?
+            } else {
+                authority.prepare_coordinate_resume_control_cutoff(
+                    adoption.epoch(),
+                    adoption.exact_cut(),
+                    at,
+                    now,
+                    merger,
+                )?
+            };
+            if let Some(prepared) = prepared {
+                session
+                    .pause
+                    .validate_coordinate_adoption(adoption, authority, &prepared, now, merger)?;
+                let basis = session
+                    .runtime
+                    .transport_mut()
+                    .output_phase_basis()
+                    .ok_or("coordinate pause lacks phase")?;
+                let transport = crate::live_pause::prepare_coordinate_live_transport(
+                    session.runtime.transport_mut(),
+                    adoption,
+                    &prepared,
+                    basis,
+                    *last_song,
+                )?;
+                let frames = adoption
+                    .playback_frame()
+                    .checked_sub(basis.active_origin_frame())
+                    .ok_or("coordinate adoption precedes active origin")?;
+                let phase = basis.point_from_elapsed_nanos(
+                    prepared.output(),
+                    i128::from(frames) * 1_000_000_000 / i128::from(basis.source_hz()),
+                )?;
+                let audio_at = schedule(device, session, *config, render_evidence, stops)?;
+                let prior_transport = session.runtime.transport_mut().clone();
+                *session.runtime.transport_mut() = transport;
+                let report = match session.runtime.advance_to_output_phase(
+                    prepared.output(),
+                    &ExplicitDomains,
+                    audio_at,
+                    phase,
+                ) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        *session.runtime.transport_mut() = prior_transport;
+                        return Err(error.into());
+                    }
+                };
+                let adoption = controls.pause.take().expect("preflighted adoption");
+                let boundary = session.pause.commit_coordinate_adoption(
+                    adoption,
+                    session
+                        .discipline
+                        .audio()
+                        .expect("audio timing")
+                        .authority(),
+                    &prepared,
+                    now,
+                    merger,
+                )?;
+                session
+                    .discipline
+                    .audio_mut()
+                    .expect("audio timing")
+                    .authority_mut()
+                    .commit_coordinate_control_cutoff(prepared, now, merger)?;
+                *last_song = report.song_time;
+                *last_host = boundary.host;
+                controls.pause_host = None;
+                if boundary.paused {
+                    *paused = Some(LivePauseBoundary {
+                        paused: true,
+                        window: crate::native_start::HostStartWindow::new(
+                            boundary.host,
+                            boundary.host,
+                        )?,
+                        at: boundary.host,
+                        playback_frame: boundary.playback_frame,
+                        song: *last_song,
+                    });
+                    *pause_committed = true;
+                } else {
+                    *paused = None;
+                    *pause_committed = false;
+                }
+                let publication = publish_with_host(session, report, stops, host);
+                let held = if boundary.paused
+                    && matches!(
+                        session
+                            .discipline
+                            .audio()
+                            .expect("audio timing")
+                            .authority()
+                            .coordinate_basis(),
+                        Some(crate::audio_authority::AudioAuthorityCoordinateBasis::TargetFrame(_))
+                    ) {
+                    device.set_audio_held(true)
+                } else {
+                    Ok(())
+                };
+                publication?;
+                held?;
+                if !boundary.paused {
+                    for event in keyboard.resume(boundary.host)? {
+                        let prepared = session
+                            .discipline
+                            .audio()
+                            .expect("audio timing")
+                            .authority()
+                            .prepare_coordinate_resume_control_cutoff(
+                                boundary.epoch,
+                                boundary.exact_cut,
+                                boundary.host,
+                                now,
+                                merger,
+                            )?
+                            .ok_or("coordinate reconciliation lost exact cutoff")?;
+                        let phase = basis
+                            .point_from_elapsed_nanos(prepared.output(), phase.elapsed_nanos())?;
+                        let report = session.runtime.process_input_output_phase(
+                            event,
+                            &CoordinateControlMapper(prepared),
+                            audio_at,
+                            phase,
+                        )?;
+                        session
+                            .discipline
+                            .audio_mut()
+                            .expect("audio timing")
+                            .authority_mut()
+                            .commit_coordinate_control_cutoff(prepared, now, merger)?;
+                        *last_song = report.song_time;
+                        publish_with_host(session, report, stops, host)?;
+                    }
+                }
+                host.publish_pause(if boundary.paused {
+                    PauseState::Paused
+                } else {
+                    PauseState::Running
+                });
+            }
+        }
+        if let (Some(staged), Some(at)) = (controls.end.as_ref(), controls.end_host) {
+            if let Some(query) = staged.query() {
+                let authority = session
+                    .discipline
+                    .audio()
+                    .expect("audio timing")
+                    .authority();
+                if let Some(prepared) = authority.prepare_coordinate_resume_control_cutoff(
+                    staged.epoch(),
+                    query,
+                    at,
+                    now,
+                    merger,
+                )? {
+                    let boundary = session
+                        .end
+                        .as_ref()
+                        .ok_or("coordinate end owner disappeared")?
+                        .validate_coordinate_end(staged, authority, &prepared, now, merger)?;
+                    let basis = session
+                        .runtime
+                        .transport_mut()
+                        .output_phase_basis()
+                        .ok_or("coordinate end lacks phase")?;
+                    let phase = crate::native_end::coordinate_final_phase(boundary, basis)?;
+                    let audio_at = schedule(device, session, *config, render_evidence, stops)?;
+                    let report = session.runtime.advance_to_output_phase(
+                        prepared.output(),
+                        &ExplicitDomains,
+                        audio_at,
+                        phase,
+                    )?;
+                    let staged = controls.end.take().expect("preflighted endpoint");
+                    session
+                        .end
+                        .as_mut()
+                        .expect("preflighted endpoint owner")
+                        .commit_coordinate_end(
+                            staged,
+                            session
+                                .discipline
+                                .audio()
+                                .expect("audio timing")
+                                .authority(),
+                            &prepared,
+                            now,
+                            merger,
+                        )?;
+                    session
+                        .discipline
+                        .audio_mut()
+                        .expect("audio timing")
+                        .authority_mut()
+                        .commit_coordinate_control_cutoff(prepared, now, merger)?;
+                    controls.end_committed = true;
+                    controls.end_host = None;
+                    *end_boundary = Some(EndBoundary {
+                        host: boundary.host,
+                        output: boundary.raw_output,
+                        physical_frame: boundary.physical_frame,
+                        playback_frame: boundary.playback_frame,
+                    });
+                    *last_song = report.song_time;
+                    *last_host = boundary.host;
+                    *terminal = true;
+                    publish_with_host(session, report, stops, host)?;
+                }
+            }
+        }
+    }
+    if *pause_committed && session.pause.phase() == PausePhase::Paused {
+        if let Some(frontier) = session
+            .discipline
+            .audio()
+            .expect("audio timing")
+            .authority()
+            .prepare_coordinate_held_frontier(now, merger)?
+        {
+            *last_host = frontier.host();
+            session
+                .discipline
+                .audio_mut()
+                .expect("audio timing")
+                .authority_mut()
+                .commit_coordinate_held_frontier(frontier, now, merger)?;
+        }
+    }
+    if controls.end_committed {
+        if let Some(prefix) = session
+            .discipline
+            .audio()
+            .expect("audio timing")
+            .authority()
+            .acquired_prefix()
+        {
+            while merger.peek_ready(prefix)?.is_some() {
+                merger.pop_ready(prefix)?;
+            }
+        }
+        if let Some(frontier) = session
+            .discipline
+            .audio()
+            .expect("audio timing")
+            .authority()
+            .prepare_coordinate_held_frontier(now, merger)?
+        {
+            *last_host = frontier.host();
+            session
+                .discipline
+                .audio_mut()
+                .expect("audio timing")
+                .authority_mut()
+                .commit_coordinate_held_frontier(frontier, now, merger)?;
+        }
+    }
+    Ok(())
+}
+
 fn service_audio_solo<
     D: crate::gameplay_presentation::GameplayDevice,
     S: SoloCompetitionPort,
@@ -2266,7 +3001,14 @@ fn service_audio_solo<
     practice_cut: Option<ClockPoint>,
     practice_end: Option<Timestamp>,
     render_evidence: &mut NativeRenderEvidence,
+    mut coordinate_controls: Option<&mut SoloCoordinateControls>,
+    coordinate_end_boundary: &mut Option<EndBoundary>,
+    coordinate_terminal: &mut bool,
 ) -> NativeGameplayResult<()> {
+    let source_history = session.discipline.source_playback_identity();
+    if source_history.is_some() && device.output_clock_suspended() {
+        return Ok(());
+    }
     let Some(prefix) = session
         .discipline
         .audio()
@@ -2276,11 +3018,56 @@ fn service_audio_solo<
     else {
         return Ok(());
     };
+    if source_history.is_some()
+        && matches!(
+            session.pause.phase(),
+            PausePhase::Pausing | PausePhase::Resuming
+        )
+        && coordinate_controls
+            .as_deref()
+            .is_none_or(|controls| controls.pause.is_none())
+    {
+        return Ok(());
+    }
+
     loop {
         let Some(event) = merger.peek_ready(prefix)? else {
             break;
         };
         let at = point(event);
+        if let Some(controls) = coordinate_controls
+            .as_deref()
+            .filter(|_| source_history.is_some())
+        {
+            if let Some(adoption) = controls.pause.as_ref() {
+                let Some(cut) = controls.pause_host else {
+                    break;
+                };
+                if (!adoption.paused() && at.timestamp >= cut.timestamp)
+                    || (adoption.paused() && at.timestamp > cut.timestamp)
+                {
+                    break;
+                }
+                if adoption.paused() && at.timestamp == cut.timestamp {
+                    keyboard.observe_paused(
+                        merger.pop_ready(prefix)?.expect("peeked pause-cut input"),
+                    )?;
+                    continue;
+                }
+            }
+            if controls
+                .end
+                .as_ref()
+                .is_some_and(|end| end.query().is_some())
+            {
+                let Some(cut) = controls.end_host else {
+                    break;
+                };
+                if at.timestamp >= cut.timestamp {
+                    break;
+                }
+            }
+        }
         if practice_cut.is_some_and(|cut| at.timestamp >= cut.timestamp) {
             break;
         }
@@ -2295,6 +3082,97 @@ fn service_audio_solo<
         }
         if end_boundary.is_some_and(|boundary| at.timestamp >= boundary.host.timestamp) {
             merger.pop_ready(prefix)?;
+            continue;
+        }
+        if let Some(identity) = source_history {
+            let Some(prepared) = session
+                .discipline
+                .audio()
+                .expect("audio timing")
+                .authority()
+                .prepare_coordinate_input(at, now)?
+            else {
+                break;
+            };
+            if prepared.is_before_origin() {
+                let count = session
+                    .pre_origin_inputs
+                    .checked_add(1)
+                    .ok_or("native pre-origin input counter overflow")?;
+                session
+                    .discipline
+                    .audio_mut()
+                    .expect("audio timing")
+                    .authority_mut()
+                    .commit_discarded_coordinate_input(prepared, now)?;
+                merger
+                    .pop_ready(prefix)?
+                    .expect("prepared pre-origin input");
+                *session.pre_origin_inputs = count;
+                continue;
+            }
+            let Some(mapping) = device.playback_mapping_at(
+                session.discipline.audio().expect("audio timing"),
+                &prepared.query(),
+                identity,
+            )?
+            else {
+                break;
+            };
+            let phase = mapping.phase(
+                session.discipline.audio().expect("audio timing"),
+                identity,
+                &prepared.query(),
+                session
+                    .runtime
+                    .transport_mut()
+                    .output_phase_basis()
+                    .ok_or("coordinate Runtime lacks output phase")?,
+                prepared.output(),
+            )?;
+            if let Some(end) = practice_end {
+                if session
+                    .runtime
+                    .transport_mut()
+                    .position_at_output_phase(phase)?
+                    >= end
+                {
+                    break;
+                }
+            }
+            session
+                .discipline
+                .audio()
+                .expect("audio timing")
+                .authority()
+                .validate_coordinate_input(&prepared, now)?;
+            if config.pause_supported && !keyboard.accept(event)? {
+                merger.pop_ready(prefix)?;
+                continue;
+            }
+            let audio_at = schedule(device, session, *config, render_evidence, stops)?;
+            if audio_at.domain != config.stream_origin.domain {
+                return Err("native audio scheduling domain differs".into());
+            }
+            let event = merger
+                .pop_ready(prefix)?
+                .expect("prepared earliest original input");
+            let report = session.runtime.process_input_output_phase(
+                event,
+                prepared.mapper(),
+                audio_at,
+                phase,
+            )?;
+            session
+                .discipline
+                .audio_mut()
+                .expect("audio timing")
+                .authority_mut()
+                .commit_coordinate_input(prepared, now)
+                .expect("private current coordinate input token was preflighted");
+            *last_song = report.song_time;
+            *last_host_operation = at;
+            publish_with_host(session, report, stops, host)?;
             continue;
         }
         let Some(prepared) = session
@@ -2363,6 +3241,39 @@ fn service_audio_solo<
     }
     if practice_cut.is_some() {
         return Ok(());
+    }
+    if source_history.is_some() {
+        if let Some(controls) = coordinate_controls.as_deref_mut() {
+            service_coordinate_solo_control(
+                device,
+                session,
+                config,
+                merger,
+                now,
+                backlog,
+                keyboard,
+                paused,
+                pause_committed,
+                last_song,
+                last_host_operation,
+                controls,
+                coordinate_end_boundary,
+                coordinate_terminal,
+                stops,
+                host,
+                render_evidence,
+            )?;
+            if controls.pause.is_some()
+                || controls
+                    .end
+                    .as_ref()
+                    .is_some_and(|end| end.query().is_some())
+                || controls.end_committed
+                || (*pause_committed && session.pause.phase() == PausePhase::Paused)
+            {
+                return Ok(());
+            }
+        }
     }
     if !backlog {
         if let Some(boundary) = *transition {
@@ -2507,6 +3418,70 @@ fn service_audio_solo<
     {
         return Ok(());
     }
+    if let Some(identity) = source_history {
+        let Some(frontier) = session
+            .discipline
+            .audio()
+            .expect("audio timing")
+            .authority()
+            .prepare_coordinate_frontier(now, merger)?
+        else {
+            return Ok(());
+        };
+        let Some(mapping) = device.playback_mapping_at(
+            session.discipline.audio().expect("audio timing"),
+            &frontier.query(),
+            identity,
+        )?
+        else {
+            return Ok(());
+        };
+        let phase = mapping.phase(
+            session.discipline.audio().expect("audio timing"),
+            identity,
+            &frontier.query(),
+            session
+                .runtime
+                .transport_mut()
+                .output_phase_basis()
+                .ok_or("coordinate Runtime lacks output phase")?,
+            frontier.output(),
+        )?;
+        let report = if let Some(output) = frontier.advance() {
+            if let Some(end) = practice_end {
+                if session
+                    .runtime
+                    .transport_mut()
+                    .position_at_output_phase(phase)?
+                    >= end
+                {
+                    return Ok(());
+                }
+            }
+            let audio_at = schedule(device, session, *config, render_evidence, stops)?;
+            Some(session.runtime.advance_to_output_phase(
+                output,
+                &ExplicitDomains,
+                audio_at,
+                phase,
+            )?)
+        } else {
+            None
+        };
+        *last_host_operation = frontier.host();
+        session
+            .discipline
+            .audio_mut()
+            .expect("audio timing")
+            .authority_mut()
+            .commit_coordinate_frontier(frontier, now, merger)
+            .expect("private current coordinate frontier was preflighted");
+        if let Some(report) = report {
+            *last_song = report.song_time;
+            publish_with_host(session, report, stops, host)?;
+        }
+        return Ok(());
+    }
     if let Some(frontier) = session
         .discipline
         .audio()
@@ -2562,7 +3537,7 @@ pub fn run_gameplay_audio_with_result_and_ports<
     control: &mut C,
     host: &mut H,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
-    run_gameplay_audio_with_result_and_ports_impl(device, audio, config, control, host, None)
+    run_gameplay_audio_with_result_and_ports_impl(device, audio, config, control, host, None, None)
 }
 
 /// Runs one original-audio solo owner using the exact selected cold speed setup.
@@ -2579,7 +3554,40 @@ pub fn run_gameplay_audio_with_result_and_ports_with_speed<
     host: &mut H,
     speed: LiveSpeedSetup,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
-    run_gameplay_audio_with_result_and_ports_impl(device, audio, config, control, host, Some(speed))
+    run_gameplay_audio_with_result_and_ports_impl(
+        device,
+        audio,
+        config,
+        control,
+        host,
+        Some(speed),
+        None,
+    )
+}
+
+/// Runs the same solo pump with an explicit exact-coordinate history binding.
+pub fn run_gameplay_audio_coordinate_with_result_and_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+>(
+    device: &mut D,
+    audio: AudioGameplaySession<'_, S>,
+    config: CoordinateGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    speed: Option<LiveSpeedSetup>,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    run_gameplay_audio_with_result_and_ports_impl(
+        device,
+        audio,
+        config.audio,
+        control,
+        host,
+        speed,
+        Some(config.source_history),
+    )
 }
 
 fn run_gameplay_audio_with_result_and_ports_impl<
@@ -2594,8 +3602,19 @@ fn run_gameplay_audio_with_result_and_ports_impl<
     control: &mut C,
     host: &mut H,
     speed: Option<LiveSpeedSetup>,
+    history: Option<crate::gameplay::output::ports::SourcePlaybackIdentity>,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
-    if let Some(speed) = speed {
+    if let Some(source_history) = history {
+        crate::native_policy_admission::validate_audio_coordinate_start(
+            &CoordinateGameplayConfig {
+                audio: config,
+                source_history,
+            },
+            audio.session.discipline,
+            audio.session.runtime.transport_mut(),
+            speed,
+        )?;
+    } else if let Some(speed) = speed {
         crate::native_policy_admission::validate_audio_config_with_speed(&config, speed)?;
     } else {
         crate::native_policy_admission::validate_audio_config(&config)?;
@@ -2603,7 +3622,7 @@ fn run_gameplay_audio_with_result_and_ports_impl<
     let section_start = config.section_start;
     let config = config.gameplay;
     let session = audio.session;
-    let mut timing = AudioTiming(session.discipline, section_start, speed);
+    let mut timing = AudioTiming(session.discipline, section_start, speed, history);
     let session = GameplaySession {
         runtime: session.runtime,
         gauge: session.gauge,
@@ -2642,7 +3661,7 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports<
     policy: &crate::play_policy::ResolvedPlayPolicy,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
     run_gameplay_audio_with_policy_and_result_and_score_and_ports_impl(
-        device, audio, config, control, host, score, policy, None,
+        device, audio, config, control, host, score, policy, None, None,
     )
 }
 
@@ -2671,6 +3690,36 @@ pub fn run_gameplay_audio_with_policy_and_result_and_score_and_ports_with_speed<
         score,
         policy,
         Some(speed),
+        None,
+    )
+}
+
+/// Coordinate-bound selected policy and scoring through the existing solo owner.
+pub fn run_gameplay_audio_coordinate_with_policy_and_result_and_score_and_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+>(
+    device: &mut D,
+    audio: AudioGameplaySession<'_, S>,
+    config: CoordinateGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    score: &mut crate::competition::ScoreSummary,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    speed: Option<LiveSpeedSetup>,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    run_gameplay_audio_with_policy_and_result_and_score_and_ports_impl(
+        device,
+        audio,
+        config.audio,
+        control,
+        host,
+        score,
+        policy,
+        speed,
+        Some(config.source_history),
     )
 }
 
@@ -2688,8 +3737,19 @@ fn run_gameplay_audio_with_policy_and_result_and_score_and_ports_impl<
     score: &mut crate::competition::ScoreSummary,
     policy: &crate::play_policy::ResolvedPlayPolicy,
     speed: Option<LiveSpeedSetup>,
+    history: Option<crate::gameplay::output::ports::SourcePlaybackIdentity>,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
-    if let Some(speed) = speed {
+    if let Some(source_history) = history {
+        crate::native_policy_admission::validate_audio_coordinate_start(
+            &CoordinateGameplayConfig {
+                audio: config,
+                source_history,
+            },
+            audio.session.discipline,
+            audio.session.runtime.transport_mut(),
+            speed,
+        )?;
+    } else if let Some(speed) = speed {
         crate::native_policy_admission::validate_audio_config_with_speed(&config, speed)?;
     } else {
         crate::native_policy_admission::validate_audio_config(&config)?;
@@ -2728,11 +3788,13 @@ fn run_gameplay_audio_with_policy_and_result_and_score_and_ports_impl<
                     .into(),
             );
         }
-        crate::native_policy_admission::validate_transport_with_speed(
-            session.runtime.transport_mut(),
-            epoch.logical_output(config.playback_origin)?.timestamp,
-            speed,
-        )?;
+        if history.is_none() {
+            crate::native_policy_admission::validate_transport_with_speed(
+                session.runtime.transport_mut(),
+                epoch.logical_output(config.playback_origin)?.timestamp,
+                speed,
+            )?;
+        }
     }
     let rows = [(crate::local_players::PlayerId(1), policy)];
     crate::native_gameplay_host::validate_play_policy_members(&rows)?;
@@ -2773,7 +3835,7 @@ fn run_gameplay_audio_with_policy_and_result_and_score_and_ports_impl<
     if session.runtime.poisoned() || session.runtime.gameplay_fence().is_some() {
         return Err("selected audio Runtime is poisoned or fenced".into());
     }
-    if policy.gauge() == &GaugeProfile::default() {
+    if speed.is_none() && policy.gauge() == &GaugeProfile::default() {
         host.prepare_play_policies(&rows)?;
     }
     let mut resolved = crate::native_gameplay_bridge::ResolvedGameplayHost {
@@ -2791,9 +3853,26 @@ fn run_gameplay_audio_with_policy_and_result_and_score_and_ports_impl<
         control,
         &mut observer,
         speed,
+        history,
     )
 }
 
 #[cfg(test)]
 #[path = "native_audio_authority_fixtures.rs"]
 mod native_audio_authority_fixtures;
+
+#[cfg(test)]
+#[path = "native_solo_coordinate_pump_fixtures.rs"]
+mod native_solo_coordinate_pump_fixtures;
+
+#[cfg(test)]
+#[path = "native_solo_coordinate_control_fixtures.rs"]
+mod native_solo_coordinate_control_fixtures;
+
+#[cfg(test)]
+#[path = "native_solo_target_practice_fixtures.rs"]
+mod native_solo_target_practice_fixtures;
+
+#[cfg(test)]
+#[path = "native_solo_source_practice_fixtures.rs"]
+mod native_solo_source_practice_fixtures;

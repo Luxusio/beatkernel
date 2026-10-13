@@ -2,6 +2,7 @@
 //! Render receipts are held one at a time until the actual native input cut and
 //! every attempt owner have committed. This module never opens an endpoint.
 use crate::{
+    live_speed::LiveSpeedSetup,
     local_players::PlayerId,
     native_audio_presentation::{NativeAudioPresentation, PreparedPracticeBoundary},
     native_gameplay::NativeGameplayResult,
@@ -9,14 +10,17 @@ use crate::{
     play_policy::ResolvedPlayPolicy,
     player::PreparedPracticePresentation,
     practice_control::{PracticeAction, PracticeApplied, PracticeCapability, PracticeReply},
-    practice_session::{prepare_attempt, PracticeAttemptConfig, PreparedPracticeAttempt},
+    practice_session::{
+        prepare_attempt, prepare_attempt_with_speed, PracticeAttemptConfig, PreparedPracticeAttempt,
+    },
     replay_capture::LiveReplayCapture,
+    replay_speed::ReplaySpeed,
     session_launch::SessionLaunch,
 };
 use beatkernel::{
     audio::{
-        OutputFrameBasis, PracticeBoundaryKind, PracticeController, PracticeError, PracticeReceipt,
-        PracticeRegion, ProjectedPracticeReceipt,
+        InterpolatedTargetTime, OutputFrameBasis, PracticeBoundaryKind, PracticeController,
+        PracticeError, PracticeReceipt, PracticeRegion, ProjectedPracticeReceipt,
     },
     replay::codec::ReplayCodecLimits,
     time::{ClockPoint, Timestamp},
@@ -567,9 +571,30 @@ pub struct PracticePlayback {
     ended: bool,
     applied_serial: u64,
     owner_id: u64,
+    initial_setup: Option<LiveSpeedSetup>,
 }
 
 impl PracticePlayback {
+    /// Mathematical history pins for the projected receipt currently held by
+    /// this owner. Queued receipts remain the audio endpoint's responsibility.
+    pub fn history_retention_pins(&self) -> Option<(u64, InterpolatedTargetTime)> {
+        let projected = self.held_projected?;
+        let target = InterpolatedTargetTime::new(projected.boundary.target_time, 0, 0, 1, 0, 1)
+            .expect("exact TargetTime with zero interpolation is representable");
+        Some((projected.receipt.physical_frame, target))
+    }
+
+    /// Original queued receipt pins, including raw Source receipts that do not
+    /// yet have a Target projection. This does not consume or hold a receipt.
+    pub fn queued_history_retention_pins(&self) -> (Option<u64>, Option<InterpolatedTargetTime>) {
+        let (source, target) = self.controller.history_retention_pins();
+        let target = target.map(|time| {
+            InterpolatedTargetTime::new(time, 0, 0, 1, 0, 1)
+                .expect("exact TargetTime with zero interpolation is representable")
+        });
+        (source, target)
+    }
+
     pub fn new(
         controller: PracticeController,
         original: BmsChart,
@@ -602,6 +627,71 @@ impl PracticePlayback {
         mixer_basis: OutputFrameBasis,
         _control_lead_frames: u64,
         default_section_end: Option<Timestamp>,
+    ) -> NativeGameplayResult<Self> {
+        Self::new_inner(
+            controller,
+            original,
+            members,
+            initial_region,
+            max_target,
+            mixer_basis,
+            default_section_end,
+            None,
+        )
+    }
+
+    /// Opt-in initial whole-preroll validation. The Started receipt describes
+    /// the initial snapshot and must not reanchor the existing exact transport.
+    /// Fresh selected-speed commits remain gated on exact fractional phase.
+    pub fn new_with_speed(
+        controller: PracticeController,
+        original: BmsChart,
+        members: Vec<PracticeMember>,
+        initial_region: PracticeRegion,
+        max_target: Timestamp,
+        mixer_basis: OutputFrameBasis,
+        _control_lead_frames: u64,
+        default_section_end: Option<Timestamp>,
+        initial_setup: LiveSpeedSetup,
+    ) -> NativeGameplayResult<Self> {
+        if initial_setup.start() != initial_region.start
+            || initial_setup.end() != default_section_end
+            || initial_setup.start() < Timestamp::ZERO
+            || controller.rate() != initial_setup.speed().rate()
+            || controller.output_preroll() != initial_setup.preroll()
+            || controller.has_open_end() != default_section_end.is_none()
+        {
+            return Err("retained practice initial speed setup differs from region".into());
+        }
+        for member in &members {
+            crate::practice_session::validate_launch_speed(&member.launch, initial_setup.speed())?;
+        }
+        // The public receipt carries its signed initial snapshot correction.
+        i64::try_from(
+            i128::from(initial_setup.song_origin().as_nanos())
+                - i128::from(initial_setup.start().as_nanos()),
+        )?;
+        Self::new_inner(
+            controller,
+            original,
+            members,
+            initial_region,
+            max_target,
+            mixer_basis,
+            default_section_end,
+            Some(initial_setup),
+        )
+    }
+
+    fn new_inner(
+        controller: PracticeController,
+        original: BmsChart,
+        members: Vec<PracticeMember>,
+        initial_region: PracticeRegion,
+        max_target: Timestamp,
+        mixer_basis: OutputFrameBasis,
+        default_section_end: Option<Timestamp>,
+        initial_setup: Option<LiveSpeedSetup>,
     ) -> NativeGameplayResult<Self> {
         Self::validate_setup(&members, initial_region, max_target, default_section_end)?;
         if controller.generation() != 1 {
@@ -644,6 +734,7 @@ impl PracticePlayback {
             ended: false,
             applied_serial: 0,
             owner_id,
+            initial_setup,
         })
     }
 
@@ -682,6 +773,15 @@ impl PracticePlayback {
         Ok(())
     }
 
+    pub fn initial_setup(&self) -> Option<LiveSpeedSetup> {
+        self.initial_setup
+    }
+    pub fn speed(&self) -> ReplaySpeed {
+        self.initial_setup.map_or_else(
+            || ReplaySpeed::new(beatkernel::transport::Rate::NORMAL).expect("NORMAL is positive"),
+            |setup| setup.speed(),
+        )
+    }
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -897,18 +997,24 @@ impl PracticePlayback {
             attempts.try_reserve_exact(self.members.len())?;
             next_launches.try_reserve_exact(self.members.len())?;
             for member in &self.members {
-                let attempt = prepare_attempt(
-                    &self.original,
-                    &member.policy,
-                    &member.launch,
-                    PracticeAttemptConfig {
-                        start: receipt.applied_song_time.max(Timestamp::ZERO),
-                        end: end_intent,
-                        domain: boundary.output().domain,
-                        chart_seed: member.chart_seed,
-                        capture_limits: member.capture_limits,
-                    },
-                )?;
+                let config = PracticeAttemptConfig {
+                    start: receipt.applied_song_time.max(Timestamp::ZERO),
+                    end: end_intent,
+                    domain: boundary.output().domain,
+                    chart_seed: member.chart_seed,
+                    capture_limits: member.capture_limits,
+                };
+                let attempt = if self.initial_setup.is_some() {
+                    prepare_attempt_with_speed(
+                        &self.original,
+                        &member.policy,
+                        &member.launch,
+                        config,
+                        self.speed(),
+                    )?
+                } else {
+                    prepare_attempt(&self.original, &member.policy, &member.launch, config)?
+                };
                 next_launches.push(attempt.next_launch.clone());
                 attempts.push((member.player, attempt));
             }
@@ -1078,7 +1184,9 @@ impl PracticePlayback {
             ))
             || receipt.physical_frame < self.basis.start_physical_frame()
             || receipt.playback_frame > receipt.physical_frame
-            || (if receipt.kind == PracticeBoundaryKind::ControlRejectedRevision {
+            || (if receipt.kind == PracticeBoundaryKind::ControlRejectedRevision
+                || (receipt.kind == PracticeBoundaryKind::Started && self.initial_setup.is_some())
+            {
                 i128::from(receipt.applied_song_time.as_nanos())
                     - i128::from(receipt.requested_song_time.as_nanos())
                     != i128::from(receipt.correction_nanos)
@@ -1100,7 +1208,11 @@ impl PracticePlayback {
                     && receipt.request_id == 0
                     && receipt.generation == 1
                     && receipt.iteration == 0
-                    && receipt.applied_song_time == self.region.start
+                    && receipt.requested_song_time == self.region.start
+                    && receipt.applied_song_time
+                        == self
+                            .initial_setup
+                            .map_or(self.region.start, |setup| setup.song_origin())
             }
             PracticeBoundaryKind::Requested => {
                 self.started
@@ -1166,3 +1278,7 @@ impl PracticePlayback {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "practice_playback_retention_fixtures.rs"]
+mod practice_playback_retention_fixtures;

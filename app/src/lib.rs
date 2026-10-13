@@ -13,6 +13,10 @@ mod asset_source_fixtures;
 mod audio_assets;
 /// Shared finite audio-output authority and original acquired-input correspondence.
 pub mod audio_authority;
+/// Exact generated playback mapping into the caller's opted transport phase.
+pub mod native_playback_phase;
+/// Original source publications used for coordinate control preparation.
+pub mod native_coordinate_control;
 /// Prepared original-song image selections shared by live and replay presentation.
 pub mod bga;
 pub mod video;
@@ -315,6 +319,8 @@ mod multiplayer_webtransport_fixtures;
 pub mod native_audio;
 /// Original native evidence coupled to the shared audio-authoritative gameplay boundary.
 pub mod native_audio_presentation;
+/// Original native coordinates retained beside matching observation evidence.
+pub mod native_output_coordinate;
 #[cfg(test)]
 mod native_audio_presentation_fixtures;
 /// Bounded original audio-observation startup for all native launchers.

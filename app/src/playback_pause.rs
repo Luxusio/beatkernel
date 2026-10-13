@@ -49,13 +49,13 @@ enum EvidenceKind {
     Point,
     Interval,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingBoundary {
     physical: u64,
     playback: u64,
     gap: u64,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TargetPauseState {
     basis: beatkernel::audio::TargetFrameBasis,
     paused_at: Option<beatkernel::audio::TargetTime>,
@@ -64,9 +64,11 @@ struct TargetPauseState {
     startup: Option<beatkernel::audio::TargetTime>,
     generation_floor: Option<beatkernel::audio::TargetTime>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativePause {
     epoch: u64,
+    coordinate_binding: Option<CoordinatePauseBinding>,
+    coordinate_reference: Option<crate::audio_authority::AudioAuthorityObservation>,
     target: Option<TargetPauseState>,
     min_physical_frame: u64,
     rebound_basis: Option<beatkernel::audio::OutputFrameBasis>,
@@ -93,7 +95,318 @@ pub struct NativePause {
     interval_window: Option<HostStartWindow>,
     last_now: Option<ClockPoint>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CoordinatePauseBinding {
+    epoch: u64,
+    basis: crate::audio_authority::AudioAuthorityCoordinateBasis,
+    source_identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+}
+
+/// Read-only staging of genuine source adoption; no native ACK is granted here.
+#[derive(Clone, Debug)]
+pub struct PreparedCoordinatePauseAdoption {
+    prior: NativePause,
+    candidate: NativePause,
+    exact_cut: beatkernel::audio::InterpolatedTargetTime,
+    target_projection: Option<beatkernel::audio::TargetBoundary>,
+    physical_frame: u64,
+    playback_frame: u64,
+    paused: bool,
+}
+impl PreparedCoordinatePauseAdoption {
+    pub const fn epoch(&self) -> u64 {
+        self.prior.epoch
+    }
+    pub const fn paused(&self) -> bool {
+        self.paused
+    }
+    pub const fn exact_cut(&self) -> beatkernel::audio::InterpolatedTargetTime {
+        self.exact_cut
+    }
+    pub const fn target_projection(&self) -> Option<beatkernel::audio::TargetBoundary> {
+        self.target_projection
+    }
+    pub const fn physical_frame(&self) -> u64 {
+        self.physical_frame
+    }
+    pub const fn playback_frame(&self) -> u64 {
+        self.playback_frame
+    }
+    pub fn source_identity(&self) -> crate::gameplay::output::ports::SourcePlaybackIdentity {
+        self.prior
+            .coordinate_binding
+            .expect("prepared coordinate binding")
+            .source_identity
+    }
+}
+/// Original adoption frames and exact physical cut remain separate from logical control.
+#[derive(Clone, Copy, Debug)]
+pub struct CoordinatePauseBoundary {
+    pub epoch: u64,
+    pub paused: bool,
+    pub exact_cut: beatkernel::audio::InterpolatedTargetTime,
+    pub target_projection: Option<beatkernel::audio::TargetBoundary>,
+    pub physical_frame: u64,
+    pub playback_frame: u64,
+    pub host: ClockPoint,
+    pub raw_output: ClockPoint,
+    pub output: ClockPoint,
+    pub source_identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+}
 impl NativePause {
+    fn require_scalar_owner(&self) -> Result<(), PauseError> {
+        if self.coordinate_binding.is_some() {
+            return Err(PauseError(
+                "coordinate pause requires exact qualified adoption",
+            ));
+        }
+        Ok(())
+    }
+    /// Explicit immutable setup; source identity is never inferred from a rounded pair.
+    pub fn with_coordinate_binding(
+        mut self,
+        epoch: u64,
+        basis: crate::audio_authority::AudioAuthorityCoordinateBasis,
+        source_identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> Result<Self, PauseError> {
+        use crate::audio_authority::AudioAuthorityCoordinateBasis as Basis;
+        if self.coordinate_binding.is_some()
+            || self.setup_locked
+            || self.last_pair.is_some()
+            || self.last_report.is_some()
+            || self.phase != PausePhase::Running
+            || source_identity.hz() != self.rate
+        {
+            return Err(PauseError(
+                "coordinate pause requires cold original source identity",
+            ));
+        }
+        match basis {
+            Basis::SourceFrame(source) | Basis::SourceCounter { basis: source, .. } => {
+                if self.target.is_some()
+                    || source.origin() != self.origin
+                    || source.sample_rate() != self.rate
+                    || source.start_physical_frame() < source_identity.initial_physical()
+                    || matches!(basis, Basis::SourceCounter { frequency: 0, .. })
+                {
+                    return Err(PauseError("coordinate source pause basis differs"));
+                }
+                self.min_physical_frame = source.start_physical_frame();
+            }
+            Basis::TargetFrame(target) => {
+                if self.epoch != epoch
+                    || self.target_basis() != Some(target)
+                    || target.origin() != self.origin
+                {
+                    return Err(PauseError("coordinate target pause basis differs"));
+                }
+                self.min_physical_frame = source_identity.initial_physical();
+            }
+        }
+        self.epoch = epoch;
+        self.coordinate_binding = Some(CoordinatePauseBinding {
+            epoch,
+            basis,
+            source_identity,
+        });
+        Ok(self)
+    }
+    /// Uses the existing report/adoption engine on a private candidate, without scalar crossing.
+    pub fn prepare_coordinate_adoption(
+        &self,
+        report: Option<RenderReport>,
+        facts: Option<beatkernel_platform::audio::ConvertedBoundaryFacts>,
+    ) -> Result<Option<PreparedCoordinatePauseAdoption>, PauseError> {
+        let binding = self
+            .coordinate_binding
+            .ok_or(PauseError("pause lacks coordinate binding"))?;
+        let Some(report) = report.filter(|report| report.frames != 0) else {
+            return Ok(None);
+        };
+        if report.playback_start_frame < binding.source_identity.initial_playback() {
+            return Err(PauseError(
+                "pause adoption precedes original source history",
+            ));
+        }
+        let mut candidate = self.clone();
+        candidate.adopt_report(report)?;
+        let Some(boundary) = candidate.boundary else {
+            return Ok(None);
+        };
+        let paused = self.phase == PausePhase::Pausing;
+        let mut target_projection = None;
+        let cut = if let Some(target) = self.target {
+            let Some(facts) = facts else {
+                return Ok(None);
+            };
+            if facts.origin != Some(self.origin) || facts.source_rate != self.rate {
+                return Err(PauseError(
+                    "coordinate target adoption source identity differs",
+                ));
+            }
+            if let Some(startup) = facts.startup {
+                if startup.source_frame != self.start_frame {
+                    return Err(PauseError("coordinate target startup differs"));
+                }
+                candidate.target.as_mut().expect("target bound").startup =
+                    Some(startup.target_time);
+            }
+            let Some(mapped) = (if paused { facts.pause } else { facts.resume }) else {
+                return Ok(None);
+            };
+            if mapped.source_frame != boundary.physical
+                || beatkernel::audio::InterpolatedTargetTime::new(mapped.target_time, 0, 0, 1, 0, 1)
+                    .map_err(|_| PauseError("target cut overflow"))?
+                    .compare_target_time(target.basis.start_time())
+                    .is_lt()
+                || target.generation_floor.is_some_and(|floor| {
+                    beatkernel::audio::InterpolatedTargetTime::new(
+                        mapped.target_time,
+                        0,
+                        0,
+                        1,
+                        0,
+                        1,
+                    )
+                    .is_ok_and(|cut| cut.compare_target_time(floor).is_lt())
+                })
+            {
+                return Err(PauseError(
+                    "target projection differs from original source adoption",
+                ));
+            }
+            target_projection = Some(mapped);
+            let state = candidate.target.as_mut().expect("target bound");
+            if paused {
+                state.paused_at = Some(mapped.target_time);
+            } else {
+                state.total_gap = combine_target_time(
+                    state.total_gap,
+                    target_duration_between(
+                        state
+                            .paused_at
+                            .ok_or(PauseError("target resume lacks frozen pause"))?,
+                        mapped.target_time,
+                    )?,
+                    false,
+                )?;
+            }
+            state.transition = Some(
+                mapped
+                    .target_time
+                    .point(self.origin)
+                    .map_err(|_| PauseError("target transition overflow"))?,
+            );
+            mapped.target_time
+        } else {
+            if facts.is_some() {
+                return Err(PauseError("source pause cannot accept target projection"));
+            }
+            beatkernel::audio::TargetTime::from_frames(boundary.physical, self.rate)
+                .map_err(|_| PauseError("source adoption cut overflow"))?
+        };
+        candidate.commit_boundary(boundary);
+        Ok(Some(PreparedCoordinatePauseAdoption {
+            prior: self.clone(),
+            candidate,
+            exact_cut: beatkernel::audio::InterpolatedTargetTime::new(cut, 0, 0, 1, 0, 1)
+                .map_err(|_| PauseError("adoption cut overflow"))?,
+            target_projection,
+            physical_frame: boundary.physical,
+            playback_frame: boundary.playback,
+            paused,
+        }))
+    }
+    pub fn validate_coordinate_adoption(
+        &self,
+        prepared: &PreparedCoordinatePauseAdoption,
+        authority: &crate::audio_authority::AudioAuthority,
+        cutoff: &crate::audio_authority::PreparedCoordinateControlCutoff,
+        now: ClockPoint,
+        merger: &crate::local_input::InputMerger,
+    ) -> Result<CoordinatePauseBoundary, PauseError> {
+        let binding = self
+            .coordinate_binding
+            .ok_or(PauseError("pause lacks coordinate binding"))?;
+        let epoch = authority.epoch();
+        if self != &prepared.prior
+            || epoch.id != binding.epoch
+            || authority.coordinate_basis() != Some(binding.basis)
+            || epoch.stream_origin
+                != binding
+                    .basis
+                    .origin()
+                    .map_err(|_| PauseError("pause creation point overflow"))?
+            || epoch.host_domain != self.host
+            || cutoff.epoch() != binding.epoch
+            || prepared.paused == cutoff.is_resume()
+            || !prepared
+                .exact_cut
+                .compare_interpolated_time(cutoff.query())
+                .is_eq()
+            || prepared
+                .exact_cut
+                .point(self.origin)
+                .map_err(|_| PauseError("pause raw cut overflow"))?
+                != cutoff.raw_output()
+            || epoch
+                .logical_output(cutoff.raw_output())
+                .map_err(|_| PauseError("pause logical cut overflow"))?
+                != cutoff.output()
+            || cutoff.host().domain != self.host
+            || self.reference.is_none_or(|reference| {
+                cutoff.host().timestamp < reference.target.timestamp
+                    || cutoff.raw_output().timestamp < reference.source.timestamp
+            })
+        {
+            return Err(PauseError("coordinate pause adoption or owner changed"));
+        }
+        let request = self
+            .coordinate_reference
+            .ok_or(PauseError("pause lacks original coordinate request"))?;
+        if prepared
+            .exact_cut
+            .compare_interpolated_time(coordinate_pause_query(binding.basis, request)?)
+            .is_lt()
+        {
+            return Err(PauseError(
+                "coordinate adoption precedes original native request",
+            ));
+        }
+        authority
+            .validate_coordinate_control_cutoff(cutoff, now, merger)
+            .map_err(|_| PauseError("coordinate pause cutoff is not currently qualified"))?;
+        Ok(CoordinatePauseBoundary {
+            epoch: binding.epoch,
+            paused: prepared.paused,
+            exact_cut: prepared.exact_cut,
+            target_projection: prepared.target_projection,
+            physical_frame: prepared.physical_frame,
+            playback_frame: prepared.playback_frame,
+            host: cutoff.host(),
+            raw_output: cutoff.raw_output(),
+            output: cutoff.output(),
+            source_identity: binding.source_identity,
+        })
+    }
+    /// Commit before the authority cutoff, whose commit changes its preparation state.
+    pub fn commit_coordinate_adoption(
+        &mut self,
+        prepared: PreparedCoordinatePauseAdoption,
+        authority: &crate::audio_authority::AudioAuthority,
+        cutoff: &crate::audio_authority::PreparedCoordinateControlCutoff,
+        now: ClockPoint,
+        merger: &crate::local_input::InputMerger,
+    ) -> Result<CoordinatePauseBoundary, PauseError> {
+        let boundary =
+            self.validate_coordinate_adoption(&prepared, authority, cutoff, now, merger)?;
+        *self = prepared.candidate;
+        self.last_pair = Some(ClockPair {
+            source: boundary.raw_output,
+            target: boundary.host,
+        });
+        Ok(boundary)
+    }
     pub fn new(
         output_origin: ClockPoint,
         host_domain: ClockDomainId,
@@ -106,6 +419,8 @@ impl NativePause {
         }
         Ok(Self {
             epoch: 0,
+            coordinate_binding: None,
+            coordinate_reference: None,
             target: None,
             min_physical_frame: 0,
             rebound_basis: None,
@@ -143,6 +458,7 @@ impl NativePause {
         basis: beatkernel::audio::TargetFrameBasis,
     ) -> Result<Self, PauseError> {
         if self.setup_locked
+            || self.coordinate_binding.is_some()
             || self.last_pair.is_some()
             || self.target.is_some()
             || basis.origin() != self.origin
@@ -176,6 +492,7 @@ impl NativePause {
         source: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<Option<PauseBoundary>, PauseError> {
+        self.require_scalar_owner()?;
         let mut next = self.clone();
         let boundary = next.observe_target_inner(epoch, basis, facts, source, pair)?;
         *self = next;
@@ -311,6 +628,7 @@ impl NativePause {
         state: &beatkernel_platform::audio::ConvertedNativeOutputState,
         basis: beatkernel::audio::TargetFrameBasis,
     ) -> Result<(), PauseError> {
+        self.require_scalar_owner()?;
         let old = self
             .target
             .ok_or(PauseError("target rebind requires target pause"))?;
@@ -433,6 +751,7 @@ impl NativePause {
         report: beatkernel::audio::ConvertedRenderReport,
         pair: ClockPair,
     ) -> Result<(), PauseError> {
+        self.require_scalar_owner()?;
         let old = self
             .target
             .ok_or(PauseError("original pause lacks target identity"))?;
@@ -480,6 +799,7 @@ impl NativePause {
         basis: beatkernel::audio::OutputFrameBasis,
         pair: ClockPair,
     ) -> Result<(), PauseError> {
+        self.require_scalar_owner()?;
         if self.phase != PausePhase::Paused
             || candidate.phase != PausePhase::Paused
             || candidate.epoch <= self.epoch
@@ -550,6 +870,7 @@ impl NativePause {
         epoch: u64,
         mixer: &beatkernel::audio::Mixer,
     ) -> Result<(), PauseError> {
+        self.require_scalar_owner()?;
         if epoch <= self.epoch {
             return Err(PauseError("pause output epoch must increase"));
         }
@@ -718,7 +1039,8 @@ impl NativePause {
     /// Configures initial silent physical frames before any request/observation.
     /// Playback scheduling remains relative to logical frame zero.
     pub fn with_start_frame(mut self, frame: u64) -> Result<Self, PauseError> {
-        if self.setup_locked
+        if self.coordinate_binding.is_some()
+            || self.setup_locked
             || self.last_pair.is_some()
             || self.last_report.is_some()
             || self.start_configured
@@ -739,7 +1061,8 @@ impl NativePause {
     /// Opts into one immutable endpoint before any request or clock/report
     /// observation. Unlimited owners retain strict manual-pause validation.
     pub fn with_playback_end_frame(mut self, end: u64) -> Result<Self, PauseError> {
-        if self.setup_locked
+        if self.coordinate_binding.is_some()
+            || self.setup_locked
             || self.last_pair.is_some()
             || self.last_report.is_some()
             || self.playback_end.is_some()
@@ -758,6 +1081,22 @@ impl NativePause {
     }
     pub fn phase(&self) -> PausePhase {
         self.phase
+    }
+    /// Keeps the original coordinate request live until its transition is acknowledged.
+    /// A staged adoption's exact cut must be retained separately until commit.
+    pub fn pending_coordinate_retention_query(
+        &self,
+    ) -> Result<Option<beatkernel::audio::InterpolatedTargetTime>, PauseError> {
+        if !matches!(self.phase, PausePhase::Pausing | PausePhase::Resuming) {
+            return Ok(None);
+        }
+        let Some(binding) = self.coordinate_binding else {
+            return Ok(None);
+        };
+        let request = self
+            .coordinate_reference
+            .ok_or(PauseError("pause lacks original coordinate request"))?;
+        coordinate_pause_query(binding.basis, request).map(Some)
     }
     /// Latest validated render evidence, retained across transient unavailable
     /// telemetry reads. This never advances a cursor without a report.
@@ -803,9 +1142,44 @@ impl NativePause {
         Ok(())
     }
     pub fn request(&mut self, paused: bool, reference: ClockPair) -> Result<bool, PauseError> {
+        self.require_scalar_owner()?;
         let mut next = self.clone();
         next.bind(EvidenceKind::Point)?;
         let accepted = next.request_point_inner(paused, reference)?;
+        *self = next;
+        Ok(accepted)
+    }
+    /// Retains the actual latest original native coordinate before pause enqueue.
+    pub fn request_coordinate(
+        &mut self,
+        paused: bool,
+        authority: &crate::audio_authority::AudioAuthority,
+    ) -> Result<bool, PauseError> {
+        let binding = self
+            .coordinate_binding
+            .ok_or(PauseError("pause lacks coordinate binding"))?;
+        let epoch = authority.epoch();
+        if epoch.id != binding.epoch
+            || authority.coordinate_basis() != Some(binding.basis)
+            || epoch.stream_origin
+                != binding
+                    .basis
+                    .origin()
+                    .map_err(|_| PauseError("pause creation point overflow"))?
+            || epoch.host_domain != self.host
+        {
+            return Err(PauseError("coordinate pause request authority differs"));
+        }
+        let observation = authority.latest_coordinate_observation().ok_or(PauseError(
+            "coordinate pause request lacks original native observation",
+        ))?;
+        coordinate_pause_query(binding.basis, observation)?;
+        let mut next = self.clone();
+        next.bind(EvidenceKind::Point)?;
+        let accepted = next.request_point_inner(paused, observation.pair())?;
+        if accepted {
+            next.coordinate_reference = Some(observation);
+        }
         *self = next;
         Ok(accepted)
     }
@@ -887,6 +1261,7 @@ impl NativePause {
         paused: bool,
         reference: PauseIntervalObservation,
     ) -> Result<bool, PauseError> {
+        self.require_scalar_owner()?;
         let mut next = self.clone();
         next.bind(EvidenceKind::Interval)?;
         let reference = next.admit_interval(reference)?;
@@ -910,6 +1285,7 @@ impl NativePause {
         observation: Option<PauseIntervalObservation>,
         now: ClockPoint,
     ) -> Result<Option<IntervalPauseBoundary>, PauseError> {
+        self.require_scalar_owner()?;
         let mut next = self.clone();
         next.bind(EvidenceKind::Interval)?;
         if now.domain != next.host
@@ -1154,8 +1530,7 @@ impl NativePause {
             }
             let anchor = Timestamp::from_nanos(i64::MAX);
             let paused = self.song_origin_after_pause(anchor)?;
-            let value = i128::from(original.as_nanos())
-                + i128::from(paused.as_nanos())
+            let value = i128::from(original.as_nanos()) + i128::from(paused.as_nanos())
                 - i128::from(anchor.as_nanos())
                 + i128::from(playback_origin.timestamp.as_nanos())
                 - i128::from(startup.timestamp.as_nanos());
@@ -1317,6 +1692,7 @@ impl NativePause {
         self.last_transition_physical = Some(boundary.physical);
         self.boundary = None;
         self.reference = None;
+        self.coordinate_reference = None;
         self.interval_reference = None;
         self.interval_window = None;
         paused
@@ -1326,6 +1702,7 @@ impl NativePause {
         report: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<Option<PauseBoundary>, PauseError> {
+        self.require_scalar_owner()?;
         let mut next = self.clone();
         next.bind(EvidenceKind::Point)?;
         let result = next.observe_inner(report, pair)?;
@@ -2163,4 +2540,57 @@ fn combine_target_time(
         denominator,
     )
     .map_err(|_| PauseError("invalid target duration"))
+}
+
+#[cfg(test)]
+#[path = "playback_pause_coordinate_fixtures.rs"]
+mod playback_pause_coordinate_fixtures;
+
+#[cfg(test)]
+#[path = "playback_pause_retention_fixtures.rs"]
+mod playback_pause_retention_fixtures;
+
+/// The retained original native units define request Q; rounded pairs are never inverted.
+fn coordinate_pause_query(
+    basis: crate::audio_authority::AudioAuthorityCoordinateBasis,
+    observation: crate::audio_authority::AudioAuthorityObservation,
+) -> Result<beatkernel::audio::InterpolatedTargetTime, PauseError> {
+    use crate::audio_authority::AudioAuthorityCoordinateBasis as Basis;
+    use crate::native_output_coordinate::NativeOutputCoordinate as Coordinate;
+    let (base, units, frequency) = match (basis, observation.coordinate()) {
+        (Basis::SourceFrame(basis), Some(Coordinate::StreamFrame { frame })) => (
+            beatkernel::audio::TargetTime::from_frames(
+                basis.start_physical_frame(),
+                basis.sample_rate(),
+            )
+            .map_err(|_| PauseError("source request coordinate overflow"))?,
+            frame,
+            u64::from(basis.sample_rate()),
+        ),
+        (
+            Basis::SourceCounter { basis, frequency },
+            Some(Coordinate::Counter {
+                position,
+                frequency: actual,
+            }),
+        ) if frequency != 0 && frequency == actual => (
+            beatkernel::audio::TargetTime::from_frames(
+                basis.start_physical_frame(),
+                basis.sample_rate(),
+            )
+            .map_err(|_| PauseError("counter request coordinate overflow"))?,
+            position,
+            frequency,
+        ),
+        (Basis::TargetFrame(basis), Some(Coordinate::StreamFrame { frame })) => {
+            (basis.start_time(), frame, u64::from(basis.sample_rate()))
+        }
+        _ => {
+            return Err(PauseError(
+                "pause request native coordinate differs from immutable descriptor",
+            ))
+        }
+    };
+    beatkernel::audio::InterpolatedTargetTime::new(base, units, units, frequency, 0, 1)
+        .map_err(|_| PauseError("pause request coordinate overflow"))
 }

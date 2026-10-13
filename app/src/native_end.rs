@@ -1,8 +1,20 @@
 //! Retained render endpoint plus actual native presentation; no device or wall clock.
 use beatkernel::{
-    audio::RenderReport,
+    audio::{RenderReport, InterpolatedTargetTime, TargetTime},
     time::{ClockDomainId, ClockPair, ClockPoint, Timestamp},
 };
+
+use crate::{
+    audio_authority::{
+        AudioAuthority, AudioAuthorityCoordinateBasis, PreparedCoordinateControlCutoff,
+    },
+    gameplay::output::ports::SourcePlaybackIdentity,
+    local_input::InputMerger,
+};
+
+#[cfg(test)]
+#[path = "native_end_coordinate_fixtures.rs"]
+mod coordinate_fixtures;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EndError(pub &'static str);
@@ -22,11 +34,84 @@ pub struct EndBoundary {
     pub playback_frame: u64,
 }
 
+/// A checked candidate retains the complete owner snapshot, without emitting an ACK.
+#[derive(Clone, Debug)]
+pub struct PreparedCoordinateEnd {
+    before: NativeEnd,
+    candidate: NativeEnd,
+    query: Option<InterpolatedTargetTime>,
+}
+impl PreparedCoordinateEnd {
+    pub fn epoch(&self) -> u64 {
+        self.before.coordinates.unwrap().0
+    }
+    pub fn basis(&self) -> AudioAuthorityCoordinateBasis {
+        self.before.coordinates.unwrap().1
+    }
+    pub fn identity(&self) -> SourcePlaybackIdentity {
+        self.before.coordinates.unwrap().2
+    }
+    pub const fn query(&self) -> Option<InterpolatedTargetTime> {
+        self.query
+    }
+    pub fn physical_frame(&self) -> Option<u64> {
+        self.candidate.physical
+    }
+    pub fn playback_frame(&self) -> u64 {
+        self.candidate.end
+    }
+}
+
+/// Native endpoint adoption, separately retaining logical chronology and original cut.
+#[derive(Clone, Copy, Debug)]
+pub struct CoordinateEndBoundary {
+    pub epoch: u64,
+    pub query: InterpolatedTargetTime,
+    pub host: ClockPoint,
+    pub raw_output: ClockPoint,
+    pub output: ClockPoint,
+    pub physical_frame: u64,
+    pub playback_frame: u64,
+    pub source_hz: u32,
+}
+
+pub fn coordinate_final_elapsed(
+    end: u64,
+    active_cut: u64,
+    source_hz: u32,
+) -> Result<i128, EndError> {
+    if source_hz == 0 {
+        return Err(EndError("final phase requires original source rate"));
+    }
+    let frames = end
+        .checked_sub(active_cut)
+        .ok_or(EndError("final endpoint precedes active attempt"))?;
+    Ok(i128::from(frames) * 1_000_000_000 / i128::from(source_hz))
+}
+
+pub fn coordinate_final_phase(
+    boundary: CoordinateEndBoundary,
+    basis: beatkernel::transport::OutputPhaseBasis,
+) -> Result<beatkernel::transport::OutputPhasePoint, EndError> {
+    if basis.source_hz() != boundary.source_hz {
+        return Err(EndError("final endpoint source rate differs"));
+    }
+    let elapsed = coordinate_final_elapsed(
+        boundary.playback_frame,
+        basis.active_origin_frame(),
+        boundary.source_hz,
+    )?;
+    basis
+        .point_from_elapsed_nanos(boundary.output, elapsed)
+        .map_err(|_| EndError("final endpoint phase basis differs"))
+}
+
 /// One fresh finite session. Host interpolation has Unknown physical accuracy.
 /// An actual lower clock bracket must be observed before presentation crosses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeEnd {
     origin: ClockPoint,
+    coordinates: Option<(u64, AudioAuthorityCoordinateBasis, SourcePlaybackIdentity)>,
     target_basis: Option<(u64, beatkernel::audio::TargetFrameBasis)>,
     target_endpoint: Option<beatkernel::audio::TargetBoundary>,
     target_generation_floor: Option<beatkernel::audio::TargetTime>,
@@ -43,6 +128,280 @@ pub struct NativeEnd {
     start_configured: bool,
 }
 impl NativeEnd {
+    /// Binds the original output descriptor and retained source history at cold setup.
+    pub fn with_coordinates(
+        mut self,
+        epoch: u64,
+        basis: AudioAuthorityCoordinateBasis,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Self, EndError> {
+        if self.coordinates.is_some()
+            || self.last_pair.is_some()
+            || self.last_report.is_some()
+            || self.physical.is_some()
+            || self.emitted
+            || self.deferred_boundary.is_some()
+            || identity.hz() != self.rate
+            || identity.initial_playback() > self.end
+        {
+            return Err(EndError(
+                "coordinate end requires matching cold source identity",
+            ));
+        }
+        let valid = match basis {
+            AudioAuthorityCoordinateBasis::SourceFrame(b) => {
+                self.target_basis.is_none()
+                    && b.origin() == self.origin
+                    && b.sample_rate() == self.rate
+                    && b.start_physical_frame() >= identity.initial_physical()
+            }
+            AudioAuthorityCoordinateBasis::SourceCounter {
+                basis: b,
+                frequency,
+            } => {
+                frequency > 0
+                    && self.target_basis.is_none()
+                    && b.origin() == self.origin
+                    && b.sample_rate() == self.rate
+                    && b.start_physical_frame() >= identity.initial_physical()
+            }
+            AudioAuthorityCoordinateBasis::TargetFrame(b) => {
+                self.target_basis == Some((epoch, b)) && b.origin() == self.origin
+            }
+        };
+        if !valid {
+            return Err(EndError(
+                "coordinate end descriptor differs from original owner",
+            ));
+        }
+        self.coordinates = Some((epoch, basis, identity));
+        Ok(self)
+    }
+
+    fn coordinate_candidate(
+        &self,
+        epoch: u64,
+        basis: AudioAuthorityCoordinateBasis,
+        identity: SourcePlaybackIdentity,
+        report: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> Result<Self, EndError> {
+        if self.coordinates != Some((epoch, basis, identity))
+            || self.emitted
+            || self.deferred_boundary.is_some()
+        {
+            return Err(EndError(
+                "coordinate end binding changed or endpoint already acknowledged",
+            ));
+        }
+        self.check_pair(pair)?;
+        let first = basis
+            .origin()
+            .map_err(|_| EndError("coordinate end basis overflow"))?;
+        if pair.source.timestamp < first.timestamp {
+            return Err(EndError("coordinate end precedes stream creation"));
+        }
+        let mut candidate = self.clone();
+        if let Some(report) = report {
+            if report.start_frame < identity.initial_physical()
+                || report.playback_start_frame < identity.initial_playback()
+            {
+                return Err(EndError(
+                    "coordinate endpoint report precedes retained source identity",
+                ));
+            }
+            candidate.physical = candidate.check_report(report)?;
+            candidate.last_report = Some(report);
+        }
+        candidate.lower.get_or_insert(pair);
+        candidate.last_pair = Some(pair);
+        Ok(candidate)
+    }
+
+    pub fn stage_coordinate_source(
+        &self,
+        epoch: u64,
+        basis: AudioAuthorityCoordinateBasis,
+        identity: SourcePlaybackIdentity,
+        report: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> Result<PreparedCoordinateEnd, EndError> {
+        if matches!(basis, AudioAuthorityCoordinateBasis::TargetFrame(_)) {
+            return Err(EndError("target endpoint requires original projection"));
+        }
+        let candidate = self.coordinate_candidate(epoch, basis, identity, report, pair)?;
+        let cut = candidate
+            .physical
+            .map(|frame| {
+                TargetTime::from_frames(frame, self.rate)
+                    .map_err(|_| EndError("source endpoint cut overflow"))
+            })
+            .transpose()?;
+        self.coordinate_stage(candidate, cut)
+    }
+
+    pub fn stage_coordinate_target(
+        &self,
+        epoch: u64,
+        basis: AudioAuthorityCoordinateBasis,
+        identity: SourcePlaybackIdentity,
+        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        source: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> Result<PreparedCoordinateEnd, EndError> {
+        if !matches!(basis, AudioAuthorityCoordinateBasis::TargetFrame(_))
+            || facts.origin != Some(self.origin)
+            || facts.source_rate != self.rate
+        {
+            return Err(EndError("target endpoint original source identity differs"));
+        }
+        let mut candidate = self.coordinate_candidate(
+            epoch,
+            basis,
+            identity,
+            source.filter(|r| r.frames != 0),
+            pair,
+        )?;
+        if let Some(mapped) = facts.end {
+            if candidate.physical != Some(mapped.source_frame)
+                || candidate.target_endpoint.is_some_and(|old| old != mapped)
+            {
+                return Err(EndError(
+                    "target endpoint projection differs from actual source marker",
+                ));
+            }
+            candidate.target_endpoint = Some(mapped);
+        }
+        let cut = candidate.target_endpoint.map(|mapped| mapped.target_time);
+        if let (Some(cut), AudioAuthorityCoordinateBasis::TargetFrame(target)) = (cut, basis) {
+            let exact = InterpolatedTargetTime::new(cut, 0, 0, 1, 0, 1)
+                .map_err(|_| EndError("target endpoint cut overflow"))?;
+            if exact.compare_target_time(target.start_time()) == std::cmp::Ordering::Less
+                || candidate.target_generation_floor.is_some_and(|floor| {
+                    exact.compare_target_time(floor) == std::cmp::Ordering::Less
+                })
+            {
+                return Err(EndError(
+                    "target endpoint precedes original generation basis",
+                ));
+            }
+        }
+        self.coordinate_stage(candidate, cut)
+    }
+
+    fn coordinate_stage(
+        &self,
+        candidate: Self,
+        cut: Option<TargetTime>,
+    ) -> Result<PreparedCoordinateEnd, EndError> {
+        let query = cut
+            .map(|cut| {
+                InterpolatedTargetTime::new(cut, 0, 0, 1, 0, 1)
+                    .map_err(|_| EndError("exact endpoint cut overflow"))
+            })
+            .transpose()?;
+        Ok(PreparedCoordinateEnd {
+            before: self.clone(),
+            candidate,
+            query,
+        })
+    }
+
+    pub fn commit_coordinate_observation(
+        &mut self,
+        prepared: PreparedCoordinateEnd,
+    ) -> Result<(), EndError> {
+        if *self != prepared.before || self.emitted {
+            return Err(EndError("coordinate endpoint snapshot is stale"));
+        }
+        *self = prepared.candidate;
+        Ok(())
+    }
+
+    pub fn validate_coordinate_end(
+        &self,
+        prepared: &PreparedCoordinateEnd,
+        authority: &AudioAuthority,
+        cutoff: &PreparedCoordinateControlCutoff,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<CoordinateEndBoundary, EndError> {
+        let query = prepared
+            .query
+            .ok_or(EndError("actual endpoint projection is unavailable"))?;
+        let (epoch, basis, identity) = self
+            .coordinates
+            .ok_or(EndError("end lacks coordinate binding"))?;
+        if *self != prepared.before
+            || self.emitted
+            || prepared.candidate.emitted
+            || prepared.candidate.deferred_boundary.is_some()
+            || prepared.candidate.coordinates != Some((epoch, basis, identity))
+            || authority.epoch().id != epoch
+            || authority.coordinate_basis() != Some(basis)
+            || authority.epoch().stream_origin
+                != basis
+                    .origin()
+                    .map_err(|_| EndError("coordinate endpoint descriptor overflow"))?
+            || authority.epoch().host_domain != self.host
+            || cutoff.epoch() != epoch
+            || !cutoff.is_resume()
+            || cutoff.query().compare_interpolated_time(query) != std::cmp::Ordering::Equal
+        {
+            return Err(EndError(
+                "coordinate endpoint owner or exact cutoff differs",
+            ));
+        }
+        authority
+            .validate_coordinate_control_cutoff(cutoff, now, merger)
+            .map_err(|_| EndError("coordinate endpoint authority is stale or undrained"))?;
+        let raw_output = query
+            .point(self.origin)
+            .map_err(|_| EndError("coordinate endpoint raw cut overflow"))?;
+        if cutoff.raw_output() != raw_output || cutoff.host().domain != self.host {
+            return Err(EndError("coordinate endpoint original cutoff differs"));
+        }
+        Ok(CoordinateEndBoundary {
+            epoch,
+            query,
+            host: cutoff.host(),
+            raw_output,
+            output: cutoff.output(),
+            physical_frame: prepared
+                .candidate
+                .physical
+                .ok_or(EndError("actual physical endpoint is unavailable"))?,
+            playback_frame: self.end,
+            source_hz: identity.hz(),
+        })
+    }
+
+    /// Commit native ACK while the authority token is still valid, before its cutoff commit.
+    pub fn commit_coordinate_end(
+        &mut self,
+        prepared: PreparedCoordinateEnd,
+        authority: &AudioAuthority,
+        cutoff: &PreparedCoordinateControlCutoff,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<CoordinateEndBoundary, EndError> {
+        let boundary = self.validate_coordinate_end(&prepared, authority, cutoff, now, merger)?;
+        let mut candidate = prepared.candidate;
+        candidate.emitted = true;
+        *self = candidate;
+        Ok(boundary)
+    }
+
+    fn require_scalar(&self) -> Result<(), EndError> {
+        if self.coordinates.is_some() {
+            Err(EndError(
+                "coordinate end requires staged original endpoint adoption",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn new(
         origin: ClockPoint,
         host: ClockDomainId,
@@ -56,6 +415,7 @@ impl NativeEnd {
         }
         let result = Self {
             origin,
+            coordinates: None,
             target_basis: None,
             target_endpoint: None,
             target_generation_floor: None,
@@ -80,6 +440,7 @@ impl NativeEnd {
         epoch: u64,
         basis: beatkernel::audio::TargetFrameBasis,
     ) -> Result<Self, EndError> {
+        self.require_scalar()?;
         if self.target_basis.is_some()
             || self.last_pair.is_some()
             || self.last_report.is_some()
@@ -101,6 +462,7 @@ impl NativeEnd {
         source: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<Option<EndBoundary>, EndError> {
+        self.require_scalar()?;
         let mut next = self.clone();
         if next.target_basis != Some((epoch, basis))
             || facts.origin != Some(next.origin)
@@ -186,6 +548,7 @@ impl NativeEnd {
         state: &beatkernel_platform::audio::ConvertedNativeOutputState,
         basis: beatkernel::audio::TargetFrameBasis,
     ) -> Result<Self, EndError> {
+        self.require_scalar()?;
         let (old_epoch, _) = self
             .target_basis
             .ok_or(EndError("finite target restart requires target session"))?;
@@ -268,6 +631,7 @@ impl NativeEnd {
         state: &beatkernel_platform::audio::ConvertedNativeOutputState,
         pair: ClockPair,
     ) -> Result<Self, EndError> {
+        self.require_scalar()?;
         let basis = state.target_frame_basis();
         let mut next = self.prepare_restart_for_target_output(epoch, state, basis)?;
         next.observe_target(
@@ -328,6 +692,7 @@ impl NativeEnd {
         basis: beatkernel::audio::TargetFrameBasis,
         pair: ClockPair,
     ) -> Result<(), EndError> {
+        self.require_scalar()?;
         if self.target_basis != Some((epoch, basis))
             || self.emitted
             || self.deferred_boundary.is_some()
@@ -355,6 +720,7 @@ impl NativeEnd {
         source: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<(), EndError> {
+        self.require_scalar()?;
         if self.emitted || self.deferred_boundary.is_some() {
             return Err(EndError("finite startup boundary is already committed"));
         }
@@ -365,6 +731,7 @@ impl NativeEnd {
     }
     /// Preserve an original startup observation without discarding early completion.
     pub fn prime(&mut self, report: Option<RenderReport>, pair: ClockPair) -> Result<(), EndError> {
+        self.require_scalar()?;
         if self.emitted || self.deferred_boundary.is_some() {
             return Err(EndError("finite startup boundary is already committed"));
         }
@@ -379,6 +746,7 @@ impl NativeEnd {
         &mut self,
         observation: beatkernel_platform::audio::asio::AsioPresentationObservation,
     ) -> Result<(), EndError> {
+        self.require_scalar()?;
         if self.emitted || self.deferred_boundary.is_some() {
             return Err(EndError("finite startup boundary is already committed"));
         }
@@ -396,6 +764,7 @@ impl NativeEnd {
         report: RenderReport,
         pair: ClockPair,
     ) -> Result<Self, EndError> {
+        self.require_scalar()?;
         self.validate_output_restart(basis, report, pair)?;
         let mut next = self.restart_relation();
         next.observe(Some(report), pair)?;
@@ -409,6 +778,7 @@ impl NativeEnd {
         basis: beatkernel::audio::OutputFrameBasis,
         observation: beatkernel_platform::audio::asio::AsioPresentationObservation,
     ) -> Result<Self, EndError> {
+        self.require_scalar()?;
         self.validate_output_restart(
             basis,
             observation.render,
@@ -465,6 +835,7 @@ impl NativeEnd {
     }
     /// Configures an immutable initial physical-frame prefix before observation.
     pub fn with_start_frame(mut self, frame: u64) -> Result<Self, EndError> {
+        self.require_scalar()?;
         if self.start_configured || self.last_pair.is_some() || self.last_report.is_some() {
             return Err(EndError("end startup is already configured or observed"));
         }
@@ -622,6 +993,7 @@ impl NativeEnd {
         &mut self,
         observation: beatkernel_platform::audio::asio::AsioPresentationObservation,
     ) -> Result<Option<EndBoundary>, EndError> {
+        self.require_scalar()?;
         if observation.sample_rate != self.rate
             || observation.output_origin != self.origin
             || observation.output != self.point(observation.render.start_frame)?
@@ -653,6 +1025,7 @@ impl NativeEnd {
         report: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<Option<EndBoundary>, EndError> {
+        self.require_scalar()?;
         let mut next = self.clone();
         let boundary = next.observe_inner(report, pair, false)?;
         *self = next;
@@ -894,9 +1267,7 @@ mod fixtures {
         latency_frames: u32,
         error_ns: u64,
     ) -> beatkernel_platform::audio::asio::AsioPresentationObservation {
-        use beatkernel_platform::audio::asio::{
-            AsioPresentationObservation, MultimediaHostInterval,
-        };
+        use beatkernel_platform::audio::asio::{AsioPresentationObservation, MultimediaHostInterval};
         AsioPresentationObservation::from_render(
             render,
             1000,

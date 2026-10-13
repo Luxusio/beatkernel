@@ -11,13 +11,14 @@ use crate::{
     native_judge::NativeJudgeConfig,
     play_policy::{GaugeSelection, OriginalGaugeContext, ResolvedPlayPolicy, ResolvedTimingPolicy},
     replay_capture::LiveReplayCapture,
+    replay_speed::ReplaySpeed,
     session_launch::SessionLaunch,
 };
 use beatkernel::{
     judge::JudgeEngine,
     replay::codec::ReplayCodecLimits,
-    time::{ClockDomainId, Timestamp},
-    transport::{Rate, Transport},
+    time::{ClockDomainId, ClockPoint, Duration, Timestamp},
+    transport::{OutputPhaseBasis, OutputPhaseError, Rate, Transport},
 };
 use beatkernel_bms::BmsChart;
 use std::path::PathBuf;
@@ -52,13 +53,41 @@ pub struct PreparedPracticeAttempt {
     pub recording_path: Option<PathBuf>,
     pub excluded_objects: usize,
     pub excluded_crossing_holds: usize,
+    speed: ReplaySpeed,
 }
 
 impl PreparedPracticeAttempt {
-    /// Build a fresh normal-rate transport at the *qualified* retained logical
-    /// audio boundary. The caller, not this cold constructor, supplies authority.
+    pub const fn speed(&self) -> ReplaySpeed {
+        self.speed
+    }
+
+    /// Build a selected-rate zero-preroll transport at a qualified boundary.
+    /// This scalar seam does not preserve fractional source/target frame phase:
+    /// non-divisor grids and converted cuts require the shared phase port before
+    /// native retained-speed pumps may use it as an exact timing authority.
     pub fn transport_at(&self, logical_boundary: Timestamp) -> Transport {
-        Transport::new(logical_boundary, self.config.start, Rate::NORMAL)
+        Transport::new(logical_boundary, self.config.start, self.speed.rate())
+    }
+
+    /// Build a fresh zero-preroll transport with the selected output phase.
+    /// This validates mathematical coherence only: the caller must qualify the
+    /// original native boundary and active frame cut, including converter phase.
+    pub fn transport_at_output_phase(
+        &self,
+        basis: OutputPhaseBasis,
+        logical_boundary: ClockPoint,
+    ) -> Result<Transport, OutputPhaseError> {
+        if basis.domain() != self.config.domain || logical_boundary.domain != self.config.domain {
+            return Err(OutputPhaseError::WrongDomain);
+        }
+        Transport::new_with_output_phase(
+            basis,
+            logical_boundary,
+            self.config.start,
+            Duration::ZERO,
+            self.speed.rate(),
+            self.config.end,
+        )
     }
 }
 
@@ -72,6 +101,63 @@ pub fn prepare_attempt(
     current_launch: &SessionLaunch,
     config: PracticeAttemptConfig,
 ) -> NativeGameplayResult<PreparedPracticeAttempt> {
+    prepare_attempt_inner(
+        original,
+        policy,
+        current_launch,
+        config,
+        ReplaySpeed::new(Rate::NORMAL)?,
+    )
+}
+
+/// Prepare canonical selected-speed owners without mutating an active attempt.
+/// Exact fractional retained phase remains the native integration prerequisite.
+pub fn prepare_attempt_with_speed(
+    original: &BmsChart,
+    policy: &ResolvedPlayPolicy,
+    current_launch: &SessionLaunch,
+    config: PracticeAttemptConfig,
+    speed: ReplaySpeed,
+) -> NativeGameplayResult<PreparedPracticeAttempt> {
+    validate_launch_speed(current_launch, speed)?;
+    prepare_attempt_inner(original, policy, current_launch, config, speed)
+}
+
+pub(crate) fn validate_launch_speed(
+    current_launch: &SessionLaunch,
+    speed: ReplaySpeed,
+) -> NativeGameplayResult<()> {
+    let mut options = current_launch
+        .args()
+        .chunks_exact(2)
+        .filter(|pair| pair[0] == "--speed");
+    let selected = options
+        .next()
+        .map(|pair| pair[1].parse::<ReplaySpeed>())
+        .transpose()?
+        .unwrap_or(ReplaySpeed::new(Rate::NORMAL)?);
+    if options.next().is_some() {
+        return Err("practice retry invocation has duplicate speed options".into());
+    }
+    if selected != speed {
+        return Err("practice selected speed differs from pinned retry invocation".into());
+    }
+    Ok(())
+}
+
+fn prepare_attempt_inner(
+    original: &BmsChart,
+    policy: &ResolvedPlayPolicy,
+    current_launch: &SessionLaunch,
+    config: PracticeAttemptConfig,
+    speed: ReplaySpeed,
+) -> NativeGameplayResult<PreparedPracticeAttempt> {
+    crate::live_speed::LiveSpeedSetup::new(
+        config.start,
+        beatkernel::time::Duration::ZERO,
+        speed,
+        config.end,
+    )?;
     if config.start.as_nanos() < 0 || config.end.is_some_and(|end| end <= config.start) {
         return Err("practice requires a nonnegative start and a strictly later end".into());
     }
@@ -119,7 +205,7 @@ pub fn prepare_attempt(
         end: config.end,
     };
     let judge = judge_config.judge_with_policy(&source, chart, policy)?;
-    let capture = crate::native_judge::prepare_section_capture_for_policy(
+    let capture = crate::native_judge::prepare_section_capture_for_policy_with_speed(
         &source,
         &judge,
         policy,
@@ -128,6 +214,7 @@ pub fn prepare_attempt(
         config.chart_seed,
         config.end,
         config.capture_limits,
+        speed,
     )?;
     Ok(PreparedPracticeAttempt {
         source,
@@ -144,6 +231,7 @@ pub fn prepare_attempt(
         recording_path,
         excluded_objects,
         excluded_crossing_holds,
+        speed,
     })
 }
 

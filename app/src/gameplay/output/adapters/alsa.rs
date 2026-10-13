@@ -3,6 +3,12 @@ use crate::gameplay::output::ports::OutputReplacementBackend;
 #[cfg(test)]
 #[path = "alsa_target_fixtures.rs"]
 mod target_fixtures;
+#[cfg(test)]
+#[path = "alsa_source_playback_fixtures.rs"]
+mod source_playback_fixtures;
+#[cfg(test)]
+#[path = "alsa_target_playback_fixtures.rs"]
+mod target_playback_fixtures;
 use beatkernel::audio::{OutputFrameBasis, OutputOpenFailure, RenderReport, StoppedMixerSource};
 use beatkernel_platform::{
     audio::presentation::discipline::{DisciplineError, PresentationDiscipline},
@@ -12,6 +18,9 @@ use beatkernel_platform::{
 
 #[derive(Debug)]
 pub enum AlsaReplacementError {
+    Playback(crate::gameplay::output::ports::SourcePlaybackPacketError),
+    TargetPlayback(crate::gameplay::output::ports::TargetPlaybackPacketError),
+    Coordinate(crate::native_output_coordinate::NativeOutputCoordinateError),
     Linux(LinuxError),
     Discipline(DisciplineError),
     Status(AlsaStatus),
@@ -20,6 +29,9 @@ pub enum AlsaReplacementError {
 impl std::fmt::Display for AlsaReplacementError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Playback(error) => error.fmt(f),
+            Self::TargetPlayback(error) => error.fmt(f),
+            Self::Coordinate(error) => error.fmt(f),
             Self::Linux(error) => error.fmt(f),
             Self::Discipline(error) => error.fmt(f),
             Self::Status(status) => write!(f, "ALSA replacement output is not running: {status:?}"),
@@ -30,6 +42,9 @@ impl std::fmt::Display for AlsaReplacementError {
 impl std::error::Error for AlsaReplacementError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Playback(error) => Some(error),
+            Self::TargetPlayback(error) => Some(error),
+            Self::Coordinate(error) => Some(error),
             Self::Linux(error) => Some(error),
             Self::Discipline(error) => Some(error),
             _ => None,
@@ -189,6 +204,12 @@ impl AlsaReplacementBackend {
         &mut self,
         output: &mut AlsaReplacementOutput,
     ) -> Result<Option<beatkernel::time::ClockPair>, AlsaReplacementError> {
+        Ok(self.original_coordinate(output)?.map(|(pair, _)| pair))
+    }
+    fn original_coordinate(
+        &mut self,
+        output: &mut AlsaReplacementOutput,
+    ) -> Result<Option<(beatkernel::time::ClockPair, u64)>, AlsaReplacementError> {
         match output.stream.snapshot().status {
             AlsaStatus::Ready => return Ok(None),
             AlsaStatus::Running => {}
@@ -198,6 +219,9 @@ impl AlsaReplacementBackend {
             return Ok(None);
         };
         alsa_presentation_pair_with_basis(snapshot, output.stream.frame_basis())
+            .map(|pair| {
+                pair.and_then(|pair| snapshot.estimated_played_frames.map(|frame| (pair, frame)))
+            })
             .map_err(AlsaReplacementError::Linux)
     }
 }
@@ -310,6 +334,12 @@ impl ConvertedAlsaReplacementBackend {
         &mut self,
         output: &mut ConvertedAlsaReplacementOutput,
     ) -> Result<Option<beatkernel::time::ClockPair>, AlsaReplacementError> {
+        Ok(self.original_coordinate(output)?.map(|(pair, _)| pair))
+    }
+    fn original_coordinate(
+        &mut self,
+        output: &mut ConvertedAlsaReplacementOutput,
+    ) -> Result<Option<(beatkernel::time::ClockPair, u64)>, AlsaReplacementError> {
         match output.stream.snapshot().status {
             AlsaStatus::Ready => return Ok(None),
             AlsaStatus::Running => {}
@@ -319,6 +349,9 @@ impl ConvertedAlsaReplacementBackend {
             return Ok(None);
         };
         alsa_presentation_pair_with_target_basis(snapshot, output.stream.frame_basis())
+            .map(|pair| {
+                pair.and_then(|pair| snapshot.estimated_played_frames.map(|frame| (pair, frame)))
+            })
             .map_err(AlsaReplacementError::Linux)
     }
 }
@@ -467,5 +500,433 @@ impl OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>
             .stream
             .set_held(held)
             .map_err(AlsaReplacementError::Linux)
+    }
+}
+
+impl crate::gameplay::output::ports::OriginalCoordinateNativeOutputBackend<NativeOutputState>
+    for AlsaReplacementBackend
+{
+    fn observe_native_coordinate(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<crate::native_output_coordinate::CoordinateNativeAudioSnapshot>, Self::Error>
+    {
+        use crate::native_output_coordinate::{CoordinateNativeAudioSnapshot, NativeOutputCoordinate};
+        self.original_coordinate(output)?.map(|(pair, frame)| {
+            CoordinateNativeAudioSnapshot::new(
+                crate::native_audio_presentation::NativeAudioSnapshot {
+                    epoch: output.epoch, basis: output.stream.frame_basis(),
+                    evidence: beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::SuppliedPair(pair),
+                }, NativeOutputCoordinate::StreamFrame { frame },
+            ).map_err(AlsaReplacementError::Coordinate)
+        }).transpose()
+    }
+}
+impl
+    crate::gameplay::output::ports::OriginalCoordinateTargetNativeOutputBackend<
+        ConvertedNativeOutputState,
+    > for ConvertedAlsaReplacementBackend
+{
+    fn observe_native_target_coordinate(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<
+        Option<crate::native_output_coordinate::CoordinateTargetNativeAudioSnapshot>,
+        Self::Error,
+    > {
+        use crate::native_output_coordinate::{
+            CoordinateTargetNativeAudioSnapshot, NativeOutputCoordinate,
+        };
+        self.original_coordinate(output)?.map(|(pair, frame)| {
+            CoordinateTargetNativeAudioSnapshot::new(
+                crate::native_audio_presentation::TargetNativeAudioSnapshot {
+                    epoch: output.epoch, basis: output.stream.frame_basis(),
+                    evidence: beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::SuppliedPair(pair),
+                }, NativeOutputCoordinate::StreamFrame { frame },
+            ).map_err(AlsaReplacementError::Coordinate)
+        }).transpose()
+    }
+}
+
+use crate::gameplay::output::ports::{
+    NativePlaybackObservation, NativeSourcePlaybackQuery, SourcePlaybackFacts,
+    SourcePlaybackIdentity, SourcePlaybackNativeOutputBackend, SourcePlaybackPacketError,
+};
+use beatkernel::audio::{InterpolatedTargetTime, TargetTime};
+use beatkernel_platform::linux::{
+    AlsaConvertedPlaybackSnapshot, AlsaSourcePlaybackSnapshot, AlsaTimingSnapshot,
+};
+use crate::gameplay::output::ports::{
+    NativeTargetPlaybackFacts, NativeTargetPlaybackObservation, NativeTargetPlaybackQuery,
+    TargetHistoryRetirementNativeOutputBackend, TargetPlaybackNativeOutputBackend,
+    TargetPlaybackPacketError,
+};
+
+/// Preserves the coherent converted publication and its original native evidence.
+pub(super) fn qualify_alsa_target_packet(
+    epoch: u64,
+    basis: TargetFrameBasis,
+    identity: SourcePlaybackIdentity,
+    query: InterpolatedTargetTime,
+    snapshot: AlsaConvertedPlaybackSnapshot,
+) -> Result<NativeTargetPlaybackQuery<AlsaTimingSnapshot>, AlsaReplacementError> {
+    let phase = snapshot.phase.phase;
+    if phase.stream_start != basis.start_time() {
+        return Err(AlsaReplacementError::TargetPlayback(
+            TargetPlaybackPacketError::BasisMismatch,
+        ));
+    }
+    let submitted_end = basis
+        .time_at_stream_frame(snapshot.submitted_target_frames)
+        .map_err(|_| AlsaReplacementError::TargetPlayback(TargetPlaybackPacketError::Overflow))?;
+    if snapshot.submitted_target_frames == 0
+        || phase.submitted_end != submitted_end
+        || snapshot
+            .timing
+            .is_some_and(|timing| timing.submitted_frames != snapshot.submitted_target_frames)
+    {
+        return Err(AlsaReplacementError::TargetPlayback(
+            TargetPlaybackPacketError::InvalidMapping(
+                crate::native_playback_phase::NativePlaybackPhaseError::Range,
+            ),
+        ));
+    }
+    NativeTargetPlaybackQuery::new(
+        epoch,
+        basis,
+        identity,
+        query,
+        NativeTargetPlaybackFacts {
+            playback: crate::native_playback_phase::ConvertedPlaybackFacts {
+                phase: phase.span,
+                segment_end: phase.segment_end,
+                generated_target_end: phase.generated_end,
+                submitted_target_end: phase.submitted_end,
+                playback: snapshot.phase.playback,
+                pulled_source_end: snapshot.phase.pulled_source_end,
+                revision: phase.revision,
+            },
+            source: phase.last_real_source,
+            converted: phase.report,
+            boundaries: phase.boundaries,
+            revision: snapshot.revision,
+        },
+        snapshot.timing,
+    )
+    .map_err(AlsaReplacementError::TargetPlayback)
+}
+
+/// The candidate chooses the query; only identical coherent evidence supplies a pair.
+pub(super) fn qualify_alsa_target_observation_packet(
+    epoch: u64,
+    basis: TargetFrameBasis,
+    identity: SourcePlaybackIdentity,
+    candidate: AlsaTimingSnapshot,
+    packet: NativeTargetPlaybackQuery<AlsaTimingSnapshot>,
+) -> Result<Option<NativeTargetPlaybackObservation<AlsaTimingSnapshot>>, AlsaReplacementError> {
+    if packet.native_evidence() != Some(&candidate) {
+        return Ok(None);
+    }
+    if packet.epoch() != epoch {
+        return Err(AlsaReplacementError::TargetPlayback(
+            TargetPlaybackPacketError::EpochMismatch,
+        ));
+    }
+    if packet.basis() != basis || packet.identity() != identity {
+        return Err(AlsaReplacementError::TargetPlayback(
+            TargetPlaybackPacketError::BasisMismatch,
+        ));
+    }
+    let Some(pair) = alsa_presentation_pair_with_target_basis(candidate, basis)
+        .map_err(AlsaReplacementError::Linux)?
+    else {
+        return Ok(None);
+    };
+    let Some(frame) = candidate.estimated_played_frames else {
+        return Ok(None);
+    };
+    let coordinate = crate::native_output_coordinate::CoordinateTargetNativeAudioSnapshot::new(
+        crate::native_audio_presentation::TargetNativeAudioSnapshot {
+            epoch, basis,
+            evidence: beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::SuppliedPair(pair),
+        },
+        crate::native_output_coordinate::NativeOutputCoordinate::StreamFrame { frame },
+    ).map_err(AlsaReplacementError::Coordinate)?;
+    NativeTargetPlaybackObservation::new(coordinate, packet)
+        .map(Some)
+        .map_err(AlsaReplacementError::TargetPlayback)
+}
+
+impl TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState>
+    for ConvertedAlsaReplacementBackend
+{
+    type NativeEvidence = AlsaTimingSnapshot;
+    fn target_playback_at(
+        &self,
+        output: &Self::Output,
+        query: &InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativeTargetPlaybackQuery<Self::NativeEvidence>>, Self::Error> {
+        output
+            .stream
+            .native_playback_at(
+                query,
+                identity.hz(),
+                identity.initial_physical(),
+                identity.initial_playback(),
+            )
+            .map(|snapshot| {
+                qualify_alsa_target_packet(
+                    output.epoch,
+                    output.stream.frame_basis(),
+                    identity,
+                    *query,
+                    snapshot,
+                )
+            })
+            .transpose()
+    }
+    fn observe_native_target_playback(
+        &mut self,
+        output: &mut Self::Output,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativeTargetPlaybackObservation<Self::NativeEvidence>>, Self::Error> {
+        match output.stream.snapshot().status {
+            AlsaStatus::Ready => return Ok(None),
+            AlsaStatus::Running => {}
+            status => return Err(AlsaReplacementError::Status(status)),
+        }
+        let basis = output.stream.frame_basis();
+        for _ in 0..3 {
+            let Some(candidate) = output.stream.timing_snapshot() else {
+                continue;
+            };
+            if alsa_presentation_pair_with_target_basis(candidate, basis)
+                .map_err(AlsaReplacementError::Linux)?
+                .is_none()
+            {
+                continue;
+            }
+            let Some(frame) = candidate.estimated_played_frames else {
+                continue;
+            };
+            let query = InterpolatedTargetTime::new(
+                basis.start_time(),
+                frame,
+                frame,
+                u64::from(basis.sample_rate()),
+                0,
+                1,
+            )
+            .map_err(|_| {
+                AlsaReplacementError::TargetPlayback(TargetPlaybackPacketError::Overflow)
+            })?;
+            let Some(packet) = self.target_playback_at(output, &query, identity)? else {
+                continue;
+            };
+            if let Some(observation) = qualify_alsa_target_observation_packet(
+                output.epoch,
+                basis,
+                identity,
+                candidate,
+                packet,
+            )? {
+                return Ok(Some(observation));
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl TargetHistoryRetirementNativeOutputBackend<ConvertedNativeOutputState>
+    for ConvertedAlsaReplacementBackend
+{
+    fn request_target_history_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        expected_epoch: u64,
+        expected_basis: TargetFrameBasis,
+        identity: SourcePlaybackIdentity,
+        source_pin: u64,
+        target_pin: TargetTime,
+    ) -> Result<Option<u64>, Self::Error> {
+        if expected_epoch != output.epoch {
+            return Err(AlsaReplacementError::EpochMismatch);
+        }
+        if expected_basis != output.stream.frame_basis() {
+            return Err(AlsaReplacementError::TargetPlayback(
+                TargetPlaybackPacketError::BasisMismatch,
+            ));
+        }
+        output
+            .stream
+            .request_history_retirement(
+                expected_basis,
+                (
+                    identity.hz(),
+                    identity.initial_physical(),
+                    identity.initial_playback(),
+                ),
+                source_pin,
+                target_pin,
+            )
+            .map_err(AlsaReplacementError::Linux)
+    }
+}
+
+/// Qualifies only the mathematical source packet, retaining optional raw evidence.
+/// Native status/freshness/epoch admission remains outside this read-only boundary.
+pub(super) fn qualify_alsa_source_packet(
+    epoch: u64,
+    basis: OutputFrameBasis,
+    identity: SourcePlaybackIdentity,
+    query: InterpolatedTargetTime,
+    snapshot: AlsaSourcePlaybackSnapshot,
+) -> Result<NativeSourcePlaybackQuery<AlsaTimingSnapshot>, AlsaReplacementError> {
+    if snapshot.timing.is_some_and(|timing| {
+        basis
+            .start_physical_frame()
+            .checked_add(timing.submitted_frames)
+            != Some(snapshot.submitted_source_end)
+    }) {
+        return Err(AlsaReplacementError::Playback(
+            SourcePlaybackPacketError::InvalidPrefix,
+        ));
+    }
+    NativeSourcePlaybackQuery::new(
+        epoch,
+        basis,
+        identity,
+        query,
+        SourcePlaybackFacts {
+            playback: snapshot.playback,
+            pulled_source_end: snapshot.pulled_source_end,
+            submitted_source_end: snapshot.submitted_source_end,
+            render: snapshot.render,
+            revision: snapshot.revision,
+        },
+        snapshot.timing,
+    )
+    .map_err(AlsaReplacementError::Playback)
+}
+
+/// The full native candidate must be the evidence in the compound source read.
+/// A changing or absent publication yields no observation, never a mixed pair.
+pub(super) fn qualify_alsa_observation_packet(
+    epoch: u64,
+    basis: OutputFrameBasis,
+    identity: SourcePlaybackIdentity,
+    candidate: AlsaTimingSnapshot,
+    packet: NativeSourcePlaybackQuery<AlsaTimingSnapshot>,
+) -> Result<Option<NativePlaybackObservation<AlsaTimingSnapshot>>, AlsaReplacementError> {
+    if packet.native_evidence() != Some(&candidate) {
+        return Ok(None);
+    }
+    if packet.epoch() != epoch {
+        return Err(AlsaReplacementError::Playback(
+            SourcePlaybackPacketError::EpochMismatch,
+        ));
+    }
+    if packet.basis() != basis || packet.identity() != identity {
+        return Err(AlsaReplacementError::Playback(
+            SourcePlaybackPacketError::BasisMismatch,
+        ));
+    }
+    let Some(pair) =
+        alsa_presentation_pair_with_basis(candidate, basis).map_err(AlsaReplacementError::Linux)?
+    else {
+        return Ok(None);
+    };
+    let Some(frame) = candidate.estimated_played_frames else {
+        return Ok(None);
+    };
+    let coordinate = crate::native_output_coordinate::CoordinateNativeAudioSnapshot::new(
+        crate::native_audio_presentation::NativeAudioSnapshot {
+            epoch, basis,
+            evidence: beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::SuppliedPair(pair),
+        }, crate::native_output_coordinate::NativeOutputCoordinate::StreamFrame { frame },
+    ).map_err(AlsaReplacementError::Coordinate)?;
+    NativePlaybackObservation::new(coordinate, packet)
+        .map(Some)
+        .map_err(AlsaReplacementError::Playback)
+}
+
+impl SourcePlaybackNativeOutputBackend<NativeOutputState> for AlsaReplacementBackend {
+    type NativeEvidence = AlsaTimingSnapshot;
+    fn source_playback_at(
+        &self,
+        output: &Self::Output,
+        query: &InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativeSourcePlaybackQuery<Self::NativeEvidence>>, Self::Error> {
+        let basis = output.stream.frame_basis();
+        if basis.sample_rate() != identity.hz()
+            || identity.initial_physical() > basis.start_physical_frame()
+        {
+            return Err(AlsaReplacementError::Playback(
+                SourcePlaybackPacketError::BasisMismatch,
+            ));
+        }
+        output
+            .stream
+            .source_playback_at(
+                query,
+                identity.hz(),
+                identity.initial_physical(),
+                identity.initial_playback(),
+            )
+            .map(|snapshot| {
+                qualify_alsa_source_packet(output.epoch, basis, identity, *query, snapshot)
+            })
+            .transpose()
+    }
+    fn observe_native_playback(
+        &mut self,
+        output: &mut Self::Output,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativePlaybackObservation<Self::NativeEvidence>>, Self::Error> {
+        match output.stream.snapshot().status {
+            AlsaStatus::Ready => return Ok(None),
+            AlsaStatus::Running => {}
+            status => return Err(AlsaReplacementError::Status(status)),
+        }
+        let basis = output.stream.frame_basis();
+        for _ in 0..3 {
+            let Some(candidate) = output.stream.timing_snapshot() else {
+                continue;
+            };
+            // Check native metadata before constructing its mathematical query.
+            if alsa_presentation_pair_with_basis(candidate, basis)
+                .map_err(AlsaReplacementError::Linux)?
+                .is_none()
+            {
+                continue;
+            }
+            let Some(frame) = candidate.estimated_played_frames else {
+                continue;
+            };
+            let base = TargetTime::from_frames(basis.start_physical_frame(), basis.sample_rate())
+                .map_err(|_| {
+                AlsaReplacementError::Playback(SourcePlaybackPacketError::Overflow)
+            })?;
+            let query = InterpolatedTargetTime::new(
+                base,
+                frame,
+                frame,
+                u64::from(basis.sample_rate()),
+                0,
+                1,
+            )
+            .map_err(|_| AlsaReplacementError::Playback(SourcePlaybackPacketError::Overflow))?;
+            let Some(packet) = self.source_playback_at(output, &query, identity)? else {
+                continue;
+            };
+            if let Some(observation) =
+                qualify_alsa_observation_packet(output.epoch, basis, identity, candidate, packet)?
+            {
+                return Ok(Some(observation));
+            }
+        }
+        Ok(None)
     }
 }

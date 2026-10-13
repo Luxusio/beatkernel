@@ -1,7 +1,11 @@
 //! One static output owner shared by gameplay adapters; input and clocks stay external.
 use super::replacement::target::{publish_ready_target_audio_output_held, ReadyTargetAudioOutput};
 use crate::gameplay::output::ports::{
-    OriginalNativeOutputBackend, OriginalTargetNativeOutputBackend, OutputReplacementBackend,
+    NativePlaybackObservation, NativeSourcePlaybackQuery, SourcePlaybackIdentity,
+    SourcePlaybackNativeOutputBackend, OriginalNativeOutputBackend,
+    OriginalTargetNativeOutputBackend, OutputReplacementBackend, NativeTargetPlaybackObservation,
+    NativeTargetPlaybackQuery, TargetPlaybackNativeOutputBackend,
+    TargetHistoryRetirementNativeOutputBackend, SourceHistoryRetirementNativeOutputBackend,
 };
 use crate::native_audio_presentation::NativeAudioPresentation;
 use crate::{
@@ -18,7 +22,9 @@ use beatkernel::{
     audio::{Mixer, OutputFrameBasis, OutputOpenFailure, RenderReport, SoftwareOutputState},
     time::{ClockPair, ClockPoint},
 };
-use beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence;
+use beatkernel_platform::audio::presentation::validation::{
+    NativeObservationAdmission, OriginalNativePresentationEvidence,
+};
 use beatkernel_platform::audio::{ConvertedBoundaryFacts, ConvertedNativeOutputState};
 
 enum RejectedReady<P: GameplayPresentationPort, O> {
@@ -813,6 +819,63 @@ where
     }
 }
 
+impl<
+        B: crate::gameplay::output::ports::OriginalCoordinateTargetNativeOutputBackend<
+            ConvertedNativeOutputState,
+        >,
+    > GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis>
+{
+    /// Acquires original target time evidence without qualifying converted playback.
+    /// The separate source report is read before either authority or cache changes.
+    pub fn observe_target_native_coordinate(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        if self.current.is_none() {
+            return Ok(());
+        }
+        self.target_identity(presentation)?;
+        if presentation.authority().coordinate_basis()
+            != Some(crate::audio_authority::AudioAuthorityCoordinateBasis::TargetFrame(self.basis))
+        {
+            return Err(ReplacementFailure::policy(
+                "target coordinate requires the published immutable target descriptor",
+            ));
+        }
+        let Some(output) = self.current.as_mut() else {
+            return Ok(());
+        };
+        let epoch = self.controller.backend().epoch(output);
+        let Some(coordinate) = self
+            .controller
+            .backend_mut()
+            .observe_native_target_coordinate(output)
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?
+        else {
+            return Ok(());
+        };
+        let reported = self
+            .controller
+            .backend()
+            .render_report(output)
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
+        if self.controller.backend().epoch(output) != epoch
+            || self.controller.backend().basis(output) != self.basis
+            || coordinate.snapshot().epoch != epoch
+            || coordinate.snapshot().basis != self.basis
+        {
+            return Err(ReplacementFailure::policy(
+                "target coordinate acquisition changed the published creation identity",
+            ));
+        }
+        presentation
+            .admit_target_coordinate(coordinate)
+            .map_err(ReplacementFailure::timing)?;
+        self.report = reported.filter(|report| report.frames != 0);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[path = "owner_fixtures.rs"]
 pub(crate) mod fixtures;
@@ -820,3 +883,507 @@ pub(crate) mod fixtures;
 #[cfg(test)]
 #[path = "native_observation_fixtures.rs"]
 mod native_observation_fixtures;
+
+#[cfg(test)]
+#[path = "target_coordinate_owner_fixtures.rs"]
+mod target_coordinate_owner_fixtures;
+
+#[cfg(test)]
+#[path = "source_playback_owner_fixtures.rs"]
+pub(crate) mod source_playback_owner_fixtures;
+
+impl<B: SourcePlaybackNativeOutputBackend<O>, O: SoftwareOutputState> GameplayOutputOwner<B, O> {
+    fn source_playback_identity(
+        &self,
+        presentation: &NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        self.audio_identity(presentation)?;
+        use crate::audio_authority::AudioAuthorityCoordinateBasis;
+        let descriptor_basis = match presentation.authority().coordinate_basis() {
+            Some(AudioAuthorityCoordinateBasis::SourceFrame(basis)) => basis,
+            Some(AudioAuthorityCoordinateBasis::SourceCounter { basis, frequency })
+                if frequency != 0 =>
+            {
+                basis
+            }
+            _ => {
+                return Err(ReplacementFailure::policy(
+                    "source playback requires original source coordinates",
+                ))
+            }
+        };
+        if descriptor_basis != self.basis
+            || identity.hz() != self.basis.sample_rate()
+            || identity.initial_physical() > self.basis.start_physical_frame()
+        {
+            return Err(ReplacementFailure::policy(
+                "source playback creation or history identity differs",
+            ));
+        }
+        Ok(())
+    }
+
+    fn source_packet_identity(
+        &self,
+        packet: &NativeSourcePlaybackQuery<B::NativeEvidence>,
+        epoch: u64,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        if packet.epoch() != epoch || packet.basis() != self.basis || packet.identity() != identity
+        {
+            return Err(ReplacementFailure::policy(
+                "source playback packet differs from published identity",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Acquires a single compound publication, then admits its original coordinate.
+    /// Neither an unavailable packet nor a failed admission changes the report cache.
+    pub fn observe_native_playback(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativePlaybackObservation<B::NativeEvidence>>, ReplacementFailure<B::Error>>
+    {
+        self.observe_native_playback_admission(presentation, identity)
+            .map(|observation| observation.map(|(packet, _)| packet))
+    }
+
+    fn observe_native_playback_admission(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<
+        Option<(
+            NativePlaybackObservation<B::NativeEvidence>,
+            NativeObservationAdmission,
+        )>,
+        ReplacementFailure<B::Error>,
+    > {
+        if self.current.is_none() {
+            return Ok(None);
+        }
+        self.source_playback_identity(presentation, identity)?;
+        let Some(output) = self.current.as_mut() else {
+            return Ok(None);
+        };
+        let epoch = self.controller.backend().epoch(output);
+        let Some(observation) = self
+            .controller
+            .backend_mut()
+            .observe_native_playback(output, identity)
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?
+        else {
+            return Ok(None);
+        };
+        if self.controller.backend().epoch(output) != epoch
+            || self.controller.backend().basis(output) != self.basis
+        {
+            return Err(ReplacementFailure::policy(
+                "source acquisition changed the published output identity",
+            ));
+        }
+        self.source_packet_identity(observation.source(), epoch, identity)?;
+        // The packet constructor checks exact coordinate/query equality. The
+        // presentation owns native validation and transactional clock admission.
+        let admission = presentation
+            .admit_coordinate(observation.coordinate())
+            .map_err(ReplacementFailure::timing)?;
+        self.report = observation.source().facts().render;
+        Ok(Some((observation, admission)))
+    }
+
+    /// Acquire and admit one compound source publication for later control staging.
+    /// No separate render/native-position read or acknowledgment occurs here.
+    pub fn observe_native_control(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<
+        Option<crate::native_coordinate_control::CoordinateControlFacts>,
+        ReplacementFailure<B::Error>,
+    > {
+        let Some((observation, admission)) =
+            self.observe_native_playback_admission(presentation, identity)?
+        else {
+            return Ok(None);
+        };
+        // A later HOST on an unchanged native position was not retained. An
+        // exact retained repeat may still carry newer render/control summaries.
+        if admission == NativeObservationAdmission::Unchanged
+            && presentation.latest_record().is_some_and(|record| {
+                *record.evidence() != observation.coordinate().snapshot().evidence
+            })
+        {
+            return Ok(None);
+        }
+        crate::native_coordinate_control::CoordinateControlFacts::from_source(
+            &observation,
+            presentation,
+            identity,
+        )
+        .map(Some)
+        .map_err(|error| ReplacementFailure::timing(error.into()))
+    }
+
+    /// Reads exact source facts without changing presentation or cached reports.
+    pub fn source_playback_at(
+        &self,
+        presentation: &NativeAudioPresentation,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativeSourcePlaybackQuery<B::NativeEvidence>>, ReplacementFailure<B::Error>>
+    {
+        let Some(output) = self.current.as_ref() else {
+            return Ok(None);
+        };
+        self.source_playback_identity(presentation, identity)?;
+        let epoch = self.controller.backend().epoch(output);
+        let Some(packet) = self
+            .controller
+            .backend()
+            .source_playback_at(output, query, identity)
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?
+        else {
+            return Ok(None);
+        };
+        self.source_packet_identity(&packet, epoch, identity)?;
+        if self.controller.backend().epoch(output) != epoch
+            || self.controller.backend().basis(output) != self.basis
+        {
+            return Err(ReplacementFailure::policy(
+                "source query changed the published output identity",
+            ));
+        }
+        if !packet.query().compare_interpolated_time(*query).is_eq() {
+            return Err(ReplacementFailure::policy(
+                "source playback packet changed the exact query",
+            ));
+        }
+        Ok(Some(packet))
+    }
+}
+
+#[cfg(test)]
+#[path = "source_control_owner_fixtures.rs"]
+pub(crate) mod source_control_owner_fixtures;
+
+impl<B: SourceHistoryRetirementNativeOutputBackend<O>, O: SoftwareOutputState>
+    GameplayOutputOwner<B, O>
+{
+    /// Queues the original covering span for a caller-qualified live minimum.
+    /// The caller must include all input, control and practice references.
+    pub fn request_source_history_retirement(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        minimum_query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<u64>, ReplacementFailure<B::Error>> {
+        self.request_source_history_retirement_with_source_pin(
+            presentation,
+            minimum_query,
+            identity,
+            None,
+        )
+    }
+
+    /// Includes an original queued or held raw Source reference without rebasing.
+    pub fn request_source_history_retirement_with_source_pin(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        minimum_query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+        source_minimum: Option<u64>,
+    ) -> Result<Option<u64>, ReplacementFailure<B::Error>> {
+        if source_minimum.is_some_and(|minimum| minimum < identity.initial_physical()) {
+            return Err(ReplacementFailure::policy(
+                "source history retirement minimum precedes the original source identity",
+            ));
+        }
+        let Some(packet) = self.source_playback_at(presentation, minimum_query, identity)? else {
+            return Ok(None);
+        };
+        if packet.native_evidence().is_none() {
+            return Err(ReplacementFailure::policy(
+                "source history retirement requires native source evidence",
+            ));
+        }
+        let covering_start = packet.facts().playback.physical_start();
+        let source_pin = source_minimum.map_or(covering_start, |pin| pin.min(covering_start));
+        let Some(output) = self.current.as_mut() else {
+            return Ok(None);
+        };
+        if self.controller.backend().epoch(output) != packet.epoch()
+            || self.controller.backend().basis(output) != packet.basis()
+        {
+            return Err(ReplacementFailure::policy(
+                "source history retirement changed the published output identity",
+            ));
+        }
+        self.controller
+            .backend_mut()
+            .request_source_history_retirement(
+                output,
+                packet.epoch(),
+                packet.basis(),
+                identity,
+                source_pin,
+            )
+            .map_err(|error| Self::failure(ReplacementPhase::Retire, error))
+    }
+}
+
+#[cfg(test)]
+#[path = "source_history_retirement_owner_fixtures.rs"]
+mod source_history_retirement_owner_fixtures;
+
+impl<B: TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState>>
+    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis>
+{
+    fn target_playback_identity(
+        &self,
+        presentation: &NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        self.target_identity(presentation)?;
+        presentation
+            .validate_coordinate_seed()
+            .map_err(ReplacementFailure::timing)?;
+        if presentation.authority().coordinate_basis()
+            != Some(crate::audio_authority::AudioAuthorityCoordinateBasis::TargetFrame(self.basis))
+            || self.target_facts.is_some_and(|old| {
+                old.origin != Some(self.basis.origin()) || old.source_rate != identity.hz()
+            })
+        {
+            return Err(ReplacementFailure::policy(
+                "target playback creation descriptor or immutable source interpretation differs",
+            ));
+        }
+        Ok(())
+    }
+
+    fn target_packet_identity(
+        &self,
+        packet: &NativeTargetPlaybackQuery<B::NativeEvidence>,
+        epoch: u64,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        let facts = packet.facts().boundaries;
+        if packet.epoch() != epoch
+            || packet.basis() != self.basis
+            || packet.identity() != identity
+            || self.target_facts.is_some_and(|old| {
+                old.origin != facts.origin || old.source_rate != facts.source_rate
+            })
+        {
+            return Err(ReplacementFailure::policy(
+                "target playback packet differs from published creation identity",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Admits the original coordinate from one compound converted publication.
+    /// Reports and boundaries become visible only after successful admission.
+    pub fn observe_target_native_playback(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<
+        Option<NativeTargetPlaybackObservation<B::NativeEvidence>>,
+        ReplacementFailure<B::Error>,
+    > {
+        self.observe_target_native_playback_admission(presentation, identity)
+            .map(|observation| observation.map(|(packet, _)| packet))
+    }
+
+    fn observe_target_native_playback_admission(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<
+        Option<(
+            NativeTargetPlaybackObservation<B::NativeEvidence>,
+            NativeObservationAdmission,
+        )>,
+        ReplacementFailure<B::Error>,
+    > {
+        if self.current.is_none() {
+            return Ok(None);
+        }
+        self.target_playback_identity(presentation, identity)?;
+        let Some(output) = self.current.as_mut() else {
+            return Ok(None);
+        };
+        let epoch = self.controller.backend().epoch(output);
+        let observation = self
+            .controller
+            .backend_mut()
+            .observe_native_target_playback(output, identity)
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
+        if self.controller.backend().epoch(output) != epoch
+            || self.controller.backend().basis(output) != self.basis
+        {
+            return Err(ReplacementFailure::policy(
+                "target playback acquisition changed the published output identity",
+            ));
+        }
+        let Some(observation) = observation else {
+            return Ok(None);
+        };
+        self.target_packet_identity(observation.playback(), epoch, identity)?;
+        let admission = presentation
+            .admit_target_coordinate(observation.coordinate())
+            .map_err(ReplacementFailure::timing)?;
+        let facts = observation.playback().facts();
+        self.report = facts.source.filter(|report| report.frames != 0);
+        self.converted = facts.converted;
+        self.target_facts = Some(facts.boundaries);
+        Ok(Some((observation, admission)))
+    }
+
+    /// Acquires target control facts only from retained original native evidence.
+    pub fn observe_target_native_control(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<
+        Option<crate::native_coordinate_control::TargetCoordinateControlFacts>,
+        ReplacementFailure<B::Error>,
+    > {
+        let Some((observation, admission)) =
+            self.observe_target_native_playback_admission(presentation, identity)?
+        else {
+            return Ok(None);
+        };
+        // Preserve exact retained repeats while waiting on unaccepted HOST evidence.
+        if admission == NativeObservationAdmission::Unchanged
+            && presentation.latest_record().is_some_and(|record| {
+                *record.evidence() != observation.coordinate().snapshot().evidence
+            })
+        {
+            return Ok(None);
+        }
+        crate::native_coordinate_control::TargetCoordinateControlFacts::from_target(
+            &observation,
+            presentation,
+            identity,
+        )
+        .map(Some)
+        .map_err(|error| ReplacementFailure::timing(error.into()))
+    }
+
+    /// Reads one exact converted packet without admitting or caching its facts.
+    pub fn target_playback_at(
+        &self,
+        presentation: &NativeAudioPresentation,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativeTargetPlaybackQuery<B::NativeEvidence>>, ReplacementFailure<B::Error>>
+    {
+        let Some(output) = self.current.as_ref() else {
+            return Ok(None);
+        };
+        self.target_playback_identity(presentation, identity)?;
+        let epoch = self.controller.backend().epoch(output);
+        let packet = self
+            .controller
+            .backend()
+            .target_playback_at(output, query, identity)
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
+        if self.controller.backend().epoch(output) != epoch
+            || self.controller.backend().basis(output) != self.basis
+        {
+            return Err(ReplacementFailure::policy(
+                "target playback query changed the published output identity",
+            ));
+        }
+        let Some(packet) = packet else {
+            return Ok(None);
+        };
+        self.target_packet_identity(&packet, epoch, identity)?;
+        if !packet.query().compare_interpolated_time(*query).is_eq() {
+            return Err(ReplacementFailure::policy(
+                "target playback packet changed the exact query",
+            ));
+        }
+        Ok(Some(packet))
+    }
+}
+
+#[cfg(test)]
+#[path = "target_playback_owner_fixtures.rs"]
+mod target_playback_owner_fixtures;
+
+impl<B: TargetHistoryRetirementNativeOutputBackend<ConvertedNativeOutputState>>
+    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis>
+{
+    /// Queues the original covering spans for a caller-qualified live minimum.
+    /// The caller must include every live input, control and practice reference.
+    pub fn request_target_history_retirement(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        minimum_query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<u64>, ReplacementFailure<B::Error>> {
+        self.request_target_history_retirement_with_source_pin(
+            presentation,
+            minimum_query,
+            identity,
+            None,
+        )
+    }
+
+    /// Includes an original queued or held Source reference in the qualified minimum.
+    pub fn request_target_history_retirement_with_source_pin(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        minimum_query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+        source_minimum: Option<u64>,
+    ) -> Result<Option<u64>, ReplacementFailure<B::Error>> {
+        if source_minimum.is_some_and(|minimum| minimum < identity.initial_physical()) {
+            return Err(ReplacementFailure::policy(
+                "target history retirement source minimum precedes the original source identity",
+            ));
+        }
+        let Some(packet) = self.target_playback_at(presentation, minimum_query, identity)? else {
+            return Ok(None);
+        };
+        let facts = packet.facts().playback;
+        let covering_source_start = facts.playback.physical_start();
+        let source_pin = source_minimum
+            .map(|minimum| minimum.min(covering_source_start))
+            .unwrap_or(covering_source_start);
+        let words = facts.phase.to_words();
+        let target_pin = beatkernel::audio::TargetTime::new(words[4], words[5], words[6])
+            .map_err(|error| ReplacementFailure::timing(Box::new(error)))?;
+        let Some(output) = self.current.as_mut() else {
+            return Ok(None);
+        };
+        if self.controller.backend().epoch(output) != packet.epoch()
+            || self.controller.backend().basis(output) != packet.basis()
+        {
+            return Err(ReplacementFailure::policy(
+                "target history retirement changed the published output identity",
+            ));
+        }
+        self.controller
+            .backend_mut()
+            .request_target_history_retirement(
+                output,
+                packet.epoch(),
+                packet.basis(),
+                identity,
+                source_pin,
+                target_pin,
+            )
+            .map_err(|error| Self::failure(ReplacementPhase::Retire, error))
+    }
+}
+
+#[cfg(test)]
+#[path = "target_history_retirement_owner_fixtures.rs"]
+mod target_history_retirement_owner_fixtures;

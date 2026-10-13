@@ -1,5 +1,5 @@
 //! Native composition around the shared output owner; ASIO keeps its HWND owner.
-use super::live_output::{Output, StartupEvidence};
+use super::live_output::{Output, StartupEvidence, WindowsSourceEvidence};
 use super::*;
 use beatkernel::audio::{
     ChannelMatrix, Mixer, OutputFrameBasis, OutputOpenFailure, RenderReport, StoppedMixerSource,
@@ -294,6 +294,108 @@ impl beatkernel_bms_runtime::gameplay::output::ports::OriginalNativeOutputBacken
         Ok(snapshot)
     }
 }
+impl beatkernel_bms_runtime::gameplay::output::ports::OriginalCoordinateNativeOutputBackend
+    for WindowsReplacementBackend
+{
+    fn observe_native_coordinate(
+        &mut self,
+        output: &mut OwnedOutput,
+    ) -> std::result::Result<
+        Option<beatkernel_bms_runtime::native_output_coordinate::CoordinateNativeAudioSnapshot>,
+        Self::Error,
+    > {
+        let observation = output
+            .native
+            .native_coordinate_observation(output.epoch)
+            .map_err(NativeOutputError)?;
+        // Keep the report from this original observation, never a later IO read.
+        output.report = observation.map(|value| {
+            use beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence;
+            match value.snapshot().evidence {
+                OriginalNativePresentationEvidence::Wasapi { snapshot, .. } => snapshot.render,
+                #[cfg(feature = "asio-sdk")]
+                OriginalNativePresentationEvidence::Asio { observation, .. } => Some(observation.render),
+                _ => None,
+            }
+        }).flatten();
+        Ok(observation)
+    }
+}
+impl beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackNativeOutputBackend
+    for WindowsReplacementBackend
+{
+    type NativeEvidence = WindowsSourceEvidence;
+    fn source_playback_at(
+        &self,
+        output: &OwnedOutput,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> std::result::Result<
+        Option<
+            beatkernel_bms_runtime::gameplay::output::ports::NativeSourcePlaybackQuery<
+                Self::NativeEvidence,
+            >,
+        >,
+        Self::Error,
+    > {
+        output
+            .native
+            .source_playback_at(output.epoch, query, identity)
+            .map_err(NativeOutputError)
+    }
+    fn observe_native_playback(
+        &mut self,
+        output: &mut OwnedOutput,
+        identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> std::result::Result<
+        Option<
+            beatkernel_bms_runtime::gameplay::output::ports::NativePlaybackObservation<
+                Self::NativeEvidence,
+            >,
+        >,
+        Self::Error,
+    > {
+        let observation = output
+            .native
+            .native_playback_observation(output.epoch, identity)
+            .map_err(NativeOutputError)?;
+        // A Source query remains immutable; only a coherent compound observation
+        // updates this raw report cache. It grants no accepted pause/end evidence.
+        output.report = observation
+            .as_ref()
+            .and_then(|value| value.source().facts().render);
+        Ok(observation)
+    }
+}
+impl beatkernel_bms_runtime::gameplay::output::ports::SourceHistoryRetirementNativeOutputBackend
+    for WindowsReplacementBackend
+{
+    fn request_source_history_retirement(
+        &mut self,
+        output: &mut OwnedOutput,
+        expected_epoch: u64,
+        expected_basis: OutputFrameBasis,
+        identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+        source_pin: u64,
+    ) -> std::result::Result<Option<u64>, Self::Error> {
+        use beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackPacketError;
+        if output.epoch != expected_epoch {
+            return Err(NativeOutputError(
+                SourcePlaybackPacketError::EpochMismatch.into(),
+            ));
+        }
+        if output.basis() != expected_basis {
+            return Err(NativeOutputError(
+                SourcePlaybackPacketError::BasisMismatch.into(),
+            ));
+        }
+        output
+            .native
+            .request_source_history_retirement(expected_basis, identity, source_pin)
+            .map_err(NativeOutputError)
+    }
+}
+
 impl OutputChannelRemixBackend for WindowsReplacementBackend {
     fn open_remixed(
         &mut self,

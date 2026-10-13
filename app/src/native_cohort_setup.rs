@@ -257,7 +257,9 @@ fn prepare_cohort_inner(
         maps,
         profile,
         beatkernel_bms::BmsInputMode::ButtonOnly,
-        policy.and_then(|policy| policy.timing()).map(|timing| timing.profiles()),
+        policy
+            .and_then(|policy| policy.timing())
+            .map(|timing| timing.profiles()),
     )?;
     let input_sounds = prepare_local_input_sounds(prepared, &configs, &reserved)?;
     let hazard_sounds = prepare_local_mine_sounds(prepared, &configs, &reserved, &input_sounds)?;
@@ -491,15 +493,88 @@ pub fn activate_audio_cohort_with_sounds(
     input_sounds: Vec<(PlayerId, InputSoundTimeline)>,
     hazard_sounds: Vec<(PlayerId, HazardSoundTimeline)>,
 ) -> NativeGameplayResult<(RuntimeGroup, InputMerger)> {
+    activate_audio_cohort_inner(
+        configs,
+        reserved,
+        host_origin,
+        raw_output,
+        logical_origin,
+        transport,
+        producer,
+        end,
+        input_sounds,
+        hazard_sounds,
+        false,
+    )
+}
+
+/// Activates a fresh phase-bearing shared audio attempt on the original coordinate grid.
+#[allow(clippy::too_many_arguments)]
+pub fn activate_audio_coordinate_cohort_with_sounds(
+    configs: Vec<MemberConfig>,
+    reserved: &[VoiceId],
+    host_origin: ClockPoint,
+    raw_output: ClockDomainId,
+    logical_origin: ClockPoint,
+    transport: Transport,
+    producer: CommandProducer,
+    end: Option<Timestamp>,
+    input_sounds: Vec<(PlayerId, InputSoundTimeline)>,
+    hazard_sounds: Vec<(PlayerId, HazardSoundTimeline)>,
+) -> NativeGameplayResult<(RuntimeGroup, InputMerger)> {
+    activate_audio_cohort_inner(
+        configs,
+        reserved,
+        host_origin,
+        raw_output,
+        logical_origin,
+        transport,
+        producer,
+        end,
+        input_sounds,
+        hazard_sounds,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn activate_audio_cohort_inner(
+    configs: Vec<MemberConfig>,
+    reserved: &[VoiceId],
+    host_origin: ClockPoint,
+    raw_output: ClockDomainId,
+    logical_origin: ClockPoint,
+    transport: Transport,
+    producer: CommandProducer,
+    end: Option<Timestamp>,
+    input_sounds: Vec<(PlayerId, InputSoundTimeline)>,
+    hazard_sounds: Vec<(PlayerId, HazardSoundTimeline)>,
+    coordinate: bool,
+) -> NativeGameplayResult<(RuntimeGroup, InputMerger)> {
     admit_cohort(configs.len(), false)?;
     if host_origin.domain == raw_output
         || logical_origin.domain == raw_output
         || logical_origin.domain == host_origin.domain
         || transport.anchor().host_time != logical_origin.timestamp
-        || transport.anchor().rate != beatkernel::transport::Rate::NORMAL
+        || (!coordinate && transport.anchor().rate != beatkernel::transport::Rate::NORMAL)
     {
         return Err("invalid audio cohort activation axes or anchor".into());
     }
+    let phase_scope = if coordinate {
+        let basis = transport
+            .output_phase_basis()
+            .ok_or("coordinate cohort lacks output phase")?;
+        if basis.domain() != logical_origin.domain
+            || basis.generation() == 0
+            || transport.anchors().len() != 1
+            || transport.anchor().rate.numerator() <= 0
+        {
+            return Err("coordinate cohort requires a fresh positive phase anchor".into());
+        }
+        Some(beatkernel::audio::CommandScope(basis.generation()))
+    } else {
+        None
+    };
     let devices = configs
         .iter()
         .map(|member| {
@@ -518,6 +593,9 @@ pub fn activate_audio_cohort_with_sounds(
         4096,
         reserved,
     )?;
+    if let Some(scope) = phase_scope {
+        group.set_audio_scope(scope);
+    }
     if !input_sounds.is_empty() {
         group.configure_input_sounds(input_sounds)?;
     }
@@ -852,30 +930,80 @@ mod fixtures {
         use beatkernel_bms::{BmsRankPrecedence, BmsTimingPreset, BmsTimingStage};
         let mut prepared = prepared();
         prepared.source.metadata.insert("RANK".into(), "3".into());
-        let policy = ResolvedPlayPolicy::with_timing(&prepared.source, GaugeSelection::BeatKernel,
-            TimingPresetSelection { preset: BmsTimingPreset::BeatorajaSevenKeys8320241dV1,
-                precedence: BmsRankPrecedence::RankFirst }, 0).unwrap();
+        let policy = ResolvedPlayPolicy::with_timing(
+            &prepared.source,
+            GaugeSelection::BeatKernel,
+            TimingPresetSelection {
+                preset: BmsTimingPreset::BeatorajaSevenKeys8320241dV1,
+                precedence: BmsRankPrecedence::RankFirst,
+            },
+            0,
+        )
+        .unwrap();
         let bindings = BTreeMap::from([(0x11, 4)]);
-        for count in [2,4,64] {
-            let assignments = (0..count).map(|index| (PlayerId(index+1),DeviceId(u64::from(index)+10))).collect::<Vec<_>>();
+        for count in [2, 4, 64] {
+            let assignments = (0..count)
+                .map(|index| (PlayerId(index + 1), DeviceId(u64::from(index) + 10)))
+                .collect::<Vec<_>>();
             let mut config = config(&bindings);
             config.early = policy.judge().max_early().as_nanos();
             config.late = policy.judge().max_late().as_nanos();
-            let mut cohort = prepare_cohort_with_policy(&prepared,&assignments,&CompetitionOptions::default(),&config,&policy).unwrap();
-            for (member,state) in cohort.configs.iter().zip(&cohort.states) {
-                policy.validate_timing(&member.judge,beatkernel_bms::BmsInputMode::ButtonOnly).unwrap();
-                let setup = crate::replay_playback::decode_section_setup(&state.capture.as_ref().unwrap().header().options).unwrap();
-                assert_eq!(setup.timing.as_ref(),policy.timing());
+            let mut cohort = prepare_cohort_with_policy(
+                &prepared,
+                &assignments,
+                &CompetitionOptions::default(),
+                &config,
+                &policy,
+            )
+            .unwrap();
+            for (member, state) in cohort.configs.iter().zip(&cohort.states) {
+                policy
+                    .validate_timing(&member.judge, beatkernel_bms::BmsInputMode::ButtonOnly)
+                    .unwrap();
+                let setup = crate::replay_playback::decode_section_setup(
+                    &state.capture.as_ref().unwrap().header().options,
+                )
+                .unwrap();
+                assert_eq!(setup.timing.as_ref(), policy.timing());
                 assert!(state.completion.is_some());
             }
             let object = prepared.compiled.chart.objects()[0].clone();
             let selected = cohort.configs[0].judge.builtin_timing(object.id).unwrap();
-            assert_eq!(selected.head, &policy.timing().unwrap().profiles().judge_profile(BmsTimingStage::KeyHead).unwrap());
-            let event = beatkernel::input::GameInputEvent { game_control: GameControlId(0x11),
-                physical: PhysicalInputEvent::Button(ButtonEvent { meta: EventMeta::new(assignments[0].1,host(0),1),
-                    control: PhysicalControlId::keyboard(4u16),state:ButtonState::Down }) };
-            let events = cohort.configs[0].judge.push_input(&event,object.time.start.checked_add(beatkernel::time::Duration::from_nanos(25_000_000)).unwrap()).unwrap();
-            assert!(matches!(events[0].outcome,JudgeOutcome::Hit { grade:JudgeGrade(2),.. }));
+            assert_eq!(
+                selected.head,
+                &policy
+                    .timing()
+                    .unwrap()
+                    .profiles()
+                    .judge_profile(BmsTimingStage::KeyHead)
+                    .unwrap()
+            );
+            let event = beatkernel::input::GameInputEvent {
+                game_control: GameControlId(0x11),
+                physical: PhysicalInputEvent::Button(ButtonEvent {
+                    meta: EventMeta::new(assignments[0].1, host(0), 1),
+                    control: PhysicalControlId::keyboard(4u16),
+                    state: ButtonState::Down,
+                }),
+            };
+            let events = cohort.configs[0]
+                .judge
+                .push_input(
+                    &event,
+                    object
+                        .time
+                        .start
+                        .checked_add(beatkernel::time::Duration::from_nanos(25_000_000))
+                        .unwrap(),
+                )
+                .unwrap();
+            assert!(matches!(
+                events[0].outcome,
+                JudgeOutcome::Hit {
+                    grade: JudgeGrade(2),
+                    ..
+                }
+            ));
             assert!(cohort.configs[1].judge.effective_song_time().is_none());
         }
     }

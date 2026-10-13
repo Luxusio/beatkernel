@@ -203,6 +203,27 @@ pub fn required_bgm_overlap(
     bank: &SampleBank,
     commands: &[AudioCommand],
 ) -> NativeGameplayResult<usize> {
+    required_bgm_overlap_inner(bank, commands, None)
+}
+
+/// Cold conservative BGM overlap in original song coordinates at a fixed speed.
+/// Normal speed preserves the legacy output-grid envelope and validation.
+pub fn required_bgm_overlap_with_speed(
+    bank: &SampleBank,
+    commands: &[AudioCommand],
+    speed: ReplaySpeed,
+) -> NativeGameplayResult<usize> {
+    if speed.rate() == Rate::NORMAL {
+        return required_bgm_overlap(bank, commands);
+    }
+    required_bgm_overlap_inner(bank, commands, Some(speed.rate()))
+}
+
+fn required_bgm_overlap_inner(
+    bank: &SampleBank,
+    commands: &[AudioCommand],
+    rate: Option<Rate>,
+) -> NativeGameplayResult<usize> {
     let mut events = Vec::new();
     events.try_reserve_exact(
         commands
@@ -227,15 +248,24 @@ pub fn required_bgm_overlap(
         if pcm.frames() == 0 {
             continue;
         }
-        let source_rate = i128::from(pcm.format().sample_rate());
-        let product = i128::try_from(pcm.frames())?
-            .checked_mul(output_rate)
-            .ok_or("BGM frame span overflow")?;
-        let frames = product / source_rate + i128::from(product % source_rate != 0);
-        let nanos = frames
-            .checked_mul(1_000_000_000)
-            .ok_or("BGM duration overflow")?;
-        let duration = nanos / output_rate + i128::from(nanos % output_rate != 0);
+        let duration = if let Some(rate) = rate {
+            i128::try_from(beatkernel::audio::practice_bgm_voice_extent(
+                pcm.frames(),
+                pcm.format().sample_rate(),
+                bank.format().sample_rate(),
+                rate,
+            )?)?
+        } else {
+            let source_rate = i128::from(pcm.format().sample_rate());
+            let product = i128::try_from(pcm.frames())?
+                .checked_mul(output_rate)
+                .ok_or("BGM frame span overflow")?;
+            let frames = product / source_rate + i128::from(product % source_rate != 0);
+            let nanos = frames
+                .checked_mul(1_000_000_000)
+                .ok_or("BGM duration overflow")?;
+            nanos / output_rate + i128::from(nanos % output_rate != 0)
+        };
         let start = i128::from(at.as_nanos());
         events.push((start, 1i64));
         events.push((
@@ -290,6 +320,41 @@ pub fn prepare_retained_audio(
     config: NativeAudioConfig,
     practice: NativePracticeAudioConfig,
 ) -> NativeGameplayResult<PreparedRetainedNativeAudio> {
+    prepare_retained_audio_inner(bank, original_commands, config, practice, None)
+}
+
+/// Opt-in fixed-speed retained preparation in original song coordinates.
+/// `None` completion is an open full-song intent; it does not inverse-map MAX.
+/// Whole preroll remains in the program, with no finite immutable Mixer fence.
+pub fn prepare_retained_audio_with_speed(
+    bank: SampleBank,
+    original_commands: Vec<AudioCommand>,
+    config: NativeAudioConfig,
+    practice: NativePracticeAudioConfig,
+    speed: ReplaySpeed,
+    completion_end: Option<Timestamp>,
+) -> NativeGameplayResult<PreparedRetainedNativeAudio> {
+    let setup = LiveSpeedSetup::new(config.start, config.preroll, speed, completion_end)?;
+    if practice.region.start != setup.start()
+        || match completion_end {
+            Some(end) => end != practice.region.end || end <= setup.start(),
+            None => {
+                practice.region.end != Timestamp::from_nanos(i64::MAX) || practice.region.repeat
+            }
+        }
+    {
+        return Err("retained speed region differs from original start/completion intent".into());
+    }
+    prepare_retained_audio_inner(bank, original_commands, config, practice, Some(setup))
+}
+
+fn prepare_retained_audio_inner(
+    bank: SampleBank,
+    original_commands: Vec<AudioCommand>,
+    config: NativeAudioConfig,
+    practice: NativePracticeAudioConfig,
+    setup: Option<LiveSpeedSetup>,
+) -> NativeGameplayResult<PreparedRetainedNativeAudio> {
     use beatkernel::audio::{practice_queue, PracticeCue, PreparedPracticeProgram};
     if config.playback_end_frame.is_some() {
         return Err("retained audio requires a program region, not a finite mixer endpoint".into());
@@ -299,7 +364,7 @@ pub fn prepare_retained_audio(
     }
     let anchor =
         i64::try_from(i128::from(config.start.as_nanos()) - i128::from(config.preroll.as_nanos()))?;
-    if practice.region.start != Timestamp::from_nanos(anchor) {
+    if setup.is_none() && practice.region.start != Timestamp::from_nanos(anchor) {
         return Err(
             "retained audio region must start at the exact start-minus-preroll anchor".into(),
         );
@@ -347,7 +412,17 @@ pub fn prepare_retained_audio(
             gain,
         });
     }
-    let program = PreparedPracticeProgram::new(&bank, cues, practice.limits)?;
+    let program = match setup {
+        Some(setup) => PreparedPracticeProgram::new_with_speed(
+            &bank,
+            cues,
+            practice.limits,
+            setup.speed().rate(),
+            setup.preroll(),
+            setup.end().is_none(),
+        )?,
+        None => PreparedPracticeProgram::new(&bank, cues, practice.limits)?,
+    };
     program.validate_region(practice.region)?;
     let (controller, endpoint) = practice_queue(&program)?;
     let format = bank.format();

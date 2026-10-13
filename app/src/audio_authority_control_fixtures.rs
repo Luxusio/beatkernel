@@ -522,7 +522,10 @@ fn held_frontiers_close_real_prefix_and_retire_two_slot_history_without_runtime_
         assert_eq!(seed.authority.history_len(), 2);
         assert_eq!(seed.authority.history.capacity(), capacity);
     }
-    assert_eq!(seed.authority.history.front().unwrap().target, host(400));
+    assert_eq!(
+        seed.authority.history.front().unwrap().pair().target,
+        host(400)
+    );
     let report = seed
         .runtime
         .advance_to(logical(5150), &Identity, raw(2300))

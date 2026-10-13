@@ -39,6 +39,45 @@ use beatkernel_platform::audio::presentation::discipline::PresentationDiscipline
 use std::collections::VecDeque;
 
 pub trait NativeGameplayDevice {
+    /// Queue retention pins without acquiring another native observation.
+    fn request_history_retirement(
+        &mut self,
+        _: &crate::native_audio_presentation::NativeAudioPresentation,
+        _: &beatkernel::audio::InterpolatedTargetTime,
+        _: crate::gameplay::output::ports::SourcePlaybackIdentity,
+        _: Option<u64>,
+    ) -> NativeGameplayResult<Option<u64>> {
+        Ok(None)
+    }
+    fn playback_mapping_at(
+        &self,
+        _: &crate::native_audio_presentation::NativeAudioPresentation,
+        _: &beatkernel::audio::InterpolatedTargetTime,
+        _: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> NativeGameplayResult<Option<crate::native_playback_phase::NativePlaybackMapping>> {
+        Err("native device does not support exact playback mapping".into())
+    }
+    fn observe_coordinate_control(
+        &mut self,
+        _: &mut crate::native_audio_presentation::NativeAudioPresentation,
+        _: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> NativeGameplayResult<Option<crate::native_coordinate_control::CoordinateControlFacts>>
+    {
+        Err("native device does not support original coordinate control facts".into())
+    }
+    /// One compound Source or Target acquisition; existing Source adapters retain their dispatch.
+    fn observe_coordinate_playback_control(
+        &mut self,
+        presentation: &mut crate::native_audio_presentation::NativeAudioPresentation,
+        identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> NativeGameplayResult<
+        Option<crate::native_coordinate_control::CoordinatePlaybackControlFacts>,
+    > {
+        self.observe_coordinate_control(presentation, identity)
+            .map(|facts| {
+                facts.map(crate::native_coordinate_control::CoordinatePlaybackControlFacts::Source)
+            })
+    }
     fn output_clock_suspended(&self) -> bool {
         false
     }
@@ -173,6 +212,46 @@ impl GameplayPresentationPort for PresentationDiscipline {
 
 impl<D: NativeGameplayDevice> GameplayDevice for D {
     type Presentation = PresentationDiscipline;
+    fn request_history_retirement(
+        &mut self,
+        presentation: &crate::native_audio_presentation::NativeAudioPresentation,
+        minimum_query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+        source_minimum: Option<u64>,
+    ) -> NativeGameplayResult<Option<u64>> {
+        NativeGameplayDevice::request_history_retirement(
+            self,
+            presentation,
+            minimum_query,
+            identity,
+            source_minimum,
+        )
+    }
+    fn playback_mapping_at(
+        &self,
+        presentation: &crate::native_audio_presentation::NativeAudioPresentation,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> NativeGameplayResult<Option<crate::native_playback_phase::NativePlaybackMapping>> {
+        NativeGameplayDevice::playback_mapping_at(self, presentation, query, identity)
+    }
+    fn observe_coordinate_control(
+        &mut self,
+        presentation: &mut crate::native_audio_presentation::NativeAudioPresentation,
+        identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> NativeGameplayResult<Option<crate::native_coordinate_control::CoordinateControlFacts>>
+    {
+        NativeGameplayDevice::observe_coordinate_control(self, presentation, identity)
+    }
+    fn observe_coordinate_playback_control(
+        &mut self,
+        presentation: &mut crate::native_audio_presentation::NativeAudioPresentation,
+        identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> NativeGameplayResult<
+        Option<crate::native_coordinate_control::CoordinatePlaybackControlFacts>,
+    > {
+        NativeGameplayDevice::observe_coordinate_playback_control(self, presentation, identity)
+    }
     fn output_clock_suspended(&self) -> bool {
         NativeGameplayDevice::output_clock_suspended(self)
     }
@@ -798,7 +877,30 @@ pub fn run_cohort_audio_with_policies_and_results_and_speed<
     )
 }
 
-/// Input composition shared by native startup and gameplay output owners.
+/// Selected member policies for retained coordinate playback on one native output.
+pub fn run_cohort_audio_coordinate_with_practice_and_policies_and_results<
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
+    R: crate::practice_playback::PracticeRecordingPort,
+>(
+    device: &mut D,
+    session: NativeAudioCohortSession<'_>,
+    config: crate::native_gameplay::CoordinateGameplayConfig,
+    policies: &[(PlayerId, &crate::play_policy::ResolvedPlayPolicy)],
+    practice: &mut crate::practice_playback::PracticePlayback,
+    recording: &mut R,
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    crate::native_cohort::run_cohort_audio_coordinate_practice_with_policies_and_results_and_ports(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+        policies,
+        practice,
+        recording,
+    )
+}
+
 /// Cold native file effect for genuine per-attempt captures.
 pub struct NativePracticeRecorder<F> {
     save: F,
@@ -839,7 +941,79 @@ pub fn run_gameplay_audio_with_practice_and_result_and_score<
     practice: &mut crate::practice_playback::PracticePlayback,
     recording: &mut R,
 ) -> NativeGameplayResult<Option<CompletedPlayResult>> {
-    crate::native_policy_admission::validate_audio_config(&config)?;
+    run_gameplay_audio_practice_with_policy_and_score_inner(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+        score,
+        policy,
+        practice,
+        recording,
+        None,
+    )
+}
+
+/// Selected-speed practice on the original coordinate-bound native output owner.
+pub fn run_gameplay_audio_coordinate_with_practice_and_result_and_score<
+    D: GameplayDevice<Presentation = PresentationDiscipline>,
+    R: crate::practice_playback::PracticeRecordingPort,
+>(
+    device: &mut D,
+    session: NativeAudioGameplaySession<'_>,
+    config: crate::native_gameplay::CoordinateGameplayConfig,
+    score: &mut crate::competition::ScoreSummary,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    practice: &mut crate::practice_playback::PracticePlayback,
+    recording: &mut R,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    run_gameplay_audio_practice_with_policy_and_score_inner(
+        device,
+        session,
+        config.audio,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+        score,
+        policy,
+        practice,
+        recording,
+        Some(config.source_history),
+    )
+}
+
+fn run_gameplay_audio_practice_with_policy_and_score_inner<
+    D: GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    R: crate::practice_playback::PracticeRecordingPort,
+>(
+    device: &mut D,
+    session: crate::native_gameplay::AudioGameplaySession<'_, S>,
+    config: crate::native_gameplay::AudioGameplayConfig,
+    control: &mut C,
+    host: &mut H,
+    score: &mut crate::competition::ScoreSummary,
+    policy: &crate::play_policy::ResolvedPlayPolicy,
+    practice: &mut crate::practice_playback::PracticePlayback,
+    recording: &mut R,
+    history: Option<crate::gameplay::output::ports::SourcePlaybackIdentity>,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    let speed = history.and_then(|_| practice.initial_setup());
+    if let Some(source_history) = history {
+        crate::native_policy_admission::validate_audio_coordinate_start(
+            &crate::native_gameplay::CoordinateGameplayConfig {
+                audio: config,
+                source_history,
+            },
+            session.session.discipline,
+            session.session.runtime.transport_mut(),
+            speed,
+        )?;
+    } else {
+        crate::native_policy_admission::validate_audio_config(&config)?;
+    }
     if *score != crate::competition::ScoreSummary::default() {
         return Err("practice requires a fresh initial score".into());
     }
@@ -854,35 +1028,87 @@ pub fn run_gameplay_audio_with_practice_and_result_and_score<
                 .ok_or("practice competition has no pinned policy header")
         })
         .transpose()?;
-    crate::native_policy_admission::validate_selected_in_domain(
-        session.session.runtime.judge(),
-        session.session.gauge,
-        policy,
-        session.session.capture.as_ref(),
-        header,
-        &config.gameplay,
-        epoch.logical_origin.domain,
-        Some(config.section_start),
-    )?;
+    if let Some(speed) = speed {
+        crate::native_policy_admission::validate_selected_in_domain_with_speed(
+            session.session.runtime.judge(),
+            session.session.gauge,
+            policy,
+            session.session.capture.as_ref(),
+            header,
+            &config.gameplay,
+            epoch.logical_origin.domain,
+            Some(config.section_start),
+            speed,
+        )?;
+    } else {
+        crate::native_policy_admission::validate_selected_in_domain(
+            session.session.runtime.judge(),
+            session.session.gauge,
+            policy,
+            session.session.capture.as_ref(),
+            header,
+            &config.gameplay,
+            epoch.logical_origin.domain,
+            Some(config.section_start),
+        )?;
+    }
+    if practice.members().len() != 1
+        || practice.members()[0].player != PlayerId(1)
+        || session.session.runtime.audio_scope() != beatkernel::audio::CommandScope(1)
+        || session.session.end.is_some()
+        || session.session.runtime.song_end() != config.gameplay.end_song
+        || config.gameplay.end_song != practice.section_end()
+    {
+        return Err("retained solo practice requires one installed unlimited scope-one owner with matching endpoints".into());
+    }
+    if history.is_some()
+        && (session.session.runtime.clock_domains()
+            != Some((epoch.logical_origin.domain, epoch.stream_origin.domain))
+            || session.session.runtime.poisoned()
+            || session.session.runtime.gameplay_fence().is_some()
+            || session.session.pause.epoch() != epoch.id
+            || session.session.pause.host_domain() != epoch.host_domain
+            || session.session.pause.phase() != crate::playback_pause::PausePhase::Running
+            || session.merger.source_capacity() != 4096)
+    {
+        return Err(
+            "coordinate practice requires pristine actual Runtime, pause and acquisition owners"
+                .into(),
+        );
+    }
     let policies = [(PlayerId(1), policy)];
-    let mut host = PlayerGameplayHost;
-    if policy.gauge() == &crate::gauge::GaugeProfile::default() {
+    if speed.is_none() && policy.gauge() == &crate::gauge::GaugeProfile::default() {
         host.prepare_play_policies(&policies)?;
     }
     let mut resolved = ResolvedGameplayHost {
-        host: &mut host,
+        host,
         policies: &policies,
     };
     let mut scored = crate::native_gameplay_host::NativeScoreHost::new(&mut resolved, score);
-    crate::native_gameplay::run_gameplay_audio_with_practice_and_ports(
-        device,
-        session,
-        config,
-        &mut SystemControl,
-        &mut scored,
-        practice,
-        recording,
-    )
+    if let Some(source_history) = history {
+        crate::native_gameplay::run_gameplay_audio_coordinate_with_practice_and_ports(
+            device,
+            session,
+            crate::native_gameplay::CoordinateGameplayConfig {
+                audio: config,
+                source_history,
+            },
+            control,
+            &mut scored,
+            practice,
+            recording,
+        )
+    } else {
+        crate::native_gameplay::run_gameplay_audio_with_practice_and_ports(
+            device,
+            session,
+            config,
+            control,
+            &mut scored,
+            practice,
+            recording,
+        )
+    }
 }
 
 /// Selected local cohort practice on the existing shared native output owner.
@@ -972,3 +1198,7 @@ impl NativeCollectedInput {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "native_coordinate_practice_policy_fixtures.rs"]
+mod coordinate_practice_policy_fixtures;

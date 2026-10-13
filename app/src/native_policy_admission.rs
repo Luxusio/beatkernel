@@ -405,6 +405,87 @@ pub(crate) fn validate_audio_config_with_speed(
     validate_speed_config(&config.gameplay, Some(config.section_start), speed)
 }
 
+/// Checks explicit coordinate/history binding against the exact cold phase.
+/// No native observation, input prefix or gameplay state is committed here.
+pub(crate) fn validate_audio_coordinate_start(
+    config: &crate::native_gameplay::CoordinateGameplayConfig,
+    presentation: &crate::native_audio_presentation::NativeAudioPresentation,
+    transport: &Transport,
+    speed: Option<LiveSpeedSetup>,
+) -> NativeGameplayResult<()> {
+    match speed {
+        Some(speed) => validate_audio_config_with_speed(&config.audio, speed)?,
+        None => validate_audio_config(&config.audio)?,
+    }
+    presentation.validate_coordinate_seed()?;
+    let authority = presentation.authority();
+    let epoch = authority.epoch();
+    let gameplay = &config.audio.gameplay;
+    let identity = config.source_history;
+    let phase = transport
+        .output_phase_basis()
+        .ok_or("coordinate gameplay requires an output-phase Transport")?;
+    if gameplay.origin.domain != epoch.host_domain
+        || gameplay.stream_origin != epoch.stream_origin
+        || gameplay.playback_origin.domain != epoch.stream_origin.domain
+        || phase.domain() != epoch.logical_origin.domain
+        || identity.hz() != gameplay.sample_rate
+        || phase.source_hz() != identity.hz()
+        || phase.active_origin_frame() < identity.initial_playback()
+    {
+        return Err("coordinate gameplay clocks or source-history identity differ".into());
+    }
+    match authority
+        .coordinate_basis()
+        .ok_or("coordinate gameplay requires an original coordinate descriptor")?
+    {
+        crate::audio_authority::AudioAuthorityCoordinateBasis::SourceFrame(basis)
+        | crate::audio_authority::AudioAuthorityCoordinateBasis::SourceCounter { basis, .. } => {
+            if basis.sample_rate() != identity.hz()
+                || basis.start_physical_frame() < identity.initial_physical()
+            {
+                return Err(
+                    "coordinate creation basis differs from retained source history".into(),
+                );
+            }
+        }
+        crate::audio_authority::AudioAuthorityCoordinateBasis::TargetFrame(_) => {
+            // validate_coordinate_seed retains the exact target creation basis.
+            // Its device rate is independent of the source history's rate.
+        }
+    }
+    let (preroll, rate) = match speed {
+        Some(speed) => (speed.preroll(), speed.speed().rate()),
+        None => (
+            beatkernel::time::Duration::from_nanos(
+                config
+                    .audio
+                    .section_start
+                    .as_nanos()
+                    .checked_sub(gameplay.song_origin.as_nanos())
+                    .ok_or("coordinate section preroll difference overflows")?,
+            ),
+            beatkernel::transport::Rate::NORMAL,
+        ),
+    };
+    let pristine = Transport::new_with_output_phase(
+        phase,
+        epoch.logical_output(gameplay.playback_origin)?,
+        config.audio.section_start,
+        preroll,
+        rate,
+        gameplay.end_song,
+    )?;
+    if transport != &pristine {
+        return Err("coordinate gameplay requires the exact pristine output phase".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "native_coordinate_binding_fixtures.rs"]
+mod native_coordinate_binding_fixtures;
+
 fn validate_speed_config(
     config: &NativeGameplayConfig,
     section_start: Option<Timestamp>,

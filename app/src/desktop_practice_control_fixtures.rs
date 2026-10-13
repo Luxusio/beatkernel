@@ -112,9 +112,155 @@ fn desktop_practice_control_f8_f11_actual_dispatch_retains_owner_until_ack() {
     app.collect_game();
     assert!(app.failure.as_ref().unwrap().contains("queue full"));
     assert!(!app.game.as_ref().unwrap().cancelling);
-    app.key(KeyCode::F5, false); // Pinned retry remains fresh-owner cancellation.
-    assert!(app.game.as_ref().unwrap().cancelling);
-    assert!(app.game.as_ref().unwrap().prepared_retry.is_some());
+    app.key(KeyCode::F5, false);
+    let request = publisher.take_practice_request().unwrap().unwrap();
+    assert_eq!(request.action, PracticeAction::Scrub { target: t(0) });
+    let game = app.game.as_ref().unwrap();
+    assert!(!game.cancelling && !game.joined && game.prepared_retry.is_none());
+}
+
+#[test]
+fn desktop_practice_control_f5_uses_pinned_start_and_applied_ack_only() {
+    let (mut app, publisher) = fixture();
+    let original = SessionLaunch::new(vec![
+        "--chart".into(),
+        "pinned.bms".into(),
+        "--start-ns".into(),
+        "123".into(),
+        "--end-ns".into(),
+        "999".into(),
+        "--speed".into(),
+        "6/4".into(),
+        "--record-replay".into(),
+        "records/pinned.bkr".into(),
+    ])
+    .unwrap();
+    let current = original
+        .retry_from(PracticeStart::from_nanoseconds(789).unwrap())
+        .unwrap();
+    assert!(current
+        .args()
+        .chunks_exact(2)
+        .any(|pair| pair == ["--start-ns", "789"]));
+    assert!(current
+        .args()
+        .chunks_exact(2)
+        .any(|pair| pair == ["--speed", "6/4"]));
+    assert!(current
+        .args()
+        .chunks_exact(2)
+        .any(|pair| pair == ["--record-replay", "records/pinned.retry1.bkr"]));
+    app.game.as_mut().unwrap().launch = current.clone();
+    app.game
+        .as_mut()
+        .unwrap()
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .song_time = Some(t(456));
+    app.key(KeyCode::F7, false);
+    app.game
+        .as_mut()
+        .unwrap()
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .song_time = Some(t(800));
+    app.key(KeyCode::F10, false);
+    app.key(KeyCode::F11, false);
+    let looping = publisher.take_practice_request().unwrap().unwrap();
+    ack(&publisher, looping, 2);
+    app.collect_game();
+    assert!(app.game.as_ref().unwrap().loop_enabled);
+
+    app.key(KeyCode::F5, true); // OS key repetition cannot create an attempt.
+    assert!(publisher.take_practice_request().unwrap().is_none());
+    app.key(KeyCode::F5, false);
+    let refused = publisher.take_practice_request().unwrap().unwrap();
+    assert_eq!(refused.action, PracticeAction::Scrub { target: t(123) });
+    app.key(KeyCode::F5, false);
+    assert!(publisher.take_practice_request().unwrap().is_none());
+    let unchanged = |app: &Desktop| {
+        let game = app.game.as_ref().unwrap();
+        assert!(!game.cancelling && !game.joined && game.prepared_retry.is_none());
+        assert_eq!(game.launch.args(), current.args());
+        assert_eq!(game.launch.original_args(), original.original_args());
+        assert_eq!(game.launch.attempt(), 1);
+        assert_eq!(game.practice_bookmark.unwrap().nanoseconds(), 456);
+    };
+    unchanged(&app);
+    assert!(app.game.as_ref().unwrap().loop_enabled);
+    publisher
+        .reply_practice(&PracticeReply {
+            id: refused.id,
+            generation: refused.generation,
+            result: Err("qualified boundary refused".into()),
+        })
+        .unwrap();
+    app.collect_game();
+    unchanged(&app);
+    assert!(app.game.as_ref().unwrap().loop_enabled);
+    assert!(app
+        .failure
+        .as_ref()
+        .unwrap()
+        .contains("qualified boundary refused"));
+
+    app.key(KeyCode::F5, false);
+    let applied = publisher.take_practice_request().unwrap().unwrap();
+    assert_eq!(applied.action, PracticeAction::Scrub { target: t(123) });
+    assert_ne!(applied.id, refused.id);
+    assert!(app.game.as_ref().unwrap().loop_enabled);
+    // Channel acceptance is UI evidence, not an injected native boundary.
+    ack(&publisher, applied, 3);
+    app.collect_game();
+    unchanged(&app);
+    assert!(!app.game.as_ref().unwrap().loop_enabled);
+    app.key(KeyCode::F8, false);
+    let bookmark = publisher.take_practice_request().unwrap().unwrap();
+    assert_eq!(bookmark.action, PracticeAction::Scrub { target: t(456) });
+}
+
+#[test]
+fn desktop_practice_control_f5_paused_or_output_pending_keeps_owner() {
+    use beatkernel_bms_runtime::{live_output_control::OutputCapability, settings::SettingsHost};
+    let (mut app, publisher) = fixture();
+    let initial = app.game.as_ref().unwrap().launch.clone();
+    for pause in [player::PauseState::Pausing, player::PauseState::Paused] {
+        app.game.as_mut().unwrap().snapshot.as_mut().unwrap().pause = pause;
+        app.key(KeyCode::F5, false);
+        assert!(publisher.take_practice_request().unwrap().is_none());
+        let game = app.game.as_ref().unwrap();
+        assert!(!game.cancelling && game.prepared_retry.is_none());
+        assert_eq!(game.launch.args(), initial.args());
+    }
+    app.game.as_mut().unwrap().snapshot.as_mut().unwrap().pause = player::PauseState::Running;
+    let args = vec![
+        "--alsa".into(),
+        "fixture-device".into(),
+        "--buffer-frames".into(),
+        "128".into(),
+        "--period-frames".into(),
+        "32".into(),
+    ];
+    publisher
+        .advertise_output(Some(OutputCapability {
+            host: SettingsHost::Linux,
+            current_args: args.clone(),
+        }))
+        .unwrap();
+    app.game
+        .as_ref()
+        .unwrap()
+        .viewer
+        .request_output(args)
+        .unwrap();
+    app.key(KeyCode::F5, false);
+    assert!(publisher.take_practice_request().unwrap().is_none());
+    let game = app.game.as_ref().unwrap();
+    assert!(game.viewer.output_pending());
+    assert!(!game.cancelling && game.prepared_retry.is_none());
+    assert_eq!(game.launch.args(), initial.args());
 }
 #[test]
 fn desktop_practice_control_scrub_clears_loop_only_after_successful_ack() {
@@ -271,11 +417,9 @@ fn desktop_practice_control_f5_and_joined_retry_follow_actual_boundary_lineage()
                 app.key(KeyCode::F5, false);
                 let game = app.game.as_ref().unwrap();
                 assert_eq!(game.launch.attempt(), 3);
-                assert_eq!(
-                    game.prepared_retry.as_ref().unwrap().args()[3],
-                    "records/game.retry4.bkr"
-                );
-                assert!(game.cancelling);
+                assert!(game.prepared_retry.is_none() && !game.cancelling);
+                let request = player::take_practice_request().unwrap().unwrap();
+                assert_eq!(request.action, PracticeAction::Scrub { target: t(0) });
             }
             Ok(())
         })
@@ -286,6 +430,9 @@ fn desktop_practice_control_f5_and_joined_retry_follow_actual_boundary_lineage()
         let game = app.game.as_mut().unwrap();
         game.sync_native_launch().unwrap();
         assert_eq!(game.launch.attempt(), 3);
+        if dispatch_f5 {
+            game.prepared_retry = Some(initial.retry().unwrap());
+        }
         game.rebase_joined_retry().unwrap();
         let retry = game.owner_finished(true).unwrap();
         assert_eq!(retry.attempt(), 4);
@@ -295,8 +442,7 @@ fn desktop_practice_control_f5_and_joined_retry_follow_actual_boundary_lineage()
 }
 
 #[test]
-fn desktop_practice_control_spawned_worker_keeps_tls_and_joined_f5_lineage_after_cancelled_visual_commit(
-) {
+fn desktop_practice_control_spawned_worker_keeps_tls_and_joined_f5_lineage_after_explicit_cancel() {
     use beatkernel_bms_runtime::{
         native_judge::NativeJudgeConfig,
         play_policy::{GaugeSelection, OriginalGaugeContext},
@@ -313,7 +459,7 @@ fn desktop_practice_control_spawned_worker_keeps_tls_and_joined_f5_lineage_after
             .chunks_exact(2)
             .any(|pair| pair == ["--record-replay", "records/thread.retry4.bkr"]));
         JOINED_VALIDATIONS.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Err("joined retry deliberately refused after validation".into())
     }
     enum Command {
         ApplyRequest,
@@ -525,12 +671,16 @@ fn desktop_practice_control_spawned_worker_keeps_tls_and_joined_f5_lineage_after
     assert_eq!(steps.recv_timeout(WAIT).unwrap().worker, ready.worker);
     app.key(KeyCode::F5, false);
     let game = app.game.as_ref().unwrap();
-    assert!(game.cancelling);
-    assert_eq!(game.prepared_retry.as_ref().unwrap().attempt(), 3);
+    assert!(!game.cancelling && game.prepared_retry.is_none());
     assert_eq!(
-        game.prepared_retry.as_ref().unwrap().args()[3],
-        "records/thread.retry3.bkr"
+        game.viewer
+            .pending_practice_request()
+            .unwrap()
+            .unwrap()
+            .action,
+        PracticeAction::Scrub { target: t(0) }
     );
+    app.game.as_mut().unwrap().cancel();
     // Keep the joined owner for inspection; avoid creating the next native owner.
     app.occluded = true;
     app.validate = validate_joined;
@@ -556,11 +706,21 @@ fn desktop_practice_control_spawned_worker_keeps_tls_and_joined_f5_lineage_after
         );
         thread::yield_now();
     }
-    app.collect_game(); // Actual production join, canonical rebase and preflight.
+    app.collect_game(); // Actual production join and canonical lineage sync.
     let game = app.game.as_ref().unwrap();
     assert!(game.joined && game.worker.is_none());
     assert_eq!(game.launch.attempt(), 3);
     assert_eq!(game.launch.original_args(), initial.original_args());
+    assert_eq!(JOINED_VALIDATIONS.load(Ordering::SeqCst), before);
+    app.occluded = false;
+    app.key(KeyCode::F5, false); // Joined owner takes the fresh retry preflight.
     assert_eq!(JOINED_VALIDATIONS.load(Ordering::SeqCst), before + 1);
+    assert!(app
+        .failure
+        .as_ref()
+        .unwrap()
+        .contains("joined retry deliberately refused"));
+    let game = app.game.as_ref().unwrap();
+    assert!(game.joined && game.worker.is_none() && game.prepared_retry.is_none());
     assert!(game.viewer.practice_capability().unwrap().is_none());
 }

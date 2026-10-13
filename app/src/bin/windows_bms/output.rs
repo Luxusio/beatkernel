@@ -14,6 +14,13 @@ use beatkernel::{
 #[cfg(feature = "asio-sdk")]
 use beatkernel_bms_runtime::native_start::StartInterval;
 use beatkernel_bms_runtime::native_start::{NativeStartObservation, NativeStartTiming};
+use beatkernel_bms_runtime::{
+    gameplay::output::{
+        adapters::wasapi::WasapiReplacementBackend,
+        ports::{NativePlaybackObservation, NativeSourcePlaybackQuery, SourcePlaybackIdentity},
+    },
+    native_output_coordinate::CoordinateNativeAudioSnapshot,
+};
 #[cfg(feature = "asio-sdk")]
 use beatkernel_platform::{
     audio::asio::{
@@ -123,14 +130,28 @@ impl Setup {
         }
     }
     #[cfg_attr(not(feature = "asio-sdk"), allow(unused_variables))]
-    pub(super) fn open(self, mixer: Mixer, options: &Options, clock: QpcClock) -> Result<Output> {
+    pub(super) fn open(
+        self,
+        mixer: Mixer,
+        options: &Options,
+        clock: QpcClock,
+        retained_history: bool,
+    ) -> Result<Output> {
         match self {
-            Self::Wasapi(request) => Ok(Output::Wasapi(WasapiBackend.open(
-                request,
-                mixer,
-                clock,
-                WasapiOptions::default(),
-            )?)),
+            Self::Wasapi(request) => {
+                let stream = if retained_history {
+                    WasapiBackend.open_with_source_history(
+                        request,
+                        mixer,
+                        clock,
+                        WasapiOptions::default(),
+                        beatkernel_bms_runtime::native_audio_startup::SOURCE_COORDINATE_HISTORY_HEADROOM,
+                    )?
+                } else {
+                    WasapiBackend.open(request, mixer, clock, WasapiOptions::default())?
+                };
+                Ok(Output::Wasapi(stream))
+            }
             #[cfg(feature = "asio-sdk")]
             Self::Asio {
                 control,
@@ -167,13 +188,24 @@ impl Setup {
                     latency_error: options.asio_latency_error,
                     age: options.asio_anchor_age,
                 };
-                let mut stream = AsioStream::prepare_with_clock(
-                    control,
-                    mixer,
-                    live.channels.clone(),
-                    request,
-                    clock,
-                )?;
+                let mut stream = if retained_history {
+                    AsioStream::prepare_with_clock_and_source_history(
+                        control,
+                        mixer,
+                        live.channels.clone(),
+                        request,
+                        clock,
+                        beatkernel_bms_runtime::native_audio_startup::SOURCE_COORDINATE_HISTORY_HEADROOM,
+                    )?
+                } else {
+                    AsioStream::prepare_with_clock(
+                        control,
+                        mixer,
+                        live.channels.clone(),
+                        request,
+                        clock,
+                    )?
+                };
                 // The actual primed Mixer block reflects the size used by native
                 // preparation, even if constraints changed since the earlier query.
                 let buffer_frames = u32::try_from(
@@ -207,6 +239,36 @@ pub(super) enum Output {
     Wasapi(WasapiStream),
     #[cfg(feature = "asio-sdk")]
     Asio(AsioOutput),
+}
+/// Complete native evidence from the existing Windows stream owner.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum WindowsSourceEvidence {
+    Wasapi(beatkernel_platform::audio::AudioStreamSnapshot),
+    #[cfg(feature = "asio-sdk")]
+    Asio(beatkernel_platform::windows::asio::stream::AsioPlaybackPhaseSnapshot),
+}
+
+fn wrap_source_packet<E: Copy>(
+    packet: NativeSourcePlaybackQuery<E>,
+    wrap: impl FnOnce(E) -> WindowsSourceEvidence,
+) -> Result<NativeSourcePlaybackQuery<WindowsSourceEvidence>> {
+    Ok(NativeSourcePlaybackQuery::new(
+        packet.epoch(),
+        packet.basis(),
+        packet.identity(),
+        packet.query(),
+        packet.facts(),
+        packet.native_evidence().copied().map(wrap),
+    )?)
+}
+
+fn wrap_playback_observation<E: Copy>(
+    observation: NativePlaybackObservation<E>,
+    wrap: impl FnOnce(E) -> WindowsSourceEvidence,
+) -> Result<NativePlaybackObservation<WindowsSourceEvidence>> {
+    let coordinate = observation.coordinate();
+    let packet = wrap_source_packet(observation.into_source(), wrap)?;
+    Ok(NativePlaybackObservation::new(coordinate, packet)?)
 }
 #[derive(Clone, Copy, Debug)]
 pub(super) enum StartupEvidence {
@@ -248,6 +310,212 @@ impl StartupEvidence {
     }
 }
 impl Output {
+    /// Original stream grid and native units only; this grants no clock admission.
+    pub(super) fn source_coordinate_basis(
+        &self,
+    ) -> Result<Option<beatkernel_bms_runtime::audio_authority::AudioAuthorityCoordinateBasis>>
+    {
+        use beatkernel_bms_runtime::audio_authority::AudioAuthorityCoordinateBasis;
+        use beatkernel_platform::audio::AudioStreamStatus;
+
+        match self {
+            Self::Wasapi(stream) => {
+                let snapshot = stream.snapshot();
+                match snapshot.status {
+                    AudioStreamStatus::Ready => return Ok(None),
+                    AudioStreamStatus::Running => {}
+                    status => {
+                        return Err(format!(
+                            "native source coordinate descriptor terminated: {status:?}"
+                        )
+                        .into());
+                    }
+                }
+                if !snapshot.telemetry_available {
+                    return Ok(None);
+                }
+                let Some(clock) = snapshot.clock else {
+                    return Ok(None);
+                };
+                if clock.frequency == 0 {
+                    return Err("native source coordinate descriptor has zero frequency".into());
+                }
+                // Frequency is the actual u64 device counter unit, never PCM Hz.
+                // Position zero may describe the grid but cannot admit playback.
+                Ok(Some(AudioAuthorityCoordinateBasis::SourceCounter {
+                    basis: stream.frame_basis(),
+                    frequency: clock.frequency,
+                }))
+            }
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio(output) => Ok(Some(AudioAuthorityCoordinateBasis::SourceFrame(
+                output.stream.frame_basis(),
+            ))),
+        }
+    }
+
+    /// Keeps original native coordinates on the existing owning-thread IO path.
+    pub(super) fn native_coordinate_observation(
+        &mut self,
+        epoch: u64,
+    ) -> Result<Option<CoordinateNativeAudioSnapshot>> {
+        match self {
+            Self::Wasapi(stream) => Ok(WasapiReplacementBackend::observe_stream_coordinate(
+                stream, epoch,
+            )?),
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio(_) => {
+                use beatkernel_bms_runtime::native_output_coordinate::{
+                    NativeOutputCoordinate, NativeOutputCoordinateError,
+                };
+                use beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence;
+                self.native_observation(epoch)?
+                    .map(|snapshot| {
+                        let OriginalNativePresentationEvidence::Asio { observation, .. } =
+                            snapshot.evidence
+                        else {
+                            return Err(NativeOutputCoordinateError::UnsupportedEvidence.into());
+                        };
+                        let frame = observation
+                            .render
+                            .start_frame
+                            .checked_sub(snapshot.basis.start_physical_frame())
+                            .ok_or(NativeOutputCoordinateError::FrameBeforeBasis)?;
+                        Ok(CoordinateNativeAudioSnapshot::new(
+                            snapshot,
+                            NativeOutputCoordinate::StreamFrame { frame },
+                        )?)
+                    })
+                    .transpose()
+            }
+        }
+    }
+
+    /// Immutable Source history lookup; no SDK call, anchor update or report cache.
+    pub(super) fn source_playback_at(
+        &self,
+        epoch: u64,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativeSourcePlaybackQuery<WindowsSourceEvidence>>> {
+        match self {
+            Self::Wasapi(stream) => WasapiReplacementBackend::source_playback_for_stream(stream, epoch, query, identity)?
+                .map(|packet| wrap_source_packet(packet, WindowsSourceEvidence::Wasapi)).transpose(),
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio(output) => beatkernel_bms_runtime::gameplay::output::adapters::asio::AsioReplacementBackend::source_playback_for_stream(
+                &output.stream, epoch, query, identity,
+            )?.map(|packet| wrap_source_packet(packet, WindowsSourceEvidence::Asio)).transpose(),
+        }
+    }
+
+    /// Queues retirement intent on the same stream without native clock admission.
+    pub(super) fn request_source_history_retirement(
+        &self,
+        expected_basis: beatkernel::audio::OutputFrameBasis,
+        identity: SourcePlaybackIdentity,
+        source_pin: u64,
+    ) -> Result<Option<u64>> {
+        let identity = (
+            identity.hz(),
+            identity.initial_physical(),
+            identity.initial_playback(),
+        );
+        match self {
+            Self::Wasapi(stream) => Ok(stream.request_source_history_retirement(
+                expected_basis,
+                identity,
+                source_pin,
+            )?),
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio(output) => Ok(output.stream.request_source_history_retirement(
+                expected_basis,
+                identity,
+                source_pin,
+            )?),
+        }
+    }
+
+    pub(super) fn native_playback_observation(
+        &mut self,
+        epoch: u64,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativePlaybackObservation<WindowsSourceEvidence>>> {
+        match self {
+            Self::Wasapi(stream) => {
+                WasapiReplacementBackend::observe_stream_playback(stream, epoch, identity)?
+                    .map(|observation| {
+                        wrap_playback_observation(observation, WindowsSourceEvidence::Wasapi)
+                    })
+                    .transpose()
+            }
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio(_) => {
+                use beatkernel_bms_runtime::gameplay::output::{
+                    adapters::asio::{
+                        AsioReplacementBackend, qualify_asio_source_observation_packet,
+                    },
+                    ports::SourcePlaybackPacketError,
+                };
+                let basis = match self {
+                    Self::Asio(output) => output.stream.frame_basis(),
+                    _ => unreachable!(),
+                };
+                if basis.sample_rate() != identity.hz()
+                    || identity.initial_physical() > basis.start_physical_frame()
+                {
+                    return Err(SourcePlaybackPacketError::BasisMismatch.into());
+                }
+                for _ in 0..3 {
+                    // Preserve the existing HWND/message and fresh SDK diagnostics route.
+                    let before = match self {
+                        Self::Asio(output) => {
+                            output.pump_driver_messages()?;
+                            output.stream.snapshot()?
+                        }
+                        _ => unreachable!(),
+                    };
+                    if before.phase == AsioStreamPhase::Ready
+                        && before.native.faults.0 == 0
+                        && before.native.render_error == 0
+                    {
+                        return Ok(None);
+                    }
+                    if before.phase != AsioStreamPhase::Running
+                        || before.native.faults.0 != 0
+                        || before.native.render_error != 0
+                    {
+                        return Err(format!("ASIO terminal/native fault (including overload or clock exhaustion): {before:?}").into());
+                    }
+                    let Some(callback) = before.buffer_observation else {
+                        continue;
+                    };
+                    let Some(candidate) = self.native_coordinate_observation(epoch)? else {
+                        continue;
+                    };
+                    let query = candidate.source_query()?;
+                    let packet = match self {
+                        Self::Asio(output) => AsioReplacementBackend::source_playback_for_stream(
+                            &output.stream,
+                            epoch,
+                            &query,
+                            identity,
+                        )?,
+                        _ => unreachable!(),
+                    };
+                    let Some(packet) = packet else {
+                        continue;
+                    };
+                    if let Some(observation) =
+                        qualify_asio_source_observation_packet(candidate, callback, packet)?
+                    {
+                        return wrap_playback_observation(observation, WindowsSourceEvidence::Asio)
+                            .map(Some);
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
     /// Original native metadata for audio authority; no correction observer or accepted cache.
     pub(super) fn native_observation(
         &mut self,

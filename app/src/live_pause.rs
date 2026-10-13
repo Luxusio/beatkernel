@@ -476,6 +476,63 @@ fn prepare_transport_at(
     Ok(next)
 }
 
+/// Preflights the real Transport control at the adopted frozen active phase.
+/// Native adoption and authority validation remain required before either live commit.
+pub fn prepare_coordinate_live_transport(
+    transport: &Transport,
+    adoption: &crate::playback_pause::PreparedCoordinatePauseAdoption,
+    control: &crate::audio_authority::PreparedCoordinateControlCutoff,
+    basis: beatkernel::transport::OutputPhaseBasis,
+    last_song: Timestamp,
+) -> Result<Transport, PauseError> {
+    if transport.output_phase_basis() != Some(basis)
+        || basis.source_hz() != adoption.source_identity().hz()
+        || basis.domain() != control.output().domain
+        || adoption.epoch() != control.epoch()
+        || adoption.paused() == control.is_resume()
+        || !adoption
+            .exact_cut()
+            .compare_interpolated_time(control.query())
+            .is_eq()
+    {
+        return Err(PauseError(
+            "coordinate live pause differs from actual phase or control",
+        ));
+    }
+    let frames = adoption
+        .playback_frame()
+        .checked_sub(basis.active_origin_frame())
+        .ok_or(PauseError(
+            "pause playback precedes current attempt active origin",
+        ))?;
+    let elapsed = i128::from(frames) * 1_000_000_000 / i128::from(basis.source_hz());
+    let point = basis
+        .point_from_elapsed_nanos(control.output(), elapsed)
+        .map_err(|_| PauseError("coordinate live pause phase is invalid"))?;
+    let song = transport
+        .position_at_output_phase(point)
+        .map_err(|_| PauseError("coordinate live pause song phase is invalid"))?;
+    let mut next = transport.clone();
+    if adoption.paused() {
+        if transport.is_paused() || last_song > song {
+            return Err(PauseError(
+                "coordinate pause exceeds frozen judge prefix or is already paused",
+            ));
+        }
+        next.pause_at_output_phase(point)
+            .map_err(|_| PauseError("coordinate pause violates exact phase or chronology"))?;
+    } else {
+        if !transport.is_paused() || last_song != song {
+            return Err(PauseError(
+                "coordinate resume differs from frozen judge prefix",
+            ));
+        }
+        next.resume_at_output_phase(point)
+            .map_err(|_| PauseError("coordinate resume violates frozen phase or chronology"))?;
+    }
+    Ok(next)
+}
+
 /// Guards original inputs admitted strictly before the pause software cutoff.
 pub fn validate_pre_pause_input(
     transport: &Transport,

@@ -17,7 +17,7 @@ use beatkernel::{
     },
     telemetry::RuntimeTelemetry,
     time::{ClockDomainId, ClockMapper, ClockPoint, Timestamp},
-    transport::{Rate, Transport},
+    transport::{OutputPhaseError, OutputPhasePoint, Rate, Transport},
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -161,11 +161,67 @@ impl RuntimeGroup {
         song_end: Option<Timestamp>,
         scope: CommandScope,
     ) -> Result<(), String> {
+        self.replace_practice_states_inner(judges, transport, song_end, scope, false)
+    }
+
+    /// Installs a fresh attempt's mathematical phase after the caller qualifies
+    /// its actual output boundary. The output owner, sample grid and selected
+    /// running rate remain unchanged; this grants no native clock permission.
+    pub fn replace_practice_states_with_output_phase(
+        &mut self,
+        judges: Vec<(PlayerId, JudgeEngine)>,
+        transport: Transport,
+        song_end: Option<Timestamp>,
+        scope: CommandScope,
+    ) -> Result<(), String> {
+        self.replace_practice_states_inner(judges, transport, song_end, scope, true)
+    }
+
+    fn replace_practice_states_inner(
+        &mut self,
+        judges: Vec<(PlayerId, JudgeEngine)>,
+        transport: Transport,
+        song_end: Option<Timestamp>,
+        scope: CommandScope,
+        output_phase: bool,
+    ) -> Result<(), String> {
         if judges.len() != self.members.len() {
             return Err("practice judge count differs from cohort".into());
         }
         let anchor = transport.anchor();
-        if transport.anchors().len() != 1 || anchor.rate != Rate::NORMAL {
+        if output_phase {
+            let old = self
+                .transport
+                .output_phase_basis()
+                .ok_or("practice source transport must have an output phase")?;
+            let new = transport
+                .output_phase_basis()
+                .ok_or("practice replacement must have an output phase")?;
+            if transport.anchors().len() != 1
+                || anchor.rate.numerator() <= 0
+                || anchor.rate != self.transport.anchor().rate
+            {
+                return Err(
+                    "practice transport must be a fresh anchor at the selected running rate".into(),
+                );
+            }
+            if new.owner() != old.owner()
+                || new.domain() != old.domain()
+                || new.source_hz() != old.source_hz()
+            {
+                return Err("practice output phase differs from the retained output owner".into());
+            }
+            if new.generation() != scope.0 || new.generation() <= old.generation() {
+                return Err(
+                    "practice output phase generation must advance to its audio scope".into(),
+                );
+            }
+            if new.active_origin_frame() < old.active_origin_frame()
+                || anchor.host_time < self.transport.anchor().host_time
+            {
+                return Err("practice output phase origin must not regress".into());
+            }
+        } else if transport.anchors().len() != 1 || anchor.rate != Rate::NORMAL {
             return Err("practice transport must be a fresh normal-rate anchor".into());
         }
         if song_end.is_some_and(|end| end.as_nanos() < 0 || end <= anchor.song_time) {
@@ -524,7 +580,7 @@ impl RuntimeGroup {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<InputResult, GroupError> {
-        self.process_input_with_position(input, None, mapper, audio_at)
+        self.process_input_with_position(input, None, mapper, audio_at, None)
     }
 
     pub fn process_input_at(
@@ -534,7 +590,62 @@ impl RuntimeGroup {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<InputResult, GroupError> {
-        self.process_input_with_position(input, Some(position), mapper, audio_at)
+        self.process_input_with_position(input, Some(position), mapper, audio_at, None)
+    }
+
+    /// Routes one member through the shared transport's active-output phase.
+    /// Raw audio scheduling retains the caller's original point.
+    pub fn process_input_output_phase(
+        &mut self,
+        input: PhysicalInputEvent,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: OutputPhasePoint,
+    ) -> Result<InputResult, GroupError> {
+        self.process_input_with_position(input, None, mapper, audio_at, Some(phase))
+    }
+
+    /// Phase-aware input through the existing positioned touch routing path.
+    pub fn process_input_at_output_phase(
+        &mut self,
+        input: PhysicalInputEvent,
+        position: Position2,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: OutputPhasePoint,
+    ) -> Result<InputResult, GroupError> {
+        self.process_input_with_position(input, Some(position), mapper, audio_at, Some(phase))
+    }
+
+    fn preflight_output_phase(
+        &self,
+        host: ClockPoint,
+        host_domain: ClockDomainId,
+        mapper: &dyn ClockMapper,
+        phase: OutputPhasePoint,
+    ) -> Result<(), RuntimeError> {
+        let logical = if host.domain == host_domain {
+            host
+        } else {
+            ClockPoint {
+                domain: host_domain,
+                timestamp: mapper
+                    .map(host, host_domain)
+                    .ok_or(RuntimeError::UnmappedClock {
+                        from: host.domain,
+                        to: host_domain,
+                    })?,
+            }
+        };
+        if logical != phase.logical() {
+            return Err(RuntimeError::OutputPhase(
+                OutputPhaseError::LogicalPointMismatch,
+            ));
+        }
+        self.transport
+            .position_at_output_phase(phase)
+            .map_err(RuntimeError::OutputPhase)?;
+        Ok(())
     }
 
     fn process_input_with_position(
@@ -543,6 +654,7 @@ impl RuntimeGroup {
         position: Option<Position2>,
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
+        phase: Option<OutputPhasePoint>,
     ) -> Result<InputResult, GroupError> {
         self.ensure_usable()?;
         let device = input.meta().source;
@@ -553,20 +665,43 @@ impl RuntimeGroup {
         else {
             return Ok(InputResult::Ignored { device });
         };
+        let player = self.members[index].player;
+        if let Some(phase) = phase {
+            let meta = input.meta();
+            self.preflight_output_phase(
+                ClockPoint {
+                    domain: meta.clock_domain,
+                    timestamp: meta.timestamp,
+                },
+                self.members[index].runtime.clock_domains().0,
+                mapper,
+                phase,
+            )
+            .map_err(|error| GroupError {
+                failed_player: Some(player),
+                kind: FailureKind::Core(error),
+                completed_reports: Vec::new(),
+            })?;
+        }
         self.poisoned = true;
         self.started = true;
-        let player = self.members[index].player;
         let result = {
             let guard = OwnerGuard::new(
                 &mut self.members[index].runtime,
                 &mut self.transport,
                 &mut self.producer,
             );
-            match position {
-                Some(position) => guard
+            match (position, phase) {
+                (Some(position), Some(phase)) => guard
+                    .runtime
+                    .process_input_at_output_phase(input, position, mapper, audio_at, phase),
+                (None, Some(phase)) => guard
+                    .runtime
+                    .process_input_output_phase(input, mapper, audio_at, phase),
+                (Some(position), None) => guard
                     .runtime
                     .process_input_at(input, position, mapper, audio_at),
-                None => guard.runtime.process_input(input, mapper, audio_at),
+                (None, None) => guard.runtime.process_input(input, mapper, audio_at),
             }
         };
         let report = result.map_err(|error| GroupError {
@@ -593,7 +728,41 @@ impl RuntimeGroup {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<Vec<PlayerReport>, GroupError> {
+        self.advance_with_phase(host, mapper, audio_at, None)
+    }
+
+    /// Advances every member in source-plan order with one shared output phase.
+    pub fn advance_to_output_phase(
+        &mut self,
+        host: ClockPoint,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: OutputPhasePoint,
+    ) -> Result<Vec<PlayerReport>, GroupError> {
+        self.advance_with_phase(host, mapper, audio_at, Some(phase))
+    }
+
+    fn advance_with_phase(
+        &mut self,
+        host: ClockPoint,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: Option<OutputPhasePoint>,
+    ) -> Result<Vec<PlayerReport>, GroupError> {
         self.ensure_usable()?;
+        if let Some(phase) = phase {
+            self.preflight_output_phase(
+                host,
+                self.members[0].runtime.clock_domains().0,
+                mapper,
+                phase,
+            )
+            .map_err(|error| GroupError {
+                failed_player: None,
+                kind: FailureKind::Core(error),
+                completed_reports: Vec::new(),
+            })?;
+        }
         self.poisoned = true;
         self.started = true;
         let mut reports = Vec::with_capacity(self.members.len());
@@ -601,7 +770,12 @@ impl RuntimeGroup {
             let result = {
                 let guard =
                     OwnerGuard::new(&mut member.runtime, &mut self.transport, &mut self.producer);
-                guard.runtime.advance_to(host, mapper, audio_at)
+                match phase {
+                    Some(phase) => guard
+                        .runtime
+                        .advance_to_output_phase(host, mapper, audio_at, phase),
+                    None => guard.runtime.advance_to(host, mapper, audio_at),
+                }
             };
             let report = match result {
                 Ok(report) => report,
@@ -743,6 +917,22 @@ impl SoloRuntime {
             .replace_practice_states(vec![(PlayerId(1), judge)], transport, song_end, scope)
     }
 
+    /// One-player forwarding through the phase-bearing cohort transaction.
+    pub fn replace_practice_state_with_output_phase(
+        &mut self,
+        judge: JudgeEngine,
+        transport: Transport,
+        song_end: Option<Timestamp>,
+        scope: CommandScope,
+    ) -> Result<(), String> {
+        self.0.replace_practice_states_with_output_phase(
+            vec![(PlayerId(1), judge)],
+            transport,
+            song_end,
+            scope,
+        )
+    }
+
     /// Actual normalized timeline and raw scheduling identity of the solo member.
     pub fn clock_domains(&self) -> Option<(ClockDomainId, ClockDomainId)> {
         self.0.clock_domains()
@@ -818,6 +1008,33 @@ impl SoloRuntime {
     ) -> Result<RuntimeReport, GroupError> {
         Self::sole_input(self.0.process_input_at(input, position, mapper, audio_at))
     }
+    /// One-player phase input through the same shared-owner execution path.
+    pub fn process_input_output_phase(
+        &mut self,
+        input: PhysicalInputEvent,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: OutputPhasePoint,
+    ) -> Result<RuntimeReport, GroupError> {
+        Self::sole_input(
+            self.0
+                .process_input_output_phase(input, mapper, audio_at, phase),
+        )
+    }
+    /// One-player positioned phase input through the existing touch router.
+    pub fn process_input_at_output_phase(
+        &mut self,
+        input: PhysicalInputEvent,
+        position: Position2,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: OutputPhasePoint,
+    ) -> Result<RuntimeReport, GroupError> {
+        Self::sole_input(
+            self.0
+                .process_input_at_output_phase(input, position, mapper, audio_at, phase),
+        )
+    }
     fn sole_input(result: Result<InputResult, GroupError>) -> Result<RuntimeReport, GroupError> {
         match result {
             Ok(InputResult::Processed(reports)) => Self::sole_report(Ok(reports)),
@@ -834,6 +1051,19 @@ impl SoloRuntime {
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, GroupError> {
         Self::sole_report(self.0.advance_to(host, mapper, audio_at))
+    }
+    /// One-player deadlines use the same shared output-phase transport.
+    pub fn advance_to_output_phase(
+        &mut self,
+        host: ClockPoint,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: OutputPhasePoint,
+    ) -> Result<RuntimeReport, GroupError> {
+        Self::sole_report(
+            self.0
+                .advance_to_output_phase(host, mapper, audio_at, phase),
+        )
     }
     // Existing native capture/UI paths must receive committed partial reports.
     // Group poison still prevents any subsequent logical continuation.
@@ -975,6 +1205,14 @@ impl VoiceAllocator {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "local_runtime_output_phase_fixtures.rs"]
+mod output_phase_fixtures;
+
+#[cfg(test)]
+#[path = "local_runtime_practice_output_phase_fixtures.rs"]
+mod practice_output_phase_fixtures;
 
 #[cfg(test)]
 mod fixtures {
