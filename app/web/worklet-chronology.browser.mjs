@@ -9,6 +9,7 @@
  * AudioParam edges in untouched production phase0; it does not prove playback.
  * WORKLET_NATIVE_PHASE_PROBE=1 streams three finite native ramp periods in the
  * same fixture; modulo agreement does not admit an absolute production clock.
+ * WORKLET_NATIVE_JOINT_PHASE_PROBE=1 measures three fixed coprime native lanes.
  * No dependency installs or external services. The owned HTTPS test response
  * wraps registerProcessor; repository production bytes and native clocks stay
  * unchanged. A deliberately omitted native callback is fault injection, not
@@ -22,7 +23,7 @@ import { X509Certificate, createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { resolve, dirname, extname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { advanceFrame, markerFrame, phaseEvidence } from "./worklet-native-frame-probe.mjs";
+import { advanceFrame, markerFrame, phaseEvidence, nativeJointOffset } from "./worklet-native-frame-probe.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const out = resolve(process.env.WORKLET_CHRONOLOGY_OUT ?? resolve(root, "target/wf/worklet-chronology-browser-development"));
@@ -30,7 +31,9 @@ const port = Number(process.env.WORKLET_CHRONOLOGY_PORT ?? 8121);
 const requireCold = process.env.WORKLET_CHRONOLOGY_REQUIRE_COLD === "1";
 const nativeProbe = process.env.WORKLET_NATIVE_FRAME_PROBE === "1";
 const phaseProbe = process.env.WORKLET_NATIVE_PHASE_PROBE === "1";
-const nativeFixture = nativeProbe || phaseProbe;
+const jointProbe = process.env.WORKLET_NATIVE_JOINT_PHASE_PROBE === "1";
+const phaseFixture = phaseProbe || jointProbe;
+const nativeFixture = nativeProbe || phaseFixture;
 const coldCases = requireCold ? ["cold-1", "cold-2", "cold-3"] : ["normal"];
 const nativeCases = [
   ...[44100, 48000].flatMap(rate => [1, 17, 63, 127].map(offset => ({ name: `native-${rate}-${offset}`, rate, offset }))),
@@ -41,15 +44,22 @@ const phaseCases = [
   ...["constant", "late", "identities", "timeout", "stop", "suspend", "callback-limit"]
     .map(operation => ({ name: `phase-${operation}`, rate: 48000, offset: 17, phaseProbe: true, operation })),
 ];
+const jointCases = [
+  ...[44100, 48000].map(rate => ({ name: `joint-${rate}`, rate, offset: 17, phaseProbe: true, jointProbe: true, operation: "stream" })),
+  ...["constant", "late", "identities", "timeout", "stop", "suspend", "callback-limit"]
+    .map(operation => ({ name: `joint-${operation}`, rate: 48000, offset: 17, phaseProbe: true, jointProbe: true, operation })),
+];
 const evidence = { kind: "development-worklet-chronology-browser", checks: [], scenarios: [],
-  mode: phaseProbe ? "native-phase0-modulo" : nativeProbe ? "native-phase0-marker" : requireCold ? "required-healthy-cold" : "historical-diagnostic",
+  mode: jointProbe ? "native-phase0-joint-modulo" : phaseProbe ? "native-phase0-modulo" : nativeProbe ? "native-phase0-marker" : requireCold ? "required-healthy-cold" : "historical-diagnostic",
   ceiling: nativeFixture ? [
     "Two native marker edges establish only their measured callback interval; future graph-pull gaps and generic counter continuity remain unproved.",
     "Reused generated WASM is artifact-specific phase0 evidence, not a fresh Rust rebuild or a repair of the prior strict browser chronology failure.",
     "AudioParam fill/scan and private diagnostic messaging are sustained test overhead, not a startup-only or zero-cost production claim.",
     ...(phaseProbe ? ["A single repeating phase cannot distinguish nP-frame gaps; checked samples and conditioned endpoint corroboration establish only this measured interval."] : []),
+    ...(jointProbe ? ["Joint residues identify only Number-safe modulo candidates; native samples alone cannot certify epoch, age or future chronology beyond the finite measured interval."] : []),
   ] : ["Measured cold-context acceptance only; no universal browser scheduling, high-frame performance, gameplay completion, replay-prefix or acoustic-output claim."], cleanup: {} };
-const required = phaseProbe ? [...phaseCases.map(x => x.name), "phase-fresh-context", "web-server-boundary"]
+const required = jointProbe ? [...jointCases.map(x => x.name), "joint-fresh-context", "web-server-boundary"]
+  : phaseProbe ? [...phaseCases.map(x => x.name), "phase-fresh-context", "web-server-boundary"]
   : nativeProbe ? [...nativeCases.map(x => x.name), "fresh-context", "web-server-boundary"]
   : [...(requireCold ? coldCases : ["diagnostic-cold-observation"]), "native-gap", "late-arm", "sample-control"];
 evidence.required = required;
@@ -124,14 +134,18 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
 // Test-only native automation and private observations. Production protocol,
 // sequence, PCM, clocks and render arguments are always delegated unchanged.
 const nativeBootstrap = `
-import { markerFrame, advanceFrame, nativePhase, phaseIdeal, phaseEvidence } from './worklet-native-frame-probe.mjs';
-const phaseMode = ${phaseProbe};
+import { markerFrame, advanceFrame, nativePhase, phaseIdeal, phaseEvidence, nativeJointOffset } from './worklet-native-frame-probe.mjs';
+const phaseMode = ${phaseProbe || jointProbe};
+const jointMode = ${jointProbe};
+const jointPeriods = [1048576, 1048575, 1048573];
 const actualRegister = globalThis.registerProcessor.bind(globalThis);
 globalThis.registerProcessor = (name, Production) => actualRegister(name, class extends Production {
   static get parameterDescriptors() {
     return [...(Production.parameterDescriptors ?? []),
       { name: '__native_marker', defaultValue: 0, minValue: 0, maxValue: 1, automationRate: 'a-rate' },
-      ...(phaseMode ? [{ name: '__native_phase', defaultValue: 0, minValue: 0, maxValue: 1048577, automationRate: 'a-rate' }] : [])];
+      ...(jointMode ? jointPeriods.map((period, lane) => ({ name: '__native_joint_phase_' + lane,
+        defaultValue: 0, minValue: 0, maxValue: period + 1, automationRate: 'a-rate' }))
+        : phaseMode ? [{ name: '__native_phase', defaultValue: 0, minValue: 0, maxValue: 1048577, automationRate: 'a-rate' }] : [])];
   }
   constructor(options) {
     super(options);
@@ -149,6 +163,7 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
       this.nativeStats = { callbacks: 0, observedFrames: 0, minFrames: null, maxFrames: 0,
         phase0: true, zeroPCM: true, reportUnavailable: true, resultTrue: true,
         rawFrameDiscrepancies: 0, firstRawDiscrepancies: [], fullPhaseArrays: 0, singlePhaseArrays: 0, otherPhaseArrays: 0 };
+      if (jointMode) this.nativeStats.laneShapes = jointPeriods.map(() => ({ full: 0, single: 0, other: 0 }));
     }
   }
   nativeReply(message) { this.nativePort?.postMessage({ generation: this.generation, ...message }); }
@@ -158,11 +173,105 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
       stats: this.nativeStats, session: this.nativeSession });
   }
   phaseSnapshot(reason, frames, marker, values, fields = {}) {
+    if (jointMode && this.nativeRawSnapshots >= 32) { this.retireNative('snapshot-limit'); return; }
     if (++this.nativeRawSnapshots > 32) { this.retireNative('snapshot-limit'); return; }
     this.nativeReply({ kind: 'phase-snapshot', id: this.nativeId, reason, ordinal: this.nativeOrdinal,
       rawGlobalFrame: currentFrame, actualFrames: frames, nativeBase: this.nativeCursor,
       markerLength: marker.length, markerValues: Array.from(marker),
-      parameterLength: values.length, values: Array.from(values), ...fields });
+      ...(jointMode ? { laneLengths: this.nativeJointValues.map(value => value?.length ?? null),
+        laneValues: this.nativeJointValues.map(value => value != null && Number.isSafeInteger(value.length)
+          && value.length <= 4096 ? Array.from(value) : null),
+        laneTypes: this.nativeJointValues.map(value => value?.constructor?.name ?? null) }
+        : { parameterLength: values.length, values: Array.from(values) }), ...fields });
+  }
+  checkJointPhase(frames, marker, end) {
+    const session = this.nativeSession, frame = this.nativeCursor, arrays = this.nativeJointValues;
+    const resets = [], horizons = [];
+    for (let lane = 0; lane < 3; lane++) {
+      const state = session.lanes[lane], values = arrays[lane];
+      const first = Math.max(frame, session.startFrame), last = Math.min(end, state.horizonFrame);
+      if (first < last) {
+        if (!(values instanceof Float32Array) || values.length !== frames) {
+          session.failureSample = { lane, parameterLength: values?.length ?? null, actualFrames: frames };
+          return 'joint-shape';
+        }
+        const checked = phaseEvidence(values.subarray(first - frame, last - frame), last - first,
+          first, session.startFrame, sampleRate, state.horizonFrame, state.period);
+        if (checked === null) {
+          session.failureSample = { lane, parameterLength: values.length, actualFrames: frames };
+          for (let index = first - frame; index < last - frame; index++) {
+            const sampleFrame = frame + index, value = values[index];
+            const ideal = phaseIdeal(sampleFrame, session.startFrame, sampleRate, state.period);
+            const phase = nativePhase(value, state.period), expectedPhase = (sampleFrame - session.startFrame) % state.period;
+            const error = ideal === null ? null : Math.abs(value - ideal);
+            if (phase !== expectedPhase || ideal === null || !(error < 0.25)) {
+              session.failureSample = { lane, index, frame: sampleFrame, value, ideal, phase, expectedPhase, error };
+              break;
+            }
+          }
+          return 'joint-evidence';
+        }
+        state.checkedSamples += checked.checkedSamples;
+        state.checkedCallbacks++;
+        state.maxError = Math.max(state.maxError, checked.maxError);
+        state.tailSamples += Math.max(0, last - Math.max(first, session.jointHorizonFrame));
+        session.maxError = Math.max(session.maxError, checked.maxError);
+        for (let cycle = 1; cycle < 3; cycle++) {
+          const resetFrame = session.startFrame + cycle * state.period;
+          if (first <= resetFrame && resetFrame < last) {
+            const reset = { lane, cycle, frame: resetFrame, index: resetFrame - frame, ordinal: this.nativeOrdinal,
+              interior: frame < resetFrame && resetFrame < end };
+            state.resets.push(reset);
+            resets.push(reset);
+          }
+        }
+      }
+    }
+    const first = Math.max(frame, session.startFrame), last = Math.min(end, session.jointHorizonFrame);
+    let joint = null;
+    if (first < last) {
+      const firstIndex = first - frame, lastIndex = last - frame - 1;
+      const firstOffset = nativeJointOffset(arrays[0][firstIndex], arrays[1][firstIndex], arrays[2][firstIndex]);
+      const lastOffset = nativeJointOffset(arrays[0][lastIndex], arrays[1][lastIndex], arrays[2][lastIndex]);
+      joint = { firstIndex, lastIndex, firstOffset, lastOffset };
+      if (firstOffset !== first - session.startFrame || lastOffset !== last - session.startFrame - 1) {
+        session.failureSample = { ...joint, expectedFirst: first - session.startFrame,
+          expectedLast: last - session.startFrame - 1 };
+        return 'joint-crt';
+      }
+      session.checkedSamples += last - first;
+      session.checkedCallbacks++;
+      session.crtChecks += 2;
+      session.firstCRT ??= firstOffset;
+      session.lastCRT = lastOffset;
+      if (session.checkedCallbacks === 1) {
+        this.phaseSnapshot('phase-onset', frames, marker, arrays[0], { activeIndex: firstIndex, firstActive: first, joint });
+        this.nativeReply({ kind: 'phase-progress', id: this.nativeId, ordinal: this.nativeOrdinal,
+          checkedSamples: session.checkedSamples });
+      }
+    }
+    if (end > session.jointHorizonFrame) session.jointHorizonRefused = true;
+    for (let lane = 0; lane < 3; lane++) {
+      const state = session.lanes[lane], values = arrays[lane];
+      if (end > state.horizonFrame) {
+        const index = Math.max(0, state.horizonFrame - frame);
+        const held = values instanceof Float32Array && (values.length === 1 ? values[0] === 1
+          : values.length === frames && values.subarray(index).every(value => value === 1));
+        if (!held) { session.failureSample = { lane, index, horizonFrame: state.horizonFrame }; return 'joint-hold'; }
+        state.holdFrames += end - Math.max(frame, state.horizonFrame);
+        if (!state.horizonRefused) {
+          state.horizonRefused = phaseEvidence(values, frames, frame, session.startFrame,
+            sampleRate, state.horizonFrame, state.period) === null;
+          horizons.push({ lane, frame: state.horizonFrame, index, ordinal: this.nativeOrdinal,
+            refused: state.horizonRefused, holdFrames: state.holdFrames });
+          if (!state.horizonRefused) return 'joint-horizon';
+        }
+      }
+    }
+    if (resets.length) this.phaseSnapshot('reset', frames, marker, arrays[0], { resets, joint });
+    if (horizons.length) this.phaseSnapshot('horizon', frames, marker, arrays[0],
+      { horizons, joint, jointHorizonRefused: session.jointHorizonRefused });
+    return null;
   }
   retireNative(reason) {
     if (!this.nativePort) return;
@@ -198,7 +307,33 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
         if (reason) { this.nativeReply({ kind: 'refused', id: request?.id, reason }); return; }
         this.nativeId = request.id;
         if (request.kind === 'retire') { this.retireNative(request.reason); return; }
-        if (phaseMode && request.kind === 'phase-start') {
+        if (jointMode && request.kind === 'joint-start') {
+          const shape = Array.isArray(request.periods) && request.periods.length === 3
+            && Array.isArray(request.horizonFrames) && request.horizonFrames.length === 3
+            && Array.isArray(request.futureEligible) && request.futureEligible.length === 3
+            && Number.isSafeInteger(request.startFrame) && request.startFrame > 0
+            && [0, 1, 2].every(lane => request.periods[lane] === jointPeriods[lane]
+              && Number.isSafeInteger(request.horizonFrames[lane])
+              && request.horizonFrames[lane] === advanceFrame(request.startFrame, 3 * jointPeriods[lane])
+              && typeof request.futureEligible[lane] === 'boolean')
+            && request.jointHorizonFrame === request.horizonFrames[2];
+          const reason = this.nativeAnchor === null ? 'origin' : this.nativeSession !== null ? 'phase-active'
+            : !shape ? 'joint-range' : request.futureEligible.some(value => !value) ? 'joint-late'
+            : request.startFrame <= this.nativeCursor ? 'joint-range' : null;
+          if (reason) { this.nativeReply({ kind: 'refused', id: request.id, reason }); return; }
+          this.nativeSession = { joint: true, startFrame: request.startFrame, periods: [...request.periods],
+            horizonFrames: [...request.horizonFrames], jointHorizonFrame: request.jointHorizonFrame,
+            futureEligible: [...request.futureEligible], lanes: jointPeriods.map((period, lane) => ({ period,
+              horizonFrame: request.horizonFrames[lane], checkedSamples: 0, checkedCallbacks: 0, maxError: 0,
+              resets: [], horizonRefused: false, holdFrames: 0, tailSamples: 0 })), checkedSamples: 0,
+            checkedCallbacks: 0, maxError: 0, crtChecks: 0, firstCRT: null, lastCRT: null,
+            jointHorizonRefused: false, closingReset: null, closing: null, done: false, failure: null };
+          this.nativeReply({ kind: 'accepted', id: request.id, operation: request.kind,
+            phase: this.phase, reportAvailable: this.owner.report_word(0, false), ordinal: this.nativeOrdinal,
+            nativeCursor: this.nativeCursor });
+          return;
+        }
+        if (phaseMode && !jointMode && request.kind === 'phase-start') {
           const reason = this.nativeAnchor === null ? 'origin' : this.nativeSession !== null ? 'phase-active'
             : request.period !== 1048576 || !Number.isSafeInteger(request.startFrame)
               || request.startFrame <= this.nativeCursor || !Number.isSafeInteger(request.horizonFrame)
@@ -248,7 +383,9 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
     while (edge < values.length && values[edge] === 0) edge++;
     const zeroPCM = outputs.every(bus => bus.every(channel => channel.every(value => value === 0)));
     if (phaseMode) {
-      const phaseValues = parameters.__native_phase;
+      if (jointMode) this.nativeJointValues = [parameters.__native_joint_phase_0,
+        parameters.__native_joint_phase_1, parameters.__native_joint_phase_2];
+      const phaseValues = jointMode ? this.nativeJointValues[0] : parameters.__native_phase;
       const stats = this.nativeStats;
       stats.callbacks++;
       stats.observedFrames += frames;
@@ -258,9 +395,15 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
       stats.zeroPCM &&= zeroPCM;
       stats.reportUnavailable &&= this.owner.report_word(0, false) === 0;
       stats.resultTrue &&= result === true;
-      if (phaseValues.length === frames) stats.fullPhaseArrays++;
-      else if (phaseValues.length === 1) stats.singlePhaseArrays++;
+      if (phaseValues?.length === frames) stats.fullPhaseArrays++;
+      else if (phaseValues?.length === 1) stats.singlePhaseArrays++;
       else stats.otherPhaseArrays++;
+      if (jointMode) for (let lane = 0; lane < 3; lane++) {
+        const values = this.nativeJointValues[lane], shape = stats.laneShapes[lane];
+        if (values instanceof Float32Array && values.length === frames) shape.full++;
+        else if (values instanceof Float32Array && values.length === 1) shape.single++;
+        else shape.other++;
+      }
       if (this.nativeAnchor === null && this.nativeWatch?.initial && candidate !== null) {
         this.nativeAnchor = { base: candidate, ordinal: this.nativeOrdinal, targetFrame, edge,
           actualFrames: frames, values: Array.from(values) };
@@ -276,6 +419,9 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
         const frame = this.nativeCursor;
         const end = advanceFrame(frame, frames);
         let failure = end === null || frames < 1 ? 'extent' : null;
+        if (session.joint) {
+          if (!failure) failure = this.checkJointPhase(frames, values, end);
+        } else {
         const first = Math.max(frame, session.startFrame), last = Math.min(end, session.horizonFrame);
         if (!failure && first < last) {
           const checked = phaseValues.length === frames
@@ -330,6 +476,7 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
             }
           }
         }
+        }
         if (!failure && this.nativeWatch?.closing) {
           if (session.closingReset === null) {
             const zeroIndex = values.length === 1 ? (values[0] === 0 ? 0 : -1)
@@ -356,18 +503,26 @@ globalThis.registerProcessor = (name, Production) => actualRegister(name, class 
           this.retireNative('phase-failure');
           return result;
         }
-        if (session.closing !== null && session.holdFrames > 0) {
+        if (session.closing !== null && (session.joint
+          ? session.lanes.every(lane => lane.horizonRefused && lane.holdFrames > 0) : session.holdFrames > 0)) {
           session.done = true;
           this.phaseSummary('phase-complete');
         }
       }
-      if (this.nativeOrdinal <= 8 || this.nativeOrdinal <= (this.nativeWatch?.startedOrdinal ?? -8) + 8 || candidate !== null) {
+      const warmup = jointMode ? 2 : 8;
+      if (this.nativeOrdinal <= warmup || this.nativeOrdinal <= (this.nativeWatch?.startedOrdinal ?? -warmup) + warmup || candidate !== null) {
+        if (jointMode && this.nativeRawSnapshots >= 32) { this.retireNative('snapshot-limit'); return result; }
         if (++this.nativeRawSnapshots > 32) { this.retireNative('snapshot-limit'); return result; }
         this.nativeReply({ kind: 'callback', id: this.nativeWatch?.id ?? this.nativeId,
           ordinal: this.nativeOrdinal, rawGlobalFrame: currentFrame, actualFrames: frames,
           parameterLength: values.length, edge, spatialCandidate: candidate,
           shape: values.every(value => value === 0) ? 'zero' : values.every(value => value === 1) ? 'one' : 'varying',
-          values: Array.from(values), phaseParameterLength: phaseValues.length, phaseValues: Array.from(phaseValues),
+          values: Array.from(values),
+          ...(jointMode ? { laneLengths: this.nativeJointValues.map(value => value?.length ?? null),
+            laneValues: this.nativeJointValues.map(value => value != null && Number.isSafeInteger(value.length)
+              && value.length <= 4096 ? Array.from(value) : null),
+            laneTypes: this.nativeJointValues.map(value => value?.constructor?.name ?? null) }
+            : { phaseParameterLength: phaseValues.length, phaseValues: Array.from(phaseValues) }),
           nativeBase: this.nativeCursor, phase: this.phase, result, zeroPCM, reportAvailable: this.owner.report_word(0, false) });
       }
       if (this.nativeOrdinal % 4096 === 0) this.nativeReply({ kind: 'phase-progress', id: this.nativeId,
@@ -661,7 +816,8 @@ async function runNativeCase(spec, generation) {
         result.sampleRate = host.sampleRate;
         result.beforeReport = await host.poll();
         result.prerequisites.nativeDefault = nodes[0].parameters.get("__native_marker").defaultValue;
-        if (spec.phaseProbe) result.prerequisites.phaseDefault = nodes[0].parameters.get("__native_phase").defaultValue;
+        if (spec.jointProbe) result.prerequisites.jointDefaults = [0, 1, 2].map(lane => nodes[0].parameters.get("__native_joint_phase_" + lane).defaultValue);
+        else if (spec.phaseProbe) result.prerequisites.phaseDefault = nodes[0].parameters.get("__native_phase").defaultValue;
         const connected = await attach(generation, id);
         privatePort = connected.channel.port1;
         messages.push(...connected.replies);
@@ -676,17 +832,17 @@ async function runNativeCase(spec, generation) {
         const positive = spec.name.startsWith("native-");
         if (spec.phaseProbe) {
           const period = 2 ** 20;
-          const phaseSet = (method, value, targetFrame) => {
+          const phaseSet = (method, value, targetFrame, parameter = "__native_phase") => {
             if (caseExpired) throw Error("Native phase case deadline exceeded");
             const time = markerTime(targetFrame, host.sampleRate);
             if (time === null) throw Error("Ambiguous native phase event time");
             const before = contexts[0].currentTime;
-            nodes[0].parameters.get("__native_phase")[method](value, time);
-            events.push({ parameter: "__native_phase", method, value, targetFrame, time,
+            nodes[0].parameters.get(parameter)[method](value, time);
+            events.push({ parameter, method, value, targetFrame, time,
               beforeContextTime: before, afterContextTime: contexts[0].currentTime });
             return time;
           };
-          const openPhase = async () => {
+          const openMarker = async () => {
             if (spec.offset >= quantum) throw Error("Native phase requires an actual interior marker");
             const firstTarget = futureTarget(spec.offset);
             const firstId = await watch(firstTarget, { initial: true });
@@ -697,6 +853,9 @@ async function runNativeCase(spec, generation) {
             result.firstAdmission = { eventCount: events.length, previousEvents: false,
               eligible: events.length === 1 && events[0].value === 1 && result.prerequisites.nativeDefault === 0 };
             if (!result.firstAdmission.eligible) throw Error("Native phase opening marker has a contaminated timeline");
+          };
+          const openPhase = async () => {
+            await openMarker();
             const startFrame = futureTarget(spec.offset), horizonFrame = startFrame + 3 * period;
             result.phaseSchedule = { period, periods: 3, startFrame, horizonFrame };
             const startId = await request("phase-start", result.phaseSchedule);
@@ -712,11 +871,58 @@ async function runNativeCase(spec, generation) {
             result.phaseSchedule.futureEligible = phaseEvents.every(x => x.beforeContextTime < x.time && x.afterContextTime < x.time);
             if (!result.phaseSchedule.futureEligible) throw Error("Native phase schedule was already late");
           };
-          if (spec.operation === "stream" || ["timeout", "stop", "suspend"].includes(spec.operation)) {
-            await openPhase();
+          const jointPeriods = [1048576, 1048575, 1048573];
+          const jointGeometry = startFrame => ({ periods: [...jointPeriods], startFrame,
+            horizonFrames: jointPeriods.map(period => startFrame + 3 * period),
+            jointHorizonFrame: startFrame + 3 * jointPeriods[2], futureEligible: [true, true, true] });
+          const submitJointLane = (lane, startFrame) => {
+            const period = jointPeriods[lane], name = "__native_joint_phase_" + lane;
+            phaseSet("setValueAtTime", 1, startFrame, name);
+            for (let cycle = 1; cycle <= 3; cycle++) {
+              const target = startFrame + cycle * period;
+              phaseSet("linearRampToValueAtTime", period + 1, target, name);
+              phaseSet("setValueAtTime", 1, target, name);
+            }
+          };
+          const openJoint = async (omitLane = false, lateLane = false) => {
+            await openMarker();
+            const startFrame = futureTarget(spec.offset);
+            result.jointSchedule = jointGeometry(startFrame);
+            submitJointLane(0, startFrame);
+            submitJointLane(1, startFrame);
+            let watched;
+            if (lateLane) {
+              await wait(() => contexts[0].currentTime > markerTime(startFrame, host.sampleRate) + 0.025, 5000, true);
+              submitJointLane(2, startFrame);
+              watched = await watch(startFrame, { initial: false });
+              result.lateWatchId = watched;
+            } else if (!omitLane) submitJointLane(2, startFrame);
+            result.jointSchedule.futureEligible = jointPeriods.map((_, lane) => events
+              .filter(x => x.parameter === "__native_joint_phase_" + lane)
+              .every(x => x.beforeContextTime < x.time && x.afterContextTime < x.time));
+            const startId = await request("joint-start", result.jointSchedule);
+            const reply = messages.find(x => x.id === startId && ["accepted", "refused"].includes(x.kind));
+            if (lateLane) {
+              result.lateRefusal = reply;
+              if (reply.kind !== "refused" || reply.reason !== "joint-late") throw Error("Late joint lane was not refused");
+              await wait(() => messages.filter(x => x.kind === "callback" && x.id === watched).length >= 2);
+              result.lateCallbacks = messages.filter(x => x.kind === "callback" && x.id === watched);
+              result.certifiedJointOffset = null;
+            } else if (reply.kind !== "accepted") throw Error("Joint start refused: " + reply.reason);
+          };
+          if (spec.jointProbe && ["constant", "late"].includes(spec.operation)) {
+            await openJoint(spec.operation === "constant", spec.operation === "late");
+            if (spec.operation === "constant") {
+              await wait(() => messages.some(x => x.kind === "phase-summary"), 5000);
+              result.summary = messages.findLast(x => x.kind === "phase-summary");
+              result.certifiedJointOffset = null;
+            }
+          } else if (spec.operation === "stream" || ["timeout", "stop", "suspend"].includes(spec.operation)) {
+            if (spec.jointProbe) await openJoint(); else await openPhase();
             if (spec.operation === "stream") {
-              const resetFrame = result.phaseSchedule.horizonFrame - 2 * quantum;
-              const targetFrame = result.phaseSchedule.horizonFrame + 2 * quantum;
+              const horizonFrame = spec.jointProbe ? result.jointSchedule.horizonFrames[0] : result.phaseSchedule.horizonFrame;
+              const resetFrame = horizonFrame + (spec.jointProbe ? quantum : -2 * quantum);
+              const targetFrame = horizonFrame + (spec.jointProbe ? 3 * quantum : 2 * quantum);
               const resetTime = markerTime(resetFrame, host.sampleRate), onsetTime = markerTime(targetFrame, host.sampleRate);
               const before = contexts[0].currentTime;
               if (resetTime === null || onsetTime === null || before >= resetTime || before >= onsetTime) throw Error("Closing marker is not future eligible");
@@ -757,15 +963,24 @@ async function runNativeCase(spec, generation) {
               result.summary = messages.findLast(x => x.kind === "phase-summary");
             }
           } else if (spec.operation === "identities") {
+            if (spec.jointProbe) {
+              await request("joint-start", jointGeometry(futureTarget(spec.offset)));
+              await openMarker();
+            }
             const stale = await attach(generation - 1, id + 1), repeated = await attach(generation, id), duplicate = await attach(generation, id + 1);
             result.rejectedAttachments = [stale.replies[0], repeated.replies[0], duplicate.replies[0]];
             for (const rejected of [stale, repeated, duplicate]) { rejected.channel.port1.close(); rejected.channel.port2.close(); }
             privatePort.postMessage({ kind: "inspect", generation: generation - 1, id: id + 1 });
             privatePort.postMessage({ kind: "inspect", generation, id });
-            await wait(() => messages.filter(x => x.kind === "refused").length === 2);
+            await wait(() => messages.filter(x => x.kind === "refused").length === (spec.jointProbe ? 3 : 2));
             await request("watch", { targetFrame: -1 });
             await request("unknown");
-            await request("phase-start", { startFrame: 1, horizonFrame: 1 + 3 * period, period });
+            if (spec.jointProbe) {
+              const geometry = jointGeometry(futureTarget(spec.offset));
+              await request("joint-start", { ...geometry, periods: [1048575, 1048576, 1048573] });
+              await request("joint-start", { ...geometry, horizonFrames: [Number.MAX_SAFE_INTEGER + 1, ...geometry.horizonFrames.slice(1)] });
+              await request("joint-start", { ...geometry, futureEligible: [true, true, false] });
+            } else await request("phase-start", { startFrame: 1, horizonFrame: 1 + 3 * period, period });
             await watch(futureTarget(spec.offset), { closing: true, resetFrame: 1, futureEligible: true });
             await request("inspect");
             result.retainedIdentity = id;
@@ -960,7 +1175,8 @@ function verifyPhase(result) {
   assert.equal(result.cleanup.nodesConstructed, 1);
   assert(result.cleanup.ownedPortEndpointsClosed >= 2);
   assert.equal(result.prerequisites.nativeDefault, 0);
-  assert.equal(result.prerequisites.phaseDefault, 0);
+  if (result.jointProbe) assert.deepEqual(result.prerequisites.jointDefaults, [0, 0, 0]);
+  else assert.equal(result.prerequisites.phaseDefault, 0);
   assert.equal(result.prerequisites.valueWrites, 0);
   assert.equal(result.beforeReport.available, false);
   if (result.afterReport) assert.equal(result.afterReport.available, false);
@@ -986,6 +1202,7 @@ function verifyPhase(result) {
     assert.equal(callback.result, true);
     assert.equal(callback.reportAvailable, 0);
   }
+  if (result.jointProbe) { verifyJoint(result, summary, stats, callbacks); return; }
   const session = summary.session;
   if (result.operation === "stream" || ["timeout", "stop", "suspend"].includes(result.operation)) {
     assert(result.firstAdmission.eligible && result.firstAdmission.eventCount === 1);
@@ -1087,6 +1304,145 @@ function verifyPhase(result) {
     resets: session?.resets.length ?? 0, horizonRefused: session?.horizonRefused ?? false,
     closingCorroborated: Boolean(session?.closing && session.closing.candidate === session.closing.expectedBase),
     rawFrameDiscrepancies: stats.rawFrameDiscrepancies, rawSnapshots: summary.rawSnapshots });
+}
+
+function verifyJoint(result, summary, stats, callbacks) {
+  const periods = [1048576, 1048575, 1048573], session = summary.session;
+  assert.equal(stats.laneShapes.length, 3);
+  for (const shape of stats.laneShapes) assert.equal(shape.full + shape.single + shape.other, stats.callbacks);
+  const raw = result.messages.filter(x => x.kind === "callback" || x.kind === "phase-snapshot");
+  assert(raw.length <= 32 && raw.length >= summary.rawSnapshots);
+  for (const snapshot of raw) {
+    assert.equal(snapshot.laneValues.length, 3);
+    assert.equal(snapshot.laneLengths.length, 3);
+    assert(snapshot.laneValues.every((values, lane) => Array.isArray(values) && values.length === snapshot.laneLengths[lane]));
+  }
+  if (result.operation !== "callback-limit") {
+    assert(result.firstAdmission.eligible && result.firstAdmission.eventCount === 1);
+    assert.equal(result.first.edge, result.offset);
+    assert.equal(markerFrame(new Float32Array(result.first.values), result.first.actualFrames, result.firstTarget), result.first.spatialCandidate);
+    assert.equal(summary.anchor.base, result.first.spatialCandidate);
+    assert.equal(summary.anchor.ordinal, result.first.ordinal);
+  }
+  if (["stream", "constant", "timeout", "stop", "suspend"].includes(result.operation)) {
+    assert(session && session.joint);
+    assert.deepEqual(session.periods, periods);
+    assert.deepEqual(session.horizonFrames, periods.map(period => session.startFrame + 3 * period));
+    assert.equal(session.jointHorizonFrame, session.horizonFrames[2]);
+    assert(result.jointSchedule.futureEligible.every(value => value));
+    assert.equal(session.lanes.length, 3);
+    if (result.operation === "constant") {
+      assert.equal(result.certifiedJointOffset, null);
+      assert.equal(summary.reason, "phase-failure");
+      assert(["joint-shape", "joint-evidence"].includes(session.failure.reason));
+      assert.equal(session.failureSample.lane, 2);
+      assert.equal(session.checkedSamples, 0);
+      assert(session.lanes[0].checkedSamples > 0 && session.lanes[1].checkedSamples > 0);
+      assert.equal(session.lanes[2].checkedSamples, 0);
+      assert.equal(result.events.filter(x => x.parameter === "__native_joint_phase_2").length, 0);
+      const failure = raw.find(x => x.reason === "first-failure");
+      assert(failure && failure.laneValues[2].every(value => value === 0));
+      assert(result.cleanup.pendingInvalidated);
+    } else {
+      assert.equal(session.failure, null, JSON.stringify(session.failureSample));
+      assert(session.checkedSamples > 0 && session.checkedCallbacks > 0);
+      assert.equal(session.crtChecks, 2 * session.checkedCallbacks);
+      assert.equal(session.firstCRT, 0);
+      assert.equal(session.lastCRT, session.checkedSamples - 1);
+      for (const lane of session.lanes) assert(lane.checkedSamples > 0 && lane.maxError < 0.25);
+      if (result.operation === "stream") {
+        assert.equal(summary.reason, "phase-complete");
+        assert(session.done && session.jointHorizonRefused);
+        assert.equal(session.checkedSamples, 3 * periods[2]);
+        assert.deepEqual(session.lanes.map(lane => lane.checkedSamples), periods.map(period => 3 * period));
+        assert.deepEqual(session.lanes.map(lane => lane.tailSamples), [9, 6, 0]);
+        assert(session.lanes.every(lane => lane.horizonRefused && lane.holdFrames > 0 && lane.resets.length === 2));
+        const resets = session.lanes.flatMap(lane => lane.resets);
+        assert(resets.every(reset => reset.interior));
+        const snapshots = raw.filter(x => x.kind === "phase-snapshot");
+        const resetSnapshots = snapshots.filter(x => x.reason === "reset");
+        assert.equal(resetSnapshots.length, new Set(resets.map(x => x.ordinal)).size);
+        assert.equal(resetSnapshots.flatMap(x => x.resets).length, 6);
+        const horizonSnapshots = snapshots.filter(x => x.reason === "horizon");
+        assert.equal(horizonSnapshots.flatMap(x => x.horizons).length, 3);
+        assert.equal(horizonSnapshots.length, new Set(horizonSnapshots.flatMap(x => x.horizons.map(fact => fact.ordinal))).size);
+        const onset = snapshots.find(x => x.reason === "phase-onset");
+        assert(onset && onset.activeIndex > 0 && onset.activeIndex < onset.actualFrames);
+        assert.equal(onset.firstActive, session.startFrame);
+        assert(onset.laneValues.every(values => values.slice(0, onset.activeIndex).every(value => value === 0)));
+        for (const snapshot of snapshots) {
+          const frame = snapshot.nativeBase, end = frame + snapshot.actualFrames;
+          for (let lane = 0; lane < 3; lane++) {
+            const first = Math.max(frame, session.startFrame), last = Math.min(end, session.horizonFrames[lane]);
+            if (first < last) {
+              assert.equal(snapshot.laneLengths[lane], snapshot.actualFrames);
+              assert(phaseEvidence(new Float32Array(snapshot.laneValues[lane]).subarray(first - frame, last - frame),
+                last - first, first, session.startFrame, result.sampleRate, session.horizonFrames[lane], periods[lane]),
+              "Independent native lane snapshot recomputation failed");
+            }
+          }
+          if (snapshot.joint) {
+            const { firstIndex, lastIndex, firstOffset, lastOffset } = snapshot.joint;
+            assert.equal(nativeJointOffset(...snapshot.laneValues.map(values => values[firstIndex])), firstOffset);
+            assert.equal(nativeJointOffset(...snapshot.laneValues.map(values => values[lastIndex])), lastOffset);
+            assert.equal(firstOffset, frame + firstIndex - session.startFrame);
+            assert.equal(lastOffset, frame + lastIndex - session.startFrame);
+          }
+        }
+        assert(result.closingAdmission.futureEligible && result.closingAdmission.eventCount === 2);
+        assert(session.closingReset !== null && session.closing.futureEligible && session.closing.resetObserved);
+        assert.equal(session.closing.candidate, session.closing.expectedBase);
+        assert.equal(session.closing.intervalCallbacks, session.closing.ordinal - summary.anchor.ordinal);
+        assert.equal(session.closing.intervalFrames, session.closing.expectedBase - summary.anchor.base);
+        const closing = snapshots.find(x => x.reason === "closing-marker");
+        assert(closing);
+        assert.equal(markerFrame(new Float32Array(closing.markerValues), closing.actualFrames, result.secondTarget), session.closing.candidate);
+      } else {
+        assert(!session.done && session.checkedSamples < 3 * periods[2]);
+        assert(result.cleanup.pendingInvalidated);
+        assert.equal(result.messages.find(x => x.kind === "retired").reason,
+          result.operation === "stop" ? "production-stop" : result.operation);
+        if (result.operation === "timeout") {
+          assert(result.timeout);
+          assert.equal(result.retiredAttachment.reason, "retired");
+          assert(result.retiredAttachment.rejectedPortClosed);
+        }
+        if (result.operation === "suspend") {
+          assert.equal(result.suspendedState, "suspended");
+          assert.equal(result.hostState, "failed");
+          assert.equal(result.suspendFailure?.code, "state");
+          assert.equal(result.suspendFailure?.operation, "context");
+        }
+      }
+    }
+  } else if (result.operation === "late") {
+    assert.equal(session, null);
+    assert.equal(result.certifiedJointOffset, null);
+    assert.equal(result.lateRefusal.reason, "joint-late");
+    assert.deepEqual(result.jointSchedule.futureEligible, [true, true, false]);
+    assert(result.lateCallbacks.length >= 2);
+    assert(result.lateCallbacks.every(x => x.ordinal < result.messages.find(y => y.kind === "retired").ordinal));
+    assert(result.lateCallbacks.some(x => x.laneValues[0].some(value => value > 1)
+      && x.laneValues[1].some(value => value > 1) && x.laneValues[2].some(value => value >= 1)));
+  } else if (result.operation === "identities") {
+    assert.equal(session, null);
+    assert.deepEqual(result.rejectedAttachments.map(x => x.reason), ["generation", "identity", "duplicate"]);
+    assert(result.rejectedAttachments.every(x => x.rejectedPortClosed));
+    assert.deepEqual(result.messages.filter(x => x.kind === "refused").map(x => x.reason),
+      ["origin", "generation", "identity", "target", "operation", "joint-range", "joint-range", "joint-late", "closing-prerequisite"]);
+    assert(result.messages.some(x => x.kind === "accepted" && x.operation === "inspect" && x.id === result.retainedIdentity));
+  } else if (result.operation === "callback-limit") {
+    assert.equal(summary.anchor, null);
+    assert.equal(stats.callbacks, 32768);
+    assert.equal(summary.ordinal, 32769);
+    assert.equal(result.messages.find(x => x.kind === "retired").reason, "callback-limit");
+    assert(result.cleanup.pendingInvalidated);
+  }
+  evidence.checks.push({ id: result.name, passed: true, callbacks: stats.callbacks,
+    checkedSamples: session?.checkedSamples ?? 0, ownSamples: session?.lanes.map(lane => lane.checkedSamples) ?? [],
+    maxErrors: session?.lanes.map(lane => lane.maxError) ?? [], tailSamples: session?.lanes.map(lane => lane.tailSamples) ?? [],
+    crtChecks: session?.crtChecks ?? 0, firstCRT: session?.firstCRT ?? null, lastCRT: session?.lastCRT ?? null,
+    rawFrameDiscrepancies: stats.rawFrameDiscrepancies, rawSnapshots: summary.rawSnapshots, retainedRawSnapshots: raw.length });
 }
 
 function verifyNative(result) {
@@ -1275,31 +1631,38 @@ function verify(result, id = result.name) {
 
 try {
   assert(!(phaseProbe && (nativeProbe || requireCold)), "WORKLET_NATIVE_PHASE_PROBE conflicts with the marker/required-cold modes");
+  assert(!(jointProbe && (nativeProbe || phaseProbe || requireCold)), "WORKLET_NATIVE_JOINT_PHASE_PROBE conflicts with the marker/single-phase/required-cold modes");
   const spki = await serve();
   const require = createRequire(import.meta.url);
   const puppeteer = require(process.env.PUPPETEER_MODULE ?? "puppeteer-core");
   browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
-    ...(phaseProbe ? { protocolTimeout: 150000 } : nativeProbe ? { protocolTimeout: 30000 } : {}),
+    ...(phaseFixture ? { protocolTimeout: 150000 } : nativeProbe ? { protocolTimeout: 30000 } : {}),
     args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required", `--ignore-certificate-errors-spki-list=${spki}`] });
   if (nativeFixture) {
     evidence.browser = { version: await browser.version(), ownedPid: browser.process()?.pid ?? null };
-    const cases = phaseProbe ? phaseCases : nativeCases;
+    const cases = jointProbe ? jointCases : phaseProbe ? phaseCases : nativeCases;
     for (let index = 0; index < cases.length; index++) {
-      const result = await runNativeCase(cases[index], index + (phaseProbe ? 111 : 11));
+      const result = await runNativeCase(cases[index], index + (jointProbe ? 211 : phaseProbe ? 111 : 11));
       evidence.scenarios.push(result);
-      try { if (phaseProbe) verifyPhase(result); else verifyNative(result); }
+      try { if (phaseFixture) verifyPhase(result); else verifyNative(result); }
       catch (error) { evidence.checks.push({ id: result.name, passed: false, detail: String(error),
-        ...(phaseProbe ? { callbacks: result.summary?.stats?.callbacks ?? 0,
+        ...(phaseFixture ? { callbacks: result.summary?.stats?.callbacks ?? 0,
           checkedSamples: result.summary?.session?.checkedSamples ?? 0,
           maxError: result.summary?.session?.maxError ?? null,
           failure: result.summary?.session?.failure ?? null,
-          failureSample: result.summary?.session?.failureSample ?? null } : {}) }); process.exitCode = 1; }
+          failureSample: result.summary?.session?.failureSample ?? null,
+          ...(jointProbe ? { ownSamples: result.summary?.session?.lanes?.map(lane => lane.checkedSamples) ?? [],
+            maxErrors: result.summary?.session?.lanes?.map(lane => lane.maxError) ?? [],
+            tailSamples: result.summary?.session?.lanes?.map(lane => lane.tailSamples) ?? [],
+            crtChecks: result.summary?.session?.crtChecks ?? 0,
+            firstCRT: result.summary?.session?.firstCRT ?? null,
+            lastCRT: result.summary?.session?.lastCRT ?? null } : {}) } : {}) }); process.exitCode = 1; }
     }
-    if (phaseProbe) {
+    if (phaseFixture) {
       const fresh = evidence.scenarios.filter(x => x.operation === "stream");
       const passed = fresh.length === 2 && new Set(fresh.map(x => x.generation)).size === 2
         && fresh.every(x => x.firstAdmission?.eligible && x.prerequisites.previousOrigin === false && x.cleanup.contextsClosed);
-      evidence.checks.push({ id: "phase-fresh-context", passed });
+      evidence.checks.push({ id: jointProbe ? "joint-fresh-context" : "phase-fresh-context", passed });
     } else {
     const fresh = evidence.scenarios.filter(x => x.name.startsWith("native-"));
     const freshPassed = fresh.length === 8 && new Set(fresh.map(x => x.generation)).size === 8
