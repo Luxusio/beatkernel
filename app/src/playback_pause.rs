@@ -8,6 +8,9 @@ use beatkernel::{
 };
 use std::collections::HashMap;
 
+#[path = "playback_pause_coordinate_epoch.rs"]
+mod coordinate_epoch;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PauseError(pub &'static str);
 impl std::fmt::Display for PauseError {
@@ -69,6 +72,9 @@ pub struct NativePause {
     epoch: u64,
     coordinate_binding: Option<CoordinatePauseBinding>,
     coordinate_reference: Option<crate::audio_authority::AudioAuthorityObservation>,
+    coordinate_replacement_observation:
+        Option<crate::native_output_coordinate::CoordinateTargetNativeAudioSnapshot>,
+    coordinate_source_pull_floor: Option<u64>,
     target: Option<TargetPauseState>,
     min_physical_frame: u64,
     rebound_basis: Option<beatkernel::audio::OutputFrameBasis>,
@@ -421,6 +427,8 @@ impl NativePause {
             epoch: 0,
             coordinate_binding: None,
             coordinate_reference: None,
+            coordinate_replacement_observation: None,
+            coordinate_source_pull_floor: None,
             target: None,
             min_physical_frame: 0,
             rebound_basis: None,
@@ -629,6 +637,14 @@ impl NativePause {
         basis: beatkernel::audio::TargetFrameBasis,
     ) -> Result<(), PauseError> {
         self.require_scalar_owner()?;
+        self.rebind_target_output_inner(epoch, state, basis)
+    }
+    fn rebind_target_output_inner(
+        &mut self,
+        epoch: u64,
+        state: &beatkernel_platform::audio::ConvertedNativeOutputState,
+        basis: beatkernel::audio::TargetFrameBasis,
+    ) -> Result<(), PauseError> {
         let old = self
             .target
             .ok_or(PauseError("target rebind requires target pause"))?;
@@ -684,9 +700,22 @@ impl NativePause {
         target_duration_between(basis.start_time(), generation)?;
         let mut next = self.clone();
         next.epoch = epoch;
-        next.min_host = self.last_pair.map(|pair| pair.target).or(self.min_host);
+        for host in [self.last_pair.map(|pair| pair.target), self.last_now]
+            .into_iter()
+            .flatten()
+        {
+            if next
+                .min_host
+                .is_none_or(|previous| host.timestamp > previous.timestamp)
+            {
+                next.min_host = Some(host);
+            }
+        }
         next.last_pair = None;
         next.reference = None;
+        next.coordinate_reference = None;
+        next.coordinate_replacement_observation = None;
+        next.coordinate_source_pull_floor = None;
         next.boundary = None;
         next.last_transition_physical = None;
         next.evidence_kind = None;
