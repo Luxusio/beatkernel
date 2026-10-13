@@ -1,10 +1,15 @@
 # Linux player output encoding
 
 Implementation status, 2026-10-13: the shared typed setting, Linux schema,
-profile persistence and Watch argument projection are implemented. The actual
-solo/local/replay launchers and paused ALSA request/capability mapping remain
-pending. The requirements below describe the complete intended behavior;
-this prerequisite checkpoint does not enable end-to-end encoding selection.
+profile persistence and Watch argument projection are connected to the actual
+solo/local/replay cold requests and paused ALSA request/capability mapping.
+Focused adapter/launcher tests and an opted ALSA null lifecycle diagnostic
+passed. Pure desktop journeys and actual shipped CLI regressions also passed,
+including opted null recorded playback through both executable routes. This is
+a connected implementation candidate; whole-task independent review,
+broader integration/foreign typing and CLI/desktop QA remain pending. Neither
+this candidate nor the earlier prerequisite checkpoint
+completes WBS05.12/07.09 or the parent player Goal.
 
 Linux native Settings and the live/local/replay ALSA launchers accept
 `--encoding float32|pcm16|pcm24|pcm32`. Omission uses Float32. PCM choices
