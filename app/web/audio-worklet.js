@@ -1,5 +1,7 @@
 import "./worklet-encoding.mjs";
 import { initSync, BrowserAudio } from "./audio-pkg/beatkernel_bms_runtime.js";
+import { CLOCK_VERSION, CLOCK_ID, CLOCK_PERIODS, CLOCK_NAMES, clockGeometry, validClockLane } from "./native-audio-clock.mjs";
+import { markerTime, nativePhase } from "./worklet-native-frame-probe.mjs";
 import {
   AUDIO_FAILURE_DIAGNOSTIC_VERSION, AUDIO_FAILURE_ORIGIN_CONTROL,
   AUDIO_FAILURE_ORIGIN_ARM, AUDIO_FAILURE_ORIGIN_PROCESS,
@@ -26,6 +28,18 @@ const COMMAND_FIELDS = ["kind", "voice", "sample", "at", "gain", "value", "denom
 
 function integer(value, min, max) {
   return Number.isSafeInteger(value) && value >= min && value <= max;
+}
+
+function zeroLane(values, frames) {
+  if (!(values instanceof Float32Array) || (values.length !== 1 && values.length !== frames)) return false;
+  for (let index = 0; index < values.length; index++) if (values[index] !== 0) return false;
+  return true;
+}
+
+function oneMarker(values, frames) {
+  if (!(values instanceof Float32Array) || (values.length !== 1 && values.length !== frames)) return false;
+  for (let index = 0; index < values.length; index++) if (values[index] !== 1) return false;
+  return true;
 }
 
 function unsigned(value) {
@@ -68,6 +82,15 @@ function validOptions(options) {
 // ACK admitted counts only this batch's exact successful queue prefix. A failed
 // batch fences playback; neither its successful prefix nor game operations retry.
 class BeatKernelAudioProcessor extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return [
+      { name: CLOCK_NAMES[0], defaultValue: 0, minValue: 0, maxValue: 1, automationRate: "a-rate" },
+      { name: CLOCK_NAMES[1], defaultValue: 0, minValue: 0, maxValue: CLOCK_PERIODS[0] + 1, automationRate: "a-rate" },
+      { name: CLOCK_NAMES[2], defaultValue: 0, minValue: 0, maxValue: CLOCK_PERIODS[1] + 1, automationRate: "a-rate" },
+      { name: CLOCK_NAMES[3], defaultValue: 0, minValue: 0, maxValue: CLOCK_PERIODS[2] + 1, automationRate: "a-rate" },
+    ];
+  }
+
   constructor(options) {
     super();
     if (liveOwner !== null) throw new Error("An audio processor already owns this worklet module.");
@@ -96,6 +119,32 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     this.memory = null;
     this.buffer = null;
     this.output = null;
+    this.clockStage = 0; // 0 virgin, 1 reserved, 2 committed, 3 first certificate, 4 ready.
+    this.clockOrigin = 0;
+    this.clockH0 = 0;
+    this.clockH1 = 0;
+    this.clockH2 = 0;
+    this.clockLowWater = 0;
+    this.clockRevision = 0;
+    this.clockPendingRevision = 0;
+    this.clockEnd = 0;
+    this.clockProbePosted = false;
+    this.pendingArm = null;
+    this.pendingStartLow = 0;
+    this.pendingStartHigh = 0;
+    // These messages are allocated before any real-time callback.
+    this.clockProbe = { kind: "clock-probe", generation: this.generation,
+      clockVersion: CLOCK_VERSION, clockId: CLOCK_ID, frames: 0 };
+    this.clockReserved = { kind: "clock-reserved", generation: this.generation,
+      clockVersion: CLOCK_VERSION, clockId: CLOCK_ID, revision: 0, status: 0, error: null };
+    this.clockCommitted = { kind: "clock-committed", generation: this.generation,
+      clockVersion: CLOCK_VERSION, clockId: CLOCK_ID, revision: 0, status: 0, error: null };
+    this.clockReady = { kind: "clock-ready", generation: this.generation,
+      clockVersion: CLOCK_VERSION, clockId: CLOCK_ID, revision: 0, origin: 0 };
+    this.clockRefill = { kind: "clock-refill", generation: this.generation,
+      clockVersion: CLOCK_VERSION, clockId: CLOCK_ID, revision: 0,
+      from0: 0, from1: 0, from2: 0, to0: 0, to1: 0, to2: 0,
+      frames: 0, endLow: 0, endHigh: 0 };
     // Preallocated because even terminal process paths must not build objects.
     this.terminal = {
       kind: "terminal", generation: this.generation, status: 0,
@@ -118,6 +167,10 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
         audio.maxFrames, audio.maxCommandsPerRender);
       if (this.owner.status() !== 0) throw new Error("Audio processor allocation or configuration failed.");
       if (this.owner.report_fields !== REPORT_FIELDS) throw new Error("Incompatible audio processor report format.");
+      if (!["native_clock_start", "native_clock_extend", "native_frame", "native_clock_ready", "arm_words"]
+        .every(name => typeof this.owner[name] === "function")) {
+        throw new Error("Incompatible native audio clock bindings.");
+      }
       this.port.onmessage = event => this.control(event.data);
       this.port.postMessage({ kind: "ready", generation: this.generation, sampleRate, channels: this.channels });
     } catch (error) {
@@ -171,6 +224,8 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
 
   fence(status, origin = AUDIO_FAILURE_ORIGIN_CONTROL, frame = 0, framePresent = 0, frames = 0, framesPresent = 0) {
     this.captureFailure(status, origin, frame, framePresent, frames, framesPresent);
+    this.cancelArm(status, "fenced");
+    this.clockPendingRevision = 0;
     if (this.terminalReady && !this.terminalPosted) {
       this.terminalPosted = true;
       const commandPort = this.commandPort;
@@ -178,6 +233,110 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
       try { this.port.postMessage(this.terminal); } catch {}
       try { commandPort?.postMessage(this.terminal); } catch {}
       try { samplePort?.postMessage(this.terminal); } catch {}
+    }
+  }
+
+  cancelArm(status, error) {
+    const pending = this.pendingArm;
+    if (pending === null) return true;
+    this.pendingArm = null;
+    pending.status = status;
+    pending.error = error;
+    if (status !== 0 && this.diagnosed) pending.diagnostics = this.terminal;
+    try { this.port.postMessage(pending); return true; } catch { return false; }
+  }
+
+  clockReply(reply, revision, status, error) {
+    reply.revision = integer(revision, 0, Number.MAX_SAFE_INTEGER) ? revision : 0;
+    reply.status = status;
+    reply.error = error;
+    this.port.postMessage(reply);
+  }
+
+  rejectClock(message, status, error) {
+    this.captureFailure(status, AUDIO_FAILURE_ORIGIN_CONTROL, 0, 0, 0, 0);
+    const reply = message?.kind === "clock-reserve" ? this.clockReserved : this.clockCommitted;
+    try { this.clockReply(reply, message?.revision, status, error); } catch {}
+    this.fence(status);
+  }
+
+  clockControl(message) {
+    try {
+      const generation = message.generation;
+      if (integer(generation, 1, Number.MAX_SAFE_INTEGER) && generation !== this.generation) return;
+      const kind = message.kind;
+      const version = message.clockVersion;
+      const id = message.clockId;
+      const revision = message.revision;
+      const origin = message.origin;
+      const h0 = message.h0;
+      const h1 = message.h1;
+      const h2 = message.h2;
+      const futureEligible = message.futureEligible;
+      if (this.failed || this.phase === 3) return;
+      if (generation !== this.generation || version !== CLOCK_VERSION || id !== CLOCK_ID
+        || !integer(revision, 0, Number.MAX_SAFE_INTEGER)
+        || !integer(origin, 1, Number.MAX_SAFE_INTEGER)
+        || !integer(h0, origin + 1, Number.MAX_SAFE_INTEGER)
+        || !integer(h1, origin + 1, Number.MAX_SAFE_INTEGER)
+        || !integer(h2, origin + 1, Number.MAX_SAFE_INTEGER)) {
+        this.rejectClock(message, INVALID, "clock-identity-or-geometry");
+        return;
+      }
+      if (kind === "clock-reserve") {
+        const geometry = clockGeometry(origin, this.maxFrames, sampleRate);
+        if (this.clockStage !== 0 || this.phase !== 0 || revision !== 0 || geometry === null
+          || h0 !== geometry.h0 || h1 !== geometry.h1 || h2 !== geometry.h2) {
+          this.rejectClock(message, STATE, "clock-reserve");
+          return;
+        }
+        this.clockOrigin = origin;
+        this.clockH0 = h0;
+        this.clockH1 = h1;
+        this.clockH2 = h2;
+        this.clockLowWater = geometry.lowWater;
+        this.clockStage = 1;
+        this.clockReady.origin = origin;
+        this.clockReply(this.clockReserved, revision, 0, null);
+        return;
+      }
+      if (kind !== "clock-commit" || futureEligible !== true || origin !== this.clockOrigin) {
+        this.rejectClock(message, INVALID, "clock-commit");
+        return;
+      }
+      let status;
+      if (this.clockStage === 1 && revision === 0 && this.phase === 0
+        && h0 === this.clockH0 && h1 === this.clockH1 && h2 === this.clockH2) {
+        status = this.owner.native_clock_start(origin % WORD, Math.floor(origin / WORD),
+          h0 % WORD, Math.floor(h0 / WORD), h1 % WORD, Math.floor(h1 / WORD),
+          h2 % WORD, Math.floor(h2 / WORD));
+        if (status === 0) this.clockStage = 2;
+      } else if (this.clockStage === 4 && this.clockPendingRevision !== 0
+        && revision === this.clockPendingRevision && revision === this.clockRevision + 1
+        && h0 === this.clockRefill.to0 && h1 === this.clockRefill.to1 && h2 === this.clockRefill.to2
+        && this.clockEnd < Math.min(this.clockH0, this.clockH1, this.clockH2)
+        && markerTime(h0, sampleRate) !== null && markerTime(h1, sampleRate) !== null
+        && markerTime(h2, sampleRate) !== null) {
+        status = this.owner.native_clock_extend(h0 % WORD, Math.floor(h0 / WORD),
+          h1 % WORD, Math.floor(h1 / WORD), h2 % WORD, Math.floor(h2 / WORD));
+        if (status === 0) {
+          this.clockH0 = h0;
+          this.clockH1 = h1;
+          this.clockH2 = h2;
+          this.clockRevision = revision;
+          this.clockPendingRevision = 0;
+        }
+      } else {
+        this.rejectClock(message, STATE, "clock-commit-state");
+        return;
+      }
+      if (!integer(status, 0, 0xffffffff) || status !== 0) {
+        this.rejectClock(message, integer(status, 1, 0xffffffff) ? status : EXCEPTION, "clock-audio");
+        return;
+      }
+      this.clockReply(this.clockCommitted, revision, 0, null);
+    } catch {
+      if (!this.failed && this.phase !== 3) this.rejectClock(message, EXCEPTION, "clock-exception");
     }
   }
 
@@ -230,6 +389,8 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
 
   stop(message) {
     this.phase = 3;
+    this.cancelArm(STATE, "stopped");
+    this.clockPendingRevision = 0;
     // Control handlers, never process(), own deallocation. Stop is also the
     // cleanup route after a malformed command or a terminal render failure.
     this.output = null;
@@ -419,14 +580,11 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
         this.reject(message, INVALID, "message");
         return;
       }
-      if (message.kind === "arm") {
-        origin = AUDIO_FAILURE_ORIGIN_ARM;
-        const actualFrame = currentFrame;
-        if (integer(actualFrame, 0, Number.MAX_SAFE_INTEGER)) {
-          frame = actualFrame;
-          framePresent = 1;
-        }
+      if (message.kind.startsWith("clock-")) {
+        this.clockControl(message);
+        return;
       }
+      if (message.kind === "arm") origin = AUDIO_FAILURE_ORIGIN_ARM;
       if (message.generation !== this.generation) {
         this.reject(message, GENERATION, "generation", 0, this.port, origin, frame, framePresent);
         return;
@@ -505,18 +663,15 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
         port.onmessageerror = () => this.fence(INVALID);
         port.start();
       } else if (message.kind === "arm") {
-        if (this.phase !== 1 || !unsigned(message.frame) || framePresent !== 1) {
+        if (this.phase !== 1 || this.pendingArm !== null || !unsigned(message.frame)) {
           this.reject(message, INVALID, "arm", 0, this.port, origin, frame, framePresent);
           return;
         }
-        status = this.owner.arm(message.frame, BigInt(frame));
-        if (status === 0) {
-          this.phase = 2;
-          if (!this.diagnosed) {
-            this.terminal.successfulArmFrame = frame;
-            this.terminal.successfulArmFramePresent = 1;
-          }
-        }
+        this.pendingStartLow = Number(message.frame & 4294967295n);
+        this.pendingStartHigh = Number(message.frame >> 32n);
+        this.pendingArm = { kind: "ack", generation: this.generation, sequence: message.sequence,
+          operation: "arm", status: 0, admitted: 0, error: null, report: null, diagnostics: undefined };
+        return;
       } else if (message.kind === "commands") {
         if (this.commandPort !== null) {
           this.reject(message, STATE, "transferred-command-owner");
@@ -544,21 +699,17 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     }
   }
 
-  process(_inputs, outputs) {
-    // No allocation, BigInt conversion, string formatting, view creation or
-    // owner destruction here. Browser messaging/GC still has no hard deadline.
+  process(_inputs, outputs, parameters) {
+    // Original native arrays and scalar WASM calls only: no callback-owned
+    // objects, BigInts, views, formatted strings or owner destruction.
     this.silence(outputs);
     if (this.failed || this.phase === 3) return false;
     let frame = 0;
     let framePresent = 0;
     let frames = 0;
     let framesPresent = 0;
+    let failureOrigin = AUDIO_FAILURE_ORIGIN_PROCESS;
     try {
-      const actualFrame = currentFrame;
-      if (integer(actualFrame, 0, Number.MAX_SAFE_INTEGER)) {
-        frame = actualFrame;
-        framePresent = 1;
-      }
       if (outputs.length > 0 && outputs[0].length > 0) {
         const actualFrames = outputs[0][0].length;
         if (integer(actualFrames, 0, 0xffffffff)) {
@@ -566,11 +717,8 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
           framesPresent = 1;
         }
       }
-      if (outputs.length !== 1 || outputs[0].length !== this.channels) {
-        this.fence(LAYOUT, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
-        return false;
-      }
-      if (frames > this.maxFrames) {
+      if (outputs.length !== 1 || outputs[0].length !== this.channels
+        || framesPresent !== 1 || frames > this.maxFrames) {
         this.fence(LAYOUT, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
         return false;
       }
@@ -580,31 +728,174 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
           return false;
         }
       }
-      if (this.phase === 0) return true;
-      if (this.memory.buffer !== this.buffer || this.output.byteLength !== this.maxFrames * this.channels * 4) {
+      if (this.phase !== 0 && (this.memory.buffer !== this.buffer
+        || this.output.byteLength !== this.maxFrames * this.channels * 4)) {
         this.fence(MEMORY, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
         return false;
       }
-      if (framePresent !== 1 || !Number.isSafeInteger(frame + frames)) {
+      if (frames === 0) return true;
+      const marker = parameters?.[CLOCK_NAMES[0]];
+      const lane0 = parameters?.[CLOCK_NAMES[1]];
+      const lane1 = parameters?.[CLOCK_NAMES[2]];
+      const lane2 = parameters?.[CLOCK_NAMES[3]];
+      let firstIndex = 0;
+      if (this.clockStage < 3) {
+        if (zeroLane(marker, frames) && zeroLane(lane0, frames)
+          && zeroLane(lane1, frames) && zeroLane(lane2, frames)) {
+          if (!this.clockProbePosted) {
+            this.clockProbePosted = true;
+            this.clockProbe.frames = frames;
+            this.port.postMessage(this.clockProbe);
+          }
+          return !this.failed && this.phase !== 3;
+        }
+        if (this.clockStage !== 2 || !(marker instanceof Float32Array) || marker.length !== frames) {
+          this.fence(FRAME, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+          return false;
+        }
+        while (firstIndex < frames && marker[firstIndex] === 0) firstIndex++;
+        if (firstIndex === 0 || firstIndex === frames) {
+          this.fence(FRAME, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+          return false;
+        }
+        for (let index = firstIndex; index < frames; index++) {
+          if (marker[index] !== 1) {
+            this.fence(FRAME, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+            return false;
+          }
+        }
+      } else if (!oneMarker(marker, frames)) {
         this.fence(FRAME, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
         return false;
       }
-      const status = this.owner.render(frame % WORD, Math.floor(frame / WORD), frames);
-      if (status !== 0) {
-        this.fence(status, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+      if (!(lane0 instanceof Float32Array) || lane0.length !== frames
+        || !(lane1 instanceof Float32Array) || lane1.length !== frames
+        || !(lane2 instanceof Float32Array) || lane2.length !== frames) {
+        this.fence(FRAME, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
         return false;
       }
-      if (this.memory.buffer !== this.buffer) {
-        this.fence(MEMORY, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+      const first0 = nativePhase(lane0[firstIndex], CLOCK_PERIODS[0]);
+      const first1 = nativePhase(lane1[firstIndex], CLOCK_PERIODS[1]);
+      const first2 = nativePhase(lane2[firstIndex], CLOCK_PERIODS[2]);
+      const last0 = nativePhase(lane0[frames - 1], CLOCK_PERIODS[0]);
+      const last1 = nativePhase(lane1[frames - 1], CLOCK_PERIODS[1]);
+      const last2 = nativePhase(lane2[frames - 1], CLOCK_PERIODS[2]);
+      if (first0 === null || first1 === null || first2 === null
+        || last0 === null || last1 === null || last2 === null
+        || (firstIndex !== 0 && (first0 !== 0 || first1 !== 0 || first2 !== 0))) {
+        this.fence(FRAME, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
         return false;
       }
-      for (let channel = 0; channel < this.channels; channel++) {
-        for (let frame = 0; frame < frames; frame++) outputs[0][channel][frame] = this.output[frame * this.channels + channel];
+      const candidate = this.owner.native_frame(first0, first1, first2,
+        last0, last1, last2, firstIndex, frames);
+      if (!integer(candidate, 0, Number.MAX_SAFE_INTEGER) || !Number.isSafeInteger(candidate + frames)) {
+        const status = this.owner.status();
+        this.fence(integer(status, 1, 0xffffffff) ? status : FRAME,
+          AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+        return false;
+      }
+      if (firstIndex !== 0 && candidate + firstIndex !== this.clockOrigin) {
+        this.fence(FRAME, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+        return false;
+      }
+      if (!validClockLane(lane0, frames, candidate, this.clockOrigin, this.clockH0,
+        CLOCK_PERIODS[0], sampleRate, firstIndex)
+        || !validClockLane(lane1, frames, candidate, this.clockOrigin, this.clockH1,
+          CLOCK_PERIODS[1], sampleRate, firstIndex)
+        || !validClockLane(lane2, frames, candidate, this.clockOrigin, this.clockH2,
+          CLOCK_PERIODS[2], sampleRate, firstIndex)) {
+        this.fence(FRAME, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+        return false;
+      }
+      frame = candidate;
+      framePresent = 1;
+      this.clockEnd = frame + frames;
+      if (this.clockStage === 2) {
+        this.clockStage = 3;
+        return true; // First partial callback never renders or commits an arm.
+      }
+      if (this.clockStage === 3) {
+        if (this.owner.native_clock_ready() !== true) {
+          this.fence(STATE, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+          return false;
+        }
+        this.clockStage = 4;
+        this.port.postMessage(this.clockReady);
+        if (this.failed || this.phase === 3) return false;
+      }
+      if (this.pendingArm !== null) {
+        failureOrigin = AUDIO_FAILURE_ORIGIN_ARM;
+        const status = this.owner.arm_words(this.pendingStartLow, this.pendingStartHigh,
+          frame % WORD, Math.floor(frame / WORD));
+        if (status !== 0) {
+          this.captureFailure(integer(status, 1, 0xffffffff) ? status : EXCEPTION,
+            AUDIO_FAILURE_ORIGIN_ARM, frame, framePresent, frames, framesPresent);
+          this.cancelArm(this.terminal.status, "audio");
+          this.fence(this.terminal.status, AUDIO_FAILURE_ORIGIN_ARM, frame, framePresent, frames, framesPresent);
+          return false;
+        }
+        this.phase = 2;
+        this.terminal.successfulArmFrame = frame;
+        this.terminal.successfulArmFramePresent = 1;
+        if (!this.cancelArm(0, null)) {
+          this.fence(EXCEPTION, AUDIO_FAILURE_ORIGIN_ARM, frame, framePresent, frames, framesPresent);
+          return false;
+        }
+        if (this.failed || this.phase === 3) return false;
+        failureOrigin = AUDIO_FAILURE_ORIGIN_PROCESS;
+      }
+      if (this.phase !== 0) {
+        const status = this.owner.render(frame % WORD, Math.floor(frame / WORD), frames);
+        if (status !== 0) {
+          this.fence(status, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+          return false;
+        }
+        if (this.memory.buffer !== this.buffer) {
+          this.fence(MEMORY, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+          return false;
+        }
+      }
+      if (this.clockPendingRevision === 0
+        && Math.min(this.clockH0, this.clockH1, this.clockH2) - this.clockEnd <= this.clockLowWater) {
+        const nextRevision = this.clockRevision + 1;
+        const to0 = this.clockH0 + CLOCK_PERIODS[0];
+        const to1 = this.clockH1 + CLOCK_PERIODS[1];
+        const to2 = this.clockH2 + CLOCK_PERIODS[2];
+        if (!integer(nextRevision, 1, Number.MAX_SAFE_INTEGER)
+          || !integer(to0, 1, Number.MAX_SAFE_INTEGER) || !integer(to1, 1, Number.MAX_SAFE_INTEGER)
+          || !integer(to2, 1, Number.MAX_SAFE_INTEGER) || markerTime(to0, sampleRate) === null
+          || markerTime(to1, sampleRate) === null || markerTime(to2, sampleRate) === null) {
+          this.fence(FRAME, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+          return false;
+        }
+        this.clockPendingRevision = nextRevision;
+        const refill = this.clockRefill;
+        refill.revision = nextRevision;
+        refill.from0 = this.clockH0;
+        refill.from1 = this.clockH1;
+        refill.from2 = this.clockH2;
+        refill.to0 = to0;
+        refill.to1 = to1;
+        refill.to2 = to2;
+        refill.frames = frames;
+        refill.endLow = this.clockEnd % WORD;
+        refill.endHigh = Math.floor(this.clockEnd / WORD);
+        this.port.postMessage(refill);
+        if (this.failed || this.phase === 3) return false;
+      }
+      if (this.phase !== 0) {
+        for (let channel = 0; channel < this.channels; channel++) {
+          for (let index = 0; index < frames; index++) {
+            outputs[0][channel][index] = this.output[index * this.channels + channel];
+          }
+        }
       }
       return true;
     } catch {
       this.silence(outputs);
-      this.fence(EXCEPTION, AUDIO_FAILURE_ORIGIN_PROCESS, frame, framePresent, frames, framesPresent);
+      this.captureFailure(EXCEPTION, failureOrigin, frame, framePresent, frames, framesPresent);
+      this.cancelArm(EXCEPTION, "exception");
+      this.fence(EXCEPTION, failureOrigin, frame, framePresent, frames, framesPresent);
       return false;
     }
   }

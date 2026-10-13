@@ -1,6 +1,8 @@
 // DOM-side ownership only. Gameplay and audio presentation evidence remain in
 // the shared runtime and the actual Worklet reports, not UI timers.
 import { readAudioFailureDiagnostics } from "./audio-failure.mjs";
+import { CLOCK_VERSION, CLOCK_ID, CLOCK_PERIODS, CLOCK_NAMES, clockGeometry } from "./native-audio-clock.mjs";
+import { markerTime } from "./worklet-native-frame-probe.mjs";
 const OWNER = Symbol("AudioHost owner");
 const U64_MAX = 18446744073709551615n;
 const I64_MIN = -9223372036854775808n;
@@ -127,6 +129,17 @@ export class AudioHost {
   #opening = deferred();
   #ready = deferred();
   #readyReceived = false;
+  #clockProbe = deferred();
+  #clockReady = deferred();
+  #clockReadyReceived = false;
+  #clockFrames = null;
+  #clockAcquiredMs = null;
+  #clockDeliveryMs = null;
+  #clockGeometry = null;
+  #clockRevision = 0;
+  #clockCommitted = false;
+  #clockPending = null;
+  #clockCancelled = null;
   #setupTimer = null;
   #abort = null;
   #sampleIds = new Set();
@@ -243,19 +256,25 @@ export class AudioHost {
           pcmLimits: config.pcmLimits, audioLimits: config.audioLimits,
         },
       });
+      host.#clockAcquiredMs = performance.now();
       host.#node.port.onmessage = event => host.#message(event.data);
       host.#node.port.onmessageerror = () => host.#fail(host.#error("message", "receive", "AudioWorklet message could not be decoded."));
       host.#node.onprocessorerror = () => host.#fail(host.#error("processor", "render", "AudioWorklet processor failed."));
       host.#node.port.start();
       host.#node.connect(host.#context.destination);
-      await Promise.race([Promise.all([resumed, host.#ready.promise]), host.#opening.promise]);
+      await Promise.race([Promise.all([resumed, host.#ready.promise, host.#clockProbe.promise]), host.#opening.promise]);
       if (host.#failure) throw host.#failure;
       if (host.#context.state !== "running") {
         throw host.#error("state", "open", "AudioContext did not enter its running state.");
       }
+      await Promise.race([host.#startClock(), host.#opening.promise]);
+      await Promise.race([host.#clockReady.promise, host.#opening.promise]);
+      if (host.#failure) throw host.#failure;
       host.#clearSetup();
       host.#opening = null;
       host.#ready = null;
+      host.#clockProbe = null;
+      host.#clockReady = null;
       host.#state = "setup";
       return host;
     } catch (cause) {
@@ -277,6 +296,157 @@ export class AudioHost {
     this.#setupTimer = null;
     if (this.#abort !== null) this.#config.signal.removeEventListener("abort", this.#abort);
     this.#abort = null;
+  }
+
+  #measureClockDelivery() {
+    if (!this.#readyReceived || this.#clockFrames === null || this.#clockDeliveryMs !== null) return;
+    const receivedMs = performance.now();
+    if (typeof receivedMs !== "number" || !Number.isFinite(receivedMs)
+      || typeof this.#clockAcquiredMs !== "number" || !Number.isFinite(this.#clockAcquiredMs)
+      || receivedMs < this.#clockAcquiredMs) {
+      throw this.#error("state", "clock", "Native clock delivery observation is invalid.");
+    }
+    this.#clockDeliveryMs = receivedMs - this.#clockAcquiredMs;
+  }
+
+  #clockFuture(boundaries) {
+    if (this.#failure) throw this.#failure;
+    if (this.#stopPromise || this.#context === null || this.#node === null) {
+      throw this.#error("closed", "clock", "Native clock owner was stopped.");
+    }
+    const seconds = this.#context.currentTime;
+    // A native getter/API can synchronously retire the owner; never continue
+    // scheduling after that retirement.
+    if (this.#failure) throw this.#failure;
+    if (this.#stopPromise || this.#context === null || this.#node === null) {
+      throw this.#error("closed", "clock", "Native clock owner was stopped.");
+    }
+    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+      throw this.#error("state", "clock", "Native clock scheduling time is invalid.");
+    }
+    for (const frame of boundaries) {
+      const time = markerTime(frame, this.sampleRate);
+      if (time === null || seconds >= time) {
+        throw this.#error("state", "clock", "Native clock scheduling missed its original deadline.");
+      }
+    }
+  }
+
+  #clockParameter(name, ramp) {
+    const parameter = this.#node.parameters?.get(name);
+    if (!parameter || typeof parameter.setValueAtTime !== "function"
+      || (ramp && typeof parameter.linearRampToValueAtTime !== "function")) {
+      throw this.#error("unsupported", "clock", "Native clock AudioParams are unavailable.");
+    }
+    return parameter;
+  }
+
+  #scheduleClock(parameter, methodName, value, frame, boundaries) {
+    const method = parameter[methodName];
+    const time = markerTime(frame, this.sampleRate);
+    if (typeof method !== "function" || time === null) {
+      throw this.#error("unsupported", "clock", "Native clock event is not representable.");
+    }
+    this.#clockFuture(boundaries);
+    method.call(parameter, value, time);
+    this.#clockFuture(boundaries);
+  }
+
+  async #startClock() {
+    const quantum = this.#clockFrames;
+    if (!integer(quantum, 2, this.#config.audioLimits.maxFrames)
+      || this.#clockDeliveryMs === null) {
+      throw this.#error("unsupported", "clock", "Initial native clock needs an interior quantum edge.");
+    }
+    const contextSeconds = this.#context.currentTime;
+    if (this.#failure) throw this.#failure;
+    if (this.#stopPromise) throw this.#error("closed", "clock", "Native clock owner was stopped.");
+    if (typeof contextSeconds !== "number" || !Number.isFinite(contextSeconds) || contextSeconds < 0) {
+      throw this.#error("state", "clock", "Native clock scheduling time is invalid.");
+    }
+    const frame = Math.ceil(contextSeconds * this.sampleRate);
+    const lead = Math.max(4 * quantum, Math.ceil(2 * this.#clockDeliveryMs * this.sampleRate / 1000));
+    const origin = Math.ceil((frame + lead) / quantum) * quantum + Math.floor(quantum / 2);
+    const geometry = clockGeometry(origin, this.#config.audioLimits.maxFrames, this.sampleRate);
+    if (!integer(frame, 0, Number.MAX_SAFE_INTEGER) || !integer(lead, 1, Number.MAX_SAFE_INTEGER)
+      || !integer(frame + lead, 1, Number.MAX_SAFE_INTEGER) || geometry === null) {
+      throw this.#error("state", "clock", "Native clock startup exceeds the representable frame range.");
+    }
+    this.#clockGeometry = geometry;
+    await this.#clockRequest("clock-reserve", {
+      revision: 0, origin, h0: geometry.h0, h1: geometry.h1, h2: geometry.h2,
+    });
+    const boundaries = [origin];
+    this.#clockFuture(boundaries);
+    const marker = this.#clockParameter(CLOCK_NAMES[0], false);
+    const lanes = CLOCK_NAMES.slice(1).map(name => this.#clockParameter(name, true));
+    // Fresh defaults and a single marker event are the origin provenance.
+    this.#scheduleClock(marker, "setValueAtTime", 1, origin, boundaries);
+    for (let lane = 0; lane < CLOCK_PERIODS.length; lane += 1) {
+      const parameter = lanes[lane];
+      const period = CLOCK_PERIODS[lane];
+      this.#scheduleClock(parameter, "setValueAtTime", 1, origin, boundaries);
+      for (let cycle = 1; cycle <= geometry.periods; cycle += 1) {
+        const end = origin + cycle * period;
+        this.#scheduleClock(parameter, "linearRampToValueAtTime", period + 1, end, boundaries);
+        this.#scheduleClock(parameter, "setValueAtTime", 1, end, boundaries);
+      }
+    }
+    this.#clockFuture(boundaries);
+    await this.#clockRequest("clock-commit", {
+      revision: 0, origin, h0: geometry.h0, h1: geometry.h1, h2: geometry.h2, futureEligible: true,
+    }, () => { this.#clockCommitted = true; });
+  }
+
+  #clockRequest(operation, payload, commit = null) {
+    const result = deferred();
+    if (this.#failure || this.#stopPromise || this.#clockPending !== null) {
+      result.reject(this.#failure ?? this.#error("state", "clock", "Native clock request owner is unavailable."));
+      return result.promise;
+    }
+    const pending = { operation, revision: payload.revision, commit, ...result, timer: null };
+    this.#clockPending = pending;
+    pending.timer = setTimeout(() => {
+      if (this.#clockPending !== pending) return;
+      this.#fail(this.#error("timeout", operation, "Native clock request timed out."));
+    }, this.#config.timeoutMs);
+    try {
+      this.#node.port.postMessage({ kind: operation, generation: this.generation,
+        clockVersion: CLOCK_VERSION, clockId: CLOCK_ID, ...payload });
+    } catch (cause) {
+      this.#fail(this.#error("transport", operation, "Native clock request could not be sent.", { cause }));
+    }
+    return result.promise;
+  }
+
+  #refillClock(message) {
+    const old = this.#clockGeometry;
+    // Reserve the one refill transaction before native API/property calls.
+    this.#clockCommitted = false;
+    const horizons = [old.h0, old.h1, old.h2];
+    const next = [message.to0, message.to1, message.to2];
+    // The existing reset at each OLD horizon begins the appended ramp.
+    // Scheduling another reset there would rewrite the original program.
+    this.#clockFuture(horizons);
+    const lanes = CLOCK_NAMES.slice(1).map(name => this.#clockParameter(name, true));
+    for (let lane = 0; lane < CLOCK_PERIODS.length; lane += 1) {
+      this.#scheduleClock(lanes[lane], "linearRampToValueAtTime", CLOCK_PERIODS[lane] + 1, next[lane], horizons);
+      this.#scheduleClock(lanes[lane], "setValueAtTime", 1, next[lane], horizons);
+    }
+    this.#clockFuture(horizons);
+    const geometry = { ...old, h0: next[0], h1: next[1], h2: next[2], periods: old.periods + 1 };
+    this.#clockRequest("clock-commit", {
+      revision: message.revision, origin: old.origin,
+      h0: next[0], h1: next[1], h2: next[2], futureEligible: true,
+    }, () => {
+      this.#clockGeometry = geometry;
+      this.#clockRevision = message.revision;
+      this.#clockCommitted = true;
+    }).catch(error => {
+      // stop() already owns cancellation and its fresh ACK; rejecting that
+      // cleanup again would retire the ACK path before it releases the owner.
+      if (!this.#stopPromise) this.#fail(error);
+    });
   }
 
   #gate(operation, phases) {
@@ -480,6 +650,114 @@ export class AudioHost {
       ? validReport(message.report) : message.report === null;
   }
 
+  #clockMessage(message, kind, ownerCurrent, ownerMalformed) {
+    const pending = this.#clockPending;
+    const cancelled = this.#clockCancelled;
+    const geometry = this.#clockGeometry;
+    const revision = this.#clockRevision;
+    const committed = this.#clockCommitted;
+    const readyReceived = this.#clockReadyReceived;
+    const frames = this.#clockFrames;
+    const current = () => ownerCurrent() && this.#clockPending === pending
+      && this.#clockCancelled === cancelled && this.#clockGeometry === geometry
+      && this.#clockRevision === revision && this.#clockCommitted === committed
+      && this.#clockReadyReceived === readyReceived && this.#clockFrames === frames;
+    const malformed = cause => { if (current()) ownerMalformed(cause); };
+    let fields;
+    try {
+      const clockVersion = message.clockVersion;
+      const clockId = message.clockId;
+      if (!current()) return;
+      if (clockVersion !== CLOCK_VERSION || clockId !== CLOCK_ID) { malformed(); return; }
+      if (kind === "clock-probe") {
+        fields = { frames: message.frames };
+      } else if (kind === "clock-ready") {
+        fields = { revision: message.revision, origin: message.origin };
+      } else if (kind === "clock-refill") {
+        fields = { revision: message.revision, from0: message.from0, from1: message.from1,
+          from2: message.from2, to0: message.to0, to1: message.to1, to2: message.to2,
+          frames: message.frames, endLow: message.endLow, endHigh: message.endHigh };
+      } else if (kind === "clock-reserved" || kind === "clock-committed") {
+        fields = { revision: message.revision, status: message.status, error: message.error };
+      } else {
+        malformed();
+        return;
+      }
+    } catch (cause) { malformed(cause); return; }
+    if (!current()) return;
+    if (kind === "clock-probe") {
+      if (!integer(fields.frames, 1, this.#config.audioLimits.maxFrames)
+        || frames !== null || this.#clockProbe === null) { malformed(); return; }
+      if (this.#stopPromise) return;
+      if (this.#state !== "opening") { malformed(); return; }
+      this.#clockFrames = fields.frames;
+      try { this.#measureClockDelivery(); }
+      catch (error) { this.#fail(error); return; }
+      this.#clockProbe.resolve();
+      return;
+    }
+    if (kind === "clock-ready") {
+      if (fields.revision !== 0 || geometry === null || fields.origin !== geometry.origin
+        || !committed || readyReceived) { malformed(); return; }
+      if (this.#stopPromise) return;
+      if (this.#state !== "opening" || this.#clockReady === null) { malformed(); return; }
+      this.#clockReadyReceived = true;
+      this.#clockReady.resolve();
+      return;
+    }
+    if (kind === "clock-refill") {
+      if (!integer(fields.endLow, 0, 0xffffffff) || !integer(fields.endHigh, 0, 0x1fffff)) {
+        malformed();
+        return;
+      }
+      const end = fields.endLow + fields.endHigh * 4294967296;
+      if (!readyReceived || !committed || geometry === null || pending !== null
+        || !integer(fields.revision, 1, Number.MAX_SAFE_INTEGER) || fields.revision !== revision + 1
+        || fields.from0 !== geometry.h0 || fields.from1 !== geometry.h1 || fields.from2 !== geometry.h2
+        || !integer(fields.to0, 1, Number.MAX_SAFE_INTEGER) || fields.to0 !== geometry.h0 + CLOCK_PERIODS[0]
+        || !integer(fields.to1, 1, Number.MAX_SAFE_INTEGER) || fields.to1 !== geometry.h1 + CLOCK_PERIODS[1]
+        || !integer(fields.to2, 1, Number.MAX_SAFE_INTEGER) || fields.to2 !== geometry.h2 + CLOCK_PERIODS[2]
+        || markerTime(fields.to0, this.sampleRate) === null
+        || markerTime(fields.to1, this.sampleRate) === null
+        || markerTime(fields.to2, this.sampleRate) === null
+        || !integer(fields.frames, 1, this.#config.audioLimits.maxFrames)
+        || !integer(end, fields.frames, Math.min(geometry.h0, geometry.h1, geometry.h2))
+        || end < geometry.origin || Math.min(geometry.h0, geometry.h1, geometry.h2) - end > geometry.lowWater) {
+        malformed();
+        return;
+      }
+      if (this.#stopPromise) return;
+      try { this.#refillClock(fields); }
+      catch (cause) {
+        this.#fail(cause instanceof AudioHostError ? cause
+          : this.#error("transport", "clock", "Native clock refill scheduling failed.", { cause }));
+      }
+      return;
+    }
+    const ackValid = request => request !== null
+      && kind === (request.operation === "clock-reserve" ? "clock-reserved" : "clock-committed")
+      && fields.revision === request.revision && integer(fields.status, 0, 0xffffffff)
+      && (fields.error === null || (typeof fields.error === "string" && fields.error.length <= 4096))
+      && (fields.status !== 0 || fields.error === null);
+    if (ackValid(cancelled)) {
+      this.#clockCancelled = null;
+      return;
+    }
+    if (!ackValid(pending)) { malformed(); return; }
+    clearTimeout(pending.timer);
+    this.#clockPending = null;
+    if (fields.status !== 0) {
+      const error = this.#error("remote", pending.operation, "AudioWorklet rejected its native clock transaction.", {
+        status: fields.status, remoteError: fields.error,
+      });
+      pending.reject(error);
+      this.#fail(error);
+      return;
+    }
+    if (pending.commit) pending.commit();
+    pending.resolve(fields);
+  }
+
   #message(message) {
     if (this.#node === null) return;
     const pending = this.#pending;
@@ -504,6 +782,10 @@ export class AudioHost {
     } catch (cause) { malformed(cause); return; }
     if (!current()) return;
     if (fields.generation !== this.generation) { malformed(); return; }
+    if (typeof fields.kind === "string" && fields.kind.startsWith("clock-")) {
+      this.#clockMessage(message, fields.kind, current, malformed);
+      return;
+    }
     if (fields.kind === "terminal") {
       if (!integer(fields.status, 1, 0xffffffff)) { malformed(); return; }
       let diagnostics;
@@ -527,6 +809,8 @@ export class AudioHost {
       if (this.#stopPromise) return;
       if (this.#state !== "opening" || this.#ready === null || this.#readyReceived) { malformed(); return; }
       this.#readyReceived = true;
+      try { this.#measureClockDelivery(); }
+      catch (error) { this.#fail(error); return; }
       this.#ready.resolve();
       return;
     }
@@ -572,6 +856,8 @@ export class AudioHost {
     this.#failure ??= error;
     this.#state = "failed";
     this.#opening?.reject(this.#failure);
+    this.#clockReady?.reject(this.#failure);
+    this.#clockProbe?.reject(this.#failure);
     // During cleanup, a broken ACK/message path cannot wait forever for stop.
     if (this.#pending?.operation === "stop") {
       const pending = this.#pending;
@@ -589,6 +875,15 @@ export class AudioHost {
     this.#clearSetup();
     const cancellation = this.#failure ?? this.#error("closed", "stop", "Audio owner was stopped.");
     this.#opening?.reject(cancellation);
+    this.#clockReady?.reject(cancellation);
+    this.#clockProbe?.reject(cancellation);
+    if (this.#clockPending) {
+      const pending = this.#clockPending;
+      this.#clockCancelled = { operation: pending.operation, revision: pending.revision };
+      this.#clockPending = null;
+      clearTimeout(pending.timer);
+      pending.reject(cancellation);
+    }
     if (this.#pending) {
       const pending = this.#pending;
       this.#cancelled = { operation: pending.operation, sequence: pending.sequence, count: pending.count };
@@ -635,6 +930,10 @@ export class AudioHost {
       }
     }
     this.#cancelled = null;
+    this.#clockCancelled = null;
+    this.#clockGeometry = null;
+    this.#clockReady = null;
+    this.#clockProbe = null;
     this.#ready = null;
     this.#opening = null;
     this.#sampleIds.clear();

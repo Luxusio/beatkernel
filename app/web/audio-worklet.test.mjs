@@ -10,6 +10,32 @@ import { readAudioFailureDiagnostics, AUDIO_FAILURE_ORIGIN_CONTROL,
 const processorSource = await readFile(new URL("./audio-worklet.js", import.meta.url), "utf8");
 const encodingSource = await readFile(new URL("./worklet-encoding.mjs", import.meta.url), "utf8");
 const failureSource = await readFile(new URL("./audio-failure.mjs", import.meta.url), "utf8");
+const nativeClockSource = await readFile(new URL("./native-audio-clock.mjs", import.meta.url), "utf8");
+const nativeProbeSource = await readFile(new URL("./worklet-native-frame-probe.mjs", import.meta.url), "utf8");
+const CLOCK_NAMES = ["__beatkernel_clock_marker", "__beatkernel_clock_0", "__beatkernel_clock_1", "__beatkernel_clock_2"];
+const PERIODS = [1048576, 1048575, 1048573];
+const DEFAULT_FRAME = 10;
+const wordPair = value => [value % 4294967296, Math.floor(value / 4294967296)];
+function geometry(origin, cycles = 3) {
+  return { origin, h0: origin + cycles * PERIODS[0], h1: origin + cycles * PERIODS[1], h2: origin + cycles * PERIODS[2] };
+}
+// Independent native event-time oracle: no product phase/CRT helper generates these inputs.
+function nativeParameters(frame, frames, origin, { markerScalar = false } = {}) {
+  const marker = markerScalar ? new Float32Array([1]) : Float32Array.from({ length: frames }, (_, index) => Number(frame + index >= origin));
+  const parameters = { [CLOCK_NAMES[0]]: marker };
+  for (let lane = 0; lane < 3; lane++) {
+    const period = PERIODS[lane];
+    parameters[CLOCK_NAMES[lane + 1]] = Float32Array.from({ length: frames }, (_, index) => {
+      const position = frame + index;
+      if (position < origin) return 0;
+      const cycle = Math.floor((position - origin) / period);
+      const from = (origin + cycle * period - 0.25) / 48000;
+      const to = (origin + (cycle + 1) * period - 0.25) / 48000;
+      return 1 + period * (position / 48000 - from) / (to - from);
+    });
+  }
+  return parameters;
+}
 const emptyModule = new WebAssembly.Module(Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0]));
 
 function options(overrides = {}) {
@@ -39,6 +65,9 @@ async function harness(faults = {}) {
   let activeProcessor;
   let callbackViews = 0;
   let callbackBigInts = 0;
+  let actualNativeFrame = 0;
+  let candidateCalls = 0;
+  let fixtureOrigin = 5;
   class CommandPort {
     constructor() { this.messages = []; this.onmessage = null; this.onmessageerror = null; this.closes = 0; this.starts = 0; }
     postMessage(message) { this.messages.push(structuredClone(message)); if (faults.portPostThrows) throw new Error("port post failed"); }
@@ -63,10 +92,12 @@ async function harness(faults = {}) {
     constructor(...args) {
       if (faults.constructorError) throw new Error("binding constructor failed");
       this.args = args;
-      this.calls = { samples: [], finish: 0, finishAt: [], arm: [], enqueue: [], render: [], reports: [], metadata: 0 };
+      this.calls = { samples: [], finish: 0, finishAt: [], arm: [], armWords: [], enqueue: [], render: [], reports: [], metadata: 0,
+        nativeStart: [], nativeExtend: [], nativeFrame: [], nativeReady: 0, order: [] };
       this.frees = 0;
       this.pcm = new Float32Array(0);
       this.words = new Uint32Array(58);
+      for (const name of faults.missingExports ?? []) this[name] = undefined;
       owners.push(this);
     }
     get report_fields() { return Object.hasOwn(faults, "reportFields") ? faults.reportFields : 29; }
@@ -83,6 +114,22 @@ async function harness(faults = {}) {
     output_ptr() { this.calls.metadata++; return faults.pointer ?? 64; }
     output_len() { this.calls.metadata++; return faults.length ?? this.args[1] * this.args[8]; }
     arm(...args) { this.calls.arm.push(args); if (faults.armThrows) throw new Error("arm failed"); return faults.armStatus ?? 0; }
+    native_clock_start(...args) { this.calls.nativeStart.push(args); candidateCalls = 0; return faults.nativeStartStatus ?? 0; }
+    native_clock_extend(...args) { this.calls.nativeExtend.push(args); return faults.nativeExtendStatus ?? 0; }
+    native_frame(...args) {
+      assert.equal(inProcess, true);
+      this.calls.nativeFrame.push(args); this.calls.order.push("native"); candidateCalls++;
+      if (faults.nativeFrameThrows) throw new Error("native frame failed");
+      return faults.nativeFrames?.[this.calls.nativeFrame.length - 1] ?? actualNativeFrame;
+    }
+    native_clock_ready() { this.calls.nativeReady++; return faults.nativeReady ?? candidateCalls >= 2; }
+    arm_words(...args) {
+      assert.equal(inProcess, true, "arm admission uses the validated callback, never control arrival");
+      this.calls.armWords.push(args); this.calls.order.push("arm");
+      this.calls.arm.push([BigInt(args[1]) * 4294967296n + BigInt(args[0]), BigInt(args[3]) * 4294967296n + BigInt(args[2])]);
+      if (faults.armThrows) throw new Error("arm failed");
+      return faults.armStatus ?? 0;
+    }
     enqueue(...args) {
       this.calls.enqueue.push(args);
       if (this.calls.enqueue.length === faults.enqueueThrowAt) throw new Error("binding admission threw");
@@ -90,7 +137,7 @@ async function harness(faults = {}) {
     }
     render(...args) {
       assert.equal(inProcess, true);
-      this.calls.render.push(args);
+      this.calls.render.push(args); this.calls.order.push("render");
       const status = faults.renderStatuses?.[this.calls.render.length - 1] ?? faults.renderStatus ?? 0;
       if (faults.renderThrows) throw new Error("render threw");
       new Float32Array(memory.buffer, 64, this.args[1] * this.args[8]).set(this.pcm);
@@ -138,6 +185,12 @@ async function harness(faults = {}) {
   });
   const encoding = new SourceTextModule(encodingSource, { context });
   const failure = new SourceTextModule(failureSource, { context });
+  const nativeProbe = new SourceTextModule(nativeProbeSource, { context });
+  const nativeClock = new SourceTextModule(nativeClockSource, { context });
+  await nativeProbe.link(() => { throw new Error("Unexpected numeric helper import"); });
+  await nativeClock.link(specifier => {
+    assert.equal(specifier, "./worklet-native-frame-probe.mjs"); return nativeProbe;
+  });
   const bindings = new SyntheticModule(["initSync", "BrowserAudio"], function () {
     this.setExport("initSync", args => {
       assert.equal(typeof context.TextEncoder, "function", "bootstrap must precede binding initialization");
@@ -151,29 +204,88 @@ async function harness(faults = {}) {
   await actual.link(specifier => {
     if (specifier === "./worklet-encoding.mjs") return encoding;
     if (specifier === "./audio-failure.mjs") return failure;
+    if (specifier === "./native-audio-clock.mjs") return nativeClock;
+    if (specifier === "./worklet-native-frame-probe.mjs") return nativeProbe;
     if (specifier === "./audio-pkg/beatkernel_bms_runtime.js") return bindings;
     throw new Error(`Unexpected processor import: ${specifier}`);
   });
   await actual.evaluate();
-  return {
+  const api = {
     owners, ports, memory, context, initializations,
+    descriptors() { return Array.from(Processor.parameterDescriptors, value => ({ ...value })); },
+    callbackBodies() {
+      const methods = new Map(Object.entries(Object.getOwnPropertyDescriptors(Processor.prototype))
+        .filter(([, descriptor]) => typeof descriptor.value === "function")
+        .map(([name, descriptor]) => [name, descriptor.value.toString()]));
+      const imports = new Map([...Object.keys(nativeClock.namespace), ...Object.keys(nativeProbe.namespace)]
+        .map(name => [name, nativeClock.namespace[name] ?? nativeProbe.namespace[name]])
+        .filter(([, value]) => typeof value === "function")
+        .map(([name, value]) => [name, value.toString()]));
+      const bodies = new Map(), queue = ["process"];
+      while (queue.length) {
+        const name = queue.pop();
+        if (bodies.has(name)) continue;
+        const body = methods.get(name) ?? imports.get(name);
+        if (!body) continue;
+        bodies.set(name, body);
+        for (const [, target] of body.matchAll(/this\.([A-Za-z_$][\w$]*)\s*\(/g)) if (methods.has(target)) queue.push(target);
+        for (const [, target] of body.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)) if (imports.has(target)) queue.push(target);
+      }
+      return bodies;
+    },
     commandPort() { return new CommandPort(); },
     get memoryReads() { return memoryReads; },
     get callbackViews() { return callbackViews; },
     get callbackBigInts() { return callbackBigInts; },
-    create(overrides) { return new Processor({ processorOptions: options(overrides) }); },
+    createRaw(overrides) { return new Processor({ processorOptions: options(overrides) }); },
+    create(overrides) { return this.createAt(faults.fixtureBase ?? DEFAULT_FRAME, overrides); },
+    createAt(base, overrides) {
+      const processor = this.createRaw(overrides);
+      this.certify(processor, base); return processor;
+    },
     send(processor, kind, sequence, fields = {}) {
       assert.equal(typeof processor.port.onmessage, "function");
       processor.port.onmessage({ data: { kind, generation: 17, sequence, ...fields } });
-      return processor.port.messages.filter(message => message.kind === "ack").at(-1);
+      return processor.port.messages.filter(message => message.kind === "ack" && message.sequence === sequence).at(-1);
     },
-    process(processor, frame, output) {
-      context.currentFrame = frame;
+    clock(processor, kind, fields = {}) {
+      processor.port.onmessage?.({ data: { kind, generation: 17, clockVersion: 1, clockId: 1, ...fields } });
+      const response = kind === "clock-reserve" ? "clock-reserved" : "clock-committed";
+      return notices(processor, response).at(-1);
+    },
+    reserve(processor, origin = fixtureOrigin, cycles = 3) {
+      fixtureOrigin = origin;
+      const program = geometry(origin, cycles);
+      this.clock(processor, "clock-reserve", { revision: 0, ...program }); return program;
+    },
+    commit(processor, program) {
+      return this.clock(processor, "clock-commit", { revision: 0, ...program, futureEligible: true });
+    },
+    certify(processor, base = DEFAULT_FRAME) {
+      assert.equal(this.process(processor, base - 10, planar(5), Object.fromEntries(CLOCK_NAMES.map(name => [name, new Float32Array([0])]))), true);
+      const program = this.reserve(processor, base - 5);
+      assert.equal(this.commit(processor, program)?.status, 0);
+      assert.equal(this.process(processor, base - 7, planar(5), nativeParameters(base - 7, 5, program.origin)), true);
+      assert.equal(notices(processor, "clock-ready").length, 0);
+      assert.equal(this.process(processor, base - 2, planar(2), nativeParameters(base - 2, 2, program.origin)), true);
+      assert.equal(notices(processor, "clock-ready").length, 1);
+      return program;
+    },
+    arm(processor, sequence, frame, current = DEFAULT_FRAME, frames = 1) {
+      assert.equal(this.send(processor, "arm", sequence, { frame }), undefined, "arm success is deferred");
+      const output = planar(frames); this.process(processor, current, output);
+      return notices(processor, "ack").find(message => message.sequence === sequence);
+    },
+    process(processor, frame, output, parameters, publishedFrame = frame) {
+      context.currentFrame = publishedFrame; actualNativeFrame = frame;
+      const frames = output?.[0]?.[0]?.length ?? 0;
+      const native = parameters ?? nativeParameters(frame, frames, fixtureOrigin);
       activeProcessor = processor;
       inProcess = true;
-      try { return processor.process([], output); } finally { inProcess = false; }
+      try { return processor.process([], output, native); } finally { inProcess = false; }
     },
   };
+  return api;
 }
 function planar(frames, channels = 2) {
   return [Array.from({ length: channels }, () => new Float32Array(frames).fill(9))];
@@ -234,7 +346,7 @@ test("dedicated samples use shared insertion with independent sequence and exact
   assert.equal(h.send(processor, "finish", 2, { endFrame: 7n }).status, 0);
   assert.deepEqual(owner.calls.finishAt, [7n]);
   const commands = h.commandPort(); assert.equal(h.send(processor, "attach-commands", 3, { port: commands }).status, 0);
-  assert.equal(h.send(processor, "arm", 4, { frame: 11n }).status, 0);
+  assert.equal(h.arm(processor, 4, 11n).status, 0);
   commands.send({ kind: "commands", generation: 17, sequence: 1, commands: [command()] });
   assert.equal(commands.messages.at(-1).admitted, 1);
   assert.equal(h.send(processor, "stop", 5).status, 0);
@@ -350,7 +462,7 @@ test("dedicated command ownership uses the actual shared enqueue path and indepe
     value.at, value.gain, value.value, value.denominator]));
   const poll = h.send(processor, "poll", 4); assert.equal(poll.sequence, 4); assert.equal(poll.report.available, false);
   assert.equal(owner.calls.reports.length, 58);
-  assert.equal(h.send(processor, "arm", 5, { frame: 9007199254740993n }).status, 0);
+  assert.equal(h.arm(processor, 5, 9007199254740993n).status, 0);
   port.send({ kind: "commands", generation: 17, sequence: 2, commands: [command({ kind: 3 })] });
   assert.equal(port.messages.at(-1).admitted, 1);
   const stale = port.onmessage;
@@ -361,7 +473,7 @@ test("dedicated command ownership uses the actual shared enqueue path and indepe
   const noticesBefore = port.messages.length;
   stale({ data: { kind: "commands", generation: 17, sequence: 3, commands: [command()] } });
   assert.equal(owner.calls.enqueue.length, 4); assert.equal(port.messages.length, noticesBefore);
-  const output = planar(2); assert.equal(h.process(processor, 0, output), false); assertSilent(output);
+  const output = planar(2); assert.equal(h.process(processor, DEFAULT_FRAME, output), false); assertSilent(output);
   const next = h.create(); h.send(next, "finish", 1);
   stale({ data: { kind: "commands", generation: 17, sequence: 3, commands: [command()] } });
   assert.equal(h.owners[1].calls.enqueue.length, 0); h.send(next, "stop", 2);
@@ -371,7 +483,7 @@ test("command endpoint refusal and actual partial admission fence both lanes onc
   for (const phase of ["setup", "armed", "duplicate"]) {
     const h = await harness(), processor = h.create(); let sequence = 0;
     if (phase !== "setup") h.send(processor, "finish", ++sequence);
-    if (phase === "armed") h.send(processor, "arm", ++sequence, { frame: 0n });
+    if (phase === "armed") h.arm(processor, ++sequence, 10n);
     const existing = phase === "duplicate" ? h.commandPort() : null;
     if (existing) assert.equal(h.send(processor, "attach-commands", ++sequence, { port: existing }).status, 0);
     const refused = h.commandPort();
@@ -398,7 +510,7 @@ test("command endpoint refusal and actual partial admission fence both lanes onc
     if (scenario.hostCommands) assert.equal(h.send(processor, "commands", 3, { commands: [command()] }).status, scenario.status);
     else if (scenario.messageError) port.onmessageerror({ type: "messageerror" });
     else if (scenario.render) {
-      const output = planar(2); assert.equal(h.process(processor, 0, output), false); assertSilent(output);
+      const output = planar(2); assert.equal(h.process(processor, DEFAULT_FRAME, output), false); assertSilent(output);
     } else {
       port.send({ kind: "commands", generation: 17, sequence: 1,
         commands: [command(), command({ kind: 1 }), command({ kind: 2 })], ...scenario.fields });
@@ -421,7 +533,7 @@ test("command endpoint refusal and actual partial admission fence both lanes onc
 });
 
 test("host and direct polling read the same actual report words outside process with independent lane sequences", async () => {
-  const h = await harness(), processor = h.create(), owner = h.owners[0], port = h.commandPort();
+  const h = await harness(), processor = h.createAt(3 * 4294967296 + 7), owner = h.owners[0], port = h.commandPort();
   h.send(processor, "finish", 1); h.send(processor, "attach-commands", 2, { port });
   port.send({ kind: "poll", generation: 17, sequence: 1 });
   const empty = port.messages.at(-1);
@@ -437,7 +549,7 @@ test("host and direct polling read the same actual report words outside process 
   const values = [command(), command({ kind: 1 })];
   port.send({ kind: "commands", generation: 17, sequence: 2, commands: values });
   assert.equal(port.messages.at(-1).admitted, 2); assert.equal(port.messages.at(-1).report, null);
-  assert.equal(h.send(processor, "arm", 4, { frame: 9007199254740993n }).status, 0);
+  assert.equal(h.arm(processor, 4, 9007199254740993n, 3 * 4294967296 + 7).status, 0);
 
   owner.pcm = new Float32Array([0.25, -0.25, 0.5, -0.5, 1, -1]);
   const readCount = owner.calls.reports.length, messages = port.messages.length;
@@ -488,7 +600,7 @@ test("direct report faults preserve zero admission, fence both lanes once and ca
       assert.equal(port.messages.at(-1).admitted, 1);
     }
     if (scenario.renderFailure) {
-      const output = planar(1); assert.equal(h.process(processor, 0, output), false); assertSilent(output);
+      const output = planar(1); assert.equal(h.process(processor, DEFAULT_FRAME, output), false); assertSilent(output);
     }
     const before = port.messages.length;
     port.send({ kind: "poll", generation: 17, sequence: scenario.priorCommand ? 2 : 1, ...scenario.fields });
@@ -608,7 +720,7 @@ test("transferred NaN and both infinities reject before Rust insertion and leave
     assert.notEqual(h.send(processor, "sample", 4, sample({ id: 2n, pcm: new Float32Array(0) })).status, 0);
     assert.equal(owner.calls.samples.length, 1, "fencing prevents retry even with a fresh valid buffer");
     const silent = planar(2);
-    assert.equal(h.process(processor, 0, silent), false); assertSilent(silent);
+    assert.equal(h.process(processor, DEFAULT_FRAME, silent), false); assertSilent(silent);
     assert.equal(owner.calls.render.length, 0); assert.equal(owner.frees, 0);
     assert.equal(notices(processor, "terminal").length, 1);
     assert.equal(h.send(processor, "stop", 5).status, 0);
@@ -646,8 +758,8 @@ test("finite finish selects the exact binding once and omitted endpoints preserv
     const polled = h.send(processor, "poll", 2);
     assert.equal(polled.report.available, false, "configuration alone cannot fabricate a finite render marker");
     assert.ok(polled.report.words.every(value => value === 0));
-    assert.equal(h.send(processor, "arm", 3, { frame: 0n }).status, 0);
-    assert.deepEqual(owner.calls.arm, [[0n, 0n]]);
+    assert.equal(h.arm(processor, 3, 10n).status, 0);
+    assert.deepEqual(owner.calls.arm, [[10n, 10n]]);
     const value = command();
     assert.equal(h.send(processor, "commands", 4, { commands: [value] }).admitted, 1);
     assert.deepEqual(owner.calls.enqueue[0], [value.kind, value.voice, value.sample, value.at, value.gain, value.value, value.denominator]);
@@ -670,7 +782,7 @@ test("worklet independently rejects malformed finite endpoints and fences bindin
     assert.deepEqual(owner.calls.finishAt, []);
     assert.equal(owner.calls.metadata, 0);
     const output = planar(3);
-    assert.equal(h.process(processor, 0, output), false);
+    assert.equal(h.process(processor, DEFAULT_FRAME, output), false);
     assertSilent(output);
     assert.equal(notices(processor, "terminal").length, 1);
     assert.equal(owner.frees, 0);
@@ -701,10 +813,11 @@ test("worklet independently rejects malformed finite endpoints and fences bindin
 
 test("setup stays silent and unavailable; fixed view copies varied planar blocks with exact frame words", async () => {
   const h = await harness();
-  const processor = h.create();
+  const base = 3 * 4294967296 - 1;
+  const processor = h.createAt(base);
   const owner = h.owners[0];
   const setup = planar(3);
-  assert.equal(h.process(processor, 0, setup), true);
+  assert.equal(h.process(processor, base, setup), true);
   assertSilent(setup);
   assert.equal(owner.calls.render.length, 0);
   const initial = h.send(processor, "poll", 1);
@@ -714,9 +827,8 @@ test("setup stays silent and unavailable; fixed view copies varied planar blocks
   assert.equal(h.send(processor, "finish", 2).status, 0);
   const metadataReads = owner.calls.metadata;
   const memoryReads = h.memoryReads;
-  const base = 3 * 4294967296 - 1;
-  h.context.currentFrame = base;
-  assert.equal(h.send(processor, "arm", 3, { frame: BigInt(base + 1) }).status, 0);
+  h.context.currentFrame = 0;
+  assert.equal(h.arm(processor, 3, BigInt(base + 1), base).status, 0);
   assert.deepEqual(owner.calls.arm, [[BigInt(base + 1), BigInt(base)]]);
   const admitted = h.send(processor, "commands", 4, { commands: [0, 1, 2, 3].map(kind => command({ kind })) });
   assert.equal(admitted.status, 0);
@@ -732,7 +844,8 @@ test("setup stays silent and unavailable; fixed view copies varied planar blocks
     assert.equal(h.process(processor, current, output), true);
     assert.deepEqual(Array.from(output[0][0]), Array.from(owner.pcm).filter((_, index) => index % 2 === 0).slice(0, frames));
     assert.deepEqual(Array.from(output[0][1]), Array.from(owner.pcm).filter((_, index) => index % 2 === 1).slice(0, frames));
-    assert.deepEqual(owner.calls.render.at(-1), words);
+    if (frames !== 0) assert.deepEqual(owner.calls.render.at(-1), words);
+    else assert.equal(owner.calls.render.at(-1)[2], 5, "zero callback does not enter Rust or advance chronology");
     current += frames;
   }
   assert.equal(owner.calls.metadata, metadataReads);
@@ -792,7 +905,7 @@ test("binding failure and exceptions acknowledge the exact admitted prefix and n
     assert.equal(h.send(processor, "commands", 3, { commands }).status, 103);
     assert.equal(owner.calls.enqueue.length, 2);
     const output = planar(2);
-    assert.equal(h.process(processor, 0, output), false);
+    assert.equal(h.process(processor, DEFAULT_FRAME, output), false);
     assertSilent(output);
     assert.equal(owner.calls.render.length, 0);
     assert.equal(notices(processor, "terminal").length, 1);
@@ -816,7 +929,7 @@ test("stale generations and sequence gaps fence once and only fresh matching sto
     assert.equal(h.send(processor, "stop", 50).status, 0);
     assert.equal(h.owners[0].frees, 1);
     const output = planar(1);
-    assert.equal(h.process(processor, 0, output), false);
+    assert.equal(h.process(processor, DEFAULT_FRAME, output), false);
     assertSilent(output);
     const next = h.create();
     h.send(next, "stop", 1);
@@ -841,12 +954,12 @@ test("memory changes and invalid output layouts fence before copying stale or pa
     h.owners[0].pcm = new Float32Array([0.5, -0.5]);
     scenario.before?.(h);
     const output = scenario.output?.() ?? planar(2);
-    assert.equal(h.process(processor, scenario.frame ?? 0, output), false);
+    assert.equal(h.process(processor, scenario.frame ?? DEFAULT_FRAME, output), false);
     assertSilent(output);
     assert.equal(h.owners[0].calls.render.length, scenario.rendered);
     assert.equal(notices(processor, "terminal")[0].status, scenario.status);
     const repeated = planar(1);
-    assert.equal(h.process(processor, 0, repeated), false);
+    assert.equal(h.process(processor, DEFAULT_FRAME, repeated), false);
     assertSilent(repeated);
     assert.equal(notices(processor, "terminal").length, 1);
     assert.equal(h.owners[0].frees, 0);
@@ -863,7 +976,7 @@ test("numeric render errors and thrown bindings emit one terminal notice without
     owner.pcm = new Float32Array([0.75, -0.75]);
     const output = planar(2);
     const acknowledgments = notices(processor, "ack").length;
-    assert.equal(h.process(processor, 0, output), false);
+    assert.equal(h.process(processor, DEFAULT_FRAME, output), false);
     assertSilent(output);
     assert.equal(notices(processor, "ack").length, acknowledgments);
     assert.equal(notices(processor, "terminal")[0].status, status);
@@ -887,7 +1000,7 @@ test("finish rejects invalid fixed storage metadata before rendering and preserv
     assert.equal(h.owners[0].calls.render.length, 0);
     assert.equal(h.owners[0].frees, 0);
     const output = planar(2);
-    assert.equal(h.process(processor, 0, output), false);
+    assert.equal(h.process(processor, DEFAULT_FRAME, output), false);
     assertSilent(output);
     h.send(processor, "stop", 2);
     assert.equal(h.owners[0].frees, 1);
@@ -907,11 +1020,11 @@ function facts(processor) { return readAudioFailureDiagnostics(notices(processor
 test("mocked native chronology gap repeat and backwards preserve exact failing grid and retained high words", async () => {
   const base = 3 * 4294967296 + 7;
   for (const failedFrame of [base + 5, base, base - 1]) {
-    const h = await harness({ renderStatuses: [0, 6] }), processor = h.create(), owner = h.owners[0];
+    const h = await harness({ renderStatuses: [0, 0, 6] }), processor = h.createAt(base), owner = h.owners[0];
     const terminal = processor.terminal;
     h.send(processor, "finish", 1);
     h.context.currentFrame = base - 10;
-    h.send(processor, "arm", 2, { frame: BigInt(base) });
+    h.arm(processor, 2, BigInt(base), base - 1);
     chronology(owner, { expected: [0xffffffff, 0xffffffff], start: [0, 0] });
     assert.equal(h.process(processor, base, planar(3)), true);
     assert.equal(owner.calls.reports.length, 0, "successful callback cannot poll chronology");
@@ -925,30 +1038,30 @@ test("mocked native chronology gap repeat and backwards preserve exact failing g
       currentFramePresent: 1, currentFrame: failedFrame, blockFramesPresent: 1, blockFrames: 2,
       expectedFramePresent: 1, expectedFrameLow: 10, expectedFrameHigh: 3,
       startFramePresent: 1, startFrameLow: 7, startFrameHigh: 3,
-      successfulArmFramePresent: 1, successfulArmFrame: base - 10,
+      successfulArmFramePresent: 1, successfulArmFrame: base - 1,
     });
     assert.deepEqual(owner.calls.reports, [[23, false], [24, false], [24, true], [25, false], [26, false], [26, true]]);
     assert.equal(h.callbackViews, 0); assert.equal(h.callbackBigInts, 0); assert.equal(owner.frees, 0);
     const original = structuredClone(terminal);
     chronology(owner, { expected: [0xffffffff, 0xffffffff], start: [0, 0] });
     assert.equal(h.process(processor, failedFrame + 99, planar(1)), false);
-    assert.equal(h.send(processor, "arm", 3, { frame: 0n }).status, 103);
+    assert.equal(h.send(processor, "arm", 3, { frame: 10n }).status, 103);
     h.send(processor, "stop", 4);
     assert.equal(processor.terminal, terminal);
     assert.deepEqual(structuredClone(terminal), original); assert.equal(notices(processor, "terminal").length, 1);
   }
 });
 
-test("native diagnostic zero is present and absence never borrows stale low high words", async () => {
+test("native chronology zero words are present and absence never borrows stale low high words", async () => {
   for (const present of [false, true]) {
     const h = await harness({ renderStatus: 6 }), processor = h.create(), owner = h.owners[0];
     h.send(processor, "finish", 1);
     chronology(owner, present ? { expected: [0, 0], start: [0, 0] } : {});
     if (!present) { owner.words[48] = 99; owner.words[49] = 8; owner.words[52] = 77; owner.words[53] = 9; }
-    assert.equal(h.process(processor, 0, planar(0)), false);
+    assert.equal(h.process(processor, DEFAULT_FRAME, planar(1)), false);
     const diagnostic = facts(processor);
-    assert.equal(diagnostic.currentFramePresent, 1); assert.equal(diagnostic.currentFrame, 0);
-    assert.equal(diagnostic.blockFramesPresent, 1); assert.equal(diagnostic.blockFrames, 0);
+    assert.equal(diagnostic.currentFramePresent, 1); assert.equal(diagnostic.currentFrame, DEFAULT_FRAME);
+    assert.equal(diagnostic.blockFramesPresent, 1); assert.equal(diagnostic.blockFrames, 1);
     assert.equal(diagnostic.expectedFramePresent, Number(present)); assert.equal(diagnostic.startFramePresent, Number(present));
     assert.equal(diagnostic.expectedFrameLow, 0); assert.equal(diagnostic.expectedFrameHigh, 0);
     assert.equal(diagnostic.startFrameLow, 0); assert.equal(diagnostic.startFrameHigh, 0);
@@ -1006,23 +1119,28 @@ test("reentrant failed ACK posting preserves first cause admitted prefix and the
   assert.equal(Object.hasOwn(notices(processor, "ack").at(-1), "diagnostics"), false, "successful ACK carries no failure object");
 });
 
-test("control and arm failures preserve operation origin phase and only validated actual arm frames", async () => {
+test("control and callback arm failures preserve operation origin phase and only validated native frames", async () => {
   for (const scenario of [
     { kind: "finish", faults: { finishStatus: 9 }, phase: 0, origin: AUDIO_FAILURE_ORIGIN_CONTROL, status: 9, current: false },
     { kind: "arm", faults: { armStatus: 6 }, phase: 1, origin: AUDIO_FAILURE_ORIGIN_ARM, status: 6, current: true },
     { kind: "arm", faults: { armThrows: true }, phase: 1, origin: AUDIO_FAILURE_ORIGIN_ARM, status: 106, current: true },
-    { kind: "arm", frame: -1, faults: {}, phase: 1, origin: AUDIO_FAILURE_ORIGIN_ARM, status: 100, current: false },
+    { kind: "arm", target: -1n, faults: {}, phase: 1, origin: AUDIO_FAILURE_ORIGIN_ARM, status: 100, current: false },
   ]) {
-    const h = await harness(scenario.faults), processor = h.create();
+    const native = 4294967305;
+    const h = await harness(scenario.faults), processor = h.createAt(native);
     let sequence = 1;
     if (scenario.kind === "arm") h.send(processor, "finish", sequence++);
-    h.context.currentFrame = scenario.frame ?? 4294967305;
-    assert.equal(h.send(processor, scenario.kind, sequence++, { frame: 0n }).status, scenario.status);
+    h.context.currentFrame = -1;
+    const seq = sequence++;
+    const ack = scenario.current ? h.arm(processor, seq, BigInt(native + 1), native)
+      : h.send(processor, scenario.kind, seq, { frame: scenario.target ?? 0n });
+    assert.equal(ack.status, scenario.status);
     const diagnostic = facts(processor);
     assert.equal(diagnostic.origin, scenario.origin); assert.equal(diagnostic.ownerPhase, scenario.phase);
     assert.equal(diagnostic.currentFramePresent, Number(scenario.current));
-    assert.equal(diagnostic.currentFrame, scenario.current ? 4294967305 : 0);
-    assert.equal(diagnostic.blockFramesPresent, 0); assert.equal(diagnostic.blockFrames, 0);
+    assert.equal(diagnostic.currentFrame, scenario.current ? native : 0);
+    assert.equal(diagnostic.blockFramesPresent, Number(scenario.current));
+    assert.equal(diagnostic.blockFrames, scenario.current ? 1 : 0);
     assert.equal(diagnostic.successfulArmFramePresent, 0); assert.equal(diagnostic.successfulArmFrame, 0);
     h.send(processor, "stop", sequence);
   }
@@ -1049,7 +1167,7 @@ test("first payload reaches every owned port despite posting cleanup and failed-
   h.send(next, "finish", 1); h.send(next, "attach-commands", 2, { port: commands });
   faults.renderStatus = 6; faults.portPostThrows = true;
   chronology(nextOwner, { expected: [0, 8], start: [9, 7] });
-  assert.equal(h.process(next, 4294967300, planar(2)), false);
+  assert.equal(h.process(next, DEFAULT_FRAME, planar(2)), false);
   const nextTerminal = next.terminal;
   const captured = structuredClone(nextTerminal);
   assert.deepEqual(commands.messages.find(message => message.kind === "terminal"), captured);
@@ -1076,10 +1194,465 @@ test("layout and memory failures retain known callback facts without inventing m
     assert.equal(notices(processor, "terminal")[0].status, scenario.status);
     const diagnostic = facts(processor);
     assert.equal(diagnostic.origin, AUDIO_FAILURE_ORIGIN_PROCESS); assert.equal(diagnostic.ownerPhase, 1);
-    assert.equal(diagnostic.currentFramePresent, 1); assert.equal(diagnostic.currentFrame, 77);
+    assert.equal(diagnostic.currentFramePresent, 0); assert.equal(diagnostic.currentFrame, 0, "published global cannot become a diagnostic native fact");
     assert.equal(diagnostic.blockFramesPresent, Number(scenario.block !== null)); assert.equal(diagnostic.blockFrames, scenario.block ?? 0);
     assert.equal(h.owners[0].calls.render.length, 0); assert.equal(h.owners[0].frees, 0);
     assert.deepEqual(h.owners[0].calls.reports, [[23, false], [25, false]]);
     h.send(processor, "stop", 2);
+  }
+});
+
+
+function defaultParameters(frames = 1) {
+  return Object.fromEntries(CLOCK_NAMES.map(name => [name, new Float32Array(frames)]));
+}
+function beginClock(h, processor, origin = 5) {
+  assert.equal(h.process(processor, 0, planar(5), defaultParameters()), true);
+  const program = h.reserve(processor, origin);
+  assert.equal(notices(processor, "clock-reserved").at(-1)?.status, 0);
+  return program;
+}
+function assertNoNativePublication(h, processor, owner) {
+  assert.equal(notices(processor, "clock-ready").length, 0);
+  assert.equal(notices(processor, "clock-refill").length, 0);
+  assert.equal(owner.calls.armWords.length, 0);
+  assert.equal(owner.calls.render.length, 0);
+  assert.equal(h.callbackViews, 0);
+  assert.equal(h.callbackBigInts, 0);
+  assert.equal(owner.frees, 0);
+}
+
+test("native clock descriptors own four default-zero a-rate lanes with fixed native bounds", async () => {
+  const h = await harness();
+  const descriptors = h.descriptors();
+  assert.equal(descriptors.length, 4);
+  assert.deepEqual(descriptors.map(value => value.name), CLOCK_NAMES);
+  for (const [index, descriptor] of descriptors.entries()) {
+    assert.equal(descriptor.defaultValue, 0);
+    assert.equal(descriptor.minValue, 0);
+    assert.equal(descriptor.maxValue, index === 0 ? 1 : PERIODS[index - 1] + 1);
+    assert.equal(descriptor.automationRate, "a-rate");
+  }
+});
+
+test("missing scalar native WASM exports refuse initialization without an old-clock fallback", async () => {
+  for (const name of ["native_clock_start", "native_clock_extend", "native_frame", "native_clock_ready", "arm_words"]) {
+    const h = await harness({ missingExports: [name] });
+    assert.throws(() => h.createRaw(), /Incompatible|native|clock/i, name);
+    assert.equal(h.owners[0].frees, 1);
+    assert.equal(h.owners[0].calls.arm.length, 0);
+    assert.equal(h.owners[0].calls.render.length, 0);
+  }
+});
+
+test("zero and mixed scalar/full default arrays establish no clock, arm, render or readiness progression", async () => {
+  const h = await harness(), processor = h.createRaw(), owner = h.owners[0];
+  assert.equal(h.process(processor, 9007199254740991, planar(0), {}, -1), true);
+  assert.equal(notices(processor, "clock-probe").length, 0);
+  for (const frames of [1, 2, 5]) {
+    const parameters = defaultParameters(frames);
+    parameters[CLOCK_NAMES[1]] = new Float32Array([0]);
+    parameters[CLOCK_NAMES[3]] = new Float32Array([0]);
+    const output = planar(frames);
+    assert.equal(h.process(processor, 1000, output, parameters, 0), true);
+    assertSilent(output);
+  }
+  assert.equal(notices(processor, "clock-probe").length, 1);
+  assert.equal(notices(processor, "clock-probe")[0].frames, 1);
+  assert.equal(owner.calls.nativeFrame.length, 0);
+  assert.equal(owner.calls.nativeStart.length, 0);
+  assertNoNativePublication(h, processor, owner);
+  h.send(processor, "stop", 1);
+});
+
+test("constructor ACK, reserve and whole initial commit cannot fabricate native readiness or consume public sequence", async () => {
+  const h = await harness(), processor = h.createRaw(), owner = h.owners[0];
+  assert.equal(notices(processor, "ready").length, 1);
+  assert.equal(notices(processor, "clock-ready").length, 0);
+  const program = beginClock(h, processor, 5);
+  assert.equal(owner.calls.nativeStart.length, 0, "reserve has no Rust timeline mutation");
+  const reserved = notices(processor, "clock-reserved")[0];
+  assert.equal(reserved.generation, 17); assert.equal(reserved.clockVersion, 1); assert.equal(reserved.clockId, 1);
+  assert.equal(reserved.revision, 0); assert.equal(reserved.status, 0);
+  assert.equal(h.commit(processor, program).status, 0);
+  assert.deepEqual(owner.calls.nativeStart[0], [5, 0, ...wordPair(program.h0), ...wordPair(program.h1), ...wordPair(program.h2)]);
+  assertNoNativePublication(h, processor, owner);
+  assert.equal(h.send(processor, "finish", 1).status, 0, "clock protocol did not take general sequence1");
+  assert.equal(h.send(processor, "poll", 2).report.available, false);
+  h.send(processor, "stop", 3);
+});
+
+test("full original interior arrays certify one immutable origin and second contiguous native block publishes readiness", async () => {
+  const h = await harness(), processor = h.createRaw(), owner = h.owners[0];
+  const program = beginClock(h, processor); h.commit(processor, program);
+  const first = nativeParameters(3, 5, 5), retained = Object.values(first).map(value => value.slice());
+  assert.equal(h.process(processor, 3, planar(5), first, 123456789), true);
+  assert.deepEqual(owner.calls.nativeFrame[0], [0, 0, 0, 2, 2, 2, 2, 5]);
+  assert.equal(notices(processor, "clock-ready").length, 0);
+  assert.equal(owner.calls.render.length, 0);
+  for (const [index, value] of Object.values(first).entries()) assert.deepEqual(value, retained[index]);
+  assert.equal(h.process(processor, 8, planar(2), nativeParameters(8, 2, 5, { markerScalar: true }), -17), true);
+  const ready = notices(processor, "clock-ready");
+  assert.equal(ready.length, 1);
+  assert.deepEqual(ready[0], { kind: "clock-ready", generation: 17, clockVersion: 1, clockId: 1, revision: 0, origin: 5 });
+  assert.equal(owner.calls.nativeFrame[1][6], 0);
+  assert.equal(owner.calls.nativeFrame[1][7], 2);
+  assert.equal(h.callbackViews, 0); assert.equal(h.callbackBigInts, 0);
+  h.send(processor, "stop", 1);
+});
+
+test("fresh index-zero and one-frame onset cannot authenticate origin", async () => {
+  for (const frames of [1, 2, 5]) {
+    const h = await harness(), processor = h.createRaw(), owner = h.owners[0];
+    const program = beginClock(h, processor); h.commit(processor, program);
+    const output = planar(frames);
+    assert.equal(h.process(processor, 5, output, nativeParameters(5, frames, 5)), false);
+    assertSilent(output); assert.equal(owner.calls.nativeFrame.length, 0);
+    assertNoNativePublication(h, processor, owner);
+    assert.equal(notices(processor, "terminal").length, 1);
+    h.send(processor, "stop", 1);
+  }
+});
+
+test("pre-origin malformed/default mixture and incomplete original arrays fence before scalar admission", async () => {
+  const bad = [
+    p => { p[CLOCK_NAMES[0]] = new Float32Array([1]); },
+    p => { p[CLOCK_NAMES[1]] = new Float32Array([1]); },
+    p => { p[CLOCK_NAMES[2]] = new Float32Array(3); },
+    p => { p[CLOCK_NAMES[3]][2] = NaN; },
+    p => { delete p[CLOCK_NAMES[0]]; },
+    p => { p[CLOCK_NAMES[1]] = new Uint32Array(5); },
+  ];
+  for (const mutate of bad) {
+    const h = await harness(), processor = h.createRaw(), owner = h.owners[0];
+    const parameters = defaultParameters(5); mutate(parameters);
+    const output = planar(5);
+    assert.equal(h.process(processor, 0, output, parameters), false);
+    assertSilent(output); assert.equal(owner.calls.nativeFrame.length, 0);
+    assertNoNativePublication(h, processor, owner);
+    h.send(processor, "stop", 1);
+  }
+});
+
+test("onset must use common indices, three exact zero prefixes and all three phase-zero values", async () => {
+  const mutations = [
+    p => { p[CLOCK_NAMES[0]][3] = 0; },
+    ...[1, 2, 3].flatMap(lane => [p => { p[CLOCK_NAMES[lane]][0] = 1; },
+      p => { p[CLOCK_NAMES[lane]][2] += 1; }, p => { p[CLOCK_NAMES[lane]] = p[CLOCK_NAMES[lane]].subarray(2); }]),
+  ];
+  for (const mutate of mutations) {
+    const h = await harness(), processor = h.createRaw(), owner = h.owners[0];
+    const program = beginClock(h, processor); h.commit(processor, program);
+    const parameters = nativeParameters(3, 5, 5); mutate(parameters);
+    const output = planar(5);
+    assert.equal(h.process(processor, 3, output, parameters), false);
+    assertSilent(output); assertNoNativePublication(h, processor, owner);
+    assert.equal(notices(processor, "terminal").length, 1);
+    h.send(processor, "stop", 1);
+  }
+});
+
+test("every original middle sample is checked before candidate readiness, pending arm ACK or PCM publication", async () => {
+  for (const lane of [1, 2, 3]) for (const index of [1, 2, 3]) {
+    const h = await harness(), processor = h.createRaw(), owner = h.owners[0];
+    const program = beginClock(h, processor); h.commit(processor, program);
+    assert.equal(h.process(processor, 3, planar(5), nativeParameters(3, 5, 5)), true);
+    h.send(processor, "finish", 1);
+    assert.equal(h.send(processor, "arm", 2, { frame: 20n }), undefined);
+    const parameters = nativeParameters(8, 5, 5); parameters[CLOCK_NAMES[lane]][index] += 1;
+    const before = Object.values(parameters).map(value => value.slice()), output = planar(5);
+    assert.equal(h.process(processor, 8, output, parameters, 7000000), false);
+    assertSilent(output); assertNoNativePublication(h, processor, owner);
+    assert.equal(owner.calls.nativeFrame.length, 2, "valid endpoints are only a candidate");
+    const arm = notices(processor, "ack").find(message => message.sequence === 2);
+    assert.ok(arm && arm.status !== 0);
+    assert.deepEqual(processor.port.messages.slice(-2).map(message => message.kind), ["ack", "terminal"]);
+    assert.equal(facts(processor).currentFramePresent, 0, "failed full scan cannot publish the scalar candidate");
+    for (const [i, value] of Object.values(parameters).entries()) assert.deepEqual(value, before[i]);
+    h.send(processor, "stop", 3);
+  }
+});
+
+test("post-certificate marker may be scalar/full one; phase lanes cannot be scalar expanded", async () => {
+  for (const markerScalar of [true, false]) {
+    const h = await harness(), processor = h.create(), owner = h.owners[0];
+    h.send(processor, "finish", 1);
+    const parameters = nativeParameters(10, 5, 5, { markerScalar });
+    assert.equal(h.process(processor, 10, planar(5), parameters), true);
+    assert.deepEqual(owner.calls.render.at(-1), [10, 0, 5]);
+    h.send(processor, "stop", 2);
+  }
+  for (const lane of [1, 2, 3]) {
+    const h = await harness(), processor = h.create(), owner = h.owners[0];
+    h.send(processor, "finish", 1);
+    const parameters = nativeParameters(10, 5, 5); parameters[CLOCK_NAMES[lane]] = new Float32Array([6.25]);
+    assert.equal(h.process(processor, 10, planar(5), parameters), false);
+    assert.equal(owner.calls.render.length, 0); assert.equal(owner.calls.nativeFrame.length, 2);
+    h.send(processor, "stop", 2);
+  }
+});
+
+test("arm remains pending through zero/default/first partial and admits next full native block before same-block render", async () => {
+  const h = await harness(), processor = h.createRaw(), owner = h.owners[0];
+  const program = beginClock(h, processor); h.commit(processor, program);
+  h.send(processor, "finish", 1);
+  const before = notices(processor, "ack").length;
+  assert.equal(h.send(processor, "arm", 2, { frame: 20n }), undefined);
+  assert.equal(owner.calls.arm.length, 0);
+  assert.equal(h.process(processor, 0, planar(0), {}, 9007199254740991), true);
+  assert.equal(h.process(processor, 0, planar(5), defaultParameters(), -1), true);
+  assert.equal(h.process(processor, 3, planar(5), nativeParameters(3, 5, 5), -1), true);
+  assert.equal(notices(processor, "ack").length, before);
+  assert.equal(owner.calls.armWords.length, 0); assert.equal(owner.calls.render.length, 0);
+  const order = owner.calls.order.length;
+  assert.equal(h.process(processor, 8, planar(2), nativeParameters(8, 2, 5), 999999), true);
+  assert.deepEqual(owner.calls.armWords, [[20, 0, 8, 0]]);
+  assert.deepEqual(owner.calls.order.slice(order), ["native", "arm", "render"]);
+  const arm = notices(processor, "ack").find(message => message.sequence === 2);
+  assert.equal(arm.status, 0); assert.equal(arm.operation, "arm"); assert.equal(arm.diagnostics, undefined);
+  assert.deepEqual(owner.calls.render, [[8, 0, 2]]);
+  assert.equal(notices(processor, "clock-ready").length, 1);
+  assert.equal(h.callbackViews, 0); assert.equal(h.callbackBigInts, 0); assert.equal(owner.frees, 0);
+  h.send(processor, "stop", 3);
+});
+
+test("authenticated one/variable/zero callback extents preserve exact native low/high coordinates and memory ownership", async () => {
+  const base = 3 * 4294967296 - 1;
+  const h = await harness(), processor = h.createAt(base), owner = h.owners[0];
+  h.send(processor, "finish", 1); owner.pcm = new Float32Array([0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.4, -0.4, 0.5, -0.5]);
+  const buffer = h.memory.buffer, reads = h.memoryReads, metadata = owner.calls.metadata;
+  let frame = base;
+  for (const frames of [1, 0, 3, 2, 5, 0, 1]) {
+    const previous = owner.calls.nativeFrame.length, rendered = owner.calls.render.length;
+    assert.equal(h.process(processor, frame, planar(frames), undefined, 0), true);
+    assert.equal(owner.calls.nativeFrame.length, previous + Number(frames !== 0));
+    assert.equal(owner.calls.render.length, rendered + Number(frames !== 0));
+    if (frames !== 0) assert.deepEqual(owner.calls.render.at(-1), [...wordPair(frame), frames]);
+    frame += frames;
+  }
+  assert.equal(h.memory.buffer, buffer); assert.equal(h.memoryReads, reads); assert.equal(owner.calls.metadata, metadata);
+  assert.equal(h.callbackViews, 0); assert.equal(h.callbackBigInts, 0); assert.equal(owner.frees, 0);
+  h.send(processor, "stop", 2); assert.equal(owner.frees, 1);
+});
+
+test("held/default/half-tie/nonfinite post-certificate input silences before render without widening precision tolerance", async () => {
+  for (const value of [0, 1, 6.5, NaN, Infinity, -Infinity, 7.25]) {
+    const h = await harness(), processor = h.create(), owner = h.owners[0];
+    h.send(processor, "finish", 1);
+    const parameters = nativeParameters(10, 5, 5); parameters[CLOCK_NAMES[2]][2] = value;
+    const output = planar(5);
+    assert.equal(h.process(processor, 10, output, parameters), false);
+    assertSilent(output); assert.equal(owner.calls.render.length, 0);
+    assert.equal(notices(processor, "terminal").length, 1);
+    assert.equal(h.process(processor, 15, planar(1)), false, "later valid input cannot revive the owner");
+    h.send(processor, "stop", 2);
+  }
+});
+
+test("candidate binding chronology refusal and exception preserve one failure without publishing readiness", async () => {
+  for (const faults of [{ nativeFrames: [3, -1] }, { nativeFrameThrows: true }]) {
+    const h = await harness(faults), processor = h.createRaw(), owner = h.owners[0];
+    const program = beginClock(h, processor); h.commit(processor, program);
+    if (!faults.nativeFrameThrows) assert.equal(h.process(processor, 3, planar(5), nativeParameters(3, 5, 5)), true);
+    if (!faults.nativeFrameThrows) faults.status = 6;
+    const frames = faults.nativeFrameThrows ? 5 : 2, output = planar(frames);
+    assert.equal(h.process(processor, faults.nativeFrameThrows ? 3 : 99, output,
+      nativeParameters(faults.nativeFrameThrows ? 3 : 99, frames, 5)), false);
+    assertSilent(output); assertNoNativePublication(h, processor, owner);
+    assert.equal(notices(processor, "terminal").length, 1);
+    assert.equal(facts(processor).currentFramePresent, 0);
+    h.send(processor, "stop", 1);
+  }
+});
+
+test("strict armed Rust render failure receives native forward-gap coordinate instead of stale published global", async () => {
+  const h = await harness({ renderStatuses: [0, 6] }), processor = h.create(), owner = h.owners[0];
+  h.send(processor, "finish", 1);
+  assert.equal(h.arm(processor, 2, 10n, 10, 2).status, 0);
+  chronology(owner, { expected: [12, 0], start: [10, 0] });
+  const output = planar(3);
+  assert.equal(h.process(processor, 40, output, nativeParameters(40, 3, 5), 12), false);
+  assertSilent(output); assert.deepEqual(owner.calls.render.at(-1), [40, 0, 3]);
+  assert.equal(notices(processor, "terminal")[0].status, 6);
+  const diagnostic = facts(processor);
+  assert.equal(diagnostic.currentFrame, 40); assert.equal(diagnostic.expectedFrameLow, 12);
+  assert.equal(diagnostic.successfulArmFrame, 10); assert.equal(owner.frees, 0);
+  h.send(processor, "stop", 3);
+});
+
+test("duplicate pending arm cancels its original ACK before one terminal notice and never calls core arm", async () => {
+  const h = await harness(), processor = h.create(), owner = h.owners[0];
+  h.send(processor, "finish", 1);
+  assert.equal(h.send(processor, "arm", 2, { frame: 20n }), undefined);
+  assert.notEqual(h.send(processor, "arm", 3, { frame: 30n }).status, 0);
+  const original = notices(processor, "ack").find(message => message.sequence === 2);
+  assert.ok(original && original.status !== 0);
+  assert.equal(owner.calls.armWords.length, 0);
+  assert.equal(notices(processor, "terminal").length, 1);
+  assert.equal(h.process(processor, 10, planar(1)), false);
+  h.send(processor, "stop", 4);
+});
+
+test("stop cancels staged arm before releasing output and cannot be revived by saved control callback", async () => {
+  const h = await harness(), processor = h.create(), owner = h.owners[0];
+  h.send(processor, "finish", 1); const saved = processor.port.onmessage;
+  assert.equal(h.send(processor, "arm", 2, { frame: 20n }), undefined);
+  assert.equal(h.send(processor, "stop", 3).status, 0);
+  const original = notices(processor, "ack").find(message => message.sequence === 2);
+  assert.ok(original && original.status !== 0);
+  assert.equal(owner.frees, 1); assert.equal(owner.calls.armWords.length, 0);
+  assert.equal(h.process(processor, 10, planar(1)), false);
+  const replacement = h.create();
+  saved({ data: { kind: "clock-commit", generation: 17, clockVersion: 1, clockId: 1, revision: 1,
+    ...geometry(5, 4), futureEligible: true } });
+  assert.equal(h.owners[1].calls.nativeExtend.length, 0);
+  assert.equal(h.owners[1].calls.armWords.length, 0);
+  h.send(replacement, "stop", 1);
+});
+
+test("valid stale clock generations are ignored before current clock identity validation", async () => {
+  const h = await harness(), processor = h.createRaw(), owner = h.owners[0];
+  const count = processor.port.messages.length;
+  h.clock(processor, "clock-reserve", { generation: 16, clockVersion: 999, clockId: 999, revision: -1, origin: NaN });
+  assert.equal(processor.port.messages.length, count);
+  assert.equal(owner.calls.nativeStart.length, 0);
+  assert.equal(notices(processor, "terminal").length, 0);
+  const program = beginClock(h, processor); assert.equal(h.commit(processor, program).status, 0);
+  h.send(processor, "stop", 1);
+});
+
+test("malformed current clock identity revision and initial geometry fence before mutation", async () => {
+  const cases = [
+    { clockVersion: 0 }, { clockId: 2 }, { generation: "17" }, { revision: 1 }, { revision: -1 },
+    { revision: 0.5 }, { origin: 0 }, { origin: Number.MAX_SAFE_INTEGER + 1 },
+    { h0: 5 + PERIODS[0] }, { h1: 5 + 3 * PERIODS[1] + 1 }, { h2: NaN }, { kind: "clock-unrecognized" },
+  ];
+  for (const fields of cases) {
+    const h = await harness(), processor = h.createRaw(), owner = h.owners[0];
+    h.clock(processor, "clock-reserve", { revision: 0, ...geometry(5), ...fields });
+    assert.equal(notices(processor, "terminal").length, 1, JSON.stringify(fields));
+    assert.equal(owner.calls.nativeStart.length, 0); assert.equal(owner.calls.nativeExtend.length, 0);
+    assert.equal(h.process(processor, 3, planar(5), nativeParameters(3, 5, 5)), false);
+    h.send(processor, "stop", 1);
+  }
+});
+
+test("initial commit requires matching full reservation future eligibility and exactly one scalar registration", async () => {
+  const mutations = [{ revision: 1 }, { origin: 6 }, { h0: 5 + 4 * PERIODS[0] },
+    { h1: 5 + 4 * PERIODS[1] }, { h2: 5 + 4 * PERIODS[2] }, { futureEligible: false }];
+  for (const fields of mutations) {
+    const h = await harness(), processor = h.createRaw(), owner = h.owners[0];
+    const program = beginClock(h, processor);
+    h.clock(processor, "clock-commit", { revision: 0, ...program, futureEligible: true, ...fields });
+    assert.equal(notices(processor, "terminal").length, 1);
+    assert.equal(owner.calls.nativeStart.length, 0);
+    h.send(processor, "stop", 1);
+  }
+  for (const duplicate of ["clock-reserve", "clock-commit"]) {
+    const h = await harness(), processor = h.createRaw(), owner = h.owners[0];
+    const program = beginClock(h, processor); h.commit(processor, program);
+    h.clock(processor, duplicate, { revision: 0, ...program, futureEligible: true });
+    assert.equal(notices(processor, "terminal").length, 1);
+    assert.equal(owner.calls.nativeStart.length, 1, "duplicate never reconfigures origin");
+    h.send(processor, "stop", 1);
+  }
+});
+
+test("failed initial scalar admission fences and leaves no native readiness or fallback", async () => {
+  const h = await harness({ nativeStartStatus: 7 }), processor = h.createRaw(), owner = h.owners[0];
+  const program = beginClock(h, processor); const ack = h.commit(processor, program);
+  assert.ok(ack && ack.status !== 0);
+  assert.equal(owner.calls.nativeStart.length, 1);
+  assertNoNativePublication(h, processor, owner);
+  assert.equal(notices(processor, "terminal").length, 1);
+  h.send(processor, "stop", 1);
+});
+
+test("native low-water refill reserves one whole next revision with original ends and does not consume public sequence", async () => {
+  const h = await harness(), processor = h.create(), owner = h.owners[0];
+  h.send(processor, "finish", 1);
+  const program = geometry(5), frame = program.h2 - PERIODS[2] - 1;
+  assert.equal(h.process(processor, frame, planar(1)), true);
+  const refills = notices(processor, "clock-refill"); assert.equal(refills.length, 1);
+  const refill = refills[0];
+  assert.equal(refill.generation, 17); assert.equal(refill.clockVersion, 1); assert.equal(refill.clockId, 1);
+  assert.equal(refill.revision, 1); assert.equal(refill.frames, 1);
+  assert.deepEqual([refill.endLow, refill.endHigh], wordPair(frame + 1));
+  assert.deepEqual([refill.from0, refill.from1, refill.from2], [program.h0, program.h1, program.h2]);
+  assert.deepEqual([refill.to0, refill.to1, refill.to2], [program.h0 + PERIODS[0], program.h1 + PERIODS[1], program.h2 + PERIODS[2]]);
+  assert.equal(h.process(processor, frame + 1, planar(2)), true);
+  assert.equal(notices(processor, "clock-refill").length, 1, "one bounded pending request");
+  assert.equal(owner.calls.nativeExtend.length, 0, "request is no horizon admission");
+  assert.equal(h.send(processor, "poll", 2).status, 0);
+  assert.equal(h.callbackViews, 0); assert.equal(h.callbackBigInts, 0); assert.equal(owner.frees, 0);
+  h.send(processor, "stop", 3);
+});
+
+test("whole refill commit extends all own horizons atomically and later callback can traverse old minimum horizon", async () => {
+  const h = await harness(), processor = h.create(), owner = h.owners[0];
+  const program = geometry(5), low = program.h2 - PERIODS[2] - 1;
+  assert.equal(h.process(processor, low, planar(1)), true);
+  const refill = notices(processor, "clock-refill")[0];
+  const next = { origin: 5, h0: refill.to0, h1: refill.to1, h2: refill.to2 };
+  const ack = h.clock(processor, "clock-commit", { revision: 1, ...next, futureEligible: true });
+  assert.equal(ack.status, 0);
+  assert.deepEqual(owner.calls.nativeExtend, [[...wordPair(next.h0), ...wordPair(next.h1), ...wordPair(next.h2)]]);
+  assert.equal(h.process(processor, program.h2 + 1, planar(2)), true);
+  assert.equal(notices(processor, "terminal").length, 0);
+  assert.equal(notices(processor, "clock-refill").length, 2, "only a new revision may request another extension");
+  assert.equal(notices(processor, "clock-refill")[1].revision, 2);
+  h.send(processor, "stop", 1);
+});
+
+test("wrong refill revision origin geometry or future eligibility fences before scalar extension", async () => {
+  for (const fields of [{ revision: 0 }, { revision: 2 }, { origin: 6 }, { h0: 5 + 5 * PERIODS[0] },
+    { h1: 5 + 4 * PERIODS[1] + 1 }, { h2: 5 + 3 * PERIODS[2] }, { futureEligible: false }]) {
+    const h = await harness(), processor = h.create(), owner = h.owners[0];
+    const program = geometry(5);
+    assert.equal(h.process(processor, program.h2 - PERIODS[2], planar(1)), true);
+    h.clock(processor, "clock-commit", { revision: 1, ...geometry(5, 4), futureEligible: true, ...fields });
+    assert.equal(owner.calls.nativeExtend.length, 0);
+    assert.equal(notices(processor, "terminal").length, 1);
+    h.send(processor, "stop", 1);
+  }
+});
+
+test("expired original horizon and failed native extension cannot be revived by a late whole commit", async () => {
+  for (const extensionFails of [false, true]) {
+    const h = await harness(extensionFails ? { nativeExtendStatus: 6 } : {}), processor = h.create(), owner = h.owners[0];
+    const program = geometry(5);
+    assert.equal(h.process(processor, program.h2 - PERIODS[2], planar(1)), true);
+    if (extensionFails) {
+      h.clock(processor, "clock-commit", { revision: 1, ...geometry(5, 4), futureEligible: true });
+      assert.equal(owner.calls.nativeExtend.length, 1);
+    } else {
+      const output = planar(1);
+      assert.equal(h.process(processor, program.h2, output), false);
+      assertSilent(output);
+      assert.equal(owner.calls.nativeExtend.length, 0);
+    }
+    const before = owner.calls.nativeExtend.length;
+    h.clock(processor, "clock-commit", { revision: 1, ...geometry(5, 4), futureEligible: true });
+    assert.equal(owner.calls.nativeExtend.length, before);
+    assert.equal(h.process(processor, program.h2 + 1, planar(1)), false);
+    assert.equal(notices(processor, "terminal").length, 1);
+    h.send(processor, "stop", 1);
+  }
+});
+
+
+test("actual process and reachable failure/native helper bodies prohibit callback-owned allocation and formatting", async () => {
+  const h = await harness();
+  const bodies = h.callbackBodies();
+  assert.ok(bodies.has("process"));
+  assert.ok(bodies.has("validClockLane"), "the actual full-array native validator participates in the callback");
+  assert.ok(bodies.has("fence"), "failure paths share the callback allocation guarantee");
+  for (const [name, raw] of bodies) {
+    const body = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    assert.doesNotMatch(body, /\bnew\s+[A-Za-z_$]/, `${name}: no constructed views/objects`);
+    assert.doesNotMatch(body, /\b(?:BigInt|String|Array|Object)\s*\(/, `${name}: no allocating conversion`);
+    assert.doesNotMatch(body, /(?:=|return)\s*(?:\{\s*[A-Za-z_$}]|\[)/, `${name}: no object/array literal result or temporary`);
+    assert.doesNotMatch(body, /\.(?:slice|subarray|map|filter|flat|concat|join|toString|toFixed|free)\s*\(/, `${name}: no new views/collections/formatting/destruction`);
+    assert.doesNotMatch(body, /`[^`]*\$\{/, `${name}: no formatted string`);
   }
 });

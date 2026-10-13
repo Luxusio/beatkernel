@@ -1,4 +1,5 @@
 //! Numeric separate-instance AudioWorklet binding; setup owns all allocations.
+use crate::browser_native_clock::{NativeClock, NativeClockError};
 use crate::worklet_audio::{
     WorkletAudio, WorkletAudioBuilder, WorkletAudioConfig, WorkletAudioError,
 };
@@ -19,6 +20,7 @@ use wasm_bindgen::prelude::*;
 pub struct BrowserAudio {
     builder: Option<WorkletAudioBuilder>,
     audio: Option<WorkletAudio>,
+    native_clock: Option<NativeClock>,
     status: u32,
     channels: u16,
     max_frames: u32,
@@ -39,6 +41,17 @@ fn worklet_status(error: WorkletAudioError) -> u32 {
         WorkletAudioError::Render(_) => 8,
         WorkletAudioError::Failed => 5,
     }
+}
+fn native_clock_status(error: NativeClockError) -> u32 {
+    match error {
+        NativeClockError::Invalid => 1,
+        NativeClockError::State => 2,
+        NativeClockError::Chronology => 6,
+        NativeClockError::Overflow => 7,
+    }
+}
+fn frame_words(low: u32, high: u32) -> u64 {
+    u64::from(low) | (u64::from(high) << 32)
 }
 impl BrowserAudio {
     fn finish_with_end(&mut self, end: Option<u64>) -> u32 {
@@ -99,6 +112,7 @@ impl BrowserAudio {
         Self {
             builder,
             audio: None,
+            native_clock: None,
             status,
             channels,
             max_frames,
@@ -106,6 +120,97 @@ impl BrowserAudio {
     }
     pub fn status(&self) -> u32 {
         self.status
+    }
+    /// Configure one native origin during setup; control metadata is not readiness.
+    pub fn native_clock_start(
+        &mut self,
+        origin_low: u32,
+        origin_high: u32,
+        h0_low: u32,
+        h0_high: u32,
+        h1_low: u32,
+        h1_high: u32,
+        h2_low: u32,
+        h2_high: u32,
+    ) -> u32 {
+        self.status = if self.builder.is_none() || self.native_clock.is_some() {
+            2
+        } else {
+            match NativeClock::new(
+                frame_words(origin_low, origin_high),
+                [
+                    frame_words(h0_low, h0_high),
+                    frame_words(h1_low, h1_high),
+                    frame_words(h2_low, h2_high),
+                ],
+            ) {
+                Ok(clock) => {
+                    self.native_clock = Some(clock);
+                    0
+                }
+                Err(error) => native_clock_status(error),
+            }
+        };
+        self.status
+    }
+    /// Commit all future lane horizons without changing the certified origin.
+    pub fn native_clock_extend(
+        &mut self,
+        h0_low: u32,
+        h0_high: u32,
+        h1_low: u32,
+        h1_high: u32,
+        h2_low: u32,
+        h2_high: u32,
+    ) -> u32 {
+        self.status = if let Some(clock) = self.native_clock.as_mut() {
+            match clock.extend([
+                frame_words(h0_low, h0_high),
+                frame_words(h1_low, h1_high),
+                frame_words(h2_low, h2_high),
+            ]) {
+                Ok(()) => 0,
+                Err(error) => native_clock_status(error),
+            }
+        } else {
+            2
+        };
+        self.status
+    }
+    /// Scalar candidate only: the adapter must validate every original sample.
+    pub fn native_frame(
+        &mut self,
+        first0: u32,
+        first1: u32,
+        first2: u32,
+        last0: u32,
+        last1: u32,
+        last2: u32,
+        first_index: u32,
+        frames: u32,
+    ) -> f64 {
+        let Some(clock) = self.native_clock.as_mut() else {
+            self.status = 2;
+            return -1.0;
+        };
+        match clock.frame(
+            [first0, first1, first2],
+            [last0, last1, last2],
+            first_index,
+            frames,
+        ) {
+            Ok(frame) => {
+                self.status = 0;
+                frame as f64
+            }
+            Err(error) => {
+                self.status = native_clock_status(error);
+                -1.0
+            }
+        }
+    }
+    pub fn native_clock_ready(&self) -> bool {
+        self.native_clock.as_ref().is_some_and(NativeClock::ready)
     }
     /// Owned Float32Array transfer/import is setup-only; each source rate survives.
     pub fn insert_sample(&mut self, id: u64, rate: u32, channels: u16, pcm: Vec<f32>) -> u32 {
@@ -137,6 +242,19 @@ impl BrowserAudio {
             2
         };
         self.status
+    }
+    /// Callback arm uses exact words and the unchanged core admission rules.
+    pub fn arm_words(
+        &mut self,
+        start_low: u32,
+        start_high: u32,
+        current_low: u32,
+        current_high: u32,
+    ) -> u32 {
+        self.arm(
+            frame_words(start_low, start_high),
+            frame_words(current_low, current_high),
+        )
     }
     /// Kinds 0 Play, 1 Stop, 2 SetRate(value/denominator), 3 Seek(value).
     /// Admission success is not evidence of command execution or presentation.
@@ -197,7 +315,7 @@ impl BrowserAudio {
     }
     /// Callback ABI uses scalar words instead of per-quantum BigInt or slice copies.
     pub fn render(&mut self, frame_low: u32, frame_high: u32, frames: u32) -> u32 {
-        let frame = u64::from(frame_low) | (u64::from(frame_high) << 32);
+        let frame = frame_words(frame_low, frame_high);
         self.status = if let Some(audio) = self.audio.as_mut() {
             match audio.render(frame, frames as usize) {
                 Ok(()) => 0,

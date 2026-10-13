@@ -9,6 +9,509 @@ const sourceUrl = new URL("./audio-host.mjs", import.meta.url);
 const source = await readFile(sourceUrl, "utf8");
 const failureUrl = new URL("./audio-failure.mjs", import.meta.url);
 const failureSource = await readFile(failureUrl, "utf8");
+const clockUrl = new URL("./native-audio-clock.mjs", import.meta.url);
+const clockSource = await readFile(clockUrl, "utf8");
+const nativeProbeUrl = new URL("./worklet-native-frame-probe.mjs", import.meta.url);
+const nativeProbeSource = await readFile(nativeProbeUrl, "utf8");
+// Independent expected program geometry, intentionally not imported from the adapter.
+const TEST_PERIODS = [1048576, 1048575, 1048573];
+const TEST_NAMES = ["__beatkernel_clock_marker", "__beatkernel_clock_0", "__beatkernel_clock_1", "__beatkernel_clock_2"];
+
+// The clock peer here supplies control packets only. These tests establish Host
+// scheduling and ownership, never native precision, WASM arithmetic or PCM.
+function expectedInitial(origin, capacity, rate) {
+  const smallest = Math.min(...TEST_PERIODS);
+  const lowWater = Math.max(smallest, 4 * capacity);
+  const cycles = Math.ceil((lowWater + 2 * capacity) / smallest) + 1;
+  return { origin, h0: origin + cycles * TEST_PERIODS[0],
+    h1: origin + cycles * TEST_PERIODS[1], h2: origin + cycles * TEST_PERIODS[2],
+    cycles, lowWater, event: frame => (frame - 0.25) / rate };
+}
+async function beginNativeOpen(h, configuration = options({ audioLimits: { maxFrames: 4096 } }), quantum = 128) {
+  const opening = observe(() => h.AudioHost.open(configuration));
+  await flush();
+  h.ready();
+  h.clockPacket("clock-probe", { frames: quantum });
+  await flush();
+  assert.equal(h.clockSent.length, 1, "initial native geometry must first be reserved");
+  const reserve = h.clockSent[0].message;
+  assert.equal(reserve.kind, "clock-reserve");
+  assert.equal(h.nativeCalls, 0, "no automation may precede reserve admission");
+  assert.equal(opening.settled, false, "constructor ready and quantum alone cannot expose a player");
+  return { opening, reserve };
+}
+async function admitNativeProgram(h, reserve) {
+  h.clockReply(reserve);
+  await flush();
+  assert.equal(h.clockSent.length, 2);
+  const commit = h.clockSent[1].message;
+  assert.equal(commit.kind, "clock-commit");
+  return commit;
+}
+async function exposeNativeOwner(h, opening, commit) {
+  h.clockReply(commit);
+  await flush();
+  assert.equal(opening.settled, false, "whole commit ACK is not native callback proof");
+  h.clockPacket("clock-ready", { revision: 0, origin: commit.origin });
+  const opened = await opening.result;
+  assert.equal(opened.ok, true, opened.error?.message);
+  return opened.value;
+}
+async function nativeOpeningError(h, opening, code) {
+  await flush();
+  const stopping = h.sent.find(row => row.message.kind === "stop")?.message;
+  if (stopping) h.reply(stopping);
+  for (let index = 0; !opening.settled && index < 5; index++) {
+    await flush();
+    if (!opening.settled) await h.expire();
+  }
+  const error = failure(await opening.result, code);
+  assertClean(h);
+  return error;
+}
+function requestRefill(h, geometry, fields = {}) {
+  const end = Math.min(geometry.h0, geometry.h1, geometry.h2) - geometry.lowWater;
+  const high = Math.floor(end / 4294967296), low = end - high * 4294967296;
+  h.clockPacket("clock-refill", { revision: 1, from0: geometry.h0, from1: geometry.h1,
+    from2: geometry.h2, to0: geometry.h0 + TEST_PERIODS[0],
+    to1: geometry.h1 + TEST_PERIODS[1], to2: geometry.h2 + TEST_PERIODS[2],
+    frames: 128, endLow: low, endHigh: high, ...fields });
+}
+function nativeEvents(h, name) {
+  return h.nodes[0].parameters.get(name).events;
+}
+
+test("native open reserves before automation and requires separate native readiness after whole commit", async () => {
+  const h = await harness({ autoClock: false });
+  const { opening, reserve } = await beginNativeOpen(h);
+  const origin = Math.ceil((0 + 4 * 128) / 128) * 128 + 64;
+  const expected = expectedInitial(origin, 4096, 48000);
+  assert.deepEqual(structuredClone(reserve), { kind: "clock-reserve", generation: 17,
+    clockVersion: 1, clockId: 1, revision: 0, origin,
+    h0: expected.h0, h1: expected.h1, h2: expected.h2 });
+  assert.ok(expected.h0 > expected.h1 && expected.h1 > expected.h2, "own horizons intentionally descend");
+  const commit = await admitNativeProgram(h, reserve);
+  assert.deepEqual(structuredClone(commit), { ...structuredClone(reserve), kind: "clock-commit", futureEligible: true });
+  assert.deepEqual(nativeEvents(h, TEST_NAMES[0]), [{ kind: "set", value: 1, at: expected.event(origin) }]);
+  for (let lane = 0; lane < 3; lane++) {
+    const period = TEST_PERIODS[lane], events = [{ kind: "set", value: 1, at: expected.event(origin) }];
+    for (let cycle = 1; cycle <= expected.cycles; cycle++) {
+      const at = expected.event(origin + cycle * period);
+      events.push({ kind: "ramp", value: period + 1, at }, { kind: "set", value: 1, at });
+    }
+    assert.deepEqual(nativeEvents(h, TEST_NAMES[lane + 1]), events);
+  }
+  assert.equal(h.sent.length, 0, "clock exchange must not consume general controls");
+  const owner = await exposeNativeOwner(h, opening, commit);
+  await acknowledged(h, () => owner.poll());
+  assert.equal(h.last().sequence, 1, "the first public operation still owns sequence one");
+  await stop(h, owner);
+});
+
+test("native startup measures acquisition through ready and quantum delivery instead of adding a fixed delay", async () => {
+  for (const arrival of ["ready-first", "probe-first"]) {
+    const h = await harness({ autoClock: false });
+    const opening = observe(() => h.AudioHost.open(options({ audioLimits: { maxFrames: 4096 } })));
+    await flush();
+    h.contexts[0].currentTime = 0.25;
+    if (arrival === "ready-first") h.ready(); else h.clockPacket("clock-probe", { frames: 128 });
+    await flush();
+    assert.equal(h.clockSent.length, 0, "both independently delivered facts are required");
+    h.advanceBeforeDeadline(9);
+    if (arrival === "ready-first") h.clockPacket("clock-probe", { frames: 128 }); else h.ready();
+    await flush();
+    const reserve = h.clockSent[0]?.message;
+    assert.equal(reserve?.kind, "clock-reserve");
+    const lead = Math.max(4 * 128, Math.ceil(2 * 9 * 48000 / 1000));
+    assert.equal(reserve.origin, Math.ceil((Math.ceil(0.25 * 48000) + lead) / 128) * 128 + 64);
+    assert.ok((reserve.origin / 48000) - 0.25 < 0.03, "no diagnostic 200ms startup delay");
+    const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+    await stop(h, owner);
+  }
+});
+
+test("maximum callback capacity reserves independently derived eight own periods", async () => {
+  const h = await harness({ autoClock: false });
+  const { opening, reserve } = await beginNativeOpen(h, options({ audioLimits: { maxFrames: 1048576 } }));
+  const expected = expectedInitial(reserve.origin, 1048576, 48000);
+  assert.equal(expected.cycles, 8);
+  for (let lane = 0; lane < 3; lane++) assert.equal(reserve["h" + lane], expected["h" + lane]);
+  const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+  assert.equal(h.nativeCalls, 1 + 3 * (1 + 2 * 8));
+  await stop(h, owner);
+});
+
+test("initial one-frame quantum refuses without scheduling an unauthenticated origin", async () => {
+  const h = await harness({ autoClock: false });
+  const opening = observe(() => h.AudioHost.open(options()));
+  await flush(); h.ready(); h.clockPacket("clock-probe", { frames: 1 });
+  await nativeOpeningError(h, opening);
+  assert.equal(h.nativeCalls, 0);
+  assert.equal(h.clockSent.length, 0);
+});
+
+test("constructor ready, reserve ACK and commit ACK cannot stand in for clock-ready", async () => {
+  for (const stalled of ["probe", "reserve", "commit", "native-ready"]) {
+    const h = await harness({ autoClock: false });
+    const opening = observe(() => h.AudioHost.open(options({ audioLimits: { maxFrames: 4096 } })));
+    await flush(); h.ready();
+    if (stalled !== "probe") {
+      h.clockPacket("clock-probe", { frames: 128 }); await flush();
+      if (stalled !== "reserve") {
+        const commit = await admitNativeProgram(h, h.clockSent[0].message);
+        if (stalled === "native-ready") h.clockReply(commit);
+      }
+    }
+    await flush(); assert.equal(opening.settled, false);
+    await h.expire();
+    await nativeOpeningError(h, opening, "timeout");
+    assert.equal(h.sent.filter(row => row.message.kind === "stop").length, 1);
+  }
+});
+
+test("native partial automation failure never publishes a whole commit or reuses the origin", async () => {
+  for (const nativeThrowAt of [1, 2, 5, 22]) {
+    const h = await harness({ autoClock: false, nativeThrowAt });
+    const { opening, reserve } = await beginNativeOpen(h);
+    h.clockReply(reserve);
+    await nativeOpeningError(h, opening, "transport");
+    assert.equal(h.nativeCalls, nativeThrowAt);
+    assert.deepEqual(h.clockSent.map(row => row.message.kind), ["clock-reserve"]);
+    assert.equal(h.nodes.length, 1);
+    assert.ok(h.trace.filter(row => row[0] === "native").every(row => row[2] !== "cancel" && row[2] !== "hold"));
+  }
+});
+
+test("late initial native program refuses both before writes and after a partially applied transaction", async () => {
+  for (const when of ["before", "during"]) {
+    const faults = { autoClock: false };
+    const h = await harness(faults);
+    const { opening, reserve } = await beginNativeOpen(h);
+    const deadline = (reserve.origin - 0.25) / 48000;
+    if (when === "before") h.contexts[0].currentTime = deadline;
+    else faults.nativeAfterCall = ({ call, context }) => { if (call === 1) context.currentTime = deadline; };
+    h.clockReply(reserve);
+    await nativeOpeningError(h, opening);
+    assert.equal(h.clockSent.some(row => row.message.kind === "clock-commit"), false);
+    if (when === "before") assert.equal(h.nativeCalls, 0); else assert.ok(h.nativeCalls >= 1);
+  }
+});
+
+test("missing native parameter and unrepresentable context geometry fail open without raw-clock fallback", async () => {
+  for (const faults of [{ autoClock: false, missingParameter: TEST_NAMES[2] }, { autoClock: false }]) {
+    const h = await harness(faults);
+    const opening = observe(() => h.AudioHost.open(options({ audioLimits: { maxFrames: 4096 } })));
+    await flush();
+    if (!faults.missingParameter) h.contexts[0].currentTime = Number.MAX_SAFE_INTEGER / 48000;
+    h.ready(); h.clockPacket("clock-probe", { frames: 128 });
+    await flush();
+    if (h.clockSent[0]) h.clockReply(h.clockSent[0].message);
+    await nativeOpeningError(h, opening);
+    assert.equal(h.clockSent.some(row => row.message.kind === "clock-commit"), false);
+  }
+});
+
+test("native refill appends only new own endpoints and commits the whole geometry independently of public pending", async () => {
+  const h = await harness({ autoClock: false });
+  const { opening, reserve } = await beginNativeOpen(h);
+  const commit = await admitNativeProgram(h, reserve);
+  const owner = await exposeNativeOwner(h, opening, commit);
+  const geometry = expectedInitial(reserve.origin, 4096, 48000);
+  const eventCounts = TEST_NAMES.map(name => nativeEvents(h, name).length);
+  const pending = observe(() => owner.poll()), publicRequest = h.last();
+  requestRefill(h, geometry);
+  await flush();
+  const extended = h.clockSent.at(-1).message;
+  assert.equal(extended.kind, "clock-commit"); assert.equal(extended.revision, 1);
+  assert.equal(extended.origin, reserve.origin); assert.equal(extended.futureEligible, true);
+  assert.equal(pending.settled, false, "native request cannot settle public pending");
+  assert.equal(h.sent.length, 1);
+  assert.equal(nativeEvents(h, TEST_NAMES[0]).length, eventCounts[0], "single fresh marker is never rewritten");
+  for (let lane = 0; lane < 3; lane++) {
+    const oldH = geometry["h" + lane], nextH = oldH + TEST_PERIODS[lane];
+    assert.equal(extended["h" + lane], nextH);
+    const appended = nativeEvents(h, TEST_NAMES[lane + 1]).slice(eventCounts[lane + 1]);
+    assert.deepEqual(appended, [{ kind: "ramp", value: TEST_PERIODS[lane] + 1, at: geometry.event(nextH) },
+      { kind: "set", value: 1, at: geometry.event(nextH) }]);
+    assert.equal(appended.some(event => event.at === geometry.event(oldH)), false, "no duplicate OLD reset");
+  }
+  h.reply(publicRequest);
+  const polled = await pending.result;
+  assert.equal(polled.ok, true); assert.equal(polled.value.words.length, 58);
+  h.clockReply(extended); await flush();
+  await acknowledged(h, () => owner.finish());
+  assert.equal(h.last().sequence, 2);
+  await stop(h, owner);
+});
+
+test("refill transaction must finish before every OLD horizon, even though all new endpoints remain future", async () => {
+  for (const when of ["before", "during"]) {
+    const faults = { autoClock: false };
+    const h = await harness(faults);
+    const { opening, reserve } = await beginNativeOpen(h);
+    const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+    const geometry = expectedInitial(reserve.origin, 4096, 48000);
+    const before = h.nativeCalls, commits = h.clockSent.length;
+    const oldDeadline = geometry.event(Math.min(geometry.h0, geometry.h1, geometry.h2));
+    assert.ok(oldDeadline < geometry.event(geometry.h2 + TEST_PERIODS[2]));
+    if (when === "before") h.contexts[0].currentTime = oldDeadline;
+    else faults.nativeAfterCall = ({ call, context }) => { if (call === before + 1) context.currentTime = oldDeadline; };
+    requestRefill(h, geometry); await flush();
+    await localError(h, () => owner.poll(), "state");
+    assert.equal(h.clockSent.length, commits, "failed partial transaction must publish no new commit");
+    if (when === "before") assert.equal(h.nativeCalls, before);
+    await stop(h, owner, "failed");
+  }
+});
+
+test("a throw in any refill lane fences the generation and cannot commit a surviving prefix", async () => {
+  for (const offset of [1, 3, 6]) {
+    const faults = { autoClock: false };
+    const h = await harness(faults);
+    const { opening, reserve } = await beginNativeOpen(h);
+    const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+    const before = h.nativeCalls, commits = h.clockSent.length;
+    faults.nativeThrowAt = before + offset;
+    requestRefill(h, expectedInitial(reserve.origin, 4096, 48000)); await flush();
+    const original = await localError(h, () => owner.poll(), "transport");
+    assert.equal(h.nativeCalls, before + offset); assert.equal(h.clockSent.length, commits);
+    assert.equal(failure(await observe(() => owner.poll()).result), original);
+    await stop(h, owner, "failed");
+  }
+});
+
+test("successive refills advance each committed own horizon by exactly one period", async () => {
+  const h = await harness({ autoClock: false });
+  const { opening, reserve } = await beginNativeOpen(h);
+  const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+  const geometry = expectedInitial(reserve.origin, 4096, 48000);
+  for (let revision = 1; revision <= 3; revision++) {
+    requestRefill(h, geometry, { revision }); await flush();
+    const extended = h.clockSent.at(-1).message;
+    assert.equal(extended.kind, "clock-commit"); assert.equal(extended.revision, revision);
+    for (let lane = 0; lane < 3; lane++) {
+      assert.equal(extended["h" + lane], geometry["h" + lane] + TEST_PERIODS[lane]);
+      geometry["h" + lane] = extended["h" + lane];
+    }
+    h.clockReply(extended); await flush();
+  }
+  await stop(h, owner);
+});
+
+test("stale clock generation ignores hostile nested fields without affecting pending operations", async () => {
+  const h = await harness({ autoClock: false });
+  const { opening, reserve } = await beginNativeOpen(h);
+  let reads = 0;
+  const stale = { kind: "clock-reserved", generation: 16 };
+  for (const name of ["clockVersion", "clockId", "revision", "status", "error"]) Object.defineProperty(stale, name, {
+    get() { reads++; throw new Error("stale field accessed"); } });
+  h.nodes[0].port.emit("message", stale); await flush();
+  assert.equal(reads, 0); assert.equal(h.nativeCalls, 0); assert.equal(opening.settled, false);
+  const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+  const pending = observe(() => owner.poll()), sent = h.last();
+  const count = h.clockSent.length, calls = h.nativeCalls;
+  h.nodes[0].port.emit("message", { ...stale, kind: "clock-refill" }); await flush();
+  assert.equal(pending.settled, false); assert.equal(h.clockSent.length, count); assert.equal(h.nativeCalls, calls);
+  h.reply(sent); assert.equal((await pending.result).ok, true);
+  await stop(h, owner);
+});
+
+test("current malformed clock ACK correlation and premature readiness fence opening before native writes", async () => {
+  for (const fields of [{ clockVersion: 2 }, { clockId: 2 }, { revision: 1 }, { status: "0" },
+    { status: 0, error: "success with error" }, { kind: "clock-committed" }, { generation: "17" }]) {
+    const h = await harness({ autoClock: false });
+    const { opening, reserve } = await beginNativeOpen(h);
+    h.clockReply(reserve, fields);
+    await nativeOpeningError(h, opening, "protocol");
+    assert.equal(h.nativeCalls, 0);
+  }
+  const h = await harness({ autoClock: false });
+  const { opening, reserve } = await beginNativeOpen(h);
+  h.clockPacket("clock-ready", { revision: 0, origin: reserve.origin });
+  await nativeOpeningError(h, opening, "protocol");
+  assert.equal(h.nativeCalls, 0);
+});
+
+test("malformed current refill geometry, revision and duplicate requests refuse before any new automation", async () => {
+  for (const fields of [{ revision: 0 }, { revision: 2 }, { clockVersion: 2 }, { clockId: 2 },
+    { from0: 0 }, { to1: 0 }, { frames: 0 }, { frames: 4097 }, { endLow: -1 }, { endHigh: "0" },
+    { endHigh: 0x200000 }, { endLow: 0, endHigh: 0 }]) {
+    const h = await harness({ autoClock: false });
+    const { opening, reserve } = await beginNativeOpen(h);
+    const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+    const before = h.nativeCalls;
+    requestRefill(h, expectedInitial(reserve.origin, 4096, 48000), fields); await flush();
+    await localError(h, () => owner.poll(), "protocol");
+    assert.equal(h.nativeCalls, before);
+    await stop(h, owner, "failed");
+  }
+  const h = await harness({ autoClock: false });
+  const { opening, reserve } = await beginNativeOpen(h);
+  const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+  const geometry = expectedInitial(reserve.origin, 4096, 48000);
+  requestRefill(h, geometry); await flush();
+  const before = h.nativeCalls;
+  requestRefill(h, geometry); await flush();
+  await localError(h, () => owner.poll(), "protocol");
+  assert.equal(h.nativeCalls, before);
+  await stop(h, owner, "failed");
+});
+
+test("refill timeout rejects concurrent public work and late clock ACK cannot revive stopped authority", async () => {
+  const h = await harness({ autoClock: false });
+  const { opening, reserve } = await beginNativeOpen(h);
+  const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+  requestRefill(h, expectedInitial(reserve.origin, 4096, 48000)); await flush();
+  const extended = h.clockSent.at(-1).message;
+  const pending = observe(() => owner.poll());
+  await h.expire();
+  const original = failure(await pending.result, "timeout");
+  h.clockReply(extended); await flush();
+  assert.equal(failure(await observe(() => owner.poll()).result), original);
+  await stop(h, owner, "failed");
+  assertClean(h);
+});
+
+test("stop cancels native and arm pending independently and tolerates their valid late replies", async () => {
+  const h = await harness({ autoClock: false });
+  const { opening, reserve } = await beginNativeOpen(h);
+  const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+  await acknowledged(h, () => owner.finish());
+  const arm = observe(() => owner.arm(10000n)), armRequest = h.last();
+  requestRefill(h, expectedInitial(reserve.origin, 4096, 48000)); await flush();
+  const extended = h.clockSent.at(-1).message;
+  const stopping = observe(() => owner.stop()), stopped = h.last();
+  failure(await arm.result, "closed");
+  h.clockReply(extended); h.reply(armRequest); await flush();
+  assert.equal(stopping.settled, false);
+  h.reply(stopped); assert.equal((await stopping.result).ok, true);
+  assert.equal(owner.state, "closed"); assertClean(h);
+});
+
+test("abort during native reserve or commit cancels opening and valid late replies never reacquire output", async () => {
+  for (const phase of ["reserve", "commit"]) {
+    const h = await harness({ autoClock: false }), controller = new AbortController();
+    const { opening, reserve } = await beginNativeOpen(h, options({ signal: controller.signal,
+      audioLimits: { maxFrames: 4096 } }));
+    const pending = phase === "reserve" ? reserve : await admitNativeProgram(h, reserve);
+    controller.abort(); await flush();
+    const calls = h.nativeCalls;
+    h.clockReply(pending); h.clockPacket("clock-ready", { revision: 0, origin: reserve.origin });
+    await nativeOpeningError(h, opening, "aborted");
+    assert.equal(h.nativeCalls, calls); assert.equal(h.nodes.length, 1);
+  }
+});
+
+test("current clock getter reentrancy cannot schedule after abort or overwrite its first cause", async () => {
+  const h = await harness({ autoClock: false }), controller = new AbortController();
+  const { opening, reserve } = await beginNativeOpen(h, options({ signal: controller.signal,
+    audioLimits: { maxFrames: 4096 } }));
+  let reads = 0;
+  const packet = { kind: "clock-reserved", generation: 17, clockVersion: 1, clockId: 1, status: 0, error: null };
+  Object.defineProperty(packet, "revision", { get() { reads++; controller.abort(); return reserve.revision; } });
+  h.nodes[0].port.emit("message", packet);
+  await nativeOpeningError(h, opening, "aborted");
+  assert.equal(reads, 1); assert.equal(h.nativeCalls, 0);
+});
+
+test("clock control posting failure clears its independent deadline and joins ordinary cleanup", async () => {
+  for (const clockPostThrowsAt of [1, 2]) {
+    const h = await harness({ autoClock: false, clockPostThrowsAt });
+    const opening = observe(() => h.AudioHost.open(options({ audioLimits: { maxFrames: 4096 } })));
+    await flush(); h.ready(); h.clockPacket("clock-probe", { frames: 128 }); await flush();
+    if (clockPostThrowsAt === 2) h.clockReply(h.clockSent[0].message);
+    await nativeOpeningError(h, opening, "transport");
+    assert.equal(h.clockSent.some(row => row.message.kind === "clock-commit"), false);
+  }
+});
+
+test("malformed initial native quantum rejects without reserving or programming lanes", async () => {
+  for (const frames of [0, -1, 1.5, NaN, Infinity, "128", 4097, 4294967296]) {
+    const h = await harness({ autoClock: false });
+    const opening = observe(() => h.AudioHost.open(options({ audioLimits: { maxFrames: 4096 } })));
+    await flush(); h.ready(); h.clockPacket("clock-probe", { frames });
+    await nativeOpeningError(h, opening, "protocol");
+    assert.equal(h.nativeCalls, 0); assert.equal(h.clockSent.length, 0);
+  }
+});
+
+test("current native ready identity, origin and revision must match the complete reserved program", async () => {
+  for (const fields of [{ origin: 0 }, { origin: 577 }, { revision: 1 }, { clockVersion: 2 },
+    { clockId: 0 }, { origin: 576n }]) {
+    const h = await harness({ autoClock: false });
+    const { opening, reserve } = await beginNativeOpen(h);
+    const commit = await admitNativeProgram(h, reserve);
+    h.clockReply(commit); await flush();
+    h.clockPacket("clock-ready", { revision: 0, origin: reserve.origin, ...fields });
+    await nativeOpeningError(h, opening, "protocol");
+  }
+});
+
+test("negative native reserve or commit ACK preserves its numeric remote refusal without exposing an owner", async () => {
+  for (const phase of ["reserve", "commit"]) {
+    const h = await harness({ autoClock: false });
+    const { opening, reserve } = await beginNativeOpen(h);
+    const pending = phase === "reserve" ? reserve : await admitNativeProgram(h, reserve);
+    const before = h.nativeCalls;
+    h.clockReply(pending, { status: 6, error: "chronology" });
+    const original = await nativeOpeningError(h, opening, "remote");
+    assert.equal(original.status, 6);
+    assert.equal(h.nativeCalls, before); assert.equal(h.nodes.length, 1);
+  }
+});
+
+test("duplicate ready or quantum after native admission fences rather than replacing clock authority", async () => {
+  for (const kind of ["clock-ready", "clock-probe"]) {
+    const h = await harness({ autoClock: false });
+    const { opening, reserve } = await beginNativeOpen(h);
+    const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+    const before = h.nativeCalls;
+    h.clockPacket(kind, { revision: 0, origin: reserve.origin, frames: 128 }); await flush();
+    await localError(h, () => owner.poll(), "protocol");
+    assert.equal(h.nativeCalls, before);
+    await stop(h, owner, "failed");
+  }
+});
+
+test("future proof is checked after all native automation and before whole commit", async () => {
+  const faults = { autoClock: false }, h = await harness(faults);
+  const { opening, reserve } = await beginNativeOpen(h);
+  const total = 1 + 3 * (1 + 2 * 3);
+  faults.nativeAfterCall = ({ call, context }) => {
+    if (call === total) context.currentTime = (reserve.origin - 0.25) / 48000;
+  };
+  h.clockReply(reserve);
+  await nativeOpeningError(h, opening);
+  assert.equal(h.nativeCalls, total);
+  assert.deepEqual(h.clockSent.map(row => row.message.kind), ["clock-reserve"]);
+});
+
+test("duplicate current native ACK after completion fences and never schedules another program", async () => {
+  for (const phase of ["reserve", "commit"]) {
+    const h = await harness({ autoClock: false });
+    const { opening, reserve } = await beginNativeOpen(h);
+    const commit = await admitNativeProgram(h, reserve);
+    const owner = await exposeNativeOwner(h, opening, commit);
+    const before = h.nativeCalls;
+    h.clockReply(phase === "reserve" ? reserve : commit); await flush();
+    await localError(h, () => owner.poll(), "protocol");
+    assert.equal(h.nativeCalls, before);
+    await stop(h, owner, "failed");
+  }
+});
+
+test("hostile current native metadata getter fails once and retains the original protocol error", async () => {
+  const h = await harness({ autoClock: false });
+  const { opening } = await beginNativeOpen(h);
+  let reads = 0;
+  const packet = { kind: "clock-reserved", generation: 17, clockVersion: 1, clockId: 1,
+    revision: 0, error: null };
+  const cause = new Error("clock metadata failed");
+  Object.defineProperty(packet, "status", { get() { reads++; throw cause; } });
+  h.nodes[0].port.emit("message", packet);
+  const original = await nativeOpeningError(h, opening, "protocol");
+  assert.equal(reads, 1); assert.equal(original.cause, cause); assert.equal(h.nativeCalls, 0);
+});
 
 test("malformed terminal during pending stop reports a distinct cleanup protocol error while retaining original diagnostics", async () => {
   const h = await harness(), owner = await open(h);
@@ -323,6 +826,8 @@ async function harness(faults = {}) {
   let now = 0;
   let timerId = 0;
   let postAttempts = 0;
+  let clockPostAttempts = 0;
+  let nativeCalls = 0;
 
   class EventTarget {
     constructor() { this.listeners = new Map(); }
@@ -345,8 +850,10 @@ async function harness(faults = {}) {
   class Port extends EventTarget {
     constructor() { super(); this.sent = []; this.closes = 0; this.starts = 0; }
     postMessage(message, transfer = []) {
-      postAttempts++;
-      if (postAttempts === faults.postThrowsAt) throw new Error("injected postMessage failure");
+      const isClock = typeof message.kind === "string" && message.kind.startsWith("clock-");
+      if (isClock) clockPostAttempts++; else postAttempts++;
+      if ((!isClock && postAttempts === faults.postThrowsAt)
+        || (isClock && clockPostAttempts === faults.clockPostThrowsAt)) throw new Error("injected postMessage failure");
       assert.equal(this.closes, 0, "posting after port cleanup");
       const transfers = Array.isArray(transfer) ? transfer : transfer.transfer ?? [];
       const snapshot = ["attach-commands", "attach-samples"].includes(message.kind)
@@ -354,6 +861,17 @@ async function harness(faults = {}) {
         : structuredClone(message, { transfer: transfers });
       this.sent.push({ message: snapshot, transfers: [...transfers] });
       trace.push(["post", message.kind, message.sequence]);
+      // Existing public-control regressions get a separate, explicit clock peer.
+      // New clock tests disable it and drive every protocol step themselves.
+      if (isClock && faults.autoClock !== false) Promise.resolve().then(() => {
+        if (this.closes) return;
+        this.emit("message", { kind: message.kind === "clock-reserve" ? "clock-reserved" : "clock-committed",
+          generation: message.generation, clockVersion: 1, clockId: 1,
+          revision: message.revision, status: 0, error: null });
+        if (message.kind === "clock-commit" && message.revision === 0) this.emit("message", {
+          kind: "clock-ready", generation: message.generation, clockVersion: 1, clockId: 1,
+          revision: 0, origin: message.origin });
+      });
     }
     start() { this.starts++; }
     close() { this.closes++; trace.push(["port-close"]); }
@@ -420,6 +938,27 @@ async function harness(faults = {}) {
       this.name = name;
       this.configuration = configuration;
       this.port = new Port();
+      this.parameters = new Map(TEST_NAMES.map(name => {
+        const parameter = { events: [],
+          setValueAtTime(value, at) { return write("set", value, at); },
+          linearRampToValueAtTime(value, at) { return write("ramp", value, at); },
+          cancelScheduledValues(at) { return write("cancel", undefined, at); },
+          cancelAndHoldAtTime(at) { return write("hold", undefined, at); },
+        };
+        let value = 0;
+        Object.defineProperty(parameter, "value", { get() { return value; }, set(next) { value = next; write("value", next, null); } });
+        function write(kind, next, at) {
+          nativeCalls++;
+          const event = { kind, value: next, at };
+          parameter.events.push(event);
+          trace.push(["native", name, kind, next, at]);
+          if (faults.nativeThrowAt === nativeCalls) throw new Error("injected native automation failure");
+          faults.nativeAfterCall?.({ name, ...event, call: nativeCalls, context });
+          return parameter;
+        }
+        return [name, parameter];
+      }));
+      if (faults.missingParameter) this.parameters.delete(faults.missingParameter);
       this.connections = [];
       this.disconnects = 0;
       nodes.push(this);
@@ -458,10 +997,14 @@ async function harness(faults = {}) {
     context, identifier: sourceUrl.href,
     initializeImportMeta(meta) { meta.url = sourceUrl.href; },
   });
-  await actual.link(specifier => {
-    if (specifier === "./audio-failure.mjs") return new SourceTextModule(failureSource, {
-      context, identifier: failureUrl.href,
-    });
+  const dependencies = new Map([[failureUrl.href, failureSource], [clockUrl.href, clockSource], [nativeProbeUrl.href, nativeProbeSource]]);
+  const linked = new Map();
+  await actual.link((specifier, parent) => {
+    const identifier = new URL(specifier, parent.identifier).href;
+    if (dependencies.has(identifier)) {
+      if (!linked.has(identifier)) linked.set(identifier, new SourceTextModule(dependencies.get(identifier), { context, identifier }));
+      return linked.get(identifier);
+    }
     throw new Error(`Unexpected host import: ${specifier}`);
   });
   await actual.evaluate();
@@ -469,12 +1012,29 @@ async function harness(faults = {}) {
     AudioHost: actual.namespace.AudioHost, AudioHostError: actual.namespace.AudioHostError,
     faults, contexts, nodes, channels, timers, trace,
     get now() { return now; },
-    get sent() { return nodes.at(-1)?.port.sent ?? []; },
+    get sent() { return (nodes.at(-1)?.port.sent ?? []).filter(row => !row.message.kind.startsWith("clock-")); },
+    get clockSent() { return (nodes.at(-1)?.port.sent ?? []).filter(row => row.message.kind.startsWith("clock-")); },
+    get allSent() { return nodes.at(-1)?.port.sent ?? []; },
+    get nativeCalls() { return nativeCalls; },
     last() { return this.sent.at(-1)?.message; },
     ready(fields = {}) {
       const node = nodes.at(-1);
       node.port.emit("message", { kind: "ready", generation: node.configuration.processorOptions.generation,
         sampleRate: node.context.sampleRate, channels: node.configuration.processorOptions.channels, ...fields });
+      if (faults.autoClock !== false && !node.clockProbed) {
+        node.clockProbed = true;
+        node.port.emit("message", { kind: "clock-probe",
+          generation: node.configuration.processorOptions.generation, clockVersion: 1, clockId: 1, frames: faults.probeFrames ?? 4 });
+      }
+    },
+    clockPacket(kind, fields = {}) {
+      const node = nodes.at(-1);
+      node.port.emit("message", { kind, generation: node.configuration.processorOptions.generation,
+        clockVersion: 1, clockId: 1, ...fields });
+    },
+    clockReply(message, fields = {}) {
+      this.clockPacket(message.kind === "clock-reserve" ? "clock-reserved" : "clock-committed",
+        { revision: message.revision, status: 0, error: null, ...fields });
     },
     reply(message, fields = {}) {
       nodes.at(-1).port.emit("message", {
