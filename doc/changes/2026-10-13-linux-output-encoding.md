@@ -5,10 +5,13 @@ The prerequisite checkpoint `cf9d3906` stores the shared setting and its tests
 before the dependent ALSA and launcher paths. `03c3603d` saves the ALSA request,
 capability and owner regressions; `d196991f` saves the live/local/replay cold
 requests and their fixtures. Those consumers are connected in the implementation
-candidate. `d90fb48b` saves the desktop and shipped CLI regressions. Whole-task
-independent review, CLI/desktop QA and broader integration/foreign typing
-checks remain pending. The connected author checks below passed. This document
-does not close the Harness task or complete WBS05.12/07.09.
+candidate. `d90fb48b` saves the desktop and shipped CLI regressions.
+`18d9c414` fixes current Settings capacity and validates desktop CLI encoding
+before profile overlay. Fresh independent code review and CLI QA passed;
+broader app regression and WASM/foreign Rust typing passed. Actual desktop
+Settings/profile journeys passed; desktop QA returned BLOCKED_ENV for required
+acknowledged-paused Output interaction without native input devices. This
+document does not close the Harness task or complete WBS05.12/07.09.
 
 Implemented:
 
@@ -38,7 +41,8 @@ The existing generic Settings and Output editors expose the Linux schema;
 desktop fixture registration uses that editor without a new UI framework.
 On Apply error, the edited draft and prior accepted capability remain; only a
 successful applied-capability refresh replaces the draft. Actual window
-edit/Apply/refusal/Back/reopen evidence remains pending. Retained-practice
+Settings edit/Apply/refusal/Back/reopen and profile restart were exercised.
+Acknowledged-paused Output interaction remains unverified. Retained-practice
 output replacement still explicitly refuses as before and remains a separate
 unfinished requirement. Adapter/null success does not establish successful
 replacement in shipped retained-practice play.
@@ -163,11 +167,82 @@ advances the Scene revision. The corrected fixture checks rejection before
 composition, then exact geometry/colors/UVs/hits after composition, preserving
 every capacity and atomicity assertion. The separate encoding-settings rerun
 passed all 18. Logs are `remediation-settings-unit.log`,
-`remediation-connected.log` and `remediation-settings-c2.log`. Fresh independent
-review and full QA of the repaired candidate remain pending.
+`remediation-connected.log` and `remediation-settings-c2.log`.
 
-Remaining task gates include broader app integration,
-portable/foreign typing checks, independent code review, CLI/desktop QA and
-final documentation review. Physical sound, device latency and Windows/macOS
-encoding support remain unproved or separate obligations. The parent player
-Goal remains active; no push is authorized.
+Fresh independent DEEP review of the full child at `18d9c414` returned PASS,
+with zero FIX_NOW, INVESTIGATE or OPTIONAL findings. Both final bounded
+discovery workers also reported no findings. CLI QA ran after that review and
+returned PASS with the following independent results:
+
+| Check | Result |
+| --- | --- |
+| App library, all seven binaries and three selected integration targets | 3,676 passed, 0 failed, 26 ignored |
+| Opted complete-owner ALSA null lifecycle, all four encodings | 1 passed, 0 failed, 0 ignored |
+| Opted primary/standalone recorded null playback, all four encodings | 1 passed, 0 failed, 0 ignored |
+| Independent shipped CLI driver | 40 invocations passed with expected exit codes 0/1 |
+| WASM browser/browser-audio library check | exit 0 |
+| Windows and macOS all-targets desktop/webtransport foreign checks | both exit 0; Rust typing only |
+
+The full app command was:
+
+```sh
+cargo test -p beatkernel-bms-runtime --features desktop,webtransport --lib --bins --test output_encoding_settings --test native_speed_settings --test native_output_encoding_cli --locked -j2
+```
+
+The two opted tests used the same package/features/locked/two-job setup and
+`BEATKERNEL_TEST_ALSA_DEVICE=null`, with
+`--lib actual_null_all_encodings_open_start_retire_and_retry_both_complete_owner_types`
+and `--test native_output_encoding_cli
+output_encoding_actual_recorded_null_cli_all_four_preserve_original_capture_and_source_bytes`,
+respectively, followed by `-- --ignored --nocapture`. The recorded test ran
+eight successful playback commands: primary/standalone times four encodings,
+preserving source 48000Hz, target 44100Hz, speed 2/1 and original source/capture
+bytes.
+
+The portable command was:
+
+```sh
+cargo check -p beatkernel-bms-runtime --lib --target wasm32-unknown-unknown --no-default-features --features browser,browser-audio --locked -j2
+CARGO_BUILD_JOBS=2 target/toolchain/xcheck.sh windows -p beatkernel-bms-runtime --all-targets --features desktop,webtransport
+CARGO_BUILD_JOBS=2 target/toolchain/xcheck.sh macos -p beatkernel-bms-runtime --all-targets --features desktop,webtransport
+```
+
+These checks ran serially with at most two compiler jobs. Foreign checks use
+stub C archives and prove Rust typing, not native linking, SDK or device
+execution. Existing warnings remain; there is no all-lint claim. Logs are in
+ignored `target/wf/linux-output-encoding/qa-cli-18d9/`, including
+`app-targets.log`, `alsa-null-owner.log`, `recorded-null-cli.log`,
+`wasm-check.log`, `windows-check.log`, `macos-check.log` and
+`public-routes.json`. The public driver initially had overly strict assertions
+for existing primary thread-start stdout and host-validation precedence; those
+assertions were corrected, the failed attempts preserved and all 40 actual
+public calls subsequently passed. No product change was required.
+
+Desktop QA reused the current source-identical debug binary on `DISPLAY=:99`
+with software GPU and real X11 input. It loaded generated v1/v2 settings
+fixtures, edited all four tokens, refused `pcm8` visibly while retaining the
+draft, applied via keyboard, navigated Back/Tab/reopen, saved a v2 profile and
+restarted from it. A full 64-player/18-binding/eight-opponent profile exposed
+129 rows; the appended encoding row remained selectable/editable, valid PCM24
+applied, and an over-limit Add Binding refused atomically. GUI Save preserved
+all 97 original native argument records and added PCM24. These are current
+saved launch settings and generated QA fixtures, not a migration of deployed
+user data. The saved full v2 restart retained 44100Hz, two channels, period64,
+buffer512, exact rate and speed3/2 beside PCM24. Desktop screenshots and owned
+process records are in ignored
+`target/wf/linux-output-encoding/qa-desktop-18d9/`.
+The reused binary SHA256 was
+`a5b08a6e743d2b52f9d1d84f6018751f6ee1cc6eaaea20ceb82a1db2242bc32e`.
+Both QA-owned app PIDs, 505992 and 530791, were absent after cleanup, and the
+final desktop window list was empty; no compiler or display process was changed.
+
+Starting the solo fixture reached the visible native input-collector error for
+absent `/dev/input/event0`. No complete game play or acknowledged-paused Output
+journey was established. Physical sound, device latency and Windows/macOS
+encoding support remain unproved or separate obligations. The earlier parent
+browser QA FAIL remains unresolved. The parent player Goal remains active;
+no push is authorized.
+
+## Known ceiling
+
+Known ceiling: The shipped acknowledged-paused Output editor and retained-practice Apply/error/capability-refresh journey remain BLOCKED_ENV because the native input collector refuses absent `/dev/input/event0` before admitted play; `/dev/input` and `/dev/snd` are unavailable. ALSA null CLI and pure paused fixtures do not establish that GUI journey, physical sound, latency, or successful retained-practice replacement. Existing parent browser FAIL remains unchanged.

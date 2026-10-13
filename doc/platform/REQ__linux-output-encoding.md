@@ -3,13 +3,14 @@
 Implementation status, 2026-10-13: the shared typed setting, Linux schema,
 profile persistence and Watch argument projection are connected to the actual
 solo/local/replay cold requests and paused ALSA request/capability mapping.
-Focused adapter/launcher tests and an opted ALSA null lifecycle diagnostic
-passed. Pure desktop journeys and actual shipped CLI regressions also passed,
-including opted null recorded playback through both executable routes. This is
-a connected implementation candidate; whole-task independent review,
-broader integration/foreign typing and CLI/desktop QA remain pending. Neither
-this candidate nor the earlier prerequisite checkpoint
-completes WBS05.12/07.09 or the parent player Goal.
+Independent code review and CLI QA passed at `18d9c414`: 3,676 app tests passed,
+with no failures and 26 ignored, and two opted ALSA null diagnostics passed
+separately. WASM and Windows/macOS Rust typing checks passed. Actual desktop
+Settings edit/refusal/Apply, profile save/restart and the 129-row maximum were
+exercised. Desktop QA returned BLOCKED_ENV for acknowledged-paused Output
+interaction because this environment has no evdev input devices. The task
+remains unfinished; these results do not complete WBS05.12/07.09 or the parent
+player Goal.
 
 Linux native Settings and the live/local/replay ALSA launchers accept
 `--encoding float32|pcm16|pcm24|pcm32`. Omission uses Float32. PCM choices
@@ -34,6 +35,9 @@ aggregate byte limits. Verify a full supported roster/bindings/opponents draft
 through both profile versions and the actual Settings view. Explicit desktop
 CLI values must be checked before profile overlay can erase a blank token;
 blank editor drafts keep their existing omission/preservation behavior.
+Profiles here are saved launch settings. Capacity checks apply to current
+supported configurations and do not presuppose deployed user data or add a
+migration mechanism.
 Linux defaults/profile overlay/primary preparation and desktop Watch/replay
 projection must retain every selected token instead of silently dropping it.
 
