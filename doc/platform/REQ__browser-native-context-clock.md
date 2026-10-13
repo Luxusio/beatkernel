@@ -87,7 +87,26 @@ choose lead=max(4Q,ceil(2*deliveryMs*F/1000)), then
 origin=ceil((ceil(context.currentTime*F)+lead)/Q)*Q+floor(Q/2).
 Require safe coordinates and representable quarter-early event times
 (targetFrame-0.25)/F. Initial Q=1 cannot produce this certificate and refuses.
-The policy gives no delivery guarantee and imposes no diagnostic200ms delay.
+Native currentTime can advance several quanta during a short wall-time
+delivery interval. After initial gesture resume and receipt of actual Q,
+suspend the owned opening context and await its exact suspended state before
+selecting origin. Use the same lead/origin formula against frozen native
+currentTime. Reserve, every native scheduling call and whole initial commit
+ACK run while the context is suspended. Then resume and await exact running
+state before native callback certification. No event is rewritten or origin
+rebased, and no fixed delay, retry or clock correction is introduced.
+
+The existing single opening deadline covers both native transitions and the
+complete handshake. After every await check current ownership, failure and
+stop before further work; late suspend/resume/ACK completion cannot resume or
+activate a canceled generation. Rejected/stalled transitions, wrong native
+state or missing paused ACK fail closed through actual stop/context cleanup.
+Opening suspension is internal setup only; active setup/allocated/armed
+interruption handling remains unchanged. Native fills and first certificates
+still require actual callbacks after resume; suspended control ACKs alone
+never establish readiness. The policy gives no universal startup/quantum
+guarantee and imposes no diagnostic200ms delay. Device suspend/resume cost and
+other engine behavior require measured verification.
 Reserve exact initial geometry before native API writes. After reserve ACK
 and before/after all scheduling calls require origin still future. Whole
 commit follows successful scheduling of marker and all three lanes; partial

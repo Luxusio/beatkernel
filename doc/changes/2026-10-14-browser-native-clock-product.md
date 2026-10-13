@@ -37,7 +37,7 @@ scalar; no callback array import or BigInt result is required.
 | Pure native clock Rust fixtures |28 PASS, including independent u128 CRT, safe-domain/long arithmetic and actual WorkletAudio composition|
 | Native JS helper |39 PASS|
 | Actual fresh audio WASM bridge |22 PASS|
-| Host |67 PASS:40 existing and27 new clock/lifecycle cases|
+| Host |Initial67 PASS; post-review71 PASS; paused-opening refinement82 PASS with11 more transition/cancellation regressions|
 | Actual Worklet source with scalar spies |53 PASS:27 existing and26 native/cancellation/allocation cases|
 | Chronology controller before fixture import alias fix |93 PASS|
 | Affected controller/observer branches after alias fix |66 PASS, including five actual served complete-module compilation regressions; final full file now has98 tests|
@@ -80,9 +80,78 @@ durable committed binary proof; each run records current source/WASM hashes.
 
 ## Independent gate status
 
-At this implementation checkpoint independent DEEP code review, fresh CLI and
-browser QA, final documentation review, and task verification have not yet
-completed. Author results above are not an authoritative review/QA PASS.
+The first independent DEEP review of95028a36 returned FAIL with three FIX_NOW
+findings: repeated startup failure retired its own stop ACK; valid queued
+refill progress was checked against canceled active geometry during stop; and
+the replay runner could click disabled Play before successful cleanup ended.
+Both discovery attempts completed, then the full formal reviewer independently
+verified the three findings and the complete18-path scope.
+
+The Host correction adds no state: reentering the same owned failure joins its
+existing stop, and stopping ignores known clock progress only after validating
+generation/version/id. Exact canceled ACK, unknown kind and malformed identity
+checks remain. Four actual Host regressions require opening/stop to remain
+pending with context still owned before the real stop ACK; abort, remote
+rejection, accepted late commit plus next refill, and malformed teardown
+identity/ACK are covered. Root reran all71 Host tests successfully. The replay
+runner now waits for Play, speed and file controls to be enabled after Worker
+terminal, preserving its existing20-second bound and original assertions.
+
+The original author evidence above precedes that Host correction; fresh
+post-remediation author evidence and final independent verification are
+recorded separately. At this checkpoint final DEEP review, fresh CLI/browser
+QA, documentation review and task verification remain pending. Author results
+are not an authoritative review/QA PASS.
+
+Post-remediation `author-cold-13686-02` passed the three cold contexts and all
+labeled negatives. `author-replay-13686-02` passed nine gameplay checks but
+failed clean-console-network on initialization audioWASM ERR_ABORTED. The one
+bounded retry, `author-replay-13686-03`, retained the same aborted request and
+also failed actual seventh-context Host startup: the UI reported Native clock
+scheduling missed its original deadline before Worker play-start. The actual
+click was received and a context created/closed; this is not a disabled-control
+race. Both failures remain GATE/OWN pending diagnosis, with no network exclusion,
+fake clock or assumed pre-existing classification. Final acceptance is pending.
+
+The passive `author-replay-13686-04` diagnostic passed nine gameplay checks and
+retained the initialization ERR_ABORTED. Its bounded observer recorded original
+native API/clock messages without replacing calls: reserve wall time around
+0.4–0.55ms coincided with native currentTime advancing8.7–11.6ms, leaving a
+future-origin margin as small as1.45ms. This explains why wall-time delivery
+does not bound native startup progress; it does not identify the exact expired
+API in the earlier bare failure. Control-observer overhead is not product
+performance evidence.
+
+The native setup-pause feasibility probe used the original Worklet, matching
+WASM and native AudioParams at44.1/48kHz. Clean
+`author-paused-feasibility-13686-02` exited0: native currentTime stayed frozen
+during paused reserve/program/whole commit ACK; actual callback certification
+followed resume; a separate suspended cancellation received its real stop ACK.
+The first probe's unrelated favicon404 remains recorded. The clean probe owned
+and closed its Chromium/server, with PID absent and reusable8171 bind passing.
+This is setup/control feasibility evidence, not gameplay or acoustic proof.
+
+The refined Host opening contract preserves its original lead/origin formula
+but executes initial reserve/program/commit while natively suspended after the
+initial gesture resume and measured quantum. It resumes before actual callback
+certification. All new awaits retain the original deadline and cancellation
+owner. Rejected/stalled transitions or wrong native state fail closed. The
+REQ and canonical PLAN were refined before source edits. Independent author
+and root executions of the actual Host suite passed82 tests. The initial
+gesture resume's late rejection first reproduced premature cleanup (81 PASS,
+1 FAIL); the minimal stopped-owner guard made all82 pass, including abort and
+timeout across first resume/suspend/second resume. Full production browser
+acceptance remains pending at this checkpoint.
+
+The separate original-native Worker EOF probe
+`native-fetch-eof-ac008-13686-01` exited0 collecting all four diagnostic
+outcomes. getReader with absent or exact Content-Length received all77456
+matching bytes, compiled the actual WASM, and retained signal.aborted=false,
+yet Chromium reported ERR_ABORTED. Native arrayBuffer with either framing
+reported requestfinished for the same bytes. Owned browser/server closure and
+reusable8173 bind passed. This disproves Content-Length alone as the remedy;
+it identifies a native consumer/report distinction without weakening clean
+network acceptance or replacing the production64MiB streaming limit.
 The Harness task is TASK__browser-native-clock-product, run
 01a13686-2986-79f1-a971-6cc00056d10a. Update this section with actual ordered
 finals and runtime attestation outcome before closure.

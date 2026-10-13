@@ -193,6 +193,17 @@ sample before publishing readiness, arm ACK or PCM. Published `currentFrame`
 and callback counters remain observations rather than clock authority. Live
 and replay use the existing strict Rust renderer and unchanged report29.
 
+Opening first resumes through the user gesture and observes the actual native
+quantum. It then awaits native suspension, selects the original origin against
+frozen currentTime, and reserves/programs/commits the complete clock while
+suspended. Only after whole commit ACK does it resume and await two actual
+callback certificates. All transitions share the existing opening deadline
+and check current ownership after every await. This avoids treating elapsed
+wall-time delivery as a bound on native startup progress; it adds no fixed
+delay, retry, event rewrite or origin correction. Suspended ACKs do not certify
+readiness. Other engines and device suspend/resume costs still require actual
+measurement, and active-play interruptions remain terminal.
+
 Generate matching audio and UI artifacts from the current source before running
 the product probes. With this checkout's cached toolchain, native dependencies
 also require the cached CC/AR wrappers; sourcing env.sh alone is insufficient.

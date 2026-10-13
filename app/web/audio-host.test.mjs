@@ -52,7 +52,7 @@ async function exposeNativeOwner(h, opening, commit) {
   h.clockReply(commit);
   await flush();
   assert.equal(opening.settled, false, "whole commit ACK is not native callback proof");
-  h.clockPacket("clock-ready", { revision: 0, origin: commit.origin });
+  h.nativeReady({ revision: 0, origin: commit.origin });
   const opened = await opening.result;
   assert.equal(opened.ok, true, opened.error?.message);
   return opened.value;
@@ -513,6 +513,360 @@ test("hostile current native metadata getter fails once and retains the original
   assert.equal(reads, 1); assert.equal(original.cause, cause); assert.equal(h.nativeCalls, 0);
 });
 
+test("abort after native commit waits for the actual stop ACK and keeps its original cause without cleanup recursion", async () => {
+  const h = await harness({ autoClock: false }), controller = new AbortController();
+  const { opening, reserve } = await beginNativeOpen(h, options({ signal: controller.signal,
+    audioLimits: { maxFrames: 4096 } }));
+  const commit = await admitNativeProgram(h, reserve);
+  assert.equal(commit.kind, "clock-commit");
+  controller.abort(); await flush();
+  const stopRequest = h.last(), calls = h.nativeCalls;
+  assert.equal(stopRequest.kind, "stop");
+  assert.equal(opening.settled, false, "abort must still join the actual stop ACK");
+  assert.equal(h.contexts[0].closes, 0, "native output cannot be released before stop ACK");
+  h.clockReply(commit);
+  h.clockPacket("clock-ready", { revision: 0, origin: reserve.origin });
+  await flush();
+  assert.equal(opening.settled, false, "late clock replies cannot retire the fresh stop request");
+  assert.equal(h.contexts[0].closes, 0);
+  assert.equal(h.nativeCalls, calls);
+  assert.ok(h.timers.size > 0, "the bounded stop acknowledgement remains live");
+  h.reply(stopRequest);
+  const original = failure(await opening.result, "aborted");
+  assert.ok(original.cleanupError == null, "a successful stop must not attach the original abort as cleanupError");
+  assertClean(h);
+});
+
+test("stop during refill preserves its actual ACK across late commit and legitimate next-revision refill", async () => {
+  const h = await harness({ autoClock: false });
+  const { opening, reserve } = await beginNativeOpen(h);
+  const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+  const geometry = expectedInitial(reserve.origin, 4096, 48000);
+  requestRefill(h, geometry); await flush();
+  const refillCommit = h.clockSent.at(-1).message;
+  assert.equal(refillCommit.kind, "clock-commit"); assert.equal(refillCommit.revision, 1);
+  const stopping = observe(() => owner.stop()), stopRequest = h.last();
+  assert.equal(stopRequest.kind, "stop");
+  const calls = h.nativeCalls, posted = h.clockSent.length;
+  assert.equal(stopping.settled, false);
+  assert.equal(h.contexts[0].closes, 0);
+  h.clockReply(refillCommit);
+  const next = { ...geometry, h0: refillCommit.h0, h1: refillCommit.h1, h2: refillCommit.h2 };
+  requestRefill(h, next, { revision: 2 });
+  await flush();
+  assert.equal(stopping.settled, false, "valid in-flight clock traffic cannot retire the fresh stop ACK");
+  assert.equal(h.contexts[0].closes, 0);
+  assert.equal(h.nativeCalls, calls, "no native scheduling after stop owns cleanup");
+  assert.equal(h.clockSent.length, posted, "no next-revision commit after cancellation");
+  assert.ok(h.timers.size > 0);
+  h.reply(stopRequest);
+  const result = await stopping.result;
+  assert.equal(result.ok, true, result.error?.message);
+  assert.equal(owner.state, "closed");
+  assertClean(h);
+});
+
+test("remote rejection of the initial native commit waits for its stop ACK without making its cause a cleanup error", async () => {
+  const h = await harness({ autoClock: false });
+  const { opening, reserve } = await beginNativeOpen(h);
+  const commit = await admitNativeProgram(h, reserve);
+  h.clockReply(commit, { status: 6, error: "chronology" });
+  await flush();
+  const stopRequest = h.last();
+  assert.equal(stopRequest.kind, "stop");
+  assert.equal(opening.settled, false, "startup refusal still joins the actual stop acknowledgement");
+  assert.equal(h.contexts[0].closes, 0);
+  assert.ok(h.timers.size > 0);
+  h.reply(stopRequest);
+  const original = failure(await opening.result, "remote");
+  assert.equal(original.status, 6);
+  assert.ok(original.cleanupError == null, "successful cleanup cannot report its original remote refusal as cleanupError");
+  assertClean(h);
+});
+
+test("stopping ignores valid queued progress but malformed current clock identity or ACK still fails cleanup", async () => {
+  for (const [kind, fields] of [
+    ["clock-ready", { clockVersion: 2 }],
+    ["clock-refill", { clockId: 2 }],
+    ["clock-committed", { revision: 2, status: 0, error: null }],
+    ["clock-committed", { revision: 1, status: "0", error: null }],
+  ]) {
+    const h = await harness({ autoClock: false });
+    const { opening, reserve } = await beginNativeOpen(h);
+    const owner = await exposeNativeOwner(h, opening, await admitNativeProgram(h, reserve));
+    requestRefill(h, expectedInitial(reserve.origin, 4096, 48000)); await flush();
+    const stopping = observe(() => owner.stop());
+    assert.equal(stopping.settled, false);
+    const before = h.nativeCalls;
+    h.clockPacket(kind, { revision: 1, origin: reserve.origin, ...fields });
+    const cleanup = failure(await stopping.result, "protocol");
+    assert.equal(cleanup.operation, "receive");
+    assert.equal(h.nativeCalls, before);
+    assert.equal(owner.state, "failed");
+    assertClean(h);
+  }
+});
+
+async function openingPausedAt(stage, extraFaults = {}) {
+  const gate = deferred(), controller = new AbortController();
+  const faults = { autoClock: false, ...extraFaults };
+  if (stage === "initial-resume") faults.resumeGate = gate;
+  if (stage === "suspend") faults.suspendGate = gate;
+  if (stage === "resume") faults.secondResumeGate = gate;
+  const h = await harness(faults);
+  const opening = observe(() => h.AudioHost.open(options({ signal: controller.signal,
+    audioLimits: { maxFrames: 4096 } })));
+  await flush(); h.ready();
+  let reserve, commit;
+  if (stage !== "initial-resume") {
+    assert.equal(h.contexts[0].state, "running", "the real quantum arrives after the gesture resume");
+    h.clockPacket("clock-probe", { frames: 128 }); await flush();
+    if (stage !== "suspend") {
+      reserve = h.clockSent[0]?.message;
+      assert.equal(reserve?.kind, "clock-reserve");
+      if (stage !== "reserve") {
+        commit = await admitNativeProgram(h, reserve);
+        if (stage !== "commit") { h.clockReply(commit); await flush(); }
+      }
+    }
+  }
+  assert.equal(opening.settled, false);
+  return { h, opening, gate, controller, reserve, commit };
+}
+
+test("native opening waits for exact suspension before selecting frozen geometry and resumes only after whole ACK", async () => {
+  const suspendGate = deferred(), secondResumeGate = deferred();
+  const faults = { autoClock: false, suspendGate, secondResumeGate, suspendedTime: 0.512 };
+  const h = await harness(faults);
+  const opening = observe(() => h.AudioHost.open(options({ audioLimits: { maxFrames: 4096 } })));
+  await flush();
+  h.advanceBeforeDeadline(7);
+  h.ready(); h.clockPacket("clock-probe", { frames: 128 }); await flush();
+  assert.equal(h.contexts[0].suspends, 1);
+  assert.equal(h.contexts[0].state, "running", "a requested suspend is not a fulfilled transition");
+  assert.equal(h.clockSent.length, 0); assert.equal(h.nativeCalls, 0);
+  h.contexts[0].currentTime = 0.25;
+  h.advanceBeforeDeadline(5);
+  suspendGate.resolve(); await flush();
+  const reserve = h.clockSent[0]?.message;
+  assert.equal(reserve?.kind, "clock-reserve");
+  const lead = Math.max(4 * 128, Math.ceil(2 * 7 * 48000 / 1000));
+  const origin = Math.ceil((Math.ceil(0.512 * 48000) + lead) / 128) * 128 + 64;
+  assert.equal(reserve.origin, origin, "origin uses frozen native time and the original delivery measurement");
+  assert.equal(h.contexts[0].state, "suspended"); assert.equal(h.contexts[0].resumes, 1);
+  const commit = await admitNativeProgram(h, reserve);
+  assert.equal(h.contexts[0].resumes, 1, "all events and whole commit await admission while suspended");
+  assert.equal(h.nodes[0].nativeObservations.length, 0);
+  assert.ok(h.nativeSnapshots.length > 0);
+  assert.ok(h.nativeSnapshots.every(value => value.state === "suspended" && value.time === 0.512));
+  assert.ok(h.clockSnapshots.every(value => value.state === "suspended" && value.time === 0.512));
+  const program = structuredClone(commit);
+  h.clockReply(commit); await flush();
+  assert.equal(h.contexts[0].resumes, 2); assert.equal(h.contexts[0].state, "suspended");
+  assert.equal(opening.settled, false);
+  assert.equal(h.nodes[0].nativeObservations.length, 0, "paused ACKs produce no callback certificate");
+  secondResumeGate.resolve(); await flush();
+  assert.equal(h.contexts[0].state, "running");
+  assert.equal(opening.settled, false, "native callbacks still own readiness after resume");
+  assert.deepEqual(structuredClone(commit), program, "resume does not rewrite origin or horizons");
+  assert.equal(h.clockSent.length, 2);
+  h.nativeReady();
+  const opened = await opening.result;
+  assert.equal(opened.ok, true, opened.error?.message);
+  assert.deepEqual(h.nodes[0].nativeObservations, [
+    { kind: "partial", frames: 128, firstIndex: 64 }, { kind: "contiguous", frames: 128, firstIndex: 0 }]);
+  await stop(h, opened.value);
+});
+
+test("rejected and throwing native suspension fail through stop without reserve or native program", async () => {
+  for (const mode of ["throw", "reject"]) {
+    const gate = deferred();
+    const h = await harness({ autoClock: false, ...(mode === "throw" ? { suspendThrows: true } : { suspendGate: gate }) });
+    const opening = observe(() => h.AudioHost.open(options({ audioLimits: { maxFrames: 4096 } })));
+    await flush(); h.ready(); h.clockPacket("clock-probe", { frames: 128 }); await flush();
+    if (mode === "reject") gate.reject(new Error("native suspend rejection"));
+    const original = await nativeOpeningError(h, opening, "transport");
+    assert.ok(original.cleanupError == null, "successful cleanup has no error");
+    assert.equal(h.contexts[0].suspends, 1); assert.equal(h.contexts[0].resumes, 1);
+    assert.equal(h.clockSent.length, 0); assert.equal(h.nativeCalls, 0);
+  }
+});
+
+test("a fulfilled suspend in the wrong native state never reserves an origin", async () => {
+  for (const suspendState of ["running", "interrupted", "closed"]) {
+    const h = await harness({ autoClock: false, suspendState });
+    const opening = observe(() => h.AudioHost.open(options({ audioLimits: { maxFrames: 4096 } })));
+    await flush(); h.ready(); h.clockPacket("clock-probe", { frames: 128 });
+    await nativeOpeningError(h, opening, "state");
+    assert.equal(h.clockSent.length, 0); assert.equal(h.nativeCalls, 0);
+    assert.equal(h.contexts[0].resumes, 1);
+  }
+});
+
+test("rejected and throwing second resume retain the admitted program and join actual cleanup", async () => {
+  for (const mode of ["throw", "reject"]) {
+    const gate = deferred();
+    const faults = { autoClock: false, ...(mode === "throw" ? { secondResumeThrows: true } : { secondResumeGate: gate }) };
+    const h = await harness(faults);
+    const { opening, reserve } = await beginNativeOpen(h);
+    const commit = await admitNativeProgram(h, reserve), calls = h.nativeCalls;
+    h.clockReply(commit); await flush();
+    if (mode === "reject") gate.reject(new Error("native second resume rejection"));
+    const original = await nativeOpeningError(h, opening, "transport");
+    assert.ok(original.cleanupError == null, "successful cleanup has no error");
+    assert.equal(h.nativeCalls, calls); assert.equal(h.clockSent.length, 2);
+    assert.equal(h.contexts[0].suspends, 1); assert.equal(h.contexts[0].resumes, 2);
+    assert.equal(h.nodes[0].nativeObservations.length, 0);
+  }
+});
+
+test("a fulfilled second resume in the wrong state cannot supply native readiness", async () => {
+  for (const secondResumeState of ["suspended", "interrupted", "closed"]) {
+    const h = await harness({ autoClock: false, secondResumeState });
+    const { opening, reserve } = await beginNativeOpen(h);
+    const commit = await admitNativeProgram(h, reserve);
+    h.clockReply(commit);
+    await nativeOpeningError(h, opening, "state");
+    assert.equal(h.nodes[0].nativeObservations.length, 0); assert.equal(h.contexts[0].resumes, 2);
+  }
+});
+
+test("abort at each native opening await preserves the actual stop ACK and forbids subsequent activation", async () => {
+  for (const stage of ["initial-resume", "suspend", "reserve", "commit", "resume", "native-ready"]) {
+    const { h, opening, gate, controller, reserve, commit } = await openingPausedAt(stage);
+    controller.abort(); await flush();
+    const stopRequest = h.last(), calls = h.nativeCalls, posts = h.clockSent.length;
+    const resumes = h.contexts[0].resumes, suspends = h.contexts[0].suspends;
+    assert.equal(stopRequest.kind, "stop", stage);
+    assert.equal(opening.settled, false, stage + " abort still joins stop");
+    assert.equal(h.contexts[0].closes, 0);
+    if (["initial-resume", "suspend", "resume"].includes(stage)) gate.resolve();
+    if (stage === "reserve") h.clockReply(reserve);
+    if (stage === "commit") h.clockReply(commit);
+    if (stage === "native-ready") h.clockPacket("clock-ready", { revision: 0, origin: reserve.origin });
+    await flush();
+    assert.equal(opening.settled, false, stage + " late completion cannot retire stop");
+    assert.equal(h.contexts[0].closes, 0);
+    assert.equal(h.nativeCalls, calls); assert.equal(h.clockSent.length, posts);
+    assert.equal(h.contexts[0].resumes, resumes); assert.equal(h.contexts[0].suspends, suspends);
+    h.reply(stopRequest);
+    const original = failure(await opening.result, "aborted");
+    assert.ok(original.cleanupError == null, "successful cleanup has no error");
+    assertClean(h);
+  }
+});
+
+test("the original opening deadline covers stalled native suspension, ACKs and second resume", async () => {
+  for (const stage of ["initial-resume", "suspend", "reserve", "commit", "resume", "native-ready"]) {
+    const { h, opening, gate, reserve, commit } = await openingPausedAt(stage);
+    await h.expire(); await flush();
+    assert.equal(h.now, 50, stage + " cannot renew the original deadline");
+    const stopRequest = h.last(), calls = h.nativeCalls, posts = h.clockSent.length;
+    const resumes = h.contexts[0].resumes, suspends = h.contexts[0].suspends;
+    assert.equal(stopRequest.kind, "stop");
+    assert.equal(opening.settled, false); assert.equal(h.contexts[0].closes, 0);
+    if (["initial-resume", "suspend", "resume"].includes(stage)) gate.resolve();
+    if (stage === "reserve") h.clockReply(reserve);
+    if (stage === "commit") h.clockReply(commit);
+    if (stage === "native-ready") h.clockPacket("clock-ready", { revision: 0, origin: reserve.origin });
+    await flush();
+    assert.equal(opening.settled, false); assert.equal(h.contexts[0].closes, 0);
+    assert.equal(h.nativeCalls, calls); assert.equal(h.clockSent.length, posts);
+    assert.equal(h.contexts[0].resumes, resumes); assert.equal(h.contexts[0].suspends, suspends);
+    h.reply(stopRequest);
+    const original = failure(await opening.result, "timeout");
+    assert.ok(original.cleanupError == null, "successful cleanup has no error");
+    assertClean(h);
+  }
+});
+
+test("a transition fulfilled only after close cannot reacquire or call the retired native owner", async () => {
+  for (const stage of ["initial-resume", "suspend", "resume"]) {
+    const { h, opening, gate, controller } = await openingPausedAt(stage);
+    controller.abort(); await flush();
+    h.reply(h.last());
+    const original = failure(await opening.result, "aborted");
+    assert.ok(original.cleanupError == null, "successful cleanup has no error");
+    assertClean(h);
+    const resumes = h.contexts[0].resumes, suspends = h.contexts[0].suspends;
+    const calls = h.nativeCalls, posts = h.clockSent.length;
+    gate.resolve(); await flush();
+    assert.equal(h.contexts[0].state, "closed"); assert.equal(h.contexts[0].resumes, resumes);
+    assert.equal(h.contexts[0].suspends, suspends); assert.equal(h.nativeCalls, calls);
+    assert.equal(h.clockSent.length, posts);
+    assertClean(h);
+  }
+});
+
+test("suspension and the second resume share the original wall deadline instead of restarting setup budgets", async () => {
+  const suspendGate = deferred(), secondResumeGate = deferred();
+  const h = await harness({ autoClock: false, suspendGate, secondResumeGate });
+  const opening = observe(() => h.AudioHost.open(options({ audioLimits: { maxFrames: 4096 } })));
+  await flush(); h.advanceBeforeDeadline(20); h.ready(); h.clockPacket("clock-probe", { frames: 128 });
+  await flush(); h.advanceBeforeDeadline(15); suspendGate.resolve(); await flush();
+  const reserve = h.clockSent[0].message;
+  h.advanceBeforeDeadline(5); h.clockReply(reserve); await flush();
+  const commit = h.clockSent[1].message;
+  h.advanceBeforeDeadline(5); h.clockReply(commit); await flush();
+  assert.equal(h.contexts[0].resumes, 2); assert.equal(h.now, 45);
+  await h.expire(); await flush();
+  assert.equal(h.now, 50);
+  const stopRequest = h.last();
+  assert.equal(stopRequest.kind, "stop"); assert.equal(opening.settled, false);
+  h.reply(stopRequest);
+  const original = failure(await opening.result, "timeout");
+  assert.ok(original.cleanupError == null, "successful cleanup has no error");
+  secondResumeGate.resolve(); await flush();
+  assertClean(h);
+});
+
+test("native transition failure retains a genuine distinct context-close error", async () => {
+  for (const stage of ["suspend", "resume"]) {
+    const closeGate = deferred();
+    const faults = { autoClock: false, closeGate, ...(stage === "suspend" ? { suspendThrows: true } : { secondResumeThrows: true }) };
+    const h = await harness(faults);
+    const opening = observe(() => h.AudioHost.open(options({ audioLimits: { maxFrames: 4096 } })));
+    await flush(); h.ready(); h.clockPacket("clock-probe", { frames: 128 }); await flush();
+    if (stage === "resume") {
+      const commit = await admitNativeProgram(h, h.clockSent[0].message);
+      h.clockReply(commit); await flush();
+    }
+    const stopping = h.last(); assert.equal(stopping.kind, "stop");
+    h.reply(stopping); await flush();
+    assert.equal(opening.settled, false); assert.equal(h.contexts[0].closes, 1);
+    const cause = new Error("actual native close rejection");
+    closeGate.reject(cause);
+    const original = failure(await opening.result, "transport");
+    assert.notEqual(original.cause, cause);
+    assert.equal(original.cleanupError.code, "transport");
+    assert.equal(original.cleanupError.operation, "close");
+    assert.equal(original.cleanupError.cause, cause);
+    assert.notEqual(original.cleanupError, original);
+    assertClean(h);
+  }
+});
+
+test("late rejected native transitions cannot replace abort or timeout while the fresh stop ACK is pending", async () => {
+  for (const stage of ["initial-resume", "suspend", "resume"]) for (const cancellation of ["abort", "timeout"]) {
+    const { h, opening, gate, controller } = await openingPausedAt(stage);
+    if (cancellation === "abort") controller.abort(); else await h.expire();
+    await flush();
+    const stopRequest = h.last(), calls = h.nativeCalls, posts = h.clockSent.length;
+    assert.equal(stopRequest.kind, "stop");
+    assert.equal(opening.settled, false);
+    const late = new Error("late " + stage + " native rejection");
+    gate.reject(late); await flush();
+    assert.equal(opening.settled, false, stage + " late rejection must not retire the stop ACK");
+    assert.equal(h.contexts[0].closes, 0);
+    assert.equal(h.nativeCalls, calls); assert.equal(h.clockSent.length, posts);
+    h.reply(stopRequest);
+    const original = failure(await opening.result, cancellation === "abort" ? "aborted" : "timeout");
+    assert.notEqual(original.cause, late);
+    assert.ok(original.cleanupError == null, "late transition rejection is not a fresh cleanup failure");
+    assertClean(h);
+  }
+});
+
 test("malformed terminal during pending stop reports a distinct cleanup protocol error while retaining original diagnostics", async () => {
   const h = await harness(), owner = await open(h);
   await acknowledged(h, () => owner.finish());
@@ -823,11 +1177,31 @@ async function harness(faults = {}) {
   const trace = [];
   const channels = [];
   const timers = new Map();
+  const nativeSnapshots = [];
+  const clockSnapshots = [];
   let now = 0;
   let timerId = 0;
   let postAttempts = 0;
   let clockPostAttempts = 0;
   let nativeCalls = 0;
+  function observeNativeReady(node, fields = {}) {
+    assert.equal(node.context.state, "running", "native readiness needs an actually resumed context");
+    assert.ok(node.context.resumes >= 2, "the opening native pause must have resumed");
+    const quantum = node.probeFrames ?? faults.probeFrames ?? 4;
+    node.nativeObservations.push({ kind: "partial", frames: quantum, firstIndex: Math.floor(quantum / 2) },
+      { kind: "contiguous", frames: quantum, firstIndex: 0 });
+    trace.push(["native-callback", "partial"], ["native-callback", "contiguous"]);
+    node.port.emit("message", { kind: "clock-ready", generation: node.configuration.processorOptions.generation,
+      clockVersion: 1, clockId: 1, revision: 0, origin: node.clockProgram.origin, ...fields });
+  }
+  function maybeNativeReady(node) {
+    if (faults.autoClock === false || !node?.clockProgram || node.nativeReadyQueued
+      || node.context.state !== "running" || node.context.resumes < 2) return;
+    node.nativeReadyQueued = true;
+    Promise.resolve().then(() => {
+      if (!node.port.closes && node.context.state === "running") observeNativeReady(node);
+    });
+  }
 
   class EventTarget {
     constructor() { this.listeners = new Map(); }
@@ -861,16 +1235,20 @@ async function harness(faults = {}) {
         : structuredClone(message, { transfer: transfers });
       this.sent.push({ message: snapshot, transfers: [...transfers] });
       trace.push(["post", message.kind, message.sequence]);
+      if (isClock) {
+        const native = nodes.find(node => node.port === this)?.context;
+        clockSnapshots.push({ kind: message.kind, state: native?.state, time: native?.currentTime });
+      }
       // Existing public-control regressions get a separate, explicit clock peer.
       // New clock tests disable it and drive every protocol step themselves.
       if (isClock && faults.autoClock !== false) Promise.resolve().then(() => {
         if (this.closes) return;
+        const node = nodes.find(candidate => candidate.port === this);
+        if (message.kind === "clock-commit" && message.revision === 0) node.clockProgram = message;
         this.emit("message", { kind: message.kind === "clock-reserve" ? "clock-reserved" : "clock-committed",
           generation: message.generation, clockVersion: 1, clockId: 1,
           revision: message.revision, status: 0, error: null });
-        if (message.kind === "clock-commit" && message.revision === 0) this.emit("message", {
-          kind: "clock-ready", generation: message.generation, clockVersion: 1, clockId: 1,
-          revision: 0, origin: message.origin });
+        maybeNativeReady(node);
       });
     }
     start() { this.starts++; }
@@ -900,6 +1278,7 @@ async function harness(faults = {}) {
           : { contextTime: 0, performanceTime: 0 };
       };
       this.resumes = 0;
+      this.suspends = 0;
       this.audioWorklet = {
         addModule: url => {
           trace.push(["add-module", String(url)]);
@@ -912,9 +1291,23 @@ async function harness(faults = {}) {
     resume() {
       this.resumes++;
       trace.push(["resume"]);
-      if (faults.resumeThrows) throw new Error("resume failed");
-      return (faults.resumeGate?.promise ?? Promise.resolve()).then(() => {
-        if (this.state !== "closed") this.state = faults.resumeState ?? "running";
+      const first = this.resumes === 1;
+      if (first ? faults.resumeThrows : faults.secondResumeThrows) throw new Error("resume failed");
+      return ((first ? faults.resumeGate : faults.secondResumeGate)?.promise ?? Promise.resolve()).then(() => {
+        if (this.state !== "closed") this.state = (first ? faults.resumeState : faults.secondResumeState) ?? "running";
+        this.emit("statechange", {});
+        maybeNativeReady(nodes.find(node => node.context === this));
+      });
+    }
+    suspend() {
+      this.suspends++;
+      trace.push(["suspend"]);
+      if (faults.suspendThrows) throw new Error("suspend failed");
+      return (faults.suspendGate?.promise ?? Promise.resolve()).then(() => {
+        if (this.state !== "closed") {
+          if (faults.suspendedTime !== undefined) this.currentTime = faults.suspendedTime;
+          this.state = faults.suspendState ?? "suspended";
+        }
         this.emit("statechange", {});
       });
     }
@@ -938,6 +1331,7 @@ async function harness(faults = {}) {
       this.name = name;
       this.configuration = configuration;
       this.port = new Port();
+      this.nativeObservations = [];
       this.parameters = new Map(TEST_NAMES.map(name => {
         const parameter = { events: [],
           setValueAtTime(value, at) { return write("set", value, at); },
@@ -952,6 +1346,7 @@ async function harness(faults = {}) {
           const event = { kind, value: next, at };
           parameter.events.push(event);
           trace.push(["native", name, kind, next, at]);
+          nativeSnapshots.push({ name, kind, value: next, at, state: context.state, time: context.currentTime });
           if (faults.nativeThrowAt === nativeCalls) throw new Error("injected native automation failure");
           faults.nativeAfterCall?.({ name, ...event, call: nativeCalls, context });
           return parameter;
@@ -1010,7 +1405,7 @@ async function harness(faults = {}) {
   await actual.evaluate();
   return {
     AudioHost: actual.namespace.AudioHost, AudioHostError: actual.namespace.AudioHostError,
-    faults, contexts, nodes, channels, timers, trace,
+    faults, contexts, nodes, channels, timers, trace, nativeSnapshots, clockSnapshots,
     get now() { return now; },
     get sent() { return (nodes.at(-1)?.port.sent ?? []).filter(row => !row.message.kind.startsWith("clock-")); },
     get clockSent() { return (nodes.at(-1)?.port.sent ?? []).filter(row => row.message.kind.startsWith("clock-")); },
@@ -1023,19 +1418,23 @@ async function harness(faults = {}) {
         sampleRate: node.context.sampleRate, channels: node.configuration.processorOptions.channels, ...fields });
       if (faults.autoClock !== false && !node.clockProbed) {
         node.clockProbed = true;
+        node.probeFrames = faults.probeFrames ?? 4;
         node.port.emit("message", { kind: "clock-probe",
           generation: node.configuration.processorOptions.generation, clockVersion: 1, clockId: 1, frames: faults.probeFrames ?? 4 });
       }
     },
     clockPacket(kind, fields = {}) {
       const node = nodes.at(-1);
+      if (kind === "clock-probe") node.probeFrames = fields.frames;
       node.port.emit("message", { kind, generation: node.configuration.processorOptions.generation,
         clockVersion: 1, clockId: 1, ...fields });
     },
     clockReply(message, fields = {}) {
+      if (message.kind === "clock-commit" && message.revision === 0) nodes.at(-1).clockProgram = message;
       this.clockPacket(message.kind === "clock-reserve" ? "clock-reserved" : "clock-committed",
         { revision: message.revision, status: 0, error: null, ...fields });
     },
+    nativeReady(fields = {}) { observeNativeReady(nodes.at(-1), fields); },
     reply(message, fields = {}) {
       nodes.at(-1).port.emit("message", {
         kind: "ack", generation: message.generation, sequence: message.sequence,

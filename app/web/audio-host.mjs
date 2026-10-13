@@ -224,7 +224,7 @@ export class AudioHost {
         config.signal.addEventListener("abort", host.#abort, { once: true });
       }
       if (config.signal?.aborted) throw host.#error("aborted", "open", "Audio setup was cancelled.");
-      host.#context = new AudioContext(config.contextOptions);
+      const context = host.#context = new AudioContext(config.contextOptions);
       host.#context.onstatechange = () => {
         if (!host.#stopPromise && ["setup", "allocated", "armed"].includes(host.#state)
           && host.#context.state !== "running") {
@@ -239,12 +239,14 @@ export class AudioHost {
       const resumed = Promise.resolve(host.#context.resume()).catch(cause => {
         throw host.#error("transport", "resume", "AudioContext resume failed.", { cause });
       });
-      resumed.catch(error => host.#fail(error));
+      resumed.catch(error => {
+        if (!host.#stopPromise) host.#fail(error);
+      });
       const loaded = Promise.resolve(host.#context.audioWorklet.addModule(new URL("./audio-worklet.js", import.meta.url)))
         .catch(cause => { throw host.#error("transport", "open", "AudioWorklet module loading failed.", { cause }); });
       await Promise.race([loaded, host.#opening.promise]);
-      if (host.#failure) throw host.#failure;
-      host.#node = new AudioWorkletNode(host.#context, "beatkernel-audio", {
+      host.#openingOwner(context, null);
+      const node = host.#node = new AudioWorkletNode(context, "beatkernel-audio", {
         numberOfInputs: 0,
         numberOfOutputs: 1,
         outputChannelCount: [config.channels],
@@ -263,13 +265,15 @@ export class AudioHost {
       host.#node.port.start();
       host.#node.connect(host.#context.destination);
       await Promise.race([Promise.all([resumed, host.#ready.promise, host.#clockProbe.promise]), host.#opening.promise]);
-      if (host.#failure) throw host.#failure;
-      if (host.#context.state !== "running") {
-        throw host.#error("state", "open", "AudioContext did not enter its running state.");
-      }
+      host.#openingOwner(context, node, "running");
+      await host.#openingTransition("suspend", "running", "suspended");
+      host.#openingOwner(context, node, "suspended");
       await Promise.race([host.#startClock(), host.#opening.promise]);
+      host.#openingOwner(context, node, "suspended");
+      await host.#openingTransition("resume", "suspended", "running");
+      host.#openingOwner(context, node, "running");
       await Promise.race([host.#clockReady.promise, host.#opening.promise]);
-      if (host.#failure) throw host.#failure;
+      host.#openingOwner(context, node, "running");
       host.#clearSetup();
       host.#opening = null;
       host.#ready = null;
@@ -289,6 +293,42 @@ export class AudioHost {
 
   #error(code, operation, message, details = {}) {
     return new AudioHostError(code, message, { operation, generation: this.generation, ...details });
+  }
+
+  #openingOwner(context, node, expectedState = undefined) {
+    const current = () => !this.#failure && !this.#stopPromise && this.#state === "opening"
+      && this.#context === context && this.#node === node;
+    if (!current()) throw this.#failure ?? this.#error("closed", "open", "Audio opening owner was stopped.");
+    if (expectedState !== undefined) {
+      const actualState = context.state;
+      if (!current()) throw this.#failure ?? this.#error("closed", "open", "Audio opening owner was stopped.");
+      if (actualState !== expectedState) {
+        throw this.#error("state", "open", "AudioContext did not enter its required opening state.");
+      }
+    }
+  }
+
+  async #openingTransition(operation, before, after) {
+    const context = this.#context;
+    const node = this.#node;
+    this.#openingOwner(context, node, before);
+    const transition = context[operation];
+    this.#openingOwner(context, node, before);
+    if (typeof transition !== "function") {
+      throw this.#error("unsupported", operation, "Native AudioContext setup transition is unavailable.");
+    }
+    let result;
+    try {
+      result = Promise.resolve(transition.call(context)).catch(cause => {
+        this.#openingOwner(context, node);
+        throw this.#error("transport", operation, "Native AudioContext setup transition failed.", { cause });
+      });
+    } catch (cause) {
+      this.#openingOwner(context, node);
+      throw this.#error("transport", operation, "Native AudioContext setup transition failed.", { cause });
+    }
+    await Promise.race([result, this.#opening.promise]);
+    this.#openingOwner(context, node, after);
   }
 
   #clearSetup() {
@@ -314,6 +354,9 @@ export class AudioHost {
     if (this.#stopPromise || this.#context === null || this.#node === null) {
       throw this.#error("closed", "clock", "Native clock owner was stopped.");
     }
+    const context = this.#context;
+    const node = this.#node;
+    if (this.#state === "opening") this.#openingOwner(context, node, "suspended");
     const seconds = this.#context.currentTime;
     // A native getter/API can synchronously retire the owner; never continue
     // scheduling after that retirement.
@@ -321,6 +364,7 @@ export class AudioHost {
     if (this.#stopPromise || this.#context === null || this.#node === null) {
       throw this.#error("closed", "clock", "Native clock owner was stopped.");
     }
+    if (this.#state === "opening") this.#openingOwner(context, node, "suspended");
     if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
       throw this.#error("state", "clock", "Native clock scheduling time is invalid.");
     }
@@ -353,6 +397,9 @@ export class AudioHost {
   }
 
   async #startClock() {
+    const context = this.#context;
+    const node = this.#node;
+    this.#openingOwner(context, node, "suspended");
     const quantum = this.#clockFrames;
     if (!integer(quantum, 2, this.#config.audioLimits.maxFrames)
       || this.#clockDeliveryMs === null) {
@@ -376,6 +423,7 @@ export class AudioHost {
     await this.#clockRequest("clock-reserve", {
       revision: 0, origin, h0: geometry.h0, h1: geometry.h1, h2: geometry.h2,
     });
+    this.#openingOwner(context, node, "suspended");
     const boundaries = [origin];
     this.#clockFuture(boundaries);
     const marker = this.#clockParameter(CLOCK_NAMES[0], false);
@@ -396,6 +444,7 @@ export class AudioHost {
     await this.#clockRequest("clock-commit", {
       revision: 0, origin, h0: geometry.h0, h1: geometry.h1, h2: geometry.h2, futureEligible: true,
     }, () => { this.#clockCommitted = true; });
+    this.#openingOwner(context, node, "suspended");
   }
 
   #clockRequest(operation, payload, commit = null) {
@@ -669,6 +718,11 @@ export class AudioHost {
       const clockId = message.clockId;
       if (!current()) return;
       if (clockVersion !== CLOCK_VERSION || clockId !== CLOCK_ID) { malformed(); return; }
+      // stop has revoked clock authority. Progress already queued by the
+      // Worklet cannot be correlated against the cancelled active geometry;
+      // only exact clock ACKs remain relevant to cleanup.
+      if (this.#stopPromise && (kind === "clock-probe"
+        || kind === "clock-ready" || kind === "clock-refill")) return;
       if (kind === "clock-probe") {
         fields = { frames: message.frames };
       } else if (kind === "clock-ready") {
@@ -853,6 +907,9 @@ export class AudioHost {
   }
 
   #fail(error) {
+    // An opening await may rethrow the exact failure that already started
+    // stop. Join its cleanup rather than rejecting its still-pending ACK.
+    if (this.#stopPromise && error === this.#failure) return;
     this.#failure ??= error;
     this.#state = "failed";
     this.#opening?.reject(this.#failure);

@@ -74,7 +74,8 @@ async function serve() {
 // constructors, messages, transfer lists, contexts and ports.
 function observeWindow() {
   const probe = globalThis.__replaySpeedProbe = { messages: [], pcm: [], contexts: [], audioContexts: [], statuses: [],
-    replayFiles: [], fileErrors: [], audioTerminals: [] };
+    replayFiles: [], fileErrors: [], audioTerminals: [], clockTrace: { contextLimit: 16, perNodeLimit: 64,
+      overflow: false, nodes: [], cost: "Diagnostic Window control observers allocate bounded records and read performance.now/currentTime before and after native calls; they add overhead and are not production performance evidence." } };
   const safe = value => JSON.parse(JSON.stringify(value, (_, x) => typeof x === "bigint" ? String(x)
     : x instanceof File ? { file: true, name: x.name, size: x.size }
       : x instanceof Blob ? { blob: true, size: x.size }
@@ -115,9 +116,77 @@ function observeWindow() {
   };
   globalThis.AudioWorkletNode = class extends ActualNode {
     constructor(context, name, options) {
+      let acquisitionPerformance = null, acquisitionContextTime = null;
+      try { acquisitionPerformance = performance.now(); acquisitionContextTime = context.currentTime; } catch {}
       super(context, name, options);
       const index = probe.contexts.length;
       probe.contexts.push({ name, sampleRate: context.sampleRate, audioContext: contextIds.get(context) });
+      // Window control observation only: original receivers, argument objects,
+      // results and exceptions pass through. These records never supply timing
+      // to Host/Worklet or touch native samples, input or PCM.
+      if (probe.clockTrace.nodes.length < probe.clockTrace.contextLimit) {
+        const trace = { index, audioContext: contextIds.get(context), sampleRate: context.sampleRate,
+          generation: options?.processorOptions?.generation, overflow: false, observationError: false, records: [] };
+        probe.clockTrace.nodes.push(trace);
+        const begin = (observation, scalars = {}) => {
+          try {
+            if (trace.records.length >= probe.clockTrace.perNodeLimit) { trace.overflow = probe.clockTrace.overflow = true; return null; }
+            const record = { observation, ...scalars, beforePerformance: performance.now(), beforeContextTime: context.currentTime };
+            trace.records.push(record); return record;
+          } catch { trace.observationError = true; return null; }
+        };
+        const finish = (record, threw = false) => {
+          if (!record) return;
+          try { record.afterPerformance = performance.now(); record.afterContextTime = context.currentTime; record.threw = threw; }
+          catch { trace.observationError = true; }
+        };
+        const acquisition = begin("acquisition");
+        if (acquisition) {
+          acquisition.beforePerformance = acquisitionPerformance; acquisition.beforeContextTime = acquisitionContextTime;
+          finish(acquisition);
+        }
+        const scalars = value => {
+          const fields = {};
+          for (const key of ["kind", "generation", "clockVersion", "clockId", "revision", "origin", "h0", "h1", "h2",
+            "futureEligible", "frames", "sequence", "operation", "status", "admitted", "error"]) {
+            const scalar = value?.[key];
+            if (scalar === null || ["string", "number", "boolean"].includes(typeof scalar)) fields[key] = scalar;
+          }
+          return fields;
+        };
+        const originalPost = this.port.postMessage;
+        try {
+          this.port.postMessage = function(...args) {
+            let record = null;
+            try { if (["clock-reserve", "clock-commit", "stop"].includes(args[0]?.kind)) record = begin("post", scalars(args[0])); }
+            catch { trace.observationError = true; }
+            try { const result = Reflect.apply(originalPost, this, args); finish(record); return result; }
+            catch (error) { finish(record, true); throw error; }
+          };
+        } catch { trace.observationError = true; }
+        this.port.addEventListener("message", event => {
+          try {
+            const value = event.data;
+            if (["ready", "clock-probe", "clock-reserved", "clock-committed", "clock-ready"].includes(value?.kind)
+              || (value?.kind === "ack" && value.operation === "stop")) finish(begin("receive", scalars(value)));
+          } catch { trace.observationError = true; }
+        });
+        for (const parameterName of ["__beatkernel_clock_marker", "__beatkernel_clock_0", "__beatkernel_clock_1", "__beatkernel_clock_2"]) {
+          const parameter = this.parameters.get(parameterName);
+          if (!parameter) { trace.observationError = true; continue; }
+          for (const methodName of ["setValueAtTime", "linearRampToValueAtTime"]) {
+            const original = parameter[methodName];
+            if (typeof original !== "function") { trace.observationError = true; continue; }
+            try {
+              parameter[methodName] = function(...args) {
+                const record = begin("native-api", { parameter: parameterName, method: methodName, value: args[0], time: args[1] });
+                try { const result = Reflect.apply(original, this, args); finish(record); return result; }
+                catch (error) { finish(record, true); throw error; }
+              };
+            } catch { trace.observationError = true; }
+          }
+        }
+      } else probe.clockTrace.overflow = true;
       this.port.addEventListener("message", event => {
         if (event.data?.kind !== "terminal") return;
         if (probe.audioTerminals.length >= 128) throw Error("Audio terminal observation ceiling");
@@ -247,7 +316,12 @@ async function setField(id, value) {
 async function waitTerminal(playId) {
   await page.waitForFunction(id => __replaySpeedProbe.messages.some(x => x.direction === "received"
     && x.data.playId === id && ["play-stopped", "play-error"].includes(x.data.kind)), { timeout: 20000 }, playId);
-  await page.waitForFunction(() => document.querySelector("#stop").disabled, { timeout: 20000 });
+  // Stop is disabled during closing too. Wait for the real idle controls after
+  // the previous stop ACK and context close before starting another session.
+  await page.waitForFunction(() => document.querySelector("#stop").disabled
+    && !document.querySelector("#play").disabled
+    && !document.querySelector("#live-speed").disabled
+    && !document.querySelector("#replay-file").disabled, { timeout: 20000 });
 }
 async function currentStart() {
   return page.evaluate(() => __replaySpeedProbe.messages.findLast(x => x.direction === "sent" && x.data.kind === "play-start")?.data);
