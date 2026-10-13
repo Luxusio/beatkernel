@@ -118,3 +118,63 @@ failure, or prove performance, physical output, gameplay or a fresh Rust build.
 
 See [finite phase evidence](../changes/2026-10-14-browser-native-phase-decoding.md)
 for measured results and independent verification status.
+
+## Joint native phase experiment
+
+The separate `WORKLET_NATIVE_JOINT_PHASE_PROBE=1` mode measures three native
+a-rate ramp lanes together, with fixed periods 1,048,576, 1,048,575 and
+1,048,573. It rejects marker, single-phase and required-cold mode conflicts
+before acquiring resources. Use a new owned directory and unused port:
+
+```bash
+PUPPETEER_MODULE="$PWD/target/wf/record-score-ui-qa-browser/node_modules/puppeteer-core" \
+CHROMIUM=/usr/bin/chromium WORKLET_NATIVE_JOINT_PHASE_PROBE=1 \
+WORKLET_CHRONOLOGY_OUT="$PWD/target/wf/browser-native-joint-phase-proof/local" \
+WORKLET_CHRONOLOGY_PORT=8163 \
+node app/web/worklet-chronology.browser.mjs
+
+node --experimental-vm-modules --test app/web/worklet-native-frame-probe.test.mjs \
+  app/web/worklet-chronology.test.mjs app/web/audio-host.test.mjs \
+  app/web/audio-worklet.test.mjs
+```
+
+The fixed periods are pairwise coprime. Their product is
+`1152917106563481600`, greater than `Number.MAX_SAFE_INTEGER`.
+`nativeJointOffset(v0,v1,v2)` decodes three scalars and performs exact BigInt
+reconstruction before narrowing to a safe Number; invalid scalars and unsafe
+reconstructions return null. A displacement of P0 can
+alias the first lane while the other lanes distinguish it; a displacement of
+the complete modulus still aliases all three. Thus the result is a modulo
+candidate in a separately certified domain, without epoch or age authority.
+This diagnostic BigInt calculation, three native parameter fills and sample
+scanning are ongoing test overhead, not a production allocation or speed claim.
+
+One fresh binary marker establishes the immutable origin inside the Worklet.
+The three lanes share a start but each retains its own integral three-period
+horizon. Their own checked sample counts are 3,145,728 / 3,145,725 / 3,145,719;
+the common interval contains 3,145,719 samples. The first two lanes have nine
+and six remaining samples after common eligibility ends. Every active native
+sample must meet the existing strict quarter-sample error margin. CRT reads
+the same original first and last eligible array indices in all lanes, and the
+cursor advances once by the original callback extent.
+
+At the measured 128-frame extent and start offset 17, the first reset indices
+are 17/16/14, the second 17/15/11, and own horizon indices 17/14/8. All lanes in
+one reset or horizon callback share one retained record. The closing marker
+follows the latest horizon; its future-submission, observed-zero reset and
+endpoint agreement prerequisites remain required. Held value 1 and expired
+horizons cannot supply chronology.
+
+The unscheduled-third-lane case admits fixed geometry then rejects actual
+active evidence. The late-third-lane case retains a fresh origin, future first
+two lanes and an existing watch near late submission; it refuses joint-start
+and grants no joint session. Both preserve native arrays before retirement.
+Identity/range refusal, active timeout/stop/suspend and the actual callback cap
+remain bounded. Joint mode reuses the shared 120s controller, 150s CDP,
+32,768-callback and 128-reply bounds, independent 3s owned-page close and
+32-record cap. Positive author runs summarized 13 records before the final raw
+callback, retaining 14. Each counter belongs to its recorded stage.
+
+See [joint phase evidence](../changes/2026-10-14-browser-native-joint-phase-proof.md)
+for author and independent review/QA results. Product chronology, rolling
+horizons, actual gameplay and the full player Goal remain pending.
