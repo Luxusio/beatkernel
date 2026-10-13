@@ -180,7 +180,14 @@ fn speed_appends_without_shifting_existing_native_field_ids() {
         assert_eq!(model.fields()[platform_rows + 6].flag, "--bind");
         assert_eq!(model.fields()[platform_rows + 30].flag, "--mp-server-name");
         assert_eq!(speed_row(&model), platform_rows + 31);
-        assert_eq!(model.fields().last().unwrap().flag, "--speed");
+        if host == SettingsHost::Linux {
+            assert_eq!(model.fields()[platform_rows + 32].flag, "--encoding");
+            assert_eq!(model.fields().len(), platform_rows + 33);
+            assert_eq!(model.fields().last().unwrap().flag, "--encoding");
+        } else {
+            assert_eq!(model.fields().len(), platform_rows + 32);
+            assert_eq!(model.fields().last().unwrap().flag, "--speed");
+        }
     }
 }
 

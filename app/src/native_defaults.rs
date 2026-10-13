@@ -137,7 +137,7 @@ pub fn replay_args(
             "--chart" | "--device" | "--backend" | "--mode" | "--shared-policy" | "--asio-view"
             | "--output-channels" | "--rate" | "--channels" | "--buffer-frames"
             | "--period-frames" | "--preroll-ns" | "--voices" | "--seconds"
-            | "--channel-policy" => pair[0].as_str(),
+            | "--channel-policy" | "--encoding" => pair[0].as_str(),
             "--asio-system-clock"
             | "--asio-timer-error-ns"
             | "--asio-drift-error-ns"

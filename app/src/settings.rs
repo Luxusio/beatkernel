@@ -16,6 +16,41 @@ pub enum SettingsHost {
     Macos,
 }
 
+/// Exact native output choices, independent of platform request types.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputEncoding {
+    #[default]
+    Float32,
+    Pcm16,
+    Pcm24,
+    Pcm32,
+}
+
+impl OutputEncoding {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Float32 => "float32",
+            Self::Pcm16 => "pcm16",
+            Self::Pcm24 => "pcm24",
+            Self::Pcm32 => "pcm32",
+        }
+    }
+}
+
+impl std::str::FromStr for OutputEncoding {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "float32" => Ok(Self::Float32),
+            "pcm16" => Ok(Self::Pcm16),
+            "pcm24" => Ok(Self::Pcm24),
+            "pcm32" => Ok(Self::Pcm32),
+            _ => Err("output encoding must be float32, pcm16, pcm24 or pcm32".into()),
+        }
+    }
+}
+
 /// Explicit override flags replace the entire corresponding profile group.
 /// Values remain individual tokens; chart selection is not persisted here.
 pub fn overlay_native_args(
@@ -405,6 +440,11 @@ const LINUX: &[Spec] = &[
         "0..1000000000 nanoseconds; preserves native acquisition ordering.",
     ),
 ];
+const LINUX_OUTPUT_ENCODING: Spec = (
+    "--encoding",
+    "OUTPUT ENCODING",
+    "Empty uses float32. float32 / pcm16 / pcm24 / pcm32; signed PCM uses the full sample width.",
+);
 const MACOS: &[Spec] = &[
     (
         "--local-player",
@@ -482,6 +522,7 @@ impl NativeSettings {
                 "--period-frames",
                 "--buffer-frames",
                 "--output-matrix",
+                "--encoding",
             ],
             SettingsHost::Windows => &[
                 "--device",
@@ -545,6 +586,9 @@ impl NativeSettings {
                     field.label = "TARGET SAMPLE RATE (HZ)";
                     field.hint = "Empty keeps the current native target rate. Source PCM rate and command timing stay fixed.";
                 }
+                "--encoding" => {
+                    field.hint = "Empty keeps the current output encoding. float32 / pcm16 / pcm24 / pcm32; signed PCM uses the full sample width.";
+                }
                 _ => {}
             }
             if host == SettingsHost::Windows {
@@ -604,7 +648,10 @@ impl NativeSettings {
             SettingsHost::Linux => LINUX,
             SettingsHost::Macos => MACOS,
         };
-        let specs: Vec<_> = platform.iter().chain(COMMON).copied().collect();
+        let mut specs: Vec<_> = platform.iter().chain(COMMON).copied().collect();
+        if host == SettingsHost::Linux {
+            specs.push(LINUX_OUTPUT_ENCODING);
+        }
         let mut fields = Vec::new();
         let mut seen = BTreeSet::new();
         for pair in args.chunks_exact(2) {
