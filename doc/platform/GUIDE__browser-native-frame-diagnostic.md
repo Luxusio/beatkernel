@@ -86,6 +86,9 @@ boundaries and contradictory samples refuse.
 Three periods contain 3,145,728 samples, requiring about 71.33 seconds at
 44.1 kHz or 65.54 seconds at 48 kHz. Only the phase session uses a fixed
 32,768-callback cap, a 120-second case watchdog and a 150-second CDP timeout.
+The controller starts the case deadline before page acquisition and shares it
+across acquisition, navigation and evaluation. Owned page closure has a separate
+3-second budget, including pages arriving after acquisition timeout.
 The marker probe retains its original bounds. Validation streams inside the
 Worklet and saves bounded aggregates and at most 32 raw opening/reset/horizon/failure
 snapshots; it does not send or retain every callback.
@@ -97,6 +100,14 @@ corroboration rather than fresh-origin authentication: both events must remain
 future at submission, native zero reset must be observed, and the endpoint must
 agree with all observed extents without rebasing. The final same-time reset
 makes the finite horizon hold 1; those samples are refused as chronology evidence.
+
+Native held-value arrays after the horizon may have scalar length 1 even when
+the original output extent is 128. Preserve that raw shape and refuse it as
+active chronology; do not require full ramp-array shape for a held-value check.
+The completion summary follows closing-marker corroboration but precedes that
+callback's final raw record. Final retained snapshots can therefore exceed the
+summary-time count; check each against its own observation stage and the fixed
+cap rather than assuming the counts match.
 
 One phase cannot distinguish a missing interval of nP frames, even with a full
 sample scan. A finite closing endpoint can expose a contradiction in the
