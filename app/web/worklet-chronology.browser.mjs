@@ -532,14 +532,40 @@ async function runCase(name) {
 
 async function runNativeCase(spec, generation) {
   const caseStarted = performance.now();
-  const page = await browser.newPage();
   const consoleMessages = [], pageErrors = [];
-  let result;
-  page.on("console", message => { if (consoleMessages.length < 32) consoleMessages.push({ type: message.type(), text: message.text().slice(0, 2000) }); });
-  page.on("pageerror", error => { if (pageErrors.length < 16) pageErrors.push(String(error).slice(0, 2000)); });
+  let page, result, controllerTimer, controllerExpired = false, deadlineError;
+  const closePhasePage = async ownedPage => {
+    let timer;
+    try {
+      await Promise.race([ownedPage.close(), new Promise((_, no) => {
+        timer = setTimeout(() => no(Error("Owned phase page close deadline exceeded")), 3000);
+      })]);
+    } finally { clearTimeout(timer); }
+  };
+  const controllerDeadline = spec.phaseProbe ? new Promise((_, no) => {
+    controllerTimer = setTimeout(() => {
+      controllerExpired = true;
+      deadlineError = Error("Native phase case120s controller watchdog exceeded");
+      deadlineError.cleanup = { pageAcquisitionTimedOut: page === undefined,
+        latePageReceived: false, pageClosed: false, pageError: null };
+      no(deadlineError);
+    }, 120000);
+  }) : null;
   try {
-    await page.goto(`https://127.0.0.1:${port}/__chronology.html`, ...(spec.phaseProbe ? [{ timeout: Math.max(1, 120000 - (performance.now() - caseStarted)) }] : []));
-    result = await page.evaluate(async ({ spec, generation, caseBudgetMs }) => {
+    const acquisition = browser.newPage().then(ownedPage => {
+      if (spec.phaseProbe && controllerExpired) {
+        deadlineError.cleanup.latePageReceived = true;
+        closePhasePage(ownedPage).then(() => { deadlineError.cleanup.pageClosed = true; },
+          error => { deadlineError.cleanup.pageError = String(error); });
+      }
+      return ownedPage;
+    });
+    page = await (spec.phaseProbe ? Promise.race([acquisition, controllerDeadline]) : acquisition);
+    page.on("console", message => { if (consoleMessages.length < 32) consoleMessages.push({ type: message.type(), text: message.text().slice(0, 2000) }); });
+    page.on("pageerror", error => { if (pageErrors.length < 16) pageErrors.push(String(error).slice(0, 2000)); });
+    const navigation = page.goto(`https://127.0.0.1:${port}/__chronology.html`, ...(spec.phaseProbe ? [{ timeout: Math.max(1, 120000 - (performance.now() - caseStarted)) }] : []));
+    await (spec.phaseProbe ? Promise.race([navigation, controllerDeadline]) : navigation);
+    const evaluation = page.evaluate(async ({ spec, generation, caseBudgetMs }) => {
       let AudioHost, markerTime, advanceFrame, module;
       const contexts = [], nodes = [], hostMessages = [], messages = [], ports = [], events = [], timestamps = [], stateEvents = [];
       const Context = AudioContext, Node = AudioWorkletNode;
@@ -905,16 +931,21 @@ async function runNativeCase(spec, generation) {
       }
       return result;
     }, { spec, generation, caseBudgetMs: spec.phaseProbe ? Math.max(1, 120000 - (performance.now() - caseStarted)) : null });
+    result = await (spec.phaseProbe ? Promise.race([evaluation, controllerDeadline]) : evaluation);
     return { ...result, consoleMessages, pageErrors };
   } finally {
-    if (spec.phaseProbe) {
-      let timer;
+    clearTimeout(controllerTimer);
+    if (spec.phaseProbe && page) {
       try {
-        await Promise.race([page.close(), new Promise((_, no) => { timer = setTimeout(() => no(Error("Owned phase page close deadline exceeded")), 3000); })]);
+        await closePhasePage(page);
         if (result) result.cleanup.pageClosed = true;
-      } catch (error) { if (result) result.cleanup.pageError = String(error); else throw error; }
-      finally { clearTimeout(timer); }
-    } else await page.close();
+        if (deadlineError) deadlineError.cleanup.pageClosed = true;
+      } catch (error) {
+        if (result) result.cleanup.pageError = String(error);
+        else if (deadlineError) deadlineError.cleanup.pageError = String(error);
+        else throw error;
+      }
+    } else if (page) await page.close();
   }
 }
 
@@ -1293,7 +1324,8 @@ try {
     }
   }
   if (required.some(id => !evidence.checks.some(x => x.id === id && x.passed))) process.exitCode = 1;
-} catch (error) { evidence.fatal = { message: String(error), stack: error.stack }; process.exitCode = 1; }
+} catch (error) { evidence.fatal = { message: String(error), stack: error.stack,
+  ...(error.cleanup ? { cleanup: error.cleanup } : {}) }; process.exitCode = 1; }
 finally {
   try { if (browser) { await browser.close(); evidence.cleanup.browserClosed = true;
     if (nativeFixture) evidence.cleanup.ownedBrowserExitCode = browser.process()?.exitCode ?? null; } }

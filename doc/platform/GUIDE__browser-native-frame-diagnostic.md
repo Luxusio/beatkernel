@@ -60,10 +60,10 @@ samples using the same owned runner and production phase0. It rejects conflicts
 with the marker probe or strict cold mode. Run it with a new owned output directory:
 
 ```bash
-PUPPETEER_MODULE="$PWD/target/wf/record-score-ui-qa-browser/node_modules/puppeteer-core" \\
-CHROMIUM=/usr/bin/chromium WORKLET_NATIVE_PHASE_PROBE=1 \\
-WORKLET_CHRONOLOGY_OUT="$PWD/target/wf/browser-native-phase-decoding/local" \\
-WORKLET_CHRONOLOGY_PORT=8161 \\
+PUPPETEER_MODULE="$PWD/target/wf/record-score-ui-qa-browser/node_modules/puppeteer-core" \
+CHROMIUM=/usr/bin/chromium WORKLET_NATIVE_PHASE_PROBE=1 \
+WORKLET_CHRONOLOGY_OUT="$PWD/target/wf/browser-native-phase-decoding/local" \
+WORKLET_CHRONOLOGY_PORT=8161 \
 node app/web/worklet-chronology.browser.mjs
 ```
 

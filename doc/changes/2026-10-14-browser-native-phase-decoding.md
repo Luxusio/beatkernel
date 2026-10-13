@@ -58,10 +58,26 @@ conflict refusal. Neither required a product source change.
 
 ## Verification status
 
-Implementation and author verification are committed. Independent DEEP code
-review, subsequent CLI/browser QA, final documentation review and ordered
-receipt verification are pending. Author PASS alone does not close this child,
-repair the earlier strict browser FAIL or promote the WBS/player Goal.
+The first independent DEEP review found two defects: page acquisition could
+escape the phase case deadline, and the guide used doubled Bash continuation
+backslashes. The controller now starts its single120s deadline before acquisition
+and applies it through navigation and evaluation. Owned page closure has its own
+3s budget, including pages arriving after acquisition timeout. Marker mode retains
+its existing behavior. The guide command now uses single continuations; executing
+the copied command with a controlled Node endpoint confirmed one invocation and
+all five environment values.
+
+Seven independent tests exercise the actual extracted controller with controlled
+promises and time, including acquisition rejection, late arrival, stalled
+navigation/evaluation, pending closure, and successful shared-budget cleanup.
+The focused helper/controller/Host/Worklet author run passed **113/113**, with no
+failures, skips or cancellations. Syntax and diff checks also passed. Artifacts:
+`target/wf/browser-native-phase-decoding/author-remediation-node.log`,
+`baseline-page-acquisition.log` and `guide-command.log`.
+
+Fresh post-fix DEEP review, subsequent CLI/browser QA, final documentation review
+and ordered receipt verification are pending. Author PASS alone does not close
+this child, repair the earlier strict browser FAIL or promote the WBS/player Goal.
 
 ## Known ceiling
 
