@@ -21,7 +21,7 @@ use crate::{
     },
     telemetry::{RuntimeCounters, RuntimeTelemetry},
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
-    transport::{Transport, TransportError},
+    transport::{OutputPhaseError, OutputPhasePoint, Transport, TransportError},
 };
 use hazard_sound::{HazardSoundError, HazardSoundTimeline};
 use input_sound::InputSoundTimeline;
@@ -75,6 +75,8 @@ fn matching_sounds(
 /// Operation failure before binding; judge fanout failures live in the report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeError {
+    /// Opted phase validation failed before gameplay/routing/queue effects.
+    OutputPhase(OutputPhaseError),
     /// No relation or representable mapping exists for these domains.
     UnmappedClock {
         /// Source clock.
@@ -315,6 +317,7 @@ pub struct Runtime {
     input_sounds_locked: bool,
     last_host: Option<Timestamp>,
     last_song: Option<Timestamp>,
+    last_phase_elapsed: Option<i128>,
     song_end: Option<Timestamp>,
     gameplay_fence: Option<Timestamp>,
     sequences: HashMap<DeviceId, u64>,
@@ -351,6 +354,12 @@ impl Runtime {
         mut sounds: Vec<SoundBinding>,
         telemetry_capacity: usize,
     ) -> Result<Self, RuntimeError> {
+        if transport
+            .output_phase_basis()
+            .is_some_and(|basis| basis.domain() != host_domain)
+        {
+            return Err(RuntimeError::OutputPhase(OutputPhaseError::WrongDomain));
+        }
         if sounds.iter().any(|sound| !sound.gain.is_finite()) {
             return Err(RuntimeError::InvalidGain);
         }
@@ -375,6 +384,7 @@ impl Runtime {
             input_sounds_locked: false,
             last_host: None,
             last_song: None,
+            last_phase_elapsed: None,
             song_end: None,
             gameplay_fence: None,
             sequences: HashMap::new(),
@@ -540,7 +550,7 @@ impl Runtime {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, RuntimeError> {
-        self.process_input_with_position::<LegacyRuntimeInput>(input, None, mapper, audio_at)
+        self.process_input_with_position::<LegacyRuntimeInput>(input, None, mapper, audio_at, None)
     }
 
     /// Processes genuine physical input with a separate touch hit-test position.
@@ -559,6 +569,7 @@ impl Runtime {
             Some(position),
             mapper,
             audio_at,
+            None,
         )
     }
 
@@ -571,7 +582,9 @@ impl Runtime {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeInputReport, RuntimeError> {
-        self.process_input_with_position::<ObservedRuntimeInput>(input, None, mapper, audio_at)
+        self.process_input_with_position::<ObservedRuntimeInput>(
+            input, None, mapper, audio_at, None,
+        )
     }
 
     /// Processes positioned input with the same routing and provenance as
@@ -588,6 +601,78 @@ impl Runtime {
             Some(position),
             mapper,
             audio_at,
+            None,
+        )
+    }
+
+    /// Processes physical input with validated relative active-output phase.
+    /// Chronology/provenance and raw audio scheduling keep their original units.
+    pub fn process_input_output_phase(
+        &mut self,
+        input: PhysicalInputEvent,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: OutputPhasePoint,
+    ) -> Result<RuntimeReport, RuntimeError> {
+        self.process_input_with_position::<LegacyRuntimeInput>(
+            input,
+            None,
+            mapper,
+            audio_at,
+            Some(phase),
+        )
+    }
+
+    /// Phase-aware positioned input through the existing touch/binding path.
+    pub fn process_input_at_output_phase(
+        &mut self,
+        input: PhysicalInputEvent,
+        position: Position2,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: OutputPhasePoint,
+    ) -> Result<RuntimeReport, RuntimeError> {
+        self.process_input_with_position::<LegacyRuntimeInput>(
+            input,
+            Some(position),
+            mapper,
+            audio_at,
+            Some(phase),
+        )
+    }
+
+    /// Phase-aware input with facts for the actual accepted bound-input prefix.
+    pub fn process_input_report_output_phase(
+        &mut self,
+        input: PhysicalInputEvent,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: OutputPhasePoint,
+    ) -> Result<RuntimeInputReport, RuntimeError> {
+        self.process_input_with_position::<ObservedRuntimeInput>(
+            input,
+            None,
+            mapper,
+            audio_at,
+            Some(phase),
+        )
+    }
+
+    /// Phase-aware positioned input with the unchanged judge observation path.
+    pub fn process_input_at_report_output_phase(
+        &mut self,
+        input: PhysicalInputEvent,
+        position: Position2,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: OutputPhasePoint,
+    ) -> Result<RuntimeInputReport, RuntimeError> {
+        self.process_input_with_position::<ObservedRuntimeInput>(
+            input,
+            Some(position),
+            mapper,
+            audio_at,
+            Some(phase),
         )
     }
 
@@ -597,6 +682,7 @@ impl Runtime {
         position: Option<Position2>,
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
+        phase: Option<OutputPhasePoint>,
     ) -> Result<M::Output, RuntimeError> {
         let started = self.processing_clock.start();
         let result = (|| {
@@ -616,7 +702,8 @@ impl Runtime {
                     });
                 }
             }
-            let (mut report, mapped_song) = self.prepare(host, audio_at, mapper, input_quality)?;
+            let (mut report, mapped_song) =
+                self.prepare(host, audio_at, mapper, input_quality, phase)?;
             if incoming.domain != self.host_domain {
                 let meta = input.meta_mut();
                 meta.original_clock_point.get_or_insert(incoming);
@@ -625,7 +712,7 @@ impl Runtime {
             }
             if self.gameplay_fence.is_some() {
                 self.sequences.insert(meta.source, meta.sequence);
-                self.commit_time(host.timestamp, mapped_song);
+                self.commit_time(host.timestamp, mapped_song, phase);
                 let counters = self.telemetry.counters_mut();
                 counters.inputs = counters.inputs.saturating_add(1);
                 report.input = Some(input);
@@ -643,7 +730,7 @@ impl Runtime {
                 TouchRoute::Unconfigured
             };
             self.sequences.insert(meta.source, meta.sequence);
-            self.commit_time(host.timestamp, mapped_song);
+            self.commit_time(host.timestamp, mapped_song, phase);
             let counters = self.telemetry.counters_mut();
             counters.inputs = counters.inputs.saturating_add(1);
             let mut input_commands = Vec::new();
@@ -717,12 +804,33 @@ impl Runtime {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, RuntimeError> {
+        self.advance_with_phase(host, mapper, audio_at, None)
+    }
+
+    /// Advances the same judge deadlines using relative active output phase.
+    pub fn advance_to_output_phase(
+        &mut self,
+        host: ClockPoint,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: OutputPhasePoint,
+    ) -> Result<RuntimeReport, RuntimeError> {
+        self.advance_with_phase(host, mapper, audio_at, Some(phase))
+    }
+
+    fn advance_with_phase(
+        &mut self,
+        host: ClockPoint,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+        phase: Option<OutputPhasePoint>,
+    ) -> Result<RuntimeReport, RuntimeError> {
         let started = self.processing_clock.start();
         let result = (|| {
             let (host, quality) = normalize(host, self.host_domain, mapper)?;
-            let (mut report, mapped_song) = self.prepare(host, audio_at, mapper, quality)?;
+            let (mut report, mapped_song) = self.prepare(host, audio_at, mapper, quality, phase)?;
             if self.gameplay_fence.is_some() {
-                self.commit_time(host.timestamp, mapped_song);
+                self.commit_time(host.timestamp, mapped_song, phase);
                 return Ok(report);
             }
             match self.judge.advance_to(report.song_time) {
@@ -731,7 +839,7 @@ impl Runtime {
                         .hazard_events
                         .extend_from_slice(self.judge.hazard_events());
                     report.judge_events = events;
-                    self.commit_time(host.timestamp, mapped_song);
+                    self.commit_time(host.timestamp, mapped_song, phase);
                 }
                 Err(error) => report.judge_error = Some(error),
             }
@@ -748,14 +856,35 @@ impl Runtime {
         audio_at: ClockPoint,
         mapper: &dyn ClockMapper,
         input_mapping_quality: ClockMappingQuality,
+        phase: Option<OutputPhasePoint>,
     ) -> Result<(RuntimeReport, Timestamp), RuntimeError> {
         if self.last_host.is_some_and(|last| host.timestamp < last) {
             return Err(RuntimeError::NonMonotonicHost);
         }
-        let song_time = self
-            .transport
-            .position_at(host.timestamp)
-            .map_err(RuntimeError::Transport)?;
+        let song_time = match phase {
+            Some(point) => {
+                if point.logical() != host {
+                    return Err(RuntimeError::OutputPhase(
+                        OutputPhaseError::LogicalPointMismatch,
+                    ));
+                }
+                if self
+                    .last_phase_elapsed
+                    .is_some_and(|last| point.elapsed_nanos() < last)
+                {
+                    return Err(RuntimeError::OutputPhase(
+                        OutputPhaseError::RegressingElapsed,
+                    ));
+                }
+                self.transport
+                    .position_at_output_phase(point)
+                    .map_err(RuntimeError::OutputPhase)?
+            }
+            None => self
+                .transport
+                .position_at(host.timestamp)
+                .map_err(RuntimeError::Transport)?,
+        };
         let segment = self
             .transport
             .anchors()
@@ -789,7 +918,10 @@ impl Runtime {
         ))
     }
 
-    fn commit_time(&mut self, host: Timestamp, song: Timestamp) {
+    fn commit_time(&mut self, host: Timestamp, song: Timestamp, phase: Option<OutputPhasePoint>) {
+        if let Some(point) = phase {
+            self.last_phase_elapsed = Some(point.elapsed_nanos());
+        }
         self.input_sounds_locked = true;
         self.last_host = Some(host);
         self.last_song = Some(song);
@@ -978,6 +1110,7 @@ impl Runtime {
         let previous_transport = std::mem::replace(&mut self.transport, transport);
         self.last_host = None;
         self.last_song = None;
+        self.last_phase_elapsed = None;
         self.song_end = None;
         self.gameplay_fence = None;
         self.gameplay_audio_sealed = false;

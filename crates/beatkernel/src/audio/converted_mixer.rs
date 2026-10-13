@@ -1,8 +1,9 @@
 //! Unique ownership of a source mixer and its retained conversion stream.
 
 use super::{
-    AudioError, AudioFormat, ChannelMatrix, FormatConverter, Mixer, MixerOpenFailure, RenderReport,
-    ResampleQuality, SourcePosition, TargetFrameBasis, TargetTime,
+    AudioError, AudioFormat, ChannelMatrix, ConvertedPhaseHistory, FormatConverter, Mixer,
+    MixerOpenFailure, RenderReport, ResampleQuality, SourcePosition, SourcePlaybackHistory,
+    TargetFrameBasis, TargetTime,
 };
 
 /// Operation performed on a target block, without native presentation evidence.
@@ -154,6 +155,7 @@ pub struct ConvertedMixer {
     pause_source_frame: Option<u64>,
     resume_source_frame: Option<u64>,
     source_was_paused: bool,
+    phase_history: Option<ConvertedPhaseHistory>,
 }
 
 impl ConvertedMixer {
@@ -210,6 +212,7 @@ impl ConvertedMixer {
             pause_source_frame: None,
             resume_source_frame: None,
             source_was_paused,
+            phase_history: None,
         })
     }
 
@@ -245,6 +248,63 @@ impl ConvertedMixer {
     /// to construction; use this owner's position for the absolute source grid.
     pub const fn converter(&self) -> &FormatConverter {
         &self.converter
+    }
+
+    /// Cold opt-in before any positive target generation, including held output.
+    /// Reserves bounded transition storage without changing PCM or the stream.
+    /// Repeated/late enabling refuses; a used disabled stream cannot recover its
+    /// missing generated history. This proves no native admission/presentation.
+    pub fn enable_phase_history(&mut self, capacity: usize) -> Result<(), AudioError> {
+        if self.phase_history.is_some() || self.target_frame_cursor != 0 {
+            return Err(AudioError::InvalidCapacity);
+        }
+        let history = ConvertedPhaseHistory::new(
+            self.converter.source_format().sample_rate(),
+            self.target_time,
+            self.source_position(),
+            capacity,
+        )?;
+        self.phase_history = Some(history);
+        Ok(())
+    }
+
+    /// Generated correspondence retained by this complete conversion owner.
+    pub const fn phase_history(&self) -> Option<&ConvertedPhaseHistory> {
+        self.phase_history.as_ref()
+    }
+
+    /// Retires generated phase prefixes on this complete owner's thread.
+    /// The caller must qualify the minimum exact pin of all live consumers;
+    /// this mathematical operation proves neither native admission nor drain.
+    /// Missing history refuses without changing the stream.
+    pub fn retire_phase_history_before(&mut self, pin: TargetTime) -> Result<usize, AudioError> {
+        self.phase_history
+            .as_mut()
+            .ok_or(AudioError::InvalidCapacity)?
+            .retire_before(pin)
+    }
+
+    /// Cold opt-in retaining actual Mixer playback adoption before positive
+    /// target generation. Repeated, late or zero-capacity enabling refuses.
+    /// This history authenticates no native presentation or pause ACK.
+    pub fn enable_source_playback_history(&mut self, capacity: usize) -> Result<(), AudioError> {
+        if self.target_frame_cursor != 0 {
+            return Err(AudioError::InvalidCapacity);
+        }
+        self.mixer.enable_source_playback_history(capacity)
+    }
+
+    /// Actual source playback intervals retained by this complete owner.
+    pub const fn source_playback_history(&self) -> Option<&SourcePlaybackHistory> {
+        self.mixer.source_playback_history()
+    }
+
+    /// Retires the actual owned mixer's physical source-history prefix.
+    /// Call only on the owning thread after qualifying the minimum original
+    /// source pin required by every live consumer. No native ACK is implied.
+    /// Missing source history refuses without changing either history.
+    pub fn retire_source_playback_before(&mut self, pin: u64) -> Result<usize, AudioError> {
+        self.mixer.retire_source_playback_before(pin)
     }
 
     /// Exclusive target cursor counting both conversion and held target frames.
@@ -290,6 +350,14 @@ impl ConvertedMixer {
         let source_start = self.source_position();
         let time_start = self.target_time;
         let time_end = self.next_target_time(frames)?;
+        if let Some(history) = &self.phase_history {
+            history.preflight(
+                time_start,
+                source_start,
+                ConvertedOutputState::Active,
+                frames != 0,
+            )?;
+        }
         let mixer = &mut self.mixer;
         let source = self.converter.render(output, |block| mixer.render(block))?;
         if source.frames != 0 {
@@ -316,6 +384,16 @@ impl ConvertedMixer {
             source_start,
             time_start,
         );
+        if let Some(history) = &mut self.phase_history {
+            history.commit(
+                time_start,
+                time_end,
+                source_start,
+                report.source_position,
+                ConvertedOutputState::Active,
+                frames != 0,
+            );
+        }
         // Source lookahead can expose a gate or endpoint before target consumption.
         // Apply strict sample-position clipping on the generated target grid.
         let channels = usize::from(self.converter.target_format().channels());
@@ -360,9 +438,27 @@ impl ConvertedMixer {
         let source_start = self.source_position();
         let time_start = self.target_time;
         let time_end = self.next_target_time(frames)?;
+        if let Some(history) = &self.phase_history {
+            history.preflight(
+                time_start,
+                source_start,
+                ConvertedOutputState::Held,
+                frames != 0,
+            )?;
+        }
         output.fill(0.0);
         self.target_frame_cursor = end;
         self.target_time = time_end;
+        if let Some(history) = &mut self.phase_history {
+            history.commit(
+                time_start,
+                time_end,
+                source_start,
+                source_start,
+                ConvertedOutputState::Held,
+                frames != 0,
+            );
+        }
         Ok(self.report(
             frames,
             None,

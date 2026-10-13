@@ -41,30 +41,39 @@
 
 mod convert;
 mod converted_mixer;
+mod converted_phase;
 mod frame_basis;
 mod handoff;
+mod interpolated_time;
 mod mixer;
 mod model;
 mod pcm;
 mod practice;
 mod queue;
+mod source_playback_phase;
+mod source_playback_history;
 mod target_time;
 
 pub use convert::{ChannelMatrix, FormatConverter, ResampleQuality, SourcePosition};
-pub use converted_mixer::{
-    ConvertedMixer, ConvertedOutputState, ConvertedRenderReport, TargetBoundary,
+pub use converted_mixer::{ConvertedMixer, ConvertedOutputState, ConvertedRenderReport, TargetBoundary};
+pub use converted_phase::{
+    ConvertedPhaseError, ConvertedPhaseHistory, ConvertedPhasePoint, ConvertedPhaseSpan,
 };
 pub use frame_basis::{OutputFrameBasis, OutputFrameBasisError};
 pub use handoff::{MixerOpenFailure, OutputOpenFailure, SoftwareOutputState, StoppedMixerSource};
+pub use interpolated_time::InterpolatedTargetTime;
+pub use source_playback_phase::{SourcePlaybackSpan, SourcePlaybackState};
+pub use source_playback_history::SourcePlaybackHistory;
 pub use mixer::Mixer;
 pub use model::{
     AudioCommand, AudioCounters, AudioError, AudioFormat, AudioLimits, MixerConfig, PcmLimits,
     RenderReport, SampleId, VoiceId,
 };
 pub use practice::{
-    practice_queue, PracticeAudioEndpoint, PracticeBoundaryKind, PracticeController, PracticeCue,
-    PracticeError, PracticeLimits, PracticeReceipt, PracticeRegion, PracticeRequest,
-    PracticeSourceSelection, PreparedPracticeProgram, ProjectedPracticeReceipt,
+    practice_bgm_voice_extent, practice_queue, PracticeAudioEndpoint, PracticeBoundaryKind,
+    PracticeController, PracticeCue, PracticeError, PracticeLimits, PracticeReceipt,
+    PracticeRegion, PracticeRequest, PracticeSourceSelection, PreparedPracticeProgram,
+    ProjectedPracticeReceipt,
 };
 pub use target_time::{TargetFrameBasis, TargetTime};
 

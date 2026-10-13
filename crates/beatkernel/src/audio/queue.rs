@@ -291,6 +291,16 @@ impl CommandProducer {
     pub fn applied_start_frame(&self) -> Option<u64> {
         self.shared.applied_start_frame()
     }
+    /// Existing initial gate configuration, read without arming or allocating.
+    /// `None` means ungated; `Some(None)` means closed and not yet armed.
+    pub fn start_gate_frame(&self) -> Option<Option<u64>> {
+        self.shared.start_gated.then(|| {
+            self.shared
+                .start_armed
+                .load(Ordering::Acquire)
+                .then(|| self.shared.start_frame.load(Ordering::Relaxed))
+        })
+    }
 
     /// Requests silence with playback scheduling frozen on a subsequent valid
     /// nonempty render. This independent desired state uses no queue slot and

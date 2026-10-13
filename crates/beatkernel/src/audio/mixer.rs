@@ -24,6 +24,7 @@ pub struct Mixer {
     song_position: Timestamp,
     practice: Option<super::practice::Practice>,
     practice_projection_deferred: bool,
+    source_playback_history: Option<super::SourcePlaybackHistory>,
 }
 
 #[derive(Clone, Copy)]
@@ -142,6 +143,15 @@ impl Mixer {
             }
         }
         let practice = super::practice::Practice::new(program, endpoint, region)?;
+        super::practice::Practice::validate_deadline(
+            &practice.program.data,
+            &practice.cursor,
+            0,
+            0,
+            self.output_frame_basis().origin(),
+        )?;
+        // Cold state adoption, not a consumed or acknowledged queue command.
+        self.rate = practice.program.data.rate;
         self.practice = Some(practice);
         Ok(())
     }
@@ -152,6 +162,15 @@ impl Mixer {
     /// Whether the nonrepeating retained region reached its end boundary.
     pub fn practice_finished(&self) -> bool {
         self.practice.as_ref().is_some_and(|p| !p.cursor.active)
+    }
+
+    /// Earliest original Source and projected Target references in live practice
+    /// receipts. Raw lookahead pins only Source; these facts grant no native ACK.
+    /// The owning audio thread can inspect them without consuming queue entries.
+    pub fn practice_history_retention_pins(&self) -> (Option<u64>, Option<super::TargetTime>) {
+        self.practice.as_ref().map_or((None, None), |practice| {
+            practice.endpoint.history_retention_pins()
+        })
     }
 
     /// Actual immutable format, scheduling origin and capacities owned by this mixer.
@@ -202,7 +221,42 @@ impl Mixer {
             song_position: Timestamp::ZERO,
             practice: None,
             practice_projection_deferred: false,
+            source_playback_history: None,
         })
+    }
+
+    /// Cold opt-in retaining actual physical/playback intervals from the
+    /// current integer cursors. Earlier output is not reconstructed.
+    /// Repeated, zero-capacity or allocation-failed enabling preserves this
+    /// mixer. This history authenticates no native presentation or pause ACK.
+    pub fn enable_source_playback_history(&mut self, capacity: usize) -> Result<(), AudioError> {
+        if self.source_playback_history.is_some() {
+            return Err(AudioError::InvalidCapacity);
+        }
+        let history = super::SourcePlaybackHistory::new(
+            self.config.format().sample_rate(),
+            self.frame_cursor,
+            self.playback_frame_cursor,
+            capacity,
+        )?;
+        self.source_playback_history = Some(history);
+        Ok(())
+    }
+
+    /// Actual source playback intervals retained by this mixer.
+    pub const fn source_playback_history(&self) -> Option<&super::SourcePlaybackHistory> {
+        self.source_playback_history.as_ref()
+    }
+
+    /// Retires complete source intervals before the interval covering `pin`.
+    /// Call only on this mixer's owning thread after qualifying the minimum of
+    /// all live consumer pins. This operation grants no native drain or ACK.
+    /// Missing source history is refused without changing mixer state.
+    pub fn retire_source_playback_before(&mut self, pin: u64) -> Result<usize, AudioError> {
+        self.source_playback_history
+            .as_mut()
+            .ok_or(AudioError::InvalidCapacity)?
+            .retire_before(pin)
     }
 
     /// Renders a contiguous block on the immutable integer output frame grid.
@@ -304,7 +358,12 @@ impl Mixer {
         let practice_controls = if !pause_requested && active_frames > 0 {
             if let Some(practice) = &self.practice {
                 practice
-                    .preflight(playback_start, active_frames)
+                    .preflight_at(
+                        playback_start,
+                        active_frames,
+                        active_start,
+                        self.output_frame_basis().origin(),
+                    )
                     .map_err(|error| match error {
                         super::PracticeError::ReceiptFull => AudioError::PracticeReceiptFull,
                         super::PracticeError::EventBudget => AudioError::PracticeEventBudget,
@@ -316,6 +375,21 @@ impl Mixer {
         } else {
             0
         };
+        let history_plan = self
+            .source_playback_history
+            .as_ref()
+            .map(|history| {
+                history.preflight(
+                    self.config.format().sample_rate(),
+                    start,
+                    end,
+                    playback_start,
+                    active_start,
+                    physical_prefix_end,
+                    prefix_extent != extent && !pause_requested && active_extent != 0,
+                )
+            })
+            .transpose()?;
         // All failure paths precede state, output, queue and evidence changes.
         if prefix_extent == extent {
             self.paused = true;
@@ -323,6 +397,11 @@ impl Mixer {
             self.frame_cursor = end;
             self.consumer.publish_physical_frontier(end);
             self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(extent);
+            if let (Some(history), Some(plan)) =
+                (self.source_playback_history.as_mut(), history_plan)
+            {
+                history.commit(plan);
+            }
             return Ok(self.report(start, playback_start, frames));
         }
         if opens_gate {
@@ -338,6 +417,11 @@ impl Mixer {
             self.frame_cursor = end;
             self.consumer.publish_physical_frontier(end);
             self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(extent);
+            if let (Some(history), Some(plan)) =
+                (self.source_playback_history.as_mut(), history_plan)
+            {
+                history.commit(plan);
+            }
             return Ok(self.report(start, playback_start, frames));
         }
         output[..prefix_samples].fill(0.0);
@@ -427,6 +511,9 @@ impl Mixer {
         self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(extent);
         if !self.practice_projection_deferred {
             self.project_direct_practice_receipts(start, frames);
+        }
+        if let (Some(history), Some(plan)) = (self.source_playback_history.as_mut(), history_plan) {
+            history.commit(plan);
         }
         Ok(self.report(start, playback_start, frames))
     }
@@ -663,6 +750,7 @@ impl Mixer {
                                 selected,
                                 practice.program.data.output_rate,
                                 practice.program.data.limits.max_overlap,
+                                practice.program.data.rate,
                             );
                         });
                     }
@@ -678,7 +766,9 @@ impl Mixer {
                 } else {
                     cursor.region.start
                 };
-                let applied = if kind == PracticeBoundaryKind::ControlRejectedRevision {
+                let applied = if kind == PracticeBoundaryKind::ControlRejectedRevision
+                    || kind == PracticeBoundaryKind::Started
+                {
                     cursor.anchor
                 } else {
                     requested
@@ -708,7 +798,8 @@ impl Mixer {
             self.playback_frame_cursor,
         ) {
             let cue = practice.program.data.cues[practice.cursor.next_cue];
-            practice.cursor.next_cue += 1;
+            Practice::advance_cue(&practice.program.data, &mut practice.cursor)
+                .expect("scalar practice preflight");
             start_program_voice(
                 &mut self.voices,
                 &self.bank,
@@ -716,8 +807,15 @@ impl Mixer {
                 0,
                 practice.program.data.output_rate,
                 practice.program.data.limits.max_overlap,
+                practice.program.data.rate,
             );
         }
+        self.song_position = Practice::song_at(
+            &practice.program.data,
+            &practice.cursor,
+            self.playback_frame_cursor,
+        )
+        .expect("scalar practice preflight");
     }
 
     fn apply(&mut self, command: AudioCommand) {
@@ -962,6 +1060,7 @@ fn start_program_voice(
     selected: usize,
     output_rate: u32,
     reserved: usize,
+    rate: Rate,
 ) {
     if selected >= cue.frames {
         return;
@@ -977,13 +1076,8 @@ fn start_program_voice(
         id: cue.cue.voice,
         sample: cue.cue.sample,
         gain: cue.cue.gain,
-        head: Head::new(
-            selected,
-            sample.format().sample_rate(),
-            output_rate,
-            Rate::NORMAL,
-        )
-        .expect("normal rational head"),
+        head: Head::new(selected, sample.format().sample_rate(), output_rate, rate)
+            .expect("cold validated rational head"),
     });
 }
 

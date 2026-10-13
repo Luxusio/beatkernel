@@ -139,14 +139,21 @@ impl TargetFrameBasis {
     pub fn time_at_stream_frame(self, frames: u64) -> Result<TargetTime, AudioError> {
         self.start.checked_add_frames(frames, self.rate)
     }
+    /// Exact native tick duration before any timestamp rounding.
+    pub fn time_at_native_counter(
+        self,
+        ticks: u64,
+        frequency: u64,
+    ) -> Result<TargetTime, AudioError> {
+        self.start.checked_add_units(ticks, frequency)
+    }
     /// Native tick duration is combined exactly before the final timestamp floor.
     pub fn point_at_native_counter(
         self,
         ticks: u64,
         frequency: u64,
     ) -> Result<ClockPoint, AudioError> {
-        self.start
-            .checked_add_units(ticks, frequency)?
+        self.time_at_native_counter(ticks, frequency)?
             .point(self.origin)
     }
     /// Stream-relative frames are added before the single timestamp floor.

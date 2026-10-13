@@ -6,9 +6,11 @@
 //! The opt-in preroll constructor retains the full signed preroll phase across
 //! exact acknowledged pause/resume controls, without changing legacy anchors.
 
+mod output_phase;
 mod rate;
 mod state;
 
+pub use output_phase::{OutputPhaseBasis, OutputPhaseError, OutputPhasePoint};
 pub use rate::{Rate, RateError};
 pub use state::{
     LiveTransportControlError, LiveTransportSetupError, PrerollTransportSetup, Transport,

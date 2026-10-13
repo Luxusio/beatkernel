@@ -1,5 +1,5 @@
-use super::Rate;
-use crate::time::{Duration, Timestamp};
+use super::{OutputPhaseBasis, OutputPhaseError, OutputPhasePoint, Rate};
+use crate::time::{ClockPoint, Duration, Timestamp};
 use std::fmt;
 
 /// The beginning of one host-to-song mapping segment.
@@ -23,6 +23,8 @@ pub struct TransportAnchor {
 /// An invalid transport query or command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportError {
+    /// Opted output phase requires an explicit validated phase point.
+    OutputPhaseRequired,
     /// A queried host time precedes the initial anchor.
     BeforeOrigin,
     /// A command precedes the last successful command's host time.
@@ -34,6 +36,7 @@ pub enum TransportError {
 impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::OutputPhaseRequired => f.write_str("transport requires an output phase point"),
             Self::BeforeOrigin => f.write_str("host time precedes transport origin"),
             Self::NonMonotonicHost => f.write_str("command host time moved backward"),
             Self::Overflow => f.write_str("song position is outside the timestamp range"),
@@ -87,6 +90,8 @@ impl std::error::Error for LiveTransportSetupError {}
 /// Invalid exact acknowledged pause/resume control.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiveTransportControlError {
+    /// Opted output phase requires an explicit validated phase control.
+    OutputPhaseRequired,
     /// The current segment has no exact phase, including after a legacy reset.
     MissingPrerollSetup,
     /// A duplicate exact pause supplied a different frozen elapsed time.
@@ -104,6 +109,7 @@ pub enum LiveTransportControlError {
 impl fmt::Display for LiveTransportControlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::OutputPhaseRequired => "transport requires an output phase control",
             Self::MissingPrerollSetup => "transport has no active exact preroll phase",
             Self::InvalidState => "exact pause control differs from the frozen elapsed time",
             Self::NonMonotonicHost => "command host time moved backward",
@@ -118,6 +124,13 @@ impl std::error::Error for LiveTransportControlError {}
 
 // Optional metadata is indexed by the existing authoritative anchor history.
 // It holds no duplicate host/song/rate or independent command chronology.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OutputPhaseHistory {
+    basis: OutputPhaseBasis,
+    // Successful acknowledgements, including no-ops, retain their phase bounds.
+    controls: Vec<(Timestamp, i128)>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PrerollHistory {
     setup: PrerollTransportSetup,
@@ -172,6 +185,7 @@ pub struct Transport {
     resume_rate: Rate,
     last_command_host: Timestamp,
     preroll: Option<PrerollHistory>,
+    output_phase: Option<OutputPhaseHistory>,
 }
 
 impl Transport {
@@ -193,6 +207,7 @@ impl Transport {
             },
             last_command_host: host_time,
             preroll: None,
+            output_phase: None,
         }
     }
 
@@ -235,6 +250,146 @@ impl Transport {
         Ok(transport)
     }
 
+    /// Opts into relative active-source phase; the origin is unchanged chronology.
+    /// Construction is mathematical validation, not native admission evidence.
+    pub fn new_with_output_phase(
+        basis: OutputPhaseBasis,
+        logical_origin: ClockPoint,
+        original_start: Timestamp,
+        output_preroll: Duration,
+        positive_rate: Rate,
+        original_end: Option<Timestamp>,
+    ) -> Result<Self, OutputPhaseError> {
+        if logical_origin.domain != basis.domain() {
+            return Err(OutputPhaseError::WrongDomain);
+        }
+        let mut transport = Self::new_with_preroll(
+            logical_origin.timestamp,
+            original_start,
+            output_preroll,
+            positive_rate,
+            original_end,
+        )
+        .map_err(OutputPhaseError::Setup)?;
+        transport.output_phase = Some(OutputPhaseHistory {
+            basis,
+            controls: vec![(logical_origin.timestamp, 0)],
+        });
+        Ok(transport)
+    }
+
+    /// Bound immutable attempt identity, independent of rounded song snapshots.
+    pub fn output_phase_basis(&self) -> Option<OutputPhaseBasis> {
+        self.output_phase.as_ref().map(|phase| phase.basis)
+    }
+
+    /// Allocation-free historical query with one whole signed preroll phase.
+    pub fn position_at_output_phase(
+        &self,
+        point: OutputPhasePoint,
+    ) -> Result<Timestamp, OutputPhaseError> {
+        let phase = self
+            .output_phase
+            .as_ref()
+            .ok_or(OutputPhaseError::MissingPhase)?;
+        if point.logical().domain != phase.basis.domain() {
+            return Err(OutputPhaseError::WrongDomain);
+        }
+        if point.basis() != phase.basis {
+            return Err(OutputPhaseError::WrongBasis);
+        }
+        let end = self
+            .anchors
+            .partition_point(|anchor| anchor.host_time <= point.logical().timestamp);
+        if end == 0 {
+            return Err(OutputPhaseError::BeforeOrigin);
+        }
+        let history = self
+            .preroll
+            .as_ref()
+            .expect("phase constructor retains preroll history");
+        let base = history.active_elapsed[end - 1].expect("phase controls retain exact elapsed");
+        let elapsed = point.elapsed_nanos();
+        let control_end = phase
+            .controls
+            .partition_point(|(at, _)| *at <= point.logical().timestamp);
+        // The initial acknowledgement precedes every admitted query. Future
+        // acknowledgements constrain historical queries as well as no-op bounds.
+        let lower = phase.controls[control_end - 1].1;
+        let upper = phase.controls.get(control_end).map(|(_, elapsed)| *elapsed);
+        if elapsed < base || elapsed < lower || upper.is_some_and(|upper| elapsed > upper) {
+            return Err(OutputPhaseError::RegressingElapsed);
+        }
+        if self.anchors[end - 1].rate == Rate::ZERO && elapsed != base {
+            return Err(OutputPhaseError::InvalidState);
+        }
+        history
+            .setup
+            .song_at_elapsed(elapsed)
+            .map_err(OutputPhaseError::Transport)
+    }
+
+    /// Freezes at an actual caller-qualified active phase; no timestamp subtraction.
+    pub fn pause_at_output_phase(
+        &mut self,
+        point: OutputPhasePoint,
+    ) -> Result<(), OutputPhaseError> {
+        self.control_output_phase(point, true)
+    }
+
+    /// Resumes at the acknowledged frozen phase, retaining the original basis.
+    pub fn resume_at_output_phase(
+        &mut self,
+        point: OutputPhasePoint,
+    ) -> Result<(), OutputPhaseError> {
+        self.control_output_phase(point, false)
+    }
+
+    fn control_output_phase(
+        &mut self,
+        point: OutputPhasePoint,
+        paused: bool,
+    ) -> Result<(), OutputPhaseError> {
+        if point.logical().timestamp < self.last_command_host {
+            return Err(OutputPhaseError::Transport(
+                TransportError::NonMonotonicHost,
+            ));
+        }
+        let song_time = self.position_at_output_phase(point)?;
+        let rate = if paused {
+            Rate::ZERO
+        } else {
+            self.preroll
+                .as_ref()
+                .expect("validated phase")
+                .setup
+                .positive_rate
+        };
+        if self.anchor().rate != rate {
+            self.anchors.push(TransportAnchor {
+                host_time: point.logical().timestamp,
+                song_time,
+                rate,
+            });
+            self.preroll
+                .as_mut()
+                .expect("validated phase")
+                .active_elapsed
+                .push(Some(point.elapsed_nanos()));
+        }
+        self.last_command_host = point.logical().timestamp;
+        let controls = &mut self
+            .output_phase
+            .as_mut()
+            .expect("validated phase")
+            .controls;
+        let acknowledgement = (point.logical().timestamp, point.elapsed_nanos());
+        if controls.last().copied() != Some(acknowledgement) {
+            controls.push(acknowledgement);
+        }
+        Ok(())
+    }
+
     /// Returns the original cold setup while the current segment retains it.
     /// Explicit seeks and real legacy rate changes discard the current exact
     /// phase; historical segments retain their original mapping.
@@ -270,6 +425,9 @@ impl Transport {
     /// subtraction, rate scaling, and song addition use `i128`; only the
     /// final song timestamp must fit `i64`. Division truncates toward zero.
     pub fn position_at(&self, host_time: Timestamp) -> Result<Timestamp, TransportError> {
+        if self.output_phase.is_some() {
+            return Err(TransportError::OutputPhaseRequired);
+        }
         let end = self
             .anchors
             .partition_point(|anchor| anchor.host_time <= host_time);
@@ -472,11 +630,17 @@ impl Transport {
     }
 
     fn validate_exact_host(&self, host_time: Timestamp) -> Result<(), LiveTransportControlError> {
+        if self.output_phase.is_some() {
+            return Err(LiveTransportControlError::OutputPhaseRequired);
+        }
         self.validate_command_host(host_time)
             .map_err(|_| LiveTransportControlError::NonMonotonicHost)
     }
 
     fn validate_command_host(&self, host_time: Timestamp) -> Result<(), TransportError> {
+        if self.output_phase.is_some() {
+            return Err(TransportError::OutputPhaseRequired);
+        }
         if host_time < self.last_command_host {
             Err(TransportError::NonMonotonicHost)
         } else {

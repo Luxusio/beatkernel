@@ -1,6 +1,7 @@
 //! Cold original-asset programs and copied, bounded retained-output controls.
 use super::{AudioError, AudioLimits, SampleBank, SampleId, VoiceId};
-use crate::time::{ClockDomainId, ClockPoint, Timestamp};
+use crate::time::{ClockDomainId, ClockPoint, Duration, Timestamp};
+use crate::transport::Rate;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
     Arc,
@@ -130,6 +131,44 @@ impl std::fmt::Display for PracticeError {
     }
 }
 impl std::error::Error for PracticeError {}
+
+/// Conservative original-song nanosecond extent of a zero-phase BGM voice.
+///
+/// The discrete output lifetime and its inverse original-song extent both
+/// round upward, bounding overlap for every exact shared region anchor.
+pub fn practice_bgm_voice_extent(
+    source_frames: usize,
+    source_rate: u32,
+    output_rate: u32,
+    rate: Rate,
+) -> Result<u128, PracticeError> {
+    if source_rate == 0 || output_rate == 0 || rate.numerator() <= 0 {
+        return Err(PracticeError::InvalidRegion);
+    }
+    if source_frames == 0 {
+        return Ok(0);
+    }
+    let numerator = rate.numerator() as u128;
+    let denominator = u128::from(rate.denominator());
+    let output_frames = mul_div_ceil(
+        (source_frames as u128)
+            .checked_mul(u128::from(output_rate))
+            .ok_or(PracticeError::Overflow)?,
+        denominator,
+        u128::from(source_rate)
+            .checked_mul(numerator)
+            .ok_or(PracticeError::Overflow)?,
+    )?;
+    mul_div_ceil(
+        output_frames,
+        1_000_000_000u128
+            .checked_mul(numerator)
+            .ok_or(PracticeError::Overflow)?,
+        u128::from(output_rate)
+            .checked_mul(denominator)
+            .ok_or(PracticeError::Overflow)?,
+    )
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Cue-local Ceil source selection and its exact rounding correction.
 pub struct PracticeSourceSelection {
@@ -162,6 +201,11 @@ pub(crate) struct Program {
     pub output_rate: u32,
     /// Channels.
     pub channels: u16,
+    pub rate: Rate,
+    pub preroll: Duration,
+    pub open_end: bool,
+    pub exact_timing: bool,
+    pub validate_deadline: bool,
 }
 /// Original sample identities and a balanced overlap index. No PCM is copied.
 pub struct PreparedPracticeProgram {
@@ -173,6 +217,54 @@ impl PreparedPracticeProgram {
         bank: &SampleBank,
         cues: Vec<PracticeCue>,
         limits: PracticeLimits,
+    ) -> Result<Self, PracticeError> {
+        Self::prepare(
+            bank,
+            cues,
+            limits,
+            Rate::NORMAL,
+            Duration::ZERO,
+            false,
+            false,
+            false,
+        )
+    }
+    /// Prepares immutable positive pitch-changing playback on the original PCM.
+    /// The initial region starts at original S; preroll is an output duration.
+    /// With open intent, nonrepeating MAX endpoints are conceptual open ends,
+    /// including subsequent scrubs; repeating or other endpoints remain finite.
+    pub fn new_with_speed(
+        bank: &SampleBank,
+        cues: Vec<PracticeCue>,
+        limits: PracticeLimits,
+        rate: Rate,
+        output_preroll: Duration,
+        open_end: bool,
+    ) -> Result<Self, PracticeError> {
+        if rate.numerator() <= 0 || output_preroll.as_nanos() < 0 {
+            return Err(PracticeError::InvalidRegion);
+        }
+        let exact_timing = rate != Rate::NORMAL || output_preroll != Duration::ZERO;
+        Self::prepare(
+            bank,
+            cues,
+            limits,
+            rate,
+            output_preroll,
+            open_end,
+            exact_timing,
+            true,
+        )
+    }
+    fn prepare(
+        bank: &SampleBank,
+        cues: Vec<PracticeCue>,
+        limits: PracticeLimits,
+        rate: Rate,
+        preroll: Duration,
+        open_end: bool,
+        exact_timing: bool,
+        validate_deadline: bool,
     ) -> Result<Self, PracticeError> {
         // Revalidate public scalar limits instead of trusting struct construction.
         PracticeLimits::new(
@@ -217,14 +309,27 @@ impl PreparedPracticeProgram {
                 // shared region anchor, rounded start differences are floor or
                 // ceil of the original separation in output frames. This
                 // envelope therefore bounds overlap without fixing an anchor.
-                let output_frames = ceil(
-                    sample.frames() as i128 * i128::from(bank.format().sample_rate()),
-                    i128::from(sample.format().sample_rate()),
-                );
-                let voice_extent = ceil(
-                    output_frames * 1_000_000_000,
-                    i128::from(bank.format().sample_rate()),
-                );
+                let voice_extent = if exact_timing {
+                    practice_bgm_voice_extent(
+                        sample.frames(),
+                        sample.format().sample_rate(),
+                        bank.format().sample_rate(),
+                        rate,
+                    )?
+                } else {
+                    let output_frames = mul_div_ceil(
+                        sample.frames() as u128 * u128::from(bank.format().sample_rate()),
+                        u128::from(rate.denominator()),
+                        u128::from(sample.format().sample_rate()) * rate.numerator() as u128,
+                    )?;
+                    mul_div_ceil(
+                        output_frames,
+                        1_000_000_000,
+                        u128::from(bank.format().sample_rate()),
+                    )?
+                };
+                let voice_extent =
+                    i128::try_from(voice_extent).map_err(|_| PracticeError::Overflow)?;
                 events.push((i128::from(cue.at.as_nanos()) + voice_extent, -1));
             }
             prepared.push(Cue {
@@ -270,12 +375,17 @@ impl PreparedPracticeProgram {
                 limits,
                 output_rate: bank.format().sample_rate(),
                 channels: bank.format().channels(),
+                rate,
+                preroll,
+                open_end,
+                exact_timing,
+                validate_deadline,
             }),
         })
     }
     /// Validates the exact original-song interval and representable duration.
     pub fn validate_region(&self, region: PracticeRegion) -> Result<(), PracticeError> {
-        self.data.region(region).map(|_| ())
+        self.data.initial_region(region).map(|_| ())
     }
     /// Cue-local source selection from the original asset, never a rounded suffix.
     pub fn source_selection(
@@ -309,13 +419,88 @@ impl PreparedPracticeProgram {
     pub fn limits(&self) -> PracticeLimits {
         self.data.limits
     }
+    /// Immutable selected source speed.
+    pub fn rate(&self) -> Rate {
+        self.data.rate
+    }
+    /// Initial physical-output preroll; fresh attempts add no new preroll.
+    pub fn output_preroll(&self) -> Duration {
+        self.data.preroll
+    }
 }
 impl Program {
+    fn is_open(&self, region: PracticeRegion) -> bool {
+        self.open_end && region.end == Timestamp::MAX && !region.repeat
+    }
+    fn initial_region(&self, region: PracticeRegion) -> Result<(Timestamp, u64), PracticeError> {
+        let (_, mut duration) = self.region(region)?;
+        let phase = i128::from(self.preroll.as_nanos())
+            .checked_mul(i128::from(self.rate.numerator()))
+            .ok_or(PracticeError::Overflow)?
+            / i128::from(self.rate.denominator());
+        let anchor = i64::try_from(i128::from(region.start.as_nanos()) - phase)
+            .map(Timestamp::from_nanos)
+            .map_err(|_| PracticeError::Overflow)?;
+        i64::try_from(phase).map_err(|_| PracticeError::Overflow)?;
+        if self.exact_timing && !self.is_open(region) {
+            duration = self.frame_at(region.start, region.end, self.preroll)?;
+        }
+        if self.exact_timing && self.is_open(region) {
+            self.validate_open_cues(region, self.preroll)?;
+        }
+        Ok((anchor, duration))
+    }
+    // First output frame where S + trunc((floor(frame*ns/Hz)-P)*N/D)
+    // reaches target. Division before multiplication preserves the full range.
+    fn frame_at(
+        &self,
+        start: Timestamp,
+        target: Timestamp,
+        preroll: Duration,
+    ) -> Result<u64, PracticeError> {
+        let delta = i128::from(target.as_nanos()) - i128::from(start.as_nanos());
+        let n = i128::from(self.rate.numerator());
+        let d = i128::from(self.rate.denominator());
+        let threshold = if delta >= 0 {
+            (delta / n)
+                .checked_mul(d)
+                .and_then(|q| q.checked_add(ceil((delta % n) * d, n)))
+        } else {
+            let before = delta - 1;
+            before
+                .div_euclid(n)
+                .checked_mul(d)
+                .and_then(|q| q.checked_add((before.rem_euclid(n) * d).div_euclid(n)))
+                .and_then(|q| q.checked_add(1))
+        }
+        .and_then(|q| q.checked_add(i128::from(preroll.as_nanos())))
+        .ok_or(PracticeError::Overflow)?;
+        if threshold <= 0 {
+            return Ok(0);
+        }
+        u64::try_from(mul_div_ceil(
+            threshold as u128,
+            u128::from(self.output_rate),
+            1_000_000_000,
+        )?)
+        .map_err(|_| PracticeError::Overflow)
+    }
     pub(crate) fn region(&self, region: PracticeRegion) -> Result<(Timestamp, u64), PracticeError> {
         if region.start >= region.end {
             return Err(PracticeError::InvalidRegion);
         }
         let applied = region.start;
+        if self.is_open(region) {
+            self.validate_open_cues(region, Duration::ZERO)?;
+            return Ok((applied, 0));
+        }
+        if self.exact_timing {
+            let duration = self.frame_at(region.start, region.end, Duration::ZERO)?;
+            if duration == 0 {
+                return Err(PracticeError::InvalidRegion);
+            }
+            return Ok((applied, duration));
+        }
         let duration = ceil(
             (i128::from(region.end.as_nanos()) - i128::from(applied.as_nanos()))
                 * i128::from(self.output_rate),
@@ -328,6 +513,19 @@ impl Program {
             applied,
             u64::try_from(duration).map_err(|_| PracticeError::Overflow)?,
         ))
+    }
+    fn validate_open_cues(
+        &self,
+        region: PracticeRegion,
+        preroll: Duration,
+    ) -> Result<(), PracticeError> {
+        let end = self.cues.partition_point(|cue| cue.cue.at < region.end);
+        if let Some(cue) = end.checked_sub(1).and_then(|index| self.cues.get(index)) {
+            if cue.cue.at > region.start {
+                self.frame_at(region.start, cue.cue.at, preroll)?;
+            }
+        }
+        Ok(())
     }
     pub(crate) fn overlaps(&self, at: Timestamp, mut visit: impl FnMut(usize)) {
         fn walk(p: &Program, lo: usize, hi: usize, at: i128, visit: &mut impl FnMut(usize)) {
@@ -363,6 +561,39 @@ impl Program {
 }
 pub(crate) fn ceil(n: i128, d: i128) -> i128 {
     n.div_euclid(d) + i128::from(n.rem_euclid(d) != 0)
+}
+// Exact checked product/division without requiring the intermediate product
+// to fit. Used in cold preparation and scalar boundary validation only.
+fn mul_div_ceil(a: u128, b: u128, d: u128) -> Result<u128, PracticeError> {
+    if let Some(product) = a.checked_mul(b) {
+        return (product / d)
+            .checked_add(u128::from(product % d != 0))
+            .ok_or(PracticeError::Overflow);
+    }
+    let mut q = (a / d).checked_mul(b).ok_or(PracticeError::Overflow)?;
+    let a = a % d;
+    let mut remainder = 0u128;
+    let mut fraction = 0u128;
+    for bit in (0..128).rev() {
+        fraction = fraction.checked_mul(2).ok_or(PracticeError::Overflow)?;
+        if remainder >= d - remainder {
+            remainder -= d - remainder;
+            fraction = fraction.checked_add(1).ok_or(PracticeError::Overflow)?;
+        } else {
+            remainder *= 2;
+        }
+        if b & (1u128 << bit) != 0 {
+            if remainder >= d - a {
+                remainder -= d - a;
+                fraction = fraction.checked_add(1).ok_or(PracticeError::Overflow)?;
+            } else {
+                remainder += a;
+            }
+        }
+    }
+    q = q.checked_add(fraction).ok_or(PracticeError::Overflow)?;
+    q.checked_add(u128::from(remainder != 0))
+        .ok_or(PracticeError::Overflow)
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Ordered request on the pause-excluding playback frame grid.
@@ -522,6 +753,47 @@ pub fn practice_queue(
     ))
 }
 impl Shared {
+    fn history_retention_pins(&self) -> (Option<u64>, Option<super::TargetTime>) {
+        let mut source_pin: Option<u64> = None;
+        let mut target_pin: Option<super::TargetTime> = None;
+        // The audio endpoint alone writes payloads; the controller only reclaims.
+        // Either caller holds its endpoint borrowed throughout this scan. An
+        // audio-side scan may retain a reclaimed payload conservatively, while
+        // a controller-side scan prevents reclamation until the scan finishes.
+        for slot in &self.receipts {
+            let ready = slot.ready.load(Ordering::Acquire);
+            if ready != 1 && ready != 2 {
+                continue;
+            }
+            let source = slot.words[3].load(Ordering::Relaxed);
+            source_pin = Some(source_pin.map_or(source, |pin| pin.min(source)));
+            if ready == 2 {
+                let target = super::TargetTime::new(
+                    slot.words[11].load(Ordering::Relaxed),
+                    slot.words[12].load(Ordering::Relaxed),
+                    slot.words[13].load(Ordering::Relaxed),
+                )
+                .expect("audio-side validated exact target time");
+                target_pin = Some(target_pin.map_or(target, |pin| {
+                    if target
+                        .seconds()
+                        .cmp(&pin.seconds())
+                        .then_with(|| {
+                            (u128::from(target.numerator()) * u128::from(pin.denominator())).cmp(
+                                &(u128::from(pin.numerator()) * u128::from(target.denominator())),
+                            )
+                        })
+                        .is_lt()
+                    {
+                        target
+                    } else {
+                        pin
+                    }
+                }));
+            }
+        }
+        (source_pin, target_pin)
+    }
     // All metadata accesses in this snapshot/write protocol use the same SC
     // order. At most two observations, never an unbounded producer spin. Odd
     // means publication is in progress. The checked sequence never wraps.
@@ -541,6 +813,24 @@ impl Shared {
     }
 }
 impl PracticeController {
+    /// Earliest original Source and projected Target references in queued
+    /// receipts, without popping them. Raw lookahead preserves only Source.
+    /// These mathematical references grant no native admission or acknowledgment.
+    pub fn history_retention_pins(&self) -> (Option<u64>, Option<super::TargetTime>) {
+        self.shared.history_retention_pins()
+    }
+    /// Immutable source speed of the prepared program, without queue activity.
+    pub fn rate(&self) -> Rate {
+        self.shared.program.rate
+    }
+    /// Initial output preroll; later attempts add no new preroll.
+    pub fn output_preroll(&self) -> Duration {
+        self.shared.program.preroll
+    }
+    /// Whether nonrepeating MAX regions have conceptual open-end intent.
+    pub fn has_open_end(&self) -> bool {
+        self.shared.program.open_end
+    }
     /// Most recently rendered program generation.
     pub fn generation(&self) -> u64 {
         self.shared.generation.load(Ordering::Acquire)
@@ -727,6 +1017,9 @@ pub(crate) struct Control {
     pub revision: u64,
 }
 impl PracticeAudioEndpoint {
+    pub(crate) fn history_retention_pins(&self) -> (Option<u64>, Option<super::TargetTime>) {
+        self.shared.history_retention_pins()
+    }
     pub(crate) fn has_pending_receipts(&self) -> bool {
         self.shared
             .receipts
@@ -859,6 +1152,9 @@ pub(crate) struct Cursor {
     pub started: bool,
     /// Active.
     pub active: bool,
+    pub preroll: Duration,
+    pub open: bool,
+    pub next_cue_frame: i128,
 }
 pub(crate) struct Practice {
     pub program: PreparedPracticeProgram,
@@ -877,7 +1173,9 @@ impl Practice {
         if !endpoint.matches(&program) {
             return Err(PracticeError::IncompatibleMixer);
         }
-        let (anchor, duration) = program.data.region(region)?;
+        let (anchor, duration) = program.data.initial_region(region)?;
+        let preroll = program.data.preroll;
+        let open = program.data.is_open(region);
         Ok(Self {
             program,
             endpoint,
@@ -892,6 +1190,9 @@ impl Practice {
                 iteration: 0,
                 started: false,
                 active: true,
+                preroll,
+                open,
+                next_cue_frame: 0,
             },
         })
     }
@@ -930,12 +1231,15 @@ impl Practice {
                 c.region = r.region;
                 c.anchor = anchor;
                 c.duration = duration;
+                c.open = program.is_open(r.region);
+                c.preroll = Duration::ZERO;
                 c.generation = c.generation.checked_add(1).ok_or(PracticeError::Overflow)?;
                 c.iteration = 0;
                 c.origin = frame;
                 c.started = true;
                 c.active = true;
                 c.next_cue = program.cues.partition_point(|x| x.cue.at <= anchor);
+                Self::set_next_cue_frame(program, c)?;
                 return Ok(Some((r.id, PracticeBoundaryKind::Requested)));
             }
         }
@@ -943,9 +1247,10 @@ impl Practice {
             c.origin = frame;
             c.started = true;
             c.next_cue = program.cues.partition_point(|x| x.cue.at <= c.anchor);
+            Self::set_next_cue_frame(program, c)?;
             return Ok(Some((0, PracticeBoundaryKind::Started)));
         }
-        if c.active && frame - c.origin >= c.duration {
+        if c.active && !c.open && frame - c.origin >= c.duration {
             c.generation = c.generation.checked_add(1).ok_or(PracticeError::Overflow)?;
             c.iteration = c.iteration.checked_add(1).ok_or(PracticeError::Overflow)?;
             c.origin = frame;
@@ -954,7 +1259,12 @@ impl Practice {
                 c.anchor = c.region.end;
                 return Ok(Some((0, PracticeBoundaryKind::Ended)));
             }
+            c.preroll = Duration::ZERO;
+            let (anchor, duration) = program.region(c.region)?;
+            c.anchor = anchor;
+            c.duration = duration;
             c.next_cue = program.cues.partition_point(|x| x.cue.at <= c.anchor);
+            Self::set_next_cue_frame(program, c)?;
             return Ok(Some((0, PracticeBoundaryKind::Looped)));
         }
         Ok(None)
@@ -963,16 +1273,75 @@ impl Practice {
     pub fn cue_due(program: &Program, c: &Cursor, frame: u64) -> bool {
         c.active
             && program.cues.get(c.next_cue).is_some_and(|x| {
-                x.cue.at < c.region.end
-                    && ceil(
-                        (i128::from(x.cue.at.as_nanos()) - i128::from(c.anchor.as_nanos()))
-                            * i128::from(program.output_rate),
-                        1_000_000_000,
-                    ) <= i128::from(frame - c.origin)
+                x.cue.at < c.region.end && c.next_cue_frame <= i128::from(frame - c.origin)
             })
     }
+    fn set_next_cue_frame(program: &Program, c: &mut Cursor) -> Result<(), PracticeError> {
+        c.next_cue_frame = match program
+            .cues
+            .get(c.next_cue)
+            .filter(|cue| cue.cue.at < c.region.end)
+        {
+            Some(cue) if program.exact_timing => {
+                i128::from(program.frame_at(c.region.start, cue.cue.at, c.preroll)?)
+            }
+            Some(cue) => ceil(
+                (i128::from(cue.cue.at.as_nanos()) - i128::from(c.anchor.as_nanos()))
+                    * i128::from(program.output_rate),
+                1_000_000_000,
+            ),
+            None => 0,
+        };
+        Ok(())
+    }
+    pub fn advance_cue(program: &Program, c: &mut Cursor) -> Result<(), PracticeError> {
+        c.next_cue += 1;
+        Self::set_next_cue_frame(program, c)
+    }
+    pub fn song_at(program: &Program, c: &Cursor, frame: u64) -> Result<Timestamp, PracticeError> {
+        if !program.exact_timing || !c.active {
+            return Ok(c.anchor);
+        }
+        let elapsed = i128::from(frame - c.origin) * 1_000_000_000
+            / i128::from(program.output_rate)
+            - i128::from(c.preroll.as_nanos());
+        let n = i128::from(program.rate.numerator());
+        let d = i128::from(program.rate.denominator());
+        let scaled = (elapsed / d)
+            .checked_mul(n)
+            .and_then(|q| q.checked_add((elapsed % d) * n / d));
+        let song = scaled
+            .and_then(|q| q.checked_add(i128::from(c.region.start.as_nanos())))
+            .ok_or(PracticeError::Overflow)?;
+        let song = if c.open {
+            song
+        } else {
+            song.min(i128::from(c.region.end.as_nanos()))
+        };
+        i64::try_from(song)
+            .map(Timestamp::from_nanos)
+            .map_err(|_| PracticeError::Overflow)
+    }
     /// Fn.
+    #[cfg(test)]
     pub fn preflight(&self, start: u64, frames: usize) -> Result<usize, PracticeError> {
+        self.preflight_inner(start, frames, None)
+    }
+    pub fn preflight_at(
+        &self,
+        start: u64,
+        frames: usize,
+        physical_start: u64,
+        origin: ClockPoint,
+    ) -> Result<usize, PracticeError> {
+        self.preflight_inner(start, frames, Some((physical_start, origin)))
+    }
+    fn preflight_inner(
+        &self,
+        start: u64,
+        frames: usize,
+        physical: Option<(u64, ClockPoint)>,
+    ) -> Result<usize, PracticeError> {
         let snapshot = (0..self.program.data.limits.control_capacity)
             .take_while(|i| self.endpoint.request(*i).is_some())
             .count();
@@ -983,6 +1352,7 @@ impl Practice {
         let free_receipts = self.endpoint.free_receipts();
         for offset in 0..frames {
             let frame = start + offset as u64;
+            let mut deadline_checked = false;
             loop {
                 let r = if controls < snapshot {
                     self.endpoint.request(controls)
@@ -992,6 +1362,16 @@ impl Practice {
                 let Some((_, kind)) = Self::step(&self.program.data, &mut c, frame, r)? else {
                     break;
                 };
+                if let Some((physical_start, origin)) = physical {
+                    Self::validate_deadline(
+                        &self.program.data,
+                        &c,
+                        frame,
+                        physical_start + offset as u64,
+                        origin,
+                    )?;
+                    deadline_checked = true;
+                }
                 receipts += 1;
                 events += 1;
                 if matches!(
@@ -1014,10 +1394,16 @@ impl Practice {
                 // A mode control at the exact endpoint must not delay it by a
                 // sample. Both ordered receipts belong to this same boundary.
             }
+            if offset == 0 && !deadline_checked {
+                if let Some((physical_start, origin)) = physical {
+                    Self::validate_deadline(&self.program.data, &c, frame, physical_start, origin)?;
+                }
+            }
             while Self::cue_due(&self.program.data, &c, frame) {
                 events += 1;
-                c.next_cue += 1;
+                Self::advance_cue(&self.program.data, &mut c)?;
             }
+            Self::song_at(&self.program.data, &c, frame)?;
             if events > self.program.data.limits.max_events_per_render {
                 return Err(PracticeError::EventBudget);
             }
@@ -1037,5 +1423,24 @@ impl Practice {
             }
         }
         Ok(snapshot)
+    }
+    pub fn validate_deadline(
+        program: &Program,
+        c: &Cursor,
+        frame: u64,
+        physical: u64,
+        origin: ClockPoint,
+    ) -> Result<(), PracticeError> {
+        if program.validate_deadline && c.active && !c.open {
+            let remaining = c
+                .duration
+                .checked_sub(frame - c.origin)
+                .ok_or(PracticeError::Overflow)?;
+            let end = physical
+                .checked_add(remaining)
+                .ok_or(PracticeError::Overflow)?;
+            super::TargetTime::from_frames(end, program.output_rate)?.point(origin)?;
+        }
+        Ok(())
     }
 }
