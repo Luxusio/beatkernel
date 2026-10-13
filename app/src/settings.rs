@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 mod room_fixtures;
 
 pub const MAX_FIELDS: usize = 128;
+/// Linux adds one encoding row to the existing editable field budget.
+pub const MAX_MODEL_ROWS: usize = MAX_FIELDS + 1;
 pub const MAX_VALUE_BYTES: usize = 4096;
 pub const MAX_TOTAL_BYTES: usize = 64 * 1024;
 
@@ -674,7 +676,7 @@ impl NativeSettings {
                 fields.push(field(spec, String::new()));
             }
         }
-        if fields.len() > MAX_FIELDS
+        if fields.len() > model_row_limit(&fields)
             || fields.iter().map(|field| field.value.len()).sum::<usize>() > MAX_TOTAL_BYTES
         {
             return Err("native settings exceed field or total byte limits".into());
@@ -770,8 +772,8 @@ impl NativeSettings {
         {
             return self.set_value(index, path);
         }
-        if self.fields.len() >= MAX_FIELDS {
-            return Err("native settings exceed 128 fields".into());
+        if self.fields.len() >= model_row_limit(&self.fields) {
+            return Err("native settings exceed editable field limit".into());
         }
         if self.fields.iter().map(|row| row.value.len()).sum::<usize>() + path.len()
             > MAX_TOTAL_BYTES
@@ -831,8 +833,8 @@ impl NativeSettings {
         }
     }
     pub fn add_binding(&mut self) -> Result<usize, String> {
-        if self.fields.len() == MAX_FIELDS {
-            return Err("native settings exceed 128 fields".into());
+        if self.fields.len() >= model_row_limit(&self.fields) {
+            return Err("native settings exceed editable field limit".into());
         }
         let index = self.fields.len();
         let spec = *COMMON
@@ -850,6 +852,13 @@ impl NativeSettings {
             .filter(|field| !field.value.is_empty())
             .flat_map(|field| [field.flag.to_owned(), field.value.clone()])
             .collect()
+    }
+}
+fn model_row_limit(fields: &[SettingsField]) -> usize {
+    if fields.iter().any(|field| field.flag == "--encoding") {
+        MAX_MODEL_ROWS
+    } else {
+        MAX_FIELDS
     }
 }
 fn field(spec: Spec, value: String) -> SettingsField {
@@ -1352,7 +1361,7 @@ mod opponent_fixtures {
                 .add_opponent(OpponentKind::Own, &format!("record{i}.bkr"))
                 .unwrap();
         }
-        while draft.fields.len() < MAX_FIELDS {
+        while draft.fields.len() < MAX_MODEL_ROWS {
             draft.add_binding().unwrap();
         }
         let before = draft.fields.clone();
@@ -1391,7 +1400,7 @@ mod opponent_fixtures {
         let mut expected = before;
         expected[cleared_index].value = "replacement.bkr".into();
         assert_eq!(draft.fields, expected);
-        assert_eq!(draft.fields.len(), MAX_FIELDS);
+        assert_eq!(draft.fields.len(), MAX_MODEL_ROWS);
         assert_eq!(draft.opponent_count(OpponentKind::Own, "record3.bkr"), 0);
         assert_eq!(
             draft.opponent_count(OpponentKind::Own, "replacement.bkr"),
@@ -1464,7 +1473,7 @@ mod opponent_fixtures {
         // Build valid boundary drafts through the existing bounded model.
         let mut full = NativeSettings::from_args(&[], SettingsHost::Linux).unwrap();
         full.add_opponent(OpponentKind::Own, "filled.bkr").unwrap();
-        while full.fields.len() < MAX_FIELDS {
+        while full.fields.len() < MAX_MODEL_ROWS {
             full.add_binding().unwrap();
         }
         let before = full.native_args();

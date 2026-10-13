@@ -136,6 +136,142 @@ fn assert_paused_owner(app: &Desktop, play: ScreenInstanceId, launch: &[String])
     assert!(game.worker.is_none());
 }
 
+struct EncodingProfiles(PathBuf);
+impl EncodingProfiles {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let fixture = loop {
+            let path = std::env::temp_dir().join(format!(
+                "beatkernel-desktop-encoding-profile-{}-{}",
+                std::process::id(),
+                SERIAL.fetch_add(1, Ordering::Relaxed),
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => break Self(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("encoding profile fixture: {error}"),
+            }
+        };
+        let native = NativeSettings::from_args(
+            &args(&[
+                "--encoding",
+                "pcm24",
+                "--alsa",
+                "saved-endpoint",
+                "--evdev",
+                "saved-evdev",
+                "--rate",
+                "48000",
+                "--channels",
+                "1",
+                "--buffer-frames",
+                "256",
+                "--period-frames",
+                "128",
+                "--bind",
+                "11:04",
+            ]),
+            SettingsHost::Linux,
+        )
+        .unwrap();
+        beatkernel_bms_runtime::settings_profile::save_profile(
+            &fixture.0.join("v1.bkp"),
+            &native,
+            SettingsHost::Linux,
+        )
+        .unwrap();
+        beatkernel_bms_runtime::settings_profile::save_player_profile(
+            &fixture.0.join("v2.bkp"),
+            &PlayerProfile {
+                native,
+                presentation: PresentationSettings::default(),
+            },
+            SettingsHost::Linux,
+        )
+        .unwrap();
+        fixture
+    }
+
+    fn cli(&self, profile: &str) -> Vec<String> {
+        args(&[
+            "--chart",
+            self.0.join("absent-chart.bms").to_str().unwrap(),
+            "--profile",
+            self.0.join(profile).to_str().unwrap(),
+        ])
+    }
+}
+impl Drop for EncodingProfiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn output_encoding_raw_desktop_cli_refuses_invalid_before_saved_profile_overlay() {
+    let profiles = EncodingProfiles::new();
+    for version in ["v1.bkp", "v2.bkp", "absent.bkp"] {
+        for invalid in [
+            "",
+            " ",
+            "\t",
+            "PCM16",
+            "Float32",
+            " pcm24",
+            "pcm24 ",
+            "pcm8",
+            "pcm24-in-32",
+        ] {
+            let mut supplied = profiles.cli(version);
+            supplied.extend(args(&["--encoding", invalid]));
+            let error = Options::parse(&supplied)
+                .err()
+                .unwrap_or_else(|| panic!("raw desktop CLI accepted {invalid:?} with {version}"));
+            assert!(error.to_string().contains("encoding"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn output_encoding_actual_startup_profile_omission_preserves_pcm_and_four_cli_tokens_override() {
+    let profiles = EncodingProfiles::new();
+    for version in ["v1.bkp", "v2.bkp"] {
+        let path = profiles.0.join(version);
+        let original = std::fs::read(&path).unwrap();
+        for token in [
+            None,
+            Some("float32"),
+            Some("pcm16"),
+            Some("pcm24"),
+            Some("pcm32"),
+        ] {
+            let mut supplied = profiles.cli(version);
+            if let Some(token) = token {
+                supplied.extend(args(&["--encoding", token]));
+            }
+            let options = Options::parse(&supplied).unwrap();
+            assert_eq!(value(&options.native, "--encoding"), token);
+            let mut job = spawn_startup_profile(&options).unwrap().unwrap();
+            let prepared = job.join().unwrap().unwrap();
+            assert_eq!(
+                value(&prepared.native, "--encoding"),
+                Some(token.unwrap_or("pcm24"))
+            );
+            assert_eq!(value(&prepared.native, "--alsa"), Some("saved-endpoint"));
+            assert_eq!(value(&prepared.native, "--evdev"), Some("saved-evdev"));
+            assert_eq!(prepared.chart, options.chart);
+            assert_eq!(prepared.profile, Some(path.clone()));
+            assert_eq!(prepared.library, None);
+            assert_eq!(prepared.title_font, None);
+            assert_eq!(value(&prepared.native, "--chart"), None);
+            crate::app::validate_native(&with_chart(&prepared.native, "absent-chart.bms")).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert!(job.join().is_none());
+        }
+    }
+}
+
 #[test]
 fn output_encoding_settings_invalid_apply_preserves_draft_then_valid_profile_apply_and_reopen() {
     let mut app = super::tests::lifecycle_fixture();
@@ -288,6 +424,28 @@ fn output_encoding_settings_invalid_apply_preserves_draft_then_valid_profile_app
         draft.select(index).unwrap();
         assert_eq!(draft.editor.value(), token);
     }
+    // Clearing the editor is an intentional omission, distinct from a raw CLI
+    // pair carrying an explicit empty value before profile overlay.
+    let draft = app.settings.as_mut().unwrap();
+    draft.editor.select_all();
+    draft.edit(None, Some(""));
+    assert_eq!(draft.editor.value(), "");
+    assert_eq!(value(&draft.values.native_args(), "--encoding"), None);
+    app.apply_settings();
+    assert_eq!(app.navigator.route(), ScreenRoute::Selection);
+    assert_eq!(value(&app.options.native, "--encoding"), None);
+    app.open_settings();
+    let draft = app.settings.as_ref().unwrap();
+    assert_eq!(
+        draft
+            .values
+            .fields()
+            .iter()
+            .find(|field| field.flag == "--encoding")
+            .unwrap()
+            .value,
+        ""
+    );
 }
 
 #[test]

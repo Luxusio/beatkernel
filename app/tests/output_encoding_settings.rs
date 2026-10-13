@@ -1,5 +1,6 @@
 //! Exact output selection through the bounded draft, profile and Watch projection.
 use beatkernel_bms_runtime::{
+    competition::OpponentKind,
     gameplay::output::adapters::encoding::{encoding_choice, native_encoding},
     native_defaults::{
         complete, prepare, replay_args, NativeDefaults, NativeKeyboardCandidate,
@@ -8,7 +9,7 @@ use beatkernel_bms_runtime::{
     presentation_settings::PresentationSettings,
     settings::{
         overlay_native_args, NativeSettings, OutputEncoding, SettingsHost, MAX_FIELDS,
-        MAX_TOTAL_BYTES, MAX_VALUE_BYTES,
+        MAX_MODEL_ROWS, MAX_TOTAL_BYTES, MAX_VALUE_BYTES,
     },
     settings_profile::{
         decode_player_profile, decode_profile, encode_player_profile, encode_profile,
@@ -725,5 +726,390 @@ fn prepare_play_and_primary_watch_replay_forward_chosen_encoding_after_real_prof
         }
         assert_eq!(value(&watch, "--encoding"), Some(token));
         assert_eq!(value(&watch, "--speed"), Some("3/2"));
+    }
+}
+
+fn supported_capacity_args(bindings: usize, opponents: usize) -> Vec<String> {
+    let mut result = Vec::new();
+    for player in 1..=64 {
+        result.extend([
+            "--local-player".to_owned(),
+            format!("{player}:/dev/input/player{player}"),
+        ]);
+    }
+    for (index, lane) in (0x11..=0x19).chain(0x21..=0x29).take(bindings).enumerate() {
+        result.extend(["--bind".to_owned(), format!("{lane:02x}:{:02x}", index + 4)]);
+    }
+    for opponent in 0..opponents {
+        result.extend([
+            "--ghost-self".to_owned(),
+            format!("records/own{opponent}.bkr"),
+        ]);
+    }
+    result.extend(args(&[
+        "--alsa",
+        "null",
+        "--rate",
+        "44100",
+        "--channels",
+        "2",
+        "--period-frames",
+        "64",
+        "--buffer-frames",
+        "512",
+        "--channel-policy",
+        "exact",
+        "--speed",
+        "3/2",
+    ]));
+    result
+}
+
+fn profile_bytes(version: u8, tokens: &[String]) -> Vec<u8> {
+    let mut result = format!("BEATKERNEL-NATIVE-PROFILE\t{version}\tlinux\n");
+    for pair in tokens.chunks_exact(2) {
+        result.push_str(&format!("{}\t{}\n", pair[0], pair[1]));
+    }
+    result.into_bytes()
+}
+
+#[test]
+fn supported_64_players_18_bindings_eight_opponents_keep_129_rows_and_original_profile_bytes() {
+    assert_eq!(MAX_FIELDS, 128);
+    assert_eq!(MAX_MODEL_ROWS, 129);
+    let supplied = supported_capacity_args(18, 8);
+    let original = supplied.clone();
+    assert!(supplied.len() / 2 < 128);
+    let model = NativeSettings::from_args(&supplied, HOST).unwrap();
+    assert_eq!(model.fields().len(), 129);
+    assert_eq!(
+        model
+            .fields()
+            .iter()
+            .filter(|row| row.flag == "--local-player")
+            .count(),
+        64
+    );
+    assert_eq!(
+        model
+            .fields()
+            .iter()
+            .filter(|row| row.flag == "--bind")
+            .count(),
+        18
+    );
+    assert_eq!(
+        model
+            .fields()
+            .iter()
+            .filter(|row| row.flag == "--ghost-self")
+            .count(),
+        8
+    );
+    assert_eq!(model.fields()[128].flag, "--encoding");
+    assert_eq!(model.fields()[128].value, "");
+    assert_eq!(model.native_args(), original);
+    assert!(value(&model.native_args(), "--encoding").is_none());
+    let v1 = profile_bytes(1, &original);
+    assert_eq!(encode_profile(&model, HOST).unwrap(), v1);
+    let restored = decode_profile(&v1, HOST).unwrap();
+    assert_eq!(restored.fields(), model.fields());
+    assert_eq!(restored.native_args(), original);
+    assert_eq!(encode_profile(&restored, HOST).unwrap(), v1);
+    let upgraded = decode_player_profile(&v1, HOST).unwrap();
+    assert_eq!(upgraded.native.fields(), model.fields());
+    assert_eq!(upgraded.presentation, PresentationSettings::default());
+    let presentation = PresentationSettings::default()
+        .apply_overrides(&args(&["--ui-fps", "144", "--ui-lookahead-ms", "500"]))
+        .unwrap();
+    let profile = PlayerProfile {
+        native: model,
+        presentation,
+    };
+    let mut all_records = original.clone();
+    all_records.extend(profile.presentation.args());
+    let v2 = profile_bytes(2, &all_records);
+    assert_eq!(encode_player_profile(&profile, HOST).unwrap(), v2);
+    let restored = decode_player_profile(&v2, HOST).unwrap();
+    assert_eq!(restored.native.fields(), profile.native.fields());
+    assert_eq!(restored.native.native_args(), original);
+    assert_eq!(restored.presentation, profile.presentation);
+    assert_eq!(encode_player_profile(&restored, HOST).unwrap(), v2);
+    assert_eq!(supplied, original);
+}
+
+#[test]
+fn supported_capacity_append_apis_agree_at_128_to_129_and_refuse_130_atomically() {
+    let mut bindings = NativeSettings::from_args(&supported_capacity_args(17, 8), HOST).unwrap();
+    assert_eq!(bindings.fields().len(), 128);
+    let last = bindings.add_binding().unwrap();
+    assert_eq!(last, 128);
+    bindings.set_value(last, "29:15").unwrap();
+    assert_eq!(bindings.fields().len(), 129);
+    assert_eq!(
+        NativeSettings::from_args(&bindings.native_args(), HOST)
+            .unwrap()
+            .fields()
+            .len(),
+        129
+    );
+    let before = bindings.fields().to_vec();
+    assert!(bindings.add_binding().is_err());
+    assert_eq!(bindings.fields(), before);
+
+    let mut opponents = NativeSettings::from_args(&supported_capacity_args(18, 7), HOST).unwrap();
+    assert_eq!(opponents.fields().len(), 128);
+    opponents
+        .add_opponent(OpponentKind::Own, "records/own7.bkr")
+        .unwrap();
+    assert_eq!(opponents.fields().len(), 129);
+    assert_eq!(
+        opponents.opponent_count(OpponentKind::Own, "records/own7.bkr"),
+        1
+    );
+    assert_eq!(
+        NativeSettings::from_args(&opponents.native_args(), HOST)
+            .unwrap()
+            .fields()
+            .len(),
+        129
+    );
+    let before = opponents.fields().to_vec();
+    assert!(opponents.add_binding().is_err());
+    assert!(opponents
+        .add_opponent(OpponentKind::Other, "records/ninth.bkr")
+        .is_err());
+    assert_eq!(opponents.fields(), before);
+
+    let mut draft = NativeSettings::from_args(&supported_capacity_args(18, 7), HOST).unwrap();
+    draft.add_binding().unwrap();
+    assert_eq!(draft.fields().len(), 129);
+    let before = draft.fields().to_vec();
+    // Eight opponents are supported, but an eighth same-kind row would be row 130 here.
+    assert!(draft
+        .add_opponent(OpponentKind::Own, "records/own7.bkr")
+        .is_err());
+    assert_eq!(draft.fields(), before);
+    draft
+        .add_opponent(OpponentKind::Other, "records/other.bkr")
+        .unwrap();
+    assert_eq!(draft.fields().len(), 129);
+    assert_eq!(
+        draft.opponent_count(OpponentKind::Other, "records/other.bkr"),
+        1
+    );
+    let mut overflowing = supported_capacity_args(18, 8);
+    overflowing.extend(args(&["--bind", "11:40"]));
+    assert!(overflowing.len() / 2 < 128);
+    assert!(NativeSettings::from_args(&overflowing, HOST).is_err());
+}
+
+#[test]
+fn foreign_models_keep_exact_128_row_capacity_for_construction_and_append() {
+    for host in [SettingsHost::Windows, SettingsHost::Macos] {
+        let empty = NativeSettings::from_args(&[], host).unwrap();
+        let binding_count = 128 - empty.fields().len() + 1;
+        let supplied: Vec<String> = (0..binding_count)
+            .flat_map(|_| args(&["--bind", "11:04"]))
+            .collect();
+        let mut model = NativeSettings::from_args(&supplied, host).unwrap();
+        assert_eq!(model.fields().len(), 128);
+        assert!(!model.fields().iter().any(|row| row.flag == "--encoding"));
+        let before = model.fields().to_vec();
+        assert!(model.add_binding().is_err());
+        assert_eq!(model.fields(), before);
+        model
+            .add_opponent(OpponentKind::Own, "records/own0.bkr")
+            .unwrap();
+        assert_eq!(model.fields().len(), 128);
+        let before = model.fields().to_vec();
+        assert!(model
+            .add_opponent(OpponentKind::Own, "records/own1.bkr")
+            .is_err());
+        assert_eq!(model.fields(), before);
+        let mut extra = supplied.clone();
+        extra.extend(args(&["--bind", "12:05"]));
+        assert!(extra.len() / 2 < 128);
+        assert!(NativeSettings::from_args(&extra, host).is_err());
+    }
+}
+
+#[test]
+fn expanded_linux_rows_preserve_raw_128_record_value_and_total_byte_bounds() {
+    for host in [HOST, SettingsHost::Windows, SettingsHost::Macos] {
+        let records: Vec<String> = (0..129).flat_map(|_| args(&["--bind", "11:04"])).collect();
+        assert!(NativeSettings::from_args(&records, host).is_err());
+    }
+    let records: Vec<String> = (0..129).flat_map(|_| args(&["--bind", "11:04"])).collect();
+    assert!(decode_profile(&profile_bytes(1, &records), HOST).is_err());
+    let mut player_records = records;
+    player_records.extend(PresentationSettings::default().args());
+    assert!(decode_player_profile(&profile_bytes(2, &player_records), HOST).is_err());
+
+    let mut model = NativeSettings::from_args(&supported_capacity_args(18, 8), HOST).unwrap();
+    let row = encoding_row(&model);
+    let before = model.fields().to_vec();
+    for invalid in [
+        "x".repeat(MAX_VALUE_BYTES + 1),
+        "pcm24\n".to_owned(),
+        "pcm24\u{2028}".to_owned(),
+    ] {
+        assert!(model.set_value(row, &invalid).is_err());
+        assert_eq!(model.fields(), before);
+    }
+    for index in 0..model.fields().len() {
+        if model.fields()[index].value.is_empty() {
+            model
+                .set_value(index, if index == row { "float32" } else { "1" })
+                .unwrap();
+        }
+    }
+    assert_eq!(model.native_args().len() / 2, 129);
+    assert!(NativeSettings::from_args(&model.native_args(), HOST).is_err());
+    assert!(decode_profile(&profile_bytes(1, &model.native_args()), HOST).is_err());
+    let mut player_records = model.native_args();
+    player_records.extend(PresentationSettings::default().args());
+    assert!(decode_player_profile(&profile_bytes(2, &player_records), HOST).is_err());
+    assert!(encode_profile(&model, HOST).is_err());
+    assert!(encode_player_profile(
+        &PlayerProfile {
+            native: model,
+            presentation: PresentationSettings::default()
+        },
+        HOST
+    )
+    .is_err());
+
+    let mut model = NativeSettings::from_args(&supported_capacity_args(18, 8), HOST).unwrap();
+    let row = encoding_row(&model);
+    for index in 0..model.fields().len() {
+        model.set_value(index, "").unwrap();
+    }
+    let mut remaining = MAX_TOTAL_BYTES;
+    for index in 0..model.fields().len() {
+        let length = if index == row {
+            0
+        } else {
+            remaining.min(MAX_VALUE_BYTES)
+        };
+        model.set_value(index, &"x".repeat(length)).unwrap();
+        remaining -= length;
+    }
+    assert_eq!(remaining, 0);
+    assert_eq!(
+        model
+            .fields()
+            .iter()
+            .map(|field| field.value.len())
+            .sum::<usize>(),
+        MAX_TOTAL_BYTES
+    );
+    let before = model.fields().to_vec();
+    assert!(model.set_value(row, "float32").is_err());
+    assert_eq!(model.fields(), before);
+}
+
+#[cfg(feature = "graphics")]
+#[test]
+fn retained_settings_view_selects_row_129_and_refuses_130_without_publishing_partial_changes() {
+    use beatkernel_bms_runtime::{
+        scene::Scene,
+        screen_lifecycle::ScreenInstanceId,
+        ui::{
+            interaction::ControlId,
+            settings::{SettingsFrame, SettingsView},
+            text_input::LineEditor,
+        },
+    };
+    use std::sync::Arc;
+
+    let model = NativeSettings::from_args(&supported_capacity_args(18, 8), HOST).unwrap();
+    assert_eq!(model.fields().len(), 129);
+    let profile = LineEditor::new("profiles/local.bkp", MAX_VALUE_BYTES).unwrap();
+    let view = SettingsView::new(ScreenInstanceId(129), 960, 720).unwrap();
+    let mut scene = Scene::new(960, 720);
+    let mut hits = Vec::new();
+    for selected in [0, 120, 128] {
+        let editor = LineEditor::new(&model.fields()[selected].value, MAX_VALUE_BYTES).unwrap();
+        view.update(SettingsFrame {
+            fields: model.fields(),
+            selected,
+            editor: &editor,
+            profile: &profile,
+            profile_focused: false,
+            message: None,
+            error: None,
+            pending: false,
+            hovered: None,
+            armed: None,
+        })
+        .unwrap();
+        view.compose(&mut scene, &mut hits).unwrap();
+        let control = ControlId(1000 + selected as u64);
+        assert!(view.node_for_control(control).unwrap().is_some());
+        let bounds = hits.iter().find(|(id, _)| *id == control).unwrap().1;
+        assert_eq!(
+            view.hit((
+                (bounds.x + bounds.width / 2) as f64,
+                (bounds.y + bounds.height / 2) as f64
+            )),
+            Some(control)
+        );
+        assert_eq!(view.node_for_control(ControlId(1129)).unwrap(), None);
+    }
+    let baseline: Vec<_> = hits
+        .iter()
+        .map(|(id, b)| (id.0, [b.x, b.y, b.width, b.height]))
+        .collect();
+    let baseline_geometry: Vec<_> = scene
+        .rectangles()
+        .iter()
+        .map(|rectangle| (rectangle.bounds, rectangle.color, rectangle.uv))
+        .collect();
+    assert!(!view.dirty());
+    let mut oversized = model.fields().to_vec();
+    oversized[0].value = "must-not-publish".into();
+    oversized.push(model.fields()[64].clone());
+    assert_eq!(oversized.len(), 130);
+    let bad_editor = LineEditor::new("must-not-publish", MAX_VALUE_BYTES).unwrap();
+    for (fields, selected) in [
+        (oversized.as_slice(), 0),
+        (model.fields(), 129),
+        (&[][..], 0),
+    ] {
+        let identity = scene.geometry_stamp().0.clone();
+        let revision = scene.geometry_stamp().1;
+        assert!(view
+            .update(SettingsFrame {
+                fields,
+                selected,
+                editor: &bad_editor,
+                profile: &profile,
+                profile_focused: true,
+                message: Some("must-not-publish"),
+                error: Some("must-not-publish"),
+                pending: true,
+                hovered: Some(ControlId(1128)),
+                armed: Some(ControlId(1128)),
+            })
+            .is_err());
+        assert!(!view.dirty());
+        assert!(Arc::ptr_eq(&identity, scene.geometry_stamp().0));
+        assert_eq!(scene.geometry_stamp().1, revision);
+        view.compose(&mut scene, &mut hits).unwrap();
+        let actual: Vec<_> = hits
+            .iter()
+            .map(|(id, b)| (id.0, [b.x, b.y, b.width, b.height]))
+            .collect();
+        assert_eq!(actual, baseline);
+        let actual_geometry: Vec<_> = scene
+            .rectangles()
+            .iter()
+            .map(|rectangle| (rectangle.bounds, rectangle.color, rectangle.uv))
+            .collect();
+        assert_eq!(actual_geometry, baseline_geometry);
+        assert!(!view.dirty());
+        assert!(view.node_for_control(ControlId(1128)).unwrap().is_some());
+        assert_eq!(view.node_for_control(ControlId(1000)).unwrap(), None);
     }
 }

@@ -26,6 +26,14 @@ Incomplete text may remain in the editor. Explicit CLI empty/unknown/case or
 whitespace-altered tokens refuse before native open. Blank initial drafts omit
 the option; blank live drafts preserve the current exact encoding. Retain
 bounded values, duplicate rejection, existing row IDs and keyboard navigation.
+Keep the prior 128 non-encoding editable rows available and reserve one further
+Linux encoding row. The shared retained Settings view must handle that bounded
+129-row maximum; Windows/macOS settings still permit 128 model rows. Raw CLI
+and native profile records remain capped at 128, with unchanged per-value and
+aggregate byte limits. Verify a full supported roster/bindings/opponents draft
+through both profile versions and the actual Settings view. Explicit desktop
+CLI values must be checked before profile overlay can erase a blank token;
+blank editor drafts keep their existing omission/preservation behavior.
 Linux defaults/profile overlay/primary preparation and desktop Watch/replay
 projection must retain every selected token instead of silently dropping it.
 

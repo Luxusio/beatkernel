@@ -49,15 +49,22 @@ fn drain(mut pipe: impl Read) -> (Vec<u8>, bool) {
 }
 
 fn invoke(executable: &str, args: &[String]) -> Output {
-    let mut process = Process(
-        Command::new(executable)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
+    invoke_with_environment(executable, args, false)
+}
+
+fn invoke_with_environment(executable: &str, args: &[String], headless: bool) -> Output {
+    let mut command = Command::new(executable);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if headless {
+        // Invalid player options must fail during parsing. A regression must
+        // also fail this test, while being unable to create an X11/Wayland window.
+        command.env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY");
+    }
+    let mut process = Process(command.spawn().unwrap());
     let stdout = process.0.stdout.take().unwrap();
     let stderr = process.0.stderr.take().unwrap();
     let stdout = thread::spawn(move || drain(stdout));
@@ -241,6 +248,70 @@ fn output_encoding_shipped_help_exposes_four_exact_tokens_and_default() {
             assert!(
                 help.contains("encoding float32") || help.contains("default float32"),
                 "{help}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn output_encoding_primary_player_rejects_invalid_cli_before_profile_catalog_or_gui_io() {
+    use beatkernel_bms_runtime::{
+        presentation_settings::PresentationSettings,
+        settings::{NativeSettings, SettingsHost},
+        settings_profile::{PlayerProfile, save_player_profile, save_profile},
+    };
+    let fixture = Fixture::new();
+    let mut saved = fixture.live_args(0);
+    saved.extend(strings(&["--encoding", "pcm24"]));
+    let native = NativeSettings::from_args(&saved, SettingsHost::Linux).unwrap();
+    save_profile(&fixture.0.join("v1.bkp"), &native, SettingsHost::Linux).unwrap();
+    save_player_profile(
+        &fixture.0.join("v2.bkp"),
+        &PlayerProfile {
+            native,
+            presentation: PresentationSettings::default(),
+        },
+        SettingsHost::Linux,
+    )
+    .unwrap();
+    for version in ["v1.bkp", "v2.bkp", "absent.bkp"] {
+        for invalid in ["", " ", "PCM16", "pcm24 ", "pcm8"] {
+            let args = strings(&[
+                "player",
+                "--chart",
+                fixture.0.join("absent-chart.bms").to_str().unwrap(),
+                "--profile",
+                fixture.0.join(version).to_str().unwrap(),
+                "--title-font",
+                fixture.0.join("absent-font.ttf").to_str().unwrap(),
+                "--encoding",
+                invalid,
+            ]);
+            let output = invoke_with_environment(PRIMARY, &args, true);
+            assert!(
+                !output.status.success(),
+                "player accepted {invalid:?}/{version}"
+            );
+            assert!(output.stdout.is_empty(), "startup metadata before refusal");
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(
+                error.contains("encoding"),
+                "wrong refusal for {invalid:?}/{version}: {error}"
+            );
+            assert!(
+                !error.contains("os error 2") && !error.contains("NotFound"),
+                "{error}"
+            );
+            assert!(
+                !error.contains("EventLoop")
+                    && !error.contains("DISPLAY")
+                    && !error.contains("WAYLAND"),
+                "{error}"
+            );
+            assert!(
+                !error.contains("ALSA") && !error.contains("Initialization"),
+                "{error}"
             );
         }
     }

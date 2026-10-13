@@ -129,6 +129,43 @@ software paths, not physical sound or input timing. Logs are
 in `ac005-connected.log`, `ac005-connected-c2.log` and
 `ac004-ac005-connected-c3.log`.
 
+Independent DEEP review of `ee44e0ff` found two concrete issues. The appended
+encoding row reduced the current supported settings capacity: 64 local players,
+18 visible-lane bindings and eight opponents need 129 materialized rows. The
+model and retained Settings view now account for that one additional Linux
+row together. Other host models retain 128 rows, and raw native/profile records
+remain bounded at 128 with the same value and aggregate byte limits. This
+addresses current configuration capacity. Both profile versions and actual
+129-row view selection/refusal have executable regressions.
+
+The desktop CLI also now parses explicit encoding tokens before profile
+overlay can erase an empty token. Real saved v1/v2 startup profiles verify
+omission and all four valid overrides; invalid CLI tokens refuse before GUI,
+catalog or device access. Blank editor and live drafts retain their intended
+semantics.
+
+Coordinator remediation checks passed:
+
+| Check | Result |
+| --- | --- |
+| Library `settings` filter | 76 passed, 0 failed, 1 ignored |
+| Complete main-binary test target | 393 passed, 0 failed, 13 ignored |
+| Native speed settings | 14 passed, 0 failed, 0 ignored |
+| Shipped CLI encoding tests | 5 passed, 0 failed, 1 ignored |
+| Encoding settings, including five new capacity regressions | 18 passed, 0 failed, 0 ignored |
+
+Commands used the same package/features/locked/two-job setup, with `--lib
+settings`, then `--bin beatkernel-bms-runtime --test output_encoding_settings
+--test native_speed_settings --test native_output_encoding_cli`. The first
+connected attempt passed the other targets but failed a new UI fixture's
+Scene-revision assertion: composing legitimately clears/replays geometry and
+advances the Scene revision. The corrected fixture checks rejection before
+composition, then exact geometry/colors/UVs/hits after composition, preserving
+every capacity and atomicity assertion. The separate encoding-settings rerun
+passed all 18. Logs are `remediation-settings-unit.log`,
+`remediation-connected.log` and `remediation-settings-c2.log`. Fresh independent
+review and full QA of the repaired candidate remain pending.
+
 Remaining task gates include broader app integration,
 portable/foreign typing checks, independent code review, CLI/desktop QA and
 final documentation review. Physical sound, device latency and Windows/macOS

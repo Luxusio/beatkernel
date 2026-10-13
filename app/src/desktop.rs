@@ -102,7 +102,7 @@ use beatkernel_bms_runtime::{
     room_presentation::RoomUiAction,
     screen_lifecycle::{ScreenInstanceId, ScreenKind, ScreenNavigator, ScreenPhase, ScreenRoute},
     session_launch::SessionLaunch,
-    settings::{NativeSettings, SettingsHost},
+    settings::{NativeSettings, OutputEncoding, SettingsHost},
     settings_profile::PlayerProfile,
     video_native_bank::NativeVideoController,
 };
@@ -269,6 +269,9 @@ impl Options {
                 }
                 index += 2;
             } else {
+                if flag == "--encoding" {
+                    value.parse::<OutputEncoding>()?;
+                }
                 if flag == "--chart" {
                     if value.is_empty() {
                         return Err("--chart path cannot be empty".into());

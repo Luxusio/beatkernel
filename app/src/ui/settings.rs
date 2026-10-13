@@ -11,7 +11,7 @@ use crate::{
     font_text::FontText,
     scene::Scene,
     screen_lifecycle::ScreenInstanceId,
-    settings::{SettingsField, MAX_FIELDS},
+    settings::{SettingsField, MAX_MODEL_ROWS},
 };
 use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
 use std::rc::Rc;
@@ -344,7 +344,7 @@ impl SettingsView {
         let mut view = Self {
             id,
             scope,
-            fields: (0..MAX_FIELDS)
+            fields: (0..MAX_MODEL_ROWS)
                 .map(|_| scope.create_rw_signal(None))
                 .collect::<Vec<_>>()
                 .into(),
@@ -713,10 +713,10 @@ impl SettingsView {
     /// avoids cloning entire field vectors or unchanged editor/status values.
     pub fn update(&self, frame: SettingsFrame<'_>) -> Result<(), String> {
         if frame.fields.is_empty()
-            || frame.fields.len() > MAX_FIELDS
+            || frame.fields.len() > MAX_MODEL_ROWS
             || frame.selected >= frame.fields.len()
         {
-            return Err("Settings requires 1..128 fields and an in-range selection".into());
+            return Err("Settings requires 1..129 fields and an in-range selection".into());
         }
         for (index, signal) in self.fields.iter().enumerate() {
             let value = frame.fields.get(index);
@@ -1087,7 +1087,7 @@ mod fixtures {
         bad.error = Some("MUST NOT MUTATE");
         assert!(view.update(bad).is_err());
         assert!(view.update(frame(&[], &editor, &profile)).is_err());
-        let too_many = self::fields(MAX_FIELDS + 1);
+        let too_many = self::fields(MAX_MODEL_ROWS + 1);
         assert!(view.update(frame(&too_many, &editor, &profile)).is_err());
         assert_eq!(paints(&view), before);
         assert_eq!(view.count.get_untracked(), 12);
