@@ -4,6 +4,11 @@ This is the implementation contract for retained-owner loop/scrub. It is not
 evidence that the feature is implemented or that WBS09.11 is complete. The
 [fresh-owner restart API](REQ__section-restart.md) retains its existing contract.
 
+Selected fixed positive pitch-changing speed follows the separate
+[retained-speed contract](REQ__retained-playback-speed.md). Its active
+implementation must preserve every original ownership and receipt rule here;
+this reference is not an implementation or verification claim.
+
 ## Original data and output ownership
 
 Prepare the BGM program from original decoded PCM and original-song cues before

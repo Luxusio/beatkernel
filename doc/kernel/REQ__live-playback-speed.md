@@ -230,3 +230,6 @@ Worklet/renderer로 검사한다. 실제 native Settings 메뉴와 CLI도 검사
 Known ceiling: 실행 중 배속 변경, retained practice/loop/seek/restart, reverse와
 물리 음향·외국 OS 실행은 후속 전체 Goal 요구다. 지원하지 않는 nonnormal
 retained 경로는 cold 단계에서 명확히 거절하며 조용히1x로 실행하지 않는다.
+
+Retained native 배속은 별도 [활성 구현 계약](REQ__retained-playback-speed.md)에
+따라 기존 출력 소유자에 연결한다. 이 링크는 구현·QA 완료를 뜻하지 않는다.

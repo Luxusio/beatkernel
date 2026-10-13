@@ -34,6 +34,14 @@ Group a working feature with its relevant tests and documentation into a
 meaningful commit. Avoid commits for every small progress step; keep each
 commit reviewable and the code buildable.
 
+On 2026-10-13 the user asked to commit throughout development instead of
+leaving a large connected implementation uncommitted across days. Commit at
+coherent core, platform and application integration boundaries with their tests;
+do not wait for hardware-dependent final acceptance to preserve verified work.
+Label unresolved verification honestly in the accompanying change document.
+Committing a checkpoint does not close its task or mark a WBS item complete.
+Keep the no-push rule and exclude `mise.toml` and `doc/HANDOFF.md`.
+
 ## Throughput workflow — user decision, 2026-10-09
 
 Develop a connected feature through its actual application path as one work
