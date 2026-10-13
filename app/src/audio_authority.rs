@@ -10,6 +10,10 @@ use beatkernel::time::{
 };
 use std::{collections::VecDeque, fmt};
 
+#[path = "audio_authority_coordinate_epoch.rs"]
+mod coordinate_epoch;
+pub use coordinate_epoch::{PreparedCoordinateEpoch, PreparedPrimedCoordinateEpoch};
+
 /// Storage, freshness and explicit input-prediction permissions, not accuracy bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioAuthorityConfig {

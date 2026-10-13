@@ -218,7 +218,78 @@ pub struct InputMerger {
     next_ordinal: u64,
     committed: Option<Timestamp>,
 }
+
+/// Exact ordering/registry state for a cold transaction with a drained queue.
+/// Event payloads stay exclusively in the merger; no acquisition path changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InputMergerPreparationState {
+    domain: ClockDomainId,
+    origin: Timestamp,
+    sources: Vec<(DeviceId, Option<(Timestamp, u64)>)>,
+    source_capacity: usize,
+    dynamic_sources: bool,
+    capacity: usize,
+    pending: usize,
+    fixed_bytes: usize,
+    payload_bytes: usize,
+    next_ordinal: u64,
+    committed: Option<Timestamp>,
+}
+impl InputMergerPreparationState {
+    pub(crate) const fn domain(&self) -> ClockDomainId {
+        self.domain
+    }
+    pub(crate) const fn origin(&self) -> Timestamp {
+        self.origin
+    }
+}
 impl InputMerger {
+    /// Only cold preparation copies bounded source metadata, never input payload.
+    /// The transaction separately requires an empty queue before using this state.
+    pub(crate) fn preparation_state(&self) -> Result<InputMergerPreparationState, MergeError> {
+        let mut sources = Vec::new();
+        sources
+            .try_reserve_exact(self.sources.len())
+            .map_err(|_| MergeError::AllocationFailed)?;
+        sources.extend(
+            self.sources
+                .iter()
+                .map(|source| (source.device, source.last)),
+        );
+        Ok(InputMergerPreparationState {
+            domain: self.domain,
+            origin: self.origin,
+            sources,
+            source_capacity: self.source_capacity,
+            dynamic_sources: self.dynamic_sources,
+            capacity: self.capacity,
+            pending: self.pending.len(),
+            fixed_bytes: self.fixed_bytes,
+            payload_bytes: self.payload_bytes,
+            next_ordinal: self.next_ordinal,
+            committed: self.committed,
+        })
+    }
+
+    /// Allocation-free revalidation also detects admit-then-pop and frontier changes.
+    pub(crate) fn matches_preparation(&self, prepared: &InputMergerPreparationState) -> bool {
+        self.domain == prepared.domain
+            && self.origin == prepared.origin
+            && self.source_capacity == prepared.source_capacity
+            && self.dynamic_sources == prepared.dynamic_sources
+            && self.capacity == prepared.capacity
+            && self.pending.len() == prepared.pending
+            && self.fixed_bytes == prepared.fixed_bytes
+            && self.payload_bytes == prepared.payload_bytes
+            && self.next_ordinal == prepared.next_ordinal
+            && self.committed == prepared.committed
+            && self
+                .sources
+                .iter()
+                .map(|source| (source.device, source.last))
+                .eq(prepared.sources.iter().copied())
+    }
+
     /// Validates and preallocates 1..=64 distinct sources and 1..=65536 slots.
     pub fn new(
         domain: ClockDomainId,
