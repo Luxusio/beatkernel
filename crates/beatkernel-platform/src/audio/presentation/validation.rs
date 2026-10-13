@@ -6,9 +6,43 @@ use crate::audio::{
     asio::{AsioPresentationError, AsioPresentationObservation},
 };
 use beatkernel::{
-    audio::OutputFrameBasis,
+    audio::{OutputFrameBasis, TargetFrameBasis},
     time::{ClockDomainId, ClockPair, ClockPoint, Timestamp},
 };
+
+/// Immutable native frame grid retained before integer timestamp rounding.
+/// This metadata validates supplied relations; it does not prove device acquisition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeFrameBasis {
+    /// Original source mixer grid, including this stream's first physical frame.
+    Source(OutputFrameBasis),
+    /// Native target grid with an exact, possibly fractional physical start.
+    Target(TargetFrameBasis),
+}
+impl NativeFrameBasis {
+    fn origin(self) -> ClockPoint {
+        match self {
+            Self::Source(basis) => basis.origin(),
+            Self::Target(basis) => basis.origin(),
+        }
+    }
+    fn point_at_stream_frame(self, frame: u64) -> Result<ClockPoint, DisciplineError> {
+        match self {
+            Self::Source(basis) => basis
+                .point_at_stream_frame(frame)
+                .map_err(|_| DisciplineError::Overflow),
+            Self::Target(basis) => basis
+                .point_at_stream_frame(frame)
+                .map_err(|_| DisciplineError::Overflow),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeFramePosition {
+    basis: NativeFrameBasis,
+    relative_frame: u64,
+}
 
 /// Original evidence remains available independently of its correlation pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +112,7 @@ struct NativeState {
     output_origin: ClockPoint,
     host_domain: ClockDomainId,
     latest: Option<NativePresentationRecord>,
+    frame: Option<NativeFramePosition>,
 }
 
 /// Immutable validated evidence bound to the exact prior epoch, origins and native record.
@@ -86,6 +121,7 @@ pub struct PreparedNativePresentation {
     state: NativeState,
     candidate: NativePresentationRecord,
     admission: NativeObservationAdmission,
+    frame: Option<NativeFramePosition>,
 }
 impl PreparedNativePresentation {
     /// Reports whether this evidence can add a correlation pair or must remain deferred.
@@ -127,6 +163,7 @@ impl NativePresentationValidator {
                 output_origin,
                 host_domain,
                 latest: None,
+                frame: None,
             },
         }
     }
@@ -145,6 +182,14 @@ impl NativePresentationValidator {
     /// Last committed progressing evidence; duplicates and deferrals leave it unchanged.
     pub const fn latest_record(&self) -> Option<NativePresentationRecord> {
         self.state.latest
+    }
+    /// Exact frame metadata from the last committed supplied frame relation.
+    /// Scalar supplied pairs and counter/native-render evidence carry no frame sidecar.
+    pub const fn latest_frame_position(&self) -> Option<(NativeFrameBasis, u64)> {
+        match self.state.frame {
+            Some(frame) => Some((frame.basis, frame.relative_frame)),
+            None => None,
+        }
     }
     /// Relation from the last committed progressing record; absent before first admission.
     pub fn latest_pair(&self) -> Option<ClockPair> {
@@ -245,6 +290,9 @@ impl NativePresentationValidator {
         {
             return Err(DisciplineError::DomainMismatch);
         }
+        if self.state.frame.is_some() {
+            return Err(DisciplineError::ObservationSourceChanged);
+        }
         let candidate = NativePresentationRecord {
             pair,
             evidence: OriginalNativePresentationEvidence::SuppliedPair(pair),
@@ -269,6 +317,75 @@ impl NativePresentationValidator {
             }
         }
         Ok(self.prepared(candidate, NativeObservationAdmission::Progress))
+    }
+
+    /// Validate a supplied relation using its original, unrounded native frame position.
+    /// Advancing frames require strictly advancing HOST time even when output nanoseconds
+    /// are unchanged. Repeating a frame never refreshes the accepted record or HOST age.
+    /// The basis and scalar/frame mode remain fixed until a successful epoch rebind.
+    pub fn prepare_frame_pair(
+        &self,
+        epoch: u64,
+        pair: ClockPair,
+        basis: NativeFrameBasis,
+        relative_frame: u64,
+    ) -> Result<PreparedNativePresentation, DisciplineError> {
+        self.validate_epoch(epoch)?;
+        if pair.source.domain != self.output_origin().domain
+            || pair.target.domain != self.host_domain()
+            || basis.origin().domain != self.output_origin().domain
+        {
+            return Err(DisciplineError::DomainMismatch);
+        }
+        if let Some(previous) = self.state.latest {
+            if !matches!(
+                previous.evidence,
+                OriginalNativePresentationEvidence::SuppliedPair(_)
+            ) {
+                return Err(DisciplineError::ObservationSourceChanged);
+            }
+            let Some(previous_frame) = self.state.frame else {
+                return Err(DisciplineError::ObservationSourceChanged);
+            };
+            if basis != previous_frame.basis {
+                return Err(DisciplineError::ObservationSourceChanged);
+            }
+        }
+        if basis.point_at_stream_frame(0)? != self.output_origin() {
+            return Err(DisciplineError::DomainMismatch);
+        }
+        if basis.point_at_stream_frame(relative_frame)? != pair.source {
+            return Err(DisciplineError::InvalidConfig);
+        }
+        let mut admission = NativeObservationAdmission::Progress;
+        if let Some(previous) = self.state.latest {
+            let previous_frame = self
+                .state
+                .frame
+                .expect("accepted frame evidence has a frame position");
+            if relative_frame < previous_frame.relative_frame
+                || pair.target.timestamp < previous.pair.target.timestamp
+            {
+                return Err(DisciplineError::NonIncreasing);
+            }
+            if relative_frame == previous_frame.relative_frame {
+                admission = NativeObservationAdmission::Unchanged;
+            } else if pair.target.timestamp == previous.pair.target.timestamp {
+                return Err(DisciplineError::NonIncreasing);
+            }
+        }
+        let mut prepared = self.prepared(
+            NativePresentationRecord {
+                pair,
+                evidence: OriginalNativePresentationEvidence::SuppliedPair(pair),
+            },
+            admission,
+        );
+        prepared.frame = Some(NativeFramePosition {
+            basis,
+            relative_frame,
+        });
+        Ok(prepared)
     }
 
     /// Validate original ASIO rate/grid/extent, full HOST bracket and block chronology.
@@ -360,7 +477,9 @@ impl NativePresentationValidator {
                 return Ok(self.prepared(candidate, NativeObservationAdmission::Unchanged));
             }
             if observation.render.start_frame < asio_end(previous_observation)?
-                || pair.source.timestamp <= previous.pair.source.timestamp
+                // Original nonoverlapping block progress may occupy the same integer
+                // nanosecond on a high-rate grid; rounding cannot replace frame order.
+                || pair.source.timestamp < previous.pair.source.timestamp
                 || pair.target.timestamp < previous.pair.target.timestamp
             {
                 return Err(DisciplineError::NonIncreasing);
@@ -382,15 +501,24 @@ impl NativePresentationValidator {
         if self.state != prepared.state {
             return Err(NativePreparationError::StalePreparation);
         }
-        let expected = match prepared.candidate.evidence {
-            OriginalNativePresentationEvidence::Wasapi { snapshot, basis } => {
-                self.prepare_wasapi(prepared.state.epoch, snapshot, basis)
-            }
-            OriginalNativePresentationEvidence::SuppliedPair(pair) => {
-                self.prepare_pair(prepared.state.epoch, pair)
-            }
-            OriginalNativePresentationEvidence::Asio { observation, basis } => {
-                self.prepare_asio(prepared.state.epoch, observation, basis)
+        let expected = if let Some(frame) = prepared.frame {
+            self.prepare_frame_pair(
+                prepared.state.epoch,
+                prepared.candidate.pair,
+                frame.basis,
+                frame.relative_frame,
+            )
+        } else {
+            match prepared.candidate.evidence {
+                OriginalNativePresentationEvidence::Wasapi { snapshot, basis } => {
+                    self.prepare_wasapi(prepared.state.epoch, snapshot, basis)
+                }
+                OriginalNativePresentationEvidence::SuppliedPair(pair) => {
+                    self.prepare_pair(prepared.state.epoch, pair)
+                }
+                OriginalNativePresentationEvidence::Asio { observation, basis } => {
+                    self.prepare_asio(prepared.state.epoch, observation, basis)
+                }
             }
         };
         if expected.ok() != Some(prepared) {
@@ -398,6 +526,7 @@ impl NativePresentationValidator {
         }
         if prepared.admission == NativeObservationAdmission::Progress {
             self.state.latest = Some(prepared.candidate);
+            self.state.frame = prepared.frame;
         }
         Ok(prepared.admission)
     }
@@ -434,6 +563,7 @@ impl NativePresentationValidator {
         self.state.epoch = prepared.epoch;
         self.state.output_origin = prepared.output_origin;
         self.state.latest = None;
+        self.state.frame = None;
         Ok(())
     }
     fn validate_epoch(&self, epoch: u64) -> Result<(), DisciplineError> {
@@ -452,9 +582,15 @@ impl NativePresentationValidator {
             state: self.state,
             candidate,
             admission,
+            frame: None,
         }
     }
 }
+
+#[cfg(test)]
+mod frame_fixtures;
+#[cfg(test)]
+mod asio_coordinate_fixtures;
 fn asio_end(observation: AsioPresentationObservation) -> Result<u64, DisciplineError> {
     observation
         .render

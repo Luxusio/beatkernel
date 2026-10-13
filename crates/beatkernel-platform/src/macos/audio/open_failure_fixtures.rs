@@ -20,8 +20,8 @@ fn mixer() -> Mixer {
     mixer
 }
 #[test]
-fn pure_coreaudio_preflight_rejects_invalid_device_buffer_format_and_capacity_before_native_ownership()
- {
+fn pure_coreaudio_preflight_rejects_invalid_device_buffer_format_and_capacity_before_native_ownership(
+) {
     let mixer = mixer();
     let basis = mixer.output_frame_basis();
     let counters = mixer.counters();
@@ -65,8 +65,8 @@ fn pure_coreaudio_preflight_rejects_invalid_device_buffer_format_and_capacity_be
     assert_eq!(mixer.frame_cursor(), 2);
 }
 #[test]
-fn pure_coreaudio_exact_capacity_boundary_accepts_without_resolving_device_or_constructing_mach_clock()
- {
+fn pure_coreaudio_exact_capacity_boundary_accepts_without_resolving_device_or_constructing_mach_clock(
+) {
     let mixer = mixer();
     let before = mixer.output_frame_basis();
     for device in [1, u32::MAX] {
@@ -136,4 +136,54 @@ fn pure_coreaudio_remix_preflight_checks_target_layout_rate_and_preserves_source
         Err(CoreAudioError::Capacity)
     );
     assert_eq!(mixer.output_frame_basis(), basis);
+}
+
+#[test]
+fn pure_coreaudio_cold_source_telemetry_allocation_refusal_keeps_original_owner_and_history() {
+    let mut mixer = mixer();
+    mixer.enable_source_playback_history(3).unwrap();
+    mixer.render(&mut [0.; 4]).unwrap();
+    let basis = mixer.output_frame_basis();
+    let counters = mixer.counters();
+    let history = mixer.source_playback_history().unwrap();
+    let identity = (
+        history.source_rate(),
+        history.initial_physical_frame(),
+        history.initial_playback_frame(),
+        history.pulled_end_frame(),
+        history.len(),
+        history.capacity(),
+    );
+    assert!(matches!(
+        crate::audio::fail_allocation(0, || prepare_render_telemetry(&mixer)),
+        Err(CoreAudioError::Capacity)
+    ));
+    assert_eq!(mixer.output_frame_basis(), basis);
+    assert_eq!(mixer.counters(), counters);
+    assert_eq!(mixer.frame_cursor(), 4);
+    let history = mixer.source_playback_history().unwrap();
+    assert_eq!(
+        (
+            history.source_rate(),
+            history.initial_physical_frame(),
+            history.initial_playback_frame(),
+            history.pulled_end_frame(),
+            history.len(),
+            history.capacity()
+        ),
+        identity
+    );
+    assert!(prepare_render_telemetry(&mixer).is_ok());
+    mixer.render(&mut [0.; 4]).unwrap();
+    assert_eq!(
+        mixer.source_playback_history().unwrap().pulled_end_frame(),
+        6
+    );
+}
+
+#[test]
+fn pure_coreaudio_default_cold_telemetry_requires_no_source_payload_allocation() {
+    let mixer = mixer();
+    assert!(crate::audio::fail_allocation(0, || prepare_render_telemetry(&mixer)).is_ok());
+    assert!(mixer.source_playback_history().is_none());
 }

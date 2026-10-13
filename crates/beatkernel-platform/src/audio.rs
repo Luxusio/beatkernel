@@ -30,7 +30,7 @@
 #![allow(clippy::result_large_err)]
 
 use beatkernel::{
-    audio::{AudioFormat, RenderReport},
+    audio::{AudioFormat, RenderReport, SourcePlaybackSpan},
     time::{ClockMappingQuality, ClockPoint, Duration},
 };
 use std::fmt;
@@ -41,11 +41,14 @@ pub mod cadence;
 pub(crate) mod channel_remix;
 mod convert;
 mod converted_output_state;
+pub(crate) mod history_retirement_mailbox;
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 pub(crate) mod mixer_launch;
 mod negotiation;
 mod output_state;
 pub mod presentation;
+pub(crate) mod source_playback_publication;
+pub(crate) mod source_history_retirement_mailbox;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", test))]
 pub(crate) mod telemetry;
 
@@ -494,6 +497,23 @@ pub struct AudioStreamSnapshot {
     pub clock: Option<AudioClockSnapshot>,
     /// Most recent core mixer report, if a buffer was rendered.
     pub render: Option<RenderReport>,
+}
+
+/// Generated source playback facts and associated scalar stream telemetry.
+///
+/// One publication revision protects these facts. They do not establish a
+/// native epoch, audible presentation, or pause acknowledgment; counters and
+/// clock metadata still require the caller's native delivery qualification.
+#[derive(Clone, Copy, Debug)]
+pub struct SourcePlaybackSnapshot {
+    /// Associated scalar telemetry; lifecycle status is independently observed.
+    pub snapshot: AudioStreamSnapshot,
+    /// Actual source playback interval selected before rounding source time.
+    pub playback: SourcePlaybackSpan,
+    /// Inclusive physical source pull frontier for the selected publication.
+    pub pulled_source_end: u64,
+    /// Even revision shared by source and scalar payloads.
+    pub revision: u64,
 }
 
 /// Native request constraint requiring an explicit caller configuration choice.

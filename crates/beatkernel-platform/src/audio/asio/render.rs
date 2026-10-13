@@ -1,7 +1,10 @@
 //! Preallocated Mixer delivery into a complete set of ASIO planar buffers.
 
 use super::{encode_asio_channel, AsioPcmEncoding, AsioPcmError};
-use beatkernel::audio::{AudioError, AudioFormat, ChannelMatrix, FormatConverter, Mixer, RenderReport};
+use beatkernel::audio::{
+    AudioError, AudioFormat, ChannelMatrix, FormatConverter, Mixer, RenderReport,
+    SourcePlaybackHistory,
+};
 use std::{error::Error, fmt};
 
 /// Setup, Mixer or planar output failure without implicit resizing or remapping.
@@ -58,6 +61,20 @@ pub struct AsioBlockRenderer {
     last_report: Option<RenderReport>,
 }
 impl AsioBlockRenderer {
+    pub(crate) fn apply_source_history_retirement(
+        &mut self,
+        request: crate::audio::source_history_retirement_mailbox::SourceHistoryRetirementRequest,
+        completed: &mut u64,
+    ) -> Result<usize, AsioRenderError> {
+        let mixer = self
+            .mixer
+            .as_mut()
+            .ok_or(AsioRenderError::MixerUnavailable)?;
+        crate::audio::source_history_retirement_mailbox::apply_source_history_retirement(
+            mixer, request, completed,
+        )
+        .map_err(AsioRenderError::Core)
+    }
     /// Allocates scratch off-thread, using the Mixer's actual format and limits.
     /// Encodings map in mixer-channel order; no hidden extra channels are created.
     pub fn new(
@@ -140,6 +157,11 @@ impl AsioBlockRenderer {
     pub fn take_mixer(&mut self) -> Option<Mixer> {
         self.mixer.take()
     }
+    /// Borrows actual source adoption history from the complete owned Mixer.
+    /// Returns None when disabled or after the retired Mixer has been transferred.
+    pub fn source_playback_history(&self) -> Option<&SourcePlaybackHistory> {
+        self.mixer.as_ref()?.source_playback_history()
+    }
     /// Configured native frame count for every render.
     pub const fn frames(&self) -> u32 {
         self.frames
@@ -164,21 +186,11 @@ impl AsioBlockRenderer {
     /// Bad destination layouts do not consume commands or advance the Mixer.
     /// Nonfinite mixed output leaves every native destination untouched.
     pub fn render(&mut self, outputs: &mut [&mut [u8]]) -> Result<RenderReport, AsioRenderError> {
+        self.validate_buffers(outputs)?;
         let mixer = self
             .mixer
             .as_mut()
             .ok_or(AsioRenderError::MixerUnavailable)?;
-        if outputs.len() != self.encodings.len()
-            || outputs
-                .iter()
-                .zip(&self.encodings)
-                .any(|(output, encoding)| {
-                    (self.frames as usize).checked_mul(encoding.bytes_per_sample())
-                        != Some(output.len())
-                })
-        {
-            return Err(AsioRenderError::InvalidBuffers);
-        }
         let report = crate::audio::channel_remix::render(mixer, &mut self.remix, &mut self.scratch)
             .map_err(AsioRenderError::Core)?;
         self.last_report = Some(report);
@@ -197,4 +209,25 @@ impl AsioBlockRenderer {
         }
         Ok(report)
     }
+    pub(crate) fn validate_buffers(&self, outputs: &[&mut [u8]]) -> Result<(), AsioRenderError> {
+        if self.mixer.is_none() {
+            return Err(AsioRenderError::MixerUnavailable);
+        }
+        if outputs.len() != self.encodings.len()
+            || outputs
+                .iter()
+                .zip(&self.encodings)
+                .any(|(output, encoding)| {
+                    (self.frames as usize).checked_mul(encoding.bytes_per_sample())
+                        != Some(output.len())
+                })
+        {
+            return Err(AsioRenderError::InvalidBuffers);
+        }
+        Ok(())
+    }
 }
+
+#[cfg(test)]
+#[path = "source_history_retirement_fixtures.rs"]
+mod source_history_retirement_fixtures;

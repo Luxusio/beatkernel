@@ -2,7 +2,10 @@
 use super::{clock::MachClock, ffi};
 use crate::audio::{AudioStreamSnapshot, AudioStreamStatus, StreamCounters, telemetry::Telemetry};
 use beatkernel::{
-    audio::{AudioFormat, ChannelMatrix, FormatConverter, Mixer, RenderReport},
+    audio::{
+        AudioFormat, ChannelMatrix, FormatConverter, InterpolatedTargetTime, Mixer, RenderReport,
+        OutputFrameBasis, SourcePlaybackSpan,
+    },
     time::{ClockDomainId, ClockPoint, Timestamp},
 };
 use std::{
@@ -166,11 +169,31 @@ pub struct CoreAudioSnapshot {
     /// Most recent coherent presentation sample, or None during concurrent write.
     pub presentation: Option<CoreAudioPresentation>,
 }
+/// Generated source facts paired with one successful all-buffer delivery revision.
+/// Diagnostics are independently observed. A growing delivery bound does not
+/// prove a gap-free audible prefix, native epoch, or acknowledged pause.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoreAudioSourcePlaybackSnapshot {
+    /// Native counters and original presentation metadata.
+    pub snapshot: CoreAudioSnapshot,
+    /// Most recent successful core render, possibly preceding a failed attempt.
+    pub render: Option<RenderReport>,
+    /// Actually generated physical-to-playback interval selected exactly.
+    pub playback: SourcePlaybackSpan,
+    /// Actual source generation frontier.
+    pub pulled_source_end: u64,
+    /// End of the latest successful complete native buffer delivery.
+    pub delivered_end_frame: u64,
+    /// Matching even outer callback publication revision.
+    pub revision: u64,
+}
 struct RenderState {
     mixer: Mixer,
     remix: Option<FormatConverter>,
     scratch: Vec<f32>,
     render_version: u64,
+    publication_version: u64,
+    completed_source_retirement: u64,
 }
 struct Context {
     render: UnsafeCell<RenderState>,
@@ -191,6 +214,8 @@ struct Context {
     frames: AtomicU64,
     failures: AtomicU64,
     version: AtomicU64,
+    delivered: AtomicBool,
+    delivered_end: AtomicU64,
     ticks: AtomicU64,
     sample_bits: AtomicU64,
     flags: AtomicU32,
@@ -223,6 +248,15 @@ fn validate_open_with_matrix(
         return Err(CoreAudioError::Capacity);
     }
     Ok(())
+}
+fn prepare_render_telemetry(mixer: &Mixer) -> Result<Telemetry, CoreAudioError> {
+    match mixer.source_playback_history() {
+        Some(history) => {
+            Telemetry::with_source_history_and_retirement(history, mixer.output_frame_basis())
+                .map_err(|_| CoreAudioError::Capacity)
+        }
+        None => Ok(Telemetry::new()),
+    }
 }
 /// Owned HAL IOProc and stable callback state, with explicit start/close lifecycle.
 /// Mutable mixer storage is accessed only by one guarded native callback.
@@ -316,6 +350,10 @@ impl CoreAudioStream {
         if let Err(error) = validate_open_with_matrix(&request, &mixer, matrix.as_ref()) {
             return Err(CoreAudioOpenFailure::recovered(error, Some(mixer)));
         }
+        let render_telemetry = match prepare_render_telemetry(&mixer) {
+            Ok(telemetry) => telemetry,
+            Err(error) => return Err(CoreAudioOpenFailure::recovered(error, Some(mixer))),
+        };
         let staged = (|| -> Result<_, CoreAudioError> {
             if !u32_property(1, address(DEVICES, GLOBAL))?.contains(&request.device) {
                 return Err(CoreAudioError::DeviceUnavailable);
@@ -413,8 +451,10 @@ impl CoreAudioStream {
                 remix,
                 scratch,
                 render_version: 0,
+                publication_version: 0,
+                completed_source_retirement: 0,
             }),
-            render_telemetry: Telemetry::new(),
+            render_telemetry,
             cadence: Box::new(crate::audio::cadence::Capture::new()),
             clock,
             origin: config.origin(),
@@ -431,6 +471,8 @@ impl CoreAudioStream {
             frames: AtomicU64::new(0),
             failures: AtomicU64::new(0),
             version: AtomicU64::new(0),
+            delivered: AtomicBool::new(false),
+            delivered_end: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
             sample_bits: AtomicU64::new(0),
             flags: AtomicU32::new(0),
@@ -609,48 +651,207 @@ impl CoreAudioStream {
     }
     /// Reads bounded atomic numeric/presentation telemetry outside the callback.
     pub fn snapshot(&self) -> CoreAudioSnapshot {
-        let Some(context) = self.context.as_deref() else {
-            return self.final_snapshot;
-        };
-        let mut result = CoreAudioSnapshot {
-            rendered_callbacks: context.calls.load(Ordering::Relaxed),
-            rendered_frames: context.frames.load(Ordering::Relaxed),
-            callback_failures: context.failures.load(Ordering::Relaxed),
-            configuration_changed: context.changed.load(Ordering::Acquire),
-            presentation: None,
-        };
+        self.context
+            .as_deref()
+            .map_or(self.final_snapshot, Context::snapshot)
+    }
+    /// Reads source facts and successful delivery metadata in one outer revision.
+    /// Initial history identity is independent of a reopened stream frame basis.
+    /// Callers must separately qualify native epoch, freshness and diagnostics.
+    /// Retired contexts provide no source qualification through this method.
+    pub fn source_playback_at(
+        &self,
+        query: &InterpolatedTargetTime,
+        expected_source_rate: u32,
+        expected_initial_physical: u64,
+        expected_initial_playback: u64,
+    ) -> Option<CoreAudioSourcePlaybackSnapshot> {
+        self.context.as_deref()?.read_source_playback_at(
+            query,
+            expected_source_rate,
+            expected_initial_physical,
+            expected_initial_playback,
+        )
+    }
+    /// Queues a coherent original Source history minimum for the callback owner.
+    /// The returned revision is intent, not application or presentation authority.
+    pub fn request_source_history_retirement(
+        &self,
+        expected_basis: OutputFrameBasis,
+        source_identity: (u32, u64, u64),
+        source_pin: u64,
+    ) -> Result<Option<u64>, CoreAudioError> {
+        if expected_basis != self.basis {
+            return Err(CoreAudioError::InvalidRequest);
+        }
+        self.context
+            .as_deref()
+            .ok_or(CoreAudioError::Closed)?
+            .request_source_history_retirement(expected_basis, source_identity, source_pin)
+    }
+}
+impl Context {
+    fn request_source_history_retirement(
+        &self,
+        expected_basis: OutputFrameBasis,
+        source_identity: (u32, u64, u64),
+        source_pin: u64,
+    ) -> Result<Option<u64>, CoreAudioError> {
+        self.request_source_history_retirement_with(
+            expected_basis,
+            source_identity,
+            source_pin,
+            || {},
+        )
+    }
+    fn request_source_history_retirement_with(
+        &self,
+        expected_basis: OutputFrameBasis,
+        source_identity: (u32, u64, u64),
+        source_pin: u64,
+        after_queue: impl FnOnce(),
+    ) -> Result<Option<u64>, CoreAudioError> {
         for _ in 0..3 {
-            let before = context.version.load(Ordering::SeqCst);
+            let before = self.version.load(Ordering::SeqCst);
             if before == 0 || before & 1 != 0 {
                 continue;
             }
-            let host_ticks = context.ticks.load(Ordering::SeqCst);
-            let flags = context.flags.load(Ordering::SeqCst);
-            let first_frame = context.first_frame.load(Ordering::SeqCst);
-            let sample = f64::from_bits(context.sample_bits.load(Ordering::SeqCst));
-            let frames = context.block_frames.load(Ordering::SeqCst);
-            if context.version.load(Ordering::SeqCst) != before {
+            let changed = self.changed.load(Ordering::Acquire);
+            let failed = self.failures.load(Ordering::Relaxed) != 0;
+            if self.version.load(Ordering::SeqCst) != before {
                 continue;
             }
-            let time = i128::from(context.origin.as_nanos())
-                + i128::from(first_frame) * 1_000_000_000 / i128::from(context.rate);
-            result.presentation = Some(CoreAudioPresentation {
-                host_ticks,
-                native: (flags & 2 != 0)
-                    .then(|| context.clock.native_point(host_ticks))
-                    .flatten(),
-                native_sample_frame: (flags & 1 != 0).then_some(sample),
-                output_grid: i64::try_from(time).ok().map(|time| ClockPoint {
-                    domain: context.output_domain,
-                    timestamp: Timestamp::from_nanos(time),
-                }),
-                flags,
-                first_frame,
-                frames,
-            });
-            break;
+            if changed {
+                return Err(CoreAudioError::ConfigurationChanged);
+            }
+            if failed {
+                return Err(CoreAudioError::InvalidRequest);
+            }
+            let requested = self
+                .render_telemetry
+                .request_source_history_retirement(expected_basis, source_identity, source_pin)
+                .map_err(|_| CoreAudioError::InvalidRequest)?;
+            // Outer diagnostics qualified admission before the sole queue effect.
+            // Subsequent callbacks cannot retract an already queued intent.
+            after_queue();
+            return Ok(requested);
+        }
+        Ok(None)
+    }
+    fn snapshot_fields(&self) -> CoreAudioSnapshot {
+        CoreAudioSnapshot {
+            rendered_callbacks: self.calls.load(Ordering::Relaxed),
+            rendered_frames: self.frames.load(Ordering::Relaxed),
+            callback_failures: self.failures.load(Ordering::Relaxed),
+            configuration_changed: self.changed.load(Ordering::Acquire),
+            presentation: None,
+        }
+    }
+    // The caller encloses these loads in the outer revision and rechecks it.
+    fn presentation(&self) -> Option<CoreAudioPresentation> {
+        if !self.delivered.load(Ordering::SeqCst) {
+            return None;
+        }
+        let host_ticks = self.ticks.load(Ordering::SeqCst);
+        let flags = self.flags.load(Ordering::SeqCst);
+        let first_frame = self.first_frame.load(Ordering::SeqCst);
+        let sample = f64::from_bits(self.sample_bits.load(Ordering::SeqCst));
+        let frames = self.block_frames.load(Ordering::SeqCst);
+        let time = i128::from(self.origin.as_nanos())
+            + i128::from(first_frame) * 1_000_000_000 / i128::from(self.rate);
+        Some(CoreAudioPresentation {
+            host_ticks,
+            native: (flags & 2 != 0)
+                .then(|| self.clock.native_point(host_ticks))
+                .flatten(),
+            native_sample_frame: (flags & 1 != 0).then_some(sample),
+            output_grid: i64::try_from(time).ok().map(|time| ClockPoint {
+                domain: self.output_domain,
+                timestamp: Timestamp::from_nanos(time),
+            }),
+            flags,
+            first_frame,
+            frames,
+        })
+    }
+    fn snapshot(&self) -> CoreAudioSnapshot {
+        let mut result = self.snapshot_fields();
+        for _ in 0..3 {
+            let before = self.version.load(Ordering::SeqCst);
+            if before == 0 || before & 1 != 0 {
+                continue;
+            }
+            let presentation = self.presentation();
+            if self.version.load(Ordering::SeqCst) == before {
+                result.presentation = presentation;
+                break;
+            }
         }
         result
+    }
+    fn read_source_playback_at(
+        &self,
+        query: &InterpolatedTargetTime,
+        expected_source_rate: u32,
+        expected_initial_physical: u64,
+        expected_initial_playback: u64,
+    ) -> Option<CoreAudioSourcePlaybackSnapshot> {
+        self.read_source_playback_with(
+            query,
+            expected_source_rate,
+            expected_initial_physical,
+            expected_initial_playback,
+            |_| {},
+        )
+    }
+    fn read_source_playback_with(
+        &self,
+        query: &InterpolatedTargetTime,
+        expected_source_rate: u32,
+        expected_initial_physical: u64,
+        expected_initial_playback: u64,
+        mut before_recheck: impl FnMut(usize),
+    ) -> Option<CoreAudioSourcePlaybackSnapshot> {
+        for attempt in 0..3 {
+            let before = self.version.load(Ordering::SeqCst);
+            if before == 0 || before & 1 != 0 {
+                continue;
+            }
+            let source = self.render_telemetry.read_source_playback_at(
+                query,
+                expected_source_rate,
+                expected_initial_physical,
+                expected_initial_playback,
+            );
+            let mut snapshot = self.snapshot_fields();
+            snapshot.presentation = self.presentation();
+            let delivered_end_frame = self.delivered_end.load(Ordering::SeqCst);
+            let in_delivery = snapshot.presentation.is_some()
+                && query
+                    .compare_source_time_frame(delivered_end_frame, expected_source_rate)
+                    .ok()
+                    .is_some_and(|order| order != std::cmp::Ordering::Greater);
+            before_recheck(attempt);
+            if self.version.load(Ordering::SeqCst) != before {
+                continue;
+            }
+            if !in_delivery {
+                return None;
+            }
+            let source = source?;
+            if delivered_end_frame > source.pulled_source_end {
+                return None;
+            }
+            return Some(CoreAudioSourcePlaybackSnapshot {
+                snapshot,
+                render: source.snapshot.render,
+                playback: source.playback,
+                pulled_source_end: source.pulled_source_end,
+                delivered_end_frame,
+                revision: before,
+            });
+        }
+        None
     }
 }
 impl Drop for CoreAudioStream {
@@ -727,6 +928,35 @@ unsafe fn render_buffers(
     output: *mut ffi::AudioBufferList,
     time: *const ffi::AudioTimestamp,
 ) -> Result<(), ()> {
+    let current = context.version.load(Ordering::SeqCst);
+    if current == u64::MAX {
+        return Err(());
+    }
+    if current & 1 != 0 || current != state.publication_version {
+        context.version.store(u64::MAX, Ordering::SeqCst);
+        return Err(());
+    }
+    let Some(next) = state
+        .publication_version
+        .checked_add(2)
+        .filter(|_| state.publication_version & 1 == 0)
+    else {
+        context.version.store(u64::MAX, Ordering::SeqCst);
+        return Err(());
+    };
+    context.version.store(next - 1, Ordering::SeqCst);
+    // SAFETY: same native buffer lifetime and callback-exclusive state as caller.
+    let result = unsafe { render_buffers_in_publication(context, state, output, time) };
+    context.version.store(next, Ordering::SeqCst);
+    state.publication_version = next;
+    result
+}
+unsafe fn render_buffers_in_publication(
+    context: &Context,
+    state: &mut RenderState,
+    output: *mut ffi::AudioBufferList,
+    time: *const ffi::AudioTimestamp,
+) -> Result<(), ()> {
     if output.is_null() {
         return Err(());
     }
@@ -783,16 +1013,41 @@ unsafe fn render_buffers(
     if samples > state.scratch.len() {
         return Err(());
     }
+    if let Some(request) = context.render_telemetry.source_retirement_request() {
+        if crate::audio::source_history_retirement_mailbox::apply_source_history_retirement(
+            &mut state.mixer,
+            request,
+            &mut state.completed_source_retirement,
+        )
+        .is_err()
+        {
+            context.render_telemetry.publish_with_source_history(
+                None,
+                state.mixer.source_playback_history(),
+                &mut state.render_version,
+            );
+            return Err(());
+        }
+    }
     let render_start = context
         .clock
         .sample_realtime()
         .map(|sample| sample.normalized.timestamp);
-    let report = crate::audio::channel_remix::render(
+    let report = match crate::audio::channel_remix::render(
         &mut state.mixer,
         &mut state.remix,
         &mut state.scratch[..samples],
-    )
-    .map_err(|_| ())?;
+    ) {
+        Ok(report) => report,
+        Err(_) => {
+            context.render_telemetry.publish_with_source_history(
+                None,
+                state.mixer.source_playback_history(),
+                &mut state.render_version,
+            );
+            return Err(());
+        }
+    };
     match render_start {
         Some(at) => context
             .cadence
@@ -801,16 +1056,21 @@ unsafe fn render_buffers(
     }
     // Publish actual completed core rendering before native buffer delivery.
     // Callback guard grants exclusive access to the local version counter.
-    context.render_telemetry.publish(
-        AudioStreamSnapshot {
+    context.render_telemetry.publish_with_source_history(
+        Some(AudioStreamSnapshot {
             telemetry_available: true,
             status: AudioStreamStatus::Running,
             counters: StreamCounters::default(),
             clock: None,
             render: Some(report),
-        },
+        }),
+        state.mixer.source_playback_history(),
         &mut state.render_version,
     );
+    let delivered_end = report
+        .start_frame
+        .checked_add(u64::from(frames))
+        .ok_or(())?;
     let mut first_channel = 0usize;
     for buffer in buffers {
         let buffer_channels = buffer.channels as usize;
@@ -842,7 +1102,6 @@ unsafe fn render_buffers(
     } else {
         unsafe { *time }
     };
-    context.version.fetch_add(1, Ordering::SeqCst);
     context.ticks.store(time.host_time, Ordering::SeqCst);
     context
         .sample_bits
@@ -852,7 +1111,8 @@ unsafe fn render_buffers(
         .first_frame
         .store(report.start_frame, Ordering::SeqCst);
     context.block_frames.store(frames, Ordering::SeqCst);
-    context.version.fetch_add(1, Ordering::SeqCst);
+    context.delivered_end.store(delivered_end, Ordering::SeqCst);
+    context.delivered.store(true, Ordering::SeqCst);
     Ok(())
 }
 fn check(operation: &'static str, code: i32) -> Result<(), CoreAudioError> {
@@ -1046,3 +1306,11 @@ impl beatkernel::audio::StoppedMixerSource for CoreAudioStream {
 #[cfg(test)]
 #[path = "audio/open_failure_fixtures.rs"]
 mod open_failure_fixtures;
+
+#[cfg(test)]
+#[path = "audio/source_playback_fixtures.rs"]
+mod source_playback_fixtures;
+
+#[cfg(test)]
+#[path = "audio/source_history_retirement_fixtures.rs"]
+mod source_history_retirement_fixtures;

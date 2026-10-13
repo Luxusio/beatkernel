@@ -11,7 +11,9 @@ mod sys;
 pub use alsa::ConvertedAlsaStream;
 pub use alsa::{
     alsa_output_devices, AlsaAppliedConfig, AlsaCadenceError, AlsaDevice, AlsaNativeTimestamp,
-    AlsaRenderCadence, AlsaRequest, AlsaSnapshot, AlsaStatus, AlsaStream, AlsaTimingSnapshot,
+    AlsaRenderCadence, AlsaRequest, AlsaSnapshot, AlsaSourcePlaybackSnapshot, AlsaStatus,
+    AlsaStream, AlsaTimingSnapshot, AlsaConvertedPlaybackSnapshot, ConvertedPhaseSnapshot,
+    ConvertedPlaybackPhaseSnapshot,
 };
 pub use input::{
     evdev_keyboard_devices, EvdevDevice, EvdevItem, EvdevKeyboardDevice, EvdevSnapshot,

@@ -313,6 +313,11 @@ impl PresentationDiscipline {
         } else {
             self.estimator.observe_clock_pair(pair)?
         };
+        // A scalar consumer can decline sub-nanosecond native frame progress.
+        // Keep its previous native evidence when no correlation was admitted.
+        if admission == ObservationAdmission::Unchanged {
+            return Ok(admission);
+        }
         self.validator
             .commit(prepared)
             .expect("private native preparation remains current after core admission");

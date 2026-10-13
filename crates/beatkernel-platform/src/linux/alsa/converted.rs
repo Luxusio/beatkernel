@@ -2,7 +2,21 @@
 use super::converted_telemetry::ConvertedTelemetry;
 use super::*;
 use crate::audio::{ConvertedBoundaryFacts, ConvertedNativeOutputState};
-use beatkernel::audio::{ConvertedRenderReport, StoppedMixerSource, TargetFrameBasis};
+use beatkernel::audio::{ConvertedRenderReport, StoppedMixerSource, TargetFrameBasis, TargetTime};
+
+/// Original converted generation, positive target submission and optional
+/// native timing from one worker publication. No epoch or pause ACK is granted.
+#[derive(Clone, Copy, Debug)]
+pub struct AlsaConvertedPlaybackSnapshot {
+    /// Source playback and converted generation from the same worker publication.
+    pub phase: ConvertedPlaybackPhaseSnapshot,
+    /// Original optional native timing; absence grants no observation or pause ACK.
+    pub timing: Option<AlsaTimingSnapshot>,
+    /// Positively submitted target frames in this stream, never source frames.
+    pub submitted_target_frames: u64,
+    /// Outer TimingShared revision, distinct from the inner phase revision.
+    pub revision: u64,
+}
 
 pub(super) type ConvertedWorkerExit = (Result<(), LinuxError>, ConvertedNativeOutputState);
 impl WorkerSpawner<ConvertedWorkerExit> for NativeWorkerSpawner {
@@ -18,15 +32,59 @@ impl WorkerSpawner<ConvertedWorkerExit> for NativeWorkerSpawner {
 struct ConvertedPump<'a> {
     state: &'a mut ConvertedNativeOutputState,
     telemetry: &'a ConvertedTelemetry,
+    retirement_completed: u64,
 }
 impl PumpOutput for ConvertedPump<'_> {
     type Report = ConvertedRenderReport;
+    fn before_pending(&mut self) -> Result<(), AudioError> {
+        let Some(request) = self.telemetry.retirement_request() else {
+            return Ok(());
+        };
+        if request.revision <= self.retirement_completed {
+            return Ok(());
+        }
+        let mut source_pin = request
+            .source_pin
+            .min(self.state.converter_owner().source_position().frame);
+        let mut target_pin = request.target_pin;
+        if let Some(pending) = self.state.pending_report() {
+            source_pin = source_pin.min(pending.source_start_position.frame);
+            if compare_retirement_time(pending.target_start_time, target_pin).is_lt() {
+                target_pin = pending.target_start_time;
+            }
+        }
+        let (practice_source, practice_target) = self.state.practice_history_retention_pins();
+        if let Some(pin) = practice_source {
+            source_pin = source_pin.min(pin);
+        }
+        if let Some(pin) = practice_target {
+            if compare_retirement_time(pin, target_pin).is_lt() {
+                target_pin = pin;
+            }
+        }
+        let (source_removed, phase_removed) =
+            self.state.retire_histories_before(source_pin, target_pin)?;
+        if source_removed != 0 || phase_removed != 0 {
+            self.telemetry.publish_generated(None, self.state);
+        }
+        if source_pin == request.source_pin
+            && compare_retirement_time(target_pin, request.target_pin).is_eq()
+        {
+            self.retirement_completed = request.revision;
+        }
+        Ok(())
+    }
     fn render_pending(&mut self, frames: usize) -> Result<Self::Report, AudioError> {
-        if self.telemetry.held() {
+        let result = if self.telemetry.held() {
             self.state.render_held_pending(frames)
         } else {
             self.state.render_pending(frames)
+        };
+        if self.telemetry.phase_enabled() {
+            self.telemetry
+                .publish_generated(result.as_ref().ok().copied(), self.state);
         }
+        result
     }
     fn pending_frames(&self) -> usize {
         self.state.pending_frames()
@@ -35,7 +93,11 @@ impl PumpOutput for ConvertedPump<'_> {
         self.state.pending_samples()
     }
     fn admit(&mut self, frames: usize) -> Result<(), AudioError> {
-        self.state.admit(frames)
+        self.state.admit(frames)?;
+        if let Some(time) = self.state.admitted_target_time() {
+            self.telemetry.publish_submitted(time);
+        }
+        Ok(())
     }
 }
 pub(super) fn run_converted_worker<P: PcmOperations, C: WorkerClock, E: PcmEncoder>(
@@ -48,7 +110,11 @@ pub(super) fn run_converted_worker<P: PcmOperations, C: WorkerClock, E: PcmEncod
     encoder: &mut E,
     telemetry: &ConvertedTelemetry,
 ) -> Result<(), LinuxError> {
-    let mut output = ConvertedPump { state, telemetry };
+    let mut output = ConvertedPump {
+        state,
+        telemetry,
+        retirement_completed: 0,
+    };
     run_output_worker(
         pcm,
         &mut output,
@@ -58,11 +124,13 @@ pub(super) fn run_converted_worker<P: PcmOperations, C: WorkerClock, E: PcmEncod
         clock,
         encoder,
         |report, state, _| {
-            telemetry.publish(
-                report,
-                state.state.boundaries(),
-                state.state.last_real_source_report(),
-            )
+            if let Some(report) = report.filter(|_| !telemetry.phase_enabled()) {
+                telemetry.publish(
+                    report,
+                    state.state.boundaries(),
+                    state.state.last_real_source_report(),
+                )
+            }
         },
     )
 }
@@ -118,9 +186,16 @@ impl ConvertedAlsaStream {
                 ))
             }
         };
-        let shared = Arc::new(Shared::new());
-        let telemetry = Arc::new(ConvertedTelemetry::new());
-        telemetry.seed(state.boundaries(), state.last_real_source_report());
+        let telemetry = match ConvertedTelemetry::with_phase_history(&state, basis) {
+            Ok(telemetry) => Arc::new(telemetry),
+            Err(error) => {
+                return Err(MixerOpenFailure::new_state(
+                    LinuxError::Mixer(error),
+                    Some(state),
+                ))
+            }
+        };
+        let shared = Arc::new(Shared::with_converted_history(&telemetry));
         let worker_shared = Arc::clone(&shared);
         let worker_telemetry = Arc::clone(&telemetry);
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -264,6 +339,22 @@ impl ConvertedAlsaStream {
         self.telemetry.set_held(held);
         Ok(())
     }
+    /// Queues caller-qualified mathematical history pins on this live stream.
+    /// A returned revision is not a native pause ACK or a retirement receipt.
+    pub fn request_history_retirement(
+        &mut self,
+        expected_basis: TargetFrameBasis,
+        source_identity: (u32, u64, u64),
+        source_pin: u64,
+        target_pin: TargetTime,
+    ) -> Result<Option<u64>, LinuxError> {
+        if self.shared.stop.load(Ordering::Acquire) || self.worker.is_none() {
+            return Err(LinuxError::InvalidLifecycle);
+        }
+        self.telemetry
+            .request_history_retirement(expected_basis, source_identity, source_pin, target_pin)
+            .map_err(LinuxError::Mixer)
+    }
     /// Joins before exposing software recovery, even if the worker returns an error.
     pub fn stop(&mut self) -> Result<(), LinuxError> {
         self.shared.stop.store(true, Ordering::Release);
@@ -319,6 +410,57 @@ impl ConvertedAlsaStream {
     pub fn boundary_facts(&self) -> ConvertedBoundaryFacts {
         self.telemetry.boundaries()
     }
+    /// Exact generated correspondence within this stream's actual positive
+    /// submission prefix. This proves neither native presentation nor epoch
+    /// authentication; callers must qualify those separately.
+    pub fn phase_snapshot_at(
+        &self,
+        query: beatkernel::audio::TargetTime,
+    ) -> Option<super::ConvertedPhaseSnapshot> {
+        self.telemetry.phase_snapshot_at(query)
+    }
+    /// Exact interpolated generated correspondence within this stream's
+    /// positive submission prefix. Native presentation and epoch
+    /// authentication require separate qualification.
+    pub fn phase_snapshot_at_interpolated_time(
+        &self,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+    ) -> Option<super::ConvertedPhaseSnapshot> {
+        self.telemetry.phase_snapshot_at_interpolated_time(query)
+    }
+    /// Coherent source playback adoption qualified by generated correspondence
+    /// and this stream's positive software submission prefix.
+    /// This does not authenticate native presentation or a pause acknowledgment.
+    pub fn playback_phase_snapshot_at_interpolated_time(
+        &self,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+    ) -> Option<super::ConvertedPlaybackPhaseSnapshot> {
+        self.telemetry
+            .playback_phase_snapshot_at_interpolated_time(query)
+    }
+
+    /// Bounded read of the original native publication and explicit cold
+    /// source-history identity. Missing timing supplies no native observation.
+    pub fn native_playback_at(
+        &self,
+        query: &InterpolatedTargetTime,
+        source_rate: u32,
+        initial_physical: u64,
+        initial_playback: u64,
+    ) -> Option<AlsaConvertedPlaybackSnapshot> {
+        shared_converted_playback_with(
+            &self.shared,
+            &self.telemetry,
+            self.basis,
+            self.configuration.requested.monotonic_domain,
+            query,
+            source_rate,
+            initial_physical,
+            initial_playback,
+            |_| {},
+        )
+    }
+
     /// Actual native played-frame estimate, unavailable outside the running epoch.
     pub fn timing_snapshot(&self) -> Option<AlsaTimingSnapshot> {
         if self.shared.stop.load(Ordering::SeqCst) || self.shared.status.load(Ordering::SeqCst) != 1
@@ -340,6 +482,63 @@ impl ConvertedAlsaStream {
         shared_snapshot(&self.shared, self.configuration.requested.monotonic_domain)
     }
 }
+
+pub(super) fn shared_converted_playback_with(
+    shared: &Shared,
+    telemetry: &ConvertedTelemetry,
+    basis: TargetFrameBasis,
+    domain: ClockDomainId,
+    query: &InterpolatedTargetTime,
+    source_rate: u32,
+    initial_physical: u64,
+    initial_playback: u64,
+    mut before_recheck: impl FnMut(usize),
+) -> Option<AlsaConvertedPlaybackSnapshot> {
+    if !shared.converted_phase_enabled {
+        return None;
+    }
+    for attempt in 0..3 {
+        let revision = shared.timing.sequence();
+        if revision & 1 != 0 {
+            continue;
+        }
+        if shared.stop.load(Ordering::SeqCst) || shared.status.load(Ordering::SeqCst) != 1 {
+            return None;
+        }
+        let submitted = shared.submitted.load(Ordering::SeqCst);
+        let phase = telemetry.playback_phase_snapshot_at_interpolated_time_with_identity(
+            query,
+            source_rate,
+            initial_physical,
+            initial_playback,
+        );
+        let timing = shared.timing.read_unversioned(domain);
+        let selected = (|| {
+            let phase = phase?;
+            if submitted == 0
+                || phase.phase.stream_start != basis.start_time()
+                || phase.phase.submitted_end != basis.time_at_stream_frame(submitted).ok()?
+                || timing.is_some_and(|timing| timing.submitted_frames != submitted)
+            {
+                return None;
+            }
+            Some(AlsaConvertedPlaybackSnapshot {
+                phase,
+                timing,
+                submitted_target_frames: submitted,
+                revision,
+            })
+        })();
+        before_recheck(attempt);
+        if shared.timing.sequence() == revision {
+            if shared.stop.load(Ordering::SeqCst) || shared.status.load(Ordering::SeqCst) != 1 {
+                return None;
+            }
+            return selected;
+        }
+    }
+    None
+}
 impl StoppedMixerSource<ConvertedNativeOutputState> for ConvertedAlsaStream {
     type Error = LinuxError;
     fn take_stopped_mixer(&mut self) -> Result<Option<ConvertedNativeOutputState>, LinuxError> {
@@ -351,3 +550,22 @@ impl Drop for ConvertedAlsaStream {
         let _ = self.stop();
     }
 }
+
+#[cfg(test)]
+#[path = "converted_native_playback_fixtures.rs"]
+mod native_playback_fixtures;
+
+fn compare_retirement_time(left: TargetTime, right: TargetTime) -> std::cmp::Ordering {
+    left.seconds().cmp(&right.seconds()).then_with(|| {
+        (u128::from(left.numerator()) * u128::from(right.denominator()))
+            .cmp(&(u128::from(right.numerator()) * u128::from(left.denominator())))
+    })
+}
+
+#[cfg(test)]
+#[path = "converted_retirement_worker_fixtures.rs"]
+mod retirement_worker_fixtures;
+
+#[cfg(test)]
+#[path = "converted_practice_retirement_worker_fixtures.rs"]
+mod practice_retirement_worker_fixtures;

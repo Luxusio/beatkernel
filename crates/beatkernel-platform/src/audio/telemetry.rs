@@ -7,11 +7,18 @@
 //! observed so a joined worker panic remains visible without a new payload.
 
 use super::{
+    source_history_retirement_mailbox::{
+        SourceHistoryRetirementMailbox, SourceHistoryRetirementRequest,
+    },
+    source_playback_publication::SourcePlaybackPublication,
     AudioClockReadingQuality, AudioClockSnapshot, AudioStreamSnapshot, AudioStreamStatus,
-    StreamCounters,
+    SourcePlaybackSnapshot, StreamCounters,
 };
 use beatkernel::{
-    audio::{AudioCounters, RenderReport},
+    audio::{
+        AudioCounters, AudioError, InterpolatedTargetTime, OutputFrameBasis, RenderReport,
+        SourcePlaybackHistory,
+    },
     time::{ClockDomainId, ClockMappingQuality, ClockPoint, Duration, Timestamp},
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,6 +27,8 @@ pub(crate) struct Telemetry {
     version: AtomicU64,
     pub(crate) status: AtomicU64,
     values: [AtomicU64; 39],
+    source_playback: Option<SourcePlaybackPublication>,
+    source_retirement: Option<SourceHistoryRetirementMailbox>,
 }
 
 /// Observes one running deadline interval; Ready/prefill is not an interval.
@@ -43,23 +52,158 @@ impl Telemetry {
             version: AtomicU64::new(0),
             status: AtomicU64::new(status_code(AudioStreamStatus::Ready)),
             values: std::array::from_fn(|_| AtomicU64::new(0)),
+            source_playback: None,
+            source_retirement: None,
         }
     }
+    /// Cold opt-in allocation, before the native publisher starts.
+    pub(crate) fn with_source_history(history: &SourcePlaybackHistory) -> Result<Self, AudioError> {
+        Ok(Self {
+            source_playback: Some(SourcePlaybackPublication::new(history)?),
+            ..Self::new()
+        })
+    }
+    /// Cold opt-in to callback-owned retirement intent. This does not retire
+    /// history or establish native presentation authority.
+    pub(crate) fn with_source_history_and_retirement(
+        history: &SourcePlaybackHistory,
+        basis: OutputFrameBasis,
+    ) -> Result<Self, AudioError> {
+        let mailbox = SourceHistoryRetirementMailbox::new(basis, history)?;
+        Ok(Self {
+            source_retirement: Some(mailbox),
+            ..Self::with_source_history(history)?
+        })
+    }
+    /// Queues only a minimum present in a coherent original Source publication.
+    /// The returned revision describes intent, never callback application or ACK.
+    pub(crate) fn request_source_history_retirement(
+        &self,
+        expected_basis: OutputFrameBasis,
+        source_identity: (u32, u64, u64),
+        source_pin: u64,
+    ) -> Result<Option<u64>, AudioError> {
+        let mailbox = self
+            .source_retirement
+            .as_ref()
+            .ok_or(AudioError::InvalidCapacity)?;
+        mailbox.validate_identity(expected_basis, source_identity)?;
+        let publication = self
+            .source_playback
+            .as_ref()
+            .ok_or(AudioError::InvalidCapacity)?;
+        for _ in 0..3 {
+            let before = self.version.load(Ordering::SeqCst);
+            if !before.is_multiple_of(2) {
+                continue;
+            }
+            let contains = publication.contains_retirement_pin(source_identity, source_pin);
+            if self.version.load(Ordering::SeqCst) != before {
+                continue;
+            }
+            if !contains {
+                return Err(AudioError::InvalidFormat);
+            }
+            return mailbox.request(expected_basis, source_identity, source_pin);
+        }
+        Ok(None)
+    }
+    /// The callback may consume this intent; observation does not apply it.
+    pub(crate) fn source_retirement_request(&self) -> Option<SourceHistoryRetirementRequest> {
+        self.source_retirement.as_ref()?.latest()
+    }
     pub(crate) fn publish(&self, snapshot: AudioStreamSnapshot, version: &mut u64) {
-        self.status
-            .store(status_code(snapshot.status), Ordering::SeqCst);
+        self.publish_with_source_history(Some(snapshot), None, version);
+    }
+    pub(crate) fn publish_with_source_history(
+        &self,
+        snapshot: Option<AudioStreamSnapshot>,
+        history: Option<&SourcePlaybackHistory>,
+        version: &mut u64,
+    ) {
+        if let Some(snapshot) = snapshot {
+            self.status
+                .store(status_code(snapshot.status), Ordering::SeqCst);
+        }
+        if self.version.load(Ordering::SeqCst) == u64::MAX {
+            return;
+        }
         let Some(next) = version.checked_add(2) else {
             // Permanent unavailable marker instead of wrapping publication ABA.
             self.version.store(u64::MAX, Ordering::SeqCst);
             return;
         };
         self.version.store(next - 1, Ordering::SeqCst);
-        let encoded = encode_snapshot(snapshot);
-        for (destination, value) in self.values.iter().zip(encoded) {
-            destination.store(value, Ordering::SeqCst);
+        if let Some(snapshot) = snapshot {
+            let encoded = encode_snapshot(snapshot);
+            for (destination, value) in self.values.iter().zip(encoded) {
+                destination.store(value, Ordering::SeqCst);
+            }
+        }
+        if let Some(publication) = &self.source_playback {
+            publication.publish(history);
         }
         self.version.store(next, Ordering::SeqCst);
         *version = next;
+    }
+    /// Reads scalar and source facts within one bounded caller-owned revision.
+    /// Submission counts and clock metadata supply no presentation authority.
+    pub(crate) fn read_source_playback_at(
+        &self,
+        query: &InterpolatedTargetTime,
+        expected_source_rate: u32,
+        expected_initial_physical: u64,
+        expected_initial_playback: u64,
+    ) -> Option<SourcePlaybackSnapshot> {
+        self.read_source_playback_with(
+            query,
+            expected_source_rate,
+            expected_initial_physical,
+            expected_initial_playback,
+            |_| {},
+        )
+    }
+    fn read_source_playback_with(
+        &self,
+        query: &InterpolatedTargetTime,
+        expected_source_rate: u32,
+        expected_initial_physical: u64,
+        expected_initial_playback: u64,
+        mut before_recheck: impl FnMut(usize),
+    ) -> Option<SourcePlaybackSnapshot> {
+        let publication = self.source_playback.as_ref()?;
+        for attempt in 0..3 {
+            let before = self.version.load(Ordering::SeqCst);
+            if !before.is_multiple_of(2) {
+                continue;
+            }
+            let values = std::array::from_fn(|index| self.values[index].load(Ordering::SeqCst));
+            let selected = publication.select(
+                expected_source_rate,
+                expected_initial_physical,
+                expected_initial_playback,
+                |frame| {
+                    query
+                        .compare_source_time_frame(frame, expected_source_rate)
+                        .ok()
+                },
+            );
+            let selected =
+                selected.filter(|selected| valid_source_report(&values, selected.pulled_end_frame));
+            before_recheck(attempt);
+            if self.version.load(Ordering::SeqCst) == before {
+                let selected = selected?;
+                let mut snapshot = decode_snapshot(values);
+                snapshot.status = decode_status(self.status.load(Ordering::SeqCst));
+                return Some(SourcePlaybackSnapshot {
+                    snapshot,
+                    playback: selected.span,
+                    pulled_source_end: selected.pulled_end_frame,
+                    revision: before,
+                });
+            }
+        }
+        None
     }
     pub(crate) fn read(&self) -> AudioStreamSnapshot {
         for _ in 0..3 {
@@ -82,6 +226,26 @@ impl Telemetry {
             render: None,
         }
     }
+}
+
+// Opted source reads reject malformed report flags and extents without changing
+// the legacy scalar decoder or equating a report end with the latest pull.
+fn valid_source_report(values: &[u64; 39], pulled_end: u64) -> bool {
+    if [15, 21, 35, 36].into_iter().any(|index| values[index] > 1) {
+        return false;
+    }
+    if values[15] == 0 {
+        return true;
+    }
+    values[33] <= values[16]
+        && values[34] <= values[17]
+        && values[16]
+            .checked_add(values[17])
+            .is_some_and(|end| end <= pulled_end)
+        && values[33].checked_add(values[34]).is_some()
+        && usize::try_from(values[17]).is_ok()
+        && usize::try_from(values[34]).is_ok()
+        && (values[36] == 0 || values[37] <= pulled_end)
 }
 
 pub(crate) fn status_code(status: AudioStreamStatus) -> u64 {
@@ -241,3 +405,11 @@ fn decode_snapshot(values: [u64; 39]) -> AudioStreamSnapshot {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "telemetry/playback_fixtures.rs"]
+mod playback_fixtures;
+
+#[cfg(test)]
+#[path = "telemetry/source_history_retirement_fixtures.rs"]
+mod source_history_retirement_fixtures;

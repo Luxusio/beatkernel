@@ -10,7 +10,7 @@ use crate::audio::{
     *,
 };
 use beatkernel::{
-    audio::{ChannelMatrix, FormatConverter, Mixer},
+    audio::{ChannelMatrix, FormatConverter, InterpolatedTargetTime, Mixer},
     time::{ClockMappingQuality, ClockPoint, Duration, Timestamp},
 };
 use std::{
@@ -208,7 +208,30 @@ impl WasapiBackend {
         clock: QpcClock,
         options: WasapiOptions,
     ) -> Result<WasapiStream, beatkernel::audio::MixerOpenFailure<AudioPlatformError>> {
-        self.open_impl(request, mixer, clock, options, None)
+        self.open_impl(request, mixer, clock, options, None, None)
+    }
+    /// Opens with Source history sized from the validated native buffer geometry.
+    pub fn open_with_source_history(
+        &self,
+        request: AudioStreamRequest,
+        mixer: Mixer,
+        clock: QpcClock,
+        options: WasapiOptions,
+        headroom: usize,
+    ) -> Result<WasapiStream, AudioPlatformError> {
+        self.open_with_source_history_recoverable(request, mixer, clock, options, headroom)
+            .map_err(|failure| failure.into_parts().0)
+    }
+    /// Retains recoverable software ownership while preparing native-sized history.
+    pub fn open_with_source_history_recoverable(
+        &self,
+        request: AudioStreamRequest,
+        mixer: Mixer,
+        clock: QpcClock,
+        options: WasapiOptions,
+        headroom: usize,
+    ) -> Result<WasapiStream, beatkernel::audio::MixerOpenFailure<AudioPlatformError>> {
+        self.open_impl(request, mixer, clock, options, None, Some(headroom))
     }
     /// Opens with an explicit channel matrix at the unchanged source/client rate.
     /// Original mixer-frame reports, pause/end boundaries and recovery are retained.
@@ -220,7 +243,7 @@ impl WasapiBackend {
         options: WasapiOptions,
         matrix: ChannelMatrix,
     ) -> Result<WasapiStream, beatkernel::audio::MixerOpenFailure<AudioPlatformError>> {
-        self.open_impl(request, mixer, clock, options, Some(matrix))
+        self.open_impl(request, mixer, clock, options, Some(matrix), None)
     }
     fn open_impl(
         &self,
@@ -229,17 +252,27 @@ impl WasapiBackend {
         clock: QpcClock,
         options: WasapiOptions,
         matrix: Option<ChannelMatrix>,
+        history_headroom: Option<usize>,
     ) -> Result<WasapiStream, beatkernel::audio::MixerOpenFailure<AudioPlatformError>> {
         let basis = mixer.output_frame_basis();
         if let Err(error) = validate_open_with_matrix(&request, &mixer, options, matrix.as_ref()) {
             return Err(beatkernel::audio::MixerOpenFailure::new(error, Some(mixer)));
         }
-        let control = Arc::new(Control {
-            request: AtomicU8::new(0),
-            telemetry: Telemetry::new(),
-            cadence: crate::audio::cadence::Capture::new(),
-        });
-        let worker_control = Arc::clone(&control);
+        // Existing history and legacy telemetry retain allocation refusal before
+        // worker launch. New opted history waits for actual native geometry.
+        let telemetry = if history_headroom.is_none() || mixer.source_playback_history().is_some() {
+            match source_telemetry(&mixer) {
+                Ok(telemetry) => Some(telemetry),
+                Err(_) => {
+                    return Err(beatkernel::audio::MixerOpenFailure::new(
+                        AudioPlatformError::Capacity,
+                        Some(mixer),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
         let (opened_tx, opened_rx) = mpsc::sync_channel(1);
         let (started_tx, started_rx) = mpsc::sync_channel(1);
         let worker =
@@ -247,15 +280,28 @@ impl WasapiBackend {
                 let mut owned = Some(mixer);
                 // Setup result owns all partial COM/native resources locally;
                 // an error has dropped them before the failure is sent.
-                let setup = Worker::new(request, &mut owned, clock, options, matrix);
-                let mut worker = match setup {
-                    Ok(worker) => worker,
+                let setup = Worker::new(
+                    request,
+                    &mut owned,
+                    clock,
+                    options,
+                    matrix,
+                    telemetry,
+                    history_headroom,
+                );
+                let (mut worker, telemetry) = match setup {
+                    Ok(prepared) => prepared,
                     Err(error) => {
                         let _ = opened_tx.send(Err(error));
                         return owned;
                     }
                 };
-                worker.publish(&worker_control.telemetry);
+                let control = Arc::new(Control {
+                    request: AtomicU8::new(0),
+                    telemetry,
+                    cadence: crate::audio::cadence::Capture::new(),
+                });
+                worker.publish(&control.telemetry);
                 let duplicate = match worker.control_event.duplicate() {
                     Ok(event) => event,
                     Err(error) => {
@@ -266,12 +312,16 @@ impl WasapiBackend {
                     }
                 };
                 if opened_tx
-                    .send(Ok((worker.configuration.clone(), duplicate)))
+                    .send(Ok((
+                        worker.configuration.clone(),
+                        duplicate,
+                        Arc::clone(&control),
+                    )))
                     .is_err()
                 {
                     return worker.mixer.take();
                 }
-                worker.run(&worker_control, &started_tx);
+                worker.run(&control, &started_tx);
                 worker.mixer.take()
             })
             .map_err(|failure| {
@@ -279,7 +329,7 @@ impl WasapiBackend {
                 beatkernel::audio::MixerOpenFailure::new(AudioPlatformError::WorkerFailure, mixer)
             })?;
         match opened_rx.recv() {
-            Ok(Ok((configuration, wake))) => Ok(WasapiStream {
+            Ok(Ok((configuration, wake, control))) => Ok(WasapiStream {
                 configuration,
                 basis,
                 options,
@@ -368,9 +418,55 @@ impl WasapiStream {
     pub const fn frame_basis(&self) -> beatkernel::audio::OutputFrameBasis {
         self.basis
     }
+    /// Queues an original Source-history minimum for the owning render worker.
+    /// A returned revision identifies intent, not retirement or native ACK.
+    pub fn request_source_history_retirement(
+        &self,
+        expected_basis: beatkernel::audio::OutputFrameBasis,
+        source_identity: (u32, u64, u64),
+        source_pin: u64,
+    ) -> Result<Option<u64>, AudioPlatformError> {
+        if expected_basis != self.basis {
+            return Err(AudioPlatformError::InvalidRequest);
+        }
+        if self.retired
+            || self.worker.is_none()
+            || self.control.request.load(Ordering::Acquire) == 2
+        {
+            return Err(AudioPlatformError::WorkerFailure);
+        }
+        match self.snapshot().status {
+            AudioStreamStatus::Ready | AudioStreamStatus::Running => {}
+            AudioStreamStatus::Failed { hresult } => return Err(native(hresult)),
+            _ => return Err(AudioPlatformError::WorkerFailure),
+        }
+        self.control
+            .telemetry
+            .request_source_history_retirement(expected_basis, source_identity, source_pin)
+            .map_err(|_| AudioPlatformError::InvalidRequest)
+    }
     /// Unmodified explicit worker scheduling/wake options.
     pub const fn options(&self) -> WasapiOptions {
         self.options
+    }
+    /// Reads generated source facts and scalar telemetry in one publication.
+    ///
+    /// Expected source identity belongs to the retained Mixer history, which
+    /// may precede this stream's frame basis after reopening. Native epoch,
+    /// counter, freshness and input-prefix qualification remain with the caller.
+    pub fn source_playback_at(
+        &self,
+        query: &InterpolatedTargetTime,
+        expected_source_rate: u32,
+        expected_initial_physical: u64,
+        expected_initial_playback: u64,
+    ) -> Option<SourcePlaybackSnapshot> {
+        self.control.telemetry.read_source_playback_at(
+            query,
+            expected_source_rate,
+            expected_initial_physical,
+            expected_initial_playback,
+        )
     }
 }
 
@@ -920,6 +1016,7 @@ struct Worker {
     snapshot: AudioStreamSnapshot,
     version: u64,
     last_qpc: Option<u64>,
+    completed_source_retirement: u64,
     _mmcss: Option<Mmcss>,
     // Declared last: interfaces/registration drop before CoUninitialize.
     _apartment: Apartment,
@@ -932,7 +1029,9 @@ impl Worker {
         clock: QpcClock,
         options: WasapiOptions,
         matrix: Option<ChannelMatrix>,
-    ) -> Result<Self, AudioPlatformError> {
+        telemetry: Option<Telemetry>,
+        history_headroom: Option<usize>,
+    ) -> Result<(Self, Telemetry), AudioPlatformError> {
         let mixer_config = mixer
             .as_ref()
             .ok_or(AudioPlatformError::RecoveryUnavailable)?
@@ -1139,6 +1238,27 @@ impl Worker {
             sizing_adjusted: adjusted,
             requested: request,
         };
+        // Cold history captures the original Mixer cursors before prefill. Keep
+        // software ownership in the recoverable slot through every allocation.
+        if let Some(headroom) = history_headroom {
+            crate::audio::source_playback_publication::prepare_native_source_history(
+                mixer
+                    .as_mut()
+                    .ok_or(AudioPlatformError::RecoveryUnavailable)?,
+                buffer_frames,
+                headroom,
+            )
+            .map_err(|_| AudioPlatformError::Capacity)?;
+        }
+        let telemetry = match telemetry {
+            Some(telemetry) => telemetry,
+            None => source_telemetry(
+                mixer
+                    .as_ref()
+                    .ok_or(AudioPlatformError::RecoveryUnavailable)?,
+            )
+            .map_err(|_| AudioPlatformError::Capacity)?,
+        };
         let mut worker = Self {
             client,
             renderer,
@@ -1161,15 +1281,16 @@ impl Worker {
             },
             version: 0,
             last_qpc: None,
+            completed_source_retirement: 0,
             _mmcss: mmcss,
             _apartment: apartment,
         };
-        if let Err(error) = worker.fill(false, None) {
+        if let Err(error) = worker.fill(false, None, &telemetry) {
             *mixer = worker.mixer.take();
             drop(worker);
             return Err(native(error));
         }
-        Ok(worker)
+        Ok((worker, telemetry))
     }
 
     fn run(&mut self, control: &Control, started: &mpsc::SyncSender<Result<(), i32>>) {
@@ -1232,7 +1353,7 @@ impl Worker {
                 break;
             }
             if should_fill {
-                if let Err(code) = self.fill(true, Some(&control.cadence)) {
+                if let Err(code) = self.fill(true, Some(&control.cadence), &control.telemetry) {
                     self.fail(code);
                     break;
                 }
@@ -1273,6 +1394,7 @@ impl Worker {
         &mut self,
         running: bool,
         cadence: Option<&crate::audio::cadence::Capture>,
+        telemetry: &Telemetry,
     ) -> Result<(), i32> {
         let mixer = self.mixer.as_mut().ok_or(E_INVALIDARG_CODE)?;
         let exclusive = self.configuration.requested.mode() == AudioStreamMode::Exclusive;
@@ -1318,16 +1440,25 @@ impl Worker {
             let render = if pointer.is_null() {
                 Err(E_INVALIDARG_CODE)
             } else {
+                let retirement = match telemetry.source_retirement_request() {
+                    Some(request) => crate::audio::source_history_retirement_mailbox::apply_source_history_retirement(
+                        mixer, request, &mut self.completed_source_retirement,
+                    ).map(|_| ()).map_err(|_| E_INVALIDARG_CODE),
+                    None => Ok(()),
+                };
                 // Direct render-entry QPC, never the device presentation clock.
                 // Ready prefill has no capture; failure is diagnostic only.
                 let render_start = cadence
                     .and_then(|_| self.clock.sample_realtime())
                     .map(|receipt| receipt.normalized.timestamp);
-                match crate::audio::channel_remix::render(
-                    mixer,
-                    &mut self.remix,
-                    &mut self.scratch[..count],
-                ) {
+                match retirement.and_then(|_| {
+                    crate::audio::channel_remix::render(
+                        mixer,
+                        &mut self.remix,
+                        &mut self.scratch[..count],
+                    )
+                    .map_err(|_| E_INVALIDARG_CODE)
+                }) {
                     Ok(report) => {
                         if let Some(cadence) = cadence {
                             match render_start {
@@ -1426,7 +1557,11 @@ impl Worker {
     }
 
     fn publish(&mut self, telemetry: &Telemetry) {
-        telemetry.publish(self.snapshot, &mut self.version);
+        telemetry.publish_with_source_history(
+            Some(self.snapshot),
+            self.mixer.as_ref().and_then(Mixer::source_playback_history),
+            &mut self.version,
+        );
     }
 }
 
@@ -1471,8 +1606,24 @@ struct Control {
     cadence: crate::audio::cadence::Capture,
 }
 
+// Existing history is allocated before worker launch; newly opted history waits
+// for validated native geometry before prefill. Both retain recoverable Mixer
+// ownership when allocation fails.
+fn source_telemetry(mixer: &Mixer) -> Result<Telemetry, beatkernel::audio::AudioError> {
+    match mixer.source_playback_history() {
+        Some(history) => {
+            Telemetry::with_source_history_and_retirement(history, mixer.output_frame_basis())
+        }
+        None => Ok(Telemetry::new()),
+    }
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "audio/source_history_retirement_fixtures.rs"]
+mod source_history_retirement_fixtures;
 
 impl beatkernel::audio::StoppedMixerSource for WasapiStream {
     type Error = AudioPlatformError;
@@ -1487,3 +1638,7 @@ impl beatkernel::audio::StoppedMixerSource for WasapiStream {
 #[cfg(test)]
 #[path = "audio/open_failure_fixtures.rs"]
 mod open_failure_fixtures;
+
+#[cfg(test)]
+#[path = "audio/source_playback_fixtures.rs"]
+mod source_playback_fixtures;

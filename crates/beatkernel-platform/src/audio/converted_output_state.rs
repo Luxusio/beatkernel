@@ -1,8 +1,9 @@
 //! Complete converted software ownership and positively unsubmitted target PCM.
 use super::DeviceFormat;
 use beatkernel::audio::{
-    AudioError, ChannelMatrix, ConvertedMixer, ConvertedOutputState, ConvertedRenderReport, Mixer,
-    MixerOpenFailure, RenderReport, ResampleQuality, TargetBoundary, TargetFrameBasis,
+    AudioError, ChannelMatrix, ConvertedMixer, ConvertedOutputState, ConvertedPhaseHistory,
+    ConvertedRenderReport, Mixer, MixerOpenFailure, RenderReport, ResampleQuality, TargetBoundary,
+    TargetFrameBasis, TargetTime,
 };
 
 /// Persisted mapped boundaries; latest/held rendering cannot erase prior evidence.
@@ -30,6 +31,7 @@ pub struct ConvertedNativeOutputState {
     max_frames: usize,
     report: Option<ConvertedRenderReport>,
     admitted: usize,
+    admitted_target_time: Option<TargetTime>,
     boundaries: ConvertedBoundaryFacts,
     last_real_source: Option<RenderReport>,
 }
@@ -56,6 +58,7 @@ impl ConvertedNativeOutputState {
             max_frames,
             report: None,
             admitted: 0,
+            admitted_target_time: None,
             boundaries,
             last_real_source: None,
         })
@@ -85,6 +88,7 @@ impl ConvertedNativeOutputState {
                     max_frames,
                     report: None,
                     admitted: 0,
+                    admitted_target_time: None,
                     boundaries,
                     last_real_source: None,
                 })
@@ -99,6 +103,113 @@ impl ConvertedNativeOutputState {
     /// Complete conversion facts; mutable subset extraction is unavailable.
     pub fn converter_owner(&self) -> &ConvertedMixer {
         &self.owner
+    }
+    /// Cold opt-in to bounded generated history before any target generation.
+    /// Generated correspondence proves neither native submission nor presentation.
+    pub fn enable_phase_history(&mut self, capacity: usize) -> Result<(), AudioError> {
+        self.owner.enable_phase_history(capacity)
+    }
+    /// Cold-enable bounded actual Mixer source playback adoption history.
+    pub fn enable_source_playback_history(&mut self, capacity: usize) -> Result<(), AudioError> {
+        self.owner.enable_source_playback_history(capacity)
+    }
+
+    /// Generated correspondence retained with the complete conversion owner.
+    pub fn phase_history(&self) -> Option<&ConvertedPhaseHistory> {
+        self.owner.phase_history()
+    }
+    /// Original queued practice references, without consuming or projecting them.
+    pub(crate) fn practice_history_retention_pins(&self) -> (Option<u64>, Option<TargetTime>) {
+        self.owner.mixer().practice_history_retention_pins()
+    }
+    /// Retires qualified generated history without discarding a pending block's
+    /// original interpretation. All external live consumers must also be pinned
+    /// by the caller; this operation grants no native admission or acknowledgment.
+    pub(crate) fn retire_phase_history_before(
+        &mut self,
+        pin: TargetTime,
+    ) -> Result<usize, AudioError> {
+        self.validate_phase_retirement(pin)?;
+        self.owner.retire_phase_history_before(pin)
+    }
+    fn validate_phase_retirement(&self, pin: TargetTime) -> Result<(), AudioError> {
+        let history = self
+            .owner
+            .phase_history()
+            .ok_or(AudioError::InvalidCapacity)?;
+        if let Some(report) = self.pending_report() {
+            let start = report.target_start_time;
+            if pin
+                .seconds()
+                .cmp(&start.seconds())
+                .then_with(|| {
+                    (u128::from(pin.numerator()) * u128::from(start.denominator()))
+                        .cmp(&(u128::from(start.numerator()) * u128::from(pin.denominator())))
+                })
+                .is_gt()
+            {
+                return Err(AudioError::InvalidFormat);
+            }
+        }
+        if let Some(start) = self.practice_history_retention_pins().1 {
+            if pin
+                .seconds()
+                .cmp(&start.seconds())
+                .then_with(|| {
+                    (u128::from(pin.numerator()) * u128::from(start.denominator()))
+                        .cmp(&(u128::from(start.numerator()) * u128::from(pin.denominator())))
+                })
+                .is_gt()
+            {
+                return Err(AudioError::InvalidFormat);
+            }
+        }
+        history.validate_retirement_before(pin)
+    }
+    /// Retires qualified physical source history on the same complete owner.
+    /// The converter's next sampling floor remains protected even after full
+    /// admission because cached output can still refer to earlier source frames.
+    /// A partially admitted block protects its original source sampling floor
+    /// until its entire PCM is admitted, including cached and held output.
+    /// The caller remains responsible for every external live consumer's pin.
+    pub(crate) fn retire_source_playback_before(&mut self, pin: u64) -> Result<usize, AudioError> {
+        self.validate_source_retirement(pin)?;
+        self.owner.retire_source_playback_before(pin)
+    }
+    fn validate_source_retirement(&self, pin: u64) -> Result<(), AudioError> {
+        let history = self
+            .owner
+            .source_playback_history()
+            .ok_or(AudioError::InvalidCapacity)?;
+        if pin > self.owner.source_position().frame
+            || self
+                .pending_report()
+                .is_some_and(|report| pin > report.source_start_position.frame)
+            || self
+                .practice_history_retention_pins()
+                .0
+                .is_some_and(|start| pin > start)
+        {
+            return Err(AudioError::InvalidFormat);
+        }
+        history.validate_retirement_before(pin)
+    }
+    /// Retires both histories only after their ranges, revision increments and
+    /// internal PCM/cache references have been checked without mutation.
+    /// Returns the source and phase removal counts in that order. The caller
+    /// must also qualify both pins against every external live consumer.
+    pub(crate) fn retire_histories_before(
+        &mut self,
+        source_pin: u64,
+        target_pin: TargetTime,
+    ) -> Result<(usize, usize), AudioError> {
+        self.validate_source_retirement(source_pin)?;
+        self.validate_phase_retirement(target_pin)?;
+        // Exclusive ownership prevents intervening changes. Each retirement
+        // modifies only its own history, so the other validation stays valid.
+        let source_removed = self.owner.retire_source_playback_before(source_pin)?;
+        let phase_removed = self.owner.retire_phase_history_before(target_pin)?;
+        Ok((source_removed, phase_removed))
     }
     /// Actual target encoding, channels and rate.
     pub const fn format(&self) -> DeviceFormat {
@@ -130,6 +241,12 @@ impl ConvertedNativeOutputState {
     /// Positively admitted prefix within the retained block.
     pub const fn admitted_frames(&self) -> usize {
         self.admitted
+    }
+    /// Exact endpoint of the last positively admitted target prefix.
+    /// This survives software owner moves but does not authenticate a native
+    /// stream epoch or actual presentation. Generation alone leaves it absent.
+    pub const fn admitted_target_time(&self) -> Option<TargetTime> {
+        self.admitted_target_time
     }
     /// Exact pending interleaved target suffix.
     pub fn pending_samples(&self) -> &[f32] {
@@ -299,7 +416,17 @@ impl ConvertedNativeOutputState {
         if frames == 0 || frames > self.pending_frames() {
             return Err(AudioError::InvalidBuffer);
         }
-        self.admitted += frames;
+        let admitted = self
+            .admitted
+            .checked_add(frames)
+            .ok_or(AudioError::Overflow)?;
+        let report = self.report.expect("pending report");
+        let admitted_target_time = report.target_start_time.checked_add_frames(
+            u64::try_from(admitted).map_err(|_| AudioError::Overflow)?,
+            report.target_rate,
+        )?;
+        self.admitted = admitted;
+        self.admitted_target_time = Some(admitted_target_time);
         Ok(())
     }
 }
@@ -327,3 +454,13 @@ fn storage(format: DeviceFormat, frames: usize) -> Result<Vec<f32>, AudioError> 
 #[cfg(test)]
 #[path = "converted_output_state_fixtures.rs"]
 mod fixtures;
+#[cfg(test)]
+#[path = "converted_output_retirement_fixtures.rs"]
+mod retirement_fixtures;
+#[cfg(test)]
+#[path = "converted_paired_retirement_fixtures.rs"]
+mod paired_retirement_fixtures;
+
+#[cfg(test)]
+#[path = "converted_practice_retention_fixtures.rs"]
+mod practice_retention_fixtures;

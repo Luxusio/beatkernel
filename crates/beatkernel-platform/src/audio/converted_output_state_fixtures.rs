@@ -536,3 +536,277 @@ fn held_partial_prefix_and_cold_failures_preserve_actual_generation_bytes_phase_
     assert_eq!(state.converter_owner().source_position(), phase);
     assert_eq!(state.mixer().counters(), counters);
 }
+
+#[test]
+fn exact_admission_frontier_requires_a_positive_prefix_and_survives_full_blocks() {
+    let (_producer, mixer) = rig(44_100);
+    let mut state = owner(mixer, 48_000, 8);
+    assert!(state.phase_history().is_none());
+    assert_eq!(state.admitted_target_time(), None);
+    state.enable_phase_history(4).unwrap();
+    assert!(state.phase_history().unwrap().is_empty());
+    let (report, calls) = count_heap_calls(|| state.render_pending(4));
+    let report = report.unwrap();
+    assert_eq!(calls, 0);
+    assert_eq!(state.admitted_target_time(), None);
+    assert_eq!(
+        state.phase_history().unwrap().end_time(),
+        report.target_end_time
+    );
+    let (admitted, calls) = count_heap_calls(|| state.admit(1));
+    admitted.unwrap();
+    assert_eq!(calls, 0);
+    assert_eq!(
+        state.admitted_target_time(),
+        Some(TargetTime::new(0, 1, 48_000).unwrap())
+    );
+    state.admit(3).unwrap();
+    let full = TargetTime::new(0, 1, 12_000).unwrap();
+    assert_eq!(state.admitted_target_time(), Some(full));
+    assert_eq!(state.pending_report(), None);
+    assert!(state.pending_samples().is_empty());
+    state.render_pending(2).unwrap();
+    assert_eq!(state.admitted_frames(), 0);
+    assert_eq!(state.admitted_target_time(), Some(full));
+    state.admit(1).unwrap();
+    assert_eq!(
+        state.admitted_target_time(),
+        Some(TargetTime::new(0, 1, 9_600).unwrap())
+    );
+}
+
+#[test]
+fn refused_prefixes_preserve_exact_frontier_generated_pcm_and_history() {
+    for positively_admitted in [false, true] {
+        let (_producer, mixer) = rig(44_100);
+        let mut state = owner(mixer, 48_000, 8);
+        state.enable_phase_history(4).unwrap();
+        state.render_pending(4).unwrap();
+        if positively_admitted {
+            state.admit(1).unwrap();
+        }
+        let frontier = state.admitted_target_time();
+        let pcm = state.pending_samples().to_vec();
+        let report = state.pending_report();
+        let basis = state.target_frame_basis();
+        let source = state.converter_owner().source_position();
+        let counters = state.mixer().counters();
+        let span = state.phase_history().unwrap().span(0).unwrap().to_words();
+        let end = state.phase_history().unwrap().end_time();
+        let admitted = state.admitted_frames();
+        for count in [0, state.pending_frames() + 1, usize::MAX] {
+            let (refused, calls) = count_heap_calls(|| state.admit(count));
+            assert_eq!(refused, Err(AudioError::InvalidBuffer));
+            assert_eq!(calls, 0);
+            assert_eq!(state.admitted_target_time(), frontier);
+            assert_eq!(state.pending_samples(), pcm);
+            assert_eq!(state.pending_report(), report);
+            assert_eq!(state.target_frame_basis(), basis);
+            assert_eq!(state.converter_owner().source_position(), source);
+            assert_eq!(state.mixer().counters(), counters);
+            assert_eq!(state.admitted_frames(), admitted);
+            assert_eq!(state.phase_history().unwrap().end_time(), end);
+            assert_eq!(
+                state.phase_history().unwrap().span(0).unwrap().to_words(),
+                span
+            );
+        }
+    }
+}
+
+#[test]
+fn held_retarget_prefix_uses_its_actual_report_grid_and_complete_move_retains_frontier() {
+    let (_producer, mixer) = rig(44_100);
+    let mut state = owner(mixer, 48_000, 8);
+    state.enable_phase_history(4).unwrap();
+    state.render_pending(4).unwrap();
+    state.admit(4).unwrap();
+    let frontier = TargetTime::new(0, 1, 12_000).unwrap();
+    let phase = state.converter_owner().source_position();
+    let counters = state.mixer().counters();
+    state.reconfigure(device(44_100), matrix(), 8).unwrap();
+    assert_eq!(state.admitted_target_time(), Some(frontier));
+    let (held, calls) = count_heap_calls(|| state.render_held_pending(2));
+    let held = held.unwrap();
+    assert_eq!(calls, 0);
+    assert_eq!(held.state, ConvertedOutputState::Held);
+    assert_eq!(held.target_start_time, frontier);
+    assert_eq!(held.target_rate, 44_100);
+    assert_eq!(state.admitted_target_time(), Some(frontier));
+    assert_eq!(state.converter_owner().source_position(), phase);
+    assert_eq!(state.mixer().counters(), counters);
+    let (admitted, calls) = count_heap_calls(|| state.admit(1));
+    admitted.unwrap();
+    assert_eq!(calls, 0);
+    let prefix = TargetTime::new(0, 187, 1_764_000).unwrap();
+    assert_eq!(state.admitted_target_time(), Some(prefix));
+    let words = state.phase_history().unwrap().span(1).unwrap().to_words();
+    let mut moved = state;
+    assert_eq!(moved.admitted_target_time(), Some(prefix));
+    assert_eq!(moved.pending_report(), Some(held));
+    assert_eq!(moved.pending_samples(), [0.0]);
+    assert_eq!(
+        moved.phase_history().unwrap().span(1).unwrap().to_words(),
+        words
+    );
+    moved.reconfigure(device(44_100), matrix(), 2).unwrap();
+    assert_eq!(moved.admitted_target_time(), Some(prefix));
+    moved.admit(1).unwrap();
+    assert_eq!(
+        moved.admitted_target_time(),
+        Some(TargetTime::new(0, 227, 1_764_000).unwrap())
+    );
+    assert_eq!(moved.converter_owner().source_position(), phase);
+    assert_eq!(moved.mixer().counters(), counters);
+}
+
+#[test]
+fn wrapping_generated_converter_retains_history_but_fabricates_no_admission() {
+    let (_producer, mixer) = rig(44_100);
+    let mut converted = ConvertedMixer::new(
+        mixer,
+        device(48_000).pcm(),
+        matrix(),
+        ResampleQuality::Linear,
+        8,
+    )
+    .unwrap_or_else(|_| panic!("valid converter"));
+    converted.enable_phase_history(4).unwrap();
+    let mut pcm = [0.0; 4];
+    let report = converted.render(&mut pcm).unwrap();
+    let words = converted
+        .phase_history()
+        .unwrap()
+        .span(0)
+        .unwrap()
+        .to_words();
+    let source = converted.source_position();
+    let mut state = ConvertedNativeOutputState::from_converted(converted, device(48_000), 8)
+        .unwrap_or_else(|_| panic!("valid complete-state wrapping"));
+    assert_eq!(state.admitted_target_time(), None);
+    assert_eq!(
+        state.phase_history().unwrap().end_time(),
+        report.target_end_time
+    );
+    assert_eq!(
+        state.phase_history().unwrap().span(0).unwrap().to_words(),
+        words
+    );
+    assert_eq!(state.converter_owner().source_position(), source);
+    assert_eq!(state.admit(1), Err(AudioError::InvalidBuffer));
+    assert_eq!(state.admitted_target_time(), None);
+    state.render_held_pending(2).unwrap();
+    assert_eq!(state.admitted_target_time(), None);
+    state.admit(1).unwrap();
+    assert_eq!(
+        state.admitted_target_time(),
+        Some(TargetTime::new(0, 1, 9_600).unwrap())
+    );
+}
+
+#[test]
+fn cold_phase_history_enable_refusals_preserve_unused_owner_and_allow_retry() {
+    let (_producer, mixer) = rig(44_100);
+    let mut state = owner(mixer, 48_000, 8);
+    let basis = state.target_frame_basis();
+    let source = state.converter_owner().source_position();
+    let counters = state.mixer().counters();
+    assert_eq!(
+        state.enable_phase_history(0),
+        Err(AudioError::InvalidCapacity)
+    );
+    assert_eq!(
+        fail_allocation(0, || state.enable_phase_history(4)),
+        Err(AudioError::AllocationFailed)
+    );
+    assert!(state.phase_history().is_none());
+    assert_eq!(state.admitted_target_time(), None);
+    assert_eq!(state.target_frame_basis(), basis);
+    assert_eq!(state.converter_owner().source_position(), source);
+    assert_eq!(state.mixer().counters(), counters);
+    assert_eq!(state.pending_report(), None);
+    state.enable_phase_history(4).unwrap();
+    assert_eq!(
+        state.enable_phase_history(8),
+        Err(AudioError::InvalidCapacity)
+    );
+    assert_eq!(state.phase_history().unwrap().capacity(), 4);
+    state.render_pending(4).unwrap();
+    assert_eq!(state.mixer().counters().commands_consumed, 1);
+}
+
+#[test]
+fn exhausted_history_refuses_transition_before_source_pcm_or_admission_mutation() {
+    for initially_held in [false, true] {
+        let (_producer, mixer) = rig(44_100);
+        let mut state = owner(mixer, 48_000, 8);
+        state.enable_phase_history(1).unwrap();
+        if initially_held {
+            state.render_held_pending(4).unwrap();
+        } else {
+            state.render_pending(4).unwrap();
+        }
+        state.admit(4).unwrap();
+        let pcm = state.samples.clone();
+        let report = state.report;
+        let basis = state.target_frame_basis();
+        let source = state.converter_owner().source_position();
+        let counters = state.mixer().counters();
+        let frontier = state.admitted_target_time();
+        let end = state.phase_history().unwrap().end_time();
+        let words = state.phase_history().unwrap().span(0).unwrap().to_words();
+        let (refused, calls) = count_heap_calls(|| {
+            if initially_held {
+                state.render_pending(2)
+            } else {
+                state.render_held_pending(2)
+            }
+        });
+        assert_eq!(refused, Err(AudioError::RenderCapacity));
+        assert_eq!(calls, 0);
+        assert_eq!(state.samples, pcm);
+        assert_eq!(state.report, report);
+        assert_eq!(state.pending_report(), None);
+        assert_eq!(state.admitted_frames(), 4);
+        assert_eq!(state.target_frame_basis(), basis);
+        assert_eq!(state.converter_owner().source_position(), source);
+        assert_eq!(state.mixer().counters(), counters);
+        assert_eq!(state.admitted_target_time(), frontier);
+        assert_eq!(state.phase_history().unwrap().end_time(), end);
+        assert_eq!(
+            state.phase_history().unwrap().span(0).unwrap().to_words(),
+            words
+        );
+    }
+}
+
+#[test]
+fn disabled_history_path_keeps_exact_admission_without_hot_allocation_or_late_enabling() {
+    for held in [false, true] {
+        let (_producer, mixer) = rig(44_100);
+        let mut state = owner(mixer, 48_000, 8);
+        let (generated, calls) = count_heap_calls(|| {
+            if held {
+                state.render_held_pending(4)
+            } else {
+                state.render_pending(4)
+            }
+        });
+        generated.unwrap();
+        assert_eq!(calls, 0);
+        assert!(state.phase_history().is_none());
+        assert_eq!(state.admitted_target_time(), None);
+        assert_eq!(
+            state.enable_phase_history(4),
+            Err(AudioError::InvalidCapacity)
+        );
+        let (admitted, calls) = count_heap_calls(|| state.admit(1));
+        admitted.unwrap();
+        assert_eq!(calls, 0);
+        assert!(state.phase_history().is_none());
+        assert_eq!(
+            state.admitted_target_time(),
+            Some(TargetTime::new(0, 1, 48_000).unwrap())
+        );
+    }
+}

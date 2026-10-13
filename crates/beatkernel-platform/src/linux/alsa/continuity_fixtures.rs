@@ -6,9 +6,9 @@ use beatkernel::audio::{
 };
 use std::cell::Cell;
 
-const PCM: [f32; 8] = [0.125, -0.25, 0.375, -0.5, 0.625, -0.75, 0.875, -1.0];
+pub(super) const PCM: [f32; 8] = [0.125, -0.25, 0.375, -0.5, 0.625, -0.75, 0.875, -1.0];
 
-fn rig(period: usize) -> (CommandProducer, NativeOutputState, AlsaAppliedConfig) {
+pub(super) fn rig(period: usize) -> (CommandProducer, NativeOutputState, AlsaAppliedConfig) {
     let format = AudioFormat::new(8, 1).unwrap();
     let limits = PcmLimits::new(128, 512, 1).unwrap();
     let mut bank = SampleBank::new(format, limits).unwrap();

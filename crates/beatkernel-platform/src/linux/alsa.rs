@@ -6,7 +6,8 @@ mod converted;
 mod converted_telemetry;
 mod timing;
 pub use cadence::{RenderCadence as AlsaRenderCadence, RenderCadenceError as AlsaCadenceError};
-pub use converted::ConvertedAlsaStream;
+pub use converted::{AlsaConvertedPlaybackSnapshot, ConvertedAlsaStream};
+pub use converted_telemetry::{ConvertedPhaseSnapshot, ConvertedPlaybackPhaseSnapshot};
 use timing::TimingShared;
 pub use timing::{AlsaNativeTimestamp, AlsaTimingSnapshot};
 
@@ -16,7 +17,10 @@ use crate::audio::{
     NativeOutputState, SampleEncoding, StreamCounters,
 };
 use beatkernel::{
-    audio::{AudioError, ChannelMatrix, Mixer, MixerOpenFailure, RenderReport},
+    audio::{
+        AudioError, ChannelMatrix, InterpolatedTargetTime, Mixer, MixerOpenFailure,
+        OutputFrameBasis, RenderReport, SourcePlaybackSpan,
+    },
     time::{ClockDomainId, ClockPoint, Timestamp},
 };
 use std::{
@@ -379,6 +383,8 @@ struct Shared {
     observed_valid: AtomicBool,
     timing: TimingShared,
     render_telemetry: Telemetry,
+    source_basis: Option<OutputFrameBasis>,
+    converted_phase_enabled: bool,
     cadence: cadence::Capture,
 }
 impl Shared {
@@ -398,7 +404,25 @@ impl Shared {
             observed_valid: AtomicBool::new(false),
             timing: TimingShared::new(),
             render_telemetry: Telemetry::new(),
+            source_basis: None,
+            converted_phase_enabled: false,
             cadence: cadence::Capture::new(),
+        }
+    }
+    fn with_source_history(state: &NativeOutputState) -> Result<Self, AudioError> {
+        let Some(history) = state.mixer().source_playback_history() else {
+            return Ok(Self::new());
+        };
+        Ok(Self {
+            render_telemetry: Telemetry::with_source_history(history)?,
+            source_basis: Some(state.output_frame_basis()),
+            ..Self::new()
+        })
+    }
+    fn with_converted_history(telemetry: &converted_telemetry::ConvertedTelemetry) -> Self {
+        Self {
+            converted_phase_enabled: telemetry.phase_enabled(),
+            ..Self::new()
         }
     }
 }
@@ -544,7 +568,15 @@ impl AlsaStream {
                 ));
             }
         }
-        let shared = Arc::new(Shared::new());
+        let shared = match Shared::with_source_history(&state) {
+            Ok(shared) => Arc::new(shared),
+            Err(error) => {
+                return Err(MixerOpenFailure::new_state(
+                    LinuxError::Mixer(error),
+                    Some(state),
+                ))
+            }
+        };
         let worker_shared = Arc::clone(&shared);
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker = launch_worker(NativeWorkerSpawner, state, move |mut state| {
@@ -699,6 +731,30 @@ impl AlsaStream {
     pub fn last_render_report(&self) -> Option<RenderReport> {
         self.shared.render_telemetry.read().render
     }
+    /// Reads actual generated playback and this stream's positive submission
+    /// prefix under one revision. Optional native timing grants no epoch,
+    /// freshness, presentation, or pause acknowledgment authority.
+    pub fn source_playback_at(
+        &self,
+        query: &InterpolatedTargetTime,
+        expected_hz: u32,
+        expected_initial_physical: u64,
+        expected_initial_playback: u64,
+    ) -> Option<AlsaSourcePlaybackSnapshot> {
+        let mut value = shared_source_playback_at(
+            &self.shared,
+            self.configuration.requested.monotonic_domain,
+            query,
+            expected_hz,
+            expected_initial_physical,
+            expected_initial_playback,
+        )?;
+        if self.shared.stop.load(Ordering::SeqCst) || self.shared.status.load(Ordering::SeqCst) != 1
+        {
+            value.timing = None;
+        }
+        Some(value)
+    }
     /// Separately coherent native status; unavailable before Start/after stop,
     /// during publication or after an unavailable/failed native query.
     /// Native PREPARED may yield raw fields with no played-frame estimate.
@@ -765,6 +821,99 @@ impl Drop for AlsaStream {
     fn drop(&mut self) {
         let _ = self.stop();
     }
+}
+
+/// Actual software generation/admission facts and optional same-revision ALSA timing.
+/// Native lifecycle, epoch, freshness and acquired-input qualification remain external.
+#[derive(Clone, Copy, Debug)]
+pub struct AlsaSourcePlaybackSnapshot {
+    /// Actual running/frozen source adoption interval.
+    pub playback: SourcePlaybackSpan,
+    /// Actual source generation frontier.
+    pub pulled_source_end: u64,
+    /// This stream's positive submitted absolute source frontier.
+    pub submitted_source_end: u64,
+    /// Last successful real render; failure can advance history without replacing it.
+    pub render: Option<RenderReport>,
+    /// Genuine native query, absent while waiting or after query refusal.
+    pub timing: Option<AlsaTimingSnapshot>,
+    /// Existing outer timing publication revision.
+    pub revision: u64,
+}
+fn shared_source_playback_at(
+    shared: &Shared,
+    domain: ClockDomainId,
+    query: &InterpolatedTargetTime,
+    hz: u32,
+    initial_physical: u64,
+    initial_playback: u64,
+) -> Option<AlsaSourcePlaybackSnapshot> {
+    shared_source_playback_with(
+        shared,
+        domain,
+        query,
+        hz,
+        initial_physical,
+        initial_playback,
+        |_| {},
+    )
+}
+fn shared_source_playback_with(
+    shared: &Shared,
+    domain: ClockDomainId,
+    query: &InterpolatedTargetTime,
+    hz: u32,
+    initial_physical: u64,
+    initial_playback: u64,
+    mut before_recheck: impl FnMut(usize),
+) -> Option<AlsaSourcePlaybackSnapshot> {
+    let basis = shared.source_basis?;
+    if hz != basis.sample_rate() {
+        return None;
+    }
+    for attempt in 0..3 {
+        let revision = shared.timing.sequence();
+        if revision & 1 != 0 {
+            continue;
+        }
+        let submitted = shared.submitted.load(Ordering::SeqCst);
+        let end = basis.start_physical_frame().checked_add(submitted);
+        let source = shared.render_telemetry.read_source_playback_at(
+            query,
+            hz,
+            initial_physical,
+            initial_playback,
+        );
+        let timing = shared.timing.read_unversioned(domain);
+        let selected = (|| {
+            let end = end?;
+            let source = source?;
+            if submitted == 0
+                || end > source.pulled_source_end
+                || query
+                    .compare_source_time_frame(basis.start_physical_frame(), hz)
+                    .ok()?
+                    == std::cmp::Ordering::Less
+                || query.compare_source_time_frame(end, hz).ok()? == std::cmp::Ordering::Greater
+                || timing.is_some_and(|timing| timing.submitted_frames != submitted)
+            {
+                return None;
+            }
+            Some(AlsaSourcePlaybackSnapshot {
+                playback: source.playback,
+                pulled_source_end: source.pulled_source_end,
+                submitted_source_end: end,
+                render: source.snapshot.render,
+                timing,
+                revision,
+            })
+        })();
+        before_recheck(attempt);
+        if shared.timing.sequence() == revision {
+            return selected;
+        }
+    }
+    None
 }
 
 struct TimingInvalidation<'a>(&'a TimingShared);
@@ -852,6 +1001,9 @@ impl PumpReport for beatkernel::audio::ConvertedRenderReport {
 }
 trait PumpOutput {
     type Report: PumpReport;
+    fn before_pending(&mut self) -> Result<(), AudioError> {
+        Ok(())
+    }
     fn render_pending(&mut self, frames: usize) -> Result<Self::Report, AudioError>;
     fn pending_frames(&self) -> usize;
     fn pending_samples(&self) -> &[f32];
@@ -890,17 +1042,25 @@ fn run_worker<P: PcmOperations, C: WorkerClock, E: PcmEncoder>(
         shared,
         clock,
         encoder,
-        |report, _, shared| {
-            shared.render_telemetry.publish(
-                AudioStreamSnapshot {
-                    telemetry_available: true,
-                    status: AudioStreamStatus::Running,
-                    counters: StreamCounters::default(),
-                    clock: None,
-                    render: Some(report),
-                },
-                &mut version,
-            )
+        |report, state, shared| {
+            let snapshot = report.map(|report| AudioStreamSnapshot {
+                telemetry_available: true,
+                status: AudioStreamStatus::Running,
+                counters: StreamCounters::default(),
+                clock: None,
+                render: Some(report),
+            });
+            if shared.source_basis.is_some() {
+                if shared.timing.sequence() != u64::MAX {
+                    shared.render_telemetry.publish_with_source_history(
+                        snapshot,
+                        state.mixer().source_playback_history(),
+                        &mut version,
+                    );
+                }
+            } else if let Some(snapshot) = snapshot {
+                shared.render_telemetry.publish(snapshot, &mut version);
+            }
         },
     )
 }
@@ -917,18 +1077,25 @@ fn run_output_worker<P: PcmOperations, C: WorkerClock, E: PcmEncoder, S: PumpOut
     mut publish: F,
 ) -> Result<(), LinuxError>
 where
-    F: FnMut(S::Report, &S, &Shared),
+    F: FnMut(Option<S::Report>, &S, &Shared),
 {
     let align = usize::from(config.format.block_align());
     let channels = usize::from(config.format.channels());
+    let opted = shared.source_basis.is_some() || shared.converted_phase_enabled;
+    let mut submitted = shared.submitted.load(if opted {
+        Ordering::SeqCst
+    } else {
+        Ordering::Relaxed
+    });
     while !shared.stop.load(Ordering::Acquire) {
+        let mut update = opted.then(|| shared.timing.update());
+        state.before_pending().map_err(LinuxError::Mixer)?;
         if state.pending_frames() == 0 {
             let render_start = clock.now()?;
-            let report = state
-                .render_pending(config.period_frames as usize)
-                .map_err(LinuxError::Mixer)?;
-            // Fresh rendering alone publishes new-stream callback evidence.
-            publish(report, state, shared);
+            let result = state.render_pending(config.period_frames as usize);
+            // Actual history can advance before a later render projection error.
+            publish(result.as_ref().ok().copied(), state, shared);
+            let report = result.map_err(LinuxError::Mixer)?;
             let (start_frame, frames) = report.target_extent();
             shared
                 .cadence
@@ -948,6 +1115,15 @@ where
             &state.pending_samples()[..frames * channels],
             bytes,
         )?;
+        if let Some(basis) = shared.source_basis {
+            let maximum = submitted
+                .checked_add(u64::try_from(frames).map_err(|_| LinuxError::Overflow)?)
+                .ok_or(LinuxError::Overflow)?;
+            basis
+                .start_physical_frame()
+                .checked_add(maximum)
+                .ok_or(LinuxError::Overflow)?;
+        }
         match pcm.write(bytes, frames)? {
             Some(written) if written > 0 => {
                 if written > frames {
@@ -957,22 +1133,39 @@ where
                 }
                 // Positive native admission is irrevocable even if telemetry fails.
                 state.admit(written).map_err(LinuxError::Mixer)?;
-                let submitted = shared
-                    .submitted
-                    .load(Ordering::Relaxed)
+                submitted = submitted
                     .checked_add(written as u64)
                     .ok_or(LinuxError::Overflow)?;
-                shared.submitted.store(submitted, Ordering::Relaxed);
+                if update.as_ref().is_none_or(|guard| guard.active()) {
+                    shared.submitted.store(
+                        submitted,
+                        if opted {
+                            Ordering::SeqCst
+                        } else {
+                            Ordering::Relaxed
+                        },
+                    );
+                }
             }
             _ => {
+                // Native wait can take 20ms. Publish actual generation/admission
+                // with no new timing before entering that blocking operation.
+                drop(update.take());
                 if !pcm.wait()? {
                     continue;
                 }
+                update = opted.then(|| shared.timing.update());
             }
         }
-        shared.timing.invalidate();
-        if let Some(timing) = pcm.timing(clock, shared.submitted.load(Ordering::Relaxed))? {
-            shared.timing.publish(timing);
+        if !opted {
+            shared.timing.invalidate();
+        }
+        if let Some(timing) = pcm.timing(clock, submitted)? {
+            if let Some(update) = &update {
+                update.publish(timing);
+            } else {
+                shared.timing.publish(timing);
+            }
         }
         let point = clock.now()?;
         shared
@@ -1696,3 +1889,7 @@ mod continuity_fixtures;
 #[cfg(test)]
 #[path = "alsa/converted_fixtures.rs"]
 mod converted_fixtures;
+
+#[cfg(test)]
+#[path = "alsa/source_playback_fixtures.rs"]
+mod source_playback_fixtures;

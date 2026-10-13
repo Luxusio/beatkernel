@@ -154,6 +154,10 @@ impl TimingShared {
         if !self.begin() {
             return;
         }
+        self.store(snapshot);
+        self.end();
+    }
+    fn store(&self, snapshot: AlsaTimingSnapshot) {
         self.state.store(snapshot.native_state, Ordering::SeqCst);
         self.mode.store(snapshot.timestamp_mode, Ordering::SeqCst);
         self.kind.store(snapshot.timestamp_type, Ordering::SeqCst);
@@ -175,7 +179,48 @@ impl TimingShared {
             Ordering::SeqCst,
         );
         self.valid.store(true, Ordering::SeqCst);
-        self.end();
+    }
+    pub(super) fn sequence(&self) -> u64 {
+        self.sequence.load(Ordering::SeqCst)
+    }
+    #[cfg(test)]
+    pub(super) fn test_sequence(&self) -> &AtomicU64 {
+        &self.sequence
+    }
+    pub(super) fn update(&self) -> TimingUpdate<'_> {
+        let active = self.begin();
+        if active {
+            self.valid.store(false, Ordering::SeqCst);
+        }
+        TimingUpdate {
+            shared: self,
+            active,
+        }
+    }
+    pub(super) fn read_unversioned(&self, domain: ClockDomainId) -> Option<AlsaTimingSnapshot> {
+        if !self.valid.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some(interpret(
+            self.state.load(Ordering::SeqCst),
+            self.submitted.load(Ordering::SeqCst),
+            self.delay.load(Ordering::SeqCst),
+            self.available.load(Ordering::SeqCst),
+            AlsaNativeTimestamp {
+                seconds: self.seconds.load(Ordering::SeqCst),
+                nanoseconds: self.nanoseconds.load(Ordering::SeqCst),
+            },
+            ClockPoint {
+                domain,
+                timestamp: Timestamp::from_nanos(self.started.load(Ordering::SeqCst)),
+            },
+            ClockPoint {
+                domain,
+                timestamp: Timestamp::from_nanos(self.finished.load(Ordering::SeqCst)),
+            },
+            self.mode.load(Ordering::SeqCst),
+            self.kind.load(Ordering::SeqCst),
+        ))
     }
     pub(super) fn snapshot(&self, domain: ClockDomainId) -> Option<AlsaTimingSnapshot> {
         for _ in 0..64 {
@@ -186,31 +231,36 @@ impl TimingShared {
             if !self.valid.load(Ordering::SeqCst) {
                 return None;
             }
-            let snapshot = interpret(
-                self.state.load(Ordering::SeqCst),
-                self.submitted.load(Ordering::SeqCst),
-                self.delay.load(Ordering::SeqCst),
-                self.available.load(Ordering::SeqCst),
-                AlsaNativeTimestamp {
-                    seconds: self.seconds.load(Ordering::SeqCst),
-                    nanoseconds: self.nanoseconds.load(Ordering::SeqCst),
-                },
-                ClockPoint {
-                    domain,
-                    timestamp: Timestamp::from_nanos(self.started.load(Ordering::SeqCst)),
-                },
-                ClockPoint {
-                    domain,
-                    timestamp: Timestamp::from_nanos(self.finished.load(Ordering::SeqCst)),
-                },
-                self.mode.load(Ordering::SeqCst),
-                self.kind.load(Ordering::SeqCst),
-            );
+            let snapshot = self.read_unversioned(domain)?;
             if self.sequence.load(Ordering::SeqCst) == before {
                 return Some(snapshot);
             }
         }
         None
+    }
+}
+
+// The sole worker holds this only around nonblocking generation/admission/query.
+// Drop before pcm.wait: readers may observe true source/prefix facts without timing.
+pub(super) struct TimingUpdate<'a> {
+    shared: &'a TimingShared,
+    active: bool,
+}
+impl TimingUpdate<'_> {
+    pub(super) fn active(&self) -> bool {
+        self.active
+    }
+    pub(super) fn publish(&self, snapshot: AlsaTimingSnapshot) {
+        if self.active {
+            self.shared.store(snapshot);
+        }
+    }
+}
+impl Drop for TimingUpdate<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.shared.end();
+        }
     }
 }
 

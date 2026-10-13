@@ -276,6 +276,333 @@ fn close(actual: &[f32], reference: &[f32]) {
 }
 
 #[test]
+fn opted_pump_publishes_positive_prefix_before_later_native_failures_without_heap() {
+    for failure in 0..4 {
+        let (_producer, mut state, config) = rig(8);
+        state.enable_phase_history(8).unwrap();
+        let telemetry = converted_telemetry::ConvertedTelemetry::with_phase_history(
+            &state,
+            state.target_frame_basis(),
+        )
+        .unwrap();
+        let shared = Shared::new();
+        if failure == 2 {
+            shared.submitted.store(u64::MAX, Ordering::Relaxed);
+        }
+        let steps = [Write::Count(2)];
+        let mut pcm = Pcm::new(&shared, &steps, if failure == 3 { 1 } else { usize::MAX });
+        pcm.timing_fail = failure == 0;
+        pcm.drop_fail = failure == 3;
+        let (result, allocations) = crate::audio::count_heap_calls(|| {
+            pump(
+                &mut pcm,
+                &mut state,
+                &config,
+                &Clock::new(if failure == 1 { 2 } else { 0 }),
+                &mut Encoder { fail: false },
+                &telemetry,
+            )
+        });
+        assert!(result.is_err());
+        assert_eq!(allocations, 0);
+        let end = TargetTime::from_frames(2, 48_000).unwrap();
+        let snapshot = telemetry
+            .phase_snapshot_at(end)
+            .expect("positive write remains published");
+        assert_eq!(snapshot.submitted_end, end);
+        assert_eq!(
+            snapshot.generated_end,
+            TargetTime::from_frames(8, 48_000).unwrap()
+        );
+        assert_eq!(snapshot.report.unwrap().target_frames, 8);
+        assert_eq!(snapshot.boundaries, state.boundaries());
+        assert_eq!(snapshot.last_real_source, state.last_real_source_report());
+        assert_eq!(
+            snapshot
+                .span
+                .point(end, snapshot.segment_end)
+                .unwrap()
+                .elapsed_nanos_since(0)
+                .unwrap(),
+            41_666
+        );
+        assert!(telemetry
+            .phase_snapshot_at(TargetTime::from_frames(3, 48_000).unwrap())
+            .is_none());
+        close(&pcm.output[..pcm.length], &expected(0, 2));
+    }
+}
+
+#[test]
+fn opted_pump_nonpositive_native_operations_never_publish_submission() {
+    for failure in 0..6 {
+        let (_producer, mut state, config) = rig(8);
+        state.enable_phase_history(8).unwrap();
+        let telemetry = converted_telemetry::ConvertedTelemetry::with_phase_history(
+            &state,
+            state.target_frame_basis(),
+        )
+        .unwrap();
+        let shared = Shared::new();
+        let steps = [match failure {
+            0 => Write::Count(0),
+            1 => Write::Again,
+            2 => Write::Interrupted,
+            3 => Write::Fail,
+            4 => Write::Excess,
+            _ => Write::Count(8),
+        }];
+        let mut pcm = Pcm::new(&shared, &steps, usize::MAX);
+        pcm.stop_on_wait = true;
+        let result = pump(
+            &mut pcm,
+            &mut state,
+            &config,
+            &Clock::new(0),
+            &mut Encoder { fail: failure == 5 },
+            &telemetry,
+        );
+        assert_eq!(result.is_err(), failure >= 3);
+        assert_eq!(state.admitted_target_time(), None);
+        assert!(telemetry
+            .phase_snapshot_at(TargetTime::from_frames(0, 48_000).unwrap())
+            .is_none());
+        assert!(telemetry
+            .phase_snapshot_at(TargetTime::from_frames(1, 48_000).unwrap())
+            .is_none());
+        assert_eq!(
+            state.phase_history().unwrap().end_time(),
+            TargetTime::from_frames(8, 48_000).unwrap()
+        );
+    }
+}
+
+#[test]
+fn opted_pump_full_write_and_phase_lookup_are_allocation_free() {
+    let (_producer, mut state, config) = rig(8);
+    state.enable_phase_history(8).unwrap();
+    let telemetry = converted_telemetry::ConvertedTelemetry::with_phase_history(
+        &state,
+        state.target_frame_basis(),
+    )
+    .unwrap();
+    let shared = Shared::new();
+    let mut pcm = Pcm::new(&shared, &[], 1);
+    let (result, allocations) = crate::audio::count_heap_calls(|| {
+        pump(
+            &mut pcm,
+            &mut state,
+            &config,
+            &Clock::new(0),
+            &mut Encoder { fail: false },
+            &telemetry,
+        )
+        .unwrap();
+        telemetry.phase_snapshot_at(TargetTime::from_frames(8, 48_000).unwrap())
+    });
+    let snapshot = result.unwrap();
+    assert_eq!(allocations, 0);
+    assert_eq!(snapshot.submitted_end, snapshot.generated_end);
+    assert_eq!(
+        snapshot.stream_start,
+        TargetTime::from_frames(0, 48_000).unwrap()
+    );
+    close(&pcm.output[..pcm.length], &expected(0, 8));
+}
+
+#[test]
+fn interpolated_public_stream_lookup_preserves_exact_submitted_ceiling() {
+    let (_producer, mut state, configuration) = rig_boundaries(8, 1, 1, None, None);
+    state.enable_phase_history(8).unwrap();
+    let basis = state.target_frame_basis();
+    let telemetry = Arc::new(
+        converted_telemetry::ConvertedTelemetry::with_phase_history(&state, basis).unwrap(),
+    );
+    let report = state.render_pending(1).unwrap();
+    telemetry.publish_generated(Some(report), &state);
+    state.admit(1).unwrap();
+    telemetry.publish_submitted(state.admitted_target_time().unwrap());
+    // This memory fixture exercises forwarding, not native clock acquisition.
+    let stream = converted::ConvertedAlsaStream {
+        configuration,
+        basis,
+        shared: Arc::new(Shared::new()),
+        telemetry,
+        worker: None,
+        recovered_output: Some(state),
+        retired: false,
+    };
+    let end = TargetTime::from_frames(1, 1).unwrap();
+    let query = InterpolatedTargetTime::new(end, 0, 0, 1, 0, 1).unwrap();
+    let f = u64::MAX;
+    let future = InterpolatedTargetTime::new(
+        TargetTime::from_frames(0, 1).unwrap(),
+        f - 1,
+        f,
+        f,
+        i128::from(f),
+        f - 1,
+    )
+    .unwrap();
+    let ((accepted, refused), calls) = crate::audio::count_heap_calls(|| {
+        (
+            stream.phase_snapshot_at_interpolated_time(&query),
+            stream.phase_snapshot_at_interpolated_time(&future),
+        )
+    });
+    assert_eq!(calls, 0);
+    assert_eq!(accepted.unwrap().submitted_end, end);
+    assert!(refused.is_none());
+    assert!(stream.phase_snapshot_at(end).is_some());
+}
+
+#[test]
+fn interpolated_pump_lookup_keeps_positive_partial_write_after_timing_failure() {
+    let (_producer, mut state, config) = rig(8);
+    state.enable_phase_history(8).unwrap();
+    let telemetry = converted_telemetry::ConvertedTelemetry::with_phase_history(
+        &state,
+        state.target_frame_basis(),
+    )
+    .unwrap();
+    let shared = Shared::new();
+    let mut pcm = Pcm::new(&shared, &[Write::Count(2)], usize::MAX);
+    pcm.timing_fail = true;
+    let end = TargetTime::from_frames(2, 48_000).unwrap();
+    let exact = InterpolatedTargetTime::new(end, 0, 0, 1, 0, 1).unwrap();
+    let future = InterpolatedTargetTime::new(end, 0, 1, u64::MAX, 1, u64::MAX - 1).unwrap();
+    let ((result, accepted, refused), calls) = crate::audio::count_heap_calls(|| {
+        let result = pump(
+            &mut pcm,
+            &mut state,
+            &config,
+            &Clock::new(0),
+            &mut Encoder { fail: false },
+            &telemetry,
+        );
+        (
+            result,
+            telemetry.phase_snapshot_at_interpolated_time(&exact),
+            telemetry.phase_snapshot_at_interpolated_time(&future),
+        )
+    });
+    assert!(result.is_err());
+    assert_eq!(calls, 0);
+    let snapshot = accepted.unwrap();
+    assert_eq!(snapshot.submitted_end, end);
+    assert_eq!(
+        snapshot.generated_end,
+        TargetTime::from_frames(8, 48_000).unwrap()
+    );
+    assert!(refused.is_none());
+    assert_eq!(state.pending_frames(), 6);
+    close(&pcm.output[..pcm.length], &expected(0, 2));
+}
+
+#[test]
+fn compound_public_stream_forwarding_preserves_actual_source_and_submitted_range_without_heap() {
+    let (_, mut state, configuration) = rig_boundaries(8, 1000, 1000, None, None);
+    state.enable_phase_history(8).unwrap();
+    state.enable_source_playback_history(8).unwrap();
+    let basis = state.target_frame_basis();
+    let telemetry = Arc::new(
+        converted_telemetry::ConvertedTelemetry::with_phase_history(&state, basis).unwrap(),
+    );
+    let report = state.render_pending(4).unwrap();
+    telemetry.publish_generated(Some(report), &state);
+    state.admit(2).unwrap();
+    telemetry.publish_submitted(state.admitted_target_time().unwrap());
+    // In-memory forwarding fixture; no native timing/ACK is fabricated.
+    let stream = converted::ConvertedAlsaStream {
+        configuration,
+        basis,
+        shared: Arc::new(Shared::new()),
+        telemetry,
+        worker: None,
+        recovered_output: Some(state),
+        retired: false,
+    };
+    let end = TargetTime::from_frames(2, 1000).unwrap();
+    let q = InterpolatedTargetTime::new(end, 0, 0, 1, 0, 1).unwrap();
+    let future = InterpolatedTargetTime::new(end, 0, 1, u64::MAX, 1, u64::MAX - 1).unwrap();
+    let ((accepted, refused), calls) = crate::audio::count_heap_calls(|| {
+        (
+            stream.playback_phase_snapshot_at_interpolated_time(&q),
+            stream.playback_phase_snapshot_at_interpolated_time(&future),
+        )
+    });
+    assert_eq!(calls, 0);
+    assert!(refused.is_none());
+    let snapshot = accepted.unwrap();
+    assert_eq!(snapshot.phase.submitted_end, end);
+    assert_eq!(
+        snapshot.pulled_source_end,
+        report.pulled_source_frame_cursor
+    );
+    assert_eq!(snapshot.playback.state(), SourcePlaybackState::Running);
+}
+
+#[test]
+fn compound_actual_pump_retains_positive_write_after_native_timing_failure_without_heap() {
+    let (_, mut state, config) = rig(8);
+    state.enable_phase_history(8).unwrap();
+    state.enable_source_playback_history(8).unwrap();
+    let telemetry = converted_telemetry::ConvertedTelemetry::with_phase_history(
+        &state,
+        state.target_frame_basis(),
+    )
+    .unwrap();
+    let shared = Shared::new();
+    let mut pcm = Pcm::new(&shared, &[Write::Count(2)], usize::MAX);
+    pcm.timing_fail = true;
+    let end = TargetTime::from_frames(2, 48_000).unwrap();
+    let q = InterpolatedTargetTime::new(end, 0, 0, 1, 0, 1).unwrap();
+    let future = InterpolatedTargetTime::new(end, 0, 1, u64::MAX, 1, u64::MAX - 1).unwrap();
+    let ((result, accepted, refused), calls) = crate::audio::count_heap_calls(|| {
+        let result = pump(
+            &mut pcm,
+            &mut state,
+            &config,
+            &Clock::new(0),
+            &mut Encoder { fail: false },
+            &telemetry,
+        );
+        (
+            result,
+            telemetry.playback_phase_snapshot_at_interpolated_time(&q),
+            telemetry.playback_phase_snapshot_at_interpolated_time(&future),
+        )
+    });
+    assert!(result.is_err());
+    assert_eq!(calls, 0);
+    assert!(refused.is_none());
+    let snapshot = accepted.unwrap();
+    assert_eq!(snapshot.phase.submitted_end, end);
+    assert_eq!(
+        snapshot.pulled_source_end,
+        snapshot.phase.report.unwrap().pulled_source_frame_cursor
+    );
+    assert_eq!(
+        snapshot.phase.last_real_source,
+        state.last_real_source_report()
+    );
+    assert_eq!(
+        snapshot
+            .phase
+            .span
+            .playback_elapsed_nanos_at_interpolated_time(
+                q,
+                snapshot.phase.segment_end,
+                snapshot.playback,
+                0
+            ),
+        Ok(41_666)
+    );
+    assert_eq!(state.pending_frames(), 6);
+    close(&pcm.output[..pcm.length], &expected(0, 2));
+}
+
+#[test]
 fn production_pump_full_and_short_writes_deliver_unequal_rate_target_pcm_once_without_heap() {
     for steps in [
         &[Write::Count(8)][..],
