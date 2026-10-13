@@ -40,6 +40,9 @@ mod native_remaining_motion_fixtures;
 #[path = "native_remaining_motion_window_fixtures.rs"]
 mod native_remaining_motion_window_fixtures;
 #[cfg(test)]
+#[path = "desktop_output_encoding_fixtures.rs"]
+mod output_encoding_fixtures;
+#[cfg(test)]
 #[path = "desktop_panel_ownership_fixtures.rs"]
 mod panel_ownership_fixtures;
 #[cfg(test)]
