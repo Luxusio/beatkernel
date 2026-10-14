@@ -413,3 +413,172 @@ fn repeated_math_reads_preserve_original_publication_without_creating_observatio
     assert_eq!(original.snapshot.callback_failures, 0);
     assert_eq!(original.playback.state(), SourcePlaybackState::Running);
 }
+
+// A real retained whole report starts before the replacement's first-unsent
+// basis. Native metadata here is supplied evidence, not a simulated callback or
+// proof that any device consumed PCM.
+fn retained_prefix_facts() -> (
+    beatkernel_platform::audio::NativeOutputState,
+    SourcePlaybackIdentity,
+    CoreAudioSourcePlaybackSnapshot,
+) {
+    use beatkernel_platform::audio::{DeviceFormat, NativeOutputState, SampleEncoding};
+    let format = AudioFormat::new(1000, 1).unwrap();
+    let bank = SampleBank::new(format, PcmLimits::new(64, 128, 1).unwrap()).unwrap();
+    let (_producer, consumer) = command_queue(8).unwrap();
+    let mut mixer = Mixer::new(
+        MixerConfig::new(
+            format,
+            ClockDomainId(7),
+            Timestamp::from_nanos(-123),
+            AudioLimits::new(8, 2, 8, 64, 8).unwrap(),
+        ),
+        bank,
+        consumer,
+    )
+    .unwrap();
+    mixer.render(&mut [0.; 2]).unwrap();
+    mixer.enable_source_playback_history(8).unwrap();
+    mixer.render(&mut [0.; 2]).unwrap();
+    let mut state = match NativeOutputState::new(
+        mixer,
+        DeviceFormat::new(1000, 1, SampleEncoding::Float32, None).unwrap(),
+        None,
+        8,
+    ) {
+        Ok(state) => state,
+        Err(_) => panic!("valid complete retained Source state"),
+    };
+    let report = state.render_pending(8).unwrap();
+    state.admit(2).unwrap();
+    let basis = state.output_frame_basis();
+    let history = state.mixer().source_playback_history().unwrap();
+    let identity = SourcePlaybackIdentity::new(
+        history.source_rate(),
+        history.initial_physical_frame(),
+        history.initial_playback_frame(),
+    )
+    .unwrap();
+    let evidence = CoreAudioSourcePlaybackSnapshot {
+        snapshot: CoreAudioSnapshot {
+            rendered_callbacks: 1,
+            rendered_frames: 3,
+            callback_failures: 0,
+            configuration_changed: false,
+            presentation: Some(CoreAudioPresentation {
+                host_ticks: 91,
+                native: Some(ClockPoint {
+                    domain: ClockDomainId(8),
+                    timestamp: Timestamp::from_nanos(987_654),
+                }),
+                native_sample_frame: Some(400.25),
+                output_grid: Some(basis.point_at_stream_frame(0).unwrap()),
+                flags: 3,
+                first_frame: 6,
+                frames: 3,
+            }),
+        },
+        render: Some(report),
+        playback: history.lookup_at_source_time(at(6)).unwrap(),
+        pulled_source_end: history.pulled_end_frame(),
+        delivered_end_frame: 9,
+        revision: 4,
+    };
+    (state, identity, evidence)
+}
+
+#[test]
+fn advanced_first_unsent_basis_keeps_original_history_and_whole_retained_report() {
+    let (state, identity, original) = retained_prefix_facts();
+    let basis = state.output_frame_basis();
+    assert_eq!(basis.start_physical_frame(), 6);
+    assert_eq!(
+        state.mixer().output_frame_basis().start_physical_frame(),
+        12
+    );
+    assert_eq!(
+        (identity.initial_physical(), identity.initial_playback()),
+        (2, 2)
+    );
+    let report = state.pending_report().unwrap();
+    assert_eq!((report.start_frame, report.frames), (4, 8));
+    assert_eq!(original.snapshot.presentation.unwrap().frames, 3);
+    assert_ne!(
+        report.frames,
+        original.snapshot.presentation.unwrap().frames as usize
+    );
+
+    let coordinate = candidate(basis, EPOCH, 6);
+    let qualified = packet(
+        basis,
+        identity,
+        coordinate.source_query().unwrap(),
+        original,
+    )
+    .unwrap();
+    let observation =
+        qualify_coreaudio_observation_packet(coordinate, original.snapshot, identity, qualified)
+            .unwrap()
+            .unwrap();
+    assert_eq!(observation.coordinate(), coordinate);
+    assert_eq!(observation.source().native_evidence(), Some(&original));
+    assert_eq!(observation.source().facts().render, Some(report));
+    assert_eq!(observation.source().identity(), identity);
+    assert_eq!(observation.source().facts().submitted_source_end, 9);
+    assert_eq!(observation.source().facts().pulled_source_end, 12);
+    // Reading the supplied mathematical packet cannot consume any retained PCM.
+    assert_eq!(state.admitted_frames(), 2);
+    assert_eq!(state.pending_frames(), 6);
+    assert_eq!(state.pending_report(), Some(report));
+}
+
+#[test]
+fn retained_native_prefix_rejects_rebased_identity_and_unsubmitted_source_lookahead() {
+    let (state, identity, original) = retained_prefix_facts();
+    let basis = state.output_frame_basis();
+    assert!(packet(basis, identity, at(9), original).is_ok());
+    for frame in [5, 10, 12] {
+        assert!(
+            matches!(
+                packet(basis, identity, at(frame), original),
+                Err(CoreAudioReplacementError::Playback(
+                    SourcePlaybackPacketError::QueryOutsidePrefix
+                ))
+            ),
+            "query {frame}"
+        );
+    }
+    let rebased = SourcePlaybackIdentity::new(1000, 6, 6).unwrap();
+    assert!(matches!(
+        packet(basis, rebased, at(6), original),
+        Err(CoreAudioReplacementError::Playback(
+            SourcePlaybackPacketError::InvalidSpan
+        ))
+    ));
+    let qualified = packet(basis, identity, at(6), original).unwrap();
+    assert!(matches!(
+        qualify_coreaudio_observation_packet(
+            candidate(basis, EPOCH + 1, 6),
+            original.snapshot,
+            identity,
+            qualified,
+        ),
+        Err(CoreAudioReplacementError::Playback(
+            SourcePlaybackPacketError::EpochMismatch
+        ))
+    ));
+    let pulled_basis = state.mixer().output_frame_basis();
+    assert!(matches!(
+        qualify_coreaudio_observation_packet(
+            candidate(pulled_basis, EPOCH, 12),
+            original.snapshot,
+            identity,
+            qualified,
+        ),
+        Err(CoreAudioReplacementError::Playback(
+            SourcePlaybackPacketError::BasisMismatch
+        ))
+    ));
+    assert_eq!(state.pending_frames(), 6);
+    assert_eq!(state.output_frame_basis(), basis);
+}

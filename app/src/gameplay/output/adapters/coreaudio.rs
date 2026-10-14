@@ -6,10 +6,14 @@ use beatkernel::{
 };
 use beatkernel_platform::{
     audio::presentation::discipline::{DisciplineError, PresentationDiscipline},
+    audio::NativeOutputState,
     macos::{
-        audio::{CoreAudioError, CoreAudioOpenFailure, CoreAudioRequest, CoreAudioStream},
+        audio::{
+            CoreAudioError, CoreAudioOpenFailure, CoreAudioRequest, CoreAudioStateOpenFailure,
+            CoreAudioStream,
+        },
         clock::MachClock,
-        presentation::{coreaudio_presentation_pair, CoreAudioPresentationError},
+        presentation::{coreaudio_presentation_pair_with_max_frames, CoreAudioPresentationError},
     },
 };
 #[derive(Debug)]
@@ -220,31 +224,7 @@ impl CoreAudioReplacementBackend {
         &mut self,
         output: &mut CoreAudioReplacementOutput,
     ) -> Result<Option<(beatkernel::time::ClockPair, u64)>, CoreAudioReplacementError> {
-        let snapshot = output.stream.snapshot();
-        if snapshot.configuration_changed {
-            return Err(CoreAudioReplacementError::Native(
-                CoreAudioError::ConfigurationChanged,
-            ));
-        }
-        if snapshot.callback_failures != 0 {
-            return Err(CoreAudioReplacementError::CallbackFailure(
-                snapshot.callback_failures,
-            ));
-        }
-        if !output.stream.is_started() {
-            return Ok(None);
-        }
-        let Some(observation) = snapshot.presentation else {
-            return Ok(None);
-        };
-        coreaudio_presentation_pair(
-            observation,
-            output.stream.configuration(),
-            self.host_domain,
-            &self.clock,
-        )
-        .map(|pair| pair.map(|pair| (pair, observation.first_frame)))
-        .map_err(CoreAudioReplacementError::Presentation)
+        original_stream_coordinate(&output.stream, self.clock, self.host_domain)
     }
 }
 
@@ -268,20 +248,7 @@ impl crate::gameplay::output::ports::OriginalCoordinateNativeOutputBackend
         output: &mut Self::Output,
     ) -> Result<Option<crate::native_output_coordinate::CoordinateNativeAudioSnapshot>, Self::Error>
     {
-        use crate::native_output_coordinate::{
-            CoordinateNativeAudioSnapshot, NativeOutputCoordinate, NativeOutputCoordinateError,
-        };
-        self.original_coordinate(output)?.map(|(pair, first_frame)| {
-            let basis = output.stream.frame_basis();
-            let frame = first_frame.checked_sub(basis.start_physical_frame())
-                .ok_or(CoreAudioReplacementError::Coordinate(NativeOutputCoordinateError::FrameBeforeBasis))?;
-            CoordinateNativeAudioSnapshot::new(
-                crate::native_audio_presentation::NativeAudioSnapshot {
-                    epoch: output.epoch, basis,
-                    evidence: beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::SuppliedPair(pair),
-                }, NativeOutputCoordinate::StreamFrame { frame },
-            ).map_err(CoreAudioReplacementError::Coordinate)
-        }).transpose()
+        observe_stream_coordinate(&output.stream, output.epoch, self.clock, self.host_domain)
     }
 }
 
@@ -307,6 +274,71 @@ fn validate_source_callback(snapshot: CoreAudioSnapshot) -> Result<(), CoreAudio
         ));
     }
     Ok(())
+}
+
+fn original_stream_coordinate(
+    stream: &CoreAudioStream,
+    clock: MachClock,
+    host_domain: ClockDomainId,
+) -> Result<Option<(beatkernel::time::ClockPair, u64)>, CoreAudioReplacementError> {
+    let snapshot = stream.snapshot();
+    validate_source_callback(snapshot)?;
+    if !stream.is_started() {
+        return Ok(None);
+    }
+    let Some(observation) = snapshot.presentation else {
+        return Ok(None);
+    };
+    coreaudio_presentation_pair_with_max_frames(
+        observation,
+        stream.configuration(),
+        stream.max_callback_frames(),
+        host_domain,
+        &clock,
+    )
+    .map(|pair| pair.map(|pair| (pair, observation.first_frame)))
+    .map_err(CoreAudioReplacementError::Presentation)
+}
+
+fn observe_stream_native(
+    stream: &CoreAudioStream,
+    epoch: u64,
+    clock: MachClock,
+    host_domain: ClockDomainId,
+) -> Result<Option<crate::native_audio_presentation::NativeAudioSnapshot>, CoreAudioReplacementError>
+{
+    Ok(original_stream_coordinate(stream, clock, host_domain)?.map(|(pair, _)| {
+        crate::native_audio_presentation::NativeAudioSnapshot {
+            epoch,
+            basis: stream.frame_basis(),
+            evidence: beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::SuppliedPair(pair),
+        }
+    }))
+}
+
+fn observe_stream_coordinate(
+    stream: &CoreAudioStream,
+    epoch: u64,
+    clock: MachClock,
+    host_domain: ClockDomainId,
+) -> Result<Option<CoordinateNativeAudioSnapshot>, CoreAudioReplacementError> {
+    original_stream_coordinate(stream, clock, host_domain)?
+        .map(|(pair, first_frame)| {
+            let basis = stream.frame_basis();
+            let frame = first_frame.checked_sub(basis.start_physical_frame()).ok_or(
+                CoreAudioReplacementError::Coordinate(NativeOutputCoordinateError::FrameBeforeBasis),
+            )?;
+            CoordinateNativeAudioSnapshot::new(
+                crate::native_audio_presentation::NativeAudioSnapshot {
+                    epoch,
+                    basis,
+                    evidence: beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::SuppliedPair(pair),
+                },
+                NativeOutputCoordinate::StreamFrame { frame },
+            )
+            .map_err(CoreAudioReplacementError::Coordinate)
+        })
+        .transpose()
 }
 
 /// Successful delivery is independent of source generation. This packet retains
@@ -419,30 +451,7 @@ impl SourcePlaybackNativeOutputBackend for CoreAudioReplacementBackend {
         query: &InterpolatedTargetTime,
         identity: SourcePlaybackIdentity,
     ) -> Result<Option<NativeSourcePlaybackQuery<Self::NativeEvidence>>, Self::Error> {
-        let basis = output.stream.frame_basis();
-        if basis.sample_rate() != identity.hz()
-            || identity.initial_physical() > basis.start_physical_frame()
-        {
-            return Err(CoreAudioReplacementError::Playback(
-                SourcePlaybackPacketError::BasisMismatch,
-            ));
-        }
-        validate_source_callback(output.stream.snapshot())?;
-        if !output.stream.is_started() {
-            return Ok(None);
-        }
-        output
-            .stream
-            .source_playback_at(
-                query,
-                identity.hz(),
-                identity.initial_physical(),
-                identity.initial_playback(),
-            )
-            .map(|snapshot| {
-                qualify_coreaudio_source_packet(output.epoch, basis, identity, *query, snapshot)
-            })
-            .transpose()
+        source_playback_for_stream(&output.stream, output.epoch, query, identity)
     }
 
     fn observe_native_playback(
@@ -450,61 +459,113 @@ impl SourcePlaybackNativeOutputBackend for CoreAudioReplacementBackend {
         output: &mut Self::Output,
         identity: SourcePlaybackIdentity,
     ) -> Result<Option<NativePlaybackObservation<Self::NativeEvidence>>, Self::Error> {
-        let basis = output.stream.frame_basis();
-        if basis.sample_rate() != identity.hz()
-            || identity.initial_physical() > basis.start_physical_frame()
-        {
-            return Err(CoreAudioReplacementError::Playback(
-                SourcePlaybackPacketError::BasisMismatch,
-            ));
+        observe_stream_playback(
+            &output.stream,
+            output.epoch,
+            self.clock,
+            self.host_domain,
+            identity,
+        )
+    }
+}
+
+fn source_playback_for_stream(
+    stream: &CoreAudioStream,
+    epoch: u64,
+    query: &InterpolatedTargetTime,
+    identity: SourcePlaybackIdentity,
+) -> Result<
+    Option<NativeSourcePlaybackQuery<CoreAudioSourcePlaybackSnapshot>>,
+    CoreAudioReplacementError,
+> {
+    let basis = stream.frame_basis();
+    if basis.sample_rate() != identity.hz()
+        || identity.initial_physical() > basis.start_physical_frame()
+    {
+        return Err(CoreAudioReplacementError::Playback(
+            SourcePlaybackPacketError::BasisMismatch,
+        ));
+    }
+    validate_source_callback(stream.snapshot())?;
+    if !stream.is_started() {
+        return Ok(None);
+    }
+    stream
+        .source_playback_at(
+            query,
+            identity.hz(),
+            identity.initial_physical(),
+            identity.initial_playback(),
+        )
+        .map(|snapshot| qualify_coreaudio_source_packet(epoch, basis, identity, *query, snapshot))
+        .transpose()
+}
+
+fn observe_stream_playback(
+    stream: &CoreAudioStream,
+    epoch: u64,
+    clock: MachClock,
+    host_domain: ClockDomainId,
+    identity: SourcePlaybackIdentity,
+) -> Result<
+    Option<NativePlaybackObservation<CoreAudioSourcePlaybackSnapshot>>,
+    CoreAudioReplacementError,
+> {
+    let basis = stream.frame_basis();
+    if basis.sample_rate() != identity.hz()
+        || identity.initial_physical() > basis.start_physical_frame()
+    {
+        return Err(CoreAudioReplacementError::Playback(
+            SourcePlaybackPacketError::BasisMismatch,
+        ));
+    }
+    for _ in 0..3 {
+        let native = stream.snapshot();
+        validate_source_callback(native)?;
+        if !stream.is_started() {
+            return Ok(None);
         }
-        for _ in 0..3 {
-            let native = output.stream.snapshot();
-            validate_source_callback(native)?;
-            if !output.stream.is_started() {
-                return Ok(None);
-            }
-            let Some(presentation) = native.presentation else {
-                continue;
-            };
-            let Some(pair) = coreaudio_presentation_pair(
-                presentation,
-                output.stream.configuration(),
-                self.host_domain,
-                &self.clock,
-            )
-            .map_err(CoreAudioReplacementError::Presentation)?
-            else {
-                continue;
-            };
-            let frame = presentation
-                .first_frame
-                .checked_sub(basis.start_physical_frame())
-                .ok_or(CoreAudioReplacementError::Coordinate(
-                    NativeOutputCoordinateError::FrameBeforeBasis,
-                ))?;
-            let candidate = CoordinateNativeAudioSnapshot::new(
+        let Some(presentation) = native.presentation else {
+            continue;
+        };
+        let Some(pair) = coreaudio_presentation_pair_with_max_frames(
+            presentation,
+            stream.configuration(),
+            stream.max_callback_frames(),
+            host_domain,
+            &clock,
+        )
+        .map_err(CoreAudioReplacementError::Presentation)?
+        else {
+            continue;
+        };
+        let frame = presentation
+            .first_frame
+            .checked_sub(basis.start_physical_frame())
+            .ok_or(CoreAudioReplacementError::Coordinate(
+                NativeOutputCoordinateError::FrameBeforeBasis,
+            ))?;
+        let candidate = CoordinateNativeAudioSnapshot::new(
                 crate::native_audio_presentation::NativeAudioSnapshot {
-                    epoch: output.epoch,
+                    epoch,
                     basis,
                     evidence: beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence::SuppliedPair(pair),
                 },
                 NativeOutputCoordinate::StreamFrame { frame },
             ).map_err(CoreAudioReplacementError::Coordinate)?;
-            let query = candidate
-                .source_query()
-                .map_err(CoreAudioReplacementError::Coordinate)?;
-            let Some(packet) = self.source_playback_at(output, &query, identity)? else {
-                continue;
-            };
-            if let Some(observation) =
-                qualify_coreaudio_observation_packet(candidate, native, identity, packet)?
-            {
-                return Ok(Some(observation));
-            }
+        let query = candidate
+            .source_query()
+            .map_err(CoreAudioReplacementError::Coordinate)?;
+        let Some(packet) = source_playback_for_stream(stream, epoch, &query, identity)? else {
+            continue;
+        };
+        if let Some(observation) =
+            qualify_coreaudio_observation_packet(candidate, native, identity, packet)?
+        {
+            return Ok(Some(observation));
         }
-        Ok(None)
     }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -522,27 +583,424 @@ impl crate::gameplay::output::ports::SourceHistoryRetirementNativeOutputBackend
         identity: SourcePlaybackIdentity,
         source_pin: u64,
     ) -> Result<Option<u64>, Self::Error> {
-        if output.epoch != expected_epoch {
-            return Err(CoreAudioReplacementError::Playback(
-                SourcePlaybackPacketError::EpochMismatch,
-            ));
+        request_stream_source_history_retirement(
+            &output.stream,
+            output.epoch,
+            expected_epoch,
+            expected_basis,
+            identity,
+            source_pin,
+        )
+    }
+}
+
+fn request_stream_source_history_retirement(
+    stream: &CoreAudioStream,
+    epoch: u64,
+    expected_epoch: u64,
+    expected_basis: OutputFrameBasis,
+    identity: SourcePlaybackIdentity,
+    source_pin: u64,
+) -> Result<Option<u64>, CoreAudioReplacementError> {
+    if epoch != expected_epoch {
+        return Err(CoreAudioReplacementError::Playback(
+            SourcePlaybackPacketError::EpochMismatch,
+        ));
+    }
+    if stream.frame_basis() != expected_basis {
+        return Err(CoreAudioReplacementError::Playback(
+            SourcePlaybackPacketError::BasisMismatch,
+        ));
+    }
+    stream
+        .request_source_history_retirement(
+            expected_basis,
+            (
+                identity.hz(),
+                identity.initial_physical(),
+                identity.initial_playback(),
+            ),
+            source_pin,
+        )
+        .map_err(CoreAudioReplacementError::Native)
+}
+
+/// Complete Source ownership remains distinct from the compatible Mixer wrapper.
+pub struct CoreAudioCompleteReplacementOutput {
+    common: CoreAudioReplacementOutput,
+    max_render_frames: usize,
+}
+impl CoreAudioCompleteReplacementOutput {
+    /// Initial composition retains the software growth ceiling and exact matrix.
+    pub fn from_stream(
+        stream: CoreAudioStream,
+        max_render_frames: usize,
+        matrix: Option<beatkernel::audio::ChannelMatrix>,
+    ) -> Self {
+        Self {
+            common: CoreAudioReplacementOutput {
+                stream,
+                epoch: 0,
+                matrix,
+            },
+            max_render_frames,
         }
-        if output.stream.frame_basis() != expected_basis {
-            return Err(CoreAudioReplacementError::Playback(
-                SourcePlaybackPacketError::BasisMismatch,
-            ));
-        }
-        output
+    }
+    pub fn stream(&self) -> &CoreAudioStream {
+        self.common.stream()
+    }
+    pub fn stream_mut(&mut self) -> &mut CoreAudioStream {
+        self.common.stream_mut()
+    }
+    pub const fn epoch(&self) -> u64 {
+        self.common.epoch
+    }
+    pub fn channel_matrix(&self) -> Option<&beatkernel::audio::ChannelMatrix> {
+        self.common.channel_matrix()
+    }
+    pub(super) fn compatibility_output(&self) -> &CoreAudioReplacementOutput {
+        &self.common
+    }
+    pub(super) fn compatibility_output_mut(&mut self) -> &mut CoreAudioReplacementOutput {
+        &mut self.common
+    }
+}
+impl StoppedMixerSource<NativeOutputState> for CoreAudioCompleteReplacementOutput {
+    type Error = CoreAudioReplacementError;
+    fn take_stopped_mixer(&mut self) -> Result<Option<NativeOutputState>, Self::Error> {
+        self.common
             .stream
-            .request_source_history_retirement(
-                expected_basis,
-                (
-                    identity.hz(),
-                    identity.initial_physical(),
-                    identity.initial_playback(),
-                ),
-                source_pin,
-            )
+            .take_stopped_output_state()
             .map_err(CoreAudioReplacementError::Native)
+    }
+}
+
+fn map_state_open_failure(
+    failure: CoreAudioStateOpenFailure,
+    epoch: u64,
+    max_render_frames: usize,
+    matrix: Option<beatkernel::audio::ChannelMatrix>,
+) -> OutputOpenFailure<
+    CoreAudioReplacementError,
+    CoreAudioCompleteReplacementOutput,
+    NativeOutputState,
+> {
+    let (error, state, pending, cleanup) = failure.into_parts();
+    let mapped = match pending {
+        Some(stream) => OutputOpenFailure::pending_state(
+            CoreAudioReplacementError::Native(error),
+            CoreAudioCompleteReplacementOutput {
+                common: CoreAudioReplacementOutput {
+                    stream,
+                    epoch,
+                    matrix,
+                },
+                max_render_frames,
+            },
+        ),
+        None => OutputOpenFailure::recovered_state(CoreAudioReplacementError::Native(error), state),
+    };
+    match cleanup {
+        Some(error) => mapped.with_cleanup_error(CoreAudioReplacementError::Native(error)),
+        None => mapped,
+    }
+}
+
+pub struct CoreAudioCompleteReplacementBackend {
+    clock: MachClock,
+    host_domain: ClockDomainId,
+    history_headroom: usize,
+}
+impl CoreAudioCompleteReplacementBackend {
+    pub fn new(clock: MachClock, host_domain: ClockDomainId, history_headroom: usize) -> Self {
+        Self {
+            clock,
+            host_domain,
+            history_headroom,
+        }
+    }
+    fn open_complete(
+        &mut self,
+        request: CoreAudioRequest,
+        state: NativeOutputState,
+        epoch: u64,
+        matrix: Option<beatkernel::audio::ChannelMatrix>,
+    ) -> Result<
+        CoreAudioCompleteReplacementOutput,
+        OutputOpenFailure<
+            CoreAudioReplacementError,
+            CoreAudioCompleteReplacementOutput,
+            NativeOutputState,
+        >,
+    > {
+        let max_render_frames = state.mixer().config().limits().max_render_frames();
+        let stream = match CoreAudioStream::open_state_recoverable(
+            request,
+            self.clock,
+            state,
+            matrix.clone(),
+            self.history_headroom,
+        ) {
+            Ok(stream) => stream,
+            Err(failure) => {
+                return Err(map_state_open_failure(
+                    failure,
+                    epoch,
+                    max_render_frames,
+                    matrix,
+                ));
+            }
+        };
+        Ok(CoreAudioCompleteReplacementOutput {
+            common: CoreAudioReplacementOutput {
+                stream,
+                epoch,
+                matrix,
+            },
+            max_render_frames,
+        })
+    }
+
+    pub fn observe_stream_native(
+        &self,
+        stream: &CoreAudioStream,
+        epoch: u64,
+    ) -> Result<
+        Option<crate::native_audio_presentation::NativeAudioSnapshot>,
+        CoreAudioReplacementError,
+    > {
+        observe_stream_native(stream, epoch, self.clock, self.host_domain)
+    }
+    pub fn observe_stream_coordinate(
+        &self,
+        stream: &CoreAudioStream,
+        epoch: u64,
+    ) -> Result<Option<CoordinateNativeAudioSnapshot>, CoreAudioReplacementError> {
+        observe_stream_coordinate(stream, epoch, self.clock, self.host_domain)
+    }
+    pub fn source_playback_for_stream(
+        &self,
+        stream: &CoreAudioStream,
+        epoch: u64,
+        query: &InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<
+        Option<NativeSourcePlaybackQuery<CoreAudioSourcePlaybackSnapshot>>,
+        CoreAudioReplacementError,
+    > {
+        source_playback_for_stream(stream, epoch, query, identity)
+    }
+    pub fn observe_stream_playback(
+        &self,
+        stream: &CoreAudioStream,
+        epoch: u64,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<
+        Option<NativePlaybackObservation<CoreAudioSourcePlaybackSnapshot>>,
+        CoreAudioReplacementError,
+    > {
+        observe_stream_playback(stream, epoch, self.clock, self.host_domain, identity)
+    }
+}
+
+impl OutputReplacementBackend<NativeOutputState> for CoreAudioCompleteReplacementBackend {
+    type Presentation = PresentationDiscipline;
+    type Output = CoreAudioCompleteReplacementOutput;
+    type Request = CoreAudioRequest;
+    type Error = CoreAudioReplacementError;
+    fn open(
+        &mut self,
+        request: Self::Request,
+        state: NativeOutputState,
+        epoch: u64,
+    ) -> Result<Self::Output, OutputOpenFailure<Self::Error, Self::Output, NativeOutputState>> {
+        self.open_complete(request, state, epoch, None)
+    }
+    fn retire(&mut self, output: &mut Self::Output) -> Result<(), Self::Error> {
+        output
+            .common
+            .stream
+            .stop()
+            .map_err(CoreAudioReplacementError::Native)
+    }
+    fn start(&mut self, output: &mut Self::Output) -> Result<(), Self::Error> {
+        output
+            .common
+            .stream
+            .start()
+            .map_err(CoreAudioReplacementError::Native)
+    }
+    fn epoch(&self, output: &Self::Output) -> u64 {
+        output.common.epoch
+    }
+    fn basis(&self, output: &Self::Output) -> OutputFrameBasis {
+        output.common.stream.frame_basis()
+    }
+    fn observe(
+        &mut self,
+        output: &mut Self::Output,
+        presentation: &mut Self::Presentation,
+    ) -> Result<(), Self::Error> {
+        if presentation.epoch() != output.common.epoch {
+            return Err(CoreAudioReplacementError::EpochMismatch);
+        }
+        if let Some((pair, _)) =
+            original_stream_coordinate(&output.common.stream, self.clock, self.host_domain)?
+        {
+            presentation
+                .observe_clock_pair_in_epoch(output.common.epoch, pair)
+                .map_err(CoreAudioReplacementError::Discipline)?;
+        }
+        Ok(())
+    }
+    fn render_report(&self, output: &Self::Output) -> Result<Option<RenderReport>, Self::Error> {
+        validate_source_callback(output.common.stream.snapshot())?;
+        Ok(output.common.stream.last_render_report())
+    }
+}
+impl crate::gameplay::output::ports::OutputChannelRemixBackend<NativeOutputState>
+    for CoreAudioCompleteReplacementBackend
+{
+    fn open_remixed(
+        &mut self,
+        request: CoreAudioRequest,
+        state: NativeOutputState,
+        epoch: u64,
+        matrix: beatkernel::audio::ChannelMatrix,
+    ) -> Result<
+        CoreAudioCompleteReplacementOutput,
+        OutputOpenFailure<
+            CoreAudioReplacementError,
+            CoreAudioCompleteReplacementOutput,
+            NativeOutputState,
+        >,
+    > {
+        self.open_complete(request, state, epoch, Some(matrix))
+    }
+}
+impl crate::gameplay::output::ports::OriginalNativeOutputBackend<NativeOutputState>
+    for CoreAudioCompleteReplacementBackend
+{
+    fn observe_native(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<crate::native_audio_presentation::NativeAudioSnapshot>, Self::Error> {
+        self.observe_stream_native(&output.common.stream, output.common.epoch)
+    }
+}
+impl crate::gameplay::output::ports::OriginalCoordinateNativeOutputBackend<NativeOutputState>
+    for CoreAudioCompleteReplacementBackend
+{
+    fn observe_native_coordinate(
+        &mut self,
+        output: &mut Self::Output,
+    ) -> Result<Option<CoordinateNativeAudioSnapshot>, Self::Error> {
+        self.observe_stream_coordinate(&output.common.stream, output.common.epoch)
+    }
+}
+impl SourcePlaybackNativeOutputBackend<NativeOutputState> for CoreAudioCompleteReplacementBackend {
+    type NativeEvidence = CoreAudioSourcePlaybackSnapshot;
+    fn source_playback_at(
+        &self,
+        output: &Self::Output,
+        query: &InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativeSourcePlaybackQuery<Self::NativeEvidence>>, Self::Error> {
+        self.source_playback_for_stream(&output.common.stream, output.common.epoch, query, identity)
+    }
+    fn observe_native_playback(
+        &mut self,
+        output: &mut Self::Output,
+        identity: SourcePlaybackIdentity,
+    ) -> Result<Option<NativePlaybackObservation<Self::NativeEvidence>>, Self::Error> {
+        self.observe_stream_playback(&output.common.stream, output.common.epoch, identity)
+    }
+}
+impl crate::gameplay::output::ports::SourceHistoryRetirementNativeOutputBackend<NativeOutputState>
+    for CoreAudioCompleteReplacementBackend
+{
+    fn request_source_history_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        expected_epoch: u64,
+        expected_basis: OutputFrameBasis,
+        identity: SourcePlaybackIdentity,
+        source_pin: u64,
+    ) -> Result<Option<u64>, Self::Error> {
+        request_stream_source_history_retirement(
+            &output.common.stream,
+            output.common.epoch,
+            expected_epoch,
+            expected_basis,
+            identity,
+            source_pin,
+        )
+    }
+}
+impl
+    crate::gameplay::output::ports::ConditionalSourceRetirementNativeOutputBackend<
+        NativeOutputState,
+    > for CoreAudioCompleteReplacementBackend
+{
+    type Ticket = beatkernel_platform::macos::audio::SourceRetirementTicket;
+    // Callback failures combine local render/layout errors and native failures.
+    // Keep the default conservative classifier rather than hiding typed refusal.
+    fn created_source_coordinate_basis(
+        &self,
+        output: &Self::Output,
+    ) -> Result<crate::audio_authority::AudioAuthorityCoordinateBasis, Self::Error> {
+        Ok(
+            crate::audio_authority::AudioAuthorityCoordinateBasis::SourceFrame(
+                output.common.stream.frame_basis(),
+            ),
+        )
+    }
+    fn submit_source_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        request: &Self::Request,
+        matrix: Option<&beatkernel::audio::ChannelMatrix>,
+    ) -> Result<Option<Self::Ticket>, Self::Error> {
+        output
+            .common
+            .stream
+            .submit_source_conditional_retirement(request, matrix, output.max_render_frames)
+            .map_err(CoreAudioReplacementError::Native)
+    }
+    fn poll_source_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        ticket: &Self::Ticket,
+    ) -> Result<crate::gameplay::output::ports::SourceRetirementStatus, Self::Error> {
+        output
+            .common
+            .stream
+            .poll_source_conditional_retirement(ticket)
+            .map(source_retirement_status)
+            .map_err(CoreAudioReplacementError::Native)
+    }
+    fn cancel_source_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        ticket: &Self::Ticket,
+    ) -> Result<crate::gameplay::output::ports::SourceRetirementStatus, Self::Error> {
+        output
+            .common
+            .stream
+            .cancel_source_conditional_retirement(ticket)
+            .map(source_retirement_status)
+            .map_err(CoreAudioReplacementError::Native)
+    }
+}
+fn source_retirement_status(
+    status: beatkernel_platform::macos::audio::SourceRetirementStatus,
+) -> crate::gameplay::output::ports::SourceRetirementStatus {
+    use crate::gameplay::output::ports::SourceRetirementStatus as Status;
+    use beatkernel_platform::macos::audio::SourceRetirementStatus as Native;
+    match status {
+        Native::Pending => Status::Pending,
+        Native::Refused => Status::Refused,
+        Native::Cancelled => Status::Cancelled,
+        Native::Authorized => Status::Authorized,
     }
 }
