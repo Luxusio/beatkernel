@@ -1,19 +1,22 @@
 //! Cold correlated UI admission, separate from output retirement and publication.
 use crate::gameplay::output::ports::OutputUiPort;
 use crate::{
-    gameplay::output::application::owner::{CoordinateTargetOwnerPublication, GameplayOutputOwner},
+    gameplay::output::application::owner::{
+        CoordinateSourceOwnerPublication, CoordinateTargetOwnerPublication, GameplayOutputOwner,
+    },
     gameplay::output::domain::control::{OutputCapability, OutputReply, OutputRequest},
     gameplay::output::ports::{
+        ConditionalSourceRetirementNativeOutputBackend,
         ConditionalTargetRetirementNativeOutputBackend, OriginalNativeOutputBackend,
         OriginalTargetNativeOutputBackend, OutputReplacementBackend, SourcePlaybackIdentity,
     },
     gameplay_presentation::{GameplayAudioOutputContext, GameplayOutputContext},
 };
 use beatkernel::{
-    audio::{SoftwareOutputState, TargetFrameBasis},
+    audio::{OutputFrameBasis, SoftwareOutputState, TargetFrameBasis},
     time::ClockPoint,
 };
-use beatkernel_platform::audio::ConvertedNativeOutputState;
+use beatkernel_platform::audio::{ConvertedNativeOutputState, NativeOutputState};
 use std::io;
 pub struct GameplayOutputUi<U: OutputUiPort> {
     ui: U,
@@ -177,6 +180,78 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
             }
         }
     }
+    /// Stage the exact applied capability before committing a Source coordinate epoch.
+    pub fn service_coordinate_source_audio<
+        B: ConditionalSourceRetirementNativeOutputBackend<NativeOutputState>,
+    >(
+        &mut self,
+        owner: &mut GameplayOutputOwner<B, NativeOutputState, OutputFrameBasis, B::Ticket>,
+        context: GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+        identity: SourcePlaybackIdentity,
+        practice_pending: bool,
+        map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
+        applied: &mut impl FnMut(&B::Output) -> Result<OutputCapability, String>,
+    ) -> crate::native_gameplay::NativeGameplayResult<bool>
+    where
+        B::Error: std::error::Error + 'static,
+    {
+        let refusal = (practice_pending || context.end.is_some())
+            .then_some("coordinate replacement requires no NativeEnd or pending practice");
+        if !self.admit_request(owner, refusal, map)? {
+            return Ok(false);
+        }
+        let publication = owner.publish_paused_coordinate_source_audio(
+            context,
+            now,
+            identity,
+            practice_pending,
+            |output| {
+                let cap = applied(output)?;
+                cap.validate()?;
+                Ok(cap)
+            },
+        );
+        match publication {
+            Ok(CoordinateSourceOwnerPublication::Pending) => Ok(false),
+            Ok(CoordinateSourceOwnerPublication::LiveRefused(reason)) => {
+                let id = self
+                    .flight
+                    .take()
+                    .expect("active coordinate output request");
+                self.reply = Some(OutputReply {
+                    id,
+                    result: Err(Self::diagnostic(&reason)),
+                });
+                let _ = self.flush()?;
+                Ok(false)
+            }
+            Ok(CoordinateSourceOwnerPublication::Published(cap)) => {
+                let id = self
+                    .flight
+                    .take()
+                    .expect("accepted coordinate output request");
+                self.reply = Some(OutputReply {
+                    id,
+                    result: Ok(cap),
+                });
+                let _ = self.flush()?;
+                Ok(true)
+            }
+            Err(error) => {
+                let id = self
+                    .flight
+                    .take()
+                    .expect("active coordinate output request");
+                self.reply = Some(OutputReply {
+                    id,
+                    result: Err(Self::diagnostic(&error.to_string())),
+                });
+                let _ = self.flush();
+                Err(error)
+            }
+        }
+    }
     fn diagnostic(error: &str) -> String {
         error
             .chars()
@@ -288,3 +363,7 @@ mod audio_fixtures;
 #[cfg(test)]
 #[path = "retained_target_requests_fixtures.rs"]
 mod retained_target_requests_fixtures;
+
+#[cfg(test)]
+#[path = "retained_source_requests_fixtures.rs"]
+mod retained_source_requests_fixtures;

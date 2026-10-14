@@ -16,7 +16,10 @@ attempt/section/generation, accepted input and capture. No new attempt or silent
 fallback. This vertical preserves original Source rate and existing encoding;
 remaining rate/encoding controls and resampling stay required follow-ons.
 
-Select an explicit complete retained WASAPI owner at retained startup. Preserve
+Select an explicit complete owner only for retained WASAPI shared startup.
+Retained exclusive and ASIO keep their existing Legacy startup path and explicit
+retained-replacement refusal until their own supported vertical is implemented.
+Never change the selected mode or backend to obtain this shared-only path. Preserve
 legacy Mixer/remixed/scalar/finite/ASIO recovery and scalar backend switching;
 do not route legacy remixed recovery through NativeOutputState.into_mixer,
 which intentionally refuses a prepared remix. Use static application variants
@@ -96,6 +99,11 @@ compatible and avoid unrestricted mutable Mixer access.
 ## UI, pumps and verification
 
 Use typed Source service and actual Windows solo/local coordinate hook. Common
+solo/cohort mapping queries use an additive mutable device port so the Source
+Owner can probe conditional permission and retain recovery errors during the
+query itself. Its default forwards the existing read-only mapping API unchanged;
+the complete Windows Source path overrides it with the conditional Owner query.
+No runtime borrow cell is needed to service this IO from the common pumps. Common
 pumps own acquired-prefix paused input, suspended polling, practice/replacement
 fences and actual resume. Preserve request ID and one correlated reply across
 WouldBlock; no duplicate transaction. Non-None coordinate NativeEnd and pending
