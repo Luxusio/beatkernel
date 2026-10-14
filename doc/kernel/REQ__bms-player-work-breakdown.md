@@ -501,6 +501,18 @@ E15·P5·U3,106/223(47.53%)다. 원래91/193·native V/E·exclusive/Source 부�
 근거는 현재 task의 qa-cli-bd9b8916/와 qa-desktop-bd9b8916/이며
 요약과 재현 범위는 exclusive 변경 문서에 있다.
 
+E71: selected-chart 키음 선택을 기존 local_preparation의 순수 함수 한 곳으로 옮기고
+Windows/Linux/macOS local 호출부를 연결했다. 실제 준비 fixture7 PASS(기존5+새2),
+retained-chart2와 cohort-setup7 PASS로 원본 PCM/BGM·전체 키음 복원·뒤로 이동·
+멤버별 voice 분리와 end=None의 실제 completion을 확인했다. 필터 전 원본 맵은
+선택 chart의 completion에서 실제 거절되므로 선택 view의 수명이 검증된다.
+호스트 bin check와 Windows/macOS app/platform lib/tests C-stub typing은 exit0다.
+WASM 기본 build도 exit0이며 browser feature와 최종 전체 앱 검사는 독립 QA에서
+확인한다. foreign typing은 native 실행이 아니다. 새 네이티브 동작·효과 port·crate는
+추가하지 않았다. 독립 coverage/contract·성능 자문에서 구체 결함은 찾지 못했으나
+정식 review/QA를 대체하지 않는다.01.05/.06은 W, 전체106/223(47.53%)와 원래91/193은
+그대로다. 남은 context/효과 주입/platform 자료형 의존과 전체 native 검증은 유지한다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -529,8 +541,8 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-01.02** 코어에는 OS API와 게임 이름 분기가 없고 플랫폼·어댑터는 상호 의존하지 않는다. — 상태=D(검증완료); 선행=-; 근거=E0,E6.
 - [x] **BK-WBS-01.03** UI·설정·기록·경쟁·네트워크를 하나의 app crate에서 조립한다. — 상태=D(검증완료); 선행=-; 근거=E6.
 - [x] **BK-WBS-01.04** Rust 1.98.1/MSRV와 CI 선언을 맞추고 Cargo.lock 기반 빌드가 가능하다. — 상태=D(검증완료); 선행=-; 근거=E6,E9.
-- [ ] **BK-WBS-01.05** 모든 application context를 DDD 모듈과 명시적 Port/Adapter로 분리한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=gameplay/output 이후 나머지 context 의존성 audit.
-- [ ] **BK-WBS-01.06** UI 제어·기록·파일·장치·시간·네트워크 효과를 주입 가능하게 만든다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=실제 adapter를 교체한 계층별 fixture.
+- [ ] **BK-WBS-01.05** 모든 application context를 DDD 모듈과 명시적 Port/Adapter로 분리한다. — 상태=W(구현·연동중); 선행=-; 근거=E71의 selected-sound 공통 정책; 필요 근거/다음=나머지 context와 application/platform 자료형 의존성 audit.
+- [ ] **BK-WBS-01.06** UI 제어·기록·파일·장치·시간·네트워크 효과를 주입 가능하게 만든다. — 상태=W(구현·연동중); 선행=-; 근거=E71의 native-free 준비와 실제 cohort/복원 fixture; 필요 근거/다음=나머지 효과와 실제 adapter를 교체한 계층별 fixture.
 - [ ] **BK-WBS-01.07** hot path의 static dispatch와 추상화 비용을 실제 코드·측정으로 확인한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=동적 dispatch/clone/alloc 위치와 비용 보고.
 - [x] **BK-WBS-01.08** 순수 기록 모델을 graphics/browser 없이 빌드한다. — 상태=D(검증완료); 선행=-; 근거=E9.
 - [ ] **BK-WBS-01.09** 미지원 기능은 capability/구체 오류로 표시하고 장치·모드·규칙을 몰래 대체하지 않는다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=native/browser capability 전체 경로 검사.

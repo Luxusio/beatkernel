@@ -7,6 +7,14 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-14 준비 경계 E71: 세 OS의 selected-chart 키음 필터를 기존
+local_preparation의 순수 함수로 통합했다. 실제 준비7·retained-chart2·cohort-setup7이
+통과했고, 전체 completion과 원본 source/PCM/BGM/키음 복원·뒤로 이동을 검증한다.
+호스트 bins 및 Windows/macOS C-stub typing은 exit0이며 실제 native 실행은 아니다.
+독립 최종 리뷰와 전체 앱/browser-feature 검증은 다음 gate다.01.05/.06은 계속 W,
+전체 **106/223(47.53%)**, 원래91/193을 유지한다.
+[변경과 검증 범위](../changes/2026-10-14-native-cohort-selected-sound-preparation.md)를 따른다.
+
 2026-10-14 exclusive E70: frozen bd9b8916의 독립 DEEP 리뷰 PASS0 뒤 독립 CLI
 소프트웨어 QA가 PASS했다. app3258/0/ignored8·bins624/0/ignored17·platform434/0/
 ignored2·worker37·외부100·sizing22·Source/Target 할당 각1, WASM·foreign typing·
