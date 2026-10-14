@@ -1,5 +1,32 @@
 # Bind real ASIO intervals to common output replacement
 
+## Complete Source adapter contract
+
+The retained ASIO implementation uses the existing Source ports and common
+Owner/pumps with complete NativeOutputState recovery. Native tickets are opaque,
+stream-bound and checked with the existing exact nonce/cancellation protocol.
+Keep original raw callback evidence and original RenderReport alongside explicit
+delivered first/count. Validate only the genuine delivered interval for original
+coordinates/history/end; scalar whole-report conversions explicitly refuse a
+partial delivery. Adjacent prefixes of one original report are real progress.
+
+Extend the existing fixed-two original-observation helper for ASIO intervals,
+frozen actual epoch/basis/Source/HOST expectations and original upper-bound HOST
+coverage. Current stream failure/liveness checks precede any cached release;
+duplicates do not refresh age. Classify only the exact recovery-unavailable
+error for the existing Owner re-probe; preserve all other typed failures.
+The concrete Windows output retains its actual hidden HWND through every
+success/pending/error/Drop path until native release is proved. Common business
+policy never owns raw handles or unsafe driver operations. Preserve typed
+outcome/cleanup precedence and attempt every cohort save after all cleanup;
+actual proven completion archival keeps its existing policy even if cleanup
+later fails. Failed start/noncompletion never creates completion evidence.
+
+These are intended contracts while WBS07.08.07.14 is in progress. Legacy APIs,
+SDK-disabled refusal and trusted driver/license policy remain compatible.
+Portable execution, Rust-only foreign typing, authentic SDK build and real
+driver acceptance are distinct proof tiers; none substitutes for the next.
+
 The SDK-gated ASIO adapter implements existing OutputReplacementBackend through
 actual driver open, recoverable prepare with caller QPC clock, start/stop,
 StoppedMixerSource and presentation_observation. Requests preserve the existing

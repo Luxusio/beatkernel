@@ -1,5 +1,33 @@
 # Native runtime boundaries
 
+## ASIO complete output decision — implementation in progress
+
+Extend NativeOutputState with an exact checked NativeOutputLayout enum instead
+of fabricating an interleaved Float32 format or genericizing every common Source
+controller. ASIO planar layout has fixed bounded ordered channel/encoding rows
+and the true target AudioFormat. Cold snapshots compare exact layout/matrix;
+pending PCM cannot silently change interpretation. Keep format() compatible for
+interleaved callers and expose borrowed layout/target PCM for complete code.
+
+Reuse one native stream lifecycle with a static Legacy/Complete owner and an
+actual portable callback step using static operations. One preflight permit
+precedes even native clock acquisition; retired native halves receive silence
+without Source work. Original report and delivered geometry remain distinct.
+Complete Ready is unprimed, B primes immediately before Start, and attempted
+Start failures quarantine possibly played PCM. This adds a bounded variant
+branch, not a claim of universally zero execution overhead.
+
+Reuse the existing replacement-only fixed-two original-observation queue for
+ASIO HOST intervals rather than creating another cache/framework. The concrete
+Windows wrapper owns HWND custody; common policy owns timeout/identity/history/
+publication. A callback retirement proof cannot discharge failed native release;
+preserve sticky uncertainty and conservatively retain HWND if necessary. Keep
+typed outcome and cleanup through the existing all-member finalizer, preserving
+proven completion archival policy. No extra crate, dynamic dispatch, callback
+heap/lock/IO, SDK/dependency/license change or new clock authority is introduced.
+Available software proof and actual SDK/driver acceptance stay separate in
+[the ASIO change record](../changes/2026-10-15-asio-retained-source-output.md).
+
 ## CoreAudio complete output owner
 
 Reuse the existing CoreAudioStream lifecycle with a private static Legacy/Complete

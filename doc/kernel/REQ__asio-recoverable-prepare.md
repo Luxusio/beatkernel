@@ -1,5 +1,27 @@
 # Retain ASIO mixer and failed prepare ownership
 
+## Complete retained owner contract
+
+The complete retained path being implemented returns the unique NativeOutputState,
+not a flattened Mixer. Exact planar layout, remix, original generated report/PCM,
+admitted prefix, Source history and quarantine survive every cold refusal and
+recoverable failure. Ready complete preparation does not prime. Capture the
+first-unsent basis before cold B priming immediately before native Start; a
+synchronous callback consumes the following prefix. Once Start is attempted,
+quarantine possibly played B after callback drain even if no callback completed.
+Never rerender, pad or replay a short/incompatible pending suffix.
+
+Preserve original operation and latest cleanup diagnostics separately. Callback
+retirement alone proves neither successful driver release nor HWND safety.
+Close currently consumes native handles even when cleanup fails; repeated
+handle-less stop must not upgrade that failure into release proof. Keep sticky
+release-unproved state and actual hidden Window custody through pending failure
+and Drop. Retain a Window conservatively if release cannot be proved, including
+initial open failures lacking such evidence. No automatic retry/reopen is
+authorized from uncertain cleanup. See the
+[retained Source contract](../runtime/REQ__retained-source-output-replacement.md).
+This is an implementation requirement, not a completed native acceptance claim.
+
 AsioBlockRenderer exposes new_recoverable alongside compatible new. Invalid
 frame/channel/capacity/storage preparation returns MixerOpenFailure with the
 original renderer error and unchanged mixer. Native ASIO preparation stages

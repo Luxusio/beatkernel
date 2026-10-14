@@ -7,6 +7,8 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-15 ASIO retained Source .14 구현을 시작했다. 정확한 ordered planar layout, original report/delivered interval, complete callback/회수와 기존 공통 UI·solo/local 연결을 개발한다. .14.01/.02는 W이며 계획 PASS를 완료로 세지 않는다. 전체136/489(27.81%), 남음353·원래91/193을 유지한다. 실제 SDK/MSVC/driver acceptance와 최종 독립 소스 리뷰·QA는 남아 있다. [진행 기록](../changes/2026-10-15-asio-retained-source-output.md)을 따른다.
+
 2026-10-14 WBS 세분화: 기존 미완료117개를383개 구체 실행 단위로 나눴다.
 기존 완료106개와 원래 요구193개/완료91개는 유지한다. 기존에 실제 검증된 하위
 범위29개를 드러내 새 말단 기준선은135/489(27.61%), 남음354개다. 이는 분모를

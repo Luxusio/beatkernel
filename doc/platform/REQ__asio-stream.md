@@ -1,5 +1,31 @@
 # ASIO native output stream
 
+## Retained complete stream contract under implementation
+
+The additive complete path owns NativeOutputState with checked exact ordered
+planar channels/encodings and actual negotiated capacity. Existing legacy
+Mixer/AsioBlockRenderer APIs remain compatible. Complete Ready stays unprimed;
+B is primed through the actual delivery step immediately before Start. A
+synchronous A callback submits the next prefix. Failed Start quarantines any
+possibly heard B after drain, even without a completed callback.
+
+The production portable step validates all geometry/extents/disjointness/source
+aliasing, counters and full-prefix finiteness before native writes, then admits
+only a successfully copied prefix. Keep the original whole report plus explicit
+delivered first/count in one coherent callback observation. Pre-start prime has
+no callback observation. Retirement uses one preflight before late clock/native
+event parsing or raw publication, zeroes the selected real half repeatedly, and
+performs no Source work or false RenderFailed publication. A Continue permit is
+consumed without a second retirement decision. Raw diagnostics on ordinary
+callbacks retain their prior order; they are not accepted Source evidence.
+
+Callback retirement, driver release and sysref/HWND lifetime remain separate.
+Consumed failed close cannot be retried as if a live control remained. Sticky
+release-unproved state and concrete HWND custody survive stop/Drop failures.
+The SDK-independent production dispatch header is executable on the host;
+Rust-only cfg checks do not establish SDK/C++/MSVC ABI or real driver behavior.
+See the [complete retained contract](../runtime/REQ__retained-source-output-replacement.md).
+
 The optional Windows MSVC SDK stream consumes an explicitly opened
 [ASIO control](REQ__asio-driver-control.md), the actual core Mixer, selected output
 channel indices and an exact/preferred buffer request. Mixer sample rate must

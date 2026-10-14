@@ -1,5 +1,44 @@
 # Retained Source-coordinate output replacement
 
+## ASIO complete Source path — implementation contract
+
+The ASIO vertical under development follows the same common Source Owner,
+typed Output UI and solo/cohort pumps. Preserve NativeOutputState, original
+pending PCM/report/admitted prefix, Source history and creation identity through
+same-family replacement. This section defines intended behavior; implementation
+and available proof are tracked in WBS07.08.07.14 and the
+[ASIO change record](../changes/2026-10-15-asio-retained-source-output.md).
+
+Store the actual ordered native channel indices and heterogeneous PCM encodings
+in a checked planar layout; never claim an interleaved Float32 native format.
+Pending PCM permits only the exact same layout and remix matrix. Cold storage
+uses actual native frames within the immutable Mixer rendering ceiling.
+Retain the original whole RenderReport beside the positively delivered first
+frame/count. Coordinates, history validation and finite-end acknowledgements
+use that delivered interval. Whole-report-only scalar pause/replay consumers
+must reject partial delivery explicitly, including a prefix at report start.
+
+The sole callback retirement decision precedes native clock acquisition,
+parsing, raw publication and Source work. Authorized retirement zeroes each
+selected actual double-buffer half on every callback without Source admission.
+A Continue permit is consumed once; a later request waits for the next callback.
+Validate the whole prefix and every plane before copying; an uncertain
+post-copy admission quarantines the owner rather than replaying possibly heard PCM.
+Ready complete preparation is unprimed; prime B immediately before Start and
+let a synchronous A callback consume the next prefix. Failed attempted Start
+quarantines possibly presented B even with zero recorded callbacks.
+
+Retain the first two progressing original ASIO intervals until HOST covers
+their original upper endpoints. Validate live/errors before cached release;
+never substitute receipt time, midpoint-only evidence or a fabricated frame.
+Keep existing timeout, cancellation, age, frozen-history and atomic epoch gates.
+Callback retirement and successful driver release are separate proofs. Preserve
+typed primary/cleanup errors, actual pending state and hidden HWND custody on
+failure; a consumed failed native handle cannot promise a cleanup retry. An
+unproved release stays unproved across repeated stop and Drop, retaining the
+HWND conservatively if necessary. Authentic SDK/MSVC and installed-driver
+acceptance remain required, separately from portable tests and foreign typing.
+
 ## CoreAudio complete Source path
 
 CoreAudio retained solo/local play uses the same common Source Owner, typed UI,
