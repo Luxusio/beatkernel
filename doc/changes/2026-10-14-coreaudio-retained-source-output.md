@@ -1,7 +1,8 @@
 # CoreAudio retained Source 출력 연결
 
-현재 진행 중이며 구현 완료나 QA PASS 기록이 아니다. 전체 플레이어 요구사항을
-유지하면서 CoreAudio의 complete 소프트웨어 소유권, 실제 callback/회수, 기존
+CoreAudio retained Source 소프트웨어 연결과 독립 code/security review·CLI QA를
+마쳤다. 실제 Mac/HAL 검증과 owning verification·전체 제품 완료는 별도다. 전체
+플레이어 요구사항을 유지하면서 CoreAudio의 complete 소프트웨어 소유권, 실제 callback/회수, 기존
 backend/typed UI/solo/local 소비자를 연결한다. 원래 Source history identity를
 보존하고 첫 미전송 프레임에서 다시 열어, 미리 생성한 PCM을 건너뛰거나 재생성하지
 않도록 한다. 사전 [복구 계약](../kernel/REQ__coreaudio-recoverable-open.md),
@@ -233,6 +234,59 @@ native backend의 narrow classifier 회귀3개를 추가해 관련 cfg-Mac backe
 format과 diff 검사를 통과했다. backend는 W에서 V로 돌아가며 D135/489는
 유지한다. 이 기록은 재검토 전 개발 검증이며 두 번째 DEEP 탐색·정식 code/security
 review·독립 QA와 실제 native acceptance는 아직 남아 있다.
+
+## 2026-10-15 최종 소프트웨어 검증
+
+source 수정은 edc8294e, 개발 근거는2a7313c6에 커밋했다. frozen
+`2a7313c6d8fc48bcec320faeb5aa91bff9ddd704`와 기준48e95988 사이 전체46개 경로를
+두 번째 독립 탐색과 정식 리뷰에 전달했다. correctness·contract/test 탐색은 각각
+빈 후보 목록을 반환했고, 정식 code review와 별도 security review가 각각 PASS0을
+반환했다. 처음 FAIL2를 숨기거나 탐색 결과로 정식 검토를 대체하지 않았다.
+
+그 **다음** 독립 `qa_cli_coreaudio_14036`가 다음 소프트웨어 범위를 PASS했다.
+
+| 실제 검사 | 결과와 범위 |
+| --- | --- |
+| `cargo test -p beatkernel --locked --offline -j2` | 전체749/0, history14 포함 |
+| platform `--lib --test audio_format --test wasapi_source_worker_allocations` | library473/0/ignored2, format23/0, 외부120/0; neutral10·callback19·WASAPI37 및 source-included 중복을 더하지 않음 |
+| app `--features desktop,webtransport --lib --bins --test coordinate_source_replacement_allocations` | library3279/0/ignored8, bins640/0/ignored17, 외부 allocation1/0; 새 helper7/controller6/Owner3/Remix3은 library 안에 포함 |
+| host bins·browser-feature WASM | 각 check exit0 |
+| Windows/macOS platform/app lib/tests 및 macOS bin | cached C-stub typing exit0; 실제 SDK/ABI/link/HAL 실행 근거 아님 |
+| source Clippy `--lib --bins` | exit0, 기존 경고 유지; 전체 strict-clean 주장 없음 |
+| Rust format·diff·WBS·링크 | 변경 Rust40, diff exit0, WBS unittest50/0, 기존231행 보존 감사, local 링크144/0 |
+| 정상 사용자 공개 CLI |17/17의 예상 exit0/1·출력; 실제 최신 binary의 help/잘못된 입력/경계/동시 실행 |
+
+Cargo는 앞 절과 같은 cached Rust1.98.1·CC/AR·locked/offline·jobs2 환경이며
+캐시 쓰기에만 narrow sudo를 썼다. 공개 CLI는 일반 사용자로 실행했다.
+`audio --fixture`는 frames8·commands3·partition_invariance PASS,
+`windows_audio --fixture`는 frames4·literal_check PASS다. 유효한 macOS solo/local
+인자는 이 Linux 호스트에서 예상 exit1과 `native playback requires macOS`로 거절된다.
+CLI 증거 수집기의 Python 이름 충돌은 `/tmp` runner만 고쳐 다시 수집했으며 제품
+실패나 source 수정이 아니다. 도구·SDK·드라이버 설치나 권한 변경은 하지 않았다.
+
+로그는 `/tmp/beatkernel-coreaudio-qa-14036-{core,platform,app,windows,macos,wasm,host-bins,clippy,cli-build,static,wbs-audit}.log`와
+`/tmp/beatkernel-coreaudio-qa-14036-cli.jsonl`이다. 새 clone에서 로그가 사라지면
+위 command와 fixture source로 재현해야 한다. 검사한 source는 QA 끝까지 동결했다.
+consumer8은 main/macOS composition에서 각각 실행돼 bins624→640이 됐으며 새로운
+고유 회귀16개를 추가한 것이 아니다. cfg-Mac audio52·새 presentation6·backend24·
+UI7은 여전히 typed-only이고, 실제 IOHID/HAL forwarding·회수/음향은 미실행이다.
+
+새 device discovery도 owned Mac 없음, macos-vm missing macos-host/providers[]를
+확인했다. `.15.12` E와 원래193개 요구·조건부4개·전체 Goal을 유지한다. 현재는
+`.15.10` 정식 검토 D, `.15.11` software QA 후 최종 문서 audit 대기 V다.
+문서 audit는 stale AC005 근거와 ASIO 미구현 carrier 타입 고정 두 표현을 고친 뒤
+독립 재검토 PASS0이다. 제품 코드·QA 대상 source는 바꾸지 않았다.
+마지막 owning task_verify는 한 번 실행해 PENDING을 반환했다. 이 run에는
+hook-owned RECEIPTS.jsonl 자체가 없어 required review-code/review-security/qa-cli
+완료 기록을 확인할 수 없었다. 실제 리뷰·QA·문서 PASS와 자동 attestation을
+구분하며, 기록만 얻으려고 검사를 반복하거나 receipt를 직접 쓰지 않는다.
+따라서 task close는 미완료이고 `.15.11` V·실제 Mac `.15.12` E를 유지한다.
+현재 WBS는136/489(27.81%), 남음353이며 원래91/193·조건부4는 그대로다.
+
+재사용 가능한 수정은 원본 future 관측 보존과 좁은 native IO 재확인 규칙으로,
+사전 REQ/ADR과 실제 회귀에 반영해 커밋했다. QA의 strict all-target Clippy 후보는
+기존 WBS14.05.02의 전체 lint 감사에 이미 포함되어 있어 이번 task의 범위를
+추가하지 않는다. 기존 intentional malformed-range fixture나 lint를 임의로 고치지 않았다.
 
 ## Known ceiling
 

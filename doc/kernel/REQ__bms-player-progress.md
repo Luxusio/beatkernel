@@ -1,4 +1,4 @@
-# BMS player 구현/검증 현황 — 2026-10-14
+# BMS player 구현/검증 현황 — 2026-10-15
 
 현재 전체 TODO/진행률은 [전체 WBS](REQ__bms-player-work-breakdown.md)를 사용한다.
 `python3 tools/wbs_status.py`가 말단 작업의 완료·검증 대기·구현 중·장비/정책 대기와
@@ -34,6 +34,15 @@ consumer8/0·공통 출력 pump9/0·Source owner9/0과 CLI 도움말/오프라�
 host 전체 app library3279/0/ignored8(새 회귀19개 포함)과 macOS platform/app
 lib/tests/macOS bin C-stub typing exit0·Rust40 format/diff를 확인했다. backend는
 V로 돌아갔고 cfg-Mac backend24개는 typed-only다. 새 정식 리뷰와 QA는 아직 남는다.
+2026-10-15 frozen2a7313c6의 새 정식 code/security review는 각각 PASS0이고,
+그 뒤 독립 CLI QA도 software scope PASS다. core749/0·platform473/0/ignored2·
+format23/0·app3279/0/ignored8·bins640/0/ignored17·Source allocation1/0과
+WASM/Windows/macOS typing, source Clippy·CLI17/17을 확인했다. 외부 WASAPI120과
+중복 consumer 실행은 고유 coverage에 더하지 않는다. .15.10 검토는 D이며 .15.11은
+독립 문서 재검토 PASS 후 owning verification 대기 V, 실제 Mac/HAL acceptance는 E다.
+한 번 task_verify를 실행했지만 hook-owned receipt가 없어 PENDING이다. 현재
+136/489(27.81%), 남음353이며 실제 리뷰/QA PASS가 task close·전체 플레이어
+완료를 뜻하지 않는다.
 [현재 변경](../changes/2026-10-14-coreaudio-retained-source-output.md)을 따른다.
 
 2026-10-14 좌표 경계 E74: frozen7ac7a1af의 독립 DEEP 리뷰 PASS0 다음 독립 CLI
