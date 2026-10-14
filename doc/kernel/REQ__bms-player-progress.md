@@ -1,4 +1,4 @@
-# BMS player 구현/검증 현황 — 2026-10-07
+# BMS player 구현/검증 현황 — 2026-10-14
 
 현재 전체 TODO/진행률은 [전체 WBS](REQ__bms-player-work-breakdown.md)를 사용한다.
 `python3 tools/wbs_status.py`가 말단 작업의 완료·검증 대기·구현 중·장비/정책 대기와
@@ -7,12 +7,20 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
-2026-10-14 CoreAudio E75(진행 중): retained Source의 complete callback·native 회수·
-backend/UI·solo/local을 연결하기 시작했다. 사전 계약 ef99f3a3과 독립 계획 검토를
-마쳤고 승인 CAS·cold history 확장에 각각 구현/테스트 작성자를 병렬 배치했다.
-.15는 N→W이며 아직 구현/QA 완료가 아니다. 전체106/223·원래91/193은 그대로다.
-실제 runner 조회에서 owned Mac 없음·macos-host 누락을 확인했으며 실제 native
-acceptance는 별도로 남긴다. [현재 변경](../changes/2026-10-14-coreaudio-retained-source-output.md)을 따른다.
+2026-10-14 WBS 세분화: 기존 미완료117개를383개 구체 실행 단위로 나눴다.
+기존 완료106개와 원래 요구193개/완료91개는 유지한다. 기존에 실제 검증된 하위
+범위29개를 드러내 새 말단 기준선은135/489(27.61%), 남음354개다. 이는 분모를
+바꾼 기록이며 분해 전106/223(47.53%)에서 진행이 후퇴하거나 새 기능29개가
+추가된 것은 아니다. 현재 상태는 WBS 집계 명령을 따른다. 각 하위 행에 범위,
+상태, 실제 근거 또는 다음 검사, 선행 조건을 남겼다.
+
+2026-10-14 CoreAudio E75(진행 중): .15를12개로 분해했다. 공통 retirement CAS,
+cold history 성장, portable production callback의3개 software 범위는 각각 실제
+검사로 D다. native 소유권/실패 fixture는 V, backend/UI·solo/local과 이후 결합
+review/QA는 N, 실제 Mac/HAL acceptance는 E다. native fixture44개를 포함한 macOS
+C-stub typing은 exit0이며 실제 native 실행 PASS가 아니다. 실제 runner 조회에서 owned Mac 없음·macos-host 누락을
+확인했으며 native acceptance를 별도로 남긴다.
+[현재 변경](../changes/2026-10-14-coreaudio-retained-source-output.md)을 따른다.
 
 2026-10-14 좌표 경계 E74: frozen7ac7a1af의 독립 DEEP 리뷰 PASS0 다음 독립 CLI
 QA가 DTO 이동의 소프트웨어 범위 PASS했다. complete core746·platform434/0/ignored2·

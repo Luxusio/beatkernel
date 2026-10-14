@@ -32,10 +32,39 @@ output state21이 포함되며 중복 합산하지 않는다. 새 테스트는 c
 platform의 기존 경고3개는 남아 있으며 strict-clean을 주장하지 않는다.
 로그는 target/wf/retained-source-coreaudio-output/{ac010-core,foundation-platform}.log다.
 
-현재 production CoreAudio callback과 native/backend/UI/solo/local 연결을 진행
-중이다. 독립 코드/보안 검토, CLI QA와 최종 문서 감사는 아직 남아 있다.
-이 기반 테스트 통과가 전체 retained 교체의 완료를 뜻하지 않는다. WBS .15는
-N에서 W로 옮겼으며 완료 수106/223·원래91/193과 분모를 유지한다.
+portable production callback은 40b8821b에 커밋했고 별도19/0을 실행했다.
+첫 실행17/2 중 두 실패는 테스트가 covering interval을 pin에서 쪼갠다고 잘못
+기대한 것이었다. 원래 interval descriptor 보존을 확인하고 실제 pause 경계가
+생긴 뒤 새 revision/pin으로 complete interval compaction을 검증하도록 보강해
+19/0을 확인했다. 로그는 ac003-callback.log와 ac003-callback-fixed.log다.
+pending prefix/short refusal, 모든 채널 검증, 원래 native extent, history/practice
+pin과 callback의 calibrated zero heap을 검증한다. 방어적 post-copy admission
+실패는 infallible copy와 exclusive safe owner 때문에 corruption 없이는 도달할 수
+없으므로 인위적인 상태 훼손 hook을 추가하지 않았다.
+
+native 수명주기에 production step을 연결하고 같은 실행 코드의 static operation
+주입으로 native fixture44개(신규20·보존24)를 작성했다. cached macOS C-stub의
+platform/app lib/tests와 macOS bin 형 검사 exit0을 확인했다. 첫 fixture 형 오류
+6건과 외부 WASAPI allocation binary의 neutral module 누락2건은 수정했으며
+외부 allocation binary는 host에서116/0을 실행했다. 외부 binary에는 source를
+포함한 기존 fixture도 있으므로 library 수와 중복 합산하지 않는다. 로그는
+ac004-macos-check-fixed.log / retry1.log / retry2.log이고, host 외부 검사는
+`cargo test -p beatkernel-platform --test wasapi_source_worker_allocations --locked --offline -j2`다.
+C-stub은 Rust typing만 확인하며 신규 native fixture의 실행 PASS가 아니다.
+backend/UI/solo/local 연결, 독립 코드/보안 검토, 전체 CLI QA와 최종 문서 감사는
+남는다. 이 기반 테스트 통과가 전체 retained 교체의 완료를 뜻하지 않는다.
+
+사용자가 WBS 세분화를 요청해 미완료117개를383개 실행 단위로 나눴다. 기존
+완료106개·조건부4개·원래91/193과 모든 원래 범위를 보존했고, 기존 실제 검사
+근거가 있는 하위29개를 드러내 새 기준선은135/489(27.61%), 남음354개다.
+분해 전106/223(47.53%)과 직접적인 진척 증감 비교에 사용하지 않는다.
+CoreAudio .15는12개로 분해했으며 portable 기반3개 D, native 소유권/fixture2개 V,
+backend/UI/solo/local4개와 결합 review/QA2개 N, actual Mac acceptance1개 E다.
+각 행에 ID·상태·근거/다음 검사·선행을 기록하고 task AC와 연결했다.
+WBS 도구는 기존 중첩 지원을 그대로 사용한다. 실제 CLI4모드, 기존 unittest50개,
+기존 행 보존·117개 coverage·부모/선행/순환 검사와 local 링크137개가 통과했다.
+독립 문서 근거 감사도 같은 결과를 확인했다. 이 범위의 문서 검증은 전체
+CoreAudio task의 formal code/security review·QA·verify/close를 대신하지 않는다.
 
 실제 device broker의 owned/backends 조회에서 owned Mac이 없고 macos-vm은
 missing-prerequisites, missing macos-host, providers 없음으로 확인됐다.
