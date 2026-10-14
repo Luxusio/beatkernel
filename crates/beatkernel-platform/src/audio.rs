@@ -47,10 +47,12 @@ pub(crate) mod mixer_launch;
 mod negotiation;
 mod output_state;
 pub mod presentation;
-pub(crate) mod source_playback_publication;
 pub(crate) mod source_history_retirement_mailbox;
+pub(crate) mod source_playback_publication;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", test))]
 pub(crate) mod telemetry;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod wasapi_source_worker;
 
 pub use convert::encode_pcm;
 pub use converted_output_state::{ConvertedBoundaryFacts, ConvertedNativeOutputState};
