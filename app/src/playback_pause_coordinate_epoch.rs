@@ -328,7 +328,7 @@ impl NativePause {
 
     fn check_coordinate_target_replacement_facts(
         &self,
-        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        facts: beatkernel::audio::ConvertedBoundaryFacts,
     ) -> Result<u64, PauseError> {
         let target = self.target.ok_or(PauseError(
             "coordinate replacement lacks target pause facts",

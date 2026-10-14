@@ -54,8 +54,9 @@ pub(crate) mod telemetry;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) mod wasapi_source_worker;
 
+pub use beatkernel::audio::ConvertedBoundaryFacts;
 pub use convert::encode_pcm;
-pub use converted_output_state::{ConvertedBoundaryFacts, ConvertedNativeOutputState};
+pub use converted_output_state::ConvertedNativeOutputState;
 pub use negotiation::{
     resolve_period, validate_buffer_size, validate_known_request_sizing, ResolvedPeriod,
 };

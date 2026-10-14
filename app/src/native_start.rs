@@ -2031,7 +2031,7 @@ impl TargetOutputStartPlan {
     /// Actual gate adoption must agree with the source identity and generated target boundary.
     pub fn validate_startup(
         self,
-        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        facts: beatkernel::audio::ConvertedBoundaryFacts,
     ) -> Result<ClockPoint, StartProjectionError> {
         let boundary = facts.startup.ok_or(StartProjectionError::TooClose)?;
         if facts.origin != Some(self.basis.origin())

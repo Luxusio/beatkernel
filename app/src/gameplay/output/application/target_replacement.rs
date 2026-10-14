@@ -7,8 +7,10 @@ use crate::{
     },
     native_end::NativeEnd,
 };
-use beatkernel::audio::{ConvertedRenderReport, RenderReport, TargetFrameBasis};
-use beatkernel_platform::audio::{ConvertedBoundaryFacts, ConvertedNativeOutputState};
+use beatkernel::audio::{
+    ConvertedBoundaryFacts, ConvertedRenderReport, RenderReport, TargetFrameBasis,
+};
+use beatkernel_platform::audio::ConvertedNativeOutputState;
 
 pub(super) struct TargetWaitingTiming {
     pause: NativePause,

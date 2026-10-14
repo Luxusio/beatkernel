@@ -11,10 +11,9 @@ use crate::{
     },
 };
 use beatkernel::{
-    audio::{InterpolatedTargetTime, RenderReport},
+    audio::{ConvertedBoundaryFacts, InterpolatedTargetTime, RenderReport},
     time::ClockPair,
 };
-use beatkernel_platform::audio::ConvertedBoundaryFacts;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoordinateControlError {

@@ -2,7 +2,7 @@
 
 use super::{
     AudioError, AudioFormat, ChannelMatrix, ConvertedPhaseHistory, FormatConverter, Mixer,
-    MixerOpenFailure, RenderReport, ResampleQuality, SourcePosition, SourcePlaybackHistory,
+    MixerOpenFailure, RenderReport, ResampleQuality, SourcePlaybackHistory, SourcePosition,
     TargetFrameBasis, TargetTime,
 };
 
@@ -63,6 +63,25 @@ pub struct TargetBoundary {
     /// Exact physical duration at that target frame boundary.
     pub target_time: TargetTime,
 }
+
+/// Persisted mapped boundaries; latest/held rendering cannot erase prior evidence.
+/// These are generated-output facts, not admission or presentation acknowledgments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConvertedBoundaryFacts {
+    /// Exact generated target onset of the immutable startup gate.
+    pub startup: Option<TargetBoundary>,
+    /// Target boundary of actual source pause adoption.
+    pub pause: Option<TargetBoundary>,
+    /// Actual source resume projected onto consumed target output.
+    pub resume: Option<TargetBoundary>,
+    /// Immutable exclusive target endpoint.
+    pub end: Option<TargetBoundary>,
+    /// Immutable original output clock origin; None only before observation.
+    pub origin: Option<crate::time::ClockPoint>,
+    /// Immutable source grid rate associated with mapped coordinates.
+    pub source_rate: u32,
+}
+
 impl ConvertedRenderReport {
     /// Projects an integer source boundary only when this active block crosses it.
     /// Cached output uses consumed positions, not the source callback pull frontier.

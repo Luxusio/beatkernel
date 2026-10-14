@@ -1,28 +1,11 @@
 //! Complete converted software ownership and positively unsubmitted target PCM.
 use super::DeviceFormat;
 use beatkernel::audio::{
-    AudioError, ChannelMatrix, ConvertedMixer, ConvertedOutputState, ConvertedPhaseHistory,
-    ConvertedRenderReport, Mixer, MixerOpenFailure, RenderReport, ResampleQuality, TargetBoundary,
-    TargetFrameBasis, TargetTime,
+    AudioError, ChannelMatrix, ConvertedBoundaryFacts, ConvertedMixer, ConvertedOutputState,
+    ConvertedPhaseHistory, ConvertedRenderReport, Mixer, MixerOpenFailure, RenderReport,
+    ResampleQuality, TargetFrameBasis, TargetTime,
 };
 
-/// Persisted mapped boundaries; latest/held rendering cannot erase prior evidence.
-/// These are generated-output facts, not admission or presentation acknowledgments.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ConvertedBoundaryFacts {
-    /// Exact generated target onset of the immutable startup gate.
-    pub startup: Option<TargetBoundary>,
-    /// Target boundary of actual source pause adoption.
-    pub pause: Option<TargetBoundary>,
-    /// Actual source resume projected onto consumed target output.
-    pub resume: Option<TargetBoundary>,
-    /// Immutable exclusive target endpoint.
-    pub end: Option<TargetBoundary>,
-    /// Immutable original output clock origin; None only before observation.
-    pub origin: Option<beatkernel::time::ClockPoint>,
-    /// Immutable source grid rate associated with mapped coordinates.
-    pub source_rate: u32,
-}
 /// Unique conversion owner plus one bounded generated target block and prefix.
 pub struct ConvertedNativeOutputState {
     owner: ConvertedMixer,
@@ -455,11 +438,11 @@ fn storage(format: DeviceFormat, frames: usize) -> Result<Vec<f32>, AudioError> 
 #[path = "converted_output_state_fixtures.rs"]
 mod fixtures;
 #[cfg(test)]
-#[path = "converted_output_retirement_fixtures.rs"]
-mod retirement_fixtures;
-#[cfg(test)]
 #[path = "converted_paired_retirement_fixtures.rs"]
 mod paired_retirement_fixtures;
+#[cfg(test)]
+#[path = "converted_output_retirement_fixtures.rs"]
+mod retirement_fixtures;
 
 #[cfg(test)]
 #[path = "converted_practice_retention_fixtures.rs"]

@@ -28,7 +28,7 @@ pub struct NativeTargetPlaybackFacts {
     pub playback: crate::native_playback_phase::ConvertedPlaybackFacts,
     pub source: Option<RenderReport>,
     pub converted: Option<beatkernel::audio::ConvertedRenderReport>,
-    pub boundaries: beatkernel_platform::audio::ConvertedBoundaryFacts,
+    pub boundaries: beatkernel::audio::ConvertedBoundaryFacts,
     pub revision: u64,
 }
 
@@ -742,7 +742,7 @@ pub trait OriginalNativeOutputBackend<O: SoftwareOutputState = Mixer>:
 pub struct TargetOutputTelemetry {
     pub source: Option<RenderReport>,
     pub converted: Option<beatkernel::audio::ConvertedRenderReport>,
-    pub facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+    pub facts: beatkernel::audio::ConvertedBoundaryFacts,
 }
 
 pub trait OriginalTargetNativeOutputBackend<O>:
@@ -766,7 +766,7 @@ pub trait OriginalTargetNativeOutputBackend<O>:
     fn boundary_facts(
         &self,
         output: &Self::Output,
-    ) -> Result<beatkernel_platform::audio::ConvertedBoundaryFacts, Self::Error>;
+    ) -> Result<beatkernel::audio::ConvertedBoundaryFacts, Self::Error>;
     /// The default is suitable only for serialized same-owner implementations.
     /// Concurrent worker adapters must override with one coherent bounded read.
     fn output_telemetry(
@@ -777,7 +777,7 @@ pub trait OriginalTargetNativeOutputBackend<O>:
         let converted = self.converted_report(output)?;
         let facts = self.boundary_facts(output)?;
         Ok(
-            (facts != beatkernel_platform::audio::ConvertedBoundaryFacts::default()).then_some(
+            (facts != beatkernel::audio::ConvertedBoundaryFacts::default()).then_some(
                 TargetOutputTelemetry {
                     source,
                     converted,

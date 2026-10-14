@@ -50,20 +50,21 @@ mod model;
 mod pcm;
 mod practice;
 mod queue;
-mod source_playback_phase;
 mod source_playback_history;
+mod source_playback_phase;
 mod target_time;
 
 pub use convert::{ChannelMatrix, FormatConverter, ResampleQuality, SourcePosition};
-pub use converted_mixer::{ConvertedMixer, ConvertedOutputState, ConvertedRenderReport, TargetBoundary};
+pub use converted_mixer::{
+    ConvertedBoundaryFacts, ConvertedMixer, ConvertedOutputState, ConvertedRenderReport,
+    TargetBoundary,
+};
 pub use converted_phase::{
     ConvertedPhaseError, ConvertedPhaseHistory, ConvertedPhasePoint, ConvertedPhaseSpan,
 };
 pub use frame_basis::{OutputFrameBasis, OutputFrameBasisError};
 pub use handoff::{MixerOpenFailure, OutputOpenFailure, SoftwareOutputState, StoppedMixerSource};
 pub use interpolated_time::InterpolatedTargetTime;
-pub use source_playback_phase::{SourcePlaybackSpan, SourcePlaybackState};
-pub use source_playback_history::SourcePlaybackHistory;
 pub use mixer::Mixer;
 pub use model::{
     AudioCommand, AudioCounters, AudioError, AudioFormat, AudioLimits, MixerConfig, PcmLimits,
@@ -75,6 +76,8 @@ pub use practice::{
     PracticeRegion, PracticeRequest, PracticeSourceSelection, PreparedPracticeProgram,
     ProjectedPracticeReceipt,
 };
+pub use source_playback_history::SourcePlaybackHistory;
+pub use source_playback_phase::{SourcePlaybackSpan, SourcePlaybackState};
 pub use target_time::{TargetFrameBasis, TargetTime};
 
 pub use pcm::{PcmSample, SampleBank, WavError};

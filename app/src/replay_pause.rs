@@ -109,7 +109,7 @@ impl ReplayPause {
         paused: bool,
         epoch: u64,
         basis: beatkernel::audio::TargetFrameBasis,
-        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        facts: beatkernel::audio::ConvertedBoundaryFacts,
         pair: ClockPair,
     ) -> Result<bool, PauseError> {
         if self.native.epoch() != epoch
@@ -135,7 +135,7 @@ impl ReplayPause {
         &mut self,
         epoch: u64,
         basis: beatkernel::audio::TargetFrameBasis,
-        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        facts: beatkernel::audio::ConvertedBoundaryFacts,
         source: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<Option<ReplayPauseBoundary>, PauseError> {

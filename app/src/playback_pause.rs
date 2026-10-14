@@ -238,7 +238,7 @@ impl NativePause {
     pub fn prepare_coordinate_adoption(
         &self,
         report: Option<RenderReport>,
-        facts: Option<beatkernel_platform::audio::ConvertedBoundaryFacts>,
+        facts: Option<beatkernel::audio::ConvertedBoundaryFacts>,
     ) -> Result<Option<PreparedCoordinatePauseAdoption>, PauseError> {
         let binding = self
             .coordinate_binding
@@ -515,7 +515,7 @@ impl NativePause {
         &mut self,
         epoch: u64,
         basis: beatkernel::audio::TargetFrameBasis,
-        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        facts: beatkernel::audio::ConvertedBoundaryFacts,
         source: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<Option<PauseBoundary>, PauseError> {
@@ -529,7 +529,7 @@ impl NativePause {
         &mut self,
         epoch: u64,
         basis: beatkernel::audio::TargetFrameBasis,
-        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        facts: beatkernel::audio::ConvertedBoundaryFacts,
         source: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<Option<PauseBoundary>, PauseError> {

@@ -16,7 +16,7 @@ pub enum LivePauseObservation {
     Target {
         epoch: u64,
         basis: beatkernel::audio::TargetFrameBasis,
-        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        facts: beatkernel::audio::ConvertedBoundaryFacts,
         source: Option<RenderReport>,
         pair: ClockPair,
     },

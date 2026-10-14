@@ -1,6 +1,6 @@
 //! Retained render endpoint plus actual native presentation; no device or wall clock.
 use beatkernel::{
-    audio::{RenderReport, InterpolatedTargetTime, TargetTime},
+    audio::{InterpolatedTargetTime, RenderReport, TargetTime},
     time::{ClockDomainId, ClockPair, ClockPoint, Timestamp},
 };
 
@@ -245,7 +245,7 @@ impl NativeEnd {
         epoch: u64,
         basis: AudioAuthorityCoordinateBasis,
         identity: SourcePlaybackIdentity,
-        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        facts: beatkernel::audio::ConvertedBoundaryFacts,
         source: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<PreparedCoordinateEnd, EndError> {
@@ -458,7 +458,7 @@ impl NativeEnd {
         &mut self,
         epoch: u64,
         basis: beatkernel::audio::TargetFrameBasis,
-        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        facts: beatkernel::audio::ConvertedBoundaryFacts,
         source: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<Option<EndBoundary>, EndError> {
@@ -716,7 +716,7 @@ impl NativeEnd {
         &mut self,
         epoch: u64,
         basis: beatkernel::audio::TargetFrameBasis,
-        facts: beatkernel_platform::audio::ConvertedBoundaryFacts,
+        facts: beatkernel::audio::ConvertedBoundaryFacts,
         source: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<(), EndError> {
@@ -1267,7 +1267,9 @@ mod fixtures {
         latency_frames: u32,
         error_ns: u64,
     ) -> beatkernel_platform::audio::asio::AsioPresentationObservation {
-        use beatkernel_platform::audio::asio::{AsioPresentationObservation, MultimediaHostInterval};
+        use beatkernel_platform::audio::asio::{
+            AsioPresentationObservation, MultimediaHostInterval,
+        };
         AsioPresentationObservation::from_render(
             render,
             1000,
