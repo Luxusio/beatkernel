@@ -41,6 +41,8 @@ pub mod cadence;
 pub(crate) mod channel_remix;
 mod convert;
 mod converted_output_state;
+#[cfg(any(target_os = "macos", test))]
+pub(crate) mod coreaudio_source_callback;
 pub(crate) mod history_retirement_mailbox;
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 pub(crate) mod mixer_launch;
