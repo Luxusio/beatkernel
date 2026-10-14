@@ -1,5 +1,11 @@
 //! Complete same-rate software output ownership, independent of native handles.
-use super::{channel_remix, DeviceFormat};
+use super::{
+    channel_remix,
+    source_history_retirement_mailbox::{
+        apply_source_history_retirement_with_pending, SourceHistoryRetirementRequest,
+    },
+    DeviceFormat,
+};
 use beatkernel::audio::{
     AudioError, ChannelMatrix, FormatConverter, Mixer, MixerOpenFailure, OutputFrameBasis,
     RenderReport, SoftwareOutputState,
@@ -15,6 +21,7 @@ pub struct NativeOutputState {
     max_frames: usize,
     report: Option<RenderReport>,
     admitted: usize,
+    admission_uncertain: bool,
 }
 impl NativeOutputState {
     /// Wraps an ordinary Mixer without allocating or inventing a target format.
@@ -27,6 +34,7 @@ impl NativeOutputState {
             max_frames: 0,
             report: None,
             admitted: 0,
+            admission_uncertain: false,
         }
     }
     /// Cold preparation; every refusal returns the original Mixer untouched.
@@ -66,6 +74,15 @@ impl NativeOutputState {
     pub fn admitted_frames(&self) -> usize {
         self.admitted
     }
+    /// Irreversibly quarantines an owner after a native release whose admission
+    /// outcome is unknown. Retained PCM remains available for diagnosis only.
+    pub fn mark_admission_uncertain(&mut self) {
+        self.admission_uncertain = true;
+    }
+    /// Unknown native admission forbids replay, reopening and publication.
+    pub const fn admission_is_uncertain(&self) -> bool {
+        self.admission_uncertain
+    }
     /// Unsubmitted complete frames remaining in the retained block.
     pub fn pending_frames(&self) -> usize {
         self.report
@@ -99,12 +116,26 @@ impl NativeOutputState {
     /// Retained output is admissible under a hold only with actual paused-zero
     /// evidence on the unchanged frozen playback grid. No tail is vacuous.
     pub fn paused_tail_admissible(&self) -> bool {
-        self.pending_report().is_none_or(|report| {
-            report.paused
-                && report.playback_frames == 0
-                && report.playback_start_frame == self.mixer.playback_frame_cursor()
-                && self.pending_samples().iter().all(|sample| *sample == 0.0)
-        })
+        !self.admission_uncertain
+            && self.pending_report().is_none_or(|report| {
+                report.paused
+                    && report.playback_frames == 0
+                    && report.playback_start_frame == self.mixer.playback_frame_cursor()
+                    && self.pending_samples().iter().all(|sample| *sample == 0.0)
+            })
+    }
+    /// Services qualified history intent while preserving the whole pending
+    /// block's original Source interpretation and queued practice references.
+    pub(crate) fn apply_source_history_retirement(
+        &mut self,
+        request: SourceHistoryRetirementRequest,
+        completed: &mut u64,
+    ) -> Result<usize, AudioError> {
+        if self.admission_uncertain {
+            return Err(AudioError::InvalidBuffer);
+        }
+        let pending = self.pending_report().map(|report| report.start_frame);
+        apply_source_history_retirement_with_pending(&mut self.mixer, request, completed, pending)
     }
     /// Cold validation and preparation commit only after every fallible step.
     /// An incompatible pending interpretation refuses without consuming state.
@@ -172,6 +203,9 @@ impl NativeOutputState {
         matrix: Option<&ChannelMatrix>,
         max_frames: usize,
     ) -> Result<(), AudioError> {
+        if self.admission_uncertain {
+            return Err(AudioError::InvalidBuffer);
+        }
         let config = self.mixer.config();
         if max_frames == 0 {
             return Err(AudioError::InvalidCapacity);
@@ -194,7 +228,7 @@ impl NativeOutputState {
     /// Renders exactly one new block into prepared storage. Pending output must
     /// first be admitted; PCM/report are retained before native encoding starts.
     pub fn render_pending(&mut self, frames: usize) -> Result<RenderReport, AudioError> {
-        if frames == 0 || self.pending_frames() != 0 {
+        if self.admission_uncertain || frames == 0 || self.pending_frames() != 0 {
             return Err(AudioError::InvalidBuffer);
         }
         if frames > self.max_frames {
@@ -211,16 +245,16 @@ impl NativeOutputState {
     /// Commits a validated positive native write before later fallible telemetry.
     /// Excess counts refuse without moving the pending prefix.
     pub fn admit(&mut self, frames: usize) -> Result<(), AudioError> {
-        if frames == 0 || frames > self.pending_frames() {
+        if self.admission_uncertain || frames == 0 || frames > self.pending_frames() {
             return Err(AudioError::InvalidBuffer);
         }
         self.admitted += frames;
         Ok(())
     }
-    /// Legacy extraction refuses if it would discard converter or unsent PCM.
-    /// Refusal returns the entire owner for a later complete-state retry.
+    /// Legacy extraction refuses if it would discard converter or unsent PCM,
+    /// or bypass quarantine. Refusal retains the entire owner for diagnosis.
     pub fn into_mixer(self) -> Result<Mixer, Self> {
-        if self.remix.is_some() || self.pending_frames() != 0 {
+        if self.admission_uncertain || self.remix.is_some() || self.pending_frames() != 0 {
             Err(self)
         } else {
             Ok(self.mixer)

@@ -17,23 +17,35 @@ pub(crate) fn apply_source_history_retirement(
     request: SourceHistoryRetirementRequest,
     completed: &mut u64,
 ) -> Result<usize, AudioError> {
+    apply_source_history_retirement_with_pending(mixer, request, completed, None)
+}
+
+/// Complete same-rate owners additionally retain the original start of any
+/// generated block until its entire PCM has been positively admitted.
+pub(super) fn apply_source_history_retirement_with_pending(
+    mixer: &mut Mixer,
+    request: SourceHistoryRetirementRequest,
+    completed: &mut u64,
+    pending_start: Option<u64>,
+) -> Result<usize, AudioError> {
     if request.revision == 0 || request.revision & 1 != 0 {
         return Err(AudioError::InvalidFormat);
     }
     if request.revision <= *completed {
         return Ok(0);
     }
-    // Validate the requested range even if a practice receipt would clamp it.
+    // Validate the original range before pending PCM or practice can clamp it.
     mixer
         .source_playback_history()
         .ok_or(AudioError::InvalidCapacity)?
         .validate_retirement_before(request.source_pin)?;
+    let pin = pending_start.map_or(request.source_pin, |pending| {
+        pending.min(request.source_pin)
+    });
     let pin = mixer
         .practice_history_retention_pins()
         .0
-        .map_or(request.source_pin, |practice| {
-            practice.min(request.source_pin)
-        });
+        .map_or(pin, |practice| practice.min(pin));
     let retired = mixer.retire_source_playback_before(pin)?;
     if pin == request.source_pin {
         *completed = request.revision;

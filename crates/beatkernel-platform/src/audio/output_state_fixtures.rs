@@ -479,3 +479,152 @@ fn explicit_identity_remix_is_not_silently_substituted_for_pending_direct_output
     state.render_pending(2).unwrap();
     assert_eq!(state.pending_samples(), [0.375, -0.5]);
 }
+
+#[test]
+fn uncertain_admission_survives_complete_recovery_and_explicit_preparation_retry() {
+    for remixed in [false, true] {
+        let (mut producer, mut mixer) = rig();
+        mixer.enable_source_playback_history(8).unwrap();
+        let format = target(if remixed { 2 } else { 1 });
+        let matrix = remixed.then(|| ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap());
+        let mut state = prepared(mixer, format, matrix.clone(), 8);
+        let report = state.render_pending(4).unwrap();
+        state.admit(1).unwrap();
+        producer
+            .try_push(AudioCommand::Play {
+                voice: VoiceId(2),
+                sample: SampleId(1),
+                at: Timestamp::from_nanos(500_000_000),
+                gain: 0.5,
+            })
+            .unwrap();
+        let pcm = state.pending_samples().to_vec();
+        assert!(pcm.iter().any(|sample| *sample != 0.));
+        let basis = state.output_frame_basis();
+        let config = state.mixer().configuration();
+        let counters = state.mixer().counters();
+        let history = state.mixer().source_playback_history().unwrap();
+        let span = history.span(0);
+        let identity = (
+            history.source_rate(),
+            history.initial_physical_frame(),
+            history.initial_playback_frame(),
+        );
+        let mut completed = 0;
+        let (results, heap) = count_heap_calls(|| {
+            state.mark_admission_uncertain();
+            state.mark_admission_uncertain();
+            (
+                state.render_pending(1),
+                state.admit(1),
+                state.validate_reconfigure(format, matrix.as_ref(), 16),
+                state.apply_source_history_retirement(
+                    crate::audio::source_history_retirement_mailbox::SourceHistoryRetirementRequest {
+                        revision: 2,
+                        source_pin: 4,
+                    },
+                    &mut completed,
+                ),
+            )
+        });
+        assert_eq!(heap, 0);
+        assert_eq!(results.0, Err(AudioError::InvalidBuffer));
+        assert_eq!(results.1, Err(AudioError::InvalidBuffer));
+        assert_eq!(results.2, Err(AudioError::InvalidBuffer));
+        assert_eq!(results.3, Err(AudioError::InvalidBuffer));
+        assert_eq!(
+            state.reconfigure(format, matrix, 16),
+            Err(AudioError::InvalidBuffer)
+        );
+        assert_eq!(completed, 0);
+        assert!(state.admission_is_uncertain());
+        assert!(!state.paused_tail_admissible());
+        let mut recovered = match state.into_mixer() {
+            Err(retained) => retained,
+            Ok(_) => panic!("uncertain admission must retain the complete owner"),
+        };
+        // Explicit retry after moving the recovered owner cannot clear quarantine.
+        let matrix = remixed.then(|| ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap());
+        assert_eq!(
+            recovered.reconfigure(format, matrix, 1),
+            Err(AudioError::InvalidBuffer)
+        );
+        assert_eq!(recovered.admit(3), Err(AudioError::InvalidBuffer));
+        assert!(recovered.admission_is_uncertain());
+        assert_eq!(recovered.pending_samples(), pcm);
+        assert_eq!(recovered.pending_report(), Some(report));
+        assert_eq!(recovered.admitted_frames(), 1);
+        assert_eq!(recovered.max_frames(), 8);
+        assert_eq!(recovered.output_frame_basis(), basis);
+        assert_eq!(recovered.mixer().configuration(), config);
+        assert_eq!(recovered.mixer().counters(), counters);
+        assert_eq!(recovered.mixer().frame_cursor(), 4);
+        assert_eq!(recovered.mixer().playback_frame_cursor(), 4);
+        let history = recovered.mixer().source_playback_history().unwrap();
+        assert_eq!(history.span(0), span);
+        assert_eq!(history.pulled_end_frame(), 4);
+        assert_eq!(history.retirement_revision(), 0);
+        assert_eq!(
+            (
+                history.source_rate(),
+                history.initial_physical_frame(),
+                history.initial_playback_frame(),
+            ),
+            identity
+        );
+    }
+}
+
+#[test]
+fn quarantine_is_sticky_even_without_pending_pcm_or_remix() {
+    let (_, mixer) = rig();
+    let mut state = prepared(mixer, target(1), None, 4);
+    state.render_pending(4).unwrap();
+    state.admit(4).unwrap();
+    assert_eq!(state.pending_report(), None);
+    assert!(state.paused_tail_admissible());
+    state.mark_admission_uncertain();
+    assert!(!state.paused_tail_admissible());
+    assert_eq!(state.render_pending(1), Err(AudioError::InvalidBuffer));
+    assert_eq!(
+        state.reconfigure(target(1), None, 8),
+        Err(AudioError::InvalidBuffer)
+    );
+    let recovered = match state.into_mixer() {
+        Err(retained) => retained,
+        Ok(_) => panic!("empty output does not discharge uncertain admission"),
+    };
+    assert!(recovered.admission_is_uncertain());
+    assert_eq!(recovered.mixer().frame_cursor(), 4);
+    assert_eq!(recovered.admitted_frames(), 4);
+}
+
+#[test]
+fn definite_local_refusal_preserves_retryable_positive_admission() {
+    let (mut producer, mixer) = rig();
+    let mut state = prepared(mixer, target(1), None, 4);
+    state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    assert_eq!(state.admit(4), Err(AudioError::InvalidBuffer));
+    assert_eq!(
+        state.reconfigure(target(2), None, 4),
+        Err(AudioError::InvalidFormat)
+    );
+    assert!(!state.admission_is_uncertain());
+    assert_eq!(state.pending_samples(), [-0.25, 0.375, -0.5]);
+    assert_eq!(state.output_frame_basis().start_physical_frame(), 1);
+    producer
+        .try_push(AudioCommand::Play {
+            voice: VoiceId(2),
+            sample: SampleId(1),
+            at: Timestamp::from_nanos(500_000_000),
+            gain: 0.5,
+        })
+        .unwrap();
+    state.reconfigure(target(1), None, 2).unwrap();
+    state.admit(3).unwrap();
+    assert_eq!(state.render_pending(2).unwrap().start_frame, 4);
+    assert_eq!(state.pending_samples(), [0.6875, -0.875]);
+    assert_eq!(state.mixer().counters().commands_consumed, 2);
+    assert!(!state.admission_is_uncertain());
+}
