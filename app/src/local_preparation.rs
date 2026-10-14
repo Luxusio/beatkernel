@@ -9,9 +9,10 @@ use crate::{
 };
 use beatkernel::{
     audio::{AudioCommand, VoiceId},
+    chart::CompiledChart,
     input::{BindingMap, DeviceSelector},
     judge::JudgeProfile,
-    runtime::{hazard_sound::HazardSoundTimeline, input_sound::InputSoundTimeline},
+    runtime::{hazard_sound::HazardSoundTimeline, input_sound::InputSoundTimeline, SoundBinding},
 };
 use beatkernel_bms::BmsInputMode;
 use std::collections::BTreeSet;
@@ -20,6 +21,23 @@ use std::collections::BTreeSet;
 pub struct PreparedLocalMembers {
     pub configs: Vec<MemberConfig>,
     pub reserved: Vec<VoiceId>,
+}
+
+/// Select chart-object bindings in input order, preserving every copied field.
+pub fn prepare_selected_sound_bindings(
+    chart: &CompiledChart,
+    sounds: &[SoundBinding],
+) -> Result<Vec<SoundBinding>, std::collections::TryReserveError> {
+    let selected_objects: BTreeSet<_> = chart.objects().iter().map(|object| object.id).collect();
+    let mut selected = Vec::new();
+    selected.try_reserve_exact(sounds.len())?;
+    selected.extend(
+        sounds
+            .iter()
+            .copied()
+            .filter(|sound| selected_objects.contains(&sound.object)),
+    );
+    Ok(selected)
 }
 
 /// Build independent actual judges and sounds in immutable source-plan order.

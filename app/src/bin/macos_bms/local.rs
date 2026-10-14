@@ -30,6 +30,7 @@ use beatkernel_bms_runtime::{
 };
 use beatkernel_bms_runtime::{
     competition_live::CompetitionOptions,
+    local_preparation::prepare_selected_sound_bindings,
     native_chart::{prepare_chart_with_policy, NativeChartConfig},
     native_end::NativeEnd,
     playback_pause::NativePause,
@@ -343,15 +344,9 @@ pub(super) fn run(
         let chart = source.source.compile()?;
         let source = std::mem::replace(&mut prepared.source, source);
         let chart = std::mem::replace(&mut prepared.compiled.chart, chart);
-        let sounds = prepared.sounds.clone();
-        prepared.sounds.retain(|sound| {
-            prepared
-                .compiled
-                .chart
-                .objects()
-                .iter()
-                .any(|object| object.id == sound.object)
-        });
+        let selected_sounds =
+            prepare_selected_sound_bindings(&prepared.compiled.chart, &prepared.sounds)?;
+        let sounds = std::mem::replace(&mut prepared.sounds, selected_sounds);
         Some((source, chart, sounds))
     } else {
         None

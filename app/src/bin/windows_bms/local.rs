@@ -25,6 +25,7 @@ use beatkernel_bms_runtime::{
 use beatkernel_bms_runtime::{
     competition_live::CompetitionOptions,
     local_players::PlayerId,
+    local_preparation::prepare_selected_sound_bindings,
     native_chart::{prepare_chart_with_policy, NativeChartConfig},
     playback_pause::NativePause,
     ChannelPolicy,
@@ -187,22 +188,9 @@ pub(super) fn run(
     // judge object. Filter only this cold preparation view, then restore the
     // original mappings for backward practice before native playback starts.
     let original_sounds = if retained {
-        let selected_objects: std::collections::BTreeSet<_> = prepared
-            .compiled
-            .chart
-            .objects()
-            .iter()
-            .map(|object| object.id)
-            .collect();
-        let sounds = std::mem::take(&mut prepared.sounds);
-        prepared.sounds.try_reserve_exact(sounds.len())?;
-        prepared.sounds.extend(
-            sounds
-                .iter()
-                .copied()
-                .filter(|sound| selected_objects.contains(&sound.object)),
-        );
-        Some(sounds)
+        let selected_sounds =
+            prepare_selected_sound_bindings(&prepared.compiled.chart, &prepared.sounds)?;
+        Some(std::mem::replace(&mut prepared.sounds, selected_sounds))
     } else {
         None
     };
