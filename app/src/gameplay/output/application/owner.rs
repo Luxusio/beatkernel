@@ -1,17 +1,21 @@
 //! One static output owner shared by gameplay adapters; input and clocks stay external.
-use super::replacement::target::{publish_ready_target_audio_output_held, ReadyTargetAudioOutput};
+use super::replacement::coordinate_target::{
+    CoordinateTargetPoll, publish_ready_coordinate_target_audio_output_held,
+};
+use super::replacement::target::{ReadyTargetAudioOutput, publish_ready_target_audio_output_held};
 use crate::gameplay::output::ports::{
-    NativePlaybackObservation, NativeSourcePlaybackQuery, SourcePlaybackIdentity,
-    SourcePlaybackNativeOutputBackend, OriginalNativeOutputBackend,
-    OriginalTargetNativeOutputBackend, OutputReplacementBackend, NativeTargetPlaybackObservation,
-    NativeTargetPlaybackQuery, TargetPlaybackNativeOutputBackend,
-    TargetHistoryRetirementNativeOutputBackend, SourceHistoryRetirementNativeOutputBackend,
+    ConditionalTargetRetirementNativeOutputBackend, NativePlaybackObservation,
+    NativeSourcePlaybackQuery, NativeTargetPlaybackObservation, NativeTargetPlaybackQuery,
+    OriginalNativeOutputBackend, OriginalTargetNativeOutputBackend, OutputReplacementBackend,
+    SourceHistoryRetirementNativeOutputBackend, SourcePlaybackIdentity,
+    SourcePlaybackNativeOutputBackend, TargetHistoryRetirementNativeOutputBackend,
+    TargetPlaybackNativeOutputBackend, TargetRetirementStatus,
 };
 use crate::native_audio_presentation::NativeAudioPresentation;
 use crate::{
     gameplay::output::application::replacement::{
-        publish_ready_audio_output_held, publish_ready_output, OutputReplacement, ReadyAudioOutput,
-        ReadyOutput, ReplacementCause, ReplacementFailure, ReplacementPhase, ReplacementState,
+        OutputReplacement, ReadyAudioOutput, ReadyOutput, ReplacementCause, ReplacementFailure,
+        ReplacementPhase, ReplacementState, publish_ready_audio_output_held, publish_ready_output,
     },
     gameplay_presentation::{GameplayOutputContext, GameplayPresentationPort},
     live_pause::LivePauseObservation,
@@ -19,7 +23,9 @@ use crate::{
 };
 use beatkernel::audio::{ConvertedRenderReport, TargetFrameBasis};
 use beatkernel::{
-    audio::{Mixer, OutputFrameBasis, OutputOpenFailure, RenderReport, SoftwareOutputState},
+    audio::{
+        Mixer, OutputFrameBasis, OutputOpenFailure, PauseHold, RenderReport, SoftwareOutputState,
+    },
     time::{ClockPair, ClockPoint},
 };
 use beatkernel_platform::audio::presentation::validation::{
@@ -31,15 +37,23 @@ enum RejectedReady<P: GameplayPresentationPort, O> {
     Legacy(ReadyOutput<P, O>),
     Audio(ReadyAudioOutput<O>),
     Target(ReadyTargetAudioOutput<O>),
+    Coordinate { output: O, hold: PauseHold },
+}
+/// The cold operation returns its staged value without retaining native evidence.
+pub enum CoordinateTargetOwnerPublication<A> {
+    Pending,
+    LiveRefused(String),
+    Published(A),
 }
 pub struct GameplayOutputOwner<
     B: OutputReplacementBackend<O, Basis>,
     O = Mixer,
     Basis = OutputFrameBasis,
+    Ticket = (),
 > {
     current: Option<B::Output>,
     basis: Basis,
-    controller: OutputReplacement<B, O, Basis>,
+    controller: OutputReplacement<B, O, Basis, Ticket>,
     pending: Option<(B::Request, u64)>,
     rejected: Option<RejectedReady<B::Presentation, B::Output>>,
     report: Option<RenderReport>,
@@ -52,15 +66,30 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis> GameplayOutputOwner<B, O, 
     /// for later lifecycle operations. Failure retains the backend's exact
     /// recovered owner, pending output and cleanup evidence.
     pub fn open_initial(
+        backend: B,
+        request: B::Request,
+        complete_owner: O,
+        epoch: u64,
+    ) -> Result<Self, OutputOpenFailure<B::Error, B::Output, O>> {
+        Self::open_initial_with_ticket(backend, request, complete_owner, epoch)
+    }
+    pub fn new(backend: B, output: B::Output) -> Self {
+        Self::new_with_ticket(backend, output)
+    }
+}
+impl<B: OutputReplacementBackend<O, Basis>, O, Basis, Ticket>
+    GameplayOutputOwner<B, O, Basis, Ticket>
+{
+    pub fn open_initial_with_ticket(
         mut backend: B,
         request: B::Request,
         complete_owner: O,
         epoch: u64,
     ) -> Result<Self, OutputOpenFailure<B::Error, B::Output, O>> {
         let output = backend.open(request, complete_owner, epoch)?;
-        Ok(Self::new(backend, output))
+        Ok(Self::new_with_ticket(backend, output))
     }
-    pub fn new(backend: B, output: B::Output) -> Self {
+    pub fn new_with_ticket(backend: B, output: B::Output) -> Self {
         let basis = backend.basis(&output);
         Self {
             basis,
@@ -75,10 +104,23 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis> GameplayOutputOwner<B, O, 
         }
     }
     pub fn current(&self) -> Option<&B::Output> {
-        self.current.as_ref()
+        self.current
+            .as_ref()
+            .or_else(|| self.controller.conditional_current())
     }
     pub fn current_mut(&mut self) -> Option<&mut B::Output> {
-        self.current.as_mut()
+        if self.current.is_some() {
+            self.current.as_mut()
+        } else {
+            self.controller.conditional_current_mut()
+        }
+    }
+    fn backend_output_mut(&mut self) -> Option<(&mut B, &mut B::Output)> {
+        if let Some(output) = self.current.as_mut() {
+            Some((self.controller.backend_mut(), output))
+        } else {
+            self.controller.conditional_backend_output_mut()
+        }
     }
     pub fn rejected_ready(&self) -> Option<&ReadyOutput<B::Presentation, B::Output>> {
         match self.rejected.as_ref() {
@@ -108,24 +150,22 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis> GameplayOutputOwner<B, O, 
         }
     }
     pub fn last_issued_epoch(&self) -> u64 {
-        self.current
-            .as_ref()
+        self.current()
             .map(|output| self.controller.backend().epoch(output))
             .unwrap_or(0)
             .max(self.controller.last_issued_epoch())
     }
     pub fn output_clock_suspended(&self) -> bool {
-        self.current.is_none()
-            && matches!(
-                self.controller.state(),
-                ReplacementState::Waiting | ReplacementState::PendingRetirement
-            )
+        self.current().is_none()
+            && (self.rejected.is_some() || self.controller.output_clock_suspended())
     }
     pub fn replacement_pending(&self) -> bool {
         self.rejected.is_some()
             || matches!(
                 self.controller.state(),
-                ReplacementState::Waiting | ReplacementState::PendingRetirement
+                ReplacementState::Waiting
+                    | ReplacementState::PendingRetirement
+                    | ReplacementState::ConditionalRetirement
             )
     }
     pub fn has_work(&self) -> bool {
@@ -133,7 +173,9 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis> GameplayOutputOwner<B, O, 
             || self.rejected.is_some()
             || matches!(
                 self.controller.state(),
-                ReplacementState::Waiting | ReplacementState::PendingRetirement
+                ReplacementState::Waiting
+                    | ReplacementState::PendingRetirement
+                    | ReplacementState::ConditionalRetirement
             )
     }
     pub fn queue(&mut self, request: B::Request, wait_ns: u64) -> Result<(), (B::Request, u64)> {
@@ -235,7 +277,9 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> GameplayOutputOwner
         Ok(())
     }
 }
-impl<B: OutputReplacementBackend<O, Basis>, O, Basis> GameplayOutputOwner<B, O, Basis> {
+impl<B: OutputReplacementBackend<O, Basis>, O, Basis, Ticket>
+    GameplayOutputOwner<B, O, Basis, Ticket>
+{
     pub fn take_recovered_mixer(&mut self) -> Option<O> {
         self.controller.take_recovered_mixer()
     }
@@ -249,6 +293,7 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis> GameplayOutputOwner<B, O, 
                 RejectedReady::Legacy(ReadyOutput { output, hold, .. }) => (output, hold),
                 RejectedReady::Audio(ReadyAudioOutput { output, hold, .. }) => (output, hold),
                 RejectedReady::Target(ready) => (ready.output, ready.hold),
+                RejectedReady::Coordinate { output, hold } => (output, hold),
             };
             let result = self.controller.retire_owned_output_held(output, hold);
             return result.map(|_| true);
@@ -579,14 +624,14 @@ where
         }
     }
 }
-impl<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>>
-    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis>
+impl<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>, Ticket>
+    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis, Ticket>
 {
     fn target_identity(
         &self,
         presentation: &NativeAudioPresentation,
     ) -> Result<(), ReplacementFailure<B::Error>> {
-        let Some(output) = self.current.as_ref() else {
+        let Some(output) = self.current() else {
             return Ok(());
         };
         let epoch = presentation.authority().epoch();
@@ -614,28 +659,26 @@ impl<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>>
         presentation: &mut NativeAudioPresentation,
     ) -> Result<(), ReplacementFailure<B::Error>> {
         self.target_identity(presentation)?;
-        let Some(output) = self.current.as_mut() else {
+        let basis = self.basis;
+        let previous_facts = self.target_facts;
+        let Some((backend, output)) = self.backend_output_mut() else {
             return Ok(());
         };
-        let snapshot = self
-            .controller
-            .backend_mut()
+        let snapshot = backend
             .observe_native_target(output)
             .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
-        let telemetry = self
-            .controller
-            .backend()
+        let telemetry = backend
             .output_telemetry(output)
             .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
         if let Some(telemetry) = telemetry {
             let facts = telemetry.facts;
-            if facts.origin != Some(self.basis.origin())
+            if facts.origin != Some(basis.origin())
                 || facts.source_rate == 0
-                || self.target_facts.is_some_and(|old| {
+                || previous_facts.is_some_and(|old| {
                     old.origin != facts.origin || old.source_rate != facts.source_rate
                 })
                 || telemetry.converted.is_some_and(|report| {
-                    report.target_rate != self.basis.sample_rate()
+                    report.target_rate != basis.sample_rate()
                         || report.source_rate != facts.source_rate
                 })
             {
@@ -645,9 +688,7 @@ impl<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>>
             }
         }
         if let Some(snapshot) = snapshot {
-            if snapshot.epoch != self.controller.backend().epoch(output)
-                || snapshot.basis != self.basis
-            {
+            if snapshot.epoch != backend.epoch(output) || snapshot.basis != basis {
                 return Err(ReplacementFailure::policy(
                     "original target snapshot differs from published creation identity",
                 ));
@@ -686,7 +727,7 @@ impl<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>>
                 "target pause observation HOST domain differs",
             ));
         }
-        if self.current.is_none() {
+        if self.current().is_none() {
             return self.pause_evidence.ok_or_else(|| {
                 ReplacementFailure::policy("waiting target output has no committed pause evidence")
             });
@@ -709,22 +750,22 @@ impl<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>>
     }
     /// Native held mode is separate from producer pause adoption and native acknowledgement.
     pub fn set_target_held(&mut self, held: bool) -> Result<(), ReplacementFailure<B::Error>> {
-        let output = self.current.as_mut().ok_or_else(|| {
+        let basis = self.basis;
+        let (backend, output) = self.backend_output_mut().ok_or_else(|| {
             ReplacementFailure::policy("target held mode requires a published output")
         })?;
-        if self.controller.backend().basis(output) != self.basis {
+        if backend.basis(output) != basis {
             return Err(ReplacementFailure::policy(
                 "target held output changed creation basis",
             ));
         }
-        self.controller
-            .backend_mut()
+        backend
             .set_held(output, held)
             .map_err(|error| Self::failure(ReplacementPhase::Observe, error))
     }
 }
-impl<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>>
-    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis>
+impl<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>, Ticket>
+    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis, Ticket>
 where
     B::Error: std::error::Error + 'static,
 {
@@ -734,7 +775,7 @@ where
         presentation: &NativeAudioPresentation,
     ) -> crate::native_gameplay::NativeGameplayResult<Option<EndBoundary>> {
         self.target_identity(presentation)?;
-        if self.current.is_none() {
+        if self.current().is_none() {
             return Ok(None);
         }
         let Some(record) = presentation.latest_record() else {
@@ -820,10 +861,11 @@ where
 }
 
 impl<
-        B: crate::gameplay::output::ports::OriginalCoordinateTargetNativeOutputBackend<
+    B: crate::gameplay::output::ports::OriginalCoordinateTargetNativeOutputBackend<
             ConvertedNativeOutputState,
         >,
-    > GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis>
+    Ticket,
+> GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis, Ticket>
 {
     /// Acquires original target time evidence without qualifying converted playback.
     /// The separate source report is read before either authority or cache changes.
@@ -831,7 +873,7 @@ impl<
         &mut self,
         presentation: &mut NativeAudioPresentation,
     ) -> Result<(), ReplacementFailure<B::Error>> {
-        if self.current.is_none() {
+        if self.current().is_none() {
             return Ok(());
         }
         self.target_identity(presentation)?;
@@ -842,27 +884,24 @@ impl<
                 "target coordinate requires the published immutable target descriptor",
             ));
         }
-        let Some(output) = self.current.as_mut() else {
+        let basis = self.basis;
+        let Some((backend, output)) = self.backend_output_mut() else {
             return Ok(());
         };
-        let epoch = self.controller.backend().epoch(output);
-        let Some(coordinate) = self
-            .controller
-            .backend_mut()
+        let epoch = backend.epoch(output);
+        let Some(coordinate) = backend
             .observe_native_target_coordinate(output)
             .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?
         else {
             return Ok(());
         };
-        let reported = self
-            .controller
-            .backend()
+        let reported = backend
             .render_report(output)
             .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
-        if self.controller.backend().epoch(output) != epoch
-            || self.controller.backend().basis(output) != self.basis
+        if backend.epoch(output) != epoch
+            || backend.basis(output) != basis
             || coordinate.snapshot().epoch != epoch
-            || coordinate.snapshot().basis != self.basis
+            || coordinate.snapshot().basis != basis
         {
             return Err(ReplacementFailure::policy(
                 "target coordinate acquisition changed the published creation identity",
@@ -910,7 +949,7 @@ impl<B: SourcePlaybackNativeOutputBackend<O>, O: SoftwareOutputState> GameplayOu
             _ => {
                 return Err(ReplacementFailure::policy(
                     "source playback requires original source coordinates",
-                ))
+                ));
             }
         };
         if descriptor_basis != self.basis
@@ -1139,8 +1178,8 @@ impl<B: SourceHistoryRetirementNativeOutputBackend<O>, O: SoftwareOutputState>
 #[path = "source_history_retirement_owner_fixtures.rs"]
 mod source_history_retirement_owner_fixtures;
 
-impl<B: TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState>>
-    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis>
+impl<B: TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState>, Ticket>
+    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis, Ticket>
 {
     fn target_playback_identity(
         &self,
@@ -1210,22 +1249,19 @@ impl<B: TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState>>
         )>,
         ReplacementFailure<B::Error>,
     > {
-        if self.current.is_none() {
+        if self.current().is_none() {
             return Ok(None);
         }
         self.target_playback_identity(presentation, identity)?;
-        let Some(output) = self.current.as_mut() else {
+        let basis = self.basis;
+        let Some((backend, output)) = self.backend_output_mut() else {
             return Ok(None);
         };
-        let epoch = self.controller.backend().epoch(output);
-        let observation = self
-            .controller
-            .backend_mut()
+        let epoch = backend.epoch(output);
+        let observation = backend
             .observe_native_target_playback(output, identity)
             .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
-        if self.controller.backend().epoch(output) != epoch
-            || self.controller.backend().basis(output) != self.basis
-        {
+        if backend.epoch(output) != epoch || backend.basis(output) != basis {
             return Err(ReplacementFailure::policy(
                 "target playback acquisition changed the published output identity",
             ));
@@ -1234,6 +1270,15 @@ impl<B: TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState>>
             return Ok(None);
         };
         self.target_packet_identity(observation.playback(), epoch, identity)?;
+        let admission = self.admit_target_playback(presentation, &observation)?;
+        Ok(Some((observation, admission)))
+    }
+
+    fn admit_target_playback(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        observation: &NativeTargetPlaybackObservation<B::NativeEvidence>,
+    ) -> Result<NativeObservationAdmission, ReplacementFailure<B::Error>> {
         let admission = presentation
             .admit_target_coordinate(observation.coordinate())
             .map_err(ReplacementFailure::timing)?;
@@ -1241,7 +1286,7 @@ impl<B: TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState>>
         self.report = facts.source.filter(|report| report.frames != 0);
         self.converted = facts.converted;
         self.target_facts = Some(facts.boundaries);
-        Ok(Some((observation, admission)))
+        Ok(admission)
     }
 
     /// Acquires target control facts only from retained original native evidence.
@@ -1258,6 +1303,19 @@ impl<B: TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState>>
         else {
             return Ok(None);
         };
+        self.target_control_from_admission(presentation, identity, &observation, admission)
+    }
+
+    fn target_control_from_admission(
+        &self,
+        presentation: &NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+        observation: &NativeTargetPlaybackObservation<B::NativeEvidence>,
+        admission: NativeObservationAdmission,
+    ) -> Result<
+        Option<crate::native_coordinate_control::TargetCoordinateControlFacts>,
+        ReplacementFailure<B::Error>,
+    > {
         // Preserve exact retained repeats while waiting on unaccepted HOST evidence.
         if admission == NativeObservationAdmission::Unchanged
             && presentation.latest_record().is_some_and(|record| {
@@ -1267,7 +1325,7 @@ impl<B: TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState>>
             return Ok(None);
         }
         crate::native_coordinate_control::TargetCoordinateControlFacts::from_target(
-            &observation,
+            observation,
             presentation,
             identity,
         )
@@ -1283,7 +1341,7 @@ impl<B: TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState>>
         identity: SourcePlaybackIdentity,
     ) -> Result<Option<NativeTargetPlaybackQuery<B::NativeEvidence>>, ReplacementFailure<B::Error>>
     {
-        let Some(output) = self.current.as_ref() else {
+        let Some(output) = self.current() else {
             return Ok(None);
         };
         self.target_playback_identity(presentation, identity)?;
@@ -1317,8 +1375,8 @@ impl<B: TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState>>
 #[path = "target_playback_owner_fixtures.rs"]
 mod target_playback_owner_fixtures;
 
-impl<B: TargetHistoryRetirementNativeOutputBackend<ConvertedNativeOutputState>>
-    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis>
+impl<B: TargetHistoryRetirementNativeOutputBackend<ConvertedNativeOutputState>, Ticket>
+    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis, Ticket>
 {
     /// Queues the original covering spans for a caller-qualified live minimum.
     /// The caller must include every live input, control and practice reference.
@@ -1360,18 +1418,15 @@ impl<B: TargetHistoryRetirementNativeOutputBackend<ConvertedNativeOutputState>>
         let words = facts.phase.to_words();
         let target_pin = beatkernel::audio::TargetTime::new(words[4], words[5], words[6])
             .map_err(|error| ReplacementFailure::timing(Box::new(error)))?;
-        let Some(output) = self.current.as_mut() else {
+        let Some((backend, output)) = self.backend_output_mut() else {
             return Ok(None);
         };
-        if self.controller.backend().epoch(output) != packet.epoch()
-            || self.controller.backend().basis(output) != packet.basis()
-        {
+        if backend.epoch(output) != packet.epoch() || backend.basis(output) != packet.basis() {
             return Err(ReplacementFailure::policy(
                 "target history retirement changed the published output identity",
             ));
         }
-        self.controller
-            .backend_mut()
+        backend
             .request_target_history_retirement(
                 output,
                 packet.epoch(),
@@ -1387,3 +1442,217 @@ impl<B: TargetHistoryRetirementNativeOutputBackend<ConvertedNativeOutputState>>
 #[cfg(test)]
 #[path = "target_history_retirement_owner_fixtures.rs"]
 mod target_history_retirement_owner_fixtures;
+
+#[derive(Debug)]
+struct ConditionalTargetObservationFailure<E> {
+    observation: E,
+    probe: ReplacementFailure<E>,
+}
+impl<E: std::fmt::Display> std::fmt::Display for ConditionalTargetObservationFailure<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "native output observation: {}; retirement probe: {}",
+            self.observation, self.probe
+        )
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for ConditionalTargetObservationFailure<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.observation)
+    }
+}
+
+impl<B: ConditionalTargetRetirementNativeOutputBackend<ConvertedNativeOutputState>>
+    GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis, B::Ticket>
+where
+    B::Error: std::error::Error + 'static,
+{
+    pub fn publish_paused_coordinate_target_audio<A>(
+        &mut self,
+        mut context: crate::gameplay_presentation::GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+        identity: SourcePlaybackIdentity,
+        practice_pending: bool,
+        stage: impl FnOnce(&B::Output) -> Result<A, Box<dyn std::error::Error>>,
+    ) -> crate::native_gameplay::NativeGameplayResult<CoordinateTargetOwnerPublication<A>> {
+        if self.rejected.is_some() {
+            return Err(
+                "ready coordinate publication was refused; explicit cancellation required".into(),
+            );
+        }
+        self.target_identity(context.presentation)?;
+        if self.pending.is_some() && context.merger.pending() != 0 {
+            return Ok(CoordinateTargetOwnerPublication::Pending);
+        }
+        if let Some((request, wait_ns)) = self.pending.take() {
+            if practice_pending || context.end.is_some() {
+                return Ok(CoordinateTargetOwnerPublication::LiveRefused(
+                    "coordinate replacement requires no NativeEnd or pending practice".into(),
+                ));
+            }
+            if let Some(output) = self.current.take() {
+                if let Err(output) = self.controller.attach(output) {
+                    self.current = Some(output);
+                    self.pending = Some((request, wait_ns));
+                    return Err("replacement controller already owns an output".into());
+                }
+            }
+            if let Err(failure) = self.controller.begin_coordinate_target_audio(
+                request,
+                context.presentation,
+                context.pause,
+                context.end.as_ref(),
+                context.merger,
+                identity,
+                practice_pending,
+                wait_ns,
+                || context.control.hold_audio_pause(),
+            ) {
+                let restored = self.controller.take_attached_output();
+                let cold = restored.is_some()
+                    && matches!(
+                        &failure.cause,
+                        ReplacementCause::Policy(_) | ReplacementCause::Timing(_)
+                    );
+                self.current = restored;
+                if cold {
+                    return Ok(CoordinateTargetOwnerPublication::LiveRefused(
+                        failure.to_string(),
+                    ));
+                }
+                return Err(Box::new(failure));
+            }
+        }
+        if !matches!(
+            self.controller.state(),
+            ReplacementState::ConditionalRetirement | ReplacementState::Waiting
+        ) {
+            return Ok(CoordinateTargetOwnerPublication::Pending);
+        }
+        match self.controller.poll_coordinate_target_audio(
+            now,
+            context.presentation,
+            context.pause,
+            context.merger,
+        )? {
+            CoordinateTargetPoll::Pending => Ok(CoordinateTargetOwnerPublication::Pending),
+            CoordinateTargetPoll::LiveRefused(reason) => {
+                self.current = self.controller.take_attached_output();
+                Ok(CoordinateTargetOwnerPublication::LiveRefused(reason.into()))
+            }
+            CoordinateTargetPoll::Ready(ready) => {
+                let basis = ready.basis();
+                let telemetry = ready.telemetry();
+                match publish_ready_coordinate_target_audio_output_held(
+                    ready,
+                    &mut self.current,
+                    context,
+                    now,
+                    |ready| stage(ready.output()),
+                ) {
+                    Ok((hold, applied)) => {
+                        self.basis = basis;
+                        self.report = telemetry.source.filter(|report| report.frames != 0);
+                        self.converted = telemetry.converted;
+                        self.target_facts = Some(telemetry.facts);
+                        self.pause_evidence = None;
+                        drop(hold);
+                        Ok(CoordinateTargetOwnerPublication::Published(applied))
+                    }
+                    Err(failure) => {
+                        let (output, hold) = failure.ready.into_output_and_hold();
+                        self.rejected = Some(RejectedReady::Coordinate { output, hold });
+                        Err(failure.error)
+                    }
+                }
+            }
+        }
+    }
+
+    fn observe_conditional_target_native_playback_admission(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> crate::native_gameplay::NativeGameplayResult<
+        Option<(
+            NativeTargetPlaybackObservation<B::NativeEvidence>,
+            NativeObservationAdmission,
+        )>,
+    > {
+        if self.controller.probe_coordinate_target_retirement()?
+            == Some(TargetRetirementStatus::Authorized)
+            || self.current().is_none()
+        {
+            return Ok(None);
+        }
+        self.target_playback_identity(presentation, identity)?;
+        let basis = self.basis;
+        let (epoch, observed, same_identity) = {
+            let Some((backend, output)) = self.backend_output_mut() else {
+                return Ok(None);
+            };
+            let epoch = backend.epoch(output);
+            let observed = backend.observe_native_target_playback(output, identity);
+            let same_identity = backend.epoch(output) == epoch && backend.basis(output) == basis;
+            (epoch, observed, same_identity)
+        };
+        let observation = match observed {
+            Ok(observation) => observation,
+            Err(observation) => {
+                return match self.controller.probe_coordinate_target_retirement() {
+                    Ok(Some(TargetRetirementStatus::Authorized)) => Ok(None),
+                    Ok(_) => Err(Box::new(Self::failure(
+                        ReplacementPhase::Observe,
+                        observation,
+                    ))),
+                    Err(probe) => Err(Box::new(ConditionalTargetObservationFailure {
+                        observation,
+                        probe,
+                    })),
+                };
+            }
+        };
+        if !same_identity {
+            return Err(Box::new(ReplacementFailure::<B::Error>::policy(
+                "target playback acquisition changed the published output identity",
+            )));
+        }
+        let Some(observation) = observation else {
+            return Ok(None);
+        };
+        self.target_packet_identity(observation.playback(), epoch, identity)?;
+        let admission = self.admit_target_playback(presentation, &observation)?;
+        Ok(Some((observation, admission)))
+    }
+
+    pub fn observe_conditional_target_native_playback(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> crate::native_gameplay::NativeGameplayResult<
+        Option<NativeTargetPlaybackObservation<B::NativeEvidence>>,
+    > {
+        self.observe_conditional_target_native_playback_admission(presentation, identity)
+            .map(|observation| observation.map(|(packet, _)| packet))
+    }
+
+    pub fn observe_conditional_target_native_control(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> crate::native_gameplay::NativeGameplayResult<
+        Option<crate::native_coordinate_control::TargetCoordinateControlFacts>,
+    > {
+        let Some((observation, admission)) =
+            self.observe_conditional_target_native_playback_admission(presentation, identity)?
+        else {
+            return Ok(None);
+        };
+        Ok(self.target_control_from_admission(presentation, identity, &observation, admission)?)
+    }
+}
+
+#[cfg(test)]
+#[path = "retained_target_observation_fixtures.rs"]
+mod retained_target_observation_fixtures;

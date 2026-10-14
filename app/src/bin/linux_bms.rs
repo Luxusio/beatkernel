@@ -797,7 +797,7 @@ mod native {
         use beatkernel_bms_runtime::gameplay::output::adapters::alsa::{
             ConvertedAlsaReplacementBackend, ConvertedAlsaReplacementRequest,
         };
-        Ok(ConvertedAlsaOutputOwner::open_initial(
+        Ok(ConvertedAlsaOutputOwner::open_initial_with_ticket(
             ConvertedAlsaReplacementBackend,
             ConvertedAlsaReplacementRequest {
                 native: request,

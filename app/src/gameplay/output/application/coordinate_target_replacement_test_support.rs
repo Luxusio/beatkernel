@@ -169,6 +169,9 @@ pub(super) struct Script {
     pub(super) render_frames: VecDeque<usize>,
     serial: u64,
     faults: VecDeque<Fault>,
+    probe_failures: VecDeque<bool>,
+    retirement_failures: VecDeque<bool>,
+    recovery_failures: VecDeque<bool>,
     pub(super) dropped: Vec<u64>,
     pub(super) consumed_tickets: Vec<u64>,
 }
@@ -203,6 +206,15 @@ impl StoppedMixerSource<ConvertedNativeOutputState> for Output {
     type Error = io::Error;
     fn take_stopped_mixer(&mut self) -> Result<Option<ConvertedNativeOutputState>, io::Error> {
         self.script.borrow_mut().calls.push("recover");
+        if self
+            .script
+            .borrow_mut()
+            .recovery_failures
+            .pop_front()
+            .unwrap_or(false)
+        {
+            return Err(io::Error::other("scripted native recovery failure"));
+        }
         if self.request.fault == Fault::Recover {
             self.request.fault = Fault::None;
             return Err(io::Error::other("original recovery failure"));
@@ -213,6 +225,7 @@ impl StoppedMixerSource<ConvertedNativeOutputState> for Output {
         Ok(self.state.take())
     }
 }
+#[derive(Clone)]
 pub(crate) struct Effects {
     script: Rc<RefCell<Script>>,
 }
@@ -228,6 +241,18 @@ impl Effects {
     }
     pub(crate) fn observation_faults(&mut self, faults: impl IntoIterator<Item = Fault>) {
         self.script.borrow_mut().faults.extend(faults);
+    }
+    pub(crate) fn conditional_probe_failures(&mut self, failures: impl IntoIterator<Item = bool>) {
+        self.script.borrow_mut().probe_failures.extend(failures);
+    }
+    pub(crate) fn retirement_failures(&mut self, failures: impl IntoIterator<Item = bool>) {
+        self.script
+            .borrow_mut()
+            .retirement_failures
+            .extend(failures);
+    }
+    pub(crate) fn recovery_failures(&mut self, failures: impl IntoIterator<Item = bool>) {
+        self.script.borrow_mut().recovery_failures.extend(failures);
     }
 }
 impl Output {
@@ -312,6 +337,15 @@ impl OutputReplacementBackend<ConvertedNativeOutputState, TargetFrameBasis> for 
     }
     fn retire(&mut self, output: &mut Output) -> Result<(), io::Error> {
         self.script.borrow_mut().calls.push("retire");
+        if self
+            .script
+            .borrow_mut()
+            .retirement_failures
+            .pop_front()
+            .unwrap_or(false)
+        {
+            return Err(io::Error::other("scripted native retirement failure"));
+        }
         if output.request.fault == Fault::Retire {
             output.request.fault = Fault::None;
             return Err(io::Error::other("original retirement failure"));
@@ -589,6 +623,11 @@ impl ConditionalTargetRetirementNativeOutputBackend<ConvertedNativeOutputState> 
         );
         let mut script = self.script.borrow_mut();
         script.calls.push("conditional-poll");
+        if script.probe_failures.pop_front().unwrap_or(false) {
+            return Err(io::Error::other(
+                "scripted native conditional probe failure",
+            ));
+        }
         let status = script
             .statuses
             .pop_front()
@@ -895,6 +934,36 @@ impl Rig {
             self.output.take().unwrap(),
         )
     }
+    /// The original stream was started before the real pause adoption above.
+    /// Initialize its native counters from the submitted prefix, never a new packet.
+    pub(crate) fn take_live_native_owner(&mut self) -> (Effects, Output) {
+        let (effects, mut output) = self.take_native_owner();
+        assert_eq!(self.pause.phase(), PausePhase::Paused);
+        let admitted = output
+            .state
+            .as_ref()
+            .unwrap()
+            .admitted_target_time()
+            .unwrap();
+        let start = output.basis.start_time();
+        let numerator = u128::from(admitted.seconds()) * u128::from(admitted.denominator())
+            + u128::from(admitted.numerator());
+        let start_numerator = u128::from(start.seconds()) * u128::from(start.denominator())
+            + u128::from(start.numerator());
+        let ticks = (numerator * u128::from(start.denominator())
+            - start_numerator * u128::from(admitted.denominator()))
+            * u128::from(output.basis.sample_rate());
+        let denominator = u128::from(admitted.denominator()) * u128::from(start.denominator());
+        assert_eq!(
+            ticks % denominator,
+            0,
+            "original submitted duration is on its native frame grid"
+        );
+        output.presented = u64::try_from(ticks / denominator).unwrap();
+        output.started = true;
+        output.held = true;
+        (effects, output)
+    }
     pub(crate) fn context(&mut self) -> GameplayAudioOutputContext<'_> {
         GameplayAudioOutputContext {
             control: GameplayPauseControl::solo(&mut self.runtime),
@@ -916,6 +985,9 @@ impl Rig {
     }
     pub(crate) fn presentation(&self) -> &NativeAudioPresentation {
         &self.current
+    }
+    pub(crate) fn presentation_mut(&mut self) -> &mut NativeAudioPresentation {
+        &mut self.current
     }
     pub(crate) fn paused(&self) -> &NativePause {
         &self.pause

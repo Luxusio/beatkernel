@@ -261,12 +261,27 @@ unsafe 금지 규칙 컴파일 실패9건은 앞선 로그에 보존하고, 라�
 같은 안전한 fixture를 공유하는 외부 테스트 실행 파일로 계측을 옮겼다.
 현재 [controller 개발본](../../app/src/gameplay/output/application/coordinate_target_replacement.rs)과
 [fixture 후보](../../app/src/gameplay/output/application/coordinate_target_replacement_fixtures.rs)는
-software 범위만 확인되어 scoped V로 추적한다. 새 retained typed Owner/UI(AC005)와 공통
-pump(AC006)는 새 구현/fixture가 없어서 N이다. `ac004-borrowed-regression-*.log`의
+software 범위만 확인되어 scoped V로 추적한다. 새 retained typed Owner/UI(AC005)는
+자체 구현·검사를 마쳐 E52의 V로 추적하고, 실제 공통 pump(AC006)는 아직 N이다.
+controller PASS를 후속 AC의 근거로 물려주지 않는다.
+`ac004-borrowed-regression-*.log`의
 output application162 / authority214 / native presentation67 / pause75 / input31도
 각각 PASS/실패0이며 서로 겹치는 필터 수를 고유 테스트 수로 합산하지 않는다.
 불필요한 merger metadata clone은 제거됐고 최종 독립 review/QA가 남았다.
 이 검사들을 후속 AC의 실행 결과나 formal current-task review/QA로 옮기지 않는다.
+
+E52: AC005 typed Owner/UI는 실제 원래 owner를 conditional 대기 중 노출하고 실제
+authorization 뒤 기존 clock을 중단하며, capability를 commit 전에 검증해 동일
+요청 ID의 응답을 WouldBlock에도 한 번만 전달하도록 구현했다.
+`ac005-retained-target-formatted.log`는17 PASS/실패0(새 request8·observation8과
+기존1)이며 output application178, controller18, ALSA UI12 PASS·ignored2,
+별도 실제 publication 할당 회귀1 PASS, Linux bin53 PASS·ignored3,
+replay bin40 PASS·ignored1 및 no-default 모든 bin check도 통과했다.
+각 필터는 겹치므로 고유 테스트 수로 합산하지 않는다. 로그는 같은 task의
+`ac005-regression-*.log`, `ac005-allocation-regression.log`,
+`ac005-linux-replay-regression.log`, `ac005-bins-check.log`에 있다.
+앞선 fixture 설정 형식 실패와 root 부분 포맷의 중복 import 컴파일 실패도 보존했다.
+현재는 software V이며 실제 solo/cohort 연결·GUI/물리 증거·최종 독립 gate는 별도다.
 
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
@@ -416,7 +431,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [ ] **BK-WBS-07.09** rate/buffer/channel/encoding 변경을 실제 설정 요청·capability·applied 결과까지 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E19 target rate/buffer/period/matrix UI bridge 검증; 실제 launcher/encoding 제어·pending PCM 해석 보존은 계속 필요.
   - [x] **BK-WBS-07.09.01** Linux encoding 설정·profile·CLI 및 실제 desktop Settings 편집/거절/Apply·재시작의 bounded software 경로를 검증한다. — 상태=D(검증완료); 선행=-; 근거=E50, 18d9c414 독립 code/CLI QA·실제 Settings/profile·129-row 경계; 범위=Linux cold 설정, acknowledged-paused Output/물리는 별도.
   - [x] **BK-WBS-07.09.02** Linux encoding ALSA request/capability/applied·solo/local startup·recorded replay와 pending 해석 거절/recovery를 검증한다. — 상태=D(검증완료); 선행=-; 근거=E50, 실제 production adapter/cold consumer·독립 app QA 및 두 opted ALSA null 검사; 범위=software encoding, retained Apply/물리/foreign는 별도.
-  - [ ] **BK-WBS-07.09.03** 새 retained Target typed Output Owner/UI 요청·응답·capability refresh를 교체 controller에 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.05; 필요 근거/다음=AC005 새 구현/fixture 없음; rate/buffer/channel/matrix/encoding 요청·applied 차이·busy/backpressure·오류 draft 보존과 유일 owner를 검증.
+  - [ ] **BK-WBS-07.09.03** 새 retained Target typed Output Owner/UI 요청·응답·capability refresh를 교체 controller에 연결한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.08.05; 필요 근거/다음=E52 새16+기존1·application178·controller18·ALSA UI12·할당1·Linux53/replay40 및 모든 bin check PASS; 실제 pump 연결과 독립 검증 필요.
   - [ ] **BK-WBS-07.09.04** 실제 acknowledged-paused Output GUI에서 retained 설정 Apply/거절·capability refresh·Back/reopen을 실행한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=E50 evdev 부재 BLOCKED_ENV; admitted native play/paused ACK 뒤 실제 입력과 current binary로 검사, Settings/null fixture 결과로 대체하지 않음.
   - [ ] **BK-WBS-07.09.05** 남은 모든 지원 플랫폼·backend의 rate/buffer/channel/encoding 요청·capability·실제 applied 및 pending PCM 해석 범위를 감사·연결한다. — 상태=U(최신현황감사필요); 선행=-; 필요 근거/다음=원래07.09 전체 기준·E19 target bridge와 미지원 선택의 명시 거절 유지; Source/foreign/실제 launcher·장치 조합을 확인하고 missing seam을 별도 bounded 단위로 갱신.
 - [ ] **BK-WBS-07.10** startup/pause/resume/finite end ACK가 lookahead/held-release가 아니라 native crossing을 기다린다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E16 공개 audio pump의 pause/resume/held 순서 검증; 실제 launcher owner→worker→native 관측 E2E 및 finite end는 계속 필요.
@@ -651,7 +666,7 @@ Native collector termination 절에 있다.
 | AC003 | BK-WBS-07.08.03 | E48 pause75·포맷 후 집중13 D; 실제 pump는 별도 |
 | AC008 | BK-WBS-07.08.04 | E49 focused16/platform387/null1 D; 실제 hardware/GUI는 별도 |
 | AC004 | BK-WBS-07.08.05 | E51 V; controller18·할당 검사1·관련 회귀 통과, 독립 gate 남음 |
-| AC005 | BK-WBS-07.09.03 | N; 새 retained typed Owner/UI 구현·fixture 필요 |
+| AC005 | BK-WBS-07.09.03 | E52 V; 새16+기존1 및 관련 회귀/bin check 통과, 독립 gate 남음 |
 | AC006 | BK-WBS-07.08.06 | N; Owner/UI 뒤 실제 retained 공통 pump 구현·fixture 필요 |
 | AC007 | 관련 child 전체의 검증 gate | 독립 review/QA·전체 통합 검증이며 별도 기능 leaf나 중복 완료 수를 만들지 않음 |
 
@@ -689,6 +704,13 @@ Source/scalar/finite/foreign/실제 GUI/물리/applied 전체 범위를 보존�
 상세 behavior/architecture/라이선스는 연결된 기존 REQ/GUIDE/ADR이 계속 소유한다.
 
 ## 변경 이력
+
+- 2026-10-14 Owner/UI 검사: AC005의 새16개와 기존1개, 관련 회귀와 모든 bin
+  check를 실제 실행해07.09.03을 W에서 V로 갱신했다. 말단 구현됨(D+V)은162개,
+  완료97/206·원래91/193은 유지하며 실제 공통 pump는 N이다.
+
+- 2026-10-14 Owner/UI 착수: AC005 구현·테스트 작성 레인을 배정하고07.09.03을
+  N에서 W로 갱신했다. 실제 검사 전이며 controller V·공통 pump N과 완료 수는 유지한다.
 
 - 2026-10-14 controller: borrowed commit으로 prepared metadata 복제를 제거하고
   실제18 unit+1외부 할당 검사와 관련 회귀를 확인했다. controller V는 최종 독립

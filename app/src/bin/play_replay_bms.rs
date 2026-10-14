@@ -1067,7 +1067,7 @@ mod native {
             )
             .map_err(|failure| failure.into_parts().0)?;
         Ok(Stream {
-            owner: ConvertedAlsaOutputOwner::new(backend, output),
+            owner: ConvertedAlsaOutputOwner::new_with_ticket(backend, output),
             source_rate,
             telemetry: None,
             recovered: None,

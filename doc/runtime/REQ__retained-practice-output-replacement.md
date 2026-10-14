@@ -134,8 +134,27 @@ overlap rather than a claimed sum of unique cases. Logs are in
 `target/wf/retained-practice-output-replacement/`, including
 `ac004-borrowed-placement-unit.log`, `ac004-borrowed-allocation-calibrated.log`
 and `ac004-borrowed-regression-*.log`. Earlier compile/test failures remain there.
-Owner/UI, actual common pumps and final independent review/QA remain unfinished;
-this checkpoint does not prove native device/GUI crossing or full player completion.
+Actual common pumps and final independent review/QA remain unfinished; this
+checkpoint does not prove native device/GUI crossing or full player completion.
+
+Owner/UI development checkpoint (2026-10-14): typed conditional ownership,
+precommit applied-capability validation and correlated reply retry are connected.
+The retained request/observation filter passes17 cases (16 new and one existing).
+The broader application178, controller18, ALSA UI12 (2 ignored), external
+allocation1, Linux53 (3 ignored) and replay40 (1 ignored) regressions pass, as
+does no-default all-bin checking. Filters overlap. The real common solo/cohort
+pause/poll/resume connection is still pending; these results do not establish it.
+Current logs are ac005-retained-target-formatted.log, ac005-regression-*.log,
+ac005-allocation-regression.log, ac005-linux-replay-regression.log and
+ac005-bins-check.log in the task work directory. Earlier failures remain recorded.
+
+```sh
+cargo test -p beatkernel-bms-runtime --no-default-features --lib retained_target_ --locked
+cargo test -p beatkernel-bms-runtime --no-default-features --lib gameplay::output::application --locked
+cargo test -p beatkernel-bms-runtime --no-default-features --test coordinate_target_replacement_allocations --locked
+cargo test -p beatkernel-bms-runtime --no-default-features --bin linux_bms --bin play_replay_bms --locked
+cargo check -p beatkernel-bms-runtime --no-default-features --bins --locked
+```
 
 Independent rational, original native snapshot, pause, transaction and request
 fixtures must cover successful changes, stale/wrong/future/torn evidence, held

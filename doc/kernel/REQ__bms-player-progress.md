@@ -15,13 +15,14 @@ coordinate 기초와 Linux encoding의 bounded software 범위를 드러낸 것�
 실제로 재실행해18 PASS/실패0을 확인했다. 후속 borrowed commit의18 unit·1외부
 할당 검사와 관련 회귀도 통과했고 실제 publication의 새 할당0회를 확인했으나
 최종 독립 gate가 남아 V다.
-새 retained Owner/UI(AC005)와 공통 pump(AC006)는 새 구현/fixture가 없어 N이며
-그18 PASS를 물려받지 않는다. Source/scalar/finite/foreign/
+새 retained Owner/UI(AC005)는 자체 새16+기존1 테스트, 관련 회귀와 모든 bin check를
+통과해 V로 갱신했다. 공통 pump(AC006)는 아직 N이며 controller·Owner/UI 결과를
+그 경로의 증거로 물려받지 않는다. Source/scalar/finite/foreign/
 실제 paused GUI·물리/applied 전체 기준은 각 child에 남는다.
 현재 retained replacement task는 같은 run/미완료 범위를 보존해 active로 재개했다.
 WBS 작업은03435bf4에서 실제 독립 review/CLI QA를 통과했고 자동 검증 기록 누락으로
 종료만 parked 상태다. 이 추적 작업의 검사를 제품 task의
-formal review/QA나 전체 Goal 완료로 바꾸지 않는다. WBS의 E46–E51과
+formal review/QA나 전체 Goal 완료로 바꾸지 않는다. WBS의 E46–E52와
 [이번 변경 기록](../changes/2026-10-14-wbs-ongoing-work-breakdown.md)을 따른다.
 
 2026-10-11 현재 연결 근거: Records의 genuine preview/history 및 retained Own/Other

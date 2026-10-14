@@ -8,12 +8,15 @@ use crate::{
     gameplay::output::application::owner::GameplayOutputOwner,
     gameplay::output::application::requests::GameplayOutputUi,
     gameplay::output::domain::control::{OutputCapability, OutputRequest},
+    gameplay::output::ports::{
+        ConditionalTargetRetirementNativeOutputBackend, SourcePlaybackIdentity,
+    },
     gameplay::output::{
         adapters::{
             encoding::{encoding_choice, native_encoding},
             remix::RemixedOutputBackend,
         },
-        domain::remix::{matrix_text, select_matrix, RemixedOutputRequest},
+        domain::remix::{RemixedOutputRequest, matrix_text, select_matrix},
     },
     gameplay_presentation::{GameplayAudioOutputContext, GameplayOutputContext},
     settings::{NativeSettings, OutputEncoding, SettingsHost},
@@ -24,7 +27,7 @@ use beatkernel::{
 };
 use beatkernel_platform::{
     audio::{
-        presentation::discipline::PresentationDiscipline, ConvertedNativeOutputState, DeviceFormat,
+        ConvertedNativeOutputState, DeviceFormat, presentation::discipline::PresentationDiscipline,
     },
     linux::{AlsaAppliedConfig, AlsaRequest},
 };
@@ -70,6 +73,9 @@ pub type ConvertedAlsaOutputOwner = GameplayOutputOwner<
     ConvertedAlsaReplacementBackend,
     ConvertedNativeOutputState,
     TargetFrameBasis,
+    <ConvertedAlsaReplacementBackend as ConditionalTargetRetirementNativeOutputBackend<
+        ConvertedNativeOutputState,
+    >>::Ticket,
 >;
 
 /// Source channels come from the retained converter matrix, never native targets.
@@ -270,7 +276,15 @@ impl ConvertedAlsaOutputUi {
         current.format = applied.format;
         current.buffer_frames = applied.buffer_frames;
         current.period_frames = applied.period_frames;
-        converted_request_for_args(&current, output.channel_matrix(), &request.args)
+        let typed = converted_request_for_args(&current, output.channel_matrix(), &request.args)?;
+        output
+            .stream()
+            .validate_conditional_replacement(
+                &typed.native,
+                typed.matrix.as_ref().unwrap_or(output.channel_matrix()),
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(typed)
     }
     pub fn service_audio(
         &mut self,
@@ -286,14 +300,32 @@ impl ConvertedAlsaOutputUi {
             &mut capability_for_converted_output,
         )
     }
+    pub fn service_coordinate_audio(
+        &mut self,
+        owner: &mut ConvertedAlsaOutputOwner,
+        context: GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+        identity: SourcePlaybackIdentity,
+        practice_pending: bool,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        self.bridge.service_coordinate_target_audio(
+            owner,
+            context,
+            now,
+            identity,
+            practice_pending,
+            &mut Self::map_request,
+            &mut capability_for_converted_output,
+        )
+    }
 }
 
 #[cfg(test)]
-#[path = "alsa_target_ui_fixtures.rs"]
-mod target_ui_fixtures;
-#[cfg(test)]
 #[path = "alsa_ui_encoding_fixtures.rs"]
 mod encoding_fixtures;
+#[cfg(test)]
+#[path = "alsa_target_ui_fixtures.rs"]
+mod target_ui_fixtures;
 pub struct NativeAlsaOutputUi {
     bridge: GameplayOutputUi<PlayerOutputUi>,
 }
@@ -480,12 +512,14 @@ mod fixtures {
                 )
                 .unwrap();
                 assert_eq!(preserved.matrix.as_ref(), output.channel_matrix());
-                assert!(remixed_request_for_args(
-                    &output.stream().configuration().requested,
-                    output.channel_matrix(),
-                    &args("--output-matrix", "1,0")
-                )
-                .is_err());
+                assert!(
+                    remixed_request_for_args(
+                        &output.stream().configuration().requested,
+                        output.channel_matrix(),
+                        &args("--output-matrix", "1,0")
+                    )
+                    .is_err()
+                );
             }
             backend.retire(&mut output).unwrap();
             let mut mixer = output.take_stopped_mixer().unwrap().unwrap();

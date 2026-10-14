@@ -1,10 +1,11 @@
 //! Cold correlated UI admission, separate from output retirement and publication.
 use crate::gameplay::output::ports::OutputUiPort;
 use crate::{
-    gameplay::output::application::owner::GameplayOutputOwner,
+    gameplay::output::application::owner::{CoordinateTargetOwnerPublication, GameplayOutputOwner},
     gameplay::output::domain::control::{OutputCapability, OutputReply, OutputRequest},
     gameplay::output::ports::{
-        OriginalNativeOutputBackend, OriginalTargetNativeOutputBackend, OutputReplacementBackend,
+        ConditionalTargetRetirementNativeOutputBackend, OriginalNativeOutputBackend,
+        OriginalTargetNativeOutputBackend, OutputReplacementBackend, SourcePlaybackIdentity,
     },
     gameplay_presentation::{GameplayAudioOutputContext, GameplayOutputContext},
 };
@@ -82,9 +83,12 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
         })
     }
     /// Keep target publication on the original converted owner and physical basis.
-    pub fn service_target_audio<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>>(
+    pub fn service_target_audio<
+        B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>,
+        Ticket,
+    >(
         &mut self,
-        owner: &mut GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis>,
+        owner: &mut GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis, Ticket>,
         context: GameplayAudioOutputContext<'_>,
         now: ClockPoint,
         map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
@@ -101,15 +105,90 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
             owner.publish_paused_target_audio(context, now)
         })
     }
-    fn service_with<B: OutputReplacementBackend<O, Basis>, O, Basis>(
+    /// Stage the exact applied capability before committing a coordinate epoch.
+    pub fn service_coordinate_target_audio<
+        B: ConditionalTargetRetirementNativeOutputBackend<ConvertedNativeOutputState>,
+    >(
         &mut self,
-        owner: &mut GameplayOutputOwner<B, O, Basis>,
-        refusal: Option<&'static str>,
+        owner: &mut GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis, B::Ticket>,
+        context: GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+        identity: SourcePlaybackIdentity,
+        practice_pending: bool,
         map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
         applied: &mut impl FnMut(&B::Output) -> Result<OutputCapability, String>,
-        publish: impl FnOnce(
-            &mut GameplayOutputOwner<B, O, Basis>,
-        ) -> Result<bool, Box<dyn std::error::Error>>,
+    ) -> crate::native_gameplay::NativeGameplayResult<bool>
+    where
+        B::Error: std::error::Error + 'static,
+    {
+        let refusal = (practice_pending || context.end.is_some())
+            .then_some("coordinate replacement requires no NativeEnd or pending practice");
+        if !self.admit_request(owner, refusal, map)? {
+            return Ok(false);
+        }
+        let publication = owner.publish_paused_coordinate_target_audio(
+            context,
+            now,
+            identity,
+            practice_pending,
+            |output| {
+                let cap = applied(output)?;
+                cap.validate()?;
+                Ok(cap)
+            },
+        );
+        match publication {
+            Ok(CoordinateTargetOwnerPublication::Pending) => Ok(false),
+            Ok(CoordinateTargetOwnerPublication::LiveRefused(reason)) => {
+                let id = self
+                    .flight
+                    .take()
+                    .expect("active coordinate output request");
+                self.reply = Some(OutputReply {
+                    id,
+                    result: Err(Self::diagnostic(&reason)),
+                });
+                let _ = self.flush()?;
+                Ok(false)
+            }
+            Ok(CoordinateTargetOwnerPublication::Published(cap)) => {
+                let id = self
+                    .flight
+                    .take()
+                    .expect("accepted coordinate output request");
+                self.reply = Some(OutputReply {
+                    id,
+                    result: Ok(cap),
+                });
+                let _ = self.flush()?;
+                Ok(true)
+            }
+            Err(error) => {
+                let id = self
+                    .flight
+                    .take()
+                    .expect("active coordinate output request");
+                self.reply = Some(OutputReply {
+                    id,
+                    result: Err(Self::diagnostic(&error.to_string())),
+                });
+                let _ = self.flush();
+                Err(error)
+            }
+        }
+    }
+    fn diagnostic(error: &str) -> String {
+        error
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(512)
+            .collect()
+    }
+    fn admit_request<B: OutputReplacementBackend<O, Basis>, O, Basis, Ticket>(
+        &mut self,
+        owner: &mut GameplayOutputOwner<B, O, Basis, Ticket>,
+        refusal: Option<&'static str>,
+        map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
     ) -> Result<bool, Box<dyn std::error::Error>>
     where
         B::Error: std::error::Error + 'static,
@@ -159,6 +238,24 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
                 return Ok(false);
             }
         }
+        Ok(true)
+    }
+    fn service_with<B: OutputReplacementBackend<O, Basis>, O, Basis, Ticket>(
+        &mut self,
+        owner: &mut GameplayOutputOwner<B, O, Basis, Ticket>,
+        refusal: Option<&'static str>,
+        map: &mut impl FnMut(&OutputRequest, &B::Output) -> Result<B::Request, String>,
+        applied: &mut impl FnMut(&B::Output) -> Result<OutputCapability, String>,
+        publish: impl FnOnce(
+            &mut GameplayOutputOwner<B, O, Basis, Ticket>,
+        ) -> Result<bool, Box<dyn std::error::Error>>,
+    ) -> Result<bool, Box<dyn std::error::Error>>
+    where
+        B::Error: std::error::Error + 'static,
+    {
+        if !self.admit_request(owner, refusal, map)? {
+            return Ok(false);
+        }
         match publish(owner) {
             Ok(false) => Ok(false),
             Ok(true) => {
@@ -175,12 +272,7 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
                 let id = self.flight.take().expect("active output request");
                 self.reply = Some(OutputReply {
                     id,
-                    result: Err(error
-                        .to_string()
-                        .chars()
-                        .filter(|ch| !ch.is_control())
-                        .take(512)
-                        .collect()),
+                    result: Err(Self::diagnostic(&error.to_string())),
                 });
                 let _ = self.flush();
                 Err(error)
@@ -192,3 +284,7 @@ impl<U: OutputUiPort> GameplayOutputUi<U> {
 #[cfg(test)]
 #[path = "audio_requests_fixtures.rs"]
 mod audio_fixtures;
+
+#[cfg(test)]
+#[path = "retained_target_requests_fixtures.rs"]
+mod retained_target_requests_fixtures;
