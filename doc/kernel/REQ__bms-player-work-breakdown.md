@@ -526,6 +526,19 @@ native ABI/장치/재생 증거가 아니다. 검사 전후 frozen10SHA와 track
 01.05/.06의 전체 범위는 아직 W이며106/223·원래91/193은 유지한다. 자동 완료 기록과
 owning verify/close는 별도 gate이고 이 소프트웨어 PASS가 task/전체 Goal 완료는 아니다.
 
+E73: 순수 ConvertedBoundaryFacts의 정의를 기존 core audio로 옮기고 platform은
+같은 타입을 직접 재노출한다. 공용 application/port10개 사용처는 core를 참조하며
+필드·derive/default·생성 경계 의미와 native 상태/효과 실행문은 보존했다.
+독립 작성한 양방향 public-path 대입 검사 포함 format23/0, core 경계7·mixer16,
+platform434/0/ignored2와 app target_327/0/ignored1이 통과했다. host bins·명시적
+browser-feature WASM·경고 비차단 app/platform Clippy와 Rust15 format/diff도 통과했다.
+Windows/macOS C-stub Rust typing도 exit0이며 실제 장치/ABI/재생 증거는 아니다.
+독립 정식 리뷰 다음 전체 앱 QA·최종 문서 audit는 아직 남는다.
+기존 platform 출력 상태/presentation 의존성까지 제거한 것은 아니므로01.05/.06은 W,
+전체106/223·원래91/193 그대로다. 정의 reflection 경로는 바뀌며 안정 ABI/layout·
+이전 빌드와의 type identity나 실제 native 실행을 보증하지 않는다.
+[변경과 검증 범위](../changes/2026-10-14-core-converted-boundary-facts.md)를 따른다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -554,7 +567,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-01.02** 코어에는 OS API와 게임 이름 분기가 없고 플랫폼·어댑터는 상호 의존하지 않는다. — 상태=D(검증완료); 선행=-; 근거=E0,E6.
 - [x] **BK-WBS-01.03** UI·설정·기록·경쟁·네트워크를 하나의 app crate에서 조립한다. — 상태=D(검증완료); 선행=-; 근거=E6.
 - [x] **BK-WBS-01.04** Rust 1.98.1/MSRV와 CI 선언을 맞추고 Cargo.lock 기반 빌드가 가능하다. — 상태=D(검증완료); 선행=-; 근거=E6,E9.
-- [ ] **BK-WBS-01.05** 모든 application context를 DDD 모듈과 명시적 Port/Adapter로 분리한다. — 상태=W(구현·연동중); 선행=-; 근거=E71/E72의 selected-sound 공통 정책과 독립 소프트웨어 QA; 필요 근거/다음=나머지 context와 application/platform 자료형 의존성 audit.
+- [ ] **BK-WBS-01.05** 모든 application context를 DDD 모듈과 명시적 Port/Adapter로 분리한다. — 상태=W(구현·연동중); 선행=-; 근거=E71/E72의 selected-sound 공통 정책·독립 QA와 E73의 core 좌표 DTO·공용10개 소비 경로; 필요 근거/다음=독립 최종 gate와 나머지 context·application/platform 자료형 의존성 audit.
 - [ ] **BK-WBS-01.06** UI 제어·기록·파일·장치·시간·네트워크 효과를 주입 가능하게 만든다. — 상태=W(구현·연동중); 선행=-; 근거=E71/E72의 native-free 준비와 실제 cohort/복원 fixture·독립 QA; 필요 근거/다음=나머지 효과와 실제 adapter를 교체한 계층별 fixture.
 - [ ] **BK-WBS-01.07** hot path의 static dispatch와 추상화 비용을 실제 코드·측정으로 확인한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=동적 dispatch/clone/alloc 위치와 비용 보고.
 - [x] **BK-WBS-01.08** 순수 기록 모델을 graphics/browser 없이 빌드한다. — 상태=D(검증완료); 선행=-; 근거=E9.

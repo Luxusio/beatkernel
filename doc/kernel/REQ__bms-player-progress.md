@@ -7,6 +7,16 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-14 좌표 경계 E73: 순수 ConvertedBoundaryFacts를 기존 core audio로 옮기고
+platform의 같은 타입 직접 재노출과 application/port10개 core 참조를 연결했다.
+core 독립 check·경계7·mixer16·platform434/0/ignored2·public-path 호환 포함 format23,
+app target_327/0/ignored1, host bins·browser-feature WASM·경고 비차단 Clippy와
+Rust15 format/diff를 통과했다. 필드/default/생성 증거 의미와 native 실행문은 그대로다.
+Windows/macOS C-stub Rust typing도 exit0이며 실제 native 재생은 아니다.
+독립 최종 리뷰·전체 앱 QA·문서 audit는 남으며01.05/.06은 W,
+전체106/223·원래91/193을 유지한다.
+[변경과 검증 범위](../changes/2026-10-14-core-converted-boundary-facts.md)를 따른다.
+
 2026-10-14 준비 경계 E72: frozen2b9928d3의 독립 DEEP 리뷰 PASS0 다음 독립 CLI QA가
 소프트웨어 범위 PASS했다. 전체 app3260/0/ignored8·bins624/0/ignored17, 준비7·
 retained2·cohort7, host bins·browser-feature WASM·Windows/macOS C-stub typing과
