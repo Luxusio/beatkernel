@@ -1041,6 +1041,9 @@ pub mod gameplay_output_owner;
 mod native_owned_output_fixtures;
 #[cfg(test)]
 mod native_retained_output_replacement_fixtures;
+
+#[cfg(test)]
+mod native_retained_source_output_replacement_fixtures;
 /// Static two-backend adapter for cross-backend output replacement.
 pub mod output_backend_switch;
 
