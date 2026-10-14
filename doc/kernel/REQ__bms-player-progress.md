@@ -7,6 +7,17 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-14 exclusive E70: frozen bd9b8916의 독립 DEEP 리뷰 PASS0 뒤 독립 CLI
+소프트웨어 QA가 PASS했다. app3258/0/ignored8·bins624/0/ignored17·platform434/0/
+ignored2·worker37·외부100·sizing22·Source/Target 할당 각1, WASM·foreign typing·
+경고 비차단 Clippy·Rust12 format/diff·문서 링크144·공개 CLI26/26와 동시 render를
+통과했다. fixture 중복은 합산하지 않고 Windows 신규9개는 typed-only다.
+순수 worker 범위 .13.01만 V→D로 옮겨 **106/223(47.53%)**, D106·V72·W20·N2·
+E15·P5·U3이다. 원래91/193과 exclusive 부모의 전체 범위는 유지한다.
+새 Windows QA도 실제 COM Render/AllStates 열거/GetCount가 성공했지만 endpoint0,
+로그인 콘솔/현재 player 부재로 BLOCKED_ENV다. VM은 같은 incarnation의 초기Off로
+정상 복구했다. native .13.02/.03은 V, 실제 재생 .13.04는 E이며 task/Goal 완료가 아니다.
+
 2026-10-14 exclusive E69: 사전 독립 coverage 점검에서 확인한 shared cold-helper
 우회 분기를 실제 pending6/buffer4·shared3조합의 owner 보존 회귀로 보강했다.
 최종 공통 worker37·외부 worker binary100 PASS이며 중복 fixture는 합산하지 않는다.

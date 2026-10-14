@@ -487,6 +487,20 @@ helper를 호출하는 pending6/buffer4·shared3조합 owner 보존 회귀로 �
 platform/app의 경고 비차단 Clippy와 실제 windows_bms --help는 exit0이다.
 독립 정식 review/QA와 실제 Windows 실행은 남는다. 신규 완료 없이 E68 집계를 유지한다.
 
+E70: frozen bd9b8916의 실제 독립 DEEP 리뷰 PASS0 뒤 CLI 소프트웨어 QA가 PASS했다.
+app3258/0/ignored8·bins624/0/ignored17·platform434/0/ignored2·worker37·외부100·
+sizing22·Source/Target 할당 각1·WASM·Windows/macOS C-stub typing·경고 비차단
+lib Clippy·scoped Rust12 format/diff·링크144와 공개 CLI26/26·동시 render를 확인했다.
+실제 BMS/WAV는8000frames·32000bytes·비영샘플792·모든 값 finite로 렌더됐다.
+외부100과 다른 suite의 중복 fixture는 합산하지 않는다. Windows 신규9개는 미실행이다.
+새 desktop QA는 소유 VM의 실제 COM Render/AllStates 열거/GetCount가 성공했으나
+endpoint0·로그인 콘솔/현재 player 부재로 BLOCKED_ENV였다. VM은 같은 incarnation의
+초기Off로 정상 복구했다. software 범위 .13.01만 V→D로 옮겨 D106·V72·W20·N2·
+E15·P5·U3,106/223(47.53%)다. 원래91/193·native V/E·exclusive/Source 부모와
+다른 backend/물리/출시 요구는 유지하며 task/전체 Goal 완료를 주장하지 않는다.
+근거는 현재 task의 qa-cli-bd9b8916/와 qa-desktop-bd9b8916/이며
+요약과 재현 범위는 exclusive 변경 문서에 있다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -642,10 +656,10 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
     - [ ] **BK-WBS-07.08.07.11** Windows solo/local의 실제 SourceCounter coordinate hook과 Legacy/complete static variant를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.10; 필요 근거/다음=E65 독립 DEEP/CLI에서 Windows bin72·Source UI9(거절24조합 포함)·전체 desktop app3258 및 Windows app typing PASS; cfgWindows mapper/COM 실제 실행과 선행 .10이 남음.
     - [ ] **BK-WBS-07.08.07.12** Source Frame/Counter 공통 solo/cohort pump에서 교체·resume·loop/scrub·원본 capture/PCM 보존을 검증한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.11; 필요 근거/다음=E65 독립 DEEP/CLI에서 실제 연결4·전체 desktop app3258 PASS, PCM 회계·종료 silence·원본 capture codec/hash·member/attempt·조건부 경합 검사; 실제 Windows acceptance와 선행 .11이 남음.
     - [ ] **BK-WBS-07.08.07.13** WASAPI exclusive retained Source 교체의 실제 mode/geometry·history·cleanup 및 pause/resume을 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E66의4개 실행 단위와 원래 native acceptance를 모두 충족해야 완료; shared 검사를 exclusive 완료로 확장하지 않는다.
-      - [ ] **BK-WBS-07.08.07.13.01** exclusive의 known Exact/actual geometry·전체 native buffer lease·whole-multiple PCM 복구와 conditional worker를 검사한다. — 상태=V(구현·개발검사통과); 선행=-; 필요 근거/다음=E69 실제 production worker37·sizing22·외부 binary100 PASS; shared cold-helper3조합과 원본 PCM/상태·오류/경합·보정된 heap0 확인, 독립 최종 review/QA 필요.
-      - [ ] **BK-WBS-07.08.07.13.02** complete exclusive open/start/Stop/join/recovery에 actual native buffer·Counter/history·정리 오류를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.13.01; 필요 근거/다음=E68 actual geometry/preparation 순서와 Ready/event dispatch·complete cleanup 연결; Windows lib/tests typing0, 새 native9개는 미실행. 독립 review/QA·actual Windows 실행 필요.
-      - [ ] **BK-WBS-07.08.07.13.03** Windows retained exclusive startup·same-family Output UI와 기존 Owner/solo/local 소비 경로를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.13.02; 필요 근거/다음=E68 실제 Windows bin79(기본 device RED2→GREEN2 포함)·공통 Owner/UI/pump37·Windows app typing0; 독립 최종 review/QA·선행 native 실행과 실제 consumer acceptance 필요.
-      - [ ] **BK-WBS-07.08.07.13.04** 실제 Windows exclusive 출력에서 pause/replace/resume·반복 연습·입력/capture/PCM·실패 정리를 검증한다. — 상태=E(환경·장비대기); 선행=BK-WBS-07.08.07.13.03; 필요 근거/다음=E65 소유 VM Render endpoint0·로그인 console/현재 실행 환경 부재; 새 QA에서 최고 가용 계층 재확인, 실제 장치·current source 실행 필요.
+      - [x] **BK-WBS-07.08.07.13.01** exclusive의 known Exact/actual geometry·전체 native buffer lease·whole-multiple PCM 복구와 conditional worker를 검사한다. — 상태=D(검증완료); 선행=-; 근거=E70 실제 독립 DEEP/CLI PASS, production worker37·sizing22·외부 binary100과 보정된 heap0; shared cold-helper3조합·원본 PCM/상태·오류/경합 보존. 범위=portable production step/geometry; COM/native 실행은 .13.02/.13.04.
+      - [ ] **BK-WBS-07.08.07.13.02** complete exclusive open/start/Stop/join/recovery에 actual native buffer·Counter/history·정리 오류를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.13.01; 필요 근거/다음=E70 독립 DEEP/CLI의 portable/build-only 범위 PASS; actual geometry/preparation 순서와 Ready/event dispatch·complete cleanup 연결, Windows lib/tests typing0. 새 native9개는 미실행이며 실제 Windows acceptance는 endpoint0·실행 환경 부재로 BLOCKED_ENV.
+      - [ ] **BK-WBS-07.08.07.13.03** Windows retained exclusive startup·same-family Output UI와 기존 Owner/solo/local 소비 경로를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.13.02; 필요 근거/다음=E70 독립 DEEP/CLI에서 Windows bin79(기본 device RED2→GREEN2 포함)·전체 app3258/bins624·공통 Owner/UI/pump·Windows app typing0 PASS; 선행 native 실행과 실제 consumer acceptance가 남음.
+      - [ ] **BK-WBS-07.08.07.13.04** 실제 Windows exclusive 출력에서 pause/replace/resume·반복 연습·입력/capture/PCM·실패 정리를 검증한다. — 상태=E(환경·장비대기); 선행=BK-WBS-07.08.07.13.03; 필요 근거/다음=E70 새 소유 VM QA의 실제 COM Render/AllStates 열거/GetCount HRESULT0·endpoint0, 로그인 콘솔/현재 player 부재. 초기Off 복구 완료; eligible Windows에서 실제 exclusive 장치 acceptance 수행.
     - [ ] **BK-WBS-07.08.07.14** ASIO SourceFrame retained 교체의 callback conditional retirement·완전 상태·Owner/UI/pump를 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=공통 Frame 기초와 실제 ASIO adapter는 별도; SDK/build 라이선스 조건·형/장치 실행·실패/재시도 검사 필요.
     - [ ] **BK-WBS-07.08.07.15** CoreAudio retained Source 교체의 원래 native 좌표·callback/회수·Owner/UI/pump를 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=실제 macOS descriptor/history·callback 승인·cleanup·장치/독립 실행 필요; WASAPI typing은 근거가 아님.
   - [ ] **BK-WBS-07.08.08** 기존 scalar 교체와 finite-end ACK·held tail·취소/실패 경로가 새 retained 교체 변경 후에도 보존되는지 재검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=기존 구현/fixture는 존재하나 current 합쳐진 후보의 regression·실제 native crossing·end/drain/owner cleanup 및 독립 확인 필요.
