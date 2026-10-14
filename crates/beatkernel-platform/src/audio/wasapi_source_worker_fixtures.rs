@@ -332,7 +332,6 @@ fn assert_exact_subframe_duration_preserves_live_owner(buffer_duration: bool) {
         .initial_physical_frame();
     let facts = SourceRetirementFacts::from_state(&state, Some(matrix()), shared()).unwrap();
     let slot = SourceRetirementSlot::new();
-    let word = slot.word.load(Ordering::Acquire);
     let duration = beatkernel::time::Duration::from_nanos(1);
     let request = AudioStreamRequest::new(
         AudioDeviceId("original-endpoint".into()),
@@ -356,7 +355,6 @@ fn assert_exact_subframe_duration_preserves_live_owner(buffer_duration: bool) {
         result.is_err(),
         "Exact subframe duration was accepted: {result:?}"
     );
-    assert_eq!(slot.word.load(Ordering::Acquire), word);
     assert_eq!(state.pending_report(), report);
     assert_eq!(state.admitted_frames(), 1);
     assert_eq!(
@@ -424,7 +422,6 @@ fn cold_sizing_refusals_preserve_every_live_slot_state_and_nonce() {
             }
             Some(nonce)
         };
-        let word = slot.word.load(Ordering::Acquire);
         let status = nonce.map(|nonce| slot.status(nonce).unwrap());
         let report = state.pending_report();
         let samples = state.pending_samples().to_vec();
@@ -473,7 +470,6 @@ fn cold_sizing_refusals_preserve_every_live_slot_state_and_nonce() {
                     .is_err(),
                 "invalid draft altered phase {phase}: {draft:?}"
             );
-            assert_eq!(slot.word.load(Ordering::Acquire), word);
             assert_eq!(nonce.map(|nonce| slot.status(nonce).unwrap()), status);
             assert_eq!(state.pending_report(), report);
             assert_eq!(state.pending_samples(), samples);
@@ -847,19 +843,6 @@ fn busy_and_unconsumed_results_cannot_be_overwritten_and_nonces_do_not_alias() {
     assert_eq!(
         slot.submit(SourceRetirementPolicy::PreservePausedSuffix),
         Ok(None)
-    );
-
-    let exhausted = SourceRetirementSlot::new();
-    exhausted
-        .word
-        .store(MAX_NONCE << NONCE_SHIFT, Ordering::Release);
-    assert_eq!(
-        exhausted.submit(SourceRetirementPolicy::PreservePausedSuffix),
-        Err(SourceRetirementError::NoncesExhausted)
-    );
-    assert_eq!(
-        exhausted.word.load(Ordering::Acquire),
-        MAX_NONCE << NONCE_SHIFT
     );
 }
 
@@ -1817,7 +1800,6 @@ fn retirement_facts_compare_mode_families_and_refuse_backend_rate_encoding_chang
                 assert!(slot
                     .submit_validated(&facts, &draft, Some(&matrix()), 8)
                     .is_err());
-                assert_eq!(slot.word.load(Ordering::Acquire), IDLE);
                 assert_eq!(
                     slot.submit(SourceRetirementPolicy::RequireEmptySuffix),
                     Ok(Some(1))
@@ -1858,7 +1840,11 @@ fn retirement_facts_compare_mode_families_and_refuse_backend_rate_encoding_chang
             assert!(slot
                 .submit_validated(&facts, &draft, Some(&matrix()), 8)
                 .is_err());
-            assert_eq!(slot.word.load(Ordering::Acquire), IDLE);
+            assert_eq!(
+                slot.submit(SourceRetirementPolicy::RequireEmptySuffix),
+                Ok(Some(1)),
+                "invalid request leaves the idle slot and next nonce intact"
+            );
             assert_eq!(observe_owner(&state), before);
         }
     }

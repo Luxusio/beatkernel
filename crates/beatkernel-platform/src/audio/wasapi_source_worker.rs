@@ -1,87 +1,20 @@
 //! The complete Source owner's WASAPI decision and one synchronous native fill.
 //! Native effects are statically supplied by the owner-thread COM adapter.
+pub(crate) use super::source_output_retirement::{
+    SourceRetirementError, SourceRetirementPolicy, SourceRetirementSlot, SourceRetirementStatus,
+};
 use super::{
     channel_remix, negotiation::known_exact_exclusive_buffer_frames,
     source_history_retirement_mailbox::SourceHistoryRetirementRequest,
-    validate_known_request_sizing, AudioBackendKind, AudioPlatformError, AudioStreamMode,
-    AudioStreamRequest, DeviceFormat, NativeOutputState,
+    source_output_retirement::SourceRetirementDecision, validate_known_request_sizing,
+    AudioBackendKind, AudioPlatformError, AudioStreamMode, AudioStreamRequest, DeviceFormat,
+    NativeOutputState,
 };
 use beatkernel::audio::{AudioFormat, ChannelMatrix, RenderReport};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 const INVALID_ARGUMENT: i32 = 0x8007_0057u32 as i32;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SourceRetirementPolicy {
-    PreservePausedSuffix,
-    RequireEmptySuffix,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SourceRetirementStatus {
-    Pending,
-    Refused,
-    Cancelled,
-    Authorized,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SourceRetirementError {
-    InvalidTicket,
-    NoncesExhausted,
-}
-
-// Policy, response and nonce share one word: cancellation and permission must
-// compete in the same CAS, including when the owner cached an old response.
-const NONCE_SHIFT: u32 = 3;
-const MAX_NONCE: u64 = u64::MAX >> NONCE_SHIFT;
-const STATE_MASK: u64 = (1 << NONCE_SHIFT) - 1;
-const IDLE: u64 = 0;
-const PENDING_PRESERVE: u64 = 1;
-const PENDING_EMPTY: u64 = 2;
-const REFUSED: u64 = 3;
-const CANCELLED: u64 = 4;
-const AUTHORIZED: u64 = 5;
-
-pub(crate) struct SourceRetirementSlot {
-    word: AtomicU64,
-}
-
 impl SourceRetirementSlot {
-    pub(crate) const fn new() -> Self {
-        Self {
-            word: AtomicU64::new(IDLE),
-        }
-    }
-
-    pub(crate) fn submit(
-        &self,
-        policy: SourceRetirementPolicy,
-    ) -> Result<Option<u64>, SourceRetirementError> {
-        let previous = self.word.load(Ordering::Acquire);
-        if previous & STATE_MASK != IDLE {
-            return Ok(None);
-        }
-        let nonce = (previous >> NONCE_SHIFT)
-            .checked_add(1)
-            .filter(|nonce| *nonce <= MAX_NONCE)
-            .ok_or(SourceRetirementError::NoncesExhausted)?;
-        let pending = match policy {
-            SourceRetirementPolicy::PreservePausedSuffix => PENDING_PRESERVE,
-            SourceRetirementPolicy::RequireEmptySuffix => PENDING_EMPTY,
-        };
-        Ok(self
-            .word
-            .compare_exchange(
-                previous,
-                (nonce << NONCE_SHIFT) | pending,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .ok()
-            .map(|_| nonce))
-    }
-
     pub(crate) fn submit_validated(
         &self,
         facts: &SourceRetirementFacts,
@@ -96,92 +29,13 @@ impl SourceRetirementSlot {
         })
     }
 
-    fn matching_word(&self, nonce: u64) -> Result<u64, SourceRetirementError> {
-        let word = self.word.load(Ordering::Acquire);
-        if nonce == 0 || word >> NONCE_SHIFT != nonce || word & STATE_MASK == IDLE {
-            return Err(SourceRetirementError::InvalidTicket);
-        }
-        Ok(word)
-    }
-
-    fn decode(word: u64) -> SourceRetirementStatus {
-        match word & STATE_MASK {
-            PENDING_PRESERVE | PENDING_EMPTY => SourceRetirementStatus::Pending,
-            REFUSED => SourceRetirementStatus::Refused,
-            CANCELLED => SourceRetirementStatus::Cancelled,
-            AUTHORIZED => SourceRetirementStatus::Authorized,
-            _ => unreachable!("matching retirement word contains a request or response"),
-        }
-    }
-
-    pub(crate) fn status(
-        &self,
-        nonce: u64,
-    ) -> Result<SourceRetirementStatus, SourceRetirementError> {
-        self.matching_word(nonce).map(Self::decode)
-    }
-
-    pub(crate) fn poll(&self, nonce: u64) -> Result<SourceRetirementStatus, SourceRetirementError> {
-        let word = self.matching_word(nonce)?;
-        let status = Self::decode(word);
-        if matches!(
-            status,
-            SourceRetirementStatus::Refused | SourceRetirementStatus::Cancelled
-        ) {
-            self.word
-                .compare_exchange(
-                    word,
-                    nonce << NONCE_SHIFT,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .map_err(|_| SourceRetirementError::InvalidTicket)?;
-        }
-        Ok(status)
-    }
-
-    pub(crate) fn cancel(
-        &self,
-        nonce: u64,
-    ) -> Result<SourceRetirementStatus, SourceRetirementError> {
-        let word = self.matching_word(nonce)?;
-        if Self::decode(word) != SourceRetirementStatus::Pending {
-            return Ok(Self::decode(word));
-        }
-        match self.word.compare_exchange(
-            word,
-            (nonce << NONCE_SHIFT) | CANCELLED,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => Ok(SourceRetirementStatus::Cancelled),
-            Err(_) => self.status(nonce),
-        }
-    }
-
     pub(crate) fn worker_decision(&self, state: &NativeOutputState) -> WasapiSourceStep {
-        let word = self.word.load(Ordering::Acquire);
-        if word & STATE_MASK == AUTHORIZED {
-            return WasapiSourceStep::Retire;
-        }
-        if state.admission_is_uncertain() {
-            return failure(WasapiSourcePhase::Quarantined, INVALID_ARGUMENT);
-        }
-        let permitted = match word & STATE_MASK {
-            PENDING_PRESERVE => state.pending_frames() == 0 || state.paused_tail_admissible(),
-            PENDING_EMPTY => state.pending_frames() == 0,
-            _ => return WasapiSourceStep::Continue,
-        };
-        let response = if permitted { AUTHORIZED } else { REFUSED };
-        match self.word.compare_exchange(
-            word,
-            (word & !STATE_MASK) | response,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) if permitted => WasapiSourceStep::Retire,
-            Err(current) if current & STATE_MASK == AUTHORIZED => WasapiSourceStep::Retire,
-            _ => WasapiSourceStep::Continue,
+        match self.decision(state) {
+            SourceRetirementDecision::Continue => WasapiSourceStep::Continue,
+            SourceRetirementDecision::Retire => WasapiSourceStep::Retire,
+            SourceRetirementDecision::Quarantined => {
+                failure(WasapiSourcePhase::Quarantined, INVALID_ARGUMENT)
+            }
         }
     }
 }

@@ -48,6 +48,8 @@ mod negotiation;
 mod output_state;
 pub mod presentation;
 pub(crate) mod source_history_retirement_mailbox;
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+pub(crate) mod source_output_retirement;
 pub(crate) mod source_playback_publication;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", test))]
 pub(crate) mod telemetry;
