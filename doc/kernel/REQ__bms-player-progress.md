@@ -9,13 +9,18 @@
 
 2026-10-14 Source 후속: 실제 WASAPI는 SourceCounter임을 확인하고 portable
 Frame/Counter 기초와 shared WASAPI complete owner 경로의 계획 검토를 마쳤다.
-원래07.08.07을15개 실행 단위로 나눴다. E59의 native epoch/pause/state/port와
-portable worker·COM 연결/controller·Owner/adapter9개는 개발검사를 통과해 V이며
-typed UI는 W, 후속5개는 N이다. 실제 portable app2761·platform411·Owner24·
+원래07.08.07을15개 실행 단위로 나눴다. E61의 실제 연결에서 startup origin
+결함을 찾아 controller를 W로 되돌린 뒤 E62에서 수정·실제 회귀를 통과했다.
+현재 native/pause/state/port·worker·COM·controller·Owner/adapter/UI·Windows
+consumer/공통 pump12개가 V, exclusive/ASIO/CoreAudio 후속3개가 N이다.
+직전 bounded 검사 portable app2773·연결4·Windows bin69·UI8·platform411·Owner24·
 canonical packet11·Source controller21·worker14와 Source/Target publication·worker
 외부 할당 각1 검사를 통과했다. typed 오류/authorization 경합은 실제 RED1건 뒤
 분류를 수정해 GREEN을 확인했다. cached Windows lib/tests typing은 실제 COM/장치
-실행이 아니다. UI/consumer/pump 연결과 독립 최종 검증은 남는다.
+실행이 아니다. 새 연결4 RED 뒤 production 원점 계산과 1ns tamper 거절을 수정해
+실제 연결4/전체 회귀를 통과했다. PCM 전체 frame 회계와 종료 silence·원본
+capture codec/hash·member/attempt를 실제 데이터로 확인했다. 독립 최종 검증과
+실제 Windows 실행은 남으며 Target의 유사 startup 가정은 별도 감사 대상이다.
 기존 browser WASM도 통과했으며 겹치는 필터는 합산하지 않는다.
 활성 분모220·완료97(44.09%)과 원래 제품 요구91/193(47.15%)은 그대로다.
 새 검사는 독립 최종 review/QA나 실제 Windows/전체 Source 완료가 아니다.

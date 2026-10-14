@@ -50,9 +50,12 @@ spawner test declaration only as needed for the shared generic contract; retain
 all original assertions. Windows-only constructor/resource lifecycle fixtures
 remain uncompiled unless a permitted Windows target check is available.
 
-This does not implement automatic application handoff or device rollback, prove
-native buffer delivery, or add CoreAudio/ASIO recoverable opening. Panic can lose
-the mixer; failure recovery retains current software state, not guaranteed
-pre-priming cursor state. Assertions/runtime/device/formal review/QA remain
-deferred. Scoped Rustfmt and the four existing sequential compile-only checks
-follow both writer terminal stops. Full BMS player Goal remains incomplete.
+The legacy API above does not itself implement application handoff or device
+rollback, prove native buffer delivery, or add CoreAudio/ASIO recoverable opening.
+Panic can lose the mixer; failure recovery retains current software state, not
+guaranteed pre-priming cursor state. The separate retained Source composition now
+connects Windows solo/local and the shared portable pumps; its executed software
+tests and remaining independent/native gates are tracked in the
+[current change record](../changes/2026-10-14-retained-source-output-replacement.md).
+Rust typing does not establish native buffer delivery. The full player Goal
+remains incomplete.

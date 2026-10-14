@@ -184,6 +184,14 @@ Preserve existing finite, Seek, pause, replay and output-recovery regressions.
 Current executed commands, results and limitations are recorded in the
 [implementation evidence](../changes/2026-10-10-gapless-practice-output-timeline.md).
 
+Retained Source output changes preserve the same practice session through the
+common solo/cohort pump. The [Source replacement contract](../runtime/REQ__retained-source-output-replacement.md)
+defines exact original Frame/Counter evidence, conditional retirement, complete
+pending PCM/history ownership, startup origin and fresh resume adoption. Current
+software evidence and the remaining Windows/device gate are recorded in the
+[Source change record](../changes/2026-10-14-retained-source-output-replacement.md).
+Shared WASAPI support does not complete exclusive, ASIO or CoreAudio replacement.
+
 ## Known ceiling
 
 Portable PCM and injected native-owner evidence do not prove physical acoustic

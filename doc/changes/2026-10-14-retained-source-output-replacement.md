@@ -28,6 +28,15 @@
   원래 Counter와 전체 상태/오류를 보존하고 관측/query/history마다 실제 승인 상태를
   확인한다. typed 오류 뒤 authorization 경합 RED1건을 재현한 뒤 static IO 분류로
   수정했다. backend envelope만으로 오류를 숨기지 않으며 Remix도 그대로 전달한다.
+- `0b64b2ee`: typed Source UI가 동일 Owner/controller에 요청을 전달하고 실제
+  capability 검증 뒤 원자 publication한다. Pending·cold 거절·WouldBlock에서도
+  원래 요청 ID와 단일 응답, 실패한 Ready의 owner/hold를 보존한다.
+- `bbdfea4b`: stream 생성과 startup gate가 다른 실제 Windows 계약에서 정확한
+  playback origin을 유도한다. startup/current basis와 1ns tamper 거절을 보존한다.
+- `e3f056d3`: Windows solo/local shared Complete Owner와 공통 mutable query를
+  연결한다. Legacy/scalar/finite/exclusive/ASIO startup 선택을 유지한다.
+- `8cf352ca`: 실제 Frame/Counter × solo/cohort pump에서 반복 교체·PCM 전체 회계·
+  원본 capture codec/hash와 member/attempt 보존을 검사한다.
 
 ## 실제 개발 검사
 
@@ -45,14 +54,18 @@ cargo test -p beatkernel-bms-runtime --no-default-features --test coordinate_sou
 bash target/toolchain/xcheck.sh windows -p beatkernel-bms-runtime --lib --tests --no-default-features -j2
 ```
 
-최신 관측 결과는 app **2761 PASS / 0 FAIL / 6 ignored**, platform **411 PASS /
+직전 bounded 관측 결과는 app **2773 PASS / 0 FAIL / 6 ignored**, platform **411 PASS /
 0 FAIL / 2 ignored**, worker14와 외부 heap 검사1 PASS다. Source controller21,
 port/remix10·native14·pause5와 authority 회귀는 app 전체에 포함되므로 더하지 않는다.
-Owner24·canonical packet11도 app 전체에 포함된다. Source와 기존 Target 실제
+Owner24·canonical packet11·Source UI8도 app 전체에 포함된다. Source와 기존 Target 실제
 publication의 별도 외부 할당 검사도 각각1 PASS이며,
 Source는 calibrated cold token copy 뒤 실제 held commit의 alloc/realloc0을 확인했다.
 앞선 browser WASM check는 exit0이다. cached Windows platform과 app lib/tests
 typing도 exit0이나 C-stub Rust 검사이며 native 실행 근거가 아니다.
+Windows bin은69 PASS다. 새 연결4개는 전체 app에 포함된다. 실제 제출 PCM과
+pending suffix를 생성 cursor와 정확히 대조하며 종료 active silence도 실제
+마지막 report/PCM으로 검증한다. query 경합은 paused pump가 실제 호출하는
+history query의 IO 경계에 주입해 재probe와 신규 요청 없음까지 확인한다.
 외부 binary는 실제 production worker/state/history와 기존 System allocator를
 사용한다. alloc/realloc/dealloc 각각의 실제 보정 후 success/refusal/authorized/
 release-failure/quarantined retry 경계의 heap 호출0회를 확인했다.
@@ -71,11 +84,18 @@ Windows complete open/start/Stop/join/recovery는 기존 Legacy Mixer/remix API�
 complete owner를 Mixer로 평탄화하지 않는다. 실제 clock frequency는 새 장치에서
 얻는다. 새로 생성한 descriptor와 Ready prefill은 playback progress가 아니다.
 
-Controller·Owner와 canonical adapter의 개발 검사는 통과했다. Windows 전용 native/
-classifier5개 fixture는 형 검사만 됐으며 실제 실행이 남는다. typed UI는 source/test를
-병렬 작성 중이고 다음 Windows solo/local hook과 실제 공통 pump를 연결해야 한다.
-전체 native owner/PCM/producer/capture 연동 보존, 실패·취소·명시 retry와 독립 review 뒤
-CLI/desktop QA가 남는다.
+실제 Frame/Counter × solo/cohort4개 연결은 fixture bootstrap을 고친 뒤 실제 Source
+startup 원점 거절 결함을 확인했다. 원래 stream 생성과 실제 gate가 다른 유효한
+Windows 계약이며 config를 같게 바꾸지 않는다. Source pause의 실제 start/current
+basis로 정확한 원점을 계산하는 수정과 1ns tamper 거절 뒤 연결4/전체 회귀를 통과했다.
+Source controller와 consumer/pump는 개발 검사 통과 V이며 독립 최종 gate가 남는다.
+Target의 같은 가정은 원래 Goal의 별도 감사 대상이다.
+
+Owner·canonical adapter와 typed UI의 bounded 개발 검사는 통과했다. Windows 전용
+native/classifier5개 fixture는 형 검사만 됐으며 실제 실행이 남는다. Windows solo/local
+consumer와 실제 공통 pump는 source/test 쌍의 병렬 작성 뒤 통합 검사를 통과했다.
+Source mutable query는 공통 포트로 실제 Owner를 호출한다. 실제 native owner 실행과
+독립 review 뒤 CLI/desktop QA가 남는다.
 Windows typing은 C-stub에 의한 Rust 형 검사이며 COM/driver 실행이 아니다.
 현재 host의 Windows 장치 실행을 소프트웨어 검사로 대체하지 않는다.
 WASAPI exclusive·ASIO·CoreAudio, 나머지 rate/encoding·cross-backend·browser·
