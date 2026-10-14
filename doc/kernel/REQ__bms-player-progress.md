@@ -1,12 +1,28 @@
 # BMS player 구현/검증 현황 — 2026-10-07
 
 현재 전체 TODO/진행률은 [전체 WBS](REQ__bms-player-work-breakdown.md)를 사용한다.
-`python3 tools/wbs_status.py`가 말단 작업의 완료·검증 대기·구현 중·장비/정책 대기를
-집계한다. 아래 60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
+`python3 tools/wbs_status.py`가 말단 작업의 완료·검증 대기·구현 중·장비/정책 대기와
+원래 상위 요구사항 집계를 함께 보여 준다. `--in-progress`는 실제 진행 단위 W/V/N을
+보여 주며 각 단위의 다음 gate는 WBS에 기록한다. `--ready`는 부모 범위와 상속된
+선행을 충족한 다음 작업을 확인한다.
+아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
+
+2026-10-14 현재 진행 추적: 원래 제품 요구 집계는 **91/193(47.15%)·조건부4개**를
+유지한다.07.08/07.09는 원래 범위를 보존한 구조 부모 아래10개/5개 실행 단위로
+분해했고 확장 말단 집계는 위 도구가 계산한다. 여섯 D는 이미 커밋되고 검사된
+coordinate 기초와 Linux encoding의 bounded software 범위를 드러낸 것이며 새 제품
+구현 완료가 아니다. current AC004 controller는 마지막 실제18개15 PASS/3 FAIL 뒤
+수정 후 미실행이므로 V다. 새 retained Owner/UI(AC005)와 공통 pump(AC006)는
+새 구현/fixture가 없어 N이며 그15/3을 물려받지 않는다. Source/scalar/finite/foreign/
+실제 paused GUI·물리/applied 전체 기준은 각 child에 남는다.
+현재 `TASK__wbs-ongoing-work-breakdown`이 active이고 retained replacement task는
+사용자 우선 요청 때문에 같은 run/미완료 범위를 보존한 parked 상태다. 제품 task의
+formal review/QA나 전체 Goal 완료로 바꾸지 않는다. WBS의 E46–E51과
+[이번 변경 기록](../changes/2026-10-14-wbs-ongoing-work-breakdown.md)을 따른다.
 
 2026-10-11 현재 연결 근거: Records의 genuine preview/history 및 retained Own/Other
 경쟁 선택은 WBS 11.05/E42의 독립 실제 browser·UX·CLI 검증과 원래 기준 감사를
-마쳤다. 전체 WBS는 91/193(47.15%)다. 관련 기능은 BK-032/BK-038/BK-039이며,
+마쳤다. 당시 원래 요구 집계는91/193(47.15%)다. 관련 기능은 BK-032/BK-038/BK-039이며,
 아래 과거 survey 상태를 전체 기능 완료 판정으로 바꾸지 않는다.
 [현재 변경 및 검증 범위](../changes/2026-10-11-records-retained-actions.md)를 따른다.
 물리 동기화·전체 UI·출시 및 Harness close는 별도다.
@@ -16,8 +32,9 @@
 독립 검증을 마쳤다(REQ__native-input-collector.md, closed task). 실제
 same-rate ALSA/app pending PCM 소유권도 REQ__native-output-continuity.md의
 새 검증을 마쳤다. 별도 browser renderer Worker·live class/EX·mines·records
-경로 역시 최신 source/evidence를 우선한다. 전체 행의 재조사·독립 사실
-검토는 TASK__parallel-player-requirements의 범위 ledger에서 진행한다.
+경로 역시 최신 source/evidence를 우선한다. TASK__parallel-player-requirements의
+범위 표는 WBS에서 역사적 매핑으로 보존한다. 전체60개 행의 새 source 감사는
+이번 진행 단위 분해의 범위가 아니며 최신 bounded 근거는 WBS의 각 단위를 따른다.
 아래 과거 상태나 수를 근거로 이 기능들을 중복 구현하지 않는다.
 
 조사 상태: 독립 사실/범위 리뷰 대기. 이전 슬롯 제한은 재시작 후 해제됐지만
