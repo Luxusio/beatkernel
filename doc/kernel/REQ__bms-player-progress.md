@@ -16,14 +16,20 @@ coordinate 기초와 Linux encoding의 bounded software 범위를 드러낸 것�
 할당 검사와 관련 회귀도 통과했고 실제 publication의 새 할당0회를 확인했으나
 최종 독립 gate가 남아 V다.
 새 retained Owner/UI(AC005)는 자체 새16+기존1 테스트, 관련 회귀와 모든 bin check를
-통과해 V로 갱신했다. 공통 pump(AC006)도 실제 solo·2인 cohort·전환상태3개와
-pure app2674·할당1·desktop app3129/각 bin/check를 통과해 V다. 독립 gate는 남았으며
+통과했다. 공통 pump(AC006)도 실제 solo·2인 cohort·전환상태3개와
+pure app2674·할당1·desktop app3129/각 bin/check를 통과했다. 이후 `015256a3`의
+독립 DEEP 리뷰가 native authorization과 history-retirement 사이 경합1건 및 연결
+fixture의 no-op history port를 확인해 두 단위를 W로 되돌렸다. 이후 기존 API의
+실패1건을 재현하고 conditional history 서비스 및 실제 연결 port를 수정해
+요청/관측25·실제 연결3·전체 pure app2682·할당1 검사를 통과했다. 두 단위는
+E54의 V로 돌아갔으며 최종 재리뷰/QA가 남았다. 개발 검사 결과를
+독립 PASS로 바꾸지 않으며
 controller·Owner/UI 결과를 그 경로의 증거로 물려받지 않는다. Source/scalar/finite/foreign/
 실제 paused GUI·물리/applied 전체 기준은 각 child에 남는다.
 현재 retained replacement task는 같은 run/미완료 범위를 보존해 active로 재개했다.
 WBS 작업은03435bf4에서 실제 독립 review/CLI QA를 통과했고 자동 검증 기록 누락으로
 종료만 parked 상태다. 이 추적 작업의 검사를 제품 task의
-formal review/QA나 전체 Goal 완료로 바꾸지 않는다. WBS의 E46–E53과
+formal review/QA나 전체 Goal 완료로 바꾸지 않는다. WBS의 E46–E54와
 [이번 변경 기록](../changes/2026-10-14-wbs-ongoing-work-breakdown.md)을 따른다.
 
 2026-10-11 현재 연결 근거: Records의 genuine preview/history 및 retained Own/Other

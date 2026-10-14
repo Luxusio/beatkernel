@@ -300,6 +300,19 @@ E53: AC006은 실제 solo 및2인 RuntimeGroup 공통 pump의 입력 수집 직�
 최종 독립 review/QA·실제 GUI/물리 clock 증거는 아직 남았다.
 앞선 compile5errors와 fixture1 PASS/2 FAIL은 원본 로그에 보존했다.
 
+E54: `015256a3`의 독립 DEEP 리뷰는 history-retirement 경합1건으로 FAIL했다.
+`review-history-red.log`는 기존 API에서 실제0 PASS/1 FAIL(exit101)을 재현했다.
+공통 Owner의 conditional history 서비스와 두 Linux delegate를 수정한 뒤
+`review-history-green.log`는 요청/관측25 PASS(새 이력 검사8개 포함),
+`review-history-connected.log`는 실제 Owner history port를 연결한 solo/cohort와
+전환상태3 PASS다. 두 pump는 실제 old packet 뒤 request authorization을 각각
+겪고도 교체·resume·loop/scrub·기록 검사를 계속 통과한다.
+`review-history-full-app.log`는2682 PASS/실패0·ignored6,
+`review-history-allocation.log`는 실제 publication 새 할당0회1 PASS다.
+38개 Task Rust 파일의 프로젝트 포맷과 scoped diff도 통과했다.
+07.09.03/07.08.06은 개발 재검사 후 V로 돌아가며 최종 재리뷰/CLI/desktop QA와
+실제 물리 clock 증거는 별도다. 앞선25/3 필터를2682개에 더하지 않는다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -440,7 +453,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
   - [x] **BK-WBS-07.08.03** coordinate pause rebind·frozen adoption·held generation 기초를 실제 Mixer/converter로 검사한다. — 상태=D(검증완료); 선행=BK-WBS-07.08.02; 근거=E48, df70e2e5 pause75 PASS와 포맷 후 집중13 PASS; 범위=원래 source grid/history/pause 보존, pump/UI는 별도.
   - [x] **BK-WBS-07.08.04** sole converted worker의 conditional retirement·거절·취소·회수/retry 경계를 검사한다. — 상태=D(검증완료); 선행=-; 근거=E49, 1463ccfa focused16/full platform387 PASS·ignored2 및 actual ALSA null1 PASS; 범위=software lifecycle, 물리/GUI는 별도.
   - [ ] **BK-WBS-07.08.05** retained Target controller의 open/start/poll/prime/commit을 새 coordinate authority·pause·입력 merger와 원자적으로 연결한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.08.01, BK-WBS-07.08.02, BK-WBS-07.08.03, BK-WBS-07.08.04; 필요 근거/다음=E51 controller18·실제 publication 할당0회1 및 관련 회귀162/214/67/75/31 PASS; 최종 독립 review/QA 확인.
-  - [ ] **BK-WBS-07.08.06** 새 retained Target 교체를 실제 solo/cohort 공통 pump에 연결하고 acknowledged pause·입력 drain·publication·resume을 검증한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.09.03; 필요 근거/다음=E53 실제 연결3·pure app2674·할당1 및 desktop app3129/각 bin/check PASS; 최종 독립 검증과 실제 GUI/물리 근거 필요.
+  - [ ] **BK-WBS-07.08.06** 새 retained Target 교체를 실제 solo/cohort 공통 pump에 연결하고 acknowledged pause·입력 drain·publication·resume을 검증한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.09.03; 필요 근거/다음=E54 실제 Owner history port 및 경합을 포함한 연결3·pure app2682·할당1 PASS; 최종 재리뷰/QA·실제 GUI/물리 근거 필요.
   - [ ] **BK-WBS-07.08.07** direct SourceFrame/SourceCounter retained 교체의 전체 controller·Owner/UI·공통 pump 및 history/pin 수명을 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=Target 기초를 Source 완료로 확장하지 않음; 원래 Source descriptor/query·callback retirement·cold history·WASAPI/ASIO/CoreAudio 경로와 실패/회수/재시도 검사.
   - [ ] **BK-WBS-07.08.08** 기존 scalar 교체와 finite-end ACK·held tail·취소/실패 경로가 새 retained 교체 변경 후에도 보존되는지 재검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=기존 구현/fixture는 존재하나 current 합쳐진 후보의 regression·실제 native crossing·end/drain/owner cleanup 및 독립 확인 필요.
   - [ ] **BK-WBS-07.08.09** Windows/macOS와 WASAPI↔ASIO 등 foreign/cross-backend retained 교체의 현재 연결·applied format·누락 경계를 감사한다. — 상태=U(최신현황감사필요); 선행=-; 필요 근거/다음=Target Linux/foreign stub typing을 전체 native 적용으로 간주하지 않음; 원래 backend/epoch/latency/history/cleanup 기준과 실제 SDK·host 실행 범위를 확인.
@@ -448,7 +461,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [ ] **BK-WBS-07.09** rate/buffer/channel/encoding 변경을 실제 설정 요청·capability·applied 결과까지 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E19 target rate/buffer/period/matrix UI bridge 검증; 실제 launcher/encoding 제어·pending PCM 해석 보존은 계속 필요.
   - [x] **BK-WBS-07.09.01** Linux encoding 설정·profile·CLI 및 실제 desktop Settings 편집/거절/Apply·재시작의 bounded software 경로를 검증한다. — 상태=D(검증완료); 선행=-; 근거=E50, 18d9c414 독립 code/CLI QA·실제 Settings/profile·129-row 경계; 범위=Linux cold 설정, acknowledged-paused Output/물리는 별도.
   - [x] **BK-WBS-07.09.02** Linux encoding ALSA request/capability/applied·solo/local startup·recorded replay와 pending 해석 거절/recovery를 검증한다. — 상태=D(검증완료); 선행=-; 근거=E50, 실제 production adapter/cold consumer·독립 app QA 및 두 opted ALSA null 검사; 범위=software encoding, retained Apply/물리/foreign는 별도.
-  - [ ] **BK-WBS-07.09.03** 새 retained Target typed Output Owner/UI 요청·응답·capability refresh를 교체 controller에 연결한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.08.05; 필요 근거/다음=E52 새16+기존1·application178·controller18·ALSA UI12·할당1·Linux53/replay40 및 모든 bin check PASS; 실제 pump 연결과 독립 검증 필요.
+  - [ ] **BK-WBS-07.09.03** 새 retained Target typed Output Owner/UI 요청·응답·capability refresh를 교체 controller에 연결한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.08.05; 필요 근거/다음=E54 이력 정리 경합 수정·실패 재현 뒤 요청/관측25·pure app2682·할당1 PASS, 두 Linux delegate 연결; 최종 재리뷰/QA 필요.
   - [ ] **BK-WBS-07.09.04** 실제 acknowledged-paused Output GUI에서 retained 설정 Apply/거절·capability refresh·Back/reopen을 실행한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=E50 evdev 부재 BLOCKED_ENV; admitted native play/paused ACK 뒤 실제 입력과 current binary로 검사, Settings/null fixture 결과로 대체하지 않음.
   - [ ] **BK-WBS-07.09.05** 남은 모든 지원 플랫폼·backend의 rate/buffer/channel/encoding 요청·capability·실제 applied 및 pending PCM 해석 범위를 감사·연결한다. — 상태=U(최신현황감사필요); 선행=-; 필요 근거/다음=원래07.09 전체 기준·E19 target bridge와 미지원 선택의 명시 거절 유지; Source/foreign/실제 launcher·장치 조합을 확인하고 missing seam을 별도 bounded 단위로 갱신.
 - [ ] **BK-WBS-07.10** startup/pause/resume/finite end ACK가 lookahead/held-release가 아니라 native crossing을 기다린다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E16 공개 audio pump의 pause/resume/held 순서 검증; 실제 launcher owner→worker→native 관측 E2E 및 finite end는 계속 필요.
@@ -683,8 +696,8 @@ Native collector termination 절에 있다.
 | AC003 | BK-WBS-07.08.03 | E48 pause75·포맷 후 집중13 D; 실제 pump는 별도 |
 | AC008 | BK-WBS-07.08.04 | E49 focused16/platform387/null1 D; 실제 hardware/GUI는 별도 |
 | AC004 | BK-WBS-07.08.05 | E51 V; controller18·할당 검사1·관련 회귀 통과, 독립 gate 남음 |
-| AC005 | BK-WBS-07.09.03 | E52 V; 새16+기존1 및 관련 회귀/bin check 통과, 독립 gate 남음 |
-| AC006 | BK-WBS-07.08.06 | E53 V; 실제 연결3개·pure app2674·할당1·desktop app/bin/check 통과, 독립 gate 남음 |
+| AC005 | BK-WBS-07.09.03 | E54 V; 경합 실패 재현 뒤 요청/관측25·pure app2682·할당1 PASS, 재리뷰/QA 필요 |
+| AC006 | BK-WBS-07.08.06 | E54 V; 실제 Owner history port와 경합 연결3·pure app2682 PASS, 독립 gate 남음 |
 | AC007 | 관련 child 전체의 검증 gate | 독립 review/QA·전체 통합 검증이며 별도 기능 leaf나 중복 완료 수를 만들지 않음 |
 
 07.08.07/07.08.08/07.08.09/07.08.10과07.09.04/07.09.05는 원래 부모의
@@ -721,6 +734,15 @@ Source/scalar/finite/foreign/실제 GUI/물리/applied 전체 범위를 보존�
 상세 behavior/architecture/라이선스는 연결된 기존 REQ/GUIDE/ADR이 계속 소유한다.
 
 ## 변경 이력
+
+- 2026-10-14 리뷰 수정 재검사: E54의 수정 전 실패1과 수정 후25/3·전체2682·
+  할당1 PASS를 확인해07.09.03/07.08.06을 W에서 V로 갱신했다. 전체 완료 수는
+  유지하며 재리뷰/QA를 개발 검사로 대체하지 않는다.
+
+- 2026-10-14 독립 리뷰: `015256a3`의 DEEP code review는 native authorization과
+  history-retirement 요청 사이 경합1건으로 FAIL했다. 연결 fixture의 기본 no-op
+  history port도 확인했다.07.09.03/07.08.06을 V에서 W로 되돌려 수정·회귀 레인을
+  배정했다. 완료97/206·원래91/193은 유지하며 개발 PASS를 리뷰 PASS로 대체하지 않는다.
 
 - 2026-10-14 공통 pump 검사: 실제 solo·2인 cohort·전환상태3개와 pure app2674,
   할당 회귀1을 통과해07.08.06을 W에서 V로 갱신했다. 말단 구현됨은163개이며

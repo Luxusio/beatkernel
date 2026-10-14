@@ -225,7 +225,7 @@ impl GameplayDevicePort for CohortDevice<'_> {
         match self.output {
             CohortOutput::Legacy(_, _) => Ok(None),
             CohortOutput::Target(owner, _) => Ok(owner
-                .request_target_history_retirement_with_source_pin(
+                .request_conditional_target_history_retirement_with_source_pin(
                     presentation,
                     minimum_query,
                     identity,

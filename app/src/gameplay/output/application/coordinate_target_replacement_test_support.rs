@@ -13,7 +13,8 @@ use super::runtime::{
         ConditionalTargetRetirementNativeOutputBackend, NativeTargetPlaybackFacts,
         NativeTargetPlaybackObservation, NativeTargetPlaybackQuery,
         OriginalCoordinateTargetNativeOutputBackend, OriginalTargetNativeOutputBackend,
-        OutputReplacementBackend, SourcePlaybackIdentity, TargetOutputTelemetry,
+        OutputReplacementBackend, SourcePlaybackIdentity,
+        TargetHistoryRetirementNativeOutputBackend, TargetOutputTelemetry,
         TargetPlaybackNativeOutputBackend, TargetRetirementStatus,
     },
     gameplay_presentation::{GameplayAudioOutputContext, GameplayPauseControl},
@@ -176,6 +177,29 @@ pub(super) struct Script {
     // Explicit connected-pump mode. Existing replacement-only fixtures keep
     // their strict held-only observer and query-panic contract.
     pump: Option<PumpScript>,
+    history: Option<HistoryScript>,
+}
+#[derive(Clone, Copy)]
+pub(super) enum HistoryFault {
+    None,
+    Io,
+    Authorize,
+    PacketIdentity,
+    PacketQuery,
+}
+#[derive(Default)]
+struct HistoryScript {
+    query_faults: VecDeque<HistoryFault>,
+    request_faults: VecDeque<HistoryFault>,
+    queries: Vec<[u64; 2]>,
+    requests: Vec<(
+        u64,
+        TargetFrameBasis,
+        SourcePlaybackIdentity,
+        u64,
+        TargetTime,
+    )>,
+    revision: u64,
 }
 struct PumpScript {
     host: i64,
@@ -303,6 +327,56 @@ impl Effects {
     }
     pub(crate) fn recovery_failures(&mut self, failures: impl IntoIterator<Item = bool>) {
         self.script.borrow_mut().recovery_failures.extend(failures);
+    }
+    pub(super) fn enable_history_service(&mut self) {
+        self.script.borrow_mut().history = Some(HistoryScript::default());
+    }
+    pub(super) fn history_query_faults(&mut self, faults: impl IntoIterator<Item = HistoryFault>) {
+        self.script
+            .borrow_mut()
+            .history
+            .as_mut()
+            .unwrap()
+            .query_faults
+            .extend(faults);
+    }
+    pub(super) fn history_request_faults(
+        &mut self,
+        faults: impl IntoIterator<Item = HistoryFault>,
+    ) {
+        self.script
+            .borrow_mut()
+            .history
+            .as_mut()
+            .unwrap()
+            .request_faults
+            .extend(faults);
+    }
+    pub(super) fn history_queries(&self) -> Vec<[u64; 2]> {
+        self.script
+            .borrow()
+            .history
+            .as_ref()
+            .unwrap()
+            .queries
+            .clone()
+    }
+    pub(super) fn history_requests(
+        &self,
+    ) -> Vec<(
+        u64,
+        TargetFrameBasis,
+        SourcePlaybackIdentity,
+        u64,
+        TargetTime,
+    )> {
+        self.script
+            .borrow()
+            .history
+            .as_ref()
+            .unwrap()
+            .requests
+            .clone()
     }
 }
 impl Output {
@@ -776,13 +850,131 @@ impl TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState> for Effects {
         query: &InterpolatedTargetTime,
         identity: SourcePlaybackIdentity,
     ) -> Result<Option<NativeTargetPlaybackQuery<Evidence>>, io::Error> {
-        if self.script.borrow().pump.is_some() {
-            return output
+        if self.script.borrow().pump.is_some() || self.script.borrow().history.is_some() {
+            let packet = output
                 .last
                 .map(|report| pump_packet_at(output, identity, *query, report))
-                .transpose();
+                .transpose()?;
+            let Some(packet) = packet else {
+                return Ok(None);
+            };
+            let mut script = self.script.borrow_mut();
+            let Some(history) = script.history.as_mut() else {
+                return Ok(Some(packet));
+            };
+            history
+                .queries
+                .push(packet.native_evidence().unwrap().original_native_words);
+            let fault = history
+                .query_faults
+                .pop_front()
+                .unwrap_or(HistoryFault::None);
+            match fault {
+                HistoryFault::None => Ok(Some(packet)),
+                HistoryFault::Io | HistoryFault::Authorize => {
+                    if matches!(fault, HistoryFault::Authorize) {
+                        script.statuses.clear();
+                        script
+                            .statuses
+                            .push_front(TargetRetirementStatus::Authorized);
+                    }
+                    Err(io::Error::other("original native history query failure"))
+                }
+                HistoryFault::PacketIdentity | HistoryFault::PacketQuery => {
+                    NativeTargetPlaybackQuery::new(
+                        packet.epoch() + u64::from(matches!(fault, HistoryFault::PacketIdentity)),
+                        packet.basis(),
+                        identity,
+                        if matches!(fault, HistoryFault::PacketQuery) {
+                            exact(
+                                output
+                                    .basis
+                                    .start_time()
+                                    .checked_add_frames(
+                                        output.presented - 1,
+                                        output.basis.sample_rate(),
+                                    )
+                                    .unwrap(),
+                            )
+                        } else {
+                            *query
+                        },
+                        packet.facts(),
+                        Some(Evidence {
+                            original_native_words: [output.native_id, output.presented],
+                        }),
+                    )
+                    .map(Some)
+                    .map_err(|error| io::Error::other(error.to_string()))
+                }
+            }
+        } else {
+            panic!("replacement must retain its exact accepted original packet")
         }
-        panic!("replacement must retain its exact accepted original packet")
+    }
+}
+impl TargetHistoryRetirementNativeOutputBackend<ConvertedNativeOutputState> for Effects {
+    fn request_target_history_retirement(
+        &mut self,
+        output: &mut Output,
+        expected_epoch: u64,
+        expected_basis: TargetFrameBasis,
+        identity: SourcePlaybackIdentity,
+        source_pin: u64,
+        target_pin: TargetTime,
+    ) -> Result<Option<u64>, io::Error> {
+        assert!(output.started && !output.retired);
+        assert_eq!(expected_epoch, output.epoch);
+        assert_eq!(expected_basis, output.basis);
+        let source = output
+            .source_state()
+            .converter_owner()
+            .source_playback_history()
+            .unwrap();
+        assert_eq!(identity.hz(), source.source_rate());
+        assert_eq!(identity.initial_physical(), source.initial_physical_frame());
+        assert_eq!(identity.initial_playback(), source.initial_playback_frame());
+        source.validate_retirement_before(source_pin).unwrap();
+        output
+            .source_state()
+            .phase_history()
+            .unwrap()
+            .validate_retirement_before(target_pin)
+            .unwrap();
+        let mut script = self.script.borrow_mut();
+        script.calls.push("history-request");
+        let history = script
+            .history
+            .as_mut()
+            .expect("history service requires explicit opt-in");
+        history.requests.push((
+            expected_epoch,
+            expected_basis,
+            identity,
+            source_pin,
+            target_pin,
+        ));
+        let fault = history
+            .request_faults
+            .pop_front()
+            .unwrap_or(HistoryFault::None);
+        if matches!(fault, HistoryFault::Io | HistoryFault::Authorize) {
+            if matches!(fault, HistoryFault::Authorize) {
+                script.statuses.clear();
+                script
+                    .statuses
+                    .push_front(TargetRetirementStatus::Authorized);
+            }
+            return Err(io::Error::other(
+                "original native history retirement failure",
+            ));
+        }
+        assert!(!matches!(
+            fault,
+            HistoryFault::PacketIdentity | HistoryFault::PacketQuery
+        ));
+        history.revision += 1;
+        Ok(Some(history.revision))
     }
 }
 impl ConditionalTargetRetirementNativeOutputBackend<ConvertedNativeOutputState> for Effects {

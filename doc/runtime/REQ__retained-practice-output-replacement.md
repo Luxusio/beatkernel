@@ -96,6 +96,13 @@ The refusal itself never discards or reinterprets PCM; subsequent ordinary
 admission may advance that original suffix. A conditional wait retains the
 live clock until actual authorization, distinct from an already retired output.
 
+Old-stream history queries and retirement requests use the same conditional
+authorization boundary as native observations. Probe before servicing them;
+if a raw backend operation fails, re-probe and defer only when authorization is
+confirmed. Preserve genuine non-authorized failures, identity/policy/timing
+rejections, and the complete original plus probe/cleanup/recovery errors.
+Cached pending state alone cannot certify that a native stream is still live.
+
 Both common pumps collect/drain original paused physical key levels and poll
 replacement even while old output is suspended. HOST orders bookkeeping and
 never substitutes for audio progress. Pending replacement/practice transition

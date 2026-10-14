@@ -1444,20 +1444,24 @@ impl<B: TargetHistoryRetirementNativeOutputBackend<ConvertedNativeOutputState>, 
 mod target_history_retirement_owner_fixtures;
 
 #[derive(Debug)]
-struct ConditionalTargetObservationFailure<E> {
-    observation: E,
+struct ConditionalTargetObservationFailure<E, Observation = E> {
+    observation: Observation,
     probe: ReplacementFailure<E>,
 }
-impl<E: std::fmt::Display> std::fmt::Display for ConditionalTargetObservationFailure<E> {
+impl<E: std::fmt::Display, Observation: std::fmt::Display> std::fmt::Display
+    for ConditionalTargetObservationFailure<E, Observation>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "native output observation: {}; retirement probe: {}",
+            "native output operation: {}; retirement probe: {}",
             self.observation, self.probe
         )
     }
 }
-impl<E: std::error::Error + 'static> std::error::Error for ConditionalTargetObservationFailure<E> {
+impl<E: std::error::Error + 'static, Observation: std::error::Error + 'static> std::error::Error
+    for ConditionalTargetObservationFailure<E, Observation>
+{
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.observation)
     }
@@ -1468,6 +1472,43 @@ impl<B: ConditionalTargetRetirementNativeOutputBackend<ConvertedNativeOutputStat
 where
     B::Error: std::error::Error + 'static,
 {
+    /// Defers old-stream history IO only after confirmed retirement authorization.
+    pub fn request_conditional_target_history_retirement_with_source_pin(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        minimum_query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+        source_minimum: Option<u64>,
+    ) -> crate::native_gameplay::NativeGameplayResult<Option<u64>>
+    where
+        B: TargetHistoryRetirementNativeOutputBackend<ConvertedNativeOutputState>,
+    {
+        if self.controller.probe_coordinate_target_retirement()?
+            == Some(TargetRetirementStatus::Authorized)
+        {
+            return Ok(None);
+        }
+        match self.request_target_history_retirement_with_source_pin(
+            presentation,
+            minimum_query,
+            identity,
+            source_minimum,
+        ) {
+            Ok(revision) => Ok(revision),
+            Err(failure) if matches!(&failure.cause, ReplacementCause::Backend { .. }) => {
+                match self.controller.probe_coordinate_target_retirement() {
+                    Ok(Some(TargetRetirementStatus::Authorized)) => Ok(None),
+                    Ok(_) => Err(Box::new(failure)),
+                    Err(probe) => Err(Box::new(ConditionalTargetObservationFailure {
+                        observation: failure,
+                        probe,
+                    })),
+                }
+            }
+            Err(failure) => Err(Box::new(failure)),
+        }
+    }
+
     pub fn publish_paused_coordinate_target_audio<A>(
         &mut self,
         mut context: crate::gameplay_presentation::GameplayAudioOutputContext<'_>,

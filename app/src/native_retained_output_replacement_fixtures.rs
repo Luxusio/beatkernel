@@ -4,7 +4,9 @@ use crate::{
     audio_authority::{AudioAuthorityConfig, AudioAuthorityCoordinateBasis},
     bgm::{BgmConfig, BgmFeeder},
     gameplay::output::{
-        application::{owner::GameplayOutputOwner, requests::GameplayOutputUi},
+        application::{
+            owner::GameplayOutputOwner, replacement::ReplacementState, requests::GameplayOutputUi,
+        },
         domain::{
             control::{OutputCapability, OutputReply, OutputRequest},
             remix::matrix_text,
@@ -69,7 +71,7 @@ use std::{
     rc::Rc,
     time::Duration as WallDuration,
 };
-use support::{point, snapshot, Effects, Fault, Request, Ticket, HOST_START};
+use support::{point, snapshot, Effects, Fault, HistoryFault, Request, Ticket, HOST_START};
 
 #[derive(Debug, PartialEq, Eq)]
 struct ColdSource {
@@ -165,6 +167,8 @@ struct State {
     paused_sequences: Vec<(DeviceId, u64)>,
     suspended_laps: usize,
     old_pending_packets: usize,
+    history_revisions: Vec<u64>,
+    history_authorized_deferrals: usize,
     publication: Vec<(u64, u64, u64, OutputFrameBasis, SourcePlaybackIdentity)>,
     paused_service: Vec<(bool, usize, PausePhase, bool)>,
     ends: Vec<Timestamp>,
@@ -195,6 +199,8 @@ impl Default for State {
             paused_sequences: vec![],
             suspended_laps: 0,
             old_pending_packets: 0,
+            history_revisions: vec![],
+            history_authorized_deferrals: 0,
             publication: vec![],
             paused_service: vec![],
             ends: vec![],
@@ -260,6 +266,7 @@ struct Device {
     pin: OutputFrameBasis,
     identity: SourcePlaybackIdentity,
     cold_source: Option<ColdSource>,
+    history_race_injected: bool,
 }
 impl Device {
     fn queue(&mut self, id: u64, request: Request) {
@@ -297,6 +304,41 @@ impl Device {
 }
 impl GameplayDevice for Device {
     type Presentation = PresentationEstimator;
+    fn request_history_retirement(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        query: &InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+        source_minimum: Option<u64>,
+    ) -> NativeGameplayResult<Option<u64>> {
+        let inject = !self.history_race_injected
+            && self.owner.state() == ReplacementState::ConditionalRetirement
+            && self.state.borrow().stage == Stage::ReplacingFirst
+            && self.state.borrow().old_pending_packets > 0;
+        if inject {
+            self.effects
+                .history_request_faults([HistoryFault::Authorize]);
+        }
+        let revision = self
+            .owner
+            .request_conditional_target_history_retirement_with_source_pin(
+                presentation,
+                query,
+                identity,
+                source_minimum,
+            )?;
+        if inject {
+            assert!(revision.is_none());
+            assert!(self.owner.current().is_none());
+            assert!(self.owner.output_clock_suspended());
+            self.history_race_injected = true;
+            self.state.borrow_mut().history_authorized_deferrals += 1;
+        }
+        if let Some(revision) = revision {
+            self.state.borrow_mut().history_revisions.push(revision);
+        }
+        Ok(revision)
+    }
     fn observe_coordinate_playback_control(
         &mut self,
         presentation: &mut NativeAudioPresentation,
@@ -371,15 +413,8 @@ impl GameplayDevice for Device {
             Stage::FirstPaused => {
                 self.owner.current_mut().unwrap().pump_partial_held(4, 1);
                 self.effects.pump_admit_limit(1);
-                self.effects.conditional_statuses([
-                    TargetRetirementStatus::Pending,
-                    TargetRetirementStatus::Pending,
-                    TargetRetirementStatus::Pending,
-                    TargetRetirementStatus::Pending,
-                    TargetRetirementStatus::Pending,
-                    TargetRetirementStatus::Pending,
-                    TargetRetirementStatus::Authorized,
-                ]);
+                self.effects
+                    .conditional_statuses([TargetRetirementStatus::Pending; 32]);
                 self.effects.observation_faults([
                     Fault::Missing,
                     Fault::Missing,
@@ -962,8 +997,9 @@ impl Fixture {
         output.enable_source_playback_history(512).unwrap();
         output.enable_phase_history(512).unwrap();
         let basis = output.target_frame_basis();
-        let (effects, native) =
+        let (mut effects, native) =
             Effects::for_active_pump(output, EPOCH, Request::normal(TARGET_HZ), 2, true);
+        effects.enable_history_service();
         let mut presentation = new_coordinate_audio_presentation(
             EPOCH,
             AudioAuthorityCoordinateBasis::TargetFrame(basis),
@@ -1132,6 +1168,7 @@ impl Fixture {
             pin,
             identity,
             cold_source: None,
+            history_race_injected: false,
         };
         let config = CoordinateGameplayConfig {
             audio: AudioGameplayConfig {
@@ -1264,6 +1301,23 @@ impl Fixture {
             state.old_pending_packets > 0,
             "old original clock stays live until authorization"
         );
+        assert!(self.device.history_race_injected);
+        assert_eq!(state.history_authorized_deferrals, 1);
+        assert!(!state.history_revisions.is_empty());
+        assert!(state
+            .history_revisions
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]));
+        let history = self.device.effects.history_requests();
+        assert!(history
+            .iter()
+            .all(|request| request.2 == self.device.identity));
+        for epoch in EPOCH..=EPOCH + 2 {
+            assert!(
+                history.iter().any(|request| request.0 == epoch),
+                "real history queue serviced output epoch {epoch}"
+            );
+        }
         assert!(
             state.suspended_laps > 0,
             "actual waiting candidate suspends old native clock"

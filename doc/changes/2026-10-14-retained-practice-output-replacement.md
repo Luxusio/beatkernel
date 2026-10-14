@@ -39,10 +39,10 @@ remain required; these are bounded development results.
 | Check | Actual result | Scope |
 | --- | --- | --- |
 | Original-coordinate controller | 18 PASS | Ownership, cancellation, stale state and atomic publication |
-| Owner/UI request and observation filter | 17 PASS, including 16 new | Capability, correlation and retirement-observation races |
-| Connected practice filter | 3 PASS | Real solo, two-member RuntimeGroup and transition receipt states |
-| No-default app library | 2674 PASS, 6 ignored | Full portable app regression |
-| Desktop app library | 3129 PASS, 8 ignored | Desktop-enabled app regression |
+| Owner/UI request and observation filter | 25 PASS, including 8 history regressions | Capability, correlation and retirement-observation/history races |
+| Connected practice filter | 3 PASS | Real solo, two-member RuntimeGroup, actual Owner history port and transition receipt states |
+| No-default app library | 2682 PASS, 6 ignored | Full portable app regression after history-race fix |
+| Desktop app library | 3129 PASS, 8 ignored | Pre-remediation desktop regression at6c9ce7c2; final QA remains |
 | Desktop binaries | All PASS, 17 ignored | Individual counts 393/53/29/40/3/7/59 |
 | Desktop all-bin check | PASS | Actual host type checking |
 | External publication allocation regression | 1 PASS | Actual prepared-token clone allocates; held commit requests zero new allocations/reallocations |
@@ -70,6 +70,31 @@ Reproduce using the commands in the
 Development logs, including earlier failed attempts, are under ignored
 `target/wf/retained-practice-output-replacement/`; they are not guaranteed to
 survive a fresh clone. Source tests and these commands are the reproducible proof.
+
+## Independent review remediation
+
+The independent DEEP review of `015256a3` returned FAIL for one verified race.
+The converted worker can authorize retirement after a mathematical history
+query but before the old stream accepts its history-retirement request. Its
+stopped-stream error then aborts the common pump before replacement publication.
+The connected fixture had used the default no-op history-retirement port and
+therefore did not cover that production boundary.
+
+The old API reproduced the failure in `review-history-red.log` (0 PASS/1 FAIL,
+exit101). The conditional-aware Owner service reuses the existing query/pin
+calculation and re-probes only raw backend failures. Confirmed authorization
+defers old-stream IO; other errors and complete probe/cleanup/recovery ownership
+remain visible. Both Linux delegates use that service.
+
+After the fix, `review-history-green.log` passes25 request/observation cases,
+including8 new history cases; `review-history-connected.log` passes3 connected
+cases with the actual Owner history port. Both solo/cohort cases inject native
+request authorization after an actual old packet, then continue through original
+replacement, resume, loop/scrub, PCM/capture/member/attempt checks.
+`review-history-full-app.log` passes2682 cases with6 ignored and
+`review-history-allocation.log` passes the actual zero-allocation publication
+regression. All38 scoped Rust format checks and scoped diff checks pass.
+WBS07.09.03/07.08.06 return to V; final independent re-review and QA remain.
 
 ## Known ceiling and remaining scope
 
