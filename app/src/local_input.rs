@@ -244,6 +244,10 @@ impl InputMergerPreparationState {
     }
 }
 impl InputMerger {
+    pub(crate) const fn domain(&self) -> ClockDomainId {
+        self.domain
+    }
+
     /// Only cold preparation copies bounded source metadata, never input payload.
     /// The transaction separately requires an empty queue before using this state.
     pub(crate) fn preparation_state(&self) -> Result<InputMergerPreparationState, MergeError> {

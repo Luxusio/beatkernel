@@ -29,6 +29,7 @@ use beatkernel_platform::audio::presentation::validation::{
 pub enum ReplacementState {
     Detached,
     Attached,
+    ConditionalRetirement,
     RecoveredMixer,
     PendingRetirement,
     Waiting,
@@ -130,19 +131,24 @@ struct AudioWaitingTiming {
     snapshots: [Option<NativeAudioSnapshot>; 2],
     pairs: [Option<beatkernel::time::ClockPair>; 2],
 }
+#[path = "coordinate_target_replacement.rs"]
+pub mod coordinate_target;
 #[path = "target_replacement.rs"]
 pub mod target;
 enum WaitingTiming<P: GameplayPresentationPort> {
     Legacy(PreparedOutputTiming<P>),
     Audio(AudioWaitingTiming),
     Target(target::TargetWaitingTiming),
+    CoordinateTarget(coordinate_target::CoordinateTargetWaitingTiming),
 }
 impl<P: GameplayPresentationPort> WaitingTiming<P> {
     fn basis(&self) -> Result<OutputFrameBasis, &'static str> {
         match self {
             Self::Legacy(value) => Ok(value.basis),
             Self::Audio(value) => Ok(value.basis),
-            Self::Target(_) => Err("target timing has no fixed source-grid basis"),
+            Self::Target(_) | Self::CoordinateTarget(_) => {
+                Err("target timing has no fixed source-grid basis")
+            }
         }
     }
 }
@@ -154,9 +160,10 @@ struct Waiting<B: OutputReplacementBackend<O, Basis>, O = Mixer, Basis = OutputF
     first_poll: Option<ClockPoint>,
     last_poll: Option<ClockPoint>,
 }
-enum Slot<B: OutputReplacementBackend<O, Basis>, O = Mixer, Basis = OutputFrameBasis> {
+enum Slot<B: OutputReplacementBackend<O, Basis>, O = Mixer, Basis = OutputFrameBasis, Ticket = ()> {
     Detached,
     Attached(B::Output),
+    Conditional(coordinate_target::ConditionalTargetWaiting<B::Output, B::Request, Ticket>),
     Recovered(O),
     Pending(B::Output),
     Waiting(Waiting<B, O, Basis>),
@@ -166,13 +173,16 @@ pub struct OutputReplacement<
     B: OutputReplacementBackend<O, Basis>,
     O = Mixer,
     Basis = OutputFrameBasis,
+    Ticket = (),
 > {
     backend: B,
-    slot: Slot<B, O, Basis>,
+    slot: Slot<B, O, Basis, Ticket>,
     last_issued: u64,
     retirement_hold: Option<PauseHold>,
 }
-impl<B: OutputReplacementBackend<O, Basis>, O, Basis> OutputReplacement<B, O, Basis> {
+impl<B: OutputReplacementBackend<O, Basis>, O, Basis, Ticket>
+    OutputReplacement<B, O, Basis, Ticket>
+{
     pub fn new(backend: B) -> Self {
         Self {
             backend,
@@ -185,6 +195,7 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis> OutputReplacement<B, O, Ba
         match &self.slot {
             Slot::Detached => ReplacementState::Detached,
             Slot::Attached(_) => ReplacementState::Attached,
+            Slot::Conditional(_) => ReplacementState::ConditionalRetirement,
             Slot::Recovered(_) => ReplacementState::RecoveredMixer,
             Slot::Pending(_) => ReplacementState::PendingRetirement,
             Slot::Waiting(_) => ReplacementState::Waiting,
@@ -200,6 +211,47 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis> OutputReplacement<B, O, Ba
     pub fn backend_mut(&mut self) -> &mut B {
         &mut self.backend
     }
+    /// The original output still owns its native clock while permission is pending.
+    pub fn conditional_current(&self) -> Option<&B::Output> {
+        match &self.slot {
+            Slot::Conditional(waiting) if !waiting.retirement_authorized() => Some(&waiting.output),
+            _ => None,
+        }
+    }
+    pub fn conditional_current_mut(&mut self) -> Option<&mut B::Output> {
+        match &mut self.slot {
+            Slot::Conditional(waiting) if !waiting.retirement_authorized() => {
+                Some(&mut waiting.output)
+            }
+            _ => None,
+        }
+    }
+    pub(super) fn conditional_backend_output_mut(&mut self) -> Option<(&mut B, &mut B::Output)> {
+        match &mut self.slot {
+            Slot::Conditional(waiting) if !waiting.retirement_authorized() => {
+                Some((&mut self.backend, &mut waiting.output))
+            }
+            _ => None,
+        }
+    }
+    /// Transfer the exact live owner after conditional refusal or cancellation.
+    pub fn take_attached_output(&mut self) -> Option<B::Output> {
+        let slot = std::mem::replace(&mut self.slot, Slot::Detached);
+        match slot {
+            Slot::Attached(output) => Some(output),
+            other => {
+                self.slot = other;
+                None
+            }
+        }
+    }
+    pub fn output_clock_suspended(&self) -> bool {
+        match &self.slot {
+            Slot::Conditional(waiting) => waiting.retirement_authorized(),
+            Slot::Waiting(_) | Slot::Pending(_) => true,
+            _ => false,
+        }
+    }
     /// Explicitly retire owned rejected/other output through the same recovery policy.
     pub fn stop_owned(&mut self) -> Result<bool, ReplacementFailure<B::Error>> {
         if self.state() == ReplacementState::Waiting {
@@ -210,6 +262,9 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis> OutputReplacement<B, O, Ba
             Slot::Attached(output) | Slot::Pending(output) => {
                 self.retire_owned_output(output).map(|_| true)
             }
+            Slot::Conditional(waiting) => self
+                .retire_owned_output_held(waiting.output, waiting.hold)
+                .map(|_| true),
             other => {
                 self.slot = other;
                 Ok(false)
@@ -288,7 +343,9 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis> OutputReplacement<B, O, Ba
         }
     }
 }
-impl<B: OutputReplacementBackend<O, Basis>, O, Basis: PartialEq> OutputReplacement<B, O, Basis> {
+impl<B: OutputReplacementBackend<O, Basis>, O, Basis: PartialEq, Ticket>
+    OutputReplacement<B, O, Basis, Ticket>
+{
     fn begin_lifecycle_with(
         &mut self,
         request: B::Request,
@@ -345,47 +402,70 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis: PartialEq> OutputReplaceme
             cleanup: None,
             recovery: None,
         })?;
-        let mixer = match std::mem::replace(&mut self.slot, Slot::Detached) {
-            Slot::Recovered(mixer) => mixer,
-            Slot::Attached(mut output) => {
-                let retirement = self.backend.retire(&mut output);
-                let recovered = output.take_stopped_mixer();
-                match (retirement, recovered) {
-                    (Ok(()), Ok(Some(mixer))) => mixer,
-                    (Err(error), Ok(Some(mixer))) => {
-                        self.slot = Slot::Recovered(mixer);
-                        return Err(ReplacementFailure::backend(ReplacementPhase::Retire, error));
-                    }
-                    (Err(error), Ok(None)) => {
-                        self.slot = Slot::Unavailable;
-                        return Err(ReplacementFailure::backend(ReplacementPhase::Retire, error));
-                    }
-                    (Ok(()), Ok(None)) => {
-                        self.slot = Slot::Unavailable;
-                        return Err(ReplacementFailure::policy(
-                            "retired output has no recoverable mixer",
-                        ));
-                    }
-                    (Err(error), Err(recovery)) => {
-                        self.slot = Slot::Pending(output);
-                        self.retain_retirement_hold(hold);
-                        let mut failure =
-                            ReplacementFailure::backend(ReplacementPhase::Retire, error);
-                        failure.recovery = Some(recovery);
-                        return Err(failure);
-                    }
-                    (Ok(()), Err(error)) => {
-                        self.slot = Slot::Pending(output);
-                        self.retain_retirement_hold(hold);
-                        return Err(ReplacementFailure::backend(
-                            ReplacementPhase::Recover,
-                            error,
-                        ));
-                    }
-                }
-            }
+        let (mixer, hold) = match std::mem::replace(&mut self.slot, Slot::Detached) {
+            Slot::Recovered(mixer) => (mixer, hold),
+            Slot::Attached(output) => self.recover_replacement_output(output, hold)?,
             _ => unreachable!("preflight admitted only attached or recovered ownership"),
         };
+        self.begin_recovered_lifecycle_with(request, next_epoch, mixer, hold, wait_ns, prepare)
+    }
+    fn recover_replacement_output(
+        &mut self,
+        mut output: B::Output,
+        hold: PauseHold,
+    ) -> Result<(O, PauseHold), ReplacementFailure<B::Error>> {
+        let retirement = self.backend.retire(&mut output);
+        let recovered = output.take_stopped_mixer();
+        match (retirement, recovered) {
+            (Ok(()), Ok(Some(mixer))) => Ok((mixer, hold)),
+            (Err(error), Ok(Some(mixer))) => {
+                self.slot = Slot::Recovered(mixer);
+                Err(ReplacementFailure::backend(ReplacementPhase::Retire, error))
+            }
+            (Err(error), Ok(None)) => {
+                self.slot = Slot::Unavailable;
+                Err(ReplacementFailure::backend(ReplacementPhase::Retire, error))
+            }
+            (Ok(()), Ok(None)) => {
+                self.slot = Slot::Unavailable;
+                Err(ReplacementFailure::policy(
+                    "retired output has no recoverable mixer",
+                ))
+            }
+            (Err(error), Err(recovery)) => {
+                self.slot = Slot::Pending(output);
+                self.retain_retirement_hold(hold);
+                let mut failure = ReplacementFailure::backend(ReplacementPhase::Retire, error);
+                failure.recovery = Some(recovery);
+                Err(failure)
+            }
+            (Ok(()), Err(error)) => {
+                self.slot = Slot::Pending(output);
+                self.retain_retirement_hold(hold);
+                Err(ReplacementFailure::backend(
+                    ReplacementPhase::Recover,
+                    error,
+                ))
+            }
+        }
+    }
+    fn begin_recovered_lifecycle_with(
+        &mut self,
+        request: B::Request,
+        next_epoch: u64,
+        mixer: O,
+        hold: PauseHold,
+        wait_ns: u64,
+        prepare: impl FnOnce(
+            &B,
+            &B::Request,
+            u64,
+            &O,
+        ) -> Result<
+            (WaitingTiming<B::Presentation>, Basis),
+            ReplacementFailure<B::Error>,
+        >,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
         let (timing, basis) = match prepare(&self.backend, &request, next_epoch, &mixer) {
             Ok(timing) => timing,
             Err(error) => {
@@ -648,15 +728,23 @@ impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> OutputReplacement<B
         }
     }
 }
-impl<B: OutputReplacementBackend<O, Basis>, O, Basis> OutputReplacement<B, O, Basis> {
+impl<B: OutputReplacementBackend<O, Basis>, O, Basis, Ticket>
+    OutputReplacement<B, O, Basis, Ticket>
+{
     pub fn cancel(&mut self) -> Result<bool, ReplacementFailure<B::Error>> {
         let slot = std::mem::replace(&mut self.slot, Slot::Detached);
-        let Slot::Waiting(waiting) = slot else {
-            self.slot = slot;
-            return Ok(false);
+        let (output, hold) = match slot {
+            Slot::Waiting(waiting) => (waiting.output, waiting.hold),
+            // Generic cancellation is a technical stop. Only the coordinate
+            // port can atomically authorize restoration of a live owner.
+            Slot::Conditional(waiting) => (waiting.output, waiting.hold),
+            other => {
+                self.slot = other;
+                return Ok(false);
+            }
         };
-        let (cleanup, recovery) = self.cleanup_output(waiting.output);
-        self.retain_retirement_hold(waiting.hold);
+        let (cleanup, recovery) = self.cleanup_output(output);
+        self.retain_retirement_hold(hold);
         match (cleanup, recovery) {
             (Some(error), recovery) => {
                 let mut failure = ReplacementFailure::backend(ReplacementPhase::Retire, error);

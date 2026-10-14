@@ -154,10 +154,23 @@ impl NativeAudioPresentation {
         now: ClockPoint,
         merger: &InputMerger,
     ) -> NativeGameplayResult<()> {
-        self.validate_coordinate_target_output_epoch(&prepared, now, merger)?;
-        self.authority
-            .commit_primed_coordinate_epoch(prepared.correlation, now, merger)?;
-        self.validator = prepared.validator;
+        self.commit_coordinate_target_output_epoch_borrowed(&prepared, now, merger)
+    }
+
+    pub(crate) fn commit_coordinate_target_output_epoch_borrowed(
+        &mut self,
+        prepared: &PreparedCoordinateTargetNativeAudioEpoch,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<()> {
+        self.validate_coordinate_target_output_epoch(prepared, now, merger)?;
+        let validator = prepared.validator.clone();
+        self.authority.commit_primed_coordinate_epoch_borrowed(
+            &prepared.correlation,
+            now,
+            merger,
+        )?;
+        self.validator = validator;
         self.basis = None;
         self.target_basis = Some(prepared.basis);
         self.practice_mixer_basis = Some(prepared.practice_mixer_basis);

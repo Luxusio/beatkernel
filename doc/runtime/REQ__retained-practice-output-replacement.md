@@ -119,11 +119,29 @@ cleanup state; destruction occurs outside callbacks.
 
 ## Verification
 
+Controller development checkpoint (2026-10-14): original-coordinate replacement
+has18 passing unit cases and one external allocation regression using the same
+safe real Mixer/converter/merger/Runtime fixture. The allocation test first proves
+that cloning the actual prepared token allocates, then measures zero allocation
+or reallocation requests during successful held publication. Cold preparation
+and metadata deallocation are outside that measurement. Public consuming commit
+APIs keep their signatures and delegate to crate-private borrowed commits, so
+every failed publication retains the intact Ready owner without copying its
+merger metadata. The library keeps its unsafe-code prohibition; only the external
+test binary delegates allocation to System. Output application162, authority214,
+native presentation67, pause75 and input31 regression filters also passed, with
+overlap rather than a claimed sum of unique cases. Logs are in
+`target/wf/retained-practice-output-replacement/`, including
+`ac004-borrowed-placement-unit.log`, `ac004-borrowed-allocation-calibrated.log`
+and `ac004-borrowed-regression-*.log`. Earlier compile/test failures remain there.
+Owner/UI, actual common pumps and final independent review/QA remain unfinished;
+this checkpoint does not prove native device/GUI crossing or full player completion.
+
 Independent rational, original native snapshot, pause, transaction and request
-fixtures cover successful changes, stale/wrong/future/torn evidence, held
+fixtures must cover successful changes, stale/wrong/future/torn evidence, held
 suffixes, ownership recovery and capability consistency. Connected portable
-solo and multi-member fixtures traverse pause→change→resume→loop/scrub/end intent
-and decode original capture to verify identity/conservation. These are software
+solo and multi-member fixtures must traverse pause→change→resume→loop/scrub/end intent
+and decode original capture to verify identity/conservation. When passed, these are software
 evidence rather than physical native timing.
 
 Actual desktop acceptance acknowledges a retained pause, edits/applies Output,

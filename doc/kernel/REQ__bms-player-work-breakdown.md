@@ -250,13 +250,23 @@ Linux 설정/profile/CLI 및 adapter/cold-start/replay software 범위만 D이�
 acknowledged-paused Output GUI는 evdev 부재로 BLOCKED_ENV였다. foreign Rust
 stub typing·null·helper로 실제 SDK/다른 OS/물리 음향·retained 교체를 완료 처리하지 않는다.
 
-E51: 현재 dirty AC004 coordinate controller 후보의 마지막 실제 실행은
-`ac004-coordinate-target-fixed.log`의18개 중15 PASS/3 FAIL이다. 이후 fixture는
-수정됐으나 재실행하지 않았다. 현재 [controller 후보](../../app/src/gameplay/output/application/coordinate_target_replacement.rs)와
+E51: AC004 coordinate controller 후보는 앞선
+`ac004-coordinate-target-fixed.log`의18개 중15 PASS/3 FAIL 이후 fixture를
+수정했고, 재개 후 실제 `ac004-coordinate-target-resumed.log`에서18 PASS/실패0을
+확인했다. borrowed commit 변경 후 `ac004-borrowed-placement-unit.log`에서도
+18 PASS/실패0이다. 별도 integration의 `ac004-borrowed-allocation-calibrated.log`는
+실제 nonempty registry를 가진 prepared token의 clone이 할당함을 먼저 확인하고,
+실제 held publication 구간의 할당/재할당0회를 검사해1 PASS다. 단위 계측기의
+unsafe 금지 규칙 컴파일 실패9건은 앞선 로그에 보존하고, 라이브러리 규칙을 유지한 채
+같은 안전한 fixture를 공유하는 외부 테스트 실행 파일로 계측을 옮겼다.
+현재 [controller 개발본](../../app/src/gameplay/output/application/coordinate_target_replacement.rs)과
 [fixture 후보](../../app/src/gameplay/output/application/coordinate_target_replacement_fixtures.rs)는
-미커밋 상태이며 scoped V로 추적한다. 새 retained typed Owner/UI(AC005)와 공통
-pump(AC006)는 새 구현/fixture가 없어서 N이다.15/3을 이 두 AC의 검사 결과로
-옮기거나 formal current-task review/QA PASS로 바꾸지 않는다.
+software 범위만 확인되어 scoped V로 추적한다. 새 retained typed Owner/UI(AC005)와 공통
+pump(AC006)는 새 구현/fixture가 없어서 N이다. `ac004-borrowed-regression-*.log`의
+output application162 / authority214 / native presentation67 / pause75 / input31도
+각각 PASS/실패0이며 서로 겹치는 필터 수를 고유 테스트 수로 합산하지 않는다.
+불필요한 merger metadata clone은 제거됐고 최종 독립 review/QA가 남았다.
+이 검사들을 후속 AC의 실행 결과나 formal current-task review/QA로 옮기지 않는다.
 
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
@@ -397,7 +407,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
   - [x] **BK-WBS-07.08.02** retained Target native presentation과 원래 Mixer creation pin을 보존하는 epoch 기초를 구현하고 검사한다. — 상태=D(검증완료); 선행=BK-WBS-07.08.01; 근거=E47, 9e224d61 successful green67 PASS; 범위=원본 관측 software owner, launcher/device는 별도.
   - [x] **BK-WBS-07.08.03** coordinate pause rebind·frozen adoption·held generation 기초를 실제 Mixer/converter로 검사한다. — 상태=D(검증완료); 선행=BK-WBS-07.08.02; 근거=E48, df70e2e5 pause75 PASS와 포맷 후 집중13 PASS; 범위=원래 source grid/history/pause 보존, pump/UI는 별도.
   - [x] **BK-WBS-07.08.04** sole converted worker의 conditional retirement·거절·취소·회수/retry 경계를 검사한다. — 상태=D(검증완료); 선행=-; 근거=E49, 1463ccfa focused16/full platform387 PASS·ignored2 및 actual ALSA null1 PASS; 범위=software lifecycle, 물리/GUI는 별도.
-  - [ ] **BK-WBS-07.08.05** retained Target controller의 open/start/poll/prime/commit을 새 coordinate authority·pause·입력 merger와 원자적으로 연결한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.08.01, BK-WBS-07.08.02, BK-WBS-07.08.03, BK-WBS-07.08.04; 필요 근거/다음=E51 current AC004 마지막18개15 PASS/3 FAIL; 수정된 미실행 fixture를 재실행하고 stale/failure/cancel/owner 보존·독립 review/QA 확인.
+  - [ ] **BK-WBS-07.08.05** retained Target controller의 open/start/poll/prime/commit을 새 coordinate authority·pause·입력 merger와 원자적으로 연결한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.08.01, BK-WBS-07.08.02, BK-WBS-07.08.03, BK-WBS-07.08.04; 필요 근거/다음=E51 controller18·실제 publication 할당0회1 및 관련 회귀162/214/67/75/31 PASS; 최종 독립 review/QA 확인.
   - [ ] **BK-WBS-07.08.06** 새 retained Target 교체를 실제 solo/cohort 공통 pump에 연결하고 acknowledged pause·입력 drain·publication·resume을 검증한다. — 상태=N(미구현); 선행=BK-WBS-07.09.03; 필요 근거/다음=AC006 새 구현/fixture 없음; 기존 scalar pump와 구분해 유일 owner·member provenance·원래 PCM/capture·두 native progressing 관측을 확인.
   - [ ] **BK-WBS-07.08.07** direct SourceFrame/SourceCounter retained 교체의 전체 controller·Owner/UI·공통 pump 및 history/pin 수명을 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=Target 기초를 Source 완료로 확장하지 않음; 원래 Source descriptor/query·callback retirement·cold history·WASAPI/ASIO/CoreAudio 경로와 실패/회수/재시도 검사.
   - [ ] **BK-WBS-07.08.08** 기존 scalar 교체와 finite-end ACK·held tail·취소/실패 경로가 새 retained 교체 변경 후에도 보존되는지 재검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=기존 구현/fixture는 존재하나 current 합쳐진 후보의 regression·실제 native crossing·end/drain/owner cleanup 및 독립 확인 필요.
@@ -629,18 +639,18 @@ Native collector termination 절에 있다.
 
 ## 현재 진행 작업과 연결
 
-현재 focused task는 `TASK__wbs-ongoing-work-breakdown`이며 사용자의 우선 요청에
-따라 진행 작업을 이 WBS와 집계 도구로 연결하는 중이다. 제품 기능을 추가 완료한
-task로 세지 않는다. `TASK__retained-practice-output-replacement`는 같은 run과
-미완료 범위를 보존한 채 parked 상태다. 완료/취소가 아니며 WBS 관리 뒤 재개한다.
+현재 focused task는 `TASK__retained-practice-output-replacement`이며 같은 run과
+미완료 범위를 보존해 재개했다. `TASK__wbs-ongoing-work-breakdown`의 도구·문서는
+03435bf4로 커밋하고 실제 독립 review/CLI QA를 통과했다. 이 추적 작업은 자동
+검증 기록 누락 때문에 종료만 parked 상태이며 제품 기능 완료 수로 합산하지 않는다.
 
-| parked retained task AC | 안정적인 실행 단위 | 현재 근거/다음 gate |
+| retained task AC | 안정적인 실행 단위 | 현재 근거/다음 gate |
 | --- | --- | --- |
 | AC001 | BK-WBS-07.08.01 | E46 범위 한정 D; 기존 input31 회귀를 새 테스트로 세지 않음 |
 | AC002 | BK-WBS-07.08.02 | E47 성공 green67 D; 앞선 실패 final 로그와 구분 |
 | AC003 | BK-WBS-07.08.03 | E48 pause75·포맷 후 집중13 D; 실제 pump는 별도 |
 | AC008 | BK-WBS-07.08.04 | E49 focused16/platform387/null1 D; 실제 hardware/GUI는 별도 |
-| AC004 | BK-WBS-07.08.05 | E51 V; 마지막 실제18개15 PASS/3 FAIL, 수정 후 미실행 |
+| AC004 | BK-WBS-07.08.05 | E51 V; controller18·할당 검사1·관련 회귀 통과, 독립 gate 남음 |
 | AC005 | BK-WBS-07.09.03 | N; 새 retained typed Owner/UI 구현·fixture 필요 |
 | AC006 | BK-WBS-07.08.06 | N; Owner/UI 뒤 실제 retained 공통 pump 구현·fixture 필요 |
 | AC007 | 관련 child 전체의 검증 gate | 독립 review/QA·전체 통합 검증이며 별도 기능 leaf나 중복 완료 수를 만들지 않음 |
@@ -679,6 +689,14 @@ Source/scalar/finite/foreign/실제 GUI/물리/applied 전체 범위를 보존�
 상세 behavior/architecture/라이선스는 연결된 기존 REQ/GUIDE/ADR이 계속 소유한다.
 
 ## 변경 이력
+
+- 2026-10-14 controller: borrowed commit으로 prepared metadata 복제를 제거하고
+  실제18 unit+1외부 할당 검사와 관련 회귀를 확인했다. controller V는 최종 독립
+  gate까지 유지하며 Owner/UI·pump N 및 전체 집계97/206·91/193은 바꾸지 않는다.
+
+- 2026-10-14 재개: AC004 수정 fixture의 실제18 PASS/실패0을 E51에 기록하고
+  다음 allocation/회귀/독립 gate를 갱신했다. retained task는 같은 run에서 active로
+  재개했다. controller V와 후속 Owner/UI·pump N, 확장97/206·원래91/193은 유지한다.
 
 - 2026-10-14: 진행 중인 retained 출력 교체를 추적하도록 원래07.08/07.09의
   ID·제목·완료 기준·선행을 그대로 두고10개와5개 child로 분해했다. 원래 활성

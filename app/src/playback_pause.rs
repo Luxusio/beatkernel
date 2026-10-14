@@ -168,6 +168,15 @@ impl NativePause {
         }
         Ok(())
     }
+    /// The original source association, without granting clock or adoption permission.
+    pub(crate) const fn coordinate_source_identity(
+        &self,
+    ) -> Option<crate::gameplay::output::ports::SourcePlaybackIdentity> {
+        match self.coordinate_binding {
+            Some(binding) => Some(binding.source_identity),
+            None => None,
+        }
+    }
     /// Explicit immutable setup; source identity is never inferred from a rounded pair.
     pub fn with_coordinate_binding(
         mut self,

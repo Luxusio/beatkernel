@@ -187,7 +187,16 @@ impl AudioAuthority {
         now: ClockPoint,
         merger: &InputMerger,
     ) -> Result<(), AudioAuthorityError> {
-        self.validate_primed_coordinate_epoch(&prepared, now, merger)?;
+        self.commit_primed_coordinate_epoch_borrowed(&prepared, now, merger)
+    }
+
+    pub(crate) fn commit_primed_coordinate_epoch_borrowed(
+        &mut self,
+        prepared: &PreparedPrimedCoordinateEpoch,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> Result<(), AudioAuthorityError> {
+        self.validate_primed_coordinate_epoch(prepared, now, merger)?;
         let revision = self.next_revision()?;
         self.epoch = prepared.staged.next;
         self.coordinate_basis = Some(prepared.staged.next_basis);

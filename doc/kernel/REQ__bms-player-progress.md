@@ -11,12 +11,16 @@
 유지한다.07.08/07.09는 원래 범위를 보존한 구조 부모 아래10개/5개 실행 단위로
 분해했고 확장 말단 집계는 위 도구가 계산한다. 여섯 D는 이미 커밋되고 검사된
 coordinate 기초와 Linux encoding의 bounded software 범위를 드러낸 것이며 새 제품
-구현 완료가 아니다. current AC004 controller는 마지막 실제18개15 PASS/3 FAIL 뒤
-수정 후 미실행이므로 V다. 새 retained Owner/UI(AC005)와 공통 pump(AC006)는
-새 구현/fixture가 없어 N이며 그15/3을 물려받지 않는다. Source/scalar/finite/foreign/
+구현 완료가 아니다. current AC004 controller는 앞선15 PASS/3 FAIL 후 수정하고
+실제로 재실행해18 PASS/실패0을 확인했다. 후속 borrowed commit의18 unit·1외부
+할당 검사와 관련 회귀도 통과했고 실제 publication의 새 할당0회를 확인했으나
+최종 독립 gate가 남아 V다.
+새 retained Owner/UI(AC005)와 공통 pump(AC006)는 새 구현/fixture가 없어 N이며
+그18 PASS를 물려받지 않는다. Source/scalar/finite/foreign/
 실제 paused GUI·물리/applied 전체 기준은 각 child에 남는다.
-현재 `TASK__wbs-ongoing-work-breakdown`이 active이고 retained replacement task는
-사용자 우선 요청 때문에 같은 run/미완료 범위를 보존한 parked 상태다. 제품 task의
+현재 retained replacement task는 같은 run/미완료 범위를 보존해 active로 재개했다.
+WBS 작업은03435bf4에서 실제 독립 review/CLI QA를 통과했고 자동 검증 기록 누락으로
+종료만 parked 상태다. 이 추적 작업의 검사를 제품 task의
 formal review/QA나 전체 Goal 완료로 바꾸지 않는다. WBS의 E46–E51과
 [이번 변경 기록](../changes/2026-10-14-wbs-ongoing-work-breakdown.md)을 따른다.
 

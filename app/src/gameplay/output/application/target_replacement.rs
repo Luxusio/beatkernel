@@ -43,8 +43,8 @@ impl<O> ReadyTargetAudioOutput<O> {
         self.end.as_ref()
     }
 }
-impl<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>>
-    OutputReplacement<B, ConvertedNativeOutputState, TargetFrameBasis>
+impl<B: OriginalTargetNativeOutputBackend<ConvertedNativeOutputState>, Ticket>
+    OutputReplacement<B, ConvertedNativeOutputState, TargetFrameBasis, Ticket>
 {
     /// Stages exact timing/source identity while the full recovered owner is still cold.
     /// Retirement/open/start/failure ownership follows the same lifecycle as other outputs.
