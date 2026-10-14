@@ -78,3 +78,28 @@ Interval startup uses NativeStartTiming to distinguish actual point pairs from b
 The Windows adapter retains typed WASAPI snapshots or ASIO observations, caches the buffer size from the actual primed render report and validates the configured sample rate. ASIO seeds finite completion and playback discipline with its original interval/render evidence. Committed ASIO sessions use the existing common logical render scheduler, excluding startup silence from keysound positions; manual ASIO pause remains unsupported. Ordinary ungated ASIO retains its software-frontier fallback. Interval math and real gated-mixer fixtures are prepared for later execution. Ordinary Windows GNU checks do not compile the SDK/MSVC driver branch, and compilation does not establish native or acoustic acceptance.
 
 Solo finalization now has one policy owner in native_finish::finish_solo. Native callers first attempt output stop/join and input close/drop and emit their platform-specific diagnostics. The common owner receives those already evaluated results, finishes optional competition and invokes the capture publisher once even when an earlier stage failed. It then returns the original first error in gameplay/output cleanup/input cleanup/save order. It preserves boxed error identity and the original failed-session flag; it does not aggregate errors or replace resource-retention behavior. Linux input drop has no separate error result. The existing exclusive-create publisher moved unchanged into this module, with native_cohort_setup re-exporting it for compatibility; local cohort all-member finalization remains distinct.
+
+## Selected-chart local-cohort sound preparation
+
+Selected-chart SoundBinding membership belongs to the existing host-neutral
+local_preparation owner. The shared prepare_selected_sound_bindings function
+uses only CompiledChart, SoundBinding and standard collections; it receives no
+native handle, clock, file or resource owner. Stable copying preserves input
+order, repeated bindings and all field bits. The returned Vec reservation uses
+the existing typed standard error, while standard set allocation is not a
+universal recoverable-OOM contract. A new crate, port, dynamic dispatch layer or
+prepared-view resource framework is unnecessary for this cold policy.
+
+Windows, Linux and macOS entries compose the helper with their currently selected
+chart, retaining the original complete sounds. Their temporary selection spans
+the full cohort constructor because completion also consumes sound identities.
+Keep restoration and full voice remapping at their existing sites: macOS performs
+its current practice-completion replacement before restoring the original tuple,
+while Windows/Linux retain their existing sequence. Original PCM/BGM/source data
+and native publication/resource lifetime do not move into the selection helper.
+
+Direct pure and actual cohort/completion tests establish this shared policy;
+host and foreign Rust typing establish consumer integration only. This extraction
+does not complete every application context, effect port, resource composition
+or application/platform type dependency. Those remain in WBS01.05/01.06, and
+native device/performance acceptance remains a separate verification obligation.

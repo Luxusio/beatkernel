@@ -197,3 +197,37 @@ retain ordinary preparation. No silent omission, BGM conversion or fake judged
 note. Native/stepped/offline Runtime installation and replay selection use the
 shared policy in REQ__bms-input-sounds.md. Test execution and native/browser/
 physical audio acceptance remain deferred.
+
+## Selected-chart sounds for retained local cohorts
+
+The shared application function `local_preparation::prepare_selected_sound_bindings`
+accepts an immutable `CompiledChart` and borrowed `SoundBinding` slice. It returns
+the bindings whose object IDs occur in that chart, in original input order.
+Empty charts or sound inputs produce an empty selection; absent object IDs are
+omitted from this view. Repeated bindings remain repeated. Object, stage, sample,
+voice and gain bits are copied unchanged, including signed zero and nonfinite
+payloads; this function selects membership and does not replace downstream gain
+or stage validation.
+
+The function returns a new `Vec<SoundBinding>` and propagates its fallible
+reservation through `std::collections::TryReserveError`. Both supplied inputs
+remain unchanged. It uses an ObjectId set and one explicitly reserved output
+Vec; standard collections may allocate scratch and allocators may round capacity.
+Auxiliary storage is O(chart objects + input sounds), not an exact allocation,
+capacity or peak-memory guarantee. Set construction retains standard allocator
+failure behavior; the API does not promise universally recoverable OOM.
+
+Native local-cohort composition keeps the complete original sound map and installs
+the selected view around the entire existing cohort preparation, including song
+completion. Original source, chart, PCM bank, BGM and full sound bindings remain
+available for backward practice and full member voice remapping. Selection must
+not invoke section preparation that slices PCM/BGM or move the current native
+resource, publication, completion-replacement or restoration operations.
+
+Pure fixtures verify all/subset/empty/absent membership, order, duplicate records,
+all fields and gain bits without mutating inputs. Integration fixtures use an
+actual selected chart with at least one excluded original binding and `end: None`,
+require completion for every prepared member, then restore originals and prepare
+the full/backward cohort with the same PCM pointers/content and BGM. Finite-end
+preparation alone cannot prove the song-completion boundary. Host/foreign typing
+and these preparation tests remain distinct from actual native playback.
