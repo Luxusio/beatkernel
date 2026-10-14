@@ -1,34 +1,42 @@
 //! Deferred genuine member preparation, shared PCM, and native delegation fixtures.
 use crate::{
-    ChannelPolicy, PreparedBms, WavDecoder, prepare_from_source,
+    ChannelPolicy, PreparedBms, WavDecoder,
     asset_paths::AssetPathPolicy,
     asset_source::MemoryFiles,
     competition_live::{CompetitionOptions, NetworkRole},
     local_players::{PlayerId, ResolvedInputPlan},
-    local_preparation::{PreparedLocalMembers, prepare_local_members},
+    local_preparation::{
+        PreparedLocalMembers, prepare_local_members, prepare_selected_sound_bindings,
+    },
     local_runtime::{InputResult, RuntimeGroup},
     native_cohort_setup::{CohortPreparation, prepare_cohort},
     native_judge::capture_limits,
+    prepare_from_source,
     replay_capture::LiveReplayCapture,
     replay_playback::decode_section_setup,
+    section_start::source_at,
 };
 use beatkernel::{
     audio::{
         AudioCommand, AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, SampleId, VoiceId,
         command_queue,
     },
+    chart::ObjectId,
     input::{
         BackendId, Binding, BindingMap, ButtonEvent, ButtonState, ContactId, DeviceId,
         DeviceSelector, EventMeta, GameControlId, PhysicalControlId, PhysicalInputEvent, Position2,
         TouchEvent, TouchPhase, VendorNamespaceId,
     },
-    judge::{JudgeGrade, JudgeOutcome, JudgeProfile, JudgeWindow},
-    runtime::RuntimeProcessingClock,
+    judge::{JudgeGrade, JudgeOutcome, JudgeProfile, JudgeStage, JudgeWindow},
+    runtime::{RuntimeProcessingClock, SoundBinding},
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
     transport::{Rate, Transport},
 };
 use beatkernel_bms::BmsInputMode;
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 const CHART: &str =
     "#BPM 60\n#WAV01 key.wav\n#WAV02 bg.wav\n#00011:01\n#00012:00010000\n#00001:02\n";
@@ -205,6 +213,277 @@ fn runtime(members: PreparedLocalMembers) -> (RuntimeGroup, beatkernel::audio::C
     .unwrap();
     group.set_processing_clock(RuntimeProcessingClock::Disabled);
     (group, consumer)
+}
+
+fn sound_fields(sounds: &[SoundBinding]) -> Vec<(ObjectId, JudgeStage, SampleId, VoiceId, u32)> {
+    sounds
+        .iter()
+        .map(|sound| {
+            (
+                sound.object,
+                sound.stage,
+                sound.sample,
+                sound.voice,
+                sound.gain.to_bits(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn selected_sound_bindings_preserve_membership_order_duplicates_and_all_field_bits() {
+    let prepared = prepared();
+    let chart = &prepared.compiled.chart;
+    let chart_before = chart.clone();
+    let earlier = chart.objects()[0].id;
+    let later = chart.objects()[1].id;
+    let unknown = ObjectId(u64::MAX);
+    assert!(chart.objects().iter().all(|object| object.id != unknown));
+    let sounds = [
+        SoundBinding {
+            object: later,
+            stage: JudgeStage::Custom(u32::MAX),
+            sample: SampleId(u64::MAX),
+            voice: VoiceId(u64::MAX),
+            gain: f32::from_bits(0x7fc1_2345),
+        },
+        SoundBinding {
+            object: earlier,
+            stage: JudgeStage::Instant,
+            sample: SampleId(0),
+            voice: VoiceId(0),
+            gain: -1.25,
+        },
+        SoundBinding {
+            object: unknown,
+            stage: JudgeStage::Custom(0),
+            sample: SampleId(9),
+            voice: VoiceId(17),
+            gain: f32::NEG_INFINITY,
+        },
+        SoundBinding {
+            object: later,
+            stage: JudgeStage::HoldTail,
+            sample: SampleId(2),
+            voice: VoiceId(u64::MAX - 1),
+            gain: -0.0,
+        },
+        SoundBinding {
+            object: later,
+            stage: JudgeStage::Custom(u32::MAX),
+            sample: SampleId(u64::MAX),
+            voice: VoiceId(u64::MAX),
+            gain: f32::from_bits(0x7fc1_2345),
+        },
+        SoundBinding {
+            object: earlier,
+            stage: JudgeStage::HoldHead,
+            sample: SampleId(3),
+            voice: VoiceId(7),
+            gain: f32::INFINITY,
+        },
+    ];
+    let sounds_before = sound_fields(&sounds);
+    let all = [sounds[0], sounds[1], sounds[3], sounds[4], sounds[5]];
+    let selected = source_at(&prepared.source, Timestamp::from_nanos(1_000_000_000))
+        .unwrap()
+        .compile()
+        .unwrap();
+    let selected_before = selected.clone();
+    assert_eq!(selected.chart.objects().len(), 1);
+    assert_eq!(selected.chart.objects()[0].id, later);
+    let empty = source_at(&prepared.source, Timestamp::from_nanos(2_000_000_000))
+        .unwrap()
+        .compile()
+        .unwrap();
+    let empty_before = empty.clone();
+    assert!(empty.chart.objects().is_empty());
+
+    assert_eq!(
+        sound_fields(&prepare_selected_sound_bindings(chart, &all).unwrap()),
+        sound_fields(&all)
+    );
+    assert_eq!(
+        sound_fields(&prepare_selected_sound_bindings(chart, &sounds).unwrap()),
+        sound_fields(&all)
+    );
+    assert_eq!(
+        sound_fields(&prepare_selected_sound_bindings(&selected.chart, &sounds).unwrap()),
+        sound_fields(&[sounds[0], sounds[3], sounds[4]])
+    );
+    assert!(
+        prepare_selected_sound_bindings(chart, &[])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        prepare_selected_sound_bindings(&empty.chart, &sounds)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        prepare_selected_sound_bindings(chart, &[sounds[2]])
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(*chart, chart_before);
+    assert_eq!(selected, selected_before);
+    assert_eq!(empty, empty_before);
+    assert_eq!(sound_fields(&sounds), sounds_before);
+}
+
+#[test]
+fn selected_cohort_completion_and_restored_backward_members_keep_original_pcm_and_bgm() {
+    let mut prepared = prepared();
+    let source_before = prepared.source.clone();
+    let compiled_before = prepared.compiled.clone();
+    let sounds_before = prepared.sounds.clone();
+    let bgm_before = prepared.bgm_commands.clone();
+    let bank_count = prepared.bank.len();
+    let pcm_before: Vec<_> = [SampleId(1), SampleId(2)]
+        .into_iter()
+        .map(|id| {
+            let sample = prepared.bank.get(id).unwrap();
+            (id, sample.samples().as_ptr(), sample.samples().to_vec())
+        })
+        .collect();
+    let assignments = [(PlayerId(7), DeviceId(91)), (PlayerId(2), DeviceId(19))];
+    let chosen = ResolvedInputPlan::new(
+        assignments
+            .iter()
+            .map(|&(player, device)| (player, Some(device)))
+            .collect(),
+    )
+    .unwrap();
+    let bindings = BTreeMap::from([(0x11, 4), (0x12, 5)]);
+    let mut config = CohortPreparation {
+        host: HOST,
+        output: OUTPUT,
+        early: 0,
+        late: 0,
+        offset: 0,
+        preroll: 0,
+        start: Timestamp::from_nanos(1_000_000_000),
+        end: None,
+        chart_seed: u64::MAX,
+        bindings: &bindings,
+        record_replay: None,
+        replay_max_bytes: 65_536,
+        replay_max_records: 128,
+    };
+    let selected_source = source_at(&prepared.source, config.start).unwrap();
+    let selected_compiled = selected_source.compile().unwrap();
+    assert_eq!(selected_compiled.chart.objects().len(), 1);
+    assert_eq!(compiled_before.chart.objects().len(), 2);
+    let original_source = std::mem::replace(&mut prepared.source, selected_source);
+    let original_compiled = std::mem::replace(&mut prepared.compiled, selected_compiled);
+    assert_eq!(
+        prepare_cohort(
+            &prepared,
+            &assignments,
+            &CompetitionOptions::default(),
+            &config
+        )
+        .err()
+        .unwrap()
+        .to_string(),
+        "completion sound has no chart object"
+    );
+    let selected_sounds =
+        prepare_selected_sound_bindings(&prepared.compiled.chart, &prepared.sounds).unwrap();
+    assert_eq!(selected_sounds.len(), 1);
+    assert_eq!(
+        sound_fields(&selected_sounds),
+        sound_fields(&sounds_before[1..])
+    );
+    let original_sounds = std::mem::replace(&mut prepared.sounds, selected_sounds);
+    let selected = prepare_cohort(
+        &prepared,
+        &assignments,
+        &CompetitionOptions::default(),
+        &config,
+    )
+    .unwrap();
+    assert_eq!(selected.configs.len(), assignments.len());
+    assert_eq!(selected.states.len(), assignments.len());
+    for (index, member) in selected.configs.iter().enumerate() {
+        assert_eq!(member.judge.chart(), &prepared.compiled.chart);
+        assert_eq!(member.sounds.len(), 1);
+        let mut sound = member.sounds[0];
+        sound.voice = prepared.sounds[0].voice;
+        assert_eq!(sound_fields(&[sound]), sound_fields(&prepared.sounds));
+        assert!(selected.states[index].completion.is_some());
+    }
+    assert_ne!(
+        selected.configs[0].sounds[0].voice,
+        selected.configs[1].sounds[0].voice
+    );
+    assert_eq!(prepared.bank.len(), bank_count);
+    assert_eq!(prepared.bgm_commands, bgm_before);
+    for &(id, pointer, ref samples) in &pcm_before {
+        assert_eq!(prepared.bank.get(id).unwrap().samples().as_ptr(), pointer);
+        assert_eq!(prepared.bank.get(id).unwrap().samples(), samples.as_slice());
+    }
+
+    prepared.source = original_source;
+    prepared.compiled = original_compiled;
+    prepared.sounds = original_sounds;
+    assert_eq!(prepared.source, source_before);
+    assert_eq!(prepared.compiled, compiled_before);
+    assert_eq!(sound_fields(&prepared.sounds), sound_fields(&sounds_before));
+    let backward = source_at(&prepared.source, Timestamp::ZERO).unwrap();
+    assert_eq!(backward, source_before);
+    assert_eq!(backward.compile().unwrap(), compiled_before);
+    config.start = Timestamp::ZERO;
+    let common = prepare_local_members(
+        &prepared,
+        &chosen,
+        maps(&chosen),
+        profile(),
+        BmsInputMode::ButtonOnly,
+    )
+    .unwrap();
+    let full = prepare_cohort(
+        &prepared,
+        &assignments,
+        &CompetitionOptions::default(),
+        &config,
+    )
+    .unwrap();
+    assert_eq!(full.configs.len(), assignments.len());
+    assert_eq!(full.states.len(), assignments.len());
+    assert_eq!(full.reserved, common.reserved);
+    let mut voices = BTreeSet::new();
+    for (index, member) in full.configs.iter().enumerate() {
+        assert_eq!(
+            (member.player, member.device),
+            (assignments[index].0, Some(assignments[index].1))
+        );
+        assert_eq!(member.judge.chart(), &compiled_before.chart);
+        assert_eq!(
+            sound_fields(&member.sounds),
+            sound_fields(&common.configs[index].sounds)
+        );
+        assert_eq!(member.sounds.len(), sounds_before.len());
+        for (sound, original) in member.sounds.iter().zip(&sounds_before) {
+            assert!(voices.insert(sound.voice));
+            assert!(!full.reserved.contains(&sound.voice));
+            let mut preserved = *sound;
+            preserved.voice = original.voice;
+            assert_eq!(sound_fields(&[preserved]), sound_fields(&[*original]));
+        }
+        assert!(full.states[index].completion.is_some());
+    }
+    assert_eq!(voices.len(), assignments.len() * sounds_before.len());
+    assert_eq!(prepared.source, source_before);
+    assert_eq!(prepared.compiled, compiled_before);
+    assert_eq!(sound_fields(&prepared.sounds), sound_fields(&sounds_before));
+    assert_eq!(prepared.bank.len(), bank_count);
+    assert_eq!(prepared.bgm_commands, bgm_before);
+    for &(id, pointer, ref samples) in &pcm_before {
+        assert_eq!(prepared.bank.get(id).unwrap().samples().as_ptr(), pointer);
+        assert_eq!(prepared.bank.get(id).unwrap().samples(), samples.as_slice());
+    }
 }
 
 #[test]
