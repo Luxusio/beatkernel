@@ -16,6 +16,13 @@ attempt/section/generation, accepted input and capture. No new attempt or silent
 fallback. This vertical preserves original Source rate and existing encoding;
 remaining rate/encoding controls and resampling stay required follow-ons.
 
+The actual adopted startup gate may follow stream creation. Preserve its distinct
+playback origin at the first replacement: require the exact original Source point
+at max(adopted startup frame, current binding's first physical frame). Later
+epochs advance that binding; validate the resulting exact point rather than an
+arbitrary later timestamp. Keep stream origin and all cold/final pause identity
+checks intact. A future gate does not justify fabricating an earlier native seed.
+
 Select an explicit complete owner only for retained WASAPI shared startup.
 Retained exclusive and ASIO keep their existing Legacy startup path and explicit
 retained-replacement refusal until their own supported vertical is implemented.

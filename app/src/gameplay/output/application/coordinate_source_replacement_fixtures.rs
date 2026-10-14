@@ -827,10 +827,11 @@ fn coordinate_source_replacement_exact_counter_progress_survives_equal_rounded_n
 #[test]
 fn coordinate_source_replacement_publication_revalidates_semantic_merger_pause_pin_and_current_atomically(
 ) {
-    for variant in 0..9 {
+    for variant in 0..10 {
         let mut r = Rig::new(false);
         let (mut c, ready) = r.ready(Request::normal(Some(10_000_000)));
         let candidate = ready.output().native_id;
+        let candidate_owner = owner_facts(ready.output().source_state());
         match variant {
             0 => {
                 r.current
@@ -881,6 +882,10 @@ fn coordinate_source_replacement_publication_revalidates_semantic_merger_pause_p
                 r.current = changed;
             }
             8 => r.config.logical_schedule = false,
+            9 => {
+                r.config.playback_origin.timestamp =
+                    Timestamp::from_nanos(r.config.playback_origin.timestamp.as_nanos() + 1);
+            }
             _ => unreachable!(),
         }
         let current = format!("{:?}", r.current);
@@ -900,6 +905,10 @@ fn coordinate_source_replacement_publication_revalidates_semantic_merger_pause_p
             "stale evidence refuses before capability staging"
         );
         assert_eq!(failure.ready.output().native_id, candidate);
+        assert_eq!(
+            owner_facts(failure.ready.output().source_state()),
+            candidate_owner
+        );
         assert_eq!(format!("{:?}", r.current), current);
         assert_eq!(format!("{:?}", r.pause), pause);
         assert_eq!(format!("{:?}", r.config), config);

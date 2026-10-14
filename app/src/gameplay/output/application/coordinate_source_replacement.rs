@@ -723,7 +723,8 @@ pub fn publish_ready_coordinate_source_audio_output_held<O, E, A>(
             || pin.origin() != ready.basis.origin()
             || pin.origin().domain != context.config.playback_origin.domain
             || context.config.stream_origin != old_epoch.stream_origin
-            || context.config.playback_origin != old_epoch.stream_origin
+            || context.config.playback_origin
+                != context.pause.coordinate_source_playback_origin()?
             || ready.pause.host_domain() != context.config.origin.domain
             || old_epoch.host_domain != context.config.origin.domain
             || ready.basis.point_at_stream_frame(0)?

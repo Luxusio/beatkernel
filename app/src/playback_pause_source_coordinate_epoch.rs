@@ -31,6 +31,19 @@ impl PreparedCoordinateSourcePauseOutput {
 }
 
 impl NativePause {
+    /// Startup can follow stream creation; a reopened Source basis advances
+    /// the publication anchor while preserving that original adopted gate.
+    pub(crate) fn coordinate_source_playback_origin(&self) -> Result<ClockPoint, PauseError> {
+        let binding = self.coordinate_binding.ok_or(PauseError(
+            "Source playback origin lacks coordinate pause binding",
+        ))?;
+        if binding.epoch != self.epoch {
+            return Err(PauseError("Source playback origin changed pause epoch"));
+        }
+        let basis = source_basis(binding.basis)?;
+        self.point(self.start_frame.max(basis.start_physical_frame()))
+    }
+
     pub fn prepare_coordinate_source_output(
         &self,
         state: &NativeOutputState,
