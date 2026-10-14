@@ -15,6 +15,10 @@ use std::io;
 mod source_playback_packet_fixtures;
 
 #[cfg(test)]
+#[path = "source_conditional_retirement_packet_fixtures.rs"]
+pub(crate) mod source_conditional_retirement_packet_fixtures;
+
+#[cfg(test)]
 #[path = "target_playback_packet_fixtures.rs"]
 mod target_playback_packet_fixtures;
 
@@ -598,6 +602,47 @@ pub trait SourcePlaybackNativeOutputBackend<O: SoftwareOutputState = Mixer>:
         query: &beatkernel::audio::InterpolatedTargetTime,
         identity: SourcePlaybackIdentity,
     ) -> Result<Option<NativeSourcePlaybackQuery<Self::NativeEvidence>>, Self::Error>;
+}
+
+/// Source and Target share decision states, not pending-tail policy.
+pub type SourceRetirementStatus = TargetRetirementStatus;
+
+/// Conditional permission from the sole Source worker, retaining the complete
+/// software owner through the inherited generic lifecycle and recovery contract.
+pub trait ConditionalSourceRetirementNativeOutputBackend<O: SoftwareOutputState = Mixer>:
+    SourcePlaybackNativeOutputBackend<O>
+{
+    /// Binds the original control allocation and a checked request nonce.
+    type Ticket;
+    /// Actual immutable descriptor of the newly created native output. Only
+    /// SourceFrame or SourceCounter is valid; Counter keeps its actual native
+    /// frequency. Created metadata and prefill grant no native progress.
+    fn created_source_coordinate_basis(
+        &self,
+        output: &Self::Output,
+    ) -> Result<crate::audio_authority::AudioAuthorityCoordinateBasis, Self::Error>;
+    /// Cold validation includes request, capacity and the exact requested matrix
+    /// before asking the worker to inspect its actual pending PCM. None means
+    /// busy or an unconsumed outcome; neither may overwrite the existing ticket.
+    fn submit_source_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        request: &Self::Request,
+        matrix: Option<&beatkernel::audio::ChannelMatrix>,
+    ) -> Result<Option<Self::Ticket>, Self::Error>;
+    /// Authorization is sticky permission, not proof of Stop, join or recovery.
+    fn poll_source_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        ticket: &Self::Ticket,
+    ) -> Result<SourceRetirementStatus, Self::Error>;
+    /// Cancellation and authorization share one decision; an already authorized
+    /// output cannot be restored by cancelling its ticket.
+    fn cancel_source_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        ticket: &Self::Ticket,
+    ) -> Result<SourceRetirementStatus, Self::Error>;
 }
 
 /// Queues an original Source-history minimum on the statically owned output.

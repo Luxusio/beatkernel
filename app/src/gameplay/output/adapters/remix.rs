@@ -47,6 +47,9 @@ impl<B: OutputChannelRemixBackend<O>, O: SoftwareOutputState> OutputReplacementB
     fn start(&mut self, output: &mut Self::Output) -> Result<(), Self::Error> {
         self.inner.start(output)
     }
+    fn prepare_replacement_start(&mut self, output: &mut Self::Output) -> Result<(), Self::Error> {
+        self.inner.prepare_replacement_start(output)
+    }
     fn epoch(&self, output: &Self::Output) -> u64 {
         self.inner.epoch(output)
     }
@@ -180,5 +183,49 @@ where
             identity,
             source_pin,
         )
+    }
+}
+
+impl<B, O: SoftwareOutputState>
+    crate::gameplay::output::ports::ConditionalSourceRetirementNativeOutputBackend<O>
+    for RemixedOutputBackend<B>
+where
+    B: OutputChannelRemixBackend<O>
+        + crate::gameplay::output::ports::ConditionalSourceRetirementNativeOutputBackend<O>,
+{
+    type Ticket = B::Ticket;
+    fn created_source_coordinate_basis(
+        &self,
+        output: &Self::Output,
+    ) -> Result<crate::audio_authority::AudioAuthorityCoordinateBasis, Self::Error> {
+        self.inner.created_source_coordinate_basis(output)
+    }
+    fn submit_source_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        request: &Self::Request,
+        matrix: Option<&beatkernel::audio::ChannelMatrix>,
+    ) -> Result<Option<Self::Ticket>, Self::Error> {
+        self.inner.submit_source_conditional_retirement(
+            output,
+            &request.native,
+            matrix.or(request.matrix.as_ref()),
+        )
+    }
+    fn poll_source_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        ticket: &Self::Ticket,
+    ) -> Result<crate::gameplay::output::ports::SourceRetirementStatus, Self::Error> {
+        self.inner
+            .poll_source_conditional_retirement(output, ticket)
+    }
+    fn cancel_source_conditional_retirement(
+        &mut self,
+        output: &mut Self::Output,
+        ticket: &Self::Ticket,
+    ) -> Result<crate::gameplay::output::ports::SourceRetirementStatus, Self::Error> {
+        self.inner
+            .cancel_source_conditional_retirement(output, ticket)
     }
 }
