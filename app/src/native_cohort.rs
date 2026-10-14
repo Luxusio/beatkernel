@@ -917,7 +917,9 @@ fn commit_cohort_practice<
             .source_playback_identity()
             .ok_or("coordinate practice lost its original Source identity")?;
         let presentation = session.discipline.audio().expect("audio timing");
-        let Some(mapping) = device.playback_mapping_at(presentation, &query, identity)? else {
+        let Some(mapping) =
+            device.conditional_playback_mapping_at(presentation, &query, identity)?
+        else {
             return Ok(false);
         };
         let basis = session
@@ -3490,7 +3492,9 @@ fn service_audio_cohort<
             }
             let query = prepared.query();
             let presentation = session.discipline.audio().expect("audio timing");
-            let Some(mapping) = device.playback_mapping_at(presentation, &query, identity)? else {
+            let Some(mapping) =
+                device.conditional_playback_mapping_at(presentation, &query, identity)?
+            else {
                 break;
             };
             let phase = mapping.phase(
@@ -3865,7 +3869,9 @@ fn service_audio_cohort<
         };
         let query = frontier.query();
         let presentation = session.discipline.audio().expect("audio timing");
-        let Some(mapping) = device.playback_mapping_at(presentation, &query, identity)? else {
+        let Some(mapping) =
+            device.conditional_playback_mapping_at(presentation, &query, identity)?
+        else {
             return Ok(());
         };
         let phase = mapping.phase(

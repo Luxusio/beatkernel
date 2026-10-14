@@ -21,6 +21,55 @@ enum Backend {
     Wasapi,
     Asio,
 }
+#[cfg(any(target_os = "windows", test))]
+fn retained_complete_startup(
+    retained: bool,
+    backend: Backend,
+    mode: beatkernel_platform::audio::AudioStreamMode,
+) -> bool {
+    retained
+        && backend == Backend::Wasapi
+        && matches!(mode, beatkernel_platform::audio::AudioStreamMode::Shared(_))
+}
+
+/// The retained vertical reuses the ordinary planner without crossing backend,
+/// mode or Source-rate ownership boundaries.
+#[cfg(any(target_os = "windows", test))]
+fn plan_retained_shared_output(
+    current: &beatkernel_bms_runtime::gameplay::output::domain::control::OutputCapability,
+    current_wasapi: &beatkernel_platform::audio::AudioStreamRequest,
+    source: beatkernel::audio::AudioFormat,
+    matrix: Option<&beatkernel::audio::ChannelMatrix>,
+    args: &[String],
+) -> std::result::Result<output_settings::WasapiTargetPlan, String> {
+    use beatkernel_platform::audio::{AudioBackendKind, AudioStreamMode};
+    if current_wasapi.backend() != AudioBackendKind::Wasapi
+        || !matches!(current_wasapi.mode(), AudioStreamMode::Shared(_))
+        || current_wasapi.format().sample_rate() != source.sample_rate()
+    {
+        return Err("retained replacement requires same-rate WASAPI shared output".into());
+    }
+    let output_settings::TargetPlan::Wasapi(plan) = output_settings::plan_target(
+        current,
+        Some(current_wasapi),
+        source,
+        matrix,
+        args,
+        cfg!(feature = "asio-sdk"),
+    )?
+    else {
+        return Err("retained replacement cannot change the audio backend".into());
+    };
+    if !matches!(plan.mode, AudioStreamMode::Shared(_))
+        || plan.format.sample_rate() != source.sample_rate()
+        || plan.format.encoding() != current_wasapi.format().encoding()
+    {
+        return Err(
+            "retained replacement requires shared mode and unchanged Source rate/encoding".into(),
+        );
+    }
+    Ok(plan)
+}
 #[cfg(any(all(target_os = "windows", feature = "asio-sdk"), test))]
 fn asio_pause_observation(
     observation: Option<beatkernel_platform::audio::asio::AsioPresentationObservation>,
@@ -1132,8 +1181,19 @@ mod native {
         ) -> NativeGameplayResult<
             Option<beatkernel_bms_runtime::native_playback_phase::NativePlaybackMapping>,
         > {
-            Ok(self.output.source_playback_at(presentation, query, identity)?
-                .as_ref().map(beatkernel_bms_runtime::native_playback_phase::NativePlaybackMapping::from_source))
+            self.output
+                .playback_mapping_at(presentation, query, identity)
+        }
+        fn conditional_playback_mapping_at(
+            &mut self,
+            presentation: &NativeAudioPresentation,
+            query: &beatkernel::audio::InterpolatedTargetTime,
+            identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+        ) -> NativeGameplayResult<
+            Option<beatkernel_bms_runtime::native_playback_phase::NativePlaybackMapping>,
+        > {
+            self.output
+                .conditional_playback_mapping_at(presentation, query, identity)
         }
         fn observe_audio(
             &mut self,
@@ -1166,6 +1226,24 @@ mod native {
                 return Ok(false);
             }
             self.output_ui.service_audio(self.output, context, now)
+        }
+        fn publish_paused_coordinate_audio_output(
+            &mut self,
+            context: beatkernel_bms_runtime::gameplay_presentation::GameplayAudioOutputContext<'_>,
+            now: ClockPoint,
+            identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+            practice_pending: bool,
+        ) -> NativeGameplayResult<bool> {
+            if !self.output.has_work() && !self.output_ui.pending() {
+                return Ok(false);
+            }
+            self.output_ui.service_coordinate_source_audio(
+                self.output,
+                context,
+                now,
+                identity,
+                practice_pending,
+            )
         }
         fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
             self.output.observe(discipline)?;
@@ -1291,7 +1369,7 @@ mod native {
         fn render_report(
             &mut self,
         ) -> NativeGameplayResult<Option<beatkernel::audio::RenderReport>> {
-            super::owned_output::stream(self.output)?.render_report()
+            self.output.startup_render_report()
         }
         fn host_now(&self) -> NativeGameplayResult<ClockPoint> {
             Ok(self.clock.sample()?.normalized)
@@ -1314,8 +1392,7 @@ mod native {
         seed_end: bool,
     ) -> Result<Option<(NativeAudioPresentation, SeededNativeAudio, Duration)>> {
         let basis = super::owned_output::basis(output)?;
-        let bound =
-            super::owned_output::stream(output)?.audio_startup_bound(basis.sample_rate())?;
+        let bound = output.audio_startup_bound(basis.sample_rate())?;
         let mut presentation = new_audio_presentation(
             output.last_issued_epoch(),
             basis,
@@ -1368,13 +1445,10 @@ mod native {
             beatkernel_bms_runtime::native_audio_startup::StartedSourceCoordinateNativeAudio,
         )>,
     > {
-        let (bound, buffer_frames) = {
-            let stream = super::owned_output::stream(output)?;
-            (
-                stream.audio_startup_bound(identity.hz())?,
-                stream.startup_buffer_frames()?,
-            )
-        };
+        let (bound, buffer_frames) = (
+            output.audio_startup_bound(identity.hz())?,
+            output.startup_buffer_frames()?,
+        );
         let deadline = Instant::now()
             .checked_add(WallDuration::from_nanos(u64::try_from(bound.as_nanos())?))
             .ok_or("Source descriptor discovery deadline overflow")?;
@@ -1386,7 +1460,7 @@ mod native {
             if !collected.service_start(collector, true, pre_origin, 256)? {
                 return Ok(None);
             }
-            if let Some(basis) = super::owned_output::stream(output)?.source_coordinate_basis()? {
+            if let Some(basis) = output.source_coordinate_basis()? {
                 break basis;
             }
             if Instant::now() >= deadline {
@@ -1784,12 +1858,13 @@ mod native {
             options.voices,
             capacity
         );
-        let stream = setup.open(mixer, &options, clock, retained)?;
-        let mut output = super::owned_output::owner(stream, clock);
+        let mut output = setup.open_owned(mixer, &options, clock, retained)?;
         let mut output_ui = super::owned_output::WindowsOutputUi::new(&output, !network_start)?;
         println!(
             "requested/applied native output={:?}",
-            super::owned_output::stream(&mut output)?.description()
+            output
+                .description()
+                .ok_or("initial Windows output unavailable")?
         );
         println!(
             "Focus the BeatKernel BMS native window and play the explicitly bound physical keys. Console prints actual grades and misses."
@@ -1894,7 +1969,7 @@ mod native {
                             return Ok(None);
                         }
                     }
-                    super::owned_output::stream(&mut output)?.start()?;
+                    output.start()?;
                     None
                 };
                 let (mut presentation, playback_origin, host_origin, transport) = if let Some(
@@ -2087,7 +2162,7 @@ mod native {
         );
         println!(
             "final audio snapshot={:?}; physical latency=unmeasured",
-            output.current_mut().map(|out| out.native.description())
+            output.description()
         );
         if let Err(error) = &stop {
             eprintln!("native output stop/join error: {error}");
@@ -2856,3 +2931,7 @@ fn exact_keyboard_selection_has_no_attachment_fallback() {
 #[cfg(test)]
 #[path = "windows_bms/output_switch_fixtures.rs"]
 mod output_switch_fixtures;
+
+#[cfg(test)]
+#[path = "windows_bms/retained_source_output_fixtures.rs"]
+mod retained_source_output_fixtures;

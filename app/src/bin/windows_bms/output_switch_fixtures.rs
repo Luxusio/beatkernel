@@ -365,3 +365,43 @@ fn capability_arguments_roundtrip_through_target_planner() {
     };
     assert_eq!(plan.into_request(None).unwrap().native, wasapi());
 }
+
+#[test]
+fn retained_shared_restrictions_preserve_legacy_backend_and_exclusive_selection() {
+    let settings::TargetPlan::Asio(asio) = from_wasapi(&asio_args(), true).unwrap() else {
+        panic!("legacy backend switching lost ASIO")
+    };
+    assert_eq!(asio.device, DRIVER);
+    assert_eq!(asio.channels, [3, 1]);
+    let settings::TargetPlan::Wasapi(exclusive) = from_wasapi(
+        &strings(&[
+            "--mode",
+            "exclusive",
+            "--buffer",
+            "frames:128",
+            "--period",
+            "frames:128",
+        ]),
+        false,
+    )
+    .unwrap() else {
+        panic!("legacy exclusive selection lost WASAPI")
+    };
+    assert_eq!(exclusive.mode, AudioStreamMode::Exclusive);
+    assert_eq!(exclusive.format, wasapi().format());
+    assert_eq!(exclusive.buffer, BufferRequest::Frames(128));
+    assert_eq!(exclusive.period, PeriodRequest::Frames(128));
+    assert!(!super::retained_complete_startup(
+        false,
+        super::Backend::Wasapi,
+        AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
+    ));
+    assert!(super::plan_retained_shared_output(
+        &wasapi_cap(),
+        &wasapi(),
+        source(),
+        None,
+        &strings(&["--mode", "shared"]),
+    )
+    .is_err());
+}

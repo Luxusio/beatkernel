@@ -2,25 +2,33 @@
 use super::live_output::{Output, StartupEvidence, WindowsSourceEvidence};
 use super::*;
 use beatkernel::audio::{
-    ChannelMatrix, Mixer, OutputFrameBasis, OutputOpenFailure, RenderReport, StoppedMixerSource,
+    AudioFormat, ChannelMatrix, Mixer, OutputFrameBasis, OutputOpenFailure, RenderReport,
+    StoppedMixerSource,
 };
 use beatkernel::time::{ClockPair, ClockPoint};
 use beatkernel_bms_runtime::{
     gameplay::output::{
-        adapters::{player::PlayerOutputUi, remix::RemixedOutputBackend},
+        adapters::{
+            player::PlayerOutputUi,
+            remix::RemixedOutputBackend,
+            wasapi::{WasapiCompleteReplacementBackend, WasapiCompleteReplacementOutput},
+        },
         application::{owner::GameplayOutputOwner, requests::GameplayOutputUi},
         ports::{OutputChannelRemixBackend, OutputReplacementBackend},
     },
     gameplay_presentation::{GameplayAudioOutputContext, GameplayOutputContext},
     live_pause::LivePauseObservation,
+    native_audio_presentation::NativeAudioPresentation,
     native_end::{EndBoundary, NativeEnd},
+    native_playback_phase::NativePlaybackMapping,
 };
 use beatkernel_platform::{
     audio::{
         presentation::discipline::PresentationDiscipline, AudioOutputStream, AudioStreamRequest,
+        NativeOutputState,
     },
     windows::{
-        audio::{WasapiBackend, WasapiOptions},
+        audio::{SourceRetirementTicket, WasapiBackend, WasapiOptions},
         clock::QpcClock,
     },
 };
@@ -407,30 +415,346 @@ impl OutputChannelRemixBackend for WindowsReplacementBackend {
         self.open_native(request, mixer, epoch, Some(matrix))
     }
 }
-pub(super) type WindowsOutputOwner =
-    GameplayOutputOwner<RemixedOutputBackend<WindowsReplacementBackend>>;
+type LegacyOutputOwner = GameplayOutputOwner<RemixedOutputBackend<WindowsReplacementBackend>>;
+type CompleteOutputOwner = GameplayOutputOwner<
+    RemixedOutputBackend<WasapiCompleteReplacementBackend>,
+    NativeOutputState,
+    OutputFrameBasis,
+    SourceRetirementTicket,
+>;
+pub(super) enum WindowsOutputOwner {
+    Legacy(LegacyOutputOwner),
+    Complete {
+        owner: CompleteOutputOwner,
+        source: AudioFormat,
+    },
+}
 pub(super) fn owner(native: Output, clock: QpcClock) -> WindowsOutputOwner {
     let source_channels = match &native {
         Output::Wasapi(stream) => stream.configuration().format.channels(),
         #[cfg(feature = "asio-sdk")]
         Output::Asio(output) => output.live.channels.len() as u16,
     };
-    WindowsOutputOwner::new(
+    WindowsOutputOwner::Legacy(LegacyOutputOwner::new(
         RemixedOutputBackend::new(WindowsReplacementBackend { clock }),
         OwnedOutput::new(native, 0, None, source_channels, clock),
-    )
+    ))
+}
+pub(super) fn complete_owner(
+    request: AudioStreamRequest,
+    mixer: Mixer,
+    clock: QpcClock,
+) -> Result<WindowsOutputOwner> {
+    // This identity belongs to the original Mixer, even after a channel remix.
+    let source = mixer.configuration().format();
+    let backend = RemixedOutputBackend::new(WasapiCompleteReplacementBackend::new(
+        clock,
+        WasapiOptions::default(),
+        beatkernel_bms_runtime::native_audio_startup::SOURCE_COORDINATE_HISTORY_HEADROOM,
+    ));
+    let owner = CompleteOutputOwner::open_initial_with_ticket(
+        backend,
+        beatkernel_bms_runtime::gameplay::output::domain::remix::RemixedOutputRequest {
+            native: request,
+            matrix: None,
+        },
+        NativeOutputState::from_mixer(mixer),
+        0,
+    )?;
+    Ok(WindowsOutputOwner::Complete { owner, source })
 }
 pub(super) fn stream(owner: &mut WindowsOutputOwner) -> Result<&mut Output> {
+    let WindowsOutputOwner::Legacy(owner) = owner else {
+        return Err("complete Source output cannot be borrowed as a legacy stream".into());
+    };
     Ok(&mut owner
         .current_mut()
         .ok_or("current Windows output unavailable")?
         .native)
 }
 pub(super) fn basis(owner: &WindowsOutputOwner) -> Result<OutputFrameBasis> {
-    Ok(owner
-        .current()
-        .ok_or("current Windows output unavailable")?
-        .basis())
+    match owner {
+        WindowsOutputOwner::Legacy(owner) => Ok(owner
+            .current()
+            .ok_or("current Windows output unavailable")?
+            .basis()),
+        WindowsOutputOwner::Complete { owner, .. } => Ok(owner
+            .current()
+            .ok_or("current Windows complete output unavailable")?
+            .stream()
+            .frame_basis()),
+    }
+}
+
+impl WindowsOutputOwner {
+    pub(super) fn last_issued_epoch(&self) -> u64 {
+        match self {
+            Self::Legacy(o) => o.last_issued_epoch(),
+            Self::Complete { owner, .. } => owner.last_issued_epoch(),
+        }
+    }
+    pub(super) fn has_work(&self) -> bool {
+        match self {
+            Self::Legacy(o) => o.has_work(),
+            Self::Complete { owner, .. } => owner.has_work(),
+        }
+    }
+    pub(super) fn replacement_pending(&self) -> bool {
+        match self {
+            Self::Legacy(o) => o.replacement_pending(),
+            Self::Complete { owner, .. } => owner.replacement_pending(),
+        }
+    }
+    pub(super) fn output_clock_suspended(&self) -> bool {
+        match self {
+            Self::Legacy(o) => o.output_clock_suspended(),
+            Self::Complete { owner, .. } => owner.output_clock_suspended(),
+        }
+    }
+    pub(super) fn render_report(&self) -> Option<RenderReport> {
+        match self {
+            Self::Legacy(o) => o.render_report(),
+            Self::Complete { owner, .. } => owner.render_report(),
+        }
+    }
+    pub(super) fn stop(&mut self) -> Result<()> {
+        match self {
+            Self::Legacy(o) => Ok(o.stop()?),
+            Self::Complete { owner, .. } => Ok(owner.stop()?),
+        }
+    }
+    pub(super) fn start(&mut self) -> Result<()> {
+        match self {
+            Self::Legacy(o) => o
+                .current_mut()
+                .ok_or("current Windows output unavailable")?
+                .native
+                .start(),
+            Self::Complete { owner, .. } => Ok(owner
+                .current_mut()
+                .ok_or("current Windows complete output unavailable")?
+                .stream_mut()
+                .start()?),
+        }
+    }
+    pub(super) fn description(&mut self) -> Option<String> {
+        match self {
+            Self::Legacy(o) => o.current_mut().map(|output| output.native.description()),
+            Self::Complete { owner, .. } => owner.current().map(|output| {
+                format!(
+                    "WASAPI retained applied={:?} snapshot={:?}",
+                    output.stream().configuration(),
+                    output.stream().snapshot()
+                )
+            }),
+        }
+    }
+    pub(super) fn startup_buffer_frames(&mut self) -> Result<u32> {
+        match self {
+            Self::Legacy(o) => o
+                .current_mut()
+                .ok_or("current Windows output unavailable")?
+                .native
+                .startup_buffer_frames(),
+            Self::Complete { owner, .. } => Ok(owner
+                .current()
+                .ok_or("current Windows complete output unavailable")?
+                .stream()
+                .configuration()
+                .buffer_frames),
+        }
+    }
+    pub(super) fn audio_startup_bound(&mut self, rate: u32) -> Result<beatkernel::time::Duration> {
+        if let Self::Legacy(o) = self {
+            return o
+                .current_mut()
+                .ok_or("current Windows output unavailable")?
+                .native
+                .audio_startup_bound(rate);
+        }
+        if rate == 0 {
+            return Err("native output has zero sample rate".into());
+        }
+        let period = (i128::from(self.startup_buffer_frames()?) * 1_000_000_000 + i128::from(rate)
+            - 1)
+            / i128::from(rate);
+        let bound = period
+            .checked_mul(4)
+            .and_then(|value| value.checked_add(2_000_000_000))
+            .ok_or("native startup bound overflow")?;
+        Ok(beatkernel::time::Duration::from_nanos(i64::try_from(
+            bound,
+        )?))
+    }
+    pub(super) fn source_coordinate_basis(
+        &mut self,
+    ) -> Result<Option<beatkernel_bms_runtime::audio_authority::AudioAuthorityCoordinateBasis>>
+    {
+        match self {
+            Self::Legacy(o) => o
+                .current_mut()
+                .ok_or("current Windows output unavailable")?
+                .native
+                .source_coordinate_basis(),
+            Self::Complete { owner, .. } => {
+                let stream = owner
+                    .current()
+                    .ok_or("current Windows complete output unavailable")?
+                    .stream();
+                Ok(Some(beatkernel_bms_runtime::audio_authority::AudioAuthorityCoordinateBasis::SourceCounter {
+                    basis: stream.frame_basis(), frequency: stream.clock_frequency(),
+                }))
+            }
+        }
+    }
+    pub(super) fn startup_render_report(&mut self) -> Result<Option<RenderReport>> {
+        match self {
+            Self::Legacy(o) => o
+                .current_mut()
+                .ok_or("current Windows output unavailable")?
+                .native
+                .render_report(),
+            Self::Complete { owner, .. } => Ok(owner.render_report()),
+        }
+    }
+    pub(super) fn observe_native_control(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> Result<Option<beatkernel_bms_runtime::native_coordinate_control::CoordinateControlFacts>>
+    {
+        match self {
+            Self::Legacy(o) => Ok(o.observe_native_control(presentation, identity)?),
+            Self::Complete { owner, .. } => {
+                owner.observe_conditional_source_native_control(presentation, identity)
+            }
+        }
+    }
+    pub(super) fn playback_mapping_at(
+        &self,
+        presentation: &NativeAudioPresentation,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> Result<Option<NativePlaybackMapping>> {
+        match self {
+            Self::Legacy(o) => Ok(o
+                .source_playback_at(presentation, query, identity)?
+                .as_ref()
+                .map(NativePlaybackMapping::from_source)),
+            Self::Complete { .. } => {
+                Err("complete Source query requires the mutable conditional device port".into())
+            }
+        }
+    }
+    pub(super) fn conditional_playback_mapping_at(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> Result<Option<NativePlaybackMapping>> {
+        match self {
+            Self::Legacy(o) => Ok(o
+                .source_playback_at(presentation, query, identity)?
+                .as_ref()
+                .map(NativePlaybackMapping::from_source)),
+            Self::Complete { owner, .. } => Ok(owner
+                .conditional_source_playback_at(presentation, query, identity)?
+                .as_ref()
+                .map(NativePlaybackMapping::from_source)),
+        }
+    }
+    pub(super) fn request_source_history_retirement_with_source_pin(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+        source_minimum: Option<u64>,
+    ) -> Result<Option<u64>> {
+        match self {
+            Self::Legacy(o) => Ok(o.request_source_history_retirement_with_source_pin(
+                presentation,
+                query,
+                identity,
+                source_minimum,
+            )?),
+            Self::Complete { owner, .. } => owner
+                .request_conditional_source_history_retirement_with_source_pin(
+                    presentation,
+                    query,
+                    identity,
+                    source_minimum,
+                ),
+        }
+    }
+    pub(super) fn observe_native(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+    ) -> Result<()> {
+        match self {
+            Self::Legacy(o) => Ok(o.observe_native(presentation)?),
+            Self::Complete { .. } => {
+                Err("complete Source observation requires coordinate identity".into())
+            }
+        }
+    }
+    pub(super) fn audio_pause_observation(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        now: ClockPoint,
+    ) -> Result<LivePauseObservation> {
+        match self {
+            Self::Legacy(o) => Ok(o.audio_pause_observation(presentation, now)?),
+            Self::Complete { .. } => {
+                Err("complete Source pause requires coordinate control facts".into())
+            }
+        }
+    }
+    pub(super) fn observe_audio_end(
+        &mut self,
+        end: &mut NativeEnd,
+        presentation: &NativeAudioPresentation,
+    ) -> Result<Option<EndBoundary>> {
+        match self {
+            Self::Legacy(o) => o.observe_audio_end(end, presentation),
+            Self::Complete { .. } => {
+                Err("complete Source end uses retained practice end intent".into())
+            }
+        }
+    }
+    pub(super) fn observe(&mut self, discipline: &mut PresentationDiscipline) -> Result<()> {
+        match self {
+            Self::Legacy(o) => Ok(o.observe(discipline)?),
+            Self::Complete { .. } => Err("complete Source cannot use scalar presentation".into()),
+        }
+    }
+    pub(super) fn pause_observation(
+        &mut self,
+        pair: ClockPair,
+        now: ClockPoint,
+    ) -> Result<LivePauseObservation> {
+        match self {
+            Self::Legacy(o) => Ok(o.pause_observation(pair, now)?),
+            Self::Complete { .. } => Err("complete Source cannot use scalar pause evidence".into()),
+        }
+    }
+    pub(super) fn seed_resume(&mut self, discipline: &mut PresentationDiscipline) -> Result<()> {
+        match self {
+            Self::Legacy(o) => Ok(o.seed_resume(discipline)?),
+            Self::Complete { .. } => {
+                Err("complete Source resume requires coordinate adoption".into())
+            }
+        }
+    }
+    pub(super) fn observe_end(
+        &mut self,
+        end: &mut NativeEnd,
+        discipline: &PresentationDiscipline,
+    ) -> Result<Option<EndBoundary>> {
+        match self {
+            Self::Legacy(o) => o.observe_end(end, discipline),
+            Self::Complete { .. } => Err("complete Source cannot use scalar end evidence".into()),
+        }
+    }
 }
 fn capability(
     output: &OwnedOutput,
@@ -464,6 +788,46 @@ fn capability(
         }
     }
 }
+fn complete_capability(
+    output: &WasapiCompleteReplacementOutput,
+) -> std::result::Result<
+    beatkernel_bms_runtime::gameplay::output::domain::control::OutputCapability,
+    String,
+> {
+    super::output_settings::switch_capability(
+        super::output_settings::capability(
+            output.stream().configuration(),
+            output.channel_matrix(),
+        )?,
+        Backend::Wasapi,
+        None,
+    )
+}
+
+fn resolve_wasapi_plan(
+    plan: super::output_settings::WasapiTargetPlan,
+) -> std::result::Result<
+    beatkernel_bms_runtime::gameplay::output::domain::remix::RemixedOutputRequest<
+        AudioStreamRequest,
+    >,
+    String,
+> {
+    let default = if plan.device.is_none() {
+        use beatkernel_platform::audio::{AudioDeviceState, AudioOutputBackend};
+        Some(
+            WasapiBackend
+                .devices()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|d| d.state == AudioDeviceState::Active && d.default_multimedia)
+                .ok_or("no active OS default multimedia output")?
+                .id,
+        )
+    } else {
+        None
+    };
+    plan.into_request(default)
+}
 pub(super) struct WindowsOutputUi {
     bridge: GameplayOutputUi<PlayerOutputUi>,
 }
@@ -471,9 +835,11 @@ impl WindowsOutputUi {
     pub(super) fn new(owner: &WindowsOutputOwner, enabled: bool) -> Result<Self> {
         let mut bridge = GameplayOutputUi::new(PlayerOutputUi);
         let cap = if enabled {
-            match owner.current() {
-                Some(output) => Some(capability(output)?),
-                _ => None,
+            match owner {
+                WindowsOutputOwner::Legacy(owner) => owner.current().map(capability).transpose()?,
+                WindowsOutputOwner::Complete { owner, .. } => {
+                    owner.current().map(complete_capability).transpose()?
+                }
             }
         } else {
             None
@@ -514,21 +880,7 @@ impl WindowsOutputUi {
         )?;
         match target {
             super::output_settings::TargetPlan::Wasapi(plan) => {
-                let default = if plan.device.is_none() {
-                    use beatkernel_platform::audio::{AudioDeviceState, AudioOutputBackend};
-                    Some(
-                        WasapiBackend
-                            .devices()
-                            .map_err(|e| e.to_string())?
-                            .into_iter()
-                            .find(|d| d.state == AudioDeviceState::Active && d.default_multimedia)
-                            .ok_or("no active OS default multimedia output")?
-                            .id,
-                    )
-                } else {
-                    None
-                };
-                let request = plan.into_request(default)?;
+                let request = resolve_wasapi_plan(plan)?;
                 Ok(
                     beatkernel_bms_runtime::gameplay::output::domain::remix::RemixedOutputRequest {
                         native: WindowsRequest::Wasapi(request.native),
@@ -587,6 +939,9 @@ impl WindowsOutputUi {
         context: GameplayOutputContext<'_, PresentationDiscipline>,
         now: ClockPoint,
     ) -> Result<bool> {
+        let WindowsOutputOwner::Legacy(owner) = owner else {
+            return Err("complete Source output cannot use scalar publication".into());
+        };
         self.bridge
             .service(owner, context, now, &mut Self::map_request, &mut capability)
     }
@@ -596,7 +951,52 @@ impl WindowsOutputUi {
         context: GameplayAudioOutputContext<'_>,
         now: ClockPoint,
     ) -> Result<bool> {
+        let WindowsOutputOwner::Legacy(owner) = owner else {
+            return Err("complete Source output requires coordinate publication".into());
+        };
         self.bridge
             .service_audio(owner, context, now, &mut Self::map_request, &mut capability)
+    }
+    pub(super) fn service_coordinate_source_audio(
+        &mut self,
+        owner: &mut WindowsOutputOwner,
+        context: GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+        identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+        practice_pending: bool,
+    ) -> Result<bool> {
+        match owner {
+            WindowsOutputOwner::Legacy(owner) => {
+                // Retained exclusive/ASIO keep their existing explicit refusal.
+                self.bridge.service_audio(
+                    owner,
+                    context,
+                    now,
+                    &mut Self::map_request,
+                    &mut capability,
+                )
+            }
+            WindowsOutputOwner::Complete { owner, source } => {
+                let source = *source;
+                self.bridge.service_coordinate_source_audio(
+                    owner,
+                    context,
+                    now,
+                    identity,
+                    practice_pending,
+                    &mut |request, output| {
+                        let plan = super::plan_retained_shared_output(
+                            &complete_capability(output)?,
+                            &output.stream().configuration().requested,
+                            source,
+                            output.channel_matrix(),
+                            &request.args,
+                        )?;
+                        resolve_wasapi_plan(plan)
+                    },
+                    &mut complete_capability,
+                )
+            }
+        }
     }
 }

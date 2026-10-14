@@ -129,6 +129,29 @@ impl Setup {
             Self::Asio { format, .. } => *format,
         }
     }
+    pub(super) fn open_owned(
+        self,
+        mixer: Mixer,
+        options: &Options,
+        clock: QpcClock,
+        retained_history: bool,
+    ) -> Result<super::owned_output::WindowsOutputOwner> {
+        match self {
+            Self::Wasapi(request)
+                if super::retained_complete_startup(
+                    retained_history,
+                    Backend::Wasapi,
+                    request.mode(),
+                ) =>
+            {
+                super::owned_output::complete_owner(request, mixer, clock)
+            }
+            setup => Ok(super::owned_output::owner(
+                setup.open(mixer, options, clock, retained_history)?,
+                clock,
+            )),
+        }
+    }
     #[cfg_attr(not(feature = "asio-sdk"), allow(unused_variables))]
     pub(super) fn open(
         self,
@@ -452,7 +475,7 @@ impl Output {
             Self::Asio(_) => {
                 use beatkernel_bms_runtime::gameplay::output::{
                     adapters::asio::{
-                        AsioReplacementBackend, qualify_asio_source_observation_packet,
+                        qualify_asio_source_observation_packet, AsioReplacementBackend,
                     },
                     ports::SourcePlaybackPacketError,
                 };

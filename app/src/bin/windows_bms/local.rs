@@ -508,8 +508,8 @@ pub(super) fn run(
         mixer,
     } = audio;
     let mut bgm = BgmSession(bgm);
-    let stream = match setup.open(mixer, &options, clock, retained) {
-        Ok(stream) => stream,
+    let mut output = match setup.open_owned(mixer, &options, clock, retained) {
+        Ok(output) => output,
         Err(error) => {
             let mut failures = vec![format!("native output open: {error}")];
             if let Err(close) = input_owner.stop_and_join() {
@@ -519,11 +519,12 @@ pub(super) fn run(
             return finish_cohort(states, save_paths, failures, save_capture);
         }
     };
-    let mut output = super::owned_output::owner(stream, clock);
     let mut output_ui = super::owned_output::WindowsOutputUi::new(&output, !network_start)?;
     println!(
         "local players={count}; shared output={}; independent judges/captures/scores",
-        super::owned_output::stream(&mut output)?.description()
+        output
+            .description()
+            .ok_or("initial Windows output unavailable")?
     );
     let mut before_origin = 0u64;
     let mut collected = beatkernel_bms_runtime::native_gameplay::NativeCollectedInput::new()?;
@@ -569,7 +570,7 @@ pub(super) fn run(
             println!("shared native applied start={:?}; HOST acquisition={:?}; host window={:?}; physical accuracy unmeasured", started.plan, started.host_origin, started.host_window);
             Some((started.host_origin, playback_origin))
         } else {
-            super::owned_output::stream(&mut output)?.start()?;
+            output.start()?;
             None
         };
         let (mut presentation, playback_origin, host_origin, logical_origin, transport) =
@@ -710,7 +711,7 @@ pub(super) fn run(
     let close = input_owner.stop_and_join();
     println!(
         "shared final output={:?}; pre-origin ignored={before_origin}; physical delivery unverified",
-        output.current_mut().map(|out| out.native.description())
+        output.description()
     );
     if let Err(error) = &stop {
         eprintln!("shared native stop/join error: {error}");

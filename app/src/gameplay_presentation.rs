@@ -294,6 +294,15 @@ pub trait GameplayDevice {
     ) -> NativeGameplayResult<Option<crate::native_playback_phase::NativePlaybackMapping>> {
         Err("device does not support exact playback mapping".into())
     }
+    /// Mapping query that can service conditional native ownership before old-stream IO.
+    fn conditional_playback_mapping_at(
+        &mut self,
+        presentation: &crate::native_audio_presentation::NativeAudioPresentation,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> NativeGameplayResult<Option<crate::native_playback_phase::NativePlaybackMapping>> {
+        self.playback_mapping_at(presentation, query, identity)
+    }
     /// One compound acquisition for original source control staging; no scalar fallback.
     fn observe_coordinate_control(
         &mut self,

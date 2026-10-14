@@ -2438,7 +2438,7 @@ fn service_practice_solo<
             .discipline
             .source_playback_identity()
             .ok_or("coordinate practice lacks original source identity")?;
-        let Some(mapping) = device.playback_mapping_at(
+        let Some(mapping) = device.conditional_playback_mapping_at(
             session.discipline.audio().expect("audio timing"),
             &query,
             identity,
@@ -3188,7 +3188,7 @@ fn service_audio_solo<
                 *session.pre_origin_inputs = count;
                 continue;
             }
-            let Some(mapping) = device.playback_mapping_at(
+            let Some(mapping) = device.conditional_playback_mapping_at(
                 session.discipline.audio().expect("audio timing"),
                 &prepared.query(),
                 identity,
@@ -3506,7 +3506,7 @@ fn service_audio_solo<
         else {
             return Ok(());
         };
-        let Some(mapping) = device.playback_mapping_at(
+        let Some(mapping) = device.conditional_playback_mapping_at(
             session.discipline.audio().expect("audio timing"),
             &frontier.query(),
             identity,
