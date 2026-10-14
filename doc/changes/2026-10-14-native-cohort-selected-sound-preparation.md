@@ -33,12 +33,37 @@ also pass; these filters overlap larger suites and are not additive totals.
 
 Host bin checking and Windows/macOS app/platform lib/tests typing exit0. The
 foreign checks use C stubs and prove Rust typing only, not native ABI/device
-execution. The initial no-default WASM check passes; the explicit browser feature
-and full desktop/WebTransport app suite remain for independent qa-cli after
-formal review. Read-only coverage/contract and performance advice found no
-concrete defect; advisory results do not replace those gates. Raw logs are in
+execution. The initial no-default WASM check passed before review. Read-only
+coverage/contract and performance advice found no concrete defect; advisory
+results did not replace the independent gates below. Foundation logs are in
 `target/wf/native-cohort-selected-sound-preparation/foundations/` and are ignored
 local artifacts. The task's canonical PLAN owns exact commands and acceptance.
+
+The actual independent DEEP review of frozen `2b9928d3` returned PASS with zero
+findings after both discovery attempts. Only then did independent qa-cli run and
+return PASS for the pure preparation and software integration scope:
+
+| Check | Actual result |
+|---|---|
+| App desktop/WebTransport library | 3260 passed, 0 failed, 8 ignored |
+| App binaries | 624 passed, 0 failed, 17 ignored |
+| Preparation / retained-chart / cohort focused filters | 7 / 2 / 7 passed; overlap the full suite |
+| Host binaries, explicit browser-feature WASM | exit0 each |
+| Windows/macOS app/platform lib/tests C-stub typing | exit0 each; no native ABI/runtime proof |
+| App library Clippy without denying warnings | exit0, 394 warnings; not strict-clean |
+| Four production/one fixture format, diff, WBS | pass |
+| Local links in the five durable documents | 139 existing targets |
+| Three freshly built public native CLI binaries | 12/12 expected argument/help results |
+
+The CLI cases check help/empty arguments at exit0 and unknown flags/missing
+values at exit1, including stdout/stderr. They do not invoke the native playback
+or selected helper path; the latter is exercised by actual library/cohort tests.
+QA confirmed all ten frozen SHA values and the tracked clean tree before and
+after execution. Its exact argv, exits and output are retained under
+`target/wf/native-cohort-selected-sound-preparation/qa-cli-2b9928d3/`.
+Actual review/QA results do not themselves supply hook-owned completion records
+or authorize task close; final documentation audit and owning verification remain
+separate. This evidence does not complete the full BMS player Goal.
 
 ## Known ceiling
 

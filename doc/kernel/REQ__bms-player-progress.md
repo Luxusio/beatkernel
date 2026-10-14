@@ -7,7 +7,15 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
-2026-10-14 준비 경계 E71: 세 OS의 selected-chart 키음 필터를 기존
+2026-10-14 준비 경계 E72: frozen2b9928d3의 독립 DEEP 리뷰 PASS0 다음 독립 CLI QA가
+소프트웨어 범위 PASS했다. 전체 app3260/0/ignored8·bins624/0/ignored17, 준비7·
+retained2·cohort7, host bins·browser-feature WASM·Windows/macOS C-stub typing과
+scoped format/diff·문서 링크139·공개 CLI12/12가 통과했다. focused 수는 중복이고
+394 warnings의 Clippy는 strict-clean이 아니다. CLI smoke/typing은 실제 native
+재생을 입증하지 않는다.01.05/.06은 W, 전체106/223·원래91/193 그대로이며
+자동 완료 기록·owning verify/close와 전체 player 완료는 별도다.
+
+2026-10-14 준비 경계 E71(개발 당시 기록): 세 OS의 selected-chart 키음 필터를 기존
 local_preparation의 순수 함수로 통합했다. 실제 준비7·retained-chart2·cohort-setup7이
 통과했고, 전체 completion과 원본 source/PCM/BGM/키음 복원·뒤로 이동을 검증한다.
 호스트 bins 및 Windows/macOS C-stub typing은 exit0이며 실제 native 실행은 아니다.
