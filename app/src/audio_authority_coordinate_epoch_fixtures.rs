@@ -383,6 +383,145 @@ fn all_coordinate_classes_accept_exact_progress_hidden_by_equal_nanoseconds() {
     }
 }
 
+fn source_seeded(counter: bool) -> (AudioAuthority, InputMerger) {
+    let source = OutputFrameBasis::new(physical_origin(), 3, 5).unwrap();
+    let basis = if counter {
+        AudioAuthorityCoordinateBasis::SourceCounter {
+            basis: source,
+            frequency: 7,
+        }
+    } else {
+        AudioAuthorityCoordinateBasis::SourceFrame(source)
+    };
+    let mut authority = owner(basis);
+    let mut inputs = merger();
+    observe(&mut authority, 0, 100);
+    observe(&mut authority, 1, 200);
+    let original = input(125, 1);
+    inputs.admit(original.clone(), host(250)).unwrap();
+    authority.record_acquired_prefix(host(250)).unwrap();
+    let mapped = authority
+        .prepare_coordinate_input(host(125), host(250))
+        .unwrap()
+        .unwrap();
+    assert_eq!(inputs.pop_ready(host(250)).unwrap(), Some(original));
+    authority
+        .commit_coordinate_input(mapped, host(250))
+        .unwrap();
+    let frontier = authority
+        .prepare_coordinate_frontier(host(250), &inputs)
+        .unwrap()
+        .unwrap();
+    authority
+        .commit_coordinate_frontier(frontier, host(250), &mut inputs)
+        .unwrap();
+    (authority, inputs)
+}
+
+fn source_replacement_basis(counter: bool) -> AudioAuthorityCoordinateBasis {
+    let basis = OutputFrameBasis::new(physical_origin(), 3, 9).unwrap();
+    if counter {
+        AudioAuthorityCoordinateBasis::SourceCounter {
+            basis,
+            frequency: 11,
+        }
+    } else {
+        AudioAuthorityCoordinateBasis::SourceFrame(basis)
+    }
+}
+
+fn source_prepared(
+    authority: &AudioAuthority,
+    inputs: &InputMerger,
+    counter: bool,
+) -> PreparedPrimedCoordinateEpoch {
+    let basis = source_replacement_basis(counter);
+    let staged = authority
+        .prepare_coordinate_epoch(next_epoch(authority, basis), basis, inputs)
+        .unwrap();
+    authority
+        .prepare_primed_coordinate_epoch(
+            staged,
+            [observation(basis, 0, 260), observation(basis, 1, 300)],
+            host(320),
+            inputs,
+        )
+        .unwrap()
+}
+
+#[test]
+fn source_borrowed_publication_preserves_every_frontier_and_drained_source_registry() {
+    for counter in [false, true] {
+        let (mut authority, inputs) = source_seeded(counter);
+        assert_ne!(inputs.source_count(), 0);
+        assert_eq!(inputs.pending(), 0);
+        let token = source_prepared(&authority, &inputs, counter);
+        let before = snapshot(&authority);
+        let accepted = watermarks(&authority);
+        let merger_before = format!("{inputs:?}");
+        authority
+            .validate_primed_coordinate_epoch(&token, host(325), &inputs)
+            .unwrap();
+        assert_eq!(snapshot(&authority), before);
+        authority
+            .commit_primed_coordinate_epoch_borrowed(&token, host(325), &inputs)
+            .unwrap();
+        assert_eq!(authority.epoch(), token.next_epoch());
+        assert_eq!(authority.coordinate_basis(), Some(token.next_basis()));
+        assert_eq!(watermarks(&authority), accepted);
+        assert_eq!(format!("{inputs:?}"), merger_before);
+        assert_eq!(authority.history.capacity(), before.1);
+        assert_eq!(authority.history_len(), 2);
+        for (entry, (pair, original)) in authority.history.iter().zip(token.observations()) {
+            assert_eq!(entry.pair(), pair);
+            assert_eq!(entry.coordinate(), Some(original));
+        }
+        if counter {
+            assert!(matches!(
+                authority.coordinate_basis(),
+                Some(AudioAuthorityCoordinateBasis::SourceCounter { frequency: 11, .. })
+            ));
+        }
+        let published = snapshot(&authority);
+        assert!(authority
+            .commit_primed_coordinate_epoch_borrowed(&token, host(325), &inputs)
+            .is_err());
+        assert_eq!(snapshot(&authority), published);
+    }
+}
+
+#[test]
+fn source_borrowed_publication_rechecks_acquired_and_merger_admit_pop_commit_state() {
+    for counter in [false, true] {
+        for mutation in 0..4 {
+            let (mut authority, mut inputs) = source_seeded(counter);
+            let token = source_prepared(&authority, &inputs, counter);
+            match mutation {
+                0 => authority.record_acquired_prefix(host(251)).unwrap(),
+                1 => inputs.admit(input(280, 2), host(320)).unwrap(),
+                2 => {
+                    let original = input(280, 2);
+                    inputs.admit(original.clone(), host(320)).unwrap();
+                    assert_eq!(inputs.pop_ready(host(320)).unwrap(), Some(original));
+                    assert_eq!(inputs.pending(), 0);
+                }
+                3 => inputs.commit(host(280)).unwrap(),
+                _ => unreachable!(),
+            }
+            let before = snapshot(&authority);
+            let merger_before = format!("{inputs:?}");
+            assert!(authority
+                .validate_primed_coordinate_epoch(&token, host(325), &inputs)
+                .is_err());
+            assert!(authority
+                .commit_primed_coordinate_epoch_borrowed(&token, host(325), &inputs)
+                .is_err());
+            assert_eq!(snapshot(&authority), before);
+            assert_eq!(format!("{inputs:?}"), merger_before);
+        }
+    }
+}
+
 #[test]
 fn preparation_rejects_class_origin_epoch_domain_and_projection_changes_atomically() {
     let (authority, merger) = seeded();

@@ -24,6 +24,12 @@ use beatkernel_platform::audio::presentation::validation::{
 mod coordinate_epoch;
 pub use coordinate_epoch::PreparedCoordinateTargetNativeAudioEpoch;
 
+#[path = "native_audio_presentation_source_coordinate_epoch.rs"]
+mod source_coordinate_epoch;
+pub use source_coordinate_epoch::{
+    PreparedCoordinateSourceNativeAudioEpoch, PreparedCoordinateSourceOwnerAssociation,
+};
+
 /// One caller-supplied native observation on its actual creation epoch and frame basis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeAudioSnapshot {
@@ -109,6 +115,7 @@ pub struct NativeAudioPresentation {
     basis: Option<OutputFrameBasis>,
     target_basis: Option<TargetFrameBasis>,
     practice_mixer_basis: Option<OutputFrameBasis>,
+    source_owner_identity: Option<crate::gameplay::output::ports::SourcePlaybackIdentity>,
 }
 
 /// Opaque qualification of a rendered receipt by retained native presentation.
@@ -190,6 +197,7 @@ impl NativeAudioPresentation {
             basis: None,
             target_basis: None,
             practice_mixer_basis: None,
+            source_owner_identity: None,
         };
         owner.validate_identity()?;
         Ok(owner)
@@ -431,6 +439,7 @@ impl NativeAudioPresentation {
         self.basis = Some(prepared.basis);
         self.target_basis = None;
         self.practice_mixer_basis = None;
+        self.source_owner_identity = None;
         Ok(())
     }
 
@@ -544,6 +553,7 @@ impl NativeAudioPresentation {
         self.basis = None;
         self.target_basis = Some(prepared.basis);
         self.practice_mixer_basis = None;
+        self.source_owner_identity = None;
         Ok(())
     }
 
@@ -570,7 +580,7 @@ impl NativeAudioPresentation {
             return Err("practice mixer creation basis is already pinned".into());
         }
         if let Some(native) = self.basis {
-            if native != basis {
+            if native != basis && !self.source_owner_preserves_pin(native, basis) {
                 return Err("practice mixer differs from native mixer creation basis".into());
             }
         } else if let Some(native) = self.target_basis {
@@ -629,7 +639,10 @@ impl NativeAudioPresentation {
                 return Err("practice projection differs from native target creation grid".into());
             }
         } else if let Some(native) = self.basis {
-            let relative = receipt.physical_frame - native.start_physical_frame();
+            let relative = receipt
+                .physical_frame
+                .checked_sub(native.start_physical_frame())
+                .ok_or("practice projection precedes current native creation basis")?;
             if projected.target_rate != native.sample_rate()
                 || projected.boundary.target_time
                     != TargetTime::from_frames(receipt.physical_frame, native.sample_rate())?
@@ -685,7 +698,10 @@ impl NativeAudioPresentation {
                 ..
             }) => {
                 self.validate_coordinate_seed()?;
-                if self.basis != Some(source_basis) || basis != source_basis {
+                if self.basis != Some(source_basis)
+                    || (basis != source_basis
+                        && !self.source_owner_preserves_pin(source_basis, basis))
+                {
                     return Err(
                         "practice Source descriptor differs from original native mixer basis"
                             .into(),

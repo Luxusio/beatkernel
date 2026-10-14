@@ -10,6 +10,9 @@ use std::collections::HashMap;
 
 #[path = "playback_pause_coordinate_epoch.rs"]
 mod coordinate_epoch;
+#[path = "playback_pause_source_coordinate_epoch.rs"]
+mod source_coordinate_epoch;
+pub use source_coordinate_epoch::PreparedCoordinateSourcePauseOutput;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PauseError(pub &'static str);
@@ -75,6 +78,11 @@ pub struct NativePause {
     coordinate_replacement_observation:
         Option<crate::native_output_coordinate::CoordinateTargetNativeAudioSnapshot>,
     coordinate_source_pull_floor: Option<u64>,
+    coordinate_source_generation_floor: Option<u64>,
+    coordinate_source_replacement_observation: Option<(
+        crate::native_output_coordinate::CoordinateNativeAudioSnapshot,
+        crate::gameplay::output::ports::SourcePlaybackFacts,
+    )>,
     target: Option<TargetPauseState>,
     min_physical_frame: u64,
     rebound_basis: Option<beatkernel::audio::OutputFrameBasis>,
@@ -438,6 +446,8 @@ impl NativePause {
             coordinate_reference: None,
             coordinate_replacement_observation: None,
             coordinate_source_pull_floor: None,
+            coordinate_source_generation_floor: None,
+            coordinate_source_replacement_observation: None,
             target: None,
             min_physical_frame: 0,
             rebound_basis: None,
