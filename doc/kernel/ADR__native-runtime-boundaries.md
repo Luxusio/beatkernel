@@ -1,5 +1,37 @@
 # Native runtime boundaries
 
+## CoreAudio complete output owner
+
+Reuse the existing CoreAudioStream lifecycle with a private static Legacy/Complete
+render-owner enum. Complete owns NativeOutputState intact; legacy retains its
+existing Mixer/remix/scratch recovery. This avoids duplicated unsafe native
+registration/drain logic and public generic stream churn. A variant branch per
+callback is explicit; static ports do not imply universally zero overhead.
+
+The portable complete callback is the actual production step. Its sole retirement
+decision precedes native configuration/error checks and outer publication;
+validated whole-layout copying is infallible. HAL supplies initially zeroed
+buffers, so authorized retirement performs no source or publication work.
+Lifetime exclusion counters remain native resource accounting. Control-thread
+extraction waits for successful Stop/unregister/drain and never reads registered
+UnsafeCell ownership. First-unsent coordinates and original native evidence
+remain distinct from Mixer pull and created descriptors.
+
+Cache native nominal and maximum variable buffer geometry off callbacks. Use the
+existing bounded Mixer limit as a retained growth ceiling, but reserve PCM and
+opt-in Source history capacity cold for actual needs. Preserve old history
+preparation semantics because some legacy telemetry is allocated before that
+helper. The new complete cold path grows history before constructing telemetry;
+capacity growth preserves all identity, history and retirement facts.
+
+Existing ports, Source controller/Owner/UI and common solo/cohort policy remain
+the business layer; CoreAudio adapters and platform implement effects. A
+single-control-producer atomic geometry payload plus the existing checked nonce
+CAS preserves cancellation without a new reservation-state framework. Native
+buffer incompatibility remains a truthful refusal, never invented padding or
+admission. Portable execution and macOS C-stub typing do not prove HAL/device
+behavior, and software rollback does not restore global native device settings.
+
 ## Generated converted-boundary value ownership
 
 ConvertedBoundaryFacts belongs beside TargetBoundary in existing core audio,

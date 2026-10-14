@@ -1,5 +1,40 @@
 # Retained Source-coordinate output replacement
 
+## CoreAudio complete Source path
+
+CoreAudio retained solo/local play uses the same common Source Owner, typed UI,
+conditional mapping/control/history and paused-coordinate publication ports.
+Native adapters own HAL effects; common gameplay policy, Runtime/RuntimeGroup,
+attempts, selected policy and capture remain shared and unchanged. Network and
+legacy scalar/remixed consumers keep their existing compatible path.
+
+Preserve complete NativeOutputState through native open/start/retirement/cleanup
+and recover it only after Stop/unregister/drain. Reopen at the first unsent frame
+and retain the original Source history identity and creation pin. Actual original
+Mach/sample/flags and coherent even-revision native delivery packets qualify
+publication; a created SourceFrame descriptor alone grants no progress.
+
+Support actual variable callback sizes within the cold advertised maximum,
+separate from nominal requested frames. With pending PCM, submit only a full
+callback prefix that already exists, retaining the original report; never pad or
+rerender a short suffix. Cold fixed-buffer reopening accepts an empty suffix or
+a whole multiple of the new buffer. Live same-interpretation retirement permits
+empty or proven paused-zero suffix with compatible fixed geometry; changed
+interpretation or variable destination requires empty suffix. Incompatible
+geometry refuses intact, with no silent device/mode fallback.
+
+Retained composition uses a bounded immutable Mixer growth ceiling and prepares
+PCM/history from actual cold maximum, preserving source history across capacity
+growth. Every group is validated before any native copy. Retirement precedes
+source work and publication; HAL's pre-zeroed silence after authorization never
+advances source admission. Native authorization and actual callback drain remain
+distinct. See [complete CoreAudio recovery](../kernel/REQ__coreaudio-recoverable-open.md).
+
+The actual adapter/UI/solo/local wiring, portable production callback execution,
+foreign Rust typing and real Mac/HAL/device acceptance are distinct evidence
+tiers. CoreAudio WBS07.08.07.15 remains unfinished until its required real native
+acceptance; absence of a Mac host does not waive the full player requirement.
+
 This is an implementation contract, not a completion claim. It extends the
 [gapless contract](../kernel/REQ__gapless-practice.md). The historical task slug
 contains sourceframe; actual WASAPI provides SourceCounter. Preserve both true

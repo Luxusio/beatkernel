@@ -28,7 +28,7 @@ or free a context while registrations might call it. Expose a CoreAudio retry
 adapter over the same injected retirement operation. A successful retry uses
 existing StoppedMixerSource extraction after stop proves retirement.
 
-Success leaves applied layout/settings, telemetry, absolute frame mapping,
+Legacy success leaves applied layout/settings, telemetry, absolute frame mapping,
 start/stop and callback rendering unchanged. No new callback allocation/lock or
 OS-specific business policy. If a caller discards an unretired pending owner,
 the existing Drop safety leak may remain necessary; this API allows retention
@@ -36,9 +36,57 @@ and retry instead. Panic and native callback behavior are not proven here.
 
 Author independent portable pending-owner state tests with real Mixer/queues/PCM,
 opaque original/cleanup errors and Drop probes, plus macOS-only pure preflight
-fixtures with no MachClock/native calls. The latter remain uncompiled by the
-four allowed Linux/WASM checks. Assertions/runtime/device/formal review/QA remain
-deferred; scoped Rustfmt and four sequential compile-only checks follow both
-writer terminal stops. ASIO preparation now follows
+fixtures with no MachClock/native calls. Execute portable production logic and
+focused regressions, then independent review and QA; cached macOS C-stub checking
+provides Rust typing only. Actual HAL/device behavior remains separately required.
+ASIO preparation follows
 [ASIO recoverable prepare](REQ__asio-recoverable-prepare.md); SDK/device
 acceptance, automatic live handoff and full BMS player completion remain pending.
+
+## Complete retained Source ownership
+
+The complete CoreAudio opener accepts NativeOutputState and returns it, or the
+actual pending CoreAudioStream, through OutputOpenFailure on every failure.
+Retain Mixer, prepared remix, generated PCM/report, admitted prefix and original
+Source history identity. Its created frame basis is the first unsent frame;
+neither the Mixer pull frontier nor created metadata grants native progress.
+Keep legacy Mixer and remixed recovery compatible without flattening a complete
+owner through into_mixer. Use one private Legacy/Complete render owner and one
+native registration/start/stop/unregister/drain lifecycle.
+
+Read nominal buffer frames and the optional native variable-buffer maximum off
+the callback. Reserve only the actual prepared maximum, within the immutable
+Mixer limit. Retained app composition must allow bounded buffer growth rather
+than fixing that limit to the initial nominal buffer. Cold opt-in history growth
+preserves every span, original identity, frontier and retirement revision, never
+shrinks and commits capacity only after successful allocation. Existing legacy
+history preparation/telemetry semantics remain unchanged. Construct complete
+telemetry after this preparation with the explicit first-unsent basis.
+
+The sole callback retirement decision precedes configuration-error accounting,
+history, rendering, PCM copies and outer publication revisions. Authorized
+retirement returns without touching HAL's documented initially zeroed output;
+silence is not admitted Source PCM. Authorization does not prove native drain.
+Preserve checked nonces, busy/unconsumed outcomes, cancellation versus
+authorization in one CAS and sticky authorization. A single control producer
+publishes requested fixed geometry before the pending request; an older request
+cannot authorize using a later payload because it must CAS its exact nonce.
+
+Validate every channel group, count, alignment, byte extent and overlap before
+any output write, then perform infallible copies. Render actual callback frames
+only when no block is pending; otherwise copy the original pending prefix and
+retain the original report. Insufficient pending PCM refuses intact, without
+padding, rerender or invented admission. Any genuine post-write uncertainty
+quarantines the complete owner against ordinary replay/reopen.
+
+Track a native start attempt separately from a successful start acknowledgement.
+Failed Start may have executed callbacks; Stop/unregister/drain must succeed
+before complete owner extraction. Preserve the original operation error and
+available cleanup error independently. Native rate/buffer settings are global
+effects and are not restored by source rollback or ownership recovery.
+
+Portable tests execute the same production decision/render/copy/admission step
+with real Mixer queues/history/nonzero PCM and allocation probes. Actual app
+backend, typed Source UI and solo/local hooks must compile through macOS code.
+Neither this contract nor host tests/foreign typing establish actual native
+registration, timing, cleanup failure behavior or acoustic acceptance.
