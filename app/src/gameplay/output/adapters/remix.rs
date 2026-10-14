@@ -144,6 +144,18 @@ where
     > {
         self.inner.observe_native_playback(output, identity)
     }
+    fn observe_native_playback_replacement_at(
+        &mut self,
+        output: &mut Self::Output,
+        identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+        now: ClockPoint,
+    ) -> Result<
+        Option<crate::gameplay::output::ports::NativePlaybackObservation<Self::NativeEvidence>>,
+        Self::Error,
+    > {
+        self.inner
+            .observe_native_playback_replacement_at(output, identity, now)
+    }
     fn source_playback_at(
         &self,
         output: &Self::Output,

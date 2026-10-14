@@ -2,7 +2,9 @@
 use super::*;
 use super::{fixtures as memory, source_playback_owner_fixtures as source};
 use crate::gameplay::output::ports::SourcePlaybackIdentity;
-use beatkernel::audio::{command_queue, AudioFormat, AudioLimits, MixerConfig, PcmLimits, SampleBank};
+use beatkernel::audio::{
+    command_queue, AudioFormat, AudioLimits, MixerConfig, PcmLimits, SampleBank,
+};
 use beatkernel::time::{ClockDomainId, Timestamp};
 use std::{cell::RefCell, rc::Rc};
 
@@ -430,4 +432,198 @@ fn ordinary_source_duplicate_returns_packet_with_new_real_render_report() {
     assert_eq!(io.query_calls.get(), 0);
     assert_eq!(io.report_calls.get(), 0);
     assert_eq!(io.legacy_calls.get(), 0);
+}
+
+// This portable analogue uses the actual complete state and Owner request path.
+// The strict classifier models only Native(CoreAudioError::RecoveryUnavailable).
+use crate::gameplay::output::application::replacement::coordinate_source::test_support as complete;
+type NarrowHistoryOwner = GameplayOutputOwner<
+    complete::Effects,
+    beatkernel_platform::audio::NativeOutputState,
+    OutputFrameBasis,
+    complete::Ticket,
+>;
+fn narrow_history_request_setup() -> (
+    complete::Rig,
+    NarrowHistoryOwner,
+    complete::Effects,
+    NativePlaybackObservation<complete::Evidence>,
+) {
+    let mut rig = complete::Rig::with_frequency(false, None);
+    let (effects, output) = rig.take_live_native_owner();
+    let mut trace = effects.clone();
+    trace.enable_history_service();
+    trace.classify_only_recovery_unavailable();
+    let mut owner = NarrowHistoryOwner::new_with_ticket(effects, output);
+    let identity = rig.identity;
+    let original = owner
+        .observe_native_playback(rig.presentation_mut(), identity)
+        .unwrap()
+        .unwrap();
+    trace.conditional_statuses([SourceRetirementStatus::Pending]);
+    assert!(owner
+        .queue(complete::Request::normal(None), 100_000_000)
+        .is_ok());
+    assert!(matches!(
+        owner
+            .publish_paused_coordinate_source_audio(
+                rig.context(),
+                complete::now(),
+                identity,
+                false,
+                |_| Ok(()),
+            )
+            .unwrap(),
+        CoordinateSourceOwnerPublication::Pending
+    ));
+    (rig, owner, trace, original)
+}
+fn conditional_probe_count(trace: &complete::Effects) -> usize {
+    trace
+        .calls()
+        .iter()
+        .filter(|call| **call == "conditional-poll")
+        .count()
+}
+
+#[test]
+fn source_control_owner_history_request_authorization_after_final_pending_probe_defers_only_classified_recovery_unavailable(
+) {
+    let (rig, mut owner, mut trace, original) = narrow_history_request_setup();
+    trace.conditional_statuses([SourceRetirementStatus::Pending; 2]);
+    trace.history_request_faults([complete::HistoryFault::AuthorizeRecoveryUnavailable]);
+    let probes = conditional_probe_count(&trace);
+    let before = format!("{:?}", rig.presentation());
+    let report = owner.render_report();
+    assert!(owner
+        .request_conditional_source_history_retirement_with_source_pin(
+            rig.presentation(),
+            &original.source().query(),
+            rig.identity,
+            Some(rig.identity.initial_physical()),
+        )
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        conditional_probe_count(&trace),
+        probes + 3,
+        "two Pending probes precede request IO; one fresh probe confirms authorization"
+    );
+    assert_eq!(trace.history_queries().len(), 1);
+    assert_eq!(
+        trace.history_requests(),
+        [(
+            complete::OLD_EPOCH,
+            rig.pin,
+            rig.identity,
+            rig.identity.initial_physical()
+        )]
+    );
+    assert_eq!(format!("{:?}", rig.presentation()), before);
+    assert_eq!(owner.render_report(), report);
+    assert!(owner.current().is_none());
+    assert!(owner.output_clock_suspended());
+    assert_eq!(owner.last_issued_epoch(), complete::OLD_EPOCH);
+    assert!(
+        !trace.calls().contains(&"retire"),
+        "authorization alone grants no native Stop or drain"
+    );
+}
+
+#[test]
+fn source_control_owner_history_request_recovery_unavailable_requires_confirmed_authorization() {
+    for status in [
+        SourceRetirementStatus::Pending,
+        SourceRetirementStatus::Refused,
+        SourceRetirementStatus::Cancelled,
+    ] {
+        let (rig, mut owner, mut trace, original) = narrow_history_request_setup();
+        trace.conditional_statuses([
+            SourceRetirementStatus::Pending,
+            SourceRetirementStatus::Pending,
+            status,
+        ]);
+        trace.history_request_faults([complete::HistoryFault::RecoveryUnavailable]);
+        let probes = conditional_probe_count(&trace);
+        let before = complete::owner_facts(owner.current().unwrap().source_state());
+        let presentation = format!("{:?}", rig.presentation());
+        let error = match owner.request_conditional_source_history_retirement_with_source_pin(
+            rig.presentation(),
+            &original.source().query(),
+            rig.identity,
+            Some(rig.identity.initial_physical()),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("{status:?} cannot hide the original request failure"),
+        };
+        let failure = error
+            .downcast_ref::<ReplacementFailure<std::io::Error>>()
+            .unwrap();
+        assert!(
+            matches!(&failure.cause, ReplacementCause::Backend { phase: ReplacementPhase::Retire, error }
+            if error.get_ref().is_some_and(|native| native.is::<complete::RecoveryUnavailable>()))
+        );
+        assert_eq!(conditional_probe_count(&trace), probes + 3);
+        assert_eq!(trace.history_queries().len(), 1);
+        assert_eq!(trace.history_requests().len(), 1);
+        assert_eq!(
+            complete::owner_facts(owner.current().unwrap().source_state()),
+            before
+        );
+        assert_eq!(format!("{:?}", rig.presentation()), presentation);
+        assert!(!owner.output_clock_suspended());
+    }
+}
+
+#[test]
+fn source_control_owner_history_request_unrelated_native_and_typed_errors_never_consume_later_authorization(
+) {
+    for (fault, expected) in [
+        (
+            complete::HistoryFault::AuthorizeOtherNative,
+            "original unrelated native failure",
+        ),
+        (
+            complete::HistoryFault::AuthorizeTyped,
+            "original typed packet refusal",
+        ),
+    ] {
+        let (rig, mut owner, mut trace, original) = narrow_history_request_setup();
+        trace.conditional_statuses([SourceRetirementStatus::Pending; 2]);
+        trace.history_request_faults([fault]);
+        let probes = conditional_probe_count(&trace);
+        let before = complete::owner_facts(owner.current().unwrap().source_state());
+        let presentation = format!("{:?}", rig.presentation());
+        let error = match owner.request_conditional_source_history_retirement_with_source_pin(
+            rig.presentation(),
+            &original.source().query(),
+            rig.identity,
+            Some(rig.identity.initial_physical()),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!(
+                "an unclassified error must remain visible even after callback authorization"
+            ),
+        };
+        let failure = error
+            .downcast_ref::<ReplacementFailure<std::io::Error>>()
+            .unwrap();
+        assert!(
+            matches!(&failure.cause, ReplacementCause::Backend { phase: ReplacementPhase::Retire, error }
+            if error.to_string() == expected)
+        );
+        assert_eq!(
+            conditional_probe_count(&trace),
+            probes + 2,
+            "unclassified errors never trigger the authorization re-probe"
+        );
+        assert_eq!(trace.history_requests().len(), 1);
+        assert_eq!(
+            complete::owner_facts(owner.current().unwrap().source_state()),
+            before
+        );
+        assert_eq!(format!("{:?}", rig.presentation()), presentation);
+        assert!(owner.current().is_some());
+        assert!(!owner.output_clock_suspended());
+    }
 }

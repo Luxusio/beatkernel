@@ -42,6 +42,131 @@ fn remix_forwards_coherent_observation_without_copy_clone_or_separate_observer()
     assert_eq!(io.report_calls.get(), 0);
     assert_eq!(io.legacy_calls.get(), 0);
 }
+
+#[test]
+fn remix_forwards_replacement_override_clock_and_original_owned_packet() {
+    let (backend, mut output, io, _producer) = memory::remix_fixture();
+    let output_pointer = &output as *const _ as *const ();
+    let mut remixed = RemixedOutputBackend::new(backend);
+    let identity = memory::identity();
+    let now = memory::point(1, 987_654_321);
+    let observation = memory::observation(output.basis, 3, 101, output.report);
+    let coordinate = observation.coordinate();
+    let facts = observation.source().facts();
+    let query = observation.source().query();
+    let pointer = observation
+        .source()
+        .native_evidence()
+        .unwrap()
+        .words
+        .as_ptr();
+    io.replacement_observations
+        .borrow_mut()
+        .push_back(Ok(Some(observation)));
+    io.observations
+        .borrow_mut()
+        .push_back(Ok(Some(memory::observation(
+            output.basis,
+            2,
+            100,
+            output.report,
+        ))));
+
+    let got = remixed
+        .observe_native_playback_replacement_at(&mut output, identity, now)
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.coordinate(), coordinate);
+    assert_eq!(got.source().identity(), identity);
+    assert_eq!(got.source().facts(), facts);
+    assert!(got
+        .source()
+        .query()
+        .compare_interpolated_time(query)
+        .is_eq());
+    assert_eq!(
+        got.source().native_evidence().unwrap().words.as_ptr(),
+        pointer
+    );
+    assert_eq!(got.source().native_evidence().unwrap().words, [19, 31]);
+    assert_eq!(
+        &*io.replacement_inputs.borrow(),
+        &[(output_pointer, identity, now)]
+    );
+    assert_eq!(io.replacement_observed_calls.get(), 1);
+    assert_eq!(io.observed_calls.get(), 0);
+    assert!(io.replacement_observations.borrow().is_empty());
+    assert_eq!(io.observations.borrow().len(), 1);
+    assert_eq!(io.report_calls.get(), 0);
+    assert_eq!(io.legacy_calls.get(), 0);
+
+    assert!(remixed
+        .observe_native_playback(&mut output, identity)
+        .unwrap()
+        .is_some());
+    assert_eq!(io.observed_calls.get(), 1);
+    assert_eq!(io.replacement_observed_calls.get(), 1);
+    assert!(output.mixer.is_some());
+    assert!(!output.retired);
+}
+
+#[test]
+fn remix_replacement_override_preserves_missing_result_and_unique_error() {
+    let (backend, mut output, io, _producer) = memory::remix_fixture();
+    let output_pointer = &output as *const _ as *const ();
+    let mut remixed = RemixedOutputBackend::new(backend);
+    let identity = crate::gameplay::output::ports::SourcePlaybackIdentity::new(3, 2, 1).unwrap();
+    let first = memory::point(17, -37);
+    let second = memory::point(19, 701);
+    let error = contract::Fault::new(105);
+    let error_pointer = error.pointer();
+    io.replacement_observations
+        .borrow_mut()
+        .extend([Ok(None), Err(error)]);
+
+    assert!(remixed
+        .observe_native_playback_replacement_at(&mut output, identity, first)
+        .unwrap()
+        .is_none());
+    let error = match remixed.observe_native_playback_replacement_at(&mut output, identity, second)
+    {
+        Err(error) => error,
+        Ok(_) => panic!("replacement observation error must remain an error"),
+    };
+    assert_eq!(error.pointer(), error_pointer);
+    assert_eq!(
+        &*io.replacement_inputs.borrow(),
+        &[
+            (output_pointer, identity, first),
+            (output_pointer, identity, second),
+        ]
+    );
+    assert_eq!(io.replacement_observed_calls.get(), 2);
+    assert_eq!(io.observed_calls.get(), 0);
+    assert_eq!(io.report_calls.get(), 0);
+    assert_eq!(io.legacy_calls.get(), 0);
+    assert!(output.mixer.is_some());
+    assert!(!output.retired);
+}
+
+#[test]
+fn remix_forwards_source_native_io_classifier_without_widening_typed_errors() {
+    use crate::gameplay::output::application::replacement::coordinate_source::test_support;
+    use std::io::{Error, ErrorKind};
+
+    let mut rig = test_support::Rig::new(true);
+    let (backend, _output) = rig.take_native_owner();
+    let remixed = RemixedOutputBackend::new(backend);
+    assert!(remixed.is_source_native_io_error(&Error::other("native IO refusal")));
+    for kind in [
+        ErrorKind::InvalidData,
+        ErrorKind::InvalidInput,
+        ErrorKind::TimedOut,
+    ] {
+        assert!(!remixed.is_source_native_io_error(&Error::new(kind, "typed packet refusal")));
+    }
+}
+
 #[test]
 fn remix_forwards_readonly_exact_query_and_missing_packet_verbatim() {
     let (backend, output, io, _producer) = memory::remix_fixture();

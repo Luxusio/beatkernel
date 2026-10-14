@@ -1,5 +1,8 @@
 //! CoreAudio replacement retains actual callback owners and thread affinity.
-use crate::gameplay::output::ports::OutputReplacementBackend;
+use crate::gameplay::output::{
+    application::replacement::coordinate_source::source_frame_observations::PendingSourceFrameObservations,
+    ports::OutputReplacementBackend,
+};
 use beatkernel::{
     audio::{Mixer, OutputFrameBasis, OutputOpenFailure, RenderReport, StoppedMixerSource},
     time::ClockDomainId,
@@ -629,6 +632,8 @@ fn request_stream_source_history_retirement(
 pub struct CoreAudioCompleteReplacementOutput {
     common: CoreAudioReplacementOutput,
     max_render_frames: usize,
+    replacement_observations:
+        Option<PendingSourceFrameObservations<CoreAudioSourcePlaybackSnapshot>>,
 }
 impl CoreAudioCompleteReplacementOutput {
     /// Initial composition retains the software growth ceiling and exact matrix.
@@ -644,6 +649,7 @@ impl CoreAudioCompleteReplacementOutput {
                 matrix,
             },
             max_render_frames,
+            replacement_observations: None,
         }
     }
     pub fn stream(&self) -> &CoreAudioStream {
@@ -696,6 +702,7 @@ fn map_state_open_failure(
                     matrix,
                 },
                 max_render_frames,
+                replacement_observations: None,
             },
         ),
         None => OutputOpenFailure::recovered_state(CoreAudioReplacementError::Native(error), state),
@@ -758,6 +765,7 @@ impl CoreAudioCompleteReplacementBackend {
                 matrix,
             },
             max_render_frames,
+            replacement_observations: None,
         })
     }
 
@@ -915,6 +923,50 @@ impl SourcePlaybackNativeOutputBackend<NativeOutputState> for CoreAudioCompleteR
     ) -> Result<Option<NativePlaybackObservation<Self::NativeEvidence>>, Self::Error> {
         self.observe_stream_playback(&output.common.stream, output.common.epoch, identity)
     }
+    fn observe_native_playback_replacement_at(
+        &mut self,
+        output: &mut Self::Output,
+        identity: SourcePlaybackIdentity,
+        now: beatkernel::time::ClockPoint,
+    ) -> Result<Option<NativePlaybackObservation<Self::NativeEvidence>>, Self::Error> {
+        if now.domain != self.host_domain {
+            return Err(CoreAudioReplacementError::Presentation(
+                CoreAudioPresentationError::DomainMismatch {
+                    expected: self.host_domain,
+                    received: now.domain,
+                },
+            ));
+        }
+        // Validate the current stream even when two original future anchors
+        // are already retained. Cached metadata cannot hide a newer failure.
+        let observation =
+            self.observe_stream_playback(&output.common.stream, output.common.epoch, identity)?;
+        if !output.common.stream.is_started() {
+            output.replacement_observations = None;
+            return Ok(None);
+        }
+        let epoch = output.common.epoch;
+        let basis = output.common.stream.frame_basis();
+        let pending = output.replacement_observations.get_or_insert_with(|| {
+            PendingSourceFrameObservations::new(epoch, basis, identity, self.host_domain)
+        });
+        pending
+            .validate_expectations(epoch, basis, identity, self.host_domain)
+            .map_err(CoreAudioReplacementError::Playback)?;
+        if let Some(observation) = observation {
+            pending
+                .push(observation)
+                .map_err(CoreAudioReplacementError::Playback)?;
+        }
+        validate_source_callback(output.common.stream.snapshot())?;
+        if !output.common.stream.is_started() {
+            pending.clear();
+            return Ok(None);
+        }
+        pending
+            .take_covered(now)
+            .map_err(CoreAudioReplacementError::Playback)
+    }
 }
 impl crate::gameplay::output::ports::SourceHistoryRetirementNativeOutputBackend<NativeOutputState>
     for CoreAudioCompleteReplacementBackend
@@ -943,8 +995,15 @@ impl
     > for CoreAudioCompleteReplacementBackend
 {
     type Ticket = beatkernel_platform::macos::audio::SourceRetirementTicket;
-    // Callback failures combine local render/layout errors and native failures.
-    // Keep the default conservative classifier rather than hiding typed refusal.
+    fn is_source_native_io_error(&self, error: &Self::Error) -> bool {
+        // A callback may authorize retirement after the Owner's live probe and
+        // before history IO. Only that lifecycle refusal permits a fresh probe;
+        // callback/layout and packet errors still need their original diagnosis.
+        matches!(
+            error,
+            CoreAudioReplacementError::Native(CoreAudioError::RecoveryUnavailable)
+        )
+    }
     fn created_source_coordinate_basis(
         &self,
         output: &Self::Output,

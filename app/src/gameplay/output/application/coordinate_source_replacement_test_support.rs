@@ -249,6 +249,7 @@ pub(crate) struct Script {
     serial: u64,
     pump: Option<PumpScript>,
     history: Option<HistoryScript>,
+    classify_only_recovery_unavailable: bool,
 }
 struct PumpScript {
     host: i64,
@@ -263,7 +264,19 @@ pub(crate) enum HistoryFault {
     Authorize,
     PacketIdentity,
     PacketQuery,
+    RecoveryUnavailable,
+    AuthorizeRecoveryUnavailable,
+    AuthorizeOtherNative,
+    AuthorizeTyped,
 }
+#[derive(Debug)]
+pub(crate) struct RecoveryUnavailable;
+impl std::fmt::Display for RecoveryUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("original native RecoveryUnavailable")
+    }
+}
+impl std::error::Error for RecoveryUnavailable {}
 #[derive(Default)]
 struct HistoryScript {
     query_faults: VecDeque<HistoryFault>,
@@ -436,6 +449,9 @@ impl Effects {
     }
     pub(crate) fn enable_history_service(&mut self) {
         self.script.borrow_mut().history = Some(HistoryScript::default());
+    }
+    pub(crate) fn classify_only_recovery_unavailable(&mut self) {
+        self.script.borrow_mut().classify_only_recovery_unavailable = true;
     }
     pub(crate) fn history_query_faults(&mut self, faults: impl IntoIterator<Item = HistoryFault>) {
         self.script
@@ -867,12 +883,23 @@ impl SourcePlaybackNativeOutputBackend<NativeOutputState> for Effects {
                 .map(Some)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
             }
+            HistoryFault::RecoveryUnavailable
+            | HistoryFault::AuthorizeRecoveryUnavailable
+            | HistoryFault::AuthorizeOtherNative
+            | HistoryFault::AuthorizeTyped => {
+                panic!("request-IO race fault belongs to the history request, after its final live probe")
+            }
         }
     }
 }
 impl ConditionalSourceRetirementNativeOutputBackend<NativeOutputState> for Effects {
     type Ticket = Ticket;
     fn is_source_native_io_error(&self, error: &io::Error) -> bool {
+        if self.script.borrow().classify_only_recovery_unavailable {
+            return error
+                .get_ref()
+                .is_some_and(|native| native.is::<RecoveryUnavailable>());
+        }
         error.kind() == io::ErrorKind::Other
     }
     fn created_source_coordinate_basis(
@@ -997,6 +1024,34 @@ impl SourceHistoryRetirementNativeOutputBackend<NativeOutputState> for Effects {
             .request_faults
             .pop_front()
             .unwrap_or(HistoryFault::None);
+        if matches!(
+            fault,
+            HistoryFault::RecoveryUnavailable
+                | HistoryFault::AuthorizeRecoveryUnavailable
+                | HistoryFault::AuthorizeOtherNative
+                | HistoryFault::AuthorizeTyped
+        ) {
+            if !matches!(fault, HistoryFault::RecoveryUnavailable) {
+                // Simulates the sole callback authorizing after the Owner's
+                // final Pending probe, during this actual native request.
+                script.statuses.clear();
+                script
+                    .statuses
+                    .push_front(SourceRetirementStatus::Authorized);
+            }
+            return Err(match fault {
+                HistoryFault::RecoveryUnavailable | HistoryFault::AuthorizeRecoveryUnavailable => {
+                    io::Error::other(RecoveryUnavailable)
+                }
+                HistoryFault::AuthorizeOtherNative => {
+                    io::Error::other("original unrelated native failure")
+                }
+                HistoryFault::AuthorizeTyped => {
+                    io::Error::new(io::ErrorKind::InvalidData, "original typed packet refusal")
+                }
+                _ => unreachable!(),
+            });
+        }
         if matches!(fault, HistoryFault::Io | HistoryFault::Authorize) {
             if matches!(fault, HistoryFault::Authorize) {
                 script.statuses.clear();

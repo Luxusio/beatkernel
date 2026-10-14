@@ -1,14 +1,14 @@
 //! Real static owner with mathematical DI packets, never hardware authentication.
-use super::*;
 use super::fixtures as memory;
+use super::*;
 use crate::{
     audio_authority::{
         AudioAuthority, AudioAuthorityConfig, AudioAuthorityCoordinateBasis, AudioAuthorityEpoch,
     },
     gameplay::output::ports::{
-        OriginalCoordinateNativeOutputBackend, SourcePlaybackNativeOutputBackend,
-        SourcePlaybackIdentity, SourcePlaybackFacts, NativeSourcePlaybackQuery,
-        NativePlaybackObservation, OutputChannelRemixBackend,
+        NativePlaybackObservation, NativeSourcePlaybackQuery,
+        OriginalCoordinateNativeOutputBackend, OutputChannelRemixBackend, SourcePlaybackFacts,
+        SourcePlaybackIdentity, SourcePlaybackNativeOutputBackend,
     },
     native_audio_presentation::NativeAudioSnapshot,
     native_output_coordinate::{CoordinateNativeAudioSnapshot, NativeOutputCoordinate},
@@ -19,13 +19,13 @@ use beatkernel::{
         InterpolatedTargetTime, MixerConfig, PcmLimits, SampleBank, TargetTime,
     },
     time::{
-        ClockDomainId, ClockMappingQuality, Duration, Timestamp,
-        presentation::PresentationEstimator,
+        presentation::PresentationEstimator, ClockDomainId, ClockMappingQuality, Duration,
+        Timestamp,
     },
 };
 use beatkernel_platform::audio::{
-    AudioClockReadingQuality, AudioClockSnapshot, AudioStreamSnapshot, AudioStreamStatus,
-    StreamCounters, presentation::validation::NativePresentationValidator,
+    presentation::validation::NativePresentationValidator, AudioClockReadingQuality,
+    AudioClockSnapshot, AudioStreamSnapshot, AudioStreamStatus, StreamCounters,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -39,9 +39,13 @@ pub(crate) struct Evidence {
 pub(crate) struct Io {
     pub observations:
         RefCell<VecDeque<Result<Option<NativePlaybackObservation<Evidence>>, memory::Fault>>>,
+    pub replacement_observations:
+        RefCell<VecDeque<Result<Option<NativePlaybackObservation<Evidence>>, memory::Fault>>>,
+    pub replacement_inputs: RefCell<Vec<(*const (), SourcePlaybackIdentity, ClockPoint)>>,
     pub queries:
         RefCell<VecDeque<Result<Option<NativeSourcePlaybackQuery<Evidence>>, memory::Fault>>>,
     pub observed_calls: Cell<usize>,
+    pub replacement_observed_calls: Cell<usize>,
     pub query_calls: Cell<usize>,
     pub legacy_calls: Cell<usize>,
     pub report_calls: Cell<usize>,
@@ -53,8 +57,11 @@ impl Default for Io {
     fn default() -> Self {
         Self {
             observations: RefCell::new(VecDeque::new()),
+            replacement_observations: RefCell::new(VecDeque::new()),
+            replacement_inputs: RefCell::new(Vec::new()),
             queries: RefCell::new(VecDeque::new()),
             observed_calls: Cell::new(0),
+            replacement_observed_calls: Cell::new(0),
             query_calls: Cell::new(0),
             legacy_calls: Cell::new(0),
             report_calls: Cell::new(0),
@@ -143,6 +150,26 @@ impl SourcePlaybackNativeOutputBackend for Backend {
             self.io.reported_epoch.set(Some(8));
         }
         result
+    }
+    fn observe_native_playback_replacement_at(
+        &mut self,
+        output: &mut Self::Output,
+        identity: SourcePlaybackIdentity,
+        now: ClockPoint,
+    ) -> Result<Option<NativePlaybackObservation<Evidence>>, Self::Error> {
+        self.io
+            .replacement_observed_calls
+            .set(self.io.replacement_observed_calls.get() + 1);
+        self.io.replacement_inputs.borrow_mut().push((
+            output as *const Self::Output as *const (),
+            identity,
+            now,
+        ));
+        self.io
+            .replacement_observations
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or(Ok(None))
     }
     fn source_playback_at(
         &self,

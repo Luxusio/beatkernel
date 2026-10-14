@@ -435,4 +435,102 @@ mod complete {
             assert!(!backend.is_source_native_io_error(&error), "{error}");
         }
     }
+
+    #[test]
+    fn only_recovery_unavailable_permits_the_existing_authorization_reprobe() {
+        use std::error::Error;
+        let backend = backend();
+        let remixed = RemixedOutputBackend::new(self::backend());
+        let error = CoreAudioReplacementError::Native(CoreAudioError::RecoveryUnavailable);
+        assert!(backend.is_source_native_io_error(&error));
+        assert!(remixed.is_source_native_io_error(&error));
+        // Classification only permits the common Owner's final authorization
+        // probe. It neither consumes nor rewrites the original failure.
+        assert_eq!(
+            error.source().unwrap().downcast_ref::<CoreAudioError>(),
+            Some(&CoreAudioError::RecoveryUnavailable)
+        );
+    }
+
+    #[test]
+    fn unrelated_native_failures_remain_errors_through_complete_and_remixed_backends() {
+        let backend = backend();
+        let remixed = RemixedOutputBackend::new(self::backend());
+        for native in [
+            CoreAudioError::Native {
+                operation: "unrelated native failure",
+                code: i32::MIN,
+            },
+            CoreAudioError::Native {
+                operation: "unrelated cleanup failure",
+                code: i32::MAX,
+            },
+            CoreAudioError::InvalidRequest,
+            CoreAudioError::DeviceUnavailable,
+            CoreAudioError::UnsupportedFormat,
+            CoreAudioError::AppliedMismatch {
+                rate: 48_000.,
+                buffer_frames: 128,
+            },
+            CoreAudioError::UnsupportedLayout,
+            CoreAudioError::Capacity,
+            CoreAudioError::Closed,
+            CoreAudioError::ConfigurationChanged,
+        ] {
+            let original = native.clone();
+            let error = CoreAudioReplacementError::Native(native);
+            assert!(!backend.is_source_native_io_error(&error), "{error}");
+            assert!(!remixed.is_source_native_io_error(&error), "{error}");
+            assert!(
+                matches!(error, CoreAudioReplacementError::Native(retained) if retained == original)
+            );
+        }
+    }
+
+    #[test]
+    fn packet_coordinate_and_timing_errors_never_become_reprobe_permission_through_remix() {
+        use crate::{
+            gameplay::output::ports::SourcePlaybackPacketError,
+            native_output_coordinate::NativeOutputCoordinateError,
+        };
+        let backend = backend();
+        let remixed = RemixedOutputBackend::new(self::backend());
+        for error in [
+            CoreAudioReplacementError::CallbackFailure(u64::MAX),
+            CoreAudioReplacementError::EpochMismatch,
+            CoreAudioReplacementError::Playback(SourcePlaybackPacketError::InvalidIdentity),
+            CoreAudioReplacementError::Playback(SourcePlaybackPacketError::BasisMismatch),
+            CoreAudioReplacementError::Playback(SourcePlaybackPacketError::EpochMismatch),
+            CoreAudioReplacementError::Playback(SourcePlaybackPacketError::InvalidRevision),
+            CoreAudioReplacementError::Playback(SourcePlaybackPacketError::InvalidPrefix),
+            CoreAudioReplacementError::Playback(SourcePlaybackPacketError::InvalidSpan),
+            CoreAudioReplacementError::Playback(SourcePlaybackPacketError::InvalidReport),
+            CoreAudioReplacementError::Playback(SourcePlaybackPacketError::QueryOutsidePrefix),
+            CoreAudioReplacementError::Playback(SourcePlaybackPacketError::QueryOutsideSpan),
+            CoreAudioReplacementError::Playback(SourcePlaybackPacketError::MissingNativeEvidence),
+            CoreAudioReplacementError::Playback(SourcePlaybackPacketError::CoordinateMismatch),
+            CoreAudioReplacementError::Playback(SourcePlaybackPacketError::Overflow),
+            CoreAudioReplacementError::Coordinate(NativeOutputCoordinateError::BasisMismatch),
+            CoreAudioReplacementError::Coordinate(NativeOutputCoordinateError::Overflow),
+            CoreAudioReplacementError::Presentation(CoreAudioPresentationError::Overflow),
+            CoreAudioReplacementError::Presentation(CoreAudioPresentationError::DomainMismatch {
+                expected: ClockDomainId(8),
+                received: ClockDomainId(9),
+            }),
+            CoreAudioReplacementError::Presentation(
+                CoreAudioPresentationError::InvalidObservation("invalid original native evidence"),
+            ),
+            CoreAudioReplacementError::Presentation(CoreAudioPresentationError::UnmappedHost {
+                from: ClockDomainId(8),
+                to: ClockDomainId(9),
+            }),
+            CoreAudioReplacementError::Discipline(DisciplineError::EpochMismatch),
+            CoreAudioReplacementError::Discipline(DisciplineError::DomainMismatch),
+            CoreAudioReplacementError::Discipline(DisciplineError::Stale),
+            CoreAudioReplacementError::Discipline(DisciplineError::Overflow),
+        ] {
+            assert!(!backend.is_source_native_io_error(&error), "{error}");
+            assert!(!remixed.is_source_native_io_error(&error), "{error}");
+        }
+    }
 }

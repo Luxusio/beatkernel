@@ -13,6 +13,10 @@ use crate::{
 };
 use beatkernel_platform::audio::{presentation::validation::NativeFrameBasis, NativeOutputState};
 
+#[cfg(any(target_os = "macos", test))]
+#[path = "source_frame_observations.rs"]
+pub(crate) mod source_frame_observations;
+
 type ConditionalSourceWaiting<O, R, Ticket> = ConditionalWaiting<O, R, Ticket, OutputFrameBasis>;
 
 pub(super) struct CoordinateSourceWaitingTiming {
@@ -568,7 +572,7 @@ impl<B: ConditionalSourceRetirementNativeOutputBackend<NativeOutputState>>
             if descriptor != timing.descriptor {
                 return Err(ReplacementFailure::policy("Source output changed actual native creation descriptor"));
             }
-            let Some(observation) = self.backend.observe_native_playback(&mut waiting.output, timing.identity)
+            let Some(observation) = self.backend.observe_native_playback_replacement_at(&mut waiting.output, timing.identity, now)
                 .map_err(|error| ReplacementFailure::backend(ReplacementPhase::Observe, error))? else {
                 return Ok(None);
             };
@@ -788,6 +792,9 @@ pub fn publish_ready_coordinate_source_audio_output<O, E, A>(
 
 #[cfg(test)]
 use crate as runtime;
+#[cfg(test)]
+#[path = "coordinate_source_future_fixtures.rs"]
+mod coordinate_source_future_fixtures;
 #[cfg(test)]
 #[path = "coordinate_source_replacement_fixtures.rs"]
 pub(crate) mod coordinate_source_replacement_fixtures;

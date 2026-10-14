@@ -596,6 +596,16 @@ pub trait SourcePlaybackNativeOutputBackend<O: SoftwareOutputState = Mixer>:
         output: &mut Self::Output,
         identity: SourcePlaybackIdentity,
     ) -> Result<Option<NativePlaybackObservation<Self::NativeEvidence>>, Self::Error>;
+    /// Replacement polling may retain original future native evidence until
+    /// `now` covers it. Ordinary playback observations keep their own policy.
+    fn observe_native_playback_replacement_at(
+        &mut self,
+        output: &mut Self::Output,
+        identity: SourcePlaybackIdentity,
+        _now: ClockPoint,
+    ) -> Result<Option<NativePlaybackObservation<Self::NativeEvidence>>, Self::Error> {
+        self.observe_native_playback(output, identity)
+    }
     fn source_playback_at(
         &self,
         output: &Self::Output,
