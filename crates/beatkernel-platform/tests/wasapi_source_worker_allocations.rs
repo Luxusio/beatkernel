@@ -12,6 +12,8 @@ mod negotiation;
 mod output_state;
 #[path = "../src/audio/source_history_retirement_mailbox.rs"]
 mod source_history_retirement_mailbox;
+#[path = "../src/audio/source_output_retirement.rs"]
+mod source_output_retirement;
 #[path = "../src/audio/source_playback_publication.rs"]
 mod source_playback_publication;
 #[path = "../src/audio/wasapi_source_worker.rs"]
