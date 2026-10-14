@@ -31,13 +31,73 @@ declaration-format corrections are included, with executable statements and
 assertions preserved. App `target_` passes327/0/ignored1. Host binaries and
 explicit browser-feature WASM check exit0. Windows/macOS app/platform lib/tests
 C-stub Rust typing also exit0; this proves neither native ABI nor device
-execution. Non-denied Clippy exits0 with358 app and111 platform warnings,
+execution. Coordinator no-default-feature library Clippy exits0 with358 app
+and111 platform warnings,
 not strict-clean status. All139 local links in the five durable documents
 resolve; freshness checking invalidates no notes across the20 scoped paths.
-Independent formal review followed by independent full application QA, and
-the final documentation audit, are still pending.
+
+The actual independent DEEP review of frozen `7ac7a1af` returns PASS with zero
+findings after both discovery attempts. Only then does independent qa-cli run
+and return PASS for this bounded DTO ownership and software integration:
+
+| Independent check | Actual result |
+|---|---|
+| Complete core tests, including doc/integration targets | 746 passed, 0 failed, 0 ignored across79 result targets |
+| Platform library | 434 passed, 0 failed, 2 ignored |
+| Platform audio format/public-path identity | 23 passed, 0 failed |
+| App desktop/WebTransport library | 3260 passed, 0 failed, 8 ignored |
+| App binaries | 624 passed, 0 failed, 17 ignored |
+| Host binaries, explicit browser-feature WASM | exit0 each |
+| Windows/macOS app/platform lib/tests C-stub typing | exit0 each; build-only |
+| Feature-enabled app/platform library Clippy | exit0; app394/platform111/core2/BMS5 warnings, not strict-clean |
+| Rust15 formatting, diff, WBS and local links | pass;139 link targets |
+| Three freshly built public CLI binaries | 12/12 expected stdout/stderr/exit results |
+
+The full suite includes coordinate-epoch13, playback-pause80, live-pause19,
+replay-pause4, coordinate-control27, end28, start19, ports38 and owner127.
+These filters overlap one another and the larger suites; do not sum them.
+The three CLI binaries each exercise help/empty arguments at exit0 and unknown
+flag/missing value at exit1. CLI smoke does not execute the DTO; actual library
+tests establish that behavior. WASM/foreign checks do not prove browser or
+native execution. QA verifies the same20 SHA values, exact scope and tracked
+clean tree before and after execution. Documentation audit and owning task
+verification/close are separate gates; direct actual PASS results alone do not
+supply hook-owned completion evidence or complete the full player Goal.
 Local raw logs are under `target/wf/core-converted-boundary-facts/` and are
-ignored artifacts, not durable or native-runtime evidence.
+ignored artifacts, not durable or native-runtime evidence. Independent QA logs
+are under its `qa-cli-7ac7a1af/` subdirectory.
+
+## Verification environment incident
+
+The first independent formatter invocation used the cached `cargo/bin/rustfmt`
+rustup proxy without `env.sh` or an explicit `RUSTUP_HOME`. It automatically
+installed Rust1.98.1's five components under `/home/ccc/.rustup`, violating the
+user's no-install constraint. The original auto-install output is in the QA
+tool session92450/chunk9feaa1; it was not written to a raw logfile. This is a
+reported verification mistake, not a claim that the procedure always complied.
+
+The coordinator checks the new root/toolchain creation times, absence of
+settings, only one new toolchain/hash and empty download/temp directories,
+then removes only those proven task-created entries and the new empty root.
+The independent verifier confirms that root is absent and the preexisting
+project cache remains. No source, user default, permission or ownership change
+is used for recovery. Permission failures against the preexisting root-owned
+target cache are retried with the already permitted narrow sudo; no chmod/chown
+or dependency change is needed.
+
+Reusable verified rule: a cached rustup proxy path does not select a cached
+Rustup home. Source `target/toolchain/env.sh`, set `RUSTUP_AUTO_INSTALL=0`, and
+use the real cached formatter binary. The safe local probe is:
+
+```sh
+source target/toolchain/env.sh
+export RUSTUP_AUTO_INSTALL=0
+"$RUSTUP_HOME/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/rustfmt" --version
+```
+
+The corrected15-file formatter check passes. This cached-proxy gotcha is
+captured here as a committed verification rule; no new workflow framework,
+installer, provisioning policy or duplicate regression command suite is added.
 
 ## Remaining scope
 

@@ -526,7 +526,7 @@ native ABI/장치/재생 증거가 아니다. 검사 전후 frozen10SHA와 track
 01.05/.06의 전체 범위는 아직 W이며106/223·원래91/193은 유지한다. 자동 완료 기록과
 owning verify/close는 별도 gate이고 이 소프트웨어 PASS가 task/전체 Goal 완료는 아니다.
 
-E73: 순수 ConvertedBoundaryFacts의 정의를 기존 core audio로 옮기고 platform은
+E73(개발 당시): 순수 ConvertedBoundaryFacts의 정의를 기존 core audio로 옮기고 platform은
 같은 타입을 직접 재노출한다. 공용 application/port10개 사용처는 core를 참조하며
 필드·derive/default·생성 경계 의미와 native 상태/효과 실행문은 보존했다.
 독립 작성한 양방향 public-path 대입 검사 포함 format23/0, core 경계7·mixer16,
@@ -538,6 +538,19 @@ Windows/macOS C-stub Rust typing도 exit0이며 실제 장치/ABI/재생 증거�
 전체106/223·원래91/193 그대로다. 정의 reflection 경로는 바뀌며 안정 ABI/layout·
 이전 빌드와의 type identity나 실제 native 실행을 보증하지 않는다.
 [변경과 검증 범위](../changes/2026-10-14-core-converted-boundary-facts.md)를 따른다.
+
+E74: frozen7ac7a1af의 독립 DEEP 리뷰 PASS0 다음 독립 qa-cli가 DTO 이동의
+소프트웨어 통합 범위 PASS했다. complete core746/0/ignored0, platform434/0/
+ignored2·audio_format23/0, desktop,webtransport app3260/0/ignored8·bins624/0/
+ignored17이다. target_에 빠지는 coordinate-epoch13개도 전체 suite에서 통과했다.
+focused 검사는 중복이므로 합산하지 않는다. host bins·browser-feature WASM·
+Windows/macOS C-stub Rust typing, Rust15 format/diff·WBS·문서 링크139개와
+새로 빌드한 공개 CLI3개/12개 인자 경로를 통과했다. foreign/WASM은 build-only,
+CLI는 도움말·인자 오류 증거이며 DTO 동작은 실제 library tests로 확인했다.
+feature를 켠 Clippy는 exit0/app394·platform111 warnings이며 strict-clean이 아니다.
+검사 전후20SHA·tracked clean을 확인했다. QA의 no-install 위반과 정확한 신규 설치
+원복은 변경 문서에 기록한다.01.05/.06은 W,106/223·원래91/193을 유지하며 최종
+문서 audit·owning verification/close와 실제 native/전체 player 완료는 별도다.
 
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
@@ -567,7 +580,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
 - [x] **BK-WBS-01.02** 코어에는 OS API와 게임 이름 분기가 없고 플랫폼·어댑터는 상호 의존하지 않는다. — 상태=D(검증완료); 선행=-; 근거=E0,E6.
 - [x] **BK-WBS-01.03** UI·설정·기록·경쟁·네트워크를 하나의 app crate에서 조립한다. — 상태=D(검증완료); 선행=-; 근거=E6.
 - [x] **BK-WBS-01.04** Rust 1.98.1/MSRV와 CI 선언을 맞추고 Cargo.lock 기반 빌드가 가능하다. — 상태=D(검증완료); 선행=-; 근거=E6,E9.
-- [ ] **BK-WBS-01.05** 모든 application context를 DDD 모듈과 명시적 Port/Adapter로 분리한다. — 상태=W(구현·연동중); 선행=-; 근거=E71/E72의 selected-sound 공통 정책·독립 QA와 E73의 core 좌표 DTO·공용10개 소비 경로; 필요 근거/다음=독립 최종 gate와 나머지 context·application/platform 자료형 의존성 audit.
+- [ ] **BK-WBS-01.05** 모든 application context를 DDD 모듈과 명시적 Port/Adapter로 분리한다. — 상태=W(구현·연동중); 선행=-; 근거=E71/E72의 selected-sound 공통 정책과 E73/E74의 core 좌표 DTO·공용10개 소비 경로 및 독립 DEEP/CLI PASS; 필요 근거/다음=나머지 context·application/platform 자료형 의존성과 native 효과 경계 audit.
 - [ ] **BK-WBS-01.06** UI 제어·기록·파일·장치·시간·네트워크 효과를 주입 가능하게 만든다. — 상태=W(구현·연동중); 선행=-; 근거=E71/E72의 native-free 준비와 실제 cohort/복원 fixture·독립 QA; 필요 근거/다음=나머지 효과와 실제 adapter를 교체한 계층별 fixture.
 - [ ] **BK-WBS-01.07** hot path의 static dispatch와 추상화 비용을 실제 코드·측정으로 확인한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=동적 dispatch/clone/alloc 위치와 비용 보고.
 - [x] **BK-WBS-01.08** 순수 기록 모델을 graphics/browser 없이 빌드한다. — 상태=D(검증완료); 선행=-; 근거=E9.

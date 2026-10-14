@@ -7,7 +7,17 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
-2026-10-14 좌표 경계 E73: 순수 ConvertedBoundaryFacts를 기존 core audio로 옮기고
+2026-10-14 좌표 경계 E74: frozen7ac7a1af의 독립 DEEP 리뷰 PASS0 다음 독립 CLI
+QA가 DTO 이동의 소프트웨어 범위 PASS했다. complete core746·platform434/0/ignored2·
+format23, 전체 app3260/0/ignored8·bins624/0/ignored17, host bins·browser-feature
+WASM·Windows/macOS C-stub typing·Rust15 format/diff·문서 링크139·공개 CLI12/12가
+통과했다. coordinate-epoch13개도 포함되며 focused 수는 합산하지 않는다.
+feature Clippy는 exit0/app394·platform111 warnings이고 strict-clean이 아니다.
+foreign typing/CLI smoke는 실제 native 재생 증거가 아니다. 도구 자동 설치 위반은
+정확한 신규 경로만 원복했고 변경 문서에 기록했다.01.05/.06은 W,106/223·원래
+91/193 그대로이며 문서 audit·owning verify/close 및 전체 player 완료는 별도다.
+
+2026-10-14 좌표 경계 E73(개발 당시): 순수 ConvertedBoundaryFacts를 기존 core audio로 옮기고
 platform의 같은 타입 직접 재노출과 application/port10개 core 참조를 연결했다.
 core 독립 check·경계7·mixer16·platform434/0/ignored2·public-path 호환 포함 format23,
 app target_327/0/ignored1, host bins·browser-feature WASM·경고 비차단 Clippy와
