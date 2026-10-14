@@ -523,9 +523,7 @@ fn wasapi_plan(
         .iter()
         .filter(|f| f.flag == "--device" && args.chunks_exact(2).any(|p| p[0] == "--device"))
     {
-        if !field.value.is_empty() || current.is_none() {
-            device = (!field.value.is_empty()).then(|| AudioDeviceId(field.value.clone()));
-        }
+        device = (!field.value.is_empty()).then(|| AudioDeviceId(field.value.clone()));
     }
     let mut text = "";
     for field in draft

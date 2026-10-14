@@ -367,7 +367,7 @@ fn capability_arguments_roundtrip_through_target_planner() {
 }
 
 #[test]
-fn retained_shared_restrictions_preserve_legacy_backend_and_exclusive_selection() {
+fn retained_source_restrictions_preserve_legacy_backend_and_exclusive_selection() {
     let settings::TargetPlan::Asio(asio) = from_wasapi(&asio_args(), true).unwrap() else {
         panic!("legacy backend switching lost ASIO")
     };
@@ -396,7 +396,7 @@ fn retained_shared_restrictions_preserve_legacy_backend_and_exclusive_selection(
         super::Backend::Wasapi,
         AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
     ));
-    assert!(super::plan_retained_shared_output(
+    assert!(super::plan_retained_source_output(
         &wasapi_cap(),
         &wasapi(),
         source(),

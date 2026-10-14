@@ -6,6 +6,8 @@ use beatkernel_platform::audio::*;
 
 #[path = "../src/audio/channel_remix.rs"]
 mod channel_remix;
+#[path = "../src/audio/negotiation.rs"]
+mod negotiation;
 #[path = "../src/audio/output_state.rs"]
 mod output_state;
 #[path = "../src/audio/source_history_retirement_mailbox.rs"]
@@ -20,6 +22,7 @@ use output_state::NativeOutputState;
 // output-state fixture supplies the sole System allocator in this binary;
 // production library unsafe-code policy and API visibility stay unchanged.
 mod audio {
+    pub(crate) use crate::negotiation;
     pub(crate) use crate::output_state::output_state_fixtures::{
         count_heap_calls, fail_allocation,
     };

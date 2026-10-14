@@ -1,7 +1,8 @@
 //! The complete Source owner's WASAPI decision and one synchronous native fill.
 //! Native effects are statically supplied by the owner-thread COM adapter.
 use super::{
-    channel_remix, source_history_retirement_mailbox::SourceHistoryRetirementRequest,
+    channel_remix, negotiation::known_exact_exclusive_buffer_frames,
+    source_history_retirement_mailbox::SourceHistoryRetirementRequest,
     validate_known_request_sizing, AudioBackendKind, AudioPlatformError, AudioStreamMode,
     AudioStreamRequest, DeviceFormat, NativeOutputState,
 };
@@ -189,6 +190,7 @@ impl SourceRetirementSlot {
 pub(crate) struct SourceRetirementFacts {
     source: AudioFormat,
     applied: DeviceFormat,
+    mode: AudioStreamMode,
     matrix: Option<ChannelMatrix>,
     render_limit: usize,
 }
@@ -197,6 +199,7 @@ impl SourceRetirementFacts {
     pub(crate) fn from_state(
         state: &NativeOutputState,
         current_matrix: Option<ChannelMatrix>,
+        current_mode: AudioStreamMode,
     ) -> Result<Self, AudioPlatformError> {
         let applied = state.format().ok_or(AudioPlatformError::InvalidFormat)?;
         state
@@ -205,6 +208,7 @@ impl SourceRetirementFacts {
         Ok(Self {
             source: state.mixer().config().format(),
             applied,
+            mode: current_mode,
             matrix: current_matrix,
             render_limit: state.mixer().config().limits().max_render_frames(),
         })
@@ -217,7 +221,11 @@ impl SourceRetirementFacts {
         max_frames: usize,
     ) -> Result<SourceRetirementPolicy, AudioPlatformError> {
         if request.backend() != AudioBackendKind::Wasapi
-            || !matches!(request.mode(), AudioStreamMode::Shared(_))
+            || !matches!(
+                (self.mode, request.mode()),
+                (AudioStreamMode::Shared(_), AudioStreamMode::Shared(_))
+                    | (AudioStreamMode::Exclusive, AudioStreamMode::Exclusive)
+            )
             || max_frames == 0
             || max_frames > self.render_limit
         {
@@ -237,13 +245,46 @@ impl SourceRetirementFacts {
         }
         validate_known_request_sizing(request, max_frames)?;
         Ok(
-            if format == self.applied && requested_matrix == self.matrix.as_ref() {
+            if matches!(self.mode, AudioStreamMode::Shared(_))
+                && format == self.applied
+                && requested_matrix == self.matrix.as_ref()
+            {
                 SourceRetirementPolicy::PreservePausedSuffix
             } else {
                 SourceRetirementPolicy::RequireEmptySuffix
             },
         )
     }
+}
+
+/// Exclusive event leases can submit retained PCM only as whole native buffers.
+pub(crate) fn validate_exclusive_source_buffer(
+    state: &NativeOutputState,
+    buffer_frames: u32,
+) -> Result<(), AudioPlatformError> {
+    let frames = buffer_frames as usize;
+    if frames == 0 {
+        return Err(AudioPlatformError::InvalidRequest);
+    }
+    if frames > state.mixer().config().limits().max_render_frames() {
+        return Err(AudioPlatformError::Capacity);
+    }
+    if state.pending_frames() % frames != 0 {
+        return Err(AudioPlatformError::InvalidRequest);
+    }
+    Ok(())
+}
+
+/// Refuses known incompatible geometry before any native ownership changes.
+pub(crate) fn validate_source_open_geometry(
+    state: &NativeOutputState,
+    request: &AudioStreamRequest,
+) -> Result<(), AudioPlatformError> {
+    validate_known_request_sizing(request, state.mixer().config().limits().max_render_frames())?;
+    if let Some(frames) = known_exact_exclusive_buffer_frames(request)? {
+        validate_exclusive_source_buffer(state, frames)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -298,6 +339,7 @@ pub(crate) enum WasapiSourceStep {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WasapiSourceWork {
     Fill { buffer_frames: u32 },
+    ExclusiveFill { buffer_frames: u32 },
     ClockOnly,
 }
 
@@ -352,72 +394,83 @@ pub(crate) fn source_worker_step(
         WasapiSourceStep::Continue => {}
         decision => return decision,
     }
-    if let WasapiSourceWork::Fill { buffer_frames } = work {
-        let available = match ops.available_frames(buffer_frames) {
-            Ok(frames) if frames <= buffer_frames => frames,
-            Ok(_) => return failure(WasapiSourcePhase::Padding, INVALID_ARGUMENT),
-            Err(code) => return failure(WasapiSourcePhase::Padding, code),
-        };
-        let frames = if state.pending_frames() == 0 {
-            available
-        } else {
-            available.min(state.pending_frames().min(u32::MAX as usize) as u32)
-        };
-        if frames != 0 {
-            let mut lease = match ops.acquire(frames) {
-                Ok(lease) => lease,
-                Err(code) => return failure(WasapiSourcePhase::Acquire, code),
+    let frames = match work {
+        WasapiSourceWork::Fill { buffer_frames } => {
+            let available = match ops.available_frames(buffer_frames) {
+                Ok(frames) if frames <= buffer_frames => frames,
+                Ok(_) => return failure(WasapiSourcePhase::Padding, INVALID_ARGUMENT),
+                Err(code) => return failure(WasapiSourcePhase::Padding, code),
             };
-            let rendered = (|| {
-                if let Some(request) = ops.history_request() {
-                    state
-                        .apply_source_history_retirement(request, completed_history)
-                        .map_err(|_| (WasapiSourcePhase::History, INVALID_ARGUMENT))?;
-                }
-                let report = match state.pending_report() {
-                    Some(report) => report,
-                    None => ops
-                        .render_pending(state, frames as usize)
-                        .map_err(|code| (WasapiSourcePhase::Render, code))?,
-                };
-                let format = state
-                    .format()
-                    .ok_or((WasapiSourcePhase::Encode, INVALID_ARGUMENT))?;
-                let count = (frames as usize)
-                    .checked_mul(usize::from(format.channels()))
-                    .ok_or((WasapiSourcePhase::Encode, INVALID_ARGUMENT))?;
-                let samples = state
-                    .pending_samples()
-                    .get(..count)
-                    .ok_or((WasapiSourcePhase::Encode, INVALID_ARGUMENT))?;
-                ops.encode(&mut lease, format, samples)
-                    .map_err(|code| (WasapiSourcePhase::Encode, code))?;
-                Ok(report)
-            })();
-            let release = ops.release(lease, rendered.is_err());
-            let mut errors = WasapiSourceFailureReport::default();
-            if let Err((phase, code)) = rendered {
-                errors.record_primary(phase, code);
+            if state.pending_frames() == 0 {
+                available
+            } else {
+                available.min(state.pending_frames().min(u32::MAX as usize) as u32)
             }
-            if let Err(code) = release {
-                state.mark_admission_uncertain();
-                errors.record_primary(WasapiSourcePhase::Release, code);
-                errors.release = Some(code);
-            }
-            if errors.primary.is_some() {
-                return WasapiSourceStep::Failure(errors);
-            }
-            // Positive release owns admission even if the later clock fails.
-            // Do not replay this prefix after recovery.
-            if state.admit(frames as usize).is_err() {
-                state.mark_admission_uncertain();
-                return failure(WasapiSourcePhase::Admission, INVALID_ARGUMENT);
-            }
-            ops.admitted(
-                rendered.expect("successful lease retains its report"),
-                frames,
-            );
         }
+        WasapiSourceWork::ExclusiveFill { buffer_frames } => {
+            if validate_exclusive_source_buffer(state, buffer_frames).is_err()
+                || (state.pending_frames() == 0 && buffer_frames as usize > state.max_frames())
+            {
+                return failure(WasapiSourcePhase::Render, INVALID_ARGUMENT);
+            }
+            buffer_frames
+        }
+        WasapiSourceWork::ClockOnly => 0,
+    };
+    if frames != 0 {
+        let mut lease = match ops.acquire(frames) {
+            Ok(lease) => lease,
+            Err(code) => return failure(WasapiSourcePhase::Acquire, code),
+        };
+        let rendered = (|| {
+            if let Some(request) = ops.history_request() {
+                state
+                    .apply_source_history_retirement(request, completed_history)
+                    .map_err(|_| (WasapiSourcePhase::History, INVALID_ARGUMENT))?;
+            }
+            let report = match state.pending_report() {
+                Some(report) => report,
+                None => ops
+                    .render_pending(state, frames as usize)
+                    .map_err(|code| (WasapiSourcePhase::Render, code))?,
+            };
+            let format = state
+                .format()
+                .ok_or((WasapiSourcePhase::Encode, INVALID_ARGUMENT))?;
+            let count = (frames as usize)
+                .checked_mul(usize::from(format.channels()))
+                .ok_or((WasapiSourcePhase::Encode, INVALID_ARGUMENT))?;
+            let samples = state
+                .pending_samples()
+                .get(..count)
+                .ok_or((WasapiSourcePhase::Encode, INVALID_ARGUMENT))?;
+            ops.encode(&mut lease, format, samples)
+                .map_err(|code| (WasapiSourcePhase::Encode, code))?;
+            Ok(report)
+        })();
+        let release = ops.release(lease, rendered.is_err());
+        let mut errors = WasapiSourceFailureReport::default();
+        if let Err((phase, code)) = rendered {
+            errors.record_primary(phase, code);
+        }
+        if let Err(code) = release {
+            state.mark_admission_uncertain();
+            errors.record_primary(WasapiSourcePhase::Release, code);
+            errors.release = Some(code);
+        }
+        if errors.primary.is_some() {
+            return WasapiSourceStep::Failure(errors);
+        }
+        // Positive release owns admission even if the later clock fails.
+        // Do not replay this prefix after recovery.
+        if state.admit(frames as usize).is_err() {
+            state.mark_admission_uncertain();
+            return failure(WasapiSourcePhase::Admission, INVALID_ARGUMENT);
+        }
+        ops.admitted(
+            rendered.expect("successful lease retains its report"),
+            frames,
+        );
     }
     match ops.read_clock() {
         Ok(()) => WasapiSourceStep::Continue,

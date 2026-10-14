@@ -8,8 +8,8 @@ use super::clock::QpcClock;
 use crate::audio::{
     telemetry::{observe_deadline, status_code, Telemetry},
     wasapi_source_worker::{
-        source_worker_step, SourceRetirementSlot, WasapiSourceFailureReport, WasapiSourcePhase,
-        WasapiSourceStep, WasapiSourceWork,
+        source_worker_step, validate_exclusive_source_buffer, SourceRetirementSlot,
+        WasapiSourceFailureReport, WasapiSourcePhase, WasapiSourceStep, WasapiSourceWork,
     },
     *,
 };
@@ -1098,6 +1098,26 @@ impl WorkerOwner {
     }
 }
 
+fn validate_complete_source_geometry(
+    owner: &WorkerOwner,
+    mode: AudioStreamMode,
+    buffer_frames: u32,
+) -> Result<(), AudioPlatformError> {
+    match (owner, mode) {
+        (WorkerOwner::Complete(state), AudioStreamMode::Exclusive) => {
+            validate_exclusive_source_buffer(state, buffer_frames)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn complete_source_fill_work(mode: AudioStreamMode, buffer_frames: u32) -> WasapiSourceWork {
+    match mode {
+        AudioStreamMode::Exclusive => WasapiSourceWork::ExclusiveFill { buffer_frames },
+        AudioStreamMode::Shared(_) => WasapiSourceWork::Fill { buffer_frames },
+    }
+}
+
 struct Worker {
     client: IAudioClient,
     renderer: IAudioRenderClient,
@@ -1298,6 +1318,13 @@ impl Worker {
                 Some(buffer_frames),
             ));
         }
+        validate_complete_source_geometry(
+            owner
+                .as_ref()
+                .ok_or(AudioPlatformError::RecoveryUnavailable)?,
+            request.mode(),
+            buffer_frames,
+        )?;
         // SAFETY: initialized client returns latency in 100ns units.
         let latency = unsafe { client.GetStreamLatency() }.map_err(win_error)?;
         let latency = latency
@@ -1436,7 +1463,7 @@ impl Worker {
                     false,
                     None,
                     &telemetry,
-                    WasapiSourceWork::Fill { buffer_frames },
+                    complete_source_fill_work(worker.configuration.requested.mode(), buffer_frames),
                 )
             } else {
                 match worker.fill(false, None, &telemetry) {
@@ -1574,9 +1601,10 @@ impl Worker {
             }
             if let Some(source) = source.filter(|_| running) {
                 let work = if should_fill {
-                    WasapiSourceWork::Fill {
-                        buffer_frames: self.configuration.buffer_frames,
-                    }
+                    complete_source_fill_work(
+                        self.configuration.requested.mode(),
+                        self.configuration.buffer_frames,
+                    )
                 } else {
                     WasapiSourceWork::ClockOnly
                 };

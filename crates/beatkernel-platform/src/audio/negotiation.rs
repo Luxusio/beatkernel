@@ -225,6 +225,33 @@ pub fn validate_known_request_sizing(
     Ok(())
 }
 
+/// Exact exclusive geometry known without a native default or alignment probe.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn known_exact_exclusive_buffer_frames(
+    request: &AudioStreamRequest,
+) -> Result<Option<u32>, AudioPlatformError> {
+    validate_known_request_sizing(request, usize::MAX)?;
+    if request.mode() != AudioStreamMode::Exclusive
+        || request.negotiation() != NegotiationPolicy::Exact
+    {
+        return Ok(None);
+    }
+    match request.buffer() {
+        BufferRequest::Frames(frames) => Ok(Some(frames)),
+        BufferRequest::Duration(duration) => {
+            duration_frames(duration, request.format().sample_rate())
+                .map(|(frames, _)| Some(frames))
+        }
+        BufferRequest::DeviceDefault => match request.period() {
+            PeriodRequest::DeviceDefault => Ok(None),
+            PeriodRequest::Frames(_) | PeriodRequest::Duration(_) => {
+                resolve_period(request, PeriodConstraints::default())
+                    .map(|period| Some(period.frames))
+            }
+        },
+    }
+}
+
 fn duration_frames(duration: Duration, rate: u32) -> Result<(u32, bool), AudioPlatformError> {
     if duration.as_nanos() <= 0 {
         return Err(AudioPlatformError::InvalidRequest);

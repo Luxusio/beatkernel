@@ -1,7 +1,8 @@
 //! Complete Source ownership and the thin native conditional-retirement ticket.
 use super::*;
 use crate::audio::wasapi_source_worker::{
-    SourceRetirementError, SourceRetirementFacts, WasapiSourceFailure, WasapiSourceOps,
+    validate_source_open_geometry, SourceRetirementError, SourceRetirementFacts,
+    WasapiSourceFailure, WasapiSourceOps,
 };
 use beatkernel::audio::{AudioError, MixerOpenFailure, OutputFrameBasis, RenderReport};
 use std::sync::{atomic::AtomicU64, Weak};
@@ -272,16 +273,11 @@ impl WasapiBackend {
             if state.pending_frames() != 0 && state.mixer().source_playback_history().is_none() {
                 return Err(AudioPlatformError::InvalidRequest);
             }
-            if request.backend() != AudioBackendKind::Wasapi
-                || !matches!(request.mode(), AudioStreamMode::Shared(_))
-            {
+            if request.backend() != AudioBackendKind::Wasapi {
                 return Err(AudioPlatformError::InvalidRequest);
             }
             validate_open_with_matrix(&request, state.mixer(), options, matrix.as_ref())?;
-            validate_known_request_sizing(
-                &request,
-                state.mixer().config().limits().max_render_frames(),
-            )?;
+            validate_source_open_geometry(&state, &request)?;
             if state
                 .format()
                 .is_some_and(|format| format.encoding() != request.format().encoding())
@@ -338,6 +334,7 @@ impl WasapiBackend {
                         WorkerOwner::Legacy(_) => unreachable!("complete launch"),
                     },
                     matrix,
+                    worker.configuration.requested.mode(),
                 );
                 let facts = match facts {
                     Ok(facts) => facts,

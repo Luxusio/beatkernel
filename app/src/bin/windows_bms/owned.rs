@@ -967,7 +967,7 @@ impl WindowsOutputUi {
     ) -> Result<bool> {
         match owner {
             WindowsOutputOwner::Legacy(owner) => {
-                // Retained exclusive/ASIO keep their existing explicit refusal.
+                // Retained ASIO keeps its existing explicit refusal.
                 self.bridge.service_audio(
                     owner,
                     context,
@@ -985,7 +985,7 @@ impl WindowsOutputUi {
                     identity,
                     practice_pending,
                     &mut |request, output| {
-                        let plan = super::plan_retained_shared_output(
+                        let plan = super::plan_retained_source_output(
                             &complete_capability(output)?,
                             &output.stream().configuration().requested,
                             source,

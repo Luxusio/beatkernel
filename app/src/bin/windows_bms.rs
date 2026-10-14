@@ -29,13 +29,17 @@ fn retained_complete_startup(
 ) -> bool {
     retained
         && backend == Backend::Wasapi
-        && matches!(mode, beatkernel_platform::audio::AudioStreamMode::Shared(_))
+        && matches!(
+            mode,
+            beatkernel_platform::audio::AudioStreamMode::Shared(_)
+                | beatkernel_platform::audio::AudioStreamMode::Exclusive
+        )
 }
 
 /// The retained vertical reuses the ordinary planner without crossing backend,
-/// mode or Source-rate ownership boundaries.
+/// mode-family or Source-rate ownership boundaries.
 #[cfg(any(target_os = "windows", test))]
-fn plan_retained_shared_output(
+fn plan_retained_source_output(
     current: &beatkernel_bms_runtime::gameplay::output::domain::control::OutputCapability,
     current_wasapi: &beatkernel_platform::audio::AudioStreamRequest,
     source: beatkernel::audio::AudioFormat,
@@ -44,10 +48,9 @@ fn plan_retained_shared_output(
 ) -> std::result::Result<output_settings::WasapiTargetPlan, String> {
     use beatkernel_platform::audio::{AudioBackendKind, AudioStreamMode};
     if current_wasapi.backend() != AudioBackendKind::Wasapi
-        || !matches!(current_wasapi.mode(), AudioStreamMode::Shared(_))
         || current_wasapi.format().sample_rate() != source.sample_rate()
     {
-        return Err("retained replacement requires same-rate WASAPI shared output".into());
+        return Err("retained replacement requires same-rate WASAPI output".into());
     }
     let output_settings::TargetPlan::Wasapi(plan) = output_settings::plan_target(
         current,
@@ -60,12 +63,16 @@ fn plan_retained_shared_output(
     else {
         return Err("retained replacement cannot change the audio backend".into());
     };
-    if !matches!(plan.mode, AudioStreamMode::Shared(_))
-        || plan.format.sample_rate() != source.sample_rate()
+    if !matches!(
+        (current_wasapi.mode(), plan.mode),
+        (AudioStreamMode::Shared(_), AudioStreamMode::Shared(_))
+            | (AudioStreamMode::Exclusive, AudioStreamMode::Exclusive)
+    ) || plan.format.sample_rate() != source.sample_rate()
         || plan.format.encoding() != current_wasapi.format().encoding()
     {
         return Err(
-            "retained replacement requires shared mode and unchanged Source rate/encoding".into(),
+            "retained replacement requires the same mode family and unchanged Source rate/encoding"
+                .into(),
         );
     }
     Ok(plan)

@@ -2,7 +2,7 @@
 use super::*;
 use crate::audio::{
     AudioBackendKind, AudioDeviceId, AudioStreamMode, AudioStreamRequest, BufferRequest,
-    DeviceFormat, PeriodRequest, SampleEncoding, SharedPeriodPolicy,
+    DeviceFormat, NegotiationPolicy, PeriodRequest, SampleEncoding, SharedPeriodPolicy,
 };
 use beatkernel::{
     audio::*,
@@ -66,6 +66,7 @@ struct Ops<'a> {
     encoded: [f32; 128],
     encoded_len: usize,
     request_during: Option<(&'a SourceRetirementSlot, Effect)>,
+    request_policy: SourceRetirementPolicy,
     requested_nonce: Option<u64>,
 }
 impl Ops<'_> {
@@ -84,6 +85,7 @@ impl Ops<'_> {
             encoded: [0.; 128],
             encoded_len: 0,
             request_during: None,
+            request_policy: SourceRetirementPolicy::PreservePausedSuffix,
             requested_nonce: None,
         }
     }
@@ -91,9 +93,7 @@ impl Ops<'_> {
         self.effects.borrow_mut().push(effect);
         if let Some((slot, at)) = self.request_during {
             if at == effect && self.requested_nonce.is_none() {
-                self.requested_nonce = slot
-                    .submit(SourceRetirementPolicy::PreservePausedSuffix)
-                    .unwrap();
+                self.requested_nonce = slot.submit(self.request_policy).unwrap();
             }
         }
     }
@@ -330,7 +330,7 @@ fn assert_exact_subframe_duration_preserves_live_owner(buffer_duration: bool) {
         .source_playback_history()
         .unwrap()
         .initial_physical_frame();
-    let facts = SourceRetirementFacts::from_state(&state, Some(matrix())).unwrap();
+    let facts = SourceRetirementFacts::from_state(&state, Some(matrix()), shared()).unwrap();
     let slot = SourceRetirementSlot::new();
     let word = slot.word.load(Ordering::Acquire);
     let duration = beatkernel::time::Duration::from_nanos(1);
@@ -399,7 +399,7 @@ fn cold_sizing_refusals_preserve_every_live_slot_state_and_nonce() {
         let (_, mut state, _) = rig_with_rate(false, None, 48_000);
         state.render_pending(4).unwrap();
         state.admit(1).unwrap();
-        let facts = SourceRetirementFacts::from_state(&state, Some(matrix())).unwrap();
+        let facts = SourceRetirementFacts::from_state(&state, Some(matrix()), shared()).unwrap();
         let slot = SourceRetirementSlot::new();
         let nonce = if phase == 0 {
             None
@@ -515,7 +515,7 @@ fn cold_sizing_accepts_representable_default_and_authorized_rounding_without_eff
     let (_, mut state, _) = rig_with_rate(false, None, 48_000);
     state.render_pending(4).unwrap();
     state.admit(1).unwrap();
-    let facts = SourceRetirementFacts::from_state(&state, Some(matrix())).unwrap();
+    let facts = SourceRetirementFacts::from_state(&state, Some(matrix()), shared()).unwrap();
     let report = state.pending_report();
     let basis = state.output_frame_basis();
     for (buffer, period, policy, capacity) in [
@@ -588,7 +588,7 @@ fn cold_validation_preserves_live_slot_and_complete_owner() {
     state.admit(1).unwrap();
     let report = state.pending_report();
     let basis = state.output_frame_basis();
-    let facts = SourceRetirementFacts::from_state(&state, Some(matrix())).unwrap();
+    let facts = SourceRetirementFacts::from_state(&state, Some(matrix()), shared()).unwrap();
     let slot = SourceRetirementSlot::new();
     for (request, capacity, matrix) in [
         (
@@ -1162,7 +1162,7 @@ fn failed_native_release_quarantines_complete_owner_and_explicit_retry_has_no_ef
     assert_eq!(state.admitted_frames(), 0);
     assert!(state.admission_is_uncertain());
     assert!(state.reconfigure(format(2), Some(matrix()), 4).is_err());
-    assert!(SourceRetirementFacts::from_state(&state, Some(matrix())).is_err());
+    assert!(SourceRetirementFacts::from_state(&state, Some(matrix()), shared()).is_err());
     let mut state = match state.into_mixer() {
         Err(owner) => owner,
         Ok(_) => panic!("quarantine cannot discard complete state"),
@@ -1448,6 +1448,1173 @@ fn worker_history_preserves_practice_receipt_and_pending_block_until_both_are_re
     );
 }
 
+// These observations are deliberately taken outside allocation measurements.
+// Besides values, retained storage and the actual Mixer/history addresses pin
+// the complete owner through cold refusals and zero-effect worker failures.
+#[derive(Debug, PartialEq)]
+struct OwnerObservation {
+    format: Option<DeviceFormat>,
+    max_frames: usize,
+    report: Option<RenderReport>,
+    admitted: usize,
+    samples: Vec<f32>,
+    samples_address: usize,
+    basis: OutputFrameBasis,
+    uncertain: bool,
+    configuration: MixerConfig,
+    counters: AudioCounters,
+    physical: u64,
+    playback: u64,
+    mixer_address: usize,
+    history_address: usize,
+    history_grid: (u32, u64, u64, u64, u64, u64, usize),
+    history_spans: Vec<SourcePlaybackSpan>,
+}
+fn observe_owner(state: &NativeOutputState) -> OwnerObservation {
+    let history = state.mixer().source_playback_history().unwrap();
+    OwnerObservation {
+        format: state.format(),
+        max_frames: state.max_frames(),
+        report: state.pending_report(),
+        admitted: state.admitted_frames(),
+        samples: state.pending_samples().to_vec(),
+        samples_address: state.pending_samples().as_ptr() as usize,
+        basis: state.output_frame_basis(),
+        uncertain: state.admission_is_uncertain(),
+        configuration: state.mixer().configuration(),
+        counters: state.mixer().counters(),
+        physical: state.mixer().frame_cursor(),
+        playback: state.mixer().playback_frame_cursor(),
+        mixer_address: state.mixer() as *const Mixer as usize,
+        history_address: history as *const SourcePlaybackHistory as usize,
+        history_grid: (
+            history.source_rate(),
+            history.initial_physical_frame(),
+            history.initial_playback_frame(),
+            history.pulled_end_frame(),
+            history.retained_start_frame(),
+            history.retirement_revision(),
+            history.capacity(),
+        ),
+        history_spans: (0..history.len())
+            .map(|i| history.span(i).unwrap())
+            .collect(),
+    }
+}
+fn exclusive_step(
+    state: &mut NativeOutputState,
+    slot: &SourceRetirementSlot,
+    ops: &mut Ops<'_>,
+    frames: u32,
+) -> WasapiSourceStep {
+    step(
+        state,
+        slot,
+        ops,
+        WasapiSourceWork::ExclusiveFill {
+            buffer_frames: frames,
+        },
+    )
+}
+fn exclusive_request(
+    rate: u32,
+    buffer: BufferRequest,
+    period: PeriodRequest,
+    policy: NegotiationPolicy,
+) -> AudioStreamRequest {
+    AudioStreamRequest::new(
+        AudioDeviceId("original-endpoint".into()),
+        AudioBackendKind::Wasapi,
+        AudioStreamMode::Exclusive,
+        DeviceFormat::new(rate, 2, SampleEncoding::Float32, None).unwrap(),
+        buffer,
+        period,
+    )
+    .unwrap()
+    .with_negotiation(policy)
+}
+
+#[test]
+fn exclusive_known_exact_frames_duration_and_explicit_period_preserve_native_uncertainty() {
+    use crate::audio::negotiation::known_exact_exclusive_buffer_frames;
+    use beatkernel::time::Duration;
+    let four_ms = Duration::from_nanos(4_000_000);
+    for (buffer, period) in [
+        (BufferRequest::Frames(4), PeriodRequest::DeviceDefault),
+        (
+            BufferRequest::Duration(four_ms),
+            PeriodRequest::DeviceDefault,
+        ),
+        (BufferRequest::DeviceDefault, PeriodRequest::Frames(4)),
+        (
+            BufferRequest::DeviceDefault,
+            PeriodRequest::Duration(four_ms),
+        ),
+        (BufferRequest::Frames(4), PeriodRequest::Duration(four_ms)),
+        (BufferRequest::Duration(four_ms), PeriodRequest::Frames(4)),
+        (
+            BufferRequest::Duration(four_ms),
+            PeriodRequest::Duration(four_ms),
+        ),
+    ] {
+        let request = exclusive_request(1000, buffer, period, NegotiationPolicy::Exact);
+        assert_eq!(
+            known_exact_exclusive_buffer_frames(&request),
+            Ok(Some(4)),
+            "{request:?}"
+        );
+    }
+    for (buffer, period, policy) in [
+        (
+            BufferRequest::DeviceDefault,
+            PeriodRequest::DeviceDefault,
+            NegotiationPolicy::Exact,
+        ),
+        (
+            BufferRequest::Frames(4),
+            PeriodRequest::Frames(4),
+            NegotiationPolicy::AllowSupportedRounding,
+        ),
+        (
+            BufferRequest::Duration(Duration::from_nanos(1)),
+            PeriodRequest::Duration(Duration::from_nanos(1)),
+            NegotiationPolicy::AllowSupportedRounding,
+        ),
+    ] {
+        let request = exclusive_request(48_000, buffer, period, policy);
+        assert_eq!(
+            known_exact_exclusive_buffer_frames(&request),
+            Ok(None),
+            "unresolved actual geometry: {request:?}"
+        );
+    }
+}
+
+#[test]
+fn exclusive_known_fractional_overflow_and_mismatched_requests_keep_typed_errors() {
+    use crate::audio::negotiation::known_exact_exclusive_buffer_frames;
+    use beatkernel::time::Duration;
+    for (buffer, period) in [
+        (
+            BufferRequest::Duration(Duration::from_nanos(1)),
+            PeriodRequest::DeviceDefault,
+        ),
+        (
+            BufferRequest::DeviceDefault,
+            PeriodRequest::Duration(Duration::from_nanos(1)),
+        ),
+        (BufferRequest::Frames(4), PeriodRequest::Frames(3)),
+        (
+            BufferRequest::Duration(Duration::from_nanos(62_500)),
+            PeriodRequest::Frames(4),
+        ),
+    ] {
+        let request = exclusive_request(48_000, buffer, period, NegotiationPolicy::Exact);
+        assert!(
+            matches!(
+                known_exact_exclusive_buffer_frames(&request),
+                Err(crate::audio::AudioPlatformError::ConfigurationUnsupported { .. })
+            ),
+            "{request:?}"
+        );
+    }
+    for (buffer, period) in [
+        (
+            BufferRequest::Duration(Duration::MAX),
+            PeriodRequest::DeviceDefault,
+        ),
+        (
+            BufferRequest::DeviceDefault,
+            PeriodRequest::Duration(Duration::MAX),
+        ),
+    ] {
+        let request = exclusive_request(48_000, buffer, period, NegotiationPolicy::Exact);
+        assert_eq!(
+            known_exact_exclusive_buffer_frames(&request),
+            Err(crate::audio::AudioPlatformError::Capacity)
+        );
+    }
+}
+
+#[test]
+fn exclusive_cold_geometry_checks_whole_pending_suffix_without_touching_owner() {
+    use beatkernel::time::Duration;
+    for pending in [0, 2, 4, 6, 8] {
+        let (_, mut state) = rig();
+        if pending != 0 {
+            state.render_pending(8).unwrap();
+            if pending != 8 {
+                state.admit(8 - pending).unwrap();
+            }
+        }
+        let before = observe_owner(&state);
+        for (buffer, period, policy, known_four) in [
+            (
+                BufferRequest::Frames(4),
+                PeriodRequest::DeviceDefault,
+                NegotiationPolicy::Exact,
+                true,
+            ),
+            (
+                BufferRequest::Duration(Duration::from_nanos(4_000_000)),
+                PeriodRequest::DeviceDefault,
+                NegotiationPolicy::Exact,
+                true,
+            ),
+            (
+                BufferRequest::DeviceDefault,
+                PeriodRequest::Frames(4),
+                NegotiationPolicy::Exact,
+                true,
+            ),
+            (
+                BufferRequest::DeviceDefault,
+                PeriodRequest::Duration(Duration::from_nanos(4_000_000)),
+                NegotiationPolicy::Exact,
+                true,
+            ),
+            (
+                BufferRequest::DeviceDefault,
+                PeriodRequest::DeviceDefault,
+                NegotiationPolicy::Exact,
+                false,
+            ),
+            (
+                BufferRequest::Frames(4),
+                PeriodRequest::Frames(4),
+                NegotiationPolicy::AllowSupportedRounding,
+                false,
+            ),
+        ] {
+            let request = exclusive_request(1000, buffer, period, policy);
+            assert_eq!(
+                validate_source_open_geometry(&state, &request).is_ok(),
+                !known_four || pending % 4 == 0,
+                "pending={pending}, {request:?}"
+            );
+            assert_eq!(observe_owner(&state), before);
+        }
+        for (buffer, period) in [
+            (
+                BufferRequest::Duration(Duration::from_nanos(1)),
+                PeriodRequest::DeviceDefault,
+            ),
+            (BufferRequest::Frames(4), PeriodRequest::Frames(3)),
+            (
+                BufferRequest::Duration(Duration::MAX),
+                PeriodRequest::DeviceDefault,
+            ),
+        ] {
+            let request = exclusive_request(1000, buffer, period, NegotiationPolicy::Exact);
+            assert!(validate_source_open_geometry(&state, &request).is_err());
+            assert_eq!(observe_owner(&state), before);
+        }
+    }
+}
+
+#[test]
+fn shared_cold_geometry_preserves_nonmultiple_suffix_for_both_shared_policies() {
+    use crate::audio::negotiation::known_exact_exclusive_buffer_frames;
+
+    let (_producer, mut state) = rig();
+    state.render_pending(8).unwrap();
+    state.admit(2).unwrap();
+    assert_eq!(state.pending_frames(), 6);
+    let before = observe_owner(&state);
+
+    for (mode, period) in [
+        (shared(), PeriodRequest::DeviceDefault),
+        (shared(), PeriodRequest::Frames(3)),
+        (
+            AudioStreamMode::Shared(SharedPeriodPolicy::DeviceDefault),
+            PeriodRequest::DeviceDefault,
+        ),
+    ] {
+        let request = AudioStreamRequest::new(
+            AudioDeviceId("original-endpoint".into()),
+            AudioBackendKind::Wasapi,
+            mode,
+            state.format().unwrap(),
+            BufferRequest::Frames(4),
+            period,
+        )
+        .unwrap()
+        .with_negotiation(NegotiationPolicy::Exact);
+        assert_eq!(
+            known_exact_exclusive_buffer_frames(&request),
+            Ok(None),
+            "shared sizing must not create exclusive whole-buffer geometry: {request:?}"
+        );
+        assert_eq!(observe_owner(&state), before);
+        assert_eq!(validate_source_open_geometry(&state, &request), Ok(()));
+        assert_eq!(observe_owner(&state), before);
+    }
+}
+
+#[test]
+fn exclusive_actual_geometry_uses_immutable_render_limit_and_retained_whole_multiples() {
+    for pending in [0, 2, 4, 6, 8] {
+        let (_, mut state) = rig();
+        if pending != 0 {
+            state.render_pending(8).unwrap();
+            if pending != 8 {
+                state.admit(8 - pending).unwrap();
+            }
+        }
+        state.reconfigure(format(2), Some(matrix()), 2).unwrap();
+        let before = observe_owner(&state);
+        for (buffer, allowed) in [
+            (0, false),
+            (4, pending % 4 == 0),
+            (8, pending % 8 == 0),
+            (16, pending == 0),
+            (33, false),
+        ] {
+            assert_eq!(
+                validate_exclusive_source_buffer(&state, buffer).is_ok(),
+                allowed,
+                "pending={pending}, buffer={buffer}"
+            );
+            assert_eq!(observe_owner(&state), before);
+        }
+    }
+}
+
+#[test]
+fn retirement_facts_compare_mode_families_and_refuse_backend_rate_encoding_changes() {
+    let (_, state) = rig();
+    let before = observe_owner(&state);
+    let shared_default = AudioStreamMode::Shared(SharedPeriodPolicy::DeviceDefault);
+    for current in [shared(), shared_default, AudioStreamMode::Exclusive] {
+        let facts = SourceRetirementFacts::from_state(&state, Some(matrix()), current).unwrap();
+        for target in [shared(), shared_default, AudioStreamMode::Exclusive] {
+            let draft = AudioStreamRequest::new(
+                AudioDeviceId("another-endpoint".into()),
+                AudioBackendKind::Wasapi,
+                target,
+                format(2),
+                BufferRequest::Frames(4),
+                PeriodRequest::DeviceDefault,
+            )
+            .unwrap();
+            let slot = SourceRetirementSlot::new();
+            let compatible =
+                (current == AudioStreamMode::Exclusive) == (target == AudioStreamMode::Exclusive);
+            if compatible {
+                assert_eq!(
+                    facts.validate(&draft, Some(&matrix()), 8),
+                    Ok(if current == AudioStreamMode::Exclusive {
+                        SourceRetirementPolicy::RequireEmptySuffix
+                    } else {
+                        SourceRetirementPolicy::PreservePausedSuffix
+                    })
+                );
+                assert_eq!(
+                    slot.submit_validated(&facts, &draft, Some(&matrix()), 8),
+                    Ok(Some(1))
+                );
+            } else {
+                assert!(slot
+                    .submit_validated(&facts, &draft, Some(&matrix()), 8)
+                    .is_err());
+                assert_eq!(slot.word.load(Ordering::Acquire), IDLE);
+                assert_eq!(
+                    slot.submit(SourceRetirementPolicy::RequireEmptySuffix),
+                    Ok(Some(1))
+                );
+            }
+            assert_eq!(observe_owner(&state), before);
+        }
+        for (backend, output) in [
+            (AudioBackendKind::Asio, format(2)),
+            (
+                AudioBackendKind::Wasapi,
+                DeviceFormat::new(2000, 2, SampleEncoding::Float32, None).unwrap(),
+            ),
+            (
+                AudioBackendKind::Wasapi,
+                DeviceFormat::new(
+                    1000,
+                    2,
+                    SampleEncoding::Pcm {
+                        container_bits: 16,
+                        valid_bits: 16,
+                    },
+                    None,
+                )
+                .unwrap(),
+            ),
+        ] {
+            let draft = AudioStreamRequest::new(
+                AudioDeviceId("original-endpoint".into()),
+                backend,
+                current,
+                output,
+                BufferRequest::Frames(4),
+                PeriodRequest::DeviceDefault,
+            )
+            .unwrap();
+            let slot = SourceRetirementSlot::new();
+            assert!(slot
+                .submit_validated(&facts, &draft, Some(&matrix()), 8)
+                .is_err());
+            assert_eq!(slot.word.load(Ordering::Acquire), IDLE);
+            assert_eq!(observe_owner(&state), before);
+        }
+    }
+}
+
+#[test]
+fn exclusive_fresh_fill_is_one_full_native_lease_with_no_padding_query() {
+    let (_, mut state) = rig();
+    let mut ops = Ops::new(0);
+    ops.failures.padding = true;
+    assert_eq!(
+        exclusive_step(&mut state, &SourceRetirementSlot::new(), &mut ops, 4),
+        WasapiSourceStep::Continue
+    );
+    effects(
+        &ops,
+        &[
+            Effect::Acquire(4),
+            Effect::History,
+            Effect::Render(4),
+            Effect::Encode(8),
+            Effect::Release(4, false),
+            Effect::Admitted(4),
+            Effect::Clock,
+        ],
+    );
+    assert_eq!(state.pending_frames(), 0);
+    assert_eq!(state.admitted_frames(), 4);
+    assert_eq!(state.mixer().frame_cursor(), 4);
+    assert_eq!(
+        &ops.encoded[..8],
+        &[0.25, -0.125, 0.25, -0.125, 0.25, -0.125, 0.25, -0.125]
+    );
+}
+
+fn distinct_sample_rig() -> (CommandProducer, NativeOutputState) {
+    let source = AudioFormat::new(1000, 1).unwrap();
+    let limits = PcmLimits::new(128 * 4, 128 * 4, 1).unwrap();
+    let mut bank = SampleBank::new(source, limits).unwrap();
+    let samples: Vec<f32> = (1..=128).map(|value| value as f32 / 256.).collect();
+    bank.insert(
+        SampleId(1),
+        PcmSample::new(source, samples, limits).unwrap(),
+    )
+    .unwrap();
+    let (mut producer, consumer) = command_queue(16).unwrap();
+    producer
+        .try_push(AudioCommand::Play {
+            voice: VoiceId(1),
+            sample: SampleId(1),
+            at: Timestamp::ZERO,
+            gain: 1.,
+        })
+        .unwrap();
+    let mut mixer = Mixer::new(
+        MixerConfig::new(
+            source,
+            ClockDomainId(71),
+            Timestamp::ZERO,
+            AudioLimits::new(16, 4, 16, 32, 16).unwrap(),
+        ),
+        bank,
+        consumer,
+    )
+    .unwrap();
+    mixer.enable_source_playback_history(16).unwrap();
+    let state = NativeOutputState::new(mixer, format(2), Some(matrix()), 16)
+        .unwrap_or_else(|_| panic!("valid distinct PCM fixture"));
+    (producer, state)
+}
+
+#[test]
+fn exclusive_two_full_leases_keep_original_report_prefix_history_and_distinct_pcm() {
+    let (mut producer, mut state) = distinct_sample_rig();
+    let report = state.render_pending(12).unwrap();
+    state.admit(4).unwrap();
+    let history_before = observe_owner(&state);
+    let original_samples = state.pending_samples().to_vec();
+    assert_ne!(
+        original_samples[0], original_samples[2],
+        "ordering oracle needs distinct PCM"
+    );
+    state.reconfigure(format(2), Some(matrix()), 4).unwrap();
+    let slot = SourceRetirementSlot::new();
+    for index in 0..2 {
+        let mut ops = Ops::new(0);
+        ops.failures.render = true;
+        assert_eq!(
+            exclusive_step(&mut state, &slot, &mut ops, 4),
+            WasapiSourceStep::Continue
+        );
+        effects(
+            &ops,
+            &[
+                Effect::Acquire(4),
+                Effect::History,
+                Effect::Encode(8),
+                Effect::Release(4, false),
+                Effect::Admitted(4),
+                Effect::Clock,
+            ],
+        );
+        assert_eq!(
+            &ops.encoded[..8],
+            &original_samples[index * 8..index * 8 + 8]
+        );
+        assert_eq!(state.admitted_frames(), 8 + index * 4);
+        assert_eq!(state.pending_frames(), 4 - index * 4);
+        assert_eq!(
+            state.pending_report(),
+            if index == 0 { Some(report) } else { None }
+        );
+        assert_eq!(
+            state.output_frame_basis().start_physical_frame(),
+            8 + index as u64 * 4
+        );
+        assert_eq!(
+            state.mixer().frame_cursor(),
+            12,
+            "pending PCM cannot be regenerated"
+        );
+        let after = observe_owner(&state);
+        assert_eq!(after.mixer_address, history_before.mixer_address);
+        assert_eq!(after.history_address, history_before.history_address);
+        assert_eq!(after.history_grid, history_before.history_grid);
+        assert_eq!(after.history_spans, history_before.history_spans);
+        assert_eq!(after.configuration, history_before.configuration);
+        assert_eq!(after.counters, history_before.counters);
+    }
+    producer
+        .try_push(AudioCommand::Stop {
+            voice: VoiceId(1),
+            at: Timestamp::from_nanos(12_000_000),
+        })
+        .unwrap();
+    let mut fresh = Ops::new(0);
+    assert_eq!(
+        exclusive_step(&mut state, &slot, &mut fresh, 4),
+        WasapiSourceStep::Continue
+    );
+    assert_eq!(
+        &fresh.encoded[..8],
+        &[0.; 8],
+        "original producer still owns the original Mixer queue"
+    );
+    assert_eq!(state.mixer().counters().commands_consumed, 2);
+}
+
+#[test]
+fn exclusive_geometry_failure_is_local_and_precedes_all_ops_and_history() {
+    for (pending, prepared, buffer) in [(6, 8, 4), (2, 8, 4), (0, 8, 0), (0, 8, 33), (0, 4, 8)] {
+        let (_, mut state) = rig();
+        if pending != 0 {
+            state.render_pending(pending).unwrap();
+        }
+        state
+            .reconfigure(format(2), Some(matrix()), prepared)
+            .unwrap();
+        let before = observe_owner(&state);
+        let mut ops = Ops::new(4);
+        ops.failures = Failures {
+            padding: true,
+            acquire: true,
+            render: true,
+            encode: true,
+            release: true,
+            clock: true,
+        };
+        ops.history = Some(SourceHistoryRetirementRequest {
+            revision: 2,
+            source_pin: u64::MAX,
+        });
+        let mut completed = 7;
+        failed(
+            source_worker_step(
+                &mut state,
+                &SourceRetirementSlot::new(),
+                &mut ops,
+                WasapiSourceWork::ExclusiveFill {
+                    buffer_frames: buffer,
+                },
+                &mut completed,
+            ),
+            WasapiSourcePhase::Render,
+            INVALID_ARGUMENT,
+        );
+        effects(&ops, &[]);
+        assert_eq!(completed, 7);
+        assert_eq!(observe_owner(&state), before);
+    }
+}
+
+#[test]
+fn exclusive_buffer_growth_past_old_max_is_legal_after_actual_cold_preparation() {
+    let (_, mut state) = rig();
+    state.render_pending(8).unwrap();
+    state.reconfigure(format(2), Some(matrix()), 2).unwrap();
+    assert_eq!(validate_exclusive_source_buffer(&state, 8), Ok(()));
+    let mut retained = Ops::new(0);
+    assert_eq!(
+        exclusive_step(&mut state, &SourceRetirementSlot::new(), &mut retained, 8),
+        WasapiSourceStep::Continue
+    );
+    effects(
+        &retained,
+        &[
+            Effect::Acquire(8),
+            Effect::History,
+            Effect::Encode(16),
+            Effect::Release(8, false),
+            Effect::Admitted(8),
+            Effect::Clock,
+        ],
+    );
+    assert_eq!(state.mixer().frame_cursor(), 8);
+    assert_eq!(validate_exclusive_source_buffer(&state, 16), Ok(()));
+    state.reconfigure(format(2), Some(matrix()), 16).unwrap();
+    let mut fresh = Ops::new(0);
+    assert_eq!(
+        exclusive_step(&mut state, &SourceRetirementSlot::new(), &mut fresh, 16),
+        WasapiSourceStep::Continue
+    );
+    effects(
+        &fresh,
+        &[
+            Effect::Acquire(16),
+            Effect::History,
+            Effect::Render(16),
+            Effect::Encode(32),
+            Effect::Release(16, false),
+            Effect::Admitted(16),
+            Effect::Clock,
+        ],
+    );
+    assert_eq!(state.mixer().frame_cursor(), 24);
+}
+
+#[test]
+fn exclusive_acquire_failure_never_changes_complete_owner_or_creates_a_lease() {
+    for retained in [false, true] {
+        let (_, mut state) = rig();
+        if retained {
+            state.render_pending(8).unwrap();
+            state.admit(4).unwrap();
+        }
+        let before = observe_owner(&state);
+        let mut ops = Ops::new(0);
+        ops.failures = Failures {
+            acquire: true,
+            release: true,
+            clock: true,
+            ..Failures::default()
+        };
+        failed(
+            exclusive_step(&mut state, &SourceRetirementSlot::new(), &mut ops, 4),
+            WasapiSourcePhase::Acquire,
+            ACQUIRE_ERROR,
+        );
+        effects(&ops, &[Effect::Acquire(4)]);
+        assert_eq!(observe_owner(&state), before);
+    }
+}
+
+#[test]
+fn exclusive_history_and_render_failures_release_one_silent_whole_buffer_and_keep_both_errors() {
+    for history in [false, true] {
+        for release in [false, true] {
+            let (_, mut state) = rig();
+            if history {
+                state.render_pending(8).unwrap();
+                state.admit(4).unwrap();
+            }
+            let mut before = observe_owner(&state);
+            let mut ops = Ops::new(0);
+            ops.failures = Failures {
+                render: true,
+                release,
+                clock: true,
+                ..Failures::default()
+            };
+            if history {
+                ops.history = Some(SourceHistoryRetirementRequest {
+                    revision: 2,
+                    source_pin: 9,
+                });
+            }
+            let mut completed = 0;
+            let error = failed(
+                source_worker_step(
+                    &mut state,
+                    &SourceRetirementSlot::new(),
+                    &mut ops,
+                    WasapiSourceWork::ExclusiveFill { buffer_frames: 4 },
+                    &mut completed,
+                ),
+                if history {
+                    WasapiSourcePhase::History
+                } else {
+                    WasapiSourcePhase::Render
+                },
+                if history {
+                    INVALID_ARGUMENT
+                } else {
+                    RENDER_ERROR
+                },
+            );
+            assert_eq!(error.release, release.then_some(RELEASE_ERROR));
+            effects(
+                &ops,
+                if history {
+                    &[
+                        Effect::Acquire(4),
+                        Effect::History,
+                        Effect::Release(4, true),
+                    ]
+                } else {
+                    &[
+                        Effect::Acquire(4),
+                        Effect::History,
+                        Effect::Render(4),
+                        Effect::Release(4, true),
+                    ]
+                },
+            );
+            assert_eq!(completed, 0);
+            before.uncertain = release;
+            assert_eq!(observe_owner(&state), before);
+        }
+    }
+}
+
+#[test]
+fn exclusive_encode_failure_keeps_original_pcm_prefix_and_compound_release_error() {
+    for retained in [false, true] {
+        for release in [false, true] {
+            let (_, mut state) = rig();
+            if retained {
+                state.render_pending(8).unwrap();
+                state.admit(4).unwrap();
+            }
+            let report = state.pending_report();
+            let basis = state.output_frame_basis();
+            let mut ops = Ops::new(0);
+            ops.failures = Failures {
+                encode: true,
+                release,
+                clock: true,
+                ..Failures::default()
+            };
+            let error = failed(
+                exclusive_step(&mut state, &SourceRetirementSlot::new(), &mut ops, 4),
+                WasapiSourcePhase::Encode,
+                ENCODE_ERROR,
+            );
+            assert_eq!(error.release, release.then_some(RELEASE_ERROR));
+            effects(
+                &ops,
+                if retained {
+                    &[
+                        Effect::Acquire(4),
+                        Effect::History,
+                        Effect::Encode(8),
+                        Effect::Release(4, true),
+                    ]
+                } else {
+                    &[
+                        Effect::Acquire(4),
+                        Effect::History,
+                        Effect::Render(4),
+                        Effect::Encode(8),
+                        Effect::Release(4, true),
+                    ]
+                },
+            );
+            assert_eq!(state.pending_frames(), 4);
+            assert_eq!(state.admitted_frames(), if retained { 4 } else { 0 });
+            assert_eq!(state.mixer().frame_cursor(), if retained { 8 } else { 4 });
+            assert_eq!(state.output_frame_basis(), basis);
+            assert_eq!(
+                state.pending_samples(),
+                [0.25, -0.125, 0.25, -0.125, 0.25, -0.125, 0.25, -0.125]
+            );
+            if retained {
+                assert_eq!(state.pending_report(), report);
+            }
+            assert_eq!(state.admission_is_uncertain(), release);
+        }
+    }
+}
+
+#[test]
+fn exclusive_failed_release_quarantines_original_owner_and_all_retry_work_is_zero_effect() {
+    let (_, mut state) = rig();
+    let report = state.render_pending(8).unwrap();
+    state.admit(4).unwrap();
+    let mut before = observe_owner(&state);
+    let slot = SourceRetirementSlot::new();
+    let mut ops = Ops::new(0);
+    ops.failures.release = true;
+    ops.failures.clock = true;
+    let error = failed(
+        exclusive_step(&mut state, &slot, &mut ops, 4),
+        WasapiSourcePhase::Release,
+        RELEASE_ERROR,
+    );
+    assert_eq!(error.release, Some(RELEASE_ERROR));
+    effects(
+        &ops,
+        &[
+            Effect::Acquire(4),
+            Effect::History,
+            Effect::Encode(8),
+            Effect::Release(4, false),
+        ],
+    );
+    before.uncertain = true;
+    assert_eq!(observe_owner(&state), before);
+    assert_eq!(state.pending_report(), Some(report));
+    assert_eq!(state.admitted_frames(), 4);
+    assert!(state.reconfigure(format(2), Some(matrix()), 4).is_err());
+    for current in [shared(), AudioStreamMode::Exclusive] {
+        assert!(SourceRetirementFacts::from_state(&state, Some(matrix()), current).is_err());
+    }
+    let retry_slot = SourceRetirementSlot::new();
+    retry_slot
+        .submit(SourceRetirementPolicy::RequireEmptySuffix)
+        .unwrap()
+        .unwrap();
+    let mut retry = Ops::new(4);
+    for work in [
+        WasapiSourceWork::ExclusiveFill { buffer_frames: 4 },
+        WasapiSourceWork::Fill { buffer_frames: 8 },
+        WasapiSourceWork::ClockOnly,
+    ] {
+        failed(
+            step(&mut state, &retry_slot, &mut retry, work),
+            WasapiSourcePhase::Quarantined,
+            INVALID_ARGUMENT,
+        );
+    }
+    effects(&retry, &[]);
+    assert_eq!(observe_owner(&state), before);
+}
+
+#[test]
+fn exclusive_positive_full_release_commits_only_that_prefix_before_clock_failure() {
+    let (mut producer, mut state) = distinct_sample_rig();
+    let report = state.render_pending(12).unwrap();
+    state.admit(4).unwrap();
+    state.reconfigure(format(2), Some(matrix()), 4).unwrap();
+    let original = state.pending_samples().to_vec();
+    let history = observe_owner(&state);
+    let slot = SourceRetirementSlot::new();
+    let mut ops = Ops::new(0);
+    ops.failures.clock = true;
+    let error = failed(
+        exclusive_step(&mut state, &slot, &mut ops, 4),
+        WasapiSourcePhase::Clock,
+        CLOCK_ERROR,
+    );
+    assert_eq!(error.release, None);
+    effects(
+        &ops,
+        &[
+            Effect::Acquire(4),
+            Effect::History,
+            Effect::Encode(8),
+            Effect::Release(4, false),
+            Effect::Admitted(4),
+            Effect::Clock,
+        ],
+    );
+    assert_eq!(&ops.encoded[..8], &original[..8]);
+    assert_eq!(state.admitted_frames(), 8);
+    assert_eq!(state.pending_report(), Some(report));
+    assert_eq!(state.pending_samples(), &original[8..]);
+    assert_eq!(state.output_frame_basis().start_physical_frame(), 8);
+    assert_eq!(state.mixer().frame_cursor(), 12);
+    assert!(!state.admission_is_uncertain());
+    let after = observe_owner(&state);
+    assert_eq!(after.history_grid, history.history_grid);
+    assert_eq!(after.history_spans, history.history_spans);
+    producer
+        .try_push(AudioCommand::Stop {
+            voice: VoiceId(1),
+            at: Timestamp::from_nanos(12_000_000),
+        })
+        .unwrap();
+    let mut retry = Ops::new(0);
+    retry.failures.render = true;
+    assert_eq!(
+        exclusive_step(&mut state, &slot, &mut retry, 4),
+        WasapiSourceStep::Continue
+    );
+    assert_eq!(&retry.encoded[..8], &original[8..]);
+    assert_eq!(state.mixer().frame_cursor(), 12);
+    let mut fresh = Ops::new(0);
+    assert_eq!(
+        exclusive_step(&mut state, &slot, &mut fresh, 4),
+        WasapiSourceStep::Continue
+    );
+    assert_eq!(&fresh.encoded[..8], &[0.; 8]);
+    assert_eq!(state.mixer().counters().commands_consumed, 2);
+}
+
+#[test]
+fn exclusive_history_keeps_original_whole_report_pin_until_pending_multiple_is_drained() {
+    let (_, mut state, _) = rig_with(false, Some(2));
+    state.reconfigure(format(2), Some(matrix()), 16).unwrap();
+    let report = state.render_pending(12).unwrap();
+    state.admit(4).unwrap();
+    state.reconfigure(format(2), Some(matrix()), 4).unwrap();
+    assert_eq!(report.start_frame, 0);
+    assert_eq!(report.playback_frames, 2);
+    assert_eq!(state.output_frame_basis().start_physical_frame(), 4);
+    let request = SourceHistoryRetirementRequest {
+        revision: 2,
+        source_pin: 12,
+    };
+    let slot = SourceRetirementSlot::new();
+    let mut completed = 0;
+    for prefix in [8, 12] {
+        let mut ops = Ops::new(0);
+        ops.history = Some(request);
+        assert_eq!(
+            source_worker_step(
+                &mut state,
+                &slot,
+                &mut ops,
+                WasapiSourceWork::ExclusiveFill { buffer_frames: 4 },
+                &mut completed
+            ),
+            WasapiSourceStep::Continue
+        );
+        assert_eq!(state.admitted_frames(), prefix);
+        assert_eq!(completed, 0);
+        assert_eq!(
+            state
+                .mixer()
+                .source_playback_history()
+                .unwrap()
+                .retained_start_frame(),
+            0
+        );
+        assert_eq!(&ops.encoded[..8], &[0.; 8]);
+    }
+    let mut fresh = Ops::new(0);
+    fresh.history = Some(request);
+    assert_eq!(
+        source_worker_step(
+            &mut state,
+            &slot,
+            &mut fresh,
+            WasapiSourceWork::ExclusiveFill { buffer_frames: 4 },
+            &mut completed
+        ),
+        WasapiSourceStep::Continue
+    );
+    assert_eq!(completed, 2);
+    assert_eq!(
+        state
+            .mixer()
+            .source_playback_history()
+            .unwrap()
+            .retained_start_frame(),
+        2
+    );
+    assert_eq!(state.mixer().playback_frame_cursor(), 2);
+}
+
+#[test]
+fn exclusive_retirement_requires_live_empty_suffix_even_for_unchanged_paused_zero_pcm() {
+    for paused in [false, true] {
+        let (mut producer, mut state) = rig();
+        let facts =
+            SourceRetirementFacts::from_state(&state, Some(matrix()), AudioStreamMode::Exclusive)
+                .unwrap();
+        let draft = exclusive_request(
+            1000,
+            BufferRequest::Frames(4),
+            PeriodRequest::Frames(4),
+            NegotiationPolicy::Exact,
+        );
+        let slot = SourceRetirementSlot::new();
+        let nonce = slot
+            .submit_validated(&facts, &draft, Some(&matrix()), 4)
+            .unwrap()
+            .unwrap();
+        if paused {
+            producer.request_pause(true);
+        }
+        state.render_pending(8).unwrap();
+        state.admit(4).unwrap();
+        assert_eq!(state.paused_tail_admissible(), paused);
+        let before = observe_owner(&state);
+        let mut clock = Ops::new(0);
+        assert_eq!(
+            step(&mut state, &slot, &mut clock, WasapiSourceWork::ClockOnly),
+            WasapiSourceStep::Continue
+        );
+        assert_eq!(slot.status(nonce), Ok(SourceRetirementStatus::Refused));
+        effects(&clock, &[Effect::Clock]);
+        assert_eq!(observe_owner(&state), before);
+        let mut drain = Ops::new(0);
+        assert_eq!(
+            exclusive_step(&mut state, &slot, &mut drain, 4),
+            WasapiSourceStep::Continue
+        );
+        assert_eq!(state.pending_frames(), 0);
+        assert_eq!(slot.poll(nonce), Ok(SourceRetirementStatus::Refused));
+        let next = slot
+            .submit_validated(&facts, &draft, Some(&matrix()), 4)
+            .unwrap()
+            .unwrap();
+        let mut stop = Ops::new(4);
+        assert_eq!(
+            exclusive_step(&mut state, &slot, &mut stop, 0),
+            WasapiSourceStep::Retire,
+            "the sole atomic authorization precedes geometry and all Ops"
+        );
+        assert_eq!(slot.status(next), Ok(SourceRetirementStatus::Authorized));
+        effects(&stop, &[]);
+    }
+}
+
+#[test]
+fn cancelled_exclusive_retirement_continues_full_work_and_cannot_authorize_from_stale_facts() {
+    let (_, mut state) = rig();
+    let facts =
+        SourceRetirementFacts::from_state(&state, Some(matrix()), AudioStreamMode::Exclusive)
+            .unwrap();
+    let draft = exclusive_request(
+        1000,
+        BufferRequest::Frames(4),
+        PeriodRequest::Frames(4),
+        NegotiationPolicy::Exact,
+    );
+    let slot = SourceRetirementSlot::new();
+    let nonce = slot
+        .submit_validated(&facts, &draft, Some(&matrix()), 4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(slot.cancel(nonce), Ok(SourceRetirementStatus::Cancelled));
+    let mut ops = Ops::new(0);
+    assert_eq!(
+        exclusive_step(&mut state, &slot, &mut ops, 4),
+        WasapiSourceStep::Continue
+    );
+    effects(
+        &ops,
+        &[
+            Effect::Acquire(4),
+            Effect::History,
+            Effect::Render(4),
+            Effect::Encode(8),
+            Effect::Release(4, false),
+            Effect::Admitted(4),
+            Effect::Clock,
+        ],
+    );
+    assert_eq!(slot.status(nonce), Ok(SourceRetirementStatus::Cancelled));
+    assert_eq!(slot.poll(nonce), Ok(SourceRetirementStatus::Cancelled));
+    assert_eq!(
+        slot.submit_validated(&facts, &draft, Some(&matrix()), 4),
+        Ok(Some(2))
+    );
+    let mut after = Ops::new(0);
+    assert_eq!(
+        exclusive_step(&mut state, &slot, &mut after, 4),
+        WasapiSourceStep::Retire
+    );
+    effects(&after, &[]);
+}
+
+#[test]
+fn exclusive_retirement_submitted_during_each_full_lease_effect_waits_for_next_decision() {
+    for during in [
+        Effect::Acquire(4),
+        Effect::Render(4),
+        Effect::Encode(8),
+        Effect::Release(4, false),
+        Effect::Clock,
+    ] {
+        let (_, mut state) = rig();
+        let slot = SourceRetirementSlot::new();
+        let mut ops = Ops::new(0);
+        ops.request_during = Some((&slot, during));
+        ops.request_policy = SourceRetirementPolicy::RequireEmptySuffix;
+        assert_eq!(
+            exclusive_step(&mut state, &slot, &mut ops, 4),
+            WasapiSourceStep::Continue
+        );
+        effects(
+            &ops,
+            &[
+                Effect::Acquire(4),
+                Effect::History,
+                Effect::Render(4),
+                Effect::Encode(8),
+                Effect::Release(4, false),
+                Effect::Admitted(4),
+                Effect::Clock,
+            ],
+        );
+        let nonce = ops.requested_nonce.unwrap();
+        assert_eq!(slot.status(nonce), Ok(SourceRetirementStatus::Pending));
+        assert_eq!(state.admitted_frames(), 4);
+        assert_eq!(state.pending_frames(), 0);
+        let before = observe_owner(&state);
+        let mut after = Ops::new(0);
+        assert_eq!(
+            exclusive_step(&mut state, &slot, &mut after, 4),
+            WasapiSourceStep::Retire
+        );
+        assert_eq!(
+            step(&mut state, &slot, &mut after, WasapiSourceWork::ClockOnly),
+            WasapiSourceStep::Retire
+        );
+        assert_eq!(slot.status(nonce), Ok(SourceRetirementStatus::Authorized));
+        effects(&after, &[]);
+        assert_eq!(observe_owner(&state), before);
+    }
+    // A lease submitted from a larger retained multiple cannot turn its one
+    // successful full prefix into permission to discard the remaining suffix.
+    let (_, mut state) = rig();
+    state.render_pending(8).unwrap();
+    let slot = SourceRetirementSlot::new();
+    let mut ops = Ops::new(0);
+    ops.request_during = Some((&slot, Effect::Release(4, false)));
+    ops.request_policy = SourceRetirementPolicy::RequireEmptySuffix;
+    assert_eq!(
+        exclusive_step(&mut state, &slot, &mut ops, 4),
+        WasapiSourceStep::Continue
+    );
+    let nonce = ops.requested_nonce.unwrap();
+    assert_eq!(slot.status(nonce), Ok(SourceRetirementStatus::Pending));
+    assert_eq!(state.pending_frames(), 4);
+    let mut after = Ops::new(0);
+    assert_eq!(
+        exclusive_step(&mut state, &slot, &mut after, 4),
+        WasapiSourceStep::Continue
+    );
+    assert_eq!(slot.status(nonce), Ok(SourceRetirementStatus::Refused));
+    effects(
+        &after,
+        &[
+            Effect::Acquire(4),
+            Effect::History,
+            Effect::Encode(8),
+            Effect::Release(4, false),
+            Effect::Admitted(4),
+            Effect::Clock,
+        ],
+    );
+}
+
 /// Shared by the external System-allocator binary; every cold owner/slot/script
 /// preparation and every owner destruction stays outside the measured step.
 pub(crate) fn run_allocation_boundaries() {
@@ -1516,4 +2683,187 @@ pub(crate) fn run_allocation_boundaries() {
     assert_eq!(calls, 0);
     effects(&retry, &[]);
     assert_eq!(state.admitted_frames(), 0);
+    run_exclusive_allocation_boundaries();
+}
+
+fn run_exclusive_allocation_boundaries() {
+    use crate::audio::{count_heap_calls, negotiation::known_exact_exclusive_buffer_frames};
+    // Request, matrix, complete owner and any diagnostic snapshots are prepared
+    // outside the meter. These are the real private production geometry paths.
+    for pending in [4, 6, 8] {
+        let (_, mut state) = rig();
+        state.render_pending(pending).unwrap();
+        let request = exclusive_request(
+            1000,
+            BufferRequest::Frames(4),
+            PeriodRequest::Frames(4),
+            NegotiationPolicy::Exact,
+        );
+        let facts =
+            SourceRetirementFacts::from_state(&state, Some(matrix()), AudioStreamMode::Exclusive)
+                .unwrap();
+        let requested_matrix = matrix();
+        let (result, calls) = count_heap_calls(|| {
+            (
+                known_exact_exclusive_buffer_frames(&request),
+                validate_source_open_geometry(&state, &request),
+                validate_exclusive_source_buffer(&state, 4),
+                facts.validate(&request, Some(&requested_matrix), 8),
+            )
+        });
+        assert_eq!(calls, 0);
+        assert_eq!(result.0, Ok(Some(4)));
+        assert_eq!(result.1.is_ok(), pending % 4 == 0);
+        assert_eq!(result.2.is_ok(), pending % 4 == 0);
+        assert_eq!(result.3, Ok(SourceRetirementPolicy::RequireEmptySuffix));
+    }
+
+    let (_, mut state) = rig();
+    let slot = SourceRetirementSlot::new();
+    let mut ops = Ops::new(0);
+    let (result, calls) = count_heap_calls(|| exclusive_step(&mut state, &slot, &mut ops, 4));
+    assert_eq!(result, WasapiSourceStep::Continue);
+    assert_eq!(calls, 0);
+    assert_eq!(state.admitted_frames(), 4);
+
+    let (_, mut state) = rig();
+    state.render_pending(8).unwrap();
+    state.reconfigure(format(2), Some(matrix()), 4).unwrap();
+    let slot = SourceRetirementSlot::new();
+    let mut first = Ops::new(0);
+    let mut second = Ops::new(0);
+    let (result, calls) = count_heap_calls(|| {
+        (
+            exclusive_step(&mut state, &slot, &mut first, 4),
+            exclusive_step(&mut state, &slot, &mut second, 4),
+        )
+    });
+    assert_eq!(
+        result,
+        (WasapiSourceStep::Continue, WasapiSourceStep::Continue)
+    );
+    assert_eq!(calls, 0);
+    assert_eq!(state.admitted_frames(), 8);
+    assert_eq!(state.mixer().frame_cursor(), 8);
+
+    let (_, mut state) = rig();
+    state.render_pending(6).unwrap();
+    let slot = SourceRetirementSlot::new();
+    let mut ops = Ops::new(0);
+    let (result, calls) = count_heap_calls(|| exclusive_step(&mut state, &slot, &mut ops, 4));
+    failed(result, WasapiSourcePhase::Render, INVALID_ARGUMENT);
+    assert_eq!(calls, 0);
+    effects(&ops, &[]);
+    assert_eq!(state.pending_frames(), 6);
+
+    for phase in [
+        WasapiSourcePhase::Acquire,
+        WasapiSourcePhase::History,
+        WasapiSourcePhase::Render,
+        WasapiSourcePhase::Encode,
+        WasapiSourcePhase::Release,
+        WasapiSourcePhase::Clock,
+    ] {
+        for compound_release in [false, true] {
+            let (_, mut state) = rig();
+            let slot = SourceRetirementSlot::new();
+            let mut ops = Ops::new(0);
+            match phase {
+                WasapiSourcePhase::Acquire => ops.failures.acquire = true,
+                WasapiSourcePhase::History => {
+                    ops.history = Some(SourceHistoryRetirementRequest {
+                        revision: 2,
+                        source_pin: 1,
+                    })
+                }
+                WasapiSourcePhase::Render => ops.failures.render = true,
+                WasapiSourcePhase::Encode => ops.failures.encode = true,
+                WasapiSourcePhase::Release => ops.failures.release = true,
+                WasapiSourcePhase::Clock => ops.failures.clock = true,
+                _ => unreachable!(),
+            }
+            // An earlier release error prevents reaching Clock; test clock
+            // failure only after a successful positive admission.
+            if compound_release
+                && matches!(phase, WasapiSourcePhase::Acquire | WasapiSourcePhase::Clock)
+            {
+                continue;
+            }
+            ops.failures.release |= compound_release;
+            let (result, calls) =
+                count_heap_calls(|| exclusive_step(&mut state, &slot, &mut ops, 4));
+            let error = failed(
+                result,
+                phase,
+                match phase {
+                    WasapiSourcePhase::Acquire => ACQUIRE_ERROR,
+                    WasapiSourcePhase::History => INVALID_ARGUMENT,
+                    WasapiSourcePhase::Render => RENDER_ERROR,
+                    WasapiSourcePhase::Encode => ENCODE_ERROR,
+                    WasapiSourcePhase::Release => RELEASE_ERROR,
+                    WasapiSourcePhase::Clock => CLOCK_ERROR,
+                    _ => unreachable!(),
+                },
+            );
+            assert_eq!(calls, 0);
+            assert_eq!(ops.acquired, ops.released);
+            assert_eq!(
+                error.release,
+                (compound_release || phase == WasapiSourcePhase::Release).then_some(RELEASE_ERROR)
+            );
+            if state.admission_is_uncertain() {
+                let retry_slot = SourceRetirementSlot::new();
+                let mut retry = Ops::new(0);
+                let (result, calls) =
+                    count_heap_calls(|| exclusive_step(&mut state, &retry_slot, &mut retry, 4));
+                failed(result, WasapiSourcePhase::Quarantined, INVALID_ARGUMENT);
+                assert_eq!(calls, 0);
+                effects(&retry, &[]);
+            }
+        }
+    }
+
+    for state_kind in 0..4 {
+        let (mut producer, mut state) = rig();
+        if state_kind == 1 {
+            producer.request_pause(true);
+            state.render_pending(8).unwrap();
+        }
+        let slot = SourceRetirementSlot::new();
+        let nonce = slot
+            .submit(SourceRetirementPolicy::RequireEmptySuffix)
+            .unwrap()
+            .unwrap();
+        if state_kind == 2 {
+            slot.cancel(nonce).unwrap();
+        }
+        let mut ops = Ops::new(0);
+        if state_kind == 3 {
+            ops.request_during = Some((&slot, Effect::Release(4, false)));
+            ops.request_policy = SourceRetirementPolicy::RequireEmptySuffix;
+            slot.cancel(nonce).unwrap();
+            slot.poll(nonce).unwrap();
+        }
+        let (result, calls) = count_heap_calls(|| exclusive_step(&mut state, &slot, &mut ops, 4));
+        assert_eq!(calls, 0);
+        if state_kind == 0 {
+            assert_eq!(result, WasapiSourceStep::Retire);
+            effects(&ops, &[]);
+            assert_eq!(slot.status(nonce), Ok(SourceRetirementStatus::Authorized));
+        } else {
+            assert_eq!(result, WasapiSourceStep::Continue);
+            assert_eq!(
+                slot.status(if state_kind == 3 {
+                    ops.requested_nonce.unwrap()
+                } else {
+                    nonce
+                }),
+                Ok(match state_kind {
+                    1 => SourceRetirementStatus::Refused,
+                    2 => SourceRetirementStatus::Cancelled,
+                    _ => SourceRetirementStatus::Pending,
+                })
+            );
+        }
+    }
 }
