@@ -552,6 +552,17 @@ feature를 켠 Clippy는 exit0/app394·platform111 warnings이며 strict-clean�
 원복은 변경 문서에 기록한다.01.05/.06은 W,106/223·원래91/193을 유지하며 최종
 문서 audit·owning verification/close와 실제 native/전체 player 완료는 별도다.
 
+E75: CoreAudio retained Source 전체 callback/회수·backend/UI·solo/local 연결을
+시작했다. 독립 계획 검토가 first-unsent telemetry, 승인 전 publication 금지,
+전체 채널 검증 후 불가실패 copy, 실제 callback 최대 크기와 Mixer 성장 한계,
+기존 telemetry와 충돌하지 않는 선택적 cold history 확장을 확인했다.
+사전 REQ/ADR을 ef99f3a3에 커밋했고 서로 겹치지 않는 승인 CAS·history 확장에
+각각 구현/테스트 작성자를 배치했다. .15는 N→W이며 아직 구현·검증 완료가 아니다.
+전체106/223·원래91/193과 분모를 유지한다. 실제 runner 조회에서 owned Mac이 없고
+macos-vm은 macos-host 누락으로 unavailable이다. native acceptance를 면제하거나
+portable 실행·macOS C-stub typing을 장치 증거로 승격하지 않는다.
+[진행 중 변경](../changes/2026-10-14-coreaudio-retained-source-output.md)을 따른다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -712,7 +723,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
       - [ ] **BK-WBS-07.08.07.13.03** Windows retained exclusive startup·same-family Output UI와 기존 Owner/solo/local 소비 경로를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.13.02; 필요 근거/다음=E70 독립 DEEP/CLI에서 Windows bin79(기본 device RED2→GREEN2 포함)·전체 app3258/bins624·공통 Owner/UI/pump·Windows app typing0 PASS; 선행 native 실행과 실제 consumer acceptance가 남음.
       - [ ] **BK-WBS-07.08.07.13.04** 실제 Windows exclusive 출력에서 pause/replace/resume·반복 연습·입력/capture/PCM·실패 정리를 검증한다. — 상태=E(환경·장비대기); 선행=BK-WBS-07.08.07.13.03; 필요 근거/다음=E70 새 소유 VM QA의 실제 COM Render/AllStates 열거/GetCount HRESULT0·endpoint0, 로그인 콘솔/현재 player 부재. 초기Off 복구 완료; eligible Windows에서 실제 exclusive 장치 acceptance 수행.
     - [ ] **BK-WBS-07.08.07.14** ASIO SourceFrame retained 교체의 callback conditional retirement·완전 상태·Owner/UI/pump를 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=공통 Frame 기초와 실제 ASIO adapter는 별도; SDK/build 라이선스 조건·형/장치 실행·실패/재시도 검사 필요.
-    - [ ] **BK-WBS-07.08.07.15** CoreAudio retained Source 교체의 원래 native 좌표·callback/회수·Owner/UI/pump를 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=실제 macOS descriptor/history·callback 승인·cleanup·장치/독립 실행 필요; WASAPI typing은 근거가 아님.
+    - [ ] **BK-WBS-07.08.07.15** CoreAudio retained Source 교체의 원래 native 좌표·callback/회수·Owner/UI/pump를 연결한다. — 상태=W(구현·연동중); 선행=-; 근거=E75 사전 REQ/ADR ef99f3a3·독립 계획 검토와 병렬 기반 구현 시작; 필요 근거/다음=실제 complete callback·회수·backend/UI·solo/local 구현·소프트웨어 검증 및 Mac/HAL 장치 acceptance; 현재 owned Mac 없음·macos-host 누락이며 foreign typing은 장치 근거가 아님.
   - [ ] **BK-WBS-07.08.08** 기존 scalar 교체와 finite-end ACK·held tail·취소/실패 경로가 새 retained 교체 변경 후에도 보존되는지 재검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=기존 구현/fixture는 존재하나 current 합쳐진 후보의 regression·실제 native crossing·end/drain/owner cleanup 및 독립 확인 필요.
   - [ ] **BK-WBS-07.08.09** Windows/macOS와 WASAPI↔ASIO 등 foreign/cross-backend retained 교체의 현재 연결·applied format·누락 경계를 감사한다. — 상태=U(최신현황감사필요); 선행=-; 필요 근거/다음=Target Linux/foreign stub typing을 전체 native 적용으로 간주하지 않음; 원래 backend/epoch/latency/history/cleanup 기준과 실제 SDK·host 실행 범위를 확인.
   - [ ] **BK-WBS-07.08.10** 실제 native retained 출력 교체에서 두 progressing 관측·입력 provenance·paused stale 보존·음향 alignment를 검증한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=실제 evdev/IOHID/Raw Input·native clock·출력 장치/ASIO SDK·물리 loopback; null/software/stub는 대체 근거가 아님.

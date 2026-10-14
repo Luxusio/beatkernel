@@ -7,6 +7,13 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-14 CoreAudio E75(진행 중): retained Source의 complete callback·native 회수·
+backend/UI·solo/local을 연결하기 시작했다. 사전 계약 ef99f3a3과 독립 계획 검토를
+마쳤고 승인 CAS·cold history 확장에 각각 구현/테스트 작성자를 병렬 배치했다.
+.15는 N→W이며 아직 구현/QA 완료가 아니다. 전체106/223·원래91/193은 그대로다.
+실제 runner 조회에서 owned Mac 없음·macos-host 누락을 확인했으며 실제 native
+acceptance는 별도로 남긴다. [현재 변경](../changes/2026-10-14-coreaudio-retained-source-output.md)을 따른다.
+
 2026-10-14 좌표 경계 E74: frozen7ac7a1af의 독립 DEEP 리뷰 PASS0 다음 독립 CLI
 QA가 DTO 이동의 소프트웨어 범위 PASS했다. complete core746·platform434/0/ignored2·
 format23, 전체 app3260/0/ignored8·bins624/0/ignored17, host bins·browser-feature
