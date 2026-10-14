@@ -628,3 +628,173 @@ fn definite_local_refusal_preserves_retryable_positive_admission() {
     assert_eq!(state.mixer().counters().commands_consumed, 2);
     assert!(!state.admission_is_uncertain());
 }
+
+#[test]
+fn complete_cold_history_prepares_actual_geometry_without_advancing_the_owner() {
+    let (mut producer, mut mixer) = rig();
+    mixer.render(&mut [0.; 2]).unwrap();
+    producer.request_pause(true);
+    mixer.render(&mut [0.; 1]).unwrap();
+    let mut state = prepared(
+        mixer,
+        target(2),
+        Some(ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap()),
+        8,
+    );
+    let counters = state.mixer().counters();
+    let producer_counters = producer.counters();
+    let config = state.mixer().configuration();
+    let basis = state.output_frame_basis();
+
+    state.prepare_native_source_history(3, 4).unwrap();
+
+    let history = state.mixer().source_playback_history().unwrap();
+    assert_eq!(history.capacity(), 7);
+    assert!(history.is_empty());
+    assert_eq!(
+        (
+            history.source_rate(),
+            history.initial_physical_frame(),
+            history.initial_playback_frame(),
+            history.pulled_end_frame(),
+        ),
+        (8, 3, 2, 3)
+    );
+    assert_eq!(state.mixer().configuration(), config);
+    assert_eq!(state.mixer().counters(), counters);
+    assert_eq!(producer.counters(), producer_counters);
+    assert_eq!(state.output_frame_basis(), basis);
+    assert_eq!(state.max_frames(), 8);
+    assert_eq!(state.pending_report(), None);
+
+    producer.request_pause(false);
+    let report = state.render_pending(2).unwrap();
+    assert_eq!((report.start_frame, report.playback_start_frame), (3, 2));
+    assert_eq!(state.pending_samples(), [0.375, -0.1875, -0.5, 0.25]);
+    assert_eq!(
+        state
+            .mixer()
+            .source_playback_history()
+            .unwrap()
+            .pulled_end_frame(),
+        5
+    );
+}
+
+#[test]
+fn complete_cold_history_preserves_retained_pcm_remix_prefix_and_original_history() {
+    let (mut producer, mut mixer) = rig();
+    mixer.enable_source_playback_history(8).unwrap();
+    let matrix = ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap();
+    let mut state = prepared(mixer, target(2), Some(matrix), 8);
+    for paused in [false, true] {
+        producer.request_pause(paused);
+        state.render_pending(2).unwrap();
+        state.admit(2).unwrap();
+    }
+    producer.request_pause(false);
+    let report = state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    let mut completed = 0;
+    assert_eq!(
+        state.apply_source_history_retirement(
+            crate::audio::source_history_retirement_mailbox::SourceHistoryRetirementRequest {
+                revision: 2,
+                source_pin: 4,
+            },
+            &mut completed,
+        ),
+        Ok(2)
+    );
+    assert_eq!(completed, 2);
+    let pcm = state.pending_samples().to_vec();
+    let basis = state.output_frame_basis();
+    let counters = state.mixer().counters();
+    let config = state.mixer().configuration();
+    let history = state.mixer().source_playback_history().unwrap();
+    let spans = (history.span(0), history.span(1), history.span(2));
+    let (result, heap) = count_heap_calls(|| state.prepare_native_source_history(2, usize::MAX));
+    assert_eq!(result, Ok(()));
+    assert_eq!(heap, 0);
+    assert_eq!(state.pending_samples(), pcm);
+    assert_eq!(state.pending_report(), Some(report));
+    assert_eq!(state.admitted_frames(), 1);
+    assert_eq!(state.output_frame_basis(), basis);
+    assert_eq!(basis.start_physical_frame(), 5);
+    assert_eq!(state.mixer().frame_cursor(), 8);
+    assert_eq!(state.mixer().playback_frame_cursor(), 6);
+    assert_eq!(state.mixer().counters(), counters);
+    assert_eq!(state.mixer().configuration(), config);
+    assert_eq!(state.max_frames(), 8);
+    let history = state.mixer().source_playback_history().unwrap();
+    assert_eq!(history.capacity(), 8);
+    assert_eq!(history.retirement_revision(), 1);
+    assert_eq!((history.span(0), history.span(1), history.span(2)), spans);
+    assert_eq!(
+        (
+            history.source_rate(),
+            history.initial_physical_frame(),
+            history.initial_playback_frame()
+        ),
+        (8, 0, 0)
+    );
+    producer.request_pause(true);
+    state.admit(3).unwrap();
+    assert!(state.render_pending(1).unwrap().paused);
+    assert_eq!(state.pending_samples(), [0., 0.]);
+}
+
+#[test]
+fn complete_cold_history_geometry_allocation_and_quarantine_refuse_atomically() {
+    let (mut producer, mixer) = rig();
+    let mut state = prepared(
+        mixer,
+        target(2),
+        Some(ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap()),
+        8,
+    );
+    let report = state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    let pcm = state.pending_samples().to_vec();
+    let basis = state.output_frame_basis();
+    let counters = state.mixer().counters();
+    for (frames, headroom, expected) in [
+        (0, 4, AudioError::InvalidCapacity),
+        (33, 4, AudioError::RenderCapacity),
+        (4, usize::MAX, AudioError::Overflow),
+    ] {
+        let (result, heap) =
+            count_heap_calls(|| state.prepare_native_source_history(frames, headroom));
+        assert_eq!(result, Err(expected));
+        assert_eq!(heap, 0);
+        assert!(state.mixer().source_playback_history().is_none());
+        assert_eq!(state.pending_samples(), pcm);
+        assert_eq!(state.pending_report(), Some(report));
+        assert_eq!(state.output_frame_basis(), basis);
+        assert_eq!(state.admitted_frames(), 1);
+        assert_eq!(state.mixer().counters(), counters);
+    }
+    assert_eq!(
+        fail_allocation(0, || state.prepare_native_source_history(4, 4)),
+        Err(AudioError::AllocationFailed)
+    );
+    assert!(state.mixer().source_playback_history().is_none());
+    assert_eq!(state.pending_samples(), pcm);
+    assert_eq!(state.pending_report(), Some(report));
+    assert_eq!(state.output_frame_basis(), basis);
+    assert_eq!(state.admitted_frames(), 1);
+    assert_eq!(state.mixer().counters(), counters);
+    assert_eq!(state.max_frames(), 8);
+    producer.request_pause(true);
+    state.mark_admission_uncertain();
+    let (result, heap) = count_heap_calls(|| state.prepare_native_source_history(4, 4));
+    assert_eq!(result, Err(AudioError::InvalidBuffer));
+    assert_eq!(heap, 0);
+    assert!(state.mixer().source_playback_history().is_none());
+    assert_eq!(state.pending_samples(), pcm);
+    assert_eq!(state.pending_report(), Some(report));
+    assert_eq!(state.output_frame_basis(), basis);
+    assert_eq!(state.admitted_frames(), 1);
+    assert_eq!(state.mixer().counters(), counters);
+    assert!(state.admission_is_uncertain());
+}

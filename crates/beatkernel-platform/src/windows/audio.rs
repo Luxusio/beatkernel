@@ -7,6 +7,10 @@
 use super::clock::QpcClock;
 use crate::audio::{
     telemetry::{observe_deadline, status_code, Telemetry},
+    wasapi_source_worker::{
+        source_worker_step, SourceRetirementSlot, WasapiSourceFailureReport, WasapiSourcePhase,
+        WasapiSourceStep, WasapiSourceWork,
+    },
     *,
 };
 use beatkernel::{
@@ -49,6 +53,14 @@ const E_FAIL_CODE: i32 = 0x8000_4005u32 as i32;
 const E_INVALIDARG_CODE: i32 = 0x8007_0057u32 as i32;
 const PCM_GUID: GUID = GUID::from_u128(0x00000001_0000_0010_8000_00aa00389b71);
 const FLOAT_GUID: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
+
+#[path = "audio/source_conditional_retirement.rs"]
+mod source_conditional_retirement;
+use source_conditional_retirement::{NativeSourceOps, SourceControl};
+pub use source_conditional_retirement::{
+    SourceRetirementStatus, SourceRetirementTicket, WasapiCompleteError, WasapiCompleteFailure,
+    WasapiCompleteFailureReport, WasapiCompletePhase, WasapiCompleteStream,
+};
 
 /// MMCSS priority selected explicitly outside buffer filling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -277,7 +289,7 @@ impl WasapiBackend {
         let (started_tx, started_rx) = mpsc::sync_channel(1);
         let worker =
             crate::audio::mixer_launch::launch_worker(NativeWorkerSpawner, mixer, move |mixer| {
-                let mut owned = Some(mixer);
+                let mut owned = Some(WorkerOwner::Legacy(mixer));
                 // Setup result owns all partial COM/native resources locally;
                 // an error has dropped them before the failure is sent.
                 let setup = Worker::new(
@@ -288,12 +300,13 @@ impl WasapiBackend {
                     matrix,
                     telemetry,
                     history_headroom,
+                    &mut WasapiSourceFailureReport::default(),
                 );
                 let (mut worker, telemetry) = match setup {
                     Ok(prepared) => prepared,
                     Err(error) => {
                         let _ = opened_tx.send(Err(error));
-                        return owned;
+                        return owned.map(WorkerOwner::into_legacy);
                     }
                 };
                 let control = Arc::new(Control {
@@ -305,7 +318,7 @@ impl WasapiBackend {
                 let duplicate = match worker.control_event.duplicate() {
                     Ok(event) => event,
                     Err(error) => {
-                        let mixer = worker.mixer.take();
+                        let mixer = worker.owner.take().map(WorkerOwner::into_legacy);
                         drop(worker);
                         let _ = opened_tx.send(Err(error));
                         return mixer;
@@ -319,10 +332,10 @@ impl WasapiBackend {
                     )))
                     .is_err()
                 {
-                    return worker.mixer.take();
+                    return worker.owner.take().map(WorkerOwner::into_legacy);
                 }
-                worker.run(&control, &started_tx);
-                worker.mixer.take()
+                worker.run(&control, None, &started_tx);
+                worker.owner.take().map(WorkerOwner::into_legacy)
             })
             .map_err(|failure| {
                 let (_, mixer) = failure.into_parts();
@@ -388,10 +401,10 @@ fn validate_open_with_matrix(
     Ok(())
 }
 struct NativeWorkerSpawner;
-impl crate::audio::mixer_launch::WorkerSpawner<Option<Mixer>> for NativeWorkerSpawner {
-    fn spawn<F>(self, work: F) -> std::io::Result<JoinHandle<Option<Mixer>>>
+impl<T: Send + 'static> crate::audio::mixer_launch::WorkerSpawner<T> for NativeWorkerSpawner {
+    fn spawn<F>(self, work: F) -> std::io::Result<JoinHandle<T>>
     where
-        F: FnOnce() -> Option<Mixer> + Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
     {
         thread::Builder::new()
             .name("beatkernel-wasapi".into())
@@ -1000,13 +1013,38 @@ fn validate_native_buffer_size(
     })
 }
 
+enum WorkerOwner {
+    Legacy(Mixer),
+    Complete(NativeOutputState),
+}
+impl WorkerOwner {
+    fn mixer(&self) -> &Mixer {
+        match self {
+            Self::Legacy(mixer) => mixer,
+            Self::Complete(state) => state.mixer(),
+        }
+    }
+    fn into_legacy(self) -> Mixer {
+        match self {
+            Self::Legacy(mixer) => mixer,
+            Self::Complete(_) => unreachable!("legacy launch retains its static owner mode"),
+        }
+    }
+    fn into_complete(self) -> NativeOutputState {
+        match self {
+            Self::Complete(state) => state,
+            Self::Legacy(_) => unreachable!("complete launch retains its static owner mode"),
+        }
+    }
+}
+
 struct Worker {
     client: IAudioClient,
     renderer: IAudioRenderClient,
     audio_clock: IAudioClock,
     render_event: Event,
     control_event: Event,
-    mixer: Option<Mixer>,
+    owner: Option<WorkerOwner>,
     remix: Option<FormatConverter>,
     scratch: Vec<f32>,
     configuration: AppliedStreamConfig,
@@ -1017,6 +1055,9 @@ struct Worker {
     version: u64,
     last_qpc: Option<u64>,
     completed_source_retirement: u64,
+    failure: WasapiSourceFailureReport,
+    source_control: Option<Arc<SourceControl>>,
+    stop_required: bool,
     _mmcss: Option<Mmcss>,
     // Declared last: interfaces/registration drop before CoUninitialize.
     _apartment: Apartment,
@@ -1025,17 +1066,22 @@ struct Worker {
 impl Worker {
     fn new(
         request: AudioStreamRequest,
-        mixer: &mut Option<Mixer>,
+        owner: &mut Option<WorkerOwner>,
         clock: QpcClock,
         options: WasapiOptions,
         matrix: Option<ChannelMatrix>,
         telemetry: Option<Telemetry>,
         history_headroom: Option<usize>,
+        setup_report: &mut WasapiSourceFailureReport,
     ) -> Result<(Self, Telemetry), AudioPlatformError> {
-        let mixer_config = mixer
+        let mixer_config = owner
             .as_ref()
             .ok_or(AudioPlatformError::RecoveryUnavailable)?
+            .mixer()
             .config();
+        if matches!(owner, Some(WorkerOwner::Complete(state)) if state.admission_is_uncertain()) {
+            return Err(AudioPlatformError::InvalidRequest);
+        }
         let apartment = Apartment::new()?;
         let device = endpoint(request.device())?;
         let render_event = Event::new()?;
@@ -1204,11 +1250,16 @@ impl Worker {
         // SAFETY: initialized client supplies owner-thread COM services.
         let audio_clock: IAudioClock = unsafe { client.GetService() }.map_err(win_error)?;
         // SAFETY: service is live and writes a scalar frequency.
-        let clock_frequency = unsafe { audio_clock.GetFrequency() }.map_err(win_error)?;
+        let clock_frequency = unsafe { audio_clock.GetFrequency() }.map_err(|error| {
+            setup_report.record_primary(WasapiSourcePhase::Clock, error.code().0);
+            win_error(error)
+        })?;
         if clock_frequency == 0 {
+            setup_report.record_primary(WasapiSourcePhase::Clock, E_INVALIDARG_CODE);
             return Err(AudioPlatformError::InvalidRequest);
         }
-        let sample_count = (buffer_frames as usize)
+        let complete = matches!(owner, Some(WorkerOwner::Complete(_)));
+        let sample_count = (if complete { 0 } else { buffer_frames as usize })
             .checked_mul(usize::from(request.format().channels()))
             .ok_or(AudioPlatformError::Capacity)?;
         let mut scratch = Vec::new();
@@ -1216,7 +1267,7 @@ impl Worker {
             .try_reserve_exact(sample_count)
             .map_err(|_| AudioPlatformError::Capacity)?;
         scratch.resize(sample_count, 0.0);
-        let remix = matrix
+        let remix = if complete { None } else { matrix.clone() }
             .map(|matrix| {
                 crate::audio::channel_remix::prepare(
                     mixer_config,
@@ -1240,23 +1291,47 @@ impl Worker {
         };
         // Cold history captures the original Mixer cursors before prefill. Keep
         // software ownership in the recoverable slot through every allocation.
-        if let Some(headroom) = history_headroom {
-            crate::audio::source_playback_publication::prepare_native_source_history(
-                mixer
-                    .as_mut()
-                    .ok_or(AudioPlatformError::RecoveryUnavailable)?,
-                buffer_frames,
-                headroom,
-            )
-            .map_err(|_| AudioPlatformError::Capacity)?;
+        match owner
+            .as_mut()
+            .ok_or(AudioPlatformError::RecoveryUnavailable)?
+        {
+            WorkerOwner::Legacy(mixer) => {
+                if let Some(headroom) = history_headroom {
+                    crate::audio::source_playback_publication::prepare_native_source_history(
+                        mixer,
+                        buffer_frames,
+                        headroom,
+                    )
+                    .map_err(|_| AudioPlatformError::Capacity)?;
+                }
+            }
+            WorkerOwner::Complete(state) => {
+                state
+                    .validate_reconfigure(
+                        configuration.format,
+                        matrix.as_ref(),
+                        buffer_frames as usize,
+                    )
+                    .map_err(|_| AudioPlatformError::InvalidFormat)?;
+                state
+                    .prepare_native_source_history(buffer_frames, history_headroom.unwrap_or(0))
+                    .map_err(|_| AudioPlatformError::Capacity)?;
+                state
+                    .reconfigure(configuration.format, matrix, buffer_frames as usize)
+                    .map_err(|_| AudioPlatformError::Capacity)?;
+            }
         }
         let telemetry = match telemetry {
             Some(telemetry) => telemetry,
-            None => source_telemetry(
-                mixer
-                    .as_ref()
-                    .ok_or(AudioPlatformError::RecoveryUnavailable)?,
-            )
+            None => match owner
+                .as_ref()
+                .ok_or(AudioPlatformError::RecoveryUnavailable)?
+            {
+                WorkerOwner::Legacy(mixer) => source_telemetry(mixer),
+                WorkerOwner::Complete(state) => {
+                    source_conditional_retirement::complete_source_telemetry(state)
+                }
+            }
             .map_err(|_| AudioPlatformError::Capacity)?,
         };
         let mut worker = Self {
@@ -1265,7 +1340,7 @@ impl Worker {
             audio_clock,
             render_event,
             control_event,
-            mixer: mixer.take(),
+            owner: owner.take(),
             remix,
             scratch,
             configuration,
@@ -1282,34 +1357,84 @@ impl Worker {
             version: 0,
             last_qpc: None,
             completed_source_retirement: 0,
+            failure: WasapiSourceFailureReport::default(),
+            source_control: None,
+            stop_required: false,
             _mmcss: mmcss,
             _apartment: apartment,
         };
-        if let Err(error) = worker.fill(false, None, &telemetry) {
-            *mixer = worker.mixer.take();
+        let prefill = if complete {
+            worker.source_step(
+                &SourceRetirementSlot::new(),
+                false,
+                None,
+                &telemetry,
+                WasapiSourceWork::Fill { buffer_frames },
+            )
+        } else {
+            match worker.fill(false, None, &telemetry) {
+                Ok(()) => WasapiSourceStep::Continue,
+                Err(code) => {
+                    let mut report = WasapiSourceFailureReport::default();
+                    report.record_primary(WasapiSourcePhase::Render, code);
+                    WasapiSourceStep::Failure(report)
+                }
+            }
+        };
+        if let WasapiSourceStep::Failure(report) = prefill {
+            *setup_report = report;
+            *owner = worker.owner.take();
             drop(worker);
-            return Err(native(error));
+            return Err(native(
+                report
+                    .primary
+                    .expect("failed fill has a primary error")
+                    .code,
+            ));
         }
         Ok((worker, telemetry))
     }
 
-    fn run(&mut self, control: &Control, started: &mpsc::SyncSender<Result<(), i32>>) {
+    fn run(
+        &mut self,
+        control: &Control,
+        source: Option<&SourceControl>,
+        started: &mpsc::SyncSender<Result<(), i32>>,
+    ) {
         let mut running = false;
+        let mut attempted_start = false;
         let mut last_timer = Instant::now();
         loop {
+            if let Some(source) = source {
+                let decision = match self.owner.as_ref() {
+                    Some(WorkerOwner::Complete(state)) => source.retirement.worker_decision(state),
+                    _ => unreachable!("complete control retains complete ownership"),
+                };
+                if self.accept_source_step(decision, source) {
+                    break;
+                }
+            }
             match control.request.load(Ordering::Acquire) {
                 2 => break,
                 1 if !running => {
+                    attempted_start = true;
+                    self.stop_required = source.is_some();
                     // SAFETY: native Start is called on the client owning thread.
                     // Raw HRESULT avoids projected error work in this loop.
                     let result = unsafe { (self.client.vtable().Start)(self.client.as_raw()) };
                     if result.is_err() {
+                        self.failure
+                            .record_primary(WasapiSourcePhase::Start, result.0);
                         self.fail(result.0);
+                        if let Some(source) = source {
+                            source.failures.publish(self.failure);
+                        }
                         self.publish(&control.telemetry);
                         let _ = started.send(Err(result.0));
                         break;
                     }
                     running = true;
+                    self.stop_required = true;
                     // Prefill/Ready time is not a running deadline interval.
                     self.last_qpc = None;
                     self.snapshot.status = AudioStreamStatus::Running;
@@ -1330,6 +1455,8 @@ impl Worker {
             // ensure shutdown recovers even if signaling the duplicate fails.
             let wait = unsafe { WaitForMultipleObjects(&handles, false, timeout) };
             if wait == WAIT_FAILED {
+                self.failure
+                    .record_primary(WasapiSourcePhase::Clock, E_FAIL_CODE);
                 self.fail(E_FAIL_CODE);
                 break;
             }
@@ -1349,11 +1476,33 @@ impl Worker {
                     }
                 };
             if wait != WAIT_TIMEOUT && wait != WAIT_OBJECT_0 && wait.0 != WAIT_OBJECT_0.0 + 1 {
+                self.failure
+                    .record_primary(WasapiSourcePhase::Clock, E_FAIL_CODE);
                 self.fail(E_FAIL_CODE);
                 break;
             }
-            if should_fill {
+            if let Some(source) = source.filter(|_| running) {
+                let work = if should_fill {
+                    WasapiSourceWork::Fill {
+                        buffer_frames: self.configuration.buffer_frames,
+                    }
+                } else {
+                    WasapiSourceWork::ClockOnly
+                };
+                let step = self.source_step(
+                    &source.retirement,
+                    should_fill,
+                    Some(&control.cadence),
+                    &control.telemetry,
+                    work,
+                );
+                if self.accept_source_step(step, source) {
+                    break;
+                }
+                self.publish(&control.telemetry);
+            } else if should_fill {
                 if let Err(code) = self.fill(true, Some(&control.cadence), &control.telemetry) {
+                    self.failure.record_primary(WasapiSourcePhase::Render, code);
                     self.fail(code);
                     break;
                 }
@@ -1363,18 +1512,28 @@ impl Worker {
                 // clock on bounded timeouts rather than waiting indefinitely
                 // for a callback that can no longer arrive.
                 if let Err(code) = self.read_clock(false) {
+                    self.failure.record_primary(WasapiSourcePhase::Clock, code);
                     self.fail(code);
                     break;
                 }
                 self.publish(&control.telemetry);
             }
         }
-        if running {
+        if running || (source.is_some() && attempted_start) {
+            self.stop_required = false;
             // SAFETY: Stop runs on the owning COM thread after fill quiescence.
             let result = unsafe { (self.client.vtable().Stop)(self.client.as_raw()) };
-            if result.is_err() && !matches!(self.snapshot.status, AudioStreamStatus::Failed { .. })
-            {
-                self.fail(result.0);
+            if result.is_err() {
+                if running {
+                    self.failure.stop.get_or_insert(result.0);
+                } else {
+                    self.failure.start_cleanup.get_or_insert(result.0);
+                }
+                self.failure
+                    .record_primary(WasapiSourcePhase::Stop, result.0);
+                if !matches!(self.snapshot.status, AudioStreamStatus::Failed { .. }) {
+                    self.fail(result.0);
+                }
             }
         }
         if !matches!(self.snapshot.status, AudioStreamStatus::Failed { .. }) {
@@ -1382,10 +1541,70 @@ impl Worker {
         }
         if let Some(mmcss) = &mut self._mmcss {
             if let Err(code) = mmcss.revert() {
-                self.fail(code);
+                self.failure.recovery.get_or_insert(code);
+                self.failure
+                    .record_primary(WasapiSourcePhase::Recovery, code);
+                if !matches!(self.snapshot.status, AudioStreamStatus::Failed { .. }) {
+                    self.fail(code);
+                }
             }
         }
         self.publish(&control.telemetry);
+        if let Some(source) = source {
+            source.failures.publish(self.failure);
+        }
+    }
+
+    fn accept_source_step(&mut self, step: WasapiSourceStep, source: &SourceControl) -> bool {
+        match step {
+            WasapiSourceStep::Continue => false,
+            WasapiSourceStep::Retire => true,
+            WasapiSourceStep::Failure(report) => {
+                source_conditional_retirement::merge_report(&mut self.failure, report);
+                self.fail(
+                    report
+                        .primary
+                        .expect("worker failure retains its primary operation")
+                        .code,
+                );
+                source.failures.publish(self.failure);
+                true
+            }
+        }
+    }
+
+    fn source_step(
+        &mut self,
+        slot: &SourceRetirementSlot,
+        running: bool,
+        cadence: Option<&crate::audio::cadence::Capture>,
+        telemetry: &Telemetry,
+        work: WasapiSourceWork,
+    ) -> WasapiSourceStep {
+        let state = match self.owner.as_mut() {
+            Some(WorkerOwner::Complete(state)) => state,
+            _ => unreachable!("complete worker uses complete Source state"),
+        };
+        let mut ops = NativeSourceOps {
+            client: &self.client,
+            renderer: &self.renderer,
+            audio_clock: &self.audio_clock,
+            clock: &self.clock,
+            clock_frequency: self.clock_frequency,
+            snapshot: &mut self.snapshot,
+            last_qpc: &mut self.last_qpc,
+            period_duration: self.configuration.period_duration,
+            running,
+            cadence,
+            telemetry,
+        };
+        source_worker_step(
+            state,
+            slot,
+            &mut ops,
+            work,
+            &mut self.completed_source_retirement,
+        )
     }
 
     // Real-time fill boundary: no projected COM errors, allocation, release of
@@ -1396,7 +1615,10 @@ impl Worker {
         cadence: Option<&crate::audio::cadence::Capture>,
         telemetry: &Telemetry,
     ) -> Result<(), i32> {
-        let mixer = self.mixer.as_mut().ok_or(E_INVALIDARG_CODE)?;
+        let mixer = match self.owner.as_mut() {
+            Some(WorkerOwner::Legacy(mixer)) => mixer,
+            _ => return Err(E_INVALIDARG_CODE),
+        };
         let exclusive = self.configuration.requested.mode() == AudioStreamMode::Exclusive;
         let mut padding = 0;
         if !exclusive {
@@ -1504,52 +1726,16 @@ impl Worker {
     }
 
     fn read_clock(&mut self, running: bool) -> Result<(), i32> {
-        let mut position = 0;
-        let mut qpc = 0;
-        // SAFETY: live owner-thread audio clock writes two stack scalars. Keep
-        // raw S_FALSE rather than erasing reading quality in a projected Result.
-        let result = unsafe {
-            (self.audio_clock.vtable().GetPosition)(
-                self.audio_clock.as_raw(),
-                &mut position,
-                &mut qpc,
-            )
-        };
-        if result.is_err() {
-            return Err(result.0);
-        }
-        let origin = i128::from(self.clock.mapping().origin_counter()) * 1_000_000_000
-            / i128::from(self.clock.mapping().frequency());
-        let host = i128::from(qpc) * 100 - origin;
-        let host_point = i64::try_from(host).ok().map(|nanos| ClockPoint {
-            domain: self.clock.output_domain(),
-            timestamp: Timestamp::from_nanos(nanos),
-        });
-        self.snapshot.clock = Some(AudioClockSnapshot {
-            position,
-            frequency: self.clock_frequency,
-            qpc_100ns: qpc,
-            host_point,
-            reading_quality: match result.0 {
-                0 => AudioClockReadingQuality::Accurate,
-                1 => AudioClockReadingQuality::Degraded,
-                _ => AudioClockReadingQuality::Unknown,
-            },
-            // Native accuracy status and conversion quantization do not establish
-            // a bound for the complete device-to-host measurement relation.
-            mapping_quality: ClockMappingQuality::Unknown,
-        });
-        if running && observe_deadline(&mut self.last_qpc, qpc, self.configuration.period_duration)
-        {
-            self.snapshot.counters.inferred_deadline_misses = self
-                .snapshot
-                .counters
-                .inferred_deadline_misses
-                .saturating_add(1);
-        }
-        Ok(())
+        read_clock_parts(
+            &self.audio_clock,
+            &self.clock,
+            self.clock_frequency,
+            &mut self.snapshot,
+            &mut self.last_qpc,
+            self.configuration.period_duration,
+            running,
+        )
     }
-
     fn fail(&mut self, code: i32) {
         self.snapshot.status = AudioStreamStatus::Failed { hresult: code };
         self.snapshot.counters.native_failures =
@@ -1559,18 +1745,76 @@ impl Worker {
     fn publish(&mut self, telemetry: &Telemetry) {
         telemetry.publish_with_source_history(
             Some(self.snapshot),
-            self.mixer.as_ref().and_then(Mixer::source_playback_history),
+            self.owner
+                .as_ref()
+                .and_then(|owner| owner.mixer().source_playback_history()),
             &mut self.version,
         );
     }
 }
 
+fn read_clock_parts(
+    audio_clock: &IAudioClock,
+    clock: &QpcClock,
+    clock_frequency: u64,
+    snapshot: &mut AudioStreamSnapshot,
+    last_qpc: &mut Option<u64>,
+    period_duration: Duration,
+    running: bool,
+) -> Result<(), i32> {
+    let mut position = 0;
+    let mut qpc = 0;
+    // SAFETY: live owner-thread audio clock writes two stack scalars. Keep
+    // raw S_FALSE rather than erasing reading quality in a projected Result.
+    let result = unsafe {
+        (audio_clock.vtable().GetPosition)(audio_clock.as_raw(), &mut position, &mut qpc)
+    };
+    if result.is_err() {
+        return Err(result.0);
+    }
+    let origin = i128::from(clock.mapping().origin_counter()) * 1_000_000_000
+        / i128::from(clock.mapping().frequency());
+    let host = i128::from(qpc) * 100 - origin;
+    let host_point = i64::try_from(host).ok().map(|nanos| ClockPoint {
+        domain: clock.output_domain(),
+        timestamp: Timestamp::from_nanos(nanos),
+    });
+    snapshot.clock = Some(AudioClockSnapshot {
+        position,
+        frequency: clock_frequency,
+        qpc_100ns: qpc,
+        host_point,
+        reading_quality: match result.0 {
+            0 => AudioClockReadingQuality::Accurate,
+            1 => AudioClockReadingQuality::Degraded,
+            _ => AudioClockReadingQuality::Unknown,
+        },
+        // Native accuracy status and conversion quantization do not establish
+        // a bound for the complete device-to-host measurement relation.
+        mapping_quality: ClockMappingQuality::Unknown,
+    });
+    if running && observe_deadline(last_qpc, qpc, period_duration) {
+        snapshot.counters.inferred_deadline_misses =
+            snapshot.counters.inferred_deadline_misses.saturating_add(1);
+    }
+    Ok(())
+}
+
 impl Drop for Worker {
     fn drop(&mut self) {
-        if self.snapshot.status == AudioStreamStatus::Running {
+        if self.stop_required {
+            self.stop_required = false;
             // SAFETY: panic fallback runs on the owner thread after scoped
             // native buffer leases have unwound and released their buffers.
-            let _ = unsafe { (self.client.vtable().Stop)(self.client.as_raw()) };
+            let result = unsafe { (self.client.vtable().Stop)(self.client.as_raw()) };
+            if result.is_err() {
+                self.failure.stop.get_or_insert(result.0);
+                self.failure
+                    .record_primary(WasapiSourcePhase::Stop, result.0);
+                if let Some(source) = &self.source_control {
+                    source.failures.publish(self.failure);
+                }
+            }
         }
     }
 }

@@ -10,6 +10,8 @@ mod channel_remix;
 mod output_state;
 #[path = "../src/audio/source_history_retirement_mailbox.rs"]
 mod source_history_retirement_mailbox;
+#[path = "../src/audio/source_playback_publication.rs"]
+mod source_playback_publication;
 #[path = "../src/audio/wasapi_source_worker.rs"]
 mod wasapi_source_worker;
 use output_state::NativeOutputState;
@@ -23,6 +25,7 @@ mod audio {
     };
     pub(crate) use crate::output_state::NativeOutputState;
     pub(crate) use crate::source_history_retirement_mailbox;
+    pub(crate) use crate::source_playback_publication;
     pub use beatkernel_platform::audio::*;
 }
 

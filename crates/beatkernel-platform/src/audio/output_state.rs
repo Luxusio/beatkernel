@@ -137,6 +137,22 @@ impl NativeOutputState {
         let pending = self.pending_report().map(|report| report.start_frame);
         apply_source_history_retirement_with_pending(&mut self.mixer, request, completed, pending)
     }
+    /// Cold native setup prepares history before its first fill, retaining the
+    /// original history and pending PCM. Quarantine refuses before any change.
+    pub(crate) fn prepare_native_source_history(
+        &mut self,
+        buffer_frames: u32,
+        headroom: usize,
+    ) -> Result<(), AudioError> {
+        if self.admission_uncertain {
+            return Err(AudioError::InvalidBuffer);
+        }
+        super::source_playback_publication::prepare_native_source_history(
+            &mut self.mixer,
+            buffer_frames,
+            headroom,
+        )
+    }
     /// Cold validation and preparation commit only after every fallible step.
     /// An incompatible pending interpretation refuses without consuming state.
     pub fn reconfigure(

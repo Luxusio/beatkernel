@@ -1,4 +1,5 @@
-//! Supplied worker/publication seams; these tests do not open an audio endpoint.
+//! Windows-gated production publication seams; no COM endpoint is opened.
+//! Portable worker execution and foreign typing are separate verification tiers.
 use super::*;
 use beatkernel::audio::*;
 use beatkernel::time::ClockDomainId;
@@ -151,4 +152,121 @@ fn retired_history_is_publishable_after_a_later_render_refusal() {
         .request_source_history_retirement(basis, id, 1)
         .is_err());
     assert_eq!(completed, 2);
+}
+
+fn complete(mixer: Mixer) -> NativeOutputState {
+    match NativeOutputState::new(
+        mixer,
+        DeviceFormat::new(1000, 1, SampleEncoding::Float32, None).unwrap(),
+        None,
+        8,
+    ) {
+        Ok(state) => state,
+        Err(_) => panic!("valid complete Source owner must prepare"),
+    }
+}
+
+#[test]
+fn complete_cold_publication_binds_first_unsent_basis_and_grants_no_native_progress() {
+    let (_, mixer) = rig();
+    let mut state = complete(mixer);
+    let report = state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    let basis = state.output_frame_basis();
+    let id = identity(state.mixer());
+    let telemetry = source_conditional_retirement::complete_source_telemetry(&state).unwrap();
+    assert_eq!(basis.start_physical_frame(), 1);
+    assert_eq!(state.mixer().output_frame_basis().start_physical_frame(), 4);
+    assert_eq!(id, (1000, 0, 0));
+    assert_eq!(
+        telemetry.request_source_history_retirement(basis, id, 3),
+        Ok(Some(2))
+    );
+    assert!(telemetry
+        .request_source_history_retirement(state.mixer().output_frame_basis(), id, 3)
+        .is_err());
+    let query =
+        InterpolatedTargetTime::new(TargetTime::from_frames(3, 1000).unwrap(), 0, 0, 1, 0, 1)
+            .unwrap();
+    let source = telemetry
+        .read_source_playback_at(&query, id.0, id.1, id.2)
+        .unwrap();
+    assert_eq!(source.pulled_source_end, 4);
+    assert_eq!(source.revision, 0);
+    assert_eq!(source.snapshot.status, AudioStreamStatus::Ready);
+    assert_eq!(source.snapshot.counters.submitted_frames, 0);
+    assert!(source.snapshot.clock.is_none());
+    assert!(source.snapshot.render.is_none());
+    assert_eq!(state.pending_report(), Some(report));
+    assert_eq!(state.admitted_frames(), 1);
+}
+
+#[test]
+fn complete_native_mailbox_clamps_to_whole_pending_report_until_positive_admission() {
+    let (mut producer, mixer) = rig();
+    let mut state = complete(mixer);
+    for paused in [false, true, false] {
+        producer.request_pause(paused);
+        state.render_pending(2).unwrap();
+        state.admit(2).unwrap();
+    }
+    producer.request_pause(true);
+    let report = state.render_pending(2).unwrap();
+    state.admit(1).unwrap();
+    let basis = state.output_frame_basis();
+    let id = identity(state.mixer());
+    let telemetry = source_conditional_retirement::complete_source_telemetry(&state).unwrap();
+    assert_eq!(basis.start_physical_frame(), 7);
+    assert_eq!(report.start_frame, 6);
+    assert_eq!(
+        telemetry.request_source_history_retirement(basis, id, 8),
+        Ok(Some(2))
+    );
+    let request = telemetry.source_retirement_request().unwrap();
+    let mut completed = 0;
+    let (result, heap) = crate::audio::count_heap_calls(|| {
+        state.apply_source_history_retirement(request, &mut completed)
+    });
+    assert_eq!(result, Ok(3));
+    assert_eq!(heap, 0);
+    assert_eq!(completed, 0, "clamped intent remains pending");
+    assert_eq!(telemetry.source_retirement_request(), Some(request));
+    assert_eq!(state.pending_report(), Some(report));
+    assert_eq!(state.admitted_frames(), 1);
+    assert_eq!(state.pending_samples(), [0.]);
+    assert_eq!(state.output_frame_basis(), basis);
+    assert_eq!(
+        state
+            .mixer()
+            .source_playback_history()
+            .unwrap()
+            .retained_start_frame(),
+        6
+    );
+    // The original request must be valid before the pending-report clamp.
+    assert_eq!(
+        state.apply_source_history_retirement(
+            crate::audio::source_history_retirement_mailbox::SourceHistoryRetirementRequest {
+                revision: 4,
+                source_pin: 9,
+            },
+            &mut completed,
+        ),
+        Err(AudioError::InvalidFormat)
+    );
+    assert_eq!(completed, 0);
+    state.admit(1).unwrap();
+    assert_eq!(
+        state.apply_source_history_retirement(request, &mut completed),
+        Ok(0)
+    );
+    assert_eq!(completed, 2);
+    assert_eq!(identity(state.mixer()), id);
+    assert_eq!(
+        (
+            state.mixer().frame_cursor(),
+            state.mixer().playback_frame_cursor()
+        ),
+        (8, 4)
+    );
 }
