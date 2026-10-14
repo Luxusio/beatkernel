@@ -187,7 +187,18 @@ fn rig_with(
     NativeOutputState,
     Option<PracticeController>,
 ) {
-    let source = AudioFormat::new(1000, 1).unwrap();
+    rig_with_rate(practice, end, 1000)
+}
+fn rig_with_rate(
+    practice: bool,
+    end: Option<u64>,
+    rate: u32,
+) -> (
+    CommandProducer,
+    NativeOutputState,
+    Option<PracticeController>,
+) {
+    let source = AudioFormat::new(rate, 1).unwrap();
     let sample_frames = 128;
     let asset_bytes = sample_frames * std::mem::size_of::<f32>();
     let limits = PcmLimits::new(asset_bytes, asset_bytes, 1).unwrap();
@@ -242,7 +253,8 @@ fn rig_with(
         controller
     });
     mixer.enable_source_playback_history(16).unwrap();
-    let state = match NativeOutputState::new(mixer, format(2), Some(matrix()), 8) {
+    let output = DeviceFormat::new(rate, 2, SampleEncoding::Float32, None).unwrap();
+    let state = match NativeOutputState::new(mixer, output, Some(matrix()), 8) {
         Ok(state) => state,
         Err(_) => panic!("valid complete owner must prepare"),
     };
@@ -301,7 +313,272 @@ fn request(
     .unwrap()
 }
 fn shared() -> AudioStreamMode {
-    AudioStreamMode::Shared(SharedPeriodPolicy::DeviceDefault)
+    // These fixtures request explicit periods, which use the engine-period API.
+    AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod)
+}
+
+fn assert_exact_subframe_duration_preserves_live_owner(buffer_duration: bool) {
+    let (_, mut state, _) = rig_with_rate(false, None, 48_000);
+    state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    let report = state.pending_report();
+    let basis = state.output_frame_basis();
+    let configuration = state.mixer().configuration();
+    let counters = state.mixer().counters();
+    let history_origin = state
+        .mixer()
+        .source_playback_history()
+        .unwrap()
+        .initial_physical_frame();
+    let facts = SourceRetirementFacts::from_state(&state, Some(matrix())).unwrap();
+    let slot = SourceRetirementSlot::new();
+    let word = slot.word.load(Ordering::Acquire);
+    let duration = beatkernel::time::Duration::from_nanos(1);
+    let request = AudioStreamRequest::new(
+        AudioDeviceId("original-endpoint".into()),
+        AudioBackendKind::Wasapi,
+        AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
+        state.format().unwrap(),
+        if buffer_duration {
+            BufferRequest::Duration(duration)
+        } else {
+            BufferRequest::Frames(4)
+        },
+        if buffer_duration {
+            PeriodRequest::DeviceDefault
+        } else {
+            PeriodRequest::Duration(duration)
+        },
+    )
+    .unwrap();
+    let result = slot.submit_validated(&facts, &request, Some(&matrix()), 8);
+    assert!(
+        result.is_err(),
+        "Exact subframe duration was accepted: {result:?}"
+    );
+    assert_eq!(slot.word.load(Ordering::Acquire), word);
+    assert_eq!(state.pending_report(), report);
+    assert_eq!(state.admitted_frames(), 1);
+    assert_eq!(
+        state.pending_samples(),
+        [0.25, -0.125, 0.25, -0.125, 0.25, -0.125]
+    );
+    assert_eq!(state.output_frame_basis(), basis);
+    assert_eq!(state.mixer().configuration(), configuration);
+    assert_eq!(state.mixer().counters(), counters);
+    assert_eq!(state.mixer().frame_cursor(), 4);
+    assert!(!state.admission_is_uncertain());
+    assert_eq!(
+        state
+            .mixer()
+            .source_playback_history()
+            .unwrap()
+            .initial_physical_frame(),
+        history_origin
+    );
+    assert_eq!(
+        slot.submit(SourceRetirementPolicy::PreservePausedSuffix),
+        Ok(Some(1)),
+        "refused sizing must not consume a retirement nonce"
+    );
+}
+
+#[test]
+fn cold_exact_subframe_buffer_duration_preserves_live_retirement_owner() {
+    assert_exact_subframe_duration_preserves_live_owner(true);
+}
+
+#[test]
+fn cold_exact_subframe_period_duration_preserves_live_retirement_owner() {
+    assert_exact_subframe_duration_preserves_live_owner(false);
+}
+
+#[test]
+fn cold_sizing_refusals_preserve_every_live_slot_state_and_nonce() {
+    for phase in 0..5 {
+        let (_, mut state, _) = rig_with_rate(false, None, 48_000);
+        state.render_pending(4).unwrap();
+        state.admit(1).unwrap();
+        let facts = SourceRetirementFacts::from_state(&state, Some(matrix())).unwrap();
+        let slot = SourceRetirementSlot::new();
+        let nonce = if phase == 0 {
+            None
+        } else {
+            let nonce = slot
+                .submit(SourceRetirementPolicy::PreservePausedSuffix)
+                .unwrap()
+                .unwrap();
+            match phase {
+                1 => {}
+                2 => {
+                    assert_eq!(slot.worker_decision(&state), WasapiSourceStep::Continue);
+                    assert_eq!(slot.status(nonce), Ok(SourceRetirementStatus::Refused));
+                }
+                3 => assert_eq!(slot.cancel(nonce), Ok(SourceRetirementStatus::Cancelled)),
+                4 => {
+                    state.admit(3).unwrap();
+                    assert_eq!(slot.worker_decision(&state), WasapiSourceStep::Retire);
+                    assert_eq!(slot.status(nonce), Ok(SourceRetirementStatus::Authorized));
+                }
+                _ => unreachable!(),
+            }
+            Some(nonce)
+        };
+        let word = slot.word.load(Ordering::Acquire);
+        let status = nonce.map(|nonce| slot.status(nonce).unwrap());
+        let report = state.pending_report();
+        let samples = state.pending_samples().to_vec();
+        let admitted = state.admitted_frames();
+        let basis = state.output_frame_basis();
+        let configuration = state.mixer().configuration();
+        let counters = state.mixer().counters();
+        for (mode, buffer, period) in [
+            (
+                AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
+                BufferRequest::Duration(beatkernel::time::Duration::from_nanos(1)),
+                PeriodRequest::DeviceDefault,
+            ),
+            (
+                AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
+                BufferRequest::Frames(4),
+                PeriodRequest::Duration(beatkernel::time::Duration::from_nanos(1)),
+            ),
+            (
+                AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
+                BufferRequest::Duration(beatkernel::time::Duration::MAX),
+                PeriodRequest::DeviceDefault,
+            ),
+            (
+                AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
+                BufferRequest::Frames(4),
+                PeriodRequest::Duration(beatkernel::time::Duration::MAX),
+            ),
+            (
+                AudioStreamMode::Shared(SharedPeriodPolicy::DeviceDefault),
+                BufferRequest::Frames(4),
+                PeriodRequest::Frames(3),
+            ),
+        ] {
+            let draft = AudioStreamRequest::new(
+                AudioDeviceId("original-endpoint".into()),
+                AudioBackendKind::Wasapi,
+                mode,
+                state.format().unwrap(),
+                buffer,
+                period,
+            )
+            .unwrap();
+            assert!(
+                slot.submit_validated(&facts, &draft, Some(&matrix()), 8)
+                    .is_err(),
+                "invalid draft altered phase {phase}: {draft:?}"
+            );
+            assert_eq!(slot.word.load(Ordering::Acquire), word);
+            assert_eq!(nonce.map(|nonce| slot.status(nonce).unwrap()), status);
+            assert_eq!(state.pending_report(), report);
+            assert_eq!(state.pending_samples(), samples);
+            assert_eq!(state.admitted_frames(), admitted);
+            assert_eq!(state.output_frame_basis(), basis);
+            assert_eq!(state.mixer().configuration(), configuration);
+            assert_eq!(state.mixer().counters(), counters);
+            assert_eq!(state.mixer().frame_cursor(), 4);
+            assert!(!state.admission_is_uncertain());
+        }
+        if let Some(nonce) = nonce {
+            if phase == 4 {
+                assert_eq!(
+                    slot.submit(SourceRetirementPolicy::PreservePausedSuffix),
+                    Ok(None)
+                );
+                assert_eq!(slot.status(nonce), Ok(SourceRetirementStatus::Authorized));
+                continue;
+            }
+            if phase == 1 {
+                assert_eq!(slot.cancel(nonce), Ok(SourceRetirementStatus::Cancelled));
+            }
+            assert!(matches!(
+                slot.poll(nonce),
+                Ok(SourceRetirementStatus::Refused | SourceRetirementStatus::Cancelled)
+            ));
+        }
+        assert_eq!(
+            slot.submit(SourceRetirementPolicy::PreservePausedSuffix),
+            Ok(Some(if phase == 0 { 1 } else { 2 }))
+        );
+    }
+}
+
+#[test]
+fn cold_sizing_accepts_representable_default_and_authorized_rounding_without_effects() {
+    use crate::audio::NegotiationPolicy;
+    use beatkernel::time::Duration;
+    let (_, mut state, _) = rig_with_rate(false, None, 48_000);
+    state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    let facts = SourceRetirementFacts::from_state(&state, Some(matrix())).unwrap();
+    let report = state.pending_report();
+    let basis = state.output_frame_basis();
+    for (buffer, period, policy, capacity) in [
+        (
+            BufferRequest::DeviceDefault,
+            PeriodRequest::DeviceDefault,
+            NegotiationPolicy::Exact,
+            8,
+        ),
+        (
+            BufferRequest::Duration(Duration::from_nanos(62_500)),
+            PeriodRequest::Frames(3),
+            NegotiationPolicy::Exact,
+            3,
+        ),
+        (
+            BufferRequest::Frames(3),
+            PeriodRequest::Duration(Duration::from_nanos(62_500)),
+            NegotiationPolicy::Exact,
+            3,
+        ),
+        (
+            BufferRequest::Duration(Duration::from_nanos(1)),
+            PeriodRequest::Duration(Duration::from_nanos(1)),
+            NegotiationPolicy::AllowSupportedRounding,
+            1,
+        ),
+        (
+            BufferRequest::Duration(Duration::from_nanos(20_834)),
+            PeriodRequest::Duration(Duration::from_nanos(20_834)),
+            NegotiationPolicy::AllowSupportedRounding,
+            2,
+        ),
+    ] {
+        let draft = AudioStreamRequest::new(
+            AudioDeviceId("original-endpoint".into()),
+            AudioBackendKind::Wasapi,
+            AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
+            state.format().unwrap(),
+            buffer,
+            period,
+        )
+        .unwrap()
+        .with_negotiation(policy);
+        let slot = SourceRetirementSlot::new();
+        assert_eq!(
+            facts.validate(&draft, Some(&matrix()), capacity),
+            Ok(SourceRetirementPolicy::PreservePausedSuffix)
+        );
+        assert_eq!(
+            slot.submit_validated(&facts, &draft, Some(&matrix()), capacity),
+            Ok(Some(1))
+        );
+        assert_eq!(slot.status(1), Ok(SourceRetirementStatus::Pending));
+        assert_eq!(state.pending_report(), report);
+        assert_eq!(state.admitted_frames(), 1);
+        assert_eq!(
+            state.pending_samples(),
+            [0.25, -0.125, 0.25, -0.125, 0.25, -0.125]
+        );
+        assert_eq!(state.output_frame_basis(), basis);
+        assert_eq!(state.mixer().frame_cursor(), 4);
+    }
 }
 
 #[test]

@@ -1,6 +1,7 @@
 //! Windows-gated production ticket/start/stop/join seams with owned threads and
-//! native Events. Worker outcomes are supplied; no COM client, device clock or
-//! acoustic delivery is exercised. Foreign typing does not execute these tests.
+//! native Events, plus actual complete cold setup and Source prefill with
+//! injected MMCSS/native-buffer effects. No COM client, device clock or acoustic
+//! delivery is exercised. Foreign typing does not execute these tests.
 use super::*;
 use beatkernel::{audio::*, time::ClockDomainId};
 use std::sync::atomic::AtomicBool;
@@ -53,7 +54,7 @@ fn request() -> AudioStreamRequest {
     AudioStreamRequest::new(
         AudioDeviceId("never-opened-complete-fixture".into()),
         AudioBackendKind::Wasapi,
-        AudioStreamMode::Shared(SharedPeriodPolicy::DeviceDefault),
+        AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
         format(),
         BufferRequest::Frames(8),
         PeriodRequest::Frames(4),
@@ -568,6 +569,514 @@ fn complete_open_cold_refusal_returns_exact_owner_before_any_com_acquisition() {
         state.admit(3).unwrap();
         assert!(state.render_pending(1).unwrap().paused);
         assert_eq!(state.pending_samples(), [0., 0.]);
+    }
+}
+
+#[test]
+fn complete_open_rejects_known_duration_and_legacy_period_errors_before_native_acquisition() {
+    let fractional_buffer = AudioPlatformError::ConfigurationUnsupported {
+        constraint: ConfigurationConstraint::EngineManagedBuffer,
+        constraints: PeriodConstraints::default(),
+        suggested_buffer_frames: Some(1),
+        suggested_period_frames: None,
+    };
+    let fractional_period = AudioPlatformError::ConfigurationUnsupported {
+        constraint: ConfigurationConstraint::PeriodBounds,
+        constraints: PeriodConstraints::default(),
+        suggested_buffer_frames: None,
+        suggested_period_frames: Some(1),
+    };
+    let legacy_period = AudioPlatformError::ConfigurationUnsupported {
+        constraint: ConfigurationConstraint::LegacyDeviceDefaultPeriod,
+        constraints: PeriodConstraints::default(),
+        suggested_buffer_frames: None,
+        suggested_period_frames: None,
+    };
+    for (mode, buffer, period, expected) in [
+        (
+            SharedPeriodPolicy::EnginePeriod,
+            BufferRequest::Duration(Duration::from_nanos(1)),
+            PeriodRequest::Frames(4),
+            fractional_buffer,
+        ),
+        (
+            SharedPeriodPolicy::EnginePeriod,
+            BufferRequest::Frames(8),
+            PeriodRequest::Duration(Duration::from_nanos(1)),
+            fractional_period,
+        ),
+        (
+            SharedPeriodPolicy::EnginePeriod,
+            BufferRequest::Duration(Duration::from_nanos(1_000_000)),
+            PeriodRequest::Frames(4),
+            AudioPlatformError::Capacity,
+        ),
+        (
+            SharedPeriodPolicy::EnginePeriod,
+            BufferRequest::Frames(8),
+            PeriodRequest::Duration(Duration::from_nanos(1_000_000)),
+            AudioPlatformError::Capacity,
+        ),
+        (
+            SharedPeriodPolicy::EnginePeriod,
+            BufferRequest::Duration(Duration::MAX),
+            PeriodRequest::Frames(4),
+            AudioPlatformError::Capacity,
+        ),
+        (
+            SharedPeriodPolicy::EnginePeriod,
+            BufferRequest::Frames(8),
+            PeriodRequest::Duration(Duration::MAX),
+            AudioPlatformError::Capacity,
+        ),
+        (
+            SharedPeriodPolicy::DeviceDefault,
+            BufferRequest::Frames(8),
+            PeriodRequest::Frames(4),
+            legacy_period,
+        ),
+    ] {
+        let requested = AudioStreamRequest::new(
+            AudioDeviceId("never-opened-complete-sizing-fixture".into()),
+            AudioBackendKind::Wasapi,
+            AudioStreamMode::Shared(mode),
+            format(),
+            buffer,
+            period,
+        )
+        .unwrap();
+        let (mut producer, state, matrix) = rig(false);
+        let before = CompleteOwnerSnapshot::of(&state);
+        let failure = match WasapiBackend.open_complete_recoverable(
+            requested,
+            state,
+            QpcClock::new(ClockDomainId(92)).unwrap(),
+            WasapiOptions::default(),
+            Some(matrix),
+            4,
+        ) {
+            Err(failure) => failure,
+            Ok(_) => panic!("known invalid sizing must refuse before native acquisition"),
+        };
+        assert_eq!(failure.error().error, expected);
+        assert_eq!(
+            failure.error().report,
+            WasapiCompleteFailureReport::default()
+        );
+        let (_, recovered) = failure.into_parts();
+        let mut recovered = recovered.expect("cold refusal must return the original owner");
+        assert_eq!(CompleteOwnerSnapshot::of(&recovered), before);
+        producer
+            .try_push(AudioCommand::Play {
+                voice: VoiceId(2),
+                sample: SampleId(1),
+                at: Timestamp::ZERO,
+                gain: 0.5,
+            })
+            .unwrap();
+        recovered.admit(3).unwrap();
+        recovered.render_pending(2).unwrap();
+        assert_eq!(
+            recovered.pending_samples(),
+            [0.375, -0.1875, 0.375, -0.1875]
+        );
+        assert_eq!(recovered.mixer().counters().commands_consumed, 2);
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct CompleteOwnerSnapshot {
+    format: Option<DeviceFormat>,
+    configuration: MixerConfig,
+    pending: Vec<f32>,
+    pending_report: Option<RenderReport>,
+    basis: OutputFrameBasis,
+    admitted: usize,
+    max_frames: usize,
+    cursor: u64,
+    counters: AudioCounters,
+    history: (u32, u64, u64),
+    history_capacity: usize,
+    history_end: u64,
+    history_revision: u64,
+    history_spans: Vec<SourcePlaybackSpan>,
+    uncertain: bool,
+}
+impl CompleteOwnerSnapshot {
+    fn of(state: &NativeOutputState) -> Self {
+        let history = state.mixer().source_playback_history().unwrap();
+        Self {
+            format: state.format(),
+            configuration: state.mixer().config(),
+            pending: state.pending_samples().to_vec(),
+            pending_report: state.pending_report(),
+            basis: state.output_frame_basis(),
+            admitted: state.admitted_frames(),
+            max_frames: state.max_frames(),
+            cursor: state.mixer().frame_cursor(),
+            counters: state.mixer().counters(),
+            history: (
+                history.source_rate(),
+                history.initial_physical_frame(),
+                history.initial_playback_frame(),
+            ),
+            history_capacity: history.capacity(),
+            history_end: history.pulled_end_frame(),
+            history_revision: history.retirement_revision(),
+            history_spans: (0..history.len())
+                .map(|index| history.span(index).unwrap())
+                .collect(),
+            uncertain: state.admission_is_uncertain(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum MmcssCall {
+    Register,
+    Priority(usize, WasapiPriority),
+    Revert(usize),
+}
+#[derive(Default)]
+struct SetupMmcssOps {
+    calls: Vec<MmcssCall>,
+    registration_error: Option<i32>,
+    priority_error: Option<i32>,
+    revert_error: Option<i32>,
+}
+impl MmcssOps for SetupMmcssOps {
+    fn register(&mut self) -> Result<HANDLE, i32> {
+        self.calls.push(MmcssCall::Register);
+        self.registration_error
+            .map_or(Ok(HANDLE(0x71usize as *mut std::ffi::c_void)), Err)
+    }
+    fn set_priority(&mut self, handle: HANDLE, priority: WasapiPriority) -> Result<(), i32> {
+        self.calls
+            .push(MmcssCall::Priority(handle.0 as usize, priority));
+        self.priority_error.map_or(Ok(()), Err)
+    }
+    fn revert(&mut self, handle: HANDLE) -> Result<(), i32> {
+        self.calls.push(MmcssCall::Revert(handle.0 as usize));
+        self.revert_error.map_or(Ok(()), Err)
+    }
+}
+
+// Always consume a returned fake registration through the supplied operations
+// before any assertion. Even an unexpectedly successful result cannot send a
+// fake HANDLE into Mmcss's native Drop path. This also proves repeated cleanup
+// cannot revert a registration twice, including when the first revert fails.
+fn finish_injected_setup<T>(
+    result: Result<(T, Option<Mmcss>), AudioPlatformError>,
+    report: &mut WasapiSourceFailureReport,
+    ops: &mut SetupMmcssOps,
+) -> Result<T, AudioPlatformError> {
+    result.map(|(prepared, mut registration)| {
+        retire_setup_mmcss(&mut registration, report, ops);
+        retire_setup_mmcss(&mut registration, report, ops);
+        prepared
+    })
+}
+
+fn prepared_setup_rig() -> (CommandProducer, NativeOutputState, ChannelMatrix) {
+    let (producer, mut state, matrix) = rig(false);
+    // Match the actual complete constructor: software preparation and
+    // telemetry allocation finish before registering the worker with MMCSS.
+    state
+        .validate_reconfigure(format(), Some(&matrix), 8)
+        .unwrap();
+    state.prepare_native_source_history(8, 4).unwrap();
+    state
+        .reconfigure(format(), Some(matrix.clone()), 8)
+        .unwrap();
+    complete_source_telemetry(&state).unwrap();
+    (producer, state, matrix)
+}
+
+#[test]
+fn complete_setup_registration_and_priority_failures_preserve_owner_and_cleanup_once() {
+    for (registration_error, priority_error, revert_error, expected, expected_calls) in [
+        (Some(-201), None, None, -201, vec![MmcssCall::Register]),
+        (
+            None,
+            Some(-202),
+            None,
+            -202,
+            vec![
+                MmcssCall::Register,
+                MmcssCall::Priority(0x71, WasapiPriority::High),
+                MmcssCall::Revert(0x71),
+            ],
+        ),
+        (
+            None,
+            Some(-202),
+            Some(-203),
+            -202,
+            vec![
+                MmcssCall::Register,
+                MmcssCall::Priority(0x71, WasapiPriority::High),
+                MmcssCall::Revert(0x71),
+            ],
+        ),
+    ] {
+        let (_, state, _) = prepared_setup_rig();
+        let before = CompleteOwnerSnapshot::of(&state);
+        let mut called_setup = false;
+        let mut report = WasapiSourceFailureReport::default();
+        let mut ops = SetupMmcssOps {
+            registration_error,
+            priority_error,
+            revert_error,
+            ..Default::default()
+        };
+        let result =
+            complete_mmcss_setup(Some(WasapiPriority::High), &mut report, &mut ops, |_| {
+                called_setup = true;
+                Ok(())
+            });
+        let result = finish_injected_setup(result, &mut report, &mut ops);
+        assert_eq!(result, Err(native(expected)));
+        assert!(!called_setup);
+        assert_eq!(ops.calls, expected_calls);
+        assert_eq!(
+            report,
+            WasapiSourceFailureReport {
+                recovery: revert_error,
+                ..primary(WasapiSourcePhase::Recovery, expected)
+            }
+        );
+        assert_eq!(CompleteOwnerSnapshot::of(&state), before);
+    }
+}
+
+#[test]
+fn complete_setup_cleanup_keeps_every_existing_primary_and_cleanup_failure() {
+    let (_, state, _) = prepared_setup_rig();
+    let before = CompleteOwnerSnapshot::of(&state);
+    let mut original = primary(WasapiSourcePhase::Start, -231);
+    original.release = Some(0);
+    original.stop = Some(-232);
+    original.start_cleanup = Some(-233);
+    original.join = Some(-234);
+    original.recovery = Some(-235);
+    let mut report = original;
+    let mut ops = SetupMmcssOps {
+        priority_error: Some(-237),
+        revert_error: Some(-236),
+        ..Default::default()
+    };
+    let mut called_setup = false;
+    let result = complete_mmcss_setup(Some(WasapiPriority::High), &mut report, &mut ops, |_| {
+        called_setup = true;
+        Ok(())
+    });
+    let result = finish_injected_setup(result, &mut report, &mut ops);
+    assert_eq!(result, Err(native(-237)));
+    assert!(!called_setup);
+    assert_eq!(report, original);
+    assert_eq!(
+        ops.calls,
+        [
+            MmcssCall::Register,
+            MmcssCall::Priority(0x71, WasapiPriority::High),
+            MmcssCall::Revert(0x71),
+        ]
+    );
+    assert_eq!(CompleteOwnerSnapshot::of(&state), before);
+}
+
+#[derive(Default)]
+struct SetupPrefillOps {
+    encode_error: Option<i32>,
+    release_error: Option<i32>,
+    acquired: usize,
+    encoded: Vec<f32>,
+    releases: Vec<(u32, bool)>,
+    clocks: usize,
+}
+impl WasapiSourceOps for SetupPrefillOps {
+    type Lease = u32;
+    fn available_frames(&mut self, _: u32) -> Result<u32, i32> {
+        Ok(2)
+    }
+    fn acquire(&mut self, frames: u32) -> Result<u32, i32> {
+        self.acquired += 1;
+        Ok(frames)
+    }
+    fn encode(&mut self, _: &mut u32, _: DeviceFormat, samples: &[f32]) -> Result<(), i32> {
+        self.encoded.extend_from_slice(samples);
+        self.encode_error.map_or(Ok(()), Err)
+    }
+    fn release(&mut self, lease: u32, silent: bool) -> Result<(), i32> {
+        self.releases.push((lease, silent));
+        self.release_error.map_or(Ok(()), Err)
+    }
+    fn read_clock(&mut self) -> Result<(), i32> {
+        self.clocks += 1;
+        Ok(())
+    }
+}
+
+#[test]
+fn complete_setup_actual_source_prefill_keeps_primary_release_recovery_and_original_owner() {
+    for (encode_error, release_error, revert_error, expected_phase, expected_code) in [
+        (
+            Some(-221),
+            None,
+            Some(-223),
+            WasapiSourcePhase::Encode,
+            -221,
+        ),
+        (
+            None,
+            Some(-222),
+            Some(-223),
+            WasapiSourcePhase::Release,
+            -222,
+        ),
+        (
+            Some(-221),
+            Some(-222),
+            Some(-223),
+            WasapiSourcePhase::Encode,
+            -221,
+        ),
+        (
+            Some(-221),
+            Some(-222),
+            None,
+            WasapiSourcePhase::Encode,
+            -221,
+        ),
+    ] {
+        let (mut producer, mut state, _) = prepared_setup_rig();
+        let mut expected_owner = CompleteOwnerSnapshot::of(&state);
+        expected_owner.uncertain = release_error.is_some();
+        let mut report = WasapiSourceFailureReport::default();
+        let mut ops = SetupMmcssOps {
+            revert_error,
+            ..Default::default()
+        };
+        let mut prefill = SetupPrefillOps {
+            encode_error,
+            release_error,
+            ..Default::default()
+        };
+        let result = complete_mmcss_setup(
+            Some(WasapiPriority::Normal),
+            &mut report,
+            &mut ops,
+            |setup_report| match source_worker_step(
+                &mut state,
+                &SourceRetirementSlot::new(),
+                &mut prefill,
+                WasapiSourceWork::Fill { buffer_frames: 8 },
+                &mut 0,
+            ) {
+                WasapiSourceStep::Failure(failure) => {
+                    *setup_report = failure;
+                    Err(native(failure.primary.unwrap().code))
+                }
+                WasapiSourceStep::Continue | WasapiSourceStep::Retire => Ok(()),
+            },
+        );
+        let result = finish_injected_setup(result, &mut report, &mut ops);
+        assert_eq!(result, Err(native(expected_code)));
+        let mut expected_report = primary(expected_phase, expected_code);
+        expected_report.release = release_error;
+        expected_report.recovery = revert_error;
+        assert_eq!(report, expected_report);
+        assert_eq!(
+            WasapiCompleteError::new(native(expected_code), report).report,
+            WasapiCompleteFailureReport::from(expected_report)
+        );
+        assert_eq!(
+            ops.calls,
+            [
+                MmcssCall::Register,
+                MmcssCall::Priority(0x71, WasapiPriority::Normal),
+                MmcssCall::Revert(0x71),
+            ]
+        );
+        assert_eq!(prefill.acquired, 1);
+        assert_eq!(prefill.encoded, [0.25, -0.125, 0.25, -0.125]);
+        assert_eq!(prefill.releases, [(2, encode_error.is_some())]);
+        assert_eq!(prefill.clocks, 0);
+        assert_eq!(CompleteOwnerSnapshot::of(&state), expected_owner);
+        producer.request_pause(true);
+        if release_error.is_some() {
+            assert_eq!(state.render_pending(1), Err(AudioError::InvalidBuffer));
+        } else {
+            state.admit(3).unwrap();
+            assert!(state.render_pending(1).unwrap().paused);
+        }
+    }
+}
+
+#[test]
+fn complete_setup_success_preserves_actual_admission_and_optional_mmcss_cleanup_once() {
+    for (priority, revert_error) in [
+        (None, None),
+        (Some(WasapiPriority::Low), None),
+        (Some(WasapiPriority::Low), Some(-241)),
+    ] {
+        let (_, mut state, _) = prepared_setup_rig();
+        let before = CompleteOwnerSnapshot::of(&state);
+        let mut report = WasapiSourceFailureReport::default();
+        let mut ops = SetupMmcssOps {
+            revert_error,
+            ..Default::default()
+        };
+        let mut prefill = SetupPrefillOps::default();
+        let result =
+            complete_mmcss_setup(
+                priority,
+                &mut report,
+                &mut ops,
+                |_| match source_worker_step(
+                    &mut state,
+                    &SourceRetirementSlot::new(),
+                    &mut prefill,
+                    WasapiSourceWork::Fill { buffer_frames: 8 },
+                    &mut 0,
+                ) {
+                    WasapiSourceStep::Continue => Ok(()),
+                    WasapiSourceStep::Failure(failure) => {
+                        Err(native(failure.primary.unwrap().code))
+                    }
+                    WasapiSourceStep::Retire => Err(AudioPlatformError::WorkerFailure),
+                },
+            );
+        let result = finish_injected_setup(result, &mut report, &mut ops);
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            report,
+            WasapiSourceFailureReport {
+                recovery: revert_error,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            ops.calls,
+            if priority.is_some() {
+                vec![
+                    MmcssCall::Register,
+                    MmcssCall::Priority(0x71, WasapiPriority::Low),
+                    MmcssCall::Revert(0x71),
+                ]
+            } else {
+                vec![]
+            }
+        );
+        assert_eq!(prefill.acquired, 1);
+        assert_eq!(prefill.releases, [(2, false)]);
+        assert_eq!(prefill.clocks, 1);
+        assert_eq!(state.pending_samples(), [0.25, -0.125]);
+        assert_eq!(state.admitted_frames(), before.admitted + 2);
+        assert_eq!(state.pending_report(), before.pending_report);
+        assert_eq!(state.mixer().counters(), before.counters);
+        assert_eq!(state.mixer().frame_cursor(), before.cursor);
+        assert!(!state.admission_is_uncertain());
     }
 }
 

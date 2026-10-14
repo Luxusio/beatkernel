@@ -669,31 +669,91 @@ impl Drop for Event {
 }
 
 struct Mmcss(Option<HANDLE>);
-impl Mmcss {
-    fn new(priority: WasapiPriority) -> Result<Self, AudioPlatformError> {
+// Cold owner-thread calls only. The same setup/cleanup composition is exercised
+// with supplied operations without constructing fake COM resources.
+trait MmcssOps {
+    fn register(&mut self) -> Result<HANDLE, i32>;
+    fn set_priority(&mut self, handle: HANDLE, priority: WasapiPriority) -> Result<(), i32>;
+    fn revert(&mut self, handle: HANDLE) -> Result<(), i32>;
+}
+struct NativeMmcssOps;
+impl MmcssOps for NativeMmcssOps {
+    fn register(&mut self) -> Result<HANDLE, i32> {
         let mut index = 0;
-        // SAFETY: registration and teardown occur on this owning worker thread.
-        let registration = Self(Some(
-            unsafe { AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut index) }
-                .map_err(win_error)?,
-        ));
+        // SAFETY: registration belongs to the current native owner thread.
+        unsafe { AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut index) }
+            .map_err(|error| error.code().0)
+    }
+    fn set_priority(&mut self, handle: HANDLE, priority: WasapiPriority) -> Result<(), i32> {
         let priority = match priority {
             WasapiPriority::Low => AVRT_PRIORITY_LOW,
             WasapiPriority::Normal => AVRT_PRIORITY_NORMAL,
             WasapiPriority::High => AVRT_PRIORITY_HIGH,
             WasapiPriority::Critical => AVRT_PRIORITY_CRITICAL,
         };
-        // SAFETY: live registration for the current worker thread.
-        unsafe {
-            AvSetMmThreadPriority(registration.0.expect("live MMCSS registration"), priority)
+        // SAFETY: the live registration was acquired by this owner thread.
+        unsafe { AvSetMmThreadPriority(handle, priority) }.map_err(|error| error.code().0)
+    }
+    fn revert(&mut self, handle: HANDLE) -> Result<(), i32> {
+        // SAFETY: consumes this owner's registration once on its native thread.
+        unsafe { AvRevertMmThreadCharacteristics(handle) }.map_err(|error| error.code().0)
+    }
+}
+fn retire_setup_mmcss(
+    registration: &mut Option<Mmcss>,
+    report: &mut WasapiSourceFailureReport,
+    ops: &mut impl MmcssOps,
+) {
+    if let Some(handle) = registration
+        .as_mut()
+        .and_then(|registration| registration.0.take())
+    {
+        if let Err(code) = ops.revert(handle) {
+            report.recovery.get_or_insert(code);
         }
-        .map_err(win_error)?;
+    }
+}
+fn complete_mmcss_setup<T>(
+    priority: Option<WasapiPriority>,
+    report: &mut WasapiSourceFailureReport,
+    ops: &mut impl MmcssOps,
+    setup: impl FnOnce(&mut WasapiSourceFailureReport) -> Result<T, AudioPlatformError>,
+) -> Result<(T, Option<Mmcss>), AudioPlatformError> {
+    let mut registration = match priority {
+        Some(priority) => {
+            let handle = ops.register().map_err(|code| {
+                report.record_primary(WasapiSourcePhase::Recovery, code);
+                native(code)
+            })?;
+            let mut registration = Some(Mmcss(Some(handle)));
+            if let Err(code) = ops.set_priority(handle, priority) {
+                report.record_primary(WasapiSourcePhase::Recovery, code);
+                retire_setup_mmcss(&mut registration, report, ops);
+                return Err(native(code));
+            }
+            registration
+        }
+        None => None,
+    };
+    match setup(report) {
+        Ok(prepared) => Ok((prepared, registration)),
+        Err(error) => {
+            retire_setup_mmcss(&mut registration, report, ops);
+            Err(error)
+        }
+    }
+}
+impl Mmcss {
+    fn new(priority: WasapiPriority) -> Result<Self, AudioPlatformError> {
+        let mut ops = NativeMmcssOps;
+        let registration = Self(Some(ops.register().map_err(native)?));
+        ops.set_priority(registration.0.expect("live MMCSS registration"), priority)
+            .map_err(native)?;
         Ok(registration)
     }
     fn revert(&mut self) -> Result<(), i32> {
         if let Some(handle) = self.0.take() {
-            // SAFETY: owned registration, reverted once on its worker thread.
-            unsafe { AvRevertMmThreadCharacteristics(handle) }.map_err(|error| error.code().0)?;
+            NativeMmcssOps.revert(handle)?;
         }
         Ok(())
     }
@@ -1278,7 +1338,11 @@ impl Worker {
                 .map_err(|_| AudioPlatformError::Capacity)
             })
             .transpose()?;
-        let mmcss = options.mmcss_priority.map(Mmcss::new).transpose()?;
+        let mmcss = if complete {
+            None
+        } else {
+            options.mmcss_priority.map(Mmcss::new).transpose()?
+        };
         let configuration = AppliedStreamConfig {
             format: request.format(),
             buffer_frames,
@@ -1363,36 +1427,63 @@ impl Worker {
             _mmcss: mmcss,
             _apartment: apartment,
         };
-        let prefill = if complete {
-            worker.source_step(
-                &SourceRetirementSlot::new(),
-                false,
-                None,
-                &telemetry,
-                WasapiSourceWork::Fill { buffer_frames },
-            )
-        } else {
-            match worker.fill(false, None, &telemetry) {
-                Ok(()) => WasapiSourceStep::Continue,
-                Err(code) => {
-                    let mut report = WasapiSourceFailureReport::default();
-                    report.record_primary(WasapiSourcePhase::Render, code);
-                    WasapiSourceStep::Failure(report)
+        // Complete software preparation precedes registration. Keep every COM
+        // resource in Worker's declared drop order even if registration fails.
+        let mut prefill = |setup_report: &mut WasapiSourceFailureReport| {
+            let prefill = if complete {
+                worker.source_step(
+                    &SourceRetirementSlot::new(),
+                    false,
+                    None,
+                    &telemetry,
+                    WasapiSourceWork::Fill { buffer_frames },
+                )
+            } else {
+                match worker.fill(false, None, &telemetry) {
+                    Ok(()) => WasapiSourceStep::Continue,
+                    Err(code) => {
+                        let mut report = WasapiSourceFailureReport::default();
+                        report.record_primary(WasapiSourcePhase::Render, code);
+                        WasapiSourceStep::Failure(report)
+                    }
                 }
+            };
+            if let WasapiSourceStep::Failure(report) = prefill {
+                *setup_report = report;
+                return Err(native(
+                    report
+                        .primary
+                        .expect("failed fill has a primary error")
+                        .code,
+                ));
             }
+            Ok(())
         };
-        if let WasapiSourceStep::Failure(report) = prefill {
-            *setup_report = report;
+        let filled = if complete {
+            complete_mmcss_setup(
+                options.mmcss_priority,
+                setup_report,
+                &mut NativeMmcssOps,
+                prefill,
+            )
+            .map(|((), mmcss)| {
+                worker._mmcss = mmcss;
+            })
+        } else {
+            prefill(setup_report)
+        };
+        if let Err(error) = filled {
             *owner = worker.owner.take();
             drop(worker);
-            return Err(native(
-                report
-                    .primary
-                    .expect("failed fill has a primary error")
-                    .code,
-            ));
+            return Err(error);
         }
         Ok((worker, telemetry))
+    }
+
+    fn finish_setup_failure(&mut self, report: &mut WasapiSourceFailureReport) {
+        source_conditional_retirement::merge_report(report, self.failure);
+        retire_setup_mmcss(&mut self._mmcss, report, &mut NativeMmcssOps);
+        source_conditional_retirement::merge_report(&mut self.failure, *report);
     }
 
     fn run(

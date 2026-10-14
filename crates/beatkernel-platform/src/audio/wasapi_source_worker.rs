@@ -2,8 +2,8 @@
 //! Native effects are statically supplied by the owner-thread COM adapter.
 use super::{
     channel_remix, source_history_retirement_mailbox::SourceHistoryRetirementRequest,
-    AudioBackendKind, AudioPlatformError, AudioStreamMode, AudioStreamRequest, BufferRequest,
-    DeviceFormat, NativeOutputState, PeriodRequest,
+    validate_known_request_sizing, AudioBackendKind, AudioPlatformError, AudioStreamMode,
+    AudioStreamRequest, DeviceFormat, NativeOutputState,
 };
 use beatkernel::audio::{AudioFormat, ChannelMatrix, RenderReport};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -235,26 +235,7 @@ impl SourceRetirementFacts {
             None if format.pcm() != self.source => return Err(AudioPlatformError::InvalidFormat),
             None => {}
         }
-        // Known geometry must fit before touching the live slot. DeviceDefault
-        // still needs actual native-capacity validation at open.
-        let check_frames = |frames: u128| {
-            frames != 0 && frames <= max_frames as u128 && frames <= self.render_limit as u128
-        };
-        let duration_frames =
-            |nanos: i64| (nanos as u128 * u128::from(format.sample_rate())).div_ceil(1_000_000_000);
-        let buffer_fits = match request.buffer() {
-            BufferRequest::DeviceDefault => true,
-            BufferRequest::Frames(frames) => check_frames(u128::from(frames)),
-            BufferRequest::Duration(duration) => check_frames(duration_frames(duration.as_nanos())),
-        };
-        let period_fits = match request.period() {
-            PeriodRequest::DeviceDefault => true,
-            PeriodRequest::Frames(frames) => check_frames(u128::from(frames)),
-            PeriodRequest::Duration(duration) => check_frames(duration_frames(duration.as_nanos())),
-        };
-        if !buffer_fits || !period_fits {
-            return Err(AudioPlatformError::Capacity);
-        }
+        validate_known_request_sizing(request, max_frames)?;
         Ok(
             if format == self.applied && requested_matrix == self.matrix.as_ref() {
                 SourceRetirementPolicy::PreservePausedSuffix

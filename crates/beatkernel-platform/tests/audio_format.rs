@@ -788,6 +788,216 @@ fn actual_buffer_zero_and_mode_specific_mismatches_have_precise_classifications(
 }
 
 #[test]
+fn known_request_sizing_refuses_explicit_capacity_overflow_under_both_policies() {
+    for policy in [
+        NegotiationPolicy::Exact,
+        NegotiationPolicy::AllowSupportedRounding,
+    ] {
+        for (buffer, period) in [
+            (BufferRequest::Frames(241), PeriodRequest::DeviceDefault),
+            (BufferRequest::DeviceDefault, PeriodRequest::Frames(241)),
+            (
+                BufferRequest::Duration(dur(5_000_001)),
+                PeriodRequest::DeviceDefault,
+            ),
+            (
+                BufferRequest::DeviceDefault,
+                PeriodRequest::Duration(dur(5_000_001)),
+            ),
+            (
+                BufferRequest::Duration(Duration::MAX),
+                PeriodRequest::DeviceDefault,
+            ),
+            (
+                BufferRequest::DeviceDefault,
+                PeriodRequest::Duration(Duration::MAX),
+            ),
+        ] {
+            let selected = engine(buffer, period).with_negotiation(policy);
+            assert_eq!(
+                validate_known_request_sizing(&selected, 240),
+                Err(AudioPlatformError::Capacity),
+                "{buffer:?} / {period:?}, {policy:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn known_request_sizing_exact_fractional_durations_keep_typed_constraints() {
+    for nanos in [1, 20_834, 5_000_001] {
+        let buffer = engine(
+            BufferRequest::Duration(dur(nanos)),
+            PeriodRequest::DeviceDefault,
+        );
+        assert!(
+            matches!(validate_known_request_sizing(&buffer, 512), Err(AudioPlatformError::ConfigurationUnsupported {
+            constraint: ConfigurationConstraint::EngineManagedBuffer,
+            constraints,
+            ..
+        }) if constraints == PeriodConstraints::default())
+        );
+        let period = engine(
+            BufferRequest::DeviceDefault,
+            PeriodRequest::Duration(dur(nanos)),
+        );
+        assert!(
+            matches!(validate_known_request_sizing(&period, 512), Err(AudioPlatformError::ConfigurationUnsupported {
+            constraint: ConfigurationConstraint::PeriodBounds,
+            constraints,
+            ..
+        }) if constraints == PeriodConstraints::default())
+        );
+    }
+    let legacy_buffer = request(
+        AudioStreamMode::Shared(SharedPeriodPolicy::DeviceDefault),
+        BufferRequest::Duration(dur(1)),
+        PeriodRequest::DeviceDefault,
+    );
+    assert!(matches!(
+        validate_known_request_sizing(&legacy_buffer, 1),
+        Err(AudioPlatformError::ConfigurationUnsupported {
+            constraint: ConfigurationConstraint::BufferSize,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn known_request_sizing_accepts_representable_boundaries_without_native_defaults() {
+    for policy in [
+        NegotiationPolicy::Exact,
+        NegotiationPolicy::AllowSupportedRounding,
+    ] {
+        for (buffer, period, capacity) in [
+            (
+                BufferRequest::DeviceDefault,
+                PeriodRequest::DeviceDefault,
+                1,
+            ),
+            (BufferRequest::Frames(1), PeriodRequest::DeviceDefault, 1),
+            (BufferRequest::DeviceDefault, PeriodRequest::Frames(1), 1),
+            (
+                BufferRequest::Duration(dur(62_500)),
+                PeriodRequest::Duration(dur(62_500)),
+                3,
+            ),
+            (
+                BufferRequest::Duration(dur(5_000_000)),
+                PeriodRequest::Frames(240),
+                240,
+            ),
+            (BufferRequest::Frames(7), PeriodRequest::Frames(3), 7),
+            (
+                BufferRequest::Frames(u32::MAX),
+                PeriodRequest::Frames(u32::MAX),
+                u32::MAX as usize,
+            ),
+        ] {
+            let selected = engine(buffer, period).with_negotiation(policy);
+            assert_eq!(
+                validate_known_request_sizing(&selected, capacity),
+                Ok(()),
+                "{buffer:?} / {period:?}, {policy:?}"
+            );
+        }
+    }
+    // Legacy accepts an actual unknown period when the caller selected default.
+    let legacy = request(
+        AudioStreamMode::Shared(SharedPeriodPolicy::DeviceDefault),
+        BufferRequest::Duration(dur(62_500)),
+        PeriodRequest::DeviceDefault,
+    );
+    assert_eq!(validate_known_request_sizing(&legacy, 3), Ok(()));
+}
+
+#[test]
+fn known_request_sizing_rounds_only_with_explicit_permission_and_keeps_capacity() {
+    for (nanos, frames) in [(1, 1), (20_834, 2), (5_000_001, 241)] {
+        for (buffer, period) in [
+            (
+                BufferRequest::Duration(dur(nanos)),
+                PeriodRequest::DeviceDefault,
+            ),
+            (
+                BufferRequest::DeviceDefault,
+                PeriodRequest::Duration(dur(nanos)),
+            ),
+            (
+                BufferRequest::Duration(dur(nanos)),
+                PeriodRequest::Duration(dur(nanos)),
+            ),
+        ] {
+            let selected =
+                engine(buffer, period).with_negotiation(NegotiationPolicy::AllowSupportedRounding);
+            assert_eq!(validate_known_request_sizing(&selected, frames), Ok(()));
+            if frames > 1 {
+                assert_eq!(
+                    validate_known_request_sizing(&selected, frames - 1),
+                    Err(AudioPlatformError::Capacity)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn known_request_sizing_rejects_legacy_explicit_period_without_inventing_constraints() {
+    for period in [
+        PeriodRequest::Frames(3),
+        PeriodRequest::Duration(dur(62_500)),
+    ] {
+        for policy in [
+            NegotiationPolicy::Exact,
+            NegotiationPolicy::AllowSupportedRounding,
+        ] {
+            let selected = request(
+                AudioStreamMode::Shared(SharedPeriodPolicy::DeviceDefault),
+                BufferRequest::DeviceDefault,
+                period,
+            )
+            .with_negotiation(policy);
+            assert_eq!(
+                validate_known_request_sizing(&selected, 3),
+                Err(AudioPlatformError::ConfigurationUnsupported {
+                    constraint: ConfigurationConstraint::LegacyDeviceDefaultPeriod,
+                    constraints: PeriodConstraints::default(),
+                    suggested_buffer_frames: None,
+                    suggested_period_frames: None,
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn known_request_sizing_zero_capacity_and_duration_conversion_overflow_are_capacity_errors() {
+    let defaults = engine(BufferRequest::DeviceDefault, PeriodRequest::DeviceDefault);
+    assert_eq!(
+        validate_known_request_sizing(&defaults, 0),
+        Err(AudioPlatformError::Capacity)
+    );
+    // Even usize::MAX does not authorize a duration unrepresentable by the
+    // native u32 frame count. These are positive valid requests, not constructor errors.
+    for (buffer, period) in [
+        (
+            BufferRequest::Duration(Duration::MAX),
+            PeriodRequest::DeviceDefault,
+        ),
+        (
+            BufferRequest::DeviceDefault,
+            PeriodRequest::Duration(Duration::MAX),
+        ),
+    ] {
+        let selected = engine(buffer, period);
+        assert_eq!(
+            validate_known_request_sizing(&selected, usize::MAX),
+            Err(AudioPlatformError::Capacity)
+        );
+    }
+}
+
+#[test]
 // Fixed-size platform errors preserve the allocation-free conversion boundary;
 // boxing them would invalidate this test's zero-allocation error-path oracle.
 #[allow(clippy::result_large_err)]

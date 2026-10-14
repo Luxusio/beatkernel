@@ -278,25 +278,10 @@ impl WasapiBackend {
                 return Err(AudioPlatformError::InvalidRequest);
             }
             validate_open_with_matrix(&request, state.mixer(), options, matrix.as_ref())?;
-            let limit = state.mixer().config().limits().max_render_frames() as u128;
-            let fits = |frames: u128| frames != 0 && frames <= limit;
-            let duration_frames = |duration: Duration| {
-                (duration.as_nanos() as u128 * u128::from(request.format().sample_rate()))
-                    .div_ceil(1_000_000_000)
-            };
-            let buffer_fits = match request.buffer() {
-                BufferRequest::DeviceDefault => true,
-                BufferRequest::Frames(frames) => fits(u128::from(frames)),
-                BufferRequest::Duration(duration) => fits(duration_frames(duration)),
-            };
-            let period_fits = match request.period() {
-                PeriodRequest::DeviceDefault => true,
-                PeriodRequest::Frames(frames) => fits(u128::from(frames)),
-                PeriodRequest::Duration(duration) => fits(duration_frames(duration)),
-            };
-            if !buffer_fits || !period_fits {
-                return Err(AudioPlatformError::Capacity);
-            }
+            validate_known_request_sizing(
+                &request,
+                state.mixer().config().limits().max_render_frames(),
+            )?;
             if state
                 .format()
                 .is_some_and(|format| format.encoding() != request.format().encoding())
@@ -357,6 +342,7 @@ impl WasapiBackend {
                 let facts = match facts {
                     Ok(facts) => facts,
                     Err(error) => {
+                        worker.finish_setup_failure(&mut setup_report);
                         let state = worker.owner.take().map(WorkerOwner::into_complete);
                         drop(worker);
                         let _ = opened_tx.send(Err(WasapiCompleteError::new(error, setup_report)));
@@ -381,6 +367,10 @@ impl WasapiBackend {
                 let wake = match worker.control_event.duplicate() {
                     Ok(wake) => wake,
                     Err(error) => {
+                        if let AudioPlatformError::Native { code } = &error {
+                            setup_report.record_primary(WasapiSourcePhase::Recovery, *code);
+                        }
+                        worker.finish_setup_failure(&mut setup_report);
                         let state = worker.owner.take().map(WorkerOwner::into_complete);
                         drop(worker);
                         let _ = opened_tx.send(Err(WasapiCompleteError::new(error, setup_report)));
@@ -401,6 +391,9 @@ impl WasapiBackend {
                     .is_ok()
                 {
                     worker.run(&control.common, Some(&control), &started_tx);
+                } else {
+                    setup_report.record_primary(WasapiSourcePhase::Recovery, E_FAIL_CODE);
+                    worker.finish_setup_failure(&mut setup_report);
                 }
                 let result = CompleteWorkerResult {
                     state: worker.owner.take().map(WorkerOwner::into_complete),

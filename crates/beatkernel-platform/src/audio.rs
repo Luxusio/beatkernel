@@ -56,7 +56,9 @@ pub(crate) mod wasapi_source_worker;
 
 pub use convert::encode_pcm;
 pub use converted_output_state::{ConvertedBoundaryFacts, ConvertedNativeOutputState};
-pub use negotiation::{resolve_period, validate_buffer_size, ResolvedPeriod};
+pub use negotiation::{
+    resolve_period, validate_buffer_size, validate_known_request_sizing, ResolvedPeriod,
+};
 #[cfg(test)]
 pub(crate) use output_state::output_state_fixtures::{count_heap_calls, fail_allocation};
 pub use output_state::NativeOutputState;

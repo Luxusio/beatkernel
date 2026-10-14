@@ -177,6 +177,54 @@ pub fn validate_buffer_size(
     })
 }
 
+/// Checks known sizing rules before transferring a live output's ownership.
+///
+/// Explicit sizes must fit the software capacity, Exact durations must represent
+/// complete frames, and legacy shared mode requires the default period. Native
+/// defaults and bounds remain unresolved; native open still validates support
+/// and the actual geometry, including caller-authorized sizing adjustments.
+pub fn validate_known_request_sizing(
+    request: &AudioStreamRequest,
+    max_frames: usize,
+) -> Result<(), AudioPlatformError> {
+    if max_frames == 0 {
+        return Err(AudioPlatformError::Capacity);
+    }
+    let check_capacity = |frames: u32| {
+        if frames as usize > max_frames {
+            Err(AudioPlatformError::Capacity)
+        } else {
+            Ok(())
+        }
+    };
+    let requested_duration_frames = |duration| {
+        // AudioStreamRequest already checked positivity. A conversion failure
+        // therefore exceeds the native frame-count capacity.
+        duration_frames(duration, request.format().sample_rate())
+            .map(|(frames, _)| frames)
+            .map_err(|_| AudioPlatformError::Capacity)
+    };
+    let period = match request.period() {
+        PeriodRequest::DeviceDefault => None,
+        PeriodRequest::Frames(frames) => Some(frames),
+        PeriodRequest::Duration(duration) => Some(requested_duration_frames(duration)?),
+    };
+    if let Some(frames) = period {
+        check_capacity(frames)?;
+        resolve_period(request, PeriodConstraints::default())?;
+    }
+    match request.buffer() {
+        BufferRequest::DeviceDefault => {}
+        BufferRequest::Frames(frames) => check_capacity(frames)?,
+        BufferRequest::Duration(duration) => {
+            let frames = requested_duration_frames(duration)?;
+            check_capacity(frames)?;
+            validate_buffer_size(request, frames)?;
+        }
+    }
+    Ok(())
+}
+
 fn duration_frames(duration: Duration, rate: u32) -> Result<(u32, bool), AudioPlatformError> {
     if duration.as_nanos() <= 0 {
         return Err(AudioPlatformError::InvalidRequest);
