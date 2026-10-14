@@ -3,12 +3,11 @@
 use super::runtime::{
     audio_authority::{AudioAuthorityConfig, AudioAuthorityCoordinateBasis},
     gameplay::output::application::replacement::{
-        OutputReplacement, ReplacementFailure,
         coordinate_target::{
-            CoordinateTargetPoll, ReadyCoordinateTargetAudioOutput,
-            ReadyCoordinateTargetAudioPublicationFailure,
-            publish_ready_coordinate_target_audio_output_held,
+            publish_ready_coordinate_target_audio_output_held, CoordinateTargetPoll,
+            ReadyCoordinateTargetAudioOutput, ReadyCoordinateTargetAudioPublicationFailure,
         },
+        OutputReplacement, ReplacementFailure,
     },
     gameplay::output::ports::{
         ConditionalTargetRetirementNativeOutputBackend, NativeTargetPlaybackFacts,
@@ -37,8 +36,8 @@ use beatkernel::{
     transport::{Rate, Transport},
 };
 use beatkernel_platform::audio::{
-    ConvertedBoundaryFacts, ConvertedNativeOutputState, DeviceFormat, SampleEncoding,
-    presentation::validation::OriginalNativePresentationEvidence,
+    presentation::validation::OriginalNativePresentationEvidence, ConvertedBoundaryFacts,
+    ConvertedNativeOutputState, DeviceFormat, SampleEncoding,
 };
 use std::{cell::RefCell, collections::VecDeque, io, rc::Rc};
 
@@ -174,6 +173,15 @@ pub(super) struct Script {
     recovery_failures: VecDeque<bool>,
     pub(super) dropped: Vec<u64>,
     pub(super) consumed_tickets: Vec<u64>,
+    // Explicit connected-pump mode. Existing replacement-only fixtures keep
+    // their strict held-only observer and query-panic contract.
+    pump: Option<PumpScript>,
+}
+struct PumpScript {
+    host: i64,
+    frames: usize,
+    admit_limit: usize,
+    pcm: Option<Vec<(u64, Vec<f32>)>>,
 }
 pub(crate) struct Ticket {
     native_id: u64,
@@ -230,6 +238,48 @@ pub(crate) struct Effects {
     script: Rc<RefCell<Script>>,
 }
 impl Effects {
+    pub(crate) fn for_active_pump(
+        state: ConvertedNativeOutputState,
+        epoch: u64,
+        request: Request,
+        frames: usize,
+        trace_pcm: bool,
+    ) -> (Self, Output) {
+        assert_eq!(state.pending_frames(), 0);
+        let script = Rc::new(RefCell::new(Script {
+            pump: Some(PumpScript {
+                host: HOST_START,
+                frames,
+                admit_limit: usize::MAX,
+                pcm: trace_pcm.then(Vec::new),
+            }),
+            ..Default::default()
+        }));
+        let basis = state.target_frame_basis();
+        let mut output = native(state, basis, epoch, request, &script);
+        output.started = true;
+        (Self { script }, output)
+    }
+    pub(crate) fn pump_now(&self) -> ClockPoint {
+        host(self.script.borrow().pump.as_ref().unwrap().host + 1_000)
+    }
+    pub(crate) fn pump_wait(&self) {
+        self.script.borrow_mut().pump.as_mut().unwrap().host += 100_000;
+    }
+    pub(crate) fn pump_pcm(&self) -> Vec<(u64, Vec<f32>)> {
+        self.script
+            .borrow()
+            .pump
+            .as_ref()
+            .unwrap()
+            .pcm
+            .clone()
+            .unwrap()
+    }
+    pub(crate) fn pump_admit_limit(&self, frames: usize) {
+        assert!(frames > 0);
+        self.script.borrow_mut().pump.as_mut().unwrap().admit_limit = frames;
+    }
     pub(crate) fn calls(&self) -> Vec<&'static str> {
         self.script.borrow().calls.clone()
     }
@@ -256,6 +306,22 @@ impl Effects {
     }
 }
 impl Output {
+    pub(crate) fn pump_partial_held(&mut self, frames: usize, admitted: usize) {
+        assert!(self.script.borrow().pump.is_some());
+        assert!(self.started && self.held && !self.retired);
+        let state = self.state.as_mut().unwrap();
+        assert_eq!(state.pending_frames(), 0);
+        let report = state.render_held_pending(frames).unwrap();
+        state.admit(admitted).unwrap();
+        self.presented += admitted as u64;
+        self.last = Some(report);
+    }
+    pub(crate) fn pump_held(&self) -> bool {
+        self.held
+    }
+    pub(crate) fn pump_presented(&self) -> u64 {
+        self.presented
+    }
     pub(crate) fn format(&self) -> DeviceFormat {
         self.state.as_ref().unwrap().format()
     }
@@ -441,6 +507,21 @@ fn packet(
     report: ConvertedRenderReport,
     fault: Fault,
 ) -> Result<NativeTargetPlaybackObservation<Evidence>, io::Error> {
+    if output.script.borrow().pump.is_some() && fault == Fault::None {
+        let coordinate = snapshot(output.epoch, output.basis, frame, at);
+        let query = exact(
+            output
+                .basis
+                .start_time()
+                .checked_add_frames(frame, output.basis.sample_rate())
+                .unwrap(),
+        );
+        return NativeTargetPlaybackObservation::new(
+            coordinate,
+            pump_packet_at(output, identity, query, report)?,
+        )
+        .map_err(|error| io::Error::other(error.to_string()));
+    }
     let state = output.state.as_ref().unwrap();
     let history = state.phase_history().unwrap();
     let source_history = state.converter_owner().source_playback_history().unwrap();
@@ -513,6 +594,80 @@ fn packet(
     NativeTargetPlaybackObservation::new(coordinate, playback)
         .map_err(|e| io::Error::other(e.to_string()))
 }
+fn pump_packet_at(
+    output: &Output,
+    identity: SourcePlaybackIdentity,
+    query: InterpolatedTargetTime,
+    report: ConvertedRenderReport,
+) -> Result<NativeTargetPlaybackQuery<Evidence>, io::Error> {
+    let state = output.state.as_ref().unwrap();
+    let history = state.phase_history().unwrap();
+    let source = state.converter_owner().source_playback_history().unwrap();
+    let mut found = None;
+    for index in 0..history.len() {
+        let phase = history.span(index).unwrap();
+        let words = phase.to_words();
+        let start = TargetTime::new(words[4], words[5], words[6]).unwrap();
+        let end = history
+            .span(index + 1)
+            .map(|next| {
+                let words = next.to_words();
+                TargetTime::new(words[4], words[5], words[6]).unwrap()
+            })
+            .unwrap_or(history.end_time());
+        if query.compare_target_time(start).is_lt()
+            || query.compare_target_time(end).is_gt()
+            || (index + 1 < history.len() && query.compare_target_time(end).is_eq())
+        {
+            continue;
+        }
+        found = Some((phase, end));
+    }
+    let (phase, segment_end) =
+        found.ok_or_else(|| io::Error::other("query outside actual phase history"))?;
+    let playback = (0..source.len())
+        .filter_map(|index| source.span(index))
+        .find(|span| {
+            phase
+                .compare_source_frame_at_interpolated_time(
+                    query,
+                    segment_end,
+                    span.physical_start(),
+                )
+                .is_ok_and(|order| !order.is_lt())
+                && span.physical_end().is_none_or(|end| {
+                    phase
+                        .compare_source_frame_at_interpolated_time(query, segment_end, end)
+                        .is_ok_and(|order| order.is_lt())
+                })
+        })
+        .ok_or_else(|| io::Error::other("query outside actual source history"))?;
+    NativeTargetPlaybackQuery::new(
+        output.epoch,
+        output.basis,
+        identity,
+        query,
+        NativeTargetPlaybackFacts {
+            playback: ConvertedPlaybackFacts {
+                phase,
+                segment_end,
+                generated_target_end: history.end_time(),
+                submitted_target_end: state.admitted_target_time().unwrap(),
+                playback,
+                pulled_source_end: source.pulled_end_frame(),
+                revision: history.retirement_revision(),
+            },
+            source: state.last_real_source_report(),
+            converted: Some(report),
+            boundaries: state.boundaries(),
+            revision: output.observations as u64 * 2,
+        },
+        Some(Evidence {
+            original_native_words: [output.native_id, output.presented],
+        }),
+    )
+    .map_err(|error| io::Error::other(error.to_string()))
+}
 impl TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState> for Effects {
     type NativeEvidence = Evidence;
     fn observe_native_target_playback(
@@ -533,24 +688,59 @@ impl TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState> for Effects {
         if fault == Fault::Missing {
             return Ok(None);
         }
-        assert!(output.started && output.held && !output.retired);
+        let pump = self.script.borrow().pump.is_some();
+        assert!(output.started && (output.held || pump) && !output.retired);
         output.observations += 1;
         let state = output.state.as_mut().unwrap();
         let report = if state.pending_frames() != 0 {
             let report = state.pending_report().unwrap();
-            let frames = state.pending_frames();
+            let frames = state.pending_frames().min(
+                self.script
+                    .borrow()
+                    .pump
+                    .as_ref()
+                    .map_or(usize::MAX, |pump| pump.admit_limit),
+            );
+            if let Some(pcm) = self
+                .script
+                .borrow_mut()
+                .pump
+                .as_mut()
+                .and_then(|pump| pump.pcm.as_mut())
+            {
+                pcm.push((
+                    output.epoch,
+                    state.pending_samples()[..frames * usize::from(state.format().channels())]
+                        .to_vec(),
+                ));
+            }
             state.admit(frames).unwrap();
             output.presented += frames as u64;
             report
         } else {
-            let frames = self
-                .script
-                .borrow_mut()
-                .render_frames
-                .pop_front()
-                .unwrap_or(2);
-            let report = state.render_held_pending(frames).unwrap();
+            let scripted_frames = self.script.borrow_mut().render_frames.pop_front();
+            let frames = scripted_frames.unwrap_or_else(|| {
+                self.script
+                    .borrow()
+                    .pump
+                    .as_ref()
+                    .map_or(2, |pump| pump.frames)
+            });
+            let report = if output.held {
+                state.render_held_pending(frames).unwrap()
+            } else {
+                state.render_pending(frames).unwrap()
+            };
             if fault != Fault::Unsubmitted {
+                if let Some(pcm) = self
+                    .script
+                    .borrow_mut()
+                    .pump
+                    .as_mut()
+                    .and_then(|pump| pump.pcm.as_mut())
+                {
+                    pcm.push((output.epoch, state.pending_samples().to_vec()));
+                }
                 state.admit(frames).unwrap();
             }
             output.presented += frames as u64;
@@ -564,6 +754,11 @@ impl TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState> for Effects {
         };
         let at = if fault == Fault::Future {
             now().timestamp.as_nanos() + 1_000_000
+        } else if pump {
+            let mut script = self.script.borrow_mut();
+            let pump = script.pump.as_mut().unwrap();
+            pump.host += 1_000;
+            pump.host
         } else {
             HOST_START + 20_000 + output.observations as i64 * 1_000
         };
@@ -580,10 +775,16 @@ impl TargetPlaybackNativeOutputBackend<ConvertedNativeOutputState> for Effects {
     }
     fn target_playback_at(
         &self,
-        _: &Output,
-        _: &InterpolatedTargetTime,
-        _: SourcePlaybackIdentity,
+        output: &Output,
+        query: &InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
     ) -> Result<Option<NativeTargetPlaybackQuery<Evidence>>, io::Error> {
+        if self.script.borrow().pump.is_some() {
+            return output
+                .last
+                .map(|report| pump_packet_at(output, identity, *query, report))
+                .transpose();
+        }
         panic!("replacement must retain its exact accepted original packet")
     }
 }

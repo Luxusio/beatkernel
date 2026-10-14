@@ -134,16 +134,16 @@ overlap rather than a claimed sum of unique cases. Logs are in
 `target/wf/retained-practice-output-replacement/`, including
 `ac004-borrowed-placement-unit.log`, `ac004-borrowed-allocation-calibrated.log`
 and `ac004-borrowed-regression-*.log`. Earlier compile/test failures remain there.
-Actual common pumps and final independent review/QA remain unfinished; this
-checkpoint does not prove native device/GUI crossing or full player completion.
+Final independent review/QA remains unfinished; this controller checkpoint does
+not prove native device/GUI crossing or full player completion.
 
 Owner/UI development checkpoint (2026-10-14): typed conditional ownership,
 precommit applied-capability validation and correlated reply retry are connected.
 The retained request/observation filter passes17 cases (16 new and one existing).
 The broader application178, controller18, ALSA UI12 (2 ignored), external
 allocation1, Linux53 (3 ignored) and replay40 (1 ignored) regressions pass, as
-does no-default all-bin checking. Filters overlap. The real common solo/cohort
-pause/poll/resume connection is still pending; these results do not establish it.
+does no-default all-bin checking. Filters overlap. These Owner/UI results alone
+do not establish the common solo/cohort pause/poll/resume connection below.
 Current logs are ac005-retained-target-formatted.log, ac005-regression-*.log,
 ac005-allocation-regression.log, ac005-linux-replay-regression.log and
 ac005-bins-check.log in the task work directory. Earlier failures remain recorded.
@@ -154,6 +154,28 @@ cargo test -p beatkernel-bms-runtime --no-default-features --lib gameplay::outpu
 cargo test -p beatkernel-bms-runtime --no-default-features --test coordinate_target_replacement_allocations --locked
 cargo test -p beatkernel-bms-runtime --no-default-features --bin linux_bms --bin play_replay_bms --locked
 cargo check -p beatkernel-bms-runtime --no-default-features --bins --locked
+```
+
+Connected-pump development checkpoint (2026-10-14): actual solo and two-member
+RuntimeGroup tests traverse retained pause, conditional same-format suffix
+replacement, suspended input drain and early resume fencing, live refusal,
+changed rate/channels/matrix, native resume, autonomous loop, fractional scrub
+and section completion. All3 connected/fence tests pass. The full no-default
+app library passes2674 cases (6 ignored), and the external successful-publication
+allocation regression passes with zero new heap requests. Counts overlap.
+Cold Source fingerprints are compared unconditionally at publication/refusal;
+real archive bytes are decoded and compared with actual accepted operations,
+JudgeEvents, exact member/attempt metadata and final live member hashes.
+Logs are ac006-connected-fixture-fixed.log, ac006-app-lib-no-default.log and
+ac006-allocation-regression.log. Earlier compile/fixture failures remain recorded.
+Desktop-feature app lib3129 (8 ignored) and every bin test (17 ignored in total)
+also pass with zero failures; desktop all-bin checking passes. Evidence is in
+ac006-desktop-app-bins.log and ac006-desktop-bins-check.log. Independent review/QA
+and actual native device/GUI crossing remain required.
+
+```sh
+cargo test -p beatkernel-bms-runtime --no-default-features --lib native_retained_output_replacement --locked
+cargo test -p beatkernel-bms-runtime --no-default-features --lib --locked
 ```
 
 Independent rational, original native snapshot, pause, transaction and request

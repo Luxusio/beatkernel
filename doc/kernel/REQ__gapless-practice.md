@@ -135,6 +135,13 @@ the original source frame-zero point. Preserve exact accumulated TargetTime,
 both coordinate watermarks and the existing program/attempt/input/capture
 owners; do not rebuild them or re-quantize them to the new rate. Candidate
 native history, pause binding and applied output capability publish together.
+While paused, both common pumps drain only the acquired original input prefix
+and service replacement before practice-receipt/backlog waits or suspended-output
+returns. A pending native retirement keeps the old clock live; authorization
+stops old output observations. Resume waits for atomic publication and later
+actual native adoption. The practice-transition admission fence includes queued
+raw/projected receipts, held receipts and requests admitted before a receipt;
+it does not suppress polling of an already owned output transaction or reply.
 The detailed control and verification contract is
 [retained practice output replacement](../runtime/REQ__retained-practice-output-replacement.md).
 

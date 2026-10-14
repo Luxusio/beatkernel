@@ -575,6 +575,16 @@ pub struct PracticePlayback {
 }
 
 impl PracticePlayback {
+    /// Admission fence only: an existing output transaction still owns its work.
+    pub fn transition_pending(&self) -> bool {
+        let (source, target) = self.controller.history_retention_pins();
+        self.pending.is_some()
+            || self.held.is_some()
+            || self.held_projected.is_some()
+            || source.is_some()
+            || target.is_some()
+    }
+
     /// Mathematical history pins for the projected receipt currently held by
     /// this owner. Queued receipts remain the audio endpoint's responsibility.
     pub fn history_retention_pins(&self) -> Option<(u64, InterpolatedTargetTime)> {

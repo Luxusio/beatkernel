@@ -1088,14 +1088,10 @@ fn run_gameplay_timed<
                     && coordinate_controls.pause.is_none()
                 {
                     let desired = host_port.pause_requested();
-                    if !desired && device.output_replacement_pending() {
-                        return Err(
-                            "coordinate output replacement requires qualified fresh history".into(),
-                        );
-                    }
-                    if session
-                        .pause
-                        .request_coordinate(desired, audio.authority())?
+                    if (desired || !device.output_replacement_pending())
+                        && session
+                            .pause
+                            .request_coordinate(desired, audio.authority())?
                     {
                         session.runtime.request_audio_pause(desired);
                         if !desired
@@ -1418,6 +1414,26 @@ fn run_gameplay_timed<
                     .authority_mut()
                     .record_acquired_prefix(prefix)?;
             }
+            if source_history.is_some()
+                && pause_committed
+                && session.pause.phase() == PausePhase::Paused
+                && !end_rendered
+            {
+                service_paused_coordinate_solo(
+                    device,
+                    &mut session,
+                    &mut config,
+                    input_merger,
+                    received,
+                    &mut keyboard,
+                    &mut last_operation,
+                    end_boundary,
+                    host_port,
+                    practice
+                        .as_ref()
+                        .is_some_and(|owner| owner.playback.transition_pending()),
+                )?;
+            }
         }
         if source_history.is_none()
             && (config.logical_schedule || config.pause_supported)
@@ -1634,6 +1650,7 @@ fn run_gameplay_timed<
                     &mut config,
                     session.end,
                     received,
+                    false,
                 )?;
             }
             if (session.pause.phase() == PausePhase::Paused && !end_rendered)
@@ -2976,6 +2993,66 @@ fn service_coordinate_solo_control<
     Ok(())
 }
 
+fn service_paused_coordinate_solo<
+    D: crate::gameplay_presentation::GameplayDevice,
+    S: SoloCompetitionPort,
+    H: NativeGameplayHost,
+    T: PumpTiming<D>,
+>(
+    device: &mut D,
+    session: &mut GameplaySession<'_, S, T>,
+    config: &mut NativeGameplayConfig,
+    merger: &mut InputMerger,
+    now: ClockPoint,
+    keyboard: &mut PauseKeyboard,
+    last_host_operation: &mut ClockPoint,
+    end_boundary: Option<EndBoundary>,
+    host: &H,
+    practice_pending: bool,
+) -> NativeGameplayResult<()> {
+    if let Some(prefix) = session
+        .discipline
+        .audio()
+        .expect("audio timing")
+        .authority()
+        .acquired_prefix()
+    {
+        while let Some(event) = merger.pop_ready(prefix)? {
+            keyboard.observe_paused(event)?;
+        }
+    }
+    if !device.output_clock_suspended() {
+        if let Some(frontier) = session
+            .discipline
+            .audio()
+            .expect("audio timing")
+            .authority()
+            .prepare_coordinate_held_frontier(now, merger)?
+        {
+            *last_host_operation = frontier.host();
+            session
+                .discipline
+                .audio_mut()
+                .expect("audio timing")
+                .authority_mut()
+                .commit_coordinate_held_frontier(frontier, now, merger)?;
+        }
+    }
+    if end_boundary.is_none() && !host.cancelled() {
+        session.discipline.publish(
+            device,
+            crate::gameplay_presentation::GameplayPauseControl::solo(session.runtime),
+            Some(merger),
+            session.pause,
+            config,
+            session.end,
+            now,
+            practice_pending,
+        )?;
+    }
+    Ok(())
+}
+
 fn service_audio_solo<
     D: crate::gameplay_presentation::GameplayDevice,
     S: SoloCompetitionPort,
@@ -3406,6 +3483,7 @@ fn service_audio_solo<
                 config,
                 session.end,
                 now,
+                false,
             )?;
         }
         return Ok(());

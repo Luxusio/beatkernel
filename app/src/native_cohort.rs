@@ -1857,6 +1857,25 @@ fn run_cohort_timed<
                     .authority_mut()
                     .record_acquired_prefix(prefix)?;
             }
+            if source_history.is_some()
+                && pause_committed
+                && session.pause.phase() == PausePhase::Paused
+                && !end_rendered
+            {
+                service_paused_coordinate_cohort(
+                    device,
+                    &mut session,
+                    &mut config,
+                    now,
+                    &mut keyboard,
+                    &mut committed,
+                    end_boundary,
+                    host_port,
+                    practice
+                        .as_ref()
+                        .is_some_and(|(owner, _)| owner.transition_pending()),
+                )?;
+            }
         }
         if source_history.is_none()
             && (config.logical_schedule || config.pause_supported)
@@ -2049,6 +2068,7 @@ fn run_cohort_timed<
                         &mut config,
                         session.end,
                         now,
+                        false,
                     )?;
                 }
                 control.wait(WallDuration::from_millis(1))?;
@@ -3237,6 +3257,66 @@ fn service_coordinate_cohort_controls<
     Ok(())
 }
 
+fn service_paused_coordinate_cohort<
+    D: crate::gameplay_presentation::GameplayDevice,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+    H: NativeGameplayHost,
+    T: PumpTiming<D>,
+>(
+    device: &mut D,
+    session: &mut CohortSession<'_, S, G, T>,
+    config: &mut NativeGameplayConfig,
+    now: ClockPoint,
+    keyboard: &mut PauseKeyboard,
+    committed: &mut Option<ClockPoint>,
+    end_boundary: Option<crate::native_end::EndBoundary>,
+    host: &H,
+    practice_pending: bool,
+) -> NativeGameplayResult<()> {
+    if let Some(prefix) = session
+        .discipline
+        .audio()
+        .expect("audio timing")
+        .authority()
+        .acquired_prefix()
+    {
+        while let Some(event) = session.merger.pop_ready(prefix)? {
+            keyboard.observe_paused(event)?;
+        }
+    }
+    if !device.output_clock_suspended() {
+        if let Some(frontier) = session
+            .discipline
+            .audio()
+            .expect("audio timing")
+            .authority()
+            .prepare_coordinate_held_frontier(now, session.merger)?
+        {
+            session
+                .discipline
+                .audio_mut()
+                .expect("audio timing")
+                .authority_mut()
+                .commit_coordinate_held_frontier(frontier, now, session.merger)?;
+            *committed = Some(frontier.host());
+        }
+    }
+    if end_boundary.is_none() && !host.cancelled() {
+        session.discipline.publish(
+            device,
+            crate::gameplay_presentation::GameplayPauseControl::cohort(session.group),
+            Some(session.merger),
+            session.pause,
+            config,
+            session.end,
+            now,
+            practice_pending,
+        )?;
+    }
+    Ok(())
+}
+
 fn service_audio_cohort<
     D: crate::gameplay_presentation::GameplayDevice,
     S: SoloCompetitionPort,
@@ -3760,6 +3840,7 @@ fn service_audio_cohort<
                 config,
                 session.end,
                 now,
+                false,
             )?;
         }
         return Ok(());

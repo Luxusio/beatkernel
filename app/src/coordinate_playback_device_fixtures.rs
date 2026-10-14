@@ -516,6 +516,7 @@ impl<D: GameplayDevice> PumpTiming<D> for SourceOnlyTiming<'_> {
         _: &mut NativeGameplayConfig,
         _: &mut Option<NativeEnd>,
         _: ClockPoint,
+        _: bool,
     ) -> NativeGameplayResult<bool> {
         panic!("no publication effect")
     }

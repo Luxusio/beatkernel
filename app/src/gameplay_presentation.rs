@@ -363,6 +363,16 @@ pub trait GameplayDevice {
     ) -> NativeGameplayResult<bool> {
         Err("device does not support held audio output publication".into())
     }
+    /// Original-coordinate retained publication keeps its source binding explicit.
+    fn publish_paused_coordinate_audio_output(
+        &mut self,
+        _: GameplayAudioOutputContext<'_>,
+        _: ClockPoint,
+        _: crate::gameplay::output::ports::SourcePlaybackIdentity,
+        _: bool,
+    ) -> NativeGameplayResult<bool> {
+        Ok(false)
+    }
     fn observe(&mut self, discipline: &mut Self::Presentation) -> NativeGameplayResult<()>;
     /// Interval owners override this with original coherent evidence;
     /// correction-only midpoint pairs cannot establish their pause boundary.
@@ -523,6 +533,7 @@ pub(crate) trait PumpTiming<D: GameplayDevice> {
         config: &mut NativeGameplayConfig,
         end: &mut Option<NativeEnd>,
         now: ClockPoint,
+        practice_pending: bool,
     ) -> NativeGameplayResult<bool>;
 }
 pub(crate) struct LegacyTiming<'a, P>(pub &'a mut P);
@@ -601,6 +612,7 @@ impl<D: GameplayDevice> PumpTiming<D> for LegacyTiming<'_, D::Presentation> {
         config: &mut NativeGameplayConfig,
         end: &mut Option<NativeEnd>,
         _: ClockPoint,
+        _: bool,
     ) -> NativeGameplayResult<bool> {
         device.publish_paused_output(GameplayOutputContext {
             control,
@@ -742,18 +754,21 @@ impl<D: GameplayDevice> PumpTiming<D> for AudioTiming<'_> {
         config: &mut NativeGameplayConfig,
         end: &mut Option<NativeEnd>,
         now: ClockPoint,
+        practice_pending: bool,
     ) -> NativeGameplayResult<bool> {
-        device.publish_paused_audio_output(
-            GameplayAudioOutputContext {
-                control,
-                presentation: self.0,
-                merger: merger.expect("audio timing owns an acquisition merger"),
-                pause,
-                config,
-                end,
-            },
-            now,
-        )
+        let context = GameplayAudioOutputContext {
+            control,
+            presentation: self.0,
+            merger: merger.expect("audio timing owns an acquisition merger"),
+            pause,
+            config,
+            end,
+        };
+        if let Some(identity) = self.3 {
+            device.publish_paused_coordinate_audio_output(context, now, identity, practice_pending)
+        } else {
+            device.publish_paused_audio_output(context, now)
+        }
     }
 }
 

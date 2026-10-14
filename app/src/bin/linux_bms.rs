@@ -1090,7 +1090,7 @@ mod native {
                     .observe_native_control(presentation, identity)?
                     .map(CoordinatePlaybackControlFacts::Source)),
                 SoloOutput::Target(owner, _) => Ok(owner
-                    .observe_target_native_control(presentation, identity)?
+                    .observe_conditional_target_native_control(presentation, identity)?
                     .map(CoordinatePlaybackControlFacts::Target)),
             }
         }
@@ -1137,6 +1137,20 @@ mod native {
             now: ClockPoint,
         ) -> NativeGameplayResult<bool> {
             self.output.service_audio(context, now)
+        }
+        fn publish_paused_coordinate_audio_output(
+            &mut self,
+            context: beatkernel_bms_runtime::gameplay_presentation::GameplayAudioOutputContext<'_>,
+            now: ClockPoint,
+            identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+            practice_pending: bool,
+        ) -> NativeGameplayResult<bool> {
+            match self.output {
+                SoloOutput::Legacy(owner, ui) => ui.service_audio(owner, context, now),
+                SoloOutput::Target(owner, ui) => {
+                    ui.service_coordinate_audio(owner, context, now, identity, practice_pending)
+                }
+            }
         }
 
         fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
