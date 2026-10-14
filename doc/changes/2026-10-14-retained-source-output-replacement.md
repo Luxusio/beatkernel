@@ -1,17 +1,18 @@
-# Retained Source output replacement — 개발 중
+# Retained Source output replacement — 소프트웨어 검증·Windows 실행 대기
 
 실제 WASAPI의 SourceCounter와 일반 SourceFrame을 유지하면서, 일시정지한
 플레이의 출력 설정을 바꾸고 같은 Mixer/Runtime/입력/capture로 재개하는 경로다.
 [계약](../runtime/REQ__retained-source-output-replacement.md)과
 [WBS 07.08.07](../kernel/REQ__bms-player-work-breakdown.md)을 따른다.
-현재 전체 연결의 완료나 독립 최종 검증을 선언하지 않는다.
+전체 native 연결 완료는 선언하지 않는다. bounded 소프트웨어의 독립 검증은
+통과했고 실제 Windows 장치 실행은 남는다.
 
 독립 DEEP 정식 리뷰는 `a7869f70`에서 FIX_NOW3 FAIL을 반환했다. 양수 Duration
 용량 초과의 cold UI 거절 누락, Exact fractional Duration의 retirement 이전
 검증 누락, complete 초기화 실패의 MMCSS teardown 오류 유실이다. 실제 기존 API
 재현2개는 48kHz의 1ns buffer/period를 승인해 실패했다. 공유 sizing 검증과
-초기화 정리 경계를 ef72c8d2·154704a4로 수정해 실제 회귀를 통과했다. 새 정식
-리뷰·CLI/native QA는 남는다.
+초기화 정리 경계를 ef72c8d2·154704a4로 수정해 실제 회귀를 통과했다. 이후
+9b6c5ae4의 새 정식 DEEP 리뷰와 CLI QA는 통과했고 native QA는 환경에 막혔다.
 아래 E62 개발 검사 통과를 이 독립 리뷰의 PASS로 인용하지 않는다. E64의 실제
 수정 후 검사 결과는 app2774/0/ignored6, platform415/0/ignored2, sizing22,
 worker 외부 binary81, Source UI9, Windows bin72 PASS다. worker 외부 binary는
@@ -19,6 +20,42 @@ worker 외부 binary81, Source UI9, Windows bin72 PASS다. worker 외부 binary�
 MMCSS5개/18조건은 Windows platform/app lib/tests Rust typing만 통과했다. actual
 Windows 실행과 구분한다. scoped48 Rust format/diff와 경고를 허용한 lib Clippy도
 통과했다. 수정 전 a7869f70의 별도 workspace는5977 PASS/실패0/ignored38이다.
+
+## 독립 검증과 실제 Windows 환경
+
+두 번째/final DEEP 리뷰는 frozen9b6c5ae4의54개 경로를 검토해 FIX_NOW0/PASS했다.
+그 뒤 독립 CLI QA의 실제 desktop,webtransport app은3258 PASS/실패0/ignored8,
+전체 bin은610/0/ignored17, platform은415/0/ignored2다. sizing22·worker 외부
+binary81과 Source/Target 실제 publication 할당 검사 각각1도 통과했다. app 내부
+필터와 source-inclusion fixture는 다른 suite와 합산하지 않는다. browser-only
+WASM, Windows/macOS app/platform lib/tests C-stub typing, scoped48 Rust format/diff와
+경고 비차단 library Clippy도 exit0이다. 경고는 앱394·platform111개가 남으며
+strict Clippy 통과가 아니다. 전체 workspace release 검사로 확장하지 않는다.
+
+새 공개 binary의 help/happy/invalid/edge18경로도 통과했다. 공백 경로의 실제
+BMS+WAV에서8000frame·32000byte PCM을 생성했고 샘플은 모두 유한하며792개가
+0이 아니었다. 같은 출력 파일에 재실행한 요청은 exit1로 거절하고 원본 바이트를
+보존했다. 처음 app 검사는 기존 root 소유 fingerprint 권한으로 exit101이었으나
+PLAN이 허용한 같은 명령의 좁은 sudo 재시도로 통과했다. 권한/소유권은 바꾸지 않았다.
+
+독립 desktop QA는 소유 Windows VM을 실제 부팅해 PowerShell Direct에 연결했다.
+Windows의 실제 IMMDeviceEnumerator Render AllStates 열거와 GetCount는 HRESULT0으로
+성공했으나 endpoint가0개였다. 로그인 콘솔이 없어 창 조회는 불가능했고 화면은
+잠금 상태였다. 현재 Source 실행 파일/빌드 도구도 없어서 WASAPI 재생·입력·GUI
+검증은 BLOCKED_ENV다. 기존 오래된 입력 검사 binary를 이번 Source 근거로 쓰지
+않았다. 설치/드라이버/소스 변경 없이 VM을 같은 incarnation의 초기 stopped/Off로
+정상 복구했다. endpoint 부재는 native 환경 blocker이며 제품 동작 실패의 증명이 아니다.
+
+독립 실행의 정확한 명령·exit·출력과 환경/복구 증거는 ignored
+`target/wf/retained-sourceframe-output-replacement/qa-cli-9b6c5ae4/` 및
+`qa-desktop-9b6c5ae4/`에 있다. 다른 clone에서는 남은 명령/소스로 재현한다.
+실제 Windows COM/MMCSS fixture는 typing만 통과했으며 미실행이다.
+
+WBS는 .01/.02/.03/.04/.06/.07/.08/.09의 소프트웨어8개만 D로 갱신한다.
+.05/.10/.11과 .11을 선행으로 갖는 .12는 V이며 exclusive/ASIO/CoreAudio는 N이다.
+확장 말단은105/220(47.73%), 원래 제품 요구91/193(47.15%)은 그대로다.
+실제 독립 결과와 별개로 hook-owned 완료 증거는 없어 한 번의 task_verify가
+PENDING이다. 결과는 NON-ATTESTING이며 task를 닫거나 full Goal 완료로 기록하지 않는다.
 
 ## 현재 구현과 커밋
 
@@ -102,14 +139,15 @@ complete owner를 Mixer로 평탄화하지 않는다. 실제 clock frequency는 
 startup 원점 거절 결함을 확인했다. 원래 stream 생성과 실제 gate가 다른 유효한
 Windows 계약이며 config를 같게 바꾸지 않는다. Source pause의 실제 start/current
 basis로 정확한 원점을 계산하는 수정과 1ns tamper 거절 뒤 연결4/전체 회귀를 통과했다.
-Source controller와 consumer/pump는 개발 검사 통과 V이며 독립 최종 gate가 남는다.
+Source controller의 소프트웨어 검증은 E65에서 완료됐고 consumer/pump의 native
+실행과 선행 gate는 남는다.
 Target의 같은 가정은 원래 Goal의 별도 감사 대상이다.
 
-Owner·canonical adapter와 typed UI의 bounded 개발 검사는 통과했다. Windows 전용
+Owner와 typed UI의 bounded 독립 소프트웨어 검사는 통과했다. Windows 전용
 native/classifier5개 fixture는 형 검사만 됐으며 실제 실행이 남는다. Windows solo/local
 consumer와 실제 공통 pump는 source/test 쌍의 병렬 작성 뒤 통합 검사를 통과했다.
 Source mutable query는 공통 포트로 실제 Owner를 호출한다. 실제 native owner 실행과
-독립 review 뒤 CLI/desktop QA가 남는다.
+desktop acceptance는 위 실제 환경 조사에서 BLOCKED_ENV이며 미완료다.
 Windows typing은 C-stub에 의한 Rust 형 검사이며 COM/driver 실행이 아니다.
 현재 host의 Windows 장치 실행을 소프트웨어 검사로 대체하지 않는다.
 WASAPI exclusive·ASIO·CoreAudio, 나머지 rate/encoding·cross-backend·browser·

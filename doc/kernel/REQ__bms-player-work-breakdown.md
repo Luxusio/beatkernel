@@ -428,6 +428,29 @@ E14·P5·U3이다. 활성220·완료97/원래91/193은 유지하며 새 독립 D
 전체 통과로 인용하지 않는다. 앞선 generic health0은 상세 진단을 버린 aggregate여서
 이를 current 실행 실패의 원인 증명으로 사용하지 않는다.
 
+E65: frozen9b6c5ae4의 두 번째/final 독립 DEEP 리뷰는 PASS/FIX_NOW0이며, 그 뒤
+독립 CLI QA도 portable 소프트웨어 범위 PASS다. 실제 desktop,webtransport app3258/
+실패0/ignored8, bin610/실패0/ignored17, platform415/실패0/ignored2, sizing22와
+worker 외부 binary81, Source/Target publication 할당 각각1이 통과했다. worker
+binary의 source-inclusion 중복과 app 내부 필터는 다른 suite와 합산하지 않는다.
+browser-only WASM, Windows/macOS app/platform lib/tests C-stub typing, scoped48
+Rust format/diff와 경고 비차단 library Clippy도 exit0이다. Clippy 경고는 앱394·
+platform111개가 남으며 strict clean 판정이 아니다. 공개 CLI18경로도 통과했고 실제
+BMS/WAV에서8000frame/32000byte PCM을 생성했다. 정확한 argv/exit와 로그는
+`target/wf/retained-sourceframe-output-replacement/qa-cli-9b6c5ae4/`에 있다.
+
+별도 실제 desktop QA는 기존 소유 Windows VM을 부팅하고 PowerShell Direct와
+실제 IMMDeviceEnumerator의 Render AllStates 열거까지 성공했으나 endpoint가0개였다.
+로그인 콘솔과 현재 Source 실행 파일/빌드 도구도 없어 실제 재생은 BLOCKED_ENV다.
+VM은 초기 stopped/Off로 정상 복구했다. 증거는 같은 task의
+`qa-desktop-9b6c5ae4/`다. Native COM/MMCSS fixture는 typed-only이며 미실행이다.
+소프트웨어 범위8개(.01/.02/.03/.04/.06/.07/.08/.09)를 V→D로 옮긴다.
+실제 Windows .05/.10/.11과 그 선행에 의존하는 공통 pump .12는 V를 유지한다.
+Source8D·4V·3N, 전체 D105·V70·W20·N3·E14·P5·U3으로 활성220·47.73%다.
+원래 제품 요구91/193·Source 부모·다른 backend/물리/출시 범위는 미완료 그대로다.
+actual review/QA 결과와 별도로 hook-owned 완료 증거가 없어 한 번의 task_verify는
+PENDING이다. 직접 수집한 결과는 NON-ATTESTING이며 task close/전체 완료로 쓰지 않는다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -570,18 +593,18 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
   - [ ] **BK-WBS-07.08.05** retained Target controller의 open/start/poll/prime/commit을 새 coordinate authority·pause·입력 merger와 원자적으로 연결한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.08.01, BK-WBS-07.08.02, BK-WBS-07.08.03, BK-WBS-07.08.04; 필요 근거/다음=E51 controller18·실제 publication 할당0회1 및 E55 독립 review/CLI PASS; 실제 native desktop acceptance와 완료 기록 gate는 남음.
   - [ ] **BK-WBS-07.08.06** 새 retained Target 교체를 실제 solo/cohort 공통 pump에 연결하고 acknowledged pause·입력 drain·publication·resume을 검증한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.09.03; 필요 근거/다음=E54 실제 Owner history 경합 연결3 및 E55 독립 review/CLI PASS; 실제 GUI solo/local 시작은 장치 부재로 BLOCKED_ENV이며 native pause/Output/resume/capture와 완료 기록은 남음.
   - [ ] **BK-WBS-07.08.07** direct SourceFrame/SourceCounter retained 교체의 전체 controller·Owner/UI·공통 pump 및 history/pin 수명을 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E56의 Source child 착수; 모든 하위와 원래 WASAPI/ASIO/CoreAudio 범위를 충족해야 완료. Target 검사를 Source 완료로 확장하지 않는다.
-    - [ ] **BK-WBS-07.08.07.01** SourceFrame/Counter native epoch·원래 creation pin·exact authority·merger 원자 publication 기초를 연결한다. — 상태=V(구현·개발검사통과); 선행=-; 필요 근거/다음=Source AC003/E57의 native14와 authority·전체 app2711 회귀 PASS; 독립 최종 검토 및 controller 연동 확인 필요.
-    - [ ] **BK-WBS-07.08.07.02** Source coordinate pause의 cold proof·새 native descriptor·frozen/startup/history/gap 보존을 연결한다. — 상태=V(구현·개발검사통과); 선행=-; 필요 근거/다음=Source AC004/E57의 실제 state/history·두 좌표·새 Counter frequency·반복 resume/repause5 PASS; 독립 검토와 실제 연동 필요.
-    - [ ] **BK-WBS-07.08.07.03** NativeOutputState의 pending PCM/history pin과 불확실 admission quarantine을 보존한다. — 상태=V(구현·개발검사통과); 선행=-; 필요 근거/다음=Source AC005/E57의 state56/history30 PASS와 pending report 시작점·practice clamp·quarantine 명시 준비 retry 검사; native open/Retry 연결과 독립 검토 필요.
-    - [ ] **BK-WBS-07.08.07.04** 실제 portable WASAPI worker step의 conditional slot·lease·clock-only·실패·무할당 경계를 검사한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.03; 필요 근거/다음=E64/ef72c8d2의 실제 Exact1ns RED2→플랫폼415·크기22·worker 외부 binary81 PASS; 새 공통 sizing과 실제 worker 호출·heap 회귀 통과. 최종 독립 재검토 필요.
-    - [ ] **BK-WBS-07.08.07.05** WASAPI shared의 complete Source open/start/Stop/join/recover와 실제 Counter descriptor를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.04, BK-WBS-07.08.07.06; 필요 근거/다음=E64/ef72c8d2의 complete MMCSS 등록/priority/prefill 및 facts/event/receiver 정리 오류 보존; 새 native5개/18subcase는 Windows platform lib/tests typing만 PASS, 미실행. eligible Windows·독립 검증 필요.
-    - [ ] **BK-WBS-07.08.07.06** Source conditional port·opaque ticket·created descriptor와 static remix forwarding을 구현한다. — 상태=V(구현·개발검사통과); 선행=-; 필요 근거/다음=Source AC002/E57의 port/remix10·browser WASM·전체 app PASS; 원본 행렬/오류/전체 소유권 전달을 독립 최종 검토할 것.
-    - [ ] **BK-WBS-07.08.07.07** 기존 replacement lifecycle에 Source controller·conditional ownership·borrowed atomic commit을 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.01, BK-WBS-07.08.07.02, BK-WBS-07.08.07.03, BK-WBS-07.08.07.06; 필요 근거/다음=E62/bbdfea4b의 정확한 startup origin·1ns tamper 거절, 연결4·전체 app2773·Source/Target 할당 각1 PASS; 독립 최종 검증 필요.
-    - [ ] **BK-WBS-07.08.07.08** Ticket-generic Source Owner의 관측/query/history와 조건부 publication을 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.07; 필요 근거/다음=AC010/E59의 실제 typed 오류 경합 RED1→Owner24·전체 app2761·publication 할당 PASS; UI/공통 pump 연동·독립 최종 검증 필요.
-    - [ ] **BK-WBS-07.08.07.09** Typed Source Output UI의 capability prevalidation·요청/응답·WouldBlock을 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.08; 필요 근거/다음=AC011/E60의 실제 Owner UI8·전체 app2769 PASS; Windows consumer/공통 pump 연동·독립 최종 검증 필요.
-    - [ ] **BK-WBS-07.08.07.10** Canonical WASAPI adapter가 complete Source owner와 원래 Counter packet을 전달한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.05, BK-WBS-07.08.07.06; 필요 근거/다음=AC009/E59의 portable canonical packet11·전체 app·Windows lib/tests typing PASS; cfgWindows native/classifier5개는 미실행이며 실제 Windows 실행·독립 검증 필요.
-    - [ ] **BK-WBS-07.08.07.11** Windows solo/local의 실제 SourceCounter coordinate hook과 Legacy/complete static variant를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.10; 필요 근거/다음=E64/154704a4의 actual resolved request cold sizing 검증; Windows bin72·Source UI9(새 거절24조합 포함)·전체 app2774 PASS 및 Windows app typing PASS. cfgWindows mapper/COM 실행·독립 검증 필요.
-    - [ ] **BK-WBS-07.08.07.12** Source Frame/Counter 공통 solo/cohort pump에서 교체·resume·loop/scrub·원본 capture/PCM 보존을 검증한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.11; 필요 근거/다음=E62/8cf352ca의 실제 연결4·전체 app2773 PASS; 전체 PCM 회계·실제 종료 silence·원본 capture codec/hash·member/attempt와 조건부 경합 검증; 독립 최종 검증·native 실행 필요.
+    - [x] **BK-WBS-07.08.07.01** SourceFrame/Counter native epoch·원래 creation pin·exact authority·merger 원자 publication 기초를 연결한다. — 상태=D(검증완료); 선행=-; 근거=E65 독립 DEEP/CLI PASS, native epoch14·authority·controller/공통 pump 연결과 전체 app3258 회귀; 범위=portable 원본 좌표/원자 publication 기초, 실제 Windows 장치 실행은 .05/.10/.11.
+    - [x] **BK-WBS-07.08.07.02** Source coordinate pause의 cold proof·새 native descriptor·frozen/startup/history/gap 보존을 연결한다. — 상태=D(검증완료); 선행=-; 근거=E65 독립 DEEP/CLI PASS, pause5·반복 resume/repause·실제 controller/pump 연결4와 creation5/start7·원점 변조 거절; 범위=portable pause 계약, 실제 native ACK/재생은 별도.
+    - [x] **BK-WBS-07.08.07.03** NativeOutputState의 pending PCM/history pin과 불확실 admission quarantine을 보존한다. — 상태=D(검증완료); 선행=-; 근거=E65 독립 DEEP/CLI PASS, platform415·실제 pending/history/practice clamp·quarantine 및 controller/Owner Retry의 open 이전 거절; 범위=완전 software 상태 보존, COM 수명은 .05.
+    - [x] **BK-WBS-07.08.07.04** 실제 portable WASAPI worker step의 conditional slot·lease·clock-only·실패·무할당 경계를 검사한다. — 상태=D(검증완료); 선행=BK-WBS-07.08.07.03; 근거=E65 독립 DEEP/CLI PASS, production worker18·sizing22·worker 외부 binary81 및 보정된 alloc/realloc/dealloc0; 실제 Exact1ns RED2→GREEN 보존. 범위=portable step, COM 호출 실행은 .05.
+    - [ ] **BK-WBS-07.08.07.05** WASAPI shared의 complete Source open/start/Stop/join/recover와 실제 Counter descriptor를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.04, BK-WBS-07.08.07.06; 필요 근거/다음=E65 독립 DEEP/CLI의 portable/build-only 범위 PASS; complete MMCSS 정리 오류 보존의 native5개/18subcase는 Windows platform lib/tests typing만 PASS, 미실행. 실제 Windows native acceptance는 endpoint0·실행 환경 부재로 BLOCKED_ENV.
+    - [x] **BK-WBS-07.08.07.06** Source conditional port·opaque ticket·created descriptor와 static remix forwarding을 구현한다. — 상태=D(검증완료); 선행=-; 근거=E65 독립 DEEP/CLI PASS, packet3·remix7·browser-only WASM; 범위=원본 행렬/오류/완전 소유권의 정적 전달 계약, 실제 native adapter는 .10.
+    - [x] **BK-WBS-07.08.07.07** 기존 replacement lifecycle에 Source controller·conditional ownership·borrowed atomic commit을 연결한다. — 상태=D(검증완료); 선행=BK-WBS-07.08.07.01, BK-WBS-07.08.07.02, BK-WBS-07.08.07.03, BK-WBS-07.08.07.06; 근거=E65 독립 DEEP/CLI PASS, controller21·정확한 startup origin/1ns tamper 거절·연결4·실제 Source publication 할당1; 범위=portable lifecycle/borrowed commit, 실제 native 후보 실행은 별도.
+    - [x] **BK-WBS-07.08.07.08** Ticket-generic Source Owner의 관측/query/history와 조건부 publication을 연결한다. — 상태=D(검증완료); 선행=BK-WBS-07.08.07.07; 근거=E65 독립 DEEP/CLI PASS, Owner24·actual UI/공통 pump 연결·publication 검사; typed 오류와 승인 경합·복합 실패를 보존. 범위=generic Owner, 실제 worker와의 Windows 경합은 별도.
+    - [x] **BK-WBS-07.08.07.09** Typed Source Output UI의 capability prevalidation·요청/응답·WouldBlock을 연결한다. — 상태=D(검증완료); 선행=BK-WBS-07.08.07.08; 근거=E65 독립 DEEP/CLI PASS, real Owner/controller UI9·sizing 거절24조합·공통 pump 연결; 범위=typed 요청/단일 응답과 live 상태 보존, 실제 Windows GUI 소비자는 .11.
+    - [ ] **BK-WBS-07.08.07.10** Canonical WASAPI adapter가 complete Source owner와 원래 Counter packet을 전달한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.05, BK-WBS-07.08.07.06; 필요 근거/다음=E65 독립 DEEP/CLI에서 portable canonical packet11·전체 app·Windows lib/tests typing PASS; cfgWindows native/classifier5개는 미실행이며 실제 Windows acceptance와 선행 .05가 남음.
+    - [ ] **BK-WBS-07.08.07.11** Windows solo/local의 실제 SourceCounter coordinate hook과 Legacy/complete static variant를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.10; 필요 근거/다음=E65 독립 DEEP/CLI에서 Windows bin72·Source UI9(거절24조합 포함)·전체 desktop app3258 및 Windows app typing PASS; cfgWindows mapper/COM 실제 실행과 선행 .10이 남음.
+    - [ ] **BK-WBS-07.08.07.12** Source Frame/Counter 공통 solo/cohort pump에서 교체·resume·loop/scrub·원본 capture/PCM 보존을 검증한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.11; 필요 근거/다음=E65 독립 DEEP/CLI에서 실제 연결4·전체 desktop app3258 PASS, PCM 회계·종료 silence·원본 capture codec/hash·member/attempt·조건부 경합 검사; 실제 Windows acceptance와 선행 .11이 남음.
     - [ ] **BK-WBS-07.08.07.13** WASAPI exclusive retained Source 교체의 실제 mode/geometry·history·cleanup 및 pause/resume을 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=shared vertical을 exclusive 완료로 확장하지 않음; exclusive 조건·실제 장치/독립 검증 필요.
     - [ ] **BK-WBS-07.08.07.14** ASIO SourceFrame retained 교체의 callback conditional retirement·완전 상태·Owner/UI/pump를 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=공통 Frame 기초와 실제 ASIO adapter는 별도; SDK/build 라이선스 조건·형/장치 실행·실패/재시도 검사 필요.
     - [ ] **BK-WBS-07.08.07.15** CoreAudio retained Source 교체의 원래 native 좌표·callback/회수·Owner/UI/pump를 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=실제 macOS descriptor/history·callback 승인·cleanup·장치/독립 실행 필요; WASAPI typing은 근거가 아님.
@@ -864,6 +887,12 @@ Source/scalar/finite/foreign/실제 GUI/물리/applied 전체 범위를 보존�
 상세 behavior/architecture/라이선스는 연결된 기존 REQ/GUIDE/ADR이 계속 소유한다.
 
 ## 변경 이력
+
+- 2026-10-14 Source E65: actual 독립 DEEP review 다음 CLI QA PASS로 소프트웨어8개를
+  V→D로 옮겼다. Source8D·4V·3N, 전체 D105·V70·W20·N3·E14·P5·U3이며
+  105/220(47.73%)다. 원래91/193은 그대로다. 실제 Windows VM의 Render endpoint0·
+  잠긴 console/현재 실행 환경 부재로 desktop BLOCKED_ENV; native4개와 full Goal은
+  미완료다. hook 완료 증거도 없어 한 번의 verify는 PENDING이며 task close와 다르다.
 
 - 2026-10-14 Source E64: 정식 리뷰3건 수정 후 actual RED2→GREEN과 새 검사·형
   검사를 확인해3개를 W→V로 복구했다. D97·V78·W20·N3·E14·P5·U3; 분모/완료

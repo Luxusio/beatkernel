@@ -7,6 +7,19 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-14 Source E65: frozen9b6c5ae4의 독립 DEEP 리뷰 PASS0 다음 독립 CLI QA가
+소프트웨어 범위 PASS했다. desktop,webtransport app3258/0/ignored8·bins610/0/ignored17·
+platform415/0/ignored2·sizing22·worker 외부81·Source/Target 할당 각1, WASM·foreign
+stub typing·scoped48 Rust format/diff·경고 비차단 Clippy와 공개 CLI18경로를 통과했다.
+중복 fixture는 합산하지 않고 Clippy 경고도 남는다. 범위가 소프트웨어인8개만
+V→D로 옮겨 현재 **105/220(47.73%)**, D105·V70·W20·N3·E14·P5·U3이다.
+Source8D·4V·3N이며 원래 제품 요구91/193(47.15%)은 그대로다. 실제 Windows VM을
+부팅해 native Render endpoint 열거는 성공했으나0개였다. 로그인 콘솔과 현재
+실행 파일/빌드 도구도 없어 desktop QA는 BLOCKED_ENV다. VM은 초기Off로 복구했다.
+native .05/.10/.11과 .11을 선행으로 갖는 .12는 V다. hook-owned 완료 증거가 없어
+한 번의 task_verify도 PENDING이며 task close/전체 Goal 완료로 처리하지 않는다.
+아래 E64 이전 문단은 각 당시의 검사/상태 기록이며 현재 집계는 E65가 우선한다.
+
 2026-10-14 Source E64: 리뷰3건을 ef72c8d2·154704a4로 수정했다. actual RED2→GREEN,
 platform415·sizing22·worker external81·Source UI9·Windows bin72·전체 app2774를
 통과했다. Windows native5개/18조건은 새 형 검사만 통과했으며 미실행이다. 현재
