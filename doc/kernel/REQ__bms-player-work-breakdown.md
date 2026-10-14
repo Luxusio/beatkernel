@@ -361,6 +361,16 @@ typing은 exit0이나 C-stub을 사용하며 Windows COM/장치 실행은 아니
 typed 오류와 authorization 경합을 추가 검사 중이며 UI/consumer/pump는 남는다.
 완료97/220과 원래91/193은 유지하며 독립 최종 review/QA 근거로 확장하지 않는다.
 
+E59: `4a4d7287`의 Source Owner와 canonical complete WASAPI adapter를 연결했다.
+typed packet 실패 뒤 authorization이 오면 오류가 숨겨지는 실제 RED1건을 확인하고,
+Source 포트의 static default-false IO classifier/Remix 전달로 raw IO만 재probe하도록
+수정했다. Owner24·canonical packet11·controller21을 포함한 전체 portable app는
+2761 PASS/실패0·ignored6, Source/Target 실제 publication 할당은 각각1 PASS다.
+Windows app lib/tests typing은 exit0이며 새 canonical native/classifier5개는 형 검사만
+됐다. typed validation·history·quarantine·복합 cleanup 오류는 그대로 보존한다.
+Owner/adapter2개를 V로, 시작한 typed UI를 W로 옮겨 Source9V·1W·5N이며 실제
+Windows consumer/pump·독립 최종 review/QA·native 실행은 남는다. 완료 수는 유지한다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -510,9 +520,9 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
     - [ ] **BK-WBS-07.08.07.05** WASAPI shared의 complete Source open/start/Stop/join/recover와 실제 Counter descriptor를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.04, BK-WBS-07.08.07.06; 필요 근거/다음=AC007/E58의 platform411·worker 할당 회귀1·Windows lib/tests typing PASS; Windows fixture12는 형 검사만 됐으며 eligible Windows 실행·독립 검증 필요.
     - [ ] **BK-WBS-07.08.07.06** Source conditional port·opaque ticket·created descriptor와 static remix forwarding을 구현한다. — 상태=V(구현·개발검사통과); 선행=-; 필요 근거/다음=Source AC002/E57의 port/remix10·browser WASM·전체 app PASS; 원본 행렬/오류/전체 소유권 전달을 독립 최종 검토할 것.
     - [ ] **BK-WBS-07.08.07.07** 기존 replacement lifecycle에 Source controller·conditional ownership·borrowed atomic commit을 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.01, BK-WBS-07.08.07.02, BK-WBS-07.08.07.03, BK-WBS-07.08.07.06; 필요 근거/다음=AC008/E58의 실제 controller21·전체 app2732·Source/Target 실제 publication 할당 각1 PASS; Owner/UI/pump 연동·독립 검증 필요.
-    - [ ] **BK-WBS-07.08.07.08** Ticket-generic Source Owner의 관측/query/history와 조건부 publication을 연결한다. — 상태=W(구현·검사중); 선행=BK-WBS-07.08.07.07; 필요 근거/다음=AC010/E58의 실제 source와 fixture 작성·host/Windows lib typing PASS; typed 오류와 authorization 경합 RED/GREEN·원본/복합 오류·연결 실행 필요.
-    - [ ] **BK-WBS-07.08.07.09** Typed Source Output UI의 capability prevalidation·요청/응답·WouldBlock을 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.08; 필요 근거/다음=Source AC011; 실제 Owner 경로의 단일 transaction·cold 거절·동일 reply 검사 필요.
-    - [ ] **BK-WBS-07.08.07.10** Canonical WASAPI adapter가 complete Source owner와 원래 Counter packet을 전달한다. — 상태=W(구현·검사중); 선행=BK-WBS-07.08.07.05, BK-WBS-07.08.07.06; 필요 근거/다음=AC009/E58의 canonical complete adapter와 fixture 작성·Windows lib typing PASS; packet/분류 회귀·Windows tests typing·실제 실행 필요.
+    - [ ] **BK-WBS-07.08.07.08** Ticket-generic Source Owner의 관측/query/history와 조건부 publication을 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.07; 필요 근거/다음=AC010/E59의 실제 typed 오류 경합 RED1→Owner24·전체 app2761·publication 할당 PASS; UI/공통 pump 연동·독립 최종 검증 필요.
+    - [ ] **BK-WBS-07.08.07.09** Typed Source Output UI의 capability prevalidation·요청/응답·WouldBlock을 연결한다. — 상태=W(구현·검사작성중); 선행=BK-WBS-07.08.07.08; 필요 근거/다음=AC011/E59의 source/test 병렬 레인 착수; 실제 Owner 경로의 단일 transaction·cold 거절·동일 reply 검사 필요.
+    - [ ] **BK-WBS-07.08.07.10** Canonical WASAPI adapter가 complete Source owner와 원래 Counter packet을 전달한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.05, BK-WBS-07.08.07.06; 필요 근거/다음=AC009/E59의 portable canonical packet11·전체 app·Windows lib/tests typing PASS; cfgWindows native/classifier5개는 미실행이며 실제 Windows 실행·독립 검증 필요.
     - [ ] **BK-WBS-07.08.07.11** Windows solo/local의 실제 SourceCounter coordinate hook과 Legacy/complete static variant를 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.10; 필요 근거/다음=Source AC012; 기존 scalar/finite/ASIO/backend-switch 보존·Windows consumer 실행 및 실제 applied capability 필요.
     - [ ] **BK-WBS-07.08.07.12** Source Frame/Counter 공통 solo/cohort pump에서 교체·resume·loop/scrub·원본 capture/PCM 보존을 검증한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.11; 필요 근거/다음=Source AC013; 실제 Owner history/관측 경합·입력 prefix·member/attempt/hash·네이티브 acceptance 구분 필요.
     - [ ] **BK-WBS-07.08.07.13** WASAPI exclusive retained Source 교체의 실제 mode/geometry·history·cleanup 및 pause/resume을 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=shared vertical을 exclusive 완료로 확장하지 않음; exclusive 조건·실제 장치/독립 검증 필요.
@@ -797,6 +807,10 @@ Source/scalar/finite/foreign/실제 GUI/물리/applied 전체 범위를 보존�
 상세 behavior/architecture/라이선스는 연결된 기존 REQ/GUIDE/ADR이 계속 소유한다.
 
 ## 변경 이력
+
+- 2026-10-14 Source E59: Owner/adapter2개를 W→V, typed UI를 N→W로 갱신했다.
+  Source9V·1W·5N이며 전체 D97·V75·W21·N5·E14·P5·U3, 활성220·완료97과
+  원래91/193은 유지한다. 실제 typed 오류 경합 RED/GREEN과 외부 할당 회귀를 기록했다.
 
 - 2026-10-14 Source E58: native/controller2개를 W→V, 작성된 Owner/adapter2개를
   N→W로 갱신했다. Source7V·2W·6N이며 전체 D97·V73·W22·N6·E14·P5·U3,

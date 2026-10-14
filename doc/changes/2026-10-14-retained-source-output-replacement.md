@@ -24,6 +24,10 @@
 - `72ac7c98`: 기존 conditional storage와 recovered/open/start lifecycle을 재사용해
   Source controller를 연결한다. 실제 새 descriptor와 두 fresh 관측으로 준비하고
   capability staging 뒤 borrowed atomic commit한다. Ready 실패는 owner와 hold를 보존한다.
+- `4a4d7287`: Ticket-generic Source Owner와 complete WASAPI adapter를 연결한다.
+  원래 Counter와 전체 상태/오류를 보존하고 관측/query/history마다 실제 승인 상태를
+  확인한다. typed 오류 뒤 authorization 경합 RED1건을 재현한 뒤 static IO 분류로
+  수정했다. backend envelope만으로 오류를 숨기지 않으며 Remix도 그대로 전달한다.
 
 ## 실제 개발 검사
 
@@ -36,14 +40,18 @@ cargo test -p beatkernel-platform --lib --locked -j2 source_history_retirement
 cargo test -p beatkernel-platform --lib --locked -j2 wasapi_source_worker
 cargo test -p beatkernel-platform --test wasapi_source_worker_allocations --locked -j2 wasapi_source_worker_external_allocation_calibration_and_exact_steps
 cargo check -p beatkernel-bms-runtime --lib --no-default-features --features browser --target wasm32-unknown-unknown --locked -j2
+cargo test -p beatkernel-bms-runtime --lib --no-default-features --locked -j2 retained_source_observation_fixtures
+cargo test -p beatkernel-bms-runtime --no-default-features --test coordinate_source_replacement_allocations --test coordinate_target_replacement_allocations --locked -j2
+bash target/toolchain/xcheck.sh windows -p beatkernel-bms-runtime --lib --tests --no-default-features -j2
 ```
 
-최신 관측 결과는 app **2732 PASS / 0 FAIL / 6 ignored**, platform **411 PASS /
+최신 관측 결과는 app **2761 PASS / 0 FAIL / 6 ignored**, platform **411 PASS /
 0 FAIL / 2 ignored**, worker14와 외부 heap 검사1 PASS다. Source controller21,
 port/remix10·native14·pause5와 authority 회귀는 app 전체에 포함되므로 더하지 않는다.
-Source와 기존 Target 실제 publication의 별도 외부 할당 검사도 각각1 PASS이며,
+Owner24·canonical packet11도 app 전체에 포함된다. Source와 기존 Target 실제
+publication의 별도 외부 할당 검사도 각각1 PASS이며,
 Source는 calibrated cold token copy 뒤 실제 held commit의 alloc/realloc0을 확인했다.
-앞선 browser WASM check는 exit0이다. cached Windows platform lib/tests와 app lib
+앞선 browser WASM check는 exit0이다. cached Windows platform과 app lib/tests
 typing도 exit0이나 C-stub Rust 검사이며 native 실행 근거가 아니다.
 외부 binary는 실제 production worker/state/history와 기존 System allocator를
 사용한다. alloc/realloc/dealloc 각각의 실제 보정 후 success/refusal/authorized/
@@ -63,9 +71,9 @@ Windows complete open/start/Stop/join/recovery는 기존 Legacy Mixer/remix API�
 complete owner를 Mixer로 평탄화하지 않는다. 실제 clock frequency는 새 장치에서
 얻는다. 새로 생성한 descriptor와 Ready prefill은 playback progress가 아니다.
 
-Controller 개발 검사는 통과했고 Owner와 canonical adapter는 작성 후 검사 중이다.
-typed backend envelope 안의 packet/identity/timing 실패를 raw IO와 구분하는 경합
-검사도 포함한다. 다음 typed UI, Windows solo/local hook과 실제 공통 pump를 연결해야 한다.
+Controller·Owner와 canonical adapter의 개발 검사는 통과했다. Windows 전용 native/
+classifier5개 fixture는 형 검사만 됐으며 실제 실행이 남는다. typed UI는 source/test를
+병렬 작성 중이고 다음 Windows solo/local hook과 실제 공통 pump를 연결해야 한다.
 전체 native owner/PCM/producer/capture 연동 보존, 실패·취소·명시 retry와 독립 review 뒤
 CLI/desktop QA가 남는다.
 Windows typing은 C-stub에 의한 Rust 형 검사이며 COM/driver 실행이 아니다.
