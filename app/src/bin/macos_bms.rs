@@ -502,6 +502,29 @@ fn finite_mode(options: &Options, _network: bool) -> Result<()> {
     Ok(())
 }
 #[cfg(any(target_os = "macos", test))]
+fn initial_audio_config(
+    options: &Options,
+    output_origin: ClockPoint,
+    retained: bool,
+    playback_end: Option<u64>,
+    gated_start: bool,
+) -> beatkernel_bms_runtime::native_audio::NativeAudioConfig {
+    beatkernel_bms_runtime::native_audio::NativeAudioConfig {
+        output_origin,
+        start: Timestamp::from_nanos(options.start_ns),
+        preroll: beatkernel::time::Duration::from_nanos(options.preroll),
+        lookahead: beatkernel::time::Duration::from_nanos(options.bgm_lookahead),
+        voices: options.voices,
+        max_render_frames: if retained {
+            AudioLimits::MAX_RENDER_FRAMES
+        } else {
+            options.buffer as usize
+        },
+        playback_end_frame: playback_end,
+        gated_start,
+    }
+}
+#[cfg(any(target_os = "macos", test))]
 #[cfg(test)]
 fn finite_session_done(
     end: Option<i64>,
@@ -601,7 +624,7 @@ mod native {
         macos::{
             audio::{CoreAudioRequest, CoreAudioStream},
             clock::MachClock,
-            presentation::coreaudio_presentation_pair,
+            presentation::coreaudio_presentation_pair_with_max_frames,
         },
     };
     use std::{collections::VecDeque, time::Duration as WallDuration};
@@ -621,12 +644,16 @@ mod native {
         if snapshot.configuration_changed || snapshot.callback_failures != 0 {
             return Err(format!("CoreAudio configuration/callback failure: {snapshot:?}").into());
         }
+        if !audio.is_started() {
+            return Ok(None);
+        }
         let Some(presentation) = snapshot.presentation else {
             return Ok(None);
         };
-        Ok(coreaudio_presentation_pair(
+        Ok(coreaudio_presentation_pair_with_max_frames(
             presentation,
             audio.configuration(),
+            audio.max_callback_frames(),
             HOST,
             clock,
         )?)
@@ -673,7 +700,7 @@ mod native {
         NativeAudioGameplaySession, NativeGameplayConfig, NativeGameplayResult,
     };
     type OwnedOutput = beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::NativeCoreAudioOutputOwner;
-    struct GameplayDevice<'a> {
+    pub(super) struct GameplayDevice<'a> {
         output: &'a mut OwnedOutput,
         output_ui: &'a mut beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::NativeCoreAudioOutputUi,
         input: &'a mut super::collected_input::Collector,
@@ -722,6 +749,20 @@ mod native {
             Ok(self.output.source_playback_at(presentation, query, identity)?
                 .as_ref().map(beatkernel_bms_runtime::native_playback_phase::NativePlaybackMapping::from_source))
         }
+        fn conditional_playback_mapping_at(
+            &mut self,
+            presentation: &beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
+            query: &beatkernel::audio::InterpolatedTargetTime,
+            identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+        ) -> NativeGameplayResult<
+            Option<beatkernel_bms_runtime::native_playback_phase::NativePlaybackMapping>,
+        > {
+            Ok(self
+                .output
+                .conditional_source_playback_at(presentation, query, identity)?
+                .as_ref()
+                .map(beatkernel_bms_runtime::native_playback_phase::NativePlaybackMapping::from_source))
+        }
         fn observe_audio(
             &mut self,
             presentation: &mut beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
@@ -754,6 +795,24 @@ mod native {
                 return Ok(false);
             }
             self.output_ui.service_audio(self.output, context, now)
+        }
+        fn publish_paused_coordinate_audio_output(
+            &mut self,
+            context: beatkernel_bms_runtime::gameplay_presentation::GameplayAudioOutputContext<'_>,
+            now: ClockPoint,
+            identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+            practice_pending: bool,
+        ) -> NativeGameplayResult<bool> {
+            if !self.output.has_work() && !self.output_ui.pending() {
+                return Ok(false);
+            }
+            self.output_ui.service_coordinate_source_audio(
+                self.output,
+                context,
+                now,
+                identity,
+                practice_pending,
+            )
         }
         fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
             self.input.status()?;
@@ -1079,16 +1138,13 @@ mod native {
         const SLACK: usize = beatkernel_bms_runtime::native_audio::LIVE_COMMAND_RESERVE;
         let capacity = AudioLimits::MAX_COMMANDS;
         let network_start = competition_options.network.is_some();
-        let audio_config = NativeAudioConfig {
-            output_origin: output_origin(),
-            start: Timestamp::from_nanos(options.start_ns),
-            preroll: Duration::from_nanos(options.preroll),
-            lookahead: Duration::from_nanos(options.bgm_lookahead),
-            voices: options.voices,
-            max_render_frames: options.buffer as usize,
-            playback_end_frame: playback_end,
-            gated_start: network_start,
-        };
+        let audio_config = initial_audio_config(
+            &options,
+            output_origin(),
+            retained,
+            playback_end,
+            network_start,
+        );
         let initial_region = retained
             .then(|| {
                 beatkernel::audio::PracticeRegion::new(
@@ -1220,8 +1276,18 @@ mod native {
             format: options.format,
             buffer_frames: options.buffer,
         };
-        let audio = match CoreAudioStream::open(request, clock, mixer) {
-            Ok(audio) => audio,
+        use beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::{
+            complete_owner, owner, NativeCoreAudioOutputUi,
+        };
+        let opened = if retained {
+            complete_owner(request, mixer, clock, HOST)
+        } else {
+            CoreAudioStream::open(request, clock, mixer)
+                .map(|audio| owner(audio, clock, HOST))
+                .map_err(Into::into)
+        };
+        let mut output = match opened {
+            Ok(output) => output,
             Err(error) => {
                 if let Err(close) = input.close() {
                     eprintln!("IOHID close error after audio open failure: {close}");
@@ -1231,7 +1297,11 @@ mod native {
         };
         println!(
             "requested/applied CoreAudio={:?}; exact selected attachment={selected:?}; explicit keyboard bindings={:?}; windows={}/{}ns offset={}ns preroll={}ns advance_lag={}ns voices={} channels={} queue/pending={} live_slack={SLACK}",
-            audio.configuration(),
+            output
+                .current()
+                .ok_or("initial CoreAudio output missing")?
+                .stream()
+                .configuration(),
             options.bindings,
             policy.judge().max_early().as_nanos(),
             policy.judge().max_late().as_nanos(),
@@ -1246,10 +1316,6 @@ mod native {
             },
             capacity
         );
-        use beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::{
-            owner, NativeCoreAudioOutputUi,
-        };
-        let mut output = owner(audio, clock, HOST);
         let mut output_ui = NativeCoreAudioOutputUi::new(&output, !network_start)?;
         let mut pre_origin = 0u64;
         let mut capture = None;
@@ -1586,6 +1652,14 @@ mod native {
 #[cfg(target_os = "macos")]
 #[path = "macos_bms/local.rs"]
 mod local_native;
+
+#[cfg(test)]
+#[path = "macos_bms/retained_source_output_fixtures.rs"]
+mod retained_source_output_fixtures;
+
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos_bms/local_retained_source_output_fixtures.rs"]
+mod local_retained_source_output_fixtures;
 
 #[cfg(test)]
 mod fixtures {

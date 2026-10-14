@@ -1,4 +1,8 @@
 //! Actual macOS local cohort: one IOHID owner, one shared CoreAudio output.
+#[cfg(test)]
+#[path = "local_retained_source_output_fixtures.rs"]
+mod retained_source_output_fixtures;
+
 use super::native::{
     audio_startup_bounds, output_origin, AudioSeedDevice, HOST, LOGICAL, M_NATIVE, OUTPUT,
 };
@@ -11,7 +15,7 @@ use beatkernel::{
     transport::{Rate, Transport},
 };
 use beatkernel_bms_runtime::gameplay::output::adapters::coreaudio_ui::{
-    owner, NativeCoreAudioOutputOwner, NativeCoreAudioOutputUi,
+    complete_owner, owner, NativeCoreAudioOutputOwner, NativeCoreAudioOutputUi,
 };
 #[cfg(test)]
 use beatkernel_bms_runtime::local_players::PlayerId;
@@ -114,6 +118,20 @@ impl GameplayDevicePort for CohortDevice<'_> {
             .as_ref()
             .map(beatkernel_bms_runtime::native_playback_phase::NativePlaybackMapping::from_source))
     }
+    fn conditional_playback_mapping_at(
+        &mut self,
+        presentation: &beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+    ) -> NativeGameplayResult<
+        Option<beatkernel_bms_runtime::native_playback_phase::NativePlaybackMapping>,
+    > {
+        Ok(self
+            .output
+            .conditional_source_playback_at(presentation, query, identity)?
+            .as_ref()
+            .map(beatkernel_bms_runtime::native_playback_phase::NativePlaybackMapping::from_source))
+    }
     fn audio_pause_observation(
         &mut self,
         presentation: &beatkernel_bms_runtime::native_audio_presentation::NativeAudioPresentation,
@@ -138,6 +156,24 @@ impl GameplayDevicePort for CohortDevice<'_> {
             return Ok(false);
         }
         self.output_ui.service_audio(self.output, context, now)
+    }
+    fn publish_paused_coordinate_audio_output(
+        &mut self,
+        context: beatkernel_bms_runtime::gameplay_presentation::GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+        identity: beatkernel_bms_runtime::gameplay::output::ports::SourcePlaybackIdentity,
+        practice_pending: bool,
+    ) -> NativeGameplayResult<bool> {
+        if !self.output.has_work() && !self.output_ui.pending() {
+            return Ok(false);
+        }
+        self.output_ui.service_coordinate_source_audio(
+            self.output,
+            context,
+            now,
+            identity,
+            practice_pending,
+        )
     }
     fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
         self.input.status()?;
@@ -497,16 +533,13 @@ pub(super) fn run(
     }
     let network_start = network.is_some();
     let prepared_audio = (|| -> Result<_> {
-        let audio_config = NativeAudioConfig {
-            output_origin: output_origin(),
-            start: Timestamp::from_nanos(options.start_ns),
-            preroll: Duration::from_nanos(options.preroll),
-            lookahead: Duration::from_nanos(options.bgm_lookahead),
-            voices: options.voices,
-            max_render_frames: options.buffer as usize,
-            playback_end_frame: playback_end,
-            gated_start: network.is_some(),
-        };
+        let audio_config = super::initial_audio_config(
+            &options,
+            output_origin(),
+            retained_practice,
+            playback_end,
+            network_start,
+        );
         let (mut audio, practice) = if retained_practice {
             let region = beatkernel::audio::PracticeRegion::new(
                 options.live_speed.start(),
@@ -656,17 +689,39 @@ pub(super) fn run(
         mixer,
     } = audio;
     let mut bgm = BgmSession(bgm);
-    let stream = match CoreAudioStream::open(
-        CoreAudioRequest {
-            device: options.device,
-            format: options.format,
-            buffer_frames: options.buffer,
-        },
-        clock,
-        mixer,
-    ) {
-        Ok(stream) => stream,
+    let coordinate_creation = coordinate_identity.map(|_| mixer.output_frame_basis());
+    let request = CoreAudioRequest {
+        device: options.device,
+        format: options.format,
+        buffer_frames: options.buffer,
+    };
+    let opened: Result<NativeCoreAudioOutputOwner> = if retained_practice {
+        complete_owner(request, mixer, clock, HOST)
+    } else {
+        CoreAudioStream::open(request, clock, mixer)
+            .map(|stream| owner(stream, clock, HOST))
+            .map_err(Into::into)
+    };
+    let mut output = match opened {
+        Ok(output) => output,
         Err(error) => {
+            if retained_practice {
+                let mut failures = Vec::new();
+                if let Err(close) = input.close() {
+                    eprintln!("IOHID close error after audio open failure: {close}");
+                    failures.push(format!("IOHID close after audio open failure: {close}"));
+                }
+                return finish_cohort_with_results_and_network(
+                    Err(error),
+                    states,
+                    network.as_mut(),
+                    save_paths,
+                    failures,
+                    None,
+                    save_capture,
+                    |_, _| Ok(()),
+                );
+            }
             let mut failures = vec![format!("CoreAudio open: {error}")];
             if let Err(close) = input.close() {
                 failures.push(format!("IOHID close after audio open failure: {close}"));
@@ -677,10 +732,8 @@ pub(super) fn run(
     };
     println!(
         "macOS local players={count}; shared requested/applied CoreAudio={:?}; independent judges/captures/scores",
-        stream.configuration()
+        output.current().map(|current| current.stream().configuration())
     );
-    let coordinate_creation = coordinate_identity.map(|_| stream.frame_basis());
-    let mut output = owner(stream, clock, HOST);
     let mut before_origin = 0u64;
     let mut retained = beatkernel_bms_runtime::native_gameplay::NativeCollectedInput::new()?;
     let outcome = (|| -> Result<Option<Vec<(beatkernel_bms_runtime::local_players::PlayerId,beatkernel_bms_runtime::play_result::CompletedPlayResult)>>> {
