@@ -423,7 +423,7 @@ fn prepare_complete_state(
         .prepare_growing_native_source_history(max_frames, headroom)
         .map_err(|_| CoreAudioError::Capacity)?;
     state
-        .reconfigure(format, matrix, max_frames as usize)
+        .reconfigure_for_coreaudio(format, matrix, max_frames as usize)
         .map_err(|_| CoreAudioError::Capacity)?;
     let history = state
         .mixer()
@@ -443,6 +443,13 @@ struct NativeSetup {
 // Production and fault fixtures run the same lifecycle sequencing. Native raw
 // handles never escape this private, statically dispatched boundary.
 trait NativeLifecycleOps {
+    fn create(&mut self, device: u32, context: *mut c_void, id: &mut ffi::IoProcId) -> i32;
+    fn add_listener(
+        &mut self,
+        object: u32,
+        address: &ffi::PropertyAddress,
+        context: *mut c_void,
+    ) -> i32;
     fn start(&mut self, device: u32, id: ffi::IoProcId) -> i32;
     fn stop(&mut self, device: u32, id: ffi::IoProcId) -> i32;
     fn remove_listener(
@@ -455,6 +462,21 @@ trait NativeLifecycleOps {
 }
 struct HalOps;
 impl NativeLifecycleOps for HalOps {
+    fn create(&mut self, device: u32, context: *mut c_void, id: &mut ffi::IoProcId) -> i32 {
+        // SAFETY: stable callback context is retained through unregister/drain.
+        unsafe { ffi::AudioDeviceCreateIOProcID(device, render_callback, context, id) }
+    }
+    fn add_listener(
+        &mut self,
+        object: u32,
+        address: &ffi::PropertyAddress,
+        context: *mut c_void,
+    ) -> i32 {
+        // SAFETY: exact listener ABI and tracked stable callback context.
+        unsafe {
+            ffi::AudioObjectAddPropertyListener(object, address, configuration_changed, context)
+        }
+    }
     fn start(&mut self, device: u32, id: ffi::IoProcId) -> i32 {
         // SAFETY: owning stream retains the registered exact device/proc pair.
         unsafe { ffi::AudioDeviceStart(device, id) }
@@ -789,6 +811,27 @@ impl CoreAudioStream {
         setup: NativeSetup,
         source_facts: Option<SourceRetirementFacts>,
     ) -> Result<Self, (CoreAudioError, Self)> {
+        Self::install_with(
+            request,
+            clock,
+            basis,
+            render_owner,
+            render_telemetry,
+            setup,
+            source_facts,
+            &mut HalOps,
+        )
+    }
+    fn install_with(
+        request: CoreAudioRequest,
+        clock: MachClock,
+        basis: OutputFrameBasis,
+        render_owner: RenderOwner,
+        render_telemetry: Telemetry,
+        setup: NativeSetup,
+        source_facts: Option<SourceRetirementFacts>,
+        ops: &mut impl NativeLifecycleOps,
+    ) -> Result<Self, (CoreAudioError, Self)> {
         let control = Arc::new(SourceControl::new());
         let complete = matches!(&render_owner, RenderOwner::Complete(_));
         let context = Box::new(Context {
@@ -848,15 +891,10 @@ impl CoreAudioStream {
         let registration = (|| -> Result<(), CoreAudioError> {
             let pointer = stream.context.as_deref().expect("context installed") as *const Context
                 as *mut c_void;
-            // SAFETY: stable callback context is retained through unregister/drain.
-            check("AudioDeviceCreateIOProcID", unsafe {
-                ffi::AudioDeviceCreateIOProcID(
-                    request.device,
-                    render_callback,
-                    pointer,
-                    &mut stream.proc_id,
-                )
-            })?;
+            check(
+                "AudioDeviceCreateIOProcID",
+                ops.create(request.device, pointer, &mut stream.proc_id),
+            )?;
             if stream.proc_id.is_null() {
                 return Err(CoreAudioError::DeviceUnavailable);
             }
@@ -876,15 +914,10 @@ impl CoreAudioStream {
                     .map(|id| (id, address(FORMAT, GLOBAL))),
             );
             for (id, address) in properties {
-                // SAFETY: exact listener ABI and tracked stable callback context.
-                check("AudioObjectAddPropertyListener", unsafe {
-                    ffi::AudioObjectAddPropertyListener(
-                        id,
-                        &address,
-                        configuration_changed,
-                        pointer,
-                    )
-                })?;
+                check(
+                    "AudioObjectAddPropertyListener",
+                    ops.add_listener(id, &address, pointer),
+                )?;
                 stream.listeners.push((id, address));
             }
             Ok(())

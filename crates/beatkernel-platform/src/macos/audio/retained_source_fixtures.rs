@@ -1131,6 +1131,8 @@ fn variable_destination_and_changed_interpretation_cannot_retire_nonempty_paused
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativeEvent {
+    Create(u32),
+    Add(u32, u32, u32, u32),
     Start(u32, usize),
     Stop(u32, usize),
     Remove(u32, u32),
@@ -1141,6 +1143,11 @@ enum NativeEvent {
 // unregister, drain, quarantine and extraction sequencing is production code.
 struct FaultOps {
     events: Vec<NativeEvent>,
+    create_code: i32,
+    create_id: usize,
+    add_code: i32,
+    fail_add: Option<usize>,
+    add_calls: usize,
     start_code: i32,
     stop_code: i32,
     remove_code: i32,
@@ -1150,18 +1157,60 @@ struct FaultOps {
 }
 impl FaultOps {
     fn new(stream: &CoreAudioStream) -> Self {
+        let mut ops = Self::before_install();
+        ops.context = stream.context.as_deref().unwrap();
+        ops
+    }
+
+    fn before_install() -> Self {
         Self {
             events: Vec::new(),
+            create_code: 0,
+            create_id: 0x10,
+            add_code: 0,
+            fail_add: None,
+            add_calls: 0,
             start_code: 0,
             stop_code: 0,
             remove_code: 0,
             destroy_code: 0,
             callback: None,
-            context: stream.context.as_deref().unwrap(),
+            context: std::ptr::null(),
         }
     }
 }
 impl NativeLifecycleOps for FaultOps {
+    fn create(&mut self, device: u32, context: *mut c_void, id: &mut ffi::IoProcId) -> i32 {
+        assert!(
+            self.context.is_null(),
+            "a fixture installs one stable context"
+        );
+        assert!(!context.is_null());
+        self.context = context.cast_const().cast();
+        self.events.push(NativeEvent::Create(device));
+        *id = self.create_id as ffi::IoProcId;
+        self.create_code
+    }
+    fn add_listener(
+        &mut self,
+        object: u32,
+        address: &ffi::PropertyAddress,
+        context: *mut c_void,
+    ) -> i32 {
+        assert_eq!(context.cast_const().cast::<Context>(), self.context);
+        self.events.push(NativeEvent::Add(
+            object,
+            address.selector,
+            address.scope,
+            address.element,
+        ));
+        self.add_calls += 1;
+        if self.fail_add == Some(self.add_calls) {
+            self.add_code
+        } else {
+            0
+        }
+    }
     fn start(&mut self, device: u32, id: ffi::IoProcId) -> i32 {
         self.events.push(NativeEvent::Start(device, id as usize));
         if let Some((context, output)) = &mut self.callback {
@@ -1190,6 +1239,323 @@ impl NativeLifecycleOps for FaultOps {
         self.events.push(NativeEvent::Destroy(device, id as usize));
         self.destroy_code
     }
+}
+
+fn install_fixture(
+    mut owner: NativeOutputState,
+    variable_property: bool,
+    variable: bool,
+    ops: &mut FaultOps,
+) -> Result<CoreAudioStream, (CoreAudioError, CoreAudioStream)> {
+    let request = request(2);
+    let basis = owner.output_frame_basis();
+    let config = owner.mixer().config();
+    let maximum = if variable { 4 } else { 2 };
+    let telemetry =
+        prepare_complete_state(&request, &mut owner, None, maximum, variable, 4).unwrap();
+    let facts = SourceRetirementFacts {
+        source: config.format(),
+        applied: request.format,
+        matrix: None,
+        render_limit: config.limits().max_render_frames(),
+    };
+    let setup = NativeSetup {
+        applied: CoreAudioApplied {
+            request,
+            format: request.format,
+            buffer_frames: 2,
+            buffer_channels: vec![1, 1],
+            output_domain: config.domain(),
+            output_origin: config.origin(),
+            native_clock: ClockDomainId(8),
+        },
+        layout: vec![1, 1],
+        streams: vec![81, 82],
+        max_frames: maximum,
+        variable,
+        variable_property,
+    };
+    CoreAudioStream::install_with(
+        request,
+        MachClock::new(ClockDomainId(8), ClockDomainId(9)).unwrap(),
+        basis,
+        RenderOwner::Complete(owner),
+        telemetry,
+        setup,
+        Some(facts),
+        ops,
+    )
+}
+
+fn expected_properties(variable_property: bool) -> Vec<(u32, u32, u32, u32)> {
+    let mut properties = vec![
+        (1, RATE, GLOBAL, 0),
+        (1, BUFFER, GLOBAL, 0),
+        (1, STREAM_CONFIG, OUTPUT, 0),
+        (1, STREAMS, OUTPUT, 0),
+    ];
+    if variable_property {
+        properties.push((1, VARIABLE_BUFFER, GLOBAL, 0));
+    }
+    properties.extend([(81, FORMAT, GLOBAL, 0), (82, FORMAT, GLOBAL, 0)]);
+    properties
+}
+
+fn tracked_properties(stream: &CoreAudioStream) -> Vec<(u32, u32, u32, u32)> {
+    stream
+        .listeners
+        .iter()
+        .map(|(object, address)| (*object, address.selector, address.scope, address.element))
+        .collect()
+}
+
+#[test]
+fn actual_install_create_status_and_null_id_refusals_retain_the_complete_owner() {
+    for (code, id) in [(-701, 0), (-702, 0x10), (0, 0)] {
+        let (_, mut owner) = owner();
+        let report = owner.render_pending(8).unwrap();
+        owner.admit(2).unwrap();
+        let pending = owner.pending_samples().to_vec();
+        let before = history(&owner);
+        let counters = owner.mixer().counters();
+        let mut ops = FaultOps::before_install();
+        ops.create_code = code;
+        ops.create_id = id;
+        let (error, mut stream) = install_fixture(owner, false, false, &mut ops)
+            .err()
+            .expect("creation refusal retains its real partial owner");
+        assert_eq!(
+            error,
+            if code == 0 {
+                CoreAudioError::DeviceUnavailable
+            } else {
+                CoreAudioError::Native {
+                    operation: "AudioDeviceCreateIOProcID",
+                    code,
+                }
+            }
+        );
+        assert_eq!(ops.events, [NativeEvent::Create(1)]);
+        assert_eq!(
+            stream.context.as_deref().unwrap() as *const Context,
+            ops.context
+        );
+        assert_eq!(stream.proc_id as usize, id);
+        assert!(stream.listeners.is_empty());
+        assert!(!stream.stop_required);
+        assert!(!stream.is_started());
+        assert_eq!(state(&stream).pending_report(), Some(report));
+        assert_eq!(state(&stream).pending_samples(), pending);
+        assert_eq!(state(&stream).admitted_frames(), 2);
+        assert_eq!(history(state(&stream)), before);
+        assert_eq!(state(&stream).mixer().counters(), counters);
+        assert_eq!(
+            stream.take_stopped_output_state().err(),
+            Some(CoreAudioError::RecoveryUnavailable)
+        );
+        stream.stop_with(&mut ops).unwrap();
+        let recovered = stream.take_stopped_output_state().unwrap().unwrap();
+        assert_eq!(recovered.pending_report(), Some(report));
+        assert_eq!(recovered.pending_samples(), pending);
+        assert_eq!(history(&recovered), before);
+        assert_eq!(recovered.mixer().counters(), counters);
+        assert_eq!(
+            ops.events,
+            if id == 0 {
+                vec![NativeEvent::Create(1)]
+            } else {
+                vec![NativeEvent::Create(1), NativeEvent::Destroy(1, id)]
+            }
+        );
+    }
+}
+
+#[test]
+fn actual_install_tracks_optional_variable_property_presence_and_every_native_stream() {
+    for (present, variable) in [(false, false), (true, false), (true, true)] {
+        let (_, owner) = owner();
+        let before = history(&owner);
+        let mut ops = FaultOps::before_install();
+        let mut stream = install_fixture(owner, present, variable, &mut ops)
+            .unwrap_or_else(|_| panic!("successful primitive registration"));
+        let properties = expected_properties(present);
+        assert_eq!(tracked_properties(&stream), properties);
+        assert_eq!(
+            stream.context.as_deref().unwrap() as *const Context,
+            ops.context
+        );
+        assert_eq!(stream.proc_id as usize, 0x10);
+        assert_eq!(stream.variable_buffers, variable);
+        assert_eq!(stream.max_callback_frames(), if variable { 4 } else { 2 });
+        assert!(!stream.is_started());
+        assert!(!stream.stop_required);
+        assert_eq!(stream.snapshot(), CoreAudioSnapshot::default());
+        assert_eq!(history(state(&stream)), before);
+        let mut events = vec![NativeEvent::Create(1)];
+        events.extend(
+            properties
+                .iter()
+                .map(|&(object, selector, scope, element)| {
+                    NativeEvent::Add(object, selector, scope, element)
+                }),
+        );
+        assert_eq!(ops.events, events);
+        stream.stop_with(&mut ops).unwrap();
+        events.extend(
+            properties
+                .iter()
+                .rev()
+                .map(|&(object, selector, _, _)| NativeEvent::Remove(object, selector)),
+        );
+        events.push(NativeEvent::Destroy(1, 0x10));
+        assert_eq!(ops.events, events);
+        assert!(stream.context.is_none());
+        assert!(stream.listeners.is_empty());
+        assert!(stream.proc_id.is_null());
+        let recovered = stream.take_stopped_output_state().unwrap().unwrap();
+        assert_eq!(history(&recovered), before);
+        assert!(!recovered.admission_is_uncertain());
+    }
+}
+
+#[test]
+fn actual_install_failure_at_each_listener_keeps_only_successful_registrations_and_exact_owner() {
+    for present in [false, true] {
+        let properties = expected_properties(present);
+        for failed in 1..=properties.len() {
+            let (_, mut owner) = owner();
+            let report = owner.render_pending(8).unwrap();
+            owner.admit(2).unwrap();
+            let pending = owner.pending_samples().to_vec();
+            let before = history(&owner);
+            let basis = owner.output_frame_basis();
+            let mut ops = FaultOps::before_install();
+            ops.fail_add = Some(failed);
+            ops.add_code = -710 - failed as i32;
+            let (error, mut stream) = install_fixture(owner, present, false, &mut ops)
+                .err()
+                .expect("one exact listener refuses");
+            assert_eq!(
+                error,
+                CoreAudioError::Native {
+                    operation: "AudioObjectAddPropertyListener",
+                    code: ops.add_code,
+                }
+            );
+            assert_eq!(tracked_properties(&stream), properties[..failed - 1]);
+            assert_eq!(
+                stream.context.as_deref().unwrap() as *const Context,
+                ops.context
+            );
+            assert_eq!(stream.proc_id as usize, 0x10);
+            assert!(!stream.stop_required);
+            assert!(!stream.is_started());
+            assert_eq!(state(&stream).pending_report(), Some(report));
+            assert_eq!(state(&stream).pending_samples(), pending);
+            assert_eq!(state(&stream).admitted_frames(), 2);
+            assert_eq!(state(&stream).output_frame_basis(), basis);
+            assert_eq!(history(state(&stream)), before);
+            let mut events = vec![NativeEvent::Create(1)];
+            events.extend(properties[..failed].iter().map(
+                |&(object, selector, scope, element)| {
+                    NativeEvent::Add(object, selector, scope, element)
+                },
+            ));
+            assert_eq!(
+                ops.events, events,
+                "no listener after the first failure is attempted"
+            );
+            stream.stop_with(&mut ops).unwrap();
+            events.extend(
+                properties[..failed - 1]
+                    .iter()
+                    .rev()
+                    .map(|&(object, selector, _, _)| NativeEvent::Remove(object, selector)),
+            );
+            events.push(NativeEvent::Destroy(1, 0x10));
+            assert_eq!(ops.events, events);
+            let recovered = stream.take_stopped_output_state().unwrap().unwrap();
+            assert_eq!(recovered.pending_report(), Some(report));
+            assert_eq!(recovered.pending_samples(), pending);
+            assert_eq!(recovered.admitted_frames(), 2);
+            assert_eq!(recovered.output_frame_basis(), basis);
+            assert_eq!(history(&recovered), before);
+        }
+    }
+}
+
+#[test]
+fn actual_install_failure_cleanup_retries_preserve_original_and_latest_error_on_the_same_owner() {
+    let (_, mut owner) = owner();
+    let report = owner.render_pending(8).unwrap();
+    owner.admit(2).unwrap();
+    let pending = owner.pending_samples().to_vec();
+    let before = history(&owner);
+    let mut ops = FaultOps::before_install();
+    ops.fail_add = Some(6); // Present vfsz succeeds; the first stream listener fails.
+    ops.add_code = -801;
+    let (original, stream) = install_fixture(owner, true, false, &mut ops).err().unwrap();
+    assert_eq!(
+        original,
+        CoreAudioError::Native {
+            operation: "AudioObjectAddPropertyListener",
+            code: -801
+        }
+    );
+    let pointer = stream.context.as_deref().unwrap() as *const Context;
+    let mut failure = CoreAudioStateOpenFailure::pending_state(original.clone(), stream);
+    ops.remove_code = -802;
+    let remove = CoreAudioError::Native {
+        operation: "AudioObjectRemovePropertyListener",
+        code: -802,
+    };
+    assert_eq!(retry_with(&mut failure, &mut ops), Err(remove.clone()));
+    assert_eq!(failure.error(), &original);
+    assert_eq!(failure.cleanup_error(), Some(&remove));
+    assert!(failure.mixer().is_none());
+    let live = failure.pending_owner().unwrap();
+    assert_eq!(live.context.as_deref().unwrap() as *const Context, pointer);
+    assert_eq!(tracked_properties(live), expected_properties(true)[..5]);
+    assert_eq!(state(live).pending_samples(), pending);
+    ops.remove_code = 0;
+    ops.destroy_code = -803;
+    let destroy = CoreAudioError::Native {
+        operation: "AudioDeviceDestroyIOProcID",
+        code: -803,
+    };
+    assert_eq!(retry_with(&mut failure, &mut ops), Err(destroy.clone()));
+    assert_eq!(failure.error(), &original);
+    assert_eq!(failure.cleanup_error(), Some(&destroy));
+    let live = failure.pending_owner().unwrap();
+    assert_eq!(live.context.as_deref().unwrap() as *const Context, pointer);
+    assert!(live.listeners.is_empty());
+    assert_eq!(live.proc_id as usize, 0x10);
+    assert_eq!(state(live).pending_report(), Some(report));
+    assert_eq!(state(live).admitted_frames(), 2);
+    assert_eq!(history(state(live)), before);
+    ops.destroy_code = 0;
+    assert_eq!(retry_with(&mut failure, &mut ops), Ok(true));
+    assert_eq!(failure.error(), &original);
+    assert!(failure.cleanup_error().is_none());
+    assert!(failure.pending_owner().is_none());
+    let recovered = failure.mixer().unwrap();
+    assert_eq!(recovered.pending_report(), Some(report));
+    assert_eq!(recovered.pending_samples(), pending);
+    assert_eq!(recovered.admitted_frames(), 2);
+    assert_eq!(history(recovered), before);
+    assert!(!recovered.admission_is_uncertain());
+    assert!(!ops
+        .events
+        .iter()
+        .any(|event| matches!(event, NativeEvent::Start(..) | NativeEvent::Stop(..))));
+    assert_eq!(
+        &ops.events[ops.events.len() - 2..],
+        [NativeEvent::Destroy(1, 0x10), NativeEvent::Destroy(1, 0x10)]
+    );
+    assert_eq!(
+        CoreAudioStream::retry_state_open_cleanup(&mut failure),
+        Ok(false)
+    );
 }
 
 fn registered_fixture(owner: NativeOutputState) -> CoreAudioStream {

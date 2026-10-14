@@ -259,6 +259,287 @@ fn prepared(
     }
 }
 
+fn prepared_storage(state: &NativeOutputState) -> (usize, Option<(usize, usize, usize)>) {
+    (
+        state.samples.len(),
+        state.remix.as_ref().map(|converter| {
+            (
+                converter.max_output_frames(),
+                converter.max_source_frames(),
+                converter.source_lookahead_frames(),
+            )
+        }),
+    )
+}
+
+#[test]
+fn coreaudio_actual_max_storage_grows_and_rebounds_without_losing_complete_source_state() {
+    for remixed in [false, true] {
+        let (mut producer, mixer) = rig_with_render_limit(AudioLimits::MAX_RENDER_FRAMES);
+        let configuration = mixer.configuration();
+        let channels = if remixed { 2 } else { 1 };
+        let format = target(channels);
+        let matrix = remixed.then(|| ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap());
+        let mut state = NativeOutputState::from_mixer(mixer);
+        state
+            .reconfigure_for_coreaudio(format, matrix.clone(), 64)
+            .unwrap();
+        assert_eq!(
+            prepared_storage(&state),
+            (64 * usize::from(channels), remixed.then_some((64, 64, 0)))
+        );
+        state.prepare_growing_native_source_history(64, 4).unwrap();
+        state.render_pending(2).unwrap();
+        state.admit(2).unwrap();
+        producer.request_pause(true);
+        assert!(state.render_pending(2).unwrap().paused);
+        state.admit(2).unwrap();
+        producer.request_pause(false);
+        assert!(!state.render_pending(2).unwrap().paused);
+        state.admit(2).unwrap();
+        let mut completed = 0;
+        assert_eq!(
+            state.apply_source_history_retirement(
+                crate::audio::source_history_retirement_mailbox::SourceHistoryRetirementRequest {
+                    revision: 2,
+                    source_pin: 4,
+                },
+                &mut completed,
+            ),
+            Ok(2)
+        );
+        assert_eq!(completed, 2);
+        let report = state.render_pending(4).unwrap();
+        state.admit(1).unwrap();
+        assert_eq!(state.output_frame_basis().start_physical_frame(), 7);
+        assert_eq!(state.mixer().frame_cursor(), 10);
+        producer
+            .try_push(AudioCommand::Play {
+                voice: VoiceId(2),
+                sample: SampleId(1),
+                at: Timestamp::from_nanos(1_000_000_000),
+                gain: 0.5,
+            })
+            .unwrap();
+        producer.request_pause(true);
+        let producer_counters = producer.counters();
+        let mut expected = cold_output_snapshot(&state);
+        assert_eq!(expected.history.as_ref().unwrap().retirement_revision, 1);
+        assert_eq!(expected.history.as_ref().unwrap().retained_start, 4);
+        assert_eq!(expected.history.as_ref().unwrap().identity, (8, 0, 0));
+
+        state
+            .reconfigure_for_coreaudio(format, matrix.clone(), 128)
+            .unwrap();
+
+        expected.max_frames = 128;
+        assert_eq!(cold_output_snapshot(&state), expected);
+        assert_eq!(state.pending_report(), Some(report));
+        assert_eq!(producer.counters(), producer_counters);
+        assert_eq!(
+            prepared_storage(&state),
+            (
+                128 * usize::from(channels),
+                remixed.then_some((128, 128, 0))
+            )
+        );
+        state.prepare_growing_native_source_history(128, 4).unwrap();
+        let capacity = state.mixer().source_playback_history().unwrap().capacity();
+        assert!(capacity >= 132);
+        expected.history.as_mut().unwrap().capacity = capacity;
+        assert_eq!(cold_output_snapshot(&state), expected);
+        state.admit(3).unwrap();
+        let paused = state.render_pending(128).unwrap();
+        assert!(paused.paused);
+        assert_eq!(
+            (
+                paused.start_frame,
+                paused.playback_start_frame,
+                paused.playback_frames
+            ),
+            (10, 8, 0)
+        );
+        assert!(state.pending_samples().iter().all(|sample| *sample == 0.));
+        state.admit(64).unwrap();
+        let mut expected = cold_output_snapshot(&state);
+
+        state
+            .reconfigure_for_coreaudio(format, matrix.clone(), 64)
+            .unwrap();
+
+        expected.max_frames = 64;
+        assert_eq!(cold_output_snapshot(&state), expected);
+        assert_eq!(state.pending_report(), Some(paused));
+        assert_eq!(state.output_frame_basis().start_physical_frame(), 74);
+        assert_eq!(
+            prepared_storage(&state),
+            (128 * usize::from(channels), remixed.then_some((64, 64, 0)))
+        );
+        state.admit(64).unwrap();
+        producer.request_pause(false);
+        let (next, heap) = count_heap_calls(|| state.render_pending(64));
+        let next = next.unwrap();
+        assert_eq!(heap, 0);
+        assert_eq!((next.start_frame, next.playback_start_frame), (138, 8));
+        assert_eq!(next.frames, 64);
+        if remixed {
+            assert_eq!(
+                &state.pending_samples()[..4],
+                &[0.0625, -0.03125, -0.125, 0.0625]
+            );
+        } else {
+            assert_eq!(&state.pending_samples()[..2], &[0.0625, -0.125]);
+        }
+        assert_eq!(state.mixer().counters().commands_consumed, 2);
+        assert_eq!(state.mixer().configuration(), configuration);
+        assert_eq!(
+            state.mixer().configuration().limits().max_render_frames(),
+            AudioLimits::MAX_RENDER_FRAMES
+        );
+    }
+}
+
+#[test]
+fn coreaudio_actual_max_refusals_preserve_storage_interpretation_history_and_pending_suffix() {
+    let (_, mixer) = rig_with_render_limit(256);
+    let matrix = ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap();
+    let mut state = NativeOutputState::from_mixer(mixer);
+    state
+        .reconfigure_for_coreaudio(target(2), Some(matrix.clone()), 64)
+        .unwrap();
+    state.prepare_growing_native_source_history(64, 4).unwrap();
+    state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    let before = cold_output_snapshot(&state);
+    let storage = prepared_storage(&state);
+    for (format, matrix, frames, error) in [
+        (
+            target(2),
+            Some(matrix.clone()),
+            0,
+            AudioError::InvalidCapacity,
+        ),
+        (
+            target(2),
+            Some(matrix.clone()),
+            257,
+            AudioError::RenderCapacity,
+        ),
+        (
+            target(2),
+            Some(matrix.clone()),
+            usize::MAX,
+            AudioError::RenderCapacity,
+        ),
+        (target(2), None, 128, AudioError::InvalidFormat),
+        (target(1), None, 128, AudioError::InvalidFormat),
+        (
+            target(2),
+            Some(ChannelMatrix::new(1, 2, &[0.5, 1.]).unwrap()),
+            128,
+            AudioError::InvalidFormat,
+        ),
+        (
+            target(2),
+            Some(ChannelMatrix::default_mix(2, 2).unwrap()),
+            128,
+            AudioError::InvalidFormat,
+        ),
+        (
+            DeviceFormat::new(16, 2, SampleEncoding::Float32, None).unwrap(),
+            Some(matrix.clone()),
+            128,
+            AudioError::InvalidFormat,
+        ),
+        (
+            DeviceFormat::new(
+                8,
+                2,
+                SampleEncoding::Pcm {
+                    container_bits: 16,
+                    valid_bits: 16,
+                },
+                None,
+            )
+            .unwrap(),
+            Some(matrix.clone()),
+            128,
+            AudioError::InvalidFormat,
+        ),
+        (
+            DeviceFormat::new(8, 2, SampleEncoding::Float32, Some(3)).unwrap(),
+            Some(matrix.clone()),
+            128,
+            AudioError::InvalidFormat,
+        ),
+    ] {
+        let result = state.reconfigure_for_coreaudio(format, matrix, frames);
+        assert_eq!(result, Err(error));
+        assert_eq!(cold_output_snapshot(&state), before);
+        assert_eq!(prepared_storage(&state), storage);
+    }
+    state.mark_admission_uncertain();
+    let quarantined = cold_output_snapshot(&state);
+    for frames in [0, 128, 257] {
+        let matrix = matrix.clone();
+        let result = state.reconfigure_for_coreaudio(target(2), Some(matrix), frames);
+        assert_eq!(result, Err(AudioError::InvalidBuffer));
+        assert_eq!(cold_output_snapshot(&state), quarantined);
+        assert_eq!(prepared_storage(&state), storage);
+    }
+}
+
+#[test]
+fn coreaudio_actual_max_allocation_refusals_keep_original_storage_and_allow_exact_retry() {
+    for index in 0..2 {
+        let (_, mixer) = rig_with_render_limit(256);
+        let matrix = ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap();
+        let mut state = NativeOutputState::from_mixer(mixer);
+        state
+            .reconfigure_for_coreaudio(target(2), Some(matrix.clone()), 64)
+            .unwrap();
+        state.prepare_growing_native_source_history(64, 4).unwrap();
+        state.render_pending(4).unwrap();
+        state.admit(1).unwrap();
+        let mut expected = cold_output_snapshot(&state);
+        let storage = prepared_storage(&state);
+        let retry_matrix = matrix.clone();
+
+        assert_eq!(
+            fail_allocation(index, || {
+                state.reconfigure_for_coreaudio(target(2), Some(retry_matrix), 128)
+            }),
+            Err(AudioError::AllocationFailed)
+        );
+
+        assert_eq!(cold_output_snapshot(&state), expected);
+        assert_eq!(prepared_storage(&state), storage);
+        state
+            .reconfigure_for_coreaudio(target(2), Some(matrix), 128)
+            .unwrap();
+        expected.max_frames = 128;
+        assert_eq!(cold_output_snapshot(&state), expected);
+        assert_eq!(prepared_storage(&state), (256, Some((128, 128, 0))));
+    }
+}
+
+#[test]
+fn legacy_native_preparation_still_prepares_remix_to_the_immutable_mixer_ceiling() {
+    let (_, mixer) = rig_with_render_limit(256);
+    let matrix = ChannelMatrix::new(1, 2, &[1., -0.5]).unwrap();
+    let mut state = prepared(mixer, target(2), Some(matrix.clone()), 64);
+    assert_eq!(prepared_storage(&state), (128, Some((256, 256, 0))));
+    state.render_pending(4).unwrap();
+    state.admit(1).unwrap();
+    let mut expected = cold_output_snapshot(&state);
+
+    state.reconfigure(target(2), Some(matrix), 128).unwrap();
+
+    expected.max_frames = 128;
+    assert_eq!(cold_output_snapshot(&state), expected);
+    assert_eq!(prepared_storage(&state), (256, Some((256, 256, 0))));
+}
+
 #[derive(Debug, PartialEq)]
 struct ColdHistorySnapshot {
     capacity: usize,

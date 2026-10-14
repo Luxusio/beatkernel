@@ -184,13 +184,43 @@ impl NativeOutputState {
         matrix: Option<ChannelMatrix>,
         max_frames: usize,
     ) -> Result<(), AudioError> {
+        self.reconfigure_with_remix_capacity(
+            format,
+            matrix,
+            max_frames,
+            self.mixer.config().limits().max_render_frames(),
+        )
+    }
+    /// CoreAudio cold preparation sizes remix storage to the actual callback
+    /// maximum while retaining the Mixer's immutable bound for later growth.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn reconfigure_for_coreaudio(
+        &mut self,
+        format: DeviceFormat,
+        matrix: Option<ChannelMatrix>,
+        max_frames: usize,
+    ) -> Result<(), AudioError> {
+        self.reconfigure_with_remix_capacity(format, matrix, max_frames, max_frames)
+    }
+    fn reconfigure_with_remix_capacity(
+        &mut self,
+        format: DeviceFormat,
+        matrix: Option<ChannelMatrix>,
+        max_frames: usize,
+        remix_max_frames: usize,
+    ) -> Result<(), AudioError> {
         self.validate_reconfigure(format, matrix.as_ref(), max_frames)?;
         let config = self.mixer.config();
         let same = self.format == Some(format)
             && self.remix.as_ref().map(FormatConverter::matrix) == matrix.as_ref();
-        // Equal-rate legacy remix uses no source lookahead. Preparing to the
-        // immutable Mixer bound allows later period changes to retain this owner.
-        let replacement = if same {
+        let storage_changed = self
+            .remix
+            .as_ref()
+            .is_some_and(|remix| remix.max_output_frames() != remix_max_frames);
+        // Equal-rate Linear remix has no retained lookahead. Cold rebuilding
+        // storage resets only its private relative diagnostics; Mixer/Source
+        // counters and the original pending report/PCM remain authoritative.
+        let replacement = if same && !storage_changed {
             None
         } else {
             Some(match matrix {
@@ -198,7 +228,7 @@ impl NativeOutputState {
                     config,
                     format.pcm(),
                     matrix,
-                    config.limits().max_render_frames(),
+                    remix_max_frames,
                 )?),
                 None => None,
             })
@@ -227,8 +257,10 @@ impl NativeOutputState {
         }
         if let Some(remix) = replacement {
             self.remix = remix;
-            self.report = None;
-            self.admitted = 0;
+            if !same {
+                self.report = None;
+                self.admitted = 0;
+            }
         }
         self.format = Some(format);
         self.max_frames = max_frames;
