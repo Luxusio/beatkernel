@@ -7,9 +7,9 @@ use beatkernel_bms_runtime::{
     gameplay::output::domain::control::OutputCapability, settings::SettingsHost,
 };
 use beatkernel_platform::audio::{
-    AppliedStreamConfig, AudioBackendKind, AudioDeviceId, AudioStreamMode, AudioStreamRequest,
-    BufferRequest, DeviceFormat, NegotiationPolicy, PeriodRequest, SampleEncoding,
-    SharedPeriodPolicy,
+    validate_known_request_sizing, AppliedStreamConfig, AudioBackendKind, AudioDeviceId,
+    AudioStreamMode, AudioStreamRequest, BufferRequest, DeviceFormat, NegotiationPolicy,
+    PeriodRequest, SampleEncoding, SharedPeriodPolicy,
 };
 
 fn strings(values: &[&str]) -> Vec<String> {
@@ -47,6 +47,19 @@ fn applied(requested: AudioStreamRequest) -> AppliedStreamConfig {
         stream_latency: Duration::from_nanos(3_000_000),
         sizing_adjusted: true,
     }
+}
+
+fn planned_sizing_request(policy: NegotiationPolicy, args: &[String]) -> AudioStreamRequest {
+    let original = current().with_negotiation(policy);
+    let resolved = super::plan_retained_shared_output(&cap(), &original, source(), None, args)
+        .unwrap()
+        .into_request(None)
+        .unwrap();
+    assert_eq!(resolved.native.device(), original.device());
+    assert_eq!(resolved.native.format(), original.format());
+    assert_eq!(resolved.native.negotiation(), policy);
+    assert!(resolved.matrix.is_none());
+    resolved.native
 }
 
 #[test]
@@ -334,6 +347,95 @@ fn retained_source_invalid_geometry_matrix_and_endpoint_never_produce_a_native_r
         &[],
     )
     .is_err());
+}
+
+#[test]
+fn retained_source_duration_capacity_refuses_after_actual_planning_and_request_resolution() {
+    // The first frame beyond the actual render allocation ceiling, at 48 kHz.
+    let oversized_nanos =
+        ((AudioLimits::MAX_RENDER_FRAMES as u128 + 1) * 1_000_000_000).div_ceil(48_000);
+    let duration = format!("ns:{oversized_nanos}");
+    for policy in [
+        NegotiationPolicy::Exact,
+        NegotiationPolicy::AllowSupportedRounding,
+    ] {
+        for flag in ["--buffer", "--period"] {
+            let requested = planned_sizing_request(policy, &strings(&[flag, &duration]));
+            let before = requested.clone();
+            assert!(
+                validate_known_request_sizing(&requested, AudioLimits::MAX_RENDER_FRAMES).is_err(),
+                "{flag} beyond allocated render capacity cannot be admitted with {policy:?}",
+            );
+            assert_eq!(requested, before);
+        }
+    }
+}
+
+#[test]
+fn retained_source_fractional_duration_requires_explicit_rounding_after_actual_planning() {
+    // 1 ms is exactly 48 frames; one more nanosecond is not a complete frame.
+    for flag in ["--buffer", "--period"] {
+        let args = strings(&[flag, "ns:1000001"]);
+        let exact = planned_sizing_request(NegotiationPolicy::Exact, &args);
+        let rounded = planned_sizing_request(NegotiationPolicy::AllowSupportedRounding, &args);
+        assert!(validate_known_request_sizing(&exact, AudioLimits::MAX_RENDER_FRAMES).is_err());
+        assert!(validate_known_request_sizing(&rounded, AudioLimits::MAX_RENDER_FRAMES).is_ok());
+        // Cold validation preserves the caller's duration and explicit policy.
+        assert_eq!(exact.buffer(), rounded.buffer());
+        assert_eq!(exact.period(), rounded.period());
+        assert_eq!(
+            if flag == "--buffer" {
+                match rounded.buffer() {
+                    BufferRequest::Duration(duration) => duration,
+                    _ => panic!("the requested buffer remains a duration"),
+                }
+            } else {
+                match rounded.period() {
+                    PeriodRequest::Duration(duration) => duration,
+                    _ => panic!("the requested period remains a duration"),
+                }
+            },
+            Duration::from_nanos(1_000_001),
+        );
+    }
+}
+
+#[test]
+fn retained_source_representable_and_unknown_default_sizes_remain_admissible() {
+    let maximum = format!("frames:{}", AudioLimits::MAX_RENDER_FRAMES);
+    // Three frames have an exact integer-nanosecond duration at 48 kHz.
+    let whole_frames = AudioLimits::MAX_RENDER_FRAMES / 3 * 3;
+    let near_limit_duration = format!("ns:{}", whole_frames as u128 * 62_500 / 3);
+    for policy in [
+        NegotiationPolicy::Exact,
+        NegotiationPolicy::AllowSupportedRounding,
+    ] {
+        for args in [
+            strings(&["--buffer", &maximum, "--period", &maximum]),
+            strings(&[
+                "--buffer",
+                &near_limit_duration,
+                "--period",
+                &near_limit_duration,
+            ]),
+            strings(&["--buffer", "ns:1000000", "--period", "ns:1000000"]),
+            strings(&["--buffer", "default", "--period", "default"]),
+            strings(&[
+                "--shared-policy",
+                "legacy",
+                "--buffer",
+                "default",
+                "--period",
+                "default",
+            ]),
+        ] {
+            let requested = planned_sizing_request(policy, &args);
+            let before = requested.clone();
+            validate_known_request_sizing(&requested, AudioLimits::MAX_RENDER_FRAMES)
+                .unwrap_or_else(|error| panic!("valid cold draft {args:?}: {error}"));
+            assert_eq!(requested, before);
+        }
+    }
 }
 
 #[test]

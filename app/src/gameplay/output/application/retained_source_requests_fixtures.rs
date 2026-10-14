@@ -13,8 +13,16 @@ use crate::{
     native_end::NativeEnd,
     settings::SettingsHost,
 };
-use beatkernel::{audio::ChannelMatrix, judge::JudgeEngine, time::ClockDomainId};
-use beatkernel_platform::audio::{DeviceFormat, NativeOutputState, SampleEncoding};
+use beatkernel::{
+    audio::{AudioLimits, ChannelMatrix},
+    judge::JudgeEngine,
+    time::{ClockDomainId, Duration},
+};
+use beatkernel_platform::audio::{
+    validate_known_request_sizing, AudioBackendKind, AudioDeviceId, AudioStreamMode,
+    AudioStreamRequest, BufferRequest, DeviceFormat, NativeOutputState, NegotiationPolicy,
+    PeriodRequest, SampleEncoding, SharedPeriodPolicy,
+};
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -91,6 +99,18 @@ fn capability(request: &Request) -> OutputCapability {
     capability
 }
 
+fn native_sizing_request(request: &Request) -> AudioStreamRequest {
+    AudioStreamRequest::new(
+        AudioDeviceId("scripted-source-ui-endpoint".into()),
+        AudioBackendKind::Wasapi,
+        AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
+        request.format(),
+        BufferRequest::Frames(request.buffer()),
+        PeriodRequest::Frames(request.period()),
+    )
+    .unwrap()
+}
+
 fn setup(
     frequency: Option<u64>,
     partial: bool,
@@ -130,6 +150,11 @@ fn tick(
         &mut |ui_request, _| {
             assert_eq!(ui_request.id, REQUEST_ID);
             assert_eq!(ui_request.args, capability(request).current_args);
+            validate_known_request_sizing(
+                &native_sizing_request(request),
+                AudioLimits::MAX_RENDER_FRAMES,
+            )
+            .map_err(|error| error.to_string())?;
             Ok(request.clone())
         },
         applied,
@@ -468,6 +493,181 @@ fn retained_source_requests_cold_mapping_practice_and_native_end_refuse_without_
         assert_eq!(count(&trace, "packet"), 0);
         assert!(!owner.has_work());
         drop(rig.runtime.hold_audio_pause().unwrap());
+    }
+}
+
+#[test]
+fn retained_source_requests_known_sizing_refusal_replies_once_without_scheduling_retirement() {
+    let oversized = Duration::from_nanos(
+        i64::try_from(
+            ((AudioLimits::MAX_RENDER_FRAMES as u128 + 1) * 1_000_000_000)
+                .div_ceil(u128::from(SOURCE_RATE)),
+        )
+        .unwrap(),
+    );
+    let fractional = Duration::from_nanos(1_000_001);
+    for frequency in [None, Some(OLD_FREQUENCY)] {
+        for blocked_reply in [false, true] {
+            for (flag, buffer, period, policy) in [
+                (
+                    "--buffer",
+                    BufferRequest::Duration(oversized),
+                    PeriodRequest::Frames(8),
+                    NegotiationPolicy::Exact,
+                ),
+                (
+                    "--period",
+                    BufferRequest::Frames(128),
+                    PeriodRequest::Duration(oversized),
+                    NegotiationPolicy::Exact,
+                ),
+                (
+                    "--buffer",
+                    BufferRequest::Duration(oversized),
+                    PeriodRequest::Frames(8),
+                    NegotiationPolicy::AllowSupportedRounding,
+                ),
+                (
+                    "--period",
+                    BufferRequest::Frames(128),
+                    PeriodRequest::Duration(oversized),
+                    NegotiationPolicy::AllowSupportedRounding,
+                ),
+                (
+                    "--buffer",
+                    BufferRequest::Duration(fractional),
+                    PeriodRequest::Frames(8),
+                    NegotiationPolicy::Exact,
+                ),
+                (
+                    "--period",
+                    BufferRequest::Frames(128),
+                    PeriodRequest::Duration(fractional),
+                    NegotiationPolicy::Exact,
+                ),
+            ] {
+                let request = Request::normal(frequency);
+                let native = AudioStreamRequest::new(
+                    native_sizing_request(&request).device().clone(),
+                    AudioBackendKind::Wasapi,
+                    AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
+                    request.format(),
+                    buffer,
+                    period,
+                )
+                .unwrap()
+                .with_negotiation(policy);
+                let error = validate_known_request_sizing(&native, AudioLimits::MAX_RENDER_FRAMES)
+                    .expect_err("a predictably invalid native size is refused before admission")
+                    .to_string();
+                let duration = if flag == "--buffer" {
+                    match buffer {
+                        BufferRequest::Duration(duration) => duration,
+                        _ => unreachable!(),
+                    }
+                } else {
+                    match period {
+                        PeriodRequest::Duration(duration) => duration,
+                        _ => unreachable!(),
+                    }
+                };
+                let mut draft = capability(&request).current_args;
+                let value = draft.iter().position(|arg| arg == flag).unwrap() + 1;
+                draft[value] = format!("ns:{}", duration.as_nanos());
+                let (mut rig, mut owner, trace, mut ui, state) = setup(frequency, true, &request);
+                state.borrow_mut().requests = VecDeque::from([OutputRequest {
+                    id: REQUEST_ID,
+                    args: draft.clone(),
+                }]);
+                state.borrow_mut().blocked = blocked_reply;
+                let original = owner.current().unwrap();
+                let owner_address = original as *const Output;
+                let native_id = original.native_id;
+                let epoch = original.creation_epoch();
+                let complete = owner_facts(original.source_state());
+                let accepted = state.borrow().capability.clone();
+                let before = (
+                    format!("{:?}", rig.presentation()),
+                    format!("{:?}", rig.pause),
+                    format!("{:?}", rig.config),
+                );
+                let preparation = rig.inputs.preparation_state().unwrap();
+                let native_calls = trace.calls();
+                let mappings = Cell::new(0);
+                let identity = rig.source_identity();
+                let service = |rig: &mut Rig, owner: &mut Owner, ui: &mut Ui| {
+                    ui.service_coordinate_source_audio(
+                        owner,
+                        rig.context(),
+                        now(),
+                        identity,
+                        false,
+                        &mut |ui_request, _| {
+                            mappings.set(mappings.get() + 1);
+                            assert_eq!(ui_request.id, REQUEST_ID);
+                            assert_eq!(ui_request.args, draft);
+                            validate_known_request_sizing(&native, AudioLimits::MAX_RENDER_FRAMES)
+                                .map_err(|error| error.to_string())?;
+                            Ok(request.clone())
+                        },
+                        &mut |_| panic!("cold sizing refusal cannot stage a capability"),
+                    )
+                };
+                assert!(!service(&mut rig, &mut owner, &mut ui).unwrap());
+                let expected = OutputReply {
+                    id: REQUEST_ID,
+                    result: Err(error),
+                };
+                if blocked_reply {
+                    assert!(state.borrow().replies.is_empty());
+                    state.borrow_mut().requests.push_back(OutputRequest {
+                        id: REQUEST_ID + 1,
+                        args: draft.clone(),
+                    });
+                    let takes = state.borrow().takes;
+                    for _ in 0..2 {
+                        assert!(!service(&mut rig, &mut owner, &mut ui).unwrap());
+                        assert_eq!(state.borrow().takes, takes);
+                        assert_eq!(state.borrow().requests.len(), 1);
+                        assert_eq!(trace.calls(), native_calls);
+                    }
+                    state.borrow_mut().requests.clear();
+                    state.borrow_mut().blocked = false;
+                    assert!(!service(&mut rig, &mut owner, &mut ui).unwrap());
+                }
+                assert_eq!(mappings.get(), 1);
+                assert_eq!(state.borrow().replies, [expected.clone()]);
+                assert!(state
+                    .borrow()
+                    .attempts
+                    .iter()
+                    .all(|reply| *reply == expected));
+                assert_eq!(state.borrow().capability, accepted);
+                let live = owner.current().unwrap();
+                assert_eq!(live as *const Output, owner_address);
+                assert_eq!(live.native_id, native_id);
+                assert_eq!(live.creation_epoch(), epoch);
+                assert_eq!(owner_facts(live.source_state()), complete);
+                assert_eq!(
+                    (
+                        format!("{:?}", rig.presentation()),
+                        format!("{:?}", rig.pause),
+                        format!("{:?}", rig.config),
+                    ),
+                    before,
+                );
+                assert!(rig.inputs.matches_preparation(&preparation));
+                assert_eq!(trace.calls(), native_calls);
+                assert_eq!(count(&trace, "submit"), 0);
+                assert_eq!(count(&trace, "retire"), 0);
+                assert_eq!(count(&trace, "open"), 0);
+                assert!(!owner.has_work());
+                assert!(!owner.replacement_pending());
+                assert!(!owner.output_clock_suspended());
+                assert!(!ui.pending());
+                drop(rig.runtime.hold_audio_pause().unwrap());
+            }
+        }
     }
 }
 

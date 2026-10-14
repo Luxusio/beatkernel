@@ -992,7 +992,13 @@ impl WindowsOutputUi {
                             output.channel_matrix(),
                             &request.args,
                         )?;
-                        resolve_wasapi_plan(plan)
+                        let resolved = resolve_wasapi_plan(plan)?;
+                        beatkernel_platform::audio::validate_known_request_sizing(
+                            &resolved.native,
+                            AudioLimits::MAX_RENDER_FRAMES,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        Ok(resolved)
                     },
                     &mut complete_capability,
                 )
