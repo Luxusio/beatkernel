@@ -15,26 +15,7 @@ use beatkernel_platform::audio::{
     presentation::validation::NativeFrameBasis, ConvertedNativeOutputState,
 };
 
-pub(super) struct ConditionalTargetWaiting<O, R, Ticket> {
-    pub(super) output: O,
-    request: R,
-    ticket: Ticket,
-    status: Option<TargetRetirementStatus>,
-    pub(super) hold: PauseHold,
-    epoch: AudioAuthorityEpoch,
-    next_epoch: u64,
-    basis: TargetFrameBasis,
-    mixer_basis: OutputFrameBasis,
-    identity: SourcePlaybackIdentity,
-    wait_ns: u64,
-    first_poll: Option<ClockPoint>,
-    last_poll: Option<ClockPoint>,
-}
-impl<O, R, Ticket> ConditionalTargetWaiting<O, R, Ticket> {
-    pub(super) fn retirement_authorized(&self) -> bool {
-        self.status == Some(TargetRetirementStatus::Authorized)
-    }
-}
+type ConditionalTargetWaiting<O, R, Ticket> = ConditionalWaiting<O, R, Ticket, TargetFrameBasis>;
 
 pub(super) struct CoordinateTargetWaitingTiming {
     pause: NativePause,

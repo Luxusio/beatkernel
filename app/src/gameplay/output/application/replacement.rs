@@ -131,6 +131,8 @@ struct AudioWaitingTiming {
     snapshots: [Option<NativeAudioSnapshot>; 2],
     pairs: [Option<beatkernel::time::ClockPair>; 2],
 }
+#[path = "coordinate_source_replacement.rs"]
+pub mod coordinate_source;
 #[path = "coordinate_target_replacement.rs"]
 pub mod coordinate_target;
 #[path = "target_replacement.rs"]
@@ -140,16 +142,38 @@ enum WaitingTiming<P: GameplayPresentationPort> {
     Audio(AudioWaitingTiming),
     Target(target::TargetWaitingTiming),
     CoordinateTarget(coordinate_target::CoordinateTargetWaitingTiming),
+    CoordinateSource(coordinate_source::CoordinateSourceWaitingTiming),
 }
 impl<P: GameplayPresentationPort> WaitingTiming<P> {
     fn basis(&self) -> Result<OutputFrameBasis, &'static str> {
         match self {
             Self::Legacy(value) => Ok(value.basis),
             Self::Audio(value) => Ok(value.basis),
+            Self::CoordinateSource(value) => Ok(value.basis),
             Self::Target(_) | Self::CoordinateTarget(_) => {
                 Err("target timing has no fixed source-grid basis")
             }
         }
+    }
+}
+struct ConditionalWaiting<O, R, Ticket, Basis> {
+    output: O,
+    request: R,
+    ticket: Ticket,
+    status: Option<crate::gameplay::output::ports::TargetRetirementStatus>,
+    hold: PauseHold,
+    epoch: AudioAuthorityEpoch,
+    next_epoch: u64,
+    basis: Basis,
+    mixer_basis: OutputFrameBasis,
+    identity: crate::gameplay::output::ports::SourcePlaybackIdentity,
+    wait_ns: u64,
+    first_poll: Option<ClockPoint>,
+    last_poll: Option<ClockPoint>,
+}
+impl<O, R, Ticket, Basis> ConditionalWaiting<O, R, Ticket, Basis> {
+    fn retirement_authorized(&self) -> bool {
+        self.status == Some(crate::gameplay::output::ports::TargetRetirementStatus::Authorized)
     }
 }
 struct Waiting<B: OutputReplacementBackend<O, Basis>, O = Mixer, Basis = OutputFrameBasis> {
@@ -163,7 +187,7 @@ struct Waiting<B: OutputReplacementBackend<O, Basis>, O = Mixer, Basis = OutputF
 enum Slot<B: OutputReplacementBackend<O, Basis>, O = Mixer, Basis = OutputFrameBasis, Ticket = ()> {
     Detached,
     Attached(B::Output),
-    Conditional(coordinate_target::ConditionalTargetWaiting<B::Output, B::Request, Ticket>),
+    Conditional(ConditionalWaiting<B::Output, B::Request, Ticket, Basis>),
     Recovered(O),
     Pending(B::Output),
     Waiting(Waiting<B, O, Basis>),
@@ -466,7 +490,38 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis: PartialEq, Ticket>
             ReplacementFailure<B::Error>,
         >,
     ) -> Result<(), ReplacementFailure<B::Error>> {
-        let (timing, basis) = match prepare(&self.backend, &request, next_epoch, &mixer) {
+        self.begin_recovered_lifecycle_with_created(
+            request,
+            next_epoch,
+            mixer,
+            hold,
+            wait_ns,
+            prepare,
+            |_, _, timing| Ok(timing),
+        )
+    }
+
+    fn begin_recovered_lifecycle_with_created<Cold>(
+        &mut self,
+        request: B::Request,
+        next_epoch: u64,
+        mixer: O,
+        hold: PauseHold,
+        wait_ns: u64,
+        prepare: impl FnOnce(
+            &B,
+            &B::Request,
+            u64,
+            &O,
+        ) -> Result<(Cold, Basis), ReplacementFailure<B::Error>>,
+        created: impl FnOnce(
+            &B,
+            &B::Output,
+            Cold,
+        )
+            -> Result<WaitingTiming<B::Presentation>, ReplacementFailure<B::Error>>,
+    ) -> Result<(), ReplacementFailure<B::Error>> {
+        let (cold, basis) = match prepare(&self.backend, &request, next_epoch, &mixer) {
             Ok(timing) => timing,
             Err(error) => {
                 self.slot = Slot::Recovered(mixer);
@@ -504,6 +559,16 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis: PartialEq, Ticket>
                 recovery,
             });
         }
+        let timing = match created(&self.backend, &output, cold) {
+            Ok(timing) => timing,
+            Err(mut failure) => {
+                let (cleanup, recovery) = self.cleanup_output(output);
+                self.retain_retirement_hold(hold);
+                failure.cleanup = cleanup;
+                failure.recovery = recovery;
+                return Err(failure);
+            }
+        };
         if let Err(error) = self
             .backend
             .prepare_replacement_start(&mut output)
