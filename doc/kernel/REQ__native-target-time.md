@@ -1,5 +1,35 @@
 # Exact native target time and converted boundaries
 
+## Core ownership of generated boundary facts
+
+`beatkernel::audio::ConvertedBoundaryFacts` owns the existing generated boundary
+value contract. It retains public startup/pause/resume/end optional
+`TargetBoundary` fields, optional core `ClockPoint` origin and u32 source_rate,
+with the same Clone/Copy/Debug/Default/PartialEq/Eq derives. Default is all None
+and source_rate0, preserving the existing telemetry absence sentinel. Moving
+the definition shall not add validation, normalization, allocation, a native
+handle, clock read or runtime operation.
+
+The existing `beatkernel_platform::audio::ConvertedBoundaryFacts` public path
+shall directly re-export that core type. Both public names denote the same
+nominal type within the new build and accept direct assignments in both
+directions without a wrapper, field copy or conversion. The defining crate's
+reflection/type_name path changes; cross-build type identity, stable Rust ABI,
+layout and serialization compatibility are not new guarantees. An assignment
+test establishes nominal identity; final source review checks direct pub use.
+
+Shared application ports and coordinate/pause/start/end policy use the core
+path. Existing native adapters and external fixtures may keep the public
+platform path. Actual ConvertedNativeOutputState/render/admission/retirement/
+telemetry/resource ownership and all existing identity/error checks remain in
+their current owners. Generated facts remain software evidence and never native
+admission or presentation acknowledgments.
+
+Verify core-only compilation without a platform dependency, public-path direct
+assignment, and existing actual converter/state/telemetry/application boundary
+fixtures. Host/foreign/browser compilation and software tests do not establish
+native ABI, physical playback or complete application/native separation.
+
 Pure target ownership and pause/rebind tests are portable across supported Rust
 targets. Shared converter rigs and controlled original association values may
 be constructed without platform-specific drivers, with that evidence tier

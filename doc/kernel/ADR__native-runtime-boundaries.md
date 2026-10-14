@@ -1,5 +1,23 @@
 # Native runtime boundaries
 
+## Generated converted-boundary value ownership
+
+ConvertedBoundaryFacts belongs beside TargetBoundary in existing core audio,
+because every field is already a core coordinate or scalar and the value has
+no native handle, IO, clock read, allocation or lock. Shared application ports
+and policy import it inward. Platform audio directly re-exports the same core
+type at the old public path so native adapters and existing source consumers
+need no wrapper/conversion or second definition. Keeping platform ownership
+would retain outward pure-type coupling; a new common/app crate or conversion
+layer adds concepts without serving this existing value seam.
+
+Preserve public fields, derive/default semantics and generated-vs-native evidence
+meaning. The type's defining reflection path changes, without a stable Rust ABI
+or cross-build type identity promise. Actual native software output state,
+presentation validation, telemetry publication and resource ownership remain in
+platform/current adapters. This removes one outward type dependency and does
+not complete WBS01.05/01.06 or every application/platform boundary.
+
 ## Loading cache and worker lifetime
 
 The loading increment uses one setup-only original preparation cache owned by
