@@ -14,6 +14,24 @@ and retain the original Source history identity and creation pin. Actual origina
 Mach/sample/flags and coherent even-revision native delivery packets qualify
 publication; a created SourceFrame descriptor alone grants no progress.
 
+An original native presentation timestamp may lie ahead of the current HOST
+poll. During replacement, retain qualifying typed SourceFrame observations and
+wait for their original HOST endpoints; do not fail, retimestamp or continuously
+replace the selected anchors with newer future callbacks. Two genuinely
+progressing original anchors, current live/error checks, bounded timeout,
+cancellation, stale-age and atomic publication checks still apply. Cache
+expectations come from the actual output epoch/basis, requested Source identity
+and backend HOST domain; malformed first or later packets refuse immediately.
+Evidence ownership moves without requiring Clone/Copy. Waiting grants no native
+admission, drain or new clock authority.
+
+A history admission request can race the sole callback's retirement approval.
+The CoreAudio adapter classifies only Native(RecoveryUnavailable) for the
+existing Owner re-probe; defer only confirmed authorization. Without that
+confirmation, preserve the error. Configuration, callback, packet, identity,
+timing and unrelated native errors remain visible even while future evidence
+is retained.
+
 Support actual variable callback sizes within the cold advertised maximum,
 separate from nominal requested frames. With pending PCM, submit only a full
 callback prefix that already exists, retaining the original report; never pad or

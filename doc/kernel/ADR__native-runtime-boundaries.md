@@ -32,6 +32,17 @@ buffer incompatibility remains a truthful refusal, never invented padding or
 admission. Portable execution and macOS C-stub typing do not prove HAL/device
 behavior, and software rollback does not restore global native device settings.
 
+For replacement-only future SourceFrame evidence, keep a fixed two-observation
+buffer with the actual CoreAudio complete output. A shared pure application
+helper retains typed evidence by move, while an additive replacement observation
+port receives the unchanged poll clock and the Remix adapter forwards it.
+This avoids threading native-evidence generics through unrelated waiting modes,
+imposing Clone/Copy on effect evidence, or introducing type erasure. Domain
+models do not import effect ports. The helper validates actual output-provided
+expectations and original chronology; native adapters still check current
+stream errors and liveness before releasing retained evidence. Common policy
+keeps timeout, pause, stale-age, native qualification and publication ownership.
+
 ## Generated converted-boundary value ownership
 
 ConvertedBoundaryFacts belongs beside TargetBoundary in existing core audio,

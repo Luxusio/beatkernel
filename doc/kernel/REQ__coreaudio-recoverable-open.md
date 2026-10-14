@@ -68,6 +68,17 @@ The explicit maximum cannot be zero or below nominal. Preserve every original
 Mach/sample/flag/grid/domain check and the legacy nominal-only helper behavior;
 never rewrite nominal settings to make an oversized observation appear valid.
 
+Replacement observation accepts native future presentation as pending work,
+retaining the first two progressing original SourceFrame packets until their
+HOST endpoints are covered. Use the caller's poll clock unchanged. Current
+stream/packet errors remain visible before any cached release; stopped or
+authorized streams cannot qualify cached evidence. Original epoch, basis,
+Source identity, domains, revisions and submission chronology must match actual
+output expectations, including the first and full-cache observations. Releasing
+an older packet must not permanently discard a later packet merely marked as
+seen while the cache was full. Timeout, cancellation and stale-evidence refusal
+remain owned by the common replacement controller.
+
 The sole callback retirement decision precedes configuration-error accounting,
 history, rendering, PCM copies and outer publication revisions. Authorized
 retirement returns without touching HAL's documented initially zeroed output;
@@ -101,7 +112,7 @@ Portable tests execute the same production decision/render/copy/admission step
 with real Mixer queues/history/nonzero PCM and allocation probes. Actual app
 backend, typed Source UI and solo/local hooks must compile through macOS code.
 Keep native lifecycle sequencing in one statically injected private implementation:
-production supplies HAL Start/Stop/listener-removal/IOProc-destruction operations,
+production supplies HAL Create/listener-add/Start/Stop/listener-removal/IOProc-destruction operations,
 and cfg-macOS fault fixtures invoke that same sequence with controlled failures.
 Prepare failed-start callback work, retry and exact error/ownership assertions
 even when this host can only compile them. Do not replace native behavior proof
