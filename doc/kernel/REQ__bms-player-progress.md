@@ -7,6 +7,14 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-14 Source 후속: 실제 WASAPI는 SourceCounter임을 확인하고 portable
+Frame/Counter 기초와 shared WASAPI complete owner 경로의 계획 검토를 마쳤다.
+원래07.08.07을15개 실행 단위로 나눠 native epoch/pause/state/port4개를 W,
+후속11개를 N으로 추적한다. 활성 분모206→220이며 완료97(44.09%)과 원래
+제품 요구91/193(47.15%)은 그대로다. 새 분해는 구현 완료가 아니다.
+Legacy 회수, uncertain admission retry 격리와 실제 Source 좌표를 먼저 계약으로
+기록했으며 ASIO/CoreAudio/exclusive/native/browser/성능/출시는 계속 남는다.
+
 2026-10-14 현재 진행 추적: 원래 제품 요구 집계는 **91/193(47.15%)·조건부4개**를
 유지한다.07.08/07.09는 원래 범위를 보존한 구조 부모 아래10개/5개 실행 단위로
 분해했고 확장 말단 집계는 위 도구가 계산한다. 여섯 D는 이미 커밋되고 검사된

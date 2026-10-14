@@ -328,6 +328,15 @@ review/CLI 결과는 NON-ATTESTING이며 task close/전체 Goal 완료가 아니
 자세한 재현·경고·한계는 [변경 기록](../changes/2026-10-14-retained-practice-output-replacement.md),
 ignored qa-cli-095a1eb3/ 및 qa-desktop-095a1eb3/에 있다.
 
+E56: Source 후속 child의 독립 계획 검토는 실제 WASAPI가 SourceFrame이 아닌
+원래 Counter position/frequency를 사용함을 확인했다. 기존 exact authority와
+NativeOutputState를 재사용하고 Legacy/complete recovery·실제 worker step·불확실한
+native admission의 retry 격리·등록/형별 검증 경계를 확정했다. 새 Source REQ와
+기존 WASAPI recovery 계약을 먼저 기록했다. 이는 구현 PASS가 아닌 계획/착수 근거다.
+아래 기존07.08.07을15개 실제 실행 경계로 나눠 Source 기초4개를 W, 나머지11개를
+N으로 추적한다. 분모는206에서220으로14개 늘고 완료97은 유지된다. 원래 상위
+요구 집계91/193과 모든 Source/native/browser/성능/출시 범위는 변하지 않는다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -469,7 +478,22 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
   - [x] **BK-WBS-07.08.04** sole converted worker의 conditional retirement·거절·취소·회수/retry 경계를 검사한다. — 상태=D(검증완료); 선행=-; 근거=E49, 1463ccfa focused16/full platform387 PASS·ignored2 및 actual ALSA null1 PASS; 범위=software lifecycle, 물리/GUI는 별도.
   - [ ] **BK-WBS-07.08.05** retained Target controller의 open/start/poll/prime/commit을 새 coordinate authority·pause·입력 merger와 원자적으로 연결한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.08.01, BK-WBS-07.08.02, BK-WBS-07.08.03, BK-WBS-07.08.04; 필요 근거/다음=E51 controller18·실제 publication 할당0회1 및 E55 독립 review/CLI PASS; 실제 native desktop acceptance와 완료 기록 gate는 남음.
   - [ ] **BK-WBS-07.08.06** 새 retained Target 교체를 실제 solo/cohort 공통 pump에 연결하고 acknowledged pause·입력 drain·publication·resume을 검증한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.09.03; 필요 근거/다음=E54 실제 Owner history 경합 연결3 및 E55 독립 review/CLI PASS; 실제 GUI solo/local 시작은 장치 부재로 BLOCKED_ENV이며 native pause/Output/resume/capture와 완료 기록은 남음.
-  - [ ] **BK-WBS-07.08.07** direct SourceFrame/SourceCounter retained 교체의 전체 controller·Owner/UI·공통 pump 및 history/pin 수명을 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=Target 기초를 Source 완료로 확장하지 않음; 원래 Source descriptor/query·callback retirement·cold history·WASAPI/ASIO/CoreAudio 경로와 실패/회수/재시도 검사.
+  - [ ] **BK-WBS-07.08.07** direct SourceFrame/SourceCounter retained 교체의 전체 controller·Owner/UI·공통 pump 및 history/pin 수명을 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E56의 Source child 착수; 모든 하위와 원래 WASAPI/ASIO/CoreAudio 범위를 충족해야 완료. Target 검사를 Source 완료로 확장하지 않는다.
+    - [ ] **BK-WBS-07.08.07.01** SourceFrame/Counter native epoch·원래 creation pin·exact authority·merger 원자 publication 기초를 연결한다. — 상태=W(구현·검사작성중); 선행=-; 필요 근거/다음=Source AC003, E56 설계; Frame/Counter·주파수 변경·원본 관측·stale 상태·정확한 단위 회귀 필요.
+    - [ ] **BK-WBS-07.08.07.02** Source coordinate pause의 cold proof·새 native descriptor·frozen/startup/history/gap 보존을 연결한다. — 상태=W(구현·검사작성중); 선행=-; 필요 근거/다음=Source AC004; 실제 held/native 제출 근거·반복 rebind·resume/repause 회귀 필요.
+    - [ ] **BK-WBS-07.08.07.03** NativeOutputState의 pending PCM/history pin과 불확실 admission quarantine을 보존한다. — 상태=W(구현·검사작성중); 선행=-; 필요 근거/다음=Source AC005; 기존 Mixer helper 호환·pending/practice clamp·원본 보존·명시 retry 거절 검사 필요.
+    - [ ] **BK-WBS-07.08.07.04** 실제 portable WASAPI worker step의 conditional slot·lease·clock-only·실패·무할당 경계를 검사한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.03; 필요 근거/다음=Source AC006; 실제 production 함수와 sole-worker 승인/취소 및 불확실 release 후 native 재실행 금지 필요.
+    - [ ] **BK-WBS-07.08.07.05** WASAPI shared의 complete Source open/start/Stop/join/recover와 실제 Counter descriptor를 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.04, BK-WBS-07.08.07.06; 필요 근거/다음=Source AC007; Legacy 회수 유지·완전 상태·원본/cleanup/join 오류와 eligible Windows 실행 필요.
+    - [ ] **BK-WBS-07.08.07.06** Source conditional port·opaque ticket·created descriptor와 static remix forwarding을 구현한다. — 상태=W(구현·검사작성중); 선행=-; 필요 근거/다음=Source AC002; 기존 default/Target API 및 원본 packet/오류·소유권 회귀 필요.
+    - [ ] **BK-WBS-07.08.07.07** 기존 replacement lifecycle에 Source controller·conditional ownership·borrowed atomic commit을 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.01, BK-WBS-07.08.07.02, BK-WBS-07.08.07.03, BK-WBS-07.08.07.06; 필요 근거/다음=Source AC008; 두 fresh 관측·실패/거절/취소/회수·실제 commit 할당 검사 필요.
+    - [ ] **BK-WBS-07.08.07.08** Ticket-generic Source Owner의 관측/query/history와 조건부 publication을 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.07; 필요 근거/다음=Source AC010; authorization 경합과 원본/복합 오류·identity/timing 거절 보존 필요.
+    - [ ] **BK-WBS-07.08.07.09** Typed Source Output UI의 capability prevalidation·요청/응답·WouldBlock을 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.08; 필요 근거/다음=Source AC011; 실제 Owner 경로의 단일 transaction·cold 거절·동일 reply 검사 필요.
+    - [ ] **BK-WBS-07.08.07.10** Canonical WASAPI adapter가 complete Source owner와 원래 Counter packet을 전달한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.05, BK-WBS-07.08.07.06; 필요 근거/다음=Source AC009; 기존 Mixer/관측 API 및 실제 native metadata 회귀·형 검사·Windows 실행 필요.
+    - [ ] **BK-WBS-07.08.07.11** Windows solo/local의 실제 SourceCounter coordinate hook과 Legacy/complete static variant를 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.10; 필요 근거/다음=Source AC012; 기존 scalar/finite/ASIO/backend-switch 보존·Windows consumer 실행 및 실제 applied capability 필요.
+    - [ ] **BK-WBS-07.08.07.12** Source Frame/Counter 공통 solo/cohort pump에서 교체·resume·loop/scrub·원본 capture/PCM 보존을 검증한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.11; 필요 근거/다음=Source AC013; 실제 Owner history/관측 경합·입력 prefix·member/attempt/hash·네이티브 acceptance 구분 필요.
+    - [ ] **BK-WBS-07.08.07.13** WASAPI exclusive retained Source 교체의 실제 mode/geometry·history·cleanup 및 pause/resume을 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=shared vertical을 exclusive 완료로 확장하지 않음; exclusive 조건·실제 장치/독립 검증 필요.
+    - [ ] **BK-WBS-07.08.07.14** ASIO SourceFrame retained 교체의 callback conditional retirement·완전 상태·Owner/UI/pump를 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=공통 Frame 기초와 실제 ASIO adapter는 별도; SDK/build 라이선스 조건·형/장치 실행·실패/재시도 검사 필요.
+    - [ ] **BK-WBS-07.08.07.15** CoreAudio retained Source 교체의 원래 native 좌표·callback/회수·Owner/UI/pump를 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=실제 macOS descriptor/history·callback 승인·cleanup·장치/독립 실행 필요; WASAPI typing은 근거가 아님.
   - [ ] **BK-WBS-07.08.08** 기존 scalar 교체와 finite-end ACK·held tail·취소/실패 경로가 새 retained 교체 변경 후에도 보존되는지 재검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=기존 구현/fixture는 존재하나 current 합쳐진 후보의 regression·실제 native crossing·end/drain/owner cleanup 및 독립 확인 필요.
   - [ ] **BK-WBS-07.08.09** Windows/macOS와 WASAPI↔ASIO 등 foreign/cross-backend retained 교체의 현재 연결·applied format·누락 경계를 감사한다. — 상태=U(최신현황감사필요); 선행=-; 필요 근거/다음=Target Linux/foreign stub typing을 전체 native 적용으로 간주하지 않음; 원래 backend/epoch/latency/history/cleanup 기준과 실제 SDK·host 실행 범위를 확인.
   - [ ] **BK-WBS-07.08.10** 실제 native retained 출력 교체에서 두 progressing 관측·입력 provenance·paused stale 보존·음향 alignment를 검증한다. — 상태=E(환경·장비대기); 선행=-; 필요 근거/다음=실제 evdev/IOHID/Raw Input·native clock·출력 장치/ASIO SDK·물리 loopback; null/software/stub는 대체 근거가 아님.
@@ -749,6 +773,10 @@ Source/scalar/finite/foreign/실제 GUI/물리/applied 전체 범위를 보존�
 상세 behavior/architecture/라이선스는 연결된 기존 REQ/GUIDE/ADR이 계속 소유한다.
 
 ## 변경 이력
+
+- 2026-10-14 Source 착수 분해: 기존07.08.07 하나를15개 실행 말단으로 나눴다.
+  활성206→220, 구조 부모2→3이며 완료97과 원래91/193은 유지한다. E56의 공통
+  native/pause/state/port 기초4개 W, 나머지11개 N으로 실제 개발/검증을 추적한다.
 
 - 2026-10-14 독립 QA: E55의 실제 재리뷰/CLI PASS 및 interactive desktop
   BLOCKED_ENV를 기록했다. 전체 완료 수는 유지하며 native 장치 acceptance와 자동

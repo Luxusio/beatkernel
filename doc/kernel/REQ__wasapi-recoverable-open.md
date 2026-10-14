@@ -1,4 +1,25 @@
-# Recover mixer ownership from failed WASAPI opening
+# Recover WASAPI output ownership
+
+## Legacy and complete retained modes
+
+The Mixer API below keeps existing legacy behavior, including remixed/scalar/
+finite callers. Retained Source adds complete NativeOutputState open/recovery,
+selected explicitly at retained startup. Preserve remix, pending PCM/report/
+admitted prefix and history; never flatten complete state through Mixer
+convenience recovery or disable old scalar/ASIO/backend-switch behavior.
+
+Use first-unsent stream basis plus the original immutable creation pin and
+actual newly created Counter frequency. Metadata grants no playback progress.
+Preserve operation plus release/Stop/start cleanup/join/recovery failures.
+Uncertain native release keeps a complete quarantined owner that cannot reopen,
+reconfigure or Retry. The generic cold launch carries complete state; the new
+path must not erase join failure through an Option conversion.
+
+These are implementation requirements, not native execution evidence. The
+[Source contract](../runtime/REQ__retained-source-output-replacement.md) defines
+exact coordinates, sole-worker conditional permission and verification tiers.
+
+## Existing Mixer convenience API
 
 WasapiBackend exposes open_recoverable with the existing request/mixer/QPC/options
 parameters and MixerOpenFailure<AudioPlatformError>. Existing open delegates and
