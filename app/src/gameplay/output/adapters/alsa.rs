@@ -1,11 +1,11 @@
 //! Actual ALSA lifecycle adapter for the portable paused-output replacement policy.
 use crate::gameplay::output::ports::OutputReplacementBackend;
 #[cfg(test)]
-#[path = "alsa_target_fixtures.rs"]
-mod target_fixtures;
-#[cfg(test)]
 #[path = "alsa_source_playback_fixtures.rs"]
 mod source_playback_fixtures;
+#[cfg(test)]
+#[path = "alsa_target_fixtures.rs"]
+mod target_fixtures;
 #[cfg(test)]
 #[path = "alsa_target_playback_fixtures.rs"]
 mod target_playback_fixtures;
@@ -511,7 +511,9 @@ impl crate::gameplay::output::ports::OriginalCoordinateNativeOutputBackend<Nativ
         output: &mut Self::Output,
     ) -> Result<Option<crate::native_output_coordinate::CoordinateNativeAudioSnapshot>, Self::Error>
     {
-        use crate::native_output_coordinate::{CoordinateNativeAudioSnapshot, NativeOutputCoordinate};
+        use crate::native_output_coordinate::{
+            CoordinateNativeAudioSnapshot, NativeOutputCoordinate,
+        };
         self.original_coordinate(output)?.map(|(pair, frame)| {
             CoordinateNativeAudioSnapshot::new(
                 crate::native_audio_presentation::NativeAudioSnapshot {
@@ -552,14 +554,14 @@ use crate::gameplay::output::ports::{
     NativePlaybackObservation, NativeSourcePlaybackQuery, SourcePlaybackFacts,
     SourcePlaybackIdentity, SourcePlaybackNativeOutputBackend, SourcePlaybackPacketError,
 };
-use beatkernel::audio::{InterpolatedTargetTime, TargetTime};
-use beatkernel_platform::linux::{
-    AlsaConvertedPlaybackSnapshot, AlsaSourcePlaybackSnapshot, AlsaTimingSnapshot,
-};
 use crate::gameplay::output::ports::{
     NativeTargetPlaybackFacts, NativeTargetPlaybackObservation, NativeTargetPlaybackQuery,
     TargetHistoryRetirementNativeOutputBackend, TargetPlaybackNativeOutputBackend,
     TargetPlaybackPacketError,
+};
+use beatkernel::audio::{InterpolatedTargetTime, TargetTime};
+use beatkernel_platform::linux::{
+    AlsaConvertedPlaybackSnapshot, AlsaSourcePlaybackSnapshot, AlsaTimingSnapshot,
 };
 
 /// Preserves the coherent converted publication and its original native evidence.

@@ -1,7 +1,7 @@
 //! Real retained Mixer/converter histories and original input/pause adoption.
 //! Scripted native effects exercise policy; they are not physical device evidence.
 use super::*;
-use crate as runtime;
+use crate::coordinate_target_replacement_test_support as support;
 use crate::{
     audio_authority::AudioAuthorityCoordinateBasis,
     gameplay::output::ports::{SourcePlaybackIdentity, TargetRetirementStatus},
@@ -12,16 +12,13 @@ use crate::{
 };
 use beatkernel::{audio::*, input::*, judge::JudgeEngine, time::ClockDomainId};
 use beatkernel_platform::audio::{
-    DeviceFormat, SampleEncoding, presentation::validation::OriginalNativePresentationEvidence,
+    presentation::validation::OriginalNativePresentationEvidence, DeviceFormat, SampleEncoding,
 };
-#[path = "coordinate_target_replacement_test_support.rs"]
-mod support;
 use support::*;
-pub(crate) use support::{Effects, Evidence, Fault, Output, Request, Rig, Ticket};
 
 #[test]
-fn coordinate_target_replacement_conserves_original_pcm_histories_pin_and_runtime_for_supported_changes()
- {
+fn coordinate_target_replacement_conserves_original_pcm_histories_pin_and_runtime_for_supported_changes(
+) {
     let mut requests = vec![
         Request::normal(TARGET_RATE),
         Request::normal(32_000),
@@ -122,10 +119,8 @@ fn coordinate_target_replacement_conserves_original_pcm_histories_pin_and_runtim
             r.pin.point_at_stream_frame(0).unwrap()
         );
         let anchors = ready.snapshots();
-        let [
-            NativeOutputCoordinate::StreamFrame { frame: first },
-            NativeOutputCoordinate::StreamFrame { frame: second },
-        ] = [anchors[0].coordinate(), anchors[1].coordinate()]
+        let [NativeOutputCoordinate::StreamFrame { frame: first }, NativeOutputCoordinate::StreamFrame { frame: second }] =
+            [anchors[0].coordinate(), anchors[1].coordinate()]
         else {
             panic!("original frame anchors");
         };
@@ -203,11 +198,10 @@ fn coordinate_target_replacement_conserves_original_pcm_histories_pin_and_runtim
         let second_hold = r.runtime.hold_audio_pause().unwrap();
         drop(second_hold);
         // The retained original producer and sample bank still drive the same owner.
-        assert!(
-            r.pause
-                .request_coordinate(false, r.current.authority())
-                .unwrap()
-        );
+        assert!(r
+            .pause
+            .request_coordinate(false, r.current.authority())
+            .unwrap());
         r.runtime.request_audio_pause(false);
         let state = r.output.as_mut().unwrap().state.as_mut().unwrap();
         let resumed = state.render_pending(16).unwrap();
@@ -278,8 +272,8 @@ fn coordinate_target_replacement_compatible_pending_suffix_is_not_new_native_gen
 }
 
 #[test]
-fn coordinate_target_replacement_conditional_pending_and_refusal_keep_the_same_live_owner_clock_and_epoch()
- {
+fn coordinate_target_replacement_conditional_pending_and_refusal_keep_the_same_live_owner_clock_and_epoch(
+) {
     for (status, via_cancel) in [
         (TargetRetirementStatus::Refused, false),
         (TargetRetirementStatus::Cancelled, false),
@@ -505,12 +499,10 @@ fn coordinate_target_replacement_cancellation_restores_only_a_consumed_matching_
                 original_position
             );
             assert!(recovered.phase_history().is_some());
-            assert!(
-                recovered
-                    .converter_owner()
-                    .source_playback_history()
-                    .is_some()
-            );
+            assert!(recovered
+                .converter_owner()
+                .source_playback_history()
+                .is_some());
             assert!(r.script.borrow().calls.contains(&"retire"));
             assert!(!r.script.borrow().calls.contains(&"open"));
             assert_eq!(controller.last_issued_epoch(), OLD_EPOCH);
@@ -617,11 +609,10 @@ fn coordinate_target_replacement_cold_guards_refuse_before_native_retirement() {
                     Some(NativeEnd::new(point(2, 0), ClockDomainId(1), SOURCE_RATE, 100).unwrap());
             }
             1 => {
-                assert!(
-                    r.pause
-                        .request_coordinate(false, r.current.authority())
-                        .unwrap()
-                );
+                assert!(r
+                    .pause
+                    .request_coordinate(false, r.current.authority())
+                    .unwrap());
             }
             2 => {
                 r.inputs
@@ -707,8 +698,8 @@ fn coordinate_target_replacement_cold_guards_refuse_before_native_retirement() {
 }
 
 #[test]
-fn coordinate_target_replacement_pending_cancellation_keeps_live_ownership_until_matching_terminal_acknowledgement()
- {
+fn coordinate_target_replacement_pending_cancellation_keeps_live_ownership_until_matching_terminal_acknowledgement(
+) {
     let mut r = Rig::new(true);
     r.script.borrow_mut().cancel_status = Some(TargetRetirementStatus::Pending);
     let id = r.output.as_ref().unwrap().native_id;
@@ -895,19 +886,15 @@ fn coordinate_target_replacement_partial_open_returns_original_error_and_pending
     )
     .unwrap();
     let failure = r.poll_failure(&mut controller);
-    assert!(
-        failure
-            .to_string()
-            .contains("original partial open failure")
-    );
-    assert!(
-        failure
-            .cleanup
-            .as_ref()
-            .unwrap()
-            .to_string()
-            .contains("original partial open cleanup")
-    );
+    assert!(failure
+        .to_string()
+        .contains("original partial open failure"));
+    assert!(failure
+        .cleanup
+        .as_ref()
+        .unwrap()
+        .to_string()
+        .contains("original partial open cleanup"));
     assert_eq!(controller.state(), ReplacementState::PendingRetirement);
     assert!(controller.output_clock_suspended());
     assert!(controller.take_attached_output().is_none());
@@ -980,8 +967,8 @@ fn coordinate_target_replacement_missing_duplicate_and_future_packets_cannot_sup
 }
 
 #[test]
-fn coordinate_target_replacement_missing_native_timeout_recovers_software_without_inventing_a_live_clock()
- {
+fn coordinate_target_replacement_missing_native_timeout_recovers_software_without_inventing_a_live_clock(
+) {
     let mut r = Rig::new(false);
     let original = format!("{:?}", r.current);
     let old_state = r.output.as_ref().unwrap().state.as_ref().unwrap();
@@ -1104,8 +1091,8 @@ fn coordinate_target_replacement_exact_native_units_progress_even_with_equal_rou
 }
 
 #[test]
-fn coordinate_target_replacement_ready_publication_revalidates_current_pause_config_and_exact_merger()
- {
+fn coordinate_target_replacement_ready_publication_revalidates_current_pause_config_and_exact_merger(
+) {
     for variant in 0..8 {
         let mut r = Rig::new(false);
         let (mut controller, ready) = r.ready(Request::normal(32_000));
@@ -1138,11 +1125,10 @@ fn coordinate_target_replacement_ready_publication_revalidates_current_pause_con
                 r.config.sample_rate += 1;
             }
             5 => {
-                assert!(
-                    r.pause
-                        .request_coordinate(false, r.current.authority())
-                        .unwrap()
-                );
+                assert!(r
+                    .pause
+                    .request_coordinate(false, r.current.authority())
+                    .unwrap());
             }
             6 => {
                 r.end =
@@ -1243,8 +1229,8 @@ fn coordinate_target_replacement_ready_native_age_and_occupied_output_refuse_ato
 }
 
 #[test]
-fn coordinate_target_replacement_capability_stage_failure_precedes_every_authoritative_commit_and_allows_same_ready_retry()
- {
+fn coordinate_target_replacement_capability_stage_failure_precedes_every_authoritative_commit_and_allows_same_ready_retry(
+) {
     let mut r = Rig::new(false);
     let (_controller, ready) = r.ready(Request::normal(32_000));
     let candidate = ready.output().native_id;
@@ -1287,8 +1273,8 @@ fn coordinate_target_replacement_capability_stage_failure_precedes_every_authori
 }
 
 #[test]
-fn coordinate_target_replacement_failed_open_can_retry_with_same_full_source_owner_and_new_checked_epoch()
- {
+fn coordinate_target_replacement_failed_open_can_retry_with_same_full_source_owner_and_new_checked_epoch(
+) {
     let mut r = Rig::new(false);
     let basis = r.output.as_ref().unwrap().basis;
     let position = r
@@ -1308,17 +1294,15 @@ fn coordinate_target_replacement_failed_open_can_retry_with_same_full_source_own
     let failed_epoch = controller.last_issued_epoch();
     let state = controller.take_recovered_mixer().unwrap();
     assert_eq!(state.converter_owner().source_position(), position);
-    assert!(
-        controller
-            .attach(native(
-                state,
-                basis,
-                OLD_EPOCH,
-                Request::normal(TARGET_RATE),
-                &r.script
-            ))
-            .is_ok()
-    );
+    assert!(controller
+        .attach(native(
+            state,
+            basis,
+            OLD_EPOCH,
+            Request::normal(TARGET_RATE),
+            &r.script
+        ))
+        .is_ok());
     r.begin(&mut controller, Request::normal(32_000)).unwrap();
     let ready = r.poll_ready(&mut controller);
     assert_eq!(ready.pause().epoch(), failed_epoch + 1);

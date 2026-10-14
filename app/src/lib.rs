@@ -1,47 +1,27 @@
 //! Off-thread bounded BMS preparation shared by offline and native compositions.
 #![forbid(unsafe_code)]
+#[cfg(test)]
+use crate as runtime;
 /// Actual ASIO replay presentation observations retained until their host upper frontier.
 pub mod asio_replay;
 /// Contained exact or compatible asset filename lookup during preparation.
 pub mod asset_paths;
 /// Bounded selected-file and native asset acquisition.
 pub mod asset_source;
-/// Seeded resource planning over a bounded declared selected-file inventory.
-pub mod browser_library_assets;
 #[cfg(test)]
 mod asset_source_fixtures;
 mod audio_assets;
 /// Shared finite audio-output authority and original acquired-input correspondence.
 pub mod audio_authority;
-/// Exact generated playback mapping into the caller's opted transport phase.
-pub mod native_playback_phase;
-/// Original source publications used for coordinate control preparation.
-pub mod native_coordinate_control;
 /// Prepared original-song image selections shared by live and replay presentation.
 pub mod bga;
-pub mod video;
-pub mod video_assets;
-#[cfg(all(test, feature = "graphics", not(target_arch = "wasm32")))]
-#[path = "video_render_fixtures.rs"]
-mod video_render_fixtures;
-#[cfg(all(test, feature = "graphics", not(target_arch = "wasm32")))]
-#[path = "video_native_scene_fixtures.rs"]
-mod video_native_scene_fixtures;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod video_native;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod video_native_bank;
 /// Rolling BGM admission on an explicitly configured output frame grid.
 pub mod bgm;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser;
-#[cfg(all(target_arch = "wasm32", feature = "browser"))]
-pub(crate) mod browser_video;
 /// Numeric bindings for the separate AudioWorklet WASM owner.
 #[cfg(all(target_arch = "wasm32", feature = "browser-audio"))]
 pub mod browser_audio;
-/// Pure exact frame admission for independently validated native browser lanes.
-pub mod browser_native_clock;
 #[cfg(test)]
 mod browser_audio_authority_fixtures;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
@@ -60,6 +40,8 @@ mod browser_hid_runtime_fixtures;
 pub mod browser_input;
 #[cfg(test)]
 mod browser_input_fixtures;
+/// Seeded resource planning over a bounded declared selected-file inventory.
+pub mod browser_library_assets;
 /// Worker bindings for the common nonblocking local gameplay owner.
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_local_game;
@@ -72,15 +54,13 @@ mod browser_local_saved_fixtures;
 pub mod browser_menu;
 #[cfg(all(feature = "graphics", test))]
 mod browser_menu_fixtures;
-#[cfg(all(feature = "graphics", test))]
-mod browser_remaining_motion_fixtures;
-#[cfg(feature = "graphics")]
-pub(crate) mod browser_results_motion;
-#[cfg(all(feature = "graphics", test))]
-mod browser_results_motion_fixtures;
 /// Browser bindings for the common multiplayer session and bounded framing.
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_multiplayer;
+/// Pure exact frame admission for independently validated native browser lanes.
+pub mod browser_native_clock;
+#[cfg(all(feature = "graphics", test))]
+mod browser_remaining_motion_fixtures;
 /// Portable committed visual snapshots and atomic receiver state.
 #[cfg(feature = "graphics")]
 pub mod browser_render_state;
@@ -88,11 +68,17 @@ pub mod browser_render_state;
 mod browser_render_state_fixtures;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_replay;
+#[cfg(feature = "graphics")]
+pub(crate) mod browser_results_motion;
+#[cfg(all(feature = "graphics", test))]
+mod browser_results_motion_fixtures;
 /// Worker bindings for the common bounded room-admission client.
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_room_client;
 #[cfg(test)]
 mod browser_touch_fixtures;
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+pub(crate) mod browser_video;
 #[cfg(test)]
 mod catalog_read_budget_fixtures;
 #[cfg(test)]
@@ -121,6 +107,11 @@ pub mod completed_results_presentation;
 pub mod completion;
 #[cfg(test)]
 mod contact_input_mode_fixtures;
+#[cfg(test)]
+#[path = "gameplay/output/application/coordinate_target_replacement_test_support.rs"]
+mod coordinate_target_replacement_test_support;
+#[cfg(all(test, feature = "graphics"))]
+mod dense_playfield_fixtures;
 /// Portable bounded audio device metadata and explicit draft selection.
 pub mod device_catalog;
 pub mod finite_replay_completion;
@@ -321,8 +312,6 @@ mod multiplayer_webtransport_fixtures;
 pub mod native_audio;
 /// Original native evidence coupled to the shared audio-authoritative gameplay boundary.
 pub mod native_audio_presentation;
-/// Original native coordinates retained beside matching observation evidence.
-pub mod native_output_coordinate;
 #[cfg(test)]
 mod native_audio_presentation_fixtures;
 /// Bounded original audio-observation startup for all native launchers.
@@ -346,12 +335,12 @@ pub mod native_competition_network;
 mod native_converted_end_fixtures;
 #[cfg(all(test, target_os = "linux"))]
 mod native_converted_gameplay_fixtures;
-#[cfg(test)]
-mod native_converted_test_support;
-#[cfg(all(test, target_os = "linux"))]
-mod replay_target_fixtures;
 #[cfg(all(test, target_os = "linux"))]
 mod native_converted_pause_fixtures;
+#[cfg(test)]
+mod native_converted_test_support;
+/// Original source publications used for coordinate control preparation.
+pub mod native_coordinate_control;
 /// Omitted solo option defaults, independent of native discovery.
 pub mod native_defaults;
 pub mod native_end;
@@ -388,6 +377,10 @@ mod native_mine_audio_fixtures;
 mod native_mine_fixtures;
 #[cfg(test)]
 mod native_mine_presentation_fixtures;
+/// Original native coordinates retained beside matching observation evidence.
+pub mod native_output_coordinate;
+/// Exact generated playback mapping into the caller's opted transport phase.
+pub mod native_playback_phase;
 mod native_policy_admission;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod native_policy_network_fixtures;
@@ -438,13 +431,23 @@ mod player_network_fault_schedule_fixtures;
 mod player_ui_fault_schedule_fixtures;
 #[cfg(feature = "graphics")]
 mod playfield_gpu;
-#[cfg(all(test, feature = "graphics"))]
-mod dense_playfield_fixtures;
+#[cfg(all(test, target_os = "linux"))]
+mod replay_target_fixtures;
+pub mod video;
+pub mod video_assets;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod video_native;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod video_native_bank;
+#[cfg(all(test, feature = "graphics", not(target_arch = "wasm32")))]
+#[path = "video_native_scene_fixtures.rs"]
+mod video_native_scene_fixtures;
+#[cfg(all(test, feature = "graphics", not(target_arch = "wasm32")))]
+#[path = "video_render_fixtures.rs"]
+mod video_render_fixtures;
 
-pub(crate) mod presentation_budget;
 #[cfg(test)]
-#[path = "presentation_budget_fixtures.rs"]
-mod presentation_budget_fixtures;
+mod gapless_practice_native_fixtures;
 /// Shared playfield partitions for rendering and projected physical touch routing.
 pub mod playfield_layout;
 #[cfg(test)]
@@ -458,10 +461,12 @@ pub mod practice_loop;
 pub mod practice_playback;
 /// Cold preparation of fresh practice attempts from the original BMS source.
 pub mod practice_session;
-#[cfg(test)]
-mod gapless_practice_native_fixtures;
 /// Owned cooperative chart preparation and bounded immutable original reuse.
 pub mod preparation;
+pub(crate) mod presentation_budget;
+#[cfg(test)]
+#[path = "presentation_budget_fixtures.rs"]
+mod presentation_budget_fixtures;
 /// Portable display configuration shared by CLI, graphical drafts and profiles.
 pub mod presentation_settings;
 #[cfg(test)]
@@ -485,20 +490,20 @@ pub mod replay_gauge_policy;
 mod replay_gauge_sound_stop_fixtures;
 /// Canonical optional recorded judgment-class identity.
 pub mod replay_judgment_policy;
-/// Canonical optional numerical timing and staged interaction identity.
-pub mod replay_timing_policy;
-#[cfg(test)]
-mod replay_timing_policy_fixtures;
 pub mod replay_pause;
 /// Checked durable replay reconstruction through the same builtin BMS judge.
 pub mod replay_playback;
 /// Bounded PCM rendering of captured BMS play through the actual core Mixer.
 pub mod replay_render;
+#[cfg(test)]
+mod replay_render_owned_stop_fixtures;
 /// Positive fixed replay speed and checked original-song presentation mapping.
 pub mod replay_speed;
 pub mod replay_speed_policy;
+/// Canonical optional numerical timing and staged interaction identity.
+pub mod replay_timing_policy;
 #[cfg(test)]
-mod replay_render_owned_stop_fixtures;
+mod replay_timing_policy_fixtures;
 /// Incremental presentation of validated recorded judging operations.
 pub mod replay_visual;
 /// Retained participant-scoped room scores and bounded borrowed pages.

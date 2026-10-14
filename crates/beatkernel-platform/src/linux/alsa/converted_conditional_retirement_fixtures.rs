@@ -1,10 +1,10 @@
 //! Real production worker/control interleavings with injected native effects.
 //! These are software ownership tests, never physical clock or acoustic proof.
-use super::super::converted::{ConvertedAlsaStream, run_converted_worker};
+use super::super::converted::{run_converted_worker, ConvertedAlsaStream};
 use super::super::converted_fixtures::rig_boundaries;
 use super::super::*;
 use super::*;
-use crate::audio::{ConvertedNativeOutputState, count_heap_calls};
+use crate::audio::{count_heap_calls, ConvertedNativeOutputState};
 use beatkernel::audio::*;
 use std::{
     cell::Cell,
@@ -356,13 +356,11 @@ fn require_empty_checks_actual_empty_state_before_the_first_callback() {
         shared.conditional_retirement.poll(nonce).unwrap(),
         ConvertedRetirementStatus::Authorized
     );
-    assert!(
-        shared
-            .conditional_retirement
-            .submit(ConvertedRetirementPolicy::PreserveHeldSuffix)
-            .unwrap()
-            .is_none()
-    );
+    assert!(shared
+        .conditional_retirement
+        .submit(ConvertedRetirementPolicy::PreserveHeldSuffix)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -445,13 +443,11 @@ fn unconsumed_refusal_busy_nonce_and_stale_cancel_preserve_the_matching_slot() {
     // A complete actual held block arose after an earlier empty snapshot.
     state.render_held_pending(8).unwrap();
     state.admit(2).unwrap();
-    assert!(
-        shared
-            .conditional_retirement
-            .submit(ConvertedRetirementPolicy::PreserveHeldSuffix)
-            .unwrap()
-            .is_none()
-    );
+    assert!(shared
+        .conditional_retirement
+        .submit(ConvertedRetirementPolicy::PreserveHeldSuffix)
+        .unwrap()
+        .is_none());
     let mut pcm = Pcm::new(&shared, None);
     pcm.stop_after = 1;
     pump(
@@ -467,13 +463,11 @@ fn unconsumed_refusal_busy_nonce_and_stale_cancel_preserve_the_matching_slot() {
         shared.conditional_retirement.status(first).unwrap(),
         ConvertedRetirementStatus::Refused
     );
-    assert!(
-        shared
-            .conditional_retirement
-            .submit(ConvertedRetirementPolicy::PreserveHeldSuffix)
-            .unwrap()
-            .is_none()
-    );
+    assert!(shared
+        .conditional_retirement
+        .submit(ConvertedRetirementPolicy::PreserveHeldSuffix)
+        .unwrap()
+        .is_none());
     assert_eq!(
         shared.conditional_retirement.cancel(first).unwrap(),
         ConvertedRetirementStatus::Refused
@@ -504,13 +498,11 @@ fn unconsumed_refusal_busy_nonce_and_stale_cancel_preserve_the_matching_slot() {
         shared.conditional_retirement.cancel(second).unwrap(),
         ConvertedRetirementStatus::Cancelled
     );
-    assert!(
-        shared
-            .conditional_retirement
-            .submit(ConvertedRetirementPolicy::RequireEmptySuffix)
-            .unwrap()
-            .is_none()
-    );
+    assert!(shared
+        .conditional_retirement
+        .submit(ConvertedRetirementPolicy::RequireEmptySuffix)
+        .unwrap()
+        .is_none());
     assert_eq!(
         shared.conditional_retirement.poll(second).unwrap(),
         ConvertedRetirementStatus::Cancelled
@@ -531,20 +523,18 @@ fn checked_nonce_exhaustion_never_wraps_or_overwrites_a_terminal_response() {
         .unwrap()
         .unwrap();
     assert_eq!(last, MAX_NONCE);
-    assert!(
-        slot.submit(ConvertedRetirementPolicy::PreserveHeldSuffix)
-            .unwrap()
-            .is_none()
-    );
+    assert!(slot
+        .submit(ConvertedRetirementPolicy::PreserveHeldSuffix)
+        .unwrap()
+        .is_none());
     assert_eq!(
         slot.cancel(last).unwrap(),
         ConvertedRetirementStatus::Cancelled
     );
-    assert!(
-        slot.submit(ConvertedRetirementPolicy::PreserveHeldSuffix)
-            .unwrap()
-            .is_none()
-    );
+    assert!(slot
+        .submit(ConvertedRetirementPolicy::PreserveHeldSuffix)
+        .unwrap()
+        .is_none());
     assert_eq!(
         slot.poll(last).unwrap(),
         ConvertedRetirementStatus::Cancelled
@@ -871,19 +861,15 @@ fn native_preflight_refusal_leaves_the_actual_running_worker_and_request_slot_un
         None,
     )
     .unwrap();
-    assert!(
-        fixture
-            .stream
-            .validate_conditional_replacement(&unsupported, &matrix)
-            .is_err()
-    );
+    assert!(fixture
+        .stream
+        .validate_conditional_replacement(&unsupported, &matrix)
+        .is_err());
     let wrong = ChannelMatrix::new(2, 1, &[0.5, 0.5]).unwrap();
-    assert!(
-        fixture
-            .stream
-            .validate_conditional_replacement(&original, &wrong)
-            .is_err()
-    );
+    assert!(fixture
+        .stream
+        .validate_conditional_replacement(&original, &wrong)
+        .is_err());
     assert_eq!(
         fixture
             .stream
@@ -965,22 +951,20 @@ fn public_tickets_bind_the_original_arc_and_isolate_same_nonce_other_streams_and
         b.stream.poll_conditional_retirement(&foreign).unwrap(),
         ConvertedRetirementStatus::Pending
     );
-    assert!(
-        a.stream
-            .submit_conditional_retirement(ConvertedRetirementPolicy::RequireEmptySuffix)
-            .unwrap()
-            .is_none()
-    );
+    assert!(a
+        .stream
+        .submit_conditional_retirement(ConvertedRetirementPolicy::RequireEmptySuffix)
+        .unwrap()
+        .is_none());
     assert_eq!(
         a.stream.cancel_conditional_retirement(&first).unwrap(),
         ConvertedRetirementStatus::Cancelled
     );
-    assert!(
-        a.stream
-            .submit_conditional_retirement(ConvertedRetirementPolicy::RequireEmptySuffix)
-            .unwrap()
-            .is_none()
-    );
+    assert!(a
+        .stream
+        .submit_conditional_retirement(ConvertedRetirementPolicy::RequireEmptySuffix)
+        .unwrap()
+        .is_none());
     assert_eq!(
         a.stream.poll_conditional_retirement(&first).unwrap(),
         ConvertedRetirementStatus::Cancelled
@@ -1020,13 +1004,11 @@ fn public_tickets_bind_the_original_arc_and_isolate_same_nonce_other_streams_and
         replacement.stream.cancel_conditional_retirement(&first),
         Err(LinuxError::InvalidLifecycle)
     ));
-    assert!(
-        replacement
-            .stream
-            .submit_conditional_retirement(ConvertedRetirementPolicy::PreserveHeldSuffix)
-            .unwrap()
-            .is_some()
-    );
+    assert!(replacement
+        .stream
+        .submit_conditional_retirement(ConvertedRetirementPolicy::PreserveHeldSuffix)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -1074,12 +1056,10 @@ fn public_authorization_survives_drop_error_and_recovers_the_unique_complete_own
     assert!(state.phase_history().is_some());
     assert!(state.converter_owner().source_playback_history().is_some());
     assert!(fixture.stream.take_stopped_output().unwrap().is_none());
-    assert!(
-        fixture
-            .stream
-            .submit_conditional_retirement(ConvertedRetirementPolicy::PreserveHeldSuffix)
-            .is_err()
-    );
+    assert!(fixture
+        .stream
+        .submit_conditional_retirement(ConvertedRetirementPolicy::PreserveHeldSuffix)
+        .is_err());
 }
 
 #[test]
@@ -1099,12 +1079,10 @@ fn worker_failure_is_not_live_refusal_and_stop_preserves_the_unsubmitted_owner()
         })
     ));
     assert!(fixture.stream.poll_conditional_retirement(&ticket).is_err());
-    assert!(
-        fixture
-            .stream
-            .cancel_conditional_retirement(&ticket)
-            .is_err()
-    );
+    assert!(fixture
+        .stream
+        .cancel_conditional_retirement(&ticket)
+        .is_err());
     let state = fixture.stream.take_stopped_output().unwrap().unwrap();
     assert_eq!(state.pending_frames(), 8);
     assert_eq!(state.admitted_frames(), 0);
@@ -1227,11 +1205,9 @@ fn opted_native_null_factory_conditional_retirement_recovers_the_complete_owner(
         None,
     )
     .unwrap();
-    assert!(
-        stream
-            .validate_conditional_replacement(&unsupported, &matrix)
-            .is_err()
-    );
+    assert!(stream
+        .validate_conditional_replacement(&unsupported, &matrix)
+        .is_err());
     assert_eq!(stream.shared.status.load(Ordering::Acquire), 1);
     assert!(!stream.shared.stop.load(Ordering::Acquire));
     assert_eq!(

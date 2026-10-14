@@ -6,8 +6,8 @@ use beatkernel::{
     time::ClockDomainId,
 };
 use std::sync::{
-    Arc, Weak,
     atomic::{AtomicU64, Ordering},
+    Arc, Weak,
 };
 
 /// How the worker may retain positively unsubmitted converted output.

@@ -10,14 +10,12 @@ mod sys;
 
 pub use alsa::ConvertedAlsaStream;
 pub use alsa::{
-    alsa_output_devices, AlsaAppliedConfig, AlsaCadenceError, AlsaDevice, AlsaNativeTimestamp,
-    AlsaRenderCadence, AlsaRequest, AlsaSnapshot, AlsaSourcePlaybackSnapshot, AlsaStatus,
-    AlsaStream, AlsaTimingSnapshot, AlsaConvertedPlaybackSnapshot, ConvertedPhaseSnapshot,
+    alsa_output_devices, AlsaAppliedConfig, AlsaCadenceError, AlsaConvertedPlaybackSnapshot,
+    AlsaDevice, AlsaNativeTimestamp, AlsaRenderCadence, AlsaRequest, AlsaSnapshot,
+    AlsaSourcePlaybackSnapshot, AlsaStatus, AlsaStream, AlsaTimingSnapshot, ConvertedPhaseSnapshot,
     ConvertedPlaybackPhaseSnapshot,
 };
-pub use alsa::{
-    ConvertedRetirementPolicy, ConvertedRetirementStatus, ConvertedRetirementTicket,
-};
+pub use alsa::{ConvertedRetirementPolicy, ConvertedRetirementStatus, ConvertedRetirementTicket};
 pub use input::{
     evdev_keyboard_devices, EvdevDevice, EvdevItem, EvdevKeyboardDevice, EvdevSnapshot,
     HidrawDevice, LinuxInputCounters,

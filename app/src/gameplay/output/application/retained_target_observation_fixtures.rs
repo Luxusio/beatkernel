@@ -1,8 +1,6 @@
 //! Old conditional native IO remains authoritative until actual retirement permission.
 use super::*;
-use crate as runtime;
-#[path = "coordinate_target_replacement_test_support.rs"]
-mod support;
+use crate::coordinate_target_replacement_test_support as support;
 use crate::gameplay::output::{
     application::owner::CoordinateTargetOwnerPublication, ports::TargetRetirementStatus,
 };
@@ -125,19 +123,15 @@ fn retained_target_observation_authorization_before_io_suspends_old_clock_withou
         let identity = rig.source_identity();
         let record = rig.presentation().latest_record().unwrap().pair();
         if control {
-            assert!(
-                owner
-                    .observe_conditional_target_native_control(rig.presentation_mut(), identity)
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(owner
+                .observe_conditional_target_native_control(rig.presentation_mut(), identity)
+                .unwrap()
+                .is_none());
         } else {
-            assert!(
-                owner
-                    .observe_conditional_target_native_playback(rig.presentation_mut(), identity)
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(owner
+                .observe_conditional_target_native_playback(rig.presentation_mut(), identity)
+                .unwrap()
+                .is_none());
         }
         assert_eq!(count(&trace, "packet"), 0);
         assert_eq!(count(&trace, "retire"), 0);
@@ -150,8 +144,8 @@ fn retained_target_observation_authorization_before_io_suspends_old_clock_withou
 }
 
 #[test]
-fn retained_target_observation_authorization_during_failing_io_only_skips_the_expected_old_stream_error()
- {
+fn retained_target_observation_authorization_during_failing_io_only_skips_the_expected_old_stream_error(
+) {
     for control in [false, true] {
         let (mut rig, mut owner, mut trace) = setup();
         trace.conditional_statuses([
@@ -162,19 +156,15 @@ fn retained_target_observation_authorization_during_failing_io_only_skips_the_ex
         let identity = rig.source_identity();
         let record = rig.presentation().latest_record().unwrap().pair();
         if control {
-            assert!(
-                owner
-                    .observe_conditional_target_native_control(rig.presentation_mut(), identity)
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(owner
+                .observe_conditional_target_native_control(rig.presentation_mut(), identity)
+                .unwrap()
+                .is_none());
         } else {
-            assert!(
-                owner
-                    .observe_conditional_target_native_playback(rig.presentation_mut(), identity)
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(owner
+                .observe_conditional_target_native_playback(rig.presentation_mut(), identity)
+                .unwrap()
+                .is_none());
         }
         assert_eq!(count(&trace, "packet"), 1);
         assert_eq!(count(&trace, "conditional-poll"), 3);

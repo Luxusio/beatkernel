@@ -23,10 +23,10 @@ use crate::{
 };
 use beatkernel::audio::*;
 use beatkernel_platform::audio::{
-    ConvertedNativeOutputState, DeviceFormat, SampleEncoding,
     presentation::{
         discipline::PresentationDiscipline, validation::OriginalNativePresentationEvidence,
     },
+    ConvertedNativeOutputState, DeviceFormat, SampleEncoding,
 };
 
 // Neither Clone nor Debug: forwarding must not require either on native evidence.

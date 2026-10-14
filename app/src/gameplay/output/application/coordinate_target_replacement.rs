@@ -12,7 +12,7 @@ use crate::{
 };
 use beatkernel::audio::{InterpolatedTargetTime, SourcePlaybackState, TargetFrameBasis};
 use beatkernel_platform::audio::{
-    ConvertedNativeOutputState, presentation::validation::NativeFrameBasis,
+    presentation::validation::NativeFrameBasis, ConvertedNativeOutputState,
 };
 
 pub(super) struct ConditionalTargetWaiting<O, R, Ticket> {

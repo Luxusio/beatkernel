@@ -7,7 +7,7 @@ use crate::{
 };
 use beatkernel::audio::{ConvertedOutputState, InterpolatedTargetTime, TargetFrameBasis};
 use beatkernel_platform::audio::{
-    ConvertedNativeOutputState, presentation::validation::OriginalNativePresentationEvidence,
+    presentation::validation::OriginalNativePresentationEvidence, ConvertedNativeOutputState,
 };
 
 impl NativePause {

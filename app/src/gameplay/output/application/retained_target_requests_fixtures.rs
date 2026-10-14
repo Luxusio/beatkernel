@@ -1,8 +1,6 @@
 //! Correlated UI requests traverse the real retained owner and coordinate publisher.
 use super::*;
-use crate as runtime;
-#[path = "coordinate_target_replacement_test_support.rs"]
-mod support;
+use crate::coordinate_target_replacement_test_support as support;
 use crate::{
     gameplay::output::application::replacement::ReplacementState,
     gameplay::output::domain::remix::matrix_text, gameplay::output::ports::TargetRetirementStatus,
@@ -157,8 +155,8 @@ fn count(trace: &Effects, name: &str) -> usize {
 }
 
 #[test]
-fn retained_target_requests_same_and_changed_configuration_preserve_actual_source_and_input_identity()
- {
+fn retained_target_requests_same_and_changed_configuration_preserve_actual_source_and_input_identity(
+) {
     let stereo = Request::configured(
         DeviceFormat::new(TARGET_RATE, 2, SampleEncoding::Float32, Some(3)).unwrap(),
         ChannelMatrix::new(1, 2, &[1.0, 0.5]).unwrap(),
@@ -411,17 +409,15 @@ fn retained_target_requests_cold_practice_refusal_keeps_original_owner_without_n
     let original = owner.current().unwrap().native_id;
     let capability = state.borrow().capability.clone();
     let generation = rig.practice_generation();
-    assert!(
-        !drive(
-            &mut rig,
-            &mut owner,
-            &mut ui,
-            &request,
-            true,
-            &mut |_| panic!("cold refusal cannot stage")
-        )
-        .unwrap()
-    );
+    assert!(!drive(
+        &mut rig,
+        &mut owner,
+        &mut ui,
+        &request,
+        true,
+        &mut |_| panic!("cold refusal cannot stage")
+    )
+    .unwrap());
     assert_eq!(owner.current().unwrap().native_id, original);
     assert_eq!(rig.practice_generation(), generation);
     assert_eq!(state.borrow().capability, capability);
@@ -485,13 +481,11 @@ fn retained_target_requests_would_block_preserves_the_staged_result_and_never_re
     state.borrow_mut().blocked = false;
     assert!(!tick(&mut rig, &mut owner, &mut ui, &request, true, &mut applied).unwrap());
     assert_eq!(state.borrow().replies, [expected_reply.clone()]);
-    assert!(
-        state
-            .borrow()
-            .attempts
-            .iter()
-            .all(|reply| *reply == expected_reply)
-    );
+    assert!(state
+        .borrow()
+        .attempts
+        .iter()
+        .all(|reply| *reply == expected_reply));
     assert_eq!(staged.get(), 1);
     assert_eq!(count(&trace, "submit"), 1);
     assert_eq!(count(&trace, "open"), 1);
@@ -507,33 +501,29 @@ fn retained_target_requests_admitted_work_continues_when_a_practice_transition_b
         TargetRetirementStatus::Pending,
         TargetRetirementStatus::Authorized,
     ]);
-    assert!(
-        !tick(
-            &mut rig,
-            &mut owner,
-            &mut ui,
-            &request,
-            false,
-            &mut |output| Ok(capability(output.applied_request()))
-        )
-        .unwrap()
-    );
+    assert!(!tick(
+        &mut rig,
+        &mut owner,
+        &mut ui,
+        &request,
+        false,
+        &mut |output| Ok(capability(output.applied_request()))
+    )
+    .unwrap());
     assert!(owner.has_work());
     assert!(owner.replacement_pending());
     assert!(!owner.output_clock_suspended());
     assert!(owner.current().is_some());
     assert_eq!(owner.state(), ReplacementState::ConditionalRetirement);
-    assert!(
-        drive(
-            &mut rig,
-            &mut owner,
-            &mut ui,
-            &request,
-            true,
-            &mut |output| Ok(capability(output.applied_request()))
-        )
-        .unwrap()
-    );
+    assert!(drive(
+        &mut rig,
+        &mut owner,
+        &mut ui,
+        &request,
+        true,
+        &mut |output| Ok(capability(output.applied_request()))
+    )
+    .unwrap());
     assert_eq!(state.borrow().replies.len(), 1);
     assert!(state.borrow().replies[0].result.is_ok());
     assert_eq!(count(&trace, "submit"), 1);

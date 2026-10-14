@@ -16,7 +16,7 @@ use crate::{
             encoding::{encoding_choice, native_encoding},
             remix::RemixedOutputBackend,
         },
-        domain::remix::{RemixedOutputRequest, matrix_text, select_matrix},
+        domain::remix::{matrix_text, select_matrix, RemixedOutputRequest},
     },
     gameplay_presentation::{GameplayAudioOutputContext, GameplayOutputContext},
     settings::{NativeSettings, OutputEncoding, SettingsHost},
@@ -27,7 +27,7 @@ use beatkernel::{
 };
 use beatkernel_platform::{
     audio::{
-        ConvertedNativeOutputState, DeviceFormat, presentation::discipline::PresentationDiscipline,
+        presentation::discipline::PresentationDiscipline, ConvertedNativeOutputState, DeviceFormat,
     },
     linux::{AlsaAppliedConfig, AlsaRequest},
 };
@@ -512,14 +512,12 @@ mod fixtures {
                 )
                 .unwrap();
                 assert_eq!(preserved.matrix.as_ref(), output.channel_matrix());
-                assert!(
-                    remixed_request_for_args(
-                        &output.stream().configuration().requested,
-                        output.channel_matrix(),
-                        &args("--output-matrix", "1,0")
-                    )
-                    .is_err()
-                );
+                assert!(remixed_request_for_args(
+                    &output.stream().configuration().requested,
+                    output.channel_matrix(),
+                    &args("--output-matrix", "1,0")
+                )
+                .is_err());
             }
             backend.retire(&mut output).unwrap();
             let mut mixer = output.take_stopped_mixer().unwrap().unwrap();

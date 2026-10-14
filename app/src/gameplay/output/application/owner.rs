@@ -1,8 +1,8 @@
 //! One static output owner shared by gameplay adapters; input and clocks stay external.
 use super::replacement::coordinate_target::{
-    CoordinateTargetPoll, publish_ready_coordinate_target_audio_output_held,
+    publish_ready_coordinate_target_audio_output_held, CoordinateTargetPoll,
 };
-use super::replacement::target::{ReadyTargetAudioOutput, publish_ready_target_audio_output_held};
+use super::replacement::target::{publish_ready_target_audio_output_held, ReadyTargetAudioOutput};
 use crate::gameplay::output::ports::{
     ConditionalTargetRetirementNativeOutputBackend, NativePlaybackObservation,
     NativeSourcePlaybackQuery, NativeTargetPlaybackObservation, NativeTargetPlaybackQuery,
@@ -14,8 +14,8 @@ use crate::gameplay::output::ports::{
 use crate::native_audio_presentation::NativeAudioPresentation;
 use crate::{
     gameplay::output::application::replacement::{
-        OutputReplacement, ReadyAudioOutput, ReadyOutput, ReplacementCause, ReplacementFailure,
-        ReplacementPhase, ReplacementState, publish_ready_audio_output_held, publish_ready_output,
+        publish_ready_audio_output_held, publish_ready_output, OutputReplacement, ReadyAudioOutput,
+        ReadyOutput, ReplacementCause, ReplacementFailure, ReplacementPhase, ReplacementState,
     },
     gameplay_presentation::{GameplayOutputContext, GameplayPresentationPort},
     live_pause::LivePauseObservation,
@@ -861,11 +861,11 @@ where
 }
 
 impl<
-    B: crate::gameplay::output::ports::OriginalCoordinateTargetNativeOutputBackend<
+        B: crate::gameplay::output::ports::OriginalCoordinateTargetNativeOutputBackend<
             ConvertedNativeOutputState,
         >,
-    Ticket,
-> GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis, Ticket>
+        Ticket,
+    > GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis, Ticket>
 {
     /// Acquires original target time evidence without qualifying converted playback.
     /// The separate source report is read before either authority or cache changes.

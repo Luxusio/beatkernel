@@ -434,11 +434,9 @@ fn preparation_rejects_class_origin_epoch_domain_and_projection_changes_atomical
         ),
     ];
     for (next, basis) in cases {
-        assert!(
-            authority
-                .prepare_coordinate_epoch(next, basis, &merger)
-                .is_err()
-        );
+        assert!(authority
+            .prepare_coordinate_epoch(next, basis, &merger)
+            .is_err());
         assert_eq!(snapshot(&authority), before);
     }
 }
@@ -456,11 +454,9 @@ fn exact_descriptor_regression_is_refused_even_when_both_rounded_origins_match()
         authority.latest_observation().unwrap().source
     );
     let before = snapshot(&authority);
-    assert!(
-        authority
-            .prepare_coordinate_epoch(next, next_basis, &merger())
-            .is_err()
-    );
+    assert!(authority
+        .prepare_coordinate_epoch(next, next_basis, &merger())
+        .is_err());
     assert_eq!(snapshot(&authority), before);
 }
 
@@ -573,16 +569,12 @@ fn publication_rechecks_freshness_time_domain_and_duplicate_use_atomically() {
     let token = prepared(&authority, &merger);
     let before = snapshot(&authority);
     for now in [host(319), host(1301), point(4, 320)] {
-        assert!(
-            authority
-                .validate_primed_coordinate_epoch(&token, now, &merger)
-                .is_err()
-        );
-        assert!(
-            authority
-                .commit_primed_coordinate_epoch(token.clone(), now, &merger)
-                .is_err()
-        );
+        assert!(authority
+            .validate_primed_coordinate_epoch(&token, now, &merger)
+            .is_err());
+        assert!(authority
+            .commit_primed_coordinate_epoch(token.clone(), now, &merger)
+            .is_err());
         assert_eq!(snapshot(&authority), before);
     }
     authority
@@ -638,16 +630,12 @@ fn changed_authority_and_drained_merger_both_invalidate_prepared_publication() {
         }
         let before = snapshot(&authority);
         let merger_before = format!("{merger:?}");
-        assert!(
-            authority
-                .validate_primed_coordinate_epoch(&token, host(360), &merger)
-                .is_err()
-        );
-        assert!(
-            authority
-                .commit_primed_coordinate_epoch(token, host(360), &merger)
-                .is_err()
-        );
+        assert!(authority
+            .validate_primed_coordinate_epoch(&token, host(360), &merger)
+            .is_err());
+        assert!(authority
+            .commit_primed_coordinate_epoch(token, host(360), &merger)
+            .is_err());
         assert_eq!(snapshot(&authority), before);
         assert_eq!(format!("{merger:?}"), merger_before);
     }
@@ -686,16 +674,12 @@ fn merger_snapshot_binds_exact_registry_domain_origin_and_capacity() {
         assert_eq!(different.pending(), 0);
         assert_eq!(different.source_count(), merger.source_count());
         let merger_before = format!("{different:?}");
-        assert!(
-            authority
-                .validate_primed_coordinate_epoch(&token, host(320), &different)
-                .is_err()
-        );
-        assert!(
-            authority
-                .commit_primed_coordinate_epoch(token.clone(), host(320), &different)
-                .is_err()
-        );
+        assert!(authority
+            .validate_primed_coordinate_epoch(&token, host(320), &different)
+            .is_err());
+        assert!(authority
+            .commit_primed_coordinate_epoch(token.clone(), host(320), &different)
+            .is_err());
         assert_eq!(snapshot(&authority), before);
         assert_eq!(format!("{different:?}"), merger_before);
     }

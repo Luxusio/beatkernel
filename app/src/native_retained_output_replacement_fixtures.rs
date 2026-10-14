@@ -1,7 +1,5 @@
 //! Connected native policy tests. Scripted submitted output is not hardware timing proof.
-use crate as runtime;
-#[path = "gameplay/output/application/coordinate_target_replacement_test_support.rs"]
-mod support;
+use crate::coordinate_target_replacement_test_support as support;
 use crate::{
     audio_authority::{AudioAuthorityConfig, AudioAuthorityCoordinateBasis},
     bgm::{BgmConfig, BgmFeeder},

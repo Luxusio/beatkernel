@@ -6,9 +6,9 @@ use crate::audio_authority::{AudioAuthorityConfig, AudioAuthorityCoordinateBasis
 use crate::native_output_coordinate::NativeOutputCoordinateError;
 use beatkernel::{
     audio::{
-        AudioFormat, AudioLimits, ChannelMatrix, Mixer, MixerConfig, PcmLimits, PracticeLimits,
-        PracticeRegion, PreparedPracticeProgram, ResampleQuality, SampleBank, command_queue,
-        practice_queue,
+        command_queue, practice_queue, AudioFormat, AudioLimits, ChannelMatrix, Mixer, MixerConfig,
+        PcmLimits, PracticeLimits, PracticeRegion, PreparedPracticeProgram, ResampleQuality,
+        SampleBank,
     },
     input::{ButtonEvent, ButtonState, DeviceId, EventMeta, PhysicalControlId, PhysicalInputEvent},
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPair, Duration, Timestamp},
@@ -359,14 +359,10 @@ fn same_and_cross_rate_original_native_commit_preserves_source_pin_and_exact_fro
         assert_eq!(mapped.original(), host(280));
         assert_eq!(mapped.raw_output(), point(2, 100 + expected));
         assert_eq!(mapped.output(), point(3, 500 + expected));
-        assert!(
-            mapped
-                .query()
-                .compare_target_time(
-                    TargetTime::new(0, numerator as u64, denominator as u64).unwrap()
-                )
-                .is_eq()
-        );
+        assert!(mapped
+            .query()
+            .compare_target_time(TargetTime::new(0, numerator as u64, denominator as u64).unwrap())
+            .is_eq());
         assert_eq!(mapped.mapper().quality(), ClockMappingQuality::Unknown);
         assert_eq!(
             mapped.mapper().map(host(280), ClockDomainId(3)),
@@ -418,12 +414,10 @@ fn original_native_frames_progress_when_both_rounded_nanosecond_points_are_equal
         .prepare_coordinate_input(host(280), host(320))
         .unwrap()
         .unwrap();
-    assert!(
-        mapped
-            .query()
-            .compare_target_time(basis.start_time())
-            .is_gt()
-    );
+    assert!(mapped
+        .query()
+        .compare_target_time(basis.start_time())
+        .is_gt());
     assert_eq!(mapped.original(), host(280));
     assert_eq!(mapped.raw_output(), first.0.source);
     assert_eq!(owner.practice_mixer_basis, Some(original_mixer));
@@ -442,17 +436,15 @@ fn scalar_and_coordinate_native_epoch_tokens_keep_their_separate_admission_guard
     let basis = retarget(&mut output, 2000);
     let next = next_epoch(&owner, basis);
     let before = state(&owner);
-    assert!(
-        owner
-            .prepare_target_output_epoch(
-                next,
-                basis,
-                originals(next.id, basis).map(|s| s.snapshot()),
-                host(320),
-                &inputs
-            )
-            .is_err()
-    );
+    assert!(owner
+        .prepare_target_output_epoch(
+            next,
+            basis,
+            originals(next.id, basis).map(|s| s.snapshot()),
+            host(320),
+            &inputs
+        )
+        .is_err());
     assert_eq!(state(&owner), before);
 
     let mut scalar = cold_owner(original_target, false);
@@ -463,18 +455,16 @@ fn scalar_and_coordinate_native_epoch_tokens_keep_their_separate_admission_guard
     }
     scalar.pin_practice_mixer_basis(original_mixer).unwrap();
     let scalar_before = state(&scalar);
-    assert!(
-        scalar
-            .prepare_coordinate_target_output_epoch(
-                next_epoch(&scalar, basis),
-                basis,
-                originals(8, basis),
-                original_mixer,
-                host(320),
-                &merger()
-            )
-            .is_err()
-    );
+    assert!(scalar
+        .prepare_coordinate_target_output_epoch(
+            next_epoch(&scalar, basis),
+            basis,
+            originals(8, basis),
+            original_mixer,
+            host(320),
+            &merger()
+        )
+        .is_err());
     assert_eq!(state(&scalar), scalar_before);
 }
 
@@ -491,18 +481,16 @@ fn torn_wrong_epoch_basis_and_host_native_snapshots_refuse_without_state_changes
         snapshot(8, different, 1, host(300)),
         snapshot(8, basis, 1, point(4, 300)),
     ] {
-        assert!(
-            owner
-                .prepare_coordinate_target_output_epoch(
-                    next,
-                    basis,
-                    [snapshot(8, basis, 0, host(260)), second],
-                    original_mixer,
-                    host(320),
-                    &inputs
-                )
-                .is_err()
-        );
+        assert!(owner
+            .prepare_coordinate_target_output_epoch(
+                next,
+                basis,
+                [snapshot(8, basis, 0, host(260)), second],
+                original_mixer,
+                host(320),
+                &inputs
+            )
+            .is_err());
         assert_eq!(state(&owner), before);
     }
     let mut wrong_pair = snapshot(8, basis, 1, host(300)).snapshot();
@@ -558,21 +546,19 @@ fn original_pair_duplicate_regression_future_and_expired_anchors_cannot_prime() 
         (0, 260, 1, 1300, 1301),
         (0, 100, 1, 200, 320),
     ] {
-        assert!(
-            owner
-                .prepare_coordinate_target_output_epoch(
-                    next,
-                    basis,
-                    [
-                        snapshot(8, basis, first_frame, host(first_host)),
-                        snapshot(8, basis, second_frame, host(second_host))
-                    ],
-                    original_mixer,
-                    host(now),
-                    &inputs
-                )
-                .is_err()
-        );
+        assert!(owner
+            .prepare_coordinate_target_output_epoch(
+                next,
+                basis,
+                [
+                    snapshot(8, basis, first_frame, host(first_host)),
+                    snapshot(8, basis, second_frame, host(second_host))
+                ],
+                original_mixer,
+                host(now),
+                &inputs
+            )
+            .is_err());
         assert_eq!(state(&owner), before);
     }
 }
@@ -599,34 +585,30 @@ fn creation_epoch_projection_origin_and_original_pin_are_not_replaced_by_new_fra
             ..next
         },
     ] {
-        assert!(
-            owner
-                .prepare_coordinate_target_output_epoch(
-                    invalid,
-                    basis,
-                    originals(invalid.id, basis),
-                    original_mixer,
-                    host(320),
-                    &inputs
-                )
-                .is_err()
-        );
-        assert_eq!(state(&owner), before);
-    }
-    let changed_origin =
-        TargetFrameBasis::new(point(2, 101), basis.start_time(), basis.sample_rate()).unwrap();
-    assert!(
-        owner
+        assert!(owner
             .prepare_coordinate_target_output_epoch(
-                next_epoch(&owner, changed_origin),
-                changed_origin,
-                originals(8, changed_origin),
+                invalid,
+                basis,
+                originals(invalid.id, basis),
                 original_mixer,
                 host(320),
                 &inputs
             )
-            .is_err()
-    );
+            .is_err());
+        assert_eq!(state(&owner), before);
+    }
+    let changed_origin =
+        TargetFrameBasis::new(point(2, 101), basis.start_time(), basis.sample_rate()).unwrap();
+    assert!(owner
+        .prepare_coordinate_target_output_epoch(
+            next_epoch(&owner, changed_origin),
+            changed_origin,
+            originals(8, changed_origin),
+            original_mixer,
+            host(320),
+            &inputs
+        )
+        .is_err());
     assert_eq!(state(&owner), before);
     let false_creation = OutputFrameBasis::new(basis.origin(), 1500, 8).unwrap();
     assert_eq!(
@@ -635,34 +617,30 @@ fn creation_epoch_projection_origin_and_original_pin_are_not_replaced_by_new_fra
     );
     for wrong_pin in [false_creation, output.mixer().output_frame_basis()] {
         assert_ne!(wrong_pin, original_mixer);
-        assert!(
-            owner
-                .prepare_coordinate_target_output_epoch(
-                    next,
-                    basis,
-                    originals(8, basis),
-                    wrong_pin,
-                    host(320),
-                    &inputs
-                )
-                .is_err()
-        );
-        assert_eq!(state(&owner), before);
-    }
-    owner.practice_mixer_basis = None;
-    let unpinned = state(&owner);
-    assert!(
-        owner
+        assert!(owner
             .prepare_coordinate_target_output_epoch(
                 next,
                 basis,
                 originals(8, basis),
-                original_mixer,
+                wrong_pin,
                 host(320),
                 &inputs
             )
-            .is_err()
-    );
+            .is_err());
+        assert_eq!(state(&owner), before);
+    }
+    owner.practice_mixer_basis = None;
+    let unpinned = state(&owner);
+    assert!(owner
+        .prepare_coordinate_target_output_epoch(
+            next,
+            basis,
+            originals(8, basis),
+            original_mixer,
+            host(320),
+            &inputs
+        )
+        .is_err());
     assert_eq!(state(&owner), unpinned);
 }
 
@@ -714,16 +692,12 @@ fn changed_authority_native_record_basis_pin_or_native_epoch_invalidate_publicat
             _ => unreachable!(),
         }
         let before = state(&owner);
-        assert!(
-            owner
-                .validate_coordinate_target_output_epoch(&token, host(325), &inputs)
-                .is_err()
-        );
-        assert!(
-            owner
-                .commit_coordinate_target_output_epoch(token, host(325), &inputs)
-                .is_err()
-        );
+        assert!(owner
+            .validate_coordinate_target_output_epoch(&token, host(325), &inputs)
+            .is_err());
+        assert!(owner
+            .commit_coordinate_target_output_epoch(token, host(325), &inputs)
+            .is_err());
         assert_eq!(state(&owner), before);
     }
 }
@@ -771,16 +745,12 @@ fn equal_record_with_changed_original_native_frame_metadata_is_still_stale() {
     // record/epoch/origin/basis cannot certify the original authority's frame1.
     owner.validator = different_native;
     let before = state(&owner);
-    assert!(
-        owner
-            .validate_coordinate_target_output_epoch(&token, host(325), &inputs)
-            .is_err()
-    );
-    assert!(
-        owner
-            .commit_coordinate_target_output_epoch(token, host(325), &inputs)
-            .is_err()
-    );
+    assert!(owner
+        .validate_coordinate_target_output_epoch(&token, host(325), &inputs)
+        .is_err());
+    assert!(owner
+        .commit_coordinate_target_output_epoch(token, host(325), &inputs)
+        .is_err());
     assert_eq!(state(&owner), before);
 }
 
@@ -805,16 +775,12 @@ fn changed_merger_pending_and_empty_after_admit_pop_both_refuse_the_original_tok
         }
         let before = state(&owner);
         let before_inputs = format!("{inputs:?}");
-        assert!(
-            owner
-                .validate_coordinate_target_output_epoch(&token, host(325), &inputs)
-                .is_err()
-        );
-        assert!(
-            owner
-                .commit_coordinate_target_output_epoch(token, host(325), &inputs)
-                .is_err()
-        );
+        assert!(owner
+            .validate_coordinate_target_output_epoch(&token, host(325), &inputs)
+            .is_err());
+        assert!(owner
+            .commit_coordinate_target_output_epoch(token, host(325), &inputs)
+            .is_err());
         assert_eq!(state(&owner), before);
         assert_eq!(format!("{inputs:?}"), before_inputs);
     }
@@ -828,26 +794,20 @@ fn prepared_clock_and_once_published_native_epoch_are_rechecked_without_partial_
     let token = prepare(&owner, basis, original_mixer, &inputs);
     let before = state(&owner);
     for now in [host(319), host(1301), point(4, 325)] {
-        assert!(
-            owner
-                .validate_coordinate_target_output_epoch(&token, now, &inputs)
-                .is_err()
-        );
-        assert!(
-            owner
-                .commit_coordinate_target_output_epoch(token.clone(), now, &inputs)
-                .is_err()
-        );
+        assert!(owner
+            .validate_coordinate_target_output_epoch(&token, now, &inputs)
+            .is_err());
+        assert!(owner
+            .commit_coordinate_target_output_epoch(token.clone(), now, &inputs)
+            .is_err());
         assert_eq!(state(&owner), before);
     }
     owner
         .commit_coordinate_target_output_epoch(token.clone(), host(325), &inputs)
         .unwrap();
     let committed = state(&owner);
-    assert!(
-        owner
-            .commit_coordinate_target_output_epoch(token, host(325), &inputs)
-            .is_err()
-    );
+    assert!(owner
+        .commit_coordinate_target_output_epoch(token, host(325), &inputs)
+        .is_err());
     assert_eq!(state(&owner), committed);
 }

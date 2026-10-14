@@ -67,8 +67,8 @@ fn measure_publication_heap_requests<T>(operation: impl FnOnce() -> T) -> (T, us
 }
 
 #[test]
-fn coordinate_target_replacement_successful_held_publication_with_original_registry_makes_no_heap_requests()
- {
+fn coordinate_target_replacement_successful_held_publication_with_original_registry_makes_no_heap_requests(
+) {
     let (allocation, requests) =
         measure_publication_heap_requests(|| Vec::<u64>::with_capacity(std::hint::black_box(128)));
     assert!(requests > 0, "the meter must see a known allocation");

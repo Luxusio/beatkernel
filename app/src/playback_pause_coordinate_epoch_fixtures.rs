@@ -20,8 +20,8 @@ use beatkernel::{
     time::{Duration, ExtrapolationPolicy},
 };
 use beatkernel_platform::audio::{
-    ConvertedNativeOutputState, DeviceFormat, SampleEncoding,
-    presentation::validation::OriginalNativePresentationEvidence,
+    presentation::validation::OriginalNativePresentationEvidence, ConvertedNativeOutputState,
+    DeviceFormat, SampleEncoding,
 };
 
 fn point(domain: u32, ns: i64) -> ClockPoint {
@@ -333,27 +333,20 @@ fn original_mixer_grid_startup_and_frozen_adoption_survive_same_and_mixed_target
         let tuple = telemetry(&r.state, held);
         let first = snapshot(8, basis, 0, 2000);
         let after = snapshot(8, basis, 1, 2001);
-        assert!(
-            candidate
-                .coordinate_target_replacement_observation_ready(first, tuple)
-                .unwrap()
-        );
-        assert!(
-            old.validate_coordinate_target_replacement(&candidate, first, tuple)
-                .is_err()
-        );
-        assert!(
-            candidate
-                .observe_coordinate_target_replacement(first, tuple)
-                .unwrap()
-        );
+        assert!(candidate
+            .coordinate_target_replacement_observation_ready(first, tuple)
+            .unwrap());
+        assert!(old
+            .validate_coordinate_target_replacement(&candidate, first, tuple)
+            .is_err());
+        assert!(candidate
+            .observe_coordinate_target_replacement(first, tuple)
+            .unwrap());
         old.validate_coordinate_target_replacement(&candidate, first, tuple)
             .unwrap();
-        assert!(
-            candidate
-                .observe_coordinate_target_replacement(after, tuple)
-                .unwrap()
-        );
+        assert!(candidate
+            .observe_coordinate_target_replacement(after, tuple)
+            .unwrap());
         old.validate_coordinate_target_replacement(&candidate, after, tuple)
             .unwrap();
         assert_eq!(invariant(&candidate), invariant(&old));
@@ -380,33 +373,25 @@ fn pending_held_suffix_keeps_original_interpretation_and_cannot_certify_fresh_ge
     assert_eq!(r.state.pending_samples(), original_suffix);
     assert_eq!(r.state.pending_report(), Some(old_held));
     assert_eq!(r.state.admitted_frames(), 2);
-    assert!(
-        !candidate
-            .coordinate_target_replacement_observation_ready(
-                snapshot(8, basis, 6, 2000),
-                telemetry(&r.state, old_held)
-            )
-            .unwrap()
-    );
+    assert!(!candidate
+        .coordinate_target_replacement_observation_ready(
+            snapshot(8, basis, 6, 2000),
+            telemetry(&r.state, old_held)
+        )
+        .unwrap());
     r.state.admit(6).unwrap();
     let fresh = r.state.render_held_pending(4).unwrap();
     let tuple = telemetry(&r.state, fresh);
     assert_eq!(fresh.target_start_time, old_held.target_end_time);
-    assert!(
-        !candidate
-            .coordinate_target_replacement_observation_ready(snapshot(8, basis, 5, 2000), tuple)
-            .unwrap()
-    );
-    assert!(
-        candidate
-            .coordinate_target_replacement_observation_ready(snapshot(8, basis, 6, 2000), tuple)
-            .unwrap()
-    );
-    assert!(
-        candidate
-            .coordinate_target_replacement_observation_ready(snapshot(8, basis, 7, 2001), tuple)
-            .unwrap()
-    );
+    assert!(!candidate
+        .coordinate_target_replacement_observation_ready(snapshot(8, basis, 5, 2000), tuple)
+        .unwrap());
+    assert!(candidate
+        .coordinate_target_replacement_observation_ready(snapshot(8, basis, 6, 2000), tuple)
+        .unwrap());
+    assert!(candidate
+        .coordinate_target_replacement_observation_ready(snapshot(8, basis, 7, 2001), tuple)
+        .unwrap());
     assert_eq!(
         r.state.converter_owner().source_position(),
         original_position
@@ -424,33 +409,28 @@ fn incompatible_pending_rate_and_active_tail_refuse_without_changing_pause_or_su
     let basis = planned(&r.state, 44_100);
     let mut candidate = r.pause.clone();
     let before = candidate.clone();
-    assert!(
-        candidate
-            .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
-            .is_err()
-    );
+    assert!(candidate
+        .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
+        .is_err());
     assert_eq!(candidate, before);
     assert_eq!(r.state.pending_report(), Some(held));
     assert_eq!(r.state.pending_samples(), suffix);
-    assert!(
-        r.state
-            .validate_reconfigure(
-                DeviceFormat::new(44_100, 1, SampleEncoding::Float32, None).unwrap(),
-                &ChannelMatrix::default_mix(1, 1).unwrap(),
-                128
-            )
-            .is_err()
-    );
+    assert!(r
+        .state
+        .validate_reconfigure(
+            DeviceFormat::new(44_100, 1, SampleEncoding::Float32, None).unwrap(),
+            &ChannelMatrix::default_mix(1, 1).unwrap(),
+            128
+        )
+        .is_err());
     r.state.admit(5).unwrap();
     let active = r.state.render_pending(8).unwrap();
     assert!(active.source.unwrap().paused);
     assert_eq!(active.state, ConvertedOutputState::Active);
     let basis = r.state.target_frame_basis();
-    assert!(
-        candidate
-            .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
-            .is_err()
-    );
+    assert!(candidate
+        .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
+        .is_err());
     assert_eq!(candidate, before);
     assert_eq!(r.state.pending_report(), Some(active));
 }
@@ -484,11 +464,9 @@ fn actual_paused_source_pull_progresses_without_changing_frozen_playback_or_hist
         .unwrap();
     let held = r.state.render_held_pending(4).unwrap();
     let native = snapshot(8, basis, 1, 2000);
-    assert!(
-        candidate
-            .observe_coordinate_target_replacement(native, telemetry(&r.state, held))
-            .unwrap()
-    );
+    assert!(candidate
+        .observe_coordinate_target_replacement(native, telemetry(&r.state, held))
+        .unwrap());
     r.pause
         .validate_coordinate_target_replacement(&candidate, native, telemetry(&r.state, held))
         .unwrap();
@@ -504,17 +482,15 @@ fn old_coordinate_epoch_adoption_tokens_and_host_brackets_do_not_authorize_new_o
         .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
         .unwrap();
     let before = candidate.clone();
-    assert!(
-        candidate
-            .commit_coordinate_adoption(
-                r.old_adoption.clone(),
-                &r.authority,
-                &r.old_cutoff,
-                host(1000),
-                &r.inputs
-            )
-            .is_err()
-    );
+    assert!(candidate
+        .commit_coordinate_adoption(
+            r.old_adoption.clone(),
+            &r.authority,
+            &r.old_cutoff,
+            host(1000),
+            &r.inputs
+        )
+        .is_err());
     assert_eq!(candidate, before);
     assert!(candidate.request_coordinate(false, &r.authority).is_err());
     assert_eq!(candidate, before);
@@ -529,25 +505,20 @@ fn old_coordinate_epoch_adoption_tokens_and_host_brackets_do_not_authorize_new_o
             candidate.min_host.unwrap().timestamp.as_nanos() - 1,
         ),
     ] {
-        assert!(
-            candidate
-                .observe_coordinate_target_replacement(native, tuple)
-                .is_err()
-        );
+        assert!(candidate
+            .observe_coordinate_target_replacement(native, tuple)
+            .is_err());
         assert_eq!(candidate, before);
     }
     let accepted = snapshot(8, basis, 1, 2000);
-    assert!(
-        candidate
-            .observe_coordinate_target_replacement(accepted, tuple)
-            .unwrap()
-    );
+    assert!(candidate
+        .observe_coordinate_target_replacement(accepted, tuple)
+        .unwrap());
     let after = candidate.clone();
-    assert!(
-        r.pause
-            .validate_coordinate_target_replacement(&candidate, snapshot(8, basis, 2, 2001), tuple)
-            .is_err()
-    );
+    assert!(r
+        .pause
+        .validate_coordinate_target_replacement(&candidate, snapshot(8, basis, 2, 2001), tuple)
+        .is_err());
     assert_eq!(candidate, after);
     r.pause
         .validate_coordinate_target_replacement(&candidate, accepted, tuple)
@@ -560,11 +531,9 @@ fn public_scalar_rebind_observation_and_publication_guards_remain_closed_to_coor
     let basis = r.state.target_frame_basis();
     let mut candidate = r.pause.clone();
     let before = candidate.clone();
-    assert!(
-        candidate
-            .rebind_target_output_with_basis(8, &r.state, basis)
-            .is_err()
-    );
+    assert!(candidate
+        .rebind_target_output_with_basis(8, &r.state, basis)
+        .is_err());
     assert!(candidate.rebind_output(8, r.state.mixer()).is_err());
     assert_eq!(candidate, before);
     candidate
@@ -577,23 +546,20 @@ fn public_scalar_rebind_observation_and_publication_guards_remain_closed_to_coor
         _ => unreachable!(),
     };
     let before = candidate.clone();
-    assert!(
-        candidate
-            .observe_target(
-                8,
-                basis,
-                r.state.boundaries(),
-                r.state.last_real_source_report(),
-                pair
-            )
-            .is_err()
-    );
+    assert!(candidate
+        .observe_target(
+            8,
+            basis,
+            r.state.boundaries(),
+            r.state.last_real_source_report(),
+            pair
+        )
+        .is_err());
     assert_eq!(candidate, before);
-    assert!(
-        r.pause
-            .validate_target_replacement(&candidate, basis, held, pair)
-            .is_err()
-    );
+    assert!(r
+        .pause
+        .validate_target_replacement(&candidate, basis, held, pair)
+        .is_err());
     assert_eq!(candidate, before);
 }
 
@@ -666,31 +632,23 @@ fn malformed_or_torn_held_telemetry_is_rejected_without_accepting_a_native_coord
         converted: None,
         ..original
     };
-    assert!(
-        !candidate
-            .coordinate_target_replacement_observation_ready(native, absent)
-            .unwrap()
-    );
-    assert!(
-        !candidate
-            .observe_coordinate_target_replacement(native, absent)
-            .unwrap()
-    );
+    assert!(!candidate
+        .coordinate_target_replacement_observation_ready(native, absent)
+        .unwrap());
+    assert!(!candidate
+        .observe_coordinate_target_replacement(native, absent)
+        .unwrap());
     assert_eq!(candidate, before);
     let absent_source = TargetOutputTelemetry {
         source: None,
         ..original
     };
-    assert!(
-        !candidate
-            .coordinate_target_replacement_observation_ready(native, absent_source)
-            .unwrap()
-    );
-    assert!(
-        !candidate
-            .observe_coordinate_target_replacement(native, absent_source)
-            .unwrap()
-    );
+    assert!(!candidate
+        .coordinate_target_replacement_observation_ready(native, absent_source)
+        .unwrap());
+    assert!(!candidate
+        .observe_coordinate_target_replacement(native, absent_source)
+        .unwrap());
     assert_eq!(candidate, before);
     let empty = TargetOutputTelemetry {
         converted: Some(ConvertedRenderReport {
@@ -699,22 +657,16 @@ fn malformed_or_torn_held_telemetry_is_rejected_without_accepting_a_native_coord
         }),
         ..original
     };
-    assert!(
-        !candidate
-            .coordinate_target_replacement_observation_ready(native, empty)
-            .unwrap()
-    );
-    assert!(
-        !candidate
-            .observe_coordinate_target_replacement(native, empty)
-            .unwrap()
-    );
+    assert!(!candidate
+        .coordinate_target_replacement_observation_ready(native, empty)
+        .unwrap());
+    assert!(!candidate
+        .observe_coordinate_target_replacement(native, empty)
+        .unwrap());
     assert_eq!(candidate, before);
-    assert!(
-        candidate
-            .observe_coordinate_target_replacement(native, original)
-            .unwrap()
-    );
+    assert!(candidate
+        .observe_coordinate_target_replacement(native, original)
+        .unwrap());
     r.pause
         .validate_coordinate_target_replacement(&candidate, native, original)
         .unwrap();
@@ -736,48 +688,39 @@ fn coordinate_kind_basis_epoch_and_native_host_progress_stay_bound_to_one_public
         snapshot(7, basis, 1, 2000),
         snapshot(8, wrong_basis, 1, 2000),
     ] {
-        assert!(
-            candidate
-                .observe_coordinate_target_replacement(invalid, tuple)
-                .is_err()
-        );
+        assert!(candidate
+            .observe_coordinate_target_replacement(invalid, tuple)
+            .is_err());
         assert_eq!(candidate, before);
     }
     // Target native coordinates are original stream frames, never a counter
     // relabelled merely because its rounded point is the same.
-    assert!(
-        CoordinateTargetNativeAudioSnapshot::new(
-            snapshot(8, basis, 1, 2000).snapshot(),
-            NativeOutputCoordinate::Counter {
-                position: 1,
-                frequency: 48_000
-            }
-        )
-        .is_err()
-    );
+    assert!(CoordinateTargetNativeAudioSnapshot::new(
+        snapshot(8, basis, 1, 2000).snapshot(),
+        NativeOutputCoordinate::Counter {
+            position: 1,
+            frequency: 48_000
+        }
+    )
+    .is_err());
     let native = snapshot(8, basis, 2, 2000);
-    assert!(
-        candidate
-            .observe_coordinate_target_replacement(native, tuple)
-            .unwrap()
-    );
+    assert!(candidate
+        .observe_coordinate_target_replacement(native, tuple)
+        .unwrap());
     let accepted = candidate.clone();
     for invalid in [snapshot(8, basis, 1, 2001), snapshot(8, basis, 3, 1999)] {
-        assert!(
-            candidate
-                .observe_coordinate_target_replacement(invalid, tuple)
-                .is_err()
-        );
+        assert!(candidate
+            .observe_coordinate_target_replacement(invalid, tuple)
+            .is_err());
         assert_eq!(candidate, accepted);
     }
     r.pause
         .validate_coordinate_target_replacement(&candidate, native, tuple)
         .unwrap();
-    assert!(
-        r.pause
-            .validate_coordinate_target_replacement(&candidate, snapshot(8, basis, 3, 2001), tuple)
-            .is_err()
-    );
+    assert!(r
+        .pause
+        .validate_coordinate_target_replacement(&candidate, snapshot(8, basis, 3, 2001), tuple)
+        .is_err());
     assert_eq!(candidate, accepted);
 }
 
@@ -788,20 +731,16 @@ fn cold_rebind_rejects_unacknowledged_resume_and_changed_source_identity_atomica
     let mut pending = r.old_adoption.prior.clone();
     let before = pending.clone();
     assert_eq!(pending.phase(), PausePhase::Pausing);
-    assert!(
-        pending
-            .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
-            .is_err()
-    );
+    assert!(pending
+        .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
+        .is_err());
     assert_eq!(pending, before);
     let mut resuming = r.pause.clone();
     assert!(resuming.request_coordinate(false, &r.authority).unwrap());
     let before = resuming.clone();
-    assert!(
-        resuming
-            .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
-            .is_err()
-    );
+    assert!(resuming
+        .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
+        .is_err());
     assert_eq!(resuming, before);
     for mutation in 0..7 {
         let mut pause = r.pause.clone();
@@ -837,11 +776,9 @@ fn cold_rebind_rejects_unacknowledged_resume_and_changed_source_identity_atomica
     assert!(!r.state.mixer().pause_requested());
     let mut candidate = r.pause.clone();
     let before = candidate.clone();
-    assert!(
-        candidate
-            .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
-            .is_err()
-    );
+    assert!(candidate
+        .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
+        .is_err());
     assert_eq!(candidate, before);
 }
 
@@ -856,11 +793,9 @@ fn changed_frozen_gap_startup_binding_and_prior_pause_cannot_publish_ready_candi
     let held = r.state.render_held_pending(4).unwrap();
     let tuple = telemetry(&r.state, held);
     let native = snapshot(8, basis, 1, 2000);
-    assert!(
-        candidate
-            .observe_coordinate_target_replacement(native, tuple)
-            .unwrap()
-    );
+    assert!(candidate
+        .observe_coordinate_target_replacement(native, tuple)
+        .unwrap());
     r.pause
         .validate_coordinate_target_replacement(&candidate, native, tuple)
         .unwrap();
@@ -896,11 +831,9 @@ fn changed_frozen_gap_startup_binding_and_prior_pause_cannot_publish_ready_candi
     let mut changed_old = r.pause.clone();
     changed_old.target.as_mut().unwrap().paused_at = Some(held.target_start_time);
     let before = changed_old.clone();
-    assert!(
-        changed_old
-            .validate_coordinate_target_replacement(&candidate, native, tuple)
-            .is_err()
-    );
+    assert!(changed_old
+        .validate_coordinate_target_replacement(&candidate, native, tuple)
+        .is_err());
     assert_eq!(changed_old, before);
     assert_eq!(invariant(&candidate), invariant(&r.pause));
 }
@@ -943,40 +876,28 @@ fn flat_nanosecond_points_still_compare_original_target_frames_against_exact_flo
         basis.point_at_stream_frame(2).unwrap()
     );
     let original = candidate.clone();
-    assert!(
-        !candidate
-            .coordinate_target_replacement_observation_ready(before, tuple)
-            .unwrap()
-    );
-    assert!(
-        !candidate
-            .observe_coordinate_target_replacement(before, tuple)
-            .unwrap()
-    );
+    assert!(!candidate
+        .coordinate_target_replacement_observation_ready(before, tuple)
+        .unwrap());
+    assert!(!candidate
+        .observe_coordinate_target_replacement(before, tuple)
+        .unwrap());
     assert_eq!(candidate, original);
-    assert!(
-        candidate
-            .coordinate_target_replacement_observation_ready(equal, tuple)
-            .unwrap()
-    );
-    assert!(
-        candidate
-            .observe_coordinate_target_replacement(equal, tuple)
-            .unwrap()
-    );
-    assert!(
-        candidate
-            .observe_coordinate_target_replacement(after, tuple)
-            .unwrap()
-    );
+    assert!(candidate
+        .coordinate_target_replacement_observation_ready(equal, tuple)
+        .unwrap());
+    assert!(candidate
+        .observe_coordinate_target_replacement(equal, tuple)
+        .unwrap());
+    assert!(candidate
+        .observe_coordinate_target_replacement(after, tuple)
+        .unwrap());
     assert_eq!(candidate.target.unwrap().generation_floor, Some(floor));
     assert_eq!(candidate.frozen, r.pause.frozen);
     let accepted = candidate.clone();
-    assert!(
-        candidate
-            .observe_coordinate_target_replacement(equal, tuple)
-            .is_err()
-    );
+    assert!(candidate
+        .observe_coordinate_target_replacement(equal, tuple)
+        .is_err());
     assert_eq!(candidate, accepted);
 }
 
@@ -1083,11 +1004,9 @@ fn actual_mixed_rate_resume_and_repause_preserve_exact_nonzero_gap_across_two_re
         let tuple = telemetry(&r.state, held);
         let start_host = 2000 + index as i64 * 3000;
         let native = snapshot(epoch, basis, 1, start_host + 100);
-        assert!(
-            candidate
-                .observe_coordinate_target_replacement(native, tuple)
-                .unwrap()
-        );
+        assert!(candidate
+            .observe_coordinate_target_replacement(native, tuple)
+            .unwrap());
         old.validate_coordinate_target_replacement(&candidate, native, tuple)
             .unwrap();
         r.state.admit(4).unwrap();
@@ -1159,24 +1078,20 @@ fn actual_mixed_rate_resume_and_repause_preserve_exact_nonzero_gap_across_two_re
 #[test]
 fn source_history_is_required_from_cold_enabling_and_cannot_be_reinvented_at_current_cursor() {
     let no_history = rig_with_history(24_000, None, false);
-    assert!(
-        no_history
-            .state
-            .converter_owner()
-            .source_playback_history()
-            .is_none()
-    );
+    assert!(no_history
+        .state
+        .converter_owner()
+        .source_playback_history()
+        .is_none());
     let mut candidate = no_history.pause.clone();
     let before = candidate.clone();
-    assert!(
-        candidate
-            .rebind_coordinate_target_output_with_basis(
-                8,
-                &no_history.state,
-                no_history.state.target_frame_basis()
-            )
-            .is_err()
-    );
+    assert!(candidate
+        .rebind_coordinate_target_output_with_basis(
+            8,
+            &no_history.state,
+            no_history.state.target_frame_basis()
+        )
+        .is_err());
     assert_eq!(candidate, before);
     let r = rig(24_000, None);
     let basis = r.state.target_frame_basis();
@@ -1195,11 +1110,9 @@ fn source_history_is_required_from_cold_enabling_and_cannot_be_reinvented_at_cur
     )
     .unwrap();
     let before = candidate.clone();
-    assert!(
-        candidate
-            .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
-            .is_err()
-    );
+    assert!(candidate
+        .rebind_coordinate_target_output_with_basis(8, &r.state, basis)
+        .is_err());
     assert_eq!(candidate, before);
     assert_eq!(
         r.state

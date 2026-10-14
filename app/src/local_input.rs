@@ -610,7 +610,9 @@ impl InputMerger {
         frontier: ClockPoint,
     ) -> Result<Option<(Option<Position2>, Option<u32>)>, MergeError> {
         self.validate_frontier(frontier)?;
-        Ok(self.pending.peek()
+        Ok(self
+            .pending
+            .peek()
             .filter(|item| item.key.0 <= frontier.timestamp)
             .map(|item| (item.position, item.page)))
     }

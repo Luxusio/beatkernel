@@ -319,9 +319,6 @@ impl Output {
     pub(crate) fn pump_held(&self) -> bool {
         self.held
     }
-    pub(crate) fn pump_presented(&self) -> u64 {
-        self.presented
-    }
     pub(crate) fn format(&self) -> DeviceFormat {
         self.state.as_ref().unwrap().format()
     }
