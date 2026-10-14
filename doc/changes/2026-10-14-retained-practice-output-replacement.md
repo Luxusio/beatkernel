@@ -33,8 +33,9 @@ through PracticePlayback.end_intent. Existing scalar/finite paths remain separat
 
 Implementation checkpoints: `3ecd1bbb` authority, `9e224d61` native association,
 `df70e2e5` pause, `1463ccfa` conditional worker retirement, `003e938e` controller,
-`ba1398e1` Owner/UI and `6c9ce7c2` connected pumps. Independent final review and QA
-remain required; these are bounded development results.
+`ba1398e1` Owner/UI, `6c9ce7c2` connected pumps and `095a1eb3` history-race fix.
+The independent acceptance below distinguishes completed software checks from
+the remaining native-device acceptance.
 
 | Check | Actual result | Scope |
 | --- | --- | --- |
@@ -42,7 +43,7 @@ remain required; these are bounded development results.
 | Owner/UI request and observation filter | 25 PASS, including 8 history regressions | Capability, correlation and retirement-observation/history races |
 | Connected practice filter | 3 PASS | Real solo, two-member RuntimeGroup, actual Owner history port and transition receipt states |
 | No-default app library | 2682 PASS, 6 ignored | Full portable app regression after history-race fix |
-| Desktop app library | 3129 PASS, 8 ignored | Pre-remediation desktop regression at6c9ce7c2; final QA remains |
+| Desktop/WebTransport app library | 3166 PASS, 8 ignored | Independent final CLI QA at095a1eb3 |
 | Desktop binaries | All PASS, 17 ignored | Individual counts 393/53/29/40/3/7/59 |
 | Desktop all-bin check | PASS | Actual host type checking |
 | External publication allocation regression | 1 PASS | Actual prepared-token clone allocates; held commit requests zero new allocations/reallocations |
@@ -94,7 +95,46 @@ replacement, resume, loop/scrub, PCM/capture/member/attempt checks.
 `review-history-full-app.log` passes2682 cases with6 ignored and
 `review-history-allocation.log` passes the actual zero-allocation publication
 regression. All38 scoped Rust format checks and scoped diff checks pass.
-WBS07.09.03/07.08.06 return to V; final independent re-review and QA remain.
+WBS07.09.03/07.08.06 return to V; the acceptance below records remaining gates.
+
+## Independent acceptance at095a1eb3
+
+The fresh full DEEP review returned PASS after the fix. Independent CLI QA then
+returned PASS: desktop/WebTransport lib3166/0/8ignored; bins584/0/17ignored
+(393/53/29/40/3/7/59); platform387/0/2ignored; external allocation1 PASS; browser
+WASM library check, scoped38-file format and diff checks all exit0. The opted
+ALSA-null retirement case also passes1; it proves software lifecycle only.
+These commands overlap and are not added as unique tests.
+
+Actual public CLI help and invalid paths pass. A3s/48kHz mono offline render
+produced144000 finite nonzero frames/576000bytes; duplicate output, zero duration
+and missing native input fail explicitly. Windows/macOS no-default app-library
+Rust typing exits0 using cached stub compilers, without foreign linking or
+execution. Clippy exits0 with non-denied app348/platform109/BMS5/kernel2 warnings;
+no strict lint or warning-free workspace claim is made. Initial cached artifact
+permission failures and exact narrow continuations remain in the CLI logs;
+no file ownership or permission changes were made.
+
+Independent desktop QA reached interactive-desktop on the existing :99 display:
+real window, selection, keyboard navigation, resize, Settings44.1kHz edit/Apply/
+reopen and audio picker were exercised. Solo and explicit two-member local Start
+both reached actual backend errors before play: missing native input and ALSA
+default card/PCM respectively. The required acknowledged retained pause, actual
+Output capability and same-capture resume were unavailable. Desktop returned
+BLOCKED_ENV, not PASS; both owned GUI processes exited cleanly and the external
+display was preserved.
+
+A diagnostic concurrent launch through /proc/PID/exe exited139 before rendering;
+it did not reproduce using the ordinarily rebuilt executable. The unsupported
+launch-method anomaly is retained in the desktop transcript without claiming a
+normal launch regression or using it as successful evidence.
+
+Reproducible commands/tests remain in source. Full transcripts/screenshots and
+first-failure logs are under ignored qa-cli-095a1eb3/ and qa-desktop-095a1eb3/
+within the same work directory. Runtime verification also reports missing
+hook-owned completions; actual review/CLI finals are NON-ATTESTING. They are not
+a close authorization, and the actual desktop environment blocker takes
+precedence over an attestation-only park. No lens is rerun solely for receipts.
 
 ## Known ceiling and remaining scope
 
