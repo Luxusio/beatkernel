@@ -109,6 +109,14 @@ fn assert_packing(format: DeviceFormat, input: &[f32], expected: &[u8]) {
 }
 
 #[test]
+fn converted_boundary_facts_public_paths_have_the_same_type() {
+    let core = beatkernel::audio::ConvertedBoundaryFacts::default();
+    let platform: beatkernel_platform::audio::ConvertedBoundaryFacts = core;
+    let round_trip: beatkernel::audio::ConvertedBoundaryFacts = platform;
+    assert_eq!(round_trip, core);
+}
+
+#[test]
 fn signed_pcm_packing_clamps_and_rounds_ties_away_from_zero() {
     assert_packing(
         pcm(16, 16),
