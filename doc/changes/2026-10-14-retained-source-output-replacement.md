@@ -6,6 +6,20 @@
 [WBS 07.08.07](../kernel/REQ__bms-player-work-breakdown.md)을 따른다.
 현재 전체 연결의 완료나 독립 최종 검증을 선언하지 않는다.
 
+독립 DEEP 정식 리뷰는 `a7869f70`에서 FIX_NOW3 FAIL을 반환했다. 양수 Duration
+용량 초과의 cold UI 거절 누락, Exact fractional Duration의 retirement 이전
+검증 누락, complete 초기화 실패의 MMCSS teardown 오류 유실이다. 실제 기존 API
+재현2개는 48kHz의 1ns buffer/period를 승인해 실패했다. 공유 sizing 검증과
+초기화 정리 경계를 ef72c8d2·154704a4로 수정해 실제 회귀를 통과했다. 새 정식
+리뷰·CLI/native QA는 남는다.
+아래 E62 개발 검사 통과를 이 독립 리뷰의 PASS로 인용하지 않는다. E64의 실제
+수정 후 검사 결과는 app2774/0/ignored6, platform415/0/ignored2, sizing22,
+worker 외부 binary81, Source UI9, Windows bin72 PASS다. worker 외부 binary는
+중복 source-inclusion fixture를 포함하며 다른 suite와 합산하지 않는다. 새 native
+MMCSS5개/18조건은 Windows platform/app lib/tests Rust typing만 통과했다. actual
+Windows 실행과 구분한다. scoped48 Rust format/diff와 경고를 허용한 lib Clippy도
+통과했다. 수정 전 a7869f70의 별도 workspace는5977 PASS/실패0/ignored38이다.
+
 ## 현재 구현과 커밋
 
 - `f4c00398`: NativeOutputState의 실제 pending report 시작점까지 Source 이력을

@@ -7,6 +7,17 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-14 Source E64: 리뷰3건을 ef72c8d2·154704a4로 수정했다. actual RED2→GREEN,
+platform415·sizing22·worker external81·Source UI9·Windows bin72·전체 app2774를
+통과했다. Windows native5개/18조건은 새 형 검사만 통과했으며 미실행이다. 현재
+Source12V·3N이며 새 독립 DEEP 리뷰/QA 전 완료로 계산하지 않는다. WBS D97/220과
+원래91/193은 유지한다. 아래 E63은 수정 전 실패 기록이다.
+
+2026-10-14 Source E63: 독립 DEEP 정식 리뷰에서 cold Duration 거절/Exact 표현
+검증과 setup MMCSS 정리 오류 보존3건을 확인해 worker/native/Windows consumer를
+W로 되돌렸다. 현재 Source9V·3W·3N이며 수정과 독립 재검토 전 완료로 계산하지
+않는다. 아래 E62 검사 수는 그 이전의 실제 개발 근거다.
+
 2026-10-14 Source 후속: 실제 WASAPI는 SourceCounter임을 확인하고 portable
 Frame/Counter 기초와 shared WASAPI complete owner 경로의 계획 검토를 마쳤다.
 원래07.08.07을15개 실행 단위로 나눴다. E61의 실제 연결에서 startup origin

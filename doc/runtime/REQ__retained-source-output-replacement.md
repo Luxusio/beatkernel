@@ -73,6 +73,13 @@ and submitted<=pulled provenance.
 ## Sole-worker decision, admission and failure
 
 Validate immutable settings/capacity/matrix before live retirement. The sole
+request sizing check must reject oversized positive durations and mathematically
+nonintegral Exact PCM frame durations before a ticket or native effect. Preserve
+explicitly authorized rounding and leave unknown native defaults/bounds unknown.
+The retained UI validates its actual resolved request before Owner scheduling;
+invalid drafts receive one correlated refusal and preserve the live owner,
+capability and epoch. Genuine native IO failures keep their original semantics.
+The sole
 worker evaluates actual pending state before history/render/native acquire,
 encode/release or clock-only timeout work. Same interpretation permits only
 empty or proven paused-zero suffix; changed interpretation requires empty PCM.
@@ -91,6 +98,10 @@ and cleanup, quarantined against ordinary reconfigure/open/publication and
 explicit Retry. Never replay uncertain PCM. No resync policy is invented;
 technical stop is visible. Preserve original phase/code plus release, Stop,
 start cleanup, join and recovery failures, not a single overwritten HRESULT.
+Complete cold setup also records MMCSS teardown failure on every exit after
+registration, including priority, preparation, prefill and pre-run publication
+failure. Keep the original operation failure and complete recovered owner; a
+Result-discarding resource destructor cannot provide this diagnostic guarantee.
 
 Source observation/query/history requests probe before old IO and re-probe only
 raw backend failures, deferring only confirmed authorization. Genuine backend,
