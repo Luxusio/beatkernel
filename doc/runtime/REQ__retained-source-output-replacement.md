@@ -26,6 +26,9 @@ Retained NativeOutputState owns Mixer, remix, generated PCM/report, admitted
 prefix and history through open/start/stop/join/recovery. Never flatten it to
 Mixer. New native basis is its first unsent frame, not the pulled Mixer frontier.
 Keep the original immutable creation pin separately from that advanced basis.
+Prepare initial Source history from the actual native buffer geometry before
+Ready prefill through a controlled cold method on that owner. Preserve existing
+history and pending PCM; do not expose unrestricted mutable Mixer access.
 
 ## Exact native evidence and publication
 

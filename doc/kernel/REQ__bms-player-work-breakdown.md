@@ -337,6 +337,19 @@ native admission의 retry 격리·등록/형별 검증 경계를 확정했다. �
 N으로 추적한다. 분모는206에서220으로14개 늘고 완료97은 유지된다. 원래 상위
 요구 집계91/193과 모든 Source/native/browser/성능/출시 범위는 변하지 않는다.
 
+E57: Source 기초를 기능별 `f4c00398`(state/history), `9e11757d`(port/remix),
+`835cc813`(native epoch/pause)로 커밋했다. 실제 portable app lib는2711 PASS/
+실패0·ignored6이며 Source port/remix10·native14·pause5 및 exact authority 회귀를
+포함한다. platform state56·Source history30과 browser-only WASM check도 통과했다.
+새 portable WASAPI production step은14 PASS, 별도 System allocator binary는
+실제 alloc/realloc/dealloc 보정 후 success/refusal/authorized/release-failure/
+quarantine retry 경로의 heap 호출0회로1 PASS다. 세부 필터는 전체 suite에 더하지
+않는다. 초기 fixture의 byte 예산·지원 PCM Hz·constructor 경계·mut 설정 오류는
+실패 로그를 보존하고 수정 후 재실행했다. Source 기초5개는 V이며 Windows COM
+연결과 controller는 W다. 독립 최종 review/QA·Windows 실제 실행·전체 Source
+적용은 아직 증명되지 않았다. 재현과 한계는
+[Source 변경 기록](../changes/2026-10-14-retained-source-output-replacement.md)을 따른다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -479,13 +492,13 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
   - [ ] **BK-WBS-07.08.05** retained Target controller의 open/start/poll/prime/commit을 새 coordinate authority·pause·입력 merger와 원자적으로 연결한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.08.01, BK-WBS-07.08.02, BK-WBS-07.08.03, BK-WBS-07.08.04; 필요 근거/다음=E51 controller18·실제 publication 할당0회1 및 E55 독립 review/CLI PASS; 실제 native desktop acceptance와 완료 기록 gate는 남음.
   - [ ] **BK-WBS-07.08.06** 새 retained Target 교체를 실제 solo/cohort 공통 pump에 연결하고 acknowledged pause·입력 drain·publication·resume을 검증한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-07.09.03; 필요 근거/다음=E54 실제 Owner history 경합 연결3 및 E55 독립 review/CLI PASS; 실제 GUI solo/local 시작은 장치 부재로 BLOCKED_ENV이며 native pause/Output/resume/capture와 완료 기록은 남음.
   - [ ] **BK-WBS-07.08.07** direct SourceFrame/SourceCounter retained 교체의 전체 controller·Owner/UI·공통 pump 및 history/pin 수명을 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E56의 Source child 착수; 모든 하위와 원래 WASAPI/ASIO/CoreAudio 범위를 충족해야 완료. Target 검사를 Source 완료로 확장하지 않는다.
-    - [ ] **BK-WBS-07.08.07.01** SourceFrame/Counter native epoch·원래 creation pin·exact authority·merger 원자 publication 기초를 연결한다. — 상태=W(구현·검사작성중); 선행=-; 필요 근거/다음=Source AC003, E56 설계; Frame/Counter·주파수 변경·원본 관측·stale 상태·정확한 단위 회귀 필요.
-    - [ ] **BK-WBS-07.08.07.02** Source coordinate pause의 cold proof·새 native descriptor·frozen/startup/history/gap 보존을 연결한다. — 상태=W(구현·검사작성중); 선행=-; 필요 근거/다음=Source AC004; 실제 held/native 제출 근거·반복 rebind·resume/repause 회귀 필요.
-    - [ ] **BK-WBS-07.08.07.03** NativeOutputState의 pending PCM/history pin과 불확실 admission quarantine을 보존한다. — 상태=W(구현·검사작성중); 선행=-; 필요 근거/다음=Source AC005; 기존 Mixer helper 호환·pending/practice clamp·원본 보존·명시 retry 거절 검사 필요.
-    - [ ] **BK-WBS-07.08.07.04** 실제 portable WASAPI worker step의 conditional slot·lease·clock-only·실패·무할당 경계를 검사한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.03; 필요 근거/다음=Source AC006; 실제 production 함수와 sole-worker 승인/취소 및 불확실 release 후 native 재실행 금지 필요.
-    - [ ] **BK-WBS-07.08.07.05** WASAPI shared의 complete Source open/start/Stop/join/recover와 실제 Counter descriptor를 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.04, BK-WBS-07.08.07.06; 필요 근거/다음=Source AC007; Legacy 회수 유지·완전 상태·원본/cleanup/join 오류와 eligible Windows 실행 필요.
-    - [ ] **BK-WBS-07.08.07.06** Source conditional port·opaque ticket·created descriptor와 static remix forwarding을 구현한다. — 상태=W(구현·검사작성중); 선행=-; 필요 근거/다음=Source AC002; 기존 default/Target API 및 원본 packet/오류·소유권 회귀 필요.
-    - [ ] **BK-WBS-07.08.07.07** 기존 replacement lifecycle에 Source controller·conditional ownership·borrowed atomic commit을 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.01, BK-WBS-07.08.07.02, BK-WBS-07.08.07.03, BK-WBS-07.08.07.06; 필요 근거/다음=Source AC008; 두 fresh 관측·실패/거절/취소/회수·실제 commit 할당 검사 필요.
+    - [ ] **BK-WBS-07.08.07.01** SourceFrame/Counter native epoch·원래 creation pin·exact authority·merger 원자 publication 기초를 연결한다. — 상태=V(구현·개발검사통과); 선행=-; 필요 근거/다음=Source AC003/E57의 native14와 authority·전체 app2711 회귀 PASS; 독립 최종 검토 및 controller 연동 확인 필요.
+    - [ ] **BK-WBS-07.08.07.02** Source coordinate pause의 cold proof·새 native descriptor·frozen/startup/history/gap 보존을 연결한다. — 상태=V(구현·개발검사통과); 선행=-; 필요 근거/다음=Source AC004/E57의 실제 state/history·두 좌표·새 Counter frequency·반복 resume/repause5 PASS; 독립 검토와 실제 연동 필요.
+    - [ ] **BK-WBS-07.08.07.03** NativeOutputState의 pending PCM/history pin과 불확실 admission quarantine을 보존한다. — 상태=V(구현·개발검사통과); 선행=-; 필요 근거/다음=Source AC005/E57의 state56/history30 PASS와 pending report 시작점·practice clamp·quarantine 명시 준비 retry 검사; native open/Retry 연결과 독립 검토 필요.
+    - [ ] **BK-WBS-07.08.07.04** 실제 portable WASAPI worker step의 conditional slot·lease·clock-only·실패·무할당 경계를 검사한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.03; 필요 근거/다음=Source AC006/E57의 실제 함수14·외부 heap 보정1 PASS; COM adapter 연결·독립 최종 검토 필요.
+    - [ ] **BK-WBS-07.08.07.05** WASAPI shared의 complete Source open/start/Stop/join/recover와 실제 Counter descriptor를 연결한다. — 상태=W(구현·검사작성중); 선행=BK-WBS-07.08.07.04, BK-WBS-07.08.07.06; 필요 근거/다음=Source AC007의 source/test 병렬 레인; Legacy 회수·controlled cold history·전체 오류·형 검사와 eligible Windows 실행 필요.
+    - [ ] **BK-WBS-07.08.07.06** Source conditional port·opaque ticket·created descriptor와 static remix forwarding을 구현한다. — 상태=V(구현·개발검사통과); 선행=-; 필요 근거/다음=Source AC002/E57의 port/remix10·browser WASM·전체 app PASS; 원본 행렬/오류/전체 소유권 전달을 독립 최종 검토할 것.
+    - [ ] **BK-WBS-07.08.07.07** 기존 replacement lifecycle에 Source controller·conditional ownership·borrowed atomic commit을 연결한다. — 상태=W(구현·검사작성중); 선행=BK-WBS-07.08.07.01, BK-WBS-07.08.07.02, BK-WBS-07.08.07.03, BK-WBS-07.08.07.06; 필요 근거/다음=Source AC008의 공유 conditional/lifecycle source와 독립 fixture 병렬 레인; 실제 compile·두 fresh 관측·실패/거절/회수·commit 할당 검증 필요.
     - [ ] **BK-WBS-07.08.07.08** Ticket-generic Source Owner의 관측/query/history와 조건부 publication을 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.07; 필요 근거/다음=Source AC010; authorization 경합과 원본/복합 오류·identity/timing 거절 보존 필요.
     - [ ] **BK-WBS-07.08.07.09** Typed Source Output UI의 capability prevalidation·요청/응답·WouldBlock을 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.08; 필요 근거/다음=Source AC011; 실제 Owner 경로의 단일 transaction·cold 거절·동일 reply 검사 필요.
     - [ ] **BK-WBS-07.08.07.10** Canonical WASAPI adapter가 complete Source owner와 원래 Counter packet을 전달한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.05, BK-WBS-07.08.07.06; 필요 근거/다음=Source AC009; 기존 Mixer/관측 API 및 실제 native metadata 회귀·형 검사·Windows 실행 필요.

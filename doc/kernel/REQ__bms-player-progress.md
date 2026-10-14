@@ -9,9 +9,12 @@
 
 2026-10-14 Source 후속: 실제 WASAPI는 SourceCounter임을 확인하고 portable
 Frame/Counter 기초와 shared WASAPI complete owner 경로의 계획 검토를 마쳤다.
-원래07.08.07을15개 실행 단위로 나눠 native epoch/pause/state/port4개를 W,
-후속11개를 N으로 추적한다. 활성 분모206→220이며 완료97(44.09%)과 원래
-제품 요구91/193(47.15%)은 그대로다. 새 분해는 구현 완료가 아니다.
+원래07.08.07을15개 실행 단위로 나눴다. E57의 native epoch/pause/state/port와
+portable worker5개는 개발검사를 통과해 V이며 COM 연결/controller2개는 W,
+후속8개는 N이다. 실제 portable app2711·platform state56/history30·worker14·
+외부 heap 보정1·browser WASM 검사를 통과했다. 겹치는 필터는 합산하지 않는다.
+활성 분모220·완료97(44.09%)과 원래 제품 요구91/193(47.15%)은 그대로다.
+새 검사는 독립 최종 review/QA나 실제 Windows/전체 Source 완료가 아니다.
 Legacy 회수, uncertain admission retry 격리와 실제 Source 좌표를 먼저 계약으로
 기록했으며 ASIO/CoreAudio/exclusive/native/browser/성능/출시는 계속 남는다.
 
@@ -38,7 +41,8 @@ pause/Output/resume/capture 및 자동 완료 기록은 남았고 전체 Goal은
 독립 PASS로 바꾸지 않으며
 controller·Owner/UI 결과를 그 경로의 증거로 물려받지 않는다. Source/scalar/finite/foreign/
 실제 paused GUI·물리/applied 전체 기준은 각 child에 남는다.
-현재 retained replacement task는 같은 run/미완료 범위를 보존해 active로 재개했다.
+Target retained replacement task는 실제 장치 blocker를 기록해 parked 상태이며,
+전체 Goal은 활성인 채 Source 후속 child의 COM/controller 병렬 구현을 진행한다.
 WBS 작업은03435bf4에서 실제 독립 review/CLI QA를 통과했고 자동 검증 기록 누락으로
 종료만 parked 상태다. 이 추적 작업의 검사를 제품 task의
 formal review/QA나 전체 Goal 완료로 바꾸지 않는다. WBS의 E46–E55와
