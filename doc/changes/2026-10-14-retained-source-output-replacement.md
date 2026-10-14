@@ -18,7 +18,12 @@
   history/startup/gap/HOST floor를 보존하며 old held suffix만으로 승인하지 않는다.
 - `cd4cc66a`: portable WASAPI worker는 fill과 clock-only 모두 같은 원자적 종료 결정을 거친다.
   성공한 양수 Release 뒤에만 prefix를 admit하며 동시 local/release 실패를 보존한다.
-  실제 Windows COM 연결 및 앱 controller는 현재 독립 source/test 레인에서 작성 중이다.
+- `1d19c952`: complete WASAPI의 open/start/Stop/join/recovery와 원래 Counter
+  descriptor를 연결한다. Legacy/complete owner를 구분하고 전체 오류와 quarantine을
+  보존한다. cold history 준비는 실제 native geometry를 받은 제한된 메서드다.
+- `72ac7c98`: 기존 conditional storage와 recovered/open/start lifecycle을 재사용해
+  Source controller를 연결한다. 실제 새 descriptor와 두 fresh 관측으로 준비하고
+  capability staging 뒤 borrowed atomic commit한다. Ready 실패는 owner와 hold를 보존한다.
 
 ## 실제 개발 검사
 
@@ -33,9 +38,13 @@ cargo test -p beatkernel-platform --test wasapi_source_worker_allocations --lock
 cargo check -p beatkernel-bms-runtime --lib --no-default-features --features browser --target wasm32-unknown-unknown --locked -j2
 ```
 
-관측 결과는 app **2711 PASS / 0 FAIL / 6 ignored**, state56·Source history30,
-worker14·외부 heap 검사1 PASS, WASM check exit0이다. Source port/remix10,
-native14, pause5와 authority 회귀는 app 전체 결과에 포함되므로 더하지 않는다.
+최신 관측 결과는 app **2732 PASS / 0 FAIL / 6 ignored**, platform **411 PASS /
+0 FAIL / 2 ignored**, worker14와 외부 heap 검사1 PASS다. Source controller21,
+port/remix10·native14·pause5와 authority 회귀는 app 전체에 포함되므로 더하지 않는다.
+Source와 기존 Target 실제 publication의 별도 외부 할당 검사도 각각1 PASS이며,
+Source는 calibrated cold token copy 뒤 실제 held commit의 alloc/realloc0을 확인했다.
+앞선 browser WASM check는 exit0이다. cached Windows platform lib/tests와 app lib
+typing도 exit0이나 C-stub Rust 검사이며 native 실행 근거가 아니다.
 외부 binary는 실제 production worker/state/history와 기존 System allocator를
 사용한다. alloc/realloc/dealloc 각각의 실제 보정 후 success/refusal/authorized/
 release-failure/quarantined retry 경계의 heap 호출0회를 확인했다.
@@ -54,9 +63,11 @@ Windows complete open/start/Stop/join/recovery는 기존 Legacy Mixer/remix API�
 complete owner를 Mixer로 평탄화하지 않는다. 실제 clock frequency는 새 장치에서
 얻는다. 새로 생성한 descriptor와 Ready prefill은 playback progress가 아니다.
 
-Controller 다음 Owner, typed UI, Windows solo/local hook과 실제 공통 pump를
-연결해야 한다. 전체 native owner/PCM/producer/capture 보존, 실패·취소·명시 retry,
-실제 publication 할당 검증과 독립 review 뒤 CLI/desktop QA가 남는다.
+Controller 개발 검사는 통과했고 Owner와 canonical adapter는 작성 후 검사 중이다.
+typed backend envelope 안의 packet/identity/timing 실패를 raw IO와 구분하는 경합
+검사도 포함한다. 다음 typed UI, Windows solo/local hook과 실제 공통 pump를 연결해야 한다.
+전체 native owner/PCM/producer/capture 연동 보존, 실패·취소·명시 retry와 독립 review 뒤
+CLI/desktop QA가 남는다.
 Windows typing은 C-stub에 의한 Rust 형 검사이며 COM/driver 실행이 아니다.
 현재 host의 Windows 장치 실행을 소프트웨어 검사로 대체하지 않는다.
 WASAPI exclusive·ASIO·CoreAudio, 나머지 rate/encoding·cross-backend·browser·

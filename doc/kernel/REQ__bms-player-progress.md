@@ -9,10 +9,13 @@
 
 2026-10-14 Source 후속: 실제 WASAPI는 SourceCounter임을 확인하고 portable
 Frame/Counter 기초와 shared WASAPI complete owner 경로의 계획 검토를 마쳤다.
-원래07.08.07을15개 실행 단위로 나눴다. E57의 native epoch/pause/state/port와
-portable worker5개는 개발검사를 통과해 V이며 COM 연결/controller2개는 W,
-후속8개는 N이다. 실제 portable app2711·platform state56/history30·worker14·
-외부 heap 보정1·browser WASM 검사를 통과했다. 겹치는 필터는 합산하지 않는다.
+원래07.08.07을15개 실행 단위로 나눴다. E58의 native epoch/pause/state/port와
+portable worker·COM 연결/controller7개는 개발검사를 통과해 V이며 Owner/adapter2개는
+W, 후속6개는 N이다. 실제 portable app2732·platform411·Source controller21·
+worker14와 Source/Target publication·worker 외부 할당 각1 검사를 통과했다.
+cached Windows lib/tests 또는 lib typing은 실제 COM/장치 실행이 아니다.
+Owner typed 오류/authorization 경합과 UI/consumer/pump 연결은 남는다.
+기존 browser WASM도 통과했으며 겹치는 필터는 합산하지 않는다.
 활성 분모220·완료97(44.09%)과 원래 제품 요구91/193(47.15%)은 그대로다.
 새 검사는 독립 최종 review/QA나 실제 Windows/전체 Source 완료가 아니다.
 Legacy 회수, uncertain admission retry 격리와 실제 Source 좌표를 먼저 계약으로
