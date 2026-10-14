@@ -153,6 +153,29 @@ impl NativeOutputState {
             headroom,
         )
     }
+
+    /// Opt-in cold preparation grows original history before native publication
+    /// storage is allocated. Every refusal preserves retained PCM and history.
+    pub(crate) fn prepare_growing_native_source_history(
+        &mut self,
+        buffer_frames: u32,
+        headroom: usize,
+    ) -> Result<(), AudioError> {
+        if self.admission_uncertain {
+            return Err(AudioError::InvalidBuffer);
+        }
+        let frames = usize::try_from(buffer_frames).map_err(|_| AudioError::Overflow)?;
+        if frames == 0 {
+            return Err(AudioError::InvalidCapacity);
+        }
+        if frames > self.mixer.configuration().limits().max_render_frames() {
+            return Err(AudioError::RenderCapacity);
+        }
+        let capacity = frames.checked_add(headroom).ok_or(AudioError::Overflow)?;
+        self.prepare_native_source_history(buffer_frames, headroom)?;
+        self.mixer.reserve_source_playback_history(capacity)
+    }
+
     /// Cold validation and preparation commit only after every fallible step.
     /// An incompatible pending interpretation refuses without consuming state.
     pub fn reconfigure(

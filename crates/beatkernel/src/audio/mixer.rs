@@ -243,6 +243,16 @@ impl Mixer {
         Ok(())
     }
 
+    /// Cold growth to an absolute minimum transition capacity, preserving all
+    /// retained source facts. Prepare any native publication storage afterward.
+    /// Missing history, zero capacity or failed allocation preserves this mixer.
+    pub fn reserve_source_playback_history(&mut self, capacity: usize) -> Result<(), AudioError> {
+        self.source_playback_history
+            .as_mut()
+            .ok_or(AudioError::InvalidCapacity)?
+            .reserve_capacity(capacity)
+    }
+
     /// Actual source playback intervals retained by this mixer.
     pub const fn source_playback_history(&self) -> Option<&super::SourcePlaybackHistory> {
         self.source_playback_history.as_ref()

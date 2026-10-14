@@ -52,6 +52,20 @@ impl SourcePlaybackHistory {
         })
     }
 
+    pub(super) fn reserve_capacity(&mut self, capacity: usize) -> Result<(), AudioError> {
+        if capacity == 0 {
+            return Err(AudioError::InvalidCapacity);
+        }
+        if capacity <= self.capacity {
+            return Ok(());
+        }
+        self.spans
+            .try_reserve_exact(capacity - self.spans.len())
+            .map_err(|_| AudioError::AllocationFailed)?;
+        self.capacity = capacity;
+        Ok(())
+    }
+
     /// Immutable original source sample rate.
     pub const fn source_rate(&self) -> u32 {
         self.source_rate

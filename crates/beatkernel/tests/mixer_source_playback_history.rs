@@ -127,6 +127,194 @@ fn converted(mixer: Mixer) -> ConvertedMixer {
     .unwrap_or_else(|failure| panic!("fixture: {:?}", failure.error()))
 }
 
+fn history_identity_and_frontiers(mixer: &Mixer) -> (u32, u64, u64, u64, u64, u64) {
+    let history = mixer.source_playback_history().unwrap();
+    (
+        history.source_rate(),
+        history.initial_physical_frame(),
+        history.initial_playback_frame(),
+        history.pulled_end_frame(),
+        history.retained_start_frame(),
+        history.retirement_revision(),
+    )
+}
+
+#[test]
+fn bare_cold_history_growth_preserves_retired_intervals_identity_and_pending_command() {
+    let (mut producer, mut mixer) = rig(false, None);
+    play(&mut producer);
+    mixer.render(&mut [0.; 5]).unwrap();
+    mixer.enable_source_playback_history(4).unwrap();
+    mixer.render(&mut [0.; 2]).unwrap();
+    producer.request_pause(true);
+    mixer.render(&mut [0.; 2]).unwrap();
+    producer.request_pause(false);
+    mixer.render(&mut [0.; 2]).unwrap();
+    assert_eq!(mixer.retire_source_playback_before(9), Ok(2));
+    assert_eq!(
+        history_identity_and_frontiers(&mixer),
+        (1000, 5, 5, 11, 9, 1)
+    );
+    producer
+        .try_push(AudioCommand::Play {
+            voice: VoiceId(2),
+            sample: SampleId(1),
+            at: Timestamp::from_nanos(9_000_000),
+            gain: 0.5,
+        })
+        .unwrap();
+    let before = (
+        mixer.configuration(),
+        mixer.output_frame_basis(),
+        mixer.frame_cursor(),
+        mixer.playback_frame_cursor(),
+        mixer.counters(),
+        producer.counters(),
+        history_identity_and_frontiers(&mixer),
+        history(&mixer),
+    );
+
+    let (result, allocations) = tracked(|| mixer.reserve_source_playback_history(9));
+
+    assert_eq!(result, Ok(()));
+    assert!(allocations[0] + allocations[1] > 0);
+    assert!(mixer.source_playback_history().unwrap().capacity() >= 9);
+    assert_eq!(
+        (
+            mixer.configuration(),
+            mixer.output_frame_basis(),
+            mixer.frame_cursor(),
+            mixer.playback_frame_cursor(),
+            mixer.counters(),
+            producer.counters(),
+            history_identity_and_frontiers(&mixer),
+            history(&mixer),
+        ),
+        before
+    );
+    let mut pcm = [99.; 1];
+    let (report, allocations) = tracked(|| mixer.render(&mut pcm));
+    assert_eq!(report.unwrap().counters.commands_consumed, 2);
+    assert_eq!(pcm, [0.375]);
+    assert_eq!(allocations, [0; 3]);
+
+    // Retirement left one span in a previously four-slot allocation. Filling
+    // the absolute new minimum catches reserving relative to capacity, not len.
+    for transition in 0..8 {
+        producer.request_pause(transition % 2 == 0);
+        let (result, allocations) = tracked(|| mixer.render(&mut pcm));
+        result.unwrap();
+        assert_eq!(allocations, [0; 3]);
+    }
+    assert_eq!(mixer.source_playback_history().unwrap().len(), 9);
+    assert_eq!(
+        mixer
+            .source_playback_history()
+            .unwrap()
+            .retirement_revision(),
+        1
+    );
+}
+
+#[test]
+fn bare_cold_history_growth_equal_and_smaller_requests_are_allocation_free() {
+    let (mut producer, mut mixer) = rig(true, Some(3));
+    producer.schedule_start_at(2).unwrap();
+    play(&mut producer);
+    mixer.enable_source_playback_history(6).unwrap();
+    let before = (
+        mixer.configuration(),
+        mixer.frame_cursor(),
+        mixer.playback_frame_cursor(),
+        mixer.start_gate_frame(),
+        mixer.applied_start_frame(),
+        mixer.counters(),
+        producer.counters(),
+        history_identity_and_frontiers(&mixer),
+        history(&mixer),
+    );
+    let capacity = mixer.source_playback_history().unwrap().capacity();
+    for requested in [capacity, capacity - 1, 1] {
+        let (result, allocations) = tracked(|| mixer.reserve_source_playback_history(requested));
+        assert_eq!(result, Ok(()));
+        assert_eq!(allocations, [0; 3]);
+        assert_eq!(
+            mixer.source_playback_history().unwrap().capacity(),
+            capacity
+        );
+        assert_eq!(
+            (
+                mixer.configuration(),
+                mixer.frame_cursor(),
+                mixer.playback_frame_cursor(),
+                mixer.start_gate_frame(),
+                mixer.applied_start_frame(),
+                mixer.counters(),
+                producer.counters(),
+                history_identity_and_frontiers(&mixer),
+                history(&mixer),
+            ),
+            before
+        );
+    }
+    let mut pcm = [99.; 8];
+    assert_eq!(
+        mixer.render(&mut pcm).unwrap().counters.commands_consumed,
+        1
+    );
+    assert_eq!(pcm, [0., 0., 0.25, 0.25, 0.25, 0., 0., 0.]);
+    assert_eq!(producer.applied_start_frame(), Some(2));
+}
+
+#[test]
+fn bare_cold_history_growth_absent_zero_and_impossible_requests_refuse_atomically() {
+    let (mut producer, mut mixer) = rig(false, None);
+    play(&mut producer);
+    let before = (
+        mixer.configuration(),
+        mixer.output_frame_basis(),
+        mixer.counters(),
+        producer.counters(),
+    );
+    for capacity in [0, 4, usize::MAX] {
+        let (result, allocations) = tracked(|| mixer.reserve_source_playback_history(capacity));
+        assert_eq!(result, Err(AudioError::InvalidCapacity));
+        assert_eq!(allocations, [0; 3]);
+        assert!(mixer.source_playback_history().is_none());
+        assert_eq!(
+            (
+                mixer.configuration(),
+                mixer.output_frame_basis(),
+                mixer.counters(),
+                producer.counters(),
+            ),
+            before
+        );
+    }
+    mixer.enable_source_playback_history(3).unwrap();
+    let before = (history_identity_and_frontiers(&mixer), history(&mixer));
+    for (capacity, expected) in [
+        (0, AudioError::InvalidCapacity),
+        (usize::MAX, AudioError::AllocationFailed),
+    ] {
+        let (result, allocations) = tracked(|| mixer.reserve_source_playback_history(capacity));
+        assert_eq!(result, Err(expected));
+        assert_eq!(allocations, [0; 3]);
+        assert_eq!(mixer.source_playback_history().unwrap().capacity(), 3);
+        assert_eq!(
+            (history_identity_and_frontiers(&mixer), history(&mixer)),
+            before
+        );
+    }
+    mixer.reserve_source_playback_history(6).unwrap();
+    let mut pcm = [99.; 4];
+    assert_eq!(
+        mixer.render(&mut pcm).unwrap().counters.commands_consumed,
+        1
+    );
+    assert_eq!(pcm, [0.25; 4]);
+}
+
 #[test]
 fn default_disabled_and_opted_bare_mixer_produce_identical_pcm_and_reports() {
     let (mut legacy_producer, mut legacy) = rig(true, Some(3));
