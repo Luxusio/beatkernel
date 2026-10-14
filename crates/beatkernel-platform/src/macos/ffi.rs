@@ -178,6 +178,7 @@ pub(super) type PropertyListener =
     unsafe extern "C" fn(u32, u32, *const PropertyAddress, *mut c_void) -> i32;
 #[link(name = "CoreAudio", kind = "framework")]
 unsafe extern "C" {
+    pub fn AudioObjectHasProperty(object: u32, address: *const PropertyAddress) -> u8;
     pub fn AudioObjectGetPropertyDataSize(
         object: u32,
         address: *const PropertyAddress,

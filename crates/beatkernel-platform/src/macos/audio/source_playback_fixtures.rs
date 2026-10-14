@@ -54,10 +54,14 @@ fn context(mixer: Mixer) -> Context {
     let config = mixer.config();
     let telemetry = prepare_render_telemetry(&mixer).unwrap();
     Context {
+        control: std::sync::Arc::new(SourceControl::new()),
+        complete: false,
         render: UnsafeCell::new(RenderState {
-            mixer,
-            remix: None,
-            scratch: vec![0.; 16],
+            owner: RenderOwner::Legacy {
+                mixer,
+                remix: None,
+                scratch: vec![0.; 16],
+            },
             render_version: 0,
             publication_version: 0,
             completed_source_retirement: 0,
@@ -152,7 +156,11 @@ fn read(context: &Context, frame: u64) -> Option<CoreAudioSourcePlaybackSnapshot
 }
 fn frame_cursor(context: &Context) -> u64 {
     // SAFETY: fixtures call only after callback return with no registered driver.
-    unsafe { (&*context.render.get()).mixer.frame_cursor() }
+    let render = unsafe { &*context.render.get() };
+    match &render.owner {
+        RenderOwner::Legacy { mixer, .. } => mixer.frame_cursor(),
+        RenderOwner::Complete(state) => state.mixer().frame_cursor(),
+    }
 }
 
 #[test]
@@ -403,10 +411,13 @@ fn history_only_helper_simulation_preserves_prior_delivery_and_presentation() {
     context.version.store(3, Ordering::SeqCst);
     // SAFETY: single fixture owner; no callbacks registered or running.
     let state = unsafe { &mut *context.render.get() };
-    state.mixer.render(&mut [0.; 4]).unwrap();
+    let RenderOwner::Legacy { mixer, .. } = &mut state.owner else {
+        panic!("legacy fixture must retain its original render owner")
+    };
+    mixer.render(&mut [0.; 4]).unwrap();
     context.render_telemetry.publish_with_source_history(
         None,
-        state.mixer.source_playback_history(),
+        mixer.source_playback_history(),
         &mut state.render_version,
     );
     state.publication_version = 4;
@@ -503,7 +514,9 @@ fn retired_owner_keeps_final_legacy_facts_and_complete_mixer_but_no_new_compound
     let final_render_report = context.render_telemetry.read().render;
     // No IOProc/listener was registered. Moving the sole-owned cell after the
     // callback returned models already-confirmed retirement, not OS teardown.
-    let mixer = context.render.into_inner().mixer;
+    let RenderOwner::Legacy { mixer, .. } = context.render.into_inner().owner else {
+        panic!("legacy fixture must retain its original render owner")
+    };
     let basis = mixer.output_frame_basis();
     let mut retired = CoreAudioStream {
         basis,
@@ -521,7 +534,17 @@ fn retired_owner_keeps_final_legacy_facts_and_complete_mixer_but_no_new_compound
             native_clock: ClockDomainId(8),
         },
         context: None,
-        recovered_mixer: Some(mixer),
+        recovered_owner: Some(RenderOwner::Legacy {
+            mixer,
+            remix: None,
+            scratch: Vec::new(),
+        }),
+        control: std::sync::Arc::new(SourceControl::new()),
+        source_facts: None,
+        variable_buffers: false,
+        max_callback_frames: 8,
+        stop_required: false,
+        failed_start: false,
         retired: true,
         proc_id: std::ptr::null_mut(),
         listeners: Vec::new(),

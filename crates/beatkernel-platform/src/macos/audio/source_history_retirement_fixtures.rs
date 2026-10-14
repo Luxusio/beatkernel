@@ -24,11 +24,15 @@ fn fixture() -> (
     mixer.enable_source_playback_history(4).unwrap();
     let basis = mixer.output_frame_basis();
     let context = Context {
+        control: std::sync::Arc::new(SourceControl::new()),
+        complete: false,
         render_telemetry: prepare_render_telemetry(&mixer).unwrap(),
         render: UnsafeCell::new(RenderState {
-            mixer,
-            remix: None,
-            scratch: vec![0.; 8],
+            owner: RenderOwner::Legacy {
+                mixer,
+                remix: None,
+                scratch: vec![0.; 8],
+            },
             render_version: 0,
             publication_version: 0,
             completed_source_retirement: 0,
@@ -94,13 +98,15 @@ fn callback(context: &Context, frames: usize, valid: bool) {
 fn history_state(context: &Context) -> (u64, u64, u64) {
     // SAFETY: inspected only between synchronous owned-memory callbacks.
     let state = unsafe { &*context.render.get() };
+    let RenderOwner::Legacy { mixer, .. } = &state.owner else {
+        panic!("legacy fixture must retain its original render owner")
+    };
     (
-        state
-            .mixer
+        mixer
             .source_playback_history()
             .unwrap()
             .retained_start_frame(),
-        state.mixer.frame_cursor(),
+        mixer.frame_cursor(),
         state.completed_source_retirement,
     )
 }
@@ -205,11 +211,11 @@ fn repeated_retirement_allows_more_real_pause_transitions_than_cold_capacity() {
         // SAFETY: synchronous callback has returned and no device owns state.
         assert!(
             unsafe {
-                (&*context.render.get())
-                    .mixer
-                    .source_playback_history()
-                    .unwrap()
-                    .len()
+                let state = &*context.render.get();
+                let RenderOwner::Legacy { mixer, .. } = &state.owner else {
+                    panic!("legacy fixture must retain its original render owner")
+                };
+                mixer.source_playback_history().unwrap().len()
             } <= 4
         );
     }

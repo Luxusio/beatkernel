@@ -1,10 +1,20 @@
 //! Native CoreAudio HAL output with exact settings and guarded preallocated IOProc.
 use super::{clock::MachClock, ffi};
-use crate::audio::{AudioStreamSnapshot, AudioStreamStatus, StreamCounters, telemetry::Telemetry};
+use crate::audio::{
+    coreaudio_source_callback::{
+        self, CoreAudioBufferDescriptor, CoreAudioSourceOps, CoreAudioSourceStep,
+    },
+    source_output_retirement::{
+        SourceRetirementError, SourceRetirementPolicy, SourceRetirementSlot,
+    },
+    telemetry::Telemetry,
+    AudioStreamSnapshot, AudioStreamStatus, DeviceFormat, NativeOutputState, SampleEncoding,
+    StreamCounters,
+};
 use beatkernel::{
     audio::{
-        AudioFormat, ChannelMatrix, FormatConverter, InterpolatedTargetTime, Mixer, RenderReport,
-        OutputFrameBasis, SourcePlaybackSpan,
+        AudioFormat, ChannelMatrix, FormatConverter, InterpolatedTargetTime, Mixer,
+        OutputFrameBasis, RenderReport, SourcePlaybackSpan,
     },
     time::{ClockDomainId, ClockPoint, Timestamp},
 };
@@ -13,7 +23,10 @@ use std::{
     ffi::c_void,
     marker::PhantomData,
     rc::Rc,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+        Arc, Weak,
+    },
 };
 const GLOBAL: u32 = u32::from_be_bytes(*b"glob");
 const OUTPUT: u32 = u32::from_be_bytes(*b"outp");
@@ -23,6 +36,7 @@ const STREAM_CONFIG: u32 = u32::from_be_bytes(*b"slay");
 const FORMAT: u32 = u32::from_be_bytes(*b"sfmt");
 const RATE: u32 = u32::from_be_bytes(*b"nsrt");
 const BUFFER: u32 = u32::from_be_bytes(*b"fsiz");
+const VARIABLE_BUFFER: u32 = u32::from_be_bytes(*b"vfsz");
 const NAME: u32 = u32::from_be_bytes(*b"name");
 const UID: u32 = u32::from_be_bytes(*b"uid ");
 const FLOAT: u32 = 1;
@@ -187,10 +201,16 @@ pub struct CoreAudioSourcePlaybackSnapshot {
     /// Matching even outer callback publication revision.
     pub revision: u64,
 }
+enum RenderOwner {
+    Legacy {
+        mixer: Mixer,
+        remix: Option<FormatConverter>,
+        scratch: Vec<f32>,
+    },
+    Complete(NativeOutputState),
+}
 struct RenderState {
-    mixer: Mixer,
-    remix: Option<FormatConverter>,
-    scratch: Vec<f32>,
+    owner: RenderOwner,
     render_version: u64,
     publication_version: u64,
     completed_source_retirement: u64,
@@ -206,6 +226,8 @@ struct Context {
     channels: u16,
     layout: Vec<u32>,
     buffer_frames: u32,
+    complete: bool,
+    control: Arc<SourceControl>,
     enabled: AtomicBool,
     rendering: AtomicBool,
     active: AtomicUsize,
@@ -225,6 +247,73 @@ struct Context {
 /// Recoverable CoreAudio opening error with retained callback owner for retry.
 pub type CoreAudioOpenFailure =
     beatkernel::audio::OutputOpenFailure<CoreAudioError, CoreAudioStream>;
+/// Recoverable opening failure retaining the complete software output owner.
+pub type CoreAudioStateOpenFailure =
+    beatkernel::audio::OutputOpenFailure<CoreAudioError, CoreAudioStream, NativeOutputState>;
+
+struct SourceControl {
+    slot: SourceRetirementSlot,
+    geometry: AtomicU32,
+    nonce: AtomicU64,
+}
+impl SourceControl {
+    fn new() -> Self {
+        Self {
+            slot: SourceRetirementSlot::new(),
+            geometry: AtomicU32::new(0),
+            nonce: AtomicU64::new(0),
+        }
+    }
+    fn authorized(&self) -> bool {
+        matches!(
+            self.slot.status(self.nonce.load(Ordering::Acquire)),
+            Ok(crate::audio::source_output_retirement::SourceRetirementStatus::Authorized)
+        )
+    }
+}
+/// One checked request bound to the original complete stream control allocation.
+pub struct SourceRetirementTicket {
+    control: Weak<SourceControl>,
+    nonce: u64,
+}
+impl std::fmt::Debug for SourceRetirementTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceRetirementTicket")
+            .field("nonce", &self.nonce)
+            .finish_non_exhaustive()
+    }
+}
+/// Permission to retire is distinct from confirmed HAL unregister and drain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceRetirementStatus {
+    /// The callback has not decided against the actual retained suffix.
+    Pending,
+    /// The callback retained the live owner and refused this request.
+    Refused,
+    /// Cancellation won the shared request decision.
+    Cancelled,
+    /// Sticky permission; native teardown still must complete.
+    Authorized,
+}
+impl From<crate::audio::source_output_retirement::SourceRetirementStatus>
+    for SourceRetirementStatus
+{
+    fn from(value: crate::audio::source_output_retirement::SourceRetirementStatus) -> Self {
+        use crate::audio::source_output_retirement::SourceRetirementStatus as S;
+        match value {
+            S::Pending => Self::Pending,
+            S::Refused => Self::Refused,
+            S::Cancelled => Self::Cancelled,
+            S::Authorized => Self::Authorized,
+        }
+    }
+}
+struct SourceRetirementFacts {
+    source: AudioFormat,
+    applied: AudioFormat,
+    matrix: Option<ChannelMatrix>,
+    render_limit: usize,
+}
 
 #[cfg(test)]
 fn validate_open(request: &CoreAudioRequest, mixer: &Mixer) -> Result<(), CoreAudioError> {
@@ -258,6 +347,218 @@ fn prepare_render_telemetry(mixer: &Mixer) -> Result<Telemetry, CoreAudioError> 
         None => Ok(Telemetry::new()),
     }
 }
+fn float_format(format: AudioFormat) -> Result<DeviceFormat, CoreAudioError> {
+    DeviceFormat::new(
+        format.sample_rate(),
+        format.channels(),
+        SampleEncoding::Float32,
+        None,
+    )
+    .map_err(|_| CoreAudioError::InvalidRequest)
+}
+fn validate_callback_geometry(
+    nominal: u32,
+    variable_max: u32,
+) -> Result<(u32, bool), CoreAudioError> {
+    if nominal == 0 || (variable_max != 0 && variable_max < nominal) {
+        return Err(CoreAudioError::UnsupportedLayout);
+    }
+    Ok((
+        if variable_max == 0 {
+            nominal
+        } else {
+            variable_max
+        },
+        variable_max != 0,
+    ))
+}
+fn native_callback_geometry(device: u32, nominal: u32) -> Result<(u32, bool), CoreAudioError> {
+    native_callback_geometry_with_presence(device, nominal)
+        .map(|(maximum, variable, _)| (maximum, variable))
+}
+fn native_callback_geometry_with_presence(
+    device: u32,
+    nominal: u32,
+) -> Result<(u32, bool, bool), CoreAudioError> {
+    let property = address(VARIABLE_BUFFER, GLOBAL);
+    // SAFETY: exact AudioObject property address; this presence query is cold.
+    let present = unsafe { ffi::AudioObjectHasProperty(device, &property) } != 0;
+    let maximum = if present {
+        scalar::<u32>(device, property)?
+    } else {
+        0
+    };
+    validate_callback_geometry(nominal, maximum)
+        .map(|(maximum, variable)| (maximum, variable, present))
+}
+fn prepare_complete_state(
+    request: &CoreAudioRequest,
+    state: &mut NativeOutputState,
+    matrix: Option<ChannelMatrix>,
+    max_frames: u32,
+    variable: bool,
+    headroom: usize,
+) -> Result<Telemetry, CoreAudioError> {
+    validate_open_with_matrix(request, state.mixer(), matrix.as_ref())?;
+    let (maximum, actual_variable) =
+        validate_callback_geometry(request.buffer_frames, if variable { max_frames } else { 0 })?;
+    if maximum != max_frames || actual_variable != variable {
+        return Err(CoreAudioError::InvalidRequest);
+    }
+    let format = float_format(request.format)?;
+    state
+        .validate_reconfigure(format, matrix.as_ref(), max_frames as usize)
+        .map_err(|_| CoreAudioError::InvalidRequest)?;
+    // Variable callbacks cannot promise a particular split of an existing tail.
+    // A pending block without original Source history cannot gain an invented
+    // history identity at the already-pulled Mixer frontier.
+    if state.pending_frames() != 0
+        && (variable
+            || state.pending_frames() % request.buffer_frames as usize != 0
+            || state.mixer().source_playback_history().is_none())
+    {
+        return Err(CoreAudioError::InvalidRequest);
+    }
+    state
+        .prepare_growing_native_source_history(max_frames, headroom)
+        .map_err(|_| CoreAudioError::Capacity)?;
+    state
+        .reconfigure(format, matrix, max_frames as usize)
+        .map_err(|_| CoreAudioError::Capacity)?;
+    let history = state
+        .mixer()
+        .source_playback_history()
+        .ok_or(CoreAudioError::InvalidRequest)?;
+    Telemetry::with_source_history_and_retirement(history, state.output_frame_basis())
+        .map_err(|_| CoreAudioError::Capacity)
+}
+struct NativeSetup {
+    applied: CoreAudioApplied,
+    layout: Vec<u32>,
+    streams: Vec<u32>,
+    max_frames: u32,
+    variable: bool,
+    variable_property: bool,
+}
+// Production and fault fixtures run the same lifecycle sequencing. Native raw
+// handles never escape this private, statically dispatched boundary.
+trait NativeLifecycleOps {
+    fn start(&mut self, device: u32, id: ffi::IoProcId) -> i32;
+    fn stop(&mut self, device: u32, id: ffi::IoProcId) -> i32;
+    fn remove_listener(
+        &mut self,
+        object: u32,
+        address: &ffi::PropertyAddress,
+        context: *mut c_void,
+    ) -> i32;
+    fn destroy(&mut self, device: u32, id: ffi::IoProcId) -> i32;
+}
+struct HalOps;
+impl NativeLifecycleOps for HalOps {
+    fn start(&mut self, device: u32, id: ffi::IoProcId) -> i32 {
+        // SAFETY: owning stream retains the registered exact device/proc pair.
+        unsafe { ffi::AudioDeviceStart(device, id) }
+    }
+    fn stop(&mut self, device: u32, id: ffi::IoProcId) -> i32 {
+        // SAFETY: storage remains owned until stop, unregister and drain finish.
+        unsafe { ffi::AudioDeviceStop(device, id) }
+    }
+    fn remove_listener(
+        &mut self,
+        object: u32,
+        address: &ffi::PropertyAddress,
+        context: *mut c_void,
+    ) -> i32 {
+        // SAFETY: exact tracked listener address/callback/context registration.
+        unsafe {
+            ffi::AudioObjectRemovePropertyListener(object, address, configuration_changed, context)
+        }
+    }
+    fn destroy(&mut self, device: u32, id: ffi::IoProcId) -> i32 {
+        // SAFETY: exact disabled/stopped IOProc, still backed by its owned box.
+        unsafe { ffi::AudioDeviceDestroyIOProcID(device, id) }
+    }
+}
+fn prepare_native(
+    request: &CoreAudioRequest,
+    clock: MachClock,
+    config: beatkernel::audio::MixerConfig,
+) -> Result<NativeSetup, CoreAudioError> {
+    if !u32_property(1, address(DEVICES, GLOBAL))?.contains(&request.device) {
+        return Err(CoreAudioError::DeviceUnavailable);
+    }
+    let initial_layout = native_layout(request.device)?;
+    if initial_layout.is_empty() {
+        return Err(CoreAudioError::DeviceUnavailable);
+    }
+    if initial_layout.iter().sum::<u32>() != u32::from(request.format.channels()) {
+        return Err(CoreAudioError::UnsupportedLayout);
+    }
+    let requested_rate = f64::from(request.format.sample_rate());
+    if scalar::<f64>(request.device, address(RATE, GLOBAL))? != requested_rate {
+        set_scalar(request.device, address(RATE, GLOBAL), requested_rate)?;
+    }
+    if scalar::<u32>(request.device, address(BUFFER, GLOBAL))? != request.buffer_frames {
+        set_scalar(
+            request.device,
+            address(BUFFER, GLOBAL),
+            request.buffer_frames,
+        )?;
+    }
+    let actual_rate: f64 = scalar(request.device, address(RATE, GLOBAL))?;
+    let actual_frames: u32 = scalar(request.device, address(BUFFER, GLOBAL))?;
+    if actual_rate != requested_rate || actual_frames != request.buffer_frames {
+        return Err(CoreAudioError::AppliedMismatch {
+            rate: actual_rate,
+            buffer_frames: actual_frames,
+        });
+    }
+    let (max_frames, variable, variable_property) =
+        native_callback_geometry_with_presence(request.device, actual_frames)?;
+    if max_frames as usize > config.limits().max_render_frames() {
+        return Err(CoreAudioError::Capacity);
+    }
+    let streams = u32_property(request.device, address(STREAMS, OUTPUT))?;
+    if streams.is_empty() {
+        return Err(CoreAudioError::DeviceUnavailable);
+    }
+    let mut expected = Vec::new();
+    for stream in &streams {
+        let format: ffi::Asbd = scalar(*stream, address(FORMAT, GLOBAL))?;
+        validate_format(format, requested_rate)?;
+        if format.format_flags & PLANAR != 0 {
+            for _ in 0..format.channels_per_frame {
+                expected.push(1);
+            }
+        } else {
+            expected.push(format.channels_per_frame);
+        }
+    }
+    let layout = native_layout(request.device)?;
+    if layout != expected
+        || layout.len() > MAX_BUFFERS
+        || layout.iter().sum::<u32>() != u32::from(request.format.channels())
+    {
+        return Err(CoreAudioError::UnsupportedLayout);
+    }
+    let applied = CoreAudioApplied {
+        request: *request,
+        format: request.format,
+        buffer_frames: actual_frames,
+        buffer_channels: layout.clone(),
+        output_domain: config.domain(),
+        output_origin: config.origin(),
+        native_clock: clock.native_domain(),
+    };
+    Ok(NativeSetup {
+        applied,
+        layout,
+        streams,
+        max_frames,
+        variable,
+        variable_property,
+    })
+}
 /// Owned HAL IOProc and stable callback state, with explicit start/close lifecycle.
 /// Mutable mixer storage is accessed only by one guarded native callback.
 /// This owner is intentionally !Send/!Sync; callback telemetry uses atomics.
@@ -265,11 +566,17 @@ pub struct CoreAudioStream {
     basis: beatkernel::audio::OutputFrameBasis,
     applied: CoreAudioApplied,
     context: Option<Box<Context>>,
-    recovered_mixer: Option<Mixer>,
+    recovered_owner: Option<RenderOwner>,
+    control: Arc<SourceControl>,
+    source_facts: Option<SourceRetirementFacts>,
+    variable_buffers: bool,
+    max_callback_frames: u32,
     retired: bool,
     proc_id: ffi::IoProcId,
     listeners: Vec<(u32, ffi::PropertyAddress)>,
     started: bool,
+    stop_required: bool,
+    failed_start: bool,
     owner: PhantomData<Rc<()>>,
     final_snapshot: CoreAudioSnapshot,
     final_render_report: Option<RenderReport>,
@@ -354,63 +661,12 @@ impl CoreAudioStream {
             Ok(telemetry) => telemetry,
             Err(error) => return Err(CoreAudioOpenFailure::recovered(error, Some(mixer))),
         };
-        let staged = (|| -> Result<_, CoreAudioError> {
-            if !u32_property(1, address(DEVICES, GLOBAL))?.contains(&request.device) {
-                return Err(CoreAudioError::DeviceUnavailable);
-            }
-            let initial_layout = native_layout(request.device)?;
-            if initial_layout.is_empty() {
-                return Err(CoreAudioError::DeviceUnavailable);
-            }
-            if initial_layout.iter().sum::<u32>() != u32::from(request.format.channels()) {
-                return Err(CoreAudioError::UnsupportedLayout);
-            }
-            let requested_rate = f64::from(request.format.sample_rate());
-            let prior_rate: f64 = scalar(request.device, address(RATE, GLOBAL))?;
-            if prior_rate != requested_rate {
-                set_scalar(request.device, address(RATE, GLOBAL), requested_rate)?;
-            }
-            let prior_frames: u32 = scalar(request.device, address(BUFFER, GLOBAL))?;
-            if prior_frames != request.buffer_frames {
-                set_scalar(
-                    request.device,
-                    address(BUFFER, GLOBAL),
-                    request.buffer_frames,
-                )?;
-            }
-            let actual_rate: f64 = scalar(request.device, address(RATE, GLOBAL))?;
-            let actual_frames: u32 = scalar(request.device, address(BUFFER, GLOBAL))?;
-            if actual_rate != requested_rate || actual_frames != request.buffer_frames {
-                return Err(CoreAudioError::AppliedMismatch {
-                    rate: actual_rate,
-                    buffer_frames: actual_frames,
-                });
-            }
-            let streams = u32_property(request.device, address(STREAMS, OUTPUT))?;
-            if streams.is_empty() {
-                return Err(CoreAudioError::DeviceUnavailable);
-            }
-            let mut expected = Vec::new();
-            for stream in &streams {
-                let format: ffi::Asbd = scalar(*stream, address(FORMAT, GLOBAL))?;
-                validate_format(format, requested_rate)?;
-                if format.format_flags & PLANAR != 0 {
-                    for _ in 0..format.channels_per_frame {
-                        expected.push(1);
-                    }
-                } else {
-                    expected.push(format.channels_per_frame);
-                }
-            }
-            let layout = native_layout(request.device)?;
-            if layout != expected
-                || layout.len() > MAX_BUFFERS
-                || layout.iter().sum::<u32>() != u32::from(request.format.channels())
-            {
-                return Err(CoreAudioError::UnsupportedLayout);
-            }
-            let config = mixer.config();
-            let samples = (request.buffer_frames as usize)
+        let setup = match prepare_native(&request, clock, mixer.config()) {
+            Ok(setup) => setup,
+            Err(error) => return Err(CoreAudioOpenFailure::recovered(error, Some(mixer))),
+        };
+        let storage = (|| {
+            let samples = (setup.max_frames as usize)
                 .checked_mul(usize::from(request.format.channels()))
                 .ok_or(CoreAudioError::Capacity)?;
             let mut scratch = Vec::new();
@@ -421,35 +677,123 @@ impl CoreAudioStream {
             let remix = matrix
                 .map(|matrix| {
                     crate::audio::channel_remix::prepare(
-                        config,
+                        mixer.config(),
                         request.format,
                         matrix,
-                        actual_frames as usize,
+                        setup.max_frames as usize,
                     )
                     .map_err(|_| CoreAudioError::Capacity)
                 })
                 .transpose()?;
-            let applied = CoreAudioApplied {
-                request,
-                format: request.format,
-                buffer_frames: actual_frames,
-                buffer_channels: layout.clone(),
-                output_domain: config.domain(),
-                output_origin: config.origin(),
-                native_clock: clock.native_domain(),
-            };
-            Ok((applied, layout, scratch, streams, remix))
+            Ok::<_, CoreAudioError>((scratch, remix))
         })();
-        let (applied, layout, scratch, streams, remix) = match staged {
-            Ok(staged) => staged,
+        let (scratch, remix) = match storage {
+            Ok(storage) => storage,
             Err(error) => return Err(CoreAudioOpenFailure::recovered(error, Some(mixer))),
         };
-        let config = mixer.config();
+        let owner = RenderOwner::Legacy {
+            mixer,
+            remix,
+            scratch,
+        };
+        match Self::install(request, clock, basis, owner, render_telemetry, setup, None) {
+            Ok(stream) => Ok(stream),
+            Err((error, stream)) => {
+                let mut failure = CoreAudioOpenFailure::pending(error, stream);
+                let _ = Self::retry_open_cleanup(&mut failure);
+                Err(failure)
+            }
+        }
+    }
+    /// Opens the complete same-rate owner, retaining original unsent PCM,
+    /// Source history and first-unsent basis on refusal or cleanup retry.
+    /// Device-global changes are not rolled back after native setup errors.
+    pub fn open_state_recoverable(
+        request: CoreAudioRequest,
+        clock: MachClock,
+        mut state: NativeOutputState,
+        matrix: Option<ChannelMatrix>,
+        history_headroom: usize,
+    ) -> Result<Self, CoreAudioStateOpenFailure> {
+        let basis = state.output_frame_basis();
+        let validation = validate_open_with_matrix(&request, state.mixer(), matrix.as_ref())
+            .and_then(|()| {
+                state
+                    .validate_reconfigure(
+                        float_format(request.format)?,
+                        matrix.as_ref(),
+                        request.buffer_frames as usize,
+                    )
+                    .map_err(|_| CoreAudioError::InvalidRequest)
+            });
+        if let Err(error) = validation {
+            return Err(CoreAudioStateOpenFailure::recovered_state(
+                error,
+                Some(state),
+            ));
+        }
+        let setup = match prepare_native(&request, clock, state.mixer().config()) {
+            Ok(setup) => setup,
+            Err(error) => {
+                return Err(CoreAudioStateOpenFailure::recovered_state(
+                    error,
+                    Some(state),
+                ))
+            }
+        };
+        let facts = SourceRetirementFacts {
+            source: state.mixer().config().format(),
+            applied: request.format,
+            matrix: matrix.clone(),
+            render_limit: state.mixer().config().limits().max_render_frames(),
+        };
+        let render_telemetry = match prepare_complete_state(
+            &request,
+            &mut state,
+            matrix,
+            setup.max_frames,
+            setup.variable,
+            history_headroom,
+        ) {
+            Ok(telemetry) => telemetry,
+            Err(error) => {
+                return Err(CoreAudioStateOpenFailure::recovered_state(
+                    error,
+                    Some(state),
+                ))
+            }
+        };
+        match Self::install(
+            request,
+            clock,
+            basis,
+            RenderOwner::Complete(state),
+            render_telemetry,
+            setup,
+            Some(facts),
+        ) {
+            Ok(stream) => Ok(stream),
+            Err((error, stream)) => {
+                let mut failure = CoreAudioStateOpenFailure::pending_state(error, stream);
+                let _ = Self::retry_state_open_cleanup(&mut failure);
+                Err(failure)
+            }
+        }
+    }
+    fn install(
+        request: CoreAudioRequest,
+        clock: MachClock,
+        basis: OutputFrameBasis,
+        render_owner: RenderOwner,
+        render_telemetry: Telemetry,
+        setup: NativeSetup,
+        source_facts: Option<SourceRetirementFacts>,
+    ) -> Result<Self, (CoreAudioError, Self)> {
+        let control = Arc::new(SourceControl::new());
+        let complete = matches!(&render_owner, RenderOwner::Complete(_));
         let context = Box::new(Context {
             render: UnsafeCell::new(RenderState {
-                mixer,
-                remix,
-                scratch,
+                owner: render_owner,
                 render_version: 0,
                 publication_version: 0,
                 completed_source_retirement: 0,
@@ -457,12 +801,14 @@ impl CoreAudioStream {
             render_telemetry,
             cadence: Box::new(crate::audio::cadence::Capture::new()),
             clock,
-            origin: config.origin(),
-            output_domain: config.domain(),
+            origin: setup.applied.output_origin,
+            output_domain: setup.applied.output_domain,
             rate: request.format.sample_rate(),
             channels: request.format.channels(),
-            layout,
-            buffer_frames: applied.buffer_frames,
+            layout: setup.layout,
+            buffer_frames: setup.max_frames,
+            complete,
+            control: Arc::clone(&control),
             enabled: AtomicBool::new(false),
             rendering: AtomicBool::new(false),
             active: AtomicUsize::new(0),
@@ -481,13 +827,19 @@ impl CoreAudioStream {
         });
         let mut stream = Self {
             basis,
-            applied,
+            applied: setup.applied,
             context: Some(context),
-            recovered_mixer: None,
+            recovered_owner: None,
+            control,
+            source_facts,
+            variable_buffers: setup.variable,
+            max_callback_frames: setup.max_frames,
             retired: false,
             proc_id: std::ptr::null_mut(),
             listeners: Vec::new(),
             started: false,
+            stop_required: false,
+            failed_start: false,
             owner: PhantomData,
             final_snapshot: CoreAudioSnapshot::default(),
             final_render_report: None,
@@ -496,8 +848,7 @@ impl CoreAudioStream {
         let registration = (|| -> Result<(), CoreAudioError> {
             let pointer = stream.context.as_deref().expect("context installed") as *const Context
                 as *mut c_void;
-            // SAFETY: stable box contains callback-exclusive UnsafeCell storage and
-            // atomics; registration lifetime is retained until successful destruction.
+            // SAFETY: stable callback context is retained through unregister/drain.
             check("AudioDeviceCreateIOProcID", unsafe {
                 ffi::AudioDeviceCreateIOProcID(
                     request.device,
@@ -515,10 +866,17 @@ impl CoreAudioStream {
                 (request.device, address(STREAM_CONFIG, OUTPUT)),
                 (request.device, address(STREAMS, OUTPUT)),
             ];
-            properties.extend(streams.into_iter().map(|id| (id, address(FORMAT, GLOBAL))));
+            if setup.variable_property {
+                properties.push((request.device, address(VARIABLE_BUFFER, GLOBAL)));
+            }
+            properties.extend(
+                setup
+                    .streams
+                    .into_iter()
+                    .map(|id| (id, address(FORMAT, GLOBAL))),
+            );
             for (id, address) in properties {
-                // SAFETY: stable callback context, native object/address and correct
-                // listener ABI; every successful registration is tracked for removal.
+                // SAFETY: exact listener ABI and tracked stable callback context.
                 check("AudioObjectAddPropertyListener", unsafe {
                     ffi::AudioObjectAddPropertyListener(
                         id,
@@ -531,12 +889,39 @@ impl CoreAudioStream {
             }
             Ok(())
         })();
-        if let Err(error) = registration {
-            let mut failure = CoreAudioOpenFailure::pending(error, stream);
-            let _ = Self::retry_open_cleanup(&mut failure);
-            return Err(failure);
+        match registration {
+            Ok(()) => Ok(stream),
+            Err(error) => Err((error, stream)),
         }
-        Ok(stream)
+    }
+    /// Retry complete opening cleanup without flattening retained software state.
+    pub fn retry_state_open_cleanup(
+        failure: &mut CoreAudioStateOpenFailure,
+    ) -> Result<bool, &CoreAudioError> {
+        failure.retry_retirement(|stream| {
+            stream.stop()?;
+            stream.take_stopped_output_state()
+        })
+    }
+    /// Largest callback permitted by cold native readback, also after drain.
+    pub const fn max_callback_frames(&self) -> u32 {
+        self.max_callback_frames
+    }
+    /// Transfers the complete owner after confirmed stop/unregister/drain.
+    pub fn take_stopped_output_state(
+        &mut self,
+    ) -> Result<Option<NativeOutputState>, CoreAudioError> {
+        if !self.retired || self.context.is_some() {
+            return Err(CoreAudioError::RecoveryUnavailable);
+        }
+        match self.recovered_owner.take() {
+            Some(RenderOwner::Complete(state)) => Ok(Some(state)),
+            Some(owner) => {
+                self.recovered_owner = Some(owner);
+                Err(CoreAudioError::InvalidRequest)
+            }
+            None => Ok(None),
+        }
     }
     /// Retry failed-open retirement, extracting only after actual stop/unregister/drain.
     pub fn retry_open_cleanup(failure: &mut CoreAudioOpenFailure) -> Result<bool, &CoreAudioError> {
@@ -553,6 +938,7 @@ impl CoreAudioStream {
     /// This control state is not a device presentation/latency observation.
     pub fn is_started(&self) -> bool {
         self.started
+            && !self.control.authorized()
             && self
                 .context
                 .as_ref()
@@ -560,20 +946,35 @@ impl CoreAudioStream {
     }
     /// Starts this exact native IOProc once; closed streams require reopening.
     pub fn start(&mut self) -> Result<(), CoreAudioError> {
+        self.start_with(&mut HalOps)
+    }
+    fn start_with(&mut self, ops: &mut impl NativeLifecycleOps) -> Result<(), CoreAudioError> {
         let context = self.context.as_deref().ok_or(CoreAudioError::Closed)?;
         if context.changed.load(Ordering::Acquire) {
             return Err(CoreAudioError::ConfigurationChanged);
         }
-        if self.started {
-            return Ok(());
+        if self.source_authorized() {
+            return Err(CoreAudioError::RecoveryUnavailable);
         }
+        if self.started {
+            return if context.enabled.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(CoreAudioError::RecoveryUnavailable)
+            };
+        }
+        if self.stop_required {
+            return Err(CoreAudioError::RecoveryUnavailable);
+        }
+        self.stop_required = true;
         context.enabled.store(true, Ordering::Release);
-        // SAFETY: registered exact IOProc and stable callback box remain owned.
-        let result = check("AudioDeviceStart", unsafe {
-            ffi::AudioDeviceStart(self.applied.request.device, self.proc_id)
-        });
+        let result = check(
+            "AudioDeviceStart",
+            ops.start(self.applied.request.device, self.proc_id),
+        );
         if result.is_err() {
             context.enabled.store(false, Ordering::Release);
+            self.failed_start = true;
         } else {
             self.started = true;
         }
@@ -582,31 +983,34 @@ impl CoreAudioStream {
     /// Stops and destroys callback/listener registrations before releasing mixer,
     /// scratch, queue and assets. Failure leaves the context owned for retry.
     pub fn stop(&mut self) -> Result<(), CoreAudioError> {
+        self.stop_with(&mut HalOps)
+    }
+    fn stop_with(&mut self, ops: &mut impl NativeLifecycleOps) -> Result<(), CoreAudioError> {
         let Some(context) = self.context.as_deref() else {
             return Ok(());
         };
         context.enabled.store(false, Ordering::Release);
-        if self.started {
-            // SAFETY: exact live device/proc pair; callback memory remains owned.
-            check("AudioDeviceStop", unsafe {
-                ffi::AudioDeviceStop(self.applied.request.device, self.proc_id)
-            })?;
+        if self.stop_required {
+            check(
+                "AudioDeviceStop",
+                ops.stop(self.applied.request.device, self.proc_id),
+            )?;
+            self.stop_required = false;
             self.started = false;
         }
         let pointer = context as *const Context as *mut c_void;
         while let Some(&(id, address)) = self.listeners.last() {
-            // SAFETY: removes only this owned listener and stable context pair.
-            check("AudioObjectRemovePropertyListener", unsafe {
-                ffi::AudioObjectRemovePropertyListener(id, &address, configuration_changed, pointer)
-            })?;
+            check(
+                "AudioObjectRemovePropertyListener",
+                ops.remove_listener(id, &address, pointer),
+            )?;
             self.listeners.pop();
         }
         if !self.proc_id.is_null() {
-            // SAFETY: disabled/stopped IOProc removed before dropping its context;
-            // unregister prevents future callbacks using this client pointer.
-            check("AudioDeviceDestroyIOProcID", unsafe {
-                ffi::AudioDeviceDestroyIOProcID(self.applied.request.device, self.proc_id)
-            })?;
+            check(
+                "AudioDeviceDestroyIOProcID",
+                ops.destroy(self.applied.request.device, self.proc_id),
+            )?;
             self.proc_id = std::ptr::null_mut();
         }
         // Existing callbacks may finish after stop; retain storage until every
@@ -621,8 +1025,16 @@ impl CoreAudioStream {
             .take()
             .expect("context retained through callback drain");
         let context = *context;
-        let render = context.render.into_inner();
-        self.recovered_mixer = Some(render.mixer);
+        let mut render = context.render.into_inner();
+        if self.failed_start && context.calls.load(Ordering::Relaxed) != 0 {
+            // A failed Start can already have invoked this IOProc. Copies made
+            // during that attempt have uncertain native admission; classify only
+            // after every callback has drained, with no registered UnsafeCell read.
+            if let RenderOwner::Complete(state) = &mut render.owner {
+                state.mark_admission_uncertain();
+            }
+        }
+        self.recovered_owner = Some(render.owner);
         self.final_cadence = Some(context.cadence);
         self.retired = true;
         Ok(())
@@ -666,6 +1078,9 @@ impl CoreAudioStream {
         expected_initial_physical: u64,
         expected_initial_playback: u64,
     ) -> Option<CoreAudioSourcePlaybackSnapshot> {
+        if self.failed_start {
+            return None;
+        }
         self.context.as_deref()?.read_source_playback_at(
             query,
             expected_source_rate,
@@ -684,10 +1099,140 @@ impl CoreAudioStream {
         if expected_basis != self.basis {
             return Err(CoreAudioError::InvalidRequest);
         }
+        if self.failed_start {
+            return Err(CoreAudioError::RecoveryUnavailable);
+        }
         self.context
             .as_deref()
             .ok_or(CoreAudioError::Closed)?
             .request_source_history_retirement(expected_basis, source_identity, source_pin)
+    }
+    fn source_authorized(&self) -> bool {
+        self.control.authorized()
+    }
+    fn source_live(&self) -> Result<(), CoreAudioError> {
+        let context = self.context.as_deref().ok_or(CoreAudioError::Closed)?;
+        if context.changed.load(Ordering::Acquire) {
+            return Err(CoreAudioError::ConfigurationChanged);
+        }
+        if context.failures.load(Ordering::Relaxed) != 0 {
+            return Err(CoreAudioError::InvalidRequest);
+        }
+        if self.failed_start || (self.stop_required && !context.enabled.load(Ordering::Acquire)) {
+            return Err(CoreAudioError::RecoveryUnavailable);
+        }
+        Ok(())
+    }
+    fn ticket_nonce(&self, ticket: &SourceRetirementTicket) -> Result<u64, CoreAudioError> {
+        if !ticket.control.ptr_eq(&Arc::downgrade(&self.control)) {
+            return Err(CoreAudioError::InvalidRequest);
+        }
+        Ok(ticket.nonce)
+    }
+    /// Validates cold request facts before publishing one callback-owned decision.
+    /// Busy or unconsumed responses preserve the existing request and geometry.
+    pub fn submit_source_conditional_retirement(
+        &mut self,
+        request: &CoreAudioRequest,
+        matrix: Option<&ChannelMatrix>,
+        max_frames: usize,
+    ) -> Result<Option<SourceRetirementTicket>, CoreAudioError> {
+        let facts = self
+            .source_facts
+            .as_ref()
+            .ok_or(CoreAudioError::InvalidRequest)?;
+        if request.device == 0
+            || request.buffer_frames == 0
+            || max_frames == 0
+            || max_frames > facts.render_limit
+            || request.buffer_frames as usize > max_frames
+            || request.format.sample_rate() != facts.source.sample_rate()
+        {
+            return Err(CoreAudioError::InvalidRequest);
+        }
+        match matrix {
+            Some(matrix) => {
+                crate::audio::channel_remix::validate(facts.source, request.format, matrix)
+                    .map_err(|_| CoreAudioError::InvalidRequest)?
+            }
+            None if request.format != facts.source => return Err(CoreAudioError::InvalidRequest),
+            None => {}
+        }
+        let policy = if request.format == facts.applied && matrix == facts.matrix.as_ref() {
+            SourceRetirementPolicy::PreservePausedSuffix
+        } else {
+            SourceRetirementPolicy::RequireEmptySuffix
+        };
+        if self.source_authorized() {
+            return Ok(None);
+        }
+        self.source_live()?;
+        // Same-device capabilities are captured during cold open. Different
+        // endpoints may be queried on this control thread, never in the IOProc.
+        let (maximum, variable) = if request.device == self.applied.request.device {
+            validate_callback_geometry(
+                request.buffer_frames,
+                if self.variable_buffers {
+                    self.max_callback_frames
+                } else {
+                    0
+                },
+            )?
+        } else {
+            native_callback_geometry(request.device, request.buffer_frames)?
+        };
+        if maximum as usize > max_frames || maximum as usize > facts.render_limit {
+            return Err(CoreAudioError::Capacity);
+        }
+        let geometry = if variable { 0 } else { request.buffer_frames };
+        let nonce = self
+            .control
+            .slot
+            .submit_prepared(policy, || {
+                self.control.geometry.store(geometry, Ordering::Relaxed);
+            })
+            .map_err(retirement_error)?;
+        if let Some(nonce) = nonce {
+            self.control.nonce.store(nonce, Ordering::Release);
+        }
+        Ok(nonce.map(|nonce| SourceRetirementTicket {
+            control: Arc::downgrade(&self.control),
+            nonce,
+        }))
+    }
+    /// Probes the original sticky authorization even after native context drain.
+    pub fn poll_source_conditional_retirement(
+        &mut self,
+        ticket: &SourceRetirementTicket,
+    ) -> Result<SourceRetirementStatus, CoreAudioError> {
+        let nonce = self.ticket_nonce(ticket)?;
+        let status = self.control.slot.status(nonce).map_err(retirement_error)?;
+        if status != crate::audio::source_output_retirement::SourceRetirementStatus::Authorized {
+            self.source_live()?;
+        }
+        self.control
+            .slot
+            .poll(nonce)
+            .map(Into::into)
+            .map_err(retirement_error)
+    }
+    /// Cancellation competes with callback authorization in the same atomic word.
+    pub fn cancel_source_conditional_retirement(
+        &mut self,
+        ticket: &SourceRetirementTicket,
+    ) -> Result<SourceRetirementStatus, CoreAudioError> {
+        let nonce = self.ticket_nonce(ticket)?;
+        let status = self.control.slot.cancel(nonce).map_err(retirement_error)?;
+        if status != crate::audio::source_output_retirement::SourceRetirementStatus::Authorized {
+            self.source_live()?;
+        }
+        Ok(status.into())
+    }
+}
+fn retirement_error(error: SourceRetirementError) -> CoreAudioError {
+    match error {
+        SourceRetirementError::InvalidTicket => CoreAudioError::InvalidRequest,
+        SourceRetirementError::NoncesExhausted => CoreAudioError::Capacity,
     }
 }
 impl Context {
@@ -711,6 +1256,9 @@ impl Context {
         source_pin: u64,
         after_queue: impl FnOnce(),
     ) -> Result<Option<u64>, CoreAudioError> {
+        if self.control.authorized() {
+            return Err(CoreAudioError::RecoveryUnavailable);
+        }
         for _ in 0..3 {
             let before = self.version.load(Ordering::SeqCst);
             if before == 0 || before & 1 != 0 {
@@ -726,6 +1274,9 @@ impl Context {
             }
             if failed {
                 return Err(CoreAudioError::InvalidRequest);
+            }
+            if self.control.authorized() {
+                return Err(CoreAudioError::RecoveryUnavailable);
             }
             let requested = self
                 .render_telemetry
@@ -813,6 +1364,9 @@ impl Context {
         mut before_recheck: impl FnMut(usize),
     ) -> Option<CoreAudioSourcePlaybackSnapshot> {
         for attempt in 0..3 {
+            if self.control.authorized() {
+                return None;
+            }
             let before = self.version.load(Ordering::SeqCst);
             if before == 0 || before & 1 != 0 {
                 continue;
@@ -834,6 +1388,11 @@ impl Context {
             before_recheck(attempt);
             if self.version.load(Ordering::SeqCst) != before {
                 continue;
+            }
+            // Retirement leaves the historical outer revision intact. Its
+            // independent sticky decision must also fence live Source evidence.
+            if self.control.authorized() {
+                return None;
             }
             if !in_delivery {
                 return None;
@@ -901,13 +1460,16 @@ unsafe extern "C" fn render_callback(
     if !context.enabled.load(Ordering::Acquire) {
         return 0;
     }
-    if context.changed.load(Ordering::Acquire)
-        || context
-            .rendering
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
+    if context
+        .rendering
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
     {
-        context.failures.fetch_add(1, Ordering::Relaxed);
+        // Complete retirement must precede every source failure publication.
+        // An overlapping IOProc has no access to its callback-owned decision.
+        if !context.complete {
+            context.failures.fetch_add(1, Ordering::Relaxed);
+        }
         return 0;
     }
     // SAFETY: rendering flag provides exclusive mutable access to UnsafeCell;
@@ -928,6 +1490,30 @@ unsafe fn render_buffers(
     output: *mut ffi::AudioBufferList,
     time: *const ffi::AudioTimestamp,
 ) -> Result<(), ()> {
+    if let RenderOwner::Complete(output_state) = &mut state.owner {
+        let mut ops = NativeSourceOps {
+            context,
+            output,
+            time,
+            descriptors: [CoreAudioBufferDescriptor::default(); MAX_BUFFERS],
+            descriptor_count: 0,
+            publication_version: &mut state.publication_version,
+            render_version: &mut state.render_version,
+        };
+        return match coreaudio_source_callback::source_callback_step(
+            output_state,
+            &context.control.slot,
+            &context.control.geometry,
+            &mut ops,
+            &mut state.completed_source_retirement,
+        ) {
+            CoreAudioSourceStep::Retire | CoreAudioSourceStep::Delivered { .. } => Ok(()),
+            CoreAudioSourceStep::Failure(_) => Err(()),
+        };
+    }
+    if context.changed.load(Ordering::Acquire) {
+        return Err(());
+    }
     let current = context.version.load(Ordering::SeqCst);
     if current == u64::MAX {
         return Err(());
@@ -951,12 +1537,176 @@ unsafe fn render_buffers(
     state.publication_version = next;
     result
 }
+struct NativeSourceOps<'a> {
+    context: &'a Context,
+    output: *mut ffi::AudioBufferList,
+    time: *const ffi::AudioTimestamp,
+    descriptors: [CoreAudioBufferDescriptor; MAX_BUFFERS],
+    descriptor_count: usize,
+    publication_version: &'a mut u64,
+    render_version: &'a mut u64,
+}
+impl CoreAudioSourceOps for NativeSourceOps<'_> {
+    fn begin_publication(&mut self) -> Result<(), i32> {
+        let current = self.context.version.load(Ordering::SeqCst);
+        let Some(next) = self
+            .publication_version
+            .checked_add(2)
+            .filter(|_| current & 1 == 0 && current == *self.publication_version)
+        else {
+            self.context.version.store(u64::MAX, Ordering::SeqCst);
+            return Err(-50);
+        };
+        self.context.version.store(next - 1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn end_publication(&mut self) {
+        *self.publication_version += 2;
+        self.context
+            .version
+            .store(*self.publication_version, Ordering::SeqCst);
+    }
+    fn check_configuration(&mut self) -> Result<(), i32> {
+        if self.context.changed.load(Ordering::Acquire) {
+            Err(-50)
+        } else {
+            Ok(())
+        }
+    }
+    fn buffers(&mut self) -> Result<(&[u32], &[CoreAudioBufferDescriptor]), i32> {
+        if self.output.is_null() {
+            return Err(-50);
+        }
+        // SAFETY: HAL supplies this initialized flexible array for the IOProc
+        // lifetime. Retired callbacks never enter this descriptor read.
+        let count = unsafe { (*self.output).count as usize };
+        if count == 0 || count > MAX_BUFFERS || count != self.context.layout.len() {
+            return Err(-50);
+        }
+        // SAFETY: bounded count belongs to the HAL flexible array, borrowed only
+        // for descriptor reads; no output PCM is touched before full validation.
+        let buffers = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!((*self.output).buffers).cast::<ffi::AudioBuffer>(),
+                count,
+            )
+        };
+        for (descriptor, buffer) in self.descriptors.iter_mut().zip(buffers) {
+            *descriptor = CoreAudioBufferDescriptor {
+                channels: buffer.channels,
+                byte_size: buffer.byte_size,
+                address: buffer.data as usize,
+            };
+        }
+        self.descriptor_count = count;
+        Ok((
+            &self.context.layout,
+            &self.descriptors[..self.descriptor_count],
+        ))
+    }
+    fn copy_channel_group(
+        &mut self,
+        buffer: CoreAudioBufferDescriptor,
+        samples: &[f32],
+        channels: usize,
+        first_channel: usize,
+    ) {
+        let group_channels = buffer.channels as usize;
+        let frames = samples.len() / channels;
+        for frame in 0..frames {
+            // SAFETY: the production step validated all source/destination
+            // extents, alignment, groups, arithmetic and nonoverlap before any
+            // copy. HAL owns writable buffers for this IOProc lifetime. Source
+            // samples and destination are disjoint; no native pointer escapes.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    samples.as_ptr().add(frame * channels + first_channel),
+                    (buffer.address as *mut f32).add(frame * group_channels),
+                    group_channels,
+                );
+            }
+        }
+    }
+    fn history_request(
+        &self,
+    ) -> Option<crate::audio::source_history_retirement_mailbox::SourceHistoryRetirementRequest>
+    {
+        self.context.render_telemetry.source_retirement_request()
+    }
+    fn render_pending(
+        &mut self,
+        state: &mut NativeOutputState,
+        frames: usize,
+    ) -> Result<RenderReport, i32> {
+        let render_start = self
+            .context
+            .clock
+            .sample_realtime()
+            .map(|sample| sample.normalized.timestamp);
+        let report = state.render_pending(frames).map_err(|_| -50)?;
+        match render_start {
+            Some(at) => self
+                .context
+                .cadence
+                .record(at, report.start_frame, report.frames as u64),
+            None => self.context.cadence.mark_unavailable(),
+        }
+        Ok(report)
+    }
+    fn publish_generated(&mut self, state: &NativeOutputState, report: Option<RenderReport>) {
+        self.context.render_telemetry.publish_with_source_history(
+            report.map(|report| AudioStreamSnapshot {
+                telemetry_available: true,
+                status: AudioStreamStatus::Running,
+                counters: StreamCounters::default(),
+                clock: None,
+                render: Some(report),
+            }),
+            state.mixer().source_playback_history(),
+            self.render_version,
+        );
+    }
+    fn delivered(&mut self, _: RenderReport, first_frame: u64, frames: u32, end_frame: u64) {
+        self.context.calls.fetch_add(1, Ordering::Relaxed);
+        self.context
+            .frames
+            .fetch_add(u64::from(frames), Ordering::Relaxed);
+        let time = if self.time.is_null() {
+            ffi::AudioTimestamp::default()
+        } else {
+            // SAFETY: HAL retains this optional initialized timestamp throughout
+            // the synchronous IOProc; no timestamp read occurs on retirement.
+            unsafe { *self.time }
+        };
+        self.context.ticks.store(time.host_time, Ordering::SeqCst);
+        self.context
+            .sample_bits
+            .store(time.sample_time.to_bits(), Ordering::SeqCst);
+        self.context.flags.store(time.flags, Ordering::SeqCst);
+        self.context
+            .first_frame
+            .store(first_frame, Ordering::SeqCst);
+        self.context.block_frames.store(frames, Ordering::SeqCst);
+        self.context
+            .delivered_end
+            .store(end_frame, Ordering::SeqCst);
+        self.context.delivered.store(true, Ordering::SeqCst);
+    }
+}
 unsafe fn render_buffers_in_publication(
     context: &Context,
     state: &mut RenderState,
     output: *mut ffi::AudioBufferList,
     time: *const ffi::AudioTimestamp,
 ) -> Result<(), ()> {
+    let RenderOwner::Legacy {
+        mixer,
+        remix,
+        scratch,
+    } = &mut state.owner
+    else {
+        return Err(());
+    };
     if output.is_null() {
         return Err(());
     }
@@ -1010,12 +1760,12 @@ unsafe fn render_buffers_in_publication(
     let frames = frames.ok_or(())?;
     let channels = usize::from(context.channels);
     let samples = (frames as usize).checked_mul(channels).ok_or(())?;
-    if samples > state.scratch.len() {
+    if samples > scratch.len() {
         return Err(());
     }
     if let Some(request) = context.render_telemetry.source_retirement_request() {
         if crate::audio::source_history_retirement_mailbox::apply_source_history_retirement(
-            &mut state.mixer,
+            mixer,
             request,
             &mut state.completed_source_retirement,
         )
@@ -1023,7 +1773,7 @@ unsafe fn render_buffers_in_publication(
         {
             context.render_telemetry.publish_with_source_history(
                 None,
-                state.mixer.source_playback_history(),
+                mixer.source_playback_history(),
                 &mut state.render_version,
             );
             return Err(());
@@ -1033,16 +1783,12 @@ unsafe fn render_buffers_in_publication(
         .clock
         .sample_realtime()
         .map(|sample| sample.normalized.timestamp);
-    let report = match crate::audio::channel_remix::render(
-        &mut state.mixer,
-        &mut state.remix,
-        &mut state.scratch[..samples],
-    ) {
+    let report = match crate::audio::channel_remix::render(mixer, remix, &mut scratch[..samples]) {
         Ok(report) => report,
         Err(_) => {
             context.render_telemetry.publish_with_source_history(
                 None,
-                state.mixer.source_playback_history(),
+                mixer.source_playback_history(),
                 &mut state.render_version,
             );
             return Err(());
@@ -1064,7 +1810,7 @@ unsafe fn render_buffers_in_publication(
             clock: None,
             render: Some(report),
         }),
-        state.mixer.source_playback_history(),
+        mixer.source_playback_history(),
         &mut state.render_version,
     );
     let delivered_end = report
@@ -1083,7 +1829,7 @@ unsafe fn render_buffers_in_publication(
             )
         };
         crate::audio::channel_remix::copy_channel_group(
-            &state.scratch[..samples],
+            &scratch[..samples],
             channels,
             first_channel,
             buffer_channels,
@@ -1299,7 +2045,14 @@ impl beatkernel::audio::StoppedMixerSource for CoreAudioStream {
         if !self.retired || self.context.is_some() {
             return Err(CoreAudioError::RecoveryUnavailable);
         }
-        Ok(self.recovered_mixer.take())
+        match self.recovered_owner.take() {
+            Some(RenderOwner::Legacy { mixer, .. }) => Ok(Some(mixer)),
+            Some(owner) => {
+                self.recovered_owner = Some(owner);
+                Err(CoreAudioError::InvalidRequest)
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -1314,3 +2067,7 @@ mod source_playback_fixtures;
 #[cfg(test)]
 #[path = "audio/source_history_retirement_fixtures.rs"]
 mod source_history_retirement_fixtures;
+
+#[cfg(test)]
+#[path = "audio/retained_source_fixtures.rs"]
+mod retained_source_fixtures;

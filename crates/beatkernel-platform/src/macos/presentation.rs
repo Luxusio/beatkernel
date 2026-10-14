@@ -44,6 +44,27 @@ pub fn coreaudio_presentation_pair(
     host_domain: ClockDomainId,
     mapper: &dyn ClockMapper,
 ) -> Result<Option<ClockPair>, CoreAudioPresentationError> {
+    coreaudio_presentation_pair_with_max_frames(
+        presentation,
+        applied,
+        applied.buffer_frames,
+        host_domain,
+        mapper,
+    )
+}
+
+/// Convert an observation bounded by the actual cold native callback maximum.
+///
+/// Variable callbacks may exceed the applied nominal buffer size. The caller
+/// supplies the maximum read by the owning stream without changing its exact
+/// request/applied metadata. All clock and observation checks remain the same.
+pub fn coreaudio_presentation_pair_with_max_frames(
+    presentation: CoreAudioPresentation,
+    applied: &CoreAudioApplied,
+    max_frames: u32,
+    host_domain: ClockDomainId,
+    mapper: &dyn ClockMapper,
+) -> Result<Option<ClockPair>, CoreAudioPresentationError> {
     use CoreAudioPresentationError as Error;
     if applied.buffer_channels.is_empty() || applied.buffer_channels.len() > 32 {
         return Err(Error::InvalidConfiguration(
@@ -65,7 +86,12 @@ pub fn coreaudio_presentation_pair(
             "exact request/applied format, buffer and native layout required",
         ));
     }
-    if presentation.frames == 0 || presentation.frames > applied.buffer_frames {
+    if max_frames == 0 || max_frames < applied.buffer_frames {
+        return Err(Error::InvalidConfiguration(
+            "callback maximum must be positive and at least the applied nominal buffer",
+        ));
+    }
+    if presentation.frames == 0 || presentation.frames > max_frames {
         return Err(Error::InvalidObservation(
             "presentation frames outside applied buffer",
         ));
@@ -132,6 +158,10 @@ pub fn coreaudio_presentation_pair(
         },
     }))
 }
+
+#[cfg(test)]
+#[path = "presentation_fixtures.rs"]
+mod presentation_fixtures;
 
 #[cfg(test)]
 mod tests {

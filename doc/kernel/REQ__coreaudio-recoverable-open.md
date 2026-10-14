@@ -62,6 +62,11 @@ preserves every span, original identity, frontier and retirement revision, never
 shrinks and commits capacity only after successful allocation. Existing legacy
 history preparation/telemetry semantics remain unchanged. Construct complete
 telemetry after this preparation with the explicit first-unsent basis.
+Native presentation validation accepts a positive observed callback up to that
+cold advertised maximum while preserving the exact applied nominal metadata.
+The explicit maximum cannot be zero or below nominal. Preserve every original
+Mach/sample/flag/grid/domain check and the legacy nominal-only helper behavior;
+never rewrite nominal settings to make an oversized observation appear valid.
 
 The sole callback retirement decision precedes configuration-error accounting,
 history, rendering, PCM copies and outer publication revisions. Authorized
@@ -71,6 +76,13 @@ Preserve checked nonces, busy/unconsumed outcomes, cancellation versus
 authorization in one CAS and sticky authorization. A single control producer
 publishes requested fixed geometry before the pending request; an older request
 cannot authorize using a later payload because it must CAS its exact nonce.
+After authorization, is_started must no longer qualify the stream as live.
+Source reads check authorization before and after their coherent read, because
+retirement deliberately leaves the last even publication unchanged. Refuse new
+history intents when authorization is already visible; an intent admitted before
+that check remains queued and is not retracted by a later authorization. Failed
+Start also prevents public Source qualification and history admission until
+retirement; historical snapshots remain available only as diagnostics.
 
 Validate every channel group, count, alignment, byte extent and overlap before
 any output write, then perform infallible copies. Render actual callback frames
@@ -88,5 +100,11 @@ effects and are not restored by source rollback or ownership recovery.
 Portable tests execute the same production decision/render/copy/admission step
 with real Mixer queues/history/nonzero PCM and allocation probes. Actual app
 backend, typed Source UI and solo/local hooks must compile through macOS code.
+Keep native lifecycle sequencing in one statically injected private implementation:
+production supplies HAL Start/Stop/listener-removal/IOProc-destruction operations,
+and cfg-macOS fault fixtures invoke that same sequence with controlled failures.
+Prepare failed-start callback work, retry and exact error/ownership assertions
+even when this host can only compile them. Do not replace native behavior proof
+with a parallel test-only lifecycle model or claim C-stub execution.
 Neither this contract nor host tests/foreign typing establish actual native
 registration, timing, cleanup failure behavior or acoustic acceptance.
