@@ -150,8 +150,15 @@ solo/cohort mapping queries use an additive mutable device port so the Source
 Owner can probe conditional permission and retain recovery errors during the
 query itself. Its default forwards the existing read-only mapping API unchanged;
 the complete Windows Source path overrides it with the conditional Owner query.
-No runtime borrow cell is needed to service this IO from the common pumps. Common
-pumps own acquired-prefix paused input, suspended polling, practice/replacement
+No runtime borrow cell is needed to service this IO from the common pumps.
+
+WASAPI request planning distinguishes an omitted device field from an explicit
+blank one. Omission keeps the selected endpoint; explicit blank requests the
+actual current OS default multimedia endpoint, discovered by the native adapter.
+An explicit nonempty endpoint remains exact. Do not silently retain the previous
+endpoint after an explicit default-device request or invent a default identity.
+
+Common pumps own acquired-prefix paused input, suspended polling, practice/replacement
 fences and actual resume. Preserve request ID and one correlated reply across
 WouldBlock; no duplicate transaction. Non-None coordinate NativeEnd and pending
 practice refuse cold; retained completion uses PracticePlayback.end_intent.

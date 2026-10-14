@@ -7,6 +7,25 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-14 exclusive E69: 사전 독립 coverage 점검에서 확인한 shared cold-helper
+우회 분기를 실제 pending6/buffer4·shared3조합의 owner 보존 회귀로 보강했다.
+최종 공통 worker37·외부 worker binary100 PASS이며 중복 fixture는 합산하지 않는다.
+platform/app 경고 비차단 Clippy와 실제 windows_bms 도움말도 exit0이다.
+독립 정식 review/QA와 native 실행은 남고 E68의 상태/완료105/223은 유지한다.
+
+2026-10-14 exclusive E68: native complete 연결 뒤 Windows platform/app lib/tests
+형 검사 exit0, 공통 Source Owner/UI/pump37·Source/Target publication 할당 각1과
+scoped Rust12 format/diff를 확인했다. 새 Windows9개 fixture는 typed-only다.
+native/consumer2개 W→V로 D105·V73·W20·N2·E15·P5·U3,105/223(47.09%)이며
+독립 최종 review/QA와 actual Windows 장치 실행은 남는다. 원래91/193은 그대로다.
+
+2026-10-14 exclusive E67: 실제 공통 worker36·sizing22·외부 worker binary99와
+Windows bin79를 통과했다. 기본 endpoint 선택의 실제 실패2개를 재현하고 공통
+parser를 수정해 GREEN2를 확인했다. 새 exclusive 측정 경계 heap 호출은0이다.
+외부 binary의 중복 fixture는 다른 suite에 합산하지 않는다. portable .13.01은 V,
+native .13.02는 작성 중 W다. D105·V71·W22·N2·E15·P5·U3,105/223(47.09%)이며
+독립 review/QA와 actual Windows 실행은 아직 남아 신규 완료로 계산하지 않는다.
+
 2026-10-14 exclusive E66: 같은 mode family의 WASAPI exclusive retained 교체를
 기존 complete Owner/worker로 확장하는 구현에 착수했다. 원래 .13의 범위를 유지하고
 portable worker·native lifecycle·Windows consumer·actual device acceptance의4개

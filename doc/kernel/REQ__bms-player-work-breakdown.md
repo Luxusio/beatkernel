@@ -461,6 +461,32 @@ native 연동 N, 장치 검사 E이며 신규 완료는 없다. 전체 D105·V70
 원래 Counter/cleanup 보존을 명시한다. 코드/실행/typing/독립 QA milestone은 각각
 이4개 항목에서 갱신하며 계획 검토를 제품 검증으로 계산하지 않는다.
 
+E67: portable source/test 쌍 동결 뒤 실제 worker36 PASS/실패0, sizing22와 외부
+worker binary99 PASS를 확인했다. 기존18 worker와 신규18개가 모두 통과했으며
+외부 binary는 중복 source-inclusion fixture와 실제 calibrated allocator1개를
+포함하므로 suite 수를 합산하지 않는다. 새 exclusive geometry/full lease/복구
+multiple·실패·conditional 경계의 측정 alloc/realloc/dealloc은0회다.
+Windows planner79 PASS/실패0에는 explicit blank device가 기존 endpoint를 잘못
+계승하는 실제 RED2→공통 parser 수정→GREEN2가 포함된다. 현재 native source/test
+쌍은 실제 geometry와 prefill/event/cleanup 연결을 작성 중이다. .13.01을 W→V,
+.13.02를 N→W로 갱신해 D105·V71·W22·N2·E15·P5·U3이며 완료/분모는105/223
+그대로다. Windows cfg 실행/형 검사와 독립 review/QA 전 완료로 계산하지 않는다.
+
+E68: native complete source/test 쌍도 동결하고 Windows platform/app의 lib/tests
+C-stub Rust 형 검사를 exit0으로 확인했다. 새 Windows9개 fixture는 compile만
+확인했으며 실행하지 않았다. 실제 GetBufferSize 뒤 history/reconfigure/MMCSS/
+prefill 이전 guard와 Ready/event의 같은 selector가 production 호출점에 연결됐다.
+기존 실제 common pump4개를 포함한 Source Owner/UI37 PASS와 Source/Target publication
+할당 검사 각각1 PASS도 확인했다. 변경 Rust12개 format/diff와 문서 local link144개가
+통과했다. native/consumer2개를 W→V로 옮겨 D105·V73·W20·N2·E15·P5·U3,
+105/223(47.09%)다. 독립 최종 review/QA와 실제 Windows 장치 실행은 남는다.
+
+E69: 사전 독립 coverage 점검의 shared cold-helper 우회 분기를 실제 production
+helper를 호출하는 pending6/buffer4·shared3조합 owner 보존 회귀로 보강했다.
+최종 공통 worker37·외부 worker binary100 PASS이며 중복 fixture는 합산하지 않는다.
+platform/app의 경고 비차단 Clippy와 실제 windows_bms --help는 exit0이다.
+독립 정식 review/QA와 실제 Windows 실행은 남는다. 신규 완료 없이 E68 집계를 유지한다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -616,9 +642,9 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
     - [ ] **BK-WBS-07.08.07.11** Windows solo/local의 실제 SourceCounter coordinate hook과 Legacy/complete static variant를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.10; 필요 근거/다음=E65 독립 DEEP/CLI에서 Windows bin72·Source UI9(거절24조합 포함)·전체 desktop app3258 및 Windows app typing PASS; cfgWindows mapper/COM 실제 실행과 선행 .10이 남음.
     - [ ] **BK-WBS-07.08.07.12** Source Frame/Counter 공통 solo/cohort pump에서 교체·resume·loop/scrub·원본 capture/PCM 보존을 검증한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.11; 필요 근거/다음=E65 독립 DEEP/CLI에서 실제 연결4·전체 desktop app3258 PASS, PCM 회계·종료 silence·원본 capture codec/hash·member/attempt·조건부 경합 검사; 실제 Windows acceptance와 선행 .11이 남음.
     - [ ] **BK-WBS-07.08.07.13** WASAPI exclusive retained Source 교체의 실제 mode/geometry·history·cleanup 및 pause/resume을 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E66의4개 실행 단위와 원래 native acceptance를 모두 충족해야 완료; shared 검사를 exclusive 완료로 확장하지 않는다.
-      - [ ] **BK-WBS-07.08.07.13.01** exclusive의 known Exact/actual geometry·전체 native buffer lease·whole-multiple PCM 복구와 conditional worker를 검사한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E66/AC002 source-test 쌍 착수; 실제 production helper/worker·오류/경합·보정된 무할당 및 독립 검증 필요.
-      - [ ] **BK-WBS-07.08.07.13.02** complete exclusive open/start/Stop/join/recovery에 actual native buffer·Counter/history·정리 오류를 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.13.01; 필요 근거/다음=E66/AC004; actual geometry guard와 prefill/event dispatch·MMCSS/전체 owner 보존, Windows 형 검사 및 실제 native 실행 필요.
-      - [ ] **BK-WBS-07.08.07.13.03** Windows retained exclusive startup·same-family Output UI와 기존 Owner/solo/local 소비 경로를 연결한다. — 상태=W(구현·연동중); 선행=BK-WBS-07.08.07.13.02; 필요 근거/다음=E66/AC003 source-test 쌍 착수; 실제 planner/capability·원본 상태 보존과 Legacy 회귀, native 연결 및 독립 검증 필요.
+      - [ ] **BK-WBS-07.08.07.13.01** exclusive의 known Exact/actual geometry·전체 native buffer lease·whole-multiple PCM 복구와 conditional worker를 검사한다. — 상태=V(구현·개발검사통과); 선행=-; 필요 근거/다음=E69 실제 production worker37·sizing22·외부 binary100 PASS; shared cold-helper3조합과 원본 PCM/상태·오류/경합·보정된 heap0 확인, 독립 최종 review/QA 필요.
+      - [ ] **BK-WBS-07.08.07.13.02** complete exclusive open/start/Stop/join/recovery에 actual native buffer·Counter/history·정리 오류를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.13.01; 필요 근거/다음=E68 actual geometry/preparation 순서와 Ready/event dispatch·complete cleanup 연결; Windows lib/tests typing0, 새 native9개는 미실행. 독립 review/QA·actual Windows 실행 필요.
+      - [ ] **BK-WBS-07.08.07.13.03** Windows retained exclusive startup·same-family Output UI와 기존 Owner/solo/local 소비 경로를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.13.02; 필요 근거/다음=E68 실제 Windows bin79(기본 device RED2→GREEN2 포함)·공통 Owner/UI/pump37·Windows app typing0; 독립 최종 review/QA·선행 native 실행과 실제 consumer acceptance 필요.
       - [ ] **BK-WBS-07.08.07.13.04** 실제 Windows exclusive 출력에서 pause/replace/resume·반복 연습·입력/capture/PCM·실패 정리를 검증한다. — 상태=E(환경·장비대기); 선행=BK-WBS-07.08.07.13.03; 필요 근거/다음=E65 소유 VM Render endpoint0·로그인 console/현재 실행 환경 부재; 새 QA에서 최고 가용 계층 재확인, 실제 장치·current source 실행 필요.
     - [ ] **BK-WBS-07.08.07.14** ASIO SourceFrame retained 교체의 callback conditional retirement·완전 상태·Owner/UI/pump를 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=공통 Frame 기초와 실제 ASIO adapter는 별도; SDK/build 라이선스 조건·형/장치 실행·실패/재시도 검사 필요.
     - [ ] **BK-WBS-07.08.07.15** CoreAudio retained Source 교체의 원래 native 좌표·callback/회수·Owner/UI/pump를 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=실제 macOS descriptor/history·callback 승인·cleanup·장치/독립 실행 필요; WASAPI typing은 근거가 아님.
@@ -901,6 +927,14 @@ Source/scalar/finite/foreign/실제 GUI/물리/applied 전체 범위를 보존�
 상세 behavior/architecture/라이선스는 연결된 기존 REQ/GUIDE/ADR이 계속 소유한다.
 
 ## 변경 이력
+
+- 2026-10-14 exclusive E68: native/app lib/tests Windows typing0와 실제 공통37·publication
+  할당 각1, scoped Rust12 format/diff를 확인했다. native/consumer2개 W→V로 현재
+  D105·V73·W20·N2·E15·P5·U3이다. 새 native9개는 미실행이며 완료105/223은 유지한다.
+
+- 2026-10-14 exclusive E67: 실제 worker36·sizing22·외부99 및 Windows bin79 PASS,
+  기본 장치 선택 RED2→GREEN2를 기록했다. portable1개 W→V, native1개 N→W로
+  D105·V71·W22·N2·E15·P5·U3이다. native 작성/독립 gate는 남고 완료105/223은 유지한다.
 
 - 2026-10-14 exclusive E66: 원래 .13을4개 하위로 나눠 활성220→223으로 확장하고
   source 기반 독립 계획 검토 뒤 software2개 W·native1개 N·실제 장치1개 E로 추적한다.
