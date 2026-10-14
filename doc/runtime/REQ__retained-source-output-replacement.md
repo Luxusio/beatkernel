@@ -3,13 +3,14 @@
 This is an implementation contract, not a completion claim. It extends the
 [gapless contract](../kernel/REQ__gapless-practice.md). The historical task slug
 contains sourceframe; actual WASAPI provides SourceCounter. Preserve both true
-Source coordinate classes, with supported WASAPI shared Counter consumption
-implemented first. Other modes/backends/formats and physical/browser acceptance
+Source coordinate classes, with WASAPI shared Counter consumption implemented
+first and same-family exclusive consumption following the same complete owner.
+Other backends/formats and physical/browser acceptance
 remain full player requirements.
 
 ## Same play and complete ownership
 
-After genuine pause adoption and native/input cutoff, supported existing shared
+After genuine pause adoption and native/input cutoff, supported same-family WASAPI
 endpoint, buffer, period, policy and matrix/channel changes resume the same
 Runtime, Mixer/program/PCM/command producer, Source history, selected policy,
 attempt/section/generation, accepted input and capture. No new attempt or silent
@@ -23,14 +24,42 @@ epochs advance that binding; validate the resulting exact point rather than an
 arbitrary later timestamp. Keep stream origin and all cold/final pause identity
 checks intact. A future gate does not justify fabricating an earlier native seed.
 
-Select an explicit complete owner only for retained WASAPI shared startup.
-Retained exclusive and ASIO keep their existing Legacy startup path and explicit
-retained-replacement refusal until their own supported vertical is implemented.
-Never change the selected mode or backend to obtain this shared-only path. Preserve
+Select an explicit complete owner for retained WASAPI shared and exclusive startup.
+Shared EnginePeriod/DeviceDefault policy changes remain supported within that
+family; exclusive replacements retain exclusive mode. Cross-family and backend
+changes refuse cold. ASIO keeps its existing Legacy startup path and explicit
+retained-replacement refusal until its own supported vertical is implemented.
+Never change the selected mode or backend to obtain a supported path. Preserve
 legacy Mixer/remixed/scalar/finite/ASIO recovery and scalar backend switching;
 do not route legacy remixed recovery through NativeOutputState.into_mixer,
 which intentionally refuses a prepared remix. Use static application variants
 and portable gameplay policy, not duplicated OS pause/replace logic.
+
+Exclusive event-driven fills acquire, encode, release and positively admit exactly
+the actual applied native buffer size, without a padding query. Both Ready prefill
+and running event work use this rule; timeout/control-wake clock-only work retains
+the same conditional permission gate. Exclusive timer mode remains explicitly
+unsupported. No requested/default buffer value is fabricated as native evidence.
+
+Exclusive live retirement always requires an actually empty suffix at the sole
+worker decision. A recovered complete owner may nevertheless contain original PCM
+from a prior setup/local failure or a public recovered-state caller. Preserve and
+support an empty suffix or a suffix that is a whole multiple of the new actual
+native buffer: eight retained frames can be submitted as two four-frame leases.
+Never re-render, discard or pad those bytes. A smaller or nonmultiple suffix
+refuses intact before any history/native lease/clock work. Existing format/matrix
+compatibility and uncertain-admission quarantine still apply.
+
+Before native acquisition, reject incompatible pending PCM only when validated
+Exact Frames/Duration/explicit Period determine the buffer size. Reuse existing
+duration/period arithmetic; unresolved defaults and caller-authorized rounding
+remain unknown. After actual GetBufferSize and native buffer/period equality,
+check the same whole-multiple rule before history preparation, reconfiguration,
+MMCSS registration or prefill. A refusal preserves the complete software owner
+while initialized native resources are retired through existing cleanup paths.
+Use the immutable Mixer render limit rather than the old prepared max_frames to
+allow legitimate native buffer growth. Geometry errors remain typed local
+failures and cannot be hidden by the native IO authorization classifier.
 
 Retained NativeOutputState owns Mixer, remix, generated PCM/report, admitted
 prefix and history through open/start/stop/join/recovery. Never flatten it to

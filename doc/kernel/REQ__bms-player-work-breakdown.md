@@ -451,6 +451,16 @@ Source8D·4V·3N, 전체 D105·V70·W20·N3·E14·P5·U3으로 활성220·47.73%
 actual review/QA 결과와 별도로 hook-owned 완료 증거가 없어 한 번의 task_verify는
 PENDING이다. 직접 수집한 결과는 NON-ATTESTING이며 task close/전체 완료로 쓰지 않는다.
 
+E66: exclusive 후속의 실제 source 기반 독립 계획 검토 뒤 구현에 착수했다.
+원래07.08.07.13을 portable worker/geometry, native complete lifecycle, Windows
+consumer, 실제 장치 acceptance의4개 말단으로 분해했다. 원래 문장과 native 범위를
+그대로 두고 실행 단위만 드러내 활성220→223이다. 시작 상태는 두 software lane W,
+native 연동 N, 장치 검사 E이며 신규 완료는 없다. 전체 D105·V70·W22·N3·E15·P5·U3,
+105/223(47.09%), 원래91/193(47.15%)은 그대로다. 이전 E65의220 분모는 당시 기록이다.
+계약은 전체 native buffer와 whole-multiple 복구 PCM, Exact cold/actual geometry,
+원래 Counter/cleanup 보존을 명시한다. 코드/실행/typing/독립 QA milestone은 각각
+이4개 항목에서 갱신하며 계획 검토를 제품 검증으로 계산하지 않는다.
+
 E1의 재현 명령(기존 [도구 설정 지침](../common/GUIDE__parallel-development.md)과
 현재 host compiler 환경을 먼저 사용한다):
 
@@ -605,7 +615,11 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
     - [ ] **BK-WBS-07.08.07.10** Canonical WASAPI adapter가 complete Source owner와 원래 Counter packet을 전달한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.05, BK-WBS-07.08.07.06; 필요 근거/다음=E65 독립 DEEP/CLI에서 portable canonical packet11·전체 app·Windows lib/tests typing PASS; cfgWindows native/classifier5개는 미실행이며 실제 Windows acceptance와 선행 .05가 남음.
     - [ ] **BK-WBS-07.08.07.11** Windows solo/local의 실제 SourceCounter coordinate hook과 Legacy/complete static variant를 연결한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.10; 필요 근거/다음=E65 독립 DEEP/CLI에서 Windows bin72·Source UI9(거절24조합 포함)·전체 desktop app3258 및 Windows app typing PASS; cfgWindows mapper/COM 실제 실행과 선행 .10이 남음.
     - [ ] **BK-WBS-07.08.07.12** Source Frame/Counter 공통 solo/cohort pump에서 교체·resume·loop/scrub·원본 capture/PCM 보존을 검증한다. — 상태=V(구현·개발검사통과); 선행=BK-WBS-07.08.07.09, BK-WBS-07.08.07.11; 필요 근거/다음=E65 독립 DEEP/CLI에서 실제 연결4·전체 desktop app3258 PASS, PCM 회계·종료 silence·원본 capture codec/hash·member/attempt·조건부 경합 검사; 실제 Windows acceptance와 선행 .11이 남음.
-    - [ ] **BK-WBS-07.08.07.13** WASAPI exclusive retained Source 교체의 실제 mode/geometry·history·cleanup 및 pause/resume을 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=shared vertical을 exclusive 완료로 확장하지 않음; exclusive 조건·실제 장치/독립 검증 필요.
+    - [ ] **BK-WBS-07.08.07.13** WASAPI exclusive retained Source 교체의 실제 mode/geometry·history·cleanup 및 pause/resume을 연결한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E66의4개 실행 단위와 원래 native acceptance를 모두 충족해야 완료; shared 검사를 exclusive 완료로 확장하지 않는다.
+      - [ ] **BK-WBS-07.08.07.13.01** exclusive의 known Exact/actual geometry·전체 native buffer lease·whole-multiple PCM 복구와 conditional worker를 검사한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=E66/AC002 source-test 쌍 착수; 실제 production helper/worker·오류/경합·보정된 무할당 및 독립 검증 필요.
+      - [ ] **BK-WBS-07.08.07.13.02** complete exclusive open/start/Stop/join/recovery에 actual native buffer·Counter/history·정리 오류를 연결한다. — 상태=N(미구현); 선행=BK-WBS-07.08.07.13.01; 필요 근거/다음=E66/AC004; actual geometry guard와 prefill/event dispatch·MMCSS/전체 owner 보존, Windows 형 검사 및 실제 native 실행 필요.
+      - [ ] **BK-WBS-07.08.07.13.03** Windows retained exclusive startup·same-family Output UI와 기존 Owner/solo/local 소비 경로를 연결한다. — 상태=W(구현·연동중); 선행=BK-WBS-07.08.07.13.02; 필요 근거/다음=E66/AC003 source-test 쌍 착수; 실제 planner/capability·원본 상태 보존과 Legacy 회귀, native 연결 및 독립 검증 필요.
+      - [ ] **BK-WBS-07.08.07.13.04** 실제 Windows exclusive 출력에서 pause/replace/resume·반복 연습·입력/capture/PCM·실패 정리를 검증한다. — 상태=E(환경·장비대기); 선행=BK-WBS-07.08.07.13.03; 필요 근거/다음=E65 소유 VM Render endpoint0·로그인 console/현재 실행 환경 부재; 새 QA에서 최고 가용 계층 재확인, 실제 장치·current source 실행 필요.
     - [ ] **BK-WBS-07.08.07.14** ASIO SourceFrame retained 교체의 callback conditional retirement·완전 상태·Owner/UI/pump를 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=공통 Frame 기초와 실제 ASIO adapter는 별도; SDK/build 라이선스 조건·형/장치 실행·실패/재시도 검사 필요.
     - [ ] **BK-WBS-07.08.07.15** CoreAudio retained Source 교체의 원래 native 좌표·callback/회수·Owner/UI/pump를 연결한다. — 상태=N(미구현); 선행=-; 필요 근거/다음=실제 macOS descriptor/history·callback 승인·cleanup·장치/독립 실행 필요; WASAPI typing은 근거가 아님.
   - [ ] **BK-WBS-07.08.08** 기존 scalar 교체와 finite-end ACK·held tail·취소/실패 경로가 새 retained 교체 변경 후에도 보존되는지 재검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=기존 구현/fixture는 존재하나 current 합쳐진 후보의 regression·실제 native crossing·end/drain/owner cleanup 및 독립 확인 필요.
@@ -887,6 +901,11 @@ Source/scalar/finite/foreign/실제 GUI/물리/applied 전체 범위를 보존�
 상세 behavior/architecture/라이선스는 연결된 기존 REQ/GUIDE/ADR이 계속 소유한다.
 
 ## 변경 이력
+
+- 2026-10-14 exclusive E66: 원래 .13을4개 하위로 나눠 활성220→223으로 확장하고
+  source 기반 독립 계획 검토 뒤 software2개 W·native1개 N·실제 장치1개 E로 추적한다.
+  새 완료는 없으며 D105·V70·W22·N3·E15·P5·U3,105/223(47.09%)다. 원래193/완료91과
+  모든 native/다른 backend·형식·출시 의무는 유지한다.
 
 - 2026-10-14 Source E65: actual 독립 DEEP review 다음 CLI QA PASS로 소프트웨어8개를
   V→D로 옮겼다. Source8D·4V·3N, 전체 D105·V70·W20·N3·E14·P5·U3이며

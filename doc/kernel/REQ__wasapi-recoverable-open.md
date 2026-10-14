@@ -11,6 +11,21 @@ convenience recovery or disable old scalar/ASIO/backend-switch behavior.
 Use first-unsent stream basis plus the original immutable creation pin and
 actual newly created Counter frequency. Metadata grants no playback progress.
 Preserve operation plus release/Stop/start cleanup/join/recovery failures.
+
+The complete path supports retained shared and event-driven exclusive startup
+through the same owner. Reuse existing exclusive initialization, equal actual
+buffer/period and explicit alignment negotiation; never fall back to shared mode.
+Exclusive filling uses a whole actual native buffer without GetCurrentPadding.
+Both prefill and event fills preserve original pending PCM across whole-buffer
+leases, including multiple-buffer suffixes; no new PCM may replace retained data.
+
+Known Exact incompatible suffixes refuse before COM. For unresolved defaults or
+authorized alignment/rounding, check actual native buffer compatibility after
+GetBufferSize but before history/reconfigure/MMCSS/prefill. Empty or whole-multiple
+pending is admissible; a nonmultiple returns the original unmodified complete
+owner and retires acquired resources. The Source contract owns the same live
+empty-suffix retirement and typed geometry-error rules.
+
 Uncertain native release keeps a complete quarantined owner that cannot reopen,
 reconfigure or Retry. The generic cold launch carries complete state; the new
 path must not erase join failure through an Option conversion.

@@ -191,6 +191,11 @@ pending PCM/history ownership, startup origin and fresh resume adoption. Current
 software evidence and the remaining Windows/device gate are recorded in the
 [Source change record](../changes/2026-10-14-retained-source-output-replacement.md).
 Shared WASAPI support does not complete exclusive, ASIO or CoreAudio replacement.
+The [exclusive follow-up](../changes/2026-10-14-retained-exclusive-output-replacement.md)
+extends the same complete owner with actual full-buffer event leases and
+whole-multiple recovered PCM. Its implementation, software checks and real
+Windows acceptance remain separate WBS milestones; this contract is not a
+native completion claim.
 
 ## Known ceiling
 

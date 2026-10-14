@@ -7,6 +7,14 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-14 exclusive E66: 같은 mode family의 WASAPI exclusive retained 교체를
+기존 complete Owner/worker로 확장하는 구현에 착수했다. 원래 .13의 범위를 유지하고
+portable worker·native lifecycle·Windows consumer·actual device acceptance의4개
+하위로 나눠 활성 분모223개다. **105/223(47.09%)**, D105·V70·W22·N3·E15·P5·U3이며
+신규 완료는 없다. 원래 제품 요구91/193(47.15%)은 그대로다. 실제 full-buffer lease와
+whole-multiple pending PCM 보존·Exact/actual geometry를 먼저 계약화했다. 아래 E65의
+완료105/분모220은 당시 기록이며 현재 상태는 E66과 WBS 도구가 우선한다.
+
 2026-10-14 Source E65: frozen9b6c5ae4의 독립 DEEP 리뷰 PASS0 다음 독립 CLI QA가
 소프트웨어 범위 PASS했다. desktop,webtransport app3258/0/ignored8·bins610/0/ignored17·
 platform415/0/ignored2·sizing22·worker 외부81·Source/Target 할당 각1, WASM·foreign
