@@ -194,6 +194,9 @@ where
         + crate::gameplay::output::ports::ConditionalSourceRetirementNativeOutputBackend<O>,
 {
     type Ticket = B::Ticket;
+    fn is_source_native_io_error(&self, error: &Self::Error) -> bool {
+        self.inner.is_source_native_io_error(error)
+    }
     fn created_source_coordinate_basis(
         &self,
         output: &Self::Output,

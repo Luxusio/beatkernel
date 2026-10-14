@@ -85,6 +85,10 @@ start cleanup, join and recovery failures, not a single overwritten HRESULT.
 Source observation/query/history requests probe before old IO and re-probe only
 raw backend failures, deferring only confirmed authorization. Genuine backend,
 identity/policy/timing and complete probe/cleanup/recovery errors remain visible.
+An adapter's backend error envelope alone does not classify an error as native
+IO. A static, default-false backend classifier identifies only raw IO/liveness;
+typed packet, coordinate, history-range and timing failures remain visible even
+when authorization follows. Remix forwards the same classification unchanged.
 History validates original range before clamping to pending report start and
 practice pins; a clamped request remains pending. Keep existing Mixer helpers
 compatible and avoid unrestricted mutable Mixer access.

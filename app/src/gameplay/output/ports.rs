@@ -614,6 +614,13 @@ pub trait ConditionalSourceRetirementNativeOutputBackend<O: SoftwareOutputState 
 {
     /// Binds the original control allocation and a checked request nonce.
     type Ticket;
+    /// Only raw native IO or liveness failures may be deferred after confirmed
+    /// retirement authorization. Typed packet, identity and timing rejections
+    /// remain visible even when an adapter returns them in its backend error.
+    /// Unclassified errors are preserved by default.
+    fn is_source_native_io_error(&self, _error: &Self::Error) -> bool {
+        false
+    }
     /// Actual immutable descriptor of the newly created native output. Only
     /// SourceFrame or SourceCounter is valid; Counter keeps its actual native
     /// frequency. Created metadata and prefill grant no native progress.

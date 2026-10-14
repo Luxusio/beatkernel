@@ -592,7 +592,7 @@ fn packet_at(
     let history = state.mixer().source_playback_history().unwrap();
     let mut playback = history
         .lookup_at_source_time(query)
-        .map_err(|error| io::Error::other(format!("{error:?}")))?;
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))?;
     if fault == Fault::RunningSource {
         playback = history.span(0).unwrap();
     }
@@ -640,7 +640,7 @@ fn packet_at(
             original_native_words: [output.native_id, output.presented],
         }),
     )
-    .map_err(|error| io::Error::other(error.to_string()))
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
 }
 impl SourcePlaybackNativeOutputBackend<NativeOutputState> for Effects {
     type NativeEvidence = Evidence;
@@ -785,7 +785,7 @@ impl SourcePlaybackNativeOutputBackend<NativeOutputState> for Effects {
         }
         let query = coordinate
             .source_query()
-            .map_err(|error| io::Error::other(error.to_string()))?;
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         let packet = packet_at(output, identity, query, Some(report), fault)?;
         self.script
             .borrow_mut()
@@ -793,7 +793,7 @@ impl SourcePlaybackNativeOutputBackend<NativeOutputState> for Effects {
             .push(coordinate);
         let result = NativePlaybackObservation::new(coordinate, packet)
             .map(Some)
-            .map_err(|error| io::Error::other(error.to_string()));
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()));
         if fault == Fault::ChangedAfterRead {
             output.epoch += 1;
         }
@@ -865,13 +865,16 @@ impl SourcePlaybackNativeOutputBackend<NativeOutputState> for Effects {
                     }),
                 )
                 .map(Some)
-                .map_err(|error| io::Error::other(error.to_string()))
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
             }
         }
     }
 }
 impl ConditionalSourceRetirementNativeOutputBackend<NativeOutputState> for Effects {
     type Ticket = Ticket;
+    fn is_source_native_io_error(&self, error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::Other
+    }
     fn created_source_coordinate_basis(
         &self,
         output: &Output,

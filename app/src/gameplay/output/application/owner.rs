@@ -1,15 +1,19 @@
 //! One static output owner shared by gameplay adapters; input and clocks stay external.
+use super::replacement::coordinate_source::{
+    publish_ready_coordinate_source_audio_output_held, CoordinateSourcePoll,
+};
 use super::replacement::coordinate_target::{
     publish_ready_coordinate_target_audio_output_held, CoordinateTargetPoll,
 };
 use super::replacement::target::{publish_ready_target_audio_output_held, ReadyTargetAudioOutput};
 use crate::gameplay::output::ports::{
-    ConditionalTargetRetirementNativeOutputBackend, NativePlaybackObservation,
-    NativeSourcePlaybackQuery, NativeTargetPlaybackObservation, NativeTargetPlaybackQuery,
-    OriginalNativeOutputBackend, OriginalTargetNativeOutputBackend, OutputReplacementBackend,
-    SourceHistoryRetirementNativeOutputBackend, SourcePlaybackIdentity,
-    SourcePlaybackNativeOutputBackend, TargetHistoryRetirementNativeOutputBackend,
-    TargetPlaybackNativeOutputBackend, TargetRetirementStatus,
+    ConditionalSourceRetirementNativeOutputBackend, ConditionalTargetRetirementNativeOutputBackend,
+    NativePlaybackObservation, NativeSourcePlaybackQuery, NativeTargetPlaybackObservation,
+    NativeTargetPlaybackQuery, OriginalNativeOutputBackend, OriginalTargetNativeOutputBackend,
+    OutputReplacementBackend, SourceHistoryRetirementNativeOutputBackend, SourcePlaybackIdentity,
+    SourcePlaybackNativeOutputBackend, SourceRetirementStatus,
+    TargetHistoryRetirementNativeOutputBackend, TargetPlaybackNativeOutputBackend,
+    TargetRetirementStatus,
 };
 use crate::native_audio_presentation::NativeAudioPresentation;
 use crate::{
@@ -31,7 +35,9 @@ use beatkernel::{
 use beatkernel_platform::audio::presentation::validation::{
     NativeObservationAdmission, OriginalNativePresentationEvidence,
 };
-use beatkernel_platform::audio::{ConvertedBoundaryFacts, ConvertedNativeOutputState};
+use beatkernel_platform::audio::{
+    ConvertedBoundaryFacts, ConvertedNativeOutputState, NativeOutputState,
+};
 
 enum RejectedReady<P: GameplayPresentationPort, O> {
     Legacy(ReadyOutput<P, O>),
@@ -41,6 +47,12 @@ enum RejectedReady<P: GameplayPresentationPort, O> {
 }
 /// The cold operation returns its staged value without retaining native evidence.
 pub enum CoordinateTargetOwnerPublication<A> {
+    Pending,
+    LiveRefused(String),
+    Published(A),
+}
+/// The cold operation returns its staged value without retaining native evidence.
+pub enum CoordinateSourceOwnerPublication<A> {
     Pending,
     LiveRefused(String),
     Published(A),
@@ -198,7 +210,9 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis, Ticket>
         }
     }
 }
-impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState> GameplayOutputOwner<B, O> {
+impl<B: OutputReplacementBackend<O>, O: SoftwareOutputState, Ticket>
+    GameplayOutputOwner<B, O, OutputFrameBasis, Ticket>
+{
     pub fn observe(
         &mut self,
         presentation: &mut B::Presentation,
@@ -313,12 +327,14 @@ impl<B: OutputReplacementBackend<O, Basis>, O, Basis, Ticket>
         cancellation.map(|_| ()).and(retirement)
     }
 }
-impl<B: OriginalNativeOutputBackend<O>, O: SoftwareOutputState> GameplayOutputOwner<B, O> {
+impl<B: OriginalNativeOutputBackend<O>, O: SoftwareOutputState, Ticket>
+    GameplayOutputOwner<B, O, OutputFrameBasis, Ticket>
+{
     fn audio_identity(
         &self,
         presentation: &NativeAudioPresentation,
     ) -> Result<(), ReplacementFailure<B::Error>> {
-        let Some(output) = self.current.as_ref() else {
+        let Some(output) = self.current() else {
             return Ok(());
         };
         let epoch = presentation.authority().epoch();
@@ -931,7 +947,9 @@ mod target_coordinate_owner_fixtures;
 #[path = "source_playback_owner_fixtures.rs"]
 pub(crate) mod source_playback_owner_fixtures;
 
-impl<B: SourcePlaybackNativeOutputBackend<O>, O: SoftwareOutputState> GameplayOutputOwner<B, O> {
+impl<B: SourcePlaybackNativeOutputBackend<O>, O: SoftwareOutputState, Ticket>
+    GameplayOutputOwner<B, O, OutputFrameBasis, Ticket>
+{
     fn source_playback_identity(
         &self,
         presentation: &NativeAudioPresentation,
@@ -1001,29 +1019,26 @@ impl<B: SourcePlaybackNativeOutputBackend<O>, O: SoftwareOutputState> GameplayOu
         )>,
         ReplacementFailure<B::Error>,
     > {
-        if self.current.is_none() {
+        if self.current().is_none() {
             return Ok(None);
         }
         self.source_playback_identity(presentation, identity)?;
-        let Some(output) = self.current.as_mut() else {
+        let basis = self.basis;
+        let Some((backend, output)) = self.backend_output_mut() else {
             return Ok(None);
         };
-        let epoch = self.controller.backend().epoch(output);
-        let Some(observation) = self
-            .controller
-            .backend_mut()
+        let epoch = backend.epoch(output);
+        let observation = backend
             .observe_native_playback(output, identity)
-            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?
-        else {
-            return Ok(None);
-        };
-        if self.controller.backend().epoch(output) != epoch
-            || self.controller.backend().basis(output) != self.basis
-        {
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
+        if backend.epoch(output) != epoch || backend.basis(output) != basis {
             return Err(ReplacementFailure::policy(
                 "source acquisition changed the published output identity",
             ));
         }
+        let Some(observation) = observation else {
+            return Ok(None);
+        };
         self.source_packet_identity(observation.source(), epoch, identity)?;
         // The packet constructor checks exact coordinate/query equality. The
         // presentation owns native validation and transactional clock admission.
@@ -1049,6 +1064,19 @@ impl<B: SourcePlaybackNativeOutputBackend<O>, O: SoftwareOutputState> GameplayOu
         else {
             return Ok(None);
         };
+        self.source_control_from_admission(presentation, identity, &observation, admission)
+    }
+
+    fn source_control_from_admission(
+        &self,
+        presentation: &NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+        observation: &NativePlaybackObservation<B::NativeEvidence>,
+        admission: NativeObservationAdmission,
+    ) -> Result<
+        Option<crate::native_coordinate_control::CoordinateControlFacts>,
+        ReplacementFailure<B::Error>,
+    > {
         // A later HOST on an unchanged native position was not retained. An
         // exact retained repeat may still carry newer render/control summaries.
         if admission == NativeObservationAdmission::Unchanged
@@ -1059,7 +1087,7 @@ impl<B: SourcePlaybackNativeOutputBackend<O>, O: SoftwareOutputState> GameplayOu
             return Ok(None);
         }
         crate::native_coordinate_control::CoordinateControlFacts::from_source(
-            &observation,
+            observation,
             presentation,
             identity,
         )
@@ -1075,20 +1103,16 @@ impl<B: SourcePlaybackNativeOutputBackend<O>, O: SoftwareOutputState> GameplayOu
         identity: SourcePlaybackIdentity,
     ) -> Result<Option<NativeSourcePlaybackQuery<B::NativeEvidence>>, ReplacementFailure<B::Error>>
     {
-        let Some(output) = self.current.as_ref() else {
+        let Some(output) = self.current() else {
             return Ok(None);
         };
         self.source_playback_identity(presentation, identity)?;
         let epoch = self.controller.backend().epoch(output);
-        let Some(packet) = self
+        let packet = self
             .controller
             .backend()
             .source_playback_at(output, query, identity)
-            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?
-        else {
-            return Ok(None);
-        };
-        self.source_packet_identity(&packet, epoch, identity)?;
+            .map_err(|error| Self::failure(ReplacementPhase::Observe, error))?;
         if self.controller.backend().epoch(output) != epoch
             || self.controller.backend().basis(output) != self.basis
         {
@@ -1096,6 +1120,10 @@ impl<B: SourcePlaybackNativeOutputBackend<O>, O: SoftwareOutputState> GameplayOu
                 "source query changed the published output identity",
             ));
         }
+        let Some(packet) = packet else {
+            return Ok(None);
+        };
+        self.source_packet_identity(&packet, epoch, identity)?;
         if !packet.query().compare_interpolated_time(*query).is_eq() {
             return Err(ReplacementFailure::policy(
                 "source playback packet changed the exact query",
@@ -1109,8 +1137,8 @@ impl<B: SourcePlaybackNativeOutputBackend<O>, O: SoftwareOutputState> GameplayOu
 #[path = "source_control_owner_fixtures.rs"]
 pub(crate) mod source_control_owner_fixtures;
 
-impl<B: SourceHistoryRetirementNativeOutputBackend<O>, O: SoftwareOutputState>
-    GameplayOutputOwner<B, O>
+impl<B: SourceHistoryRetirementNativeOutputBackend<O>, O: SoftwareOutputState, Ticket>
+    GameplayOutputOwner<B, O, OutputFrameBasis, Ticket>
 {
     /// Queues the original covering span for a caller-qualified live minimum.
     /// The caller must include all input, control and practice references.
@@ -1136,6 +1164,26 @@ impl<B: SourceHistoryRetirementNativeOutputBackend<O>, O: SoftwareOutputState>
         identity: SourcePlaybackIdentity,
         source_minimum: Option<u64>,
     ) -> Result<Option<u64>, ReplacementFailure<B::Error>> {
+        let Some(packet) = self.source_history_retirement_packet(
+            presentation,
+            minimum_query,
+            identity,
+            source_minimum,
+        )?
+        else {
+            return Ok(None);
+        };
+        self.request_source_history_retirement_packet(&packet, source_minimum)
+    }
+
+    fn source_history_retirement_packet(
+        &self,
+        presentation: &NativeAudioPresentation,
+        minimum_query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+        source_minimum: Option<u64>,
+    ) -> Result<Option<NativeSourcePlaybackQuery<B::NativeEvidence>>, ReplacementFailure<B::Error>>
+    {
         if source_minimum.is_some_and(|minimum| minimum < identity.initial_physical()) {
             return Err(ReplacementFailure::policy(
                 "source history retirement minimum precedes the original source identity",
@@ -1149,25 +1197,30 @@ impl<B: SourceHistoryRetirementNativeOutputBackend<O>, O: SoftwareOutputState>
                 "source history retirement requires native source evidence",
             ));
         }
+        Ok(Some(packet))
+    }
+
+    fn request_source_history_retirement_packet(
+        &mut self,
+        packet: &NativeSourcePlaybackQuery<B::NativeEvidence>,
+        source_minimum: Option<u64>,
+    ) -> Result<Option<u64>, ReplacementFailure<B::Error>> {
         let covering_start = packet.facts().playback.physical_start();
         let source_pin = source_minimum.map_or(covering_start, |pin| pin.min(covering_start));
-        let Some(output) = self.current.as_mut() else {
+        let Some((backend, output)) = self.backend_output_mut() else {
             return Ok(None);
         };
-        if self.controller.backend().epoch(output) != packet.epoch()
-            || self.controller.backend().basis(output) != packet.basis()
-        {
+        if backend.epoch(output) != packet.epoch() || backend.basis(output) != packet.basis() {
             return Err(ReplacementFailure::policy(
                 "source history retirement changed the published output identity",
             ));
         }
-        self.controller
-            .backend_mut()
+        backend
             .request_source_history_retirement(
                 output,
                 packet.epoch(),
                 packet.basis(),
-                identity,
+                packet.identity(),
                 source_pin,
             )
             .map_err(|error| Self::failure(ReplacementPhase::Retire, error))
@@ -1466,6 +1519,238 @@ impl<E: std::error::Error + 'static, Observation: std::error::Error + 'static> s
         Some(&self.observation)
     }
 }
+
+impl<B: ConditionalSourceRetirementNativeOutputBackend<NativeOutputState>>
+    GameplayOutputOwner<B, NativeOutputState, OutputFrameBasis, B::Ticket>
+where
+    B::Error: std::error::Error + 'static,
+{
+    /// Raw native IO may race the sole worker's retirement permission.
+    /// Typed packet, policy and timing failures remain visible without a poll.
+    fn complete_conditional_source_operation<T>(
+        &mut self,
+        operation: Result<Option<T>, ReplacementFailure<B::Error>>,
+    ) -> crate::native_gameplay::NativeGameplayResult<Option<T>> {
+        match operation {
+            Ok(value) => Ok(value),
+            Err(failure)
+                if matches!(&failure.cause, ReplacementCause::Backend { error, .. }
+                    if self.controller.backend().is_source_native_io_error(error)) =>
+            {
+                match self.controller.probe_coordinate_source_retirement() {
+                    Ok(Some(SourceRetirementStatus::Authorized)) => Ok(None),
+                    Ok(_) => Err(Box::new(failure)),
+                    Err(probe) => Err(Box::new(ConditionalTargetObservationFailure {
+                        observation: failure,
+                        probe,
+                    })),
+                }
+            }
+            Err(failure) => Err(Box::new(failure)),
+        }
+    }
+
+    pub fn publish_paused_coordinate_source_audio<A>(
+        &mut self,
+        mut context: crate::gameplay_presentation::GameplayAudioOutputContext<'_>,
+        now: ClockPoint,
+        identity: SourcePlaybackIdentity,
+        practice_pending: bool,
+        stage: impl FnOnce(&B::Output) -> Result<A, Box<dyn std::error::Error>>,
+    ) -> crate::native_gameplay::NativeGameplayResult<CoordinateSourceOwnerPublication<A>> {
+        if self.rejected.is_some() {
+            return Err(
+                "ready coordinate publication was refused; explicit cancellation required".into(),
+            );
+        }
+        self.source_playback_identity(context.presentation, identity)?;
+        if self.pending.is_some() && context.merger.pending() != 0 {
+            return Ok(CoordinateSourceOwnerPublication::Pending);
+        }
+        if let Some((request, wait_ns)) = self.pending.take() {
+            if practice_pending || context.end.is_some() {
+                return Ok(CoordinateSourceOwnerPublication::LiveRefused(
+                    "coordinate replacement requires no NativeEnd or pending practice".into(),
+                ));
+            }
+            if let Some(output) = self.current.take() {
+                if let Err(output) = self.controller.attach(output) {
+                    self.current = Some(output);
+                    self.pending = Some((request, wait_ns));
+                    return Err("replacement controller already owns an output".into());
+                }
+            }
+            if let Err(failure) = self.controller.begin_coordinate_source_audio(
+                request,
+                context.presentation,
+                context.pause,
+                context.end.as_ref(),
+                context.merger,
+                identity,
+                practice_pending,
+                wait_ns,
+                || context.control.hold_audio_pause(),
+            ) {
+                let restored = self.controller.take_attached_output();
+                let cold = restored.is_some()
+                    && matches!(
+                        &failure.cause,
+                        ReplacementCause::Policy(_) | ReplacementCause::Timing(_)
+                    );
+                self.current = restored;
+                if cold {
+                    return Ok(CoordinateSourceOwnerPublication::LiveRefused(
+                        failure.to_string(),
+                    ));
+                }
+                return Err(Box::new(failure));
+            }
+        }
+        if !matches!(
+            self.controller.state(),
+            ReplacementState::ConditionalRetirement | ReplacementState::Waiting
+        ) {
+            return Ok(CoordinateSourceOwnerPublication::Pending);
+        }
+        match self.controller.poll_coordinate_source_audio(
+            now,
+            context.presentation,
+            context.pause,
+            context.merger,
+        )? {
+            CoordinateSourcePoll::Pending => Ok(CoordinateSourceOwnerPublication::Pending),
+            CoordinateSourcePoll::LiveRefused(reason) => {
+                self.current = self.controller.take_attached_output();
+                Ok(CoordinateSourceOwnerPublication::LiveRefused(reason.into()))
+            }
+            CoordinateSourcePoll::Ready(ready) => {
+                let basis = ready.basis();
+                let report = ready.observation().source().facts().render;
+                match publish_ready_coordinate_source_audio_output_held(
+                    ready,
+                    &mut self.current,
+                    context,
+                    now,
+                    |ready| stage(ready.output()),
+                ) {
+                    Ok((hold, applied)) => {
+                        self.basis = basis;
+                        self.report = report;
+                        self.pause_evidence = None;
+                        drop(hold);
+                        Ok(CoordinateSourceOwnerPublication::Published(applied))
+                    }
+                    Err(failure) => {
+                        let (output, hold) = failure.ready.into_output_and_hold();
+                        self.rejected = Some(RejectedReady::Coordinate { output, hold });
+                        Err(failure.error)
+                    }
+                }
+            }
+        }
+    }
+
+    fn observe_conditional_source_native_playback_admission(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> crate::native_gameplay::NativeGameplayResult<
+        Option<(
+            NativePlaybackObservation<B::NativeEvidence>,
+            NativeObservationAdmission,
+        )>,
+    > {
+        if self.controller.probe_coordinate_source_retirement()?
+            == Some(SourceRetirementStatus::Authorized)
+        {
+            return Ok(None);
+        }
+        let observed = self.observe_native_playback_admission(presentation, identity);
+        self.complete_conditional_source_operation(observed)
+    }
+
+    pub fn observe_conditional_source_native_playback(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> crate::native_gameplay::NativeGameplayResult<
+        Option<NativePlaybackObservation<B::NativeEvidence>>,
+    > {
+        self.observe_conditional_source_native_playback_admission(presentation, identity)
+            .map(|observation| observation.map(|(packet, _)| packet))
+    }
+
+    pub fn observe_conditional_source_native_control(
+        &mut self,
+        presentation: &mut NativeAudioPresentation,
+        identity: SourcePlaybackIdentity,
+    ) -> crate::native_gameplay::NativeGameplayResult<
+        Option<crate::native_coordinate_control::CoordinateControlFacts>,
+    > {
+        let Some((observation, admission)) =
+            self.observe_conditional_source_native_playback_admission(presentation, identity)?
+        else {
+            return Ok(None);
+        };
+        Ok(self.source_control_from_admission(presentation, identity, &observation, admission)?)
+    }
+
+    /// Reads old Source history only while a fresh probe permits live IO.
+    pub fn conditional_source_playback_at(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+    ) -> crate::native_gameplay::NativeGameplayResult<
+        Option<NativeSourcePlaybackQuery<B::NativeEvidence>>,
+    > {
+        if self.controller.probe_coordinate_source_retirement()?
+            == Some(SourceRetirementStatus::Authorized)
+        {
+            return Ok(None);
+        }
+        let queried = self.source_playback_at(presentation, query, identity);
+        self.complete_conditional_source_operation(queried)
+    }
+
+    /// Both the history query and its later request can race authorization.
+    pub fn request_conditional_source_history_retirement_with_source_pin(
+        &mut self,
+        presentation: &NativeAudioPresentation,
+        minimum_query: &beatkernel::audio::InterpolatedTargetTime,
+        identity: SourcePlaybackIdentity,
+        source_minimum: Option<u64>,
+    ) -> crate::native_gameplay::NativeGameplayResult<Option<u64>>
+    where
+        B: SourceHistoryRetirementNativeOutputBackend<NativeOutputState>,
+    {
+        if self.controller.probe_coordinate_source_retirement()?
+            == Some(SourceRetirementStatus::Authorized)
+        {
+            return Ok(None);
+        }
+        let qualified = self.source_history_retirement_packet(
+            presentation,
+            minimum_query,
+            identity,
+            source_minimum,
+        );
+        let Some(packet) = self.complete_conditional_source_operation(qualified)? else {
+            return Ok(None);
+        };
+        if self.controller.probe_coordinate_source_retirement()?
+            == Some(SourceRetirementStatus::Authorized)
+        {
+            return Ok(None);
+        }
+        let requested = self.request_source_history_retirement_packet(&packet, source_minimum);
+        self.complete_conditional_source_operation(requested)
+    }
+}
+
+#[cfg(test)]
+#[path = "retained_source_observation_fixtures.rs"]
+mod retained_source_observation_fixtures;
 
 impl<B: ConditionalTargetRetirementNativeOutputBackend<ConvertedNativeOutputState>>
     GameplayOutputOwner<B, ConvertedNativeOutputState, TargetFrameBasis, B::Ticket>
