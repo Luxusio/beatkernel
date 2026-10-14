@@ -148,7 +148,7 @@ native registration의 create/null-ID/listener 실패는 등록 이후부터 시
 solo/local의 실제 paused UI forwarding은 구체 CoreAudio stream과 IOHID 소유자가
 필요해 host 행동 실행면이 없으며, 공통 Owner/UI 테스트나 위 포트 형 검사가 그
 실행을 대신하지 않는다. 실제 Mac 연결 여정과 WBS .15.12에 이 검증을 남긴다.
-전체 task의 독립 formal code/security review·CLI QA는 아직 진행하지 않았다.
+이 consumer 구현 시점에는 전체 task의 독립 formal code/security review·CLI QA를 아직 진행하지 않았다.
 
 후속 검증 candidate는 solo/local9e68bbb4와 cold storage/등록 회귀32c5b78d다.
 수정 후 host platform 전체473/0/ignored2와 consumer8/0을 실행했다. platform473에는
@@ -190,6 +190,49 @@ exit0(14.96초)이지만 기존 경고가 남아 strict-clean은 아니다. `--a
 native 재생 증거가 아니다. 로그는 `/tmp/beatkernel-coreaudio-cli-help-fixed-14034.log`와
 `/tmp/beatkernel-coreaudio-runtime-fixture-14034.log`다. 이 단계의 smoke/개발 검사는
 이후 independent formal review와 QA를 대신하지 않는다.
+
+독립 DEEP code review는 frozen2c14803a에 FAIL2를 반환했고, 별도 security review는
+PASS했다. 두 탐색 입력을 검증한 후 독립 정식 reviewer가 전체 변경을 재검토해
+정상적인 future CoreAudio 출력 예정 시각을 Source 교체 실패로 처리하는 경로와,
+최종 Pending probe 직후 승인된 history 요청의 RecoveryUnavailable이 게임 오류로
+전파되는 경합을 확인했다. QA는 아직 시작하지 않았다.
+
+같은 독립 계획 검토자가 필요한 AC012 수정안을 PASS했고 owning MCP로 PLAN에
+반영했다. 기존 non-generic waiting mode를 바꾸는 대신 교체 전용 관측 port와
+실제 complete 출력이 소유하는 고정2개 typed packet buffer를 사용한다. shared
+pure helper는 application에 두어 domain→ports 의존성을 만들지 않는다. 실제 출력의
+epoch/basis·요청 Source identity·HOST domain을 기대값으로 동결하고 첫/미래/full
+packet을 모두 검증한다. native E에 Clone/Copy를 요구하지 않고 원본을 이동한다.
+full[A,B]+freshC+releaseA 뒤 동일C도 공간이 생기면 보존해야 하며, 새 future 관측이
+기존 두 앵커를 계속 밀어내지 않게 한다. callback/configuration/packet 오류와
+stopped/authorized 상태를 매번 먼저 검사하고, 기존 controller의 timeout/cancel/
+stale/frozen/generation/two-anchor publication을 유지한다. 분류는 Native의 정확한
+RecoveryUnavailable 하나만 기존 authorization 재확인에 보낸다. 사전 REQ/ADR은
+소스 수정 전에 갱신했고, shared source·backend와 독립 fixture 작성자를 병렬 배정했다.
+최종 검토·QA·실제 native acceptance 완료를 아직 주장하지 않는다.
+
+2026-10-15 AC012 구현과 회귀를 동결했다. 실제 출력이 보관하는 원래 두 관측은
+호출자가 전달한 HOST 시각이 도달했을 때만 꺼내며, 새 관측은 대기열이 가득 차도
+검사한다. 전달한 프레임과 검증한 최신 publication을 구분해 full[A,B] 상태에서
+버린 C가 공간이 생긴 뒤 동일하게 다시 읽혀도 대기열에 들어갈 수 있다. 기존
+Remixed adapter는 교체 전용 호출의 output·identity·now를 그대로 전달한다.
+RecoveryUnavailable만 기존 Owner의 승인 상태 재확인에 보내며 다른 typed/native
+오류를 숨기지 않는다. 공통 helper7·실제 controller 미래 관측6·Owner IO 경합3·
+Remix3인 새 host 회귀19개를 포함해 전체 app library3279/0/ignored8을 실행했다.
+최초 실행의 누락 import2건을 고쳤고, 다음3278/1의 실패는 malformed packet을
+미래 시각 전부터 거절하는 올바른 동작을 테스트가 Pending으로 기대한 오류였다.
+잘못된 packet은 즉시 거절하고 다른 frozen/report 위반도 각각 실제 오류 이유와
+epoch/owner 보존을 검사하도록 보강한 최종 실행이다. 로그는
+`/tmp/beatkernel-coreaudio-ac012-app-lib-final-14035.log`다.
+
+최종 macOS platform/app lib/tests/macOS bin C-stub 타입 검사도 exit0이다.
+native backend의 narrow classifier 회귀3개를 추가해 관련 cfg-Mac backend fixture는
+24개이며 실제 실행 PASS가 아니다. native audio52·추가 presentation6·UI7과 함께
+같은 검사에서 형을 확인했다. 로그는
+`/tmp/beatkernel-coreaudio-ac012-macos-final-14035.log`다. 변경 Rust40개 scoped
+format과 diff 검사를 통과했다. backend는 W에서 V로 돌아가며 D135/489는
+유지한다. 이 기록은 재검토 전 개발 검증이며 두 번째 DEEP 탐색·정식 code/security
+review·독립 QA와 실제 native acceptance는 아직 남아 있다.
 
 ## Known ceiling
 

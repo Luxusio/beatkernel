@@ -16,7 +16,7 @@
 
 2026-10-14 CoreAudio E75(진행 중): .15를12개로 분해했다. 공통 retirement CAS,
 cold history 성장, portable production callback의3개 software 범위는 각각 실제
-검사로 D다. native 소유권/실패 fixture·backend·UI·solo/local은 V, 이후 결합
+검사로 D다. native 소유권/실패 fixture·UI·solo/local은 V, backend는 리뷰 수정으로 W이며 이후 결합
 review는 W·QA는 N, 실제 Mac/HAL acceptance는 E다. b8f7494f의 native audio48개·추가
 presentation6개와 app backend fixture21개를 포함한 macOS C-stub typing은 exit0이며
 실제 native 실행 PASS가 아니다. platform 전체 library469/0/ignored2와 host 공통
@@ -28,6 +28,12 @@ converter 준비·등록 실패 회귀도 macOS typing exit0이다. host platfor
 실행했고 native audio52개·추가 presentation6개는 여전히 typed-only다.
 consumer8/0·공통 출력 pump9/0·Source owner9/0과 CLI 도움말/오프라인 PCM fixture도
 실행했다. 최종 독립 review/QA와 native 오디오 이력의 실제 시간/장치 acceptance는 아직 미완료다.
+2c14803a의 독립 DEEP code review는 정상 future native 관측 대기와 history/승인
+경합2건으로 FAIL, 별도 security review는 PASS다. AC012로 shared replacement port·
+고정2개 typed 관측 대기·narrow classifier와 회귀를 수정했다. 2026-10-15 최종
+host 전체 app library3279/0/ignored8(새 회귀19개 포함)과 macOS platform/app
+lib/tests/macOS bin C-stub typing exit0·Rust40 format/diff를 확인했다. backend는
+V로 돌아갔고 cfg-Mac backend24개는 typed-only다. 새 정식 리뷰와 QA는 아직 남는다.
 [현재 변경](../changes/2026-10-14-coreaudio-retained-source-output.md)을 따른다.
 
 2026-10-14 좌표 경계 E74: frozen7ac7a1af의 독립 DEEP 리뷰 PASS0 다음 독립 CLI
