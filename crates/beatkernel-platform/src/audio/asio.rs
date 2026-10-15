@@ -8,8 +8,12 @@ use std::fmt;
 mod driver_id;
 mod pcm;
 pub use driver_id::{canonical_asio_clsid, AsioDriverIdError};
+#[cfg(any(all(target_os = "windows", feature = "asio-sdk"), test))]
+pub(crate) use pcm::encode_asio_channel_validated;
 pub use pcm::{encode_asio_channel, AsioPcmEncoding, AsioPcmError};
 mod render;
+#[cfg(any(all(target_os = "windows", feature = "asio-sdk"), test))]
+pub(crate) mod source_callback;
 pub use render::{AsioBlockRenderer, AsioRenderError};
 mod clocks;
 pub use clocks::{validate_clock_sources, AsioClockSource, AsioClockSourceError};

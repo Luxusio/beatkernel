@@ -208,11 +208,28 @@ pub fn encode_asio_channel(
     {
         return Err(AsioPcmError::NonFiniteSample);
     }
+    encode_asio_channel_validated(encoding, input, channels, channel, output);
+    Ok(())
+}
+
+/// Writes a channel after the owning callback has validated the entire prefix,
+/// all native plane extents and their disjointness. Keeping this shared inner
+/// loop infallible avoids a partial multichannel delivery on a later rejection.
+pub(crate) fn encode_asio_channel_validated(
+    encoding: AsioPcmEncoding,
+    input: &[f32],
+    channels: usize,
+    channel: usize,
+    output: &mut [u8],
+) {
+    debug_assert!(channels != 0 && channel < channels);
+    debug_assert!(input.len().is_multiple_of(channels));
+    let width = encoding.bytes_per_sample();
+    debug_assert_eq!(output.len(), input.len() / channels * width);
     for (frame, bytes) in input
         .chunks_exact(channels)
         .zip(output.chunks_exact_mut(width))
     {
         encoding.write_sample(frame[channel], bytes);
     }
-    Ok(())
 }
