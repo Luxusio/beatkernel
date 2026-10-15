@@ -3,6 +3,7 @@
 use crate::{
     PreparedBms,
     play_policy::{GaugeSelection, PolicyError, ResolvedPlayPolicy, TimingPresetSelection},
+    section_start::PreparedRetainedSection,
 };
 use beatkernel::{audio::PcmLimits, time::Timestamp};
 
@@ -29,6 +30,22 @@ pub(crate) fn prepare_selected_at(
     let (prepared, _) = crate::section_start::prepare_at(original, start, limits)?;
     Ok((prepared, policy))
 }
+
+pub(crate) fn prepare_selected_retained_at(
+    original: PreparedBms,
+    start: Timestamp,
+    selection: (TimingPresetSelection, GaugeSelection),
+    offset_ns: i64,
+) -> Result<(PreparedRetainedSection, ResolvedPlayPolicy), Box<dyn std::error::Error>> {
+    let (timing, gauge) = selection;
+    let policy = ResolvedPlayPolicy::with_timing(&original.source, gauge, timing, offset_ns)?;
+    let prepared = crate::section_start::prepare_retained_at(original, start)?;
+    Ok((prepared, policy))
+}
+
+#[cfg(test)]
+#[path = "browser_retained_preparation_fixtures.rs"]
+mod retained_preparation_fixtures;
 
 #[cfg(test)]
 mod tests {

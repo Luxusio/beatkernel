@@ -779,6 +779,8 @@ impl BrowserLibrary {
             limits,
             seed,
             assets_ready: false,
+            advance_started: false,
+            retained_practice: false,
             result: None,
             admission: None,
         })
@@ -807,6 +809,8 @@ pub struct BrowserPreparationJob {
     limits: PcmLimits,
     seed: u64,
     assets_ready: bool,
+    advance_started: bool,
+    retained_practice: bool,
     result: Option<BrowserPrepared>,
     admission: Option<crate::preparation::PreparationAdmission>,
 }
@@ -825,43 +829,85 @@ impl BrowserPreparationJob {
             movies,
             replay,
         } = original;
-        let (prepared, start, play_policy) = match self.mode {
-            BrowserPreparationMode::Original => (prepared, Timestamp::ZERO, None),
-            BrowserPreparationMode::Section {
-                start,
-                policy: None,
-            } => {
-                let (prepared, _) = crate::section_start::prepare_at(prepared, start, self.limits)
+        let (prepared, start, play_policy, retained) = if self.retained_practice {
+            let (start, policy) = match self.mode {
+                BrowserPreparationMode::Original => (Timestamp::ZERO, None),
+                BrowserPreparationMode::Section { start, policy } => (start, policy),
+                BrowserPreparationMode::Replay { .. } => {
+                    return Err(js_error("recorded replay cannot use retained practice"));
+                }
+            };
+            let (prepared, play_policy) = match policy {
+                Some((timing, gauge, offset)) => {
+                    let (prepared, policy) = timing_policy::prepare_selected_retained_at(
+                        prepared,
+                        start,
+                        (timing, gauge),
+                        offset,
+                    )
                     .map_err(js_error)?;
-                (prepared, start, None)
-            }
-            BrowserPreparationMode::Section {
+                    (prepared, Some(policy))
+                }
+                None => (
+                    crate::section_start::prepare_retained_at(prepared, start).map_err(js_error)?,
+                    None,
+                ),
+            };
+            let crate::section_start::PreparedRetainedSection {
+                prepared,
+                original_source,
+                section,
+            } = prepared;
+            (
+                prepared,
                 start,
-                policy: Some((timing, gauge, offset)),
-            } => {
-                let (prepared, policy) = timing_policy::prepare_selected_at(
-                    prepared,
+                play_policy,
+                Some(BrowserRetainedPreparation {
+                    original_source,
+                    section,
+                }),
+            )
+        } else {
+            let (prepared, start, play_policy) = match self.mode {
+                BrowserPreparationMode::Original => (prepared, Timestamp::ZERO, None),
+                BrowserPreparationMode::Section {
                     start,
-                    self.limits,
-                    (timing, gauge),
-                    offset,
-                )
-                .map_err(js_error)?;
-                (prepared, start, Some(policy))
-            }
-            BrowserPreparationMode::Replay { start } => {
-                let file = replay
-                    .as_ref()
-                    .ok_or_else(|| js_error("recorded setup missing"))?;
-                let prepared = crate::section_start::prepare_section_replay(
-                    prepared,
-                    file,
-                    crate::competition_live::replay_limits().map_err(js_error)?,
-                    self.limits,
-                )
-                .map_err(js_error)?;
-                (prepared, start, None)
-            }
+                    policy: None,
+                } => {
+                    let (prepared, _) =
+                        crate::section_start::prepare_at(prepared, start, self.limits)
+                            .map_err(js_error)?;
+                    (prepared, start, None)
+                }
+                BrowserPreparationMode::Section {
+                    start,
+                    policy: Some((timing, gauge, offset)),
+                } => {
+                    let (prepared, policy) = timing_policy::prepare_selected_at(
+                        prepared,
+                        start,
+                        self.limits,
+                        (timing, gauge),
+                        offset,
+                    )
+                    .map_err(js_error)?;
+                    (prepared, start, Some(policy))
+                }
+                BrowserPreparationMode::Replay { start } => {
+                    let file = replay
+                        .as_ref()
+                        .ok_or_else(|| js_error("recorded setup missing"))?;
+                    let prepared = crate::section_start::prepare_section_replay(
+                        prepared,
+                        file,
+                        crate::competition_live::replay_limits().map_err(js_error)?,
+                        self.limits,
+                    )
+                    .map_err(js_error)?;
+                    (prepared, start, None)
+                }
+            };
+            (prepared, start, play_policy, None)
         };
         let chart = PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
             .map_err(js_error)?;
@@ -875,12 +921,30 @@ impl BrowserPreparationJob {
             start,
             replay,
             play_policy,
+            retained,
         })
     }
 }
 #[wasm_bindgen]
 impl BrowserPreparationJob {
+    /// Opt into original-asset retained playback before any preparation step.
+    pub fn enable_retained_practice(&mut self) -> Result<(), JsValue> {
+        if self.retained_practice
+            || self.advance_started
+            || self.assets_ready
+            || self.result.is_some()
+            || matches!(self.assets.phase(), "ready" | "taken" | "cancelled")
+            || matches!(self.mode, BrowserPreparationMode::Replay { .. })
+        {
+            return Err(js_error(
+                "retained practice requires an untouched live preparation job",
+            ));
+        }
+        self.retained_practice = true;
+        Ok(())
+    }
     pub fn advance(&mut self, library: &BrowserLibrary) -> Result<bool, JsValue> {
+        self.advance_started = true;
         let result = (|| {
             self.assets
                 .validate_current(&library.preparation, &library.files)
@@ -982,6 +1046,11 @@ impl BrowserPreparationJob {
     }
 }
 
+pub(crate) struct BrowserRetainedPreparation {
+    pub(crate) original_source: beatkernel_bms::BmsChart,
+    pub(crate) section: crate::section_start::SectionReport,
+}
+
 /// Owns resources once; moving into BrowserView does not clone PCM or indexes.
 #[wasm_bindgen]
 pub struct BrowserPrepared {
@@ -994,10 +1063,15 @@ pub struct BrowserPrepared {
     pub(crate) start: Timestamp,
     pub(crate) replay: Option<ReplayFile>,
     pub(crate) play_policy: Option<crate::play_policy::ResolvedPlayPolicy>,
+    pub(crate) retained: Option<BrowserRetainedPreparation>,
 }
 
 #[wasm_bindgen]
 impl BrowserPrepared {
+    #[wasm_bindgen(getter)]
+    pub fn retained_practice(&self) -> bool {
+        self.retained.is_some()
+    }
     /// Transfer compressed movie resources once, before consuming preparation.
     pub fn video_registration(&self) -> Result<JsValue, JsValue> {
         crate::browser_video::registration(&self.movies)

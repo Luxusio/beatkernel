@@ -96,6 +96,66 @@ pub struct SectionReport {
     pub tails: Vec<TailSelection>,
 }
 
+/// Selected initial objects with the complete original retained audio program.
+#[derive(Debug)]
+pub struct PreparedRetainedSection {
+    pub prepared: PreparedBms,
+    pub original_source: beatkernel_bms::BmsChart,
+    pub section: SectionReport,
+}
+
+/// Selects initial judge objects without slicing or retiring original PCM cues.
+/// The complete source is retained for later backward scrub or original restart.
+pub fn prepare_retained_at(
+    original: PreparedBms,
+    start: Timestamp,
+) -> Result<PreparedRetainedSection> {
+    if start.as_nanos() < 0 {
+        return Err("practice start must be nonnegative".into());
+    }
+    let PreparedBms {
+        source: original_source,
+        mut compiled,
+        bank,
+        sounds,
+        bgm_commands,
+    } = original;
+    let mut source = original_source.clone();
+    let mut section = SectionReport {
+        original_gauge: crate::play_policy::OriginalGaugeContext::from_source(&original_source),
+        start,
+        excluded_objects: 0,
+        excluded_crossing_holds: 0,
+        retired_bgm: 0,
+        tails: Vec::new(),
+    };
+    if start != Timestamp::ZERO {
+        let retained = retained_objects(&compiled.chart, start);
+        section.excluded_objects = compiled.chart.objects().len() - retained.len();
+        section.excluded_crossing_holds = compiled
+            .chart
+            .objects()
+            .iter()
+            .filter(|object| {
+                object.time.start < start && object.time.end.is_some_and(|end| end >= start)
+            })
+            .count();
+        retain_source(&mut source, &retained);
+        compiled.chart = source.source.compile()?;
+    }
+    Ok(PreparedRetainedSection {
+        prepared: PreparedBms {
+            source,
+            compiled,
+            bank,
+            sounds,
+            bgm_commands,
+        },
+        original_source,
+        section,
+    })
+}
+
 /// Prepares an independent practice chart and bank before opening native output.
 /// Objects with earlier heads (including crossing holds) are excluded. Targets,
 /// BGM commands and all timing markers retain original absolute song times.

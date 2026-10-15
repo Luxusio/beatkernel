@@ -58,6 +58,7 @@ fn prepared() -> BrowserPrepared {
         start: Timestamp::ZERO,
         replay: None,
         play_policy: None,
+        retained: None,
     }
 }
 fn button(member: usize, ns: i64, sequence: u64, state: ButtonState) -> PhysicalInputEvent {

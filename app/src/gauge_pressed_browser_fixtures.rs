@@ -53,6 +53,7 @@ fn prepared(damage: &str) -> BrowserPrepared {
         start: Timestamp::ZERO,
         replay: None,
         play_policy: None,
+        retained: None,
     }
 }
 fn button(ns: i64, sequence: u64, state: ButtonState) -> PhysicalInputEvent {
