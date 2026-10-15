@@ -1,4 +1,4 @@
-use super::{OutputPhaseBasis, OutputPhaseError, OutputPhasePoint, Rate};
+use super::{OutputPhaseBasis, OutputPhaseError, OutputPhasePoint, PositiveRatePhase, Rate};
 use crate::time::{ClockPoint, Duration, Timestamp};
 use std::fmt;
 
@@ -122,13 +122,15 @@ impl fmt::Display for LiveTransportControlError {
 
 impl std::error::Error for LiveTransportControlError {}
 
-// Optional metadata is indexed by the existing authoritative anchor history.
-// It holds no duplicate host/song/rate or independent command chronology.
+// Optional exact metadata is indexed by the authoritative anchor history.
+// Acknowledgements bound elapsed values; phases add no separate chronology.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OutputPhaseHistory {
     basis: OutputPhaseBasis,
     // Successful acknowledgements, including no-ops, retain their phase bounds.
     controls: Vec<(Timestamp, i128)>,
+    // Present only for runtime-rate opt-in, indexed by authoritative anchors.
+    runtime_phases: Option<Vec<PositiveRatePhase>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,8 +167,9 @@ impl PrerollTransportSetup {
 ///
 /// Position lookup is allocation-free and O(log n). Actual changes append
 /// anchors in amortized O(1) time and retain O(n) history for late input events.
-/// Construction and mutation may allocate and belong on a control thread,
-/// outside an audio callback.
+/// Construction and unreserved mutation may allocate and belong on a control
+/// thread, outside an audio callback. Opted output-phase controls can reserve
+/// all required history capacity before application.
 ///
 /// ```
 /// use beatkernel::{time::Timestamp, transport::{Rate, Transport}};
@@ -274,8 +277,63 @@ impl Transport {
         transport.output_phase = Some(OutputPhaseHistory {
             basis,
             controls: vec![(logical_origin.timestamp, 0)],
+            runtime_phases: None,
         });
         Ok(transport)
+    }
+
+    /// Opts into exact same-attempt positive rate changes at actual output cuts.
+    ///
+    /// The original setup remains immutable. This mathematical constructor does
+    /// not establish presentation, native admission or clock-domain authority.
+    pub fn new_with_runtime_output_phase(
+        basis: OutputPhaseBasis,
+        logical_origin: ClockPoint,
+        original_start: Timestamp,
+        output_preroll: Duration,
+        positive_rate: Rate,
+        original_end: Option<Timestamp>,
+    ) -> Result<Self, OutputPhaseError> {
+        let mut transport = Self::new_with_output_phase(
+            basis,
+            logical_origin,
+            original_start,
+            output_preroll,
+            positive_rate,
+            original_end,
+        )?;
+        let phase =
+            PositiveRatePhase::new(original_start, output_preroll, positive_rate, original_end)
+                .map_err(OutputPhaseError::RatePhase)?;
+        transport
+            .output_phase
+            .as_mut()
+            .expect("output phase constructor retains history")
+            .runtime_phases = Some(vec![phase]);
+        Ok(transport)
+    }
+
+    /// Returns the current positive runtime rate, including while paused.
+    /// Fixed-only and scalar transports return `None`.
+    pub fn runtime_output_rate(&self) -> Option<Rate> {
+        self.output_phase
+            .as_ref()?
+            .runtime_phases
+            .as_ref()?
+            .last()
+            .map(|phase| phase.rate())
+    }
+
+    /// Reserves history for additional output-phase controls on a cold thread.
+    ///
+    /// Subsequent controls within the reserved count do not allocate. Each
+    /// control can append at most one anchor, elapsed value, exact phase and
+    /// acknowledgement; unchanged controls need no new anchor or phase.
+    pub fn try_reserve_output_phase_controls(
+        &mut self,
+        additional: usize,
+    ) -> Result<(), OutputPhaseError> {
+        self.reserve_output_phase_history(additional, additional)
     }
 
     /// Bound immutable attempt identity, independent of rounded song snapshots.
@@ -298,7 +356,7 @@ impl Transport {
         if point.basis() != phase.basis {
             return Err(OutputPhaseError::WrongBasis);
         }
-        let end = self
+        let mut end = self
             .anchors
             .partition_point(|anchor| anchor.host_time <= point.logical().timestamp);
         if end == 0 {
@@ -308,11 +366,23 @@ impl Transport {
             .preroll
             .as_ref()
             .expect("phase constructor retains preroll history");
-        let base = history.active_elapsed[end - 1].expect("phase controls retain exact elapsed");
         let elapsed = point.elapsed_nanos();
+        // Several actual cuts can share a rounded logical nanosecond.
+        // Within that timestamp the exact active elapsed value selects the
+        // segment, so late input before a cut keeps its previous phase.
+        let equal_start = self.anchors[..end]
+            .partition_point(|anchor| anchor.host_time < point.logical().timestamp);
+        end = equal_start
+            + history.active_elapsed[equal_start..end].partition_point(|base| {
+                base.expect("phase controls retain exact elapsed") <= elapsed
+            });
+        if end == 0 {
+            return Err(OutputPhaseError::BeforeOrigin);
+        }
+        let base = history.active_elapsed[end - 1].expect("phase controls retain exact elapsed");
         let control_end = phase
             .controls
-            .partition_point(|(at, _)| *at <= point.logical().timestamp);
+            .partition_point(|control| *control <= (point.logical().timestamp, elapsed));
         // The initial acknowledgement precedes every admitted query. Future
         // acknowledgements constrain historical queries as well as no-op bounds.
         let lower = phase.controls[control_end - 1].1;
@@ -323,10 +393,81 @@ impl Transport {
         if self.anchors[end - 1].rate == Rate::ZERO && elapsed != base {
             return Err(OutputPhaseError::InvalidState);
         }
+        if let Some(runtime_phases) = &phase.runtime_phases {
+            return runtime_phases[end - 1]
+                .song_at_elapsed(elapsed)
+                .map_err(OutputPhaseError::RatePhase);
+        }
         history
             .setup
             .song_at_elapsed(elapsed)
             .map_err(OutputPhaseError::Transport)
+    }
+
+    /// Changes an opted positive runtime rate at an actual qualified active cut.
+    ///
+    /// The same attempt and fractional phase survive. A same-rate control only
+    /// advances control chronology; it does not add or reanchor a phase segment.
+    /// Paused output cannot establish an active application cut.
+    pub fn set_rate_at_output_phase(
+        &mut self,
+        point: OutputPhasePoint,
+        rate: Rate,
+    ) -> Result<(), OutputPhaseError> {
+        let current_phase = self
+            .output_phase
+            .as_ref()
+            .and_then(|history| history.runtime_phases.as_ref())
+            .and_then(|phases| phases.last())
+            .copied()
+            .ok_or(OutputPhaseError::RuntimeRateRequired)?;
+        let song_time = self.validate_output_phase_control(point)?;
+        if self.is_paused() {
+            return Err(OutputPhaseError::InvalidState);
+        }
+        let candidate = current_phase
+            .with_rate_at_elapsed(point.elapsed_nanos(), rate)
+            .map_err(OutputPhaseError::RatePhase)?;
+        let changed = candidate.rate() != current_phase.rate();
+        let acknowledgement = (point.logical().timestamp, point.elapsed_nanos());
+        let append_control = self
+            .output_phase
+            .as_ref()
+            .expect("validated runtime phase")
+            .controls
+            .last()
+            .copied()
+            != Some(acknowledgement);
+        self.reserve_output_phase_history(usize::from(changed), usize::from(append_control))?;
+        if changed {
+            self.anchors.push(TransportAnchor {
+                host_time: point.logical().timestamp,
+                song_time,
+                rate,
+            });
+            self.preroll
+                .as_mut()
+                .expect("validated runtime phase")
+                .active_elapsed
+                .push(Some(point.elapsed_nanos()));
+            self.output_phase
+                .as_mut()
+                .expect("validated runtime phase")
+                .runtime_phases
+                .as_mut()
+                .expect("runtime opt-in retains phases")
+                .push(candidate);
+            self.resume_rate = rate;
+        }
+        self.last_command_host = point.logical().timestamp;
+        if append_control {
+            self.output_phase
+                .as_mut()
+                .expect("validated runtime phase")
+                .controls
+                .push(acknowledgement);
+        }
+        Ok(())
     }
 
     /// Freezes at an actual caller-qualified active phase; no timestamp subtraction.
@@ -350,22 +491,41 @@ impl Transport {
         point: OutputPhasePoint,
         paused: bool,
     ) -> Result<(), OutputPhaseError> {
-        if point.logical().timestamp < self.last_command_host {
-            return Err(OutputPhaseError::Transport(
-                TransportError::NonMonotonicHost,
-            ));
-        }
-        let song_time = self.position_at_output_phase(point)?;
+        let song_time = self.validate_output_phase_control(point)?;
+        let runtime_phase = self
+            .output_phase
+            .as_ref()
+            .expect("validated phase")
+            .runtime_phases
+            .as_ref()
+            .and_then(|phases| phases.last())
+            .copied();
         let rate = if paused {
             Rate::ZERO
         } else {
-            self.preroll
-                .as_ref()
-                .expect("validated phase")
-                .setup
-                .positive_rate
+            runtime_phase.map_or_else(
+                || {
+                    self.preroll
+                        .as_ref()
+                        .expect("validated phase")
+                        .setup
+                        .positive_rate
+                },
+                |phase| phase.rate(),
+            )
         };
-        if self.anchor().rate != rate {
+        let changed = self.anchor().rate != rate;
+        let acknowledgement = (point.logical().timestamp, point.elapsed_nanos());
+        let append_control = self
+            .output_phase
+            .as_ref()
+            .expect("validated phase")
+            .controls
+            .last()
+            .copied()
+            != Some(acknowledgement);
+        self.reserve_output_phase_history(usize::from(changed), usize::from(append_control))?;
+        if changed {
             self.anchors.push(TransportAnchor {
                 host_time: point.logical().timestamp,
                 song_time,
@@ -376,16 +536,70 @@ impl Transport {
                 .expect("validated phase")
                 .active_elapsed
                 .push(Some(point.elapsed_nanos()));
+            if let Some(runtime_phase) = runtime_phase {
+                self.output_phase
+                    .as_mut()
+                    .expect("validated phase")
+                    .runtime_phases
+                    .as_mut()
+                    .expect("runtime opt-in retains phases")
+                    .push(runtime_phase);
+            }
         }
         self.last_command_host = point.logical().timestamp;
-        let controls = &mut self
+        if append_control {
+            self.output_phase
+                .as_mut()
+                .expect("validated phase")
+                .controls
+                .push(acknowledgement);
+        }
+        Ok(())
+    }
+
+    fn validate_output_phase_control(
+        &self,
+        point: OutputPhasePoint,
+    ) -> Result<Timestamp, OutputPhaseError> {
+        if point.logical().timestamp < self.last_command_host {
+            return Err(OutputPhaseError::Transport(
+                TransportError::NonMonotonicHost,
+            ));
+        }
+        let song_time = self.position_at_output_phase(point)?;
+        let history = self.output_phase.as_ref().expect("validated phase");
+        if point.elapsed_nanos() < history.controls.last().expect("phase has an origin").1 {
+            return Err(OutputPhaseError::RegressingElapsed);
+        }
+        Ok(song_time)
+    }
+
+    fn reserve_output_phase_history(
+        &mut self,
+        anchors: usize,
+        controls: usize,
+    ) -> Result<(), OutputPhaseError> {
+        let history = self
             .output_phase
             .as_mut()
-            .expect("validated phase")
-            .controls;
-        let acknowledgement = (point.logical().timestamp, point.elapsed_nanos());
-        if controls.last().copied() != Some(acknowledgement) {
-            controls.push(acknowledgement);
+            .ok_or(OutputPhaseError::MissingPhase)?;
+        self.anchors
+            .try_reserve(anchors)
+            .map_err(|_| OutputPhaseError::AllocationFailed)?;
+        self.preroll
+            .as_mut()
+            .expect("output phase retains preroll history")
+            .active_elapsed
+            .try_reserve(anchors)
+            .map_err(|_| OutputPhaseError::AllocationFailed)?;
+        history
+            .controls
+            .try_reserve(controls)
+            .map_err(|_| OutputPhaseError::AllocationFailed)?;
+        if let Some(phases) = &mut history.runtime_phases {
+            phases
+                .try_reserve(anchors)
+                .map_err(|_| OutputPhaseError::AllocationFailed)?;
         }
         Ok(())
     }

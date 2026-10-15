@@ -449,3 +449,42 @@ fn largest_direct_elapsed_is_valid_math_but_song_conversion_remains_checked() {
     let capped = transport(b, 0, 0, Rate::new(2, 1).unwrap(), Some(70));
     assert_eq!(capped.position_at_output_phase(q).unwrap(), ts(70));
 }
+
+#[test]
+fn fixed_phase_controls_at_equal_logical_ns_keep_distinct_elapsed_history() {
+    let b = basis(1_000_000_000, 2);
+    let mut t = transport(b, 0, 1, Rate::new(1, 2).unwrap(), None);
+    // Two actual acknowledgements can share the same rounded logical timestamp.
+    // The no-op still constrains E; the later pause must not shadow earlier E.
+    t.resume_at_output_phase(p(b, 110, 4)).unwrap(); // E=2
+    t.pause_at_output_phase(p(b, 110, 6)).unwrap(); // E=4
+    assert_eq!(t.anchors().len(), 2);
+    for (relative, expected) in [(0, 0), (1, 0), (2, 0), (3, 1), (4, 1)] {
+        assert_eq!(
+            t.position_at_output_phase(p(b, 110, 2 + relative)).unwrap(),
+            ts(expected),
+            "fixed rate history must distinguish equal-ns cut E={relative}"
+        );
+    }
+    let snapshot = t.clone();
+    assert_eq!(
+        t.pause_at_output_phase(p(b, 110, 5)),
+        Err(beatkernel::transport::OutputPhaseError::RegressingElapsed),
+        "historical E=3 is queryable but cannot mutate after E=4"
+    );
+    assert_eq!(t, snapshot);
+    assert_eq!(
+        t.resume_at_output_phase(p(b, 110, 5)),
+        Err(beatkernel::transport::OutputPhaseError::RegressingElapsed)
+    );
+    assert_eq!(t, snapshot);
+    t.resume_at_output_phase(p(b, 110, 6)).unwrap();
+    assert_eq!(t.anchors().len(), 3);
+    assert_eq!(t.position_at_output_phase(p(b, 110, 5)).unwrap(), ts(1));
+    assert_eq!(t.position_at_output_phase(p(b, 111, 7)).unwrap(), ts(2));
+    assert_eq!(
+        t.runtime_output_rate(),
+        None,
+        "fixed constructor stays fixed"
+    );
+}

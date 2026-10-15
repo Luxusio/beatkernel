@@ -837,3 +837,123 @@ fn direct_elapsed_input_report_preserves_normalized_provenance_and_raw_audio_poi
     assert_eq!(queue.try_pop().unwrap(), command);
     assert!(queue.try_pop().is_err());
 }
+
+#[test]
+fn runtime_rate_history_judges_late_and_current_inputs_with_original_provenance() {
+    // The cut is admitted before either physical input is delivered. The first
+    // input predates it and must still use the initial half-speed segment.
+    for (native_ns, host_ns, relative_frame, expected_song) in
+        [(100, 1100, 1, 0), (201, 1201, 3, 2)]
+    {
+        let b = basis(1_000_000_000, 3);
+        let transport = Transport::new_with_runtime_output_phase(
+            b,
+            point(1, 1000),
+            ts(0),
+            Duration::from_nanos(1),
+            Rate::new(1, 2).unwrap(),
+            None,
+        )
+        .unwrap();
+        let (mut r, mut queue) = runtime(transport, Some(expected_song), 0, 4, 1, false);
+        let judge_before = r.judge().stable_hash().unwrap();
+        r.transport_mut()
+            .set_rate_at_output_phase(phase(b, 1200, 4), Rate::new(3, 2).unwrap())
+            .unwrap(); // original cut2 + relative2 => E=2, Q=1/2
+        assert_eq!(r.judge().stable_hash().unwrap(), judge_before);
+        let mut physical = input(host_ns, 9, ButtonState::Down);
+        physical.meta_mut().clock_domain = ClockDomainId(9);
+        physical.meta_mut().timestamp = ts(native_ns);
+        physical.meta_mut().native = Some(NativeEventMeta {
+            backend: BackendId(17),
+            code: Some(4),
+            timestamp: Some(point(9, native_ns)),
+        });
+        let original_native = physical.meta().native;
+        let result = r
+            .process_input_report_output_phase(
+                physical,
+                &Mapper,
+                point(2, 777),
+                phase(b, host_ns, 2 + relative_frame),
+            )
+            .unwrap();
+        assert_eq!(result.report.song_time, ts(expected_song));
+        assert_eq!(result.report.audio_at, point(2, 777));
+        let meta = *result.report.input.as_ref().unwrap().meta();
+        assert_eq!(meta.clock_domain, ClockDomainId(1));
+        assert_eq!(meta.timestamp, ts(host_ns));
+        assert_eq!(meta.original_clock_point, Some(point(9, native_ns)));
+        assert_eq!(meta.native, original_native);
+        assert_eq!(meta.source, DeviceId(8));
+        assert_eq!(meta.sequence, 9);
+        assert_eq!(result.dispositions.len(), 1);
+        assert_eq!(result.dispositions[0].selected(), Some(ObjectId(1)));
+        assert_eq!(result.report.judge_events.len(), 1);
+        assert!(matches!(
+            result.report.judge_events[0].outcome,
+            JudgeOutcome::Hit { .. }
+        ));
+        assert_eq!(result.report.judge_events[0].input, Some(meta));
+        assert_eq!(result.report.judge_events[0].at, ts(expected_song));
+        let command = AudioCommand::Play {
+            voice: VoiceId(1),
+            sample: SampleId(1),
+            at: ts(777),
+            gain: 0.25,
+        };
+        assert_eq!(result.report.audio_commands, [command]);
+        assert_eq!(queue.try_pop().unwrap(), command);
+        assert!(queue.try_pop().is_err());
+        assert_eq!(
+            r.transport().runtime_output_rate(),
+            Some(Rate::new(3, 2).unwrap())
+        );
+    }
+}
+
+#[test]
+fn rate_control_keeps_runtime_held_key_freshness_in_the_same_attempt() {
+    let b = basis(1_000_000_000, 3);
+    let transport = Transport::new_with_runtime_output_phase(
+        b,
+        point(1, 1000),
+        ts(0),
+        Duration::from_nanos(1),
+        Rate::new(1, 2).unwrap(),
+        None,
+    )
+    .unwrap();
+    let (mut r, _) = runtime(transport, None, 0, 4, 0, false);
+    let first = r
+        .process_input_report_output_phase(
+            input(1100, 1, ButtonState::Down),
+            &Mapper,
+            point(2, 777),
+            phase(b, 1100, 3),
+        )
+        .unwrap();
+    assert_eq!(
+        first.dispositions[0].freshness(),
+        InputFreshness::FreshPress
+    );
+    r.transport_mut()
+        .set_rate_at_output_phase(phase(b, 1200, 4), Rate::new(3, 2).unwrap())
+        .unwrap();
+    let held = r
+        .process_input_report_output_phase(
+            input(1201, 2, ButtonState::Down),
+            &Mapper,
+            point(2, 778),
+            phase(b, 1201, 5),
+        )
+        .unwrap();
+    assert_eq!(held.report.song_time, ts(2));
+    assert_eq!(
+        held.dispositions[0].freshness(),
+        InputFreshness::HeldDown,
+        "rate application must not release and re-acquire held controls"
+    );
+    assert_eq!(r.telemetry().counters().inputs, 2);
+    assert_eq!(r.transport().output_phase_basis(), Some(b));
+}

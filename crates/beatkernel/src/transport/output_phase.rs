@@ -1,5 +1,5 @@
 //! Mathematical active-output phase values; native admission remains caller-owned.
-use super::{LiveTransportSetupError, TransportError};
+use super::{LiveTransportSetupError, PositiveRatePhaseError, TransportError};
 use crate::{
     audio::SourcePosition,
     time::{ClockDomainId, ClockPoint},
@@ -50,10 +50,16 @@ pub enum OutputPhaseError {
     MissingPhase,
     /// Scalar timing cannot operate an opted phase transport.
     PhaseRequired,
+    /// Runtime rate changes require explicit opt-in at construction.
+    RuntimeRateRequired,
     /// Cold whole-preroll setup was invalid.
     Setup(LiveTransportSetupError),
+    /// Exact runtime phase arithmetic or denominator capacity failed.
+    RatePhase(PositiveRatePhaseError),
     /// Existing chronology or song representation failed.
     Transport(TransportError),
+    /// Cold history reservation could not allocate its required capacity.
+    AllocationFailed,
     /// A required value is unrepresentable.
     Overflow,
 }
