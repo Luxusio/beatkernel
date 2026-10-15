@@ -131,8 +131,53 @@ from previous children remains scoped to their actual sources/artifacts.
 
 ## Independent gates and WBS
 
-Fresh formal code review and independent QA have not run yet. Root execution
-above is development evidence, not independent QA or lifecycle attestation.
-BK-WBS-12.09.02 remains V until its applicable final gates are satisfied.
-WBS remains136/489 complete, remaining353; audio kernel12/27. The full Goal is
-active and incomplete.
+## Actual independent review and QA
+
+Frozen candidate: 0c393802877f2ecaa5f98efdc2a9eb4388af4a4b. Both fresh
+read-only DEEP discovery lanes returned actual empty candidate arrays. A separate
+fresh formal code_review_multi_host_14127_c1 completed PASS with
+FIX_NOW0/INVESTIGATE0/OPTIONAL0, then the independent
+qa_cli_multi_host_14127 completed PASS. Their actual finals are distinct from
+automatic lifecycle attestation.
+
+The independent QA ran the planned current-source headless build once, public
+serve-multiplayer --help, fresh strict PKI/owned relay and the exact nine cases
+once: 9passed/0failed/0ignored/0filtered, 3.95s. Relay PID1688807 on its own
+UDP46956 had actual inode/socket readiness and SIGINT exit0/join; test PID1688825
+and supervisor also exited0/joined and all handles were terminal. Scoped
+formatter/diff/WBS checks exited0. Operation, intent, CLI UX and runtime roles
+passed at the executed-command tier.
+
+QA evidence: target/wf/webtransport-multi-host-qa-cli-14127/invocations.json,
+SHA256 a1228c448f438aef13dba39d4beb0164a5b561a29e10aa13c2c850f38b50c706.
+Its independent-fresh/tests.log SHA256 is
+72139ad8932de1ef9367e77037e613109e6668ba2421d3d0c211c1abe40ceb18.
+All five candidate source hashes, HEAD/tracked state and native artifact were
+identical before/after QA. The initial QA driver stopped before product commands
+on Git ownership128/wrapper1; preserved setup-failure files record it. Per-command
+safe.directory fixed that setup without global configuration changes or product
+reexecution. No product failure was hidden.
+
+After actual review PASS then actual QA PASS, exactly one owning task_verify
+returned PENDING: the required automatic completion stream was absent, with zero
+rows of any kind. The owning task_blocked published the exact empty-stream park
+pair returned by that verify. No manual receipt, fabricated lifecycle PASS,
+receipt-only rerun, task_close or whole-Goal completion occurred. Actual software
+verification succeeded; task closure remains unfinished for missing attestation.
+The exact owner RPC results are retained in
+target/wf/webtransport-multi-host-14127/owning-verification.json, which is
+diagnostic evidence and not a receipt.
+
+BK-WBS-12.09.02 stays V, total136/489/remaining353 and audio12/27.
+The full Goal remains active; next available work is the separately scoped actual
+room cancellation and same-key replacement acceptance under12.09.03. A bounded
+matrix must retain pending-setup/outstanding-Commit and arbitrary-late-event
+limits rather than claiming the whole cancellation requirement complete.
+
+Commit-backed learning classification: the source-backed rule "confirm positive
+snapshots and exact case identities; distinguish API, actual wire and physical
+evidence" is captured in the existing competition REQ and actual fixture.
+The repeated Git ownership setup fact is already handled by command-scoped Git
+configuration; no new global policy, duplicate runbook or generic framework was
+added. No codifiable standalone command was emitted because the suite needs
+fresh strict PKI and a live owned relay.
