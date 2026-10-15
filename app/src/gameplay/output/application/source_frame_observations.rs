@@ -11,7 +11,7 @@ use beatkernel::{
     time::{ClockDomainId, ClockPoint},
 };
 use beatkernel_platform::audio::{
-    asio::AsioPresentationError,
+    asio::{AsioPresentationError, AsioPresentationObservation},
     presentation::{
         discipline::DisciplineError,
         validation::{NativePresentationValidator, OriginalNativePresentationEvidence},
@@ -125,7 +125,7 @@ impl<E> PendingSourceFrameObservations<E> {
     ) -> Result<(), SourcePlaybackPacketError> {
         use SourcePlaybackPacketError as Error;
         let packet = observation.source();
-        let coordinate = observation.coordinate();
+        let mut coordinate = observation.coordinate();
         let snapshot = coordinate.snapshot();
         self.validate_expectations(
             packet.epoch(),
@@ -169,15 +169,48 @@ impl<E> PendingSourceFrameObservations<E> {
                 {
                     return Err(Error::CoordinateMismatch);
                 }
-                let prepared = validator
-                    .prepare_asio(self.epoch, observation, basis)
-                    .map_err(|error| match error {
-                        DisciplineError::Overflow
-                        | DisciplineError::AsioPresentation(AsioPresentationError::Overflow) => {
-                            Error::Overflow
-                        }
-                        _ => Error::CoordinateMismatch,
-                    })?;
+                let original = self.latest.and_then(|prior| {
+                    let OriginalNativePresentationEvidence::Asio {
+                        observation: previous,
+                        basis: previous_basis,
+                    } = prior.coordinate.snapshot().evidence
+                    else {
+                        return None;
+                    };
+                    let unchanged = AsioPresentationObservation {
+                        host: previous.host,
+                        ..observation
+                    };
+                    (basis == previous_basis && unchanged == previous).then_some((prior, previous))
+                });
+                let invalid = |error| match error {
+                    DisciplineError::Overflow
+                    | DisciplineError::AsioPresentation(AsioPresentationError::Overflow) => {
+                        Error::Overflow
+                    }
+                    _ => Error::CoordinateMismatch,
+                };
+                // A renewed clock anchor may remap the same callback earlier or
+                // later. Validate that current relation before retaining its first
+                // genuine interval; its new bracket is not callback progress.
+                let prepared = if let Some((prior, previous)) = original {
+                    let current = NativePresentationValidator::new(
+                        self.epoch,
+                        validator.output_origin(),
+                        self.host_domain,
+                    );
+                    current
+                        .prepare_asio(self.epoch, observation, basis)
+                        .map_err(invalid)?;
+                    coordinate = prior.coordinate;
+                    validator
+                        .prepare_asio(self.epoch, previous, basis)
+                        .map_err(invalid)?
+                } else {
+                    validator
+                        .prepare_asio(self.epoch, observation, basis)
+                        .map_err(invalid)?
+                };
                 let delivered_end =
                     observation
                         .delivered_end_frame()
@@ -191,19 +224,21 @@ impl<E> PendingSourceFrameObservations<E> {
                 if delivered_end > packet.facts().submitted_source_end {
                     return Err(Error::InvalidPrefix);
                 }
-                let midpoint = i128::from(observation.host.before.timestamp.as_nanos())
-                    + (i128::from(observation.host.after.timestamp.as_nanos())
-                        - i128::from(observation.host.before.timestamp.as_nanos()))
-                        / 2;
-                (
+                let host = if let Some((prior, _)) = original {
+                    prior.host
+                } else {
+                    let midpoint = i128::from(observation.host.before.timestamp.as_nanos())
+                        + (i128::from(observation.host.after.timestamp.as_nanos())
+                            - i128::from(observation.host.before.timestamp.as_nanos()))
+                            / 2;
                     ClockPoint {
                         domain: self.host_domain,
                         timestamp: beatkernel::time::Timestamp::from_nanos(
                             i64::try_from(midpoint).map_err(|_| Error::Overflow)?,
                         ),
-                    },
-                    Some(prepared),
-                )
+                    }
+                };
+                (host, Some(prepared))
             }
             _ => return Err(Error::CoordinateMismatch),
         };
@@ -231,6 +266,11 @@ impl<E> PendingSourceFrameObservations<E> {
                 return Err(Error::CoordinateMismatch);
             }
         }
+        let observation = if coordinate == observation.coordinate() {
+            observation
+        } else {
+            NativePlaybackObservation::new(coordinate, observation.into_source())?
+        };
         if let (EvidenceFamily::Asio(validator), Some(prepared)) = (&mut self.family, prepared_asio)
         {
             validator

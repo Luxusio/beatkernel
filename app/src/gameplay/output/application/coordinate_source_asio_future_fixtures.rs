@@ -40,6 +40,8 @@ struct AsioFutureEffects {
     pending: Option<PendingSourceFrameObservations<Evidence>>,
     next_before: i64,
     trace: Rc<RefCell<Trace>>,
+    held_native: Option<(CoordinateNativeAudioSnapshot, SourcePlaybackFacts, [u64; 2])>,
+    renewed_host: Option<MultimediaHostInterval>,
 }
 impl AsioFutureEffects {
     fn new(inner: Effects, identity: SourcePlaybackIdentity, trace: Rc<RefCell<Trace>>) -> Self {
@@ -49,7 +51,39 @@ impl AsioFutureEffects {
             pending: None,
             next_before: FIRST_BEFORE,
             trace,
+            held_native: None,
+            renewed_host: None,
         }
+    }
+    fn queue_publication(
+        &mut self,
+        coordinate: CoordinateNativeAudioSnapshot,
+        identity: SourcePlaybackIdentity,
+        facts: SourcePlaybackFacts,
+        words: [u64; 2],
+        now: ClockPoint,
+    ) -> Result<Option<NativePlaybackObservation<Evidence>>, io::Error> {
+        let snapshot = coordinate.snapshot();
+        let source = NativeSourcePlaybackQuery::new(
+            snapshot.epoch,
+            snapshot.basis,
+            identity,
+            coordinate.source_query().unwrap(),
+            facts,
+            Some(Evidence {
+                original_native_words: words,
+            }),
+        )
+        .map_err(io::Error::other)?;
+        let packet =
+            NativePlaybackObservation::new(coordinate, source).map_err(io::Error::other)?;
+        self.trace
+            .borrow_mut()
+            .reads
+            .push((coordinate, facts, words));
+        let pending = self.pending.as_mut().unwrap();
+        pending.push(packet).map_err(io::Error::other)?;
+        pending.take_covered(now).map_err(io::Error::other)
     }
 }
 impl OutputReplacementBackend<NativeOutputState> for AsioFutureEffects {
@@ -163,6 +197,25 @@ impl SourcePlaybackNativeOutputBackend<NativeOutputState> for AsioFutureEffects 
         let Some(original) = self.inner.observe_native_playback(output, identity)? else {
             return Ok(None);
         };
+        if let Some((coordinate, facts, words)) = self.held_native {
+            // Script the same coherent native callback being read again. The
+            // real Mixer still runs, and a current native failure above wins.
+            // Only the read's HOST bracket is renewed; source revision/facts
+            // and callback-delivered geometry remain the original values.
+            let mut snapshot = coordinate.snapshot();
+            let OriginalNativePresentationEvidence::Asio { observation, .. } =
+                &mut snapshot.evidence
+            else {
+                unreachable!("only ASIO publications are held");
+            };
+            observation.host = self
+                .renewed_host
+                .expect("explicit supplied renewed bracket");
+            let renewed =
+                CoordinateNativeAudioSnapshot::new(snapshot, coordinate.coordinate()).unwrap();
+            self.next_before += CALLBACK_NS;
+            return self.queue_publication(renewed, self.identity, facts, words, now);
+        }
         let facts = original.source().facts();
         let words = original
             .source()
@@ -203,26 +256,7 @@ impl SourcePlaybackNativeOutputBackend<NativeOutputState> for AsioFutureEffects 
             },
         )
         .unwrap();
-        let source = NativeSourcePlaybackQuery::new(
-            original.source().epoch(),
-            original.source().basis(),
-            original.source().identity(),
-            coordinate.source_query().unwrap(),
-            facts,
-            Some(Evidence {
-                original_native_words: words,
-            }),
-        )
-        .map_err(io::Error::other)?;
-        let packet =
-            NativePlaybackObservation::new(coordinate, source).map_err(io::Error::other)?;
-        self.trace
-            .borrow_mut()
-            .reads
-            .push((coordinate, facts, words));
-        let pending = self.pending.as_mut().unwrap();
-        pending.push(packet).map_err(io::Error::other)?;
-        pending.take_covered(now).map_err(io::Error::other)
+        self.queue_publication(coordinate, original.source().identity(), facts, words, now)
     }
     fn source_playback_at(
         &self,
@@ -512,6 +546,94 @@ fn asio_future_original_age_still_refuses_stale_covered_anchors() {
     };
     assert!(matches!(error.cause, ReplacementCause::Policy(message) if message.contains("stale")));
     assert_eq!(rig.current.authority().epoch().id, OLD_EPOCH);
+}
+
+#[test]
+fn asio_future_controller_same_revision_renewal_preserves_original_anchor_until_real_next_callback()
+{
+    let (mut rig, mut c, trace) = setup(100_000_000, false);
+    pending(poll(&rig, &mut c, now()).unwrap());
+    let first = trace.borrow().reads[0];
+    assert_eq!(first.1.revision, 2);
+    c.backend_mut().held_native = Some(first);
+    for offset in [1_000_000, 2_000_000, 3_000_000] {
+        c.backend_mut().renewed_host = Some(MultimediaHostInterval {
+            before: host(FIRST_BEFORE + offset),
+            after: host(FIRST_AFTER + offset),
+        });
+        pending(poll(&rig, &mut c, now()).unwrap());
+    }
+    // The original interval is covered even though every renewed upper bound
+    // is still future. This supplies one original anchor, never two duplicates.
+    pending(poll(&rig, &mut c, host(FIRST_AFTER)).unwrap());
+    assert_eq!(rig.current.authority().epoch().id, OLD_EPOCH);
+    c.backend_mut().held_native = None;
+    pending(poll(&rig, &mut c, host(FIRST_AFTER)).unwrap());
+    let next = *trace.borrow().reads.last().unwrap();
+    assert!(next.1.revision > first.1.revision);
+    let OriginalNativePresentationEvidence::Asio { observation, .. } = next.0.snapshot().evidence
+    else {
+        unreachable!()
+    };
+    c.backend_mut().held_native = Some(next);
+    c.backend_mut().renewed_host = Some(MultimediaHostInterval {
+        before: host(observation.host.before.timestamp.as_nanos() + 50_000_000),
+        after: host(observation.host.after.timestamp.as_nanos() + 50_000_000),
+    });
+    let ready = match poll(&rig, &mut c, observation.host.after).unwrap() {
+        CoordinateSourcePoll::Ready(ready) => ready,
+        _ => panic!("two real original callbacks must qualify without HOST renewal"),
+    };
+    assert_eq!(ready.snapshots(), [first.0, next.0]);
+    assert_eq!(ready.observation().source().facts(), next.1);
+    assert_eq!(
+        ready
+            .observation()
+            .source()
+            .native_evidence()
+            .unwrap()
+            .original_native_words,
+        next.2
+    );
+    let (hold, ()) = publish_ready_coordinate_source_audio_output_held(
+        ready,
+        &mut rig.output,
+        GameplayAudioOutputContext {
+            control: GameplayPauseControl::solo(&mut rig.runtime),
+            presentation: &mut rig.current,
+            merger: &rig.inputs,
+            pause: &mut rig.pause,
+            config: &mut rig.config,
+            end: &mut rig.end,
+        },
+        observation.host.after,
+        |_| Ok(()),
+    )
+    .unwrap_or_else(|f| panic!("original renewed ASIO epoch: {}", f.error));
+    assert_eq!(rig.current.authority().epoch().id, OLD_EPOCH + 1);
+    assert_eq!(rig.pause.phase(), PausePhase::Paused);
+    drop(hold);
+}
+
+#[test]
+fn asio_future_controller_same_revision_renewal_never_refreshes_original_stale_age() {
+    let (rig, mut c, trace) = setup(1_000_000_000, false);
+    pending(poll(&rig, &mut c, now()).unwrap());
+    let first = trace.borrow().reads[0];
+    assert_eq!(first.1.revision, 2);
+    c.backend_mut().held_native = Some(first);
+    let at = FIRST_BEFORE + 101_000_000;
+    c.backend_mut().renewed_host = Some(MultimediaHostInterval {
+        before: host(at - WIDTH_NS),
+        after: host(at),
+    });
+    let error = match poll(&rig, &mut c, host(at)) {
+        Err(error) => error,
+        _ => panic!("the original callback remains stale despite a freshly supplied HOST bracket"),
+    };
+    assert!(matches!(error.cause, ReplacementCause::Policy(message) if message.contains("stale")));
+    assert_eq!(rig.current.authority().epoch().id, OLD_EPOCH);
+    assert_eq!(c.state(), ReplacementState::RecoveredMixer);
 }
 
 #[test]

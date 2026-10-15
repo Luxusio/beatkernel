@@ -249,20 +249,196 @@ fn asio_duplicate_with_later_host_does_not_refresh_or_return_an_original_twice()
     let mut later = header(0);
     later.before = point(1, 9000);
     later.after = point(1, 9080);
-    later.revision = 4;
+    // Re-reading one actual callback does not change its publication revision.
+    assert_eq!(later.revision, 2);
     cache.push(observation(later, &drops)).unwrap();
     let original = take(&mut cache, 0);
     assert_eq!(raw(&original).host.after, header(0).after);
     cache.push(observation(later, &drops)).unwrap();
     assert!(cache.take_covered(point(1, 9999)).unwrap().is_none());
     let mut next = header(1);
-    next.revision = 6;
+    next.revision = 4;
     cache.push(observation(next, &drops)).unwrap();
     assert_eq!(raw(&take(&mut cache, 1)).delivered_first_frame, 19);
 }
 
 #[test]
-fn asio_equal_midpoint_waits_for_real_host_progress_without_replacing_original_anchor() {
+fn asio_full_queue_renewed_c_keeps_first_original_bracket_and_moves_only_selected_evidence() {
+    for renew_before in [900, 9000] {
+        let drops = Rc::new(Cell::new(0));
+        let mut cache = cache();
+        cache.push(observation(header(0), &drops)).unwrap();
+        cache.push(observation(header(1), &drops)).unwrap();
+        let original_c = observation(header(2), &drops);
+        let original_coordinate = original_c.coordinate();
+        cache.push(original_c).unwrap();
+        assert_eq!(
+            drops.get(),
+            1,
+            "a full queue does not retain native E for C"
+        );
+        let mut renewed = header(2);
+        renewed.before = point(1, renew_before);
+        renewed.after = point(1, renew_before + 80);
+        cache.push(observation(renewed, &drops)).unwrap();
+        assert_eq!(drops.get(), 2, "full-cache renewal is still not selected");
+        let a = take(&mut cache, 0);
+        renewed.before = point(1, renew_before + 10);
+        renewed.after = point(1, renew_before + 100);
+        let selected_c = observation(renewed, &drops);
+        let selected_e = selected_c
+            .source()
+            .native_evidence()
+            .unwrap()
+            .words
+            .as_ptr();
+        cache.push(selected_c).unwrap();
+        let b = take(&mut cache, 1);
+        assert!(cache.take_covered(point(1, 1279)).unwrap().is_none());
+        let c = take(&mut cache, 2);
+        assert_eq!(c.coordinate(), original_coordinate);
+        assert_eq!(raw(&c).host.after, header(2).after);
+        assert_eq!(c.source().facts().revision, 6);
+        assert_eq!(
+            c.source().native_evidence().unwrap().words.as_ptr(),
+            selected_e
+        );
+        assert_eq!(
+            drops.get(),
+            2,
+            "normalization must move rather than clone or drop E"
+        );
+        drop((a, b, c));
+        assert_eq!(drops.get(), 5);
+    }
+}
+
+#[test]
+fn asio_renewed_awaiting_c_never_becomes_progress_but_a_new_callback_d_does() {
+    for renew_before in [900, 9000] {
+        let drops = Rc::new(Cell::new(0));
+        let mut cache = cache();
+        cache.push(observation(header(0), &drops)).unwrap();
+        cache.push(observation(header(1), &drops)).unwrap();
+        let mut c = header(2);
+        // C advances actual frames but has B's original coarse HOST midpoint.
+        c.before = point(1, 1110);
+        c.after = point(1, 1170);
+        cache.push(observation(c, &drops)).unwrap();
+        let mut renewed = c;
+        renewed.before = point(1, renew_before);
+        renewed.after = point(1, renew_before + 80);
+        cache.push(observation(renewed, &drops)).unwrap();
+        let a = take(&mut cache, 0);
+        renewed.before = point(1, renew_before + 10);
+        renewed.after = point(1, renew_before + 90);
+        cache.push(observation(renewed, &drops)).unwrap();
+        let b = take(&mut cache, 1);
+        assert!(
+            cache.take_covered(point(1, 99_999)).unwrap().is_none(),
+            "new HOST brackets cannot promote the unchanged C callback"
+        );
+        cache.push(observation(header(3), &drops)).unwrap();
+        let d = take(&mut cache, 3);
+        assert_eq!(raw(&d).delivered_first_frame, header(3).first);
+        assert_eq!(raw(&d).host.after, header(3).after);
+        drop((a, b, d));
+        assert_eq!(drops.get(), 6);
+    }
+}
+
+#[test]
+fn asio_same_revision_renewal_refuses_changed_facts_geometry_report_or_host_domain() {
+    let drops = Rc::new(Cell::new(0));
+    for invalid in 0..5 {
+        let mut cache = cache();
+        let first = observation(header(0), &drops);
+        let original = first.coordinate();
+        cache.push(first).unwrap();
+        let mut bad = header(0);
+        bad.before = point(1, 9000);
+        bad.after = point(1, 9080);
+        match invalid {
+            0 => bad.pulled += 1,
+            1 => {
+                bad.pulled += 1;
+                bad.submitted += 1;
+            }
+            2 => bad.render.song_position = Timestamp::from_nanos(1),
+            3 => bad.frames = 1,
+            _ => {
+                bad.before.domain = ClockDomainId(77);
+                bad.after.domain = ClockDomainId(77);
+            }
+        }
+        assert!(
+            cache.push(observation(bad, &drops)).is_err(),
+            "invalid={invalid}"
+        );
+        assert_eq!(take(&mut cache, 0).coordinate(), original);
+        cache.push(observation(header(1), &drops)).unwrap();
+        assert_eq!(
+            raw(&take(&mut cache, 1)).delivered_first_frame,
+            header(1).first
+        );
+    }
+}
+
+#[test]
+fn malformed_renewed_asio_bracket_refuses_at_checked_coordinate_boundary() {
+    let drops = Rc::new(Cell::new(0));
+    let mut cache = cache();
+    let first = observation(header(0), &drops);
+    let original = first.coordinate();
+    cache.push(first).unwrap();
+    for invalid in 0..2 {
+        let mut snapshot = original.snapshot();
+        let OriginalNativePresentationEvidence::Asio { observation, .. } = &mut snapshot.evidence
+        else {
+            unreachable!()
+        };
+        if invalid == 0 {
+            observation.host.before = point(1, 9080);
+            observation.host.after = point(1, 9000);
+        } else {
+            observation.host.after.domain = ClockDomainId(77);
+        }
+        assert!(CoordinateNativeAudioSnapshot::new(snapshot, original.coordinate()).is_err());
+    }
+    assert_eq!(take(&mut cache, 0).coordinate(), original);
+}
+
+#[test]
+fn supplied_pair_keeps_strict_same_revision_coordinate_equality() {
+    let drops = Rc::new(Cell::new(0));
+    let h = header(0);
+    let mut cache =
+        PendingSourceFrameObservations::new(h.epoch, h.basis, h.identity, ClockDomainId(1));
+    let coordinate = |target| {
+        CoordinateNativeAudioSnapshot::new(
+            NativeAudioSnapshot {
+                epoch: h.epoch,
+                basis: h.basis,
+                evidence: OriginalNativePresentationEvidence::SuppliedPair(ClockPair {
+                    source: h.basis.point_at_stream_frame(0).unwrap(),
+                    target,
+                }),
+            },
+            NativeOutputCoordinate::StreamFrame { frame: 0 },
+        )
+        .unwrap()
+    };
+    let original = coordinate(h.after);
+    cache.push(packet(h, original, &drops)).unwrap();
+    assert!(matches!(
+        cache.push(packet(h, coordinate(point(1, 9080)), &drops)),
+        Err(SourcePlaybackPacketError::InvalidRevision)
+    ));
+    assert_eq!(take(&mut cache, 0).coordinate(), original);
+}
+
+#[test]
+fn asio_equal_midpoint_requires_a_new_callback_and_never_renews_the_tied_original() {
     let drops = Rc::new(Cell::new(0));
     let mut cache = cache();
     cache.push(observation(header(0), &drops)).unwrap();
@@ -272,10 +448,31 @@ fn asio_equal_midpoint_waits_for_real_host_progress_without_replacing_original_a
     cache.push(observation(tied, &drops)).unwrap();
     assert_eq!(raw(&take(&mut cache, 0)).host.after, header(0).after);
     assert!(cache.take_covered(point(1, 9999)).unwrap().is_none());
-    let mut progressed = header(1);
-    progressed.revision = 6;
-    cache.push(observation(progressed, &drops)).unwrap();
-    assert_eq!(raw(&take(&mut cache, 1)).host.after, header(1).after);
+    let mut renewed = header(1);
+    renewed.revision = 6;
+    cache.push(observation(renewed, &drops)).unwrap();
+    assert!(
+        cache.take_covered(point(1, 9999)).unwrap().is_none(),
+        "a higher Source revision does not turn the same delivered callback into progress"
+    );
+    renewed.before = point(1, 9000);
+    renewed.after = point(1, 9080);
+    cache.push(observation(renewed, &drops)).unwrap();
+    assert!(
+        cache.take_covered(point(1, 9999)).unwrap().is_none(),
+        "the original tied midpoint survives repeated bracket renewal"
+    );
+    let mut next_callback = header(2);
+    next_callback.revision = 8;
+    let original_next = observation(next_callback, &drops);
+    let original_coordinate = original_next.coordinate();
+    cache.push(original_next).unwrap();
+    assert!(cache.take_covered(point(1, 1279)).unwrap().is_none());
+    let next = take(&mut cache, 2);
+    assert_eq!(next.coordinate(), original_coordinate);
+    assert_eq!(raw(&next).delivered_first_frame, next_callback.first);
+    assert_eq!(raw(&next).host.after, next_callback.after);
+    assert!(cache.take_covered(point(1, 9999)).unwrap().is_none());
 }
 
 #[test]
