@@ -207,3 +207,115 @@ fn header_and_operation_caps_are_independent_of_nested_payload_limits() {
         ReplayCodecError::TooManyRecords
     );
 }
+
+#[test]
+fn borrowed_parts_match_default_envelope_bytes_for_original_provenance_and_empty_logs() {
+    let source = fixture();
+    for records in [source.records, Vec::new()] {
+        let file = ReplayFile::new(source.header.clone(), records);
+        let owned = encode_replay(&file, limits(1_000_000)).unwrap();
+        let borrowed =
+            encode_replay_parts(&file.header, &file.records, limits(owned.len())).unwrap();
+        assert_eq!(borrowed, owned);
+        assert_eq!(decode_replay(&borrowed, limits(owned.len())).unwrap(), file);
+    }
+}
+
+#[test]
+fn borrowed_parts_preserve_header_chronology_domain_and_all_independent_limits() {
+    let source = fixture();
+    let file = ReplayFile::new(source.header, source.records);
+    let check = |candidate: &ReplayFile, bounds, expected| {
+        assert_eq!(
+            encode_replay_parts(&candidate.header, &candidate.records, bounds).unwrap_err(),
+            expected
+        );
+        assert_eq!(encode_replay(candidate, bounds).unwrap_err(), expected);
+    };
+    let mut invalid = file.clone();
+    invalid.header.version = REPLAY_VERSION + 1;
+    check(
+        &invalid,
+        limits(1_000_000),
+        ReplayCodecError::Replay(ReplayError::UnsupportedVersion(REPLAY_VERSION + 1)),
+    );
+    invalid = file.clone();
+    invalid.records[1].ordinal = 2;
+    check(
+        &invalid,
+        limits(1_000_000),
+        ReplayCodecError::Replay(ReplayError::InvalidOrdinal),
+    );
+    invalid = file.clone();
+    invalid.records[2].song_time = Timestamp::from_nanos(199);
+    check(
+        &invalid,
+        limits(1_000_000),
+        ReplayCodecError::Replay(ReplayError::NonMonotonicSongTime),
+    );
+    invalid = file.clone();
+    invalid.header.normalized_clock = ClockDomainId(2);
+    check(
+        &invalid,
+        limits(1_000_000),
+        ReplayCodecError::Replay(ReplayError::ClockDomainMismatch),
+    );
+    let bytes = encode_replay(&file, limits(1_000_000)).unwrap();
+    check(
+        &file,
+        limits(bytes.len() - 1),
+        ReplayCodecError::FileTooLarge,
+    );
+    let header_size = file.runtime_version.len()
+        + file.header.chart_identity.len()
+        + file.header.rules_identity.len()
+        + file.header.options.len();
+    check(
+        &file,
+        ReplayCodecLimits::new(
+            1_000_000,
+            128,
+            header_size - 1,
+            CodecLimits::new(4096, 1024).unwrap(),
+        )
+        .unwrap(),
+        ReplayCodecError::HeaderTooLarge,
+    );
+    check(
+        &file,
+        ReplayCodecLimits::new(1_000_000, 2, 256, CodecLimits::new(4096, 1024).unwrap()).unwrap(),
+        ReplayCodecError::TooManyRecords,
+    );
+    check(
+        &file,
+        ReplayCodecLimits::new(1_000_000, 128, 256, CodecLimits::new(6, 0).unwrap()).unwrap(),
+        ReplayCodecError::Input(InputCodecError::EncodedTooLarge),
+    );
+    invalid = file.clone();
+    let ReplayOperation::Input(input) = &mut invalid.records[0].operation else {
+        unreachable!();
+    };
+    input.physical = PhysicalInputEvent::Custom(CustomInputEvent {
+        meta: *input.physical.meta(),
+        namespace: VendorNamespaceId(17),
+        type_id: 23,
+        payload: vec![1, 2, 3],
+    });
+    check(
+        &invalid,
+        ReplayCodecLimits::new(1_000_000, 128, 256, CodecLimits::new(4096, 2).unwrap()).unwrap(),
+        ReplayCodecError::Input(InputCodecError::PayloadTooLarge),
+    );
+}
+
+#[test]
+fn owned_encoder_keeps_custom_runtime_version_and_calibration_envelope() {
+    let mut file = fixture();
+    file.runtime_version = "custom-runtime/with-original-envelope".into();
+    let bytes = encode_replay(&file, limits(1_000_000)).unwrap();
+    assert_eq!(decode_replay(&bytes, limits(bytes.len())).unwrap(), file);
+    let canonical = encode_replay_parts(&file.header, &file.records, limits(1_000_000)).unwrap();
+    assert_ne!(canonical, bytes);
+    let restored = decode_replay(&canonical, limits(canonical.len())).unwrap();
+    assert_eq!(restored, ReplayFile::new(file.header, file.records));
+}

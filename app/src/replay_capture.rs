@@ -7,7 +7,9 @@ use beatkernel::{
     input::encode_event,
     judge::JudgeEngine,
     replay::{
-        codec::{encode_replay, ReplayCodecError, ReplayCodecLimits, ReplayFile},
+        codec::{
+            encode_replay, encode_replay_parts, ReplayCodecError, ReplayCodecLimits, ReplayFile,
+        },
         ReplayError, ReplayHeader, ReplayRecord, ReplayRecorder, REPLAY_VERSION,
     },
     runtime::RuntimeReport,
@@ -911,6 +913,14 @@ impl LiveReplayCapture {
     pub fn into_file(self) -> ReplayFile {
         let (_, records) = self.recorder.into_parts();
         ReplayFile::new(self.effective_header, records)
+    }
+    /// Encodes the accepted prefix while retaining ownership for a later retry.
+    pub fn encode_bytes(&self) -> Result<Vec<u8>, CaptureError> {
+        Ok(encode_replay_parts(
+            self.header(),
+            self.records(),
+            self.limits,
+        )?)
     }
     /// Encodes the accepted prefix with its original limits, without file I/O.
     /// Consuming the capture makes this one export attempt; no judge is rerun.

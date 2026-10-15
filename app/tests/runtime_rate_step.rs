@@ -14,7 +14,11 @@ use beatkernel::{
         GameControlId, PhysicalControlId, PhysicalInputEvent,
     },
     judge::{JudgeOutcome, JudgeStage},
-    replay::{codec::decode_replay, ReplayHeader, ReplayOperation},
+    replay::{
+        codec::{decode_replay, encode_replay, ReplayCodecError, ReplayFile},
+        ReplayHeader, ReplayOperation, ReplayRecord,
+    },
+    runtime::RuntimeReport,
     time::{ClockDomainId, ClockPair, ClockPoint, Duration, ExtrapolationPolicy, Timestamp},
     transport::Rate,
 };
@@ -31,19 +35,88 @@ use beatkernel_bms_runtime::{
         PracticeAction, PracticeRateState, PracticeRequest, PracticeTransactionReply,
         PracticeTransactionRequest,
     },
+    replay_capture::CaptureError,
     replay_playback::decode_section_setup,
     replay_speed::ReplaySpeed,
     replay_speed_policy::split_schedule,
     section_start::prepare_retained_at,
     step_gameplay::{
-        StepGameplay, StepGameplayConfig, StepLocalGameplay, StepRemoteHistorySnapshot,
-        StepRetainedAdmissionKind, StepRetainedOptions, StepRetainedSetup,
+        StepGameplay, StepGameplayConfig, StepGameplayError, StepLocalGameplay,
+        StepLocalGameplayError, StepRemoteHistorySnapshot, StepRetainedAdmissionKind,
+        StepRetainedOptions, StepRetainedSetup,
     },
     worklet_audio::{
         WorkletAudio, WorkletAudioBuilder, WorkletAudioConfig, WorkletRetainedConfig,
         WorkletRetainedEnvelope, WorkletRetainedEvent,
     },
 };
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    cell::Cell,
+};
+
+thread_local! {
+    static FAIL_ENCODING_ALLOCATION: Cell<bool> = const { Cell::new(false) };
+    static FAILED_ENCODING_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+fn refuse_encoding_allocation() -> bool {
+    FAIL_ENCODING_ALLOCATION
+        .try_with(|fail| {
+            if !fail.replace(false) {
+                return false;
+            }
+            let _ = FAILED_ENCODING_ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
+            true
+        })
+        .unwrap_or(false)
+}
+struct EncodingAllocator;
+// SAFETY: Every successful allocation and every deallocation uses System.
+// Failure bookkeeping uses only allocation-free per-thread scalar cells.
+unsafe impl GlobalAlloc for EncodingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if refuse_encoding_allocation() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: The caller supplies a valid allocation layout.
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if refuse_encoding_allocation() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: The caller supplies a valid allocation layout.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        if refuse_encoding_allocation() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: The caller supplies a live System allocation and valid size.
+        unsafe { System.realloc(pointer, layout, size) }
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        // SAFETY: Successful pointers retain their original System ownership.
+        unsafe { System.dealloc(pointer, layout) }
+    }
+}
+#[global_allocator]
+static ALLOCATOR: EncodingAllocator = EncodingAllocator;
+struct EncodingFailureScope;
+impl Drop for EncodingFailureScope {
+    fn drop(&mut self) {
+        FAIL_ENCODING_ALLOCATION.with(|fail| fail.set(false));
+    }
+}
+fn fail_next_encoding_allocation<T>(encode: impl FnOnce() -> T) -> (T, usize) {
+    FAIL_ENCODING_ALLOCATION.with(|fail| assert!(!fail.get()));
+    FAILED_ENCODING_ALLOCATIONS.with(|count| count.set(0));
+    FAIL_ENCODING_ALLOCATION.with(|fail| fail.set(true));
+    let scope = EncodingFailureScope;
+    let result = encode();
+    drop(scope);
+    (result, FAILED_ENCODING_ALLOCATIONS.with(Cell::get))
+}
 
 const PROGRAM: u64 = (1 << 53) + 913;
 const CONTEXT: u64 = (1 << 53) + 177;
@@ -224,6 +297,54 @@ fn as_rate(event: WorkletRetainedEnvelope) -> PracticeRateEvent {
         }) => rate,
         other => panic!("expected real rate event, got {other:?}"),
     }
+}
+
+fn accepted_input_record(report: &RuntimeReport, ordinal: u64, song_ns: i64) -> ReplayRecord {
+    assert_eq!(report.song_time, ts(song_ns));
+    assert_eq!(report.bound_inputs.len(), 1);
+    ReplayRecord {
+        ordinal,
+        song_time: ts(song_ns),
+        operation: ReplayOperation::Input(report.bound_inputs[0].clone()),
+    }
+}
+
+fn render_local(game: &mut StepLocalGameplay, audio: &mut WorkletAudio, from: u64, frames: usize) {
+    audio.render(CONTEXT + from, frames).unwrap();
+    let frame = from + frames as u64;
+    let ns = frame as i64 * NS;
+    game.observe_audio_coordinate(
+        1,
+        ClockPair {
+            source: raw(ns),
+            target: host(ns),
+        },
+        NativeOutputCoordinate::StreamFrame { frame },
+    )
+    .unwrap();
+    game.observe_retained_history(history(audio)).unwrap();
+}
+
+fn finish_local_event(
+    game: &mut StepLocalGameplay,
+    audio: &mut WorkletAudio,
+    inputs: &mut InputMerger,
+    frame: u64,
+) {
+    let event = audio
+        .poll_retained_event()
+        .unwrap()
+        .expect("actual local event");
+    game.retain_output_event(event).unwrap();
+    let ns = frame as i64 * NS;
+    game.record_audio_prefix(host(ns)).unwrap();
+    assert_eq!(
+        game.service_retained_event(inputs, host(ns), raw(ns))
+            .unwrap(),
+        Some(event.serial)
+    );
+    game.acknowledge_retained_event(event.serial).unwrap();
+    audio.acknowledge_retained_event(event.serial).unwrap();
 }
 
 struct Solo {
@@ -1408,6 +1529,172 @@ fn retired_capture_slot_backpressures_second_fresh_boundary_until_exact_old_capt
 }
 
 #[test]
+fn solo_retired_encoding_failure_preserves_exact_prefix_and_fresh_boundary_backpressure() {
+    let mut rig = Solo::new(true);
+    rig.started();
+    rig.inputs
+        .admit(input(2 * NS, 1, 0, ButtonState::Down), host(3 * NS))
+        .unwrap();
+    let head = rig
+        .game
+        .process_next_audio_input(&mut rig.inputs, host(3 * NS), raw(3 * NS), None)
+        .unwrap()
+        .unwrap();
+    rig.admit_rate(120, 2, 1);
+    rig.render(2);
+    let event = rig.event();
+    rig.finish_event(event);
+    rig.game.take_retained_response();
+    rig.inputs
+        .admit(input(3_750_000, 1, 1, ButtonState::Up), host(5 * NS))
+        .unwrap();
+    let tail = rig
+        .game
+        .process_next_audio_input(&mut rig.inputs, host(5 * NS), raw(5 * NS), None)
+        .unwrap()
+        .unwrap();
+    let original_header = rig.game.effective_header(PlayerId(1)).unwrap().clone();
+    assert_schedule(&original_header, &[(1_500_000, 2, 1)]);
+    let expected = ReplayFile::new(
+        original_header,
+        vec![
+            accepted_input_record(&head, 0, NS),
+            accepted_input_record(&tail, 1, 3 * NS),
+        ],
+    );
+    assert_eq!(
+        head.bound_inputs[0].physical.meta().original_clock_point,
+        Some(host(2 * NS))
+    );
+    assert_eq!(
+        tail.bound_inputs[0].physical.meta().original_clock_point,
+        Some(host(3_750_000))
+    );
+    let expected_bytes = encode_replay(&expected, fixture::limits()).unwrap();
+    let cap = rig.game.retained_capability().unwrap();
+    rig.game
+        .prepare_retained_transaction(
+            PracticeTransactionRequest::Region(PracticeRequest {
+                id: 121,
+                generation: cap.practice.generation,
+                action: PracticeAction::Loop {
+                    start: ts(NS),
+                    end: ts(4 * NS),
+                },
+            }),
+            false,
+        )
+        .unwrap();
+    rig.audio
+        .try_region_next(
+            121,
+            cap.practice.generation,
+            cap.rate.revision,
+            PracticeRegion::new(ts(NS), ts(4 * NS), true).unwrap(),
+        )
+        .unwrap();
+    rig.game
+        .acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 121, Ok(()))
+        .unwrap();
+    rig.render(1);
+    let region = rig.event();
+    rig.finish_event(region);
+    rig.game.take_retained_response();
+    let current_header = rig.game.effective_header(PlayerId(1)).unwrap().clone();
+    assert_ne!(current_header, expected.header);
+    rig.inputs
+        .admit(input(5_500_000, 1, 2, ButtonState::Down), host(6 * NS))
+        .unwrap();
+    let current = rig
+        .game
+        .process_next_audio_input(&mut rig.inputs, host(6 * NS), raw(6 * NS), None)
+        .unwrap()
+        .unwrap();
+    let expected_current = ReplayFile::new(
+        current_header.clone(),
+        vec![accepted_input_record(&current, 0, 2 * NS)],
+    );
+    let (failed, refusals) =
+        fail_next_encoding_allocation(|| rig.game.take_retired_replay(PlayerId(1)));
+    assert_eq!(
+        refusals, 1,
+        "the real encoder allocation must have been refused"
+    );
+    assert!(matches!(
+        failed,
+        Err(StepGameplayError::Capture {
+            error: CaptureError::Codec(ReplayCodecError::AllocationFailed),
+            report: None,
+        })
+    ));
+    assert_eq!(
+        rig.game.effective_header(PlayerId(1)).unwrap(),
+        &current_header
+    );
+    let cap = rig.game.retained_capability().unwrap();
+    let restart = rig
+        .game
+        .prepare_retained_transaction(
+            PracticeTransactionRequest::RestartOriginal {
+                id: 122,
+                generation: cap.practice.generation,
+                expected: cap.rate,
+            },
+            false,
+        )
+        .unwrap();
+    rig.audio
+        .try_restart_original_next(
+            122,
+            cap.practice.generation,
+            cap.rate.revision,
+            restart.preparation.unwrap(),
+        )
+        .unwrap();
+    rig.game
+        .acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 122, Ok(()))
+        .unwrap();
+    rig.render(1);
+    let restart_event = rig.event();
+    assert_eq!(
+        rig.service(),
+        None,
+        "failed export must still occupy the retired slot"
+    );
+    assert_eq!(rig.game.retained_capability().unwrap(), cap);
+    assert_eq!(
+        rig.game.effective_header(PlayerId(1)).unwrap(),
+        &current_header
+    );
+    assert_eq!(
+        rig.audio.poll_retained_event().unwrap(),
+        Some(restart_event)
+    );
+    let recovered = rig.game.take_retired_replay(PlayerId(1)).unwrap().unwrap();
+    assert_eq!(recovered, expected_bytes);
+    assert_eq!(
+        decode_replay(&recovered, fixture::limits()).unwrap(),
+        expected
+    );
+    assert!(rig.game.take_retired_replay(PlayerId(1)).unwrap().is_none());
+    rig.finish_event(restart_event);
+    let current_bytes = rig.game.take_retired_replay(PlayerId(1)).unwrap().unwrap();
+    assert_eq!(
+        decode_replay(&current_bytes, fixture::limits()).unwrap(),
+        expected_current
+    );
+    assert!(rig.game.take_retired_replay(PlayerId(1)).unwrap().is_none());
+    let final_header = rig.game.effective_header(PlayerId(1)).unwrap().clone();
+    rig.game.fail();
+    let final_bytes = rig.game.take_replay().unwrap().unwrap();
+    assert_eq!(
+        decode_replay(&final_bytes, fixture::limits()).unwrap(),
+        ReplayFile::new(final_header, vec![])
+    );
+    assert!(rig.game.take_replay().unwrap().is_none());
+}
+
+#[test]
 fn local_two_and_four_members_share_exact_cut_and_keep_all_effective_headers_with_mixed_capture() {
     for count in [2, 4] {
         let members: Vec<_> = (1..=count)
@@ -1589,5 +1876,268 @@ fn local_two_and_four_members_share_exact_cut_and_keep_all_effective_headers_wit
             game.take_replay(PlayerId(count)).unwrap().is_none(),
             "capture-off member keeps identity without inventing a recording"
         );
+    }
+}
+
+#[test]
+fn local_retired_encoding_failure_preserves_player_prefix_and_other_captures() {
+    let members = vec![
+        (PlayerId(1), Some(DeviceId(1))),
+        (PlayerId(2), Some(DeviceId(2))),
+    ];
+    let maps = members
+        .iter()
+        .map(|(_, device)| bindings(*device))
+        .collect();
+    let (mut game, bank) = StepLocalGameplay::new_retained_audio_section(
+        prepared(),
+        config(),
+        ResolvedInputPlan::new(members).unwrap(),
+        maps,
+        Some(ts(20 * NS)),
+        BmsInputMode::ButtonOnly,
+        authority(true),
+        None,
+        options(),
+    )
+    .unwrap();
+    for player in [PlayerId(1), PlayerId(2)] {
+        game.configure_capture(player, fixture::limits(), SEED)
+            .unwrap();
+    }
+    let mut audio = audio(bank, game.retained_setup().unwrap());
+    let mut inputs =
+        InputMerger::new(host(0).domain, host(0), vec![DeviceId(1), DeviceId(2)], 32).unwrap();
+    game.activate_audio().unwrap();
+    game.observe_audio_coordinate(
+        1,
+        ClockPair {
+            source: raw(0),
+            target: host(0),
+        },
+        NativeOutputCoordinate::StreamFrame { frame: 0 },
+    )
+    .unwrap();
+    render_local(&mut game, &mut audio, 0, 3);
+    finish_local_event(&mut game, &mut audio, &mut inputs, 3);
+    let mut original_records = [Vec::new(), Vec::new()];
+    for player in [1, 2] {
+        inputs
+            .admit(input(2 * NS, player, 0, ButtonState::Down), host(3 * NS))
+            .unwrap();
+        let Some(InputResult::Processed(reports)) = game
+            .process_next_audio_input(&mut inputs, host(3 * NS), raw(3 * NS), None)
+            .unwrap()
+        else {
+            panic!("local original head was not processed");
+        };
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].player, PlayerId(player as u32));
+        assert_eq!(
+            reports[0].report.bound_inputs[0]
+                .physical
+                .meta()
+                .original_clock_point,
+            Some(host(2 * NS))
+        );
+        original_records[player as usize - 1].push(accepted_input_record(
+            &reports[0].report,
+            0,
+            NS,
+        ));
+    }
+    let cap = game.retained_capability().unwrap();
+    let change = game
+        .prepare_retained_transaction(rate_request(130, cap, 2, 1), false)
+        .unwrap();
+    audio
+        .try_set_rate_next(
+            130,
+            cap.practice.generation,
+            cap.rate.revision,
+            change.preparation.unwrap(),
+        )
+        .unwrap();
+    game.acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 130, Ok(()))
+        .unwrap();
+    render_local(&mut game, &mut audio, 3, 2);
+    finish_local_event(&mut game, &mut audio, &mut inputs, 5);
+    game.take_retained_response();
+    for player in [1, 2] {
+        inputs
+            .admit(input(3_750_000, player, 1, ButtonState::Up), host(5 * NS))
+            .unwrap();
+        let Some(InputResult::Processed(reports)) = game
+            .process_next_audio_input(&mut inputs, host(5 * NS), raw(5 * NS), None)
+            .unwrap()
+        else {
+            panic!("local original tail was not processed");
+        };
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].player, PlayerId(player as u32));
+        assert_eq!(
+            reports[0].report.bound_inputs[0]
+                .physical
+                .meta()
+                .original_clock_point,
+            Some(host(3_750_000))
+        );
+        original_records[player as usize - 1].push(accepted_input_record(
+            &reports[0].report,
+            1,
+            3 * NS,
+        ));
+    }
+    let expected: [ReplayFile; 2] = std::array::from_fn(|index| {
+        let header = game
+            .effective_header(PlayerId(index as u32 + 1))
+            .unwrap()
+            .clone();
+        assert_schedule(&header, &[(1_500_000, 2, 1)]);
+        ReplayFile::new(header, std::mem::take(&mut original_records[index]))
+    });
+    let expected_bytes: [Vec<u8>; 2] =
+        std::array::from_fn(|i| encode_replay(&expected[i], fixture::limits()).unwrap());
+    let cap = game.retained_capability().unwrap();
+    game.prepare_retained_transaction(
+        PracticeTransactionRequest::Region(PracticeRequest {
+            id: 131,
+            generation: cap.practice.generation,
+            action: PracticeAction::Loop {
+                start: ts(NS),
+                end: ts(4 * NS),
+            },
+        }),
+        false,
+    )
+    .unwrap();
+    audio
+        .try_region_next(
+            131,
+            cap.practice.generation,
+            cap.rate.revision,
+            PracticeRegion::new(ts(NS), ts(4 * NS), true).unwrap(),
+        )
+        .unwrap();
+    game.acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 131, Ok(()))
+        .unwrap();
+    render_local(&mut game, &mut audio, 5, 1);
+    finish_local_event(&mut game, &mut audio, &mut inputs, 6);
+    game.take_retained_response();
+    let mut expected_current: [ReplayFile; 2] = std::array::from_fn(|index| {
+        ReplayFile::new(
+            game.effective_header(PlayerId(index as u32 + 1))
+                .unwrap()
+                .clone(),
+            vec![],
+        )
+    });
+    inputs
+        .admit(input(5_500_000, 1, 2, ButtonState::Down), host(6 * NS))
+        .unwrap();
+    let Some(InputResult::Processed(reports)) = game
+        .process_next_audio_input(&mut inputs, host(6 * NS), raw(6 * NS), None)
+        .unwrap()
+    else {
+        panic!("local current input was not processed");
+    };
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].player, PlayerId(1));
+    expected_current[0]
+        .records
+        .push(accepted_input_record(&reports[0].report, 0, 2 * NS));
+    let (failed, refusals) =
+        fail_next_encoding_allocation(|| game.take_retired_replay(PlayerId(1)));
+    assert_eq!(
+        refusals, 1,
+        "the real encoder allocation must have been refused"
+    );
+    assert!(matches!(
+        failed,
+        Err(StepLocalGameplayError::Control(
+            StepGameplayError::Capture {
+                error: CaptureError::Codec(ReplayCodecError::AllocationFailed),
+                report: None,
+            }
+        ))
+    ));
+    let other = game.take_retired_replay(PlayerId(2)).unwrap().unwrap();
+    assert_eq!(other, expected_bytes[1]);
+    assert_eq!(
+        decode_replay(&other, fixture::limits()).unwrap(),
+        expected[1]
+    );
+    assert!(game.take_retired_replay(PlayerId(2)).unwrap().is_none());
+    let cap = game.retained_capability().unwrap();
+    let restart = game
+        .prepare_retained_transaction(
+            PracticeTransactionRequest::RestartOriginal {
+                id: 132,
+                generation: cap.practice.generation,
+                expected: cap.rate,
+            },
+            false,
+        )
+        .unwrap();
+    audio
+        .try_restart_original_next(
+            132,
+            cap.practice.generation,
+            cap.rate.revision,
+            restart.preparation.unwrap(),
+        )
+        .unwrap();
+    game.acknowledge_retained_admission(StepRetainedAdmissionKind::Transaction, 132, Ok(()))
+        .unwrap();
+    render_local(&mut game, &mut audio, 6, 1);
+    let event = audio.poll_retained_event().unwrap().unwrap();
+    game.retain_output_event(event).unwrap();
+    game.record_audio_prefix(host(7 * NS)).unwrap();
+    assert_eq!(
+        game.service_retained_event(&mut inputs, host(7 * NS), raw(7 * NS))
+            .unwrap(),
+        None,
+        "the failed member alone must still backpressure the whole fresh cohort"
+    );
+    assert_eq!(game.retained_capability().unwrap(), cap);
+    for (index, current) in expected_current.iter().enumerate() {
+        assert_eq!(
+            game.effective_header(PlayerId(index as u32 + 1)).unwrap(),
+            &current.header
+        );
+    }
+    assert_eq!(audio.poll_retained_event().unwrap(), Some(event));
+    let recovered = game.take_retired_replay(PlayerId(1)).unwrap().unwrap();
+    assert_eq!(recovered, expected_bytes[0]);
+    assert_eq!(
+        decode_replay(&recovered, fixture::limits()).unwrap(),
+        expected[0]
+    );
+    assert!(game.take_retired_replay(PlayerId(1)).unwrap().is_none());
+    assert_eq!(
+        game.service_retained_event(&mut inputs, host(7 * NS), raw(7 * NS))
+            .unwrap(),
+        Some(event.serial)
+    );
+    game.acknowledge_retained_event(event.serial).unwrap();
+    audio.acknowledge_retained_event(event.serial).unwrap();
+    for (index, current) in expected_current.iter().enumerate() {
+        let player = PlayerId(index as u32 + 1);
+        let bytes = game.take_retired_replay(player).unwrap().unwrap();
+        assert_eq!(&decode_replay(&bytes, fixture::limits()).unwrap(), current);
+        assert!(game.take_retired_replay(player).unwrap().is_none());
+    }
+    let final_headers: Vec<_> = [PlayerId(1), PlayerId(2)]
+        .map(|player| game.effective_header(player).unwrap().clone())
+        .into();
+    game.fail();
+    for (index, header) in final_headers.into_iter().enumerate() {
+        let player = PlayerId(index as u32 + 1);
+        let bytes = game.take_replay(player).unwrap().unwrap();
+        assert_eq!(
+            decode_replay(&bytes, fixture::limits()).unwrap(),
+            ReplayFile::new(header, vec![])
+        );
+        assert!(game.take_replay(player).unwrap().is_none());
     }
 }

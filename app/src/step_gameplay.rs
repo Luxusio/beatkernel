@@ -880,14 +880,15 @@ fn take_retired_capture(
     let Some(index) = state.retired.iter().position(|(id, _)| *id == player) else {
         return Ok(None);
     };
-    let (_, capture) = state.retired.remove(index);
-    capture
-        .into_bytes()
-        .map(Some)
+    let (_, capture) = &state.retired[index];
+    let bytes = capture
+        .encode_bytes()
         .map_err(|error| StepGameplayError::Capture {
             error,
             report: None,
-        })
+        })?;
+    state.retired.remove(index);
+    Ok(Some(bytes))
 }
 
 fn prepare_retained_setup(

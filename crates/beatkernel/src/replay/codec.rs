@@ -193,16 +193,39 @@ pub fn encode_replay(
     file: &ReplayFile,
     limits: ReplayCodecLimits,
 ) -> Result<Vec<u8>, ReplayCodecError> {
-    validate_header(&file.header)?;
-    if file.records.len() > limits.max_records {
+    encode_replay_envelope(
+        &file.runtime_version,
+        file.calibration_metadata.as_deref(),
+        &file.header,
+        &file.records,
+        limits,
+    )
+}
+/// Encodes a borrowed log using the same default envelope as [`ReplayFile::new`].
+pub fn encode_replay_parts(
+    header: &ReplayHeader,
+    records: &[ReplayRecord],
+    limits: ReplayCodecLimits,
+) -> Result<Vec<u8>, ReplayCodecError> {
+    encode_replay_envelope(env!("CARGO_PKG_VERSION"), None, header, records, limits)
+}
+fn encode_replay_envelope(
+    runtime_version: &str,
+    calibration_metadata: Option<&[u8]>,
+    header: &ReplayHeader,
+    records: &[ReplayRecord],
+    limits: ReplayCodecLimits,
+) -> Result<Vec<u8>, ReplayCodecError> {
+    validate_header(header)?;
+    if records.len() > limits.max_records {
         return Err(ReplayCodecError::TooManyRecords);
     }
     let fields = [
-        file.runtime_version.as_bytes(),
-        &file.header.chart_identity,
-        &file.header.rules_identity,
-        &file.header.options,
-        file.calibration_metadata.as_deref().unwrap_or(&[]),
+        runtime_version.as_bytes(),
+        &header.chart_identity,
+        &header.rules_identity,
+        &header.options,
+        calibration_metadata.unwrap_or(&[]),
     ];
     let header_size = fields
         .iter()
@@ -212,8 +235,8 @@ pub fn encode_replay(
         return Err(ReplayCodecError::HeaderTooLarge);
     }
     let mut previous = None;
-    for (index, record) in file.records.iter().enumerate() {
-        validate_record(record, index, previous, file.header.normalized_clock)?;
+    for (index, record) in records.iter().enumerate() {
+        validate_record(record, index, previous, header.normalized_clock)?;
         previous = Some(record.song_time);
     }
     let mut out = Writer {
@@ -222,22 +245,22 @@ pub fn encode_replay(
     };
     out.put(MAGIC)?;
     out.put(&REPLAY_FILE_VERSION.to_le_bytes())?;
-    out.put(&file.header.version.to_le_bytes())?;
-    out.put(&file.header.normalized_clock.0.to_le_bytes())?;
-    out.put(&file.header.seed.to_le_bytes())?;
+    out.put(&header.version.to_le_bytes())?;
+    out.put(&header.normalized_clock.0.to_le_bytes())?;
+    out.put(&header.seed.to_le_bytes())?;
     for field in &fields[..4] {
         out.blob(field)?;
     }
-    out.put(&[u8::from(file.calibration_metadata.is_some())])?;
-    if let Some(metadata) = &file.calibration_metadata {
+    out.put(&[u8::from(calibration_metadata.is_some())])?;
+    if let Some(metadata) = calibration_metadata {
         out.blob(metadata)?;
     }
     out.put(
-        &u64::try_from(file.records.len())
+        &u64::try_from(records.len())
             .map_err(|_| ReplayCodecError::LengthOverflow)?
             .to_le_bytes(),
     )?;
-    for record in &file.records {
+    for record in records {
         out.put(&record.ordinal.to_le_bytes())?;
         out.put(&record.song_time.as_nanos().to_le_bytes())?;
         match &record.operation {
