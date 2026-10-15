@@ -44,7 +44,8 @@ assert.equal(sha(sources["audio-pkg/beatkernel_bms_runtime_bg.wasm"]), expectedA
 await mkdir(out); // An existing evidence directory must never be reused.
 const required = ["fresh-artifacts", "solo-rate-continuation", "pause-pending-resume", "invalid-drafts",
   "completed-variable-record", "record-save-load", "independent-replay", "region-loop-disable-scrub-f5",
-  "retired-custody", "local-shared-rate", "fixed-opponent-refusal", "clean-console-network"];
+  "retired-custody", "local-shared-rate", "fixed-opponent-refusal", "clean-console-network",
+  "held-key-release-in-editor", "variable-records-menu-history"];
 const evidence = { kind: "development-runtime-rate-browser", status: "RUNNING", required, checks: [], snapshots: [],
   wasmSha256: expected, audioWasmSha256: expectedAudio, sources: Object.fromEntries(Object.entries(sources).map(([name, b]) => [name, sha(b)])),
   errors: [], consoleErrors: [], networkErrors: [], networkLifecycle: [], networkOverflow: false, cleanup: {},
@@ -96,7 +97,7 @@ function observeWindow() {
     }
   };
   for (const type of ["keydown", "keyup", "pointerdown", "pointerup", "touchstart", "touchend"])
-    document.addEventListener(type, event => add(probe.input, { type, trusted: event.isTrusted, code: event.code, target: event.target?.id }), true);
+    document.addEventListener(type, event => add(probe.input, { type, trusted: event.isTrusted, code: event.code, target: event.target?.id, timeStamp: event.timeStamp }), true);
 }
 
 async function observeBusiness() {
@@ -117,13 +118,14 @@ async function observeBusiness() {
     }
   });
   const bindings = await import("./pkg/beatkernel_bms_runtime.js"), owners = new WeakMap(); let nextOwner = 0;
-  for (const name of ["BrowserGame", "BrowserLocalGame", "BrowserReplay"]) {
+  for (const name of ["BrowserGame", "BrowserLocalGame", "BrowserReplay", "BrowserMenuOwner"]) {
     const proto = bindings[name]?.prototype;
     if (!proto) throw Error(`actual generated ${name} missing`);
     for (const method of ["retained_prepare_rate", "retained_prepare_region", "retained_prepare_disable_loop", "retained_prepare_original_restart",
       "retained_prepare_pause", "retained_admission", "retained_observe_presentation", "retained_history", "retained_event", "retained_service",
       "retained_event_ack", "retained_response_words", "retained_history_pin", "retained_capability_words", "take_retired_replay",
-      "visual_registration", "queue_input_blob", "queue_input_blob_on_surface_on_page", "configure_touch_regions", "observe_output", "evaluate_completion"]) {
+      "visual_registration", "queue_input_blob", "queue_input_blob_on_surface_on_page", "configure_touch_regions", "observe_output", "evaluate_completion",
+      "action", "select", "preview_record", "record_snapshot"]) {
       const original = proto[method]; if (typeof original !== "function") continue;
       proto[method] = function(...args) {
         if (!owners.has(this)) owners.set(this, ++nextOwner);
@@ -198,6 +200,8 @@ function observeRenderer() {
     if (probe.records.length >= 40000) { probe.overflow = true; return; }
     const row = { order: probe.records.length, direction, kind: value?.kind, mode: value?.mode,
       generation: String(value?.generation ?? ""), content: String(value?.content ?? ""), sequence: String(value?.sequence ?? "") };
+    for (const key of ["control", "menuGeneration", "screen", "revision", "geometryVersion", "width", "height", "details", "page", "operation"])
+      if (value?.[key] !== undefined) row[key] = typeof value[key] === "bigint" ? String(value[key]) : value[key];
     const bytes = value?.packet;
     if (bytes instanceof Uint8Array) {
       if (bytes.length < 40 || bytes.length > 1048576) throw Error("actual renderer packet extent");
@@ -205,6 +209,7 @@ function observeRenderer() {
       row.packet = { kind: view.getUint16(6, true), generation: String(view.getBigUint64(8, true)),
         content: String(view.getBigUint64(16, true)), sequence: String(view.getBigUint64(24, true)) };
       if (row.packet.kind === 2 && bytes.length >= 69) row.packet.songNs = String(view.getBigInt64(61, true));
+      if (row.packet.kind === 2 && bytes.length >= 73) row.packet.pressed = view.getUint32(69, true);
     }
     probe.records.push(row);
   };
@@ -239,6 +244,10 @@ function decodeRecord(bytes) {
       const original = option(() => ({ domain: e(4).readUInt32LE(), ns: e(8).readBigInt64LE() }));
       assert.equal(normalizedDomain, domain); assert(original, "original HOST provenance must survive capture");
       input = { lane, variant, source, normalizedNs, sequence, original };
+      if (variant === 0) {
+        const control = e(1)[0]; assert(control <= 2); e(control === 0 ? 4 : 8);
+        input.button = e(1)[0]; assert(input.button <= 2); assert.equal(q, event.length);
+      }
     }
     records.push({ ordinal: i, songNs, input });
   }
@@ -517,15 +526,28 @@ async function acquireKeyboard(session, until = 800000000n) {
   // The literal fixture has its first lane11 tap at0.5s. One genuine Down/Up
   // near that note supplies both capture records without layering a ten-second
   // keysound on every progress poll. Keep the long sample and real voice limit.
-  await progress(session, 475000000n);
+  await page.click("#canvas"); await progress(session, 475000000n);
+  const gameplayTarget = await page.evaluate(() => document.activeElement?.id);
+  assert(!["runtime-rate", "runtime-start", "runtime-end"].includes(gameplayTarget));
+  const offset = await page.evaluate(() => __runtimeWindow.input.length);
   await page.keyboard.down("z");
-  try { await delay(8); } finally { await page.keyboard.up("z"); }
+  try {
+    await page.click("#runtime-rate");
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "runtime-rate");
+  } finally { await page.keyboard.up("z"); }
+  const input = await page.evaluate(offset => __runtimeWindow.input.slice(offset).filter(row => row.code === "KeyZ"), offset);
+  assert.equal(input.length, 2); assert.deepEqual(input.map(row => row.type), ["keydown", "keyup"]);
+  assert(input.every(row => row.trusted), "held key and its editor-targeted release must be genuine browser input");
+  assert.equal(input[0].target, gameplayTarget); assert.equal(input[1].target, "runtime-rate");
+  await page.click("#canvas");
+  assert.notEqual(await page.evaluate(() => document.activeElement?.id), "runtime-rate");
   await progress(session, until);
+  return input;
 }
 async function saveAndSelect(name, session) {
   // Retained play deliberately leaves the custodian selector unselected. Pick
   // this actual Program's final current File, never an earlier retired prefix.
-  const currentKey = `${session.prepared.programId}:current:1`;
+  const currentKey = `${session.request.playId}:${session.prepared.programId}:current:1`;
   await page.waitForFunction(key => !document.querySelector("#captured-replay").disabled
     && [...document.querySelector("#captured-replay").options].some(option => option.value === key), {}, currentKey);
   const choice = await page.$eval("#captured-replay", (select, key) => [...select.options].find(option => option.value === key)?.textContent, currentKey);
@@ -543,6 +565,84 @@ async function saveAndSelect(name, session) {
   const loaded = (await messages()).slice(offset).find(row => row.data.kind === "records-reply" && row.data.action === "load" && row.data.error === null)?.data;
   assert(loaded?.result?.replayFile?.actualFile, "original stored File must return through actual Worker load");
   check(name, { recordId: id, capturedTuple: currentKey }); return id;
+}
+async function submittedMenu(route, details) {
+  await page.waitForFunction(({ route, details }) => {
+    const rows = __runtimeWindow.messages, state = rows.findLast(row => row.direction === "received" && row.data.kind === "menu-state")?.data;
+    const geometry = state && rows.findLast(row => row.direction === "received" && row.data.kind === "render-geometry" && row.data.mode === "menu"
+      && row.data.menuGeneration === state.menuGeneration && row.data.screen === state.screen && row.data.revision === state.revision)?.data;
+    return state?.route === route && geometry?.width > 0 && geometry.height > 0 && (details === undefined || geometry.details === details);
+  }, {}, { route, details });
+  return page.evaluate(() => {
+    const rows = __runtimeWindow.messages, state = rows.findLast(row => row.direction === "received" && row.data.kind === "menu-state").data;
+    const geometry = rows.findLast(row => row.direction === "received" && row.data.kind === "render-geometry" && row.data.mode === "menu"
+      && row.data.menuGeneration === state.menuGeneration && row.data.screen === state.screen && row.data.revision === state.revision).data;
+    return { state, geometry };
+  });
+}
+async function clickMenu(route, bounds, control, details) {
+  const submitted = await submittedMenu(route, details), g = submitted.geometry;
+  // The shared retained layouts scale their anchors to the submitted extent;
+  // row children retain their fixed allocation and gap, as in Settings/Records.
+  const left = Math.floor(bounds.x * g.width / 960) + (bounds.offsetX ?? 0);
+  const top = Math.floor(bounds.y * g.height / 720) + (bounds.offsetY ?? 0);
+  const right = Math.min(g.width, left + bounds.width), bottom = Math.min(g.height, top + bounds.height);
+  assert(right > left && bottom > top, "menu control needs a submitted visible extent");
+  const element = await page.$("#canvas"); await element.scrollIntoView(); const box = await element.boundingBox(); assert(box);
+  const offset = await renderer.evaluate(() => __runtimeRenderer.records.length);
+  await page.mouse.click(box.x + (left + right) * box.width / (2 * g.width), box.y + (top + bottom) * box.height / (2 * g.height));
+  await bounded((async () => {
+    while (!await renderer.evaluate(({ offset, control, g }) => __runtimeRenderer.records.slice(offset).some(row => row.kind === "menu-action"
+      && row.control === String(control) && row.menuGeneration === g.menuGeneration && row.screen === g.screen && row.revision === g.revision), { offset, control, g })) await delay(20);
+  })(), 10000, `actual canvas menu control ${control}`);
+  return submitted;
+}
+async function variableRecordsMenuHistory(recordId, original) {
+  evidence.stage = "variable-records-menu-history";
+  const selected = await page.$eval("#records", element => element.value), replayName = await page.$eval("#replay-name", element => element.textContent);
+  assert.equal(selected, String(recordId));
+  const offset = (await messages()).length, calls = await business.evaluate(() => __runtimeBusiness.calls.length);
+  await page.click("#menu-open");
+  await clickMenu(1, { x: 750, y: 20, width: 180, height: 30 }, 5);
+  await clickMenu(2, { x: 265, y: 60, offsetX: 136, width: 125, height: 34 }, 19);
+  const records = await submittedMenu(4, false), index = records.state.fields.indexOf(String(recordId));
+  assert(index >= 0 && index < 10, "the actual saved variable File must be on the first Records page");
+  await clickMenu(4, { x: 24, y: 170, offsetY: index * 30, width: 906, height: 28 }, 50000 + index, false);
+  await page.waitForFunction(index => __runtimeWindow.messages.findLast(row => row.direction === "received" && row.data.kind === "menu-state")?.data.selected === index, {}, index);
+  await clickMenu(4, { x: 24, y: 620, offsetX: 140, width: 130, height: 34 }, 51, false);
+  await bounded((async () => {
+    while (!await business.evaluate(({ calls, id }) => __runtimeBusiness.calls.slice(calls).some(row => row.name === "BrowserMenuOwner"
+      && row.method === "preview_record" && row.args[4] === String(id) && row.error === undefined), { calls, id: recordId })) await delay(20);
+  })(), 15000, "actual variable BrowserMenuOwner preview");
+  const preview = await business.evaluate(({ calls, id }) => __runtimeBusiness.calls.slice(calls).find(row => row.name === "BrowserMenuOwner"
+    && row.method === "preview_record" && row.args[4] === String(id) && row.error === undefined), { calls, id: recordId });
+  assert.deepEqual(Buffer.from(preview.args[5]), original, "menu preview must inspect the selected stored variable File unchanged");
+  await bounded((async () => {
+    while (!await business.evaluate(preview => __runtimeBusiness.calls.some(row => row.name === "BrowserMenuOwner" && row.owner === preview.owner
+      && row.method === "record_snapshot" && row.tick > preview.tick && Array.isArray(row.result) && row.result.length > 32 && row.error === undefined), preview)) await delay(20);
+  })(), 10000, "actual historical record snapshot");
+  const actualSnapshot = await business.evaluate(preview => __runtimeBusiness.calls.find(row => row.name === "BrowserMenuOwner" && row.owner === preview.owner
+    && row.method === "record_snapshot" && row.tick > preview.tick && Array.isArray(row.result) && row.result.length > 32 && row.error === undefined), preview);
+  const bytes = Buffer.from(actualSnapshot.result); assert.equal(bytes.subarray(0, 4).toString(), "BKRP");
+  const pathLength = bytes.readUInt32LE(28); assert(pathLength <= 4096 && 32 + pathLength <= bytes.length);
+  assert.equal(bytes.subarray(32, 32 + pathLength).toString(), String(recordId));
+  const request = (await messages()).slice(offset).find(row => row.direction === "sent" && row.data.kind === "menu-record-preview" && row.data.key === String(recordId))?.data;
+  assert(request?.replayFile?.actualFile && request.archiveBlob?.actualBlob && request.archiveBlob.size > 0, "real menuTicket preview must retain its saved historical archive");
+  assert.equal(request.screen, preview.args[0]); assert.equal(request.revision, preview.args[1]);
+  const beforeDetails = await clickMenu(4, { x: 304, y: 575, width: 110, height: 34 }, 66, false);
+  const details = await submittedMenu(4, true);
+  assert.equal(details.state.fields[details.state.selected], String(recordId)); assert.equal(details.geometry.page, 0);
+  assert(BigInt(details.geometry.geometryVersion) > BigInt(beforeDetails.geometry.geometryVersion));
+  const state = await snapshot("variable-records-menu-history");
+  assert(state.renderer.records.some(row => row.kind === "geometry-ack" && row.details === true && row.geometryVersion === details.geometry.geometryVersion
+    && row.menuGeneration === details.state.menuGeneration && row.screen === details.state.screen && row.revision === details.state.revision), "historical DETAILS must actually draw and acknowledge its submitted geometry");
+  assert(!(await messages()).slice(offset).some(row => row.data.kind === "menu-error"), "variable history must open without a menu error");
+  await clickMenu(4, { x: 754, y: 620, width: 176, height: 34 }, 66, true); await submittedMenu(4, false);
+  await page.click("#menu-back"); await submittedMenu(2); await page.click("#menu-back"); await submittedMenu(1);
+  assert.equal(await page.$eval("#records", element => element.value), selected);
+  assert.equal(await page.$eval("#replay-name", element => element.textContent), replayName);
+  check("variable-records-menu-history", { recordId, originalSha256: sha(original), preview: { owner: preview.owner, tick: preview.tick, screen: preview.args[0], revision: preview.args[1] },
+    recordSnapshotSha256: sha(bytes), details: details.geometry, selectedReplayPreserved: true });
 }
 function assertCut(cut, numerator, denominator, expectedRate) {
   const whole = numerator / denominator, remainder = numerator % denominator;
@@ -582,12 +682,21 @@ function assertFreshDraws(state, minimum) {
     // explicit restart below separately waits for a genuine new draw.
   }
 }
+function releasedFrame(state, mode) {
+  const rows = state.renderer.records, registration = rows.findLast(row => row.packet?.kind === 1 && row.mode === mode);
+  assert(registration, `actual ${mode} registration required for held-key release`);
+  const frame = rows.findLast(row => row.packet?.kind === 2 && row.packet.generation === registration.packet.generation
+    && row.packet.content === registration.packet.content && BigInt(row.packet.songNs) >= 800000000n && row.packet.pressed === 0
+    && rows.some(drawn => drawn.kind === "drawn" && drawn.generation === row.packet.generation && drawn.content === row.packet.content && drawn.sequence === row.packet.sequence));
+  assert(frame, `actual ${mode} must draw released held state after the genuine editor keyup`);
+  return frame.packet;
+}
 
 async function runJourneys() {
   await toggle("touch-input", false); await toggle("record", true); await toggle("runtime-retained", true);
   await field("live-speed", "1/2"); await field("live-start", "0"); await field("live-end", "6");
   evidence.stage = "solo-variable";
-  const solo = await start(); await progress(solo, 200000000n); await acquireKeyboard(solo);
+  const solo = await start(); await progress(solo, 200000000n); const heldKeyboard = await acquireKeyboard(solo);
   const badRate = await invalidDraft(solo, "rate", { fraction: "0/1" }, /rate|positive|speed|fraction|numerator/i);
   const badEnd = await invalidDraft(solo, "region", { start: "0.25", end: "1", repeat: false }, /end|scrub|region|endpoint/i);
   check("invalid-drafts", { rate: badRate.reply.error, endpoint: badEnd.reply.error });
@@ -625,14 +734,29 @@ async function runJourneys() {
   const inputs = decoded.records.filter(row => row.input); assert(inputs.length >= 2);
   const acquired = completed.window.messages.filter(row => row.direction === "sent" && row.data.kind === "play-step" && row.data.playId === solo.request.playId).flatMap(row => row.data.events ?? []);
   for (const record of inputs) assert(acquired.some(event => String(event.sequence) === String(record.input.sequence) && String(event.hostNs) === String(record.input.original.ns)), "captured input must retain its original trusted Window acquisition");
+  const heldDelivery = heldKeyboard.map((event, index) => {
+    const whole = Math.floor(event.timeStamp), hostNs = BigInt(whole) * 1000000n + BigInt(Math.floor((event.timeStamp - whole) * 1000000));
+    const delivery = acquired.filter(row => String(row.hostNs) === String(hostNs) && row.down === (index === 0));
+    assert.equal(delivery.length, 1, "each genuine held key transition must be delivered exactly once");
+    const recorded = inputs.filter(row => row.input.variant === 0 && row.input.source === 1n && row.input.sequence === BigInt(delivery[0].sequence));
+    assert.equal(recorded.length, 1); assert.equal(recorded[0].input.button, index); assert.equal(recorded[0].input.original.ns, hostNs);
+    return { event, delivery: delivery[0], input: recorded[0].input };
+  });
+  assert(BigInt(heldDelivery[1].delivery.sequence) > BigInt(heldDelivery[0].delivery.sequence));
   await writeFile(resolve(out, "variable-source.bkr"), original);
   check("completed-variable-record", { sha256: sha(original), initial: decoded.initial, cuts: decoded.cuts, inputs: inputs.length, stopped });
   const recordId = await saveAndSelect("record-save-load", solo);
+  await variableRecordsMenuHistory(recordId, original);
   await field("replay-speed", "1/1"); evidence.stage = "independent-replay";
   const replay = await start("replay-play"); assert.notEqual(replay.request.retained, true); assert.equal(replay.request.replaySpeed, "1/1");
   const replayStopped = await terminal(replay), replayState = await snapshot("variable-record-replay");
   assert.equal(replayStopped.hits, stopped.hits); assert.equal(replayStopped.misses, stopped.misses);
   const loaded = replayState.business.loads.find(row => row.playId === replay.request.playId); assert(loaded?.bytes); assert.deepEqual(Buffer.from(loaded.bytes), original);
+  const replayedInputs = decodeRecord(loaded.bytes).records.filter(row => row.input);
+  for (const held of heldDelivery) assert(replayedInputs.some(row => row.input.sequence === held.input.sequence && row.input.button === held.input.button
+    && row.input.original.ns === held.input.original.ns), "actual independent replay must retain the editor-targeted release and its original acquisition");
+  check("held-key-release-in-editor", { acquisition: heldDelivery, liveReleased: releasedFrame(completed, "live"), replayReleased: releasedFrame(replayState, "replay"),
+    replayPlayId: replay.request.playId, replayedOriginalFileSha256: sha(Buffer.from(loaded.bytes)) });
   assert.equal(sha(await readFile(resolve(out, "variable-source.bkr"))), sha(original));
   check("independent-replay", { recordId, originalSha256: sha(original), sourceInitial: decoded.initial, sourceCuts: decoded.cuts, selectedOutput: "1/1", stopped: replayStopped });
 
