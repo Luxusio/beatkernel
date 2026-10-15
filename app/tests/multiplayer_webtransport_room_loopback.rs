@@ -12,7 +12,7 @@ use beatkernel_bms_runtime::{
     local_players::PlayerId,
     multiplayer::{competition_identity, Progress},
     multiplayer_group::MemberProgress,
-    multiplayer_group_rooms::GroupRoomPhase,
+    multiplayer_group_rooms::{GroupRoomMember, GroupRoomPhase},
     multiplayer_room_io::RoomPlayIo,
     multiplayer_start::{StartPolicy, StartRole, StartSchedule},
     multiplayer_webtransport_client::{
@@ -28,7 +28,7 @@ use std::{
 
 const WAIT: Duration = Duration::from_secs(10);
 const CLOSE: Duration = Duration::from_secs(2);
-const PREROLL: [i64; 2] = [10_000_000, 25_000_000];
+const PREROLL: [i64; 4] = [10_000_000, 25_000_000, 40_000_000, 55_000_000];
 
 fn identity(seed: u64) -> Vec<u8> {
     competition_identity(
@@ -152,97 +152,139 @@ fn pump(peers: &mut [Peer], label: &str, done: impl Fn(&[Peer]) -> bool) {
 fn connected(case: &str) -> Vec<Peer> {
     connected_with_identities(case, &[identity(41), identity(41)])
 }
-fn connected_with_identities(case: &str, identities: &[Vec<u8>; 2]) -> Vec<Peer> {
+fn connected_with_identities(case: &str, identities: &[Vec<u8>]) -> Vec<Peer> {
+    assert!((2..=4).contains(&identities.len()));
     let config = options(case);
-    let mut peers = vec![Peer::connect_admitted(
-        config.clone(),
-        &identities[0],
-        &[PlayerId(11), PlayerId(12)],
-        PREROLL[0],
-    )];
-    // Observe first admission before adding the next peer, making room sealing
-    // authority deterministic without sleeping for a guessed network delay.
-    pump(&mut peers, "first room admission", |peers| {
-        peers[0].owner().session().participant().is_some()
-    });
-    assert!(peers[0]
-        .owner_mut()
-        .publish_progress(&members(11, 1), false)
-        .is_err());
-    assert!(peers[0].schedule.is_none());
-    peers.push(Peer::connect_admitted(
-        config,
-        &identities[1],
-        &[PlayerId(21), PlayerId(22)],
-        PREROLL[1],
-    ));
-    pump(&mut peers, "complete collecting roster", |peers| {
-        peers.iter().all(|peer| {
-            peer.owner()
-                .session()
+    let mut peers = Vec::new();
+    let mut roster = Vec::<GroupRoomMember>::new();
+    let mut deadlines = Vec::new();
+    for (index, identity) in identities.iter().enumerate() {
+        let first = 11 + index as u32 * 10;
+        let players = [PlayerId(first), PlayerId(first + 1)];
+        peers.push(Peer::connect_admitted(
+            config.clone(),
+            identity,
+            &players,
+            PREROLL[index],
+        ));
+        // Admit one host at a time and observe its actual ID and first deadline
+        // before waiting for the exact ordered snapshot at every current peer.
+        pump(&mut peers, "new room admission", |peers| {
+            let session = peers.last().unwrap().owner().session();
+            session.participant().is_some() && session.room().is_some()
+        });
+        let session = peers[index].owner().session();
+        let id = session.participant().unwrap();
+        assert_ne!(id.0, 0);
+        assert!(roster.iter().all(|member| member.id != id));
+        deadlines.push(
+            session
                 .room()
-                .is_some_and(|room| room.members.len() == 2)
-        })
-    });
-    let ids: Vec<_> = peers
-        .iter()
-        .map(|peer| peer.owner().session().participant().unwrap())
-        .collect();
-    for peer in &peers {
-        let room = peer.owner().session().room().unwrap();
-        assert_eq!(room.phase, GroupRoomPhase::Collecting);
-        assert_eq!(
-            room.members
-                .iter()
-                .map(|member| member.id)
-                .collect::<Vec<_>>(),
-            ids
+                .unwrap()
+                .deadline_ns
+                .expect("collecting room must retain its waiting deadline"),
         );
-        assert_eq!(room.members[0].players, vec![PlayerId(11), PlayerId(12)]);
-        assert_eq!(room.members[1].players, vec![PlayerId(21), PlayerId(22)]);
+        roster.push(GroupRoomMember {
+            id,
+            players: players.to_vec(),
+            prepared: false,
+        });
+        pump(&mut peers, "exact collecting roster after Join", |peers| {
+            peers.iter().all(|peer| {
+                peer.owner().session().room().is_some_and(|room| {
+                    room.phase == GroupRoomPhase::Collecting && room.members == roster.as_slice()
+                })
+            })
+        });
+        for (index, peer) in peers.iter_mut().enumerate() {
+            let room = peer.owner().session().room().unwrap();
+            assert_eq!(room.identity, identities[index].as_slice());
+            assert_eq!(room.deadline_ns, Some(deadlines[index]));
+            assert!(peer.schedule.is_none());
+            assert!(peer
+                .owner_mut()
+                .publish_progress(&members(11 + index as u32 * 10, 1), false)
+                .is_err());
+        }
     }
-    assert!(
-        peers[1].owner_mut().request_seal().is_err(),
-        "joiner cannot seal"
-    );
+    // RoomClientSession refuses these calls before a Seal frame is queued.
+    // This proves local API authority, not forged-wire/server enforcement.
+    for peer in &mut peers[1..] {
+        let error = peer
+            .owner_mut()
+            .request_seal()
+            .expect_err("every joiner must be locally refused permission to seal");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
     peers[0].owner_mut().request_seal().unwrap();
     pump(&mut peers, "frozen complete roster", |peers| {
         peers.iter().all(|peer| {
-            peer.owner()
-                .session()
-                .room()
-                .is_some_and(|room| room.phase == GroupRoomPhase::Frozen)
+            peer.owner().session().room().is_some_and(|room| {
+                room.phase == GroupRoomPhase::Frozen && room.members == roster.as_slice()
+            })
         })
     });
-    // Both actual Ready writes are needed before Prepared or a start schedule.
-    peers[0].owner_mut().request_ready().unwrap();
-    pump(&mut peers, "first Ready receipt", |peers| {
-        peers.iter().all(|peer| {
-            peer.owner()
-                .session()
-                .room()
-                .is_some_and(|room| room.members[0].prepared)
-        })
-    });
-    assert!(peers.iter().all(|peer| peer.schedule.is_none()));
-    peers[1].owner_mut().request_ready().unwrap();
+    // Each positive partial bitmap must reach every peer before the next Ready.
+    // The initial Frozen bitmap is all false, and the last Ready is held back.
+    for ready_count in 0..peers.len() {
+        if ready_count > 0 {
+            peers[ready_count - 1].owner_mut().request_ready().unwrap();
+            roster[ready_count - 1].prepared = true;
+            pump(&mut peers, "exact partial Ready bitmap", |peers| {
+                peers.iter().all(|peer| {
+                    peer.owner().session().room().is_some_and(|room| {
+                        room.phase == GroupRoomPhase::Frozen && room.members == roster.as_slice()
+                    })
+                })
+            });
+        }
+        for (index, peer) in peers.iter_mut().enumerate() {
+            let room = peer.owner().session().room().unwrap();
+            assert_eq!(room.phase, GroupRoomPhase::Frozen);
+            assert_eq!(room.members, roster.as_slice());
+            assert_eq!(room.deadline_ns, Some(deadlines[index]));
+            assert!(peer.schedule.is_none());
+            assert!(peer
+                .owner_mut()
+                .publish_progress(&members(11 + index as u32 * 10, 1), false)
+                .is_err());
+        }
+    }
+    peers
+        .last_mut()
+        .unwrap()
+        .owner_mut()
+        .request_ready()
+        .unwrap();
+    roster.last_mut().unwrap().prepared = true;
     pump(
         &mut peers,
         "prepared measured clock and committed start",
-        |peers| peers.iter().all(|peer| peer.schedule.is_some()),
+        |peers| {
+            peers.iter().all(|peer| {
+                peer.schedule.is_some()
+                    && peer.owner().session().room().is_some_and(|room| {
+                        room.phase == GroupRoomPhase::Prepared
+                            && room.members == roster.as_slice()
+                            && room.deadline_ns.is_none()
+                    })
+            })
+        },
     );
-    for (index, peer) in peers.iter().enumerate() {
+    for (index, peer) in peers.iter_mut().enumerate() {
         let room = peer.owner().session().room().unwrap();
         assert_eq!(room.phase, GroupRoomPhase::Prepared);
-        assert!(room.members.iter().all(|member| member.prepared));
+        assert_eq!(room.members, roster.as_slice());
         assert_eq!(room.deadline_ns, None);
         let schedule = peer.schedule.unwrap();
         assert!(schedule.target_ns > 0);
+        assert!(schedule.song_target_ns > 0);
         assert_eq!(
             schedule.song_target_ns.checked_sub(schedule.target_ns),
             Some(PREROLL[index])
         );
         assert!(schedule.uncertainty_ns <= StartPolicy::default().max_uncertainty_ns);
+        assert_eq!(peer.owner_mut().take_schedule().unwrap(), None);
     }
     peers
 }
@@ -262,66 +304,83 @@ fn members(first: u32, tick: u64) -> Vec<MemberProgress> {
         .collect()
 }
 
-#[test]
-#[ignore = "requires coordinator-owned local HTTP/3 relay and ephemeral valid PKI"]
-fn real_room_roster_readiness_start_ordered_progress_finals_and_drain() {
-    let mut peers = connected("complete");
+fn complete_progress_and_drain(mut peers: Vec<Peer>) {
     let ids: Vec<_> = peers
         .iter()
         .map(|peer| peer.owner().session().participant().unwrap())
         .collect();
-    for tick in 1..=2 {
-        let prefixes = [members(11, tick), members(21, tick)];
+    for tick in 1..=3 {
+        let final_prefix = tick == 3;
+        let prefixes: Vec<_> = (0..peers.len())
+            .map(|index| members(11 + index as u32 * 10, tick))
+            .collect();
         for (peer, prefix) in peers.iter_mut().zip(&prefixes) {
-            peer.owner_mut().publish_progress(prefix, false).unwrap();
+            peer.owner_mut()
+                .publish_progress(prefix, final_prefix)
+                .unwrap();
         }
-        pump(&mut peers, "ordered exact progress", |peers| {
-            peers.iter().enumerate().all(|(index, peer)| {
-                peer.owner()
-                    .peer_progress(ids[1 - index])
-                    .is_some_and(|prefix| {
-                        prefix.sequence == tick
-                            && !prefix.final_prefix
-                            && prefix.members == prefixes[1 - index]
-                    })
+        pump(&mut peers, "all directed exact ordered prefixes", |peers| {
+            peers.iter().enumerate().all(|(receiver, peer)| {
+                ids.iter().enumerate().all(|(sender, &id)| {
+                    receiver == sender
+                        || peer.owner().peer_progress(id).is_some_and(|prefix| {
+                            prefix.sequence == tick
+                                && prefix.final_prefix == final_prefix
+                                && prefix.members == prefixes[sender]
+                        })
+                })
             })
         });
     }
-    let finals = [members(11, 3), members(21, 3)];
-    for (peer, prefix) in peers.iter_mut().zip(&finals) {
-        peer.owner_mut().publish_progress(prefix, true).unwrap();
-    }
     pump(
         &mut peers,
-        "both final prefixes and genuine application acknowledgements",
+        "all genuine final application acknowledgements",
         |peers| peers.iter().all(|peer| peer.owner().progress_complete()),
     );
     for (index, peer) in peers.iter().enumerate() {
-        let prefix = peer.owner().peer_progress(ids[1 - index]).unwrap();
-        assert_eq!(prefix.sequence, 3);
-        assert!(prefix.final_prefix);
-        assert_eq!(prefix.members, finals[1 - index]);
         assert!(peer.owner().local_final_written());
         assert!(peer.owner().local_final_acknowledged());
-        assert!(peer.owner().peer_final_ack_written(ids[1 - index]));
+        for (sender, &id) in ids.iter().enumerate() {
+            if sender != index {
+                let prefix = peer.owner().peer_progress(id).unwrap();
+                assert_eq!(prefix.sequence, 3);
+                assert!(prefix.final_prefix);
+                assert_eq!(prefix.members, members(11 + sender as u32 * 10, 3));
+                assert!(peer.owner().peer_final_ack_written(id));
+            }
+        }
         assert!(
             !peer.owner().drain_complete(),
             "final completion does not fabricate drain ACK"
         );
     }
-    for peer in &mut peers {
-        peer.owner_mut().request_drain().unwrap();
+    let drain_requests: Vec<_> = peers
+        .iter_mut()
+        .map(|peer| peer.owner_mut().request_drain())
+        .collect();
+    for result in drain_requests {
+        result.unwrap();
     }
     pump(&mut peers, "actual drain acknowledgement", |peers| {
         peers.iter().all(|peer| peer.owner().drain_complete())
     });
-    for peer in &mut peers {
-        assert!(!peer.step().unwrap(), "drained driver moves no new bytes");
+    let inert_steps: Vec<_> = peers.iter_mut().map(Peer::step).collect();
+    let closes: Vec<_> = peers.iter_mut().map(Peer::close).collect();
+    for result in inert_steps {
+        assert!(!result.unwrap(), "drained driver moves no new bytes");
     }
-    let results: Vec<_> = peers.iter_mut().map(Peer::close).collect();
-    for result in results {
+    for result in closes {
         result.expect("bounded HTTP/3 owner close failed");
     }
+    assert!(peers
+        .iter()
+        .all(|peer| peer.io.is_none() && peer.retired.is_none()));
+}
+
+#[test]
+#[ignore = "requires coordinator-owned local HTTP/3 relay and ephemeral valid PKI"]
+fn real_room_roster_readiness_start_ordered_progress_finals_and_drain() {
+    complete_progress_and_drain(connected("complete"));
 }
 
 #[test]
@@ -702,56 +761,37 @@ mod selected_policy_rooms {
             admitted_identity(selected, &[PlayerId(21), PlayerId(22)]),
         ];
         assert_eq!(identities[0], identities[1]);
-        let mut peers = connected_with_identities("selected_complete", &identities);
-        let ids: Vec<_> = peers
-            .iter()
-            .map(|peer| peer.owner().session().participant().unwrap())
-            .collect();
-        for tick in 1..=2 {
-            let prefixes = [members(11, tick), members(21, tick)];
-            for (peer, prefix) in peers.iter_mut().zip(&prefixes) {
-                peer.owner_mut().publish_progress(prefix, false).unwrap();
-            }
-            pump(&mut peers, "selected exact ordered prefixes", |peers| {
-                peers.iter().enumerate().all(|(index, peer)| {
-                    peer.owner()
-                        .peer_progress(ids[1 - index])
-                        .is_some_and(|prefix| {
-                            prefix.sequence == tick
-                                && !prefix.final_prefix
-                                && prefix.members == prefixes[1 - index]
-                        })
-                })
-            });
-        }
-        let finals = [members(11, 3), members(21, 3)];
-        for (peer, prefix) in peers.iter_mut().zip(&finals) {
-            peer.owner_mut().publish_progress(prefix, true).unwrap();
-        }
-        pump(&mut peers, "selected finals and actual ACKs", |peers| {
-            peers.iter().all(|peer| peer.owner().progress_complete())
-        });
-        for (index, peer) in peers.iter().enumerate() {
-            let prefix = peer.owner().peer_progress(ids[1 - index]).unwrap();
-            assert_eq!(prefix.sequence, 3);
-            assert!(prefix.final_prefix);
-            assert_eq!(prefix.members, finals[1 - index]);
-            assert!(peer.owner().local_final_written());
-            assert!(peer.owner().local_final_acknowledged());
-            assert!(peer.owner().peer_final_ack_written(ids[1 - index]));
-            assert!(!peer.owner().drain_complete());
-        }
-        for peer in &mut peers {
-            peer.owner_mut().request_drain().unwrap();
-        }
-        pump(&mut peers, "selected actual drain ACKs", |peers| {
-            peers.iter().all(|peer| peer.owner().drain_complete())
-        });
-        for peer in &mut peers {
-            assert!(!peer.step().unwrap());
-            peer.close()
-                .expect("selected HTTP/3 owners must close boundedly");
-        }
+        complete_progress_and_drain(connected_with_identities("selected_complete", &identities));
+    }
+
+    #[test]
+    #[ignore = "requires local HTTP/3 relay and ephemeral valid PKI; admitted three-host selected policy"]
+    fn real_three_host_room_roster_readiness_start_ordered_progress_finals_and_drain() {
+        let selected = Selected::default();
+        let identities = [
+            admitted_identity(selected, &[PlayerId(11), PlayerId(12)]),
+            admitted_identity(selected, &[PlayerId(21), PlayerId(22)]),
+            admitted_identity(selected, &[PlayerId(31), PlayerId(32)]),
+        ];
+        assert!(identities.iter().all(|identity| identity == &identities[0]));
+        complete_progress_and_drain(connected_with_identities(
+            "three_host_complete",
+            &identities,
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires local HTTP/3 relay and ephemeral valid PKI; admitted four-host selected policy"]
+    fn real_four_host_room_roster_readiness_start_ordered_progress_finals_and_drain() {
+        let selected = Selected::default();
+        let identities = [
+            admitted_identity(selected, &[PlayerId(11), PlayerId(12)]),
+            admitted_identity(selected, &[PlayerId(21), PlayerId(22)]),
+            admitted_identity(selected, &[PlayerId(31), PlayerId(32)]),
+            admitted_identity(selected, &[PlayerId(41), PlayerId(42)]),
+        ];
+        assert!(identities.iter().all(|identity| identity == &identities[0]));
+        complete_progress_and_drain(connected_with_identities("four_host_complete", &identities));
     }
 
     #[test]

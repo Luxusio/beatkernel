@@ -980,6 +980,46 @@ remain required. Source/compile-only evidence cannot prove endpoint,
 TLS, browser interoperability, physical sync or performance acceptance. Author
 deterministic I/O, ownership and refusal fixtures for deferred execution.
 
+### Actual multi-host room verification
+
+Verify the common room owner through a current-source, coordinator-owned local
+HTTP/3 relay with both three and four actual host connections. Each host shall
+use the canonical identity admitted from a pristine prepared BMS cohort of two
+local players. Fixture progress values verify the protocol; they do not prove
+that those players completed actual gameplay or produced physical output.
+
+After each serial admission, every connected host must observe the exact ordered
+participant leases and original local-player roster. Use actual nonzero, unique
+admitted IDs rather than assuming sequential values. Check noncreator Seal
+refusal through the client API and creator Seal through the actual connection;
+the former is not a malicious wire-message test of server enforcement. Preserve
+the separate portable registry authorization coverage.
+
+After each nonfinal Ready, require positive snapshots at every host with the
+exact readiness bitmap, unchanged Frozen roster and original waiting deadline.
+No start schedule or progress publication may be available at that point. Only
+then send the final Ready and require Prepared, all members ready, no waiting
+deadline and one committed schedule per host. Validate each schedule against its
+own clock origin, requested preroll and uncertainty policy; raw targets from
+different clock origins are not directly comparable. A snapshot proves observed
+state, not the absence of every arbitrarily delayed future network frame.
+
+For each ordered progress prefix and final prefix, compare every directed pair
+of distinct hosts against that source's exact member payload and sequence.
+Require local final write and aggregate acknowledgement plus every remote final
+acknowledgement write. Explicit drain must complete separately, make further
+driver steps inert, and be followed by bounded close attempts for every host.
+Keep existing two-host, selected-policy, cancellation, identity, exact Origin
+and unrelated valid CA refusal cases. Execute the ignored integration cases
+explicitly and match their names as well as nonzero counts.
+
+Use fresh synthetic task-local PKI, explicit CA verification and the exact
+allowed Origin. Record the owned relay's actual socket readiness and bounded
+SIGINT exit/join; a forced kill is not graceful success. Ordinary supervisor
+SIGINT/SIGTERM must enter owned-child cleanup; SIGKILL cannot provide that
+guarantee. This software acceptance does not prove browser interoperability,
+64-host operation, every leave/rejoin phase, cross-OS devices or acoustic sync.
+
 ## Common room admission client
 
 The application shall use one transport-independent client for BKMR admission

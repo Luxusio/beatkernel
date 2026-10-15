@@ -1,6 +1,8 @@
 # BMS player 구현/검증 현황 — 2026-10-16
 
-현재 작업: TASK__runtime-first-judge-batch-reuse에서 Runtime 첫 owned 판정 묶음을
+현재 작업: TASK__webtransport-multi-host-room-acceptance에서 실제 HTTP/3의3/4호스트·host별2인 prepared cohort 검사를 추가했다. 기존7개 이름을 보존하고 root 실제9/0(실제연결8case·순수1·ignored0)을 확인했다. 모든 참가자의 정확한 roster·단계별 Ready·단일 schedule·모든 방향의 progress/final ACK·실제 drain/close를 대조했다. 새 strict PKI와 owned relay는 socket readiness·SIGINT exit0/join을 확인했다. 정식 독립 code review와 QA는 아직 남아12.09.02V·전체136/489·오디오12/27을 유지한다. [실행·재현·한계](../changes/2026-10-16-webtransport-multi-host-room-acceptance.md)를 따른다. 전체 Goal은 미완료다.
+
+직전 Runtime 작업: TASK__runtime-first-judge-batch-reuse에서 Runtime 첫 owned 판정 묶음을
 재사용하고 이후 append·키음 borrower·오류 prefix를 보존했다. 독립 full-report·FIFO
 회귀3개를 포함한 core840/0·fixture release11/0·app local_runtime36/0과
 core WASM typing0을 실제 root Verify했다. 원래66사례 debug/release14/0에서
@@ -10,7 +12,7 @@ core WASM typing0을 실제 root Verify했다. 원래66사례 debug/release14/0�
 새 native e9167621…는 과거 GUI 산출물과 다르고 browser4개는 미갱신이다.
 정식 독립 DEEP code→qa-cli도 실제 PASS했고 동일840/11/36·양 meter14/0/66상한·WASM0을 확인했다.
 한 번 owning verify는 자동 완료 기록0으로 PENDING이며 태스크 종료만 보류했다.
-다음 후보는 실제 HTTP/3의3/4host·host별2인 cohort 검증이며 아직 구현/실행하지 않았다.
+당시 후속 후보였던 실제 HTTP/3의3/4host 검증의 현재 실행 범위는 위 절을 따른다.
 13.06.01W·전체136/489·오디오12/27과 전체 Goal 미완료를 유지한다.
 [실측·capacity·산출물 한계](../changes/2026-10-16-runtime-first-judge-batch-reuse.md)를 따른다.
 
