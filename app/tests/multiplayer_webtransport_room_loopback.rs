@@ -153,8 +153,18 @@ fn connected(case: &str) -> Vec<Peer> {
     connected_with_identities(case, &[identity(41), identity(41)])
 }
 fn connected_with_identities(case: &str, identities: &[Vec<u8>]) -> Vec<Peer> {
-    assert!((2..=4).contains(&identities.len()));
     let config = options(case);
+    let (mut peers, mut roster, deadlines) = collecting_with_identities(&config, identities);
+    frozen_partial_ready(&mut peers, &mut roster, &deadlines);
+    commit_last_ready(&mut peers, &mut roster);
+    peers
+}
+
+fn collecting_with_identities(
+    config: &WebTransportOptions,
+    identities: &[Vec<u8>],
+) -> (Vec<Peer>, Vec<GroupRoomMember>, Vec<i64>) {
+    assert!((2..=4).contains(&identities.len()));
     let mut peers = Vec::new();
     let mut roster = Vec::<GroupRoomMember>::new();
     let mut deadlines = Vec::new();
@@ -207,6 +217,10 @@ fn connected_with_identities(case: &str, identities: &[Vec<u8>]) -> Vec<Peer> {
                 .is_err());
         }
     }
+    (peers, roster, deadlines)
+}
+
+fn frozen_partial_ready(peers: &mut [Peer], roster: &mut [GroupRoomMember], deadlines: &[i64]) {
     // RoomClientSession refuses these calls before a Seal frame is queued.
     // This proves local API authority, not forged-wire/server enforcement.
     for peer in &mut peers[1..] {
@@ -217,10 +231,10 @@ fn connected_with_identities(case: &str, identities: &[Vec<u8>]) -> Vec<Peer> {
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
     peers[0].owner_mut().request_seal().unwrap();
-    pump(&mut peers, "frozen complete roster", |peers| {
+    pump(peers, "frozen complete roster", |peers| {
         peers.iter().all(|peer| {
             peer.owner().session().room().is_some_and(|room| {
-                room.phase == GroupRoomPhase::Frozen && room.members == roster.as_slice()
+                room.phase == GroupRoomPhase::Frozen && room.members == &*roster
             })
         })
     });
@@ -230,10 +244,10 @@ fn connected_with_identities(case: &str, identities: &[Vec<u8>]) -> Vec<Peer> {
         if ready_count > 0 {
             peers[ready_count - 1].owner_mut().request_ready().unwrap();
             roster[ready_count - 1].prepared = true;
-            pump(&mut peers, "exact partial Ready bitmap", |peers| {
+            pump(peers, "exact partial Ready bitmap", |peers| {
                 peers.iter().all(|peer| {
                     peer.owner().session().room().is_some_and(|room| {
-                        room.phase == GroupRoomPhase::Frozen && room.members == roster.as_slice()
+                        room.phase == GroupRoomPhase::Frozen && room.members == &*roster
                     })
                 })
             });
@@ -241,7 +255,7 @@ fn connected_with_identities(case: &str, identities: &[Vec<u8>]) -> Vec<Peer> {
         for (index, peer) in peers.iter_mut().enumerate() {
             let room = peer.owner().session().room().unwrap();
             assert_eq!(room.phase, GroupRoomPhase::Frozen);
-            assert_eq!(room.members, roster.as_slice());
+            assert_eq!(room.members, &*roster);
             assert_eq!(room.deadline_ns, Some(deadlines[index]));
             assert!(peer.schedule.is_none());
             assert!(peer
@@ -250,6 +264,9 @@ fn connected_with_identities(case: &str, identities: &[Vec<u8>]) -> Vec<Peer> {
                 .is_err());
         }
     }
+}
+
+fn commit_last_ready(peers: &mut [Peer], roster: &mut [GroupRoomMember]) {
     peers
         .last_mut()
         .unwrap()
@@ -258,14 +275,14 @@ fn connected_with_identities(case: &str, identities: &[Vec<u8>]) -> Vec<Peer> {
         .unwrap();
     roster.last_mut().unwrap().prepared = true;
     pump(
-        &mut peers,
+        peers,
         "prepared measured clock and committed start",
         |peers| {
             peers.iter().all(|peer| {
                 peer.schedule.is_some()
                     && peer.owner().session().room().is_some_and(|room| {
                         room.phase == GroupRoomPhase::Prepared
-                            && room.members == roster.as_slice()
+                            && room.members == &*roster
                             && room.deadline_ns.is_none()
                     })
             })
@@ -274,7 +291,7 @@ fn connected_with_identities(case: &str, identities: &[Vec<u8>]) -> Vec<Peer> {
     for (index, peer) in peers.iter_mut().enumerate() {
         let room = peer.owner().session().room().unwrap();
         assert_eq!(room.phase, GroupRoomPhase::Prepared);
-        assert_eq!(room.members, roster.as_slice());
+        assert_eq!(room.members, &*roster);
         assert_eq!(room.deadline_ns, None);
         let schedule = peer.schedule.unwrap();
         assert!(schedule.target_ns > 0);
@@ -286,7 +303,6 @@ fn connected_with_identities(case: &str, identities: &[Vec<u8>]) -> Vec<Peer> {
         assert!(schedule.uncertainty_ns <= StartPolicy::default().max_uncertainty_ns);
         assert_eq!(peer.owner_mut().take_schedule().unwrap(), None);
     }
-    peers
 }
 
 fn members(first: u32, tick: u64) -> Vec<MemberProgress> {
@@ -715,6 +731,318 @@ mod selected_policy_rooms {
             }
         }
         admitted.unwrap()
+    }
+
+    #[derive(Clone, Copy)]
+    enum RetirementPhase {
+        Collecting,
+        PartialReady,
+        Committed,
+    }
+    #[derive(Clone, Copy)]
+    enum Departure {
+        Leave,
+        Disconnect,
+    }
+
+    fn assert_fenced(peer: &mut Peer, index: usize, first: &io::Error) {
+        let prefix = members(11 + index as u32 * 10, 1);
+        let errors = [
+            peer.owner_mut().configure_frame_wait(1).unwrap_err(),
+            peer.owner_mut().request_seal().unwrap_err(),
+            peer.owner_mut().request_ready().unwrap_err(),
+            peer.owner_mut().request_leave().unwrap_err(),
+            peer.owner_mut().request_drain().unwrap_err(),
+            peer.owner_mut()
+                .publish_progress(&prefix, false)
+                .unwrap_err(),
+            peer.owner_mut()
+                .publish_progress(&prefix, true)
+                .unwrap_err(),
+            peer.owner_mut().take_schedule().unwrap_err(),
+            peer.step().unwrap_err(),
+        ];
+        for error in errors {
+            assert_eq!(error.kind(), first.kind());
+            assert_eq!(error.to_string(), first.to_string());
+        }
+    }
+
+    fn retirement_and_replacement(case: &str, phase: RetirementPhase, departure: Departure) {
+        let config = options(case);
+        let selected = Selected::default();
+        let players = [
+            [PlayerId(11), PlayerId(12)],
+            [PlayerId(21), PlayerId(22)],
+            [PlayerId(31), PlayerId(32)],
+        ];
+        let identities: Vec<_> = players
+            .iter()
+            .map(|players| admitted_identity(selected, players))
+            .collect();
+        assert!(identities.iter().all(|identity| identity == &identities[0]));
+        let replacement_identities: Vec<_> = players
+            .iter()
+            .map(|players| {
+                admitted_identity(
+                    Selected {
+                        seed: selected.seed + 1,
+                        ..selected
+                    },
+                    players,
+                )
+            })
+            .collect();
+        assert!(replacement_identities
+            .iter()
+            .all(|identity| identity == &replacement_identities[0]));
+        assert_ne!(identities[0], replacement_identities[0]);
+        let (mut old, mut roster, deadlines) = collecting_with_identities(&config, &identities);
+        if !matches!(phase, RetirementPhase::Collecting) {
+            frozen_partial_ready(&mut old, &mut roster, &deadlines);
+        }
+        if matches!(phase, RetirementPhase::Committed) {
+            commit_last_ready(&mut old, &mut roster);
+        }
+        let (expected_phase, prepared) = match phase {
+            RetirementPhase::Collecting => (GroupRoomPhase::Collecting, [false, false, false]),
+            RetirementPhase::PartialReady => (GroupRoomPhase::Frozen, [true, true, false]),
+            RetirementPhase::Committed => (GroupRoomPhase::Prepared, [true, true, true]),
+        };
+        assert_eq!(
+            roster
+                .iter()
+                .map(|member| member.prepared)
+                .collect::<Vec<_>>(),
+            prepared
+        );
+        let schedules: Vec<_> = old.iter().map(|peer| peer.schedule).collect();
+        let assert_history = |index: usize, peer: &Peer| {
+            let owner = peer.owner();
+            assert_eq!(owner.session().participant(), Some(roster[index].id));
+            let room = owner.session().room().unwrap();
+            assert_eq!(room.identity, identities[index].as_slice());
+            assert_eq!(room.members, roster.as_slice());
+            assert_eq!(room.phase, expected_phase);
+            assert_eq!(
+                room.deadline_ns,
+                if matches!(phase, RetirementPhase::Committed) {
+                    None
+                } else {
+                    Some(deadlines[index])
+                }
+            );
+            // A delivered committed schedule remains history after failure.
+            assert_eq!(peer.schedule, schedules[index]);
+            assert_eq!(
+                peer.schedule.is_some(),
+                matches!(phase, RetirementPhase::Committed)
+            );
+            assert!(!owner.local_final_written());
+            assert!(!owner.local_final_acknowledged());
+            assert!(!owner.progress_complete());
+            assert!(!owner.drain_complete());
+            for member in &roster {
+                assert!(owner.peer_progress(member.id).is_none());
+                assert!(!owner.peer_final_ack_written(member.id));
+            }
+        };
+        for (index, peer) in old.iter().enumerate() {
+            assert_history(index, peer);
+            assert!(!peer.owner().session().leave_requested());
+            assert!(!peer.owner().session().leave_written());
+        }
+
+        let deadline = Instant::now() + WAIT;
+        match departure {
+            Departure::Leave => {
+                old[1].owner_mut().request_leave().unwrap();
+                while !old[1].owner().session().leave_written() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "middle joiner Leave did not settle"
+                    );
+                    old[1].step().unwrap();
+                }
+            }
+            Departure::Disconnect => old[1].owner_mut().stop(),
+        }
+        assert_eq!(
+            old[1].owner().session().leave_requested(),
+            matches!(departure, Departure::Leave)
+        );
+        assert_eq!(
+            old[1].owner().session().leave_written(),
+            matches!(departure, Departure::Leave)
+        );
+        let own_fence = old[1].owner_mut().request_ready().unwrap_err();
+        assert_fenced(&mut old[1], 1, &own_fence);
+        assert_history(1, &old[1]);
+        old[1].retired = Some(old[1].io.take().unwrap().into_stream());
+        let disconnect_close = if matches!(departure, Departure::Disconnect) {
+            // Actual bounded FIN/connection shutdown drives the runtime. Local
+            // Stop or Drop alone would not establish transport disconnection.
+            let started = Instant::now();
+            let result = old[1].retired.as_mut().unwrap().finish(CLOSE);
+            Some((result, started.elapsed()))
+        } else {
+            None
+        };
+
+        let mut first_errors = [None, None, None];
+        while first_errors[0].is_none() || first_errors[2].is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "both survivors must independently observe actual room retirement"
+            );
+            if matches!(departure, Departure::Leave) {
+                // A completed write is not a QUIC-driver flush. Retain and
+                // drive this stream until both survivors fail on their own I/O.
+                old[1]
+                    .retired
+                    .as_ref()
+                    .unwrap()
+                    .idle(Duration::from_millis(1));
+            }
+            for index in [0, 2] {
+                if first_errors[index].is_none() {
+                    if let Err(error) = old[index].step() {
+                        first_errors[index] = Some(error);
+                    }
+                }
+            }
+        }
+        for index in [0, 2] {
+            let first = first_errors[index].as_ref().unwrap();
+            assert!(
+                matches!(
+                    first.kind(),
+                    io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::Other
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::BrokenPipe
+                ),
+                "expected actual non-timeout transport retirement, got {first}"
+            );
+            assert_fenced(&mut old[index], index, first);
+            assert_history(index, &old[index]);
+            assert!(!old[index].owner().session().leave_requested());
+            assert!(!old[index].owner().session().leave_written());
+        }
+
+        // Reuse this exact configuration/URL while both failed survivor owners
+        // and the departing stream still exist, with genuinely different metadata.
+        let (mut replacement, mut new_roster, new_deadlines) =
+            collecting_with_identities(&config, &replacement_identities);
+        assert!(old[0].io.is_some() && old[2].io.is_some() && old[1].retired.is_some());
+        for member in &new_roster {
+            assert_ne!(member.id.0, 0);
+            assert!(roster.iter().all(|old_member| old_member.id != member.id));
+        }
+        for index in [0, 2] {
+            assert_history(index, &old[index]);
+            assert_fenced(
+                &mut old[index],
+                index,
+                first_errors[index].as_ref().unwrap(),
+            );
+        }
+        let started = Instant::now();
+        let closes: Vec<_> = old.iter_mut().map(Peer::close).collect();
+        let elapsed = started.elapsed();
+        // Attempt every retained close before checking any close result. A
+        // reset may mask a later internal idle timeout in drain.and(closed);
+        // retain the original public result and reject returned timeouts only.
+        for result in &closes {
+            if let Err(error) = result {
+                assert_ne!(error.kind(), io::ErrorKind::TimedOut, "old close: {error}");
+            }
+        }
+        assert!(
+            elapsed < WAIT,
+            "all old close attempts exceeded their bound"
+        );
+        if let Some((first_close, elapsed)) = disconnect_close {
+            assert!(elapsed < WAIT, "transport shutdown exceeded its bound");
+            match (first_close, &closes[1]) {
+                (Ok(()), Ok(())) => {}
+                (Err(first), Err(repeated)) => {
+                    assert_ne!(first.kind(), io::ErrorKind::TimedOut, "disconnect: {first}");
+                    assert_eq!(repeated.kind(), first.kind());
+                    assert_eq!(repeated.to_string(), first.to_string());
+                }
+                (first, repeated) => {
+                    panic!("transport finish result changed: {first:?}, {repeated:?}")
+                }
+            }
+        }
+        assert!(old
+            .iter()
+            .all(|peer| peer.io.is_none() && peer.retired.is_none()));
+        frozen_partial_ready(&mut replacement, &mut new_roster, &new_deadlines);
+        commit_last_ready(&mut replacement, &mut new_roster);
+        complete_progress_and_drain(replacement);
+    }
+
+    #[test]
+    #[ignore = "requires local HTTP/3 relay and ephemeral valid PKI; actual selected room retirement"]
+    fn real_three_host_collecting_leave_releases_room_and_replacement_survives() {
+        retirement_and_replacement(
+            "collecting_leave",
+            RetirementPhase::Collecting,
+            Departure::Leave,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local HTTP/3 relay and ephemeral valid PKI; actual selected room retirement"]
+    fn real_three_host_partial_ready_leave_releases_room_and_replacement_survives() {
+        retirement_and_replacement(
+            "partial_ready_leave",
+            RetirementPhase::PartialReady,
+            Departure::Leave,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local HTTP/3 relay and ephemeral valid PKI; actual selected room retirement"]
+    fn real_three_host_committed_leave_releases_room_and_replacement_survives() {
+        retirement_and_replacement(
+            "committed_leave",
+            RetirementPhase::Committed,
+            Departure::Leave,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local HTTP/3 relay and ephemeral valid PKI; actual selected room retirement"]
+    fn real_three_host_collecting_disconnect_releases_room_and_replacement_survives() {
+        retirement_and_replacement(
+            "collecting_disconnect",
+            RetirementPhase::Collecting,
+            Departure::Disconnect,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local HTTP/3 relay and ephemeral valid PKI; actual selected room retirement"]
+    fn real_three_host_partial_ready_disconnect_releases_room_and_replacement_survives() {
+        retirement_and_replacement(
+            "partial_ready_disconnect",
+            RetirementPhase::PartialReady,
+            Departure::Disconnect,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local HTTP/3 relay and ephemeral valid PKI; actual selected room retirement"]
+    fn real_three_host_committed_disconnect_releases_room_and_replacement_survives() {
+        retirement_and_replacement(
+            "committed_disconnect",
+            RetirementPhase::Committed,
+            Departure::Disconnect,
+        );
     }
 
     #[test]

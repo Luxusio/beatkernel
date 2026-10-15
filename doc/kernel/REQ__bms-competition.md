@@ -1020,6 +1020,55 @@ SIGINT/SIGTERM must enter owned-child cleanup; SIGKILL cannot provide that
 guarantee. This software acceptance does not prove browser interoperability,
 64-host operation, every leave/rejoin phase, cross-OS devices or acoustic sync.
 
+### Actual room retirement and replacement verification
+
+Exercise a three-host room with two pristine prepared local players per host at
+three positively observed milestones: complete Collecting membership, Frozen
+with the exact incomplete readiness bitmap, and one committed schedule per host
+before final/drain. At each milestone test both explicit Leave by a noncreator
+and actual bounded transport shutdown without Leave. Transport shutdown is not
+evidence of abrupt packet loss. Keep all existing successful room and refusal
+cases, including the original committed creator Leave case.
+
+Observe the full Leave write before extracting its stream, and keep that
+stream's current-thread runtime driving until every surviving original host
+independently receives a genuine non-timeout transport failure. Never stop or
+close a surviving owner to manufacture that observation. Each failed owner must
+retain its first error and accepted participant/roster history while fencing
+new control, progress and schedule delivery. A previously observed committed
+schedule is history; cancellation does not require erasing that observation.
+Do not fabricate final acknowledgement or drain completion on these failures.
+
+Create the connection configuration once and reuse the exact URL/key for a new
+cohort with a different genuinely admitted selected identity. Require actual
+replacement participant leases to be nonzero, unique and disjoint from every old
+lease. Observe replacement Collecting membership before disposing all retained
+old streams. Require actual replacement Ready/start and, after each observed
+old-cleanup stage, further genuine replacement exchange through every directed
+progress/final payload and acknowledgement, explicit drain and bounded close.
+Cached snapshots or a guessed delay are insufficient replacement-liveness
+evidence.
+
+Attempt every old close and preserve its public error, rejecting returned
+TimedOut. These are bounded owner-disposal attempts, not graceful drain receipts
+or proof that every internal timeout was absent: an earlier finish error can
+mask a later internal idle timeout. Report that public observable boundary.
+
+Separately exercise pending setup cancellation at both public room admission
+and room-play connection entrypoints. Prepare the normal explicit-CA endpoint,
+target a separately owned silent loopback UDP sink, and positively observe its
+actual QUIC Initial before setting cancellation. Require Interrupted rather
+than timeout, network refusal or a returned application owner. On every
+controller branch set cancellation and join the owned worker before assertions;
+retain original deadline and process bounds. This proves pending setup cleanup,
+not authenticated TLS/HTTP3 admission, an assigned lease or late acquisition.
+
+The observed old-cleanup/replacement ordering does not force every delayed stale
+server callback. Preserve complementary deterministic stale-event fixtures.
+Cancellation during outstanding Accept/Commit writes, forced late acquisition,
+post-final failures and browser/physical gameplay acceptance remain separate
+original requirements; milestone tests must not silently mark them complete.
+
 ## Common room admission client
 
 The application shall use one transport-independent client for BKMR admission
