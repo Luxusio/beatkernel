@@ -670,6 +670,35 @@ pub fn finish_cohort_with_results(
 }
 pub fn finish_cohort_with_results_and_network(
     outcome: NativeGameplayResult<Option<Vec<(PlayerId, crate::play_result::CompletedPlayResult)>>>,
+    states: Vec<PlayerState>,
+    network: Option<&mut NativeGroupCompetition>,
+    save_paths: Vec<(PlayerId, Option<PathBuf>)>,
+    failures: Vec<String>,
+    base_path: Option<&Path>,
+    save: impl FnMut(Option<LiveReplayCapture>, Option<&Path>, bool) -> NativeGameplayResult<()>,
+    save_archive: impl FnOnce(
+        &crate::result_archive::ResultArchive,
+        Option<&Path>,
+    ) -> NativeGameplayResult<()>,
+) -> NativeGameplayResult<()> {
+    finish_cohort_with_results_and_network_and_cleanup(
+        outcome,
+        Ok(()),
+        states,
+        network,
+        save_paths,
+        failures,
+        base_path,
+        save,
+        save_archive,
+    )
+}
+
+/// Retain typed session and cleanup failures after finishing and saving every member.
+/// Proven completion remains eligible for an archive even when cleanup later fails.
+pub fn finish_cohort_with_results_and_network_and_cleanup(
+    outcome: NativeGameplayResult<Option<Vec<(PlayerId, crate::play_result::CompletedPlayResult)>>>,
+    cleanup: NativeGameplayResult<()>,
     mut states: Vec<PlayerState>,
     mut network: Option<&mut NativeGroupCompetition>,
     save_paths: Vec<(PlayerId, Option<PathBuf>)>,
@@ -772,14 +801,21 @@ pub fn finish_cohort_with_results_and_network(
             "local session failed (original typed error retained)".into(),
         );
     }
+    if cleanup.is_err() {
+        failures.push("local native cleanup failed (original typed error retained)".into());
+    }
     crate::native_completed_save::finalize_completed_save(
         outcome,
-        Ok(()),
+        cleanup,
         archive,
         || finish_cohort(states, save_paths, failures, save),
         |archive| save_archive(archive, base_path),
     )
 }
+
+#[cfg(test)]
+#[path = "native_cohort_typed_cleanup_fixtures.rs"]
+mod typed_cleanup_fixtures;
 
 /// Call after every native cleanup attempt. Match by ID, never positional zip.
 /// Ambiguous destinations are rejected rather than publishing a capture twice.
