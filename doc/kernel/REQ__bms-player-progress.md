@@ -7,7 +7,7 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
-현재 진행 작업(2026-10-16): TASK__judge-refresh-empty-route에서 빈 additional의
+최근 최적화 checkpoint(2026-10-16): TASK__judge-refresh-empty-route에서 빈 additional의
 임시 route Vec를 제거하고 nonempty 알고리즘·callback·deadline을 보존했다.
 독립 작성한 core 회귀4개를 포함한 전체 core837/0, 새 release4/0,
 app local_runtime36/0와 core WASM typing0을 실제 root Verify했다.
@@ -15,7 +15,10 @@ app local_runtime36/0와 core WASM typing0을 실제 root Verify했다.
 30개는 alloc/dealloc 각각1회·4B, fanout1개는 각각2회·8B 감소했고 증가한 필드는 없다.
 그 뒤31개 정적 상한만 좁힌 최종 양 profile도14/0·66상한 PASS다.
 새 native675d5cbd…는 과거6f/c43와 다르며 browser4개는 미갱신이라
-현재 GUI/browser 성능 PASS로 확대하지 않는다. 독립 정식 review→QA는 아직 남았다.
+현재 GUI/browser 성능 PASS로 확대하지 않는다. 이후 정식 DEEP code→독립 qa-cli도
+실제 PASS했고 core837/0·release4/0·local_runtime36/0·양 meter14/0/66상한·WASM0을 확인했다.
+한 번 owning verify는 자동 완료 기록 부재로 PENDING이며 태스크 종료만 미완료다.
+후속 후보는 Runtime 첫 owned 판정 묶음 재사용이며 아직 감소 수치를 주장하지 않는다.
 13.06.01W·전체136/489·오디오12/27과 전체 Goal 미완료를 유지한다.
 [실측·행동 회귀·산출물 한계](../changes/2026-10-16-judge-empty-route-allocation.md)를 따른다.
 

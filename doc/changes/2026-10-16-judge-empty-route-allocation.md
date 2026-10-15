@@ -44,7 +44,7 @@ root 실제 실행 결과:
 | 최종 상한 meter debug/release | 각각14 / 0 / 0,66 raw/66 checked |
 | core wasm32 타입 검사 | exit0 |
 
-core source와 새 fixture SHA는 이 실행들과 app 상한 변경 사이에 같다. app의 숫자·주석만 바뀐 뒤 전체 core를 반복 실행하지 않고 최종 meter와 WASM typing을 실행했다. 별도 독립 review→QA는 이 root Verify와 구분하며 아직 남아 있다.
+core source와 새 fixture SHA는 이 실행들과 app 상한 변경 사이에 같다. app의 숫자·주석만 바뀐 뒤 전체 core를 반복 실행하지 않고 최종 meter와 WASM typing을 실행했다. 별도 독립 DEEP code review→qa-cli도 이후 실제 PASS했다. 아래 독립 검증 기록과 owning 종료 대기를 구분한다.
 
 ## 재현 환경과 명령
 
@@ -99,4 +99,29 @@ cargo check -p beatkernel --target wasm32-unknown-unknown --locked --offline -j2
 
 요청 수의 감소는 실제 입력 지연·CPU·RSS·세계 순위나 모든 플랫폼의 개선을 증명하지 않는다. System 내부와 caller callback, Native clock·다른 thread·lock/IO tracing·각 OS/물리 callback은 별도 미완료 의무다. nonempty 알고리즘은 source와 행동 회귀로 보존했으며 비어 있지 않은 모든 커스텀 callback의 elapsed-time 성능을 측정했다고 주장하지 않는다.
 
-WBS13.06.01은 넓은 관측 경계가 남아W다. 전체136/489(27.81%)·오디오12/27·원래91/193과 전체 player Goal 미완료를 유지한다. 현재 child의 독립 정식 code review·qa-cli 및 owning verification/종료는 아직 남아 있다.
+WBS13.06.01은 넓은 관측 경계가 남아W다. 전체136/489(27.81%)·오디오12/27·원래91/193과 전체 player Goal 미완료를 유지한다. 현재 child의 독립 정식 code review·qa-cli는 실제 PASS했으나 아래 자동 완료 기록 gate 때문에 종료는 미완료다.
+
+## 독립 검증과 종료 대기
+
+커밋 `a71bcd5d21d39faa0a93a4ce9e0cd9e13b0f4235`에서 fresh correctness와 contract/test discovery는 각각빈 배열이었다. 그 후 `code_review_judge_refresh_14125_c1`의 전체 DEEP 정식 검토가 FIX_NOW0/INVESTIGATE0/OPTIONAL0으로 실제 PASS했다. 정식 검토는 source3개와 문서4개, 호출 경로·66개 원본/상한·artifact 정체성을 독립 대조했다.
+
+그 actual PASS 이후 `qa_cli_judge_refresh_14125`가 위6개 Cargo 명령을 순서대로 각각1회 실행해 모두 exit0으로 PASS했다. 전체 core837/0/ignored0, 새 release4/0, app local_runtime36/0/2870filtered, meter debug/release 각각14/0/66raw/66checked, core WASM typing0이다. 기존 교정 raw·기존 독립 QA·이번 상한 전후·새 QA의 모든66개 name/params/target/type/Requests와 literal 상한을 별도 parser로 재대조했다. 31개 감소·35개 동일·증가 없음, 교정9/public57과 단일13scalar·overflow·unknown 거부도 그대로 확인했다.
+
+독립 QA 전후7개 tracked source/doc·HEAD와 실제5개 artifact hash/크기는 고정됐다. native675d5cbd…/181,917,864B와 browser4개가 위 표와 일치하며 현재 GUI/served WASM/물리 성능 PASS는 부여하지 않는다. 검증 깊이는 test-suite다. private core 변경이므로 새 CLI/help/UX가 없고 실제 public API를 테스트에서 실행했다.
+
+최초 QA rustfmt 재귀 검사는 범위 밖 child `hazard_storage_fixtures.rs` 포맷 차이로 exit1이었다. 원본 `rustfmt.log`를 보존했으며 파일 수정 없이 `--config skip_children=true`의 실제3파일 scoped 검사를 실행해 exit0을 확인했다. 정적 parser의 `Requests::default()` arm 누락도 고쳐25arms/66cases를 모두 대조했다. 이 검사기 보정 때문에 Cargo 명령을 반복하지 않았다. diff/WBS/scoped format도 exit0이다.
+
+로컬 ignored `target/wf/judge-refresh-qa-cli-14125/invocations.json`과 `evidence-verification.json`에 exact argv/env/compiler/exits/source·artifact identity, raw 대조와 검사기 실패 이력을 보존한다.
+
+| 독립 QA raw log, 위 디렉터리 기준 | SHA256 |
+| --- | --- |
+| `core-debug.log` | `a8f61071a2884d963986a3be0c6ab2f40e915a946726a03364df1edec2e7c038` |
+| `core-routes-release.log` | `dfc7fd86e266318e723be552909c7240213a0696e5ce5ad10abb78d08a0cc10f` |
+| `app-local-runtime.log` | `a20097931a3c661f0f3f87f02ad1ec5d70db3da9bb520d5b2efdfa7183fb3450` |
+| `meter-debug.log` | `740768b979e9e0271033d930069591408c36b4bca8e6d7096d4e3f0ce77483de` |
+| `meter-release.log` | `c4333ae8c7a35bfc67de0bd1eb0441bf8a0c19ed3f629fcd9eec3c843b5e0e34` |
+| `core-wasm.log` | `8d6ed13006f1ce4b52a7e35ff69c0933974995ecaadec051bd40aba3d7702994` |
+
+실제 review PASS→QA PASS 뒤 한 번 owning `task_verify`는 필수 자동 review/QA 완료 기록 부재로 PENDING이었다. 현재 run의 `RECEIPTS.jsonl`은 없고 row0이다. direct final을 hook-owned 증거로 대체하지 않고 close하지 않는다. owner가 제공한 대기 조건으로 미완료 상태를 보존하며 전체 Goal은 활성이다. source/test 재실행·watcher 수리·receipt 수동 작성으로 종료 권한을 만들지 않는다.
+
+다음 후속 후보는 Runtime의 첫 owned 판정 묶음을 빈 report에 복사하는 비용 제거다. 아직 구현·비용 감소 실측은 없으며 별도 계획에서 fanout·오류 accepted-prefix와 dense 묶음의 잔여 capacity를 함께 확인해야 한다.
