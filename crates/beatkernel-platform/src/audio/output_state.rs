@@ -123,6 +123,10 @@ impl NativeOutputState {
     pub fn target_pcm(&self) -> Option<AudioFormat> {
         self.layout.as_ref().map(NativeOutputLayout::pcm)
     }
+    /// Borrow the exact prepared channel interpretation without copying its gains.
+    pub fn channel_matrix(&self) -> Option<&ChannelMatrix> {
+        self.remix.as_ref().map(FormatConverter::matrix)
+    }
     /// Maximum size of a fresh block; retained tails may be larger after reopen.
     pub fn max_frames(&self) -> usize {
         self.max_frames

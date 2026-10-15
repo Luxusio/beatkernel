@@ -4,7 +4,7 @@ use crate::{
     audio_authority::PreparedPrimedCoordinateEpoch, gameplay::output::ports::SourcePlaybackIdentity,
 };
 use beatkernel::audio::{MixerConfig, RenderReport, SourcePlaybackSpan};
-use beatkernel_platform::audio::{DeviceFormat, NativeOutputState};
+use beatkernel_platform::audio::{NativeOutputLayout, NativeOutputState};
 
 /// Cold semantic association captured while the recovered output is exclusively
 /// owned. The controller retains that unique owner across its subsequent open;
@@ -26,7 +26,8 @@ pub struct PreparedCoordinateSourceOwnerAssociation {
     history_retirement_revision: u64,
     history: Vec<SourcePlaybackSpan>,
     mixer_config: MixerConfig,
-    output_format: Option<DeviceFormat>,
+    output_layout: Option<NativeOutputLayout>,
+    output_matrix: Option<(u16, u16, Vec<u32>)>,
     max_frames: usize,
     pending_report: Option<RenderReport>,
     admitted_frames: usize,
@@ -67,7 +68,20 @@ impl PreparedCoordinateSourceOwnerAssociation {
             .ok_or("Source replacement lost original playback history")?;
         if state.admission_is_uncertain()
             || config != self.mixer_config
-            || state.format() != self.output_format
+            || state.layout() != self.output_layout.as_ref()
+            || match (&self.output_matrix, state.channel_matrix()) {
+                (None, None) => false,
+                (Some((source, target, coefficients)), Some(matrix)) => {
+                    *source != matrix.source_channels()
+                        || *target != matrix.target_channels()
+                        || coefficients.len() != matrix.coefficients().len()
+                        || coefficients
+                            .iter()
+                            .zip(matrix.coefficients())
+                            .any(|(saved, current)| *saved != current.to_bits())
+                }
+                _ => true,
+            }
             || state.max_frames() != self.max_frames
             || config.domain() != self.practice_mixer_basis.origin().domain
             || config.origin() != self.practice_mixer_basis.origin().timestamp
@@ -216,7 +230,18 @@ impl NativeAudioPresentation {
                 .map(|index| history.span(index).expect("retained Source history span"))
                 .collect(),
             mixer_config: mixer.config(),
-            output_format: state.format(),
+            output_layout: state.layout().copied(),
+            output_matrix: state.channel_matrix().map(|matrix| {
+                (
+                    matrix.source_channels(),
+                    matrix.target_channels(),
+                    matrix
+                        .coefficients()
+                        .iter()
+                        .map(|gain| gain.to_bits())
+                        .collect(),
+                )
+            }),
             max_frames: state.max_frames(),
             pending_report: state.pending_report(),
             admitted_frames: state.admitted_frames(),

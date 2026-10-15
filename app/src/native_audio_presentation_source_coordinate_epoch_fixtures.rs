@@ -11,9 +11,10 @@ use beatkernel::{
     time::{ClockDomainId, ClockPair, Duration, Timestamp},
 };
 use beatkernel_platform::audio::{
-    asio::{AsioPresentationObservation, MultimediaHostInterval},
-    AudioClockReadingQuality, AudioClockSnapshot, AudioStreamSnapshot, AudioStreamStatus,
-    DeviceFormat, NativeOutputState, SampleEncoding, StreamCounters,
+    asio::{AsioPcmEncoding, AsioPresentationObservation, MultimediaHostInterval},
+    AsioPlanarLayout, AudioClockReadingQuality, AudioClockSnapshot, AudioStreamSnapshot,
+    AudioStreamStatus, DeviceFormat, NativeOutputLayout, NativeOutputState, SampleEncoding,
+    StreamCounters,
 };
 
 fn point(domain: u32, nanos: i64) -> ClockPoint {
@@ -336,7 +337,8 @@ fn output_facts(output: &NativeOutputState) -> String {
             mixer.config(),
             mixer.frame_cursor(),
             mixer.playback_frame_cursor(),
-            output.format(),
+            output.layout(),
+            output.channel_matrix(),
             output.max_frames(),
             output.output_frame_basis(),
             output.pending_report(),
@@ -433,6 +435,187 @@ fn later_practice_boundary(rig: &mut Rig, frequency: Option<u64>) {
     assert_eq!(history.initial_playback_frame(), 5);
     assert_eq!(history.span(1).unwrap().physical_start(), 9);
     assert_eq!(history.span(2).unwrap().physical_start(), 17);
+}
+
+fn asio_layout(channels: &[(u32, AsioPcmEncoding); 2]) -> AsioPlanarLayout {
+    AsioPlanarLayout::new(AudioFormat::new(1000, 2).unwrap(), channels).unwrap()
+}
+
+fn original_asio_layout() -> AsioPlanarLayout {
+    asio_layout(&[
+        (3, AsioPcmEncoding::Int16Msb),
+        (8, AsioPcmEncoding::Float64Lsb),
+    ])
+}
+
+fn asio_matrix(gains: &[f32; 2]) -> ChannelMatrix {
+    ChannelMatrix::new(1, 2, gains).unwrap()
+}
+
+fn asio_rig() -> Rig {
+    let mut rig = rig(1000, None);
+    rig.output.admit(rig.output.pending_frames()).unwrap();
+    rig.output
+        .reconfigure_asio(original_asio_layout(), Some(asio_matrix(&[1.0, 0.25])), 16)
+        .unwrap();
+    assert_eq!(rig.output.format(), None);
+    assert_eq!(rig.output.pending_report(), None);
+    assert_eq!(rig.output.admitted_frames(), 0);
+    assert_eq!(rig.output.output_frame_basis().start_physical_frame(), 17);
+    rig
+}
+
+#[test]
+fn source_planar_cold_association_preserves_pending_prefix_history_and_epoch_publication() {
+    let mut rig = asio_rig();
+    let report = rig.output.render_pending(8).unwrap();
+    assert!(report.paused);
+    assert_eq!(report.start_frame, 17);
+    assert_eq!(report.playback_start_frame, 9);
+    assert_eq!(report.playback_frames, 0);
+    rig.output.admit(3).unwrap();
+    assert_eq!(rig.output.pending_frames(), 5);
+    assert_eq!(rig.output.pending_samples().len(), 10);
+    assert!(rig.output.paused_tail_admissible());
+    let association = rig
+        .owner
+        .prepare_coordinate_source_owner_association(&rig.output, rig.identity)
+        .unwrap();
+    let basis = association.basis();
+    assert_eq!(basis.start_physical_frame(), 20);
+    assert_eq!(rig.output.mixer().frame_cursor(), 25);
+    assert_eq!(
+        rig.output.layout(),
+        Some(&NativeOutputLayout::AsioPlanar(original_asio_layout()))
+    );
+    assert_eq!(association.practice_mixer_basis(), rig.creation);
+    let output = output_facts(&rig.output);
+    let samples = rig.output.pending_samples().as_ptr();
+    let frontiers = watermarks(&rig.owner);
+    for _ in 0..8 {
+        association.validate_recovered_state(&rig.output).unwrap();
+    }
+    let snapshots = [
+        asio_snapshot(8, basis, 0, 259, 261),
+        asio_snapshot(8, basis, 1, 299, 301),
+    ];
+    let token = rig
+        .owner
+        .prepare_coordinate_source_output_epoch(
+            next_epoch(&rig.owner, basis),
+            AudioAuthorityCoordinateBasis::SourceFrame(basis),
+            snapshots,
+            &association,
+            host(320),
+            &rig.inputs,
+        )
+        .unwrap();
+    rig.owner
+        .commit_coordinate_source_output_epoch_borrowed(&token, host(325), &rig.inputs)
+        .unwrap();
+    association.validate_recovered_state(&rig.output).unwrap();
+    assert_eq!(rig.owner.authority().epoch().id, 8);
+    assert_eq!(
+        rig.owner.latest_record().unwrap().evidence(),
+        &snapshots[1].snapshot().evidence
+    );
+    assert_eq!(rig.owner.practice_mixer_basis(), Some(rig.creation));
+    assert_eq!(rig.output.pending_report(), Some(report));
+    assert_eq!(rig.output.admitted_frames(), 3);
+    assert_eq!(rig.output.pending_samples().as_ptr(), samples);
+    assert_eq!(output_facts(&rig.output), output);
+    assert_eq!(watermarks(&rig.owner), frontiers);
+}
+
+#[test]
+fn source_planar_cold_association_rejects_changed_order_channel_or_encoding_with_empty_pending() {
+    let changed = [
+        asio_layout(&[
+            (8, AsioPcmEncoding::Float64Lsb),
+            (3, AsioPcmEncoding::Int16Msb),
+        ]),
+        asio_layout(&[
+            (4, AsioPcmEncoding::Int16Msb),
+            (8, AsioPcmEncoding::Float64Lsb),
+        ]),
+        asio_layout(&[
+            (3, AsioPcmEncoding::Int24Lsb),
+            (8, AsioPcmEncoding::Float64Lsb),
+        ]),
+    ];
+    for layout in changed {
+        let mut rig = asio_rig();
+        let association = rig
+            .owner
+            .prepare_coordinate_source_owner_association(&rig.output, rig.identity)
+            .unwrap();
+        let before = state(&rig.owner);
+        let basis = rig.output.output_frame_basis();
+        rig.output
+            .reconfigure_asio(layout, Some(asio_matrix(&[1.0, 0.25])), 16)
+            .unwrap();
+        // Both layouts deliberately have no legacy DeviceFormat. A format-only
+        // comparison would miss all three native interpretation changes.
+        assert_eq!(rig.output.format(), None);
+        assert_eq!(rig.output.target_pcm(), Some(layout.pcm()));
+        assert_eq!(rig.output.pending_report(), None);
+        assert_eq!(rig.output.admitted_frames(), 0);
+        assert_eq!(rig.output.output_frame_basis(), basis);
+        let output = output_facts(&rig.output);
+        assert!(association.validate_recovered_state(&rig.output).is_err());
+        assert_eq!(output_facts(&rig.output), output);
+        assert_eq!(state(&rig.owner), before);
+        rig.output
+            .reconfigure_asio(original_asio_layout(), Some(asio_matrix(&[1.0, 0.25])), 16)
+            .unwrap();
+        association.validate_recovered_state(&rig.output).unwrap();
+    }
+}
+
+#[test]
+fn source_planar_cold_association_rejects_changed_matrix_with_identical_native_layout() {
+    let mut rig = asio_rig();
+    let association = rig
+        .owner
+        .prepare_coordinate_source_owner_association(&rig.output, rig.identity)
+        .unwrap();
+    let before = state(&rig.owner);
+    let layout = rig.output.layout().copied();
+    let basis = rig.output.output_frame_basis();
+    rig.output
+        .reconfigure_asio(original_asio_layout(), Some(asio_matrix(&[0.25, 1.0])), 16)
+        .unwrap();
+    assert_eq!(rig.output.layout().copied(), layout);
+    assert_eq!(rig.output.pending_report(), None);
+    assert_eq!(rig.output.admitted_frames(), 0);
+    assert_eq!(rig.output.output_frame_basis(), basis);
+    let output = output_facts(&rig.output);
+    assert!(association.validate_recovered_state(&rig.output).is_err());
+    assert_eq!(output_facts(&rig.output), output);
+    assert_eq!(state(&rig.owner), before);
+    rig.output
+        .reconfigure_asio(original_asio_layout(), Some(asio_matrix(&[1.0, 0.25])), 16)
+        .unwrap();
+    association.validate_recovered_state(&rig.output).unwrap();
+}
+
+#[test]
+fn source_cold_association_keeps_legacy_interleaved_pending_after_idempotent_prepare() {
+    let mut rig = rig(1000, None);
+    let format = DeviceFormat::new(1000, 1, SampleEncoding::Float32, None).unwrap();
+    let association = rig
+        .owner
+        .prepare_coordinate_source_owner_association(&rig.output, rig.identity)
+        .unwrap();
+    let output = output_facts(&rig.output);
+    rig.output.reconfigure(format, None, 16).unwrap();
+    assert_eq!(rig.output.format(), Some(format));
+    assert_eq!(
+        rig.output.layout(),
+        Some(&NativeOutputLayout::Interleaved(format))
+    );
+    association.validate_recovered_state(&rig.output).unwrap();
+    assert_eq!(output_facts(&rig.output), output);
 }
 
 #[test]
