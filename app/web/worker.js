@@ -3029,7 +3029,6 @@ async function preparePlay(state, request) {
       state.retainedSetup = retainedWords(state.game.retained_setup_words(), 32, "setup");
       state.programId = retainedWord(state.retainedSetup, 1);
       if (retainedWord(state.retainedSetup, 0) !== 1n || state.programId === 0n) throw new Error("Invalid retained Program identity.");
-      state.retainedGeneration = retainedWord(retainedCapability(state), 2);
       metadata.retained = true;
       metadata.programId = state.programId;
       metadata.capability = retainedCapability(state);
@@ -3395,11 +3394,22 @@ function retainedWords(words, length, label) {
 function retainedWord(words, index) {
   return BigInt(words[index * 2]) | BigInt(words[index * 2 + 1]) << 32n;
 }
-function retainedCapability(state) {
-  const words = retainedWords(state.game.retained_capability_words(), 16, "capability");
+function retainedCapability(state, required = false) {
+  const words = state.game.retained_capability_words();
+  if (words?.length === 0) {
+    retainedWords(words, 0, "capability");
+    if (required) throw new Error("Retained control capability is unavailable before actual playback starts or after it ends.");
+    return null;
+  }
+  retainedWords(words, 16, "capability");
   if (retainedWord(words, 0) !== 1n || retainedWord(words, 1) !== state.programId
     || retainedWord(words, 6) === 0n || retainedWord(words, 7) === 0n) throw new Error("Retained capability changed Program ownership.");
   return words;
+}
+function retainedFresh(event) {
+  const tag = retainedWord(event, 1), kind = retainedWord(event, 25);
+  return tag === 1n && (kind === 1n || kind === 2n)
+    || tag === 3n && retainedWord(event, 17) === 0n && kind === 1n;
 }
 function retainedPlayers(state) { return state.localPlan ? state.localPlan.members.map(({ player }) => player) : [1]; }
 function requireCaptureBudget(state, fresh) {
@@ -3428,7 +3438,7 @@ function prepareRetained(state, request) {
   if (request.action === "rate" && (state.opponentCount !== 0 || state.network || state.room)) {
     throw new Error("Runtime rate changes are unavailable with an admitted fixed-condition saved or network opponent; start a separate practice session.");
   }
-  const capability = retainedCapability(state);
+  const capability = retainedCapability(state, true);
   const id = BigInt(request.rpcId), attempt = retainedWord(capability, 2), revision = retainedWord(capability, 5);
   const entry = { request, id, action: request.action, attempt, revision, pause, preparation: null };
   switch (request.action) {
@@ -3486,7 +3496,7 @@ async function sendRetained(state, entry, client) {
   state.game.retained_admission(entry.pause ? 1 : 0, entry.id, true, "");
   state.retainedSend = null;
   reply(state, entry.request, { kind: "retained-pending", version: 1, id: entry.id,
-    action: entry.action, capability: retainedCapability(state) });
+    action: entry.action, capability: retainedCapability(state, true) });
 }
 
 async function drainRetiredRecordings(state, boundarySerial) {
@@ -3564,8 +3574,7 @@ async function observeRetainedOutput(state, observation, snapshot, client) {
     if (event !== null) {
       retainedWords(event, 80, "event");
       if (retainedWord(event, 2) !== state.programId) throw new Error("Retained event changed Program identity.");
-      const fresh = retainedWord(event, 5) > state.retainedGeneration;
-      if (fresh) requireCaptureBudget(state, true);
+      if (retainedFresh(event)) requireCaptureBudget(state, true);
       game.retained_event(event);
       state.retainedEvent = event;
     }
@@ -3577,11 +3586,9 @@ async function observeRetainedOutput(state, observation, snapshot, client) {
     const event = state.retainedEvent;
     if (!event || retainedWord(event, 3) !== serial) throw new Error("Retained service returned an unowned commit serial.");
     const capability = retainedCapability(state);
-    const generation = retainedWord(capability, 2);
-    if (generation !== state.retainedGeneration) {
+    if (retainedFresh(event)) {
       fenceVisual();
       await drainRetiredRecordings(state, serial);
-      state.retainedGeneration = generation;
     }
     if (play !== state || state.game !== game || state.commandClient !== client) return false;
     const tag = retainedWord(event, 1), id = retainedWord(event, 4);
@@ -3736,6 +3743,7 @@ function publishRender(state, observation, completed) {
   sendRoomProgress(state, completed);
   report("play-render-done", { playId: state.id, renderId: observation.renderId, completed,
     commandsPending: commandsPending(state), pendingInputs: pendingInputs(state), observedTick: state.lastTick,
+    ...(state.retained ? { retainedCapability: retainedCapability(state) } : {}),
     ...statistics(state) });
   if (state.mode === "live") {
     sendProgress(state, statistics(state));
@@ -4077,7 +4085,7 @@ function handlePlay(request) {
       hidSources: null, gamepadAdapter: null, pointerSources: null,
       rate: null, network: null, room: null, samplesEnded: false, commandsDrained: false,
       prepared: false, opponentCount: 0, opponentsFailed: false, opponentError: null, lastOpponents: null,
-      retained: request.retained === true, programId: null, retainedSetup: null, retainedGeneration: null,
+      retained: request.retained === true, programId: null, retainedSetup: null,
       retainedPending: new Map(), retainedSend: null, retainedEvent: null, retainedPin: null,
       captureBudget: null, retiredCohort: null,
     };

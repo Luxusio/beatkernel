@@ -31,8 +31,10 @@ function envelope({ tag = 2n, serial = 9n, id = 3n, generation = 1n, revision = 
       31: 4801n, 32: 48000n, 33: 1n });
     if (tag === 1n || tag === 3n) Object.assign(values, { 22: 1000000000n,
       23: 1000000000n, 25: boundary });
+    if (tag === 1n && boundary === 0n) Object.assign(values, {
+      7: 0n, 8: 0n, 22: 0n, 23: 0n, 26: 0n, 29: 0n, 30: 1n, 31: 0n });
     if (tag === 2n || tag === 3n) Object.assign(values, { 9: revision - 1n,
-      10: revision, 11: 1n, 12: 1n, 13: numerator, 14: denominator,
+      10: outcome === 2n ? revision - 1n : revision, 11: 1n, 12: 1n, 13: numerator, 14: denominator,
       15: outcome === 2n ? 1n : numerator, 16: outcome === 2n ? 1n : denominator,
       17: outcome, 18: outcome === 2n ? 1n : 0n, 20: tag === 2n ? 100020833n : 0n });
   }
@@ -99,7 +101,8 @@ replaceFixture('  if (options.missingSectionConstructor)', `
     },
     retained_capability_words() {
       this.live();
-      if (!this.prepared.retained_practice) return new Uint32Array();
+      if(options.capabilityWords)return options.capabilityWords.slice();
+      if (!this.prepared.retained_practice || this.retainedReady !== true || this.retainedEnded === true) return new Uint32Array();
       return fixtureWords([1n,41n,this.retainedGeneration??1n,0n,2000000000n,
         this.retainedRevision??0n,this.retainedNumerator??1n,this.retainedDenominator??1n]);
     },
@@ -135,8 +138,11 @@ replaceFixture('  if (options.missingSectionConstructor)', `
     retained_service(now,audio) {
       this.calls.push(["retained-service",now,audio]);
       if (!this.allowCommit || !this.retainedHeld) return undefined;
-      const event=this.retainedHeld; this.retainedCommitted=event;
+      const event=this.retainedHeld;
+      if(fixtureAt(event,4)!==0n)this.retainedCommitted=event;
       this.retainedGeneration=fixtureAt(event,5);
+      if(fixtureAt(event,1)===1n&&fixtureAt(event,25)===0n)this.retainedReady=true;
+      if(fixtureAt(event,1)===1n&&fixtureAt(event,25)===3n)this.retainedEnded=true;
       if(fixtureAt(event,1)===2n||fixtureAt(event,1)===3n) {
         this.retainedRevision=fixtureAt(event,10);
         this.retainedNumerator=fixtureAt(event,15); this.retainedDenominator=fixtureAt(event,16);
@@ -219,13 +225,16 @@ async function upload(h) {
   assert.equal(reply(h,rpcId)?.error,undefined); assert.ok(reply(h,rpcId));
   h.samples=samples;return samples;
 }
-async function attach(h,{activate=true,startFrame=START}={}) {
+async function attach(h,{activate=true,startFrame=START,started=true}={}) {
   await upload(h);const audio=port(),rpcId=++h.nextRpc;
   await h.send({kind:"play-audio",playId:7,rpcId,port:audio,generation:7,queueCapacity:4096,timeoutMs:50});
   h.audio=audio;
   for(let count=0;!reply(h,rpcId)&&count<8;count++) await ackAudio(h);
   assert.equal(reply(h,rpcId)?.error,undefined);
-  if(activate)await h.send({kind:"play-activate",playId:7,rpcId:++h.nextRpc,hostNs:ORIGIN,startFrame});
+  if(activate) {
+    await h.send({kind:"play-activate",playId:7,rpcId:++h.nextRpc,hostNs:ORIGIN,startFrame});
+    if(started)await startOwner(h);
+  }
   return audio;
 }
 async function ackAudio(h,fields={}) {
@@ -252,6 +261,17 @@ async function serviceHeld(h) {
   const now=h.windowNowNs();
   await h.send({kind:"play-step",playId:7,tickId:h.nextTick=(h.nextTick??0)+1,
     events:[],watermark:now,nowNs:now,audioNs:0n});
+}
+async function startOwner(h) {
+  const previous=h.owner.allowCommit;
+  h.owner.allowCommit=true;
+  await deliverPoll(h,envelope({tag:1n,serial:1n,id:0n,boundary:0n}));
+  await reachControl(h,"retained-event-ack");
+  assert.equal(h.audio.pending.serial,1n);
+  await ackAudio(h);
+  h.owner.allowCommit=previous;
+  assert.equal(h.owner.retainedReady,true,"only an actual Started service makes the controlled binding ready");
+  assert.equal(h.of("play-retired-recordings").length,0,"Started never retires a capture cohort");
 }
 async function stop(h) { await h.send({kind:"play-stop",playId:7}); }
 
@@ -295,15 +315,15 @@ test("Worker prepares canonical scalar rate, settles admission pending and publi
   assert.equal(h.of("play-retained-result").length,0);
   const event=envelope({id:BigInt(rpcId)});await deliverPoll(h,event);
   assert.equal(h.of("play-retained-result").length,0,"latched Worklet event is not a committed result");
-  assert.equal(h.audio.posts.some(row=>row.kind==="retained-event-ack"),false);
+  assert.equal(h.audio.posts.some(row=>row.kind==="retained-event-ack"&&row.serial===9n),false);
   owner.allowCommit=true;await serviceHeld(h);
   const result=h.of("play-retained-result").at(-1);assert.ok(result);
   assert.deepEqual(result.event,event);assert.equal(result.outcome,"applied");assert.equal(result.id,BigInt(rpcId));
   assert.equal(at(result.capability,5),1n);assert.equal(at(result.capability,6),2n);
   await reachControl(h,"retained-event-ack");
-  assert.equal(owner.calls.some(row=>row[0]==="retained-local-ack"),false,"Worklet ACK precedes Rust latch ACK");
+  assert.equal(owner.calls.some(row=>row[0]==="retained-local-ack"&&row[1]===9n),false,"Worklet ACK precedes Rust latch ACK");
   owner.retainedPin=17n;
-  await ackAudio(h);assert.deepEqual(owner.calls.find(row=>row[0]==="retained-local-ack"),["retained-local-ack",9n]);
+  await ackAudio(h);assert.deepEqual(owner.calls.find(row=>row[0]==="retained-local-ack"&&row[1]===9n),["retained-local-ack",9n]);
   const retire=await reachControl(h,"retained-history-retire");assert.equal(retire.pin,17n,"only Rust input pin permits retirement");
   await ackAudio(h);await stop(h);
 });
@@ -361,13 +381,13 @@ test("cancelled retained preparation cannot acquire an owner or replace a later 
 test("retained report/history/event use original output timestamp pair and service before ack; nonfresh rate retains visual registration",async()=>{
   const h=await catalog();const owner=await begin(h);await attach(h);
   const initial=h.visualExports.filter(row=>row.kind===1&&row.owner===owner).length;
-  await h.send({kind:"play-render",playId:7,renderId:1,
+  await h.send({kind:"play-render",playId:7,renderId:2,
     timestamp:{contextTime:9187500001.25,performanceTime:9007199255},observedNowMs:9007199255,
     controlClock:{beforeMs:9007199255,afterMs:9007199255,contextTime:9999,sampleRate:48000}});
   const id=await request(h,"rate",{fraction:"2/1"});await reachControl(h,"retained-rate");await ackAudio(h);
   const event=envelope({id:BigInt(id)});owner.allowCommit=true;await deliverPoll(h,event);
-  const history=owner.calls.findIndex(row=>row[0]==="retained-history");
-  const held=owner.calls.findIndex(row=>row[0]==="retained-event");
+  const held=owner.calls.findIndex(row=>row[0]==="retained-event"&&at(row[1],3)===9n);
+  const history=owner.calls.findLastIndex((row,index)=>row[0]==="retained-history"&&index<held);
   assert.ok(history>=0&&held>history);assert.ok(owner.calls.slice(held+1).some(row=>row[0]==="retained-service"));
   assert.deepEqual(owner.calls.find(row=>row[0]==="retained-presentation"),["retained-presentation",1250000000n,9007199255000000n]);
   assert.equal(h.visualExports.filter(row=>row.kind===1&&row.owner===owner).length,initial);
@@ -375,12 +395,96 @@ test("retained report/history/event use original output timestamp pair and servi
 });
 
 test("retained raw observation refuses an absolute context frame outside signed nanoseconds without fabricating presentation",async()=>{
-  const h=await catalog();const owner=await begin(h);await attach(h,{startFrame:9007199254741999n});
+  const h=await catalog();const owner=await begin(h);await attach(h,{startFrame:9007199254741999n,started:false});
   await h.send({kind:"play-render",playId:7,renderId:1,
     timestamp:{contextTime:187649984476,performanceTime:9007199255},observedNowMs:9007199255});
   const failure=h.of("play-error").at(-1);assert.ok(failure);assert.match(failure.message,/Audio frame exceeds signed nanoseconds/);
   assert.equal(owner.calls.some(row=>row[0]==="retained-presentation"),false);
   assert.equal(owner.frees,1);
+});
+
+test("cold retained None stays unavailable through preparation and uncommitted Started, then publishes only the serviced capability",async()=>{
+  const h=await catalog();const owner=await begin(h,{recordReplay:true,
+    captureBudget:{remainingRecords:1,remainingBytes:64*MiB}});
+  assert.equal(reply(h,1).result.capability,null);
+  assert.equal(owner.retained_capability_words().length,0);
+  await attach(h,{started:false});
+  const registrations=h.visualExports.filter(row=>row.kind===1&&row.owner===owner).length;
+  const score=owner.score;
+  const early=await request(h,"rate",{fraction:"2/1"});
+  assert.match(reply(h,early)?.error??"",/capability|available|started/i);
+  assert.equal(owner.calls.some(row=>row[0]==="prepare-rate"),false);
+  assert.equal(h.audio.posts.some(row=>row.kind==="retained-rate"),false);
+  const started=envelope({tag:1n,serial:1n,id:0n,boundary:0n});
+  await deliverPoll(h,started);
+  assert.equal(h.of("play-render-done").at(-1).retainedCapability,null);
+  assert.equal(owner.retained_capability_words().length,0,"receiving Started is not business commit");
+  assert.equal(h.audio.posts.some(row=>row.kind==="retained-event-ack"&&row.serial===1n),false);
+  owner.allowCommit=true;await serviceHeld(h);
+  await reachControl(h,"retained-event-ack");assert.equal(h.audio.pending.serial,1n);await ackAudio(h);
+  await deliverPoll(h,null);
+  assert.deepEqual(h.of("play-render-done").at(-1).retainedCapability,capability());
+  assert.equal(owner.retainedGeneration,1n);
+  assert.equal(h.of("play-retired-recordings").length,0,"Started does not spend final-current capture room");
+  assert.equal(h.visualExports.filter(row=>row.kind===1&&row.owner===owner).length,registrations);
+  assert.equal(owner.score,score);
+  const id=await request(h,"rate",{fraction:"2/1"});await reachControl(h,"retained-rate");await ackAudio(h);
+  assert.equal(reply(h,id)?.result.capability.length,16,"actual admission still requires a live capability");
+  await stop(h);assert.equal(owner.replayTakes,1);
+});
+
+test("cold capability accepts only the actual empty view or strict sixteen words, never a malformed extent as None",async()=>{
+  const h=await catalog({capabilityWords:new Uint32Array([1,0])});await h.send(start());
+  assert.equal(reply(h,1)?.result,undefined);
+  assert.match(h.of("play-error").at(-1)?.message??"",/capability|words/i);
+  assert.equal(h.games[0].frees,1);assert.equal(h.audio,undefined);
+});
+
+test("Ended revokes capability without retiring current capture or resetting visuals, and late Rate Refused remains correlated with null permission",async()=>{
+  const h=await catalog();const owner=await begin(h,{recordReplay:true,
+    captureBudget:{remainingRecords:128,remainingBytes:256*MiB}});await attach(h);owner.allowCommit=true;
+  const registrations=h.visualExports.filter(row=>row.kind===1&&row.owner===owner).length;
+  const score=owner.score,snapshotScore={...score};
+  const id=await request(h,"rate",{fraction:"2/1"});await reachControl(h,"retained-rate");await ackAudio(h);
+  assert.equal(reply(h,id)?.result.kind,"retained-pending");
+  await deliverPoll(h,envelope({tag:1n,boundary:3n,generation:2n,serial:40n,id:0n}));
+  await reachControl(h,"retained-event-ack");assert.equal(h.audio.pending.serial,40n);await ackAudio(h);
+  assert.equal(h.of("play-render-done").at(-1).retainedCapability,null);
+  assert.equal(owner.retained_capability_words().length,0);
+  assert.equal(owner.retainedGeneration,2n,"the serviced original Ended event owns generation");
+  assert.equal(h.of("play-retired-recordings").length,0);
+  assert.equal(owner.calls.some(row=>row[0]==="take-retired"),false);
+  assert.equal(h.visualExports.filter(row=>row.kind===1&&row.owner===owner).length,registrations);
+  assert.equal(owner.score,score);assert.deepEqual(owner.score,snapshotScore);
+  const refused=envelope({id:BigInt(id),generation:2n,serial:41n,outcome:2n});
+  await deliverPoll(h,refused);
+  const response=h.of("play-retained-result").at(-1);assert.ok(response);
+  assert.equal(response.id,BigInt(id));assert.equal(response.action,"rate");assert.equal(response.outcome,"refused");
+  assert.equal(response.capability,null);assert.deepEqual(response.event,refused);
+  assert.equal(at(response.event,10),0n,"refusal preserves committed revision");
+  await reachControl(h,"retained-event-ack");await ackAudio(h);
+  assert.equal(h.of("play-retired-recordings").length,0);
+  assert.equal(h.visualExports.filter(row=>row.kind===1&&row.owner===owner).length,registrations);
+  await stop(h);const terminal=h.of("play-stopped").at(-1);assert.ok(terminal?.replay instanceof File);
+  assert.equal(owner.replayTakes,1);assert.equal(terminal.replayComplete,false);
+  assert.equal(terminal.hits,snapshotScore.hits);assert.equal(terminal.combo,snapshotScore.combo);
+});
+
+for(const kind of ["requested","looped","restart"]) test(`only actual ${kind} fresh service re-registers visual content`,async()=>{
+  const h=await catalog();const owner=await begin(h);await attach(h);owner.allowCommit=true;
+  const initial=h.visualExports.filter(row=>row.kind===1&&row.owner===owner).length;
+  let id=0;
+  if(kind!=="looped") {
+    id=await request(h,kind==="restart"?"restart-original":"region",
+      kind==="restart"?{}:{startSeconds:"1",endSeconds:"2",repeat:true});
+    await reachControl(h,kind==="restart"?"retained-restart-original":"retained-region");await ackAudio(h);
+  }
+  await deliverPoll(h,envelope({tag:kind==="restart"?3n:1n,boundary:kind==="looped"?2n:1n,
+    id:BigInt(id),generation:2n,serial:50n,numerator:1n}));
+  await reachControl(h,"retained-event-ack");await ackAudio(h);
+  assert.ok(h.visualExports.filter(row=>row.kind===1&&row.owner===owner).length>initial);
+  assert.equal(h.of("play-render-done").at(-1).retainedCapability.length,16);
+  assert.equal(owner.retainedGeneration,2n);await stop(h);
 });
 
 for(const count of [2,4]) for(const capture of [false,true]) test(`fresh boundary drains entire ${count}-member roster capture=${capture} before acceptance and Worklet ACK`,async()=>{
@@ -438,6 +542,7 @@ for(const competition of ["saved","network"]) test(`actual admitted fixed ${comp
     endpoint.emit({kind:"start",targetNs:500000000n,songTargetNs:600000000n,uncertaintyNs:4n});await flushJobs();
     const target=reply(h,rpcId)?.result?.targetHostNs;assert.equal(typeof target,"bigint");
     await h.send({kind:"play-activate",playId:7,rpcId:++h.nextRpc,hostNs:target+100n,startFrame:START,targetHostNs:target});
+    await startOwner(h);
   }
   const saved=owner.saved.map(row=>({...row})),network=h.networks[0];
   const id=await request(h,"rate",{fraction:"2/1"});
@@ -522,16 +627,34 @@ const {harness,flush,finalScore:baseFinalScore,selectedRecording,chooseRecording
 function finalScore(playId,fields={}) {
   return baseFinalScore(playId,{replay:null,replayComplete:false,replayError:null,...fields});
 }
-async function windowStart(h,{record=false,metadata={}}={}) {
+async function windowStart(h,{record=false,metadata={},ready=true}={}) {
   await h.preview();h.get("runtime-retained").checked=true;h.get("record").checked=record;h.get("live-end").value="2";
   const pending=await h.begin(),worker=h.workers[0];
   await h.reply(pending,{kind:"prepared",mode:"live",title:"Retained",artist:"Fixture",notes:1,samples:0,
     lanes:[0x11],opponentCount:0,startNs:0n,endNs:2000000000n,retained:true,programId:PROGRAM,
-    capability:capability(),liveSpeed:"1/1",liveSpeedNumerator:1n,liveSpeedDenominator:1n,...metadata});
+    capability:null,liveSpeed:"1/1",liveSpeedNumerator:1n,liveSpeedDenominator:1n,...metadata});
   const upload=worker.last("play-samples-upload");assert.ok(upload);await h.admitSamples(upload,0);
   await h.reply(upload,{kind:"samples-uploaded",count:0,bytes:0});
   await h.reply(worker.last("play-audio"),null);await h.reply(worker.last("play-activate"),null);
-  await h.geometry({playId:pending.playId});return pending;
+  await h.geometry({playId:pending.playId});
+  if(ready)await windowCapability(h,pending,capability());
+  return pending;
+}
+async function windowCapability(h,session,value) {
+  const worker=h.workers[0];
+  await h.advance(8);
+  for(let count=0;count<4;count++) {
+    const step=worker.last("play-step");
+    if(!step||step.tickId===(h.lastSettledTick??0))break;
+    await h.receive({kind:"play-step-done",playId:session.playId,tickId:step.tickId,
+      commandsPending:false,pendingInputs:0,songNs:0n,hits:0n,misses:0n,combo:0n,preOriginInputs:0});
+    h.lastSettledTick=step.tickId;
+  }
+  const step=worker.last("play-step");
+  assert.equal(step?.tickId??0,h.lastSettledTick??0,"the actual acquired prefix is acknowledged before its render reply");
+  const observation=worker.last("play-render");assert.ok(observation,"existing render request precedes capability publication");
+  await h.receive({kind:"play-render-done",playId:session.playId,renderId:observation.renderId,
+    completed:false,commandsPending:false,observedTick:step?.tickId??0,pendingInputs:0,retainedCapability:value});
 }
 function resultFor(start,request,{outcome="applied",serial=9n,tag=2n,generation=1n,numerator=2n,denominator=1n}={}) {
   return {kind:"play-retained-result",version:1,playId:start.playId,id:BigInt(request.rpcId),action:request.action,
@@ -554,6 +677,56 @@ test("Window opt-in passes negotiated limits and bounded capture budget; retaine
     assert.equal(session.audioLimits.maxVoices,h.audio.configuration.audioLimits.maxVoices);
     assert.deepEqual(structuredClone(h.audio.finishArgs),[[undefined,{mode:"retained"}]]);
     assert.equal(h.audio.polls,0);h.click("stop");await flush();await h.receive(finalScore(session.playId));
+  }finally{await h.close();}
+});
+
+test("Window cold null permission enables only from actual render capability, preserves drafts and held input through Ended and settles late refusal",async()=>{
+  const h=await harness();try {
+    const session=await windowStart(h,{record:true,ready:false}),worker=h.workers[0];
+    assert.equal(h.get("runtime-rate-apply").disabled,true);assert.equal(h.get("runtime-pause").disabled,true);
+    h.get("runtime-rate").value="003/002";h.get("runtime-start").value="0.123456789";
+    h.get("runtime-end").value="1.999999999";
+    await windowCapability(h,session,null);
+    assert.equal(h.get("runtime-rate-apply").disabled,true);assert.equal(worker.messages("play-retained").length,0);
+    await windowCapability(h,session,capability());
+    assert.equal(h.get("runtime-rate-apply").disabled,false);assert.equal(h.get("runtime-pause").disabled,false);
+    assert.equal(h.get("runtime-rate").value,"003/002");assert.equal(h.get("runtime-start").value,"0.123456789");
+    h.setNow(1300);h.window.emit("keydown",{code:"KeyZ",repeat:false,timeStamp:1300});await flush();
+    const down=worker.last("play-step").events.find(event=>event.key===2&&event.down===true);assert.ok(down);
+    h.click("runtime-rate-apply");await flush();const rate=worker.last("play-retained");
+    assert.equal(rate.fraction,"003/002");await pendingReply(h,rate);
+    const title=h.get("title").textContent;
+    await windowCapability(h,session,null);
+    assert.equal(h.get("runtime-rate-apply").disabled,true);assert.equal(h.get("runtime-pause").disabled,true);
+    assert.equal(h.get("runtime-rate").value,"003/002");assert.equal(h.get("runtime-end").value,"1.999999999");
+    assert.equal(h.get("title").textContent,title);assert.equal(worker.messages("play-stop").length,0);
+    const refused={kind:"play-retained-result",version:1,playId:session.playId,id:BigInt(rate.rpcId),action:"rate",
+      event:envelope({id:BigInt(rate.rpcId),generation:2n,serial:41n,outcome:2n,numerator:3n,denominator:2n}),
+      capability:null,outcome:"refused",reason:"Ended before pending rate could apply"};
+    await h.receive(refused);
+    assert.match(h.get("runtime-status").textContent,/refused|Ended/);
+    assert.equal(h.get("runtime-rate-apply").disabled,true,"settled late refusal cannot revive ended permission");
+    const status=h.get("runtime-status").textContent;await h.receive(refused);
+    assert.equal(h.get("runtime-status").textContent,status,"late result is consumed once");
+    h.window.emit("keyup",{code:"KeyZ",repeat:false,timeStamp:1308});await flush();
+    const up=worker.last("play-step").events.find(event=>event.key===2&&event.down===false);assert.ok(up);
+    assert.ok(up.sequence>down.sequence,"Ended capability publication does not reset held-key acquisition");
+    h.click("stop");await flush();const current=new File([Uint8Array.of(66,75,82,37)],"ended-current.bkr");
+    await h.receive(finalScore(session.playId,{replay:current}));
+    const choices=h.get("captured-replay").children.filter(option=>option.value!=="");assert.equal(choices.length,1);
+    h.get("captured-replay").value=choices[0].value;h.get("captured-replay").emit("change");
+    h.click("export");await flush();assert.equal(h.urls.at(-1).blob,current);
+  }finally{await h.close();}
+});
+
+test("Window rejects a null admission capability while preserving its raw draft and actual display",async()=>{
+  const h=await harness();try {
+    const session=await windowStart(h),worker=h.workers[0];
+    h.get("runtime-rate").value="3/2";h.click("runtime-rate-apply");await flush();const rate=worker.last("play-retained");
+    await h.reply(rate,{kind:"retained-pending",version:1,id:BigInt(rate.rpcId),action:"rate",capability:null});
+    assert.match(h.get("runtime-status").textContent,/capability|available|admission/i);
+    assert.equal(h.get("runtime-rate").value,"3/2");assert.equal(worker.messages("play-stop").length,0);
+    h.click("stop");await flush();await h.receive(finalScore(session.playId));
   }finally{await h.close();}
 });
 

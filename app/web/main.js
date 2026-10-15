@@ -1827,12 +1827,22 @@ ui["captured-replay"].addEventListener("change", () => {
   controls();
 });
 function runtimeWord(words, index) { return BigInt(words[index * 2]) | BigInt(words[index * 2 + 1]) << 32n; }
-function runtimeCapability(session, words) {
+function runtimeCapability(session, words, required = false) {
+  if (words === null) {
+    if (required) throw new Error("Retained admission omitted its actual control capability.");
+    return null;
+  }
   if (!(words instanceof Uint32Array) || words.length !== 16 || !(words.buffer instanceof ArrayBuffer)
     || words.buffer.resizable === true || words.byteOffset !== 0 || words.buffer.byteLength !== 64
     || runtimeWord(words, 0) !== 1n || runtimeWord(words, 1) !== session.programId
     || runtimeWord(words, 6) === 0n || runtimeWord(words, 7) === 0n) throw new Error("Invalid actual retained capability.");
   return words;
+}
+function acceptRuntimeCapability(session, words, required = false) {
+  const capability = runtimeCapability(session, words, required);
+  session.runtimeCapability = capability;
+  if (capability !== null) session.runtimeApplied = `${runtimeWord(capability, 6)}/${runtimeWord(capability, 7)}`;
+  return capability;
 }
 function runtimeControls() {
   const session = activePlay;
@@ -1858,7 +1868,7 @@ async function requestRetained(action) {
     if (activePlay !== session || session.phase !== "playing") return;
     if (result?.kind !== "retained-pending" || result.version !== 1 || typeof result.id !== "bigint"
       || result.id <= 0n || result.action !== action || session.runtimePending.has(result.id)) throw new Error("Invalid retained admission response.");
-    session.runtimeCapability = runtimeCapability(session, result.capability);
+    acceptRuntimeCapability(session, result.capability, true);
     session.runtimePending.set(result.id, action);
     ui["runtime-status"].textContent = `Pending ${action} · applied ${runtimeWord(result.capability, 6)}/${runtimeWord(result.capability, 7)}`;
   } catch (error) {
@@ -2439,8 +2449,8 @@ async function play(mode = "live") {
     if (session.retained) {
       if (prepared.retained !== true || typeof prepared.programId !== "bigint" || prepared.programId <= 0n || prepared.programId > 18446744073709551615n) throw new Error("Preparation omitted the actual retained Program.");
       session.programId = prepared.programId;
-      session.runtimeCapability = runtimeCapability(session, prepared.capability);
-      ui["runtime-status"].textContent = `Applied ${runtimeWord(prepared.capability, 6)}/${runtimeWord(prepared.capability, 7)}`;
+      const capability = acceptRuntimeCapability(session, prepared.capability);
+      ui["runtime-status"].textContent = capability === null ? "Waiting for actual active playback." : `Applied ${session.runtimeApplied}`;
     } else if (prepared.retained !== undefined || prepared.programId !== undefined) throw new Error("Preparation unexpectedly changed retained mode.");
     if (session.localPlan) {
       const local = validateLocalPrepared(session.localPlan, prepared, session.recordReplay);
@@ -3251,11 +3261,11 @@ function receivePlay(data) {
         : tag === 1n ? runtimeWord(event, 25) === 5n ? "refused" : "applied"
           : ["applied", "noop", "refused"][Number(runtimeWord(event, 17))];
       if (tag !== expectedTag || data.outcome !== outcome) throw new Error("Retained display outcome differs from its actual event.");
-      session.runtimeCapability = runtimeCapability(session, data.capability);
+      acceptRuntimeCapability(session, data.capability);
       session.runtimeSerial = runtimeWord(event, 3);
       if (data.outcome === "paused" || data.outcome === "resumed") session.runtimePaused = data.outcome === "paused";
       session.runtimePending.delete(data.id);
-      ui["runtime-status"].textContent = `${data.outcome} · applied ${runtimeWord(data.capability, 6)}/${runtimeWord(data.capability, 7)}`
+      ui["runtime-status"].textContent = `${data.outcome}` + (session.runtimeApplied ? ` · applied ${session.runtimeApplied}` : "")
         + (data.reason ? ` · ${data.reason}` : "");
       controls();
     } catch (error) { void stopPlay(error.message, true); }
@@ -3333,6 +3343,18 @@ function receivePlay(data) {
       || !Number.isInteger(data.pendingInputs) || data.pendingInputs < 0 || data.pendingInputs > 65536
       || (data.completed && data.pendingInputs !== 0)
       || (data.completed && data.commandsPending)) { void stopPlay("Song completion evidence was malformed.", true); return; }
+    if (session.retained) {
+      try {
+        const previous = session.runtimeCapability;
+        const capability = acceptRuntimeCapability(session, data.retainedCapability);
+        if ((previous === null) !== (capability === null)) {
+          ui["runtime-status"].textContent = capability === null
+            ? `Playback controls unavailable${session.runtimeApplied ? ` · applied ${session.runtimeApplied}` : ""}`
+            : `${session.runtimePending.size ? "Pending control" : "Applied"} · ${session.runtimeApplied}`;
+        }
+        controls();
+      } catch (error) { void stopPlay(error.message, true); return; }
+    } else if (Object.hasOwn(data, "retainedCapability")) { void stopPlay("Unexpected retained capability in ordinary playback.", true); return; }
     clearTimeout(session.renderPending.timer);
     session.renderPending = null;
     session.pendingInputs = data.pendingInputs;
