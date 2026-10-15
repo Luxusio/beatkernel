@@ -7,29 +7,32 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
-현재 checkpoint(2026-10-16): 렌더러 원인 전달966c4ff0과 분수 cut 교착 수정
-ee137b5b는 각각 관련346/0·Step32/Worklet24/PCM3=59/0 및 새 UI/audio 실제
-빌드를 확인했고 c8 독립 code/security/doc 리뷰도 PASS다. 후속 실제 browser는
-재생·기록·메뉴 흐름을 통과했으나 HTTP200/EOF/compile 뒤 ERR_ABORTED 때문에
-strict 필수13/14·전체14/15, FAIL이다. c6 실제 PASS도 있어 원인을 단정하지 않는다.
+현재 checkpoint(2026-10-16): AC042 오류 폭주 수정0cba6616의 관련152개와
+새 독립 DEEP code/security/doc 리뷰가 PASS다. 새 required browser는 원본 strict
+runner1회로 필수14/14·전체15/15, console/page/network0·overflow0이다.
+실제 원본8953137a…/8528B, 정수 phase의 두 cut과6cohort File→Worklet→Rust
+ACK를 독립 확인했다. 새 required CLI는 전체 Node57파일1703/0/skip0을 실행했다.
+변경 없는 Rust/의존성1181파일·소비 artifact5개·CLI4개·원본 증거106개 동일성으로
+앱4865/0(ignored43), Linux/Windows/macOS typing0·CLI30/30·PCM96000샘플의
+실제 검증을 이월했다. 이전 Node1700을 현재 결과로 사용하지 않았다.
 
-추가 실제 UX의 긴 rate/F5/mobile/variable SaveLoad/menu/history는 PASS다.
-별도 renderer binding fault1회에서는 원본 File이 정상 회수됐지만 실패한 preview를
-자동 재등록해 selection-error11994회 이상으로 폭주했다. AC042에서 현재 그래픽
-통신의 종결 실패와 정상 화면 교체를 구분해 자동 발행·dirty 재예약을 중단한다.
-CPU·Records·후보 File·기록 회수를 유지하는 수정과 독립 회귀를 작성했고,
-root 관련152개가 최종 통과했다. 새 독립 리뷰·영향받은 QA는 아직 남는다.
-Save/download는 검사기가 현재 캡처 선택 전에 기다린 별도 오류도 있어 아직
-최종 검증을 마치지 못했다. 실제 제품 오류 폭주가 확인돼 보충 실행은 중단했다.
+실제 renderer binding 오류1회 보충도 PASS다. idle 메시지445→445, 오류1회·
+selection-error0·generation2 유지로 자동 재등록 폭주가 사라졌다. 선택 File과
+상대1명, 원본 incomplete884B 캡처8:1:current:1을 보존했고, 실제 다운로드→
+Save→Load 바이트(SHA)가 일치했고 Save에 원본 File을 그대로 전달했다.
+AudioContext 실제 종료와
+종료 후 trusted 키의 gameplay 미전달, desktop1200/mobile390 안내도 확인했다.
+검사기 오류2건의 실패 원본과 두 번째 실행의 실제 ERR_ABORTED1은 보존한다.
+마지막 보충은 누락된 저장·Load·모바일 검증을 끝냈으며 network 재시도가 아니다.
+과거 strict 실패와 자연 GPU/메뉴 오류의 최초 원인은 여전히 미확정이다.
 
-현재 native GUI는 새 c43a8790 바이너리의 Settings/Records/키보드/resize와
-WATCH 논리 복원을 확인했지만 입력·오디오 장치 부재로 BLOCKED_ENV다.
-CLI의 pre-AC042 전체 Node1700/0·앱4865/0(43 ignored)은 실제 완료했다.
-해당 웹 소스116파일 snapshot 뒤 JS 소비 범위를 해제했다. 변경 없는 Rust의
-Linux/Windows/macOS all-target typing은 모두0, 실제 CLI30/30·독립 PCM96000샘플
-바이트 비교까지 완료해 CLI software 최종 PASS다. 새 JS의 전체 Node 결과로
-과거1700을 쓰지 않는다. AC042는 Worker128/0·변경 없는 history24/0으로 관련152/0이다.
-전체136/489·오디오12/27을 유지하고 태스크·전체 Goal은 미완료다.
+Native GUI는 c43a8790의 Settings/Records/키보드/resize와 WATCH 논리 복원을
+확인했지만 /dev/input·/dev/snd 부재로 실제 재생 BLOCKED_ENV다. JS-only 수정의
+native 호출 경로·바이너리 동일성을 확인해 이 실제 장치 한계를 이월한다.
+한 번 owning task_verify는 자동 review/QA 완료 기록 부재로 PENDING이다.
+태스크를 완료하지 않고 실제 장치 검증 대기로 보존한 뒤 다음 입력 할당 계측을
+진행한다. 05.13.06은 코드·현재 software 검사를 마쳐 W→V이며 실제 장치 .07은 E다.
+전체136/489·오디오12/27과 전체 Goal 미완료를 유지한다.
 
 직전 QA checkpoint(2026-10-16): 수정7f38f2b2·소비 패키지 문서 정정99c86f60에서
 독립 DEEP code/security 리뷰와 문서 감사가 PASS다. 실제 required CLI도 PASS:

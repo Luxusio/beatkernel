@@ -1024,3 +1024,51 @@ AC042는 개발 검사 완료이며 새 독립 DEEP code/security와 영향받�
 브라우저·fault UX가 남는다. 이전 strict browser FAIL, 실제 UX P1 FAIL, native
 BLOCKED_ENV를 현재 완료로 바꾸지 않는다. WBS136/489·오디오12/27·전체 Goal은
 그대로 미완료다.
+
+
+## c9 최종 실제 검증14123와 남은 실제 장치 범위
+
+Frozen0cba6616에서 독립 DEEP code/security/doc 리뷰가 PASS다. 전체136경로 중
+129개는 이전 후보와 blob이 같고 변경7경로와 소비 artifact5개를 독립 확인했다.
+새 required qa-browser는 원본 strict runner를1회 실행해 exit0, 필수14/14·전체15/15,
+console/page/network0·overflow0을 확인했다. 실제 원본8953137ad5c517ae63a8b2aa2bf672a0f1c893aceffc539d02abebf4a5fba552/8528B와 replaybytes가 같고, 실제 정수 phase cut965680272/1ns→2/1·1563594104/1ns→3/2,
+6cohort File수락→WorkletACK→RustACK 순서를 확인했다. 오디오 HTTP200/175806B,
+EOF/release/compile 각1, cancel0·실제 CDP loadingFinished1이다. 현재 실제 frame을
+분수 cut이라고 꾸미지 않는다. 소스19hash 불변·18장9종 화면 검사와 소유 프로세스
+정리까지 완료했다. 원본은 target/wf/runtime-rate-qa-browser-14123/이다.
+
+새 required qa-cli는 두 Node glob·57파일을1회 실행해1703/0/skip0(227.910s)이다.
+1181 tracked 파일 content/blob·7tree·소비5artifact·CLI4개·원본 증거106개를
+독립 확인해 실제 앱4865/0/ignored43·3OS typing0·CLI30/30·core1742/null4를
+이월했다. PCM96000샘플도 실제 WAV로 다시 계산해 byte가 일치했다.
+target/wf/runtime-rate-qa-cli-14123/{full-node-once.log,cli-evidence-and-ac-map.json,
+final-current-source-and-artifact-audit.json}에 있다. 이전 Node1700은 역사 증거다.
+
+UX fault 보충은 검사기 실패 원본2건을 보존한다. 첫49309는 잘못된 KeyS 때문에
+actual fault 전에 멈췄다. 실제 binding KeyZ로 고친92724는 진짜 fault1회 뒤
+오류1·selection-error0·generation 증가 없음·원본850B download/Save를 확인했지만
+metadata BigInt를 Puppeteer로 반환한 검사기 오류로 reference/Load/mobile 관찰을
+끝내지 못했다. 이 실행의 실제 ERR_ABORTED1도 네트워크 FAIL 이력으로 유지한다.
+
+마지막 최소 보충52769는 원래 실제 다운로드850B를 정상 UI로 불러와 선택File·
+상대1명/실제 admission을 만들었다. 새로운 실제 binding fault1회 후 현재의
+incomplete884B8:1:current:1 File을 정확히 선택하고 download→Save→Load했다.
+원본 File reference===true, 전송/download/저장 후 Load SHA는 모두
+f25caafd44fa9e7b8677872e45e1d30d0a70fb97ec7d2439b3be9efa3b62b5ed다.
+idle 메시지445→445·selection-error0·화면generation2·firstcause 지속, 실제
+AudioContextclosed, 종료 후 trustedKeyZ의 gameplay 미전달,1200×1000·390×844의
+안내/Records 동작·overflow0을 확인했다. 제품 소스14hash 불변, 모든 소유 프로세스·
+임시 파일 정리 후 actual UX FINAL PASS다. 원본은
+target/wf/runtime-rate-ux-browser-14123/{ux-summary.json,transcript.md,
+minimal-completion/ux-evidence.json}이다. 이 보충은 누락된 검사 완수를 위한 것이며
+strict network의 재시도나 자연 GPU 오류 원인 재현이 아니다. 과거 FAIL을 지우지 않는다.
+
+현재 native 코드·c43a8790 binary와 GUI 경로는 c8 actual desktop 검사와 같지만
+실제 입력·출력 장치가 없어 BLOCKED_ENV다. software NULL/foreign typing으로
+실제 장치·음향·시계 검증을 대신하지 않는다. 한 번 task_verify는 hook-owned
+완료 기록 부재로 PENDING이며 receipt 수집용 리뷰/QA/verify 재시도나 close를
+하지 않는다. 실제 장치 acceptance가 남은 태스크·전체 Goal은 미완료다.
+
+05.13.06은 코드/현재 software 검사를 마친 V로 바꾸고 실제 장치 .07E 및
+별도 browser .05W는 유지한다. 상태는 D136·V194·W12·E103·P10·U34, 완료
+136/489(27.81%)·오디오12/27 그대로다. 다음 queued 입력 할당 계측을 진행한다.

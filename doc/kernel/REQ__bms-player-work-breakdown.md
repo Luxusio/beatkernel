@@ -771,7 +771,7 @@ QUIC 실제 4-case loopback은 Tokio context 결함 수정 후 E11로 통과했�
   - [ ] **BK-WBS-05.13.03** 실제 live solo/local의 고정 배속이 Transport 분수 위상·BGM/key 명령·finite-end credit와 capture를 보존한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=REQ__live-playback-speed 및2ce281d DEEP PASS 이후 필수 QA 완료; native3/2·NORMAL, pause/resume, expired/applied/consumed와 original provenance를 current source에서 확인.
   - [ ] **BK-WBS-05.13.04** retained practice의 F5·loop/scrub·Source/Target controls가 선택 배속·원본 section/attempt/capture를 유지한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=2026-10-12-retained-playback-speed.md CLI4763/0·24경로 및 DEEP/security PASS를 기준으로 qualified native retained play/controls/drain과 남은 task QA를 수행.
   - [ ] **BK-WBS-05.13.05** retained browser의 delayed touch·in-flight prefix·audio WASM fetch 오류를 해결하고 실제 practice 흐름을 재검증한다. — 상태=W(구현·연동중); 선행=BK-WBS-05.13.04; 필요 근거/다음=동일 문서 strict browser10/14 FAIL과 delayed-touch diagnostics의 원본 reproduction을 유지하고 actual main.js/Worker/Worklet 경로 수정→전체 strict runner 통과; ERR_ABORTED를 제외하지 않음. 현재=doc/changes/2026-10-15-browser-audio-current-acceptance.md의 fresh13journey2회 strict FAIL·공식 Chromium153 pre-fix loader 확인; test oracle/CDP cleanup 수정은 완료했으나 delayed touch/in-flight 복구와 fixed-engine network acceptance는 남음.
-  - [ ] **BK-WBS-05.13.06** 실행 중 배속 전환의 sample read-head·명령 rate·Transport/seek/pause 정책을 구현한다. — 상태=W(구현·연동중); 선행=-; 필요 근거/다음=REQ__runtime-playback-rate.md·ADR__runtime-rate-phase-and-receipts.md·2026-10-15-runtime-playback-rate.md 참조. 공통 phase/PCM/Transport/가변 기록·native solo/cohort·browser Step/Worker/Worklet/UI를 연결했다. AC040 오류 전달966c4ff0 관련346/0과 AC041 분수 cut 교착ee137b5b 관련59/0·새 실제 UI/audio WASM+matching bindgen, c8 독립 code/security/doc PASS다. 후속 browser의 재생/기록/메뉴는 통과했으나 HTTP200/EOF/compile와 ERR_ABORTED가 공존해 strict13/14·전체14/15 FAIL이다. 추가 UX 긴 여정은 PASS지만 실제 renderer fault 뒤 preview 자동 재등록/오류11994회 이상 P1을 발견해 AC042를 수정했고 root 관련152/0을 확인했다. pre-AC042 Node1700/0·앱4865/0, Linux/Windows/macOS typing0·실제 CLI30/30·PCM96000샘플 동일로 CLI software는 최종 PASS다. 새 JS는 독립 리뷰·영향받은 Node/browser QA 대기이며 과거 Node1700을 새 결과로 쓰지 않는다. 새 native GUI는 Settings/Records 등을 확인했지만 /dev/input·/dev/snd 부재로 재생 BLOCKED_ENV다. 원래 미확정 GPU 원인·.07 E·전체136/489·오디오12/27은 유지한다.
+  - [ ] **BK-WBS-05.13.06** 실행 중 배속 전환의 sample read-head·명령 rate·Transport/seek/pause 정책을 구현한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=REQ__runtime-playback-rate.md·ADR__runtime-rate-phase-and-receipts.md·2026-10-15-runtime-playback-rate.md 참조. AC040966c4ff0 관련346/0, AC041ee137b5b 분수 cut 교착 관련59/0, AC0420cba6616 오류 폭주 fence 관련152/0과 c9 독립 DEEP code/security/doc PASS다. 새 required browser strict1회14/14·전체15/15/network0, 전체 Node1703/0, 실제 renderer fault1회 뒤 generation2·idle445→445/선택File+상대1명/원본 incomplete884B의 Save 전달 File reference 동일·download/Save/Load bytes(SHA) 일치을 확인했다. 변경 없는 Rust4865/0·3OS typing0·CLI30/30·PCM96000샘플은 실제 파일/산출물/원본 증거 동일성으로 이월했다. 코드 작업은 마쳐 W→V이며 native 실제 재생은 /dev/input·/dev/snd 부재 BLOCKED_ENV, .07 E·owning verification PENDING을 남긴다. 과거 strictFAIL·보충92724 ERR_ABORTED1과 자연 GPU 최초 원인 미확정을 보존하며 전체136/489·오디오12/27은 유지한다.
   - [ ] **BK-WBS-05.13.07** 실제 출력 장치에서 고정/retained/전환 배속의 PCM 속도·시계·pause/seek alignment를 측정한다. — 상태=E(환경·장비대기); 선행=BK-WBS-05.13.03, BK-WBS-05.13.04, BK-WBS-05.13.05, BK-WBS-05.13.06; 필요 근거/다음=clock-capable native 장치·실제 browser audio와 loopback에서 배속별 PCM/pitch/시간을 기록; device sample-rate 변경으로 playback speed를 대신하지 않음.
 - [ ] **BK-WBS-05.14** ReverseTimelineOnly/ReverseSamples/Mute 선택 정책의 명령·원본 sample 방향·무음 결과를 검증한다. — 상태=V(구현됨·검증대기); 선행=BK-WBS-09.02; 필요 근거/다음=core runtime/playback.rs 및 reverse_playback fixture를 현재 scope로 확인; Transport reverse만으로 sample 정책을 완료 처리하지 않음.
   - [ ] **BK-WBS-05.14.01** ReverseTimelineOnly가 복원된 역방향 timeline에서 원본 sample 방향과 명령 정책을 유지하는지 검증한다. — 상태=V(구현됨·검증대기); 선행=-; 필요 근거/다음=crates/beatkernel/tests/reverse_playback.rs literal_pcm_policies_restore_identical_logical_state 및 normal_to_reverse_transition_changes_pcm_without_changing_judge를 current source로 실행.
@@ -1386,14 +1386,13 @@ Native collector termination 절에 있다.
 
 ## 현재 진행 작업과 연결
 
-현재 focused task는 `TASK__retained-runtime-rate-switch`이며
-`BK-WBS-05.13.06`의 실제 실행 중 배속 전환을 연결·검증한다. AC040은 렌더러
-오류 전달·기록 보존을966c4ff0으로 수정하고 관련346/0을 확인했다. AC041은
-분수 Source cut 교착을 수정하고 관련59/0을 확인했다. 현재 AC042는 실제 UX에서
-확인한 renderer 종결 오류 뒤 preview 자동 재등록·오류 폭주를 중단하도록 수정했고
-root 관련152/0을 확인했다. c8 required CLI software는 PASS지만 required browser는
-strict13/14·전체14/15 FAIL이며 원래 자연 메뉴 실패의 원인은 미확정이다.
-AC042의 새 정식 리뷰·영향받은 QA가 필요하고 실제 native 장치 검증은 계속 E다.
+현재 배속 전환 `TASK__retained-runtime-rate-switch`의 `BK-WBS-05.13.06`은 V다.
+AC040·041·042 수정을 커밋하고 새 독립 리뷰, required browser14/14·15/15,
+전체 Node1703/0 및 실제 fault 후 download/Save/Load·상대 보존을 확인했다.
+실제 native 장치 검증 BLOCKED_ENV와 owning verification PENDING을 유지하며
+완료 D로 계산하지 않는다. 과거 네트워크 실패/자연 GPU 원인 미확정도 보존한다.
+다음 queued task는 `TASK__runtime-input-allocation-budget`이며13.06.01의
+실제 judge/Runtime/solo/cohort 입력 경계를 계측한다. 아직 해당 코드는 쓰지 않았다.
 
 아래 표는 이전 `TASK__retained-source-coreaudio-output`의 연결 기록이다. 원래
 `BK-WBS-07.08.07.15`의 범위를12개 실행 단위로 추적한다. 구현된 portable
