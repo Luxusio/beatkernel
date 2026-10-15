@@ -31,6 +31,7 @@ let renderLimits = null;
 let visual = null;
 let visualGeneration = 0n;
 let visualPump = null;
+let visualTransportFailure = null;
 let surface = null;
 let geometryVersion = 0n;
 let surfaceSentVersion = 0n;
@@ -872,12 +873,12 @@ function nextGeometry(requested) {
   return next;
 }
 function publishVisual() {
-  if (failed || disposed || !cpuReady || !renderPort) return;
+  if (visualTransportFailure !== null || failed || disposed || !cpuReady || !renderPort) return;
   if (visualPump) { visualPump.dirty = true; return; }
   const pump = { dirty: true };
   visualPump = pump;
   void (async () => {
-    while (pump.dirty && !failed && !disposed) {
+    while (pump.dirty && visualTransportFailure === null && !failed && !disposed) {
       pump.dirty = false;
       const selected = visualSelection();
       if (!selected) continue;
@@ -888,7 +889,7 @@ function publishVisual() {
           context.retired = true;
           try { if (context.client.state === "ready") await context.client.retire(); }
           catch { context.client.close(); }
-          if (failed || disposed) return;
+          if (visualTransportFailure !== null || failed || disposed) return;
         }
         // Navigation during retirement selects the latest owner, never the old candidate.
         const latest = visualSelection();
@@ -897,7 +898,12 @@ function publishVisual() {
         context = { ...latest, generation: ++visualGeneration, content: visualGeneration, sequence: 0n, retired: false, controls: [], motionRequests: [], motionActive: null, motionRequestId: 0n };
         visual = context;
         context.client = new RenderClient({ port: scopedRenderPort(context), ...renderLimits, generation: context.generation, content: context.content,
-          onError: error => visualFailure(context, error),
+          onError: error => {
+            // Failure can arrive during construction, before client assignment.
+            // A retired owner's error must not poison a healthy replacement.
+            if (currentVisual(context)) visualTransportFailure ??= { cause: error };
+            visualFailure(context, error);
+          },
           onGeometry: evidence => { if (currentVisual(context)) { context.geometry = evidence; report("render-geometry", { ...evidence, mode: context.mode, selectedId, ...(play === context.owner ? { playId: play.id } : {}) }); } } });
         const bytes = context.mode === "menu" ? context.source.snapshot() : ["preview", "live", "local", "replay"].includes(context.mode)
           ? context.source.visual_registration(context.generation, context.content, renderLimits.maxPacketBytes, renderLimits.maxDiagnosticBytes)
@@ -972,10 +978,11 @@ function publishVisual() {
       }
     }
   })().catch(error => {
+    if (visualTransportFailure !== null) return;
     if (visual && currentVisual(visual)) visualFailure(visual, error);
     else if (!failed && !disposed) pump.dirty = true;
   })
-    .finally(() => { if (visualPump === pump) { visualPump = null; if (pump.dirty) publishVisual(); } });
+    .finally(() => { if (visualPump === pump) { visualPump = null; if (pump.dirty && visualTransportFailure === null) publishVisual(); } });
 }
 function reportMenu(receipt = {}) {
   if (visual?.mode === "menu") {
@@ -4296,7 +4303,7 @@ self.addEventListener("message", event => {
     if (menuOwner) { menuOwner.dispose(); menuOwner.free(); menuOwner = null; }
     menuVisible = false;
     fenceVisual();
-    visual?.client.close();
+    visual?.client?.close();
     visual = null;
     try { renderPort?.close(); } catch {}
     renderPort = null;

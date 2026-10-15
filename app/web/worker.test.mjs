@@ -3765,6 +3765,139 @@ test("missing renderer ACK deadline fails play with its actual incomplete captur
   assert.equal(worker.visualAcks.length, count, "timeout does not fabricate producer baseline adoption");
 });
 
+function terminalRenderEndpoint(cause) {
+  const channel = new NodeMessageChannel(), requests = [];
+  let fused = false;
+  channel.port2.on("message", request => {
+    requests.push(request);
+    // The old bug creates another owner after every terminal reply. A real
+    // queued port and this finite fuse make that regression observable without
+    // an infinite Promise-only responder or an invented successful ACK.
+    if (requests.length >= 16) { fused = true; channel.port1.close(); channel.port2.close(); return; }
+    channel.port2.postMessage({ kind: "render-error", generation: request.generation,
+      content: request.content, operationId: request.operationId, message: cause });
+  });
+  return { port: channel.port1, requests, get fused() { return fused; },
+    close() { channel.port1.close(); channel.port2.close(); } };
+}
+async function terminalBusinessWorker(endpoint, store) {
+  const h = await realPreparationWorker({ skipInit: true, realChannels: true, recordsStore: store });
+  await h.send({ kind: "init", renderPort: endpoint.port, maxPacketBytes: 16 * 1024 * 1024,
+    maxDiagnosticBytes: 4096, renderTimeoutMs: 10000 });
+  assert.equal(h.of("ready").length, 1);
+  return h;
+}
+async function settleTerminalGraphics(h) {
+  for (let turn = 0; turn < 8; turn++) await h.yieldOne();
+}
+async function closeTerminalBusinessWorker(h, endpoint) {
+  try { if (h) await h.send({ kind: "dispose" }); }
+  finally {
+    endpoint.close();
+    for (const channel of h?.channels ?? []) for (const port of [channel.port1, channel.port2]) {
+      if (port.closes === 0) port.close();
+    }
+  }
+}
+
+test("actual WASM preview terminal transport failure cannot restart publications while CPU menus and Records remain usable", async () => {
+  const cause = "first renderer lifetime failure", endpoint = terminalRenderEndpoint(cause), store = controlledRecordStore();
+  let h;
+  try {
+    h = await terminalBusinessWorker(endpoint, store); await admitPreparationFiles(h);
+    await h.send(actualSelect()); await h.settle(() => h.of("selected").length === 1);
+    await settleTerminalGraphics(h);
+    assert.equal(endpoint.fused, false); assert.equal(endpoint.requests.length, 1);
+    assert.equal(endpoint.requests[0].kind, "packet");
+    assert.equal(h.of("selection-error").length, 1); assert.equal(h.of("selection-error")[0].message, cause);
+    assert.equal(h.of("fatal").length, 0); assert.equal(h.libraries[0].frees, 0);
+    await h.send({ kind: "resize", width: 800, height: 600 });
+    await h.send({ kind: "seek", id: 3, selectedId: 2, ns: "1" });
+    assert.equal(h.of("position").at(-1).ns, "1");
+    await h.send(actualSelect(4)); await h.settle(() => h.of("selected").some(row => row.id === 4));
+    await h.send({ kind: "menu-open", fields: ["chart.bms"] });
+    assert.equal(h.of("menu-state").length, 1, "CPU menu ownership survives failed graphics");
+    await h.send({ kind: "records-request", id: 1, action: "list" });
+    assert.equal(h.of("records-reply").at(-1).error, null);
+    assert.deepEqual(structuredClone(h.of("records-reply").at(-1).result.entries), [store.metadata]);
+    await settleTerminalGraphics(h);
+    assert.equal(endpoint.requests.length, 1, "resize, seek, library and menu changes cannot reuse the failed transport");
+    assert.equal(h.of("selection-error").length, 1); assert.equal(h.of("fatal").length, 0);
+    assert.equal(h.libraries[0].frees, 0); h.assertClosedChannels();
+  } finally { await closeTerminalBusinessWorker(h, endpoint); }
+});
+
+test("actual WASM capture File remains saveable through the CPU owner after terminal graphics release", async () => {
+  const cause = "original live renderer fault", endpoint = terminalRenderEndpoint(cause), store = controlledRecordStore();
+  let h;
+  try {
+    h = await terminalBusinessWorker(endpoint, store); await admitPreparationFiles(h);
+    await h.send({ kind: "play-start", playId: 1, rpcId: 1, libraryId: 1, path: "chart.bms", rate: 24000,
+      seed: "0", keyPairs: new Uint32Array([0x11, 4]), windowOriginNs: 0n, recordReplay: true });
+    await h.settle(() => h.of("play-error").length > 0); await settleTerminalGraphics(h);
+    assert.equal(h.of("play-error").length, 1); const receipt = h.of("play-error")[0];
+    assert.equal(receipt.message, cause); assert.equal(receipt.released, true);
+    assert.equal(receipt.replayComplete, false); assert.equal(receipt.replayError, null);
+    assert.ok(receipt.replay instanceof FileType, "the real WASM owner exported the genuine prefix through Worker cleanup");
+    const original = new Uint8Array(await receipt.replay.arrayBuffer());
+    assert.ok(original.length > 40); assert.deepEqual([...original.slice(0, 3)], [66, 75, 82]);
+    assert.equal(endpoint.requests.length, 1); assert.equal(h.of("fatal").length, 0);
+    assert.equal(h.libraries[0].frees, 0);
+    const value = recordSaveValue({ metadata: { name: "Original captured prefix", chartPath: "chart.bms", complete: false,
+      hits: receipt.hits, misses: receipt.misses, combo: receipt.combo }, replayFile: receipt.replay,
+      archiveBlob: null, archivePlayer: null, players: [1], player: 1 });
+    await h.send({ kind: "records-request", id: 1, action: "save", value });
+    await settleRecord(() => h.of("records-reply").some(row => row.id === 1));
+    assert.equal(h.of("records-reply").at(-1).error, null);
+    const saved = store.calls.find(call => call.action === "save").value;
+    assert.deepEqual(new Uint8Array(saved.bytes), original); assert.equal(saved.complete, false);
+    assert.deepEqual(new Uint8Array(await receipt.replay.arrayBuffer()), original, "saving cannot consume or replace the original File");
+    await h.send({ kind: "records-request", id: 2, action: "list" });
+    await settleTerminalGraphics(h);
+    assert.equal(h.of("records-reply").at(-1).error, null);
+    assert.equal(endpoint.requests.length, 1); assert.equal(h.of("play-error").length, 1);
+    assert.equal(h.of("fatal").length, 0); assert.equal(endpoint.fused, false); h.assertClosedChannels();
+  } finally { await closeTerminalBusinessWorker(h, endpoint); }
+});
+
+test("healthy visual preemption drains retirement and draws only the latest owner without accepting old failure", async () => {
+  const h = await gameWorker();
+  try {
+    await h.send({ kind: "select", id: 2, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0" });
+    h.renderPort.blocked = true;
+    await h.send({ kind: "seek", id: 3, selectedId: 2, ns: "1" });
+    const pending = h.renderPort.posts.at(-1), acknowledgements = h.visualAcks.length;
+    await h.send({ kind: "select", id: 4, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0" });
+    const intermediate = h.preparedOwners.at(-1);
+    const retirement = h.renderPort.posts.at(-1); assert.equal(retirement.kind, "retire");
+    await h.send({ kind: "select", id: 5, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0" });
+    const latest = h.preparedOwners.at(-1), beforeDraws = h.views[0].draws;
+    h.renderPort.ack(pending); await h.flushTasks();
+    assert.equal(h.visualAcks.length, acknowledgements, "retired state cannot adopt a late ACK");
+    h.renderPort.blocked = false; h.renderPort.ack(retirement); await h.flushTasks();
+    assert.equal(h.views[0].current, latest);
+    assert.equal(h.visualExports.some(row => row.owner === intermediate), false, "an owner replaced during retirement cannot register or draw");
+    assert.equal(h.views[0].replacements.includes(intermediate), false);
+    // Registration installs the preview; only kind3 frames draw it. The
+    // selection queued during retirement also marks publication dirty, so
+    // its coalesced frame follows the new owner's initial frame ACK.
+    const bootstrap = [[1, 0n], [3, 1n], [3, 2n]];
+    assert.deepEqual(h.visualExports.filter(row => row.owner === latest).map(row => [row.kind, row.sequence]), bootstrap);
+    assert.deepEqual(h.visualAcks.filter(row => row.owner === latest).map(row => row.sequence), [1n, 2n]);
+    const bootstrapDraws = bootstrap.filter(([kind]) => kind === 3).length;
+    assert.equal(h.views[0].draws, beforeDraws + bootstrapDraws);
+    h.renderPort.emit({ kind: "render-error", generation: pending.generation, content: pending.content,
+      operationId: pending.operationId, message: "stale old owner failure" }); await h.flushTasks();
+    assert.deepEqual(h.visualExports.filter(row => row.owner === latest).map(row => [row.kind, row.sequence]), bootstrap);
+    await h.send({ kind: "seek", id: 6, selectedId: 5, ns: "2" });
+    assert.equal(h.views[0].current, latest);
+    assert.deepEqual(h.visualExports.filter(row => row.owner === latest).map(row => [row.kind, row.sequence]), [...bootstrap, [3, 3n]]);
+    assert.deepEqual(h.visualAcks.filter(row => row.owner === latest).map(row => row.sequence), [1n, 2n, 3n]);
+    assert.equal(h.views[0].draws, beforeDraws + bootstrapDraws + 1);
+    assert.equal(h.of("selection-error").length, 0); assert.equal(h.of("fatal").length, 0);
+  } finally { await h.send({ kind: "dispose" }); }
+});
+
 test("missing visual ACK coalesces preview changes until exact full acknowledgement", async () => {
   const worker = await readyWorker();
   await worker.send({ kind: "import", id: 1, files: [selectedFile("a.bms")] });

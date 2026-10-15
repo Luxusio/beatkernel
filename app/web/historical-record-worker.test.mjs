@@ -1838,12 +1838,14 @@ test("record continuity: old history render failure preserves staged candidate a
   assert.equal(prior.frees, 0); assert.equal(candidate.frees, 0);
   const failure = { kind: "render-error", generation: oldPacket.generation,
     content: oldPacket.content, message: "old historical surface lost" };
+  const publications = h.renderPort.posts.length, draws = h.views[0].historicalDraws.length;
   h.renderPort.emit(failure); await flushJobs();
   assert.equal(prior.frees, 1); assert.equal(candidate.frees, 0);
   const notice = h.of("historical-record-result").at(-1);
   assert.equal(notice.id, 1); assert.equal(notice.available, false);
-  await h.send({ kind: "historical-record-accept", id: queued.id }); await h.tick();
-  assert.equal(h.views[0].historicalDraws.at(-1), candidate);
+  await h.send({ kind: "historical-record-accept", id: queued.id }); await flushJobs();
+  assert.equal(h.views[0].historicalDraws.length, draws, "the accepted CPU candidate cannot revive a terminal renderer");
+  assert.equal(h.renderPort.posts.length, publications);
   await h.send({ kind: "historical-record-page", id: 2, rpcId: 1, page: 0 });
   assert.equal(h.of("historical-record-page-result").at(-1).error, null);
   const replies = h.of("historical-record-result").length;
@@ -1853,6 +1855,7 @@ test("record continuity: old history render failure preserves staged candidate a
   assert.equal(h.of("historical-record-result").length, replies);
   await h.send({ kind: "historical-record-page", id: 2, rpcId: 2, page: 0 });
   assert.equal(h.of("historical-record-page-result").at(-1).error, null);
+  assert.equal(h.renderPort.posts.length, publications); assert.equal(h.views[0].historicalDraws.length, draws);
   await h.send({ kind: "dispose" }); assert.equal(candidate.frees, 1); assert.equal(prior.frees, 1);
 });
 
@@ -1860,6 +1863,7 @@ test("record continuity: old history render failure preserves newer deferred acq
   const h = await catalogWorker(); await presentHistorical(h);
   const prior = h.historicalOwners[0], gate = deferred(), file = replayFile(() => gate.promise);
   const oldPacket = h.renderPort.posts.findLast(row => row.kind === "packet");
+  const publications = h.renderPort.posts.length, draws = h.views[0].historicalDraws.length;
   await h.send(historicalRequest(2, { replayFile: file.file }));
   assert.equal(file.reads, 1); assert.equal(h.historicalOwners.length, 1);
   h.renderPort.emit({ kind: "render-error", generation: oldPacket.generation,
@@ -1869,9 +1873,12 @@ test("record continuity: old history render failure preserves newer deferred acq
   const queued = h.of("historical-record-result").at(-1);
   assert.equal(queued.id, 2); assert.equal(queued.available, true);
   const candidate = h.historicalOwners[1]; assert.ok(candidate); assert.equal(candidate.frees, 0);
-  await h.send({ kind: "historical-record-accept", id: 2 }); await h.tick();
-  assert.equal(h.views[0].historicalDraws.at(-1), candidate);
+  await h.send({ kind: "historical-record-accept", id: 2 }); await flushJobs();
+  assert.equal(h.views[0].historicalDraws.length, draws); assert.equal(h.renderPort.posts.length, publications);
   await h.send({ kind: "historical-record-page", id: 2, rpcId: 1, page: 0 });
   assert.equal(h.of("historical-record-page-result").at(-1).error, null);
+  assert.equal(file.reads, 1, "terminal rendering never reacquires the original accepted File");
+  assert.deepEqual(new Uint8Array(await Blob.prototype.arrayBuffer.call(file.file)), file.bytes);
+  assert.equal(h.renderPort.posts.length, publications); assert.equal(h.views[0].historicalDraws.length, draws);
   await h.send({ kind: "dispose" }); assert.equal(prior.frees, 1); assert.equal(candidate.frees, 1);
 });

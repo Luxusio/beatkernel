@@ -944,3 +944,83 @@ browser-{ui,audio}-bindgen-first.log, final-current-consumed-artifacts.json이�
 이 개발 검증은 새 독립 리뷰·전체 앱/Node·foreign typing·실제 browser/desktop/UX의
 완료가 아니다. 새 후보를 정식 리뷰에 넘기며 최초 미확정 메뉴 실패·장치 한계와
 WBS136/489·오디오12/27을 유지한다.
+
+
+## c8 실제 QA와 AC042 오류 폭주 수정14122 (진행 중)
+
+Frozen ee137b5b의 새 실제 qa-browser는 원본 strict runner1회 exit1이다.
+필수13/14·전체14/15의 재생/기록/메뉴 흐름을 확인했지만 clean-network에서
+실제 오디오 WASM HTTP200/175806bytes·EOF1/release1/compile1/cancel0과
+Worker/page ERR_ABORTED·loadingFinished0이 공존했다. Console/page error0,
+소스19hash 불변, 실제 원본 e87ad85d…de433/8494bytes와 동일 replay·두 분수 cut·
+6cohort File수락→WorkletACK→RustACK를 독립 확인했다. 현재 Chrome153.0.8010.12와
+loader4264bytes의 이전 증상이 같지만 c6 실제 PASS도 있어 단독 원인을 확정하지
+않는다. strict 실패를 제외하거나 재실행하지 않았고 원본은
+runtime-rate-qa-browser-14122/{evidence.json,independent-audit.json,engine-history-audit.json}다.
+
+실제 ux-browser의 원래 긴 배속·F5·모바일 왕복·새 variable SaveLoad→menu/history
+여정은 PASS다. 별도 실제 BrowserView binding 오류 주입은 renderer.catch의
+render-error1회와 genuine play-error(released:true)/원본303B File을 만들었지만,
+이후 selection-error11994회 이상·renderer generation16→11049로 폭주했다.
+worker.publishVisual catch가 onError로 이미 retired된 실패를 정상 owner 교체로
+해석해 dirty→새 preview 등록→즉시 원래 오류를 반복한 구체적인 P1이다.
+첫 fault 검사기는 current capture를 선택하기 전 Save enabled를 기다린 별도 실수도
+있지만 제품 폭주와 독립적이다. 저장/다운로드 완료를 주장하지 않고 실제 제품
+실패 확인 후 보충 실행을 중지했다. 최초 자연 GPU 원인 재현이라고 부르지 않는다.
+원본 runtime-rate-ux-browser-14122/ux-summary.json·ux-evidence.json과 모든 실패
+로그를 보존한다. 관측 상한에 도달해 오류 개수는 하한이다. 소유 프로세스는 정리됐다.
+
+새 actual desktop는 현재 native c43a8790에서 Settings 초기 배속·오류 복구·원본
+Records469ops/fixed OwnOther 거절0/0·키보드/resize를 확인했다. WATCH는 원본
+6results/1hit/hash0x4e7821ddb1997fe5 뒤 ALSA-2, Play는 ENOENT2다. /dev/input·
+/dev/snd 부재로 BLOCKED_ENV이며 NULL은 선택하지 않았다. 실제 GUI/창/소유 PID·
+focus를 정리했고 원본 runtime-rate-qa-desktop-14122/desktop-evidence.json을 남겼다.
+
+CLI는 실제 앱4865/0/ignored43(lib1+bins7+85 integrations)과 전체 Node57files
+1700/0/skip0을 완료했다. Node1700은 pre-AC042 원본ee137b5b의 증거다.
+현재 웹116파일 Git/content hash와 raw log를 pre-ac042-node-snapshot.json으로
+고정한 뒤 actor가 JS 소비 범위를 명시 해제했다. 이후 Rust/native typing·실제
+CLI만 진행하며 worker.js/mjs를 읽지 않음을 양쪽에서 확인했다. 따라서 AC042
+JS-only source/test 작업을 독립적으로 진행하고, 수정 후 새 Node QA를 수행한다.
+Rust/native/소비 WASM/glue는 변경하지 않는다. 이 부분 진행은 최종 CLI PASS가
+아니며 남은 실제 프로세스가 끝나기 전에 결론을 만들지 않는다.
+
+AC042는 현재 RenderClient의 종결 onError를 그래픽 통신 수명에 보관하고
+publishVisual의 진입·반복·재예약을 중단한다. 정상 화면 교체/오래된 owner 격리와
+CPU Records·후보 File·기록 회수는 유지한다. 제품 한 파일 worker.js, 독립 테스트는
+worker.test.mjs·historical-record-worker.test.mjs다. 실패한 같은 renderer로
+새 GPU draw가 성공한다고 가정하던 역사 기록 fixture는 CPU/bytes/page/free
+보존 검사를 유지한 채 발행 중단을 검사하도록 바로잡는다. 루프를 timeout·retry
+추가나 전역 business failure로 숨기지 않는다. 관련 검증과 새 독립 리뷰/영향받은
+QA가 남아 있으며 WBS136/489·오디오12/27은 유지한다.
+
+
+## AC042 개발 검증과 c8 CLI 최종 결과14122
+
+Source/test 작성자 QUIET 뒤 root 첫 두 파일 검사는151 PASS/1 FAIL이었다.
+새 정상 화면 교체 fixture가 최초 frame 뒤 dirty 요청으로 병합되는 두 번째 frame을
+누락한 기대값이었다. 실제 등록(kind1/seq0)은 view를 설치하고 draw하지 않으며
+frame(kind3/seq1,seq2)이 각각 draw·ACK된다. 독립 작성자가 이 전체 순서·ACK1/2,
+중간 owner 발행 금지·stale ACK/오류 격리·후속 seek frame/ACK3를 명시적으로
+검사하도록 보정했다. 제품 코드는 바꾸지 않았고 원래 실패 로그를 보존했다.
+
+Root Worker 파일만 재실행해128/0/skip0, 변경 없는 history24/0을 이월해 최종
+관련152/0이다. 151+128로 중복 합산하지 않는다. 로그는
+target/wf/runtime-rate-ac042-14122/{focused-first.log,focused-worker-second.log}다.
+현재 수정은 worker.js 한 곳의 그래픽 통신 수명 종결 fence이며 Rust/Step/native/
+UI·audio WASM/glue는 변경하지 않아 재빌드하지 않았다.
+
+c8 qa-cli14122의 실제 최종은 software PASS다. 앱4865/0/ignored43,
+pre-AC042 Node1700/0/skip0, native·Windows·macOS all-target typing0,
+실제 CLI30/30 예상 exit와 독립 stereo PCM96000샘플 전체 바이트 일치다.
+현재 실제 BKR e87ad85d…는468records/6judge/1hit/5miss와 원래 engine hash로
+복원됐다. 원본 fixture·Rust/의존성·소비 artifact5개의 최종 동일성을 확인했고
+모든 프로세스 terminal/QUIET다. 기존 fmt1/strict Clippy101 baseline과 foreign
+타입 검사·null 소프트웨어 진단의 실제 장치 한계를 유지한다.
+cli-evidence-and-ac-map.json 및 final-unchanged-rust-and-artifact-proof.json이
+target/wf/runtime-rate-qa-cli-14122/에 있다. Node1700은 현재 JS 증거가 아니다.
+
+AC042는 개발 검사 완료이며 새 독립 DEEP code/security와 영향받은 실제 Node·
+브라우저·fault UX가 남는다. 이전 strict browser FAIL, 실제 UX P1 FAIL, native
+BLOCKED_ENV를 현재 완료로 바꾸지 않는다. WBS136/489·오디오12/27·전체 Goal은
+그대로 미완료다.

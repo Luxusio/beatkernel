@@ -27,6 +27,16 @@ Window는 현재 시작 수명의 정확한 renderer Worker에서 온 최초 오
 그 후속 오류와 구분한다. 이 오류 전달 계약은 실제 한 차례 관찰한 흰 화면/메뉴 timeout의
 최초 GPU 원인을 확정하거나 그 원인이 해결됐다는 증거가 아니다.
 
+그래픽 통신의 현재 소유자에서 RenderClient 종결 오류가 나면 CPU Worker도 해당
+통신 수명의 그래픽 발행을 중단한다. onError가 이미 retired로 바꾼 소유자를 정상
+화면 교체로 해석해 dirty 재예약·새 preview 등록을 반복해서는 안 된다. 실제 이전
+소유자의 늦은 오류는 기존 identity 격리로 무시하고, 정상 화면 교체의 최신 소유자
+발행·ACK는 유지한다. client가 정상인 일반 producer/preflight 실패와 종결 통신
+실패를 구분한다. CPU의 Records·대기 중인 역사 기록 후보·File·기록 회수는 유지하되,
+실패한 같은 렌더러로 새 GPU draw가 성공했다고 간주하지 않는다. 그래픽 중단은
+실제 새 Worker/port 수명에서만 해제한다. 자동 오류 폭주를 retry·timeout 증가로
+덮거나 전역 business failure로 바꿔 기록 접근을 잃지 않는다.
+
 ## 실제 시작 원점을 감싸는 브라우저 관측
 
 Retained browser는 getOutputTimestamp의 실제 context/HOST 쌍에서 arm 원점만

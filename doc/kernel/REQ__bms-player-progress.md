@@ -7,15 +7,29 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
-현재 후속 작업(2026-10-16): AC040 렌더러 오류 전달·기록 보존을966c4ff0으로
-커밋했고 root 관련346/0·독립 문서/안전성 검토는 PASS다. 전체134경로를 본 c7
-코드 리뷰는 별도 P1 한 건으로 FAIL했다. 분수 Source cut 뒤 첫 정수 HOST의 입력이
-exact query guard와 inclusive cutoff 사이에서 서로 기다리는 공통 Step 교착이다.
-AC041에서 실제 같은 HOST의 acquired 입력이 cut 뒤인지 원래 authority로 확인해
-기존 strict cutoff로 남긴다. 정확히 같은 query의 기존 우선 처리는 유지한다.
-AC041 수정 후 실제 Step32/0·Worklet24/0·PCM3/0을 확인했다. 새 실제 UI/audio
-release WASM과 matching bindgen도 통과했고 새 정식 리뷰·QA는 아직 남는다.
-이는 원래 미확정 메뉴/GPU 최초 원인과 별개다. WBS136/489·오디오12/27은 유지한다.
+현재 checkpoint(2026-10-16): 렌더러 원인 전달966c4ff0과 분수 cut 교착 수정
+ee137b5b는 각각 관련346/0·Step32/Worklet24/PCM3=59/0 및 새 UI/audio 실제
+빌드를 확인했고 c8 독립 code/security/doc 리뷰도 PASS다. 후속 실제 browser는
+재생·기록·메뉴 흐름을 통과했으나 HTTP200/EOF/compile 뒤 ERR_ABORTED 때문에
+strict 필수13/14·전체14/15, FAIL이다. c6 실제 PASS도 있어 원인을 단정하지 않는다.
+
+추가 실제 UX의 긴 rate/F5/mobile/variable SaveLoad/menu/history는 PASS다.
+별도 renderer binding fault1회에서는 원본 File이 정상 회수됐지만 실패한 preview를
+자동 재등록해 selection-error11994회 이상으로 폭주했다. AC042에서 현재 그래픽
+통신의 종결 실패와 정상 화면 교체를 구분해 자동 발행·dirty 재예약을 중단한다.
+CPU·Records·후보 File·기록 회수를 유지하는 수정과 독립 회귀를 작성했고,
+root 관련152개가 최종 통과했다. 새 독립 리뷰·영향받은 QA는 아직 남는다.
+Save/download는 검사기가 현재 캡처 선택 전에 기다린 별도 오류도 있어 아직
+최종 검증을 마치지 못했다. 실제 제품 오류 폭주가 확인돼 보충 실행은 중단했다.
+
+현재 native GUI는 새 c43a8790 바이너리의 Settings/Records/키보드/resize와
+WATCH 논리 복원을 확인했지만 입력·오디오 장치 부재로 BLOCKED_ENV다.
+CLI의 pre-AC042 전체 Node1700/0·앱4865/0(43 ignored)은 실제 완료했다.
+해당 웹 소스116파일 snapshot 뒤 JS 소비 범위를 해제했다. 변경 없는 Rust의
+Linux/Windows/macOS all-target typing은 모두0, 실제 CLI30/30·독립 PCM96000샘플
+바이트 비교까지 완료해 CLI software 최종 PASS다. 새 JS의 전체 Node 결과로
+과거1700을 쓰지 않는다. AC042는 Worker128/0·변경 없는 history24/0으로 관련152/0이다.
+전체136/489·오디오12/27을 유지하고 태스크·전체 Goal은 미완료다.
 
 직전 QA checkpoint(2026-10-16): 수정7f38f2b2·소비 패키지 문서 정정99c86f60에서
 독립 DEEP code/security 리뷰와 문서 감사가 PASS다. 실제 required CLI도 PASS:
