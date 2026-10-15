@@ -86,4 +86,8 @@ release log SHA256: `735ec4a24f53c510b4a1b0b63d61122fb32188f51b064c75decd706410e
 최종 debug log SHA256: `5723d684c4fbe269bbba2d02c75f6e8e6f2c7dbbfb598a43a1f86db16ffca86b`.
 최종 release log SHA256: `06f63ca4be1923c1e9eeff1657f920d3b11e18fdef6233a5849d36de79912d3b`.
 
-현재 독립 정식 code review와 그 이후 qa-cli는 아직 실행 전이며 이 root Verify를 독립 QA 또는 task close PASS로 표시하지 않는다.
+독립 `code_review_input_alloc_14125_c1`의 전체 DEEP 검토(both discovery, 확정 지적0)가 PASS한 뒤 `qa_cli_input_alloc_14125`가 커밋4c1c9f00에서 실제 scoped suite를 실행해 PASS했다. debug/release를 순서대로 각각1회 실행했고 각각14/0·ignored0,66개 raw/66개 상한 검사를 확인했다. case 이름·params·target/type metadata와 모든 Requests가 교정 raw baseline·JSON 및 Rust 고정 상한과 일치했다. 단일13 scalar 초과·overflow·unknown 거부도 두 profile에서 실제 실행했다. scoped fmt/diff/WBS 검사0, source SHA33b57d…858d6와 tracked/index 상태를 유지했다. 새 전체 Node/Rust/WASM/GUI/foreign 검사를 이 test-only delta의 근거로 추가하지 않았다.
+
+독립 QA 로그 SHA256은 debug `baf31e4137fb52849cb34c7a7d38ab71ae2a825be7672f6f84d32145d12e0dc1`, release `428cd0df0cbc256c4bb117d8ba490485c054bf23f6090ba673f21ec7dbf03293`다. 로컬 ignored `target/wf/runtime-input-alloc-qa-cli-14125/`의 `invocations.json`, `evidence-verification.json`, `post-cargo-product-identity.json`과 raw log에 보존한다. 준비 Git ownership 검사128과 ignored evidence parser의 key 가정1은 준비/검사기 오류로 구분해 보존했고, 기능 검사를 반복하지 않았다. QA 후4browser와 현재 native6f의 실제 hash는 QA 전과 같았다.
+
+실제 code review→qa-cli PASS 뒤 한 번 owning `task_verify`는 필수 자동 완료 기록 부재로 PENDING이었다. 현재 run의 receipt 파일/행은 없으며 직접 agent final을 hook-owned 완료 기록으로 대체하지 않는다. 실제 소프트웨어 PASS와 태스크 종료 권한을 구분해 close하지 않으며, owner의 기록 대기 조건에 따라 미완료로 보존한다. 전체 Goal은 활성이고 다음 `TASK__judge-refresh-empty-route`는 기존 임시 route 할당의 실제 감소를 검증할 별도 작업으로 대기한다. 아직 최적화 구현이나 감소 수치를 이 기록에 추가하지 않는다.
