@@ -2,6 +2,7 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=BEATKERNEL_ASIO_SDK_DIR");
     println!("cargo:rerun-if-changed=src/windows/asio/bridge.cpp");
+    println!("cargo:rerun-if-changed=src/windows/asio/bridge_dispatch.h");
     #[cfg(feature = "asio-sdk")]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         build_sdk();

@@ -1,10 +1,10 @@
 //! SDK-gated types, memory-backed real callback writes; no physical driver proof.
 use super::*;
+use crate::audio::asio::AsioPcmEncoding;
 use beatkernel::{
     audio::*,
     time::{ClockDomainId, Timestamp},
 };
-use crate::audio::asio::AsioPcmEncoding;
 
 struct Owner {
     stream: AsioStream,
@@ -51,7 +51,10 @@ fn owner() -> Owner {
         host_clock: None,
         cadence: crate::audio::cadence::Capture::new(),
         state: UnsafeCell::new(RenderState {
-            renderer,
+            renderer: RenderOwner::Legacy(renderer),
+            frames: 2,
+            permit: None,
+            last_report: None,
             rows,
             prepared_frames: 0,
             buffer_fills: 0,
@@ -61,6 +64,7 @@ fn owner() -> Owner {
         telemetry,
         publication: AtomicU64::new(0),
         event_values: std::array::from_fn(|_| AtomicU64::new(0)),
+        source_control: Arc::new(SourceControl::new()),
     });
     Owner {
         stream: AsioStream {
@@ -75,6 +79,11 @@ fn owner() -> Owner {
                 output_frames: 0,
             },
             sample_rate: 1000,
+            buffer_frames: 2,
+            source_facts: None,
+            native_release_unproved: false,
+            latest_cleanup: None,
+            failed_start: false,
         },
         _planes: planes,
         producer,

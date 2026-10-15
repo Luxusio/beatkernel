@@ -1,10 +1,10 @@
 //! Actual memory-backed callback writes; no driver/control/SDK operation.
 use super::*;
+use crate::audio::asio::AsioPcmEncoding;
 use beatkernel::{
     audio::*,
     time::{ClockDomainId, Timestamp},
 };
-use crate::audio::asio::AsioPcmEncoding;
 
 struct MemoryOwner {
     // Owner is dropped before its referenced planar regions.
@@ -55,7 +55,10 @@ fn owner(capacity: usize, advance: bool) -> MemoryOwner {
         host_clock: None,
         cadence: crate::audio::cadence::Capture::new(),
         state: UnsafeCell::new(RenderState {
-            renderer,
+            renderer: RenderOwner::Legacy(renderer),
+            frames: 2,
+            permit: None,
+            last_report: None,
             rows,
             prepared_frames: 0,
             buffer_fills: 0,
@@ -65,6 +68,7 @@ fn owner(capacity: usize, advance: bool) -> MemoryOwner {
         telemetry,
         publication: AtomicU64::new(0),
         event_values: std::array::from_fn(|_| AtomicU64::new(0)),
+        source_control: Arc::new(SourceControl::new()),
     });
     MemoryOwner {
         stream: AsioStream {
@@ -79,6 +83,11 @@ fn owner(capacity: usize, advance: bool) -> MemoryOwner {
                 output_frames: 0,
             },
             sample_rate: 4,
+            buffer_frames: 2,
+            source_facts: None,
+            native_release_unproved: false,
+            latest_cleanup: None,
+            failed_start: false,
         },
         planes,
         producer,

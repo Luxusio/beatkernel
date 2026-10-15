@@ -2,8 +2,8 @@
 use super::*;
 use beatkernel::audio::AudioFormat;
 #[test]
-fn actual_channel_preflight_accepts_original_order_and_signed_index_boundary_for_every_supported_count()
- {
+fn actual_channel_preflight_accepts_original_order_and_signed_index_boundary_for_every_supported_count(
+) {
     for count in 1..=32u16 {
         let format = AudioFormat::new(48_000, count).unwrap();
         let channels = (0..u32::from(count))
@@ -18,8 +18,8 @@ fn actual_channel_preflight_accepts_original_order_and_signed_index_boundary_for
     assert!(validate_channels(&[0], AudioFormat::new(48_000, 1).unwrap()).is_ok());
 }
 #[test]
-fn actual_channel_preflight_refuses_empty_count_mismatch_duplicate_later_row_and_nonrepresentable_index_atomically()
- {
+fn actual_channel_preflight_refuses_empty_count_mismatch_duplicate_later_row_and_nonrepresentable_index_atomically(
+) {
     let format = AudioFormat::new(48_000, 2).unwrap();
     for channels in [
         vec![],

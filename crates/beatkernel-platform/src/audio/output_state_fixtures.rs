@@ -1,8 +1,6 @@
 //! Software admission tests: native presentation is deliberately not inferred.
 use super::*;
-use crate::audio::{
-    asio::AsioPcmEncoding, AsioPlanarLayout, DeviceFormat, NativeOutputLayout, SampleEncoding,
-};
+use crate::audio::{asio::AsioPcmEncoding, DeviceFormat, SampleEncoding};
 use beatkernel::{
     audio::*,
     time::{ClockDomainId, Timestamp},

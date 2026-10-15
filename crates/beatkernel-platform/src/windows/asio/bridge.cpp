@@ -17,6 +17,7 @@
 #include <limits>
 #include <thread>
 #include "iasiodrv.h"
+#include "bridge_dispatch.h"
 
 static_assert(sizeof(long) == 4, "IASIO Windows long must be 32-bit");
 static_assert(std::is_same<ASIOSampleRate, double>::value, "ASIO rate must be IEEE double");
@@ -52,6 +53,7 @@ struct BkAsioDiagnostics {
     std::int32_t render_error, clock_available, reserved;
     BkAsioEvent event;
 };
+using PreflightCallback = std::int32_t (__cdecl*)(void*, std::int32_t);
 using RenderCallback = std::int32_t (__cdecl*)(void*, std::int32_t, const BkAsioEvent*);
 static_assert(sizeof(BkAsioOutput) == (sizeof(void*) == 8 ? 32 : 20), "Output ABI");
 static_assert(sizeof(BkAsioEvent) == 40 && sizeof(BkAsioDiagnostics) == 56, "Clock ABI");
@@ -89,6 +91,7 @@ struct Control {
     ASIOCallbacks callbacks{};
     std::int32_t count = 0, frames = 0;
     double configured_rate = 0;
+    PreflightCallback preflight = nullptr;
     RenderCallback render = nullptr;
     void* context = nullptr;
     std::atomic<std::uint32_t> faults{0};
@@ -168,55 +171,66 @@ void publish(Control* c, const BkAsioEvent& event) noexcept {
     c->rate_bits.store(bits, std::memory_order_seq_cst);
     c->version.store(version + 2, std::memory_order_seq_cst);
 }
-void buffer_callback(Control* c, const BkAsioEvent& event) noexcept {
-    if (!c->ready.load(std::memory_order_seq_cst)) return;
-    if (event.index != 0 && event.index != 1) { c->faults.fetch_or(InvalidIndex); return; }
-    if (c->rendering.test_and_set(std::memory_order_acquire)) {
-        c->faults.fetch_or(Reentrant); return;
-    }
-    publish(c, event);
-    if (!(c->faults.load() & Fatal)) {
-        const auto result = c->render(c->context, event.index, &event);
-        if (result) {
-            std::int32_t empty = 0; c->render_error.compare_exchange_strong(empty, result);
-            c->faults.fetch_or(RenderFailed);
-        }
-    }
-    if (c->faults.load() & Fatal) {
+struct CallbackOps {
+    Control* c;
+    bool ready() noexcept { return c->ready.load(std::memory_order_seq_cst); }
+    void invalid_index() noexcept { c->faults.fetch_or(InvalidIndex); }
+    bool enter() noexcept { return !c->rendering.test_and_set(std::memory_order_acquire); }
+    void reentrant() noexcept { c->faults.fetch_or(Reentrant); }
+    std::int32_t preflight(std::int32_t index) noexcept { return c->preflight(c->context, index); }
+    void silence(std::int32_t index) noexcept {
         for (int i = 0; i < c->count; ++i)
-            std::memset(c->rows[i].buffers[event.index], 0,
+            std::memset(c->rows[i].buffers[index], 0,
                 static_cast<std::size_t>(c->frames) * c->outputs[i].width);
     }
-    c->rendering.clear(std::memory_order_release);
-}
+    void publish(const BkAsioEvent& event) noexcept { ::publish(c, event); }
+    bool fatal() noexcept { return (c->faults.load() & Fatal) != 0; }
+    std::int32_t render(std::int32_t index, const BkAsioEvent& event) noexcept {
+        return c->render(c->context, index, &event);
+    }
+    void render_failed(std::int32_t result) noexcept {
+        std::int32_t empty = 0; c->render_error.compare_exchange_strong(empty, result);
+        c->faults.fetch_or(RenderFailed);
+    }
+    void leave() noexcept { c->rendering.clear(std::memory_order_release); }
+};
 void legacy_switch(long index, ASIOBool direct) {
     Admission admission; auto* c = admission.control; if (!c) return;
-    BkAsioEvent event{}; event.index = static_cast<std::int32_t>(index); event.direct = direct;
-    ASIOSamples position{}; ASIOTimeStamp time{};
-    try {
-        if (c->driver->getSamplePosition(&position, &time) == ASE_OK) {
-            event.flags = 3; event.position = native64(position); event.system_ns = native64(time);
-        }
-    } catch (...) { c->faults.fetch_or(MalformedTime); }
-    buffer_callback(c, event);
+    CallbackOps ops{c};
+    // Native acquisition is deliberately late: a retired callback never queries
+    // the driver clock, builds an event, or publishes raw diagnostics.
+    beatkernel_asio::dispatch_buffer(ops, static_cast<std::int32_t>(index), [&]() noexcept {
+        BkAsioEvent event{}; event.index = static_cast<std::int32_t>(index); event.direct = direct;
+        ASIOSamples position{}; ASIOTimeStamp time{};
+        try {
+            if (c->driver->getSamplePosition(&position, &time) == ASE_OK) {
+                event.flags = 3; event.position = native64(position); event.system_ns = native64(time);
+            }
+        } catch (...) { c->faults.fetch_or(MalformedTime); }
+        return event;
+    });
 }
 ASIOTime* time_switch(ASIOTime* time, long index, ASIOBool direct) {
     Admission admission; auto* c = admission.control; if (!c) return time;
-    BkAsioEvent event{}; event.index = static_cast<std::int32_t>(index); event.direct = direct;
-    if (!time) c->faults.fetch_or(MalformedTime);
-    else {
-        event.flags = static_cast<std::uint32_t>(time->timeInfo.flags);
-        if (event.flags & kClockSourceChanged) c->faults.fetch_or(Resync);
-        if (event.flags & kSampleRateChanged) c->faults.fetch_or(Rate);
-        if (event.flags & kSamplePositionValid) event.position = native64(time->timeInfo.samplePosition);
-        if (event.flags & kSystemTimeValid) event.system_ns = native64(time->timeInfo.systemTime);
-        if (event.flags & kSampleRateValid) {
-            event.rate = time->timeInfo.sampleRate;
-            if (!std::isfinite(event.rate) || event.rate <= 0) c->faults.fetch_or(MalformedTime);
-            else if (event.rate != c->configured_rate) c->faults.fetch_or(Rate);
+    CallbackOps ops{c};
+    beatkernel_asio::dispatch_buffer(ops, static_cast<std::int32_t>(index), [&]() noexcept {
+        BkAsioEvent event{}; event.index = static_cast<std::int32_t>(index); event.direct = direct;
+        if (!time) c->faults.fetch_or(MalformedTime);
+        else {
+            event.flags = static_cast<std::uint32_t>(time->timeInfo.flags);
+            if (event.flags & kClockSourceChanged) c->faults.fetch_or(Resync);
+            if (event.flags & kSampleRateChanged) c->faults.fetch_or(Rate);
+            if (event.flags & kSamplePositionValid) event.position = native64(time->timeInfo.samplePosition);
+            if (event.flags & kSystemTimeValid) event.system_ns = native64(time->timeInfo.systemTime);
+            if (event.flags & kSampleRateValid) {
+                event.rate = time->timeInfo.sampleRate;
+                if (!std::isfinite(event.rate) || event.rate <= 0) c->faults.fetch_or(MalformedTime);
+                else if (event.rate != c->configured_rate) c->faults.fetch_or(Rate);
+            }
         }
-    }
-    buffer_callback(c, event); return time;
+        return event;
+    });
+    return time;
 }
 void rate_changed(ASIOSampleRate rate) {
     Admission admission; auto* c = admission.control; if (!c) return;
@@ -406,8 +420,8 @@ extern "C" BkAsioStatus bk_asio_select_clock(void* raw, std::int32_t index) noex
 
 extern "C" BkAsioStatus bk_asio_prepare(void* raw, BkAsioOutput* outputs,
     std::int32_t count, std::int32_t frames, double rate,
-    RenderCallback render, void* context) noexcept {
-    if (!raw || !outputs || !render || !context || count < 1 || count > 32 ||
+    PreflightCallback preflight, RenderCallback render, void* context) noexcept {
+    if (!raw || !outputs || !preflight || !render || !context || count < 1 || count > 32 ||
         frames <= 0 || !std::isfinite(rate) || rate <= 0) return {Bridge, BadArgument};
     auto* c = static_cast<Control*>(raw);
     if (c->owner != GetCurrentThreadId()) return {Bridge, WrongThread};
@@ -438,7 +452,7 @@ extern "C" BkAsioStatus bk_asio_prepare(void* raw, BkAsioOutput* outputs,
             c->rows[i].isInput = ASIOFalse; c->rows[i].channelNum = outputs[i].channel;
         }
         c->count = count; c->frames = frames; c->configured_rate = rate;
-        c->render = render; c->context = context;
+        c->preflight = preflight; c->render = render; c->context = context;
         c->callbacks.bufferSwitch = legacy_switch;
         c->callbacks.sampleRateDidChange = rate_changed;
         c->callbacks.asioMessage = message;

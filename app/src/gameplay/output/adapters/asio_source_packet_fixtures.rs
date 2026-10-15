@@ -14,8 +14,8 @@ use beatkernel_platform::{
     audio::asio::MultimediaHostInterval,
     audio::presentation::validation::OriginalNativePresentationEvidence,
     windows::asio::stream::{
-        AsioPlaybackPhaseSnapshot, AsioStreamSnapshot, AsioDiagnostics, AsioFaults,
-        AsioBufferObservation, AsioCallbackEvent,
+        AsioBufferObservation, AsioCallbackEvent, AsioDiagnostics, AsioFaults,
+        AsioPlaybackPhaseSnapshot, AsioStreamSnapshot,
     },
 };
 
@@ -76,6 +76,8 @@ fn fixture() -> (
             buffer_observation: Some(AsioBufferObservation {
                 event,
                 render: report,
+                delivered_first_frame: report.start_frame,
+                delivered_frames: u32::try_from(report.frames).unwrap(),
             }),
             native: AsioDiagnostics::default(),
         },
@@ -225,9 +227,15 @@ fn malformed_publication_delivery_and_report_metadata_refuse_without_observation
 
 #[test]
 fn exact_partial_delivery_prefix_and_original_epoch_query_are_enforced() {
-    let (basis, id, mut view, candidate) = fixture();
+    let (basis, id, mut view, whole_candidate) = fixture();
     // Explicit supplied partial-write metadata: no Mixer history is rewritten.
     view.snapshot.prepared_frames = 3;
+    view.snapshot
+        .buffer_observation
+        .as_mut()
+        .unwrap()
+        .delivered_frames = 1;
+    let candidate = delivery_candidate(whole_candidate, 6, 1);
     let edge = qualify_asio_source_packet(23, basis, id, at(7), view).unwrap();
     assert_eq!(edge.facts().submitted_source_end, 7);
     assert_eq!(edge.facts().pulled_source_end, 8);
@@ -242,17 +250,180 @@ fn exact_partial_delivery_prefix_and_original_epoch_query_are_enforced() {
     .unwrap();
     assert!(qualify_asio_source_packet(23, basis, id, fraction, view).is_err());
     let wrong_epoch = qualify_asio_source_packet(24, basis, id, at(6), view).unwrap();
-    assert!(qualify_asio_source_observation_packet(
-        candidate,
-        view.snapshot.buffer_observation.unwrap(),
-        wrong_epoch
-    )
-    .is_err());
+    assert!(matches!(
+        qualify_asio_source_observation_packet(
+            candidate,
+            view.snapshot.buffer_observation.unwrap(),
+            wrong_epoch
+        ),
+        Err(SourcePlaybackPacketError::EpochMismatch)
+    ));
     let wrong_query = qualify_asio_source_packet(23, basis, id, at(7), view).unwrap();
-    assert!(qualify_asio_source_observation_packet(
-        candidate,
-        view.snapshot.buffer_observation.unwrap(),
-        wrong_query
+    assert!(matches!(
+        qualify_asio_source_observation_packet(
+            candidate,
+            view.snapshot.buffer_observation.unwrap(),
+            wrong_query
+        ),
+        Err(SourcePlaybackPacketError::CoordinateMismatch)
+    ));
+}
+
+fn delivery_candidate(
+    whole: CoordinateNativeAudioSnapshot,
+    first: u64,
+    frames: usize,
+) -> CoordinateNativeAudioSnapshot {
+    let mut snapshot = whole.snapshot();
+    let OriginalNativePresentationEvidence::Asio { observation, basis } = snapshot.evidence else {
+        panic!("ASIO fixture must retain its original evidence family");
+    };
+    snapshot.evidence = OriginalNativePresentationEvidence::Asio {
+        observation: AsioPresentationObservation::from_delivery(
+            observation.render,
+            first,
+            frames,
+            observation.sample_rate,
+            observation.host,
+            0,
+            0,
+            observation.output_origin,
+        )
+        .unwrap(),
+        basis,
+    };
+    CoordinateNativeAudioSnapshot::new(
+        snapshot,
+        NativeOutputCoordinate::StreamFrame {
+            frame: first - snapshot.basis.start_physical_frame(),
+        },
     )
-    .is_err());
+    .unwrap()
+}
+
+#[test]
+fn two_deliveries_of_one_original_render_preserve_report_history_and_advance_coordinates() {
+    let (basis, id, view, whole) = fixture();
+    let original_report = view.snapshot.render.unwrap();
+    for (first, prepared, relative) in [(6, 3, 2), (7, 4, 3)] {
+        let mut prefix_view = view;
+        prefix_view.snapshot.prepared_frames = prepared;
+        let callback = prefix_view.snapshot.buffer_observation.as_mut().unwrap();
+        callback.delivered_first_frame = first;
+        callback.delivered_frames = 1;
+        let candidate = delivery_candidate(whole, first, 1);
+        let query = candidate.source_query().unwrap();
+        let packet = qualify_asio_source_packet(23, basis, id, query, prefix_view).unwrap();
+        let qualified = qualify_asio_source_observation_packet(
+            candidate,
+            prefix_view.snapshot.buffer_observation.unwrap(),
+            packet,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            qualified.coordinate().coordinate(),
+            NativeOutputCoordinate::StreamFrame { frame: relative }
+        );
+        assert_eq!(qualified.source().facts().render, Some(original_report));
+        assert_eq!(qualified.source().facts().submitted_source_end, first + 1);
+        assert_eq!(qualified.source().facts().pulled_source_end, 8);
+        assert_eq!(qualified.source().facts().playback, view.playback);
+        assert_eq!(qualified.source().native_evidence(), Some(&prefix_view));
+    }
+}
+
+#[test]
+fn callback_and_native_observation_must_agree_on_both_delivery_fields_in_both_directions() {
+    let (basis, id, view, whole) = fixture();
+    // Matching the report/event alone cannot authenticate a different prefix.
+    for (callback_first, callback_frames, candidate_first, candidate_frames) in
+        [(6, 2, 6, 1), (6, 1, 6, 2), (6, 1, 7, 1), (7, 1, 6, 1)]
+    {
+        let mut current = view;
+        current.snapshot.prepared_frames =
+            callback_first + u64::from(callback_frames) - basis.start_physical_frame();
+        let callback = current.snapshot.buffer_observation.as_mut().unwrap();
+        callback.delivered_first_frame = callback_first;
+        callback.delivered_frames = callback_frames;
+        let callback = *callback;
+        let candidate = delivery_candidate(whole, candidate_first, candidate_frames);
+        let packet =
+            qualify_asio_source_packet(23, basis, id, candidate.source_query().unwrap(), current)
+                .unwrap();
+        assert!(qualify_asio_source_observation_packet(candidate, callback, packet)
+            .unwrap()
+            .is_none(), "callback {callback_first}+{callback_frames}, candidate {candidate_first}+{candidate_frames}");
+    }
+    // A changed expected callback is independently refused as well.
+    for field in 0..2 {
+        let mut changed = view.snapshot.buffer_observation.unwrap();
+        if field == 0 {
+            changed.delivered_first_frame += 1;
+        } else {
+            changed.delivered_frames -= 1;
+        }
+        let packet = qualify_asio_source_packet(23, basis, id, at(6), view).unwrap();
+        assert!(
+            qualify_asio_source_observation_packet(whole, changed, packet)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn invalid_delivered_interval_never_authenticates_a_report_or_submitted_prefix() {
+    let (basis, id, view, _) = fixture();
+    for (first, count, prepared) in [
+        (6, 0, 4),
+        (5, 1, 4),
+        (7, 2, 4),
+        (u64::MAX, 1, 4),
+        (6, u32::MAX, 4),
+        (6, 2, 3),
+    ] {
+        let mut malformed = view;
+        malformed.snapshot.prepared_frames = prepared;
+        let callback = malformed.snapshot.buffer_observation.as_mut().unwrap();
+        callback.delivered_first_frame = first;
+        callback.delivered_frames = count;
+        assert!(
+            qualify_asio_source_packet(23, basis, id, at(6), malformed).is_err(),
+            "delivery {first}+{count}, prepared {prepared}"
+        );
+    }
+}
+
+#[test]
+fn packet_rejections_keep_existing_typed_revision_report_and_prefix_errors() {
+    let (basis, id, view, _) = fixture();
+    for revision in [0, 1, 3, u64::MAX] {
+        let mut malformed = view;
+        malformed.revision = revision;
+        assert!(matches!(
+            qualify_asio_source_packet(23, basis, id, at(6), malformed),
+            Err(SourcePlaybackPacketError::InvalidRevision)
+        ));
+    }
+    let mut malformed = view;
+    malformed
+        .snapshot
+        .buffer_observation
+        .as_mut()
+        .unwrap()
+        .render
+        .start_frame += 1;
+    assert!(matches!(
+        qualify_asio_source_packet(23, basis, id, at(6), malformed),
+        Err(SourcePlaybackPacketError::InvalidReport)
+    ));
+    for prepared in [0, 5] {
+        let mut malformed = view;
+        malformed.snapshot.prepared_frames = prepared;
+        assert!(matches!(
+            qualify_asio_source_packet(23, basis, id, at(6), malformed),
+            Err(SourcePlaybackPacketError::InvalidPrefix)
+        ));
+    }
 }

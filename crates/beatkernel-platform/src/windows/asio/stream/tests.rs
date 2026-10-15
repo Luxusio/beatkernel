@@ -68,7 +68,10 @@ fn rig_with_history(samples: &[f32], frames: u32, history_capacity: Option<usize
             host_clock: None,
             cadence: crate::audio::cadence::Capture::new(),
             state: UnsafeCell::new(RenderState {
-                renderer,
+                renderer: RenderOwner::Legacy(renderer),
+                frames,
+                permit: None,
+                last_report: None,
                 rows,
                 prepared_frames: 0,
                 buffer_fills: 0,
@@ -78,12 +81,19 @@ fn rig_with_history(samples: &[f32], frames: u32, history_capacity: Option<usize
             telemetry,
             publication: AtomicU64::new(0),
             event_values: std::array::from_fn(|_| AtomicU64::new(0)),
+            source_control: Arc::new(SourceControl::new()),
         },
         planes,
         producer,
     }
 }
 impl MemoryRig {
+    fn legacy_mut(&mut self) -> &mut AsioBlockRenderer {
+        match &mut self.context.state.get_mut().renderer {
+            RenderOwner::Legacy(renderer) => renderer,
+            RenderOwner::Complete(_) => panic!("legacy fixture keeps its actual renderer"),
+        }
+    }
     fn fill(
         &mut self,
         index: i32,
@@ -240,10 +250,7 @@ fn exhausted_publication_generation_fails_before_queue_or_mixer_mutation() {
         memory.fill(0, Some(event(0, 1))),
         Err(AsioRenderError::Capacity)
     ));
-    assert_eq!(
-        memory.context.state.get_mut().renderer.last_render_report(),
-        None
-    );
+    assert_eq!(memory.legacy_mut().last_render_report(), None);
     assert!(memory
         .planes
         .iter()
@@ -257,13 +264,7 @@ fn exhausted_publication_generation_fails_before_queue_or_mixer_mutation() {
     );
     assert!(!memory.context.read().0.telemetry_available);
     // Actual cold owner recovery proves no queued command was consumed.
-    let mut mixer = memory
-        .context
-        .state
-        .get_mut()
-        .renderer
-        .take_mixer()
-        .unwrap();
+    let mut mixer = memory.legacy_mut().take_mixer().unwrap();
     let mut output = [0.0; 2];
     let report = mixer.render(&mut output).unwrap();
     assert_eq!(
@@ -501,10 +502,7 @@ fn default_source_disabled_and_odd_or_exhausted_outer_revision_refuse_compound_p
         .is_none());
     assert_eq!(
         memory
-            .context
-            .state
-            .get_mut()
-            .renderer
+            .legacy_mut()
             .source_playback_history()
             .unwrap()
             .pulled_end_frame(),
