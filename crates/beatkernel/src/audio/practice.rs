@@ -1209,6 +1209,7 @@ struct Shared {
     runtime_pending: AtomicBool,
     max_overlap: AtomicU64,
     max_cue_burst: AtomicU64,
+    control_frame_event_bound: AtomicU64,
 }
 /// Sole cold/control owner of copied requests and ordered receipts.
 pub struct PracticeController {
@@ -1251,6 +1252,7 @@ pub fn practice_queue(
         runtime_pending: AtomicBool::new(false),
         max_overlap: AtomicU64::new(program.data.initial_overlap as u64),
         max_cue_burst: AtomicU64::new(program.data.initial_cue_burst as u64),
+        control_frame_event_bound: AtomicU64::new(0),
     });
     Ok((
         PracticeController {
@@ -1314,9 +1316,9 @@ impl Shared {
     // order. At most two observations, never an unbounded producer spin. Odd
     // means publication is in progress. The checked sequence never wraps.
     fn metadata(&self) -> Result<PracticeMetadata, PracticeError> {
-        self.snapshot().map(|(metadata, _, _)| metadata)
+        self.snapshot().map(|(metadata, _, _, _)| metadata)
     }
-    fn snapshot(&self) -> Result<(PracticeMetadata, usize, usize), PracticeError> {
+    fn snapshot(&self) -> Result<(PracticeMetadata, usize, usize, usize), PracticeError> {
         for _ in 0..2 {
             let before = self.metadata_sequence.load(Ordering::SeqCst);
             if !before.is_multiple_of(2) {
@@ -1332,6 +1334,8 @@ impl Shared {
             let state = self.state.load(Ordering::SeqCst);
             let max_overlap = self.max_overlap.load(Ordering::SeqCst) as usize;
             let max_cue_burst = self.max_cue_burst.load(Ordering::SeqCst) as usize;
+            let control_frame_event_bound =
+                self.control_frame_event_bound.load(Ordering::SeqCst) as usize;
             if self.metadata_sequence.load(Ordering::SeqCst) == before {
                 return Ok((
                     PracticeMetadata {
@@ -1343,6 +1347,7 @@ impl Shared {
                     },
                     max_overlap,
                     max_cue_burst,
+                    control_frame_event_bound,
                 ));
             }
         }
@@ -1425,7 +1430,7 @@ impl PracticeController {
         if !Arc::ptr_eq(&rate.program, &self.shared.program) {
             return Err(PracticeError::InvalidRatePreparation);
         }
-        let metadata = self.shared.metadata()?;
+        let (metadata, _, _, control_frame_event_bound) = self.shared.snapshot()?;
         if !metadata.started {
             return Err(PracticeError::NotStarted);
         }
@@ -1455,6 +1460,22 @@ impl PracticeController {
                 .any(|slot| slot.ready.load(Ordering::Acquire) != 0)
         {
             return Err(PracticeError::Full);
+        }
+        // The producer cannot predict the next callback's exact cut. Reserve
+        // its control event alongside any ordinary frame in the current pass,
+        // including unchanged playback after an audio-side refusal.
+        let limit = self.shared.program.limits.max_events_per_render;
+        if control_frame_event_bound >= limit {
+            return Err(PracticeError::EventBudget);
+        }
+        if let Some(region) = region {
+            let mut events = 1usize;
+            self.shared.program.overlaps(region.start, |_| {
+                events = events.saturating_add(1);
+            });
+            if events > limit {
+                return Err(PracticeError::EventBudget);
+            }
         }
         let tag = if region.is_some() { 2 } else { 1 };
         let region = region.unwrap_or(PracticeRegion {
@@ -1588,7 +1609,7 @@ impl PracticeController {
         if r.id == 0 || r.id <= self.last_id || !next && r.at_playback_frame < self.last_frame {
             return Err(PracticeError::InvalidRegion);
         }
-        let (metadata, max_overlap, max_cue_burst) = self.shared.snapshot()?;
+        let (metadata, max_overlap, max_cue_burst, _) = self.shared.snapshot()?;
         if r.expected_generation != metadata.generation {
             return Err(PracticeError::StaleGeneration);
         }
@@ -1889,6 +1910,29 @@ impl PracticeAudioEndpoint {
         self.shared
             .max_cue_burst
             .store(cursor.max_cue_burst as u64, Ordering::SeqCst);
+        // Existing boundary publications retain a conservative pass bound;
+        // consumed cues need no per-frame metadata updates. Initial preroll
+        // can put the current anchor before the selected region start.
+        let program = &self.shared.program;
+        let mut events = 0;
+        if program.runtime_program_id != 0 && cursor.active {
+            let first = program
+                .cues
+                .partition_point(|cue| cue.cue.at <= cursor.anchor);
+            events = program.future_cue_burst(cursor.region, first, cursor.max_cue_burst);
+            if !cursor.open {
+                let mut boundary = 1usize;
+                if cursor.region.repeat {
+                    program.overlaps(cursor.region.start, |_| {
+                        boundary = boundary.saturating_add(1);
+                    });
+                }
+                events = events.max(boundary);
+            }
+        }
+        self.shared
+            .control_frame_event_bound
+            .store(events as u64, Ordering::SeqCst);
         self.shared
             .metadata_sequence
             .store(sequence + 2, Ordering::SeqCst);

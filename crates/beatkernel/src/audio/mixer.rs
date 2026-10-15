@@ -1033,15 +1033,6 @@ impl Mixer {
                 break;
             };
             {
-                if matches!(
-                    kind,
-                    PracticeBoundaryKind::Requested
-                        | PracticeBoundaryKind::LoopDisabled
-                        | PracticeBoundaryKind::ControlRejectedRevision
-                ) {
-                    practice.endpoint.consume();
-                    *consumed += 1;
-                }
                 let cursor = practice.cursor;
                 if !matches!(
                     kind,
@@ -1111,6 +1102,17 @@ impl Mixer {
                     },
                     &cursor,
                 );
+                if matches!(
+                    kind,
+                    PracticeBoundaryKind::Requested
+                        | PracticeBoundaryKind::LoopDisabled
+                        | PracticeBoundaryKind::ControlRejectedRevision
+                ) {
+                    // Admission must always observe this queued control or
+                    // its published receipt alongside the new metadata.
+                    practice.endpoint.consume();
+                    *consumed += 1;
+                }
             }
         }
         while Practice::cue_due(

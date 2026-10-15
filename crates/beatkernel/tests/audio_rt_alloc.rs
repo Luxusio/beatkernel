@@ -474,8 +474,8 @@ fn retained_runtime_capacity_refusal_continues_pcm_without_heap_or_fake_credits(
 #[test]
 fn retained_runtime_preflight_budget_error_is_allocation_free_and_transactional() {
     let (mut mixer, _producer, mut controller) = runtime_practice(
-        vec![runtime_cue(1, 1_000_000)],
-        PracticeLimits::new(8, 1, 1, 8, 8).unwrap(),
+        vec![runtime_cue(1, 1_000_000), runtime_cue(2, 3_000_000)],
+        PracticeLimits::new(8, 2, 2, 8, 8).unwrap(),
     );
     render(&mut mixer, &mut [0.0]);
     controller.try_pop_event().unwrap();
@@ -490,6 +490,77 @@ fn retained_runtime_preflight_budget_error_is_allocation_free_and_transactional(
     assert_eq!(untouched, [99.0; 2]);
     assert_eq!(controller.metadata().unwrap(), metadata);
     assert_eq!(mixer.render(&mut []).unwrap(), before);
+    assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+    // Control1+cue1 fits the minimum frame, while the failed two-frame
+    // callback also contains the next cue and exceeds the unchanged budget2.
+    let mut one = [99.0];
+    render(&mut mixer, &mut one);
+    assert_eq!(one, [0.25]);
+    let (event, counts) = track(|| controller.try_pop_event());
+    assert_eq!(counts, [0, 0, 0]);
+    match event.unwrap() {
+        PracticeEvent::Rate(event) => {
+            assert_eq!(event.outcome, PracticeRateOutcome::Applied);
+            assert_eq!((event.request_id, event.generation), (1, 1));
+            assert_eq!((event.request_revision, event.applied_revision), (0, 1));
+            assert_eq!((event.physical_frame, event.playback_frame), (1, 1));
+        }
+        event => panic!("expected preserved rate after a smaller retry, got {event:?}"),
+    }
+    let mut suffix = [99.0; 2];
+    let report = render(&mut mixer, &mut suffix);
+    assert_eq!(suffix, [1.0, 0.75]);
+    assert_eq!(report.counters.voice_full, 0);
+    assert_eq!(report.counters.commands_applied, 0);
+    assert_eq!(controller.metadata().unwrap().revision, 1);
+    assert_eq!(controller.history_retention_pins(), (None, None));
+}
+
+#[test]
+fn retained_runtime_minimum_budget_refusal_keeps_pcm_and_control_ownership_without_heap() {
+    let (mut mixer, _producer, mut controller) = runtime_practice(
+        vec![runtime_cue(1, 1_000_000)],
+        PracticeLimits::new(8, 1, 1, 8, 8).unwrap(),
+    );
+    render(&mut mixer, &mut [0.0]);
+    controller.try_pop_event().unwrap();
+    let metadata = controller.metadata().unwrap();
+    let prepared = controller.prepare_rate(Rate::new(2, 1).unwrap()).unwrap();
+    let (result, counts) = track(|| controller.try_set_rate_next(1, 1, &prepared));
+    assert_eq!(counts, [0, 0, 0]);
+    assert_eq!(result, Err(PracticeError::EventBudget));
+    let original = PracticeRegion::new(ts(0), ts(20_000_000), false).unwrap();
+    let (result, counts) = track(|| controller.try_restart_next(1, 1, original, &prepared));
+    assert_eq!(counts, [0, 0, 0]);
+    assert_eq!(result, Err(PracticeError::EventBudget));
+    assert_eq!(controller.metadata().unwrap(), metadata);
+    assert_eq!(controller.history_retention_pins(), (None, None));
+    assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+    let mut one = [99.0];
+    let report = render(&mut mixer, &mut one);
+    assert_eq!(one, [0.25]);
+    assert_eq!(report.counters.commands_applied, 0);
+    assert_eq!(report.counters.voice_full, 0);
+    assert_eq!(controller.metadata().unwrap(), metadata);
+    let empty = PracticeRegion::new(ts(8_000_000), ts(20_000_000), false).unwrap();
+    let (result, counts) = track(|| controller.try_request_next(1, 1, empty));
+    assert_eq!(counts, [0, 0, 0]);
+    result.unwrap();
+    render(&mut mixer, &mut one);
+    assert_eq!(one, [0.0]);
+    let (event, counts) = track(|| controller.try_pop_event());
+    assert_eq!(counts, [0, 0, 0]);
+    match event.unwrap() {
+        PracticeEvent::Boundary(boundary) => {
+            assert_eq!(boundary.kind, PracticeBoundaryKind::Requested);
+            assert_eq!((boundary.request_id, boundary.generation), (1, 2));
+            assert_eq!((boundary.physical_frame, boundary.playback_frame), (2, 2));
+            assert_eq!(boundary.applied_song_time, ts(8_000_000));
+        }
+        event => panic!("expected usable control after cold refusal, got {event:?}"),
+    }
+    assert_eq!(controller.metadata().unwrap().revision, 1);
+    assert_eq!(controller.history_retention_pins(), (None, None));
 }
 
 #[test]

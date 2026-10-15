@@ -469,12 +469,12 @@ fn full_unread_receipt_refuses_admission_without_consuming_request_id_or_evidenc
 fn whole_callback_event_budget_failure_keeps_pcm_control_heads_and_metadata_untouched() {
     let (mut mixer, mut producer, mut controller) = rig(
         1000,
-        vec![(1, 1000, ramp(8, 8.0))],
-        vec![cue(1, 1, 1_000_000)],
+        vec![(1, 1000, Vec::new()), (2, 1000, ramp(8, 8.0))],
+        vec![cue(1, 1, 1_000_000), cue(2, 1, 3_000_000)],
         Rate::NORMAL,
         0,
         region(0, 20_000_000, false),
-        PracticeLimits::new(8, 1, 1, 8, 8).unwrap(),
+        PracticeLimits::new(8, 0, 2, 8, 8).unwrap(),
         false,
         PROGRAM,
     );
@@ -485,7 +485,7 @@ fn whole_callback_event_budget_failure_keeps_pcm_control_heads_and_metadata_unto
             CommandScope(1),
             AudioCommand::Play {
                 voice: VoiceId(100),
-                sample: SampleId(1),
+                sample: SampleId(2),
                 at: ns(1_000_000),
                 gain: 1.0,
             },
@@ -506,6 +506,523 @@ fn whole_callback_event_budget_failure_keeps_pcm_control_heads_and_metadata_unto
         "failed block retains FIFO request"
     );
     assert_eq!(mixer.render(&mut []).unwrap(), before);
+    // The control and first empty cue fit exactly in one frame. The second
+    // cue belongs to frame2, so only the oversized block exceeds the limit.
+    let mut retry = [99.0];
+    let report = render(&mut mixer, &mut retry);
+    assert_eq!(retry, [0.0]);
+    assert_eq!(report.counters.commands_consumed, 1);
+    assert_eq!(report.counters.commands_applied, 1);
+    let event = changed(&mut controller);
+    assert_eq!(event.outcome, PracticeRateOutcome::Applied);
+    assert_eq!(
+        (event.request_id, event.generation, event.iteration),
+        (1, 1, 0)
+    );
+    assert_eq!((event.request_revision, event.applied_revision), (0, 1));
+    assert_eq!((event.physical_frame, event.playback_frame), (1, 1));
+    assert_eq!(event.active_elapsed_nanos, 1_000_000);
+    assert_eq!(controller.history_retention_pins(), (None, None));
+    let mut suffix = [99.0; 2];
+    render(&mut mixer, &mut suffix);
+    assert_eq!(
+        suffix,
+        [0.25, 0.5],
+        "queued key advances from its original head"
+    );
+    assert_eq!(controller.metadata().unwrap().revision, 1);
+    assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+}
+
+#[test]
+fn minimum_budget_refuses_due_cue_rate_noop_and_restart_before_owning_a_control() {
+    for nonempty in [false, true] {
+        let samples = if nonempty {
+            vec![0.125, 0.25, 0.375, 0.5]
+        } else {
+            Vec::new()
+        };
+        let (mut mixer, _producer, mut controller) = rig(
+            1000,
+            vec![(1, 1000, samples)],
+            vec![cue(1, 1, 1_000_000)],
+            Rate::NORMAL,
+            0,
+            region(0, 20_000_000, false),
+            PracticeLimits::new(8, usize::from(nonempty), 1, 8, 8).unwrap(),
+            false,
+            PROGRAM,
+        );
+        let mut first = [99.0];
+        render(&mut mixer, &mut first);
+        assert_eq!(first, [0.0]);
+        started(&mut controller);
+        let before = mixer.render(&mut []).unwrap();
+        let metadata = controller.metadata().unwrap();
+        for requested in [rate(2, 1), rate(2, 2)] {
+            let prepared = controller.prepare_rate(requested).unwrap();
+            assert_eq!(
+                controller.try_set_rate_next(1, 1, &prepared),
+                Err(PracticeError::EventBudget)
+            );
+            assert_eq!(
+                controller.try_restart_next(1, 1, region(8_000_000, 20_000_000, false), &prepared),
+                Err(PracticeError::EventBudget)
+            );
+            assert_eq!(controller.metadata().unwrap(), metadata);
+            assert_eq!(mixer.render(&mut []).unwrap(), before);
+            assert_eq!(controller.history_retention_pins(), (None, None));
+            assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+        }
+        let mut due = [99.0];
+        let report = render(&mut mixer, &mut due);
+        assert_eq!(due, [if nonempty { 0.125 } else { 0.0 }]);
+        assert_eq!(
+            (report.playback_start_frame, report.playback_frames),
+            (1, 1)
+        );
+        assert_eq!(report.counters.voice_full, 0);
+        assert_eq!(mixer.rate(), Rate::NORMAL);
+        assert_eq!(controller.metadata().unwrap(), metadata);
+        assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+        // Reusing id1 proves neither request identity nor pending ownership
+        // was consumed. This region has no cue or carried sample at its start.
+        controller
+            .try_request_next(1, 1, region(8_000_000, 20_000_000, false))
+            .unwrap();
+        let mut following = [99.0];
+        render(&mut mixer, &mut following);
+        assert_eq!(following, [0.0]);
+        let projected = controller.try_pop_projected_event().unwrap();
+        assert_eq!((projected.target_frame, projected.target_rate), (2, 1000));
+        match projected.event {
+            PracticeEvent::Boundary(boundary) => {
+                assert_eq!(boundary.kind, PracticeBoundaryKind::Requested);
+                assert_eq!((boundary.request_id, boundary.generation), (1, 2));
+                assert_eq!((boundary.physical_frame, boundary.playback_frame), (2, 2));
+                assert_eq!(boundary.applied_song_time, ns(8_000_000));
+            }
+            event => panic!("expected fresh request after cold refusal, got {event:?}"),
+        }
+        let metadata = controller.metadata().unwrap();
+        assert_eq!(
+            (metadata.generation, metadata.revision, metadata.rate),
+            (2, 1, Rate::NORMAL)
+        );
+        assert_eq!(controller.history_retention_pins(), (None, None));
+        assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+    }
+}
+
+#[test]
+fn exact_two_event_budget_admits_due_empty_and_nonempty_cues_at_the_original_cut() {
+    for nonempty in [false, true] {
+        for requested in [rate(2, 1), rate(2, 2)] {
+            let samples = if nonempty {
+                vec![0.125, 0.25, 0.375, 0.5]
+            } else {
+                Vec::new()
+            };
+            let (mut mixer, _producer, mut controller) = rig(
+                1000,
+                vec![(1, 1000, samples)],
+                vec![cue(1, 1, 1_000_000)],
+                Rate::NORMAL,
+                0,
+                region(0, 20_000_000, false),
+                PracticeLimits::new(8, usize::from(nonempty), 2, 8, 8).unwrap(),
+                false,
+                PROGRAM,
+            );
+            render(&mut mixer, &mut [0.0]);
+            let start = started(&mut controller);
+            let metadata = controller.metadata().unwrap();
+            apply_rate(&mut controller, 1, requested);
+            assert_eq!(controller.metadata().unwrap(), metadata);
+            let mut cut = [99.0];
+            let report = render(&mut mixer, &mut cut);
+            assert_eq!(cut, [if nonempty { 0.125 } else { 0.0 }]);
+            assert_eq!(report.counters.commands_applied, 0);
+            assert_eq!(report.counters.voice_full, 0);
+            assert_eq!(controller.history_retention_pins().0, Some(1));
+            let event = changed(&mut controller);
+            assert_eq!(
+                event.outcome,
+                if requested == Rate::NORMAL {
+                    PracticeRateOutcome::Noop
+                } else {
+                    PracticeRateOutcome::Applied
+                }
+            );
+            assert_eq!(
+                (event.request_id, event.generation, event.iteration),
+                (1, start.generation, start.iteration)
+            );
+            assert_eq!((event.request_revision, event.applied_revision), (0, 1));
+            assert_eq!((event.physical_frame, event.playback_frame), (1, 1));
+            assert_eq!(event.active_elapsed_nanos, 1_000_000);
+            assert_eq!(
+                (
+                    event.previous_rate,
+                    event.requested_rate,
+                    event.applied_rate
+                ),
+                (Rate::NORMAL, requested, requested)
+            );
+            let mut suffix = [99.0];
+            render(&mut mixer, &mut suffix);
+            assert_eq!(
+                suffix,
+                [if !nonempty {
+                    0.0
+                } else if requested == Rate::NORMAL {
+                    0.25
+                } else {
+                    0.375
+                }]
+            );
+            let metadata = controller.metadata().unwrap();
+            assert_eq!(
+                (metadata.generation, metadata.revision, metadata.rate),
+                (1, 1, requested)
+            );
+            assert_eq!(controller.history_retention_pins(), (None, None));
+            assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+        }
+    }
+}
+
+#[test]
+fn cold_admission_reserves_the_current_cue_burst_even_for_a_slower_requested_rate() {
+    let (mut mixer, _producer, mut controller) = rig(
+        1000,
+        vec![(1, 1000, Vec::new())],
+        vec![cue(1, 1, 1_000_000), cue(2, 1, 2_000_000)],
+        rate(2, 1),
+        0,
+        region(0, 10_000_000, false),
+        PracticeLimits::new(8, 0, 2, 8, 8).unwrap(),
+        false,
+        PROGRAM,
+    );
+    render(&mut mixer, &mut [0.0]);
+    started(&mut controller);
+    let before = mixer.render(&mut []).unwrap();
+    let metadata = controller.metadata().unwrap();
+    let slower = controller.prepare_rate(rate(1, 2)).unwrap();
+    assert_eq!(
+        controller.try_set_rate_next(1, 1, &slower),
+        Err(PracticeError::EventBudget)
+    );
+    assert_eq!(controller.metadata().unwrap(), metadata);
+    assert_eq!(mixer.render(&mut []).unwrap(), before);
+    assert_eq!(controller.history_retention_pins(), (None, None));
+    let mut due = [99.0];
+    render(&mut mixer, &mut due);
+    assert_eq!(
+        due,
+        [0.0],
+        "the two original due cues still fit without a control"
+    );
+    assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+    controller
+        .try_request_next(1, 1, region(5_000_000, 10_000_000, false))
+        .unwrap();
+    render(&mut mixer, &mut due);
+    match controller.try_pop_event().unwrap() {
+        PracticeEvent::Boundary(boundary) => {
+            assert_eq!(boundary.kind, PracticeBoundaryKind::Requested);
+            assert_eq!((boundary.request_id, boundary.generation), (1, 2));
+            assert_eq!((boundary.physical_frame, boundary.playback_frame), (2, 2));
+            assert_eq!(boundary.applied_song_time, ns(5_000_000));
+        }
+        event => panic!("expected usable control after burst refusal, got {event:?}"),
+    }
+    assert_eq!(controller.metadata().unwrap().rate, rate(2, 1));
+    assert_eq!(controller.metadata().unwrap().revision, 1);
+}
+
+#[test]
+fn minimum_budget_preserves_a_finite_end_and_allows_event_only_controls_afterward() {
+    let original = region(5_000_000, 6_000_000, false);
+    let (mut mixer, _producer, mut controller) = rig(
+        1000,
+        vec![(1, 1000, vec![0.125, 0.25, 0.375, 0.5])],
+        vec![cue(1, 1, 0)],
+        Rate::NORMAL,
+        0,
+        original,
+        PracticeLimits::new(8, 1, 1, 8, 8).unwrap(),
+        false,
+        PROGRAM,
+    );
+    let mut silence = [99.0];
+    render(&mut mixer, &mut silence);
+    assert_eq!(silence, [0.0]);
+    started(&mut controller);
+    let metadata = controller.metadata().unwrap();
+    let prepared = controller.prepare_rate(rate(2, 1)).unwrap();
+    assert_eq!(
+        controller.try_set_rate_next(1, 1, &prepared),
+        Err(PracticeError::EventBudget)
+    );
+    assert_eq!(
+        controller.try_restart_next(1, 1, original, &prepared),
+        Err(PracticeError::EventBudget)
+    );
+    assert_eq!(controller.metadata().unwrap(), metadata);
+    assert_eq!(controller.history_retention_pins(), (None, None));
+    assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+    render(&mut mixer, &mut silence);
+    assert_eq!(silence, [0.0]);
+    match controller.try_pop_event().unwrap() {
+        PracticeEvent::Boundary(end) => {
+            assert_eq!(end.kind, PracticeBoundaryKind::Ended);
+            assert_eq!((end.generation, end.iteration), (2, 1));
+            assert_eq!((end.physical_frame, end.playback_frame), (1, 1));
+            assert_eq!(end.applied_song_time, original.end);
+        }
+        event => panic!("expected original finite end, got {event:?}"),
+    }
+    assert!(mixer.practice_finished());
+    let ended = controller.metadata().unwrap();
+    assert!(!ended.active);
+    assert_eq!(
+        (ended.generation, ended.revision, ended.rate),
+        (2, 0, Rate::NORMAL)
+    );
+    // The end already owns its real boundary. A later refusal needs only its
+    // single event, so a minimum budget must not disable all runtime controls.
+    let prepared = controller.prepare_rate(rate(2, 1)).unwrap();
+    controller.try_set_rate_next(1, 2, &prepared).unwrap();
+    render(&mut mixer, &mut silence);
+    assert_eq!(silence, [0.0]);
+    let event = changed(&mut controller);
+    assert_eq!(
+        event.outcome,
+        PracticeRateOutcome::Refused(PracticeRateRefusal::Ended)
+    );
+    assert_eq!((event.request_id, event.generation), (1, 2));
+    assert_eq!((event.request_revision, event.applied_revision), (0, 0));
+    assert_eq!((event.physical_frame, event.playback_frame), (2, 2));
+    assert_eq!(
+        (
+            event.previous_rate,
+            event.requested_rate,
+            event.applied_rate
+        ),
+        (Rate::NORMAL, rate(2, 1), Rate::NORMAL)
+    );
+    assert_eq!(controller.metadata().unwrap(), ended);
+    assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+    let restore = controller.prepare_rate(Rate::NORMAL).unwrap();
+    // A fresh target with a live anchor voice needs event1+reseed1. Refusing
+    // it must preserve the ended attempt and leave id2 available.
+    assert_eq!(
+        controller.try_restart_next(2, 2, region(0, 4_000_000, false), &restore),
+        Err(PracticeError::EventBudget)
+    );
+    assert_eq!(controller.metadata().unwrap(), ended);
+    assert_eq!(controller.history_retention_pins(), (None, None));
+    assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+    controller
+        .try_restart_next(2, 2, original, &restore)
+        .unwrap();
+    render(&mut mixer, &mut silence);
+    assert_eq!(silence, [0.0]);
+    match controller.try_pop_event().unwrap() {
+        PracticeEvent::Restart(restart) => {
+            assert_eq!(restart.outcome, PracticeRateOutcome::Applied);
+            assert_eq!(
+                (restart.boundary.request_id, restart.boundary.generation),
+                (2, 3)
+            );
+            assert_eq!(
+                (
+                    restart.boundary.physical_frame,
+                    restart.boundary.playback_frame
+                ),
+                (3, 3)
+            );
+            assert_eq!(restart.boundary.applied_song_time, original.start);
+            assert_eq!((restart.request_revision, restart.applied_revision), (0, 1));
+            assert_eq!(
+                (
+                    restart.previous_rate,
+                    restart.requested_rate,
+                    restart.applied_rate
+                ),
+                (Rate::NORMAL, Rate::NORMAL, Rate::NORMAL)
+            );
+        }
+        event => panic!("expected exact empty-target restart, got {event:?}"),
+    }
+    let metadata = controller.metadata().unwrap();
+    assert!(metadata.active);
+    assert_eq!(
+        (metadata.generation, metadata.revision, metadata.rate),
+        (3, 1, Rate::NORMAL)
+    );
+    assert!(!mixer.practice_finished());
+    assert_eq!(controller.history_retention_pins(), (None, None));
+    assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+}
+
+#[test]
+fn exact_three_event_budget_preserves_rate_refusal_loop_and_anchor_at_one_cut() {
+    let (mut mixer, _producer, mut controller) = rig(
+        1000,
+        vec![(1, 1000, vec![0.125, 0.25, 0.375, 0.5])],
+        vec![cue(1, 1, 0)],
+        Rate::NORMAL,
+        0,
+        region(0, 2_000_000, true),
+        PracticeLimits::new(8, 1, 3, 8, 8).unwrap(),
+        false,
+        PROGRAM,
+    );
+    let mut prefix = [99.0; 2];
+    render(&mut mixer, &mut prefix);
+    assert_eq!(prefix, [0.125, 0.25]);
+    started(&mut controller);
+    apply_rate(&mut controller, 1, rate(2, 1));
+    let mut cut = [99.0];
+    let report = render(&mut mixer, &mut cut);
+    assert_eq!(
+        cut,
+        [0.125],
+        "the original loop reseeds at its exact boundary"
+    );
+    assert_eq!(report.counters.voice_full, 0);
+    assert_eq!(report.counters.commands_applied, 0);
+    let event = changed(&mut controller);
+    assert_eq!(
+        event.outcome,
+        PracticeRateOutcome::Refused(PracticeRateRefusal::Ended)
+    );
+    assert_eq!(
+        (event.request_id, event.generation, event.iteration),
+        (1, 1, 0)
+    );
+    assert_eq!((event.request_revision, event.applied_revision), (0, 0));
+    assert_eq!((event.physical_frame, event.playback_frame), (2, 2));
+    assert_eq!(event.active_elapsed_nanos, 2_000_000);
+    assert_eq!(
+        (
+            event.previous_rate,
+            event.requested_rate,
+            event.applied_rate
+        ),
+        (Rate::NORMAL, rate(2, 1), Rate::NORMAL)
+    );
+    assert_eq!(controller.history_retention_pins().0, Some(2));
+    match controller.try_pop_event().unwrap() {
+        PracticeEvent::Boundary(boundary) => {
+            assert_eq!(boundary.kind, PracticeBoundaryKind::Looped);
+            assert_eq!(
+                (boundary.request_id, boundary.generation, boundary.iteration),
+                (0, 2, 1)
+            );
+            assert_eq!((boundary.physical_frame, boundary.playback_frame), (2, 2));
+            assert_eq!(boundary.applied_song_time, ns(0));
+        }
+        event => panic!("expected original same-cut loop, got {event:?}"),
+    }
+    let metadata = controller.metadata().unwrap();
+    assert_eq!(
+        (metadata.generation, metadata.revision, metadata.rate),
+        (2, 0, Rate::NORMAL)
+    );
+    assert_eq!(controller.history_retention_pins(), (None, None));
+    render(&mut mixer, &mut cut);
+    assert_eq!(cut, [0.25]);
+    assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+}
+
+#[test]
+fn minimum_budget_empty_open_pass_admits_applied_noop_and_compound_restart_controls() {
+    let original = region(0, i64::MAX, false);
+    let (mut mixer, _producer, mut controller) = rig(
+        1000,
+        Vec::new(),
+        Vec::new(),
+        Rate::NORMAL,
+        0,
+        original,
+        PracticeLimits::new(8, 0, 1, 8, 8).unwrap(),
+        true,
+        PROGRAM,
+    );
+    render(&mut mixer, &mut [0.0]);
+    started(&mut controller);
+    for (id, requested, outcome) in [
+        (1, rate(2, 1), PracticeRateOutcome::Applied),
+        (2, rate(4, 2), PracticeRateOutcome::Noop),
+    ] {
+        let before = controller.metadata().unwrap();
+        apply_rate(&mut controller, id, requested);
+        assert_eq!(controller.metadata().unwrap(), before);
+        let mut silence = [99.0];
+        let report = render(&mut mixer, &mut silence);
+        assert_eq!(silence, [0.0]);
+        assert_eq!(report.counters.commands_applied, 0);
+        let event = changed(&mut controller);
+        assert_eq!(event.outcome, outcome);
+        assert_eq!(
+            (event.request_id, event.generation, event.iteration),
+            (id, 1, 0)
+        );
+        assert_eq!(
+            (event.request_revision, event.applied_revision),
+            (id - 1, id)
+        );
+        assert_eq!((event.physical_frame, event.playback_frame), (id, id));
+        assert_eq!(event.active_elapsed_nanos, i128::from(id) * 1_000_000);
+        assert_eq!(event.applied_rate, rate(2, 1));
+        assert_eq!(controller.history_retention_pins(), (None, None));
+        assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
+    }
+    let restore = controller.prepare_rate(Rate::NORMAL).unwrap();
+    controller
+        .try_restart_next(3, 1, original, &restore)
+        .unwrap();
+    let mut silence = [99.0];
+    render(&mut mixer, &mut silence);
+    assert_eq!(silence, [0.0]);
+    match controller.try_pop_event().unwrap() {
+        PracticeEvent::Restart(restart) => {
+            assert_eq!(restart.outcome, PracticeRateOutcome::Applied);
+            assert_eq!(
+                (restart.boundary.request_id, restart.boundary.generation),
+                (3, 2)
+            );
+            assert_eq!(
+                (
+                    restart.boundary.physical_frame,
+                    restart.boundary.playback_frame
+                ),
+                (3, 3)
+            );
+            assert_eq!((restart.request_revision, restart.applied_revision), (2, 3));
+            assert_eq!(
+                (
+                    restart.previous_rate,
+                    restart.requested_rate,
+                    restart.applied_rate
+                ),
+                (rate(2, 1), Rate::NORMAL, Rate::NORMAL)
+            );
+        }
+        event => panic!("expected minimum-budget open restart, got {event:?}"),
+    }
+    let metadata = controller.metadata().unwrap();
+    assert!(metadata.active);
+    assert_eq!(
+        (metadata.generation, metadata.revision, metadata.rate),
+        (2, 3, Rate::NORMAL)
+    );
+    assert_eq!(controller.history_retention_pins(), (None, None));
+    assert_eq!(controller.try_pop_event(), Err(PracticeError::Empty));
 }
 
 #[test]
@@ -698,16 +1215,20 @@ fn rate_after_last_empty_cue_refuses_future_repeat_event_budget_without_wedging(
         let (mut mixer, _producer, mut controller) = rig(
             1000,
             vec![(1, 1000, Vec::new())],
-            vec![cue(1, 1, 1_000_000), cue(2, 1, 2_000_000)],
+            vec![
+                cue(1, 1, 1_000_000),
+                cue(2, 1, 2_000_000),
+                cue(3, 1, 3_000_000),
+            ],
             Rate::NORMAL,
             0,
             region(0, 10_000_000, true),
-            PracticeLimits::new(8, 0, 1, 8, 16).unwrap(),
+            PracticeLimits::new(8, 0, 2, 8, 16).unwrap(),
             false,
             PROGRAM,
         );
         // Every original callback uses at most one event: Started at0,
-        // then the two zero-frame cues separately at1 and2.
+        // then the three zero-frame cues separately at1,2 and3.
         for _ in 0..4 {
             let mut silence = [99.0];
             render(&mut mixer, &mut silence);
@@ -715,15 +1236,15 @@ fn rate_after_last_empty_cue_refuses_future_repeat_event_budget_without_wedging(
         }
         started(&mut controller);
         if request_change {
-            apply_rate(&mut controller, 1, rate(2, 1));
+            apply_rate(&mut controller, 1, rate(3, 1));
         }
         if probe_oversized_cut_block {
             assert!(request_change);
             let before = mixer.render(&mut []).unwrap();
             let metadata = controller.metadata().unwrap();
-            // Rate refusal plus the next loop already exceed a whole-block
-            // budget of1, even at the unchanged speed. The invalid large
-            // callback must preserve its request so a valid retry can run.
+            // Rate refusal, the next loop and its first empty cue exceed a
+            // whole-block budget of2 even at the unchanged speed. The invalid
+            // large callback must preserve its request for a valid small retry.
             let mut untouched = [99.0; 8];
             assert_eq!(
                 mixer.render(&mut untouched),
@@ -755,8 +1276,8 @@ fn rate_after_last_empty_cue_refuses_future_repeat_event_budget_without_wedging(
         }
         (output, events, controller.metadata().unwrap())
     }
-    // The current suffix is empty at frame4. At2x the next loop maps both
-    // zero-frame cues onto one frame, requiring two events despite needing
+    // The current suffix is empty at frame4. At3x the next loop maps all three
+    // zero-frame cues onto one frame, requiring three events despite needing
     // zero voice slots. Accepting the rate would wedge that future callback.
     let small_callbacks = run(true, false);
     let retried_after_large_block = run(true, true);
@@ -793,7 +1314,7 @@ fn rate_after_last_empty_cue_refuses_future_repeat_event_budget_without_wedging(
             refused.requested_rate,
             refused.applied_rate
         ),
-        (Rate::NORMAL, rate(2, 1), Rate::NORMAL)
+        (Rate::NORMAL, rate(3, 1), Rate::NORMAL)
     );
     assert_eq!((refused.request_revision, refused.applied_revision), (0, 0));
     let boundaries: Vec<_> = small_callbacks
