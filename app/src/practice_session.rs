@@ -89,6 +89,24 @@ impl PreparedPracticeAttempt {
             self.config.end,
         )
     }
+
+    pub fn transport_at_runtime_output_phase(
+        &self,
+        basis: OutputPhaseBasis,
+        logical_boundary: ClockPoint,
+    ) -> Result<Transport, OutputPhaseError> {
+        if basis.domain() != self.config.domain || logical_boundary.domain != self.config.domain {
+            return Err(OutputPhaseError::WrongDomain);
+        }
+        Transport::new_with_runtime_output_phase(
+            basis,
+            logical_boundary,
+            self.config.start,
+            Duration::ZERO,
+            self.speed.rate(),
+            self.config.end,
+        )
+    }
 }
 
 /// Prepare without modifying a current judge, launch, capture, queue or bank.
@@ -107,6 +125,7 @@ pub fn prepare_attempt(
         current_launch,
         config,
         ReplaySpeed::new(Rate::NORMAL)?,
+        false,
     )
 }
 
@@ -120,7 +139,19 @@ pub fn prepare_attempt_with_speed(
     speed: ReplaySpeed,
 ) -> NativeGameplayResult<PreparedPracticeAttempt> {
     validate_launch_speed(current_launch, speed)?;
-    prepare_attempt_inner(original, policy, current_launch, config, speed)
+    prepare_attempt_inner(original, policy, current_launch, config, speed, false)
+}
+
+/// New sections inherit the actual retained rate, without rewriting the pinned
+/// invocation that owns a later original restart.
+pub fn prepare_attempt_with_runtime_speed(
+    original: &BmsChart,
+    policy: &ResolvedPlayPolicy,
+    current_launch: &SessionLaunch,
+    config: PracticeAttemptConfig,
+    speed: ReplaySpeed,
+) -> NativeGameplayResult<PreparedPracticeAttempt> {
+    prepare_attempt_inner(original, policy, current_launch, config, speed, true)
 }
 
 pub(crate) fn validate_launch_speed(
@@ -151,6 +182,7 @@ fn prepare_attempt_inner(
     current_launch: &SessionLaunch,
     config: PracticeAttemptConfig,
     speed: ReplaySpeed,
+    runtime: bool,
 ) -> NativeGameplayResult<PreparedPracticeAttempt> {
     crate::live_speed::LiveSpeedSetup::new(
         config.start,
@@ -170,7 +202,11 @@ fn prepare_attempt_inner(
     }) {
         return Err("retained practice requires live nonnetwork playback".into());
     }
-    let next_launch = current_launch.retry()?;
+    let next_launch = if runtime {
+        current_launch.retry_with_speed(speed)?
+    } else {
+        current_launch.retry()?
+    };
     let recording_path = next_launch
         .args()
         .chunks_exact(2)

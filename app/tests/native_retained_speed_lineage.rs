@@ -20,7 +20,9 @@ use beatkernel_bms_runtime::{
     play_policy::{GaugeSelection, OriginalGaugeContext, ResolvedPlayPolicy},
     practice::PracticeStart,
     practice_loop::PracticeLoop,
-    practice_session::{prepare_attempt_with_speed, PracticeAttemptConfig},
+    practice_session::{
+        prepare_attempt_with_runtime_speed, prepare_attempt_with_speed, PracticeAttemptConfig,
+    },
     replay_playback::{decode_section_setup, reconstruct_section, validate_section_setup},
     replay_speed::ReplaySpeed,
     session_launch::SessionLaunch,
@@ -380,6 +382,142 @@ fn local_members_keep_roster_and_disjoint_original_base_across_retry_chains() {
     assert_eq!(paths.len(), 6);
     assert_eq!(global.args(), global_args);
     assert_eq!(global.attempt(), 0);
+}
+
+#[test]
+fn runtime_scrub_preparation_uses_current_speed_and_keeps_original_f5_invocation() {
+    let original = source();
+    let policy = policy(&original);
+    let pinned = launch(false);
+    let original_args = pinned.original_args().to_vec();
+    let selected = pinned
+        .retry_from(PracticeStart::from_nanoseconds(500_000_000).unwrap())
+        .unwrap();
+    let cfg = config(&selected);
+    let current: ReplaySpeed = "2/1".parse().unwrap();
+    assert!(prepare_attempt_with_speed(&original, &policy, &selected, cfg, current).is_err());
+    let attempt =
+        prepare_attempt_with_runtime_speed(&original, &policy, &selected, cfg, current).unwrap();
+    assert_eq!(attempt.speed(), current);
+    assert_eq!(value(&attempt.next_launch, "--speed"), "2/1");
+    assert_eq!(attempt.next_launch.attempt(), 2);
+    assert_eq!(attempt.next_launch.original_args(), original_args);
+    assert_eq!(attempt.next_launch.retry().unwrap().args()[3], "6/4");
+    let f5 = attempt.next_launch.retry().unwrap();
+    assert_eq!(value(&f5, "--start-ns"), "2000000000");
+    assert_eq!(value(&f5, "--end-ns"), "3500000000");
+    assert_eq!(value(&f5, "--preroll-ns"), "100000000");
+    let basis = OutputPhaseBasis::new(DOMAIN, 14045, 2, 7, 44_100).unwrap();
+    let transport = attempt
+        .transport_at_runtime_output_phase(basis, point(1000))
+        .unwrap();
+    let zero = basis.point_from_elapsed_nanos(point(1000), 0).unwrap();
+    let later = basis.point_from_elapsed_nanos(point(1001), 22_675).unwrap();
+    assert_eq!(transport.runtime_output_rate(), Some(current.rate()));
+    assert_eq!(
+        transport.position_at_output_phase(zero).unwrap(),
+        ts(500_000_000)
+    );
+    assert_eq!(
+        transport.position_at_output_phase(later).unwrap(),
+        ts(500_045_350)
+    );
+    assert_eq!(attempt.score, ScoreSummary::default());
+    assert_eq!(
+        attempt.gauge.snapshot(),
+        BmsGauge::new(policy.gauge().try_copy().unwrap()).snapshot()
+    );
+    assert_eq!(pinned.args(), original_args);
+    assert_eq!(value(&selected, "--speed"), "6/4");
+}
+
+#[test]
+fn current_speed_runtime_retry_records_real_original_time_hits_with_unmodified_policy() {
+    let original = source();
+    let policy = policy(&original);
+    let selected = launch(false)
+        .retry_from(PracticeStart::from_nanoseconds(500_000_000).unwrap())
+        .unwrap();
+    let recording = launch(false);
+    let mut cfg = config(&selected);
+    cfg.capture_limits = Some(replay_limits().unwrap());
+    let mut attempt = prepare_attempt_with_runtime_speed(
+        &original,
+        &policy,
+        &recording,
+        cfg,
+        "2/1".parse().unwrap(),
+    )
+    .unwrap();
+    let basis = OutputPhaseBasis::new(DOMAIN, 14045, 1, 0, 1000).unwrap();
+    let transport = attempt
+        .transport_at_runtime_output_phase(basis, point(1000))
+        .unwrap();
+    let first = attempt.judge.chart().objects()[0].clone();
+    assert_eq!(first.time.start, ts(1_000_000_000));
+    let bindings = BindingMap::from_bindings([Binding {
+        device: DeviceSelector::Any,
+        physical: PhysicalControlId::keyboard(4),
+        game_control: GameControlId(0x11),
+    }])
+    .unwrap();
+    let (producer, _consumer) = command_queue(16).unwrap();
+    let mut runtime = Runtime::new(
+        DOMAIN,
+        DOMAIN,
+        transport,
+        bindings,
+        attempt.judge,
+        producer,
+        vec![],
+        0,
+    )
+    .unwrap();
+    let input = PhysicalInputEvent::Button(ButtonEvent {
+        meta: EventMeta::new(DeviceId(8), point(1001), 9),
+        control: PhysicalControlId::keyboard(4),
+        state: ButtonState::Down,
+    });
+    let report = runtime
+        .process_input_output_phase(
+            input.clone(),
+            &Identity,
+            point(2000),
+            basis
+                .point_from_elapsed_nanos(point(1001), 250_000_000)
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(report.song_time, ts(1_000_000_000));
+    assert_eq!(report.judge_events.len(), 1);
+    assert_eq!(report.judge_events[0].object, first.id);
+    assert_eq!(report.judge_events[0].input, Some(*input.meta()));
+    attempt
+        .capture
+        .as_mut()
+        .unwrap()
+        .record_report(&report)
+        .unwrap();
+    let file = decode_replay(
+        &attempt.capture.unwrap().into_bytes().unwrap(),
+        replay_limits().unwrap(),
+    )
+    .unwrap();
+    let setup = decode_section_setup(&file.header.options).unwrap();
+    assert_eq!(setup.source_speed, "2/1".parse().unwrap());
+    assert_eq!(setup.start, ts(500_000_000));
+    assert_eq!(setup.end, Some(ts(3_500_000_000)));
+    assert_eq!(&setup.profile, policy.judge());
+    assert_eq!(&setup.gauge, policy.gauge());
+    assert_eq!(file.records.len(), 1);
+    assert_eq!(file.records[0].song_time, ts(1_000_000_000));
+    let mut replay = reconstruct_section(&original, file, replay_limits().unwrap()).unwrap();
+    replay.seek_cursor(1).unwrap();
+    assert_eq!(replay.results(), report.judge_events);
+    assert_eq!(
+        replay.engine().stable_hash().unwrap(),
+        runtime.judge().stable_hash().unwrap()
+    );
 }
 
 #[test]

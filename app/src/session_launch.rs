@@ -229,6 +229,45 @@ impl SessionLaunch {
             attempt,
         })
     }
+    /// Fresh retained sections keep the currently applied rate; the original
+    /// invocation stays immutable so ordinary F5 still restores its selection.
+    pub fn retry_with_speed(
+        &self,
+        speed: crate::replay_speed::ReplaySpeed,
+    ) -> Result<Self, String> {
+        let mut retry = self.retry()?;
+        let mut selected = None;
+        for pair in retry.args.chunks_exact(2) {
+            if pair[0] == "--speed" {
+                if selected.is_some() {
+                    return Err("duplicate retry speed option".into());
+                }
+                selected = Some(
+                    pair[1]
+                        .parse::<crate::replay_speed::ReplaySpeed>()
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+        }
+        let original = selected.unwrap_or(
+            crate::replay_speed::ReplaySpeed::new(beatkernel::transport::Rate::NORMAL)
+                .expect("NORMAL is positive"),
+        );
+        if original != speed {
+            let mut replaced = false;
+            for pair in retry.args.chunks_exact_mut(2) {
+                if pair[0] == "--speed" {
+                    pair[1] = speed.to_string();
+                    replaced = true;
+                }
+            }
+            if !replaced {
+                retry.args.extend(["--speed".into(), speed.to_string()]);
+            }
+            validate(&retry.args)?;
+        }
+        Ok(retry)
+    }
     /// Rebase an already selected retry after its old owner has joined. Retained
     /// laps may advance the recording ordinal between UI preflight and cancel.
     /// Preserve the selected bookmark/loop arguments, but derive recording
@@ -415,9 +454,11 @@ mod practice_lineage_tests {
         assert_eq!(next.args()[3], "records/game.p2.retry3.bkr");
         assert_eq!(current.args()[3], "records/game.retry2.bkr");
         assert_eq!(initial.args()[3], "records/game.bkr");
-        assert!(current
-            .for_recording_path("records/a\nb.bkr".into(), "records/c.bkr".into())
-            .is_err());
+        assert!(
+            current
+                .for_recording_path("records/a\nb.bkr".into(), "records/c.bkr".into())
+                .is_err()
+        );
     }
     #[test]
     fn joined_retry_rebase_preserves_selected_endpoints_and_final_global_ordinal() {

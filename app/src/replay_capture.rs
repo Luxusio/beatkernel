@@ -391,8 +391,9 @@ struct RateReservation {
 }
 
 /// Cold, owner-bound storage for one actual source-rate result.
-/// Dropping an uncommitted token releases its byte reservation.
-#[derive(Debug)]
+/// Clones share one reservation. Dropping the last uncommitted clone releases
+/// its byte reservation; commit or explicit cancellation invalidates all clones.
+#[derive(Clone, Debug)]
 pub struct PreparedSourceRateChange {
     owner: Arc<()>,
     lifetime: Arc<()>,

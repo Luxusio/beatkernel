@@ -11,8 +11,8 @@ use crate::{
     },
 };
 use beatkernel::audio::{
-    InterpolatedTargetTime, OutputFrameBasis, PracticeReceipt, ProjectedPracticeReceipt,
-    TargetFrameBasis, TargetTime,
+    InterpolatedTargetTime, OutputFrameBasis, PracticeEvent, PracticeReceipt,
+    ProjectedPracticeEvent, ProjectedPracticeReceipt, TargetFrameBasis, TargetTime,
 };
 use beatkernel::time::{presentation::ObservationAdmission, ClockPoint};
 use beatkernel_platform::audio::presentation::validation::{
@@ -29,6 +29,10 @@ mod source_coordinate_epoch;
 pub use source_coordinate_epoch::{
     PreparedCoordinateSourceNativeAudioEpoch, PreparedCoordinateSourceOwnerAssociation,
 };
+
+#[cfg(test)]
+#[path = "native_audio_presentation_runtime_rate_fixtures.rs"]
+mod runtime_rate_fixtures;
 
 /// One caller-supplied native observation on its actual creation epoch and frame basis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,6 +179,74 @@ impl PreparedPracticeBoundary {
         };
         Ok(Some(InterpolatedTargetTime::new(time, 0, 0, 1, 0, 1)?))
     }
+}
+
+/// Actual typed PCM event qualified on the original native epoch and grid.
+/// A Rate event is never replaced with an invented region receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedPracticeEventBoundary {
+    epoch: AudioAuthorityEpoch,
+    coordinate_basis: Option<AudioAuthorityCoordinateBasis>,
+    mixer_basis: OutputFrameBasis,
+    projected: ProjectedPracticeEvent,
+    raw: ClockPoint,
+    logical: ClockPoint,
+    host: ClockPoint,
+}
+impl PreparedPracticeEventBoundary {
+    pub const fn projected_event(&self) -> ProjectedPracticeEvent {
+        self.projected
+    }
+    pub const fn raw_output(&self) -> ClockPoint {
+        self.raw
+    }
+    pub const fn output(&self) -> ClockPoint {
+        self.logical
+    }
+    pub const fn host(&self) -> ClockPoint {
+        self.host
+    }
+    pub fn coordinate_query(&self) -> NativeGameplayResult<Option<InterpolatedTargetTime>> {
+        practice_coordinate_query(
+            self.coordinate_basis,
+            event_frames(self.projected.event).1,
+            Some(self.projected.boundary.target_time),
+        )
+    }
+}
+
+fn event_frames(event: PracticeEvent) -> (u64, u64, u64) {
+    match event {
+        PracticeEvent::Boundary(receipt) => (
+            receipt.generation,
+            receipt.physical_frame,
+            receipt.playback_frame,
+        ),
+        PracticeEvent::Rate(rate) => (rate.generation, rate.physical_frame, rate.playback_frame),
+        PracticeEvent::Restart(restart) => (
+            restart.boundary.generation,
+            restart.boundary.physical_frame,
+            restart.boundary.playback_frame,
+        ),
+    }
+}
+
+fn practice_coordinate_query(
+    coordinate_basis: Option<AudioAuthorityCoordinateBasis>,
+    physical_frame: u64,
+    target_time: Option<TargetTime>,
+) -> NativeGameplayResult<Option<InterpolatedTargetTime>> {
+    let time = match coordinate_basis {
+        Some(AudioAuthorityCoordinateBasis::SourceFrame(basis))
+        | Some(AudioAuthorityCoordinateBasis::SourceCounter { basis, .. }) => {
+            TargetTime::from_frames(physical_frame, basis.sample_rate())?
+        }
+        Some(AudioAuthorityCoordinateBasis::TargetFrame(_)) => {
+            target_time.ok_or("coordinate practice lacks original Target projection")?
+        }
+        None => return Ok(None),
+    };
+    Ok(Some(InterpolatedTargetTime::new(time, 0, 0, 1, 0, 1)?))
 }
 impl NativeAudioPresentation {
     /// Construct matching cold owners without stitching independently admitted histories.
@@ -690,6 +762,42 @@ impl NativeAudioPresentation {
         raw: ClockPoint,
         now: ClockPoint,
     ) -> NativeGameplayResult<Option<PreparedPracticeBoundary>> {
+        let Some((coordinate_basis, host, logical)) = self.qualify_practice_cut(
+            receipt.physical_frame,
+            projected.map(|p| p.boundary.target_time),
+            basis,
+            raw,
+            now,
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(PreparedPracticeBoundary {
+            epoch: self.authority.epoch(),
+            coordinate_basis,
+            mixer_basis: basis,
+            receipt,
+            projected,
+            raw,
+            logical,
+            host,
+        }))
+    }
+
+    fn qualify_practice_cut(
+        &self,
+        physical_frame: u64,
+        target_time: Option<TargetTime>,
+        basis: OutputFrameBasis,
+        raw: ClockPoint,
+        now: ClockPoint,
+    ) -> NativeGameplayResult<
+        Option<(
+            Option<AudioAuthorityCoordinateBasis>,
+            ClockPoint,
+            ClockPoint,
+        )>,
+    > {
         let coordinate_basis = self.authority.coordinate_basis();
         let (host, logical) = match coordinate_basis {
             Some(AudioAuthorityCoordinateBasis::SourceFrame(source_basis))
@@ -708,7 +816,7 @@ impl NativeAudioPresentation {
                     );
                 }
                 let query =
-                    PreparedPracticeBoundary::query_for(coordinate_basis, receipt, projected)?
+                    practice_coordinate_query(coordinate_basis, physical_frame, target_time)?
                         .ok_or("coordinate practice lacks its original Source descriptor")?;
                 let Some(host) = self
                     .authority
@@ -725,10 +833,11 @@ impl NativeAudioPresentation {
                         "practice Target descriptor differs from original native basis".into(),
                     );
                 }
-                let projected = projected
-                    .ok_or("coordinate practice requires an actual projected Target boundary")?;
                 let query =
-                    InterpolatedTargetTime::new(projected.boundary.target_time, 0, 0, 1, 0, 1)?;
+                    practice_coordinate_query(coordinate_basis, physical_frame, target_time)?
+                        .ok_or(
+                            "coordinate practice requires an actual projected Target boundary",
+                        )?;
                 let Some(host) = self
                     .authority
                     .presented_coordinate_boundary_host(&query, now)?
@@ -744,16 +853,163 @@ impl NativeAudioPresentation {
                 (host, self.authority.checked_logical_output(raw)?)
             }
         };
-        Ok(Some(PreparedPracticeBoundary {
+        Ok(Some((coordinate_basis, host, logical)))
+    }
+
+    pub fn prepare_projected_practice_event(
+        &self,
+        projected: ProjectedPracticeEvent,
+        now: ClockPoint,
+    ) -> NativeGameplayResult<Option<PreparedPracticeEventBoundary>> {
+        self.validate_identity()?;
+        if self.validator.latest_record().map(|record| record.pair())
+            != self.authority.latest_observation()
+        {
+            return Err("practice event lacks matching original native observation".into());
+        }
+        let basis = self
+            .practice_mixer_basis
+            .ok_or("practice mixer basis is not pinned")?;
+        let (generation, physical, playback) = event_frames(projected.event);
+        if generation == 0
+            || playback > physical
+            || physical < basis.start_physical_frame()
+            || projected.boundary.source_frame != physical
+            || projected.origin != basis.origin()
+            || projected.target_rate == 0
+            || projected.boundary.target_frame_offset as u128 > u128::from(projected.target_frame)
+        {
+            return Err("malformed projected practice event".into());
+        }
+        if let PracticeEvent::Boundary(receipt) = projected.event {
+            self.validate_practice_receipt(receipt)?;
+        }
+        if let PracticeEvent::Restart(restart) = projected.event {
+            self.validate_practice_receipt(restart.boundary)?;
+        }
+        let raw = projected.boundary.target_time.point(projected.origin)?;
+        if let Some(native) = self.target_basis {
+            if projected.origin != native.origin()
+                || projected.target_rate != native.sample_rate()
+                || raw.timestamp < native.point_at_stream_frame(0)?.timestamp
+            {
+                return Err("practice event differs from native Target creation grid".into());
+            }
+        } else if let Some(native) = self.basis {
+            let relative = physical
+                .checked_sub(native.start_physical_frame())
+                .ok_or("practice event precedes native Source creation")?;
+            if projected.target_rate != native.sample_rate()
+                || projected.boundary.target_time
+                    != TargetTime::from_frames(physical, native.sample_rate())?
+                || raw != native.point_at_stream_frame(relative)?
+                || projected.target_frame != physical
+            {
+                return Err("practice event differs from native Source creation grid".into());
+            }
+        } else {
+            return Err("practice event lacks native creation identity".into());
+        }
+        let Some((coordinate_basis, host, logical)) = self.qualify_practice_cut(
+            physical,
+            Some(projected.boundary.target_time),
+            basis,
+            raw,
+            now,
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(PreparedPracticeEventBoundary {
             epoch: self.authority.epoch(),
             coordinate_basis,
             mixer_basis: basis,
-            receipt,
             projected,
             raw,
             logical,
             host,
         }))
+    }
+
+    fn validate_practice_event_boundary(
+        &self,
+        prepared: &PreparedPracticeEventBoundary,
+        now: ClockPoint,
+    ) -> NativeGameplayResult<()> {
+        if self.authority.epoch() != prepared.epoch
+            || self.practice_mixer_basis != Some(prepared.mixer_basis)
+            || self.authority.coordinate_basis() != prepared.coordinate_basis
+            || self.prepare_projected_practice_event(prepared.projected, now)? != Some(*prepared)
+        {
+            return Err("practice event native qualification changed or retired".into());
+        }
+        Ok(())
+    }
+
+    pub fn practice_event_boundary_ready(
+        &self,
+        prepared: &PreparedPracticeEventBoundary,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<bool> {
+        self.validate_practice_event_boundary(prepared, now)?;
+        if let Some(query) = prepared.coordinate_query()? {
+            return Ok(self
+                .authority
+                .prepare_coordinate_resume_control_cutoff(
+                    prepared.epoch.id,
+                    query,
+                    prepared.host,
+                    now,
+                    merger,
+                )?
+                .is_some());
+        }
+        Ok(self
+            .authority
+            .prepare_resume_control_cutoff(
+                prepared.epoch.id,
+                prepared.raw,
+                prepared.host,
+                now,
+                merger,
+            )?
+            .is_some())
+    }
+
+    pub fn commit_practice_event_boundary(
+        &mut self,
+        prepared: PreparedPracticeEventBoundary,
+        now: ClockPoint,
+        merger: &InputMerger,
+    ) -> NativeGameplayResult<()> {
+        self.validate_practice_event_boundary(&prepared, now)?;
+        if let Some(query) = prepared.coordinate_query()? {
+            let cutoff = self
+                .authority
+                .prepare_coordinate_resume_control_cutoff(
+                    prepared.epoch.id,
+                    query,
+                    prepared.host,
+                    now,
+                    merger,
+                )?
+                .ok_or("practice event awaits acquired prefix or pre-cut input drain")?;
+            return Ok(self
+                .authority
+                .commit_coordinate_control_cutoff(cutoff, now, merger)?);
+        }
+        let cutoff = self
+            .authority
+            .prepare_resume_control_cutoff(
+                prepared.epoch.id,
+                prepared.raw,
+                prepared.host,
+                now,
+                merger,
+            )?
+            .ok_or("practice event awaits acquired prefix or pre-cut input drain")?;
+        Ok(self.authority.commit_control_cutoff(cutoff, merger)?)
     }
 
     /// Check the exact original input cut after all strictly earlier inputs drain.

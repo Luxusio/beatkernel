@@ -536,3 +536,112 @@ fn per_report_allocation_volume_does_not_scale_with_growing_variable_history() {
     exact(&short);
     exact(&long);
 }
+
+#[test]
+fn dropped_prepared_clone_keeps_original_reservation_charged_to_later_reports() {
+    let report = reports().remove(0);
+    let empty = capture_at("1/1", limits()).encoded_bytes();
+    let mut probe = capture_at("1/1", limits());
+    probe.record_report(&report).unwrap();
+    let record_cost = probe.encoded_bytes() - empty;
+    let required = empty + FIRST_GROWTH + record_cost;
+    for (cap, accepts_report) in [(required - 1, false), (required, true)] {
+        let mut capture = capture_at("1/1", bounded(cap, 4096.min(cap)));
+        let original = capture.prepare_source_rate_change(speed("3/2")).unwrap();
+        let before = encoded_snapshot(&capture);
+        let mut discarded = original.clone();
+        capture
+            .prepare_applied_source_rate_change(&mut discarded, cut(0, 1, 2, "3/2"))
+            .unwrap();
+        drop(discarded);
+        assert_eq!(encoded_snapshot(&capture), before);
+        assert!(capture.prepare_source_rate_change(speed("2/1")).is_err());
+        assert_eq!(capture.record_report(&report).is_ok(), accepts_report);
+        if !accepts_report {
+            assert_eq!(encoded_snapshot(&capture), before);
+            assert!(capture.records().is_empty());
+        }
+        // The retained original permits another independently filled candidate
+        // for the identical actual cut after the first candidate was abandoned.
+        let mut retry = original.clone();
+        capture
+            .prepare_applied_source_rate_change(&mut retry, cut(0, 1, 2, "3/2"))
+            .unwrap();
+        capture.commit_source_rate_change(retry).unwrap();
+        drop(original);
+        assert_eq!(
+            capture.encoded_bytes(),
+            empty + FIRST_GROWTH + if accepts_report { record_cost } else { 0 }
+        );
+        assert_eq!(capture.source_rate_schedule().cuts(), [cut(0, 1, 2, "3/2")]);
+        if accepts_report {
+            assert_eq!(capture.records(), probe.records());
+        }
+        exact(&capture);
+    }
+}
+
+#[test]
+fn commit_or_explicit_cancel_invalidates_every_clone_without_cancelling_a_later_reservation() {
+    for cancel in [false, true] {
+        let mut capture = capture_at("1/1", limits());
+        let before = encoded_snapshot(&capture);
+        let original = capture.prepare_source_rate_change(speed("3/2")).unwrap();
+        let mut applied_clone = original.clone();
+        capture
+            .prepare_applied_source_rate_change(&mut applied_clone, cut(0, 1, 2, "3/2"))
+            .unwrap();
+        let mut stale_filled = applied_clone.clone();
+        let mut stale_original = original.clone();
+        if cancel {
+            capture.cancel_source_rate_change(applied_clone).unwrap();
+            assert_eq!(encoded_snapshot(&capture), before);
+            assert_eq!(capture.source_rate_schedule().current_speed(), speed("1/1"));
+        } else {
+            capture.commit_source_rate_change(applied_clone).unwrap();
+            assert_ne!(encoded_snapshot(&capture), before);
+            assert_eq!(capture.source_rate_schedule().current_speed(), speed("3/2"));
+        }
+        let completed = encoded_snapshot(&capture);
+        let requested = if cancel { "3/2" } else { "2/1" };
+        let actual_cut = cut(1, 1, 2, requested);
+        let mut next = capture
+            .prepare_source_rate_change(speed(requested))
+            .unwrap();
+        assert!(
+            capture
+                .prepare_applied_source_rate_change(&mut stale_original, cut(0, 1, 2, "3/2"))
+                .is_err()
+        );
+        assert!(
+            capture
+                .prepare_applied_source_rate_change(&mut stale_filled, cut(0, 1, 2, "3/2"))
+                .is_err()
+        );
+        assert!(capture.commit_source_rate_change(stale_filled).is_err());
+        assert!(capture.cancel_source_rate_change(stale_original).is_err());
+        assert!(capture.cancel_source_rate_change(original).is_err());
+        assert_eq!(encoded_snapshot(&capture), completed);
+        assert!(
+            capture.prepare_source_rate_change(speed("5/2")).is_err(),
+            "stale clones must not cancel the newer reservation"
+        );
+        capture
+            .prepare_applied_source_rate_change(&mut next, actual_cut)
+            .unwrap();
+        capture.commit_source_rate_change(next).unwrap();
+        assert_eq!(
+            capture.source_rate_schedule().current_speed(),
+            speed(requested)
+        );
+        assert_eq!(
+            capture.source_rate_schedule().cuts().last().copied(),
+            Some(actual_cut)
+        );
+        assert_eq!(
+            capture.source_rate_schedule().cuts().len(),
+            if cancel { 1 } else { 2 }
+        );
+        exact(&capture);
+    }
+}
