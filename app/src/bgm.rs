@@ -1,6 +1,9 @@
 //! Off-thread rolling admission of prepared BGM into one existing audio queue.
 use beatkernel::{
-    audio::{AudioCommand, AudioLimits, CommandPushError},
+    audio::{
+        AudioCommand, AudioLimits, CommandPushError, PracticeCue, PracticeRateCueGeometry,
+        SampleBank,
+    },
     time::{ClockPoint, Duration},
     transport::Rate,
 };
@@ -349,3 +352,55 @@ fn ceil_frames(nanos: i128, sample_rate: u32) -> Result<u64, BgmFeedError> {
 #[cfg(test)]
 #[path = "output_stop_feed_fixtures.rs"]
 mod output_stop_feed_fixtures;
+
+/// Cold original-song cues; stable ordering preserves equal-onset voice identity.
+pub fn retained_bgm_cues(commands: &[AudioCommand]) -> Result<Vec<PracticeCue>, BgmFeedError> {
+    let mut cues = Vec::new();
+    cues.try_reserve_exact(commands.len())
+        .map_err(|_| BgmFeedError::AllocationFailed)?;
+    for &command in commands {
+        let AudioCommand::Play {
+            voice,
+            sample,
+            at,
+            gain,
+        } = command
+        else {
+            return Err(BgmFeedError::InvalidCommand(command));
+        };
+        if !gain.is_finite() {
+            return Err(BgmFeedError::InvalidCommand(command));
+        }
+        cues.push(PracticeCue {
+            voice,
+            sample,
+            at,
+            gain,
+        });
+    }
+    cues.sort_by_key(|cue| cue.at);
+    Ok(cues)
+}
+/// Copies immutable source geometry before the bank leaves the producer.
+pub fn retained_rate_geometry(
+    bank: &SampleBank,
+    cues: &[PracticeCue],
+) -> Result<Vec<PracticeRateCueGeometry>, BgmFeedError> {
+    let mut geometry = Vec::new();
+    geometry
+        .try_reserve_exact(cues.len())
+        .map_err(|_| BgmFeedError::AllocationFailed)?;
+    for cue in cues {
+        let sample = bank
+            .get(cue.sample)
+            .ok_or(BgmFeedError::InvalidConfiguration(
+                "unknown retained sample",
+            ))?;
+        geometry.push(PracticeRateCueGeometry {
+            at: cue.at,
+            source_frames: u64::try_from(sample.frames()).map_err(|_| BgmFeedError::Overflow)?,
+            source_hz: sample.format().sample_rate(),
+        });
+    }
+    Ok(geometry)
+}

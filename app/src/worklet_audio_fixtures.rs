@@ -25,6 +25,62 @@ fn audio(max_frames: usize, queue: usize) -> WorkletAudio {
         .unwrap();
     builder.finish().unwrap()
 }
+
+#[test]
+fn legacy_owner_retains_pcm_and_report_behavior_when_retained_controls_are_refused() {
+    use beatkernel::{
+        audio::{PracticeRateCueGeometry, PracticeRegion, prepare_practice_rate},
+        transport::Rate,
+    };
+    let mut audio = audio(8, 4);
+    let prep = prepare_practice_rate(
+        444,
+        1000,
+        &[PracticeRateCueGeometry {
+            at: Timestamp::ZERO,
+            source_frames: 4,
+            source_hz: 1000,
+        }],
+        Rate::NORMAL,
+    )
+    .unwrap();
+    assert_eq!(
+        audio.retained_metadata(),
+        Err(WorkletAudioError::RetainedRequired)
+    );
+    assert!(audio.source_playback_history().is_none());
+    assert!(audio.try_set_rate_next(1, 1, 0, prep).is_err());
+    assert!(
+        audio
+            .try_region_next(
+                2,
+                1,
+                0,
+                PracticeRegion::new(Timestamp::ZERO, Timestamp::from_nanos(2_000_000), false)
+                    .unwrap()
+            )
+            .is_err()
+    );
+    assert!(audio.try_restart_original_next(3, 1, 0, prep).is_err());
+    assert!(audio.request_pause(4, 1, true).is_err());
+    assert!(audio.poll_retained_event().is_err());
+    assert!(!audio.failed());
+    audio.enqueue(play(1, 1, 0)).unwrap();
+    audio.arm(100, 100).unwrap();
+    audio.render(100, 4).unwrap();
+    assert_eq!(&audio.output()[..4], &[0.25, 0.5, 0.75, 1.0]);
+    let report = audio.report().unwrap();
+    assert_eq!(
+        (
+            report.start_frame,
+            report.playback_start_frame,
+            report.playback_frames
+        ),
+        (0, 0, 4)
+    );
+    assert!(!report.paused);
+    assert_eq!(report.counters.commands_applied, 1);
+}
 fn play(sample: u64, voice: u64, ns: i64) -> AudioCommand {
     AudioCommand::Play {
         voice: VoiceId(voice),

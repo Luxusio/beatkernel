@@ -106,6 +106,164 @@ fn actual_words(audio: &WorkletAudio) -> [u32; 58] {
 }
 
 #[test]
+fn retained_decoder_accepts_actual_pause_excluding_reports_while_fixed_decoders_stay_strict() {
+    use crate::worklet_audio::{WorkletRetainedConfig, decode_retained_output};
+    use beatkernel::{
+        audio::{PracticeCue, PracticeLimits, PracticeRegion},
+        time::Duration,
+        transport::Rate,
+    };
+    let format = AudioFormat::new(1000, 1).unwrap();
+    let mut builder = WorkletAudioBuilder::new(WorkletAudioConfig {
+        format,
+        pcm_limits: PcmLimits::new(32, 32, 1).unwrap(),
+        audio_limits: AudioLimits::new(8, 4, 8, 16, 8).unwrap(),
+    })
+    .unwrap();
+    builder
+        .insert_sample(SampleId(1), format, vec![0.125; 8])
+        .unwrap();
+    let mut audio = builder
+        .finish_retained(
+            vec![PracticeCue {
+                voice: VoiceId(1),
+                sample: SampleId(1),
+                at: Timestamp::ZERO,
+                gain: 1.0,
+            }],
+            WorkletRetainedConfig {
+                program_id: 444,
+                initial_region: PracticeRegion::new(
+                    Timestamp::ZERO,
+                    Timestamp::from_nanos(20_000_000),
+                    false,
+                )
+                .unwrap(),
+                initial_rate: Rate::NORMAL,
+                output_preroll: Duration::ZERO,
+                open_end: false,
+                limits: PracticeLimits::new(8, 1, 64, 8, 8).unwrap(),
+                source_history_capacity: 16,
+            },
+        )
+        .unwrap();
+    let base = (1 << 53) + 137;
+    audio.arm(base, base).unwrap();
+    assert!(
+        decode_retained_output(&actual_words(&audio))
+            .unwrap()
+            .report
+            .is_none()
+    );
+    audio.render(base, 2).unwrap();
+    let started = audio.poll_retained_event().unwrap().unwrap();
+    audio.acknowledge_retained_event(started.serial).unwrap();
+    assert_eq!(
+        decode_retained_output(&actual_words(&audio))
+            .unwrap()
+            .report,
+        audio.report()
+    );
+    let generation = audio.retained_metadata().unwrap().generation;
+    audio.request_pause(1, generation, true).unwrap();
+    audio.render(base + 2, 3).unwrap();
+    let words = actual_words(&audio);
+    let report = audio.report().unwrap();
+    assert_eq!(
+        (
+            report.start_frame,
+            report.frames,
+            report.playback_start_frame,
+            report.playback_frames,
+            report.paused
+        ),
+        (2, 3, 2, 0, true)
+    );
+    let decoded = decode_retained_output(&words).unwrap();
+    assert_eq!(decoded.report, Some(report));
+    assert_eq!(decoded.context, Some(base + 5));
+    assert_eq!(decoded.start, base);
+    assert!(decode_output(&words).is_err());
+    assert!(decode_section_output(&words, None).is_err());
+    let pause = audio.poll_retained_event().unwrap().unwrap();
+    audio.acknowledge_retained_event(pause.serial).unwrap();
+    audio.request_pause(2, generation, false).unwrap();
+    audio.render(base + 5, 2).unwrap();
+    let words = actual_words(&audio);
+    let report = audio.report().unwrap();
+    assert_eq!(
+        (
+            report.start_frame,
+            report.playback_start_frame,
+            report.playback_frames,
+            report.paused
+        ),
+        (5, 2, 2, false)
+    );
+    assert_eq!(decode_retained_output(&words).unwrap().report, Some(report));
+    assert!(
+        decode_output(&words).is_err(),
+        "fixed consumers cannot silently use physical time as active playback"
+    );
+}
+
+#[test]
+fn retained_decoder_rejects_fences_bad_playback_extents_flags_and_counter_forgery() {
+    use crate::worklet_audio::decode_retained_output;
+    let mut words = rendered(100, 7, 3);
+    put(&mut words, 3, 2);
+    put(&mut words, 4, 0);
+    put(&mut words, 5, 1);
+    assert!(
+        decode_retained_output(&words)
+            .unwrap()
+            .report
+            .unwrap()
+            .paused
+    );
+    for (field, value) in [
+        (0, 2),
+        (3, 8),
+        (4, 4),
+        (4, 1),
+        (5, 2),
+        (6, 1),
+        (7, 1),
+        (11, 1),
+        (12, 9),
+        (14, 1),
+        (23, 0),
+        (24, 109),
+        (25, 0),
+        (27, 1),
+    ] {
+        let mut invalid = words;
+        put(&mut invalid, field, value);
+        assert!(
+            decode_retained_output(&invalid).is_err(),
+            "field {field}={value}"
+        );
+    }
+    for length in [0, 1, 56, 57] {
+        assert!(decode_retained_output(&words[..length]).is_err());
+    }
+    let mut extra = words.to_vec();
+    extra.push(0);
+    assert!(decode_retained_output(&extra).is_err());
+    let mut absent = [0; 58];
+    put(&mut absent, 23, 1);
+    put(&mut absent, 24, 100);
+    put(&mut absent, 25, 1);
+    put(&mut absent, 26, 100);
+    assert!(decode_retained_output(&absent).unwrap().report.is_none());
+    put(&mut absent, 5, 1);
+    assert!(
+        decode_retained_output(&absent).is_err(),
+        "absent report cannot smuggle a pause"
+    );
+}
+
+#[test]
 fn finite_decoder_preserves_actual_partial_worklet_reports_across_exact_crossing_and_zero_ends() {
     let base = (1u64 << 53) + 101;
     for endpoint in [0, 3] {
