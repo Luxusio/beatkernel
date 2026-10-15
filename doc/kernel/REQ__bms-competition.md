@@ -1069,6 +1069,50 @@ Cancellation during outstanding Accept/Commit writes, forced late acquisition,
 post-final failures and browser/physical gameplay acceptance remain separate
 original requirements; milestone tests must not silently mark them complete.
 
+### Actual delayed Accept receipt after Commit verification
+
+Exercise a three-host room with two genuinely prepared selected players per host
+through the public RoomPlayClient and actual WebTransportStream. Send one middle
+joiner's complete real Accept frame while retaining its exact local write ID,
+echo target and original completion timestamp. Continue actual reads and runtime
+progress at every host until the matching server Commit is positively received.
+Do not substitute a server reply for the missing local full-write receipt.
+The held owner must expose no schedule, refuse local progress publication and
+refuse Leave while that control callback remains outstanding.
+
+Include a normal control: deliver the preserved original completion observation
+immediately after that observation at its actual processing time and require
+exactly one valid schedule, followed by
+actual all-directed progress/finals, genuine ACKs, explicit drain and bounded
+close. Preserve every host's original elapsed-clock origin and positive I/O
+capture time; compare schedule/preroll within its own clock domain. An outer
+observation deadline does not extend current-time start freshness; preserve an
+actual stale/too-close failure rather than retimestamping or relaxing policy.
+
+Separately stop the pending owner before delivering that exact late receipt.
+Require Stopped without changing the stopped owner or restoring schedule,
+progress, final-ACK or drain authority. Perform actual transport shutdown and
+observe each survivor's own first non-timeout transport failure before any local
+survivor stop. Retain old stopped state while a distinct genuinely selected
+cohort receives disjoint actual participant leases at the exact same URL. A late
+old receipt must remain fenced after replacement admission too. Attempt every
+retained old close, then require further genuine replacement exchanges through
+ACK/drain/close; cached state or a guessed delay cannot prove that liveness.
+
+Any transfer from a test-controlled raw stream to the existing I/O owner must
+preserve its original session/clock and prove no outstanding outbound frame
+(including an unwritten zero-offset frame), partial write, held receipt or
+buffered partial input frame. A decoder's remaining-needed size
+alone does not prove an empty frame buffer. Preserve original real receipt data;
+replaying a retained inbound observation is not evidence of another wire packet.
+
+This verifies a delayed client Accept completion after actual Commit reception.
+It does not force the private server Commit write/receipt at an outstanding
+instant, arbitrary stale actor ordering or late successful setup acquisition.
+Keep those original requirements and portable deterministic coverage open.
+The public finish timeout-masking limit and all earlier browser/physical limits
+remain unchanged.
+
 ## Common room admission client
 
 The application shall use one transport-independent client for BKMR admission

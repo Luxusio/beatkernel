@@ -563,6 +563,12 @@ fn real_incompatible_identity_never_publishes_foreign_roster_or_start() {
 // owners prove the wire/room lifecycle, separately from native output completion.
 mod selected_policy_rooms {
     use super::*;
+
+    mod accept_receipt {
+        use super::*;
+        include!("support/webtransport_room_accept_receipt.rs");
+    }
+
     use beatkernel::{
         audio::{AudioFormat, PcmLimits, SampleBank},
         input::DeviceId,
