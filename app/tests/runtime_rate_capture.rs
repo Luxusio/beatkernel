@@ -3,13 +3,13 @@
 use beatkernel::{
     audio::command_queue,
     input::{
-        Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId, DeviceSelector,
-        EventMeta, GameControlId, PhysicalControlId, PhysicalInputEvent, encode_event,
+        encode_event, Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId,
+        DeviceSelector, EventMeta, GameControlId, PhysicalControlId, PhysicalInputEvent,
     },
     judge::JudgeEngine,
     replay::{
+        codec::{decode_replay, encode_replay, ReplayCodecLimits, ReplayFile},
         ReplayOperation,
-        codec::{ReplayCodecLimits, ReplayFile, decode_replay, encode_replay},
     },
     runtime::{Runtime, RuntimeReport},
     time::{
@@ -23,7 +23,7 @@ use beatkernel_bms_runtime::{
     replay_capture::LiveReplayCapture,
     replay_playback::{decode_section_setup, reconstruct_section},
     replay_speed::ReplaySpeed,
-    replay_speed_policy::{SourceRateCut, split_schedule},
+    replay_speed_policy::{split_schedule, SourceRateCut},
 };
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -453,26 +453,23 @@ fn invalid_actual_cut_and_cross_owner_tokens_fail_before_mutation() {
     let original = encoded_snapshot(&a);
     let other = encoded_snapshot(&b);
     let mut token = a.prepare_source_rate_change(speed("3/2")).unwrap();
-    assert!(
-        b.prepare_applied_source_rate_change(&mut token, cut(0, 1, 2, "3/2"))
-            .is_err()
-    );
+    assert!(b
+        .prepare_applied_source_rate_change(&mut token, cut(0, 1, 2, "3/2"))
+        .is_err());
     assert_eq!(encoded_snapshot(&a), original);
     assert_eq!(encoded_snapshot(&b), other);
-    assert!(
-        a.prepare_applied_source_rate_change(&mut token, cut(0, 1, 2, "2/1"))
-            .is_err()
-    );
+    assert!(a
+        .prepare_applied_source_rate_change(&mut token, cut(0, 1, 2, "2/1"))
+        .is_err());
     assert_eq!(encoded_snapshot(&a), original);
     a.prepare_applied_source_rate_change(&mut token, cut(0, 1, 2, "3/2"))
         .unwrap();
     a.commit_source_rate_change(token).unwrap();
     let applied = encoded_snapshot(&a);
     let mut backwards = a.prepare_source_rate_change(speed("2/1")).unwrap();
-    assert!(
-        a.prepare_applied_source_rate_change(&mut backwards, cut(0, 1, 3, "2/1"))
-            .is_err()
-    );
+    assert!(a
+        .prepare_applied_source_rate_change(&mut backwards, cut(0, 1, 3, "2/1"))
+        .is_err());
     assert_eq!(encoded_snapshot(&a), applied);
     a.cancel_source_rate_change(backwards).unwrap();
     for cancel in [false, true] {
@@ -608,16 +605,12 @@ fn commit_or_explicit_cancel_invalidates_every_clone_without_cancelling_a_later_
         let mut next = capture
             .prepare_source_rate_change(speed(requested))
             .unwrap();
-        assert!(
-            capture
-                .prepare_applied_source_rate_change(&mut stale_original, cut(0, 1, 2, "3/2"))
-                .is_err()
-        );
-        assert!(
-            capture
-                .prepare_applied_source_rate_change(&mut stale_filled, cut(0, 1, 2, "3/2"))
-                .is_err()
-        );
+        assert!(capture
+            .prepare_applied_source_rate_change(&mut stale_original, cut(0, 1, 2, "3/2"))
+            .is_err());
+        assert!(capture
+            .prepare_applied_source_rate_change(&mut stale_filled, cut(0, 1, 2, "3/2"))
+            .is_err());
         assert!(capture.commit_source_rate_change(stale_filled).is_err());
         assert!(capture.cancel_source_rate_change(stale_original).is_err());
         assert!(capture.cancel_source_rate_change(original).is_err());

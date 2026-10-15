@@ -1702,9 +1702,9 @@ fn run_gameplay_timed<
                 }
             }
             let practice_end = practice.as_ref().and_then(|_| config.end_song);
-            let practice_source_cut = practice.as_ref().and_then(|owner| {
-                NativePracticeBoundary::unprojected_source_cut(owner.playback)
-            });
+            let practice_source_cut = practice
+                .as_ref()
+                .and_then(|owner| NativePracticeBoundary::unprojected_source_cut(owner.playback));
             service_audio_solo(
                 device,
                 &mut session,
@@ -2693,7 +2693,11 @@ fn service_practice_solo<
         &mut false,
     )?;
     if backlog
-        || !boundary.ready(session.discipline.audio().expect("audio timing"), now, merger)?
+        || !boundary.ready(
+            session.discipline.audio().expect("audio timing"),
+            now,
+            merger,
+        )?
     {
         return Ok(PracticeService::Waiting);
     }
@@ -2718,7 +2722,11 @@ fn service_practice_solo<
             session.runtime.transport_mut(),
             &mut captures,
         )?;
-        boundary.commit(session.discipline.audio_mut().expect("audio timing"), now, merger)?;
+        boundary.commit(
+            session.discipline.audio_mut().expect("audio timing"),
+            now,
+            merger,
+        )?;
         let applied = owner.playback.apply_rate_event(prepared)?;
         owner.playback.publish_rate_event(&applied, host)?;
         return Ok(PracticeService::Committed {
@@ -2855,13 +2863,15 @@ fn service_practice_solo<
         let (_, attempt) = prepared.attempts.pop().expect("prepared solo attempt");
         let transport = fresh_transport.expect("prepared fresh transport");
         if boundary.restarts_original() {
-            session.runtime.replace_practice_state_with_runtime_restart(
-                attempt.judge,
-                transport,
-                attempt.config.end,
-                CommandScope(receipt.generation),
-                owner.playback.speed().rate(),
-            )?;
+            session
+                .runtime
+                .replace_practice_state_with_runtime_restart(
+                    attempt.judge,
+                    transport,
+                    attempt.config.end,
+                    CommandScope(receipt.generation),
+                    owner.playback.speed().rate(),
+                )?;
         } else if coordinate.is_some() {
             session.runtime.replace_practice_state_with_output_phase(
                 attempt.judge,
@@ -2892,7 +2902,11 @@ fn service_practice_solo<
         *last_host_operation = boundary.host();
         owner.last_playback_frame = receipt.playback_frame;
     }
-    boundary.commit(session.discipline.audio_mut().expect("audio timing"), now, merger)?;
+    boundary.commit(
+        session.discipline.audio_mut().expect("audio timing"),
+        now,
+        merger,
+    )?;
     // Applied attempt identity is authoritative before fallible publication.
     // In particular, final cleanup must archive the installed fresh capture
     // under its new ordinal even when a screen observer refuses or cancels.

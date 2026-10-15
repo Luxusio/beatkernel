@@ -3612,11 +3612,19 @@ async function observeRetainedOutput(state, observation, snapshot, client) {
     if (play !== state || state.game !== game || state.commandClient !== client) return false;
     game.retained_event_ack(serial);
     state.retainedEvent = null;
+    // Another actual event can share this cut; observe it before advancing inputs.
+    return false;
   }
   serviceLiveAudio(state, currentWindowHost(state), state.audioNs);
   const pin = game.retained_history_pin();
-  if (pin !== undefined && pin !== null && pin !== state.retainedPin) {
-    await client.retainedHistoryRetire(pin);
+  if (snapshot !== null && pin !== undefined && pin !== null && pin !== state.retainedPin) {
+    try { await client.retainedHistoryRetire(pin); }
+    catch (error) {
+      if (error?.code !== "remote" || error.status !== 1 || error.terminal !== false
+        || error.admitted !== 0 || client.state !== "ready") throw error;
+      // A newly queued Worklet event still owns history; retry after a fresh poll.
+      return false;
+    }
     if (play !== state || state.game !== game || state.commandClient !== client) return false;
     state.retainedPin = pin;
   }

@@ -17,8 +17,8 @@ use crate::{
         PracticeTransactionCapability, PracticeTransactionReply, PracticeTransactionRequest,
     },
     practice_session::{
-        PracticeAttemptConfig, PreparedPracticeAttempt, prepare_attempt,
-        prepare_attempt_with_runtime_speed, prepare_attempt_with_speed,
+        prepare_attempt, prepare_attempt_with_runtime_speed, prepare_attempt_with_speed,
+        PracticeAttemptConfig, PreparedPracticeAttempt,
     },
     replay_capture::{LiveReplayCapture, PreparedSourceRateChange},
     replay_speed::ReplaySpeed,
@@ -31,7 +31,7 @@ use beatkernel::{
         PracticeError, PracticeEvent, PracticeRateEvent, PracticeRateOutcome, PracticeRateRefusal,
         PracticeReceipt, PracticeRegion, ProjectedPracticeEvent, ProjectedPracticeReceipt,
     },
-    replay::{ReplayHeader, codec::ReplayCodecLimits},
+    replay::{codec::ReplayCodecLimits, ReplayHeader},
     time::{ClockPoint, Duration, Timestamp},
     transport::{OutputPhasePoint, PositiveRatePhase, Transport},
 };

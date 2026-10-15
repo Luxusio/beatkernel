@@ -1198,21 +1198,24 @@ mod native {
                 options.replay_max_records,
             )?
             .unwrap_or(beatkernel_bms_runtime::competition_live::replay_limits()?);
-            let initial_header = beatkernel_bms_runtime::native_judge::prepare_policy_header_with_speed(
-                &initial_source,
-                &judge,
-                &policy,
-                LOGICAL,
-                options.live_speed.start(),
-                options.chart_seed,
-                options.live_speed.end(),
-                options.live_speed.speed(),
-            )?;
-            let headers = vec![beatkernel_bms_runtime::practice_playback::PracticeRuntimeHeader {
-                player: beatkernel_bms_runtime::local_players::PlayerId(1),
-                header: initial_header,
-                limits: identity_limits,
-            }];
+            let initial_header =
+                beatkernel_bms_runtime::native_judge::prepare_policy_header_with_speed(
+                    &initial_source,
+                    &judge,
+                    &policy,
+                    LOGICAL,
+                    options.live_speed.start(),
+                    options.chart_seed,
+                    options.live_speed.end(),
+                    options.live_speed.speed(),
+                )?;
+            let headers = vec![
+                beatkernel_bms_runtime::practice_playback::PracticeRuntimeHeader {
+                    player: beatkernel_bms_runtime::local_players::PlayerId(1),
+                    header: initial_header,
+                    limits: identity_limits,
+                },
+            ];
             let prepared_audio =
                 beatkernel_bms_runtime::native_audio::prepare_retained_audio_with_runtime_rates(
                     prepared.bank,

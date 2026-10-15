@@ -323,7 +323,22 @@ fn rate_waits_through_pause_and_resume_evidence_precedes_the_same_cut_rate() {
     let mut audio = standard(rate(1, 2), region(0, 20_000_000, false));
     audio.arm(BASE, BASE).unwrap();
     audio.render(BASE, 2).unwrap();
-    started(&mut audio);
+    assert_eq!(&audio.output()[..2], &[0.0, 0.0625]);
+    let start = next(&mut audio);
+    assert_eq!(start.serial, 1);
+    assert!(matches!(
+        start.event,
+        WorkletRetainedEvent::Practice(ProjectedPracticeEvent {
+            event: PracticeEvent::Boundary(PracticeReceipt {
+                kind: PracticeBoundaryKind::Started,
+                request_id: 0,
+                physical_frame: 0,
+                playback_frame: 0,
+                ..
+            }),
+            ..
+        })
+    ));
     let m = audio.retained_metadata().unwrap();
     audio.request_pause(20, m.generation, true).unwrap();
     assert!(audio.poll_retained_event().unwrap().is_none());
@@ -331,7 +346,9 @@ fn rate_waits_through_pause_and_resume_evidence_precedes_the_same_cut_rate() {
     assert!(audio.poll_retained_event().unwrap().is_none());
     audio.render(BASE + 2, 3).unwrap();
     assert_eq!(&audio.output()[..3], &[0.0; 3]);
-    match next(&mut audio).event {
+    let pause = next(&mut audio);
+    assert_eq!(pause.serial, 2);
+    match pause.event {
         WorkletRetainedEvent::Pause(e) => assert_eq!(
             (e.request_id, e.physical_frame, e.playback_frame, e.paused),
             (20, 2, 2, true)
@@ -345,28 +362,144 @@ fn rate_waits_through_pause_and_resume_evidence_precedes_the_same_cut_rate() {
     audio.request_pause(22, m.generation, false).unwrap();
     audio.render(BASE + 7, 2).unwrap();
     assert_eq!(&audio.output()[..2], &[0.125, 0.375]);
-    match next(&mut audio).event {
+    let resume = audio.poll_retained_event().unwrap().unwrap();
+    assert_eq!(
+        (resume.program_id, resume.context_start, resume.serial),
+        (PROGRAM, BASE, 3)
+    );
+    match resume.event {
         WorkletRetainedEvent::Pause(e) => assert_eq!(
             (e.request_id, e.physical_frame, e.playback_frame, e.paused),
             (22, 7, 2, false)
         ),
         other => panic!("resume must precede rate at the same actual cut, got {other:?}"),
     }
-    let e = changed(&mut audio);
+    assert_eq!(audio.poll_retained_event().unwrap(), Some(resume));
+    let snapshot = |audio: &WorkletAudio| {
+        let history = audio.source_playback_history().unwrap();
+        (
+            history.source_rate(),
+            history.initial_physical_frame(),
+            history.initial_playback_frame(),
+            history.retained_start_frame(),
+            history.pulled_end_frame(),
+            history.retirement_revision(),
+            history.capacity(),
+            (0..history.len())
+                .map(|i| {
+                    let span = history.span(i).unwrap();
+                    (
+                        span.physical_start(),
+                        span.physical_end(),
+                        span.playback_start(),
+                        span.state(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    let before = snapshot(&audio);
     assert_eq!(
-        (e.physical_frame, e.playback_frame, e.active_elapsed_nanos),
-        (7, 2, 2_000_000)
+        (before.0, before.1, before.2, before.3, before.4, before.5, before.6),
+        (1000, 0, 0, 0, 9, 0, 64)
     );
-    let history = audio.source_playback_history().unwrap();
-    assert!(
-        (0..history.len()).any(|i| history.span(i).unwrap().state() == SourcePlaybackState::Frozen)
+    assert_eq!(
+        before.7,
+        vec![
+            (0, Some(2), 0, SourcePlaybackState::Running),
+            (2, Some(7), 2, SourcePlaybackState::Frozen),
+            (7, None, 2, SourcePlaybackState::Running),
+        ]
     );
-    assert!((0..history.len()).any(|i| {
-        let s = history.span(i).unwrap();
-        s.state() == SourcePlaybackState::Running
-            && s.physical_start() == 7
-            && s.playback_start() == 2
-    }));
+    let metadata = audio.retained_metadata().unwrap();
+    assert_eq!(
+        (metadata.generation, metadata.revision, metadata.rate),
+        (1, 1, rate(2, 1))
+    );
+    audio.acknowledge_retained_event(resume.serial).unwrap();
+    assert_eq!(
+        snapshot(&audio),
+        before,
+        "Resume ACK never retires source history"
+    );
+    assert_eq!(
+        audio.retire_source_playback_before(8),
+        Err(WorkletAudioError::InvalidRetentionPin),
+        "the original unreported Rate still pins physical7 after Resume ACK"
+    );
+    assert_eq!(
+        snapshot(&audio),
+        before,
+        "refusal preserves every original history descriptor and revision"
+    );
+    assert_eq!(audio.retained_metadata().unwrap(), metadata);
+    assert!(!audio.failed());
+    assert_eq!(&audio.output()[..2], &[0.125, 0.375]);
+    let changed = audio.poll_retained_event().unwrap().unwrap();
+    assert_eq!(
+        (changed.program_id, changed.context_start, changed.serial),
+        (PROGRAM, BASE, 4)
+    );
+    let e = match changed.event {
+        WorkletRetainedEvent::Practice(ProjectedPracticeEvent {
+            event: PracticeEvent::Rate(event),
+            ..
+        }) => event,
+        other => panic!("original same-cut Rate must follow Resume ACK, got {other:?}"),
+    };
+    assert_eq!(
+        (
+            e.request_id,
+            e.generation,
+            e.physical_frame,
+            e.playback_frame,
+            e.active_elapsed_nanos
+        ),
+        (21, 1, 7, 2, 2_000_000)
+    );
+    assert_eq!(
+        (
+            e.request_revision,
+            e.applied_revision,
+            e.previous_rate,
+            e.requested_rate,
+            e.applied_rate,
+            e.outcome
+        ),
+        (
+            0,
+            1,
+            rate(1, 2),
+            rate(2, 1),
+            rate(2, 1),
+            PracticeRateOutcome::Applied
+        )
+    );
+    assert_eq!(audio.poll_retained_event().unwrap(), Some(changed));
+    assert_eq!(
+        audio.retire_source_playback_before(9),
+        Err(WorkletAudioError::InvalidRetentionPin),
+        "delivery alone does not release the Rate latch pin"
+    );
+    assert_eq!(snapshot(&audio), before);
+    audio.acknowledge_retained_event(changed.serial).unwrap();
+    assert_eq!(
+        snapshot(&audio),
+        before,
+        "Rate ACK preserves unread input history too"
+    );
+    assert!(audio.poll_retained_event().unwrap().is_none());
+    let safe_pin = audio.source_playback_history().unwrap().pulled_end_frame();
+    assert_eq!(
+        safe_pin, 9,
+        "use the genuine source frontier after the event-free poll"
+    );
+    assert_eq!(audio.retire_source_playback_before(safe_pin).unwrap(), 2);
+    let after = snapshot(&audio);
+    assert_eq!((after.3, after.4, after.5), (7, 9, 1));
+    assert_eq!(after.7, vec![(7, None, 2, SourcePlaybackState::Running)]);
+    assert_eq!(audio.retained_metadata().unwrap(), metadata);
+    assert_eq!(&audio.output()[..2], &[0.125, 0.375]);
 }
 
 #[test]

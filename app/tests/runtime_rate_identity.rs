@@ -4,14 +4,14 @@ use beatkernel::{
     input::CodecLimits,
     judge::JudgeEngine,
     replay::{
+        codec::{encode_replay, ReplayCodecLimits, ReplayFile},
         ReplayHeader,
-        codec::{ReplayCodecLimits, ReplayFile, encode_replay},
     },
     time::{ClockDomainId, Timestamp},
 };
 use beatkernel_bms::{BmsChart, BmsInputMode};
 use beatkernel_bms_runtime::{
-    competition::{Competition, OpponentKind, compatible_headers},
+    competition::{compatible_headers, Competition, OpponentKind},
     multiplayer::{competition_identity, competition_identity_for_section},
     play_policy::ResolvedPlayPolicy,
     record_catalog::RecordPreview,
@@ -22,8 +22,8 @@ use beatkernel_bms_runtime::{
     },
     replay_speed::ReplaySpeed,
     replay_speed_policy::{
-        SourceRateCut, SourceRateSchedule, split_options, split_schedule, wrap_header,
-        wrap_header_with_schedule,
+        split_options, split_schedule, wrap_header, wrap_header_with_schedule, SourceRateCut,
+        SourceRateSchedule,
     },
 };
 use std::path::Path;
@@ -332,41 +332,35 @@ fn variable_is_readable_for_replay_and_history_but_not_saved_or_network_competit
         assert_eq!(preview.records, 0);
         assert!(!compatible_headers(&effective, &effective));
         let mut competition = Competition::new(effective.clone(), 2).unwrap();
-        assert!(
-            competition
-                .add_replay(
-                    &source(),
-                    file.clone(),
-                    limits(),
-                    OpponentKind::Own,
-                    "variable"
-                )
-                .is_err()
-        );
+        assert!(competition
+            .add_replay(
+                &source(),
+                file.clone(),
+                limits(),
+                OpponentKind::Own,
+                "variable"
+            )
+            .is_err());
         assert!(competition.opponents().is_empty());
         assert!(competition_identity(&effective, env!("CARGO_PKG_VERSION"), limits()).is_err());
-        assert!(
-            competition_identity_for_section(
-                &effective,
-                env!("CARGO_PKG_VERSION"),
-                limits(),
-                Some(Timestamp::from_nanos(10))
-            )
-            .is_err()
-        );
+        assert!(competition_identity_for_section(
+            &effective,
+            env!("CARGO_PKG_VERSION"),
+            limits(),
+            Some(Timestamp::from_nanos(10))
+        )
+        .is_err());
     }
     for initial in ["1/1", "3/2"] {
         let fixed = header(initial);
         assert!(compatible_headers(&fixed, &fixed));
         assert!(competition_identity(&fixed, env!("CARGO_PKG_VERSION"), limits()).is_ok());
-        assert!(
-            competition_identity_for_section(
-                &fixed,
-                env!("CARGO_PKG_VERSION"),
-                limits(),
-                Some(Timestamp::from_nanos(10))
-            )
-            .is_ok()
-        );
+        assert!(competition_identity_for_section(
+            &fixed,
+            env!("CARGO_PKG_VERSION"),
+            limits(),
+            Some(Timestamp::from_nanos(10))
+        )
+        .is_ok());
     }
 }

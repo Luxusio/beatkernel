@@ -958,11 +958,8 @@ fn commit_cohort_practice<
                 .iter_mut()
                 .map(|state| (state.player, &mut state.capture)),
         );
-        let prepared = owner.prepare_rate_event_at_cut(
-            &cut,
-            session.group.transport_mut(),
-            &mut captures,
-        )?;
+        let prepared =
+            owner.prepare_rate_event_at_cut(&cut, session.group.transport_mut(), &mut captures)?;
         boundary.commit(
             session.discipline.audio_mut().expect("audio timing"),
             now,
@@ -2016,9 +2013,9 @@ fn run_cohort_timed<
         };
         if T::AUDIO {
             let practice_end = practice.as_ref().and_then(|_| config.end_song);
-            let practice_source_cut = practice.as_ref().and_then(|(owner, _)| {
-                NativePracticeBoundary::unprojected_source_cut(owner)
-            });
+            let practice_source_cut = practice
+                .as_ref()
+                .and_then(|(owner, _)| NativePracticeBoundary::unprojected_source_cut(owner));
             service_audio_cohort(
                 device,
                 &mut session,
@@ -2046,8 +2043,7 @@ fn run_cohort_timed<
                     session.discipline.audio().expect("audio timing"),
                     now,
                     session.merger,
-                )?
-                {
+                )? {
                     control.wait(WallDuration::from_millis(1))?;
                     continue;
                 }
@@ -3987,13 +3983,8 @@ fn service_audio_cohort<
             .output_phase_basis()
             .ok_or("coordinate cohort lost output-phase binding")?;
         let advance = if let Some(output) = frontier.advance() {
-            let phase = mapping.phase(
-                presentation,
-                identity,
-                &query,
-                attempt,
-                frontier.output(),
-            )?;
+            let phase =
+                mapping.phase(presentation, identity, &query, attempt, frontier.output())?;
             Some((output, phase))
         } else {
             mapping.validate_correspondence(

@@ -7,10 +7,10 @@ use crate::{
     gameplay::output::ports::SourcePlaybackIdentity,
     local_input::InputMerger,
     native_gameplay::NativeGameplayResult,
-    native_playback_phase::NativePlaybackMapping,
     native_output_coordinate::{
         CoordinateNativeAudioSnapshot, CoordinateTargetNativeAudioSnapshot, NativeOutputCoordinate,
     },
+    native_playback_phase::NativePlaybackMapping,
 };
 use beatkernel::audio::{
     InterpolatedTargetTime, OutputFrameBasis, PracticeEvent, PracticeReceipt,

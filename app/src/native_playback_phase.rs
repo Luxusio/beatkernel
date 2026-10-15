@@ -239,21 +239,17 @@ impl NativePlaybackMapping {
                 if state != 0 || event.physical_frame > facts.pulled_source_end {
                     return Err(Error::Range);
                 }
-                let delta = event.physical_frame.checked_sub(frame).ok_or(Error::Range)?;
+                let delta = event
+                    .physical_frame
+                    .checked_sub(frame)
+                    .ok_or(Error::Range)?;
                 let base = TargetTime::new(seconds, n, d).map_err(|_| Error::Arithmetic)?;
                 // base + delta/hz - numerator/(denominator*hz), retaining
                 // both fractions without rounding to a target sample or ns.
                 // Split a positive delta before the signed fraction so even
                 // delta+numerator outside u64 needs no narrowing or extra term.
                 let query = if delta == 0 {
-                    InterpolatedTargetTime::new(
-                        base,
-                        0,
-                        1,
-                        hz,
-                        -i128::from(numerator),
-                        denominator,
-                    )
+                    InterpolatedTargetTime::new(base, 0, 1, hz, -i128::from(numerator), denominator)
                 } else {
                     InterpolatedTargetTime::new(
                         base,
@@ -266,8 +262,12 @@ impl NativePlaybackMapping {
                 }
                 .map_err(|_| Error::Arithmetic)?;
                 if query.compare_target_time(basis.start_time()).is_lt()
-                    || query.compare_target_time(facts.submitted_target_end).is_gt()
-                    || query.compare_target_time(facts.generated_target_end).is_gt()
+                    || query
+                        .compare_target_time(facts.submitted_target_end)
+                        .is_gt()
+                    || query
+                        .compare_target_time(facts.generated_target_end)
+                        .is_gt()
                     || !facts
                         .phase
                         .compare_source_frame_at_interpolated_time(

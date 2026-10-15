@@ -275,6 +275,17 @@ Browser의 admission 성공은 pending 응답으로 Window의 기존 RPC 슬롯�
 따라서 pause 중 배속 요청이 있어도 resume 요청을 보낼 수 있다. 실제 owner의
 commit 전에는 적용값·노트 상태·완료 결과를 낙관적으로 바꾸지 않는다.
 
+실제 event의 Worklet ACK와 business ACK를 끝낸 뒤에는 새로운 retained poll로
+다음 실제 event를 확인하기 전까지 일반 입력 진행과 history retirement를 재개하지
+않는다. 같은 실제 cut의 Resume이 먼저 전달돼도 그 뒤 대기한 Rate가 원래 cut과
+history pin을 유지해야 한다. Window File custody가 필요한 fresh 경계는 기존
+보관 응답을 먼저 기다린다. ACK를 합성하거나 아직 전달되지 않은 event를 추정하지 않는다.
+
+history retirement의 검증된 비종결 admission 거절은 원래 pin과 owner를 보존하고
+다음 실제 관측 뒤 pin을 다시 계산해 처리한다. 실제 성공 전에 cached pin을 바꾸거나
+같은 요청을 즉시 반복하지 않는다. 이 처리는 해당 retirement 호출에만 적용하며
+protocol·transport·timeout·종결 오류와 다른 operation의 실패 규칙은 유지한다.
+
 시작 전 실제 capability는 없으며 준비 응답의 capability는 null이다. 기존
 render-done의 retainedCapability는 실제 owner의16word view 또는 null을 전달한다.
 실제 Started 이후에만 제어를 활성화하고 Ended 이후에는 권한을 철회한다.

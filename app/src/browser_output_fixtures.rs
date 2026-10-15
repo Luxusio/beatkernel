@@ -107,7 +107,7 @@ fn actual_words(audio: &WorkletAudio) -> [u32; 58] {
 
 #[test]
 fn retained_decoder_accepts_actual_pause_excluding_reports_while_fixed_decoders_stay_strict() {
-    use crate::worklet_audio::{WorkletRetainedConfig, decode_retained_output};
+    use crate::worklet_audio::{decode_retained_output, WorkletRetainedConfig};
     use beatkernel::{
         audio::{PracticeCue, PracticeLimits, PracticeRegion},
         time::Duration,
@@ -149,12 +149,10 @@ fn retained_decoder_accepts_actual_pause_excluding_reports_while_fixed_decoders_
         .unwrap();
     let base = (1 << 53) + 137;
     audio.arm(base, base).unwrap();
-    assert!(
-        decode_retained_output(&actual_words(&audio))
-            .unwrap()
-            .report
-            .is_none()
-    );
+    assert!(decode_retained_output(&actual_words(&audio))
+        .unwrap()
+        .report
+        .is_none());
     audio.render(base, 2).unwrap();
     let started = audio.poll_retained_event().unwrap().unwrap();
     audio.acknowledge_retained_event(started.serial).unwrap();

@@ -21,14 +21,15 @@ function capability({ generation = 1n, revision = 0n, numerator = 1n, denominato
   return words([1n, PROGRAM, generation, 0n, 2000000000n, revision, numerator, denominator]);
 }
 function envelope({ tag = 2n, serial = 9n, id = 3n, generation = 1n, revision = 1n,
-  numerator = 2n, denominator = 1n, outcome = 0n, boundary = 1n, paused = false } = {}) {
+  numerator = 2n, denominator = 1n, outcome = 0n, boundary = 1n, paused = false,
+  physicalFrame = 4801n, playbackFrame = 4801n } = {}) {
   const values = Array(40).fill(0n);
   Object.assign(values, { 0: 1n, 1: tag, 2: PROGRAM, 3: serial, 4: id, 5: generation,
-    7: 4801n, 8: 4801n, 35: CONTEXT });
+    7: physicalFrame, 8: playbackFrame, 35: CONTEXT });
   if (tag === 4n) values[36] = BigInt(paused);
   else {
-    Object.assign(values, { 26: 4801n, 28: 0n, 29: 4801n, 30: 48000n,
-      31: 4801n, 32: 48000n, 33: 1n });
+    Object.assign(values, { 26: physicalFrame, 28: 0n, 29: physicalFrame, 30: 48000n,
+      31: physicalFrame, 32: 48000n, 33: 1n });
     if (tag === 1n || tag === 3n) Object.assign(values, { 22: 1000000000n,
       23: 1000000000n, 25: boundary });
     if (tag === 1n && boundary === 0n) Object.assign(values, {
@@ -36,16 +37,17 @@ function envelope({ tag = 2n, serial = 9n, id = 3n, generation = 1n, revision = 
     if (tag === 2n || tag === 3n) Object.assign(values, { 9: revision - 1n,
       10: outcome === 2n ? revision - 1n : revision, 11: 1n, 12: 1n, 13: numerator, 14: denominator,
       15: outcome === 2n ? 1n : numerator, 16: outcome === 2n ? 1n : denominator,
-      17: outcome, 18: outcome === 2n ? 1n : 0n, 20: tag === 2n ? 100020833n : 0n });
+      17: outcome, 18: outcome === 2n ? 1n : 0n,
+      20: tag === 2n ? playbackFrame * 1000000000n / 48000n : 0n });
   }
   return words(values);
 }
-function snapshot(event = null) {
+function snapshot(event = null, { frontier = 5000n, spans = [0n,0n,0n,0n,1n] } = {}) {
   const rate=event!==null&&(at(event,1)===2n||at(event,1)===3n);
   return { metadata: words([event===null?1n:at(event,5),rate?at(event,10):0n,
     rate?at(event,15):1n,rate?at(event,16):1n,1n,event!==null&&at(event,1)===4n&&at(event,36)===1n?0n:1n]),
-    history: words([1n, PROGRAM, CONTEXT, 48000n, 0n, 0n, 0n, 5000n, 0n, 1n,
-      0n, 0n, 0n, 0n, 1n]), event };
+    history: words([1n, PROGRAM, CONTEXT, 48000n, 0n, 0n, 0n, frontier, 0n,
+      BigInt(spans.length / 5), ...spans]), event };
 }
 
 // Extend only the generated binding fixture. The actual source modules are
@@ -251,6 +253,16 @@ async function deliverPoll(h,event,fields={}) {
   assert.equal(h.audio.pending?.kind,"retained-poll");
   await ackAudio(h,{report:renderReport(),retained:snapshot(event),...fields});
 }
+// Unlike deliverPoll, this may not settle another operation while seeking a
+// poll: the interval after an event ACK is the ordering under test.
+async function freshPoll(h,event=null,fields={}) {
+  if(!h.audio.pending) {
+    h.nextRender=Math.max(h.nextRender??0,...h.of("play-render-done").map(row=>row.renderId))+1;
+    await h.send({kind:"play-render",playId:7,renderId:h.nextRender,presentedNs:null,presentedHostNs:null});
+  }
+  assert.equal(h.audio.pending?.kind,"retained-poll","a fresh observation must precede ordinary drain or retirement");
+  await ackAudio(h,{report:renderReport(),retained:snapshot(event),...fields});
+}
 async function reachControl(h,kind) {
   await flushJobs();
   for(let count=0;h.audio.pending?.kind!==kind&&count<8;count++) await ackAudio(h);
@@ -324,24 +336,114 @@ test("Worker prepares canonical scalar rate, settles admission pending and publi
   assert.equal(owner.calls.some(row=>row[0]==="retained-local-ack"&&row[1]===9n),false,"Worklet ACK precedes Rust latch ACK");
   owner.retainedPin=17n;
   await ackAudio(h);assert.deepEqual(owner.calls.find(row=>row[0]==="retained-local-ack"&&row[1]===9n),["retained-local-ack",9n]);
+  assert.notEqual(h.audio.pending?.kind,"retained-history-retire");
+  await freshPoll(h);
   const retire=await reachControl(h,"retained-history-retire");assert.equal(retire.pin,17n,"only Rust input pin permits retirement");
   await ackAudio(h);await stop(h);
 });
 
-test("paused rate admission leaves room for resume and retains event chronology",async()=>{
-  const h=await catalog();const owner=await begin(h);await attach(h);owner.allowCommit=true;
+for(const mode of ["solo","local"]) test(`${mode} paused rate preserves same-cut event order and yields after both ACKs until fresh observations`,async()=>{
+  const h=await catalog();const owner=await begin(h,mode==="local"?{inputMode:"physical-contact",
+    localPlanWords:new Uint32Array([99,1,1,0,7,1,2,0])}:{});
+  await attach(h);owner.allowCommit=true;
   const pauseId=await request(h,"pause",{paused:true});await reachControl(h,"retained-pause");await ackAudio(h);
-  await deliverPoll(h,envelope({tag:4n,id:BigInt(pauseId),serial:10n,paused:true}));
+  const paused=envelope({tag:4n,id:BigInt(pauseId),serial:10n,paused:true,
+    physicalFrame:105839n,playbackFrame:105839n});
+  await deliverPoll(h,paused,{retained:snapshot(paused,{frontier:143000n,
+    spans:[0n,1n,105839n,0n,1n,105839n,0n,0n,105839n,0n]})});
   await reachControl(h,"retained-event-ack");await ackAudio(h);
   const rateId=await request(h,"rate",{fraction:"3/2"});await reachControl(h,"retained-rate");await ackAudio(h);
   assert.equal(reply(h,rateId)?.result.kind,"retained-pending");
   const resumeId=await request(h,"pause",{paused:false});await reachControl(h,"retained-pause");await ackAudio(h);
   assert.equal(reply(h,resumeId)?.result.kind,"retained-pending");
-  await deliverPoll(h,envelope({tag:4n,id:BigInt(resumeId),serial:11n,paused:false}));
-  await reachControl(h,"retained-event-ack");await ackAudio(h);
-  await deliverPoll(h,envelope({id:BigInt(rateId),serial:12n,numerator:3n,denominator:2n}));
-  assert.deepEqual(h.of("play-retained-result").map(row=>row.outcome),["paused","resumed","applied"]);
+  // Original twelfth-browser geometry: Resume is delivered before an already
+  // applied Rate at physical143215/playback105839, with history pulled further.
+  const spans=[0n,1n,105839n,0n,1n,105839n,1n,143215n,105839n,0n,
+    143215n,0n,0n,105839n,1n];
+  const resume=envelope({tag:4n,id:BigInt(resumeId),serial:11n,paused:false,
+    physicalFrame:143215n,playbackFrame:105839n});
+  await deliverPoll(h,resume,{retained:snapshot(resume,{frontier:143250n,spans})});
+  await reachControl(h,"retained-event-ack");assert.equal(h.audio.pending.serial,11n);
+  assert.equal(owner.calls.some(row=>row[0]==="retained-local-ack"&&row[1]===11n),false);
+  const host=h.windowNowNs(),input={hostNs:host,key:2,down:true,sequence:17n};
+  await h.send({kind:"play-step",playId:7,tickId:h.nextTick=(h.nextTick??0)+1,
+    events:[input],watermark:host,nowNs:host,audioNs:0n});
+  const queued=owner.pendingInput.find(row=>row.sequence===17n);assert.ok(queued);
+  assert.equal(queued.host,host);assert.equal(queued.received,host);
+  owner.retainedPin=143237n;
+  let services=owner.calls.filter(row=>row[0]==="service").length;
+  const retired=h.audio.posts.filter(row=>row.kind==="retained-history-retire").length;
+  await ackAudio(h);
+  assert.ok(owner.calls.some(row=>row[0]==="retained-local-ack"&&row[1]===11n));
+  assert.equal(owner.calls.filter(row=>row[0]==="service").length,services,"Resume ACK cannot drain ordinary input before polling the same-cut Rate");
+  assert.equal(h.audio.posts.filter(row=>row.kind==="retained-history-retire").length,retired);
+  assert.ok(owner.pendingInput.includes(queued),"acquired input remains owned across Resume ACK");
+  const changed=envelope({id:BigInt(rateId),serial:12n,numerator:3n,denominator:2n,
+    physicalFrame:143215n,playbackFrame:105839n});
+  await freshPoll(h,changed,{retained:snapshot(changed,{frontier:143250n,spans})});
+  assert.deepEqual(h.of("play-retained-result").map(row=>[row.id,row.outcome]),[
+    [BigInt(pauseId),"paused"],[BigInt(resumeId),"resumed"],[BigInt(rateId),"applied"]]);
+  assert.deepEqual(h.of("play-retained-result").slice(-2).map(row=>[at(row.event,3),at(row.event,7),at(row.event,8)]),
+    [[11n,143215n,105839n],[12n,143215n,105839n]]);
+  await reachControl(h,"retained-event-ack");assert.equal(h.audio.pending.serial,12n);
+  assert.equal(owner.calls.some(row=>row[0]==="retained-local-ack"&&row[1]===12n),false);
+  services=owner.calls.filter(row=>row[0]==="service").length;
+  await ackAudio(h);
+  assert.ok(owner.calls.some(row=>row[0]==="retained-local-ack"&&row[1]===12n));
+  assert.equal(owner.calls.filter(row=>row[0]==="service").length,services,"Rate ACK also yields before ordinary drain");
+  assert.equal(h.audio.posts.filter(row=>row.kind==="retained-history-retire").length,retired);
+  assert.ok(owner.pendingInput.includes(queued));
+  // The later actual observation, rather than the ACK, permits a newly read pin.
+  owner.retainedPin=143249n;
+  const idle=snapshot(null,{frontier:143260n,spans});idle.metadata=words([1n,1n,3n,2n,1n,1n]);
+  await freshPoll(h,null,{retained:idle});
+  assert.ok(owner.calls.filter(row=>row[0]==="service").length>services);
+  assert.equal((await reachControl(h,"retained-history-retire")).pin,143249n);
+  await ackAudio(h);
+  assert.equal(h.of("play-error").length,0);assert.equal(owner.frees,0);
   await stop(h);
+});
+
+test("validated nonterminal history refusal retains the last successful pin and retries only after another actual poll",async()=>{
+  const h=await catalog();const owner=await begin(h);await attach(h);
+  const retirements=()=>h.audio.posts.filter(row=>row.kind==="retained-history-retire");
+  owner.retainedPin=17n;await freshPoll(h);
+  assert.equal((await reachControl(h,"retained-history-retire")).pin,17n);await ackAudio(h);
+  owner.retainedPin=23n;await freshPoll(h);
+  assert.equal((await reachControl(h,"retained-history-retire")).pin,23n);
+  await ackAudio(h,{status:1,error:"opaque concurrent owner refusal",terminal:false});
+  const attempts=retirements().length;
+  assert.equal(h.of("play-error").length,0);assert.equal(owner.frees,0);assert.equal(h.audio.closes,0);
+  await flushJobs();assert.equal(retirements().length,attempts,"a refusal cannot busy retry");
+  await serviceHeld(h);assert.equal(retirements().length,attempts,"ordinary acquisition cannot retry without a fresh poll");
+  await freshPoll(h);
+  assert.equal((await reachControl(h,"retained-history-retire")).pin,23n,"a failed pin must not enter the success cache");
+  await ackAudio(h);
+  await freshPoll(h);assert.equal(retirements().length,attempts+1,"only genuine success caches the pin");
+  owner.retainedPin=31n;await freshPoll(h);
+  assert.equal((await reachControl(h,"retained-history-retire")).pin,31n);
+  await ackAudio(h,{status:1,error:"same refusal, different original input minimum",terminal:false});
+  owner.retainedPin=29n;await freshPoll(h);
+  assert.equal((await reachControl(h,"retained-history-retire")).pin,29n,"retry recomputes the original input pin instead of resending the refused request");
+  await ackAudio(h);assert.equal(h.of("play-error").length,0);await stop(h);
+});
+
+for(const [name,fault] of [
+  ["terminal refusal",{status:1,error:"retained-admission",terminal:true}],
+  ["other remote status",{status:2,error:"retained-admission",terminal:false}],
+  ["malformed admitted count",{status:1,error:"retained-admission",terminal:false,admitted:1}],
+  ["uncorrelated Program",{status:1,error:"retained-admission",terminal:false,programId:PROGRAM+1n}],
+  ["transport failure",null],
+  ["timeout",null],
+]) test(`history retirement preserves fatal ${name} behavior`,async()=>{
+  const h=await catalog();const owner=await begin(h);await attach(h);
+  owner.retainedPin=23n;await freshPoll(h);await reachControl(h,"retained-history-retire");
+  if(name==="transport failure") { h.audio.onmessageerror({});await flushJobs(); }
+  else if(name==="timeout") await h.runTimer(50);
+  else await ackAudio(h,fault);
+  assert.equal(h.of("play-error").length,1);assert.equal(owner.frees,1);assert.equal(h.audio.closes,1);
+  const attempts=h.audio.posts.filter(row=>row.kind==="retained-history-retire").length;
+  await flushJobs();assert.equal(h.audio.posts.filter(row=>row.kind==="retained-history-retire").length,attempts);
 });
 
 test("normal rate refusal clears its reservation and preserves the same owner opponent and next request",async()=>{

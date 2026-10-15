@@ -7,13 +7,13 @@ mod output_fixtures;
 use beatkernel::audio::AudioCounters;
 use beatkernel::{
     audio::{
-        AudioCommand, AudioError, AudioFormat, AudioLimits, CommandProducer, CommandPushError,
-        CommandScope, Mixer, MixerConfig, PcmLimits, PcmSample, PracticeBoundaryKind,
-        PracticeController, PracticeCue, PracticeError, PracticeEvent, PracticeLimits,
-        PracticeMetadata, PracticeRateEvent, PracticeRateOutcome, PracticeRatePreparation,
-        PracticeRateRefusal, PracticeReceipt, PracticeRegion, PracticeRestartEvent,
-        PreparedPracticeProgram, ProjectedPracticeEvent, QueuePushError, RenderReport, SampleBank,
-        SampleId, SourcePlaybackHistory, TargetBoundary, TargetTime, command_queue, practice_queue,
+        command_queue, practice_queue, AudioCommand, AudioError, AudioFormat, AudioLimits,
+        CommandProducer, CommandPushError, CommandScope, Mixer, MixerConfig, PcmLimits, PcmSample,
+        PracticeBoundaryKind, PracticeController, PracticeCue, PracticeError, PracticeEvent,
+        PracticeLimits, PracticeMetadata, PracticeRateEvent, PracticeRateOutcome,
+        PracticeRatePreparation, PracticeRateRefusal, PracticeReceipt, PracticeRegion,
+        PracticeRestartEvent, PreparedPracticeProgram, ProjectedPracticeEvent, QueuePushError,
+        RenderReport, SampleBank, SampleId, SourcePlaybackHistory, TargetBoundary, TargetTime,
     },
     time::{ClockDomainId, ClockPoint, Duration, Timestamp},
     transport::{PositiveRatePhaseError, Rate},

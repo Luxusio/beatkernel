@@ -432,11 +432,9 @@ fn typed_practice_same_rate_requires_noop_instead_of_applied() {
     assert_eq!(valid.outcome, PracticeRateOutcome::Noop);
     let mut invalid = valid;
     invalid.outcome = PracticeRateOutcome::Applied;
-    assert!(
-        controls
-            .reply_transaction(&copied_rate_reply(request, invalid))
-            .is_err()
-    );
+    assert!(controls
+        .reply_transaction(&copied_rate_reply(request, invalid))
+        .is_err());
     assert_transaction_untouched(&mut controls, transaction_cap(), request);
     controls
         .reply_transaction(&copied_rate_reply(request, valid))
@@ -506,11 +504,9 @@ fn typed_practice_actual_refusal_cannot_change_rate_or_revision() {
         } else {
             event.applied_rate = control_rate(2, 1);
         }
-        assert!(
-            controls
-                .reply_transaction(&copied_rate_reply(request, event))
-                .is_err()
-        );
+        assert!(controls
+            .reply_transaction(&copied_rate_reply(request, event))
+            .is_err());
         assert_transaction_untouched(&mut controls, transaction_cap(), request);
         // Current and requested generation/revision still agree. A capacity
         // refusal cannot truthfully be relabelled as superseded control state.
@@ -520,11 +516,9 @@ fn typed_practice_actual_refusal_cannot_change_rate_or_revision() {
         ] {
             let mut mislabeled = valid;
             mislabeled.outcome = PracticeRateOutcome::Refused(wrong_reason);
-            assert!(
-                controls
-                    .reply_transaction(&copied_rate_reply(request, mislabeled))
-                    .is_err()
-            );
+            assert!(controls
+                .reply_transaction(&copied_rate_reply(request, mislabeled))
+                .is_err());
             assert_transaction_untouched(&mut controls, transaction_cap(), request);
         }
         controls
@@ -558,11 +552,9 @@ fn typed_practice_stale_generation_facts_preserve_the_newer_advertisement() {
     event.outcome = PracticeRateOutcome::Refused(PracticeRateRefusal::StaleGeneration);
     let mut wrong_actual_attempt = event;
     wrong_actual_attempt.generation = 3;
-    assert!(
-        controls
-            .reply_transaction(&copied_rate_reply(request, wrong_actual_attempt))
-            .is_err()
-    );
+    assert!(controls
+        .reply_transaction(&copied_rate_reply(request, wrong_actual_attempt))
+        .is_err());
     assert_transaction_untouched(&mut controls, current, request);
     let reply = copied_rate_reply(request, event);
     controls.reply_transaction(&reply).unwrap();
@@ -603,11 +595,9 @@ fn typed_practice_stale_revision_refusal_preserves_the_actual_current_state() {
     stale_fabrication.applied_revision = 7;
     stale_fabrication.previous_rate = ControlRate::NORMAL;
     stale_fabrication.applied_rate = ControlRate::NORMAL;
-    assert!(
-        controls
-            .reply_transaction(&copied_rate_reply(request, stale_fabrication))
-            .is_err()
-    );
+    assert!(controls
+        .reply_transaction(&copied_rate_reply(request, stale_fabrication))
+        .is_err());
     assert_transaction_untouched(&mut controls, current, request);
     let reply = copied_rate_reply(request, event);
     controls.reply_transaction(&reply).unwrap();
@@ -629,11 +619,9 @@ fn typed_practice_revoke_cancels_once_without_admitting_a_late_actual_reply() {
         assert!(controls.capability().is_none());
         assert!(controls.transaction_capability().is_none());
         assert!(controls.pending());
-        assert!(
-            controls
-                .reply_transaction(&copied_rate_reply(request, copied_rate_event(request)))
-                .is_err()
-        );
+        assert!(controls
+            .reply_transaction(&copied_rate_reply(request, copied_rate_event(request)))
+            .is_err());
         let response = controls.take_transaction_response().unwrap();
         assert_eq!(response.request, request);
         let PracticeTransactionReply::Rate { result, .. } = response.reply else {
@@ -811,11 +799,9 @@ fn typed_practice_restart_refusal_marker_keeps_old_generation_and_revision() {
     event.outcome = PracticeRateOutcome::Refused(PracticeRateRefusal::BgmCapacity);
     let mut wrong_marker = event;
     wrong_marker.boundary.kind = PracticeBoundaryKind::Requested;
-    assert!(
-        controls
-            .reply_transaction(&copied_restart_reply(request, wrong_marker))
-            .is_err()
-    );
+    assert!(controls
+        .reply_transaction(&copied_restart_reply(request, wrong_marker))
+        .is_err());
     assert_transaction_untouched(&mut controls, capability, request);
     for wrong_reason in [
         PracticeRateRefusal::StaleRevision,
@@ -823,11 +809,9 @@ fn typed_practice_restart_refusal_marker_keeps_old_generation_and_revision() {
     ] {
         let mut mislabeled = event;
         mislabeled.outcome = PracticeRateOutcome::Refused(wrong_reason);
-        assert!(
-            controls
-                .reply_transaction(&copied_restart_reply(request, mislabeled))
-                .is_err()
-        );
+        assert!(controls
+            .reply_transaction(&copied_restart_reply(request, mislabeled))
+            .is_err());
         assert_transaction_untouched(&mut controls, capability, request);
     }
     let reply = copied_restart_reply(request, event);
@@ -906,20 +890,16 @@ fn practice_control_response_retains_originating_action_across_actual_lock_conte
 #[test]
 fn practice_control_actual_channel_pending_stale_ack_and_generation() {
     let (publisher, viewer) = channel();
-    assert!(
-        viewer
-            .request_practice(PracticeAction::Scrub { target: t(1) })
-            .is_err()
-    );
+    assert!(viewer
+        .request_practice(PracticeAction::Scrub { target: t(1) })
+        .is_err());
     publisher.advertise_practice(Some(cap())).unwrap();
-    assert!(
-        viewer
-            .request_practice(PracticeAction::Loop {
-                start: t(2),
-                end: t(1)
-            })
-            .is_err()
-    );
+    assert!(viewer
+        .request_practice(PracticeAction::Loop {
+            start: t(2),
+            end: t(1)
+        })
+        .is_err());
     let id = viewer
         .request_practice(PracticeAction::Scrub {
             target: t(604_800_000_000_000),
@@ -928,11 +908,9 @@ fn practice_control_actual_channel_pending_stale_ack_and_generation() {
     let request = publisher.take_practice_request().unwrap().unwrap();
     assert_eq!(request.id, id);
     assert!(publisher.take_practice_request().unwrap().is_none());
-    assert!(
-        viewer
-            .request_practice(PracticeAction::DisableLoop)
-            .is_err()
-    );
+    assert!(viewer
+        .request_practice(PracticeAction::DisableLoop)
+        .is_err());
     viewer.request_pause(true);
     assert!(!viewer.pause_requested());
     assert!(viewer.request_output(vec![]).is_err());
@@ -956,14 +934,12 @@ fn practice_control_actual_channel_pending_stale_ack_and_generation() {
     assert!(next > id);
     let request = publisher.take_practice_request().unwrap().unwrap();
     publisher.reply_practice(&applied(request, 2)).unwrap(); // Mode receipt keeps generation.
-    assert!(
-        viewer
-            .take_practice_reply()
-            .unwrap()
-            .unwrap()
-            .result
-            .is_ok()
-    );
+    assert!(viewer
+        .take_practice_reply()
+        .unwrap()
+        .unwrap()
+        .result
+        .is_ok());
 }
 #[test]
 fn practice_control_tls_pause_cancel_and_close_preserve_request_identity() {
@@ -971,18 +947,14 @@ fn practice_control_tls_pause_cancel_and_close_preserve_request_identity() {
     with_publisher(publisher.clone(), || {
         advertise_practice(Some(cap())).unwrap();
         publish_pause(PauseState::Paused);
-        assert!(
-            viewer
-                .request_practice(PracticeAction::DisableLoop)
-                .is_err()
-        );
+        assert!(viewer
+            .request_practice(PracticeAction::DisableLoop)
+            .is_err());
         publish_pause(PauseState::Running);
         viewer.request_pause(true);
-        assert!(
-            viewer
-                .request_practice(PracticeAction::DisableLoop)
-                .is_err()
-        );
+        assert!(viewer
+            .request_practice(PracticeAction::DisableLoop)
+            .is_err());
         viewer.request_pause(false);
         let id = viewer
             .request_practice(PracticeAction::Scrub { target: t(8) })
@@ -1006,14 +978,12 @@ fn practice_control_tls_pause_cancel_and_close_preserve_request_identity() {
         Ok(())
     })
     .unwrap();
-    assert!(
-        viewer
-            .take_practice_reply()
-            .unwrap()
-            .unwrap()
-            .result
-            .is_err()
-    );
+    assert!(viewer
+        .take_practice_reply()
+        .unwrap()
+        .unwrap()
+        .result
+        .is_err());
     assert!(viewer.practice_capability().unwrap().is_none());
 }
 #[test]
@@ -1296,10 +1266,11 @@ fn practice_presentation_cohort_invalid_last_member_and_stale_commit_are_atomic(
         }
         let mut invalid = practice_attempt(&source, &policy);
         invalid.score.hits = 1;
-        assert!(
-            prepare_practice_presentation(1, &[(PlayerId(3), &attempt), (PlayerId(9), &invalid)])
-                .is_err()
-        );
+        assert!(prepare_practice_presentation(
+            1,
+            &[(PlayerId(3), &attempt), (PlayerId(9), &invalid)]
+        )
+        .is_err());
         assert_eq!(practice_current().players[0].score.hits, 1);
         let stale =
             prepare_practice_presentation(1, &[(PlayerId(3), &attempt), (PlayerId(9), &attempt)])
@@ -1460,7 +1431,7 @@ fn practice_recording_attempt(
 }
 #[test]
 fn practice_applied_identity_survives_cancel_and_visual_poison_without_screen_reset() {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     let source = practice_original();
     let policy = practice_policy(&source);
     for fault in 0..3 {
@@ -1478,22 +1449,18 @@ fn practice_applied_identity_survives_cancel_and_visual_poison_without_screen_re
             if fault == 0 {
                 viewer.cancel();
             } else {
-                assert!(
-                    catch_unwind(AssertUnwindSafe(|| {
-                        let _guard = publisher.0.latest.lock().unwrap();
-                        panic!("scripted visual publication poison");
-                    }))
-                    .is_err()
-                );
+                assert!(catch_unwind(AssertUnwindSafe(|| {
+                    let _guard = publisher.0.latest.lock().unwrap();
+                    panic!("scripted visual publication poison");
+                }))
+                .is_err());
             }
             if fault == 2 {
-                assert!(
-                    catch_unwind(AssertUnwindSafe(|| {
-                        let _guard = publisher.0.native_launch.lock().unwrap();
-                        panic!("scripted complete metadata swap poison");
-                    }))
-                    .is_err()
-                );
+                assert!(catch_unwind(AssertUnwindSafe(|| {
+                    let _guard = publisher.0.native_launch.lock().unwrap();
+                    panic!("scripted complete metadata swap poison");
+                }))
+                .is_err());
             }
             apply_practice_identity(&mut staged, 2);
             let applied = viewer.take_native_launch().unwrap().unwrap();

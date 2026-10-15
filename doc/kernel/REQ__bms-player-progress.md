@@ -7,6 +7,17 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+현재 runtime05.13.06은 구현·연동 중(W)이며 실제 브라우저 필수12개 흐름이
+모두 통과했다. 열세 번째 실행80375는 추가 저장 검사까지13개 check PASS,
+unmet0·console/network0·owned browser/Xvfb exit0이다. ACK 뒤 새 poll을 기다리는
+Worker 수정과 정확한 retirement 거절 처리의 Node324/0·실제 Rust Worklet24/0을
+확인했다. 브라우저는 현재 JS와 일치하는 기존 fresh UI/audio WASM을 사용했다.
+이 증거는 개발 검증이며 필수 독립 code/security review와 browser/CLI/desktop QA가
+남아 전체136/489·오디오 커널12/27은 유지한다.
+[현재 변경/증거](../changes/2026-10-15-runtime-playback-rate.md)를 따른다.
+
+아래 날짜별 문단은 당시의 실행 기록이다. runtime의 현재 상태는 위 checkpoint가 우선한다.
+
 2026-10-15 실제 browser 첫 실행: fresh 두 WASM은 일치했으나 cold capability가
 정상적으로 빈 값인 시점에 JS가16words를 요구해 시작이 실패했다. network/console
 오류는 없었고 owned browser/Xvfb는 exit0으로 정리했다. 기존 Rust의 실제 Started

@@ -415,29 +415,25 @@ fn malformed_and_nonpositive_phase_construction_cannot_reach_replacement() {
     let (group, mut queue) = group(&[1], Rate::NORMAL);
     let before = group.transport().clone();
     for rate in [Rate::new(0, 1).unwrap(), Rate::new(-1, 1).unwrap()] {
-        assert!(
-            Transport::new_with_output_phase(
-                basis(2, 10),
-                clock(1, 1200),
-                ts(0),
-                Duration::ZERO,
-                rate,
-                None
-            )
-            .is_err()
-        );
-    }
-    assert!(
-        Transport::new_with_output_phase(
+        assert!(Transport::new_with_output_phase(
             basis(2, 10),
-            clock(3, 1200),
+            clock(1, 1200),
             ts(0),
             Duration::ZERO,
-            Rate::NORMAL,
+            rate,
             None
         )
-        .is_err()
-    );
+        .is_err());
+    }
+    assert!(Transport::new_with_output_phase(
+        basis(2, 10),
+        clock(3, 1200),
+        ts(0),
+        Duration::ZERO,
+        Rate::NORMAL,
+        None
+    )
+    .is_err());
     assert_eq!(group.transport(), &before);
     assert_eq!(group.audio_scope(), CommandScope(1));
     assert_eq!(queue.try_pop(), Err(QueuePopError::Empty));
@@ -606,28 +602,24 @@ fn fixed_and_runtime_phase_modes_cannot_mix_in_region_or_compound_restart() {
         } else {
             runtime_transport(basis(2, 10), 1200, Rate::new(3, 2).unwrap())
         };
-        assert!(
-            group
-                .replace_practice_states_with_output_phase(
-                    judges(&[7, 29]),
-                    candidate.clone(),
-                    Some(ts(9_000_000)),
-                    CommandScope(2),
-                )
-                .is_err()
-        );
+        assert!(group
+            .replace_practice_states_with_output_phase(
+                judges(&[7, 29]),
+                candidate.clone(),
+                Some(ts(9_000_000)),
+                CommandScope(2),
+            )
+            .is_err());
         assert_unchanged(&group, &before, &hashes, 0);
-        assert!(
-            group
-                .replace_practice_states_with_runtime_restart(
-                    judges(&[7, 29]),
-                    candidate,
-                    Some(ts(9_000_000)),
-                    CommandScope(2),
-                    Rate::new(3, 2).unwrap(),
-                )
-                .is_err()
-        );
+        assert!(group
+            .replace_practice_states_with_runtime_restart(
+                judges(&[7, 29]),
+                candidate,
+                Some(ts(9_000_000)),
+                CommandScope(2),
+                Rate::new(3, 2).unwrap(),
+            )
+            .is_err());
         assert_unchanged(&group, &before, &hashes, 0);
     }
 }

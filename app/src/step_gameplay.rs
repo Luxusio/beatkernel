@@ -1858,8 +1858,8 @@ impl StepGameplay {
         .map_err(retained_error)?
         .to_words();
         if let Some(total) = total_voices {
-            limits.max_overlap = usize::try_from(preparation[6])
-                .map_err(|_| StepGameplayError::SequenceOverflow)?;
+            limits.max_overlap =
+                usize::try_from(preparation[6]).map_err(|_| StepGameplayError::SequenceOverflow)?;
             let gameplay = total.checked_sub(limits.max_overlap).ok_or(
                 StepGameplayError::InvalidConfiguration(
                     "retained BGM overlap exceeds total voice budget",

@@ -631,23 +631,27 @@ pub(super) fn run(
                     .iter()
                     .find(|config| config.player == member.player)
                     .ok_or("retained cohort runtime header player missing")?;
-                let limits = member.capture_limits
+                let limits = member
+                    .capture_limits
                     .unwrap_or(beatkernel_bms_runtime::competition_live::replay_limits()?);
-                let header = beatkernel_bms_runtime::native_judge::prepare_policy_header_with_speed(
-                    initial_source,
-                    &config.judge,
-                    &member.policy,
-                    LOGICAL,
-                    options.live_speed.start(),
-                    member.chart_seed,
-                    options.live_speed.end(),
-                    options.live_speed.speed(),
-                )?;
-                headers.push(beatkernel_bms_runtime::practice_playback::PracticeRuntimeHeader {
-                    player: member.player,
-                    header,
-                    limits,
-                });
+                let header =
+                    beatkernel_bms_runtime::native_judge::prepare_policy_header_with_speed(
+                        initial_source,
+                        &config.judge,
+                        &member.policy,
+                        LOGICAL,
+                        options.live_speed.start(),
+                        member.chart_seed,
+                        options.live_speed.end(),
+                        options.live_speed.speed(),
+                    )?;
+                headers.push(
+                    beatkernel_bms_runtime::practice_playback::PracticeRuntimeHeader {
+                        player: member.player,
+                        header,
+                        limits,
+                    },
+                );
             }
             let prepared_audio =
                 beatkernel_bms_runtime::native_audio::prepare_retained_audio_with_runtime_rates(

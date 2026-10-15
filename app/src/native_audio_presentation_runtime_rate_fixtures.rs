@@ -628,16 +628,14 @@ fn native_runtime_rate_exact_cut_keeps_first_target26_native_proof_unchanged() {
     assert_eq!(cut.output(), point(3, 5_017_000_000));
     assert_eq!(cut.phase().elapsed_nanos(), 17_000_000);
     assert_eq!(cut.phase().logical(), cut.output());
-    assert!(
-        cut.coordinate_query()
-            .compare_target_time(TargetTime::from_frames(17, 1000).unwrap())
-            .is_eq()
-    );
-    assert!(
-        cut.coordinate_query()
-            .compare_interpolated_time(projected.coordinate_query().unwrap().unwrap())
-            .is_lt()
-    );
+    assert!(cut
+        .coordinate_query()
+        .compare_target_time(TargetTime::from_frames(17, 1000).unwrap())
+        .is_eq());
+    assert!(cut
+        .coordinate_query()
+        .compare_interpolated_time(projected.coordinate_query().unwrap().unwrap())
+        .is_lt());
     assert!(owner.authority().committed_coordinate_operation().is_none());
 }
 
@@ -687,11 +685,9 @@ fn native_runtime_rate_exact_acquisition_and_cutoff_preserve_equal_and_between_p
         Some(point(3, 5_017_000_000))
     );
     let committed = owner.authority().committed_coordinate_operation().unwrap();
-    assert!(
-        committed
-            .compare_target_time(TargetTime::from_frames(17, 1000).unwrap())
-            .is_eq()
-    );
+    assert!(committed
+        .compare_target_time(TargetTime::from_frames(17, 1000).unwrap())
+        .is_eq());
     assert_eq!(inputs.pending(), 3);
     for (sequence, at) in [(2, 25_500_100), (3, 25_750_100), (4, 26_000_100)] {
         let event = inputs.pop_ready(now).unwrap().unwrap();
@@ -749,21 +745,15 @@ fn native_runtime_rate_requires_original_presented_projection_and_current_input_
         .authority_mut()
         .record_acquired_prefix(now)
         .unwrap();
-    assert!(
-        other_epoch
-            .practice_rate_cut_ready(&cut, now, &merger())
-            .is_err()
-    );
-    assert!(
-        other_epoch
-            .commit_practice_rate_cut(cut, now, &merger())
-            .is_err()
-    );
-    assert!(
-        owner
-            .practice_rate_cut_ready(&cut, point(99, 40_000_100), &merger())
-            .is_err()
-    );
+    assert!(other_epoch
+        .practice_rate_cut_ready(&cut, now, &merger())
+        .is_err());
+    assert!(other_epoch
+        .commit_practice_rate_cut(cut, now, &merger())
+        .is_err());
+    assert!(owner
+        .practice_rate_cut_ready(&cut, point(99, 40_000_100), &merger())
+        .is_err());
 }
 
 #[test]
@@ -778,30 +768,26 @@ fn native_runtime_rate_exact_token_rejects_wrong_identity_generation_or_projecte
     let before = format!("{owner:?}");
     let wrong_identity =
         crate::gameplay::output::ports::SourcePlaybackIdentity::new(1000, 1, 0).unwrap();
-    assert!(
-        owner
-            .prepare_practice_rate_cut(
-                boundary,
-                fixture.mapping,
-                wrong_identity,
-                fixture.attempt,
-                now
-            )
-            .is_err()
-    );
+    assert!(owner
+        .prepare_practice_rate_cut(
+            boundary,
+            fixture.mapping,
+            wrong_identity,
+            fixture.attempt,
+            now
+        )
+        .is_err());
     let wrong_attempt =
         beatkernel::transport::OutputPhaseBasis::new(ClockDomainId(3), 41, 2, 0, 1000).unwrap();
-    assert!(
-        owner
-            .prepare_practice_rate_cut(
-                boundary,
-                fixture.mapping,
-                fixture.identity,
-                wrong_attempt,
-                now
-            )
-            .is_err()
-    );
+    assert!(owner
+        .prepare_practice_rate_cut(
+            boundary,
+            fixture.mapping,
+            fixture.identity,
+            wrong_attempt,
+            now
+        )
+        .is_err());
     let mut bad = fixture.projected;
     if let PracticeEvent::Rate(ref mut event) = bad.event {
         event.active_elapsed_nanos = 17_333_333;

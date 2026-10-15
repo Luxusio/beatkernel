@@ -366,3 +366,75 @@ owned browser/Xvfb exit0이다. Worker 명령과 실제 Worklet/Rust admission �
 경합을 읽기 전용 병렬 분석한다. product 수정 전 canonical PLAN에 원인·소유권·
 회귀를 반영하며 거절/ACK 조건을 약화하지 않는다. WBS05.13.06 W·전체136/489·
 오디오 커널12/27을 유지한다. AC010/011과 실제 독립 review/QA는 아직 미완료다.
+
+AC026은 Worklet의 올바른 보호 조건을 유지하고 Worker의 처리 순서를 수정했다.
+실제 event의 Worklet ACK와 Rust ACK 뒤에는 일반 입력 진행·history retirement를
+계속하지 않고 다음 기존 실제 poll을 기다린다. history retirement는 실제 snapshot에
+대해서만 요청하며, client가 검증한 remote/status1/terminalfalse/admitted0/ready
+거절만 해당 호출에서 보류한다. 성공 전 cached pin은 바뀌지 않고 다음 관측에서
+원본 pin을 다시 산출한다. protocol·transport·timeout·종결·다른 status는 여전히
+실패하며 새 timer나 재시도 framework를 추가하지 않았다. 변경은 Worker12줄이다.
+
+Root Node 검증85124는 여섯 관련 suite324/0·skip0으로 통과했다.
+`target/wf/runtime-rate-14043/node-fresh-poll-first-14115.log`가 원본이다.
+솔로/로컬에서 원래 Resume/Rate cut143215·playback105839, acquired input 소유권,
+두 ACK 뒤 fresh poll 우선, pin143249의 후속 성공과 typed 거절·실패 구분을 확인했다.
+Root Rust 검증88189는 기존 Worklet 통합24/0·ignored0으로 통과했다.
+`target/wf/runtime-rate-14043/rust-fresh-poll-first-14115.log`가 원본이다.
+실제 WorkletAudio/Mixer에서 Resume serial3과 Rate serial4의 cut7/playback2,
+PCM0.125/0.375와 history span 전부를 보존하며 미전달 Rate 뒤 retirement8,
+latched Rate 뒤 retirement9가 정확히 InvalidRetentionPin으로 무변경 거절되는지
+확인했다. 실제 Rate ACK·event-free poll 뒤 frontier9에서만 두 span을 정리했다.
+
+관련 native 감사의 초기 same-cut 반례는 실제 host 계약을 위반한 가상 admission을
+전제해 철회했다. 실제 PracticeMailbox는 paused Rate를 Resume adoption 뒤에
+전달하고 solo는 controller ring을 모두 처리하며 cohort는 경계마다 다음 loop로
+진행한다. queued/held pin도 유지한다. 이를 이유로 native 소스를 추가 수정하거나
+새 수용 기준을 늘리지 않았다.
+
+열세 번째 실제 브라우저 검증80375는 **필수12개 흐름 모두 PASS**다. 추가
+fixed-opponent-record-save-load 검사까지13checks, unmet0이며 실제 solo/local
+rate·pause/resume·invalid draft·complete variable record·Save/Load·독립 replay·
+region/loop/disable/scrub/F5·retired File custody·fixed opponent 유지/거절과
+strict console/network를 확인했다. errors/console/network 모두0, overflowfalse,
+owned browser/Xvfb exit0이다. 원본은
+`target/wf/runtime-rate-browser-thirteenth-14115/evidence.json` 및
+`target/wf/runtime-rate-14043/actual-browser-thirteenth-14115.log`다.
+8개 원본 snapshot과 화면/canvas screenshot을 보존했다. 변경된 실제 Worker를
+사용했고 당시 Rust product source는12cb538e 이후 변경되지 않은 상태였다. 해당
+fresh UI/audio WASM SHA256 b558327a6407d2fdcb3fe783c65a031796e5203f774e7c4b02448c2077f4347f /
+772c283e8dc0a2664e26e64bbc3cb82f0ce21b9837e5d098175d133835c004e8를 재사용했다.
+이 실행은 개발 통합 검사이며 필수 독립 review-code/security와
+qa-browser/CLI/desktop 또는 최종 owning gate를 대신하지 않는다.
+WBS05.13.06은 W·전체136/489·오디오 커널12/27을 유지한다. 별도 browser-audio
+fixed-engine acceptance의 미완료 범위는 이 runtime 실행으로 완료 처리하지 않는다.
+
+## Known ceiling
+
+Known ceiling: 실제 Chromium/SwiftShader/AudioWorklet 실행은 물리 장치·음향 지연·production 성능의 증거가 아니다.
+
+Known ceiling: Analyser pitch는 진단용이며 sample-exact PCM·44.1/48kHz rational 검증은 별도 실제 Rust 통합 결과를 따른다.
+
+Known ceiling: 브라우저 trusted keyboard/touch는 물리 keyboard/HID acceptance를 대신하지 않는다.
+
+Known ceiling: 원본 진단 observer의 할당·실행 비용을 production 경로의 성능 측정값으로 사용하지 않는다.
+
+최종 workspace 포맷 검사는 기존 차이도 포함해 실패했다. 기준364c6542의 원본과
+직접 비교해 이번 변경에서 새로 실패한20개 파일만 workspace edition2021 서식에
+맞췄고, 해당20개 direct file checks는 통과했다. 변경 파일 중21개는 기준 커밋부터
+서식 차이가 있었으며 전체 workspace의 기존 서식을 완료로 표시하거나 대량 수정하지
+않았다. 비교 원본은 `rust-format-final-14115.log`,
+`rust-format-baseline-classification-14115.json`,
+`rust-format-own-corrections-14115.log`이며 모두 `target/wf/runtime-rate-14043/` 아래다.
+stdin의 rustfmt --check는 Diff를 출력하면서 exit0일 수 있어, 기준 비교는 실제 Diff
+출력과 exit를 함께 확인했다. 실제 파일 검사로 이번 수정의 통과를 확인했다.
+
+서식 정리 뒤 source에서 UI/audio release WASM을 순서대로 새로 빌드하고 각 build
+직후 matching bindgen을 생성했다(실제30902 exit0). 두 WASM과 두 generated JS의
+SHA256이 열세 번째 브라우저 실행의 네 파일과 전부 byte-identical했다. 따라서
+열세 번째의 현재 Worker·실제 runtime 증거가 유지되며 동일 동작의 개발 browser를
+중복 실행하지 않았다. 최종 build/sha 원본은
+`browser-format-release-wasm-14115.log`,
+`browser-audio-format-release-wasm-14115.log`,
+`browser-format-bindgen-sha256-14115.log`다. 이는 정식 독립 리뷰와 그 뒤 필수 QA를
+생략한 근거가 아니며 WBS 상태·물리 acceptance도 그대로 남는다.
