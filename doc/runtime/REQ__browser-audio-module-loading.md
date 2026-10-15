@@ -1,11 +1,15 @@
 # Browser audio module preparation
 
 Status: implemented; independent code/security review and full Node QA passed.
-Two strict production browser runs passed, but the latest third run failed
-on the recurring audio-WASM cancellation. Actual browser acceptance remains
-unfinished. This does not complete the BMS player or diagnose that cancellation.
-Verification details and limitations are recorded in
-[the change evidence](../changes/2026-10-11-browser-audio-module-loading.md).
+Historical two strict browser passes and a later failure remain recorded in
+[the original evidence](../changes/2026-10-11-browser-audio-module-loading.md).
+The current-artifact runs both completed all 13 journeys but failed the strict
+audio network completion gate. The second run confirms the separate CDP owner
+cleanup correction, with no cleanup errors. The installed Chromium version's
+official source contains the pre-fix loader for the matching upstream bug;
+fixed-engine end-to-end acceptance remains unfinished. This does not complete
+the BMS player. Current identities, exact results and limits are in
+[the current evidence](../changes/2026-10-15-browser-audio-current-acceptance.md).
 
 The existing business Worker owns audio WASM fetch, bounded body storage,
 byte copying and compilation. Window requests preparation and receives only a
@@ -105,5 +109,7 @@ The reproducible command and snapshot limits are in
 ## Known ceiling
 
 Setup can temporarily compete with preview work in the existing business
-Worker. Physical input/audio latency, real hardware performance, every browser
-engine and the recurring cancellation's root cause remain unestablished.
+Worker. Physical input/audio latency, real hardware performance and every
+browser engine remain unestablished. The current evidence strongly supports
+the documented upstream loader defect for the recurring cancellation; it does
+not prove acceptance on a fixed browser or establish the first fixed release.

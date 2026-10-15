@@ -152,3 +152,10 @@ calling the child's `detach()` instead sends at the root connection and fails
 with `No session with given id`. An actual Chromium probe confirms the owner
 command succeeds for the same child after the root command fails. Keep genuine
 cleanup errors visible; browser exit alone does not substitute for detachment.
+
+When the existing authorized-account wrapper resets PATH, invoke the already
+installed Node by its absolute path. In this checkout the verified executable
+is `/home/ccc/.local/share/mise/installs/node/22/bin/node`; this uses the cached
+runtime and does not run mise or install anything. A wrapper's prelaunch exit127
+is separate from an actual browser run and must not consume or overwrite its
+evidence directory.
