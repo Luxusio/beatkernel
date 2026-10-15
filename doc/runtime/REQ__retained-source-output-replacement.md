@@ -122,8 +122,10 @@ checks intact. A future gate does not justify fabricating an earlier native seed
 Select an explicit complete owner for retained WASAPI shared and exclusive startup.
 Shared EnginePeriod/DeviceDefault policy changes remain supported within that
 family; exclusive replacements retain exclusive mode. Cross-family and backend
-changes refuse cold. ASIO keeps its existing Legacy startup path and explicit
-retained-replacement refusal until its own supported vertical is implemented.
+changes refuse cold. Retained ASIO solo/local sessions use the additive complete
+Source owner and common typed Output UI/pumps. Network sessions keep legacy
+startup with retained output controls disabled; callers choosing legacy APIs
+keep their existing retained-operation restrictions.
 Never change the selected mode or backend to obtain a supported path. Preserve
 legacy Mixer/remixed/scalar/finite/ASIO recovery and scalar backend switching;
 do not route legacy remixed recovery through NativeOutputState.into_mixer,

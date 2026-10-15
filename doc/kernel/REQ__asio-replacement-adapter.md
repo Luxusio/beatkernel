@@ -90,6 +90,8 @@ Verify portable policy with real Mixer report/interval admission/provenance
 tests and gated native error mapping with recovered real PCM/queues. Tests must
 not invent drivers, registry controls, QPC clocks or callback owners. Linux
 execution, Windows Rust-only typing, authentic SDK build and physical driver
-acceptance are reported separately. Native play-loop/UI composition and final
-independent review/QA remain pending while this integration is in progress.
-Full BMS player Goal stays active.
+acceptance are reported separately. Complete native play-loop/UI composition is
+implemented, and independent code/security review plus the highest available
+software QA have passed. Actual Windows native caller execution, authentic SDK
+build and installed-driver/acoustic acceptance remain unfinished. Hook-owned
+completion evidence is a separate gate. Full BMS player Goal stays active.
