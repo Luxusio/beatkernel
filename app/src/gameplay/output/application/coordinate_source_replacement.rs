@@ -13,7 +13,11 @@ use crate::{
 };
 use beatkernel_platform::audio::{presentation::validation::NativeFrameBasis, NativeOutputState};
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "windows", feature = "asio-sdk"),
+    test
+))]
 #[path = "source_frame_observations.rs"]
 pub(crate) mod source_frame_observations;
 
@@ -608,7 +612,11 @@ impl<B: ConditionalSourceRetirementNativeOutputBackend<NativeOutputState>>
             let progressing = prepared.correlation_pair().is_some();
             timing.validator.commit(prepared).map_err(|error| ReplacementFailure::timing(error.into()))?;
             let Some(pair) = timing.validator.latest_pair() else { return Ok(None); };
-            if pair.target.timestamp > now.timestamp
+            let covered_after = match snapshot.evidence {
+                OriginalNativePresentationEvidence::Asio { observation, .. } => observation.host.after,
+                _ => pair.target,
+            };
+            if covered_after.timestamp > now.timestamp
                 || i128::from(now.timestamp.as_nanos()) - i128::from(pair.target.timestamp.as_nanos())
                     > i128::from(current.authority().config().max_observation_age.as_nanos())
             {
@@ -792,6 +800,9 @@ pub fn publish_ready_coordinate_source_audio_output<O, E, A>(
 
 #[cfg(test)]
 use crate as runtime;
+#[cfg(test)]
+#[path = "coordinate_source_asio_future_fixtures.rs"]
+mod coordinate_source_asio_future_fixtures;
 #[cfg(test)]
 #[path = "coordinate_source_future_fixtures.rs"]
 mod coordinate_source_future_fixtures;

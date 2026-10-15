@@ -10,7 +10,18 @@ use beatkernel::{
     audio::OutputFrameBasis,
     time::{ClockDomainId, ClockPoint},
 };
-use beatkernel_platform::audio::presentation::validation::OriginalNativePresentationEvidence;
+use beatkernel_platform::audio::{
+    asio::AsioPresentationError,
+    presentation::{
+        discipline::DisciplineError,
+        validation::{NativePresentationValidator, OriginalNativePresentationEvidence},
+    },
+};
+
+enum EvidenceFamily {
+    SuppliedPair,
+    Asio(NativePresentationValidator),
+}
 
 #[derive(Clone, Copy)]
 struct Publication {
@@ -27,6 +38,7 @@ pub(crate) struct PendingSourceFrameObservations<E> {
     basis: OutputFrameBasis,
     identity: SourcePlaybackIdentity,
     host_domain: ClockDomainId,
+    family: EvidenceFamily,
     pending: [Option<NativePlaybackObservation<E>>; 2],
     latest: Option<Publication>,
     selected: Option<(u64, ClockPoint)>,
@@ -43,16 +55,41 @@ impl<E> PendingSourceFrameObservations<E> {
             basis,
             identity,
             host_domain,
+            family: EvidenceFamily::SuppliedPair,
             pending: [None, None],
             latest: None,
             selected: None,
         }
     }
 
+    /// ASIO retains its complete native interval and validates delivered prefixes.
+    pub(crate) fn new_asio(
+        epoch: u64,
+        basis: OutputFrameBasis,
+        identity: SourcePlaybackIdentity,
+        host_domain: ClockDomainId,
+    ) -> Result<Self, SourcePlaybackPacketError> {
+        let mut pending = Self::new(epoch, basis, identity, host_domain);
+        pending.validate_expectations(epoch, basis, identity, host_domain)?;
+        let origin = basis
+            .point_at_stream_frame(0)
+            .map_err(|_| SourcePlaybackPacketError::Overflow)?;
+        pending.family =
+            EvidenceFamily::Asio(NativePresentationValidator::new(epoch, origin, host_domain));
+        Ok(pending)
+    }
+
     pub(crate) fn clear(&mut self) {
         self.pending = [None, None];
         self.latest = None;
         self.selected = None;
+        if let EvidenceFamily::Asio(validator) = &mut self.family {
+            *validator = NativePresentationValidator::new(
+                self.epoch,
+                validator.output_origin(),
+                self.host_domain,
+            );
+        }
     }
 
     /// Expectations come from the current output and requested Source identity.
@@ -102,23 +139,74 @@ impl<E> PendingSourceFrameObservations<E> {
         if snapshot.basis != self.basis {
             return Err(Error::BasisMismatch);
         }
-        let (
-            OriginalNativePresentationEvidence::SuppliedPair(pair),
-            NativeOutputCoordinate::StreamFrame { frame },
-        ) = (snapshot.evidence, coordinate.coordinate())
-        else {
+        let NativeOutputCoordinate::StreamFrame { frame } = coordinate.coordinate() else {
             return Err(Error::CoordinateMismatch);
         };
-        if pair.source.domain != self.basis.origin().domain
-            || pair.target.domain != self.host_domain
-            || self
-                .basis
-                .point_at_stream_frame(frame)
-                .map_err(|_| Error::Overflow)?
-                != pair.source
-        {
-            return Err(Error::CoordinateMismatch);
-        }
+        let (host, prepared_asio) = match (&self.family, snapshot.evidence) {
+            (
+                EvidenceFamily::SuppliedPair,
+                OriginalNativePresentationEvidence::SuppliedPair(pair),
+            ) => {
+                if pair.source.domain != self.basis.origin().domain
+                    || pair.target.domain != self.host_domain
+                    || self
+                        .basis
+                        .point_at_stream_frame(frame)
+                        .map_err(|_| Error::Overflow)?
+                        != pair.source
+                {
+                    return Err(Error::CoordinateMismatch);
+                }
+                (pair.target, None)
+            }
+            (
+                EvidenceFamily::Asio(validator),
+                OriginalNativePresentationEvidence::Asio { observation, basis },
+            ) => {
+                if basis != Some(self.basis)
+                    || self.basis.start_physical_frame().checked_add(frame)
+                        != Some(observation.delivered_first_frame)
+                {
+                    return Err(Error::CoordinateMismatch);
+                }
+                let prepared = validator
+                    .prepare_asio(self.epoch, observation, basis)
+                    .map_err(|error| match error {
+                        DisciplineError::Overflow
+                        | DisciplineError::AsioPresentation(AsioPresentationError::Overflow) => {
+                            Error::Overflow
+                        }
+                        _ => Error::CoordinateMismatch,
+                    })?;
+                let delivered_end =
+                    observation
+                        .delivered_end_frame()
+                        .map_err(|error| match error {
+                            AsioPresentationError::Overflow => Error::Overflow,
+                            _ => Error::CoordinateMismatch,
+                        })?;
+                if packet.facts().render != Some(observation.render) {
+                    return Err(Error::InvalidReport);
+                }
+                if delivered_end > packet.facts().submitted_source_end {
+                    return Err(Error::InvalidPrefix);
+                }
+                let midpoint = i128::from(observation.host.before.timestamp.as_nanos())
+                    + (i128::from(observation.host.after.timestamp.as_nanos())
+                        - i128::from(observation.host.before.timestamp.as_nanos()))
+                        / 2;
+                (
+                    ClockPoint {
+                        domain: self.host_domain,
+                        timestamp: beatkernel::time::Timestamp::from_nanos(
+                            i64::try_from(midpoint).map_err(|_| Error::Overflow)?,
+                        ),
+                    },
+                    Some(prepared),
+                )
+            }
+            _ => return Err(Error::CoordinateMismatch),
+        };
         let facts = packet.facts();
         if facts.revision == 0 || facts.revision & 1 != 0 {
             return Err(Error::InvalidRevision);
@@ -135,12 +223,19 @@ impl<E> PendingSourceFrameObservations<E> {
             {
                 return Err(Error::InvalidPrefix);
             }
-            if frame < prior.frame
-                || pair.target.timestamp < prior.host.timestamp
-                || (frame > prior.frame && pair.target.timestamp == prior.host.timestamp)
+            if matches!(self.family, EvidenceFamily::SuppliedPair)
+                && (frame < prior.frame
+                    || host.timestamp < prior.host.timestamp
+                    || (frame > prior.frame && host.timestamp == prior.host.timestamp))
             {
                 return Err(Error::CoordinateMismatch);
             }
+        }
+        if let (EvidenceFamily::Asio(validator), Some(prepared)) = (&mut self.family, prepared_asio)
+        {
+            validator
+                .commit(prepared)
+                .map_err(|_| Error::CoordinateMismatch)?;
         }
         // Validation also covers input that cannot fit. It must not mark that
         // input selected: an identical read remains eligible after space opens.
@@ -148,10 +243,10 @@ impl<E> PendingSourceFrameObservations<E> {
             coordinate,
             facts,
             frame,
-            host: pair.target,
+            host,
         });
         if self.selected.is_some_and(|(old_frame, old_host)| {
-            frame <= old_frame || pair.target.timestamp <= old_host.timestamp
+            frame <= old_frame || host.timestamp <= old_host.timestamp
         }) {
             return Ok(());
         }
@@ -163,7 +258,7 @@ impl<E> PendingSourceFrameObservations<E> {
             return Ok(());
         };
         self.pending[slot] = Some(observation);
-        self.selected = Some((frame, pair.target));
+        self.selected = Some((frame, host));
         Ok(())
     }
 
@@ -177,12 +272,12 @@ impl<E> PendingSourceFrameObservations<E> {
         let Some(first) = &self.pending[0] else {
             return Ok(None);
         };
-        let OriginalNativePresentationEvidence::SuppliedPair(pair) =
-            first.coordinate().snapshot().evidence
-        else {
-            unreachable!("only validated Source frame pairs are queued");
+        let covered_after = match first.coordinate().snapshot().evidence {
+            OriginalNativePresentationEvidence::SuppliedPair(pair) => pair.target,
+            OriginalNativePresentationEvidence::Asio { observation, .. } => observation.host.after,
+            _ => unreachable!("only validated Source frame evidence is queued"),
         };
-        if pair.target.timestamp > now.timestamp {
+        if covered_after.timestamp > now.timestamp {
             return Ok(None);
         }
         let covered = self.pending[0].take();
@@ -194,3 +289,7 @@ impl<E> PendingSourceFrameObservations<E> {
 #[cfg(test)]
 #[path = "source_frame_observations_fixtures.rs"]
 mod source_frame_observations_fixtures;
+
+#[cfg(test)]
+#[path = "source_frame_asio_observations_fixtures.rs"]
+mod source_frame_asio_observations_fixtures;
