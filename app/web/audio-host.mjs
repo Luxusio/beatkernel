@@ -590,10 +590,15 @@ export class AudioHost {
     }
   }
 
-  async finish(endFrame = undefined) {
+  async finish(endFrame = undefined, { mode = "plain" } = {}) {
     this.#gate("finish", ["setup"]);
+    if ((mode !== "plain" && mode !== "retained") || (mode === "retained" && endFrame !== undefined)) {
+      throw this.#error("validation", "finish", "Finish requires plain or retained mode, with no retained end frame.");
+    }
     if (endFrame !== undefined && !unsigned(endFrame)) throw this.#error("validation", "finish", "Playback end frame must be a u64 BigInt.");
-    return this.#request("finish", endFrame === undefined ? {} : { endFrame }, 0, [], () => { this.#state = "allocated"; });
+    this.#gate("finish", ["setup"]);
+    return this.#request("finish", mode === "retained" ? { mode } : endFrame === undefined ? {} : { endFrame },
+      0, [], () => { this.#state = "allocated"; });
   }
 
   async arm(frame) {

@@ -50,6 +50,30 @@ function signed(value) {
   return typeof value === "bigint" && value >= I64_MIN && value <= I64_MAX;
 }
 
+function exactFields(value, fields) {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && Reflect.ownKeys(value).length === fields.length
+    && fields.every(field => Object.hasOwn(value, field));
+}
+
+function validWords(words, count) {
+  if (!(words instanceof Uint32Array) || !(words.buffer instanceof ArrayBuffer)
+    || words.buffer.resizable === true || words.byteOffset !== 0
+    || words.length !== count || words.byteLength !== count * 4
+    || words.buffer.byteLength !== count * 4) return false;
+  try { new Uint32Array(words.buffer, 0, count); } catch { return false; }
+  return true;
+}
+
+function wordValue(words, index) {
+  return BigInt(words[index * 2]) | (BigInt(words[index * 2 + 1]) << 32n);
+}
+
+function putWord(words, index, value) {
+  words[index * 2] = Number(value & 4294967295n);
+  words[index * 2 + 1] = Number(value >> 32n);
+}
+
 function validCommand(command) {
   return command !== null && typeof command === "object"
     && Reflect.ownKeys(command).length === COMMAND_FIELDS.length
@@ -108,6 +132,8 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     this.maxFrames = config.audioLimits.maxFrames;
     this.maxBatch = config.audioLimits.queueCapacity;
     this.pcmLimits = config.pcmLimits;
+    this.maxVoices = config.audioLimits.maxVoices;
+    this.retained = null;
     this.sampleIds = new Set();
     this.pcmBytes = 0;
     this.owner = null;
@@ -345,8 +371,104 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
       sequence: Number.isSafeInteger(message?.sequence) ? message.sequence : null,
       operation: typeof message?.kind === "string" ? message.kind : null,
       status, admitted, error, report };
-    if (status !== 0) acknowledgement.diagnostics = this.terminal;
+    if (typeof message?.kind === "string" && message.kind.startsWith("retained-")) {
+      acknowledgement.version = 1;
+      acknowledgement.programId = this.retained?.programId ?? message.programId;
+      acknowledgement.terminal = this.failed;
+      acknowledgement.retained = null;
+    }
+    if (status !== 0 && this.diagnosed) acknowledgement.diagnostics = this.terminal;
     port.postMessage(acknowledgement);
+  }
+
+  retainedReply(message, status, error, port, report = null, retained = null) {
+    port.postMessage({ kind: "ack", version: 1, generation: this.generation,
+      sequence: message.sequence, operation: message.kind, programId: this.retained.programId,
+      status, admitted: 0, error, terminal: false, report, retained });
+  }
+
+  retainedStatus(message, status, port) {
+    if (status === 0) {
+      this.retainedReply(message, 0, null, port);
+    } else if (status === 1 || status === 2 || status === 3 || status === 7) {
+      this.retainedReply(message, status, "retained-admission", port);
+    } else {
+      this.reject(message, integer(status, 1, 0xffffffff) ? status : EXCEPTION,
+        "retained-audio", 0, port);
+    }
+  }
+
+  retainedEnvelope(message, fields) {
+    return exactFields(message, ["kind", "version", "generation", "sequence", "programId", ...fields])
+      && message.version === 1 && unsigned(message.programId) && message.programId > 0n
+      && (this.retained === null || message.programId === this.retained.programId);
+  }
+
+  retainedSetup(message, port) {
+    if (!this.retainedEnvelope(message, ["words"]) || !validWords(message.words, 32)
+      || this.retained !== null || this.sampleIds.size !== 0 || this.pcmBytes !== 0) {
+      this.reject(message, INVALID, "retained-setup", 0, port);
+      return;
+    }
+    const words = message.words;
+    const cues = wordValue(words, 9);
+    const samples = wordValue(words, 10);
+    const history = wordValue(words, 15);
+    if (wordValue(words, 0) !== 1n || wordValue(words, 1) !== message.programId
+      || cues > 4294967295n || samples > BigInt(this.pcmLimits.maxSamples)
+      || wordValue(words, 4) > 1n || wordValue(words, 8) > 1n
+      || wordValue(words, 11) > BigInt(this.maxVoices)
+      || wordValue(words, 12) < 1n || wordValue(words, 12) > 4294967295n
+      || wordValue(words, 13) < 1n || wordValue(words, 13) > 65536n
+      || wordValue(words, 14) < 1n || wordValue(words, 14) > 65536n
+      || history < 1n || history > 4294967295n) {
+      this.reject(message, INVALID, "retained-setup-fields", 0, port);
+      return;
+    }
+    if (!["retained_setup", "retained_cue", "finish_retained", "retained_preparation_word",
+      "retained_rate", "retained_region", "retained_disable_loop", "retained_restart_original",
+      "retained_pause", "retained_event_poll", "retained_event_word", "retained_event_ack",
+      "retained_metadata_word", "retained_history_len", "retained_history_word",
+      "retained_history_span_word", "retained_history_retire"].every(name => typeof this.owner[name] === "function")) {
+      this.reject(message, STATE, "retained-bindings", 0, port);
+      return;
+    }
+    const status = this.owner.retained_setup(words);
+    if (status !== 0) {
+      this.reject(message, status, "retained-setup-audio", 0, port);
+      return;
+    }
+    this.retained = { programId: message.programId, cues: Number(cues), samples: Number(samples),
+      historyCapacity: Number(history), nextCue: 0, lastCue: null };
+    this.ack(message, 0, 0, null, null, port);
+  }
+
+  retainedCue(message, port) {
+    if (!this.retainedEnvelope(message, ["index", "words"]) || this.retained === null
+      || !validWords(message.words, 9) || !integer(message.index, 0, 0xffffffff)
+      || message.index !== this.retained.nextCue || message.index >= this.retained.cues
+      || this.sampleIds.size !== this.retained.samples) {
+      this.reject(message, INVALID, "retained-cue", 0, port);
+      return;
+    }
+    const words = message.words;
+    const voice = wordValue(words, 0);
+    const sample = wordValue(words, 1);
+    const at = BigInt.asIntN(64, wordValue(words, 2));
+    const gain = new DataView(words.buffer).getFloat32(24, true);
+    if (words[7] !== 0 || words[8] !== 0 || !Number.isFinite(gain)
+      || !this.sampleIds.has(sample) || (this.retained.lastCue !== null && at < this.retained.lastCue)) {
+      this.reject(message, INVALID, "retained-cue-fields", 0, port);
+      return;
+    }
+    const status = this.owner.retained_cue(message.index, voice, sample, at, gain);
+    if (status !== 0) {
+      this.reject(message, status, "retained-cue-audio", 0, port);
+      return;
+    }
+    this.retained.nextCue++;
+    this.retained.lastCue = at;
+    this.ack(message, 0, 0, null, null, port);
   }
 
   reject(message, status, error, admitted = 0, port = this.port,
@@ -460,12 +582,175 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     this.ack(message, 0, 0, null, { available: words[0] !== 0, words }, port);
   }
 
+  retainedPoll(message, port) {
+    // Bounded MessagePort snapshots belong to message control, never process().
+    const words = new Uint32Array(REPORT_FIELDS * 2);
+    for (let index = 0; index < words.length; index++) {
+      const value = this.owner.report_word(Math.floor(index / 2), index % 2 !== 0);
+      if (!integer(value, 0, 0xffffffff)) {
+        this.reject(message, INVALID, "retained-report-word", 0, port);
+        return;
+      }
+      words[index] = value;
+    }
+    const metadata = new Uint32Array(12);
+    for (let index = 0; index < metadata.length; index++) {
+      const value = this.owner.retained_metadata_word(Math.floor(index / 2), index % 2 !== 0);
+      const status = this.owner.status();
+      if (status !== 0) {
+        if (status === 3) this.retainedReply(message, status, "retained-metadata-busy", port);
+        else this.reject(message, integer(status, 1, 0xffffffff) ? status : EXCEPTION,
+          "retained-metadata-audio", 0, port);
+        return;
+      }
+      if (!integer(value, 0, 0xffffffff)) {
+        this.reject(message, INVALID, "retained-metadata-word", 0, port);
+        return;
+      }
+      metadata[index] = value;
+    }
+    const count = this.owner.retained_history_len();
+    const capacityLow = this.owner.retained_history_word(6, false);
+    const capacityHigh = this.owner.retained_history_word(6, true);
+    if (!integer(count, 0, this.retained.historyCapacity)
+      || capacityLow !== this.retained.historyCapacity || capacityHigh !== 0) {
+      this.reject(message, INVALID, "retained-history-capacity", 0, port);
+      return;
+    }
+    const history = new Uint32Array(20 + count * 10);
+    putWord(history, 0, 1n);
+    putWord(history, 1, this.retained.programId);
+    history[4] = words[52];
+    history[5] = words[53];
+    for (let index = 0; index < 12; index++) {
+      const value = this.owner.retained_history_word(Math.floor(index / 2), index % 2 !== 0);
+      if (!integer(value, 0, 0xffffffff)) {
+        this.reject(message, INVALID, "retained-history-word", 0, port);
+        return;
+      }
+      history[6 + index] = value;
+    }
+    if (wordValue(history, 3) !== BigInt(sampleRate)) {
+      this.reject(message, INVALID, "retained-history-rate", 0, port);
+      return;
+    }
+    history[18] = count;
+    for (let span = 0; span < count; span++) {
+      for (let index = 0; index < 10; index++) {
+        const value = this.owner.retained_history_span_word(span, Math.floor(index / 2), index % 2 !== 0);
+        if (!integer(value, 0, 0xffffffff)) {
+          this.reject(message, INVALID, "retained-history-span-word", 0, port);
+          return;
+        }
+        history[20 + span * 10 + index] = value;
+      }
+    }
+    const available = this.owner.retained_event_poll();
+    const status = this.owner.status();
+    if (status !== 0) {
+      this.reject(message, integer(status, 1, 0xffffffff) ? status : EXCEPTION,
+        "retained-event-audio", 0, port);
+      return;
+    }
+    if (available !== 0 && available !== 1) {
+      this.reject(message, INVALID, "retained-event-availability", 0, port);
+      return;
+    }
+    let event = null;
+    if (available === 1) {
+      event = new Uint32Array(80);
+      for (let index = 0; index < event.length; index++) {
+        const value = this.owner.retained_event_word(index);
+        if (!integer(value, 0, 0xffffffff)) {
+          this.reject(message, INVALID, "retained-event-word", 0, port);
+          return;
+        }
+        event[index] = value;
+      }
+      if (wordValue(event, 0) !== 1n || wordValue(event, 1) < 1n || wordValue(event, 1) > 4n
+        || wordValue(event, 2) !== this.retained.programId || wordValue(event, 3) === 0n
+        || wordValue(event, 35) !== wordValue(history, 2)) {
+        this.reject(message, INVALID, "retained-event-identity", 0, port);
+        return;
+      }
+    }
+    this.retainedReply(message, 0, null, port, { available: words[0] !== 0, words },
+      { metadata, history, event });
+  }
+
+  retainedControl(message, port) {
+    const kind = message.kind;
+    let fields;
+    if (kind === "retained-rate" || kind === "retained-restart-original") {
+      fields = ["id", "attempt", "revision", "preparation"];
+    } else if (kind === "retained-region") {
+      fields = ["id", "attempt", "revision", "start", "end", "repeat"];
+    } else if (kind === "retained-disable-loop") {
+      fields = ["id", "attempt", "revision"];
+    } else if (kind === "retained-pause") {
+      fields = ["id", "attempt", "paused"];
+    } else if (kind === "retained-poll") {
+      fields = [];
+    } else if (kind === "retained-event-ack") {
+      fields = ["serial"];
+    } else if (kind === "retained-history-retire") {
+      fields = ["pin"];
+    } else {
+      this.reject(message, INVALID, "retained-operation", 0, port);
+      return;
+    }
+    if (this.retained === null || (this.phase !== 1 && this.phase !== 2)
+      || !this.retainedEnvelope(message, fields)) {
+      this.reject(message, INVALID, "retained-control", 0, port);
+      return;
+    }
+    if ((Object.hasOwn(message, "id") && (!unsigned(message.id) || message.id === 0n
+      || !unsigned(message.attempt) || message.attempt === 0n))
+      || (Object.hasOwn(message, "revision") && !unsigned(message.revision))
+      || (kind === "retained-region" && (!signed(message.start) || !signed(message.end)
+        || typeof message.repeat !== "boolean"))
+      || (kind === "retained-pause" && typeof message.paused !== "boolean")
+      || (kind === "retained-event-ack" && (!unsigned(message.serial) || message.serial === 0n))
+      || (kind === "retained-history-retire" && !unsigned(message.pin))
+      || (Object.hasOwn(message, "preparation") && !validWords(message.preparation, 20))) {
+      this.reject(message, INVALID, "retained-control-fields", 0, port);
+      return;
+    }
+    if (kind === "retained-poll") { this.retainedPoll(message, port); return; }
+    if (Object.hasOwn(message, "preparation")) {
+      for (let index = 0; index < 10; index++) {
+        const status = this.owner.retained_preparation_word(index,
+          message.preparation[index * 2], message.preparation[index * 2 + 1]);
+        if (status !== 0) { this.retainedStatus(message, status, port); return; }
+      }
+    }
+    let status;
+    if (kind === "retained-rate") {
+      status = this.owner.retained_rate(message.id, message.attempt, message.revision);
+    } else if (kind === "retained-restart-original") {
+      status = this.owner.retained_restart_original(message.id, message.attempt, message.revision);
+    } else if (kind === "retained-region") {
+      status = this.owner.retained_region(message.id, message.attempt, message.revision,
+        message.start, message.end, message.repeat);
+    } else if (kind === "retained-disable-loop") {
+      status = this.owner.retained_disable_loop(message.id, message.attempt, message.revision);
+    } else if (kind === "retained-pause") {
+      status = this.owner.retained_pause(message.id, message.attempt, message.paused);
+    } else if (kind === "retained-event-ack") {
+      status = this.owner.retained_event_ack(Number(message.serial & 4294967295n), Number(message.serial >> 32n));
+    } else {
+      status = this.owner.retained_history_retire(Number(message.pin & 4294967295n), Number(message.pin >> 32n));
+    }
+    this.retainedStatus(message, status, port);
+  }
+
   commandControl(message) {
     const port = this.commandPort;
     if (port === null) return;
     try {
       if (message === null || typeof message !== "object"
-        || (message.kind !== "commands" && message.kind !== "poll")) {
+        || (message.kind !== "commands" && message.kind !== "poll"
+          && !(typeof message.kind === "string" && message.kind.startsWith("retained-")))) {
         this.reject(message, INVALID, "command-operation", 0, port);
         return;
       }
@@ -482,7 +767,8 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
         this.reject(message, STATE, "fenced", 0, port);
         return;
       }
-      if (message.kind === "commands") this.commands(message, port);
+      if (message.kind.startsWith("retained-")) this.retainedControl(message, port);
+      else if (message.kind === "commands") this.commands(message, port);
       else this.poll(message, port);
     } catch {
       this.reject(message, EXCEPTION, "exception", 0, port);
@@ -494,6 +780,11 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
       const pcm = message.pcm;
       if (this.phase !== 0) {
         this.reject(message, STATE, "sample-state", 0, port);
+        return;
+      }
+      if (this.retained !== null && (this.retained.nextCue !== 0
+        || this.sampleIds.size >= this.retained.samples)) {
+        this.reject(message, STATE, "retained-sample-order", 0, port);
         return;
       }
       if (!unsigned(message.id) || !integer(message.rate, 1, 0xffffffff)
@@ -535,7 +826,8 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     if (port !== this.samplePort) return;
     try {
       if (!message || typeof message !== "object"
-        || (message.kind !== "sample" && message.kind !== "end-samples")) {
+        || (message.kind !== "sample" && message.kind !== "end-samples"
+          && message.kind !== "retained-setup" && message.kind !== "retained-cue")) {
         this.reject(message, INVALID, "sample-operation", 0, port);
         return;
       }
@@ -552,13 +844,17 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
         this.reject(message, STATE, "fenced", 0, port);
         return;
       }
+      if (message.kind === "retained-setup") { this.retainedSetup(message, port); return; }
+      if (message.kind === "retained-cue") { this.retainedCue(message, port); return; }
       if (message.kind === "sample") {
         this.sample(message, port);
         return;
       }
       if (!integer(message.count, 0, this.pcmLimits.maxSamples)
         || !integer(message.bytes, 0, this.pcmLimits.maxTotalBytes)
-        || message.count !== this.sampleIds.size || message.bytes !== this.pcmBytes) {
+        || message.count !== this.sampleIds.size || message.bytes !== this.pcmBytes
+        || (this.retained !== null && (message.count !== this.retained.samples
+          || this.retained.nextCue !== this.retained.cues))) {
         this.reject(message, INVALID, "sample-end", 0, port);
         return;
       }
@@ -618,12 +914,19 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
           this.reject(message, STATE, "finish-state");
           return;
         }
+        const mode = Object.hasOwn(message, "mode") ? message.mode : "plain";
         const endFrame = message.endFrame;
-        if (endFrame !== undefined && !unsigned(endFrame)) {
+        if ((mode !== "plain" && mode !== "retained")
+          || (endFrame !== undefined && !unsigned(endFrame))
+          || (mode === "retained" && (this.retained === null || !this.samplesEnded
+            || Object.hasOwn(message, "endFrame")
+            || !exactFields(message, ["kind", "generation", "sequence", "mode"])))
+          || (mode === "plain" && this.retained !== null)) {
           this.reject(message, INVALID, "finish-end");
           return;
         }
-        status = endFrame === undefined ? this.owner.finish() : this.owner.finish_at(endFrame);
+        status = mode === "retained" ? this.owner.finish_retained()
+          : endFrame === undefined ? this.owner.finish() : this.owner.finish_at(endFrame);
         if (status === 0) {
           this.memory = BrowserAudio.memory();
           this.buffer = this.memory.buffer;

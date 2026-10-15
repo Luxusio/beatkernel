@@ -3,12 +3,26 @@ import { readAudioFailureDiagnostics } from "./audio-failure.mjs";
 const U64_MAX = 18446744073709551615n;
 const integer = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
 const unsigned = value => typeof value === "bigint" && value >= 0n && value <= U64_MAX;
+const RETAINED_ACK_FIELDS = ["kind", "version", "generation", "sequence", "operation", "programId",
+  "status", "admitted", "error", "terminal", "report", "retained"];
+const word = (words, index) => BigInt(words[index * 2]) | (BigInt(words[index * 2 + 1]) << 32n);
+
+function snapshotWords(words, count) {
+  if (!(words instanceof Uint32Array)) throw new TypeError("Expected retained u32 words.");
+  const buffer = words.buffer, length = words.length, offset = words.byteOffset, bytes = words.byteLength;
+  if (!(buffer instanceof ArrayBuffer) || buffer.resizable === true || offset !== 0
+    || length !== count || bytes !== count * 4 || buffer.byteLength !== bytes) {
+    throw new TypeError("Invalid retained word extent.");
+  }
+  return new Uint32Array(new Uint32Array(buffer, 0, count));
+}
 
 function failure(code, message, generation = null, details = {}) {
   const error = new Error(message, details.cause === undefined ? undefined : { cause: details.cause });
   Object.assign(error, { code, generation, sequence: details.sequence ?? null,
     status: details.status ?? null, admitted: details.admitted ?? null,
     diagnostics: details.diagnostics ?? null });
+  if (details.terminal !== undefined) error.terminal = details.terminal;
   return error;
 }
 
@@ -24,6 +38,10 @@ export class AudioSampleClient {
   #failure = null;
   #sampleIds = new Set();
   #bytes = 0;
+  #programId = null;
+  #expectedSamples = 0;
+  #expectedCues = 0;
+  #cues = 0;
 
   constructor(options = {}) {
     const { port, generation, channels, pcmLimits, timeoutMs } = options ?? {};
@@ -74,6 +92,9 @@ export class AudioSampleClient {
 
   async sample(input) {
     this.#available();
+    if (this.#programId !== null && (this.#cues !== 0 || this.#sampleIds.size >= this.#expectedSamples)) {
+      throw this.#error("state", "Retained sample upload must precede its original cues.");
+    }
     const id = input?.id;
     const rate = input?.rate;
     const channels = input?.channels;
@@ -86,6 +107,9 @@ export class AudioSampleClient {
     const resizable = buffer?.resizable;
     // A caller getter may close the owner or admit another operation.
     this.#available();
+    if (this.#programId !== null && (this.#cues !== 0 || this.#sampleIds.size >= this.#expectedSamples)) {
+      throw this.#error("state", "Retained sample upload must precede its original cues.");
+    }
     const limits = this.#limits;
     if (!unsigned(id) || !integer(rate, 1, 0xffffffff) || channels !== this.#channels
       || !(pcm instanceof Float32Array) || !(buffer instanceof ArrayBuffer)
@@ -105,8 +129,48 @@ export class AudioSampleClient {
     });
   }
 
+  async retainedSetup(input) {
+    this.#available();
+    let words;
+    try { words = snapshotWords(input, 32); }
+    catch (cause) { throw this.#error("validation", "Invalid retained setup words.", { cause }); }
+    this.#available();
+    if (this.#programId !== null || this.#sampleIds.size !== 0) {
+      throw this.#error("state", "Retained setup requires the original empty sample owner.");
+    }
+    const programId = word(words, 1), cueCount = word(words, 9), sampleCount = word(words, 10);
+    if (word(words, 0) !== 1n || programId === 0n || cueCount > 0xffffffffn
+      || sampleCount > BigInt(this.#limits.maxSamples)) {
+      throw this.#error("validation", "Invalid retained setup identity or counts.");
+    }
+    return this.#request("retained-setup", { version: 1, programId, words }, [], () => {
+      this.#programId = programId;
+      this.#expectedCues = Number(cueCount);
+      this.#expectedSamples = Number(sampleCount);
+    });
+  }
+
+  async retainedCue(index, input) {
+    this.#available();
+    let words;
+    try { words = snapshotWords(input, 9); }
+    catch (cause) { throw this.#error("validation", "Invalid retained cue words.", { cause }); }
+    this.#available();
+    if (this.#programId === null) throw this.#error("state", "Retained cues require an accepted setup.");
+    if (!integer(index, 0, 0xffffffff) || index !== this.#cues || index >= this.#expectedCues
+      || this.#sampleIds.size !== this.#expectedSamples || words[7] !== 0 || words[8] !== 0) {
+      throw this.#error("validation", "Retained cues require all samples and original indexed order.");
+    }
+    return this.#request("retained-cue", { version: 1, programId: this.#programId, index, words }, [], () => {
+      this.#cues++;
+    });
+  }
+
   async end() {
     this.#available();
+    if (this.#programId !== null && (this.#sampleIds.size !== this.#expectedSamples || this.#cues !== this.#expectedCues)) {
+      throw this.#error("validation", "Retained upload has not reached its declared sample and cue totals.");
+    }
     const totals = Object.freeze({ count: this.#sampleIds.size, bytes: this.#bytes });
     return this.#request("end-samples", totals, [], () => {
       this.#state = "ended";
@@ -122,7 +186,8 @@ export class AudioSampleClient {
     const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
     promise.catch(() => {});
     const sequence = ++this.#sequence;
-    const pending = { sequence, operation, commit, resolve, reject, timer: null };
+    const pending = { sequence, operation, programId: fields.programId, retained: operation.startsWith("retained-"),
+      commit, resolve, reject, timer: null };
     this.#pending = pending;
     pending.timer = setTimeout(() => {
       if (this.#pending === pending) this.#dispose(this.#error("timeout", "Sample acknowledgement timed out.", { sequence }));
@@ -149,6 +214,8 @@ export class AudioSampleClient {
       if (integer(generation, 1, Number.MAX_SAFE_INTEGER) && generation !== this.#generation) return;
       fields = { generation, kind: message.kind, operation: message.operation, sequence: message.sequence,
         status: message.status, admitted: message.admitted, error: message.error, report: message.report };
+      if (fields.kind === "ack" && pending?.retained) Object.assign(fields, { version: message.version, programId: message.programId,
+        terminal: message.terminal, retained: message.retained });
     } catch (cause) { malformed(cause); return; }
     // Read response fields only once. Getters cannot revive a closed owner or
     // settle a different operation admitted while the response was inspected.
@@ -175,6 +242,20 @@ export class AudioSampleClient {
       malformed();
       return;
     }
+    if (pending.retained) {
+      let valid;
+      try {
+        const keys = Reflect.ownKeys(message);
+        const expected = Object.hasOwn(message, "diagnostics") ? [...RETAINED_ACK_FIELDS, "diagnostics"] : RETAINED_ACK_FIELDS;
+        valid = keys.length === expected.length && expected.every(key => Object.hasOwn(message, key))
+          && fields.version === 1 && fields.programId === pending.programId && fields.retained === null
+          && typeof fields.terminal === "boolean" && (fields.status !== 0 || fields.terminal === false)
+          && (fields.status === 0 || typeof fields.error === "string")
+          && (!Object.hasOwn(message, "diagnostics") || fields.terminal === true);
+      } catch (cause) { malformed(cause); return; }
+      if (!current()) return;
+      if (!valid) { malformed(); return; }
+    }
     let diagnostics = null;
     try {
       const supplied = message.diagnostics;
@@ -186,8 +267,14 @@ export class AudioSampleClient {
     } catch (cause) { malformed(cause); return; }
     if (!current()) return;
     if (fields.status !== 0) {
-      this.#dispose(this.#error("remote", `Audio processor rejected ${pending.operation}${fields.error ? `: ${fields.error}` : "."}`,
-        { sequence: pending.sequence, status: fields.status, admitted: fields.admitted, diagnostics }));
+      const error = this.#error("remote", `Audio processor rejected ${pending.operation}${fields.error ? `: ${fields.error}` : "."}`,
+        { sequence: pending.sequence, status: fields.status, admitted: fields.admitted, diagnostics,
+          ...(pending.retained ? { terminal: fields.terminal } : {}) });
+      if (pending.retained && fields.terminal === false) {
+        this.#pending = null;
+        clearTimeout(pending.timer);
+        pending.reject(error);
+      } else this.#dispose(error);
       return;
     }
     this.#pending = null;
