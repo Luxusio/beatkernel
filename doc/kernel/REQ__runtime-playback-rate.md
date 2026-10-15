@@ -23,6 +23,26 @@ target projection, native presentation은 서로 다른 사실이다. UI는 실�
 표현 범위·용량 부족, 종료/취소 경합은 상관관계를 보존한 거절로 답한다. 거절된
 요청은 기존 PCM, rate, history, recording, opponent를 바꾸지 않는다.
 
+전송 상관관계가 맞는 admission 거절 ACK를 처리한 사실과 재생 요청의 실패는
+구분한다. 유효한 transaction ACK는 처리 성공으로 받고 원래 요청 ID의 typed
+실패 응답을 보관한다. 잘못된 kind/ID나 중복 ACK는 기존 상태를 보존하고 거절한다.
+실제 commit serial의 local ACK는 event latch만 해제하며, 이전 capture를 소비하거나
+입력 history 회수를 허가하지 않는다. 남은 capture는 다음 fresh 경계의 service를
+막고, 실제 Worker는 전원 회수 뒤 Worklet ACK를 보낸다.
+
+샘플레이트 변환의 첫 Target sample 도달 증거와 실제 정수 Source 적용 cut은
+분리한다. Rate 전용 native token은 원래 도달 증거를 보존하면서 실제 변환 이력의
+정확한 source cut을 별도 query·logical/HOST·E로 검증한다. 이전 입력은 그 cut보다
+앞까지만 처리하고 cut과 첫 Target sample 사이 입력은 새 배속으로 판정한다.
+변환 span 밖으로 외삽하거나 E 일치를 완화하지 않으며, 기존 구간·F5 경계는
+이 Rate 전용 보정의 대상이 아니다.
+
+PCM에서 이미 발생한 Rate의 Source pin이 있지만 첫 Target projection은 아직
+없는 exclusive block 끝에서는 해당 Source cut 이상 입력·frontier를 보존한다.
+이미 검증한 실제 playback mapping의 정확한 Source 비교로 진행만 제한하며,
+pin에서 HOST·위상·ACK나 native 권한을 만들어 내지 않는다. 단순 pending 요청은
+이 제한을 만들지 않고, 기존 Pause/Resume·adoption 처리는 계속 진행한다.
+
 같은 구간을 반복할 때는 다음 pass에서 다시 발성할 cue도 변경 용량 검사에
 포함한다. 이후 scrub/loop의 시간 표현 범위와 BGM 용량도 현재 적용 배속으로
 검사한다. 초기 선택 배속으로 유효한 요청을 거절하거나, 적용 뒤 실패를 반복하며
@@ -74,8 +94,11 @@ timestamp-only Transport 동작은 유지한다. Finite cap은 수치 상한이�
 전체 cue scan/sort, 저장 공간 확보와 미래 BGM overlap 준비는 오디오 렌더링
 스레드 밖에서 수행한다. AudioWorklet의 onmessage도 이 스레드에 속한다.
 callback은 모든 head와 cursor의 변경 가능성을 먼저 검사하고, 하나의 결정으로
-함께 적용한다. callback과 활성 Worklet 메시지 경로에서 전체 채보 스캔, heap
-할당/해제, 잠금, I/O를 새로 도입하지 않는다. 기존 명령 credit/ACK도 보존한다.
+함께 적용한다. callback과 활성 Worklet의 Rust 제어 적용에는 전체 채보 스캔,
+heap 할당/해제, 잠금, I/O를 새로 도입하지 않는다. 기존 MessagePort 제어 응답의
+직렬화에 필요한 bounded JS snapshot 복사는 별도 비용으로 명시하고 render의
+`process()` 밖에서만 수행한다. 이 복사까지 무할당이라고 주장하지 않으며 기존
+명령 credit/ACK도 보존한다.
 
 Browser는 arm 전에 원본 cue와 초기 구간으로 retained Program을 설치한다.
 준비 job의 첫 advance 전에 retained 모드를 명시적으로 선택한다. 이 모드에서는
@@ -98,6 +121,30 @@ native proof의 logical output으로 검증한다. Mixer의 raw origin과 같다
 요청 전에 capacity를 확보하되, 실제 event가 오기 전 예상 cut으로 Transport를
 확정하지 않는다. backend 교체나 sample-rate 변경으로 배속을 흉내 내지 않는다.
 
+Native runtime owner는 첫 PCM 렌더 전에 원래 header·capture 예약을 갖춘 상태로
+생성한다. Worklet projection은 내부 상대 원점(domain1,0ns)을 유지하고, 외부 RAW
+시계 원점이나 normalized LOGICAL 원점과 동일시하지 않는다. 상대 target frame/time과
+실제 source Hz를 검증한 뒤 기존 authority로 각 원점을 연결한다.
+
+Browser retained 관측은 기존 getOutputTimestamp에서 얻은 audio-ns/host-ns 쌍을
+1GHz SourceCounter 좌표로 그대로 보존한다. ns를 물리 sample frame으로 역산해
+관측한 값처럼 표시하지 않는다. AudioContext.currentTime은 미래 arm 선택용이며
+presentation을 대신하지 않는다. 입력 authority의 실제 future-input 하한과 대기
+event의 최소 physical cut을 별도 history pin으로 전달하고 Worklet의 queued/latch
+pin도 따로 검사한다. event ACK나 최신 rendered frontier로 pin을 추정하지 않는다.
+
+실제 합의된 Mixer voice/event 한도와 bounded 제어·receipt·history 용량은 초기
+생성 직후 설정한다. 활성화·관측·녹화·요청·event가 시작된 뒤 바꾸지 않으며,
+초기 기본값을 실제 장치 설정으로 가정하지 않는다. Worklet은 업로드된 설정을
+자신의 실제 Mixer 한도와 다시 대조하고 지원 불가한 시작을 명시적으로 거절한다.
+
+원본 채보의 전체 lane/화면 geometry는 처음 구간을 고르기 전에 기존 compiled
+결과에서 준비한다. 구간별 화면은 원본 geometry에서 head가 시작 전인 노트를
+제외하고, 교차 hold 전체 제외와 원래 lane index를 유지한다. 새 구간의 chart와
+모든 member의 NoteProgress는 실제 commit 전에 준비하고 일치하는 serial에서만
+설치한다. Worker는 새 visual content를 등록한 뒤 frame을 전송한다. Rate/Pause나
+거절된 제어를 이유로 기존 note/held/score 진행을 초기화하지 않는다.
+
 ## 구간 제어와 기록
 
 scrub/loop는 현재 적용된 배속을 유지한다. F5는 기존 계약대로 원래 invocation의
@@ -116,6 +163,24 @@ bounded retired-cohort slot으로 이동한다. Worker가 기존 기록 저장 �
 기존 stopped export 의미는 유지하며, 이미 종료된 attempt의 별도 export로
 이전 prefix를 회수한다. 종료·오류에서도 남은 prefix를 버리지 않고, 미완료
 prefix를 완료 결과로 표시하지 않는다. Rate 변경 자체는 attempt를 종료하지 않는다.
+
+Browser는 기존 captured File 목록을 최대128개·256MiB로 제한하고 전송 중인
+retired cohort는 하나만 보유한다. 기존 cohort당64MiB와 실제 roster 수를 사용해
+새 fresh 요청 전에 이전 cohort와 다음 current export 공간을 함께 남겨 둔다.
+공간 부족은 명시적 요청이면 enqueue 전 거절하고, 자율 반복이면 business commit
+전에 capacity 오류로 종료해 이전 File과 current capture를 보존한다. 자동 DB 저장이나
+download는 하지 않는다. 명시 Save의 실제 저장 성공 ACK 뒤에만 해당 임시 보관을
+해제할 수 있다. Capture-off는 File 보관 공간을 사용하지 않는다.
+
+보관 키는 실제 Program·fresh boundary serial·player다. 종료 시 current capture는
+별도 null 키로 구분한다. Window는 전체 roster·File 크기·예산을 검사하고 전원을
+보관한 뒤에만 retired acceptance ACK를 보낸다. Worker는 그 ACK까지 File을 보유하고
+이후 Worklet ACK→Rust ACK를 진행한다. 미완료 prefix의 score는 null이고 현재
+attempt의 score나 completed archive를 붙이지 않는다. 종료·실패에서도 보관을 마친
+뒤 Worker 소유권을 해제하며, 아직 주인 없는 capture가 있으면 released를 보고하지 않는다.
+current 종료 응답의 File·metadata 검증에 실패하면 원본 immutable File 응답을
+보존하고 보관 승인과 Worker 해제를 보류한다. 실패한 응답을 빈 기록 목록의
+성공으로 바꾸거나, 기존 retired 기록과 current 기록의 보관 키를 합치지 않는다.
 
 실제 non-noop 전환만 원본 곡의 정확한 phase와 rate를 포함한 canonical 이력에
 추가한다. 원래 배속으로 돌아와도 가변 배속 기록이다. 원본 replay operation과
@@ -143,6 +208,11 @@ Cold 준비 token의 복제본은 하나의 예약을 공유하고 첫 commit �
 가능해야 하며 고정 배속 상대인 것처럼 admission하지 않는다. 임의의 미래 가변
 배속을 네트워크에서 합의하는 프로토콜은 별도 작업이다.
 
+현재 설정과 비교하는 `RecordPreview::inspect`는 기존 seed·판정 class·timing·gauge·
+profile·구간·입력 방식·고정 배속 일치를 계속 검사한다. 유효한 가변 조건의 역사
+조회는 명시적인 `from_file_for_history`를 사용하며, 조회 성공이 고정 상대의
+호환성 승인이 되지 않는다.
+
 ## UI와 검증 기준
 
 기존 Play lifecycle에 붙는 작은 retained 선언형 제어를 사용한다. draft 오류는
@@ -157,6 +227,11 @@ draft를 제출하며, 편집기 클릭은 해당 입력을 선택한다. 커서
 편집기에 focus가 있을 때만 전달한다. Escape/F5/F9의 기존 Play 제어는 유지한다.
 pending 중에도 draft와 실제 적용값을 보존하며 Apply를 중복 실행하지 않는다.
 
+Browser의 admission 성공은 pending 응답으로 Window의 기존 RPC 슬롯만 해제한다.
+실제 business pending은 유지하고 적용 결과는 원래 요청 ID로 따로 전달한다.
+따라서 pause 중 배속 요청이 있어도 resume 요청을 보낼 수 있다. 실제 owner의
+commit 전에는 적용값·노트 상태·완료 결과를 낙관적으로 바꾸지 않는다.
+
 공통 phase의 양/음수 preroll, 분수 cut/no-op, 큰 정수·denominator·역산을 독립
 literal/oracle로 검증한다. 실제 Mixer PCM, 여러 voice 중 마지막 실패의 전체
 무변경, pause/resume, cue/end/loop 경계, converted suffix, calibrated callback
@@ -166,3 +241,8 @@ literal/oracle로 검증한다. 실제 Mixer PCM, 여러 voice 중 마지막 실
 ## Known ceiling
 
 Known ceiling: Exact accessor requires retained Q and resulting original-song floor to fit i128 — widen only if a concrete consumer requires phase beyond retained cut storage.
+
+Source1000→Target1500의 실제 raw Source17/미투영 Target26 경계는 공통 solo와
+2·4인 cohort의 capture 활성·비활성 회귀로 확인했다. 해당 입력을 보존하고 실제
+projection 후 새 배속으로 처리한다. 이 supplied-clock 소프트웨어 증거가 실제
+driver·장치 acceptance를 대신하지는 않는다.

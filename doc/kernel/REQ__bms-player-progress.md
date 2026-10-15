@@ -7,6 +7,15 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
+2026-10-15 최신 runtime 연동 검사: 공통 native Source/Target pump·정확한 Source cut과
+미투영 경계 barrier·6곳 native cold 조립은 앱 lib3356/0(ignored9)·관련 integration99/0을
+통과했다. Windows/macOS C-stub 타입 검사와 실제 두 release WASM·matching bindgen도
+통과했다. Worklet·포트 Node231개, Worker/Window 신규33개와 관련 기존504개도
+모두 통과했다. 실제 poll 중 요청의 wake와 잘못된 최종 File 응답의 보관 경계도
+회귀로 확인했다. 추가 PCM·기록·리플레이 end-to-end3개도 모두 통과했고 실제 브라우저
+runner는 작성 중이다. 실제 browser·desktop와 전체 독립 review/QA는 남으므로
+WBS 완료 수136/489, 오디오12/27을 유지한다.
+
 2026-10-15 실행 중 배속 전환05.13.06은 W다. 공유 phase·PCM·exact Transport
 history·가변 source 기록의 AC001–004를 구현하고 core 전체816/0·app 관련81/0을
 확인했다. 앞선 scoped 검사는 subset이므로 더하지 않는다. 이어서 Worklet public24/0·

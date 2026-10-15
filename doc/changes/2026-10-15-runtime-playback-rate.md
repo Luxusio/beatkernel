@@ -116,3 +116,54 @@ owner10/0을 확인했다. RAW2/LOGICAL3은 그대로 검증하며 실제 입력
 anchor-rate 비교와 F5 원래 배속 복구 충돌은 공통 RuntimeGroup/SoloRuntime에서
 해결하며, browser fresh 경계의 old capture 회수는 bounded 단일 cohort slot과
 별도 export로 유지한다. 이 후속 변경은 아직 검증 완료로 표시하지 않는다.
+
+2026-10-15 후속 연동: 공통 native solo/cohort가 실제 Source rate cut과 첫 Target
+projection을 분리하고, raw PCM 경계가 아직 투영되지 않았으면 cut 이상 입력과
+frontier만 보류한다. Pause/Resume/adoption은 계속 처리한다. 같은 attempt의
+Transport/header/capture와 2·4인 capture 활성·비활성 입력 순서를 회귀로 확인했다.
+6곳 실제 native 시작 경로도 공통 runtime Program/owner를 조립한다. 초기 seed와
+선택 judgment class의 strict RecordPreview 검증은 복구했고, 명시적인 가변 기록
+history 읽기는 유지했다.
+
+현재 합친 host 검사에서 앱 lib3356 PASS/실패0/ignored9와 관련 integration99
+PASS/실패0을 확인했다. 이는 겹치는 기존·신규 회귀를 포함한 실행 수이며 신규
+기능 수가 아니다. 원본은 native-raw-barrier-fixture-calls-14108.log다. Windows와
+macOS lib/tests/bins C/archive-stub 타입 검사도 exit0이며 실제 SDK/driver 실행은
+아니다. Browser Step/export 연결은 실제 UI/audio release WASM과 matching cached
+bindgen 생성까지 통과했다(browser-release-wasm-14107.log,
+browser-audio-release-wasm-14107.log). 실제 브라우저 acceptance는 별도다.
+
+브라우저 JS는 Worklet·포트/host·Worker/Window 세 쌍으로 구현과 독립 테스트를
+나눴다. 첫 focused 실행은79개 중38 PASS/41 FAIL이며 raw 로그는
+js-focused-first-14109.log에 있다. Worklet 공통106은 계수용 VM BigInt spy의 표준
+asIntN 누락으로 확인돼 fixture를 교정했다. 이후 Worklet·포트의 새/기존 Node
+231개가 모두 통과했다(js-worklet-ports-corrected-14109.log). Worker/Window의
+타이머·장치 binding·DOM 설정 오류와 실제 구현 결함은 구분하며 새 실행으로
+확인한다. 이는 개발 회귀 단계이며 독립 전체 review/QA PASS나 WBS D 승격을
+뜻하지 않는다. WBS05.13.06은 W, 전체136/489·오디오12/27을 유지한다.
+
+후속 수정에서 남은 raw timestamp 사례는 실제 serial pump wake 결함이었다.
+poll ACK 대기 중 온 retained 요청을 보관했으나 기존 commandBatch가 비면 drain이
+종료해 다음 외부 tick까지 전송하지 않았다. 같은 drain이 pending retained 요청을
+다시 확인하도록 최소 수정했고, 해당 literal timestamp/실제 순서 oracle은 유지했다.
+별도 검토에서 찾은 malformed current File receipt는 원본 File을 보존하고 custody
+승인·Worker 해제를 보류하도록 수정했다. 완전한 wire의 current+retired 개수3/4
+검사와 malformed 응답→동일 File 유효 재시도 회귀를 보존했다.
+
+수정 후 신규 Worker/Window33개와 기존 관련504개가 모두 통과했다.
+js-worker-window-wake-fixed-14109.log 및 js-worker-window-legacy-final-14109.log가
+원본이며, 앞선231개와 모듈별 실행을 구분한다. 실제 PCM/기록/replay 추가3개는
+첫 실행2 PASS/1 FAIL로 converter의 sample literal 원인을 독립 조사 중이다.
+실제 브라우저 runner는 별도 작성 중이며 formal review/QA는 아직 시작하지 않았다.
+
+검증한 source 후보는 ecc744a5(native), c0e398ed(browser Step/export),
+8bd1b2ca(Worklet/ports), dd567eeb(Worker/Window/capture custody)로 나눠 커밋했다.
+이들 커밋은 최종 전체 acceptance를 뜻하지 않으며 push하지 않았다.
+
+추가 end-to-end3개도 최종 통과했다
+(pcm-step-replay-end-to-end-prefill-fixed-14109.log). 실제 Step발행 키음과 BGM의
+연속 PCM, capture decode/reconstruction 및 별도 replay 출력 배속,44.1/48kHz
+odd cut·preroll·지연 입력, 양방향 실제 ConvertedMixer의 분수·최초 crossing을
+검사한다. 초기 converter fixture의 legacy scope0과 reverse prefill 부족을 실제
+생산 generation/선형 lookahead에 맞췄으며 모든 PCM·분수·cut 기대값을 유지했다.
+Converter generated facts와 실제 native/물리 presentation 증거는 구분한다.

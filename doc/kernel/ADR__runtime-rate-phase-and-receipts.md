@@ -53,6 +53,18 @@ Worklet에는 시작 전에 retained Program을 설치해 future cue/end를 같�
 Program/revision/geometry 검증은 분리된 인스턴스 사이의 소유권 계약이며 새로운
 보안 인증 체계나 암호학적 attestation이 아니다.
 
+기존 MessagePort의 제어 응답은 길이를 제한한 JS snapshot을 직렬화한다. Rust의
+제어 적용은 준비된 scalar slot을 사용하고 `process()`는 기존 scalar render/copy를
+유지한다. MessagePort 응답의 JS 복사·할당과 GC 비용까지 zero-cost라고 부르지 않는다.
+실제 browser 검증에서 이 제어 비용과 출력 deadline을 확인해야 하며 Node spy나
+Rust 무할당 검사만으로 AudioWorklet 전체의 무할당·무지연을 선언하지 않는다.
+
+Browser의 이전 attempt는 기존 File 보관 흐름에서 Program/boundary/player로
+구별한다. 최대128개·256MiB와 cohort당64MiB 예산으로 current export 공간을
+예약하고 전체 cohort의 실제 인수 ACK 뒤에만 Worklet event를 해제한다. 자율 반복이
+이 공간을 넘으면 명시적인 capacity 종료로 기존 데이터를 보존한다. 영구 저장은
+기존 명시 Save의 성공 ACK를 따르며, 새 자동 저장 권한이나 무한 보관 큐는 추가하지 않는다.
+
 ## 대안과 결과
 
 정수 anchor 또는 새 attempt는 작지만 PCM·score·fraction 연속성을 충족하지 않아
