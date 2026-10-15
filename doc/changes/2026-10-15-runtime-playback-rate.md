@@ -518,3 +518,29 @@ AC032는 실제 수락을 일시적인 Promise와 독립적으로 보존한다. 
 수정 뒤 새 matching WASM/browser와 새 정식 리뷰·필수 browser/CLI/desktop QA가
 남는다. 현재 개발 증거로 독립 QA나 실제 장치·음향·성능 acceptance를 대신하지
 않으며, WBS05.13.06 W·전체136/489·오디오 커널12/27과 full player Goal을 유지한다.
+
+
+## 기록 회수 결함 두 건 수정·개발 검증
+
+`a4bad974`는 유효한 실제 Window 수락을 retired cohort에 보존해, timeout 뒤의
+Stop 정리가 같은 File을 다시 보내지 않도록 한다. 중복 tuple 거절과 잘못된 ACK
+검사는 유지한다. 기존 current File cache도 사용해 원본 File을 다시 내보내지 않는다.
+`bfb6affb`는 기존 직렬화기를 공유하는 borrowed encoding 경로로 원본 capture를
+먼저 직렬화한 뒤 성공할 때만 slot에서 꺼낸다. 전체 기록 복사나 새 저장 계층을
+추가하지 않으며, 기존 사용자 지정 envelope와 stopped/current 일회 export를 유지한다.
+
+Root의 현재 Node 실행16201은376/0·skip0이다
+(`node-late-custody-ack-first-14118.log`). 실제 Worker timeout·늦은 수락·거절·
+재시도와 solo/local 임시 인코딩 오류의 원본 cohort 회수를 검사한다.
+Root Rust 실행62794는 codec7/0, 앱 capture12·PCM end-to-end3·identity10·signed
+clock10·Step23으로58/0이다 (`rust-borrowed-replay-codec-first-14118.log`,
+`rust-retired-capture-transaction-first-14118.log`). 실제 public Step에서 해당
+스레드의 인코딩 할당을 한 번 거절하고 typed AllocationFailed·계속 유지되는
+backpressure·동일 원본 바이트의 재시도 성공·다른 player/current capture 보존을
+확인했다. 기존 검사와 겹치는 수를 누적 합산하지 않는다.
+
+관련 원본 로그는 모두 `target/wf/runtime-rate-14043/`에 있다. 이 제품 변경 뒤
+실제 release WASM·matching bindgen을 다시 빌드 중이며, 열네 번째 browser PASS는
+이전 제품 버전의 증거다. 새 브라우저 확인과 새 독립 code/security 리뷰 및
+필수 browser/CLI/desktop QA는 아직 완료하지 않았다. WBS05.13.06 W와 전체
+136/489·오디오12/27을 유지한다.
