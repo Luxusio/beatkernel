@@ -26,6 +26,15 @@ The SDK-independent production dispatch header is executable on the host;
 Rust-only cfg checks do not establish SDK/C++/MSVC ABI or real driver behavior.
 See the [complete retained contract](../runtime/REQ__retained-source-output-replacement.md).
 
+## Legacy stream baseline and historical verification
+
+The baseline and older verification notes below describe the legacy API and
+their original verification dates. Current complete-path implementation and
+proof tiers follow the contract above and the
+[2026-10-15 progress record](../changes/2026-10-15-asio-retained-source-output.md).
+Historical deferred-execution statements do not override that newer evidence;
+authentic SDK/driver and acoustic acceptance remain separate unfinished gates.
+
 The optional Windows MSVC SDK stream consumes an explicitly opened
 [ASIO control](REQ__asio-driver-control.md), the actual core Mixer, selected output
 channel indices and an exact/preferred buffer request. Mixer sample rate must

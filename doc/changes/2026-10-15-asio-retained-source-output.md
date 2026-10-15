@@ -119,6 +119,27 @@ history 회귀3개를 포함한 lifecycle21개는 **typed-only**다. 성공한 �
 작성했다. 로그는 `/tmp/beatkernel-asio-formal-fix-windows-bin-14038.log`·
 `/tmp/beatkernel-asio-formal-fix-rust-only-14038.log`다. 재검토와 독립 QA는 남아 있다.
 
+## 독립 재검토 수정 — 동일 callback의 시계 재매핑
+
+`0632e06b`의 두 번째 DEEP code review는1건으로 FAIL, 별도 security review는
+PASS0이었다. 새 multimedia anchor가 같은 실제 callback을 다른 HOST 구간으로
+매핑하면 동일 Source revision의 coordinate가 달라져 정상 교체도 거절됐다.
+`272b564f`는 기존 고정 두 슬롯과 latest 원본 관측을 재사용한다. 현재 들어온
+delivery·Source facts·식별자·domain·HOST 형식은 검증하면서, 동일 callback에는
+처음의 coordinate·HOST 상한·age를 유지한다. 새 캐시·필드·adapter API는 없다.
+시각 재매핑만으로 AwaitingHostProgress가 진행 상태로 승격되지 않으며,
+SuppliedPair의 동일 revision 엄격성도 유지한다.
+
+새 queue/controller 회귀는 총23개다. 기존 equal-midpoint 검사가 같은 callback의
+HOST/revision 변경을 실제 진행으로 기대해 첫 실행은278 PASS/1 FAIL이었다.
+독립 작성자가 그 기대를 수정하고, 반복 재매핑은 계속 대기하며 실제 다음 callback만
+원래 HOST 상한 뒤에 진행함을 확인하도록 강화했다. 최종 실제 실행은
+`cargo test -p beatkernel-bms-runtime --lib gameplay::output::application --locked --offline -j2`로
+279 PASS/실패0/ignored0, exit0이다. 23개는279개에 포함되며 중복 합산하지 않는다.
+로그는 `/tmp/beatkernel-asio-renewed-original-host-14038.log`·
+`/tmp/beatkernel-asio-renewed-original-host-final-14038.log`다. 새 회귀의 변경 전 RED는
+실행하지 않았으므로 RED 증거로 주장하지 않는다. 최종 독립 재검토와 QA는 남아 있다.
+
 ## Known ceiling
 
 Authentic MSVC/ASIO SDK build와 설치된 실제 driver/HWND/callback/음향 동작은

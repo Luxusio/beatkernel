@@ -9,7 +9,7 @@
 원래 명세의 초기 비목표는 이후 사용자가 승인한 UI/browser/멀티플레이 요구를
 제외하는 근거가 아니다. 검증 연기는 2026-10-06 해제됐다.
 
-2026-10-15 ASIO .14.01–.06은 V이며 독립 리뷰/QA .14.07을 W로 진행한다. 첫 DEEP code review의2건을 a56e039b·8ee68fb1에서 수정했다. 수정 후 host Windows bin94 PASS/실패0(신규 portable15 포함)·platform/app all-target Windows Rust-only 형 검사 exit0이다. gated composition1·native lifecycle21·adapter17은 typed-only다. 실제 SDK/driver .14.08은 E다. [진행 기록](../changes/2026-10-15-asio-retained-source-output.md)을 따른다. 완료 수/분모136/489·원래91/193은 유지한다.
+2026-10-15 ASIO .14.01–.06은 V이며 독립 리뷰/QA .14.07을 W로 진행한다. 첫 DEEP code review의2건은 a56e039b·8ee68fb1, 두 번째 review의 시계 재매핑1건은272b564f에서 수정했다. host Windows bin94/0·platform/app all-target Windows Rust-only 형 검사 exit0에 더해 공통 출력 application279/0(ASIO queue/controller23 포함)을 실행했다. gated composition1·native lifecycle21·adapter17은 typed-only다. 실제 SDK/driver .14.08은 E이고 최종 재검토·독립 QA가 남는다. [진행 기록](../changes/2026-10-15-asio-retained-source-output.md)을 따른다. 완료 수/분모136/489·원래91/193은 유지한다.
 
 ## 읽는 법과 집계
 

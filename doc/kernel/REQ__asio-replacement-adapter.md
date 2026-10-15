@@ -15,6 +15,14 @@ frozen actual epoch/basis/Source/HOST expectations and original upper-bound HOST
 coverage. Current stream failure/liveness checks precede any cached release;
 duplicates do not refresh age. Classify only the exact recovery-unavailable
 error for the existing Owner re-probe; preserve all other typed failures.
+Renewing the multimedia-clock anchor may change the derived HOST bracket of
+the same callback publication. Retain its first genuine mapped coordinate and
+interval rather than treating that remapping as a changed Source publication.
+Validate current immutable delivery, Source facts, domains and HOST bounds
+before reusing original evidence. This also applies to an unselected observation
+seen while both queue slots are full. A callback awaiting HOST progress cannot
+gain progress or a younger age solely from renewed mapping; actual newer native
+evidence is still required. Supplied-pair revision checks stay strict.
 An already-authorized retirement must not mask a cached native fault, failed
 telemetry or original cleanup error. Return those failures before the narrow
 healthy-authorization refusal, retaining the original cleanup allocation.
