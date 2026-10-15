@@ -244,3 +244,34 @@ audio WASM은 `772c283e8dc0a2664e26e64bbc3cb82f0ce21b9837e5d098175d133835c004e8`
 `browser-voice-budget-bindgen-sha256-14111.log`에 있다.
 이는 범위 내 software 검증이며 AC010 실제 browser 전체·독립 review/QA는 남는다.
 WBS05.13.06은 W, 전체136/489·오디오 커널12/27을 유지한다.
+
+다섯 번째 실제 browser49352는 fresh artifact·solo 배속·pause/pending/resume·잘못된
+값 거절·자연 완료 variable record의5개 검사를 통과했다. 이후 retained 기록은
+명시 선택해야 하는 정상 UI인데 runner가 자동 선택을 가정해 Save 활성 대기에서
+멈췄다. 실제 current Program complete capture tuple을 UI로 선택하도록 runner를
+수정했다. 제품 상태를 직접 바꾸거나 File을 합성하지 않았다. 원본은
+`target/wf/runtime-rate-browser-fifth-14111/evidence.json`이다.
+여섯 번째59262는 fresh·배속·pause3개 뒤 짧은6초 구간의 정상 완료와 후반 invalid
+draft 조작이 경합했다. 실제3/2 cut 뒤 남은 source 시간은 약1.30초였으며,
+play-error는 없었다. invalid 검사를 실제 초기1/2 상태로 옮기고,200ms pitch 관측
+후 실제 Pause를 적용한 다음 무거운 screenshot을 수집하도록 최소 수정했다.
+원본은 `target/wf/runtime-rate-browser-sixth-14111/evidence.json`이다. 두 실행 모두
+console/network0, owned browser/Xvfb exit0이며 전체 strict PASS로 표시하지 않는다.
+전체12개 journey·두 실제 rate cut·원본 입력·complete File·저장/불러오기·독립 replay
+검증은 모두 유지한다.
+
+일곱 번째25925는 위5개와 실제 record-save-load·independent-replay를 포함한7개
+검사를 통과했다. 다음 region 세션의 실제 arm·play-activate ACK 뒤250ms 시작
+시한을 넘겨 정상 거절됐고 incomplete File252B를 보존했다. runner가 시작 도중
+누적 원본 메시지5136개/JSON약1.44MB를 반복 반환하는 진단 비용을 확인했다.
+단독 원인은 미계측이므로 확정하지 않는다. start()만 해당 세션의 원본 receipt를
+좁혀 반환하도록 수정하고 전체 원본 로그·deadline·실제 시계·검증 기준은 보존했다.
+원본은 `target/wf/runtime-rate-browser-seventh-14111/evidence.json`이다.
+여덟 번째39779도 동일7개 검사를 통과했고 region 세션 시작까지 진행했다. 실제
+loop region 적용 도중 `retained source coordinate: NegativeElapsed`로 play-error가
+발생했다. 원래 incomplete File252B가 보존됐으며 다음 작업은 이 실제 source
+coordinate/region 경계의 원인을 분석하고 기존 기록·원본 시계 계약을 지키며
+수정하는 것이다. 원본은
+`target/wf/runtime-rate-browser-eighth-14111/evidence.json`이다. 두 실행의
+console/network는0이고 owned browser/Xvfb exit0이다. source checkpoint는
+`7fb921fc`이며, 실제 전체 strict browser와 독립 review/QA는 계속 미완료다.
