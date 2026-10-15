@@ -7,23 +7,25 @@
 선행을 충족한 다음 작업을 확인한다.
 아래60개 행은 stable 기능 ID와 과거 source survey이며 완료 분모가 아니다.
 
-최신 checkpoint(2026-10-16): fd9c114a의 실제 독립 code/security 리뷰는 PASS다.
-그 뒤 required browser QA는 필수14/전체15검사와 실제 open-ended solo/local
-자연 완료를 확인했다. CLI는 Node1692/0, core/platform/BMS1742/0, 앱 library3392/0,
-컴파일 가능한83개 통합 suite779/0이지만, 두 allocation 테스트의 enum 누락3곳과
-main/Linux에서 중복 실행된 잘못된 logical domain 거절 검사4건, 수정 파일5개의
-포맷 오류로 FAIL이다. 실제 browser UX도 초기 배속을 현재값처럼 표시해 FAIL이다.
-AC036–039의 문구·포맷·enum 소비자·Linux 실행 경계 수정을 마쳤다.
-Root의 관련 Window100/0·입력35/0, allocation 각3/0·Settings14/0·startup9/0,
-main/Linux solo 각1/0·cohort 각10/0/6/0과10경로 포맷을 확인했다. 중복 실행은
-고유 coverage처럼 합산하지 않는다. 전체85 integration 포함 app 컴파일과 실제
-UI/audio release WASM·소비 경로의 matching bindgen·native main 빌드가 모두 통과했다.
-문서 감사에서 첫 audio out-name 오류를 찾아 사용 중인 runtime 이름으로 다시 생성했고,
-현재 소비4파일의 hash를 별도 확인했다. 미사용 출력의 hash를 현재 검증으로 쓰지 않는다.
-새 전체 runtime 검사와 독립 리뷰/QA/UX를 수행하며 이전 PASS를 새 소스의 PASS로 바꾸지 않는다.
-실제 desktop QA는 Records·가변 기록 조회/고정 상대 거절을 확인했으나
-/dev/input·/dev/snd 부재와 ALSA default 카드 실패로 native 재생이 BLOCKED_ENV다.
-전체136/489·오디오12/27은 유지한다. 상세 명령/증거/한계는
+최신 checkpoint(2026-10-16): 수정7f38f2b2·소비 패키지 문서 정정99c86f60에서
+독립 DEEP code/security 리뷰와 문서 감사가 PASS다. 실제 required CLI도 PASS:
+앱4859/0(43 ignored), Node1693/0(skip0), Linux/Windows/macOS all-target typing0,
+별도 ALSA-null 소프트웨어 진단4/4다. Foreign typing/null을 실제 장치 검증으로
+확대하지 않는다. Required browser는 strict runner1회 필수14/전체15검사 PASS,
+console/network0·소비19파일 hash 불변이다. 기존 초기/현재 배속 표시 문제는 해결됐다.
+
+추가 실제 browser UX는 긴 배속 변경·F5·모바일 왕복·새 가변 기록 Save/Load 뒤
+메뉴 ACK timeout/흰 canvas1회로 FAIL/P2다. 단순 재현과 원래 긴 prefix의 별도
+진단1회는 실제 menu ACK/drawn/geometry까지 성공했으나 원인·회귀 여부는 미확정이다.
+최초 실패를 무효화하거나 baseline이라고 단정하지 않는다. 렌더러 종결 오류 뒤
+다음 owner의 요청이 조용히 버려져 최초 원인이 사라질 수 있는 소스 경로를 확인했고,
+이 오류 전달 경로의 순수 회귀와 대응을 다음으로 검토한다. 아직 제품 수정은 없다.
+
+실제 required desktop와 독립 UX-desktop은 Settings 초기 배속/입력 복구·Records
+원본469ops·고정 상대0/0 거절·탐색/resize를 확인했으나 native 재생은
+/dev/input·/dev/snd 부재/Play ENOENT2·WATCH ALSAdefault-2로 BLOCKED_ENV다.
+모든 실제 QA/진단 프로세스는 종료했고 추적 소스·패키지는 바꾸지 않았다.
+현재 태스크는 미완료이며 전체136/489·오디오12/27을 유지한다. 상세 명령·증거·한계는
 [변경 기록](../changes/2026-10-15-runtime-playback-rate.md)을 따른다.
 
 이하 checkpoint는 해당 버전의 과거 기록이며 현재 상태는 위 절이 우선한다.

@@ -777,3 +777,65 @@ browser-audio-consumed-bindgen-14121.log로 별도 보존한다.
 scoped-rustfmt-ten-14121.log, browser{,-audio}-remediation-*-14121.log,
 native-remediation-player-sha256-14121.log다. 새 전체 앱 runtime 검증과 독립 리뷰,
 필수 QA/UX는 남아 있으며 WBS/실제 장치 acceptance는 올리지 않는다.
+
+
+## c6 이후 실제 QA와 남은 메뉴 실패14121
+
+99c86f60의 실제 c6 DEEP code/security는 PASS0이고 문서 감사도 PASS다.
+Required qa-browser14121은 committed strict runner1회에서 필수14/전체15검사,
+console/network/overflow/Worklet terminal 오류0을 확인했다. 소비 소스/패키지19개
+hash가 전후 동일하며 current original File SHA는
+f79ff374b972a254bf50c3135f5a11bde5001d765ed8f46668b232dafd61a6d6이다.
+실제 두 cut은970034013+1/2ns→2/1,1591167799+1/2ns→3/2로 독립 계산했고
+6개 retired cohort의 File 수락→Worklet ACK→Rust ACK를 보존했다.
+초기1/2와 실제 applied2/1 표시를 실제 화면에서 구분했다. 원본은
+runtime-rate-qa-browser-14121/evidence.json·runtime-rate-qa-browser-independent-audit-14121.json
+(target/wf/ 아래)이며 owned browser/Xvfb/HTTPS는 정리했다.
+
+Required qa-cli14121의 실제 최종 판정은 CLI/software 범위 PASS다.
+앱 library3392·7bins682·85 integration targets785=4859pass/0fail/ignored43,
+Node 최상위56파일1668+중첩25=1693pass/0fail/skip0이다. 중첩26/총1694는
+최종 집계기의 assertion이 잡은 추정 오류였고 실제 terminal summary로 정정했다.
+테스트를 재실행하거나 겹치는 focused 실행을 합산하지 않았다.
+Linux/Windows/macOS all-target typecheck는 모두0, cached C/archive stub은
+foreign 실행 근거가 아니다. 기존 core/platform/BMS1742/0/ignored2는 fd9와 현재의
+crates/adapters/manifest/lock Git 객체 동일성을 확인해 이월했다.
+ALSA-null 소프트웨어 진단4개는 각각1/0이고 output encoding은4종×2CLI를 포함한다.
+실제 장치의 RUNNING/presentation/음향 검증으로 쓰지 않는다. CLI27개 기대 결과와
+원본 stereo PCM96000samples의 독립 decimation·충돌 시 원본 SHA 보존도 확인했다.
+최초 mono-stride oracle 실패와 잘못된 aggregate는 보존했다. 전역 formatter1과
+Clippy101은 기존 drift·source_playback_history.rs:265로 남아 strict-clean이 아니다.
+원본은 target/wf/runtime-rate-qa-cli-14121/의 app-full-runtime.log,
+node-{full,nested-results-motion}.log, type-null-strict-results.json,
+format-baseline-proof.json, independent-pcm-audit.json이다.
+
+실제 required desktop/독립 UX-desktop은 현재 native main0f39b0f5…66031에서
+Settings INITIAL PLAYBACK SPEED·0/1 오류→1/2 복구·Records 원본469ops와 고정
+Own/Other 거절0/0·키보드/resize를 확인했다. 실제 Play는 ENOENT2, WATCH는
+원본 logical replay6results/1hit를 복원한 뒤 ALSAdefault-2다. /dev/input,/dev/snd가
+없어 실제 native RateView·pause/rate/presentation/driver·음향은 BLOCKED_ENV다.
+Native 두 app/session은 실제 exit0이고 focus가 비었다. 긴 Records 거절 문구 잘림과
+800x600 작은 글자는 회귀 미확정 UX BACKLOG다. 원본은 같은 target/wf 아래
+runtime-rate-qa-desktop-14121/ 및 runtime-rate-ux-desktop-14121/다.
+
+실제 ux-browser14121은 AC036 solo/local·pausepending/resume/F5·입력 복구·모바일
+focus/wrap·별도 Records DETAILS를 확인했지만 새 P2 메뉴 실패 때문에 FAIL이다.
+긴 rate/pause/invalid복구/F5→390↔desktop→새 variable 원본 Save/Load→menu에서
+흰 canvas와 Render acknowledgement timed out이1회 발생했다. 원래 오류 trace가
+불충분해 pending RPC의 종류와 첫 renderer error는 모른다. 단순 fresh 재현은
+성공했고, 승인된 원래 긴 prefix 진단1회도 generation/content9/op1 menu ACK,
+drawn, geometry26→27→28에 도달했다.3992행에서 render-error/control-reject0이고
+처음 성공해 retry는 안 했다. 관찰자 영향·원인·회귀·부하 원인은 입증하지 않았다.
+나중 통과로 최초 FAIL을 없애거나 baseline으로 단정하지 않는다. 별도 QA 스크립트의
+초기 Applied 구분점 regex와 잘못된 저장 기록 선택 오류는 제품 실패와 분리했다.
+원본은 runtime-rate-ux-browser-14121/{ux-summary.json,current-journey/failure.png,
+original-prefix-diagnostic/diagnostic-summary.json}이다. 모든 소유 프로세스를 정리했다.
+
+한 건에 한정한 읽기 전용 조사는 renderer-worker.failed 뒤 모든 새 RPC가 버려지고,
+이전 owner의 첫 terminal 오류가 identity 필터 사이에서 사라질 수 있음을 확인했다.
+이는 구체적인 다음 검증 후보이며 이번 실제 timeout의 원인이라는 증거는 아니다.
+다음 제품 수정은 명시적 AC/경로·REQ를 먼저 정의하고 독립 fault 회귀로 검증한다.
+타임아웃을 늘리거나 ACK를 합성하지 않는다. 현재 제품 소스는 그대로이고,
+actual UX FAIL을 해결하지 않은 채 실제 장치 대기만으로 완료/close하지 않는다.
+AC010의 현재 browser 검증은 완료했지만 최종 AC011과 태스크·전체 Goal은 미완료다.
+WBS05.13.06 W·전체136/489·오디오12/27을 유지한다.
