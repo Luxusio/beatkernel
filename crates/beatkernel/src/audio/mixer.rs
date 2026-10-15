@@ -25,6 +25,9 @@ pub struct Mixer {
     practice: Option<super::practice::Practice>,
     practice_projection_deferred: bool,
     source_playback_history: Option<super::SourcePlaybackHistory>,
+    // Only runtime retained BGM needs a transactional scalar voice simulation.
+    // Storage is cold, and contains no owning PCM or callback allocations.
+    practice_preflight_voices: Vec<Option<Voice>>,
 }
 
 #[derive(Clone, Copy)]
@@ -109,6 +112,32 @@ impl Head {
     fn in_bounds(self, frames: usize) -> bool {
         self.whole >= 0 && self.whole < frames as i128
     }
+
+    // A sufficient (never optimistic) retirement proof. Ignoring an existing
+    // proper fraction can only retain a carry voice longer. Wide products that
+    // do not fit simply decline this optional capacity refinement.
+    fn proven_retired_after(
+        self,
+        steps: u64,
+        frames: usize,
+        source_hz: u32,
+        output_hz: u32,
+        rate: Rate,
+    ) -> bool {
+        let remaining = frames as i128 - self.whole;
+        if remaining <= 0 {
+            return true;
+        }
+        let numerator = u128::from(source_hz) * rate.numerator() as u128;
+        let denominator = u128::from(output_hz) * u128::from(rate.denominator());
+        let whole_step = numerator / denominator;
+        if whole_step != 0 && u128::from(steps) >= (remaining as u128).div_ceil(whole_step) {
+            return true;
+        }
+        u128::from(steps)
+            .checked_mul(numerator)
+            .is_some_and(|advance| advance / denominator >= remaining as u128)
+    }
 }
 
 impl Mixer {
@@ -150,8 +179,16 @@ impl Mixer {
             0,
             self.output_frame_basis().origin(),
         )?;
+        let mut preflight_voices = Vec::new();
+        if practice.program.data.runtime_program_id != 0 {
+            preflight_voices
+                .try_reserve_exact(practice.program.data.limits.max_overlap)
+                .map_err(|_| super::PracticeError::Capacity)?;
+            preflight_voices.resize(practice.program.data.limits.max_overlap, None);
+        }
         // Cold state adoption, not a consumed or acknowledged queue command.
         self.rate = practice.program.data.rate;
+        self.practice_preflight_voices = preflight_voices;
         self.practice = Some(practice);
         Ok(())
     }
@@ -222,6 +259,7 @@ impl Mixer {
             practice: None,
             practice_projection_deferred: false,
             source_playback_history: None,
+            practice_preflight_voices: Vec::new(),
         })
     }
 
@@ -365,25 +403,23 @@ impl Mixer {
         let physical_prefix_end = active_start
             .checked_add(active_extent)
             .ok_or(AudioError::Overflow)?;
-        let practice_controls = if !pause_requested && active_frames > 0 {
-            if let Some(practice) = &self.practice {
-                practice
-                    .preflight_at(
-                        playback_start,
-                        active_frames,
-                        active_start,
-                        self.output_frame_basis().origin(),
-                    )
-                    .map_err(|error| match error {
-                        super::PracticeError::ReceiptFull => AudioError::PracticeReceiptFull,
-                        super::PracticeError::EventBudget => AudioError::PracticeEventBudget,
-                        _ => AudioError::PracticeControl,
-                    })?
-            } else {
-                0
-            }
+        let (practice_controls, rate_decision) = if !pause_requested && active_frames > 0 {
+            let origin = self.output_frame_basis().origin();
+            let decision = self
+                .prepare_runtime_rate_decision(playback_start, active_start, origin)
+                .map_err(practice_audio_error)?;
+            let controls = self
+                .preflight_practice(
+                    playback_start,
+                    active_frames,
+                    active_start,
+                    origin,
+                    decision,
+                )
+                .map_err(practice_audio_error)?;
+            (controls, decision)
         } else {
-            0
+            (0, None)
         };
         let history_plan = self
             .source_playback_history
@@ -483,6 +519,7 @@ impl Mixer {
                     active_start + frame_offset as u64,
                     practice_controls,
                     &mut applied_practice_controls,
+                    (frame_offset == 0).then_some(rate_decision).flatten(),
                 );
             }
             while self
@@ -702,10 +739,283 @@ impl Mixer {
         }
     }
 
-    fn practice_frame(&mut self, physical: u64, control_snapshot: usize, consumed: &mut usize) {
+    fn prepare_runtime_rate_decision(
+        &self,
+        playback: u64,
+        physical: u64,
+        origin: crate::time::ClockPoint,
+    ) -> Result<Option<super::practice::RateDecision>, super::PracticeError> {
+        use super::practice::Practice;
+        use super::{PracticeRateOutcome, PracticeRateRefusal};
+        let Some(practice) = self.practice.as_ref() else {
+            return Ok(None);
+        };
+        let Some(mut decision) = practice.prepare_rate_decision(playback, physical, origin)? else {
+            return Ok(None);
+        };
+        if decision.outcome != PracticeRateOutcome::Applied {
+            return Ok(Some(decision));
+        }
+        let program = &practice.program.data;
+        let cursor = decision.cursor;
+        let rate = cursor.rate;
+        let refuse = |decision: &mut super::practice::RateDecision, reason| {
+            decision.cursor = practice.cursor;
+            decision.outcome = PracticeRateOutcome::Refused(reason);
+        };
+        if !decision.control.restart
+            && self.voices.iter().flatten().any(|voice| {
+                let sample = self.bank.get(voice.sample).expect("owned voice asset");
+                voice
+                    .head
+                    .with_rate(sample.format().sample_rate(), program.output_rate, rate)
+                    .is_none()
+            })
+        {
+            refuse(&mut decision, PracticeRateRefusal::VoiceDenominatorCapacity);
+            return Ok(Some(decision));
+        }
+        let first_index = if decision.control.restart {
+            cursor.next_cue
+        } else {
+            decision.cut_due_end
+        };
+        let future_burst =
+            program.future_cue_burst(cursor.region, first_index, decision.control.max_cue_burst);
+        if future_burst > program.limits.max_events_per_render
+            || (cursor.region.repeat || decision.control.restart)
+                && program.pass_event_bound(cursor.region, decision.control.max_cue_burst)
+                    > program.limits.max_events_per_render
+        {
+            refuse(&mut decision, PracticeRateRefusal::EventBudget);
+            return Ok(Some(decision));
+        }
+        let first = program
+            .nonempty_cues
+            .partition_point(|index| *index < first_index);
+        let end = program
+            .nonempty_cues
+            .partition_point(|index| program.cues[*index].cue.at < cursor.region.end);
+        if cursor.region.repeat
+            && program.pass_voice_bound(cursor.region, decision.control.max_overlap)
+                > program.limits.max_overlap
+        {
+            // A later pass revisits cues already behind this cut. Its upper
+            // bound is the smaller of the cold global overlap and every voice
+            // that can be born in that pass, including clipped start voices.
+            // Only the bounded overlap tree is visited; future count is indexed.
+            refuse(&mut decision, PracticeRateRefusal::BgmCapacity);
+            return Ok(Some(decision));
+        }
+        let future_bound = decision.control.max_overlap.min(end.saturating_sub(first));
+        let first_future_delta = if first < end {
+            let cue = program.cues[program.nonempty_cues[first]];
+            let relative =
+                match Practice::phase_frame(cursor.phase.unwrap(), cue.cue.at, program.output_rate)
+                {
+                    Ok(frame) => frame,
+                    Err(_) => {
+                        refuse(&mut decision, PracticeRateRefusal::DeadlineOverflow);
+                        return Ok(Some(decision));
+                    }
+                };
+            match cursor
+                .origin
+                .checked_add(relative)
+                .and_then(|frame| frame.checked_sub(playback))
+            {
+                Some(delta) => Some(delta),
+                None => {
+                    refuse(&mut decision, PracticeRateRefusal::DeadlineOverflow);
+                    return Ok(Some(decision));
+                }
+            }
+        } else {
+            None
+        };
+        let mut carry = 0usize;
+        let mut carry_at_future = 0usize;
+        let mut include = |head: Head, frames: usize, source_hz: u32| {
+            carry += 1;
+            if first_future_delta.is_some_and(|delta| {
+                !head.proven_retired_after(delta, frames, source_hz, program.output_rate, rate)
+            }) {
+                carry_at_future += 1;
+            }
+        };
+        if decision.control.restart {
+            program.overlaps(cursor.anchor, |index| {
+                let cue = program.cues[index];
+                let selected = super::practice::ceil(
+                    (i128::from(cursor.anchor.as_nanos()) - i128::from(cue.cue.at.as_nanos()))
+                        * i128::from(cue.source_rate),
+                    1_000_000_000,
+                ) as usize;
+                if let Some(head) = Head::new(selected, cue.source_rate, program.output_rate, rate)
+                {
+                    include(head, cue.frames, cue.source_rate);
+                }
+            });
+        } else {
+            for voice in self.voices[..program.limits.max_overlap].iter().flatten() {
+                let sample = self.bank.get(voice.sample).expect("owned voice asset");
+                include(voice.head, sample.frames(), sample.format().sample_rate());
+            }
+            for cue in &program.cues[practice.cursor.next_cue..decision.cut_due_end] {
+                if cue.frames != 0 {
+                    let head = Head::new(0, cue.source_rate, program.output_rate, rate)
+                        .expect("single positive rate head fits i128");
+                    include(head, cue.frames, cue.source_rate);
+                }
+            }
+        }
+        if carry > program.limits.max_overlap
+            || carry_at_future + future_bound > program.limits.max_overlap
+        {
+            refuse(&mut decision, PracticeRateRefusal::BgmCapacity);
+        }
+        Ok(Some(decision))
+    }
+
+    fn preflight_practice(
+        &mut self,
+        playback: u64,
+        frames: usize,
+        physical: u64,
+        origin: crate::time::ClockPoint,
+        decision: Option<super::practice::RateDecision>,
+    ) -> Result<usize, super::PracticeError> {
+        use super::practice::PreflightVoiceStep;
+        let Some(practice) = self.practice.as_ref() else {
+            return Ok(0);
+        };
+        if practice.program.data.runtime_program_id == 0 {
+            return practice.preflight_at(playback, frames, physical, origin, decision, |_| Ok(()));
+        }
+        let program = &practice.program.data;
+        let bank = &self.bank;
+        let scratch = &mut self.practice_preflight_voices;
+        scratch.copy_from_slice(&self.voices[..program.limits.max_overlap]);
+        practice.preflight_at(playback, frames, physical, origin, decision, |step| {
+            match step {
+                PreflightVoiceStep::Rate(rate) => {
+                    for voice in scratch.iter_mut().flatten() {
+                        let sample = bank.get(voice.sample).expect("owned voice asset");
+                        voice.head = voice
+                            .head
+                            .with_rate(sample.format().sample_rate(), program.output_rate, rate)
+                            .ok_or(super::PracticeError::Capacity)?;
+                    }
+                }
+                PreflightVoiceStep::Reset(cursor) => {
+                    scratch.fill(None);
+                    if cursor.active {
+                        let mut result = Ok(());
+                        program.overlaps(cursor.anchor, |index| {
+                            if result.is_err() {
+                                return;
+                            }
+                            let cue = program.cues[index];
+                            let selected = super::practice::ceil(
+                                (i128::from(cursor.anchor.as_nanos())
+                                    - i128::from(cue.cue.at.as_nanos()))
+                                    * i128::from(cue.source_rate),
+                                1_000_000_000,
+                            ) as usize;
+                            result = start_program_voice(
+                                scratch,
+                                bank,
+                                cue,
+                                selected,
+                                program.output_rate,
+                                program.limits.max_overlap,
+                                cursor.rate,
+                            );
+                        });
+                        result?;
+                    }
+                }
+                PreflightVoiceStep::Cue(cue, rate) => {
+                    start_program_voice(
+                        scratch,
+                        bank,
+                        cue,
+                        0,
+                        program.output_rate,
+                        program.limits.max_overlap,
+                        rate,
+                    )?;
+                }
+                PreflightVoiceStep::Advance => advance_voices(scratch, bank),
+            }
+            Ok(())
+        })
+    }
+
+    fn practice_frame(
+        &mut self,
+        physical: u64,
+        control_snapshot: usize,
+        consumed: &mut usize,
+        decision: Option<super::practice::RateDecision>,
+    ) {
         use super::practice::{ceil, Practice};
         use super::{PracticeBoundaryKind, PracticeReceipt};
         let practice = self.practice.as_mut().expect("installed program");
+        if let Some(decision) = decision {
+            if decision.outcome == super::PracticeRateOutcome::Applied {
+                if decision.control.restart {
+                    self.voices.fill(None);
+                    self.pending
+                        .retain(|pending| pending.scope.0 >= decision.cursor.generation);
+                    let mut result = Ok(());
+                    practice
+                        .program
+                        .data
+                        .overlaps(decision.cursor.anchor, |index| {
+                            if result.is_err() {
+                                return;
+                            }
+                            let cue = practice.program.data.cues[index];
+                            let selected = ceil(
+                                (i128::from(decision.cursor.anchor.as_nanos())
+                                    - i128::from(cue.cue.at.as_nanos()))
+                                    * i128::from(cue.source_rate),
+                                1_000_000_000,
+                            ) as usize;
+                            result = start_program_voice(
+                                &mut self.voices,
+                                &self.bank,
+                                cue,
+                                selected,
+                                practice.program.data.output_rate,
+                                practice.program.data.limits.max_overlap,
+                                decision.cursor.rate,
+                            );
+                        });
+                    result.expect("whole-block retained voice preflight");
+                } else {
+                    for voice in self.voices.iter_mut().flatten() {
+                        let sample = self.bank.get(voice.sample).expect("owned voice asset");
+                        voice.head = voice
+                            .head
+                            .with_rate(
+                                sample.format().sample_rate(),
+                                practice.program.data.output_rate,
+                                decision.cursor.rate,
+                            )
+                            .expect("frozen all-head runtime rate decision");
+                    }
+                }
+                self.rate = decision.cursor.rate;
+            }
+            practice.cursor = decision.cursor;
+            practice.endpoint.consume();
+            *consumed += 1;
+            practice
+                .endpoint
+                .rate_event(&decision, physical, self.playback_frame_cursor);
+        }
         loop {
             let request = if *consumed < control_snapshot {
                 practice.endpoint.request(0)
@@ -760,8 +1070,9 @@ impl Mixer {
                                 selected,
                                 practice.program.data.output_rate,
                                 practice.program.data.limits.max_overlap,
-                                practice.program.data.rate,
-                            );
+                                cursor.rate,
+                            )
+                            .expect("preflight retained overlap capacity");
                         });
                     }
                 }
@@ -798,7 +1109,7 @@ impl Mixer {
                         .expect("preflight checked rejection correction"),
                         kind,
                     },
-                    cursor.revision,
+                    &cursor,
                 );
             }
         }
@@ -817,8 +1128,9 @@ impl Mixer {
                 0,
                 practice.program.data.output_rate,
                 practice.program.data.limits.max_overlap,
-                practice.program.data.rate,
-            );
+                practice.cursor.rate,
+            )
+            .expect("whole-block retained voice preflight");
         }
         self.song_position = Practice::song_at(
             &practice.program.data,
@@ -1034,15 +1346,7 @@ impl Mixer {
             }
             *destination = sum.clamp(-1.0, 1.0) as f32;
         }
-        for slot in &mut self.voices {
-            if let Some(voice) = slot {
-                voice.head.advance();
-                let sample = self.bank.get(voice.sample).expect("owned voice asset");
-                if !voice.head.in_bounds(sample.frames()) {
-                    *slot = None;
-                }
-            }
-        }
+        advance_voices(&mut self.voices, &self.bank);
     }
 
     fn report(&self, start_frame: u64, playback_start_frame: u64, frames: usize) -> RenderReport {
@@ -1071,9 +1375,9 @@ fn start_program_voice(
     output_rate: u32,
     reserved: usize,
     rate: Rate,
-) {
+) -> Result<(), super::PracticeError> {
     if selected >= cue.frames {
-        return;
+        return Ok(());
     }
     let sample = bank
         .get(cue.cue.sample)
@@ -1081,14 +1385,35 @@ fn start_program_voice(
     let index = voices[..reserved]
         .iter()
         .position(Option::is_none)
-        .expect("cold validated overlap capacity");
+        .ok_or(super::PracticeError::Capacity)?;
     voices[index] = Some(Voice {
         id: cue.cue.voice,
         sample: cue.cue.sample,
         gain: cue.cue.gain,
         head: Head::new(selected, sample.format().sample_rate(), output_rate, rate)
-            .expect("cold validated rational head"),
+            .ok_or(super::PracticeError::Capacity)?,
     });
+    Ok(())
+}
+
+fn advance_voices(voices: &mut [Option<Voice>], bank: &SampleBank) {
+    for slot in voices {
+        if let Some(voice) = slot {
+            voice.head.advance();
+            let sample = bank.get(voice.sample).expect("owned voice asset");
+            if !voice.head.in_bounds(sample.frames()) {
+                *slot = None;
+            }
+        }
+    }
+}
+
+fn practice_audio_error(error: super::PracticeError) -> AudioError {
+    match error {
+        super::PracticeError::ReceiptFull => AudioError::PracticeReceiptFull,
+        super::PracticeError::EventBudget => AudioError::PracticeEventBudget,
+        _ => AudioError::PracticeControl,
+    }
 }
 
 fn interpolated(sample: &PcmSample, head: Head, channel: usize) -> f64 {
@@ -1111,6 +1436,10 @@ fn gcd(mut left: i128, mut right: i128) -> i128 {
     }
     left
 }
+
+#[cfg(test)]
+#[path = "runtime_rate_fixtures.rs"]
+mod runtime_rate_fixtures;
 
 #[cfg(test)]
 mod start_gate_race_fixtures {
@@ -1222,7 +1551,7 @@ mod practice_snapshot_race_fixtures {
         let mut consumed = 0;
         let mut old_pcm = [0.0; 4];
         for (physical, frame) in old_pcm.iter_mut().enumerate() {
-            mixer.practice_frame(physical as u64, snapshot, &mut consumed);
+            mixer.practice_frame(physical as u64, snapshot, &mut consumed, None);
             mixer.mix_frame(std::slice::from_mut(frame));
             mixer.playback_frame_cursor += 1;
             mixer.frame_cursor += 1;

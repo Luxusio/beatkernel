@@ -71,10 +71,13 @@ pub use model::{
     RenderReport, SampleId, VoiceId,
 };
 pub use practice::{
-    practice_bgm_voice_extent, practice_queue, PracticeAudioEndpoint, PracticeBoundaryKind,
-    PracticeController, PracticeCue, PracticeError, PracticeLimits, PracticeReceipt,
-    PracticeRegion, PracticeRequest, PracticeSourceSelection, PreparedPracticeProgram,
-    ProjectedPracticeReceipt,
+    practice_bgm_voice_extent, practice_queue, prepare_practice_rate, PracticeAudioEndpoint,
+    PracticeBoundaryKind, PracticeController, PracticeCue, PracticeError, PracticeEvent,
+    PracticeLimits, PracticeMetadata, PracticeRateCueGeometry, PracticeRateEvent,
+    PracticeRateOutcome, PracticeRatePreparation, PracticeRateRefusal, PracticeReceipt,
+    PracticeRegion, PracticeRequest, PracticeRestartEvent, PracticeSourceSelection,
+    PreparedPracticeProgram, PreparedPracticeRate, ProjectedPracticeEvent,
+    ProjectedPracticeReceipt, PRACTICE_RATE_PREPARATION_WORDS,
 };
 pub use source_playback_history::SourcePlaybackHistory;
 pub use source_playback_phase::{SourcePlaybackSpan, SourcePlaybackState};

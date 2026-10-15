@@ -352,3 +352,183 @@ fn requested_pause_silence_and_resume_preserve_rt_storage_and_voice_phase() {
     assert!(!resumed.paused);
     assert_eq!(resumed.pending_commands, 2);
 }
+
+fn runtime_practice(
+    cues: Vec<PracticeCue>,
+    practice_limits: PracticeLimits,
+) -> (Mixer, CommandProducer, PracticeController) {
+    let format = AudioFormat::new(1000, 1).unwrap();
+    let pcm_limits = PcmLimits::new(64, 64, 1).unwrap();
+    let mut bank = SampleBank::new(format, pcm_limits).unwrap();
+    bank.insert(
+        SampleId(1),
+        PcmSample::new(format, vec![0.25, 0.5, 0.75, 1.0], pcm_limits).unwrap(),
+    )
+    .unwrap();
+    let program = PreparedPracticeProgram::new_with_runtime_rates(
+        &bank,
+        cues,
+        practice_limits,
+        Rate::NORMAL,
+        beatkernel::time::Duration::ZERO,
+        false,
+        0x14043,
+    )
+    .unwrap();
+    let (controller, endpoint) = practice_queue(&program).unwrap();
+    let (producer, consumer) = command_queue(16).unwrap();
+    let mut mixer = Mixer::new(
+        MixerConfig::new(
+            format,
+            ClockDomainId(9),
+            ts(0),
+            AudioLimits::new(16, 4, 16, 32, 16).unwrap(),
+        ),
+        bank,
+        consumer,
+    )
+    .unwrap();
+    mixer
+        .install_practice(
+            program,
+            endpoint,
+            PracticeRegion::new(ts(0), ts(20_000_000), false).unwrap(),
+        )
+        .unwrap();
+    (mixer, producer, controller)
+}
+fn runtime_cue(voice: u64, at: i64) -> PracticeCue {
+    PracticeCue {
+        voice: VoiceId(voice),
+        sample: SampleId(1),
+        at: ts(at),
+        gain: 1.0,
+    }
+}
+
+#[test]
+fn retained_runtime_rate_and_compound_restart_callbacks_use_no_heap() {
+    let (mut mixer, _producer, mut controller) = runtime_practice(
+        vec![runtime_cue(1, 0)],
+        PracticeLimits::new(8, 1, 64, 8, 8).unwrap(),
+    );
+    render(&mut mixer, &mut [0.0]);
+    assert!(matches!(
+        controller.try_pop_event().unwrap(),
+        PracticeEvent::Boundary(_)
+    ));
+    let prepared = controller.prepare_rate(Rate::new(2, 1).unwrap()).unwrap();
+    let (admitted, counts) = track(|| controller.try_set_rate_next(1, 1, &prepared));
+    assert_eq!(counts, [0, 0, 0]);
+    admitted.unwrap();
+    let mut changed = [99.0; 2];
+    render(&mut mixer, &mut changed);
+    assert_eq!(changed, [0.5, 1.0]);
+    let (event, counts) = track(|| controller.try_pop_projected_event());
+    assert_eq!(counts, [0, 0, 0]);
+    assert!(
+        matches!(event.unwrap().event, PracticeEvent::Rate(rate) if rate.outcome == PracticeRateOutcome::Applied)
+    );
+    let restore = controller.prepare_rate(Rate::NORMAL).unwrap();
+    let original = PracticeRegion::new(ts(0), ts(20_000_000), false).unwrap();
+    let (admitted, counts) = track(|| controller.try_restart_next(2, 1, original, &restore));
+    assert_eq!(counts, [0, 0, 0]);
+    admitted.unwrap();
+    let mut restarted = [99.0; 3];
+    render(&mut mixer, &mut restarted);
+    assert_eq!(restarted, [0.25, 0.5, 0.75]);
+    let (event, counts) = track(|| controller.try_pop_event());
+    assert_eq!(counts, [0, 0, 0]);
+    assert!(
+        matches!(event.unwrap(), PracticeEvent::Restart(restart) if restart.outcome == PracticeRateOutcome::Applied)
+    );
+}
+
+#[test]
+fn retained_runtime_capacity_refusal_continues_pcm_without_heap_or_fake_credits() {
+    let (mut mixer, _producer, mut controller) = runtime_practice(
+        vec![
+            runtime_cue(1, 0),
+            runtime_cue(2, 4_000_000),
+            runtime_cue(3, 8_000_000),
+        ],
+        PracticeLimits::new(8, 1, 64, 8, 8).unwrap(),
+    );
+    render(&mut mixer, &mut [0.0]);
+    controller.try_pop_event().unwrap();
+    let prepared = controller.prepare_rate(Rate::new(8, 1).unwrap()).unwrap();
+    controller.try_set_rate_next(1, 1, &prepared).unwrap();
+    let mut old_pcm = [99.0; 4];
+    let report = render(&mut mixer, &mut old_pcm);
+    assert_eq!(old_pcm, [0.5, 0.75, 1.0, 0.25]);
+    let (event, counts) = track(|| controller.try_pop_event());
+    assert_eq!(counts, [0, 0, 0]);
+    assert!(
+        matches!(event.unwrap(), PracticeEvent::Rate(rate) if rate.outcome == PracticeRateOutcome::Refused(PracticeRateRefusal::BgmCapacity))
+    );
+    assert_eq!(controller.metadata().unwrap().revision, 0);
+    assert_eq!(report.counters.commands_applied, 0);
+    assert_eq!(report.counters.voice_full, 0);
+}
+
+#[test]
+fn retained_runtime_preflight_budget_error_is_allocation_free_and_transactional() {
+    let (mut mixer, _producer, mut controller) = runtime_practice(
+        vec![runtime_cue(1, 1_000_000)],
+        PracticeLimits::new(8, 1, 1, 8, 8).unwrap(),
+    );
+    render(&mut mixer, &mut [0.0]);
+    controller.try_pop_event().unwrap();
+    let prepared = controller.prepare_rate(Rate::new(2, 1).unwrap()).unwrap();
+    controller.try_set_rate_next(1, 1, &prepared).unwrap();
+    let before = mixer.render(&mut []).unwrap();
+    let metadata = controller.metadata().unwrap();
+    let mut untouched = [99.0; 2];
+    let (result, counts) = track(|| mixer.render(&mut untouched));
+    assert_eq!(counts, [0, 0, 0]);
+    assert_eq!(result, Err(AudioError::PracticeEventBudget));
+    assert_eq!(untouched, [99.0; 2]);
+    assert_eq!(controller.metadata().unwrap(), metadata);
+    assert_eq!(mixer.render(&mut []).unwrap(), before);
+}
+
+#[test]
+fn live_portable_rate_binding_and_token_drop_use_no_heap() {
+    let (mut mixer, _producer, mut controller) = runtime_practice(
+        vec![runtime_cue(1, 0)],
+        PracticeLimits::new(8, 1, 64, 8, 8).unwrap(),
+    );
+    render(&mut mixer, &mut [0.0]);
+    controller.try_pop_event().unwrap();
+    let geometry = [PracticeRateCueGeometry {
+        at: ts(0),
+        source_frames: 4,
+        source_hz: 1000,
+    }];
+    // Geometry preparation and wire decoding are producer-side cold work.
+    // Only the active Worklet's bounded bind and temporary token lifetime
+    // belong to the measured message boundary below.
+    let cold = prepare_practice_rate(0x14043, 1000, &geometry, Rate::new(3, 2).unwrap()).unwrap();
+    let decoded = PracticeRatePreparation::from_words(cold.to_words()).unwrap();
+    let metadata = controller.metadata().unwrap();
+    assert!(metadata.started && metadata.active);
+    let (bound, counts) = track(|| -> Result<(), PracticeError> {
+        let token =
+            controller.bind_rate_preparation(metadata.generation, metadata.revision, decoded)?;
+        std::hint::black_box(&token);
+        drop(token);
+        Ok(())
+    });
+    assert_eq!(
+        counts,
+        [0, 0, 0],
+        "live bounded bind/drop alloc/realloc/dealloc"
+    );
+    bound.unwrap();
+    assert_eq!(controller.metadata().unwrap(), metadata);
+    // Both original owners remain alive throughout the measured drop.
+    let mut continuing = [99.0];
+    render(&mut mixer, &mut continuing);
+    assert_eq!(continuing, [0.5]);
+    assert_eq!(mixer.rate(), Rate::NORMAL);
+}
